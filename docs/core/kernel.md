@@ -27,7 +27,7 @@ completion ports, message queues, critical sections and named objects are built 
 | `requires` | `['cpu', 'memory', 'log']`     |
 
 Source: `src/layers/kernel/module.js` and `src/layers/kernel/internal/{threads,switch,sync,
-time,handles,processes}.js`.
+time,handles,processes,stacks}.js`.
 
 ### Configuration
 
@@ -35,14 +35,14 @@ time,handles,processes}.js`.
 |--------|------|---------|---------|
 | `quantum` | number | `100_000` | Retired guest instructions per scheduler turn. Below a page the emulator cannot honour a smaller one. |
 | `stacks.base` | number | `0x00300000` | Where the first pool stack is placed (`0x00400000 - 0x00100000`). |
-| `stacks.size` | number | `0x10000` | Bytes per pool stack. |
-| `stacks.limit` | number | `Infinity` | Address the pool may not grow past. `createThread` throws when the next stack would cross it. |
+| `stacks.size` | number | `0x10000` | The default reserve: the stack a thread whose creator asks for no size gets. |
+| `stacks.limit` | number | `Infinity` | Address the pool may not grow past. A stack that fits nowhere below it makes `createThread` answer `null`. |
 | `clock.now` | `() => number` | `Date.now` | The host clock, in milliseconds. |
 | `clock.floorMs` | number | `0.5` | A credited host interval below this is ignored. |
 | `clock.ceilingMs` | number | `16` | No single credited interval exceeds this. |
 
-The process assembler passes `quantum` through from its own options and sizes the pool from the
-image's `SizeOfStackReserve` (see [`memory.md`](./memory.md) for the resulting layout).
+The process assembler passes `quantum` through from its own options and makes the image's
+`SizeOfStackReserve` the default reserve (see [`memory.md`](./memory.md) for the resulting layout).
 
 ### API
 
@@ -53,7 +53,7 @@ Threads and turns:
 
 | member | signature | meaning |
 |--------|-----------|---------|
-| `createThread` | `({ entry, parameter?, stackTop?, stackLimit?, tebAddress?, name?, returnTo? }) => Thread` | A ready thread with a primed stack (parameter above a return address). Stack from the pool unless `stackTop` is given. `returnTo` defaults to the park loop. Opens a `'thread'` handle on it. |
+| `createThread` | `({ entry, parameter?, stackTop?, stackLimit?, stackSize?, stackReserve?, tebAddress?, name?, returnTo? }) => Thread \| null` | A ready thread with a primed stack (parameter above a return address). Stack from the pool unless `stackTop` is given, sized as `CreateThread` documents (see "Thread stacks" below): `stackReserve` is the reserve, and a `stackSize` -- the commit -- moves it only when it is at least the default reserve. `null` when the pool has no room for that stack, logged at `warn`: a thread that cannot be made rather than a machine that has to stop. `returnTo` defaults to the park loop. Opens a `'thread'` handle on it. |
 | `holdThread` | `() => number` | Replaces the return address at ESP with the park loop and returns what it was. For a stub about to `ret`. |
 | `parkThread` | `(thread, restingStack) => void` | The same, but remembers the address on `thread.parkedReturn` so the thread resumes where it left off. `restingStack` — where the stub's `ret` leaves ESP — is kept on `thread.resumeStack`, so the resume does not depend on whether that `ret` ran before the switch. |
 | `scheduleResume` | `(thread, { eip, esp?, returnValue?, registers? }) => void` | Where a stopped thread continues on its next turn; applied inside the switch. `registers` names any others it continues with (EAX there wins over `returnValue`), for code that reads them before setting them -- an exception handler's block, entered with its function's EBP. |
@@ -61,7 +61,9 @@ Threads and turns:
 | `writeThreadId` | `(address, id) => void` | Writes a thread id into guest memory (an out-parameter helper). |
 | `runOnce` | `() => { ran, instructions, switched }` | One turn. `ran: null` means nothing could run. |
 | `nextDeadline` | `() => number \| null` | The soonest guest time a blocked thread or an armed timer waits for. |
-| `exitThread` | `(thread, exitCode) => void` | Abandons the thread's mutexes, terminates it, releases everything waiting on it. |
+| `exitThread` | `(thread, exitCode) => void` | Abandons the thread's mutexes, terminates it, releases everything waiting on it. A thread that ends itself gives its stack back to the pool; one ended by another thread keeps it. |
+| `suspendThread` | `(thread) => number \| null` | Adds one to the thread's suspend count. It keeps its state -- a wait stays a wait, deadline and all -- but gets no turn, and no object it waits on is handed to it, until it has been resumed as often. The count before, or `null` when it already carries `MAXIMUM_SUSPEND_COUNT` (127) and nothing is counted. |
+| `resumeThread` | `(thread) => number` | Takes one from the count, never below zero; the count before. The resume that brings it to zero looks again at the wait the thread is still in: an object signalled meanwhile, and still signalled, ends the wait then. |
 | `block` | `(thread, reason?, { deadline?, result? }?) => void` | Blocks a thread on something the kernel does not hold a queue for. |
 | `wake` | `(thread, result?) => boolean` | Makes a blocked thread ready, optionally with the value its call answers. |
 | `onTimeout` | `(handler) => void` | Told when a timed wait expires, so an external queue can drop the thread. |
@@ -119,8 +121,9 @@ answer `null`, the boolean calls (`wake`, `armTimer`, `releaseMutex`,
 answer `WaitResult.FAILED` and `waitAny` answers `{ index: -1, result: WaitResult.FAILED }`, the
 listing calls (`threads`/`pages`/`syncObjects`/`diagnosticsSnapshot`/`processes.all`) answer
 empty, `currentThread`/`nextDeadline`/`processes.pending`/`handles.resolve`/`handles.close`/
-`handles.typeOf` answer `null`, `handles.open` answers `0`, `setEvent` answers `[]`,
-`releaseSemaphore` answers `0`, `runOnce` answers `{ ran: null, instructions: 0, switched: false }`,
+`handles.typeOf`/`suspendThread` answer `null`, `handles.open`/`resumeThread` answer `0`, `setEvent`
+answers `[]`, `releaseSemaphore` answers `0`, `runOnce` answers
+`{ ran: null, instructions: 0, switched: false }`,
 and `exitThread`/`block`/`onTimeout`/`cancelTimer`/`sleep`/`resetEvent` are no-ops.
 `holdThread`/`parkThread`/`scheduleResume`/`writeThreadId` touch only `cpu` and `memory`, which
 outlive this layer's own disposal, so they are unaffected.
@@ -128,7 +131,8 @@ outlive this layer's own disposal, so they are unaffected.
 A `Thread` is a plain record: `id`, `name`, `state`, `tebAddress`, `stackTop`, `stackLimit`,
 `entry`, `context`, `instructions`, `exitCode`, `waitingOn`, `awaitingHost`, `kind: 'thread'`,
 `waiters`, `handle`, plus the scheduling fields `parkedReturn`, `resumeStack`, `waitResult`,
-`deadline`, `timeoutResult`. It is itself a waitable object (`SyncKind.THREAD`): signalled once
+`deadline`, `timeoutResult`, `suspendCount`, and `releasesStack` (set as it ends: whether its stack
+goes back to the pool). It is itself a waitable object (`SyncKind.THREAD`): signalled once
 its `exitCode` is not null, never taken.
 
 A `Timer` is the other clock-owned waitable object (`SyncKind.TIMER`): `kind`, `manualReset`,
@@ -150,7 +154,8 @@ sub-record each for handles, sync objects, processes and time:
 | `expiries` | Timed waits that ran out. | Each expiry. |
 | `stackEscapes`, `stackEscaped` | Threads whose ESP has been seen outside their stack, and where. | Checked once a turn, before the slice. |
 | `deepestStackUse` | `name used/size` per thread. | Once a turn. |
-| `threads`, `byState`, `byThread`, `current`, `waiting` | Counts, per-state counts, `name instructions state` per thread, who is on the CPU, and what each blocked thread waits on. | Continuously. |
+| `threads`, `byState`, `byThread`, `current`, `waiting` | Counts, per-state counts, `name instructions state` per thread, who is on the CPU, and what each blocked thread waits on and how many times each suspended one is suspended. | Continuously. |
+| `stacksHeld`, `stacksIssued`, `stackBytesHeld` | Pool stacks in use, stacks ever handed out, and the bytes the ones in use span. | Each pool allocation. |
 | `switches`, `selfSwitches` | Real context switches; switches to the thread already running (no-ops). | Each `switchTo`. |
 | `handles` | `{ open, opened, closed, pendingReuse, byType }`. | Each open/close. |
 | `sync` | `{ objects, event, mutex, semaphore }` — counts only; the rows are `syncObjects()`. | Each create. |
@@ -187,9 +192,12 @@ host speed.
 1. `expire()` — wake every blocked thread whose deadline has passed (only scanned once the
    clock has reached `noDeadlineBefore`, a lower bound kept so a polling program does not pay
    a full scan tens of thousands of times a second).
-2. `ready()` — threads in `READY` that are **not** `awaitingHost`. A thread parked on a host
-   call that has not answered is stopped on `hlt` with nothing to run; counting it ready would
-   keep the scheduler from ever reaching the clock-skipping branch below.
+2. `ready()` — threads in `READY` that are **not** `awaitingHost` and not suspended. A thread
+   parked on a host call that has not answered is stopped on `hlt` with nothing to run; counting
+   it ready would keep the scheduler from ever reaching the clock-skipping branch below.
+   Suspension is a count beside the state rather than a state of its own, so a thread suspended in
+   the middle of a wait is still in that wait when it is resumed, and its time suspended is not
+   counted as time passed over.
 3. If nothing is ready: `soonest()` finds the earliest deadline among blocked threads; if there
    is none, return `{ ran: null }`. Otherwise `skipTo(deadline)` asks the clock to move; if it
    answers 0 (the clock has caught up with the host's), return `{ ran: null }` — the machine
@@ -286,7 +294,9 @@ FIFO; choosing an order and keeping it makes a multithreaded program reproducibl
   clears it, so an APC queued during a later wait that is not alertable does not end that one.
   `alert` is the only thing that reads it.
 
-`releaseTo(object)` hands a signalled object to the first waiter that can take it: a thread
+`releaseTo(object)` hands a signalled object to the first waiter that can take it. A suspended
+waiter cannot, and stays queued: what it took it could not use, and whoever else waits would starve
+for as long as it stayed suspended; `resumeThread` retries its wait. Otherwise a thread
 waiting for **all** of a set is passed over unless every member is signalled or already owned
 by it; a thread waiting for **any** is answered `base + index` where base is `OBJECT_0` or
 `ABANDONED` and index is the object's position in its set. Whoever is released leaves the
@@ -296,6 +306,20 @@ left a stale entry which later handed the object to a thread waiting on somethin
 Timed waits carry a deadline into `block`; on expiry the scheduler's `onTimeout` handlers run,
 and the sync layer's handler removes the thread from exactly the queues it stood in
 (`thread.queuedOn`).
+
+### Thread stacks (`internal/stacks.js`)
+
+The pool runs from `stacks.base` to `stacks.limit`. Each stack is registered with the memory layer
+as a `stack-N` region, so a stack that runs into its neighbour is caught by the region map rather
+than by the corruption it causes, and is placed first-fit, lowest address first. Its reserve follows
+`CreateThread`'s rules: a size given as a reservation (`stackReserve`) is the reserve; a commit
+(`stackSize`) at or above the default reserve raises the reserve to that commit rounded up to a
+megabyte; anything less keeps the default; either way the reserve is rounded to the 64 KiB
+allocation granularity. A stack goes back when its thread has ended itself, as Microsoft documents
+("Thread Stack Size": freed when the thread exits, not when another thread terminates it): its
+region is unregistered and its span free for the next stack. The taking back happens when the next
+stack is asked for rather than at the exit, because the call that ends a thread still writes on
+that thread's stack on its way out.
 
 ### Handles (`internal/handles.js`)
 
@@ -329,8 +353,9 @@ stops the machine from outside the trap.
   guest milliseconds (4000 by default) outranks everything for one turn; there is no wake boost.
 - **A thread is never removed** from `threads`; a terminated one stays in the list and in
   `byState`.
-- **Pool stacks are fixed-size** (`stacks.size`) and never freed; the pool is bounded by
-  `stacks.limit` and `createThread` throws past it.
+- **A stack goes back only from a thread that ended itself**, and only when the next thread asks
+  for one; a thread another ended keeps its stack, whatever it left there readable. The pool is
+  bounded by `stacks.limit`, and a thread whose stack fits nowhere in it is not made.
 - **`stackLimit` is a diagnostic**, not a guard page: an overflow is reported as an escape in
   `stackEscaped`, not raised as an exception.
 - **Timed waits expire on guest time**, which moves only by `advance`/`skipTo`; a deadline is
@@ -354,14 +379,14 @@ Unit tests (`npm test`; filter with `node --test src/layers/kernel/internal/<fil
 
 | file | kind | covers |
 |------|------|--------|
-| `internal/threads.test.js` | unit | Turn order, priority order and starvation, blocking/waking, `awaitingHost` excluded from candidates, quantum bound, overrun and slow-slice accounting, per-thread and per-page reports, deadline ordering, a resume carrying registers applied once. |
+| `internal/threads.test.js` | unit | Turn order, priority order and starvation, blocking/waking, `awaitingHost` excluded from candidates, a suspended thread keeping its state and getting no turn until resumed as often, quantum bound, overrun and slow-slice accounting, per-thread and per-page reports, deadline ordering, a resume carrying registers applied once. |
 | `internal/timers.test.js` | unit | The clock-driven timer against the real scheduler: a waiter parked before the arm, periods with nobody waiting, a timeout leaving the queue, cancellation, a timer in a set; `fired` told of every expiry and never after a cancel; a block alertable only inside an alertable call and only until it wakes; a thread that stops waiting leaving every queue. |
 | `internal/switch.test.js` | unit | Save/restore, TEB travelling with the restore, first switch, self-switch as no-op, error on no thread. |
 | `internal/sync.test.js` | contract | Event/mutex/semaphore semantics per Win32: auto vs manual reset, recursion, owner-only release, abandonment, wait-all atomicity, wait-any index and base, poll never queueing, thread objects, expiry leaving only its queues. |
 | `internal/time.test.js` | unit | Advance, credit floor and ceiling, skip never past real time, diagnostics. |
 | `internal/handles.test.js` | unit | Alignment, type assertion, invalid/closed handles, deferred reuse. |
 | `internal/processes.test.js` | unit | Record contents, id spacing, suspended children not pending. |
-| `module.test.js` | unit | `createThread` priming: return address, park-loop default, headroom, pool registration, a caller-supplied stack; a second instance in one realm does not take the first one's threads; a disposed kernel answers harmlessly rather than throwing; `diagnostics()` answers for the most recently created instance; `alert` ends an alertable wait with its answer, off the object's queue, and leaves every other wait alone. |
+| `module.test.js` | unit | `createThread` priming: return address, park-loop default, headroom, pool registration, a caller-supplied stack; a thread that exits giving its stack to the next, one ended by another keeping it, a stack size honoured the way `CreateThread` honours it; a suspended waiter passed over by what it waits on, a wait satisfied while suspended ending at the resume, a resumed thread not handed the objects of a wait already answered, at most 127 suspensions; a second instance in one realm does not take the first one's threads; a disposed kernel answers harmlessly rather than throwing; `diagnostics()` answers for the most recently created instance; `alert` ends an alertable wait with its answer, off the object's queue, and leaves every other wait alone. |
 
 Integration (`npm run test:integration`): `src/threads.itest.js` runs a real two-thread
 executable contending on a mutex and checks the Windows answer, that both threads took turns,

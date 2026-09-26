@@ -113,8 +113,10 @@ message the device repeats is counted and written again every 256th time with it
 Only before the program's journal exists does it go to the worker's console. A device that is lost
 (`GPUDevice.lost`, for any reason but its own destruction at the end of the run) is written the
 same way, once, with the reason and the browser's message: nothing drawn after it reaches the
-screen, and the device is not reacquired -- a lost device ends the picture for that run, and the
-guest's own device-lost states are not driven by it.
+screen, and the device is not reacquired -- a lost device ends the picture for that run. The
+graphics layer tells the guest: every Direct3D 8 and 9 device made on it answers
+`D3DERR_DEVICELOST` from then on, and a `Reset` does not bring it back
+([`graphics.md`](./graphics.md)).
 
 ### `host: 'thread'`
 
@@ -220,8 +222,9 @@ Events an engine emits and the page may subscribe to include `frame`, `output`, 
 such import called — the **first** call only, once per import per run, with its `count`; every
 later call is counted for diagnostics and written to the journal but never announced again, so a
 program calling a missing import in a loop cannot flood the page's queue; both events carry
-`origin`, `'system'` or `'program'` — and a call to an
-undecorated name of a system library ends the run as a `guest-fault` naming it), `divergence`, `message-box` (the program's `MessageBox`, drawn by the page, not inside the program's desktop; or, with `id: 0` and `exit`, the engine's own box when the game has finished -- see `exitNotice`), `clipboard` (`{ text }`, what a program copied, for the page to put on the browser clipboard), `library-loaded`, `library-missing`,
+`origin`, `'system'` or `'program'` — and a call to an undecorated name of a system library, or to
+a C++ name that does not carry its argument bytes, ends the run as a `guest-fault` naming it),
+`divergence`, `message-box` (the program's `MessageBox`, drawn by the page, not inside the program's desktop; or, with `id: 0` and `exit`, the engine's own box when the game has finished -- see `exitNotice`), `clipboard` (`{ text }`, what a program copied, for the page to put on the browser clipboard), `library-loaded`, `library-unloaded` (`{ name, base }`, a library the program freed for the last time), `library-missing`,
 `libraries`, `bundle`, `bundle-retry`, `bundle-prefetch`, `bundle-unavailable`, `session`,
 `process-create`, `process-replace`, `process-child` (`{ image, commandLine }`, a parent waiting on a child it started: the child is about to run beside it), `process-started`, `process-resumed` (`{ image, code }`, that child exited with `code` and its parent goes on), `process-patched`, `hooks-bound`
 (`{ image, bound, refused, pending }`, once per image the sidecar is bound against -- the
@@ -396,4 +399,6 @@ the first one's history and poll are gone with it.
 - **One program per worker at a time.** A second `start` is refused. A child process the program
   asks for runs inside the same engine: on a machine of its own beside the parent's while the
   parent waits on it, after which the parent goes on; in the parent's place once the parent has
-  exited. Two machines exist at once only in the first case, and only one of them runs.
+  exited. Two machines exist at once only in the first case, and only one of them runs. Either way
+  the child starts from the parent's files and its registry as it stands, and a child run beside
+  hands back that registry with its own changes.
