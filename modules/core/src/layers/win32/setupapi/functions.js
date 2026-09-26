@@ -7,6 +7,7 @@
 import { INF_STYLE_OLDNT, INF_STYLE_WIN4, infText, parseInf } from './inf.js';
 import { decodeFolder, folderOf, readCabinet } from '../cabinet/cabinet.js';
 import { commitQueue, queueInstallSection } from './queue.js';
+import { CATALOG_STORE } from '../sfc/functions.js';
 
 /**
  * setupapi — INF files, cabinets and file queues: how an installer that
@@ -35,6 +36,9 @@ const ERROR_INVALID_DATA = 13;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_INVALID_USER_BUFFER = 1784;
+const ERROR_FILE_EXISTS = 80;
+const ERROR_NO_MORE_ITEMS = 259;
+const ERROR_NO_SUCH_DEVINST = 0xe000020b;
 export const ERROR_SECTION_NOT_FOUND = 0xe0000101;
 export const ERROR_LINE_NOT_FOUND = 0xe0000102;
 const ERROR_CLASS_MISMATCH = 0xe0000201;
@@ -63,6 +67,16 @@ const DEFAULT_ANSWERS = new Map([
     [SPFILENOTIFY.DELETEERROR, FILEOP.ABORT], [SPFILENOTIFY.RENAMEERROR, FILEOP.ABORT],
     [SPFILENOTIFY.COPYERROR, FILEOP.ABORT],
 ]);
+
+/** SetupCopyOEMInf's copy styles that change its answer. */
+const SP_COPY_REPLACEONLY = 0x2;
+const SP_COPY_NOOVERWRITE = 0x8;
+
+/** SetupDiGetClassDevs: every class, rather than the one named. */
+const DIGCF_ALLCLASSES = 0x4;
+
+/** sizeof(SP_DEVINFO_DATA): cbSize, the class GUID, DevInst, Reserved. */
+const SP_DEVINFO_DATA_SIZE = 28;
 
 /** SetupInstallFromInfSection's flags. */
 const SPINST_FILES = 0x10;
@@ -557,6 +571,22 @@ export function createSetupapiFunctions(host){
     };
 
     /**
+     * The devices of a set a HDEVINFO names, or null for a handle that is
+     * not one.
+     *
+     * @param {number} handle @returns {any[] | null}
+     */
+    const deviceSet = handle=>{
+        try
+        {
+            return host.handles.resolve(handle >>> 0, 'device-info-set')?.devices ?? null;
+        }
+        catch {
+            return null;
+        }
+    };
+
+    /**
      * Where OS components are recorded, one key per component GUID holding
      * the two structures its registration was given. The location is this
      * build's own; programs reach it only through the three calls.
@@ -984,6 +1014,198 @@ export function createSetupapiFunctions(host){
                     return code === ERROR_SUCCESS ? 1 : 0;
                 });
             },
+        },
+
+        /**
+         * BOOL SetupCopyOEMInfA(PCSTR SourceInfFileName, PCSTR OEMSourceMediaLocation,
+         *     DWORD OEMSourceMediaType, DWORD CopyStyle, PSTR DestinationInfFileName,
+         *     DWORD DestinationInfFileNameSize, PDWORD RequiredSize,
+         *     PSTR *DestinationInfFileNameComponent)
+         *
+         * The INF goes into the INF directory as oemN.inf, N the first number
+         * free, and its catalog, when [Version] names one beside it, into the
+         * catalog store as oemN.CAT. An INF already there with the same
+         * contents is not copied again: its name is the answer, and with
+         * SP_COPY_NOOVERWRITE that is ERROR_FILE_EXISTS; with
+         * SP_COPY_REPLACEONLY there must be one (Wine's setupapi
+         * test_copy_oem_inf).
+         */
+        SetupCopyOEMInfA: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([sourcePointer, , , style, dest, destSize, required, component])=>{
+                const name = text(sourcePointer);
+                if (name === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const source = name === '' ? null : host.fullPath(name);
+                const bytes = source === null ? null : readWhole(source);
+                if (bytes === null)
+                {
+                    return fail(ERROR_FILE_NOT_FOUND);
+                }
+                const thread = host.callerThread();
+                const sourceDirectory = directoryOf(/** @type {string} */ (source));
+                const infDirectory = `${windows}\\inf`;
+                /** @param {Uint8Array} data */
+                const place = data=>{
+                    /** @param {Uint8Array} a @param {Uint8Array} b */
+                    const same = (a, b)=>a.length === b.length && a.every((byte, i)=>byte === b[i]);
+                    const oem = host.files.list(infDirectory, 'oem*.inf')
+                        .map(entry=>entry.name)
+                        .filter(entry=>/^oem\d+\.inf$/i.test(entry));
+                    const existing = oem.find(entry=>{
+                        const there = readWhole(`${infDirectory}\\${entry}`);
+                        return there instanceof Uint8Array && same(there, data);
+                    });
+                    let code = ERROR_SUCCESS;
+                    let target;
+                    if (existing)
+                    {
+                        target = `${infDirectory}\\${existing}`;
+                        code = ((style >>> 0) & SP_COPY_NOOVERWRITE) ? ERROR_FILE_EXISTS : code;
+                    }
+                    else if ((style >>> 0) & SP_COPY_REPLACEONLY)
+                    {
+                        host.setLastErrorFor(thread, ERROR_FILE_NOT_FOUND);
+                        return 0;
+                    }
+                    else
+                    {
+                        const taken = new Set(oem.map(entry=>entry.toLowerCase()));
+                        let number = 0;
+                        while (taken.has(`oem${number}.inf`))
+                        {
+                            number++;
+                        }
+                        target = `${infDirectory}\\oem${number}.inf`;
+                        makeDirectories(infDirectory);
+                        code = writeWhole(target, data);
+                        const parsed = parseInf(infText(data), { dirid });
+                        const catalog = 'inf' in parsed
+                            ? parsed.inf.value('Version', 'CatalogFile') : null;
+                        const catalogBytes = catalog
+                            ? readWhole(`${sourceDirectory}${catalog}`) : null;
+                        if (code === ERROR_SUCCESS && catalogBytes instanceof Uint8Array)
+                        {
+                            makeDirectories(CATALOG_STORE);
+                            writeWhole(`${CATALOG_STORE}\\oem${number}.CAT`, catalogBytes);
+                        }
+                    }
+                    const written = ansi(target);
+                    if ((required >>> 0) !== 0)
+                    {
+                        writeU32(required, written.length);
+                    }
+                    if ((dest >>> 0) !== 0)
+                    {
+                        if ((destSize >>> 0) < written.length)
+                        {
+                            host.setLastErrorFor(thread, ERROR_INSUFFICIENT_BUFFER);
+                            return 0;
+                        }
+                        host.writeMemory(dest >>> 0, written);
+                        if ((component >>> 0) !== 0)
+                        {
+                            writeU32(component, (dest >>> 0) + target.lastIndexOf('\\') + 1);
+                        }
+                    }
+                    host.setLastErrorFor(thread, code);
+                    return code === ERROR_SUCCESS ? 1 : 0;
+                };
+                return bytes instanceof Uint8Array ? place(bytes) : bytes.then(place);
+            },
+        },
+
+        /**
+         * HDEVINFO SetupDiGetClassDevsA(const GUID *ClassGuid, PCSTR Enumerator,
+         *                               HWND hwndParent, DWORD Flags)
+         *
+         * This machine registers no Plug and Play devices, so a set is
+         * always empty -- but the arguments are checked as Wine's setupapi
+         * test_get_class_devs shows: no class without DIGCF_ALLCLASSES is
+         * ERROR_INVALID_PARAMETER, and an empty enumerator or one ending in
+         * a separator ERROR_INVALID_DATA.
+         */
+        SetupDiGetClassDevsA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([classGuid, enumerator, , flags])=>{
+                if ((classGuid >>> 0) === 0 && ((flags >>> 0) & DIGCF_ALLCLASSES) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+                }
+                const name = text(enumerator);
+                if (name !== null && (name === '' || /\\$/.test(name)))
+                {
+                    return fail(ERROR_INVALID_DATA, INVALID_HANDLE_VALUE);
+                }
+                return host.handles.open('device-info-set', { devices: [] });
+            },
+        },
+
+        /**
+         * BOOL SetupDiEnumDeviceInfo(HDEVINFO DeviceInfoSet, DWORD MemberIndex,
+         *                            PSP_DEVINFO_DATA DeviceInfoData)
+         */
+        SetupDiEnumDeviceInfo: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([set, index, data])=>{
+                const devices = deviceSet(set);
+                if (!devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((data >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if (readU32(data) !== SP_DEVINFO_DATA_SIZE)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                return (index >>> 0) < devices.length ? 1 : fail(ERROR_NO_MORE_ITEMS);
+            },
+        },
+
+        /** BOOL SetupDiDestroyDeviceInfoList(HDEVINFO DeviceInfoSet) */
+        SetupDiDestroyDeviceInfoList: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([set])=>{
+                if (!deviceSet(set))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                host.handles.close(set >>> 0);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SetupDiGetDeviceRegistryPropertyA(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, DWORD Property, PDWORD PropertyRegDataType,
+         *     PBYTE PropertyBuffer, DWORD PropertyBufferSize, PDWORD RequiredSize)
+         *
+         * No device data can name a device of an empty set.
+         */
+        SetupDiGetDeviceRegistryPropertyA: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([set])=>fail(deviceSet(set) ? ERROR_NO_SUCH_DEVINST : ERROR_INVALID_HANDLE),
+        },
+
+        /**
+         * BOOL SetupDiSetDeviceRegistryPropertyA(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, DWORD Property, const BYTE *PropertyBuffer,
+         *     DWORD PropertyBufferSize)
+         */
+        SetupDiSetDeviceRegistryPropertyA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([set])=>fail(deviceSet(set) ? ERROR_NO_SUCH_DEVINST : ERROR_INVALID_HANDLE),
         },
 
         /**

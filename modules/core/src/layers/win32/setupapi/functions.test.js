@@ -595,3 +595,91 @@ test('an OS component is registered, found and forgotten by its GUID', async()=>
     assert.equal(m.fns.SetupUnRegisterOsComponent.handler([guid]), 0);
     assert.equal(m.lastError(), ERROR_FILE_NOT_FOUND);
 });
+
+test('SetupCopyOEMInf puts an INF in the INF directory as oemN.inf, once', async()=>{
+    // Wine's setupapi test_copy_oem_inf.
+    const m = await machine();
+    const ERROR_FILE_EXISTS = 80;
+    const SP_COPY_REPLACEONLY = 0x2;
+    const SP_COPY_NOOVERWRITE = 0x8;
+    const copy = (/** @type {number[]} */ args)=>m.fns.SetupCopyOEMInfA.handler(args);
+    assert.equal(copy([0, 0, 0, SP_COPY_NOOVERWRITE, 0, 0, 0, 0]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_PARAMETER);
+    assert.equal(copy([m.str(''), 0, 0, SP_COPY_NOOVERWRITE, 0, 0, 0, 0]), 0);
+    assert.equal(m.lastError(), ERROR_FILE_NOT_FOUND);
+    assert.equal(copy([m.str('C:\\src\\none.inf'), 0, 0, 0, 0, 0, 0, 0]), 0);
+    assert.equal(m.lastError(), ERROR_FILE_NOT_FOUND);
+
+    m.file('C:\\src\\driver.inf',
+        '[Version]\r\nSignature="$Chicago$"\r\nCatalogFile=driver.cat\r\n');
+    m.file('C:\\src\\driver.cat', 'catalog');
+    m.file('C:\\WINDOWS\\inf\\oem0.inf', 'someone else\'s');
+    const inf = m.str('C:\\src\\driver.inf');
+    assert.equal(copy([inf, 0, 1, SP_COPY_REPLACEONLY, 0, 0, 0, 0]), 0,
+        'replace-only with nothing to replace');
+    assert.equal(m.lastError(), ERROR_FILE_NOT_FOUND);
+
+    const dest = m.buffer(260);
+    const size = m.buffer(4);
+    const part = m.buffer(4);
+    assert.equal(copy([inf, 0, 1, 0, dest, 260, size, part]), 1);
+    assert.equal(m.lastError(), 0);
+    assert.equal(m.readCString(dest, 260), 'C:\\WINDOWS\\inf\\oem1.inf', 'the first free number');
+    assert.equal(m.u32(size), 24, 'the terminator counted');
+    assert.equal(m.u32(part), dest + 15, 'the file part');
+    assert.match(m.contents('C:\\WINDOWS\\inf\\oem1.inf') ?? '', /CatalogFile=driver.cat/);
+    assert.equal(m.contents(
+        'C:\\WINDOWS\\system32\\CatRoot\\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\\oem1.CAT'),
+    'catalog', 'the catalog goes into the catalog store under the same number');
+
+    assert.equal(copy([inf, 0, 1, 0, dest, 260, 0, 0]), 1, 'already there');
+    assert.equal(m.readCString(dest, 260), 'C:\\WINDOWS\\inf\\oem1.inf');
+    assert.equal(m.contents('C:\\WINDOWS\\inf\\oem2.inf'), null, 'and not copied twice');
+    assert.equal(copy([inf, 0, 1, SP_COPY_REPLACEONLY, dest, 260, 0, 0]), 1);
+    assert.equal(copy([inf, 0, 1, SP_COPY_NOOVERWRITE, dest, 260, 0, 0]), 0);
+    assert.equal(m.lastError(), ERROR_FILE_EXISTS);
+    assert.equal(m.readCString(dest, 260), 'C:\\WINDOWS\\inf\\oem1.inf', 'naming the one there');
+    assert.equal(copy([inf, 0, 1, 0, dest, 5, size, 0]), 0);
+    assert.equal(m.lastError(), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(m.fns.SetupCopyOEMInfA.argBytes, 32);
+});
+
+test('this machine\'s device tree has no devices to enumerate or change', async()=>{
+    // Wine's setupapi test_get_class_devs for the arguments; every class is
+    // empty here, so a set enumerates nothing.
+    const m = await machine();
+    const ERROR_NO_MORE_ITEMS = 259;
+    const ERROR_NO_SUCH_DEVINST = 0xe000020b;
+    const DIGCF_PRESENT = 0x2;
+    const DIGCF_ALLCLASSES = 0x4;
+    const guid = m.buffer(16);
+    assert.equal(m.fns.SetupDiGetClassDevsA.handler([0, 0, 0, 0]), INVALID_HANDLE_VALUE);
+    assert.equal(m.lastError(), ERROR_INVALID_PARAMETER, 'no class, and not all of them');
+    assert.equal(m.fns.SetupDiGetClassDevsA.handler([0, m.str(''), 0, DIGCF_ALLCLASSES]),
+        INVALID_HANDLE_VALUE);
+    assert.equal(m.lastError(), ERROR_INVALID_DATA);
+    assert.equal(m.fns.SetupDiGetClassDevsA.handler([0, m.str('ROOT\\'), 0, DIGCF_ALLCLASSES]),
+        INVALID_HANDLE_VALUE);
+    assert.equal(m.lastError(), ERROR_INVALID_DATA);
+
+    const set = m.fns.SetupDiGetClassDevsA.handler([guid, 0, 0, DIGCF_PRESENT]);
+    assert.notEqual(set, INVALID_HANDLE_VALUE);
+    const device = m.buffer(28);
+    m.view.setUint32(device, 28, true);
+    assert.equal(m.fns.SetupDiEnumDeviceInfo.handler([set, 0, device]), 0);
+    assert.equal(m.lastError(), ERROR_NO_MORE_ITEMS);
+    m.view.setUint32(device, 20, true);
+    assert.equal(m.fns.SetupDiEnumDeviceInfo.handler([set, 0, device]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_USER_BUFFER, 'an SP_DEVINFO_DATA of the wrong size');
+    m.view.setUint32(device, 28, true);
+    assert.equal(m.fns.SetupDiGetDeviceRegistryPropertyA.handler([set, device, 0, 0, 0, 0, 0]),
+        0);
+    assert.equal(m.lastError(), ERROR_NO_SUCH_DEVINST);
+    assert.equal(m.fns.SetupDiSetDeviceRegistryPropertyA.handler([set, device, 0, 0, 0]), 0);
+    assert.equal(m.lastError(), ERROR_NO_SUCH_DEVINST);
+    assert.equal(m.fns.SetupDiDestroyDeviceInfoList.handler([set]), 1);
+    assert.equal(m.fns.SetupDiDestroyDeviceInfoList.handler([set]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_HANDLE);
+    assert.equal(m.fns.SetupDiEnumDeviceInfo.handler([set, 0, device]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_HANDLE);
+});
