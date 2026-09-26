@@ -21,11 +21,16 @@
  * Text mode belongs to the descriptor: a read folds CR LF into LF and stops at
  * a ^Z, a write puts CR before every LF. Which mode a file opens in is the
  * caller's `_O_TEXT` or `_O_BINARY`, and when it names neither, the runtime's
- * `_fmode`, which starts out text.
+ * `_fmode`, which starts out text. A Unicode translation is text mode over
+ * UTF-16, which the file keeps as UTF-16 or UTF-8 (see widetext.js).
  */
 
 import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from '../kernel32/console.js';
 import { EACCES, EBADF, EEXIST, EINVAL, EMFILE, ENOENT, ENOSPC } from './globals.js';
+import {
+    O_UNICODE, O_WTEXT, bytesOfUnits, decodeUnits, encodeUnits, encodingOf, foldUnits, markIn,
+    markOf, textOfUnits, unitsOf, unmarkedEncodingOf,
+} from './widetext.js';
 
 /** `_open` flags, at msvcrt's values (fcntl.h). */
 const O_WRONLY = 0x0001;
@@ -39,8 +44,12 @@ const O_EXCL = 0x0400;
 const O_TEXT = 0x4000;
 export const O_BINARY = 0x8000;
 
-/** The Unicode translations `_setmode` names, which this runtime does not carry. */
-const O_UNICODE = [0x10000, 0x20000, 0x40000];
+/**
+ * The Unicode translation a set of flags names, or 0.
+ *
+ * @param {number} flags
+ */
+const unicodeOf = flags=>O_UNICODE.find(mode=>(flags & mode) !== 0) ?? 0;
 
 /** msvcrt's own ceiling on open descriptors. */
 const MAX_DESCRIPTORS = 2048;
@@ -149,6 +158,13 @@ export function latin1(bytes){
  *           0 before. Closing the descriptor closes it.
  * @property {boolean} append    Every write goes to the end of the file first.
  * @property {boolean} text
+ * @property {number} unicode    The Unicode translation the descriptor is in,
+ *           `_O_WTEXT`, `_O_U16TEXT` or `_O_U8TEXT`; 0 for none.
+ * @property {import('./widetext.js').Encoding} encoding
+ *           How the file keeps the UTF-16 of a Unicode translation.
+ * @property {Promise<void> | null} ready
+ *           The file's mark being read, when the volume has not got the
+ *           bytes yet; a read waits for it.
  * @property {boolean} ended     A ^Z was read: reads answer nothing until a seek.
  * @property {boolean} temporary The file is removed when the descriptor closes.
  * @property {number} [console]  The standard handle a console descriptor stands for.
@@ -174,7 +190,7 @@ export function latin1(bytes){
  *
  * @param {OpenFile} file
  * @param {{ text: boolean, append?: boolean, temporary?: boolean, handle?: number,
- *           console?: number }} settings
+ *           console?: number, unicode?: number }} settings
  * @returns {Descriptor}
  */
 const over = (file, settings)=>({
@@ -199,7 +215,10 @@ const over = (file, settings)=>({
     },
     handle: settings.handle ?? 0,
     append: Boolean(settings.append),
-    text: settings.text,
+    text: settings.text || Boolean(settings.unicode),
+    unicode: settings.unicode ?? 0,
+    encoding: encodingOf(settings.unicode ?? 0),
+    ready: null,
     ended: false,
     temporary: Boolean(settings.temporary),
     console: settings.console,
@@ -209,7 +228,8 @@ const over = (file, settings)=>({
 /**
  * A descriptor on the console, for the standard handle it stands for.
  *
- * @param {number} handle @param {{ text: boolean, append?: boolean }} settings
+ * @param {number} handle
+ * @param {{ text: boolean, append?: boolean, unicode?: number }} settings
  */
 const onConsole = (handle, settings)=>{
     const read = handle === HANDLE_STDIN;
@@ -227,6 +247,7 @@ const onConsole = (handle, settings)=>{
  * @property {boolean} [append]
  * @property {boolean | null} [text]  Null: whatever `_fmode` says.
  * @property {boolean} [temporary]  Remove the file when the descriptor closes.
+ * @property {number} [unicode]  A Unicode translation to open it in.
  */
 
 /**
@@ -292,6 +313,70 @@ export function createDescriptors(host){
     const sizeOf = descriptor=>host.files.stat(descriptor.path)?.size ?? 0;
 
     /**
+     * A file opened in a Unicode translation: an empty one open for writing
+     * starts with the mark of the translation's encoding, and one with
+     * something in it that is open for reading is read the way its own mark
+     * says -- skipped, so the first read is of the text -- or, with no mark,
+     * the way the translation reads such a file (Wine's msvcrt
+     * test_file_write_read).
+     *
+     * @param {Descriptor} descriptor
+     */
+    const markFile = descriptor=>{
+        const size = sizeOf(descriptor);
+        if (size === 0 && descriptor.write)
+        {
+            const mark = markOf(descriptor.encoding);
+            descriptor.position = host.files.write(descriptor.node, 0, mark);
+            return;
+        }
+        if (size === 0 || !descriptor.read)
+        {
+            return;
+        }
+        const reading = settle(host.files.read(descriptor.node, 0, 3), head=>{
+            const mark = markIn(head);
+            descriptor.encoding = mark?.encoding ?? unmarkedEncodingOf(descriptor.unicode);
+            if (mark && descriptor.position === 0)
+            {
+                descriptor.position = mark.length;
+            }
+        });
+        if (reading instanceof Promise)
+        {
+            descriptor.ready = reading.then(()=>{
+                descriptor.ready = null;
+            });
+        }
+    };
+
+    /**
+     * Up to `limit` bytes of the program's UTF-16 from a descriptor in a
+     * Unicode translation: the file's units, CR LF folded to LF, and the
+     * position moved past the bytes of the file they came from. As many
+     * bytes are asked for as the units could take, and a unit more, which
+     * says whether a CR is the first half of a CR LF. A read waits for the
+     * file's mark when that is still on its way.
+     *
+     * @param {Descriptor} descriptor @param {number} limit
+     * @returns {Uint8Array | Promise<Uint8Array>}
+     */
+    const pullUnicode = (descriptor, limit)=>{
+        const units = Math.floor(limit / 2);
+        const widest = descriptor.encoding === 'utf16' ? 2 : descriptor.encoding === 'utf8' ? 3 : 1;
+        /** @returns {Uint8Array | Promise<Uint8Array>} */
+        const read = ()=>{
+            const start = descriptor.position;
+            return settle(host.files.read(descriptor.node, start, (units + 2) * widest + 2), raw=>{
+                const folded = foldUnits(decodeUnits(raw, descriptor.encoding), units);
+                descriptor.position = start + folded.consumed;
+                return bytesOfUnits(folded.units);
+            });
+        };
+        return descriptor.ready ? descriptor.ready.then(read) : read();
+    };
+
+    /**
      * A stretch of the file for a stream, from what the last one read when it
      * holds the stretch -- or holds the end of the file, when that read found
      * it and some of what it read is still unconsumed. Past that, the volume
@@ -354,11 +439,17 @@ export function createDescriptors(host){
                 return -1;
             }
             const file = { node, path, position: 0, read: request.read, write: request.write };
-            table.set(fd, over(file, {
+            const descriptor = over(file, {
                 append: request.append,
                 text: request.text ?? ((host.fmode?.() ?? 0) & O_BINARY) === 0,
                 temporary: request.temporary,
-            }));
+                unicode: request.unicode,
+            });
+            table.set(fd, descriptor);
+            if (descriptor.unicode !== 0)
+            {
+                markFile(descriptor);
+            }
             return fd;
         },
 
@@ -383,7 +474,8 @@ export function createDescriptors(host){
          * then on: the lowest number free, or -1 with EBADF for a handle
          * that is not an open file. A standard handle is the console.
          *
-         * @param {number} handle @param {{ text: boolean, append: boolean }} settings
+         * @param {number} handle
+         * @param {{ text: boolean, append: boolean, unicode: number }} settings
          */
         adopt(handle, settings){
             const standard = handle === HANDLE_STDIN || handle === HANDLE_STDOUT
@@ -446,6 +538,18 @@ export function createDescriptors(host){
             return live;
         },
 
+        /**
+         * Closes every descriptor but the console's three, as the end of the
+         * process closes every handle it held, however it ended: a temporary
+         * file goes then if it has not gone before.
+         */
+        closeAll(){
+            for (const fd of [...table.keys()].filter(number=>number >= STANDARD_DESCRIPTORS))
+            {
+                this.close(fd);
+            }
+        },
+
         size: sizeOf,
 
         /**
@@ -467,7 +571,8 @@ export function createDescriptors(host){
          * position stays the offset of the next byte the program has not
          * seen; in text mode a CR LF is one LF that consumed two bytes, a CR
          * not before an LF is itself, and a ^Z ends the data, the position
-         * going to the end of the file since nothing after it is data.
+         * going to the end of the file since nothing after it is data. In a
+         * Unicode translation the bytes are the program's UTF-16.
          *
          * @param {Descriptor} descriptor @param {number} limit @param {boolean} line
          * @returns {Uint8Array | Promise<Uint8Array>}
@@ -476,6 +581,10 @@ export function createDescriptors(host){
             if (descriptor.node === null || descriptor.ended || limit <= 0)
             {
                 return new Uint8Array(0);
+            }
+            if (descriptor.unicode !== 0)
+            {
+                return pullUnicode(descriptor, limit);
             }
             if (!descriptor.text)
             {
@@ -527,19 +636,31 @@ export function createDescriptors(host){
         /**
          * Writes at the position -- at the end first when the descriptor
          * appends -- and answers with how many of the caller's bytes were
-         * stored whole; in text mode each LF goes out as CR LF.
+         * stored whole; in text mode each LF goes out as CR LF. In a Unicode
+         * translation the caller's bytes are UTF-16, kept in the file's
+         * encoding, and on the console they are the characters they spell.
          *
          * @param {Descriptor} descriptor @param {Uint8Array} bytes
          */
         put(descriptor, bytes){
             if (descriptor.node === null)
             {
-                host.write?.(/** @type {number} */ (descriptor.console), latin1(bytes));
+                host.write?.(/** @type {number} */ (descriptor.console), descriptor.unicode === 0
+                    ? latin1(bytes)
+                    : textOfUnits(unitsOf(bytes)));
                 return bytes.length;
             }
             if (descriptor.append)
             {
                 descriptor.position = sizeOf(descriptor);
+            }
+            if (descriptor.unicode !== 0)
+            {
+                const { bytes: raw, ends } = encodeUnits(unitsOf(bytes), descriptor.encoding);
+                const stored = host.files.write(descriptor.node, descriptor.position, raw);
+                descriptor.position += stored;
+                descriptor.ahead = null;
+                return ends.filter(end=>end <= stored).length * 2;
             }
             let raw = bytes;
             if (descriptor.text)
@@ -588,6 +709,8 @@ export function createDescriptors(host){
  * @property {(code: number) => void} [errno]
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a call refuses what real Windows would have done.
+ * @property {(values: Record<string, number>) => void} [setRegisters]
+ *           Where the high half of an __int64 answer goes: EDX.
  */
 
 /**
@@ -654,6 +777,76 @@ export function createIoFunctions(host, descriptors){
         view.setUint32(layout.MTIME, time, true);
         view.setUint32(layout.CTIME, time, true);
         host.writeMemory(address >>> 0, bytes);
+    };
+
+    /**
+     * The body `_lseek` and `_lseeki64` share: the new position; -1 with
+     * EINVAL for an origin that is not one or a position before the start,
+     * EBADF for a number that is not a file.
+     *
+     * @param {number} fd @param {number} offset @param {number} origin
+     */
+    const seekTo = (fd, offset, origin)=>{
+        const descriptor = fileAt(fd);
+        if (!descriptor)
+        {
+            return -1;
+        }
+        const base = origin === SEEK_SET ? 0
+            : origin === SEEK_CUR ? descriptor.position
+                : origin === SEEK_END ? descriptors.size(descriptor) : -1;
+        const position = base + offset;
+        if (base < 0 || position < 0)
+        {
+            fail(EINVAL);
+            return -1;
+        }
+        descriptors.seek(descriptor, position);
+        return position;
+    };
+
+    /**
+     * An __int64 answer: the high half to EDX, the low half returned for EAX.
+     *
+     * @param {number} value
+     */
+    const wide = value=>{
+        const bits = BigInt.asUintN(64, BigInt(value));
+        host.setRegisters?.({ edx: Number(bits >> 32n) });
+        return Number(bits & 0xffffffffn);
+    };
+
+    /**
+     * The body `_fstat` and `_fstati64` share. A file is a regular file
+     * anyone may read and write, on device 0; a console descriptor is a
+     * character device whose device is its number.
+     *
+     * @param {number} fd @param {number} buffer
+     * @param {typeof STAT | typeof STATI64} layout
+     */
+    const statDescriptor = (fd, buffer, layout)=>{
+        const descriptor = descriptors.get(fd | 0);
+        if (!descriptor)
+        {
+            fail(EBADF);
+            return -1;
+        }
+        if ((buffer >>> 0) === 0)
+        {
+            fail(EINVAL);
+            return -1;
+        }
+        if (descriptor.node === null)
+        {
+            writeStat(buffer, { device: fd | 0, mode: S_IFCHR, size: 0, modified: 0 }, layout);
+            return 0;
+        }
+        const entry = host.files.stat(descriptor.path);
+        writeStat(buffer, {
+            device: 0, mode: S_IFREG | ALL_READ | ALL_WRITE,
+            size: entry?.size ?? 0, modified: entry?.modified ?? 0,
+        }, layout);
+        return 0;
     };
 
     /**
@@ -752,24 +945,16 @@ export function createIoFunctions(host, descriptors){
              * A descriptor on a handle, which it owns from then on: `_close`
              * closes the handle, and a second descriptor on it finds it closed
              * (Wine's msvcrt test__open_osfhandle and test_close). Binary
-             * unless `_O_TEXT` is named; the access is the handle's. -1 with
-             * EBADF for a handle that is not an open file. A Unicode
-             * translation is refused as `_setmode` refuses it.
+             * unless `_O_TEXT` or a Unicode translation is named, which
+             * writes no mark into a file the handle already has; the access
+             * is the handle's. -1 with EBADF for a handle that is not an
+             * open file.
              */
-            _open_osfhandle: cdecl(8, ([handle, flags])=>{
-                const unicode = O_UNICODE.find(mode=>((flags >>> 0) & mode) !== 0);
-                if (unicode !== undefined)
-                {
-                    host.divergence?.('_open_osfhandle',
-                        `Unicode translation 0x${unicode.toString(16)} is not carried`);
-                    fail(EINVAL);
-                    return -1;
-                }
-                return descriptors.adopt(handle >>> 0, {
-                    text: ((flags >>> 0) & O_TEXT) !== 0,
-                    append: ((flags >>> 0) & O_APPEND) !== 0,
-                });
-            }),
+            _open_osfhandle: cdecl(8, ([handle, flags])=>descriptors.adopt(handle >>> 0, {
+                text: ((flags >>> 0) & O_TEXT) !== 0,
+                append: ((flags >>> 0) & O_APPEND) !== 0,
+                unicode: unicodeOf(flags >>> 0),
+            })),
         }
         : {};
 
@@ -799,6 +984,7 @@ export function createIoFunctions(host, descriptors){
                 append: (flags & O_APPEND) !== 0,
                 text: (flags & O_BINARY) !== 0 ? false : ((flags & O_TEXT) !== 0 ? true : null),
                 temporary: (flags & O_TEMPORARY) !== 0,
+                unicode: (flags & O_BINARY) !== 0 ? 0 : unicodeOf(flags),
             });
         }),
 
@@ -830,9 +1016,28 @@ export function createIoFunctions(host, descriptors){
                 return -1;
             }
             const wanted = count >>> 0;
-            if (wanted === 0 || descriptor.node === null || descriptor.ended)
+            if (wanted === 0)
             {
                 return 0;
+            }
+            if (descriptor.unicode !== 0 && wanted % 2 !== 0)
+            {
+                fail(EINVAL);
+                return -1;
+            }
+            if (descriptor.node === null || descriptor.ended)
+            {
+                return 0;
+            }
+            if (descriptor.unicode !== 0)
+            {
+                return settle(descriptors.pull(descriptor, wanted, false), bytes=>{
+                    if (bytes.length > 0)
+                    {
+                        host.writeMemory(buffer >>> 0, bytes);
+                    }
+                    return bytes.length;
+                });
             }
             const start = descriptor.position;
             /** @param {Uint8Array} bytes @param {number} consumed */
@@ -886,6 +1091,11 @@ export function createIoFunctions(host, descriptors){
             {
                 return 0;
             }
+            if (descriptor.unicode !== 0 && wanted % 2 !== 0)
+            {
+                fail(EINVAL);
+                return -1;
+            }
             const bytes = host.readMemory(buffer >>> 0, wanted).slice();
             if (descriptors.put(descriptor, bytes) < wanted)
             {
@@ -901,24 +1111,7 @@ export function createIoFunctions(host, descriptors){
          * The new position; -1 with EINVAL for an origin that is not one or a
          * position before the start, EBADF for a number that is not a file.
          */
-        _lseek: cdecl(12, ([fd, offset, origin])=>{
-            const descriptor = fileAt(fd);
-            if (!descriptor)
-            {
-                return -1;
-            }
-            const base = origin === SEEK_SET ? 0
-                : origin === SEEK_CUR ? descriptor.position
-                    : origin === SEEK_END ? descriptors.size(descriptor) : -1;
-            const position = base + (offset | 0);
-            if (base < 0 || position < 0)
-            {
-                fail(EINVAL);
-                return -1;
-            }
-            descriptors.seek(descriptor, position);
-            return position;
-        }),
+        _lseek: cdecl(12, ([fd, offset, origin])=>seekTo(fd, offset | 0, origin)),
 
         /** long _tell(int fd) -- the position, as `_lseek(fd, 0, SEEK_CUR)` answers it. */
         _tell: cdecl(4, ([fd])=>fileAt(fd)?.position ?? -1),
@@ -947,11 +1140,11 @@ export function createIoFunctions(host, descriptors){
         /**
          * int _setmode(int fd, int mode)
          *
-         * The translation the descriptor had, `_O_TEXT` or `_O_BINARY`. The
-         * mode is checked before the number and must be exactly one mode
-         * (Wine's msvcrt test_setmode). The Unicode translations are refused:
-         * the byte calls here would write their text untranslated, and a
-         * program told -1 knows its wide output is not being converted.
+         * The translation the descriptor had: `_O_TEXT`, `_O_BINARY`, or
+         * `_O_WTEXT` for any of the three Unicode ones. The mode is checked
+         * before the number and must be exactly one mode (Wine's msvcrt
+         * test_setmode). A Unicode translation keeps its text in the
+         * encoding it names, with no mark written.
          */
         _setmode: cdecl(8, ([fd, mode])=>{
             const wanted = mode >>> 0;
@@ -966,15 +1159,11 @@ export function createIoFunctions(host, descriptors){
                 fail(EBADF);
                 return -1;
             }
-            if (O_UNICODE.includes(wanted))
-            {
-                host.divergence?.('_setmode',
-                    `Unicode translation 0x${wanted.toString(16)} is not carried`);
-                fail(EINVAL);
-                return -1;
-            }
-            const previous = descriptor.text ? O_TEXT : O_BINARY;
-            descriptor.text = wanted === O_TEXT;
+            const previous = descriptor.unicode !== 0 ? O_WTEXT
+                : (descriptor.text ? O_TEXT : O_BINARY);
+            descriptor.text = wanted !== O_BINARY;
+            descriptor.unicode = O_UNICODE.includes(wanted) ? wanted : 0;
+            descriptor.encoding = encodingOf(descriptor.unicode);
             return previous;
         }),
 
@@ -984,30 +1173,10 @@ export function createIoFunctions(host, descriptors){
          * A file is a regular file anyone may read and write, on device 0; a
          * console descriptor is a character device whose device is its number.
          */
-        _fstat: cdecl(8, ([fd, buffer])=>{
-            const descriptor = descriptors.get(fd | 0);
-            if (!descriptor)
-            {
-                fail(EBADF);
-                return -1;
-            }
-            if ((buffer >>> 0) === 0)
-            {
-                fail(EINVAL);
-                return -1;
-            }
-            if (descriptor.node === null)
-            {
-                writeStat(buffer, { device: fd | 0, mode: S_IFCHR, size: 0, modified: 0 });
-                return 0;
-            }
-            const entry = host.files.stat(descriptor.path);
-            writeStat(buffer, {
-                device: 0, mode: S_IFREG | ALL_READ | ALL_WRITE,
-                size: entry?.size ?? 0, modified: entry?.modified ?? 0,
-            });
-            return 0;
-        }),
+        _fstat: cdecl(8, ([fd, buffer])=>statDescriptor(fd, buffer, STAT)),
+
+        /** int _fstati64(int fd, struct _stati64 *buffer) -- `_fstat` with the 64-bit size. */
+        _fstati64: cdecl(8, ([fd, buffer])=>statDescriptor(fd, buffer, STATI64)),
 
         /** int _stat(const char *path, struct _stat *buffer) */
         _stat: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT)),
@@ -1018,5 +1187,30 @@ export function createIoFunctions(host, descriptors){
          * `_stat` with a size that goes past 4 GiB, and the same answers.
          */
         _stati64: cdecl(8, ([path, buffer])=>statPath(path, buffer, STATI64)),
+
+        // An __int64 answer is EDX:EAX, and only a seam onto the registers
+        // reaches EDX: without one these would answer a high half that is
+        // whatever the register held, so they stay unexported.
+        ...(host.setRegisters
+            ? {
+                /**
+                 * __int64 _lseeki64(int fd, __int64 offset, int origin)
+                 *
+                 * `_lseek` with an offset and an answer past 4 GiB: -1 as an
+                 * __int64, with the same errno, when it fails.
+                 */
+                _lseeki64: cdecl(16, ([fd, low, high, origin])=>
+                    wide(seekTo(fd, (high | 0) * 0x100000000 + (low >>> 0), origin))),
+
+                /** __int64 _telli64(int fd) */
+                _telli64: cdecl(4, ([fd])=>wide(fileAt(fd)?.position ?? -1)),
+
+                /** __int64 _filelengthi64(int fd) */
+                _filelengthi64: cdecl(4, ([fd])=>{
+                    const descriptor = fileAt(fd);
+                    return wide(descriptor ? descriptors.size(descriptor) : -1);
+                }),
+            }
+            : {}),
     };
 }

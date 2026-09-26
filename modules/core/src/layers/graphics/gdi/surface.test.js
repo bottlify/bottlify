@@ -268,8 +268,32 @@ test('a sixteen-bit section made with BI_BITFIELDS is laid out by its masks', ()
     fiveFive.write(0, 0, 0x0000ff00);
     assert.deepEqual([...memory.subarray(0, 2)], [0xe0, 0x03]);
 
-    assert.equal(section([0x0f00, 0x00f0, 0x000f]), null,
-        'masks this layer cannot draw by are refused rather than drawn as 5-5-5');
+    const fourFour = section([0x0f00, 0x00f0, 0x000f]);
+    assert.ok(fourFour, 'any other masks are drawn by, not as 5-5-5');
+    fourFour.write(0, 0, 0x0000ff00);
+    assert.deepEqual([...memory.subarray(0, 2)], [0xf0, 0x00]);
+    assert.equal(fourFour.read(0, 0), 0x0000ff00);
+});
+
+test('a thirty-two-bit section made with BI_BITFIELDS is laid out by its masks', ()=>{
+    const memory = new Uint8Array(16);
+    const bits = 0x100;
+    /** @param {number[]} bitfields */
+    const section = bitfields=>/** @type {import('./contract.js').Surface} */ (
+        surfaceForDibSection({ width: 1, height: 1, bitCount: 32, bits, compression: 3,
+            bitfields }, memory, bits));
+    const view = new DataView(memory.buffer);
+
+    section([0xff0000, 0x00ff00, 0x0000ff]).write(0, 0, 0x00123456);
+    assert.equal(view.getUint32(0, true), 0x00123456, 'the native layout');
+    const swapped = section([0x0000ff, 0x00ff00, 0xff0000]);
+    swapped.write(0, 0, 0x00123456);
+    assert.equal(view.getUint32(0, true), 0x00563412, 'red in the low byte');
+    assert.equal(swapped.read(0, 0), 0x00123456);
+    const wide = section([0x3ff00000, 0x000ffc00, 0x000003ff]);
+    wide.write(0, 0, 0x00ff00ff);
+    assert.equal(view.getUint32(0, true), 0x3fc003fc, 'each channel in its top bits');
+    assert.equal(wide.read(0, 0), 0x00ff00ff);
 });
 
 test('byte-exact: a one-bit surface packs its leftmost pixel into the top bit', ()=>{

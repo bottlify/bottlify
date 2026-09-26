@@ -352,8 +352,11 @@ test('the blits that need no source, and the ones that scale, reach the service'
     assert.deepEqual(graphics.calls.filter(call=>call[0] === 'stretchDIBits'),
         [['stretchDIBits', hdc, 2, 4, 16, 8, 4]]);
     assert.equal(fns.StretchDIBits.handler(
-        [hdc, 0, 0, 4, 4, 0, 0, 2, 2, BITS, INFO, DIB_PAL_COLORS, SRCCOPY]), 0,
-    'a palette-relative table is not decoded, and says so with zero lines');
+        [hdc, 0, 0, 4, 4, 0, 0, 2, 2, BITS, INFO, DIB_PAL_COLORS, SRCCOPY]), 2,
+    'a palette-relative table is read through the palette');
+    assert.equal(fns.StretchDIBits.handler(
+        [hdc, 0, 0, 4, 4, 0, 0, 2, 2, BITS, INFO, DIB_PAL_COLORS + 2, SRCCOPY]), 0,
+    'and past DIB_PAL_INDICES there is no usage');
     assert.equal(fns.PatBlt.argBytes, 24);
     assert.equal(fns.StretchDIBits.argBytes, 52);
 });
@@ -550,6 +553,47 @@ test('GetObject fills a DIBSECTION for a DIB section when there is room for one'
     assert.equal(fns.GetObjectA.handler([topDown, 84, OUT]), 84);
     assert.equal(memory.u32(OUT + 24 + 8), 3);
     assert.equal(memory.u32(OUT + 24 + 32), 0, 'no colour table above eight bits');
+});
+
+test('CreateCompatibleBitmap on a DC with a DIB section selected makes a DIB section', ()=>{
+    // The CreateCompatibleBitmap documentation: with a DIB section selected,
+    // the bitmap it makes is a DIB section -- here in the selected one's
+    // format, its depth, masks and colours, over rows of its own.
+    const { memory, fns, hdc } = setup();
+    const dc = fns.CreateCompatibleDC.handler([hdc]);
+    const colors = [...Array(256).keys()].map(index=>index * 0x010203 & 0xffffff);
+    putInfo(memory, { width: 4, height: -4, bitCount: 8, colors });
+    const section = fns.CreateDIBSection.handler([hdc, STRUCT, 0, OUT + 0x80, 0, 0]);
+    const first = memory.u32(OUT + 0x80);
+    const previous = fns.SelectObject.handler([dc, section]);
+
+    const made = fns.CreateCompatibleBitmap.handler([dc, 5, 3]);
+    memory.bytes.fill(0xaa, OUT, OUT + 84);
+    assert.equal(fns.GetObjectA.handler([made, 84, OUT]), 84, 'a DIBSECTION, so a section');
+    assert.ok(memory.u32(OUT + 20) !== 0 && memory.u32(OUT + 20) !== first, 'rows of its own');
+    assert.deepEqual([4, 8, 12].map(at=>memory.u32(OUT + at)), [5, 3, 8]);
+    assert.equal(memory.u16(OUT + 18), 8, 'the section\'s depth, not the screen\'s');
+    const other = fns.CreateCompatibleDC.handler([hdc]);
+    fns.SelectObject.handler([other, made]);
+    memory.bytes.fill(0, OUT, OUT + 1024);
+    assert.equal(fns.GetDIBColorTable.handler([other, 0, 256, OUT]), 256);
+    assert.deepEqual([...Array(256).keys()].map(index=>memory.u32(OUT + index * 4)), colors);
+    fns.SelectObject.handler([other, previous]);
+
+    putInfo(memory, { width: 2, height: 2, bitCount: 16, colors: [0xf800, 0x07e0, 0x001f] });
+    memory.putU32s(STRUCT + 16, [3]);
+    memory.putU32s(STRUCT + 32, [0]);
+    fns.SelectObject.handler([dc, fns.CreateDIBSection.handler([hdc, STRUCT, 0, OUT + 0x80,
+        0, 0])]);
+    const masked = fns.CreateCompatibleBitmap.handler([dc, 2, 2]);
+    assert.equal(fns.GetObjectA.handler([masked, 84, OUT]), 84);
+    assert.equal(memory.u16(OUT + 18), 16);
+    assert.equal(memory.u32(OUT + 24 + 16), 3, 'BI_BITFIELDS');
+    assert.deepEqual([64, 68, 72].map(at=>memory.u32(OUT + at)), [0xf800, 0x07e0, 0x001f]);
+
+    fns.SelectObject.handler([dc, fns.CreateCompatibleBitmap.handler([hdc, 2, 2])]);
+    assert.equal(fns.GetObjectA.handler([fns.CreateCompatibleBitmap.handler([dc, 2, 2]), 84,
+        OUT]), 24, 'with a device-dependent bitmap selected, a device-dependent bitmap');
 });
 
 test('GetObject hands a font back as the LOGFONT it was made from, in either spelling', ()=>{
@@ -786,6 +830,40 @@ test('palette entries are kept, and only as far as the palette goes', ()=>{
     assert.equal(fns.SetPaletteEntries.handler([palette, 1 << 20, 3, STRUCT]), 0);
     assert.equal(fns.SetPaletteEntries.handler([0x1234, 0, 3, STRUCT]), 0,
         'and a handle that is not a palette is not one');
+});
+
+test('the stock default palette holds the twenty colours Windows records for it', ()=>{
+    // Wine's metafile tests replay a Windows-recorded CreatePalette of the
+    // stock palette: these twenty PALETTEENTRYs, red first. Its palette tests
+    // read twenty back, and find SetPaletteEntries refused on it.
+    const { memory, fns, hdc } = setup();
+    const stock = fns.GetStockObject.handler([15]);
+    assert.equal(fns.GetPaletteEntries.argBytes, 16);
+    assert.equal(fns.GetPaletteEntries.handler([stock, 0, 0, 0]), 20,
+        'a null buffer asks the size');
+    assert.equal(fns.GetPaletteEntries.handler([stock, 0, 20, OUT]), 20);
+    const colours = [...Array(20).keys()].map(index=>memory.u32(OUT + index * 4));
+    assert.deepEqual(colours, [
+        0x000000, 0x000080, 0x008000, 0x008080, 0x800000, 0x800080, 0x808000, 0xc0c0c0,
+        0xc0dcc0, 0xf0caa6, 0xf0fbff, 0xa4a0a0,
+        0x808080, 0x0000ff, 0x00ff00, 0x00ffff, 0xff0000, 0xff00ff, 0xffff00, 0xffffff,
+    ].map(bgr=>bgr >>> 0));
+    assert.equal(fns.GetPaletteEntries.handler([stock, 18, 5, OUT]), 2, 'only as far as it goes');
+
+    memory.putU32s(STRUCT, [0x00123456]);
+    assert.equal(fns.SetPaletteEntries.handler([stock, 0, 1, STRUCT]), 0);
+    fns.GetPaletteEntries.handler([stock, 0, 1, OUT]);
+    assert.equal(memory.u32(OUT), 0, 'and it is not changed');
+
+    // A DIB_PAL_COLORS table is indices into it from the moment a DC exists.
+    memory.putU32s(STRUCT, [40, 1, 1, 1 | 8 << 16, 0, 0, 0, 0, 1, 0]);
+    memory.bytes[STRUCT + 40] = 13;
+    memory.bytes[STRUCT + 41] = 0;
+    const section = fns.CreateDIBSection.handler([hdc, STRUCT, 1, 0, 0, 0]);
+    const reader = fns.CreateCompatibleDC.handler([hdc]);
+    fns.SelectObject.handler([reader, section]);
+    assert.equal(fns.GetDIBColorTable.handler([reader, 0, 1, OUT]), 1);
+    assert.equal(memory.u32(OUT), 0x00ff0000, 'entry 13 is red');
 });
 
 test('the system palette has no entries to report', ()=>{

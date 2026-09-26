@@ -621,6 +621,70 @@ test('a 5-6-5 DIB draws as 5-6-5, from StretchDIBits and in a section of its own
     assert.deepEqual([...bytes.subarray(at, at + 2)], [0xe0, 0x07]);
 });
 
+test('a BI_BITFIELDS section of any masks is drawn and read by them', ()=>{
+    // Wine's test_simple_graphics draws into 32-bit sections whose masks put
+    // blue high (a8b8g8r8), are ten bits wide (r10g10b10) and six bits wide
+    // (r6g6b6), and into a 16-bit r4g4b4 one. Each channel goes into its mask
+    // as its top bits, and comes back widened to eight by repeating them.
+    const { fns, view } = wiredGdi();
+    const BI_BITFIELDS = 3;
+    const dc = fns.CreateCompatibleDC.handler([0]);
+    const colour = 0x563412;
+    const cases = [
+        { bitCount: 32, masks: [0x0000ff, 0x00ff00, 0xff0000], stored: 0x00563412,
+            back: colour, raw: 0x00ff0080, rawColour: 0xff0080 },
+        { bitCount: 32, masks: [0x3ff00000, 0x000ffc00, 0x000003ff],
+            stored: (0x12 << 22) | (0x34 << 12) | (0x56 << 2), back: colour,
+            raw: 0x3ff003ff, rawColour: 0xff00ff },
+        { bitCount: 32, masks: [0x0003f000, 0x00000fc0, 0x0000003f],
+            stored: (0x04 << 12) | (0x0d << 6) | 0x15, back: 0x553410,
+            raw: 0x0003f03f, rawColour: 0xff00ff },
+        { bitCount: 16, masks: [0x0f00, 0x00f0, 0x000f], stored: 0x0135, back: 0x553311,
+            raw: 0x0f0f, rawColour: 0xff00ff },
+    ];
+    for (const { bitCount, masks, stored, back, raw, rawColour } of cases)
+    {
+        const name = masks.map(mask=>mask.toString(16)).join('/');
+        putInfo(view, { width: 4, height: -1, bitCount, compression: BI_BITFIELDS, table: masks });
+        const section = fns.CreateDIBSection.handler([dc, WIRED_INFO, 0, WIRED_POINTER, 0, 0]);
+        assert.notEqual(section, 0, name);
+        const at = view.getUint32(WIRED_POINTER, true);
+        /** @param {number} x */
+        const pixel = x=>(bitCount === 32 ? view.getUint32(at + x * 4, true)
+            : view.getUint16(at + x * 2, true));
+        const previous = fns.SelectObject.handler([dc, section]);
+        assert.equal(fns.SetPixel.handler([dc, 0, 0, colour]), back, `${name} SetPixel`);
+        assert.equal(pixel(0) >>> 0, stored >>> 0, `${name} stored`);
+        assert.equal(fns.GetPixel.handler([dc, 0, 0]), back, `${name} GetPixel`);
+        if (bitCount === 32)
+        {
+            view.setUint32(at + 4, raw, true);
+        }
+        else
+        {
+            view.setUint16(at + 2, raw, true);
+        }
+        assert.equal(fns.GetPixel.handler([dc, 1, 0]), rawColour, `${name} read`);
+
+        // A fill and a blit out to plain 32 bits go through the masks too.
+        const brush = fns.CreateSolidBrush.handler([colour]);
+        fns.SelectObject.handler([dc, brush]);
+        fns.PatBlt.handler([dc, 2, 0, 1, 1, PATCOPY]);
+        assert.equal(pixel(2) >>> 0, stored >>> 0, `${name} filled`);
+        putInfo(view, { width: 4, height: -1, bitCount: 32 });
+        const plain = fns.CreateDIBSection.handler([dc, WIRED_INFO, 0, WIRED_POINTER, 0, 0]);
+        const plainAt = view.getUint32(WIRED_POINTER, true);
+        const other = fns.CreateCompatibleDC.handler([0]);
+        fns.SelectObject.handler([other, plain]);
+        assert.equal(fns.BitBlt.handler([other, 0, 0, 4, 1, dc, 0, 0, 0x00cc0020]), 1);
+        assert.deepEqual([0, 1].map(x=>view.getUint32(plainAt + x * 4, true)),
+            [back, rawColour].map(value=>((value & 0xff) << 16 | value & 0xff00
+                | value >>> 16) >>> 0), `${name} blitted`);
+        fns.DeleteDC.handler([other]);
+        fns.SelectObject.handler([dc, previous]);
+    }
+});
+
 test('GetDIBits into BI_BITFIELDS writes the masks it packs the pixels by', ()=>{
     // Wine's test_GetDIBits_BI_BITFIELDS: with bits, the masks come back
     // filled in, and biSizeImage with them.
@@ -803,4 +867,438 @@ test('CreateDIBitmap with CBM_INIT converts the bits it is given into the DC\'s 
     const indexed = fns.CreateDIBitmap.handler([dc, HEADER, CBM_INIT, WIRED_BITS, WIRED_INFO, 1]);
     assert.ok(indexed > 0);
     assert.deepEqual(pixelsOf(indexed, 2), [0x00aabbcc, 0x00112233]);
+});
+
+test('StretchDIBits reads a DIB_PAL_COLORS table through the palette the DC has', ()=>{
+    // Wine's test_SetDIBits and test_SetDIBitsToDevice: each WORD is an index
+    // into the selected palette, wrapping at its end, and an index past
+    // biClrUsed is black; test_dib_formats: DIB_PAL_COLORS + 1, whose pixels
+    // index the palette directly, is drawn too, and nothing past it is.
+    const { fns, view } = wiredGdi();
+    const screen = fns.GetDC.handler([0]);
+    const dc = fns.CreateCompatibleDC.handler([screen]);
+    fns.SelectObject.handler([dc, fns.CreateCompatibleBitmap.handler([screen, 4, 1])]);
+    /** @param {number} usage */
+    const stretch = usage=>fns.StretchDIBits.handler([dc, 0, 0, 4, 1, 0, 0, 4, 1,
+        WIRED_BITS, WIRED_INFO, usage, 0x00cc0020]);
+    /** @returns {number[]} */
+    const row = ()=>[0, 1, 2, 3].map(x=>fns.GetPixel.handler([dc, x, 0]));
+
+    putInfo(view, { width: 4, height: 1, bitCount: 8, table: [0x00000002, 0x00000004] });
+    view.setUint32(WIRED_INFO + BITMAPINFOHEADER.biClrUsed, 3, true);
+    view.setUint32(WIRED_BITS, 0x03020100, true);
+    assert.equal(stretch(1), 1);
+    assert.deepEqual(row(), [0x008000, 0x000000, 0x800000, 0x000000],
+        'the default palette\'s entries 2, 0 and 4, then black past biClrUsed');
+
+    const LOGPALETTE = 0x1100;
+    view.setUint16(LOGPALETTE, 0x300, true);
+    view.setUint16(LOGPALETTE + 2, 3, true);
+    view.setUint32(LOGPALETTE + 4, 0x00332211, true);
+    view.setUint32(LOGPALETTE + 8, 0x00665544, true);
+    view.setUint32(LOGPALETTE + 12, 0x00998877, true);
+    fns.SelectPalette.handler([dc, fns.CreatePalette.handler([LOGPALETTE]), 0]);
+    assert.equal(stretch(1), 1);
+    assert.deepEqual(row(), [0x998877, 0x332211, 0x665544, 0x000000], 'index 4 wraps to 1');
+
+    assert.equal(stretch(2), 1);
+    assert.deepEqual(row(), [0x332211, 0x665544, 0x998877, 0x332211],
+        'DIB_PAL_INDICES: the pixel is the palette index, wrapping too');
+    assert.equal(stretch(3), 0);
+});
+
+// --- scan lines, as Wine's bitmap tests place them ---
+
+/** Where 128 DWORDs of source data, counting up from zero, sit. */
+const SCAN_DATA = 0x2000;
+
+/**
+ * Wine's fixture for the scan-line tests: an 8x8 32-bit DIB section
+ * selected into a memory DC, bottom-up or top-down, and 128 DWORDs of data
+ * counting from zero. Its `inverted` is the tests' inverted_data: the same
+ * sixteen rows of eight in the other order.
+ *
+ * @param {boolean} topDown
+ */
+function scanFixture(topDown){
+    const wired = wiredGdi();
+    const { fns, view } = wired;
+    putInfo(view, { width: 8, height: topDown ? -8 : 8, bitCount: 32 });
+    const section = fns.CreateDIBSection.handler([0, WIRED_INFO, 0, WIRED_POINTER, 0, 0]);
+    const bits = view.getUint32(WIRED_POINTER, true);
+    const dc = fns.CreateCompatibleDC.handler([0]);
+    fns.SelectObject.handler([dc, section]);
+    for (let index = 0; index < 128; index++)
+    {
+        view.setUint32(SCAN_DATA + index * 4, index, true);
+    }
+    return {
+        ...wired,
+        section,
+        dc,
+        /** @param {number} height */
+        header: height=>putInfo(view, { width: 8, height, bitCount: 32 }),
+        fill: ()=>{
+            for (let index = 0; index < 64; index++)
+            {
+                view.setUint32(bits + index * 4, 0xaaaaaaaa, true);
+            }
+        },
+        /** @returns {number[]} the section's 64 DWORDs */
+        pixels: ()=>[...Array(64).keys()].map(index=>view.getUint32(bits + index * 4, true)),
+        /** The section's own DWORDs counting from zero, as GetDIBits' tests set them. */
+        count: ()=>{
+            for (let index = 0; index < 64; index++)
+            {
+                view.setUint32(bits + index * 4, index, true);
+            }
+        },
+    };
+}
+
+/** @param {number} index @returns {number} inverted_data[index] */
+const inverted = index=>120 - (index & ~7) + (index & 7);
+
+/**
+ * What the section should hold: `pick(i)` for each index a range covers, and
+ * 0xaaaaaaaa -- untouched -- everywhere else.
+ *
+ * @param {[number, number, (i: number) => number][]} ranges
+ * @returns {number[]}
+ */
+const expecting = ranges=>[...Array(64).keys()].map(index=>{
+    const range = ranges.find(([from, to])=>index >= from && index < to);
+    return range ? range[2](index) : 0xaaaaaaaa;
+});
+
+/** @param {number} shift @returns {(i: number) => number} data[i + shift] */
+const data = shift=>index=>index + shift;
+/** @param {number} shift @returns {(i: number) => number} inverted_data[i + shift] */
+const flipped = shift=>index=>inverted(index + shift);
+/** @param {number[]} indices @param {(i: number) => number} pick */
+const only = (indices, pick)=>indices.map(index=>/** @type {[number, number,
+    (i: number) => number]} */ ([index, index + 1, pick]));
+
+test('SetDIBitsToDevice draws only the scan lines it was given, from the picture\'s bottom', ()=>{
+    // Wine's test_SetDIBitsToDevice, every case outside a mapping mode or an
+    // RTL layout: the arguments are xDest, yDest, width, height, xSrc, ySrc,
+    // uStartScan and cLines.
+    /** @type {[boolean, number, number[], number, [number, number, any][]][]} */
+    const cases = [
+        [false, 8, [0, 0, 8, 8, 0, 0, 0, 8], 8, [[0, 64, data(0)]]],
+        [false, 8, [0, 0, 8, 8, 0, 0, 1, 5], 5, [[8, 48, data(-8)]]],
+        [false, 8, [0, 0, 8, 8, 0, 3, 1, 5], 5, [[0, 24, data(16)]]],
+        [false, 16, [0, 0, 8, 8, 0, 0, 1, 12], 7, [[8, 64, data(-8)]]],
+        [false, 16, [0, 2, 8, 8, 0, 6, 1, 12], 12, [[0, 40, data(56)]]],
+        [false, 16, [0, -4, 8, 8, 0, 3, 1, 12], 10, [[32, 64, data(-16)]]],
+        [false, 16, [0, 4, 8, 8, 0, -3, 1, 12], 4, [[0, 32, data(0)]]],
+        [false, 16, [0, 2, 8, 5, 0, -2, 1, 12], 2, [[32, 48, data(-32)]]],
+        [false, 5, [0, 0, 8, 8, 0, 0, 2, 2], 2, [[16, 32, data(-16)]]],
+        [false, 5, [3, 3, 2, 2, 1, 2, 1, 5], 3, only([27, 28, 35, 36], data(-18))],
+        [false, 5, [0, 0, 16, 16, 0, 0, 0, 5], 5, []],
+        [false, 5, [0, 2, 8, 4, 0, -1, 3, 12], 0, []],
+        [false, -8, [0, 0, 8, 8, 0, 0, 0, 8], 8, [[0, 64, flipped(64)]]],
+        [false, -8, [0, 0, 8, 8, 0, 0, 1, 5], 5, [[8, 48, flipped(80)]]],
+        [false, -8, [0, 0, 8, 8, 0, 4, 1, 5], 5, [[0, 16, flipped(112)]]],
+        [false, -16, [0, 0, 8, 8, 0, 0, 1, 12], 12, [[8, 64, flipped(24)]]],
+        [false, -16, [0, 4, 8, 8, 0, 7, 1, 12], 12, [[0, 16, flipped(112)]]],
+        [false, -16, [0, 0, 8, 8, 0, 0, 4, 12], 12, [[32, 64, flipped(0)]]],
+        [false, -16, [0, -3, 8, 8, 0, 2, 4, 12], 12, [[40, 64, flipped(-8)]]],
+        [false, -16, [0, 3, 8, 8, 0, -2, 4, 12], 12, [[24, 40, flipped(8)]]],
+        [false, -16, [0, 0, 8, 8, 0, 0, 5, 12], 12, [[40, 64, flipped(-8)]]],
+        [false, -16, [0, 2, 8, 4, 0, -1, 3, 12], 12, []],
+        [false, -16, [5, -7, 8, 16, -2, -4, 0, 12], 12, only([31, 39, 47, 55, 63], flipped(1))],
+        [false, -5, [0, 0, 8, 8, 0, 0, 1, 2], 2, [[8, 24, flipped(104)]]],
+        [false, -5, [5, 4, 2, 2, 6, 3, 1, 5], 5, only([21, 22, 29, 30], flipped(89))],
+        [false, -5, [0, 0, 16, 16, 0, 0, 0, 5], 5, []],
+        [true, -8, [0, 0, 8, 8, 0, 0, 0, 8], 8, [[0, 64, data(0)]]],
+        [true, -8, [0, 0, 8, 8, 0, 0, 1, 5], 5, [[16, 56, data(-16)]]],
+        [true, -8, [0, 3, 8, 3, 0, 2, 1, 5], 5, [[24, 48, data(-16)]]],
+        [true, -16, [0, 0, 8, 8, 0, 0, 1, 12], 12, [[0, 56, data(40)]]],
+        [true, -16, [5, -7, 8, 16, -1, -8, 0, 12], 12, only([6, 7], data(82))],
+        [true, -5, [0, 0, 8, 8, 0, 0, 1, 2], 2, [[40, 56, data(-40)]]],
+        [true, -5, [7, 2, 8, 8, 1, 0, 0, 5], 5, only([47, 55, 63], data(-46))],
+        [true, -5, [0, 0, 16, 16, 0, 0, 0, 5], 5, []],
+        [true, 8, [0, 0, 8, 8, 0, 0, 0, 8], 8, [[0, 64, flipped(64)]]],
+        [true, 8, [0, 0, 8, 8, 0, 0, 1, 5], 5, [[16, 56, flipped(72)]]],
+        [true, 16, [0, 0, 8, 8, 0, 0, 1, 12], 7, [[0, 56, flipped(72)]]],
+        [true, 16, [4, 4, 8, 8, 0, -4, 1, 12], 3,
+            [[36, 40, flipped(68)], [44, 48, flipped(68)], [52, 56, flipped(68)]]],
+        [true, 16, [4, 4, 8, 8, -30, -30, 1, 12], 0, []],
+        [true, 16, [5, -5, 8, 16, -2, -4, 4, 12], 8, only([7, 15, 23], flipped(97))],
+        [true, 5, [0, 0, 8, 8, 0, 0, 1, 2], 2, [[40, 56, flipped(72)]]],
+        [true, 5, [0, 0, 16, 16, 0, 0, 0, 5], 5, []],
+    ];
+    for (const [topDown, height, args, lines, ranges] of cases)
+    {
+        const scan = scanFixture(topDown);
+        scan.header(height);
+        scan.fill();
+        const name = `${topDown ? 't-d' : 'b-u'} section, biHeight ${height}, ${args}`;
+        assert.equal(scan.fns.SetDIBitsToDevice.handler([scan.dc, ...args,
+            SCAN_DATA, WIRED_INFO, 0]), lines, name);
+        assert.deepEqual(scan.pixels(), expecting(ranges), name);
+    }
+});
+
+test('SetDIBits lays the scan lines it is given against the top of the bitmap', ()=>{
+    // Wine's test_SetDIBits: uStartScan and cLines, and what lands where.
+    /** @type {[boolean, number, number, number, [number, number, any][]][]} */
+    const cases = [
+        [false, 8, 0, 8, [[0, 64, data(0)]]],
+        [false, 8, 1, 5, [[8, 48, data(-8)]]],
+        [false, 16, 1, 12, [[0, 40, data(56)]]],
+        [false, 5, 1, 2, [[32, 48, data(-32)]]],
+        [false, -8, 0, 8, [[0, 64, flipped(64)]]],
+        [false, -8, 1, 5, [[8, 48, flipped(80)]]],
+        [false, -16, 1, 12, [[0, 40, flipped(88)]]],
+        [false, -16, 4, 12, [[0, 64, flipped(64)]]],
+        [false, -16, 5, 12, [[0, 64, flipped(56)]]],
+        [false, -5, 1, 2, [[32, 48, flipped(80)]]],
+        [true, -8, 0, 8, [[0, 64, data(0)]]],
+        [true, -8, 1, 5, [[16, 56, data(-16)]]],
+        [true, -16, 1, 12, [[24, 64, data(-24)]]],
+        [true, -5, 1, 2, [[16, 32, data(-16)]]],
+        [true, 8, 0, 8, [[0, 64, flipped(64)]]],
+        [true, 8, 1, 5, [[16, 56, flipped(72)]]],
+        [true, 16, 1, 12, [[24, 64, flipped(8)]]],
+        [true, 5, 1, 2, [[16, 32, flipped(96)]]],
+    ];
+    for (const [topDown, height, start, lines, ranges] of cases)
+    {
+        const scan = scanFixture(topDown);
+        scan.header(height);
+        scan.fill();
+        const screen = scan.fns.GetDC.handler([0]);
+        const name = `${topDown ? 't-d' : 'b-u'} section, biHeight ${height}, ${start}+${lines}`;
+        assert.equal(scan.fns.SetDIBits.handler([screen, scan.section, start, lines,
+            SCAN_DATA, WIRED_INFO, 0]), lines, name);
+        assert.deepEqual(scan.pixels(), expecting(ranges), name);
+    }
+});
+
+test('GetDIBits hands back the scan lines asked for, zeros where the bitmap is not', ()=>{
+    // Wine's test_GetDIBits_scanlines, every case: a section whose DWORDs
+    // count from zero, read back as bottom-up and top-down DIBs of 5, 8 and
+    // 16 rows from uStartScan for cLines. Each range names what lands in the
+    // 128-DWORD buffer; everything else is left as it was.
+    /** @param {number} index @returns {number} the tests' 64-DWORD inverted_bits */
+    const inverted64 = index=>56 - (index & ~7) + (index & 7);
+    /** @param {number} shift */
+    const own = shift=>(/** @type {number} */ index)=>index + shift;
+    /** @param {number} shift */
+    const turned = shift=>(/** @type {number} */ index)=>inverted64(index + shift);
+    const zero = ()=>0;
+    /** @type {[boolean, number, number, number, number, [number, number, any][]][]} */
+    const cases = [
+        [false, 8, 0, 8, 8, [[0, 64, own(0)]]],
+        [false, 8, 1, 5, 5, [[0, 40, own(8)]]],
+        [false, 8, 1, 12, 7, [[0, 56, own(8)]]],
+        [false, 8, 9, 12, 1, []],
+        [false, 16, 1, 12, 5, [[0, 56, zero], [56, 96, own(-56)]]],
+        [false, 16, 2, 12, 6, [[0, 48, zero], [48, 96, own(-48)]]],
+        [false, 16, 2, 3, 0, [[0, 24, zero]]],
+        [false, 5, 1, 2, 2, [[0, 16, own(32)]]],
+        [false, -8, 0, 8, 8, [[0, 64, turned(0)]]],
+        [false, -8, 1, 5, 5, [[0, 40, turned(16)]]],
+        [false, -8, 1, 12, 7, [[0, 56, turned(0)]]],
+        [false, -8, 4, 12, 4, [[0, 32, turned(0)]]],
+        [false, -8, 3, 12, 5, [[0, 40, turned(0)]]],
+        [false, -8, 3, 13, 5, [[0, 40, turned(0)]]],
+        [false, -16, 0, 16, 8, [[0, 64, turned(0)], [64, 128, zero]]],
+        [false, -16, 1, 12, 5, [[0, 40, turned(24)], [40, 96, zero]]],
+        [false, -16, 4, 12, 8, [[0, 64, turned(0)], [64, 96, zero]]],
+        [false, -16, 5, 12, 8, [[0, 64, turned(0)], [64, 88, zero]]],
+        [false, -16, 9, 12, 7, [[0, 56, turned(0)]]],
+        [false, -16, 18, 12, 1, []],
+        [false, -5, 1, 2, 2, [[0, 16, turned(16)]]],
+        [true, -8, 0, 8, 8, [[0, 64, own(0)]]],
+        [true, -8, 1, 5, 5, [[0, 40, own(16)]]],
+        [true, -8, 1, 12, 7, [[0, 56, own(0)]]],
+        [true, -8, 4, 12, 4, [[0, 32, own(0)]]],
+        [true, -8, 3, 12, 5, [[0, 40, own(0)]]],
+        [true, -8, 3, 13, 5, [[0, 40, own(0)]]],
+        [true, -16, 0, 16, 8, [[0, 64, own(0)], [64, 128, zero]]],
+        [true, -16, 1, 12, 5, [[0, 40, own(24)], [40, 96, zero]]],
+        [true, -16, 4, 12, 8, [[0, 64, own(0)], [64, 96, zero]]],
+        [true, -16, 5, 12, 8, [[0, 64, own(0)], [64, 88, zero]]],
+        [true, -16, 9, 12, 7, [[0, 56, own(0)]]],
+        [true, -5, 1, 2, 2, [[0, 16, own(16)]]],
+        [true, 8, 0, 8, 8, [[0, 64, turned(0)]]],
+        [true, 8, 1, 5, 5, [[0, 40, turned(8)]]],
+        [true, 8, 1, 12, 7, [[0, 56, turned(8)]]],
+        [true, 8, 9, 12, 1, []],
+        [true, 16, 1, 12, 5, [[0, 56, zero], [56, 96, turned(-56)]]],
+        [true, 16, 2, 12, 6, [[0, 48, zero], [48, 96, turned(-48)]]],
+        [true, 16, 2, 3, 0, [[0, 24, zero]]],
+        [true, 5, 1, 2, 2, [[0, 16, turned(32)]]],
+    ];
+    const OUT = 0x3000;
+    for (const [topDown, height, start, lines, answer, ranges] of cases)
+    {
+        const scan = scanFixture(topDown);
+        scan.count();
+        scan.header(height);
+        for (let index = 0; index < 128; index++)
+        {
+            scan.view.setUint32(OUT + index * 4, 0xaaaaaaaa, true);
+        }
+        const screen = scan.fns.GetDC.handler([0]);
+        const name = `${topDown ? 't-d' : 'b-u'} section, biHeight ${height}, ${start}+${lines}`;
+        assert.equal(scan.fns.GetDIBits.handler([screen, scan.section, start, lines, OUT,
+            WIRED_INFO, 0]), answer, name);
+        const got = [...Array(128).keys()].map(index=>scan.view.getUint32(OUT + index * 4, true));
+        const wanted = [...Array(128).keys()].map(index=>{
+            const range = ranges.find(([from, to])=>index >= from && index < to);
+            return range ? range[2](index) : 0xaaaaaaaa;
+        });
+        assert.deepEqual(got, wanted, name);
+    }
+});
+
+test('a DIB pattern brush paints its DIB, a palette-relative one through the DC\'s palette', ()=>{
+    // Wine's test_palette_brush: an 8-bit DIB_PAL_COLORS brush made before any
+    // palette is selected paints each index through the palette selected
+    // when it is drawn, and again through the next one.
+    const { fns, view, bytes } = wiredGdi();
+    putInfo(view, { width: 16, height: 16, bitCount: 32 });
+    const section = fns.CreateDIBSection.handler([0, WIRED_INFO, 0, WIRED_POINTER, 0, 0]);
+    const bits = view.getUint32(WIRED_POINTER, true);
+    const dc = fns.CreateCompatibleDC.handler([0]);
+    fns.SelectObject.handler([dc, section]);
+
+    const PACKED = 0x4000;
+    putInfo(view, { width: 16, height: 16, bitCount: 8 });
+    bytes.copyWithin(PACKED, WIRED_INFO, WIRED_INFO + 40);
+    for (let index = 0; index < 256; index++)
+    {
+        view.setUint16(PACKED + 40 + index * 2, 255 - index, true);
+        bytes[PACKED + 40 + 512 + index] = index;
+    }
+    const brush = fns.CreateDIBPatternBrushPt.handler([PACKED, 1]);
+    assert.notEqual(brush, 0);
+
+    const LOGPALETTE = 0x5000;
+    /** @param {(index: number) => number} red */
+    const palette = red=>{
+        view.setUint16(LOGPALETTE, 0x300, true);
+        view.setUint16(LOGPALETTE + 2, 256, true);
+        for (let index = 0; index < 256; index++)
+        {
+            bytes.set([red(index) & 0xff, index * 2 & 0xff, index * 2 & 0xff, 0],
+                LOGPALETTE + 4 + index * 4);
+        }
+        return fns.CreatePalette.handler([LOGPALETTE]);
+    };
+    fns.SelectObject.handler([dc, brush]);
+    for (const red of [(/** @type {number} */ index)=>index * 2,
+        (/** @type {number} */ index)=>index * 3])
+    {
+        fns.SelectPalette.handler([dc, palette(red), 0]);
+        bytes.fill(0xaa, bits, bits + 16 * 16 * 4);
+        assert.equal(fns.PatBlt.handler([dc, 0, 0, 16, 16, PATCOPY]), 1);
+        for (let index = 0; index < 256; index++)
+        {
+            const entry = 255 - index;
+            const expect = ((red(entry) & 0xff) << 16) | ((entry * 2 & 0xff) << 8)
+                | (entry * 2 & 0xff);
+            assert.equal(view.getUint32(bits + index * 4, true), expect, `${index}`);
+        }
+    }
+
+    // A DIB_RGB_COLORS brush keeps its own colours, and tiles from the origin.
+    putInfo(view, { width: 2, height: -1, bitCount: 1, table: [0x00ff0000, 0x000000ff] });
+    bytes.copyWithin(PACKED, WIRED_INFO, WIRED_INFO + 48);
+    bytes[PACKED + 48] = 0b01000000;
+    fns.SelectObject.handler([dc, fns.CreateDIBPatternBrushPt.handler([PACKED, 0])]);
+    fns.PatBlt.handler([dc, 0, 0, 4, 1, PATCOPY]);
+    assert.deepEqual([0, 1, 2, 3].map(x=>fns.GetPixel.handler([dc, x, 0])),
+        [0x0000ff, 0xff0000, 0x0000ff, 0xff0000], 'red, blue, as COLORREFs');
+});
+
+test('a BITMAPCOREHEADER DIB is read, drawn and handed back as Windows does', ()=>{
+    // Wine's test_dibsections: GetDIBits fills a BITMAPCOREHEADER with the
+    // bitmap's shape, and its colour table as RGBTRIPLEs, and CreateDIBSection
+    // takes one. The header's WORD fields -- the height unsigned, so the rows
+    // bottom-up -- and three-byte table go through every call that reads a
+    // DIB: StretchDIBits, SetDIBitsToDevice, CreateDIBitmap's SetDIBits and
+    // a DIB pattern brush.
+    const { fns, view, bytes } = wiredGdi();
+    const CORE = 0x4000;
+    const OUT = 0x5000;
+    const DIB = 0x6000;
+    /**
+     * @param {number} width @param {number} height @param {number} bitCount
+     * @param {number[]} [triples]
+     */
+    const putCore = (width, height, bitCount, triples = [])=>{
+        view.setUint32(CORE, 12, true);
+        [width, height, 1, bitCount].forEach((value, index)=>
+            view.setUint16(CORE + 4 + index * 2, value, true));
+        bytes.set(triples, CORE + 12);
+    };
+    const dc = fns.CreateCompatibleDC.handler([0]);
+
+    putInfo(view, { width: 16, height: 16, bitCount: 1, table: [0x00ff0000, 0x000000ff] });
+    view.setUint32(WIRED_INFO + 32, 2, true);
+    const section = fns.CreateDIBSection.handler([dc, WIRED_INFO, 0, WIRED_POINTER, 0, 0]);
+    const at = view.getUint32(WIRED_POINTER, true);
+    for (let index = 0; index < 64; index++)
+    {
+        bytes[at + index] = index * 37 & 0xff;
+    }
+    putCore(0, 0, 0);
+    assert.ok(fns.GetDIBits.handler([dc, section, 0, 16, 0, CORE, 0]));
+    assert.deepEqual([4, 6, 8, 10].map(offset=>view.getUint16(CORE + offset, true)),
+        [16, 16, 1, 1], 'bcWidth, bcHeight, bcPlanes, bcBitCount');
+    bytes.fill(0xaa, CORE + 12, CORE + 18);
+    assert.equal(fns.GetDIBits.handler([dc, section, 0, 16, OUT, CORE, 0]), 16);
+    assert.deepEqual([...bytes.subarray(CORE + 12, CORE + 18)], [0, 0, 0xff, 0xff, 0, 0],
+        'red and blue, as RGBTRIPLEs');
+    /** @param {number} from @returns {number[]} each row's two bytes of pixels */
+    const rows = from=>[...Array(16).keys()].flatMap(row=>[bytes[from + row * 4],
+        bytes[from + row * 4 + 1]]);
+    assert.deepEqual(rows(OUT), rows(at));
+
+    const core = fns.CreateDIBSection.handler([dc, CORE, 0, WIRED_POINTER, 0, 0]);
+    assert.notEqual(core, 0, 'CreateDIBSection takes a BITMAPCOREINFO');
+    bytes.fill(0, CORE + 12, CORE + 18);
+    assert.equal(fns.GetDIBits.handler([dc, core, 0, 16, OUT, CORE, 0]), 16);
+    assert.deepEqual([...bytes.subarray(CORE + 12, CORE + 18)], [0, 0, 0xff, 0xff, 0, 0]);
+
+    putInfo(view, { width: 2, height: -2, bitCount: 32 });
+    const target = fns.CreateDIBSection.handler([dc, WIRED_INFO, 0, WIRED_POINTER, 0, 0]);
+    const pixels = view.getUint32(WIRED_POINTER, true);
+    fns.SelectObject.handler([dc, target]);
+    const read = ()=>[0, 1, 2, 3].map(index=>view.getUint32(pixels + index * 4, true));
+    const RED = 0xff0000;
+    const BLUE = 0x0000ff;
+
+    putCore(2, 2, 1, [0, 0, 0xff, 0xff, 0, 0]);
+    bytes.set([0b01000000, 0, 0, 0, 0b10000000, 0, 0, 0], DIB);
+    assert.equal(fns.StretchDIBits.handler([dc, 0, 0, 2, 2, 0, 0, 2, 2, DIB, CORE, 0,
+        0x00cc0020]), 2);
+    assert.deepEqual(read(), [BLUE, RED, RED, BLUE], 'the first row of the bits at the bottom');
+
+    putCore(2, 2, 24);
+    bytes.set([0x33, 0x22, 0x11, 0x66, 0x55, 0x44, 0, 0,
+        0x99, 0x88, 0x77, 0xcc, 0xbb, 0xaa, 0, 0], DIB);
+    assert.equal(fns.SetDIBitsToDevice.handler([dc, 0, 0, 2, 2, 0, 0, 0, 2, DIB, CORE, 0]), 2);
+    assert.deepEqual(read(), [0x778899, 0xaabbcc, 0x112233, 0x445566]);
+
+    putCore(2, 1, 1, [0, 0, 0xff, 0xff, 0, 0]);
+    bytes.set([0b01000000, 0, 0, 0], CORE + 18);
+    fns.SelectObject.handler([dc, fns.CreateDIBPatternBrushPt.handler([CORE, 0])]);
+    fns.PatBlt.handler([dc, 0, 0, 2, 2, PATCOPY]);
+    assert.deepEqual(read(), [RED, BLUE, RED, BLUE], 'a packed BITMAPCOREINFO as a brush');
+
+    putCore(2, 1, 8, [0x10, 0x20, 0x30, 0x40, 0x50, 0x60]);
+    bytes.set([1, 0, 0, 0], DIB);
+    const screen = fns.GetDC.handler([0]);
+    const ddb = fns.CreateDIBitmap.handler([screen, CORE, 4, DIB, CORE, 0]);
+    assert.notEqual(ddb, 0);
+    const other = fns.CreateCompatibleDC.handler([screen]);
+    fns.SelectObject.handler([other, ddb]);
+    assert.deepEqual([0, 1].map(x=>fns.GetPixel.handler([other, x, 0])), [0x405060, 0x102030],
+        'CBM_INIT through the three-byte table, as COLORREFs');
 });

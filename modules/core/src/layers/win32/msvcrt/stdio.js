@@ -62,6 +62,15 @@ const IOLBF = 0x0040;
 const IONBF = 0x0004;
 
 /**
+ * The records of stdin, stdout and stderr, where `_iob` keeps them: nothing
+ * before the runtime's image has placed `_iob`.
+ *
+ * @param {number} iob
+ */
+export const standardRecords = iob=>(iob === 0 ? []
+    : Array.from({ length: STANDARD_STREAMS }, (_, index)=>iob + index * FILE_SIZE));
+
+/**
  * @typedef {Object} StdioHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -77,6 +86,8 @@ const IONBF = 0x0004;
  *           The runtime's descriptor table, shared with `_open` and the rest;
  *           absent, the streams keep one of their own.
  * @property {() => number} [fmode]  The runtime's `_fmode`, for that table.
+ * @property {(list: number) => number[]} [varargs]
+ *           The argument slots a `va_list` points at, for vprintf.
  */
 
 /**
@@ -328,6 +339,26 @@ export function createStdioFunctions(host){
     };
 
     /**
+     * Whether a stream's descriptor is in a Unicode translation, which the
+     * narrow character calls do not read or write -- "fputc doesn't
+     * currently support output into a UNICODE stream", and the runtime
+     * asserts on a narrow print into one; here it is an error on the stream
+     * and EINVAL. fread and fwrite are not refused: in a Unicode translation
+     * their bytes are UTF-16.
+     *
+     * @param {Stream} stream
+     */
+    const narrowRefused = stream=>{
+        if ((descriptorOf(stream)?.unicode ?? 0) === 0)
+        {
+            return false;
+        }
+        raise(stream, IOERR);
+        fail(EINVAL);
+        return true;
+    };
+
+    /**
      * Up to `limit` bytes as the program reads them: what ungetc gave back
      * first, then the file, stopping after a line feed when `line` says so.
      *
@@ -398,6 +429,10 @@ export function createStdioFunctions(host){
      * @returns {number | Promise<number>}
      */
     const nextByte = stream=>{
+        if (narrowRefused(stream))
+        {
+            return EOF;
+        }
         if (!readable(stream))
         {
             raise(stream, IOERR);
@@ -413,8 +448,32 @@ export function createStdioFunctions(host){
         });
     };
 
+    /**
+     * fprintf's body: the count of characters formatted; a negative one on a
+     * stream not open for writing, or when not all of them were stored.
+     *
+     * @param {Stream} stream @param {number} format @param {number[]} values
+     */
+    const printTo = (stream, format, values)=>{
+        if (narrowRefused(stream))
+        {
+            return EOF;
+        }
+        if (!writable(stream))
+        {
+            refuseWrite(stream);
+            return EOF;
+        }
+        const text = formatToString(readString(format), values, readString);
+        return emit(stream, bytesOf(text)) === text.length ? text.length : EOF;
+    };
+
     /** @param {Stream} stream @param {number} c */
     const putByte = (stream, c)=>{
+        if (narrowRefused(stream))
+        {
+            return EOF;
+        }
         if (!writable(stream))
         {
             refuseWrite(stream);
@@ -636,7 +695,12 @@ export function createStdioFunctions(host){
             });
         }),
 
-        /** size_t fwrite(const void *buffer, size_t size, size_t count, FILE *stream) */
+        /**
+         * size_t fwrite(const void *buffer, size_t size, size_t count, FILE *stream)
+         *
+         * In a Unicode translation the bytes are UTF-16, and an odd count of
+         * them is EINVAL with nothing written.
+         */
         fwrite: cdecl(16, ([buffer, size, count, pointer])=>{
             const stream = argument(pointer);
             const wanted = (size >>> 0) * (count >>> 0);
@@ -647,6 +711,11 @@ export function createStdioFunctions(host){
             if (!writable(stream))
             {
                 refuseWrite(stream);
+                return 0;
+            }
+            if ((descriptorOf(stream)?.unicode ?? 0) !== 0 && wanted % 2 !== 0)
+            {
+                fail(EINVAL);
                 return 0;
             }
             const stored = emit(stream, host.readMemory(buffer >>> 0, wanted).slice());
@@ -819,7 +888,7 @@ export function createStdioFunctions(host){
             {
                 fail(EINVAL);
             }
-            if (!stream || (buffer >>> 0) === 0 || (count | 0) <= 0)
+            if (!stream || (buffer >>> 0) === 0 || (count | 0) <= 0 || narrowRefused(stream))
             {
                 return 0;
             }
@@ -888,7 +957,7 @@ export function createStdioFunctions(host){
             {
                 fail(EINVAL);
             }
-            if (!stream || (string >>> 0) === 0)
+            if (!stream || (string >>> 0) === 0 || narrowRefused(stream))
             {
                 return EOF;
             }
@@ -909,7 +978,7 @@ export function createStdioFunctions(host){
          */
         ungetc: cdecl(8, ([c, pointer])=>{
             const stream = argument(pointer);
-            if (!stream || (c | 0) === EOF || !readable(stream))
+            if (!stream || (c | 0) === EOF || !readable(stream) || narrowRefused(stream))
             {
                 return EOF;
             }
@@ -928,20 +997,50 @@ export function createStdioFunctions(host){
          * open for writing, or when not all of them were stored.
          */
         fprintf: cdecl(8 + VARIADIC_SLOTS * 4, args=>{
-            const [pointer, format] = args;
-            const stream = argument(pointer);
-            if (!stream)
-            {
-                return EOF;
-            }
-            if (!writable(stream))
-            {
-                refuseWrite(stream);
-                return EOF;
-            }
-            const text = formatToString(readString(format), args.slice(2), readString);
-            return emit(stream, bytesOf(text)) === text.length ? text.length : EOF;
+            const stream = argument(args[0]);
+            return stream ? printTo(stream, args[1], args.slice(2)) : EOF;
         }),
+
+        /**
+         * int printf(const char *format, ...)
+         *
+         * fprintf on stdout, so a program that moved stdout with freopen
+         * finds the text where it moved it. The variadic arguments sit above
+         * the format on the caller's stack and arrive as the tail of `args`.
+         */
+        printf: cdecl(4 + VARIADIC_SLOTS * 4, args=>{
+            const stream = standardStream(1);
+            return stream ? printTo(stream, args[0], args.slice(1)) : EOF;
+        }),
+
+        /** int puts(const char *str) -- the string and a newline on stdout: 0, or EOF. */
+        puts: cdecl(4, ([string])=>{
+            const stream = standardStream(1);
+            if (!stream || narrowRefused(stream) || !writable(stream))
+            {
+                if (stream && !writable(stream))
+                {
+                    refuseWrite(stream);
+                }
+                return EOF;
+            }
+            const line = bytesOf(`${readString(string)}\n`);
+            return emit(stream, line) === line.length ? 0 : EOF;
+        }),
+
+        // A `va_list` carries no count, so it is read through whoever knows
+        // how far the caller's stack reaches; without that, vprintf stays
+        // unexported.
+        ...(host.varargs
+            ? {
+                /** int vprintf(const char *format, va_list args) -- printf from a list. */
+                vprintf: cdecl(8, ([format, list])=>{
+                    const stream = standardStream(1);
+                    const values = /** @type {(list: number) => number[]} */ (host.varargs);
+                    return stream ? printTo(stream, format, values(list)) : EOF;
+                }),
+            }
+            : {}),
 
         /**
          * int setvbuf(FILE *stream, char *buffer, int mode, size_t size)

@@ -38,11 +38,14 @@
 import { readRect, writeU16, writeU32s } from '../user32/structs.js';
 import {
     BITMAP,
+    BITMAPCOREHEADER,
     BITMAPINFOHEADER,
     DIBSECTION,
     PALETTEENTRY_SIZE,
+    colorEntryBytes,
     ddbStride,
     dibStride,
+    isDibHeaderSize,
     logFontBytes,
     paletteEntryToPixel,
     readBitmapInfoHeader,
@@ -51,19 +54,22 @@ import {
 
 /**
  * iUsage of the DIB functions: a colour table of RGBQUADs, or of WORD
- * indices into the palette the DC has selected. Nothing else is a usage.
+ * indices into the palette the DC has selected -- or, for the calls that draw
+ * a DIB, no table and pixels that are palette indices themselves.
  */
-const DIB_RGB_COLORS = 0;
 const DIB_PAL_COLORS = 1;
+const DIB_PAL_INDICES = 2;
 
 /** The drawing layer's name for a sixteen-bit surface made in 5-6-5. */
 const RGB_565 = '565';
 
 /**
  * The default palette's twenty colours, the ones a palette device keeps for
- * itself: eight dark, four pale, eight bright. 0x00RRGGBB.
+ * itself: eight dark, four pale, eight bright. 0x00RRGGBB. They are the
+ * entries of the CreatePalette record a Windows metafile holds for the stock
+ * palette, which Wine's metafile tests replay.
  */
-const DEFAULT_PALETTE_COLORS = Object.freeze([
+export const DEFAULT_PALETTE_COLORS = Object.freeze([
     0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0xc0c0c0,
     0xc0dcc0, 0xa6caf0, 0xfffbf0, 0xa0a0a4,
     0x808080, 0xff0000, 0x00ff00, 0xffff00, 0x0000ff, 0xff00ff, 0x00ffff, 0xffffff,
@@ -270,11 +276,18 @@ function masksFor(shape, bitCount){
  * @param {<T>(bitmap: number, action: (hdc: number) => T) => T} options.lend
  *        Runs `action` over a context of the bookkeeping half's own with the
  *        bitmap in it, wherever else the bitmap is selected.
- * @returns The entry points, and `bound`: the drawing interface a context is
+ * @param {(at: number, count: number, usage: number, dc: any, entryBytes?: number)
+ *        => number[]} options.readColorTable
+ *        A DIB's colour table as colours, whatever its usage says it holds;
+ *        a table of colours has entries `entryBytes` apart, four by default.
+ * @returns The entry points; `bound`, the drawing interface a context is
  *     bound to, for the window manager, which paints its own controls through
- *     the same engine without a guest string to read.
+ *     the same engine without a guest string to read; and `setDIBits`, which
+ *     CreateDIBitmap initialises a bitmap with.
  */
-export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, currentMetrics, lend }){
+export function createDrawingFunctions(
+    { host, objects, dcOf, surfaceOf, currentMetrics, lend, readColorTable })
+{
     /** @type {DrawingServices} */
     const services = host.graphics ?? {};
 
@@ -372,18 +385,22 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
      *
      * A BI_BITFIELDS DIB's masks sit where a colour table would, forty bytes
      * in, which in a larger header is inside the header rather than after it.
+     * A table shorter than the depth allows leaves the indices past it black.
      *
      * @param {number} info @param {number} bits
+     * @param {number} usage  What the colour table holds.
+     * @param {any} dc  Whose palette a palette-relative table indexes.
+     * @param {number} [lines]  How many rows the bits hold: all of them by default.
      * @returns {{ header: import('./structs.js').BitmapInfoHeaderFields, bits: Uint8Array,
      *             colors: number[], masks: number[] } | null}
      */
-    const readDib = (info, bits)=>{
+    const readDib = (info, bits, usage, dc, lines)=>{
         const header = readBitmapInfoHeader(host, info);
         const masked = header.compression === BI_BITFIELDS
             && (header.bitCount === 16 || header.bitCount === 32);
-        if (header.size < BITMAPINFOHEADER.SIZE || header.width <= 0 || header.height === 0
+        if (!isDibHeaderSize(header.size) || header.width <= 0 || header.height === 0
             || !DIB_BIT_COUNTS.has(header.bitCount)
-            || (header.compression !== BI_RGB && !masked))
+            || (header.compression !== BI_RGB && !masked) || usage > DIB_PAL_INDICES)
         {
             return null;
         }
@@ -391,19 +408,47 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
             ? [0, 4, 8].map(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at))
             : [];
         const stride = ((header.width * header.bitCount + 31) >> 5) * 4;
-        const rows = Math.abs(header.height);
-        const colors = [];
-        if (header.bitCount <= 8)
-        {
-            const used = header.clrUsed || (1 << header.bitCount);
-            const table = host.readMemory(info + header.size, used * 4);
-            for (let index = 0; index < used; index++)
-            {
-                colors.push((table[index * 4] | table[index * 4 + 1] << 8
-                    | table[index * 4 + 2] << 16) >>> 0);
-            }
-        }
+        const rows = lines ?? Math.abs(header.height);
+        // DIB_PAL_INDICES has no table for biClrUsed to shorten.
+        const size = 1 << header.bitCount;
+        const count = usage === DIB_PAL_INDICES ? size : Math.min(header.clrUsed || size, size);
+        const colors = header.bitCount <= 8
+            ? readColorTable(info + header.size, count, usage, dc, colorEntryBytes(header))
+            : [];
         return { header, bits: host.readMemory(bits, stride * rows), colors, masks };
+    };
+
+    /**
+     * SetDIBits: scan lines of a DIB converted into a bitmap's own format.
+     *
+     * The DIB's picture lies against the bitmap's top-left corner and the
+     * supplied lines land where they belong in it (Wine's test_SetDIBits);
+     * a row outside the bitmap is dropped. The answer is the lines handed
+     * in, however many of them landed. Unlike the calls that draw a DIB, this
+     * one checks a BI_BITFIELDS DIB's masks, and refuses DIB_PAL_INDICES.
+     *
+     * @param {number} bitmap @param {number} start @param {number} lines
+     * @param {number} bits @param {number} info @param {number} usage
+     * @param {any} dc  Whose palette a palette-relative table indexes.
+     * @returns {number}
+     */
+    const setDIBits = (bitmap, start, lines, bits, info, usage, dc)=>{
+        const image = usage === DIB_PAL_INDICES ? null
+            : readDib(info, bits, usage, dc, lines);
+        if (!image || image.masks.some(mask=>mask === 0))
+        {
+            return 0;
+        }
+        const header = image.header;
+        const landed = lend(bitmap, target=>{
+            const interfaces = bound(target, false);
+            interfaces?.setDIBitsToDevice(target, {
+                xDest: 0, yDest: 0, width: header.width, height: Math.abs(header.height),
+                xSrc: 0, ySrc: 0, firstScan: start, scans: lines, image,
+            });
+            return interfaces !== null;
+        });
+        return landed ? lines : 0;
     };
 
     /** @param {any} a @param {any} b */
@@ -518,8 +563,7 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
          *                   DWORD rop)
          *
          * The bits are read as the header describes them and the colour table
-         * that follows it; a palette-relative table (DIB_PAL_COLORS) is not
-         * decoded, which is reported as zero lines rather than drawn wrongly.
+         * that follows it, a palette-relative one through the DC's palette.
          */
         StretchDIBits: {
             argBytes: 52,
@@ -527,12 +571,11 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
             handler: ([dest, xDest, yDest, destWidth, destHeight, xSrc, ySrc, srcWidth,
                 srcHeight, bits, info, usage, rop])=>{
                 const interfaces = bound(dest);
-                if (!interfaces || (bits >>> 0) === 0 || (info >>> 0) === 0
-                    || (usage >>> 0) !== DIB_RGB_COLORS)
+                if (!interfaces || (bits >>> 0) === 0 || (info >>> 0) === 0)
                 {
                     return 0;
                 }
-                const image = readDib(info >>> 0, bits >>> 0);
+                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dcOf(dest));
                 if (!image)
                 {
                     return 0;
@@ -545,6 +588,62 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                     image,
                     rop: rop >>> 0,
                 });
+            },
+        },
+
+        /**
+         * int SetDIBitsToDevice(HDC hdc, int xDest, int yDest, DWORD w, DWORD h,
+         *   int xSrc, int ySrc, UINT StartScan, UINT cLines, const VOID *lpvBits,
+         *   const BITMAPINFO *lpbmi, UINT ColorUse)
+         *
+         * The bits hold cLines scan lines from StartScan on, and only those are
+         * drawn: see the drawing layer's setDIBitsToDevice for how they and the
+         * source rectangle are counted, and what the answer counts.
+         */
+        SetDIBitsToDevice: {
+            argBytes: 48,
+            /** @param {number[]} args */
+            handler: ([dest, xDest, yDest, width, height, xSrc, ySrc, start, lines, bits, info,
+                usage])=>{
+                const interfaces = bound(dest);
+                if (!interfaces || (bits >>> 0) === 0 || (info >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dcOf(dest),
+                    lines >>> 0);
+                if (!image)
+                {
+                    return 0;
+                }
+                return interfaces.setDIBitsToDevice(dest >>> 0, {
+                    xDest: xDest | 0, yDest: yDest | 0, width: width | 0, height: height | 0,
+                    xSrc: xSrc | 0, ySrc: ySrc | 0,
+                    firstScan: start >>> 0, scans: lines >>> 0,
+                    image,
+                });
+            },
+        },
+
+        /**
+         * int SetDIBits(HDC hdc, HBITMAP hbm, UINT start, UINT cLines,
+         *   const VOID *lpBits, const BITMAPINFO *lpbmi, UINT ColorUse)
+         *
+         * The DC only lends its palette to a palette-relative table.
+         */
+        SetDIBits: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([handle, bitmap, start, lines, bits, info, usage])=>{
+                const record = objects.get(bitmap);
+                const dc = dcOf(handle);
+                if (!dc || !record || record.type !== 'bitmap' || (bits >>> 0) === 0
+                    || (info >>> 0) === 0)
+                {
+                    return 0;
+                }
+                return setDIBits(bitmap >>> 0, start >>> 0, lines >>> 0, bits >>> 0, info >>> 0,
+                    usage >>> 0, dc);
             },
         },
 
@@ -773,13 +872,14 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                 }
                 const shape = record.attributes;
                 const header = readBitmapInfoHeader(host, info);
-                if (header.size < BITMAPINFOHEADER.SIZE)
+                if (!isDibHeaderSize(header.size))
                 {
-                    // A BITMAPCOREHEADER's fields are WORDs at other offsets,
-                    // and forty bytes written over its twelve would land on
-                    // the program's colour table.
                     return 0;
                 }
+                // A BITMAPCOREHEADER has WORD fields and none past bcBitCount,
+                // and its table is RGBTRIPLEs: forty bytes written over its
+                // twelve would land on the program's colour table.
+                const core = header.size === BITMAPCOREHEADER.SIZE;
                 const describing = (bits >>> 0) === 0 || (lines >>> 0) === 0;
                 if (header.bitCount === 0)
                 {
@@ -788,6 +888,12 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                         return 0;
                     }
                     const depth = shape.bitCount;
+                    if (core)
+                    {
+                        [shape.width, shape.height, 1, depth].forEach((value, index)=>
+                            writeU16(host, info + BITMAPCOREHEADER.bcWidth + index * 2, value));
+                        return 1;
+                    }
                     writeU32s(host, info + BITMAPINFOHEADER.biWidth, [shape.width, shape.height]);
                     writeU16(host, info + BITMAPINFOHEADER.biPlanes, 1);
                     writeU16(host, info + BITMAPINFOHEADER.biBitCount, depth);
@@ -806,9 +912,12 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                 {
                     return 0;
                 }
-                writeU32s(host, info + BITMAPINFOHEADER.biSizeImage,
-                    [dibStride(header.width, header.bitCount) * Math.abs(header.height)]);
-                writeU32s(host, info + BITMAPINFOHEADER.biClrUsed, [0]);
+                if (!core)
+                {
+                    writeU32s(host, info + BITMAPINFOHEADER.biSizeImage,
+                        [dibStride(header.width, header.bitCount) * Math.abs(header.height)]);
+                    writeU32s(host, info + BITMAPINFOHEADER.biClrUsed, [0]);
+                }
                 const masks = masked ? masksFor(shape, header.bitCount) : [];
                 if (masked)
                 {
@@ -822,6 +931,11 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                     colors.forEach((_, index)=>
                         writeU16(host, info + header.size + index * 2, index));
                 }
+                else if (core)
+                {
+                    host.writeMemory(info + header.size, Uint8Array.from(colors.flatMap(color=>
+                        [color & 0xff, (color >>> 8) & 0xff, (color >>> 16) & 0xff])));
+                }
                 else if (colors.length > 0)
                 {
                     writeU32s(host, info + header.size, [...colors]);
@@ -830,10 +944,19 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                 {
                     return 1;
                 }
-                const wanted = Math.min(lines >>> 0, shape.height);
-                const buffer = new Uint8Array(
-                    (((header.width * header.bitCount + 31) / 32 | 0) * 4) * wanted);
-                /** @param {number} source */
+                // The DIB's picture lies against the bitmap's top-left, and the
+                // lines are counted from the DIB's bottom whichever way it is
+                // stored, written in its own order: a line of the DIB outside
+                // the bitmap is zeros, and only the lines inside it are
+                // counted (Wine's test_GetDIBits_scanlines).
+                const height = Math.abs(header.height);
+                if ((start >>> 0) >= height)
+                {
+                    return 1;
+                }
+                const wanted = Math.min(lines >>> 0, height - (start >>> 0));
+                const buffer = new Uint8Array(dibStride(header.width, header.bitCount) * wanted);
+                /** @param {number} source @returns {number | null} */
                 const read = source=>{
                     const interfaces = bound(source, false);
                     return interfaces
@@ -842,16 +965,19 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                             bits: buffer,
                             masks,
                             colors,
-                            startScan: start >>> 0,
+                            startScan: header.height < 0
+                                ? height - (start >>> 0) - wanted
+                                : start >>> 0,
                             scanLines: wanted,
                         })
-                        : 0;
+                        : null;
                 };
                 const written = dc.bitmap === (bitmap >>> 0) ? read(handle) : lend(bitmap, read);
-                if (written > 0)
+                if (written === null)
                 {
-                    host.writeMemory(bits >>> 0, buffer);
+                    return 0;
                 }
+                host.writeMemory(bits >>> 0, buffer);
                 return written;
             },
         },
@@ -1111,6 +1237,33 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
         },
 
         /**
+         * UINT GetPaletteEntries(HPALETTE hpal, UINT iStart, UINT cEntries,
+         *                       LPPALETTEENTRY pPalEntries)
+         *
+         * The entries from iStart on, as far as the palette goes; a null buffer
+         * asks how many entries the palette has.
+         */
+        GetPaletteEntries: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, start, count, out])=>{
+                const record = objects.get(handle);
+                if (!record || record.type !== 'palette')
+                {
+                    return 0;
+                }
+                const held = record.attributes.entries;
+                if ((out >>> 0) === 0)
+                {
+                    return held.length;
+                }
+                const copied = held.slice(start >>> 0, (start >>> 0) + (count >>> 0));
+                writeU32s(host, out >>> 0, copied);
+                return copied.length;
+            },
+        },
+
+        /**
          * UINT SetPaletteEntries(HPALETTE hpal, UINT iStart, UINT cEntries,
          *                       const PALETTEENTRY *pPalEntries)
          *
@@ -1125,7 +1278,9 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
             /** @param {number[]} args */
             handler: ([handle, start, count, entries])=>{
                 const record = objects.get(handle);
-                if (!record || record.type !== 'palette' || (entries >>> 0) === 0)
+                // The stock palette is the system's, and no program changes it.
+                if (!record || record.type !== 'palette' || record.stock
+                    || (entries >>> 0) === 0)
                 {
                     return 0;
                 }
@@ -1447,7 +1602,7 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
         return interfaces.extTextOutA(handle >>> 0, x | 0, y | 0, options >>> 0,
             (rect >>> 0) === 0 ? null : readRect(host, rect), text, advances) ? 1 : 0;
     };
-    return { functions, bound };
+    return { functions, bound, setDIBits };
 }
 
 /**

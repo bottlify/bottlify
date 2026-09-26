@@ -108,6 +108,23 @@ test('a file opened _O_TEMPORARY is removed when its descriptor closes', ()=>{
     assert.ok(files.files['C:\\game\\keep.bin'], 'a file opened without it stays');
 });
 
+test('the end of the process closes every descriptor, and a temporary file goes with it', ()=>{
+    // Windows closes every handle a process held when it ends, however it
+    // ends, which is when a file opened to be deleted on close is.
+    const { memory, files, fns, descriptors, open, console } = build();
+    const scratch = open('C:\\game\\scratch.tmp', O_CREAT | O_RDWR | O_TEMPORARY);
+    open('C:\\game\\kept.bin', O_CREAT | O_RDWR);
+    fns._write.handler([scratch, memory.put('x'), 1]);
+
+    descriptors.closeAll();
+    assert.equal(files.files['C:\\game\\scratch.tmp'], undefined);
+    assert.ok(files.files['C:\\game\\kept.bin']);
+    assert.deepEqual([...files.closed].sort(), ['C:\\game\\kept.bin', 'C:\\game\\scratch.tmp']);
+    assert.equal(fns._write.handler([scratch, memory.put('y'), 1]), -1);
+    assert.equal(fns._write.handler([1, memory.put('still'), 5]), 5, 'the console stays');
+    assert.deepEqual(console, [[2, 'still']]);
+});
+
 test('_open says why it failed', ()=>{
     const { memory, fns, errno, open } = build({ 'C:\\game\\data.bin': bytesOf('x') });
 
@@ -337,6 +354,81 @@ test('_stati64 reports a size past 4 GiB whole', ()=>{
     assert.equal(view.getBigInt64(STATI64.SIZE, true), BigInt(big));
 });
 
+/**
+ * The descriptor calls with a register for the high half of an __int64
+ * answer, which a program reads from EDX:EAX.
+ *
+ * @param {Record<string, Uint8Array>} [contents]
+ */
+function wide(contents = {}){
+    const memory = fakeMemory();
+    const files = fakeVolume(contents, { directories: ['C:\\', 'C:\\game'] });
+    /** @type {number[]} */
+    const errno = [];
+    const registers = { edx: 0x5a5a5a5a };
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({
+        ...memory, files, errno: code=>errno.push(code),
+        setRegisters: values=>Object.assign(registers, values),
+    }, createDescriptors({ files, errno: code=>errno.push(code) })));
+    /** @param {number} eax */
+    const pair = eax=>BigInt(registers.edx >>> 0) << 32n | BigInt(eax >>> 0);
+    /** @param {string} path @param {number} flags */
+    const open = (path, flags)=>fns._open.handler([memory.put(path), flags, 0x180]);
+    return { memory, files, errno, fns, pair, open };
+}
+
+test('_lseeki64, _telli64 and _filelengthi64 answer in EDX:EAX', ()=>{
+    const { files, errno, fns, pair, open } = wide({ 'C:\\game\\data.bin': bytesOf('12345') });
+    const fd = open('C:\\game\\data.bin', O_RDWR | O_BINARY);
+
+    assert.equal(pair(fns._lseeki64.handler([fd, 3, 0, SEEK_SET])), 3n);
+    assert.equal(pair(fns._telli64.handler([fd])), 3n);
+    assert.equal(pair(fns._lseeki64.handler([fd, -1, -1, SEEK_END])), 4n, 'a negative offset');
+    assert.equal(pair(fns._lseeki64.handler([fd, 0, 1, SEEK_SET])), 0x100000000n,
+        'past 4 GiB');
+    assert.equal(pair(fns._telli64.handler([fd])), 0x100000000n);
+    assert.equal(pair(fns._filelengthi64.handler([fd])), 5n);
+    assert.equal(pair(fns._telli64.handler([fd])), 0x100000000n, 'the position stays');
+
+    files.stat = ()=>({ exists: true, isDirectory: false, size: 5 * 2 ** 30, modified: 0 });
+    assert.equal(pair(fns._filelengthi64.handler([fd])), BigInt(5 * 2 ** 30));
+
+    for (const call of [
+        ()=>fns._lseeki64.handler([77, 0, 0, SEEK_SET]),
+        ()=>fns._telli64.handler([77]),
+        ()=>fns._filelengthi64.handler([77]),
+    ])
+    {
+        assert.equal(pair(call()), 0xffffffffffffffffn, '-1 as an __int64');
+    }
+    assert.equal(pair(fns._lseeki64.handler([fd, -1, -1, SEEK_SET])), 0xffffffffffffffffn);
+    assert.deepEqual(errno, [EBADF, EBADF, EBADF, EINVAL]);
+    assert.deepEqual([fns._lseeki64.argBytes, fns._telli64.argBytes,
+        fns._filelengthi64.argBytes], [16, 4, 4]);
+});
+
+test('_fstati64 answers as _fstat does, into the record with the 64-bit size', ()=>{
+    const { memory, fns, open } = wide({ 'C:\\game\\data.bin': bytesOf('12345') });
+    const stat = memory.allocate(STATI64.BYTES);
+    memory.writeMemory(stat, new Uint8Array(STATI64.BYTES).fill(0xcc));
+    const view = new DataView(memory.bytes.buffer, stat, STATI64.BYTES);
+
+    assert.equal(fns._fstati64.handler([open('C:\\game\\data.bin', O_RDONLY), stat]), 0);
+    assert.equal(view.getUint16(STATI64.MODE, true), 0x8000 | 0o666);
+    assert.equal(view.getBigInt64(STATI64.SIZE, true), 5n);
+    assert.equal(view.getUint32(44, true), 0, 'the whole record');
+    assert.equal(fns._fstati64.handler([1, stat]), 0);
+    assert.equal(view.getUint16(STATI64.MODE, true), 0x2000, 'the console');
+    assert.equal(fns._fstati64.handler([77, stat]), -1);
+});
+
+test('without a register for the high half the __int64 calls are not exported', ()=>{
+    const { fns } = build();
+    assert.deepEqual([fns._lseeki64, fns._telli64, fns._filelengthi64],
+        [undefined, undefined, undefined]);
+    assert.notEqual(fns._fstati64, undefined, 'its answer is an int');
+});
+
 test('a stream\'s read folds text as the program reads it and consumes only that', ()=>{
     // Wine's msvcrt test_asciimode: CR CR LF is CR LF, and "foo" then ^Z is
     // three bytes and then the end.
@@ -386,26 +478,78 @@ test('_setmode checks the mode, then the number, and answers with the mode it re
     assert.deepEqual(errno, []);
 });
 
-test('_setmode refuses the Unicode translations it does not carry, and says so', ()=>{
-    const memory = fakeMemory();
-    const files = fakeVolume({});
-    /** @type {number[]} */
-    const errno = [];
-    /** @type {string[]} */
-    const divergences = [];
-    const descriptors = createDescriptors({ files, errno: code=>errno.push(code) });
-    const fns = /** @type {Record<string, any>} */ (createIoFunctions({
-        ...memory, files, errno: code=>errno.push(code),
-        divergence: api=>divergences.push(api),
-    }, descriptors));
+test('_setmode takes the Unicode translations and answers _O_WTEXT for any of them', ()=>{
+    // Wine's msvcrt test_setmode, the rest of its sequence.
+    const { errno, fns, open } = build();
+    const fd = open('C:\\game\\empty1', O_CREAT | O_WRONLY);
+    assert.equal(fns._setmode.handler([fd, O_BINARY]), O_TEXT);
+    assert.equal(fns._setmode.handler([fd, O_WTEXT]), O_BINARY);
+    assert.equal(fns._setmode.handler([fd, O_TEXT]), O_WTEXT);
+    assert.equal(fns._setmode.handler([fd, O_U16TEXT]), O_TEXT);
+    assert.equal(fns._setmode.handler([fd, O_U8TEXT]), O_WTEXT);
+    assert.equal(fns._setmode.handler([fd, O_TEXT]), O_WTEXT);
+    assert.deepEqual(errno, []);
+});
 
-    for (const mode of [O_WTEXT, O_U16TEXT, O_U8TEXT])
-    {
-        assert.equal(fns._setmode.handler([1, mode]), -1);
-    }
-    assert.deepEqual(errno, [EINVAL, EINVAL, EINVAL]);
-    assert.deepEqual(divergences, ['_setmode', '_setmode', '_setmode']);
-    assert.equal(fns._setmode.handler([1, O_TEXT]), O_TEXT, 'the mode stayed what it was');
+/** @param {Uint8Array} bytes */
+const hex = bytes=>[...bytes].map(byte=>byte.toString(16).padStart(2, '0')).join(' ');
+
+test('in a Unicode mode _write takes UTF-16, writes the BOM first and LF as CR LF', ()=>{
+    // Wine's msvcrt test_file_write_read: an odd count is refused, and a
+    // new file starts with the BOM of the translation it was opened in.
+    const { memory, files, errno, fns, open } = build();
+    const utf16 = open('C:\\game\\w.txt', O_CREAT | O_TRUNC | O_WRONLY | O_WTEXT);
+    assert.equal(fns._write.handler([utf16, memory.put('a'), 1]), -1);
+    assert.equal(fns._write.handler([utf16, memory.put('a\0\n\0\xff\xff'), 6]), 6);
+    fns._close.handler([utf16]);
+    assert.equal(hex(files.files['C:\\game\\w.txt']), 'ff fe 61 00 0d 00 0a 00 ff ff');
+
+    const utf8 = open('C:\\game\\8.txt', O_CREAT | O_TRUNC | O_WRONLY | O_U8TEXT);
+    assert.equal(fns._write.handler([utf8, memory.put('a'), 1]), -1);
+    assert.equal(fns._write.handler([utf8, memory.put('a\0\n\0b\0'), 6]), 6);
+    fns._close.handler([utf8]);
+    assert.equal(hex(files.files['C:\\game\\8.txt']), 'ef bb bf 61 0d 0a 62');
+    assert.deepEqual(errno, [EINVAL, EINVAL]);
+});
+
+test('in a Unicode mode _read hands back UTF-16, the file\'s BOM saying how it is kept', ()=>{
+    // Wine's msvcrt test_file_write_read, reading those files back with
+    // _O_WTEXT, and a UTF-8 file of its own with a stray byte in it.
+    const { memory, errno, fns, open, buffer } = build({
+        'C:\\game\\w.txt': Uint8Array.of(0xff, 0xfe, 0x61, 0, 0x0d, 0, 0x0a, 0, 0xff, 0xff),
+        'C:\\game\\8.txt': Uint8Array.of(0xef, 0xbb, 0xbf, 0x61, 0x0d, 0x0a, 0x62),
+        'C:\\game\\z.txt': Uint8Array.of(0xef, 0xbb, 0xbf, 0x61, 0xc4, 0x85, 0x62, 0xc5, 0xbc,
+            0x0d, 0x0d, 0x0a),
+    });
+    /** @param {number} fd @param {number} count */
+    const read = (fd, count)=>{
+        const got = fns._read.handler([fd, buffer, count]);
+        return got < 0 ? got : hex(memory.bytes.subarray(buffer, buffer + got));
+    };
+
+    const utf16 = open('C:\\game\\w.txt', O_RDONLY | O_WTEXT);
+    assert.equal(read(utf16, 3), -1);
+    assert.deepEqual(errno.splice(0), [EINVAL]);
+    assert.equal(read(utf16, 256), '61 00 0a 00 ff ff');
+
+    const utf8 = open('C:\\game\\8.txt', O_RDONLY | O_WTEXT);
+    assert.equal(read(utf8, 256), '61 00 0a 00 62 00');
+    fns._lseek.handler([utf8, 6, SEEK_SET]);
+    assert.equal(read(utf8, 2), '62 00');
+
+    const mixed = open('C:\\game\\z.txt', O_RDONLY | O_WTEXT);
+    assert.equal(read(mixed, 256), '61 00 05 01 62 00 7c 01 0d 00 0a 00');
+    fns._lseek.handler([mixed, 5, SEEK_SET]);
+    assert.equal(read(mixed, 256), 'fd ff 62 00 7c 01 0d 00 0a 00',
+        'a byte that begins nothing is U+FFFD');
+    assert.deepEqual(errno, []);
+});
+
+test('a console descriptor in a Unicode mode writes the characters its UTF-16 spells', ()=>{
+    const { memory, fns, console } = build();
+    assert.equal(fns._setmode.handler([1, O_U16TEXT]), O_TEXT);
+    assert.equal(fns._write.handler([1, memory.put('h\0\xe9\0\n\0'), 6]), 6);
+    assert.deepEqual(console, [[2, 'h\xe9\n']]);
 });
 
 test('_tell is where the next byte goes, counted in the file\'s own bytes', ()=>{
@@ -578,13 +722,16 @@ test('_open_osfhandle of a standard handle is a descriptor on the console', ()=>
     assert.equal(fns._open_osfhandle.handler([2, 0]), fd, 'the number is free again');
 });
 
-test('_open_osfhandle refuses the Unicode translations, as _setmode does', ()=>{
-    const { handles, errno, divergences, fns } = withHandles({
+test('_open_osfhandle takes a Unicode translation, as _setmode does', ()=>{
+    const { memory, handles, errno, fns, text } = withHandles({
         'C:\\game\\u.txt': new Uint8Array(0),
     });
-    assert.equal(fns._open_osfhandle.handler([handles.create('C:\\game\\u.txt'), O_WTEXT]), -1);
-    assert.deepEqual(errno, [EINVAL]);
-    assert.deepEqual(divergences, ['_open_osfhandle']);
+    const fd = fns._open_osfhandle.handler([handles.create('C:\\game\\u.txt'), O_U16TEXT]);
+    assert.ok(fd > 2);
+    assert.equal(fns._write.handler([fd, memory.put('a\0\n\0'), 4]), 4);
+    assert.equal(text('C:\\game\\u.txt'), 'a\0\r\0\n\0', 'the handle\'s file is as it was: no BOM');
+    assert.equal(fns._setmode.handler([fd, O_TEXT]), O_WTEXT);
+    assert.deepEqual(errno, []);
 });
 
 test('without a handle table the two are not exported', ()=>{

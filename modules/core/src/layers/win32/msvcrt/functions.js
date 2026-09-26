@@ -18,7 +18,6 @@
  * undefined, the choice made here is written down at the function.
  */
 
-import { HANDLE_STDOUT } from '../kernel32/console.js';
 import { formatToString, varargsSlots } from './format.js';
 import { createStringFunctions } from './strings.js';
 import { createConversionFunctions } from './convert.js';
@@ -32,7 +31,7 @@ import {
 import { createCxxFunctions } from './cxx.js';
 import { createMathFunctions } from './math.js';
 import { createStartupFunctions } from './startup.js';
-import { createStdioFunctions } from './stdio.js';
+import { createStdioFunctions, standardRecords } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
 import { createGlobals, EINVAL, ERANGE } from './globals.js';
 import { createDescriptors, createIoFunctions } from './io.js';
@@ -89,12 +88,18 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  * @property {() => number} [systemTimeMs]  Guest wall clock, milliseconds.
  * @property {() => number} [now]           Guest running time, milliseconds.
  * @property {any} [files]                  The volume, for the path functions.
+ * @property {(task: () => void) => void} [atProcessEnd]
+ *           Where the runtime leaves what is to run when the process ends,
+ *           whichever way it ends. Absent, its files stay open at the end.
  * @property {import('./io.js').FileHandles} [handles]
  *           kernel32's handle table, as far as files go: what `_get_osfhandle`
  *           hands out and `_open_osfhandle` takes. Absent, the two stay
  *           unexported.
  * @property {() => string[]} [drives]      Letters the filesystem has mounted.
  * @property {() => number} [iob]           Where the runtime's `_iob` was placed, once it has been.
+ * @property {(values: Record<string, number>) => void} [setRegisters]
+ *           Registers a call answers in besides EAX: EDX, for the high half
+ *           of an __int64. Absent, the calls answering one stay unexported.
  * @property {import('./float.js').FloatHost} [fpu]
  * @property {() => string} [commandLine]
  *           What the process was started with, as GetCommandLineA reports it.
@@ -563,37 +568,6 @@ export function createMsvcrtFunctions(host){
             },
         },
 
-        /** int puts(const char *str) */
-        puts: {
-            convention: 'cdecl',
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([string])=>{
-                // puts appends the newline that printf would have had in the
-                // format string.
-                host.write(HANDLE_STDOUT, `${readString(string)}\n`);
-                return 0;
-            },
-        },
-
-        /**
-         * int printf(const char *format, ...)
-         *
-         * The variadic arguments sit contiguously above the format pointer on
-         * the caller's stack and arrive as the tail of `args` -- everything
-         * from index 1 on -- for as many slots as `argBytes` reads.
-         */
-        printf: {
-            convention: 'cdecl',
-            argBytes: 4 + VARIADIC_SLOTS * 4,
-            /** @param {number[]} args */
-            handler: args=>{
-                const text = render(args, 1);
-                host.write(HANDLE_STDOUT, text);
-                return text.length;
-            },
-        },
-
         /**
          * void qsort(void *base, size_t num, size_t width, int (*cmp)(const void*, const void*))
          *
@@ -743,18 +717,6 @@ export function createMsvcrtFunctions(host){
                 boundedPrint(buffer, size, format, (format >>> 0) === 0 ? [] : varargsAt(list)),
         },
 
-        /** int vprintf(const char *format, va_list args) */
-        vprintf: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([format, list])=>{
-                const text = formatToString(readString(format), varargsAt(list), readString);
-                host.write(HANDLE_STDOUT, text);
-                return text.length;
-            },
-        },
-
         /**
          * void *bsearch(const void *key, const void *base, size_t num,
          *               size_t width, int (*compare)(const void *, const void *))
@@ -844,6 +806,41 @@ export function createMsvcrtFunctions(host){
         })
         : null;
 
+    // Every handle a process held closes when it ends, however it ends --
+    // which is when a file opened to be deleted on close goes.
+    if (descriptors)
+    {
+        host.atProcessEnd?.(()=>descriptors.closeAll());
+    }
+
+    const stdio = host.files && host.allocate && host.free
+        ? createStdioFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readCString: host.readCString,
+            allocate: host.allocate,
+            free: host.free,
+            files: host.files,
+            write: host.write,
+            iob: host.iob,
+            errno,
+            descriptors: descriptors ?? undefined,
+            varargs: varargsAt,
+        })
+        : null;
+
+    /**
+     * What `_cexit` closes: every stream fopen and its kin opened, and a
+     * standard stream freopen moved to a file, which goes back on the console.
+     */
+    const closeStreams = ()=>{
+        if (stdio)
+        {
+            stdio._fcloseall.handler([]);
+            standardRecords(host.iob?.() ?? 0).forEach(record=>stdio.fclose.handler([record]));
+        }
+    };
+
     const narrow = {
         ...table,
         ...createStringFunctions({
@@ -889,6 +886,7 @@ export function createMsvcrtFunctions(host){
                 exit: host.exit,
                 globals,
                 errnoName,
+                closeStreams,
             })
             : {}),
 
@@ -921,6 +919,7 @@ export function createMsvcrtFunctions(host){
         ...(host.files
             ? createPathFunctions({
                 readCString: host.readCString,
+                readMemory: host.readMemory,
                 writeMemory: host.writeMemory,
                 allocate,
                 drives: host.drives,
@@ -936,22 +935,10 @@ export function createMsvcrtFunctions(host){
                 files: host.files,
                 errno,
                 divergence: host.divergence,
+                setRegisters: host.setRegisters,
             }, descriptors)
             : {}),
-        ...(host.files && host.allocate && host.free
-            ? createStdioFunctions({
-                readMemory: host.readMemory,
-                writeMemory: host.writeMemory,
-                readCString: host.readCString,
-                allocate: host.allocate,
-                free: host.free,
-                files: host.files,
-                write: host.write,
-                iob: host.iob,
-                errno,
-                descriptors: descriptors ?? undefined,
-            })
-            : {}),
+        ...(stdio ?? {}),
         ...(host.threads ? createThreadFunctions(host.threads) : {}),
         ...(host.fpu
             ? createMathFunctions({ writeMemory: host.writeMemory, fpu: host.fpu })

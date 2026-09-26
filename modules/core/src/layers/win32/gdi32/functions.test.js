@@ -492,6 +492,56 @@ test('a pattern brush names its bitmap and no colour, and outlives the bitmap', 
     assert.equal(fns.CreateBrushIndirect.handler([STRUCT]), 0, 'no bitmap, no pattern');
 });
 
+test('a DIB pattern brush reads back as BS_DIBPATTERN naming its packed DIB', ()=>{
+    // Wine's test_pattern_brush: CreateDIBPatternBrushPt, CreateDIBPatternBrush
+    // and the BS_DIBPATTERN forms of LOGBRUSH all read back as BS_DIBPATTERN,
+    // colour zero, and the DIB they were made from -- an HGLOBAL's being its
+    // address here, which is what GlobalLock hands back for it. BS_PATTERN8X8
+    // reads back as BS_PATTERN. The usages end at DIB_PAL_COLORS + 1, and
+    // neither run-length encoding nor the other styles make a brush.
+    const { fns, memory } = setup();
+    const DIB = STRUCT + 0x40;
+    /** @param {number} bitCount @param {number} [compression] */
+    const putDib = (bitCount, compression = 0)=>{
+        memory.putU32s(DIB, [40, 32, 32, 1 | (bitCount << 16), compression, 0, 0, 0, 2, 0]);
+        memory.putU32s(DIB + 40, [0, 0x00ffffff]);
+    };
+    /** @param {number} brush @returns {number[]} its LOGBRUSH */
+    const logBrush = brush=>{
+        memory.fill(OUT, 3);
+        assert.equal(fns.GetObjectA.handler([brush, LOGBRUSH.SIZE, OUT]), LOGBRUSH.SIZE);
+        return [memory.u32(OUT), memory.u32(OUT + 4), memory.u32(OUT + 8)];
+    };
+    putDib(1);
+    assert.equal(fns.CreateDIBPatternBrushPt.argBytes, 8);
+    assert.deepEqual(logBrush(fns.CreateDIBPatternBrushPt.handler([DIB, 0])), [5, 0, DIB]);
+    assert.equal(fns.CreateDIBPatternBrush.argBytes, 8);
+    assert.deepEqual(logBrush(fns.CreateDIBPatternBrush.handler([DIB, 1])), [5, 0, DIB]);
+    for (const style of [5, 6])
+    {
+        memory.putU32s(STRUCT, [style, 1, DIB]);
+        assert.deepEqual(logBrush(fns.CreateBrushIndirect.handler([STRUCT])), [5, 0, DIB]);
+    }
+    const bitmap = fns.CreateBitmap.handler([8, 8, 1, 1, 0]);
+    memory.putU32s(STRUCT, [7, 0x12345, bitmap]);
+    assert.deepEqual(logBrush(fns.CreateBrushIndirect.handler([STRUCT])), [3, 0, bitmap]);
+
+    assert.ok(fns.CreateDIBPatternBrushPt.handler([DIB, 1]) > 0);
+    assert.ok(fns.CreateDIBPatternBrushPt.handler([DIB, 2]) > 0);
+    assert.equal(fns.CreateDIBPatternBrushPt.handler([DIB, 3]), 0);
+    assert.equal(fns.CreateDIBPatternBrushPt.handler([DIB, 4]), 0);
+    putDib(8, 1);
+    assert.equal(fns.CreateDIBPatternBrushPt.handler([DIB, 0]), 0, 'BI_RLE8');
+    putDib(4, 2);
+    assert.equal(fns.CreateDIBPatternBrushPt.handler([DIB, 0]), 0, 'BI_RLE4');
+    putDib(1);
+    for (const style of [8, 9, 4])
+    {
+        memory.putU32s(STRUCT, [style, 0, DIB]);
+        assert.equal(fns.CreateBrushIndirect.handler([STRUCT]), 0, `style ${style}`);
+    }
+});
+
 test('CreateFontIndirectA reads LOGFONTA at the documented offsets', ()=>{
     const { fns, memory, hdc } = withDC();
     putLogFont(memory, { height: -20, weight: 700, italic: 1, charSet: 0xcc });
@@ -546,6 +596,63 @@ test('CreateBitmap keeps the format it was given', ()=>{
     assert.ok(fns.CreateBitmap.handler([8, 8, 1, 1, 0]) > 0);
     assert.ok(fns.CreateBitmap.handler([8, 8, 1, 24, 0x12000]) > 0);
 });
+
+test('CreateBitmap refuses a side past 0x7ffffff with ERROR_INVALID_PARAMETER', ()=>{
+    // Wine's test_bitmap: 0x7ffffff + 1 pixels wide fails, and says why. A
+    // height past the same bound is refused the same way.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errors = [];
+    const fns = createGdiFunctions({
+        readMemory: (address, length)=>memory.readMemory(address, length),
+        writeMemory: (address, data)=>memory.writeMemory(address, data),
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        handles: fakeHandles(),
+        surfaces: fakeSurfaces(),
+        setLastError: code=>errors.push(code),
+    }).table;
+    const ERROR_INVALID_PARAMETER = 87;
+    assert.equal(fns.CreateBitmap.handler([0x7ffffff + 1, 1, 1, 1, 0]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+    assert.equal(fns.CreateBitmap.handler([1, 0x7ffffff + 1, 1, 1, 0]), 0);
+    memory.putU32s(STRUCT, [0, 0x7ffffff + 1, 1, 2, 0x00010001, 0]);
+    assert.equal(fns.CreateBitmapIndirect.handler([STRUCT]), 0);
+    assert.deepEqual(errors, new Array(3).fill(ERROR_INVALID_PARAMETER));
+    assert.ok(fns.CreateBitmap.handler([64, 64, 1, 1, 0]) > 0);
+    assert.equal(errors.length, 3, 'a bitmap that is made sets nothing');
+});
+
+test('CreateBitmapIndirect is CreateBitmap from a BITMAP; CreateDiscardableBitmap, compatible',
+    ()=>{
+        // Wine's test_CreateBitmap: the BITMAP's bmWidthBytes is ignored, its
+        // depth rounds up as CreateBitmap's does, and no size is the stock
+        // pixel from either call; the documentation adds that bmType must be 0.
+        const { fns, memory, hdc } = withDC();
+        assert.deepEqual([fns.CreateBitmapIndirect.argBytes, fns.CreateDiscardableBitmap.argBytes],
+            [4, 12]);
+        /** @param {number} width @param {number} bitsPixel @param {number} [type] */
+        const indirect = (width, bitsPixel, type = 0)=>{
+            memory.putU32s(STRUCT, [type, width, 1, 28, 1 | (bitsPixel << 16), 0]);
+            return fns.CreateBitmapIndirect.handler([STRUCT]);
+        };
+        const bitmap = indirect(1, 7);
+        assert.ok(bitmap > 0);
+        assert.equal(fns.GetObjectA.handler([bitmap, 24, OUT]), 24);
+        assert.deepEqual([memory.u32(OUT + 12), memory.u32(OUT + 16) >>> 16], [2, 8],
+            'its own stride, not the 28 it was handed, and seven bits made eight');
+        assert.equal(indirect(1, 33), 0);
+        assert.equal(indirect(1, 1, 1), 0, 'bmType is always zero');
+        assert.equal(fns.CreateBitmapIndirect.handler([0]), 0);
+
+        const memoryDC = fns.CreateCompatibleDC.handler([hdc]);
+        const stock = fns.CreateCompatibleBitmap.handler([memoryDC, 0, 0]);
+        assert.equal(indirect(0, 1), stock);
+        assert.equal(fns.CreateDiscardableBitmap.handler([memoryDC, 0, 0]), stock);
+        const discardable = fns.CreateDiscardableBitmap.handler([hdc, 4, 2]);
+        assert.equal(fns.GetObjectA.handler([discardable, 24, OUT]), 24);
+        assert.deepEqual([memory.u32(OUT + 4), memory.u32(OUT + 8), memory.u32(OUT + 16) >>> 16],
+            [4, 2, 32], 'the DC\'s depth, as CreateCompatibleBitmap gives it');
+    });
 
 test('a bitmap of no size is the one stock monochrome pixel every memory DC starts with', ()=>{
     // Wine's test_CreateBitmap, and both calls' documentation: a zero width
@@ -687,15 +794,120 @@ test('CreateDIBSection refuses what it cannot back with plain memory', ()=>{
     assert.equal(fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]), 0,
         'a run-length encoded DIB has no addressable rows to hand out');
 
-    putBitmapInfo(memory, { size: 12 });
+    putBitmapInfo(memory, { size: 20 });
     assert.equal(fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]), 0,
-        'biSize says which header the guest compiled, and 12 is a different one');
+        'biSize says which header the guest compiled, and 20 is none of them');
 
     putBitmapInfo(memory);
     assert.equal(fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0x1234, 0]), 0,
         'a file mapping is the filesystem\'s, and there is none to map');
 
     assert.deepEqual(surfaces.allocated, [], 'a refused section allocates nothing');
+});
+
+test('CreateDIBSection refuses an image past 32 bits of bytes, or one there is no room for',
+    ()=>{
+        // Wine's test_dib_formats: 0x4000 square at one bit is made, and five
+        // shapes whose rows come to more bytes than 32 bits count are not.
+        const { fns, memory, surfaces, hdc } = withDC();
+        /** @param {number} width @param {number} height @param {number} bitCount */
+        const made = (width, height, bitCount)=>{
+            putBitmapInfo(memory, { width, height, bitCount });
+            return fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]) !== 0;
+        };
+        assert.equal(made(0x4000, 0x4000, 1), true);
+        assert.equal(made(0x8001, 0x8001, 32), false);
+        assert.equal(made(1, 0x40000001, 32), false);
+        assert.equal(made(2, 0x40000001, 16), false);
+        assert.equal(made(0x40000001, 1, 32), false);
+        assert.equal(made(0x40000001, 4, 8), false);
+        assert.equal(surfaces.allocated.length, 1, 'nothing asked for the refused ones');
+
+        putBitmapInfo(memory, { width: 4, height: 4, bitCount: 32 });
+        const dc = fns.CreateCompatibleDC.handler([hdc]);
+        fns.SelectObject.handler([dc, fns.CreateDIBSection.handler([hdc, STRUCT, 0, 0, 0, 0])]);
+        surfaces.allocate = ()=>0;
+        assert.equal(made(16, 16, 32), false, 'no memory, no section');
+        assert.equal(fns.CreateCompatibleBitmap.handler([dc, 16, 16]), 0,
+            'nor one made compatible with a section');
+    });
+
+test('CreateDIBSection takes a BITMAPCOREHEADER or a header of forty bytes or more', ()=>{
+    // Wine's test_bitmapinfoheadersize: a BITMAPINFOHEADER of 39 bytes is
+    // refused and one of 40, 41, 44, BITMAPV4HEADER's 108 or BITMAPV5HEADER's
+    // 124 taken; a BITMAPCOREHEADER of exactly 12 bytes is taken, and 11, 13
+    // or BITMAPCOREINFO's 16 refused.
+    const { fns, memory, hdc } = withDC();
+    /** @returns {number[] | null} the section's width, height and depth */
+    const made = ()=>{
+        const section = fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]);
+        if (!section)
+        {
+            return null;
+        }
+        assert.equal(fns.GetObjectA.handler([section, 24, OUT]), 24);
+        return [memory.u32(OUT + 4), memory.u32(OUT + 8), memory.u32(OUT + 16) >>> 16];
+    };
+    for (const size of [39, 40, 41, 44, 108, 124])
+    {
+        putBitmapInfo(memory, { size, width: 512, height: 100, bitCount: 24 });
+        assert.deepEqual(made(), size < 40 ? null : [512, 100, 24], `${size}`);
+    }
+    for (const size of [11, 12, 13, 16])
+    {
+        memory.putU32s(STRUCT, [size]);
+        [512, 100, 1, 24].forEach((value, index)=>memory.putU16(STRUCT + 4 + index * 2, value));
+        assert.deepEqual(made(), size === 12 ? [512, 100, 24] : null, `core ${size}`);
+    }
+});
+
+test('CreateDIBSection takes the formats, planes, masks and usages Windows does', ()=>{
+    // Wine's test_dib_formats: BI_BITFIELDS only at 16 and 32 bits and never
+    // with DIB_PAL_COLORS; planes 1, or any count whose product with the
+    // depth is at most 16, but never zero; every mask non-zero, though masks
+    // that are not a run of bits are accepted; DIB_PAL_COLORS + 1 refused;
+    // and a width or height that is negative or zero refused.
+    const { fns, memory, hdc } = withDC();
+    /**
+     * @param {{ bitCount?: number, compression?: number, planes?: number,
+     *           masks?: number[], usage?: number, width?: number, height?: number }} format
+     */
+    const made = ({ bitCount = 16, compression = BI_RGB, planes = 1, masks = [0xaaaaaaaa,
+        0xaaaaaaaa, 0xaaaaaaaa], usage = 0, width = 2, height = 2 })=>{
+        putBitmapInfo(memory, { width, height, bitCount, compression });
+        memory.putU16(STRUCT + BITMAPINFOHEADER.biPlanes, planes);
+        memory.putU32s(STRUCT + BITMAPINFOHEADER.SIZE, masks);
+        const section = fns.CreateDIBSection.handler([hdc, STRUCT, usage, BITS_POINTER, 0, 0]);
+        if (section)
+        {
+            fns.DeleteObject.handler([section]);
+        }
+        return section !== 0;
+    };
+    const BI_BITFIELDS = 3;
+    for (const bitCount of [1, 4, 8, 16, 24, 32])
+    {
+        for (const usage of [0, 1])
+        {
+            assert.equal(made({ bitCount, usage }), true, `${bitCount} BI_RGB ${usage}`);
+            assert.equal(made({ bitCount, usage, compression: BI_BITFIELDS }),
+                (bitCount === 16 || bitCount === 32) && usage === 0,
+                `${bitCount} BI_BITFIELDS ${usage}`);
+        }
+        for (const planes of [0, 2, 3, 16])
+        {
+            assert.equal(made({ bitCount, planes }), planes > 0 && planes * bitCount <= 16,
+                `${bitCount} bits, ${planes} planes`);
+        }
+    }
+    assert.equal(made({ compression: BI_BITFIELDS, masks: [0, 0, 0] }), false, 'no masks');
+    assert.equal(made({ compression: BI_BITFIELDS, masks: [3, 0, 7] }), false, 'one empty');
+    assert.equal(made({ compression: BI_BITFIELDS, masks: [0x55, 0x44, 0x33] }), true,
+        'garbage is ok though');
+    assert.equal(made({ bitCount: 1, usage: 2 }), false, 'DIB_PAL_COLORS + 1');
+    assert.equal(made({ bitCount: 32, width: -2 }), false, 'negative width');
+    assert.equal(made({ bitCount: 32, width: 0 }), false, 'zero width');
+    assert.equal(made({ bitCount: 32, height: 0 }), false, 'zero height');
 });
 
 test('deleting a DIB section gives its memory back', ()=>{
@@ -748,6 +960,17 @@ test('CreateDIBitmap makes a device-dependent bitmap at the depth of the DC it i
     assert.ok(fns.CreateDIBitmap.handler([hdc, STRUCT, 0, 0, 0, 0]) > 0);
     putBitmapInfo(memory, { width: 2, height: 2, bitCount: 8, compression: 4 });
     assert.equal(fns.CreateDIBitmap.handler([hdc, STRUCT, 0, 0, 0, 0]), 0, 'BI_JPEG');
+
+    // test_dib_formats again: a zero width or height makes a bitmap -- the one
+    // pixel CreateCompatibleBitmap gives for it -- and a negative width none.
+    const stock = fns.CreateCompatibleBitmap.handler([hdc, 0, 0]);
+    putBitmapInfo(memory, { width: 0, height: 2, bitCount: 32 });
+    assert.equal(fns.CreateDIBitmap.handler([hdc, STRUCT, 0, 0, 0, 0]), stock);
+    putBitmapInfo(memory, { width: 2, height: 0, bitCount: 32 });
+    assert.equal(fns.CreateDIBitmap.handler([hdc, STRUCT, 4, BITS_POINTER, STRUCT, 0]), stock,
+        'and nothing is drawn into that shared pixel');
+    putBitmapInfo(memory, { width: -2, height: 2, bitCount: 32 });
+    assert.equal(fns.CreateDIBitmap.handler([hdc, STRUCT, 0, 0, 0, 0]), 0);
 });
 
 test('CreatePalette reads its entries out of the structure that carries them', ()=>{
@@ -960,6 +1183,22 @@ test('GetTextMetricsA writes TEXTMETRIC at the documented offsets', ()=>{
     assert.equal(memory.u8(OUT + TEXTMETRICA.tmBreakChar), 0x20);
     assert.equal(memory.u8(OUT + TEXTMETRICA.tmPitchAndFamily) & 1, 0,
         'TMPF_FIXED_PITCH is set for a VARIABLE pitch font, and everything here is fixed');
+});
+
+test('a font here reports itself a vector font, as its enumeration does', ()=>{
+    // TMPF_VECTOR is what separates a scalable font from a raster one (Wine's
+    // dib tests skip their outline text when it is clear); neither
+    // TMPF_TRUETYPE nor TMPF_DEVICE is claimed, as FontType claims neither.
+    const TMPF_VECTOR = 0x02;
+    const { fns, memory, hdc } = withDC();
+    for (const pitchAndFamily of [0, 0x11, 0x22, 0x31])
+    {
+        putLogFont(memory, { pitchAndFamily });
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+        assert.ok(fns.GetTextMetricsA.handler([hdc, OUT]));
+        assert.equal(memory.u8(OUT + TEXTMETRICA.tmPitchAndFamily),
+            (pitchAndFamily & 0xf0) | TMPF_VECTOR, `${pitchAndFamily}`);
+    }
 });
 
 test('a taller font asks for more of everything', ()=>{

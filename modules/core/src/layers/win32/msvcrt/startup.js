@@ -134,6 +134,9 @@ export function splitCommandLine(line){
  *           errno is set by whichever call fails. Absent, these are private.
  * @property {() => string} [errnoName]
  *           Which of them is the calling thread's errno. Absent, one for all.
+ * @property {() => void} [closeStreams]
+ *           Closes every stream still open, for `_cexit`. Absent, there are
+ *           no streams to close.
  */
 
 /**
@@ -667,14 +670,21 @@ export function createStartupFunctions(host){
          * afterwards, and ending here would take away the rest of its shutdown.
          *
          * `_cexit` is `exit` without the ending: what `atexit` and `_onexit`
-         * registered runs, last first, and then the streams are flushed --
-         * which here is nothing, every stream writing straight through to the
-         * volume. `_c_exit` is `_exit` without the ending, so it runs nothing.
+         * registered runs, last first, and then every open stream is closed,
+         * as it is documented to be -- flushing one is nothing here, every
+         * stream writing straight through to the volume. `_c_exit` is `_exit`
+         * without the ending, so it runs and closes nothing.
          */
         _cexit: {
             convention: 'cdecl',
             argBytes: 0,
-            handler: ()=>(onExit.length === 0 ? 0 : runOnExit().then(()=>0)),
+            handler: ()=>{
+                const close = ()=>{
+                    host.closeStreams?.();
+                    return 0;
+                };
+                return onExit.length === 0 ? close() : runOnExit().then(close);
+            },
         },
         _c_exit: { convention: 'cdecl', argBytes: 0, handler: ()=>0 },
 

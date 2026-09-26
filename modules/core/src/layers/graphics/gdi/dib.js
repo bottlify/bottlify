@@ -29,6 +29,7 @@
  */
 
 import { bitBlt, stretchBlt } from './blit.js';
+import { channelsOf, packPixel, unpackPixel } from './channels.js';
 import { SRCCOPY } from './rop.js';
 import { BI_BITFIELDS, createSurface, dibPitch, nearestEntry } from './surface.js';
 
@@ -71,81 +72,15 @@ export function isConvertibleDib(image){
 }
 
 /**
- * How a sixteen- or thirty-two-bit DIB's pixels split into channels: for
- * each of red, green and blue, its mask, where the mask starts and how many
- * bits wide it is. A mask is one run of bits, as the format requires; an
- * empty one is a channel that is always zero.
+ * How a sixteen- or thirty-two-bit DIB's pixels split into channels: by the
+ * masks a BI_BITFIELDS DIB names, else by those its depth implies.
  *
  * @param {DibImage} image
- * @returns {{ mask: number, shift: number, bits: number }[]}
  */
-function channelsOf(image){
-    const masks = image.header.compression === BI_BITFIELDS
+function channelsFor(image){
+    return channelsOf(image.header.compression === BI_BITFIELDS
         ? image.masks ?? [0, 0, 0]
-        : RGB_MASKS[image.header.bitCount];
-    return masks.map(value=>{
-        const mask = value >>> 0;
-        let shift = 0;
-        while (shift < 32 && ((mask >>> shift) & 1) === 0)
-        {
-            shift++;
-        }
-        let bits = 0;
-        while (shift + bits < 32 && ((mask >>> (shift + bits)) & 1) === 1)
-        {
-            bits++;
-        }
-        return { mask, shift, bits };
-    });
-}
-
-/**
- * A channel `bits` wide, widened to eight by repeating its bits, so full
- * scale stays full scale: a shift alone leaves five-bit white at 0xf8.
- *
- * @param {number} value @param {number} bits
- */
-function widenChannel(value, bits){
-    if (bits === 0 || bits >= 8)
-    {
-        return bits === 0 ? 0 : (value >>> (bits - 8)) & 0xff;
-    }
-    let wide = value;
-    let filled = bits;
-    while (filled < 8)
-    {
-        wide = (wide << bits) | value;
-        filled += bits;
-    }
-    return (wide >>> (filled - 8)) & 0xff;
-}
-
-/**
- * @param {number} value  A masked pixel.
- * @param {{ mask: number, shift: number, bits: number }[]} channels
- * @returns {number} 0x00RRGGBB
- */
-function unpack(value, channels){
-    const [red, green, blue] = channels.map(channel=>widenChannel(
-        ((value & channel.mask) >>> 0) >>> channel.shift, channel.bits));
-    return ((red << 16) | (green << 8) | blue) >>> 0;
-}
-
-/**
- * @param {number} pixel  0x00RRGGBB
- * @param {{ mask: number, shift: number, bits: number }[]} channels
- * @returns {number} the masked pixel, each channel's top bits kept
- */
-function pack(pixel, channels){
-    const eight = [(pixel >>> 16) & 0xff, (pixel >>> 8) & 0xff, pixel & 0xff];
-    let value = 0;
-    channels.forEach((channel, index)=>{
-        const narrowed = channel.bits >= 8
-            ? eight[index] * (2 ** (channel.bits - 8))
-            : eight[index] >>> (8 - channel.bits);
-        value |= channel.bits === 0 ? 0 : (narrowed * (2 ** channel.shift)) & channel.mask;
-    });
-    return value >>> 0;
+        : RGB_MASKS[image.header.bitCount]);
 }
 
 /**
@@ -193,11 +128,16 @@ export function decodeDib(image){
     const startScan = image.startScan ?? 0;
     const scanLines = Math.min(image.scanLines ?? height, height - startScan);
     const out = createSurface({ width, height });
-    const channels = header.bitCount === 16 || header.bitCount === 32 ? channelsOf(image) : [];
+    const channels = header.bitCount === 16 || header.bitCount === 32 ? channelsFor(image) : [];
 
     for (let index = 0; index < scanLines; index++)
     {
         const dibRow = startScan + index;
+        if (dibRow < 0)
+        {
+            // Supplied rows can begin above a top-down picture's first.
+            continue;
+        }
         // The one place the sign of biHeight is consulted: a bottom-up DIB's
         // row zero is the picture's last row.
         const y = topDown ? dibRow : height - 1 - dibRow;
@@ -208,7 +148,7 @@ export function decodeDib(image){
             if (header.bitCount === 32)
             {
                 const at = row + (x * 4);
-                pixel = unpack(bits[at] | (bits[at + 1] << 8) | (bits[at + 2] << 16)
+                pixel = unpackPixel(bits[at] | (bits[at + 1] << 8) | (bits[at + 2] << 16)
                     | (bits[at + 3] << 24), channels);
             }
             else if (header.bitCount === 24)
@@ -219,7 +159,7 @@ export function decodeDib(image){
             else if (header.bitCount === 16)
             {
                 const at = row + (x * 2);
-                pixel = unpack(bits[at] | (bits[at + 1] << 8), channels);
+                pixel = unpackPixel(bits[at] | (bits[at + 1] << 8), channels);
             }
             else
             {
@@ -253,7 +193,7 @@ export function encodeDib(surface, image){
     const base = image.offset ?? 0;
     const startScan = image.startScan ?? 0;
     const scanLines = Math.min(image.scanLines ?? height, height - startScan);
-    const channels = header.bitCount === 16 || header.bitCount === 32 ? channelsOf(image) : [];
+    const channels = header.bitCount === 16 || header.bitCount === 32 ? channelsFor(image) : [];
     // The table is fixed for the whole call, so every answer can be kept.
     /** @type {Map<number, number>} */
     const indices = new Map();
@@ -305,7 +245,7 @@ export function encodeDib(surface, image){
             else if (header.bitCount === 32)
             {
                 const at = row + (x * 4);
-                const value = pack(pixel, channels);
+                const value = packPixel(pixel, channels);
                 bits[at] = value & 0xff;
                 bits[at + 1] = (value >>> 8) & 0xff;
                 bits[at + 2] = (value >>> 16) & 0xff;
@@ -321,7 +261,7 @@ export function encodeDib(surface, image){
             else
             {
                 const at = row + (x * 2);
-                const value = pack(pixel, channels);
+                const value = packPixel(pixel, channels);
                 bits[at] = value & 0xff;
                 bits[at + 1] = (value >>> 8) & 0xff;
             }
@@ -359,34 +299,63 @@ function sourceTop(ySrc, rows, height, topDown){
  * @property {number} height
  * @property {number} xSrc
  * @property {number} ySrc
- * @property {DibImage} image
+ * @property {DibImage} image  Its bits hold the supplied scan lines only.
+ * @property {number} [firstScan]  uStartScan: the first scan line supplied.
+ * @property {number} [scans]      cLines: how many; the whole DIB by default.
  */
 
 /**
+ * SetDIBitsToDevice: the part of a DIB's source rectangle the caller supplied
+ * scan lines for, onto the device, and nothing of the rest.
+ *
+ * Every row here is counted as the call counts it, which is from the
+ * picture's bottom whichever way the DIB is stored: scan line zero is the
+ * bottom row, ySrc is the bottom of the source rectangle, and the bits hold
+ * scans firstScan onward -- bottom-up in a bottom-up DIB, top-down in a
+ * top-down one. The answer counts differently by storage too (Wine's
+ * test_SetDIBitsToDevice): a top-down DIB answers the lines it was handed, a
+ * bottom-up one the supplied lines at or below the source rectangle's top.
+ *
  * @param {SetDibOptions} options
- * @returns {number} how many scan lines were transferred, or zero on failure
+ * @returns {number} the scan lines, as above, or zero on failure
  */
 export function setDIBitsToDevice(options){
-    const source = decodeDib(options.image);
+    const header = options.image.header;
+    const height = Math.abs(header.height);
+    const topDown = header.height < 0;
+    const first = options.firstScan ?? 0;
+    const scans = options.scans ?? height;
+    const rows = options.height | 0;
+    const ySrc = options.ySrc | 0;
+    const source = decodeDib({
+        ...options.image,
+        startScan: topDown ? height - first - scans : first,
+        scanLines: scans,
+    });
     if (!source)
     {
         return 0;
     }
-    const top = sourceTop(options.ySrc | 0, options.height | 0,
-        Math.abs(options.image.header.height), options.image.header.height < 0);
-    const copied = bitBlt({
-        dest: options.dest,
-        clip: options.clip,
-        x: options.xDest | 0,
-        y: options.yDest | 0,
-        width: options.width | 0,
-        height: options.height | 0,
-        src: source,
-        srcX: options.xSrc | 0,
-        srcY: top,
-        rop: SRCCOPY,
-    });
-    return copied ? Math.abs(options.height | 0) : 0;
+    // Both in picture rows, top-down: what was supplied, and what was asked for.
+    const rectangleTop = height - ySrc - rows;
+    const top = Math.max(height - first - scans, rectangleTop);
+    const bottom = Math.min(height - first, height - ySrc);
+    if (bottom > top && (options.width | 0) > 0)
+    {
+        bitBlt({
+            dest: options.dest,
+            clip: options.clip,
+            x: options.xDest | 0,
+            y: (options.yDest | 0) + (top - rectangleTop),
+            width: options.width | 0,
+            height: bottom - top,
+            src: source,
+            srcX: options.xSrc | 0,
+            srcY: top,
+            rop: SRCCOPY,
+        });
+    }
+    return topDown ? scans : Math.max(0, Math.min(first + scans, ySrc + rows) - Math.max(first, 0));
 }
 
 /**

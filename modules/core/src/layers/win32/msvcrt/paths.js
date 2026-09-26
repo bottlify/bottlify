@@ -28,7 +28,7 @@ const MAX_STRING = 1 << 20;
 /** `struct _finddata_t` as msvcrt.dll lays it out: 32-bit times, 260 bytes of name. */
 const FINDDATA = Object.freeze({
     ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: false,
-    NAME: 20, BYTES: 280,
+    NAME: 20, WIDE_NAME: false, BYTES: 280,
 });
 
 /**
@@ -37,8 +37,16 @@ const FINDDATA = Object.freeze({
  */
 const FINDDATAI64 = Object.freeze({
     ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: true,
-    NAME: 24, BYTES: 288,
+    NAME: 24, WIDE_NAME: false, BYTES: 288,
 });
+
+/** `struct _wfinddatai64_t`: `_finddatai64_t` with 260 wide characters of name. */
+const WFINDDATAI64 = Object.freeze({
+    ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: true,
+    NAME: 24, WIDE_NAME: true, BYTES: 544,
+});
+
+/** @typedef {typeof FINDDATA | typeof FINDDATAI64 | typeof WFINDDATAI64} FindLayout */
 const MAX_NAME = 259;
 
 /** The attributes FindFirstFile reports, which `_findfirst` passes on. */
@@ -116,6 +124,8 @@ export function fullPath(path, current){
  * @property {any} files  The volume: stat, list, remove, rename, mkdir and the
  *           current directory.
  * @property {(code: number) => void} [errno]  Where a failure says why.
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ *           For a wide pattern. Absent, the wide finds stay unexported.
  */
 
 /**
@@ -176,11 +186,31 @@ export function createPathFunctions(host){
     let nextSearch = 1;
 
     /**
-     * Fills a whole `_finddata_t` or `_finddatai64_t`. The volume keeps one
-     * time per file, the last write, and it stands for all three.
+     * A wide string, read a character at a time up to its terminator.
      *
-     * @param {number} address @param {any} entry
-     * @param {typeof FINDDATA | typeof FINDDATAI64} layout
+     * @param {number} pointer
+     */
+    const readWide = pointer=>{
+        let text = '';
+        for (let at = pointer >>> 0; text.length < MAX_STRING; at += 2)
+        {
+            const unit = host.readMemory?.(at, 2) ?? new Uint8Array(2);
+            const code = unit[0] | unit[1] << 8;
+            if (code === 0)
+            {
+                break;
+            }
+            text += String.fromCharCode(code);
+        }
+        return text;
+    };
+
+    /**
+     * Fills a whole `_finddata_t`, `_finddatai64_t` or `_wfinddatai64_t`.
+     * The volume keeps one time per file, the last write, and it stands for
+     * all three.
+     *
+     * @param {number} address @param {any} entry @param {FindLayout} layout
      */
     const writeFound = (address, entry, layout)=>{
         const bytes = new Uint8Array(layout.BYTES);
@@ -201,7 +231,14 @@ export function createPathFunctions(host){
         const name = String(entry.name).slice(0, MAX_NAME);
         for (let at = 0; at < name.length; at++)
         {
-            bytes[layout.NAME + at] = name.charCodeAt(at) & 0xff;
+            if (layout.WIDE_NAME)
+            {
+                view.setUint16(layout.NAME + at * 2, name.charCodeAt(at), true);
+            }
+            else
+            {
+                bytes[layout.NAME + at] = name.charCodeAt(at) & 0xff;
+            }
         }
         host.writeMemory(address >>> 0, bytes);
     };
@@ -210,9 +247,10 @@ export function createPathFunctions(host){
      * `_findfirst` for one layout of the record: a handle for `_findnext`
      * with the first match written out, or -1 with ENOENT when nothing
      * matches or the directory is not there -- the same answers
-     * FindFirstFile gives, over the same listing.
+     * FindFirstFile gives, over the same listing. A wide record's pattern is
+     * wide too.
      *
-     * @param {typeof FINDDATA | typeof FINDDATAI64} layout
+     * @param {FindLayout} layout
      */
     const findFirst = layout=>({
         convention: 'cdecl',
@@ -224,7 +262,8 @@ export function createPathFunctions(host){
                 fail(EINVAL);
                 return -1;
             }
-            const { directory, pattern } = splitSearch(readString(spec));
+            const { directory, pattern } = splitSearch(
+                layout.WIDE_NAME ? readWide(spec) : readString(spec));
             const holder = host.files.stat(directory);
             const entries = pattern !== '' && holder?.isDirectory
                 ? host.files.list(directory, pattern) ?? []
@@ -245,7 +284,7 @@ export function createPathFunctions(host){
      * `_findnext` for one layout -- ENOENT at the end. The searches are one
      * table, whichever record a program asked for them in.
      *
-     * @param {typeof FINDDATA | typeof FINDDATAI64} layout
+     * @param {FindLayout} layout
      */
     const findNext = layout=>({
         convention: 'cdecl',
@@ -490,6 +529,21 @@ export function createPathFunctions(host){
 
         /** int _findnexti64(intptr_t handle, struct _finddatai64_t *fileinfo) */
         _findnexti64: findNext(FINDDATAI64),
+
+        // A wide pattern is read from memory as it lies, which needs the
+        // bytes themselves rather than the narrow string reader.
+        ...(host.readMemory
+            ? {
+                /**
+                 * intptr_t _wfindfirsti64(const wchar_t *filespec,
+                 *                         struct _wfinddatai64_t *fileinfo)
+                 */
+                _wfindfirsti64: findFirst(WFINDDATAI64),
+
+                /** int _wfindnexti64(intptr_t handle, struct _wfinddatai64_t *fileinfo) */
+                _wfindnexti64: findNext(WFINDDATAI64),
+            }
+            : {}),
 
         /** int _findclose(intptr_t handle) -- EBADF for a handle not open. */
         _findclose: operation(4, ([handle])=>(searches.delete(handle | 0) ? 0 : EBADF)),

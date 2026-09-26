@@ -21,15 +21,18 @@
  */
 
 import { createGdiObjects } from './objects.js';
-import { createDrawingFunctions } from './drawing.js';
+import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
 import { FACES, faceNamed } from './faces.js';
 import {
+    BITMAP,
     BITMAPINFOHEADER,
     LF_FACESIZE,
     LOGFONTA,
     LOGFONTW_SIZE,
+    colorEntryBytes,
     ddbStride,
     dibStride,
+    isDibHeaderSize,
     logFontBytes,
     readBitmapInfoHeader,
     readLogBrush,
@@ -77,7 +80,16 @@ const BS_SOLID = 0;
 const BS_NULL = 1;
 const BS_HATCHED = 2;
 const BS_PATTERN = 3;
-const BRUSH_STYLES = new Set([BS_SOLID, BS_NULL, BS_HATCHED, BS_PATTERN]);
+/**
+ * A packed DIB's brush: lbHatch the DIB -- an HGLOBAL, which is its address
+ * here, or the address itself -- and lbColor its usage. BS_PATTERN8X8 is
+ * BS_PATTERN under an older name.
+ */
+const BS_DIBPATTERN = 5;
+const BS_DIBPATTERNPT = 6;
+const BS_PATTERN8X8 = 7;
+const BRUSH_STYLES = new Set([BS_SOLID, BS_NULL, BS_HATCHED, BS_PATTERN, BS_DIBPATTERN,
+    BS_DIBPATTERNPT, BS_PATTERN8X8]);
 
 /** Pen styles, PS_SOLID through PS_INSIDEFRAME. */
 const PS_NULL = 5;
@@ -174,6 +186,10 @@ const ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
 /** Bit depths a bitmap can have. Anything else is not a format GDI knows. */
 const BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 
+/** The longest side CreateBitmap takes. */
+const MAX_BITMAP_SIDE = 0x7ffffff;
+const ERROR_INVALID_PARAMETER = 87;
+
 /**
  * Depths a device context over somebody else's surface can be made at.
  * A palettised primary is the common one for a program of this era, which is
@@ -188,8 +204,13 @@ const BI_BITFIELDS = 3;
 /** BI_JPEG and BI_PNG: an image file for a printer, never a bitmap's rows. */
 const IMAGE_COMPRESSIONS = new Set([4, 5]);
 
-/** iUsage: the colour table is palette indices, not colours. */
+/**
+ * iUsage: the colour table is colours; it is palette indices; or there is no
+ * table, and each pixel is a palette index itself.
+ */
+const DIB_RGB_COLORS = 0;
 const DIB_PAL_COLORS = 1;
+const DIB_PAL_INDICES = 2;
 
 /** Entries an indexed DIB's colour table holds, by depth. */
 const colorTableSize = (/** @type {number} */ bitCount)=>1 << bitCount;
@@ -238,6 +259,12 @@ const FONTSIGNATURE_SIZE = 24;
  * for a variable-pitch font and clear for a fixed-pitch one.
  */
 const TMPF_FIXED_PITCH = 0x01;
+/**
+ * TMPF_VECTOR: a font drawn from outlines at any size rather than from
+ * bitmaps at one, which every face here is. TMPF_TRUETYPE is not claimed
+ * with it, since no face has the tables a TrueType font would.
+ */
+const TMPF_VECTOR = 0x02;
 
 /** The character range a metric describes, and the two special characters in it. */
 const FIRST_CHAR = 0x20;
@@ -260,8 +287,8 @@ const NEWTEXTMETRICEXW_SIZE = 100;
 /**
  * An enumerated face's FontType: none of RASTER_FONTTYPE, DEVICE_FONTTYPE and
  * TRUETYPE_FONTTYPE, which is what a vector font is. Every face here is drawn
- * at any size, and none has tables a program could read, as TEXTMETRIC and
- * GetTextCharsetInfo already say.
+ * at any size, and none has tables a program could read, as TEXTMETRIC's
+ * TMPF_VECTOR and GetTextCharsetInfo already say.
  */
 const SCALABLE_FONTTYPE = 0;
 
@@ -287,6 +314,8 @@ const SCALABLE_FONTTYPE = 0;
  *           Absent in a build that cannot, where nothing is enumerated.
  * @property {() => any} [callerThread]
  *           The thread whose call is being answered, which a callback runs on.
+ * @property {(code: number) => void} [setLastError]
+ *           The calling thread's last error, for the calls documented to set it.
  */
 
 /**
@@ -313,24 +342,30 @@ export function createGdiFunctions(host){
      * A palette-relative table (DIB_PAL_COLORS) holds indices into the
      * palette the device has selected, and those are resolved now: the
      * bitmap keeps colours, not a reference to a palette that may change.
+     * An index past the palette's end wraps round to its start (Wine's
+     * test_SetDIBits). DIB_PAL_INDICES has no table at all: a pixel is the
+     * palette index itself, which is the identity table here.
      *
      * @param {number} at @param {number} count @param {number} usage @param {any} dc
      * @param {boolean} [live]  False for a table read once and dropped, which
      *        the palette need not keep up to date.
+     * @param {number} [entryBytes]  How far apart a table of colours' entries
+     *        are: an RGBQUAD's four, or a BITMAPCOREINFO's RGBTRIPLE's three.
      * @returns {number[]}
      */
-    const readColorTable = (at, count, usage, dc, live = true)=>{
+    const readColorTable = (at, count, usage, dc, live = true, entryBytes = 4)=>{
         const colors = [];
-        if (usage === DIB_PAL_COLORS)
+        if (usage === DIB_PAL_COLORS || usage === DIB_PAL_INDICES)
         {
             const record = objects.get(dc?.palette ?? 0);
             const entries = record?.attributes.entries ?? [];
-            const raw = host.readMemory(at, count * 2);
+            const raw = usage === DIB_PAL_COLORS ? host.readMemory(at, count * 2) : null;
             /** @type {number[]} */
             const indices = [];
             for (let index = 0; index < count; index++)
             {
-                const entry = raw[index * 2] | (raw[index * 2 + 1] << 8);
+                const entry = (raw ? raw[index * 2] | (raw[index * 2 + 1] << 8) : index)
+                    % Math.max(1, entries.length);
                 indices.push(entry);
                 colors.push(paletteEntryToPixel(entries[entry] ?? 0));
             }
@@ -346,11 +381,11 @@ export function createGdiFunctions(host){
             }
             return colors;
         }
-        const quads = host.readMemory(at, count * 4);
-        for (let index = 0; index < count; index++)
+        const entries = host.readMemory(at, count * entryBytes);
+        for (let offset = 0; offset < count * entryBytes; offset += entryBytes)
         {
-            colors.push((quads[index * 4] | quads[index * 4 + 1] << 8
-                | quads[index * 4 + 2] << 16) >>> 0);
+            colors.push((entries[offset] | entries[offset + 1] << 8
+                | entries[offset + 2] << 16) >>> 0);
         }
         return colors;
     };
@@ -407,7 +442,10 @@ export function createGdiFunctions(host){
             case DEFAULT_GUI_FONT:
                 return { type: 'font', attributes: logFont({ height: -11 }) };
             case DEFAULT_PALETTE:
-                return { type: 'palette', attributes: { version: 0x300, entries: [] } };
+                // PALETTEENTRYs, red in the low byte.
+                return { type: 'palette', attributes: { version: 0x300,
+                    entries: DEFAULT_PALETTE_COLORS.map(pixel=>((pixel & 0xff) << 16
+                        | (pixel & 0xff00) | (pixel >>> 16) & 0xff) >>> 0) } };
             default:
                 return null;
         }
@@ -834,7 +872,7 @@ export function createGdiFunctions(host){
             // The family nibble travels through unchanged; the pitch bits do not,
             // because there is only one pitch here and it is not the one the
             // constant is named after.
-            pitchAndFamily: (font.pitchAndFamily & 0xf0) & ~TMPF_FIXED_PITCH,
+            pitchAndFamily: ((font.pitchAndFamily & 0xf0) & ~TMPF_FIXED_PITCH) | TMPF_VECTOR,
             charSet: font.charSet === DEFAULT_CHARSET ? ANSI_CHARSET : font.charSet,
             ...measured,
         };
@@ -911,7 +949,7 @@ export function createGdiFunctions(host){
      * @param {number} bitCount
      */
     const dibSize = (width, height, bitCount)=>
-        (((((width * bitCount) + 31) / 32) | 0) * 4) * Math.abs(height);
+        Math.floor(((width * bitCount) + 31) / 32) * 4 * Math.abs(height);
 
     /**
      * A device-dependent bitmap's attributes, its bits among them: rows
@@ -1039,6 +1077,84 @@ export function createGdiFunctions(host){
     };
 
     /**
+     * A pattern brush over a packed DIB -- header, masks, colour table and
+     * rows in one block -- or zero for one that cannot be a pattern.
+     *
+     * The rows are copied now, as a bitmap's are. A DIB_RGB_COLORS table is
+     * copied too, but a palette-relative one is kept as its indices: Windows
+     * resolves them through the palette the DC has when the brush paints,
+     * and again through the next one (Wine's test_palette_brush). LOGBRUSH
+     * names the DIB it was made from and no colour.
+     *
+     * @param {number} packed @param {number} usage
+     */
+    const dibPatternBrush = (packed, usage)=>{
+        if (packed === 0 || usage > DIB_PAL_INDICES)
+        {
+            return 0;
+        }
+        const header = readBitmapInfoHeader(host, packed);
+        const { width, bitCount, compression } = header;
+        const height = Math.abs(header.height);
+        const masked = compression === BI_BITFIELDS && (bitCount === 16 || bitCount === 32);
+        if (!isDibHeaderSize(header.size) || !BIT_COUNTS.has(bitCount)
+            || (compression !== BI_RGB && !masked) || width <= 0 || height === 0)
+        {
+            return 0;
+        }
+        const indexed = bitCount <= 8;
+        const size = colorTableSize(bitCount);
+        const entries = !indexed ? header.clrUsed
+            : usage === DIB_PAL_INDICES ? 0
+                : Math.min(header.clrUsed || size, size);
+        const table = packed + header.size
+            + (masked && header.size === BITMAPINFOHEADER.SIZE ? 12 : 0);
+        const entryBytes = colorEntryBytes(header);
+        const bitsAt = table + entries * (usage === DIB_PAL_COLORS ? 2 : entryBytes);
+        const stride = ddbStride(width, bitCount);
+        const pitch = dibStride(width, bitCount);
+        const pixels = new Uint8Array(stride * height);
+        for (let y = 0; y < height; y++)
+        {
+            const row = header.height < 0 ? y : height - 1 - y;
+            pixels.set(host.readMemory(bitsAt + row * pitch, stride), y * stride);
+        }
+        /** @type {number[] | undefined} */
+        let indices;
+        if (indexed && usage === DIB_PAL_COLORS)
+        {
+            const raw = host.readMemory(table, entries * 2);
+            indices = Array.from({ length: entries }, (_, index)=>raw[index * 2]
+                | (raw[index * 2 + 1] << 8));
+        }
+        else if (indexed && usage === DIB_PAL_INDICES)
+        {
+            indices = Array.from({ length: size }, (_, index)=>index);
+        }
+        return objects.create('brush', {
+            style: BS_DIBPATTERN,
+            color: 0,
+            hatch: packed,
+            pattern: {
+                width,
+                height,
+                bitCount,
+                pixels,
+                dib: true,
+                palette: indexed && !indices
+                    ? [...readColorTable(table, entries, DIB_RGB_COLORS, null, false, entryBytes),
+                        ...new Array(size - entries).fill(0)]
+                    : undefined,
+                indices,
+                compression,
+                bitfields: masked
+                    ? [0, 4, 8].map(at=>readU32(host, packed + BITMAPINFOHEADER.SIZE + at))
+                    : [0, 0, 0],
+            },
+        });
+    };
+
+    /**
      * Runs `action` over a memory context of this layer's own with `bitmap`
      * in it, whether or not a program has the bitmap selected somewhere: a
      * bitmap read back or drawn for the window manager is not a selection,
@@ -1066,6 +1182,9 @@ export function createGdiFunctions(host){
 
     const drawing = createDrawingFunctions({
         host, objects, dcOf, surfaceOf, currentMetrics, lend,
+        /** @param {number} at @param {number} count @param {number} usage @param {any} dc */
+        readColorTable: (at, count, usage, dc, entryBytes)=>
+            readColorTable(at, count, usage, dc, false, entryBytes),
     });
 
     /**
@@ -1086,43 +1205,6 @@ export function createGdiFunctions(host){
             solidBrushes.set(key, handle);
         }
         return handle;
-    };
-
-    /**
-     * A DIB converted into a bitmap's own format across the whole bitmap, the
-     * DIB's bottom row on the bitmap's bottom row, as SetDIBits from scan line
-     * zero lays it. False when the DIB is not one this build reads, or there
-     * is nothing to draw with.
-     *
-     * @param {number} bitmap @param {number} bits @param {number} info
-     * @param {number} usage @param {any} dc  Whose palette DIB_PAL_COLORS indexes.
-     */
-    const setBits = (bitmap, bits, info, usage, dc)=>{
-        const header = readBitmapInfoHeader(host, info);
-        if (header.size < BITMAPINFOHEADER.SIZE || !BIT_COUNTS.has(header.bitCount)
-            || header.width <= 0 || header.height === 0 || usage > DIB_PAL_COLORS)
-        {
-            return false;
-        }
-        const table = colorTableSize(header.bitCount);
-        const image = {
-            header,
-            bits: host.readMemory(bits, dibStride(header.width, header.bitCount)
-                * Math.abs(header.height)),
-            colors: header.bitCount <= 8
-                ? readColorTable(info + header.size, Math.min(header.clrUsed || table, table),
-                    usage, dc, false)
-                : [],
-            masks: header.compression === BI_BITFIELDS
-                ? [0, 4, 8].map(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at))
-                : [],
-        };
-        const shape = /** @type {import('./objects.js').GdiObject} */ (
-            objects.get(bitmap)).attributes;
-        return lend(bitmap, target=>(drawing.bound(target, false)?.setDIBitsToDevice(target, {
-            xDest: 0, yDest: 0, width: shape.width, height: shape.height, xSrc: 0, ySrc: 0,
-            image,
-        }) ?? 0) > 0);
     };
 
     /**
@@ -1482,8 +1564,12 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                return fields.style === BS_PATTERN
-                    ? patternBrush(fields.hatch)
+                if (fields.style === BS_PATTERN || fields.style === BS_PATTERN8X8)
+                {
+                    return patternBrush(fields.hatch);
+                }
+                return fields.style === BS_DIBPATTERN || fields.style === BS_DIBPATTERNPT
+                    ? dibPatternBrush(fields.hatch, fields.color)
                     : objects.create('brush', fields);
             },
         },
@@ -1499,6 +1585,24 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([bitmap])=>patternBrush(bitmap),
+        },
+
+        /**
+         * HBRUSH CreateDIBPatternBrushPt(const void *lpPackedDIB, UINT iUsage)
+         * HBRUSH CreateDIBPatternBrush(HGLOBAL hglbDIBPacked, UINT fuColorSpec)
+         *
+         * A brush over a packed DIB, which the BS_DIBPATTERNPT and BS_DIBPATTERN
+         * forms of a LOGBRUSH describe; an HGLOBAL is the address it locks to.
+         */
+        CreateDIBPatternBrushPt: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([packed, usage])=>dibPatternBrush(packed >>> 0, usage >>> 0),
+        },
+        CreateDIBPatternBrush: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([packed, usage])=>dibPatternBrush(packed >>> 0, usage >>> 0),
         },
 
         /** HBRUSH CreateHatchBrush(int iHatch, COLORREF color) */
@@ -1593,6 +1697,34 @@ export function createGdiFunctions(host){
                 {
                     return defaultBitmap();
                 }
+                const selected = objects.get(dc.bitmap);
+                const shape = selected?.type === 'bitmap' ? selected.attributes : null;
+                if (shape && (shape.section >>> 0) !== 0)
+                {
+                    // Also documented: over a DIB section, the bitmap made is a
+                    // DIB section, in the selected one's format -- its depth,
+                    // masks and colours, copied -- with bottom-up rows of its own.
+                    const bytes = dibSize(cx | 0, cy | 0, shape.bitCount);
+                    const address = bytes > 0xffffffff ? 0 : host.surfaces.allocate(bytes);
+                    if (address === 0)
+                    {
+                        return 0;
+                    }
+                    return objects.create('bitmap', {
+                        width: cx | 0,
+                        height: cy | 0,
+                        planes: 1,
+                        bitCount: shape.bitCount,
+                        topDown: false,
+                        usage: 0,
+                        bits: address,
+                        section: address,
+                        palette: shape.palette ? [...shape.palette] : undefined,
+                        compression: shape.compression,
+                        bitfields: [...(shape.bitfields ?? [0, 0, 0])],
+                        pelsPerMeter: [0, 0],
+                    });
+                }
                 const attributes = deviceBitmap(cx | 0, cy | 0, surfaceOf(dc).bitCount);
                 return attributes ? objects.create('bitmap', attributes) : 0;
             },
@@ -1605,12 +1737,18 @@ export function createGdiFunctions(host){
          * lpBits, when there are any, is the whole image in the bitmap's own
          * layout, and it is copied: the buffer is the caller's, free to be
          * reused or freed the moment this returns. A zero width or height is
-         * the one-pixel monochrome bitmap, whatever the rest says.
+         * the one-pixel monochrome bitmap, whatever the rest says; a side
+         * past 0x7ffffff is ERROR_INVALID_PARAMETER (Wine's test_bitmap).
          */
         CreateBitmap: {
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([width, height, planes, bitCount, bits])=>{
+                if ((width | 0) > MAX_BITMAP_SIDE || (height | 0) > MAX_BITMAP_SIDE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
                 if ((width | 0) === 0 || (height | 0) === 0)
                 {
                     return defaultBitmap();
@@ -1639,6 +1777,39 @@ export function createGdiFunctions(host){
                 }
                 return objects.create('bitmap', attributes);
             },
+        },
+
+        /**
+         * HBITMAP CreateBitmapIndirect(const BITMAP *pbm)
+         *
+         * CreateBitmap with its arguments in a BITMAP, whose bmType must be zero.
+         * bmWidthBytes is not read: the rows are as wide as the width and depth
+         * make them (Wine's test_CreateBitmap).
+         */
+        CreateBitmapIndirect: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([bitmap])=>{
+                if ((bitmap >>> 0) === 0 || readU32(host, bitmap + BITMAP.bmType) !== 0)
+                {
+                    return 0;
+                }
+                const layout = readU32(host, bitmap + BITMAP.bmPlanes);
+                return table.CreateBitmap.handler([
+                    readU32(host, bitmap + BITMAP.bmWidth),
+                    readU32(host, bitmap + BITMAP.bmHeight),
+                    layout & 0xffff,
+                    layout >>> 16,
+                    readU32(host, bitmap + BITMAP.bmBits),
+                ]);
+            },
+        },
+
+        /** HBITMAP CreateDiscardableBitmap(HDC hdc, int cx, int cy): CreateCompatibleBitmap. */
+        CreateDiscardableBitmap: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>table.CreateCompatibleBitmap.handler(args),
         },
 
         /**
@@ -1700,10 +1871,8 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([hdc, info, usage, bitsOut, section])=>{
                 const header = readBitmapInfoHeader(host, info);
-                if (header.size < 40)
+                if (!isDibHeaderSize(header.size))
                 {
-                    // Anything smaller is a BITMAPCOREHEADER, whose fields are at
-                    // different offsets and are not the ones read above.
                     return 0;
                 }
                 if (header.compression !== BI_RGB && header.compression !== BI_BITFIELDS)
@@ -1712,8 +1881,25 @@ export function createGdiFunctions(host){
                     // is no pointer to hand back.
                     return 0;
                 }
-                if (!BIT_COUNTS.has(header.bitCount) || header.width <= 0 || header.height === 0)
+                if (!BIT_COUNTS.has(header.bitCount) || header.width <= 0 || header.height === 0
+                    || (usage >>> 0) > DIB_PAL_COLORS)
                 {
+                    return 0;
+                }
+                // Windows refuses no planes, and several whose product with the
+                // depth passes sixteen, and ignores the rest (Wine's
+                // test_dib_formats).
+                if (header.planes === 0
+                    || (header.planes > 1 && header.planes * header.bitCount > 16))
+                {
+                    return 0;
+                }
+                if (header.compression === BI_BITFIELDS && ((header.bitCount !== 16
+                    && header.bitCount !== 32) || (usage >>> 0) === DIB_PAL_COLORS
+                    || [0, 4, 8].some(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at) === 0)))
+                {
+                    // Every mask has to name some bits, though not necessarily
+                    // the one run of them the documentation asks for.
                     return 0;
                 }
                 if ((section >>> 0) !== 0)
@@ -1723,8 +1909,14 @@ export function createGdiFunctions(host){
                     // back memory that is not the file.
                     return 0;
                 }
+                // An image whose bytes 32 bits cannot count is refused (Wine's
+                // test_dib_formats), and so is one the arena has no room for.
                 const bytes = dibSize(header.width, header.height, header.bitCount);
-                const address = host.surfaces.allocate(bytes);
+                const address = bytes > 0xffffffff ? 0 : host.surfaces.allocate(bytes);
+                if (address === 0)
+                {
+                    return 0;
+                }
                 if ((bitsOut >>> 0) !== 0)
                 {
                     writeU32s(host, bitsOut, [address]);
@@ -1738,7 +1930,7 @@ export function createGdiFunctions(host){
                     ? readColorTable(info + header.size,
                         Math.min(header.clrUsed || colorTableSize(header.bitCount),
                             colorTableSize(header.bitCount)),
-                        usage >>> 0, dcOf(hdc))
+                        usage >>> 0, dcOf(hdc), true, colorEntryBytes(header))
                     : undefined;
                 if (palette)
                 {
@@ -1845,11 +2037,17 @@ export function createGdiFunctions(host){
                 }
                 const header = readBitmapInfoHeader(host, infoHeader);
                 const dc = (hdc >>> 0) === 0 ? null : dcOf(hdc);
-                if (header.size < BITMAPINFOHEADER.SIZE
+                if (!isDibHeaderSize(header.size)
                     || IMAGE_COMPRESSIONS.has(header.compression)
-                    || header.width <= 0 || header.height === 0 || ((hdc >>> 0) !== 0 && !dc))
+                    || header.width < 0 || ((hdc >>> 0) !== 0 && !dc))
                 {
                     return 0;
+                }
+                // No size is CreateCompatibleBitmap's answer to no size, and
+                // that pixel is shared: nothing is drawn into it.
+                if (header.width === 0 || header.height === 0)
+                {
+                    return defaultBitmap();
                 }
                 const attributes = deviceBitmap(header.width, Math.abs(header.height),
                     dc ? surfaceOf(dc).bitCount : 1);
@@ -1858,8 +2056,14 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const bitmap = objects.create('bitmap', attributes);
-                if ((init & CBM_INIT) === 0 || (bits >>> 0) === 0 || (info >>> 0) === 0
-                    || setBits(bitmap, bits >>> 0, info >>> 0, usage >>> 0, dc))
+                if ((init & CBM_INIT) === 0 || (bits >>> 0) === 0 || (info >>> 0) === 0)
+                {
+                    return bitmap;
+                }
+                // SetDIBits of the whole DIB the bits are described by.
+                const lines = Math.abs(readBitmapInfoHeader(host, info >>> 0).height);
+                if (drawing.setDIBits(bitmap, 0, lines, bits >>> 0, info >>> 0, usage >>> 0, dc)
+                    > 0)
                 {
                     return bitmap;
                 }
