@@ -260,8 +260,17 @@ function runtime(contents, { fmode = 0 } = {}){
     const record = code=>{
         errno.push(code);
     };
-    const descriptors = createDescriptors({ files, errno: record, fmode: ()=>fmode });
-    const host = { ...memory, free: ()=>true, files, iob: ()=>IOB, errno: record };
+    /** @type {[number, string][]} */
+    const console = [];
+    const descriptors = createDescriptors({
+        files, errno: record, fmode: ()=>fmode, write: (handle, text)=>console.push([handle, text]),
+    });
+    /** @type {number[]} */
+    const freed = [];
+    const host = {
+        ...memory, free: (/** @type {number} */ at)=>freed.push(at) > 0, files, iob: ()=>IOB,
+        errno: record,
+    };
     const fns = /** @type {Record<string, any>} */ ({
         ...createIoFunctions(host, descriptors),
         ...createStdioFunctions({ ...host, descriptors }),
@@ -278,7 +287,7 @@ function runtime(contents, { fmode = 0 } = {}){
     const flag = stream=>memory.u32(stream + FLAG);
     /** @param {string} name */
     const text = name=>String.fromCharCode(...files.files[name]);
-    return { memory, files, fns, errno, open, gets, flag, text };
+    return { memory, files, fns, errno, open, gets, flag, text, console, freed };
 }
 
 test('the end of the file and an error reach the record\'s _flag, where the macros read them', ()=>{
@@ -555,12 +564,114 @@ test('fgetpos and fsetpos refuse a null argument, and fsetpos a position before 
     assert.equal(fns.ftell.handler([file]), 0, 'the position did not move');
 });
 
+test('freopen closes the stream\'s file and opens another in the same record', ()=>{
+    // Wine's msvcrt test_freopen.
+    const { memory, fns, open, errno, freed } = runtime({ 'C:\\A': '1', 'C:\\B': '2' });
+    const buffer = memory.allocate(4);
+    /** @param {string} name @param {string} mode @param {number} stream */
+    const reopen = (name, mode, stream)=>
+        fns.freopen.handler([memory.put(name), memory.put(mode), stream]);
+
+    const file = open('C:\\A', 'rt');
+    assert.equal(reopen('C:\\B', 'rt', file), file);
+    assert.equal(fns.fread.handler([buffer, 1, 1, file]), 1);
+    assert.equal(memory.bytes[buffer], 0x32);
+    assert.equal(fns.fclose.handler([file]), 0);
+
+    const appending = open('C:\\A', 'at');
+    assert.equal(reopen('C:\\A', 'rt', appending), appending);
+    assert.equal(fns.ftell.handler([appending]), 0);
+    assert.equal(fns.fgetc.handler([appending]), 0x31, 'open for reading now');
+    fns.fclose.handler([appending]);
+
+    const failing = open('C:\\A', 'rt');
+    const fd = fns._fileno.handler([failing]);
+    freed.length = 0;
+    assert.equal(reopen('C:\\none\\x', 'rt', failing), 0);
+    assert.equal(fns._read.handler([fd, buffer, 1]), -1, 'the old file is closed either way');
+    assert.deepEqual(errno.splice(0), [2, 9]);
+    assert.deepEqual(freed, [failing], 'and the stream with it');
+    assert.equal(fns.fclose.handler([failing]), -1);
+    assert.deepEqual(errno, [], 'a stream closed already leaves errno alone');
+
+    const closedUnder = open('C:\\A', 'rb');
+    fns._close.handler([fns._fileno.handler([closedUnder])]);
+    assert.equal(reopen('C:\\B', 'rb', closedUnder), closedUnder,
+        'a stream whose descriptor was closed under it is still reopened');
+    assert.equal(fns.fgetc.handler([closedUnder]), 0x32);
+    assert.equal(memory.u32(closedUnder + 16), fns._fileno.handler([closedUnder]));
+});
+
+test('freopen refuses a null or empty name, a null stream and a mode that is not one', ()=>{
+    const { memory, fns, open, errno } = runtime({ 'C:\\A': '1' });
+    const file = open('C:\\A', 'r');
+    assert.equal(fns.freopen.handler([0, memory.put('r'), file]), 0);
+    assert.equal(fns.freopen.handler([memory.put(''), memory.put('r'), file]), 0);
+    assert.equal(fns.freopen.handler([memory.put('C:\\A'), memory.put('x'), file]), 0);
+    assert.equal(fns.freopen.handler([memory.put('C:\\A'), 0, file]), 0);
+    assert.equal(fns.freopen.handler([memory.put('C:\\A'), memory.put('r'), 0]), 0);
+    assert.deepEqual(errno, Array(5).fill(22));
+    assert.equal(fns.fgetc.handler([file]), 0x31, 'and leaves the stream as it was');
+});
+
+test('freopen moves stdout to a file, and fclose puts it back on the console', ()=>{
+    const { memory, fns, text, console } = runtime({});
+    const stdout = IOB + 32;
+    assert.equal(fns.freopen.handler([memory.put('C:\\log.txt'), memory.put('w'), stdout]),
+        stdout);
+    fns.fprintf.handler([stdout, memory.put('%d\n'), 7]);
+    fns.putchar.handler([0x21]);
+    assert.equal(text('C:\\log.txt'), '7\r\n!');
+    assert.deepEqual(console, []);
+    assert.notEqual(memory.u32(stdout + 16), 1, 'the record names the file\'s descriptor');
+
+    assert.equal(fns.fclose.handler([stdout]), 0);
+    fns.putchar.handler([0x3f]);
+    assert.deepEqual(console, [[2, '?']]);
+    assert.equal(memory.u32(stdout + 16), 1);
+    assert.equal(text('C:\\log.txt'), '7\r\n!', 'the file was closed with what it had');
+});
+
+test('_fdopen puts a stream on a descriptor, which fclose then closes', ()=>{
+    // Wine's msvcrt test_fdopen: the stream reads on from where the
+    // descriptor already was.
+    const { memory, files, fns, errno } = runtime({
+        'C:\\fdopen.tst': '\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09',
+    });
+    const fd = fns._open.handler([memory.put('C:\\fdopen.tst'), 0x8000, 0]);
+    fns._lseek.handler([fd, 5, 0]);
+    const file = fns._fdopen.handler([fd, memory.put('rb')]);
+    assert.notEqual(file, 0);
+    assert.equal(memory.u32(file + 16), fd);
+    const buffer = memory.allocate(16);
+    assert.equal(fns.fread.handler([buffer, 1, 10, file]), 5);
+    assert.deepEqual([...memory.bytes.subarray(buffer, buffer + 5)], [5, 6, 7, 8, 9]);
+    assert.equal(fns.fclose.handler([file]), 0);
+    assert.deepEqual(files.closed, ['C:\\fdopen.tst']);
+    assert.equal(fns._close.handler([fd]), -1, 'the descriptor went with the stream');
+    errno.length = 0;
+
+    assert.equal(fns._fdopen.handler([77, memory.put('r')]), 0);
+    assert.equal(fns._fdopen.handler([1, memory.put('x')]), 0);
+    assert.equal(fns._fdopen.handler([1, 0]), 0);
+    assert.deepEqual(errno, [9, 22, 22]);
+});
+
+test('_fdopen keeps the descriptor\'s own translation, whatever the mode says', ()=>{
+    const { memory, fns } = runtime({ 'C:\\t.txt': 'a\r\nb' });
+    const text = fns._open.handler([memory.put('C:\\t.txt'), 0x4000, 0]);
+    const stream = fns._fdopen.handler([text, memory.put('rb')]);
+    const buffer = memory.allocate(16);
+    assert.equal(fns.fread.handler([buffer, 1, 16, stream]), 3);
+    assert.equal(memory.text(buffer).slice(0, 3), 'a\nb');
+});
+
 test('the stream calls are cdecl with the argument count each reads', ()=>{
     const { fns } = runtime({});
     const expected = {
         fflush: 4, feof: 4, ferror: 4, clearerr: 4, fgetc: 4, getc: 4, _filbuf: 4,
         fgets: 12, fputc: 8, putc: 8, _flsbuf: 8, fputs: 8, ungetc: 8, rewind: 4, _fileno: 4,
-        fgetpos: 8, fsetpos: 8,
+        fgetpos: 8, fsetpos: 8, freopen: 12, _fdopen: 8,
     };
     for (const [name, argBytes] of Object.entries(expected))
     {

@@ -143,6 +143,18 @@ export function createStdioFunctions(host){
     const bytesOf = text=>Uint8Array.from(text, character=>character.charCodeAt(0) & 0xff);
 
     /**
+     * Which of `_iob`'s standard three a record is, or -1.
+     *
+     * @param {number} pointer
+     */
+    const standardIndex = pointer=>{
+        const base = host.iob?.() ?? 0;
+        const offset = (pointer >>> 0) - base;
+        return base === 0 || offset < 0 || offset % FILE_SIZE !== 0
+            || offset / FILE_SIZE >= STANDARD_STREAMS ? -1 : offset / FILE_SIZE;
+    };
+
+    /**
      * The stream a record is. One of `_iob`'s first three is a standard
      * stream the first time it is used: nothing opens them, and the program's
      * `stdout` is only ever the address of a record in the runtime's image.
@@ -156,14 +168,11 @@ export function createStdioFunctions(host){
         {
             return known;
         }
-        const base = host.iob?.() ?? 0;
-        const offset = (pointer >>> 0) - base;
-        if (base === 0 || offset < 0 || offset % FILE_SIZE !== 0
-            || offset / FILE_SIZE >= STANDARD_STREAMS)
+        const index = standardIndex(pointer);
+        if (index < 0)
         {
             return null;
         }
-        const index = offset / FILE_SIZE;
         /** @type {Stream} */
         const stream = {
             record: pointer >>> 0, fd: index, flags: index === 0 ? IOREAD : IOWRT, pushback: [],
@@ -215,6 +224,71 @@ export function createStdioFunctions(host){
 
     /** @param {Stream} stream */
     const descriptorOf = stream=>descriptors.get(stream.fd);
+
+    /**
+     * Points a stream at a descriptor: what `_fileno` and the macros read
+     * from the record, and no bytes held, so the macros call back in.
+     *
+     * @param {Stream} stream @param {number} fd @param {number} flags
+     */
+    const standOn = (stream, fd, flags)=>{
+        stream.fd = fd;
+        stream.pushback.length = 0;
+        writeU32(stream.record + FILE_FILE, fd);
+        writeU32(stream.record + FILE_CNT, 0);
+        setFlags(stream, flags);
+    };
+
+    /**
+     * A new record for a stream on a descriptor, the program's to pass back
+     * until fclose frees it; 0 when the heap has no room.
+     *
+     * @param {number} fd @param {number} flags
+     */
+    const attach = (fd, flags)=>{
+        const record = host.allocate(FILE_SIZE);
+        if (record === 0)
+        {
+            return 0;
+        }
+        host.writeMemory(record, new Uint8Array(FILE_SIZE));
+        const stream = { record, fd, flags: 0, pushback: [] };
+        standOn(stream, fd, flags);
+        streams.set(record, stream);
+        return record;
+    };
+
+    /**
+     * Ends a stream whose descriptor is already closed. Its record is freed,
+     * unless it is one of the standard three, which are the runtime's: one
+     * that freopen moved to a file goes back on the console it started on.
+     *
+     * @param {Stream} stream
+     */
+    const forget = stream=>{
+        const index = standardIndex(stream.record);
+        if (index < 0)
+        {
+            streams.delete(stream.record);
+            host.free(stream.record);
+        }
+        else if (stream.fd !== index)
+        {
+            standOn(stream, index, index === 0 ? IOREAD : IOWRT);
+        }
+    };
+
+    /**
+     * fclose's body: the descriptor closes -- the console's stays open, as it
+     * always does -- and the stream ends.
+     *
+     * @param {Stream} stream @returns {boolean} whether the descriptor closed
+     */
+    const release = stream=>{
+        const closed = descriptors.close(stream.fd);
+        forget(stream);
+        return closed;
+    };
 
     /**
      * Where the program is in the stream: the descriptor's position, less
@@ -416,18 +490,69 @@ export function createStdioFunctions(host){
             {
                 return 0;
             }
-            const record = host.allocate(FILE_SIZE);
+            const record = attach(fd, parsed.flags);
             if (record === 0)
             {
                 descriptors.close(fd);
+            }
+            return record;
+        }),
+
+        /**
+         * FILE *freopen(const char *filename, const char *mode, FILE *stream)
+         *
+         * Closes the stream's file and opens the one named in the same
+         * record, which is the answer. When the new file cannot be opened
+         * the old one is closed all the same, the stream with it, and the
+         * answer is NULL (Wine's msvcrt test_freopen). A null or empty name,
+         * a null stream and a mode that is not one are EINVAL, and close
+         * nothing.
+         */
+        freopen: cdecl(12, ([path, mode, pointer])=>{
+            const stream = argument(pointer);
+            const parsed = (mode >>> 0) === 0 ? null : parseMode(readString(mode));
+            const text = (path >>> 0) === 0 ? '' : readString(path);
+            if (stream && (!parsed || text === ''))
+            {
+                fail(EINVAL);
+            }
+            if (!stream || !parsed || text === '')
+            {
                 return 0;
             }
-            host.writeMemory(record, new Uint8Array(FILE_SIZE));
-            writeU32(record + FILE_FILE, fd);
-            const stream = { record, fd, flags: 0, pushback: [] };
-            setFlags(stream, parsed.flags);
-            streams.set(record, stream);
-            return record;
+            descriptors.close(stream.fd);
+            const fd = descriptors.open(text, parsed);
+            if (fd < 0)
+            {
+                forget(stream);
+                return 0;
+            }
+            standOn(stream, fd, parsed.flags);
+            return stream.record;
+        }),
+
+        /**
+         * FILE *_fdopen(int fd, const char *mode)
+         *
+         * A stream on a descriptor already open, reading and writing from
+         * where it stands; fclose closes the two together. The mode says
+         * what the stream may do, and the translation stays the
+         * descriptor's. A mode that is not one is EINVAL, checked before the
+         * number, which is EBADF when it is not open.
+         */
+        _fdopen: cdecl(8, ([fd, mode])=>{
+            const parsed = (mode >>> 0) === 0 ? null : parseMode(readString(mode));
+            if (!parsed)
+            {
+                fail(EINVAL);
+                return 0;
+            }
+            if (!descriptors.get(fd | 0))
+            {
+                fail(EBADF);
+                return 0;
+            }
+            return attach(fd | 0, parsed.flags);
         }),
 
         /**
@@ -442,15 +567,7 @@ export function createStdioFunctions(host){
             {
                 return EOF;
             }
-            // A standard stream is the runtime's, not the program's to free.
-            if (stream.fd < STANDARD_STREAMS)
-            {
-                return 0;
-            }
-            const closed = descriptors.close(stream.fd);
-            streams.delete(pointer >>> 0);
-            host.free(pointer >>> 0);
-            return closed ? 0 : EOF;
+            return release(stream) ? 0 : EOF;
         }),
 
         /**
