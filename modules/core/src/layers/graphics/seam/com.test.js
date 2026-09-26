@@ -78,6 +78,41 @@ test('an object released to nothing is not reachable through its pointer any mor
     assert.equal(seam.count(), 0);
 });
 
+test('a pointer QueryInterface laid out names its object once the reference is taken', ()=>{
+    // The bridge answers a query from the object's own interfaces: it lays
+    // the pointer out and takes the reference, and never calls `publish`. A
+    // program hands such a pointer back -- SetTexture with an
+    // IDirect3DTexture2, which exists only as a query's answer.
+    /** @type {WeakMap<any, Map<string, number>>} */
+    const laid = new WeakMap();
+    let next = 0x1000;
+    /** @param {any} object @param {string} id */
+    const publishInterface = (object, id)=>{
+        const byInterface = laid.get(object) ?? new Map();
+        laid.set(object, byInterface);
+        if (!byInterface.has(id))
+        {
+            next += 0x100;
+            byInterface.set(id, next);
+        }
+        return /** @type {number} */ (byInterface.get(id));
+    };
+    const seam = createPublisher({ publishInterface });
+    const api = counted();
+    seam.publish(api, DESCRIPTORS, IID_ONE);
+    const adapter = seam.adapterFor(api);
+
+    const queried = publishInterface(adapter, IID_TWO);
+    assert.equal(seam.objectAt(queried), null, 'laid out, and not yet known');
+    adapter.addRef(IID_TWO);
+    assert.equal(seam.objectAt(queried), api);
+    assert.equal(seam.count(), 2);
+
+    adapter.release(IID_TWO);
+    assert.equal(adapter.release(IID_ONE), 0);
+    assert.equal(seam.objectAt(queried), null, 'and it is given up with the others');
+});
+
 test('a pointer that was released and handed back again resolves once more', ()=>{
     // A device keeps its own surfaces: a program releases the back buffer and
     // asks for it again, and what it gets is the pointer it had before, which

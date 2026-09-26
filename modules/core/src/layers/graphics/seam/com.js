@@ -83,9 +83,11 @@ function methodsFor(descriptor){
  * @param {any} api        The drawing API's own object.
  * @param {InterfaceDescriptor[]} interfaces
  * @param {(adapter: any) => void} onGone  Called when the last reference goes.
+ * @param {(adapter: any, id: string) => void} onReferenced
+ *        Called when a reference is taken through an interface.
  * @returns {any} something the bridge's publisher will accept
  */
-function adapt(api, interfaces, onGone){
+function adapt(api, interfaces, onGone, onReferenced){
     const declared = new Map(interfaces.map(entry=>[entry.id, entry]));
 
     /**
@@ -130,6 +132,10 @@ function adapt(api, interfaces, onGone){
         /** @param {string} [id] */
         addRef(id){
             settle();
+            if (id !== undefined)
+            {
+                onReferenced(adapter, id);
+            }
             return api.addRef?.(id) ?? 1;
         },
 
@@ -192,10 +198,30 @@ export function createPublisher({ publishInterface }){
         let adapter = adapters.get(api);
         if (!adapter)
         {
-            adapter = adapt(api, interfaces, forget);
+            adapter = adapt(api, interfaces, forget, remember);
             adapters.set(api, adapter);
         }
         return adapter;
+    };
+
+    /**
+     * A pointer QueryInterface laid out, recorded when the reference it
+     * carries is taken. The bridge answers a query from the object's own
+     * interfaces without coming through `publish`, and a program then hands
+     * that pointer back -- an IDirect3DTexture2 exists only as a query's
+     * answer, and SetTexture takes one -- so without this the way back from
+     * it knew nothing. Asking the bridge again is its memoised answer, the
+     * pointer the program holds.
+     *
+     * @param {any} adapter @param {string} id
+     */
+    const remember = (adapter, id)=>{
+        const pointer = publishInterface(adapter, id);
+        if (pointer !== 0 && !adapter.pointers.has(pointer >>> 0))
+        {
+            byPointer.set(pointer >>> 0, adapter.api);
+            adapter.pointers.add(pointer >>> 0);
+        }
     };
 
     /** @param {any} adapter */
