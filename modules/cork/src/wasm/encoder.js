@@ -220,10 +220,19 @@ export class Body {
         this.buffer.copyWithin(at + other.length, at, this.length);
         this.buffer.set(other.buffer.subarray(0, other.length), at);
         this.length += other.length;
-        if (this.hints.length > 0 || other.hints.length > 0)
+        if (other.hints.length > 0)
         {
-            this.hints = this.hints.map(hint=>(hint >= at ? hint + other.length : hint))
-                .concat(other.hints.map(hint=>hint + at));
+            // In order still: the ones before, the other's, the ones moved on.
+            this.hints = [...this.hints.filter(hint=>hint < at),
+                ...other.hints.map(hint=>hint + at),
+                ...this.hints.filter(hint=>hint >= at).map(hint=>hint + other.length)];
+        }
+        else
+        {
+            for (let i = this.hints.length - 1; i >= 0 && this.hints[i] >= at; i--)
+            {
+                this.hints[i] += other.length;
+            }
         }
         return this;
     }
@@ -685,10 +694,12 @@ export class ModuleBuilder {
             }
             return out;
         };
-        /** The branch hints by function: its index, then offset, size 1 and 0 (unlikely) each.
-         * @type {number[][]} */
-        const hinted = [];
-        const codes = this.functions.map(({ locals, body, hints }, at)=>{
+        // The branch hints, by function: its index and count, then an offset, a size of
+        // 1 and 0 (unlikely) each -- written into one buffer, as a region can have
+        // hundreds and a batch hundreds of regions.
+        const hints = new Body();
+        let hinted = 0;
+        const codes = this.functions.map(({ locals, body, hints: marked }, at)=>{
             // Runs of one type are one entry: "3 × i32, 1 × f64".
             /** @type {number[][]} */
             const runs = [];
@@ -706,20 +717,26 @@ export class ModuleBuilder {
             }
             const declared = vector(
                 runs.flatMap(([count, type])=>[...leb128u(count), type]), runs.length);
-            if (hints.length > 0)
+            if (marked.length > 0)
             {
-                // An offset counts from the body's start, its local declarations included.
-                const offsets = [...new Set(hints)].sort((a, b)=>a - b);
-                hinted.push([...leb128u(this.importedFunctions + at), ...vector(
-                    offsets.flatMap(offset=>[...leb128u(declared.length + offset), 1, 0]),
-                    offsets.length)]);
+                // In the order the body was written, which inserts keep; an offset
+                // counts from the body's start, its local declarations included.
+                hinted++;
+                hints.u32(this.importedFunctions + at).u32(marked.length);
+                for (const offset of marked)
+                {
+                    hints.u32(declared.length + offset).byte(1).byte(0);
+                }
             }
             return concat([leb128u(declared.length + body.length), declared, body]);
         });
         // Custom, but before the code section: an engine reads it while it compiles.
-        const hintSection = hinted.length === 0 ? [] : (()=>{
-            const content = [...name('metadata.code.branch_hint'), ...entries(hinted)];
-            return [0x00, ...leb128u(content.length), ...content];
+        const hintSection = hinted === 0 ? new Uint8Array(0) : (()=>{
+            const title = name('metadata.code.branch_hint');
+            const count = leb128u(hinted);
+            const content = hints.buffer.subarray(0, hints.length);
+            return concat([[0x00], leb128u(title.length + count.length + content.length), title,
+                count, content]);
         })();
         const codeSection = codes.length === 0 ? new Uint8Array(0) : (()=>{
             const content = concat([leb128u(codes.length), ...codes]);

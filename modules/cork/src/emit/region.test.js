@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../testing/machine.js';
-import { Exit, planLoops } from './region.js';
+import { Exit, deadFlagPass, liveFlagsOut, planLoops } from './region.js';
 
 const CODE = 0x1000;
 const DATA = 0x3000;
@@ -584,6 +584,56 @@ test('the ways out a loop rarely takes are branches hinted unlikely', ()=>{
         opcodes.map(opcode=>opcode.toString(16)).join(' '));
     assert.equal(unit.run(CODE, 1_000_000).kind, Exit.HALT);
     assert.equal(m.reg('eax'), 3000);
+});
+
+test('the flag liveness over a region is the walk of every instruction to a fixed point', ()=>{
+    // Each block's kills and early reads are taken once; the answer is the one a
+    // walk of every instruction on every round gives, `deadFlagPass`'s own: with
+    // a nop put first, what it finds live after that nop is the block's live-in.
+    const nop = { op: 'nop', operands: [], flagsWritten: 0, flagsUndefined: 0, flagsRead: 0 };
+    /** @param {import('../region.js').Block[]} blocks @param {boolean} precise */
+    const walked = (blocks, precise)=>{
+        const labels = new Map(blocks.map((block, i)=>[block.start, i]));
+        const liveIn = blocks.map(()=>0);
+        const out = blocks.map(()=>0);
+        for (let changed = true; changed;)
+        {
+            changed = false;
+            for (let i = blocks.length - 1; i >= 0; i--)
+            {
+                const { kind, targets, next } = blocks[i].exit;
+                const edges = kind === 'jump' ? targets
+                    : ['jcc', 'loop', 'fallthrough'].includes(kind) ? [...targets, next] : null;
+                // A way out of the region reads every arithmetic flag and DF.
+                out[i] = edges === null || edges.some(t=>!labels.has(t)) ? 0xcd5
+                    : edges.reduce((f, t)=>f | liveIn[/** @type {number} */ (labels.get(t))], 0);
+                /** @type {number[]} */
+                const after = [];
+                deadFlagPass(/** @type {any} */ ({ ...blocks[i],
+                    instructions: [nop, ...blocks[i].instructions] }), out[i], after, precise);
+                if (after[0] !== liveIn[i])
+                {
+                    liveIn[i] = after[0];
+                    changed = true;
+                }
+            }
+        }
+        return out;
+    };
+    const hash = [0xba, ...u32(DATA - 1), 0xb9, ...u32(0x811c9dc5), 0x31, 0xc0, 0x42, 0x31, 0xc1,
+        0x0f, 0xb6, 0x02, 0x69, 0xc9, ...u32(0x1000193), 0x84, 0xc0, 0x75, 0xf0, 0xf4];
+    for (const program of [LOOP, hash])
+    {
+        const m = createTestMachine();
+        m.write(CODE, program);
+        const { region } = m.translate(CODE);
+        const labels = new Map(region.blocks.map((block, i)=>[block.start, i]));
+        for (const precise of [false, true])
+        {
+            assert.deepEqual(liveFlagsOut(region.blocks, labels, precise),
+                walked(region.blocks, precise));
+        }
+    }
 });
 
 test('loops that overlap are widened until they nest', ()=>{
