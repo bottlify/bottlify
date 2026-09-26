@@ -261,6 +261,34 @@ export function shellFolders(windows = windowsVersion()){
     });
 }
 
+/**
+ * The directories a Windows's profile folders need on the volume, each parent
+ * before its children: every shell folder under the user's, the shared and the
+ * public profile, and the directories that hold them.
+ *
+ * @param {WindowsVersion} [windows]
+ * @returns {string[]}
+ */
+export function profileDirectories(windows = windowsVersion()){
+    const { user, allUsers, public: shared } = windows.profiles;
+    const roots = [user, allUsers, shared].filter(root=>root !== null);
+    /** @type {Set<string>} */
+    const directories = new Set();
+    for (const folder of Object.values(shellFolders(windows)))
+    {
+        if (!roots.some(root=>folder === root || folder.startsWith(`${root}\\`)))
+        {
+            continue;
+        }
+        const parts = folder.split('\\');
+        for (let depth = 2; depth <= parts.length; depth++)
+        {
+            directories.add(parts.slice(0, depth).join('\\'));
+        }
+    }
+    return [...directories];
+}
+
 /** What NT 4, 2000 and XP keep in CurrentBuild; Vista put the build number there. */
 const OBSOLETE_BUILD = '1.511.1 () (Obsolete data - do not use)';
 
