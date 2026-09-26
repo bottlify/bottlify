@@ -25,7 +25,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3D10_BIND, D3D10_CLEAR, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_FILTER, D3D10_MAP,
+    D3D10_BIND, D3D10_BLEND, D3D10_BLEND_OP, D3D10_CLEAR, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE,
+    D3D10_FILTER, D3D10_MAP,
     D3D10_PRIMITIVE_TOPOLOGY, D3D10_QUERY, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION,
     D3D10_TEXTURE_ADDRESS, D3D10_USAGE, DXGI_FORMAT, S_FALSE, S_OK,
 } from './constants.js';
@@ -1312,6 +1313,39 @@ test('the stencil reference reaches the pass, once per change', async()=>{
         call.reference), [5, 0]);
     assert.ok(!diverged(h, 'stencil reference'));
 });
+
+test('a blend by the constant factor blends by white, the only constant this build sets',
+    async()=>{
+        // WebGPU's constant is black until set, and the backend's pass sets
+        // none, so a pipeline naming it would blend by zero.
+        const h = harness();
+        const { device } = h;
+        bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+        /** @type {{ state?: any }} */
+        const blend = {};
+        assert.equal(device.CreateBlendState({
+            AlphaToCoverageEnable: false,
+            BlendEnable: [true, false, false, false, false, false, false, false],
+            SrcBlend: D3D10_BLEND.BLEND_FACTOR, DestBlend: D3D10_BLEND.INV_BLEND_FACTOR,
+            BlendOp: D3D10_BLEND_OP.ADD, SrcBlendAlpha: D3D10_BLEND.BLEND_FACTOR,
+            DestBlendAlpha: D3D10_BLEND.ZERO, BlendOpAlpha: D3D10_BLEND_OP.ADD,
+            RenderTargetWriteMask: new Array(8).fill(15),
+        }, blend), S_OK);
+        device.OMSetBlendState(blend.state, null, 0xffffffff);
+        device.Draw(3, 0);
+        await h.present();
+        const pipeline = h.gpu.of('createRenderPipeline').at(-1);
+        assert.deepEqual(pipeline.descriptor.fragment.targets[0].blend, {
+            color: { srcFactor: 'one', dstFactor: 'zero', operation: 'add' },
+            alpha: { srcFactor: 'one', dstFactor: 'zero', operation: 'add' },
+        });
+        assert.ok(!diverged(h, 'blend factor'));
+
+        device.OMSetBlendState(blend.state, [0.5, 0.5, 0.5, 1], 0xffffffff);
+        device.Draw(3, 0);
+        await h.present();
+        assert.ok(diverged(h, 'blend factor other than white is drawn as white'));
+    });
 
 // --- queries ---
 

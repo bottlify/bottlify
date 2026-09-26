@@ -113,6 +113,24 @@ const BLEND_FACTOR = Object.freeze({
     [D3D10_BLEND.INV_BLEND_FACTOR]: 'one-minus-constant',
 });
 
+/**
+ * A blend factor as the pipeline is given it. The backend's pass sets no
+ * blend constant, and WebGPU's is black until one is set, so the constant
+ * factors are written as what they equal under Direct3D's default constant,
+ * white: one, and one minus one. A program's own constant is reported at the
+ * draw.
+ *
+ * @param {number} factor
+ * @returns {string}
+ */
+const pipelineFactor = factor=>{
+    if (factor === D3D10_BLEND.BLEND_FACTOR)
+    {
+        return 'one';
+    }
+    return factor === D3D10_BLEND.INV_BLEND_FACTOR ? 'zero' : BLEND_FACTOR[factor];
+};
+
 /** @type {Readonly<Record<number, string>>} */
 const BLEND_OP = Object.freeze({
     [D3D10_BLEND_OP.ADD]: 'add',
@@ -1223,13 +1241,13 @@ export function createRenderer(services){
                         ? {
                             blend: {
                                 color: {
-                                    srcFactor: BLEND_FACTOR[blend.SrcBlend],
-                                    dstFactor: BLEND_FACTOR[blend.DestBlend],
+                                    srcFactor: pipelineFactor(blend.SrcBlend),
+                                    dstFactor: pipelineFactor(blend.DestBlend),
                                     operation: BLEND_OP[blend.BlendOp],
                                 },
                                 alpha: {
-                                    srcFactor: BLEND_FACTOR[blend.SrcBlendAlpha],
-                                    dstFactor: BLEND_FACTOR[blend.DestBlendAlpha],
+                                    srcFactor: pipelineFactor(blend.SrcBlendAlpha),
+                                    dstFactor: pipelineFactor(blend.DestBlendAlpha),
                                     operation: BLEND_OP[blend.BlendOpAlpha],
                                 },
                             },
@@ -1971,7 +1989,7 @@ export function createRenderer(services){
             }
             if (pipeline.blendFactor.some((/** @type {number} */ value)=>value !== 1))
             {
-                diverge('a blend factor other than white is not applied: the backend'
+                diverge('a blend factor other than white is drawn as white: the backend'
                     + ' exposes no blend constant');
             }
             const rasterizer = pipeline.rasterizerState
