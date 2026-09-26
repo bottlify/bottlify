@@ -1481,6 +1481,50 @@ test('an RLE DIB needs its size, and is drawn but never read back', ()=>{
     }
 });
 
+test('a DIB of no planes is refused by every call that draws or sets it, not described', ()=>{
+    // Wine's test_dib_formats: "all functions check planes except GetDIBits
+    // with 0 lines" -- SetDIBits, SetDIBitsToDevice and StretchDIBits refuse
+    // an uncompressed DIB whose biPlanes is 0 and take one of 1 or 2, and
+    // GetDIBits describes it with no lines but will not fill lines of it.
+    const scan = scanFixture(false);
+    const { fns, view } = scan;
+    const screen = fns.GetDC.handler([0]);
+    const bitmap = fns.CreateCompatibleBitmap.handler([screen, 10, 10]);
+    const DATA = 0x3000;
+    /** @returns {number[]} what each of the three calls answers */
+    const answers = ()=>[
+        fns.SetDIBits.handler([screen, bitmap, 0, 1, DATA, WIRED_INFO, 0]),
+        fns.SetDIBitsToDevice.handler([scan.dc, 0, 0, 1, 1, 0, 0, 0, 1, DATA, WIRED_INFO, 0]),
+        fns.StretchDIBits.handler([scan.dc, 0, 0, 1, 1, 0, 0, 1, 1, DATA, WIRED_INFO, 0,
+            0x00cc0020]),
+    ];
+    for (const bitCount of [1, 4, 8, 16, 24, 32])
+    {
+        for (const planes of [0, 1, 2])
+        {
+            putInfo(view, { width: 2, height: 2, bitCount,
+                table: bitCount <= 8 ? Array(1 << bitCount).fill(0) : [] });
+            view.setUint16(WIRED_INFO + BITMAPINFOHEADER.biPlanes, planes, true);
+            const name = `${bitCount} bits, ${planes} planes`;
+            if (planes === 0)
+            {
+                assert.deepEqual(answers(), [0, 0, 0], name);
+            }
+            else
+            {
+                assert.ok(answers().every(answer=>answer !== 0), name);
+            }
+            view.setUint16(WIRED_INFO + BITMAPINFOHEADER.biPlanes, planes, true);
+            assert.notEqual(fns.GetDIBits.handler([screen, bitmap, 0, 0, DATA, WIRED_INFO, 0]),
+                0, `${name}, described`);
+            view.setUint16(WIRED_INFO + BITMAPINFOHEADER.biPlanes, planes, true);
+            view.setUint16(WIRED_INFO + BITMAPINFOHEADER.biBitCount, bitCount, true);
+            assert.equal(fns.GetDIBits.handler([screen, bitmap, 0, 2, DATA, WIRED_INFO, 0]) !== 0,
+                planes !== 0, `${name}, filled`);
+        }
+    }
+});
+
 test('StretchDIBits draws an RLE DIB\'s runs and leaves the rest as it was', ()=>{
     // Wine's dib tests draw these through StretchDIBits under SRCCOPY and
     // SRCAND, offset and doubled, and compare the result's hash; here the

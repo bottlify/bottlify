@@ -421,8 +421,9 @@ export function createDrawingFunctions(
      * in, which in a larger header is inside the header rather than after it.
      * A table shorter than the depth allows leaves the indices past it black.
      * A run-length encoded DIB is biSizeImage bytes, which it must give, and
-     * bottom-up, a top-down one being ERROR_INVALID_PARAMETER (Wine's
-     * test_dib_formats and RLE tests).
+     * bottom-up, a top-down one being ERROR_INVALID_PARAMETER; any other DIB
+     * must have planes, which an RLE one need not (Wine's test_dib_formats and
+     * RLE tests).
      *
      * @param {number} info @param {number} bits
      * @param {number} usage  What the colour table holds.
@@ -443,6 +444,7 @@ export function createDrawingFunctions(
         }
         if (!isDibHeaderSize(header.size) || header.width <= 0 || header.height === 0
             || !DIB_BIT_COUNTS.has(header.bitCount) || (rle && header.sizeImage === 0)
+            || (!rle && header.planes === 0)
             || (header.compression !== BI_RGB && !masked && !rle) || usage > DIB_PAL_INDICES)
         {
             return null;
