@@ -182,8 +182,9 @@ writing it never evicts compiled guest code sitting next to the routines that wr
 
 **A29 — Video memory is a constant 256 MiB that creating a surface or texture never reduces.**
 `GetAvailableTextureMem` (Direct3D 8 and 9) and `GetAvailableVidMem` (DirectDraw) answer the same
-number however much has been created, where Wine's tests (`d3d9/tests/device.c`,
-`ddraw/tests/ddraw7.c` and its older siblings) see it fall as render targets are made. A program
+number however much has been created, and WMI's `Win32_VideoController.AdapterRAM` gives the
+same figure, where Wine's tests (`d3d9/tests/device.c`, `ddraw/tests/ddraw7.c` and its older
+siblings) see it fall as render targets are made. A program
 asks to size a cache, and what it does with a falling answer is evict and reload; here nothing is
 ever evicted, because a texture's storage is the guest's own memory and its GPU copy lives as long
 as it does, so a shrinking figure would make a program work around a pressure that does not exist.
