@@ -1542,6 +1542,53 @@ test('a device whose last reference goes is gone through every generation asked 
     assert.equal(g.call(second, slotOf(IDIRECTINPUTDEVICE2_SLOTS, 'Acquire')), E_POINTER);
 });
 
+test('the DirectInput object counts its references, one count for every interface', ()=>{
+    // Wine's dinput.c test_QueryInterface: each interface asked for is one
+    // more reference, released back to one, and the last Release answers
+    // zero; after it the object is gone through every pointer it had.
+    const g = guestMachine();
+    assert.equal(g.dinput.libraries['DINPUT.dll']
+        .DirectInputCreateA.handler([0, 0x0700, AT.out, 0]), DI_OK);
+    const root = g.memory.u32(AT.out);
+    const [ADDREF, RELEASE] = [1, 2];
+    writeGuid(g.memory, AT.iid, '{00000000-0000-0000-C000-000000000046}');
+    assert.equal(g.call(root, 0, [AT.iid, AT.state]), 0);
+    const unknown = g.memory.u32(AT.state);
+    assert.equal(g.call(unknown, RELEASE), 1);
+    writeGuid(g.memory, AT.iid, '{5944E662-AA8A-11CF-BFC7-444553540000}');
+    assert.equal(g.call(root, 0, [AT.iid, AT.state]), 0, 'IDirectInput2A');
+    const second = g.memory.u32(AT.state);
+    assert.equal(g.call(second, ADDREF), 3);
+    assert.equal(g.call(second, RELEASE), 2);
+    assert.equal(g.call(second, RELEASE), 1);
+
+    assert.equal(g.call(root, RELEASE), 0);
+    assert.equal(g.call(root, ADDREF), E_POINTER);
+    assert.equal(g.call(second, ADDREF), E_POINTER);
+    assert.equal(g.call(unknown, ADDREF), E_POINTER);
+});
+
+test('a device goes on working after the DirectInput object that made it is released', ()=>{
+    // Wine's device8.c test_sys_keyboard_action_format: the object's last
+    // Release answers zero while a device it made is still held, and the
+    // device still answers.
+    const g = guestMachine();
+    writeGuid(g.memory, AT.iid, IID_IDirectInput8A);
+    assert.equal(g.dinput.libraries['DINPUT8.dll']
+        .DirectInput8Create.handler([0, 0x0800, AT.iid, AT.out, 0]), DI_OK);
+    const root = g.memory.u32(AT.out);
+    writeGuid(g.memory, AT.guid, GUID_SysKeyboard);
+    assert.equal(g.call(root, slotOf(IDIRECTINPUT8_SLOTS, 'CreateDevice'),
+        [AT.guid, AT.out, 0]), DI_OK);
+    const device = g.memory.u32(AT.out);
+
+    assert.equal(g.call(root, 2), 0, 'the device takes no reference the program sees');
+    assert.equal(g.call(device, slotOf(IDIRECTINPUTDEVICE8_SLOTS, 'SetDataFormat'),
+        [dataFormat(g.memory, 256)]), DI_OK);
+    assert.equal(g.call(device, slotOf(IDIRECTINPUTDEVICE8_SLOTS, 'Acquire')), DI_OK);
+    assert.equal(g.call(device, 2), 0);
+});
+
 test('diagnostics report what a run actually did', ()=>{
     const f = keyboard();
     setBufferSize(f, f.device, 8);

@@ -398,9 +398,9 @@ again after each later release and forgotten once the answer is no. `ole32`'s ob
 then held by `reachable` while its device lives) and the drawing APIs' adapter
 (`graphics/seam/com.js`: true when the release ended the object -- a count of zero on an object
 that does not say it outlives it, which a DirectDraw object says while another generation is held)
-report `destroyed`; the DirectInput root, which counts nothing, does not. A method without `invoke`
-answers `E_NOTIMPL`; a call through an unpublished pointer answers `E_POINTER`. A method's `invoke`
-may return a promise, and the caller is parked on it.
+report `destroyed`, and so does the DirectInput object itself. A method without `invoke` answers
+`E_NOTIMPL`; a call through an unpublished pointer answers `E_POINTER`. A method's `invoke` may
+return a promise, and the caller is parked on it.
 
 A table that cannot be built — stub table full, or the arena refusing — is counted as a refusal
 with its reason, and the guest gets a failure code rather than a null pointer with `S_OK`.
