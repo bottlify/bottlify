@@ -22,6 +22,7 @@
 import { S_OK, IID } from '../d3d10/constants.js';
 import { parseEffect } from '../d3d10/effect.js';
 import { INVALID, PASS_STATE, VARIABLE_KIND, createEffect } from '../d3d10/effect-object.js';
+import { STATE_BLOCK_MASK_SIZE } from '../d3d10/stateblock.js';
 import { describe as describeSlots } from './vtables.js';
 
 /** D3DERR_INVALIDCALL, which effect creation answers for a missing device. */
@@ -326,6 +327,23 @@ export function createEffectSeam(context){
 
     // --- passes and techniques ---
 
+    /**
+     * ComputeStateBlockMask: the program's mask read, added to and written
+     * back.
+     *
+     * @param {any} object @param {number[]} args
+     */
+    const computeMask = (object, [maskAt])=>{
+        if ((maskAt >>> 0) === 0)
+        {
+            return object.ComputeStateBlockMask(null);
+        }
+        const mask = Uint8Array.from(memory.readMemory(maskAt >>> 0, STATE_BLOCK_MASK_SIZE));
+        const hr = object.ComputeStateBlockMask(mask);
+        memory.writeMemory(maskAt >>> 0, mask);
+        return hr;
+    };
+
     /** @param {number} state */
     const shaderDesc = state=>{
         /** @param {any} pass @param {number[]} args */
@@ -360,6 +378,10 @@ export function createEffectSeam(context){
         /** @param {any} pass @param {number[]} args */
         GetAnnotationByName: (pass, [name])=>
             publishVariable(pass.GetAnnotationByName(nameArgument(name))),
+        /** @param {any} pass @param {number[]} args */
+        Apply: (pass, [flags])=>(pass.invalid ? E_FAIL : pass.Apply(flags >>> 0)),
+        /** @param {any} pass @param {number[]} args */
+        ComputeStateBlockMask: (pass, args)=>(pass.invalid ? E_FAIL : computeMask(pass, args)),
     })];
 
     const techniqueInterfaces = [describe(IID.ID3D10EffectTechnique,
@@ -381,6 +403,10 @@ export function createEffectSeam(context){
             /** @param {any} technique @param {number[]} args */
             GetPassByName: (technique, [name])=>
                 publishPass(technique.GetPassByName(nameArgument(name))),
+            /** @param {any} technique @param {number[]} args */
+            ComputeStateBlockMask: (technique, args)=>(technique.invalid
+                ? E_FAIL
+                : computeMask(technique, args)),
         })];
 
     // --- the effect ---

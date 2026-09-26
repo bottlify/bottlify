@@ -33,8 +33,11 @@
  */
 
 import { attachCom } from './com.js';
-import { E_FAIL, E_INVALIDARG, IID, S_OK } from './constants.js';
+import { D3D10_BIND, D3D10_USAGE, E_FAIL, E_INVALIDARG, IID, S_OK } from './constants.js';
 import { ASSIGNMENT, CONSTANT_TYPE, D3D10_SVC, D3D10_SVT } from './effect.js';
+import { stateDesc } from './effect-states.js';
+import { reflectShader } from './reflection.js';
+import { D3D10_DST, stateBlockMask } from './stateblock.js';
 
 /** D3D10_EFFECT_VARIABLE flags. */
 export const D3D10_EFFECT_VARIABLE = Object.freeze({
@@ -53,6 +56,36 @@ export const VARIABLE_KIND = Object.freeze({
 export const PASS_STATE = Object.freeze({
     RASTERIZER: 0, DEPTH_STENCIL: 1, BLEND: 2, VERTEX_SHADER: 6, PIXEL_SHADER: 7,
     GEOMETRY_SHADER: 8, STENCIL_REF: 9, BLEND_FACTOR: 0xa, SAMPLE_MASK: 0xb,
+});
+
+/** D3D10_SHADER_INPUT_TYPE: what a shader's binding is. */
+const SHADER_INPUT = Object.freeze({ CBUFFER: 0, TBUFFER: 1, TEXTURE: 2, SAMPLER: 3 });
+
+/** The state block entry each whole pass state is. @type {Readonly<Record<number, number>>} */
+const MASK_OF_STATE = Object.freeze({
+    [PASS_STATE.RASTERIZER]: D3D10_DST.RS_RASTERIZER_STATE,
+    [PASS_STATE.DEPTH_STENCIL]: D3D10_DST.OM_DEPTH_STENCIL_STATE,
+    [PASS_STATE.BLEND]: D3D10_DST.OM_BLEND_STATE,
+    [PASS_STATE.VERTEX_SHADER]: D3D10_DST.VS,
+    [PASS_STATE.PIXEL_SHADER]: D3D10_DST.PS,
+    [PASS_STATE.GEOMETRY_SHADER]: D3D10_DST.GS,
+});
+
+/**
+ * The state block entries a shader's bindings are, by stage and binding type.
+ *
+ * @type {Readonly<Record<string, Readonly<Record<number, number>>>>}
+ */
+const MASK_OF_BINDING = Object.freeze({
+    VS: { [SHADER_INPUT.CBUFFER]: D3D10_DST.VS_CONSTANT_BUFFERS,
+        [SHADER_INPUT.TEXTURE]: D3D10_DST.VS_SHADER_RESOURCES,
+        [SHADER_INPUT.SAMPLER]: D3D10_DST.VS_SAMPLERS },
+    GS: { [SHADER_INPUT.CBUFFER]: D3D10_DST.GS_CONSTANT_BUFFERS,
+        [SHADER_INPUT.TEXTURE]: D3D10_DST.GS_SHADER_RESOURCES,
+        [SHADER_INPUT.SAMPLER]: D3D10_DST.GS_SAMPLERS },
+    PS: { [SHADER_INPUT.CBUFFER]: D3D10_DST.PS_CONSTANT_BUFFERS,
+        [SHADER_INPUT.TEXTURE]: D3D10_DST.PS_SHADER_RESOURCES,
+        [SHADER_INPUT.SAMPLER]: D3D10_DST.PS_SAMPLERS },
 });
 
 /**
@@ -617,8 +650,99 @@ export function createEffect(data, services){
         return buffer;
     });
 
+    // --- what the effect makes on its device ---
+
+    /**
+     * Device objects the effect made, each holding its reference until the
+     * effect's last release.
+     *
+     * @type {any[]}
+     */
+    const owned = [];
+
+    for (const buffer of buffers)
+    {
+        /** @type {{ resource?: any }} */
+        const out = {};
+        const hr = device.CreateBuffer({
+            ByteWidth: buffer.bytes.length, Usage: D3D10_USAGE.DEFAULT,
+            BindFlags: D3D10_BIND.CONSTANT_BUFFER, CPUAccessFlags: 0, MiscFlags: 0,
+        }, null, out);
+        buffer.gpu = hr === S_OK ? out.resource : null;
+        if (buffer.gpu)
+        {
+            owned.push(buffer.gpu);
+        }
+        buffer.dirty = true;
+    }
+
+    /**
+     * A shader an effect holds, made on the device when the effect is. A
+     * geometry shader built with stream output is made without it, which the
+     * device could not honour, and says so.
+     *
+     * @param {string} stage  'vertexshader', 'pixelshader' or 'geometryshader'.
+     * @param {import('./effect.js').FxShader | null} shader
+     * @param {boolean} streamOutput
+     */
+    const makeShader = (stage, shader, streamOutput)=>{
+        if (!shader)
+        {
+            return null;
+        }
+        if (streamOutput || shader.streamOutput)
+        {
+            report('an effect\'s geometry shader with stream output is made without it: nothing'
+                + ' here writes a stream-output buffer');
+        }
+        /** @type {{ shader?: any }} */
+        const out = {};
+        const method = stage === 'vertexshader'
+            ? 'CreateVertexShader'
+            : stage === 'pixelshader' ? 'CreatePixelShader' : 'CreateGeometryShader';
+        if (device[method](shader.bytecode, out) !== S_OK || !out.shader)
+        {
+            report(`an effect's ${stage} could not be made on the device; it is set as none`);
+            return null;
+        }
+        owned.push(out.shader);
+        return out.shader;
+    };
+
+    /** @type {Record<string, { block: 'blend' | 'depthstencil' | 'rasterizer' | 'sampler', create: string }>} */
+    const STATE_BLOCKS = {
+        [VARIABLE_KIND.BLEND]: { block: 'blend', create: 'CreateBlendState' },
+        [VARIABLE_KIND.DEPTH_STENCIL]: { block: 'depthstencil', create: 'CreateDepthStencilState' },
+        [VARIABLE_KIND.RASTERIZER]: { block: 'rasterizer', create: 'CreateRasterizerState' },
+        [VARIABLE_KIND.SAMPLER]: { block: 'sampler', create: 'CreateSamplerState' },
+    };
+
     const objects = data.objects.map(fx=>{
+        /** @type {any[]} */
         const slots = fx.elements.map(element=>({ ...element }));
+        const kind = kindOf(fx.type);
+        const stateBlock = STATE_BLOCKS[kind];
+        for (const slot of slots)
+        {
+            if (stateBlock)
+            {
+                slot.desc = stateDesc(stateBlock.block, slot.assignments ?? [], report);
+                /** @type {{ state?: any }} */
+                const out = {};
+                slot.made = device[stateBlock.create](slot.desc, out) === S_OK
+                    ? out.state ?? null
+                    : null;
+                if (slot.made)
+                {
+                    owned.push(slot.made);
+                }
+            }
+            else if (kind === VARIABLE_KIND.SHADER)
+            {
+                slot.made = makeShader(/** @type {string} */ (fx.type.object), slot.shader ?? null,
+                    fx.type.streamOutput);
+            }
+        }
         return objectVariable(fx, slots, -1);
     });
 
@@ -659,7 +783,8 @@ export function createEffect(data, services){
             kind: VARIABLE_KIND.SHADER, name: { text: '$Anonymous' }, semantic: null,
             semanticAt: -1, flags: 0, bufferOffset: 0, explicitBindPoint: 0,
             type: ()=>anonymousTypeOf(stage), fxType: null, fxAnnotations: [], annotations: [],
-            buffer: null, storage: null, slots: [{ shader }], slot: 0, members: null,
+            buffer: null, storage: null,
+            slots: [{ shader, made: makeShader(stage, shader, false) }], slot: 0, members: null,
             element: null,
         });
         variable.shape.memberName = '$Anonymous';
@@ -755,6 +880,37 @@ export function createEffect(data, services){
         return as === 'float' ? Math.fround(value) : (Math.trunc(value) >>> 0);
     };
 
+    /**
+     * A constant buffer's bytes onto its GPU buffer, when they changed.
+     *
+     * @param {any} buffer
+     */
+    const upload = buffer=>{
+        if (buffer.dirty && buffer.gpu)
+        {
+            device.UpdateSubresource(buffer.gpu, 0, null, buffer.bytes, 0, 0);
+            buffer.dirty = false;
+        }
+    };
+
+    /** @type {WeakMap<object, import('./reflection.js').ReflectedBinding[]>} */
+    const bindings = new WeakMap();
+    /**
+     * What a shader reads and at which slots, from its own resource
+     * definitions.
+     *
+     * @param {import('./effect.js').FxShader} shader
+     */
+    const bindingsOf = shader=>{
+        let known = bindings.get(shader);
+        if (!known)
+        {
+            known = reflectShader(shader.bytecode)?.bindings ?? [];
+            bindings.set(shader, known);
+        }
+        return known;
+    };
+
     /** @param {import('./effect.js').FxPass} fx */
     const passObject = fx=>{
         const annotationAt = objectsOf(fx.annotations, annotationVariable,
@@ -799,6 +955,128 @@ export function createEffect(data, services){
             const assignment = fx.assignments.find(entry=>entry.state === state);
             return assignment ? constantsOf(assignment, count) : null;
         };
+        /**
+         * The state object an assignment names: a state variable's element,
+         * or none for NULL. Undefined for what cannot be evaluated, which is
+         * then left as it is on the device.
+         *
+         * @param {import('./effect.js').FxAssignment} assignment
+         * @param {string} kind
+         */
+        const stateOf = (assignment, kind)=>{
+            if (assignment.kind === ASSIGNMENT.CONSTANT)
+            {
+                return null;
+            }
+            if (assignment.kind === ASSIGNMENT.VARIABLE
+                || assignment.kind === ASSIGNMENT.CONSTANT_INDEX)
+            {
+                const named = variableNamed(assignment.variable ?? '');
+                if (named?.kind === kind)
+                {
+                    return named.shape.slots[assignment.element ?? 0]?.made ?? null;
+                }
+            }
+            report(`a pass's ${kind} state picked by an expression, or naming no ${kind}`
+                + ' variable, is not applied');
+            return undefined;
+        };
+
+        /** @type {Readonly<Record<number, string>>} */
+        const STAGE_OF = Object.freeze({
+            [PASS_STATE.VERTEX_SHADER]: 'VS', [PASS_STATE.PIXEL_SHADER]: 'PS',
+            [PASS_STATE.GEOMETRY_SHADER]: 'GS',
+        });
+
+        /** @param {number} state @returns {{ made: any, shader: import('./effect.js').FxShader | null } | null} */
+        const shaderSlotOf = state=>{
+            const { variable, index } = shaderOf(state);
+            if (variable.invalid)
+            {
+                return null;
+            }
+            const slots = variable.shape.slots;
+            return slots[variable.shape.slot >= 0 ? variable.shape.slot : index] ?? null;
+        };
+
+        /**
+         * What a shader reads, bound where its bindings say: the effect's
+         * constant buffer of that name, uploaded first if it changed, and the
+         * resources and samplers its variables of those names hold.
+         *
+         * @param {string} stage  'VS', 'GS' or 'PS'.
+         * @param {import('./effect.js').FxShader} shader
+         */
+        const bindFor = (stage, shader)=>{
+            for (const binding of bindingsOf(shader))
+            {
+                if (binding.type === SHADER_INPUT.CBUFFER)
+                {
+                    const buffer = buffers.find(entry=>entry.shape.memberName === binding.name);
+                    if (buffer?.gpu)
+                    {
+                        upload(buffer);
+                        device[`${stage}SetConstantBuffers`](binding.bindPoint, [buffer.gpu]);
+                    }
+                    continue;
+                }
+                const named = variableNamed(binding.name);
+                const slots = named?.shape.slots ?? [];
+                const count = Math.max(1, binding.bindCount);
+                if (binding.type === SHADER_INPUT.TEXTURE
+                    && named?.kind === VARIABLE_KIND.SHADER_RESOURCE)
+                {
+                    device[`${stage}SetShaderResources`](binding.bindPoint,
+                        Array.from({ length: count }, (_, index)=>slots[index]?.resource ?? null));
+                }
+                else if (binding.type === SHADER_INPUT.SAMPLER
+                    && named?.kind === VARIABLE_KIND.SAMPLER)
+                {
+                    device[`${stage}SetSamplers`](binding.bindPoint,
+                        Array.from({ length: count }, (_, index)=>slots[index]?.made ?? null));
+                }
+                else if (binding.type === SHADER_INPUT.TBUFFER)
+                {
+                    report('a texture buffer an effect\'s shader reads is not bound');
+                }
+            }
+        };
+
+        /** @param {number} state */
+        const uintOf = state=>convert(stateValues(state, 1)?.[0], 'uint');
+
+        /** @param {Uint8Array | null} mask */
+        const computeMask = mask=>{
+            if (!mask)
+            {
+                return E_INVALIDARG;
+            }
+            for (const assignment of fx.assignments)
+            {
+                const whole = MASK_OF_STATE[assignment.state];
+                if (whole !== undefined)
+                {
+                    stateBlockMask.EnableCapture(mask, whole, 0, 1);
+                }
+                const stage = STAGE_OF[assignment.state];
+                const shader = stage ? shaderSlotOf(assignment.state)?.shader : null;
+                if (!stage || !shader)
+                {
+                    continue;
+                }
+                for (const binding of bindingsOf(shader))
+                {
+                    const type = MASK_OF_BINDING[stage][binding.type];
+                    if (type !== undefined)
+                    {
+                        stateBlockMask.EnableCapture(mask, type, binding.bindPoint,
+                            Math.max(1, binding.bindCount));
+                    }
+                }
+            }
+            return S_OK;
+        };
+
         /** The vertex shader's bytecode, which is its input signature's container. */
         const inputSignature = ()=>{
             const { variable, index } = shaderOf(PASS_STATE.VERTEX_SHADER);
@@ -842,6 +1120,75 @@ export function createEffect(data, services){
             /** @param {string | null} name */
             GetAnnotationByName: name=>annotationAt(fx.annotations.findIndex(entry=>
                 entry.name === name)),
+            /**
+             * Sets what the pass assigns, in its order, and binds what each
+             * shader it sets reads; what it does not assign is left as it is.
+             *
+             * @param {number} flags  None are defined.
+             */
+            Apply(flags){
+                void flags;
+                for (const assignment of fx.assignments)
+                {
+                    switch (assignment.state)
+                    {
+                        case PASS_STATE.RASTERIZER: {
+                            const state = stateOf(assignment, VARIABLE_KIND.RASTERIZER);
+                            if (state !== undefined)
+                            {
+                                device.RSSetState(state);
+                            }
+                            break;
+                        }
+                        case PASS_STATE.DEPTH_STENCIL: {
+                            const state = stateOf(assignment, VARIABLE_KIND.DEPTH_STENCIL);
+                            if (state !== undefined)
+                            {
+                                device.OMSetDepthStencilState(state,
+                                    uintOf(PASS_STATE.STENCIL_REF));
+                            }
+                            break;
+                        }
+                        case PASS_STATE.BLEND: {
+                            const state = stateOf(assignment, VARIABLE_KIND.BLEND);
+                            if (state !== undefined)
+                            {
+                                const factor = stateValues(PASS_STATE.BLEND_FACTOR, 4);
+                                device.OMSetBlendState(state,
+                                    [0, 1, 2, 3].map(index=>convert(factor?.[index], 'float')),
+                                    uintOf(PASS_STATE.SAMPLE_MASK));
+                            }
+                            break;
+                        }
+                        case PASS_STATE.VERTEX_SHADER:
+                        case PASS_STATE.PIXEL_SHADER:
+                        case PASS_STATE.GEOMETRY_SHADER: {
+                            const stage = STAGE_OF[assignment.state];
+                            const { variable } = shaderOf(assignment.state);
+                            if (variable.invalid)
+                            {
+                                break;
+                            }
+                            const slot = shaderSlotOf(assignment.state);
+                            device[`${stage}SetShader`](slot?.made ?? null);
+                            if (slot?.shader)
+                            {
+                                bindFor(stage, slot.shader);
+                            }
+                            break;
+                        }
+                        case PASS_STATE.STENCIL_REF:
+                        case PASS_STATE.BLEND_FACTOR:
+                        case PASS_STATE.SAMPLE_MASK:
+                            break;
+                        default:
+                            report(`a pass state 0x${assignment.state.toString(16)} is not`
+                                + ' applied');
+                    }
+                }
+                return S_OK;
+            },
+            ComputeStateBlockMask: computeMask,
         });
     };
 
@@ -866,6 +1213,15 @@ export function createEffect(data, services){
             GetPassByIndex: passAt,
             /** @param {string | null} name */
             GetPassByName: name=>passAt(fx.passes.findIndex(pass=>pass.name === name)),
+            /** @param {Uint8Array | null} mask */
+            ComputeStateBlockMask: mask=>{
+                if (!mask)
+                {
+                    return E_INVALIDARG;
+                }
+                fx.passes.forEach((_, index)=>passAt(index).ComputeStateBlockMask(mask));
+                return S_OK;
+            },
         });
     });
 
@@ -933,6 +1289,10 @@ export function createEffect(data, services){
     }), {
         interfaces: [IID.ID3D10Effect],
         onLastRef: ()=>{
+            for (const object of owned.splice(0))
+            {
+                object.release?.();
+            }
             device.release?.();
             services.onLastRef?.();
         },

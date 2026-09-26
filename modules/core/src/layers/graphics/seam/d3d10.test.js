@@ -44,6 +44,7 @@ import {
 } from '../d3d10/shader-fixtures.js';
 import { createBackend } from '../webgpu/backend.js';
 import { FX_KIND, effectBinary } from '../d3d10/effect-fixtures.js';
+import { D3D10_DST, STATE_BLOCK_MASK_SIZE, stateBlockMask } from '../d3d10/stateblock.js';
 import {
     EFFECT_VARIABLE_INTERFACES, ID3D10EFFECTPASS_SLOTS, ID3D10EFFECTTECHNIQUE_SLOTS,
     ID3D10EFFECTTYPE_SLOTS, ID3D10EFFECTVARIABLE_SLOTS, ID3D10EFFECT_SLOTS,
@@ -1386,13 +1387,20 @@ function effectOn(spec){
     /** @param {number} onDevice */
     const create = onDevice=>h.seam.effects.fromMemory(
         [at, bytes.length, 0, onDevice, 0, outAt]) >>> 0;
+    /** The device's reference count, read by taking one and giving it back. */
+    const references = ()=>{
+        const count = h.box.call(device, 1);
+        h.box.call(device, 2);
+        return count - 1;
+    };
+    const baseline = references();
     assert.equal(create(device), S_OK);
     const effect = h.box.memory.readU32(outAt);
     /** @param {[string, number][]} slots */
     const on = slots=>(/** @type {number} */ pointer, /** @type {string} */ name,
         /** @type {number[]} */ args = [])=>h.box.call(pointer, bareSlot(slots, name), args);
     return {
-        h, device, swapChain, effect, bytes, at, outAt, create,
+        h, device, swapChain, effect, bytes, at, outAt, create, references, baseline,
         /** @param {string} name @param {number[]} [args] */
         fx: (name, args = [])=>h.box.call(effect, slot(ID3D10EFFECT_SLOTS, name), args),
         variable: on(ID3D10EFFECTVARIABLE_SLOTS),
@@ -1497,21 +1505,31 @@ test('an effect is made on a device and walked through its interfaces', ()=>{
     assert.equal(text(h.box.memory.readU32(desc)), '$Anonymous');
     const invalidPass = technique(render, 'GetPassByIndex', [2]);
     assert.equal(pass(invalidPass, 'IsValid'), 0);
+    assert.equal(pass(invalidPass, 'Apply', [0]), E_FAIL);
 
-    const references = ()=>{
-        const count = h.box.call(e.device, 1);
-        h.box.call(e.device, 2);
-        return count - 1;
-    };
-    const held = references();
+    const shaderAt = h.box.place([0]);
+    assert.equal(pass(p1, 'Apply', [0]), S_OK);
+    h.device(e.device, 'VSGetShader', [shaderAt]);
+    const bound = h.box.memory.readU32(shaderAt);
+    assert.notEqual(bound, 0, 'the pass set its vertex shader');
+    h.box.call(bound, 2);
+    const mask = h.box.placeBytes(new Uint8Array(STATE_BLOCK_MASK_SIZE));
+    assert.equal(technique(render, 'ComputeStateBlockMask', [mask]), S_OK);
+    const written = h.box.services.readMemory(mask, STATE_BLOCK_MASK_SIZE);
+    assert.ok(stateBlockMask.GetSetting(written, D3D10_DST.VS, 0));
+    assert.ok(!stateBlockMask.GetSetting(written, D3D10_DST.PS, 0));
+
+    const held = e.references();
     const deviceAt = h.box.place([0]);
     assert.equal(fx('GetDevice', [deviceAt]), S_OK);
     assert.equal(h.box.memory.readU32(deviceAt), e.device);
-    assert.equal(references(), held + 1, 'GetDevice hands over a reference');
+    assert.equal(e.references(), held + 1, 'GetDevice hands over a reference');
     h.box.call(e.device, 2);
 
+    h.device(e.device, 'VSSetShader', [0]);
     assert.equal(h.box.call(e.effect, 2), 0, 'the last release');
-    assert.equal(references(), held - 1, 'and the effect gave its own back');
+    assert.equal(e.references(), e.baseline,
+        'the effect gave back its own reference and those of everything it made');
     assert.equal(variable(f2, 'IsValid'), E_POINTER, 'its variables went with it');
     assert.equal(technique(render, 'IsValid'), E_POINTER);
     assert.equal(variable(none, 'IsValid'), 0, 'the invalid objects stay');

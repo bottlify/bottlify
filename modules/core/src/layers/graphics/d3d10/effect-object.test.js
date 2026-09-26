@@ -21,7 +21,10 @@ import { FX_KIND, effectBinary } from './effect-fixtures.js';
 import {
     D3D10_EFFECT_VARIABLE, INVALID, PASS_STATE, VARIABLE_KIND, createEffect,
 } from './effect-object.js';
-import { passThroughVertexShader, solidPixelShader } from './shader-fixtures.js';
+import {
+    passThroughVertexShader, resourceDefinitions, solidPixelShader, withChunks,
+} from './shader-fixtures.js';
+import { D3D10_DST, STATE_BLOCK_MASK_SIZE, stateBlockMask } from './stateblock.js';
 
 const FLOAT = { name: 'float', numeric: /** @type {const} */ ({ layout: 'scalar', base: 'float' }) };
 const STRING = { name: 'String', object: FX_KIND.STRING };
@@ -411,4 +414,256 @@ test('what an effect made is named for giving back, and goes with its last relea
     assert.equal(effect.release(), 0);
     assert.equal(released, 1);
     assert.equal(device.release(), 0);
+});
+
+// --- applying a pass ---
+
+/** The state blocks of Wine's fx_test_state_groups, described. */
+const STATE_GROUPS = (()=>{
+    const I = CONSTANT_TYPE.INT;
+    const U = CONSTANT_TYPE.UINT;
+    const B = CONSTANT_TYPE.BOOL;
+    const F = CONSTANT_TYPE.FLOAT;
+    /** @param {number} state @param {number} type @param {number} bits @param {number} [index] */
+    const is = (state, type, bits, index = 0)=>({ state, index, constant: [[type, bits]] });
+    /** @param {string} name @param {number} object @param {any[][]} blocks */
+    const states = (name, object, blocks)=>({ name,
+        type: { name, object, elements: blocks.length > 1 ? blocks.length : 0 },
+        elements: blocks.map(assignments=>({ assignments })) });
+    return [
+        states('rast_state', FX_KIND.RASTERIZER, [[is(0x0c, I, 2), is(0x0d, I, 2), is(0x0e, B, 1),
+            is(0x0f, I, -4 >>> 0), is(0x10, F, 0x3f000000), is(0x11, F, 0x3e800000),
+            is(0x12, B, 0), is(0x13, B, 1), is(0x14, B, 1), is(0x15, B, 1)], [is(0x0d, I, 3)]]),
+        states('ds_state', FX_KIND.DEPTHSTENCIL, [[is(0x16, B, 1), is(0x17, I, 0), is(0x18, I, 3),
+            is(0x19, B, 1), is(0x1a, U, 4), is(0x1b, U, 5), is(0x1c, I, 6), is(0x1d, I, 7),
+            is(0x1e, I, 8), is(0x1f, I, 4), is(0x20, I, 3), is(0x21, I, 4), is(0x22, I, 5),
+            is(0x23, I, 7)], [is(0x16, B, 0)]]),
+        states('blend_state', FX_KIND.BLEND, [[is(0x24, B, 0), is(0x25, B, 1), is(0x25, B, 0, 7),
+            is(0x26, I, 2), is(0x27, I, 3), is(0x28, I, 4), is(0x29, I, 5), is(0x2a, I, 6),
+            is(0x2b, I, 5), is(0x2c, U, 8), is(0x2c, U, 7, 7)], [is(0x26, I, 3)]]),
+        states('sampler0', FX_KIND.SAMPLER, [[is(0x2d, I, 0x15), is(0x2e, I, 1), is(0x2f, I, 2),
+            is(0x30, I, 3), is(0x31, I, -1 >>> 0), is(0x32, U, 4), is(0x33, I, 8),
+            { state: 0x34, constant: [[F, 0x3f800000], [F, 0x40000000], [F, 0x40400000],
+                [F, 0x40800000]] }, is(0x35, U, 6), is(0x36, U, 5), is(0x37, I, 0)],
+        [is(0x2e, I, 2)]]),
+        states('defaults_rast', FX_KIND.RASTERIZER, [[]]),
+        states('defaults_ds', FX_KIND.DEPTHSTENCIL, [[]]),
+        states('defaults_blend', FX_KIND.BLEND, [[]]),
+        states('defaults_sampler', FX_KIND.SAMPLER, [[]]),
+    ];
+})();
+
+test('a state block starts from the effect\'s own defaults and takes what it assigns', ()=>{
+    // Wine's test_effect_state_groups and test_effect_state_group_defaults:
+    // each block's backing store, and the state object made from it.
+    const { effect, device } = made({ objects: STATE_GROUPS });
+    /** @param {string} name @param {number} [element] */
+    const slotOf = (name, element = 0)=>effect.GetVariableByName(name).shape.slots[element];
+    assert.deepEqual(slotOf('rast_state').desc, {
+        FillMode: 2, CullMode: 2, FrontCounterClockwise: true, DepthBias: -4,
+        DepthBiasClamp: 0.5, SlopeScaledDepthBias: 0.25, DepthClipEnable: false,
+        ScissorEnable: true, MultisampleEnable: true, AntialiasedLineEnable: true,
+    });
+    assert.equal(slotOf('rast_state', 1).desc.CullMode, 3);
+    assert.deepEqual(slotOf('ds_state').desc, {
+        DepthEnable: true, DepthWriteMask: 0, DepthFunc: 3, StencilEnable: true,
+        StencilReadMask: 4, StencilWriteMask: 5,
+        FrontFace: { StencilFailOp: 6, StencilDepthFailOp: 7, StencilPassOp: 8, StencilFunc: 4 },
+        BackFace: { StencilFailOp: 3, StencilDepthFailOp: 4, StencilPassOp: 5, StencilFunc: 7 },
+    });
+    const blend = slotOf('blend_state').desc;
+    assert.deepEqual([blend.AlphaToCoverageEnable, blend.BlendEnable[0], blend.BlendEnable[7],
+        blend.SrcBlend, blend.DestBlend, blend.BlendOp, blend.SrcBlendAlpha, blend.DestBlendAlpha,
+        blend.BlendOpAlpha, blend.RenderTargetWriteMask[0], blend.RenderTargetWriteMask[7]],
+    [false, true, false, 2, 3, 4, 5, 6, 5, 8, 7]);
+    assert.deepEqual(slotOf('sampler0').desc, {
+        Filter: 0x15, AddressU: 1, AddressV: 2, AddressW: 3, MipLODBias: -1, MaxAnisotropy: 4,
+        ComparisonFunc: 8, BorderColor: [1, 2, 3, 4], MinLOD: 6, MaxLOD: 5,
+    });
+    assert.equal(slotOf('sampler0', 1).desc.AddressU, 2);
+
+    assert.deepEqual(slotOf('defaults_rast').desc, { FillMode: 3, CullMode: 3,
+        FrontCounterClockwise: false, DepthBias: 0, DepthBiasClamp: 0, SlopeScaledDepthBias: 0,
+        DepthClipEnable: true, ScissorEnable: false, MultisampleEnable: false,
+        AntialiasedLineEnable: false });
+    const dsDefaults = slotOf('defaults_ds').desc;
+    assert.deepEqual([dsDefaults.DepthEnable, dsDefaults.DepthWriteMask, dsDefaults.DepthFunc,
+        dsDefaults.StencilEnable, dsDefaults.StencilReadMask, dsDefaults.FrontFace.StencilFunc],
+    [true, 1, 2, false, 0xff, 8]);
+    const blendDefaults = slotOf('defaults_blend').desc;
+    assert.deepEqual([blendDefaults.SrcBlend, blendDefaults.DestBlend, blendDefaults.BlendOp,
+        blendDefaults.RenderTargetWriteMask[7]], [5, 6, 1, 0xf],
+    'source alpha over its inverse, not the device\'s one and zero');
+    assert.deepEqual(slotOf('defaults_sampler').desc, { Filter: 0, AddressU: 1, AddressV: 1,
+        AddressW: 1, MipLODBias: 0, MaxAnisotropy: 16, ComparisonFunc: 1,
+        BorderColor: [0, 0, 0, 0], MinLOD: 0, MaxLOD: 3.4028234663852886e38 });
+
+    /** @type {{ desc?: any }} */
+    const described = {};
+    slotOf('rast_state').made.GetDesc(described);
+    assert.equal(described.desc.CullMode, 2, 'a state object made from the backing store');
+    assert.equal(effect.release(), 0);
+    assert.equal(device.release(), 0, 'every state object went with the effect');
+});
+
+test('a pass applies the states it assigns, with its values, and leaves the rest', ()=>{
+    // Wine's test_effect_state_groups, passes 0 and 2.
+    const F = CONSTANT_TYPE.FLOAT;
+    const { effect, device } = made({ objects: STATE_GROUPS, techniques: [{ name: 'tech0',
+        passes: [
+            { name: 'pass0', assignments: [
+                { state: PASS_STATE.BLEND_FACTOR, constant: [[F, 0x3f000000], [F, 0x3f19999a],
+                    [F, 0x3f333333], [F, 0x3f4ccccd]] },
+                { state: PASS_STATE.SAMPLE_MASK, constant: [[CONSTANT_TYPE.UINT, 0xffff]] },
+                { state: PASS_STATE.BLEND, variable: 'blend_state' },
+                { state: PASS_STATE.STENCIL_REF, constant: [[F, 0x3f800000]] },
+                { state: PASS_STATE.DEPTH_STENCIL, variable: 'ds_state' },
+                { state: PASS_STATE.RASTERIZER, variable: 'rast_state', element: 1 },
+            ] },
+            { name: 'pass2', assignments: [
+                { state: PASS_STATE.DEPTH_STENCIL, constant: [[CONSTANT_TYPE.INT, 0]] },
+                { state: PASS_STATE.BLEND, constant: [[CONSTANT_TYPE.INT, 0]] },
+            ] },
+        ] }] });
+    const technique = effect.GetTechniqueByName('tech0');
+    assert.equal(technique.GetPassByName('pass0').Apply(0), S_OK);
+    /** @type {any} */
+    const blend = {};
+    device.OMGetBlendState(blend);
+    assert.equal(blend.state, effect.GetVariableByName('blend_state').shape.slots[0].made);
+    assert.deepEqual(blend.blendFactor, [0.5, 0.6, 0.7, 0.8].map(Math.fround));
+    assert.equal(blend.sampleMask, 0xffff);
+    /** @type {any} */
+    const depth = {};
+    device.OMGetDepthStencilState(depth);
+    assert.equal(depth.state, effect.GetVariableByName('ds_state').shape.slots[0].made);
+    assert.equal(depth.stencilRef, 1, 'given as 1.0f, applied as an integer');
+    /** @type {any} */
+    const raster = {};
+    device.RSGetState(raster);
+    assert.equal(raster.state, effect.GetVariableByName('rast_state').shape.slots[1].made);
+    for (const held of [blend.state, depth.state, raster.state])
+    {
+        held.release();
+    }
+
+    assert.equal(technique.GetPassByName('pass2').Apply(0), S_OK);
+    /** @type {any} */
+    const none = {};
+    device.OMGetBlendState(none);
+    device.OMGetDepthStencilState(none);
+    assert.equal(none.state, null, 'NULL is none');
+    device.RSGetState(raster);
+    assert.equal(raster.state, effect.GetVariableByName('rast_state').shape.slots[1].made,
+        'what the pass does not assign stays');
+    raster.state.release();
+
+    const mask = new Uint8Array(STATE_BLOCK_MASK_SIZE);
+    assert.equal(technique.GetPassByName('pass0').ComputeStateBlockMask(mask), S_OK);
+    assert.ok(stateBlockMask.GetSetting(mask, D3D10_DST.RS_RASTERIZER_STATE, 0));
+    assert.ok(stateBlockMask.GetSetting(mask, D3D10_DST.OM_DEPTH_STENCIL_STATE, 0));
+    assert.ok(stateBlockMask.GetSetting(mask, D3D10_DST.OM_BLEND_STATE, 0));
+    assert.ok(!stateBlockMask.GetSetting(mask, D3D10_DST.VS, 0));
+    assert.equal(technique.ComputeStateBlockMask(null), E_INVALIDARG);
+    effect.release();
+    device.OMSetBlendState(null, null, 0);
+    device.OMSetDepthStencilState(null, 0);
+    device.RSSetState(null);
+    assert.equal(device.release(), 0);
+});
+
+test('a pass sets its shaders and binds what each reads by the effect\'s names', ()=>{
+    // Wine's test_effect_local_shader: no assignment leaves the stage as it
+    // is, NULL clears it; a shader's constant buffer, texture and sampler
+    // come from the effect's variables of their names, the buffer uploaded
+    // when it changed.
+    const float4 = { name: 'float4', numeric: /** @type {const} */ ({ layout: 'vector',
+        base: 'float', columns: 4 }) };
+    const ps = withChunks(solidPixelShader([1, 0, 0, 1]), [{ name: 'RDEF',
+        bytes: resourceDefinitions({ target: 0xffff0400, flags: 0, bindings: [
+            { name: 's', type: 3, bindPoint: 1 },
+            { name: 'tex', type: 2, returnType: 5, dimension: 4, bindPoint: 2, bindCount: 2 },
+            { name: 'cb', type: 0, bindPoint: 3 },
+        ] }) }]);
+    const { effect, device } = made({
+        buffers: [{ name: 'cb', size: 16, variables: [{ name: 'colour', offset: 0,
+            type: float4, defaultValue: [0x3f800000, 0, 0, 0x3f800000] }] }],
+        objects: [
+            { name: 'tex', type: { name: 'Texture2D', object: FX_KIND.TEXTURE2D, elements: 2 } },
+            { name: 's', type: { name: 'SamplerState', object: FX_KIND.SAMPLER } },
+            { name: 'p', type: { name: 'PixelShader', object: FX_KIND.PIXELSHADER },
+                elements: [{ shader: ps }] },
+        ],
+        techniques: [{ name: 'Render', passes: [
+            { name: 'none' },
+            { name: 'null', assignments: [{ state: PASS_STATE.PIXEL_SHADER,
+                constant: [[CONSTANT_TYPE.INT, 0]] }] },
+            { name: 'named', assignments: [{ state: PASS_STATE.PIXEL_SHADER, variable: 'p' }] },
+        ] }],
+    });
+    /** @type {any[]} */
+    const uploads = [];
+    const update = device.UpdateSubresource;
+    device.UpdateSubresource = (/** @type {any[]} */ ...args)=>{
+        uploads.push(args);
+        return update(...args);
+    };
+    const technique = effect.GetTechniqueByIndex(0);
+    const shader = effect.GetVariableByName('p').shape.slots[0].made;
+    assert.ok(shader, 'the effect made its shader on the device');
+
+    device.PSSetShader(shader);
+    technique.GetPassByName('none').Apply(0);
+    /** @type {any} */
+    const bound = {};
+    device.PSGetShader(bound);
+    assert.equal(bound.shader, shader, 'nothing assigned, nothing changed');
+    bound.shader.release();
+    technique.GetPassByName('null').Apply(0);
+    device.PSGetShader(bound);
+    assert.equal(bound.shader, null);
+
+    /** @type {{ resource?: any }} */
+    const texture = {};
+    assert.equal(device.CreateTexture2D({ Width: 4, Height: 4, MipLevels: 1, ArraySize: 1,
+        Format: 28, SampleDesc: { Count: 1, Quality: 0 }, Usage: 0, BindFlags: 8,
+        CPUAccessFlags: 0, MiscFlags: 0 }, null, texture), S_OK);
+    /** @type {{ view?: any }} */
+    const view = {};
+    assert.equal(device.CreateShaderResourceView(texture.resource, null, view), S_OK);
+    effect.GetVariableByName('tex').shape.slots[1].resource = view.view;
+
+    const named = technique.GetPassByName('named');
+    named.Apply(0);
+    device.PSGetShader(bound);
+    assert.equal(bound.shader, shader);
+    bound.shader.release();
+    const [buffer] = effect.buffers();
+    /** @type {any} */
+    const slots = {};
+    device.PSGetConstantBuffers(3, 1, slots);
+    assert.equal(slots.buffers[0], buffer.gpu, 'the effect\'s buffer at the shader\'s slot');
+    slots.buffers[0].release();
+    assert.equal(uploads.length, 1, 'uploaded once');
+    assert.equal(uploads[0][3], buffer.bytes);
+    device.PSGetShaderResources(2, 2, slots);
+    assert.deepEqual(slots.views, [null, view.view], 'every element, at its slots');
+    view.view.release();
+    device.PSGetSamplers(1, 1, slots);
+    assert.equal(slots.samplers[0], effect.GetVariableByName('s').shape.slots[0].made);
+    slots.samplers[0].release();
+
+    named.Apply(0);
+    assert.equal(uploads.length, 1, 'unchanged, not uploaded again');
+    buffer.dirty = true;
+    named.Apply(0);
+    assert.equal(uploads.length, 2);
+
+    const mask = new Uint8Array(STATE_BLOCK_MASK_SIZE);
+    named.ComputeStateBlockMask(mask);
+    assert.ok(stateBlockMask.GetSetting(mask, D3D10_DST.PS, 0));
+    assert.ok(stateBlockMask.GetSetting(mask, D3D10_DST.PS_CONSTANT_BUFFERS, 3));
+    assert.ok(stateBlockMask.GetSetting(mask, D3D10_DST.PS_SHADER_RESOURCES, 3));
+    assert.ok(stateBlockMask.GetSetting(mask, D3D10_DST.PS_SAMPLERS, 1));
+    assert.ok(!stateBlockMask.GetSetting(mask, D3D10_DST.VS_SHADER_RESOURCES, 2));
 });
