@@ -39,7 +39,7 @@ import { IID_IDirect3D8, IID_IDirect3DDevice8, IID_IDirect3DSurface8,
     IID_IDirect3DIndexBuffer8 } from './iids.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DSURFACE_DESC8, D3DLOCKED_RECT, D3DLIGHT7, RECT, POINT, createFields } from './structs.js';
-import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE } from '../d3d8/constants.js';
+import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
@@ -1867,7 +1867,14 @@ export function createDirect3D8Seam(
     };
 
     const rootMethods = {
+        // Accepted and ignored: no software rasteriser is ever plugged in.
+        RegisterSoftwareDevice: ()=>D3D_OK,
         GetAdapterCount: ()=>1,
+
+        // An HMONITOR rather than an HRESULT: the display user32 names for
+        // every window, and none for an adapter that does not exist.
+        /** @param {any} root @param {number[]} args */
+        GetAdapterMonitor: (root, [adapter])=>((adapter >>> 0) === 0 ? PRIMARY_MONITOR : 0),
 
         /**
          * Who made the adapter, as a program's card database wants to know.

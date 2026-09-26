@@ -183,8 +183,9 @@ test('every slot the interface declares is there, including the unimplemented on
             `slot ${slot} is empty`);
     }
 
-    // RegisterSoftwareDevice is slot 3 and nothing implements it.
-    assert.equal(box.call(pointer, 3, [0]) >>> 0, 0x80004001, 'E_NOTIMPL');
+    // RegisterSoftwareDevice is slot 3, the first after IUnknown's three, and
+    // is answered from there: accepted, as Direct3D 9 accepts it.
+    assert.equal(box.call(pointer, 3, [0]) >>> 0, 0, 'D3D_OK');
 });
 
 test('argBytes counts the interface pointer, so the callee pops what it should', ()=>{

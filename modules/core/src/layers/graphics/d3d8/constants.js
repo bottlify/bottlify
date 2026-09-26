@@ -127,6 +127,13 @@ export const D3DSBT = Object.freeze({
     VERTEXSTATE: 3,
 });
 
+/**
+ * The HMONITOR of the one display, as user32's MonitorFromWindow names it:
+ * GetAdapterMonitor answers this so the handle goes on to GetMonitorInfo.
+ * The seam tests hold the two together.
+ */
+export const PRIMARY_MONITOR = 0x00010001;
+
 /** The behaviour flags CreateDevice takes. Only vertex processing matters here. */
 export const D3DCREATE = Object.freeze({
     FPU_PRESERVE: 0x00000002,

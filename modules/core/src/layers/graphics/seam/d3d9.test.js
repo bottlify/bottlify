@@ -39,6 +39,7 @@ import { D3DFMT, D3DPOOL, D3DRS } from '../d3d9/constants.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { END_TOKEN, SHADER_KIND, versionToken } from '../d3d9/shader.js';
 import { displayModes } from '../../win32/user32/display.js';
+import { createSystemFunctions } from '../../win32/user32/system.js';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
@@ -503,7 +504,14 @@ test('the adapter lists its modes per format, bounded by the display and not the
     assert.equal(h.fields.readU32(quality), 1);
     assert.equal(ask('CheckDeviceMultiSampleType', [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 1, 4,
         quality]), D3DERR_NOTAVAILABLE);
-    assert.equal(ask('GetAdapterMonitor', [0]), 0);
+    // The monitor is the one user32 names for every window, so the handle
+    // goes straight into GetMonitorInfo (Wine's d3d9 device.c requires
+    // !!monitor); an adapter that does not exist has none.
+    const user32 = createSystemFunctions({ host: {}, live: ()=>null, windows: new Map(),
+        classes: new Map() });
+    assert.equal(ask('GetAdapterMonitor', [0]), user32.MonitorFromWindow.handler());
+    assert.notEqual(ask('GetAdapterMonitor', [0]), 0);
+    assert.equal(ask('GetAdapterMonitor', [1]), 0);
     assert.equal(ask('RegisterSoftwareDevice', [0x1234]), D3D_OK);
     h.release(root);
 });

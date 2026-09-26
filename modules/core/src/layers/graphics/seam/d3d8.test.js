@@ -30,6 +30,7 @@ import {
     IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
 } from './vtables.js';
 import { REFRESH_HZ } from '../../win32/user32/display.js';
+import { createSystemFunctions } from '../../win32/user32/system.js';
 import {
     D3DCAPS8, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS8,
     D3DSURFACE_DESC8, D3DVIEWPORT8, POINT, RECT, createFields,
@@ -464,6 +465,18 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     assert.equal(ask('CheckDepthStencilMatch',
         [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, D3DFMT.X8R8G8B8, D3DFMT.A8R8G8B8]),
     D3DERR_NOTAVAILABLE);
+
+    // An HMONITOR, not an HRESULT: the one user32 names for every window, so
+    // it goes straight into GetMonitorInfo (Wine's d3d8 device.c requires
+    // !!monitor). An adapter that does not exist has none.
+    const user32 = createSystemFunctions({ host: {}, live: ()=>null, windows: new Map(),
+        classes: new Map() });
+    assert.equal(ask('GetAdapterMonitor', [0]), user32.MonitorFromWindow.handler());
+    assert.notEqual(ask('GetAdapterMonitor', [0]), 0);
+    assert.equal(ask('GetAdapterMonitor', [1]), 0);
+    // No software rasteriser is ever plugged in, and Direct3D 9 answers the
+    // same call with success.
+    assert.equal(ask('RegisterSoftwareDevice', [0x1234]), D3D_OK);
 
     h.release(root);
     assert.equal(h.roots[0].refCount, 0);

@@ -50,7 +50,7 @@ import {
     ADAPTER_STRING_LENGTH, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES,
 } from '../d3d8/structs.js';
-import { D3DFMT_INDEX, D3DFMT, D3DRTYPE } from '../d3d8/constants.js';
+import { D3DFMT_INDEX, D3DFMT, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
 import { vertexCountOf } from '../d3d8/render.js';
 import { createCursorTeller } from './cursor.js';
 import { capabilityWords } from '../d3d9/caps.js';
@@ -2198,9 +2198,9 @@ export function createDirect3D9Seam(
             return D3D_OK;
         },
 
-        // No monitor handle exists on this side; a null one is what a program
-        // checks for and falls back from.
-        GetAdapterMonitor: ()=>0,
+        // The display user32 names for every window; no second adapter has one.
+        /** @param {any} root @param {number[]} args */
+        GetAdapterMonitor: (root, [adapter])=>((adapter >>> 0) === 0 ? PRIMARY_MONITOR : 0),
 
         /**
          * The device, made the way a program makes one. The adapter must be
