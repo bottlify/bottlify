@@ -26,7 +26,8 @@ import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js
 import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './keys.js';
 import { REFRESH_HZ, displayModes } from './display.js';
 import {
-    BORDER, CAPTION_HEIGHT, SCROLLBAR, SIZE_FRAME, WS_CHILD, WS_VISIBLE, frameOf,
+    BORDER, CAPTION_HEIGHT, SCROLLBAR, SIZE_FRAME, TOOL_CAPTION_HEIGHT, WS_CHILD, WS_VISIBLE,
+    frameOf,
 } from './frame.js';
 import {
     DEVMODEA,
@@ -67,6 +68,49 @@ const SM_CYSIZEFRAME = 33;
 const SM_CMONITORS = 80;
 const SM_CXVIRTUALSCREEN = 78;
 const SM_CYVIRTUALSCREEN = 79;
+const SM_CYMIN = 29;
+const SM_CYMINTRACK = 35;
+const SM_CYSMCAPTION = 51;
+const SM_CXSMSIZE = 52;
+const SM_CYSMSIZE = 53;
+const SM_CXMAXTRACK = 59;
+const SM_CYMAXTRACK = 60;
+const SM_CXMAXIMIZED = 61;
+const SM_CYMAXIMIZED = 62;
+
+/**
+ * The metrics that do not follow the screen, as a display at 96 dots per inch
+ * with the classic non-client metrics answers them: icons and cursors, the
+ * caption's buttons, edges, the minimum width a caption's buttons and title
+ * need, double-click and drag slop, the mouse and its wheel. Anything not
+ * here and not derived below is a zero, which is also Windows' answer for a
+ * feature this machine does not have.
+ *
+ * @type {ReadonlyMap<number, number>}
+ */
+const FIXED_METRICS = new Map([
+    [9, 16], [10, 16],        // SM_CYVTHUMB, SM_CXHTHUMB: a scroll bar's thumb
+    [11, 32], [12, 32],       // SM_CXICON, SM_CYICON
+    [13, 32], [14, 32],       // SM_CXCURSOR, SM_CYCURSOR
+    [19, 1],                  // SM_MOUSEPRESENT
+    [20, 16], [21, 16],       // SM_CYVSCROLL, SM_CXHSCROLL: a scroll bar's arrow
+    [28, 112], [34, 112],     // SM_CXMIN, SM_CXMINTRACK
+    [30, 18], [31, 18],       // SM_CXSIZE, SM_CYSIZE: a caption button
+    [36, 4], [37, 4],         // SM_CXDOUBLECLK, SM_CYDOUBLECLK
+    [38, 75], [39, 75],       // SM_CXICONSPACING, SM_CYICONSPACING
+    [43, 3],                  // SM_CMOUSEBUTTONS
+    [45, 2], [46, 2],         // SM_CXEDGE, SM_CYEDGE
+    [47, 160], [48, 24],      // SM_CXMINSPACING, SM_CYMINSPACING
+    [49, 16], [50, 16],       // SM_CXSMICON, SM_CYSMICON
+    [54, 18], [55, 18],       // SM_CXMENUSIZE, SM_CYMENUSIZE
+    [56, 8],                  // SM_ARRANGE: ARW_HIDE, minimised windows not shown
+    [57, 160], [58, 24],      // SM_CXMINIMIZED, SM_CYMINIMIZED
+    [68, 4], [69, 4],         // SM_CXDRAG, SM_CYDRAG
+    [71, 13], [72, 13],       // SM_CXMENUCHECK, SM_CYMENUCHECK
+    [75, 1],                  // SM_MOUSEWHEELPRESENT
+    [81, 1],                  // SM_SAMEDISPLAYFORMAT: one display
+    [83, 1], [84, 1],         // SM_CXFOCUSBORDER, SM_CYFOCUSBORDER
+]);
 
 /** A menu bar's height; the rest of the frame is the window geometry's. */
 const MENU_HEIGHT = 19;
@@ -1106,10 +1150,16 @@ export function createSystemFunctions({ host, live, windows, classes }){
             case SM_CYSCREEN:
             case SM_CYVIRTUALSCREEN:
                 return screen.height;
-            // The usable height is the screen less the frame a full-screen
-            // window still carries, which is what a program subtracts for.
+            // The client height of a maximised window: the maximised height
+            // less the minimum window's, which leaves the screen less a
+            // caption.
             case SM_CYFULLSCREEN:
-                return screen.height - CAPTION_HEIGHT - 2 * BORDER;
+                return screen.height - CAPTION_HEIGHT;
+            case SM_CYSMCAPTION:
+                return TOOL_CAPTION_HEIGHT;
+            case SM_CXSMSIZE:
+            case SM_CYSMSIZE:
+                return TOOL_CAPTION_HEIGHT - 1;
             case SM_CXBORDER:
             case SM_CYBORDER:
                 return BORDER;
@@ -1128,8 +1178,22 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 return SCROLLBAR;
             case SM_CMONITORS:
                 return 1;
+            // The minimum a window is a caption and two sizing frames high,
+            // and the most it may be tracked to is the screen and its frame
+            // with some to spare, as Windows derives both.
+            case SM_CYMIN:
+            case SM_CYMINTRACK:
+                return CAPTION_HEIGHT + 2 * SIZE_FRAME;
+            case SM_CXMAXTRACK:
+            case SM_CYMAXTRACK:
+                return ((index | 0) === SM_CXMAXTRACK ? screen.width : screen.height)
+                    + 4 + 2 * SIZE_FRAME;
+            case SM_CXMAXIMIZED:
+            case SM_CYMAXIMIZED:
+                return ((index | 0) === SM_CXMAXIMIZED ? screen.width : screen.height)
+                    + 2 * SIZE_FRAME;
             default:
-                return 0;
+                return FIXED_METRICS.get(index | 0) ?? 0;
         }
     };
 

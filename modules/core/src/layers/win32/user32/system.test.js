@@ -646,6 +646,59 @@ test('the metrics agree with the screen this build was configured for', ()=>{
         'a metric with no answer is zero, not an invented number');
 });
 
+test('the metrics a window, an icon and a mouse are measured by are the classic ones', ()=>{
+    // user32's sysparams tests at 96 dpi with the classic non-client metrics:
+    // icons and cursors 32 across, small icons 16, edges 2, the minimum
+    // window a caption and two sizing frames high, the tracking limits
+    // derived from those -- and a mouse present, with its buttons.
+    const { fns } = setup();
+    /** @param {number} index */
+    const gsm = index=>fns.GetSystemMetrics.handler([index]);
+    const SM_CYCAPTION = 4;
+    const SM_CXICON = 11;
+    const SM_CYICON = 12;
+    const SM_CXCURSOR = 13;
+    const SM_CYCURSOR = 14;
+    const SM_MOUSEPRESENT = 19;
+    const SM_CXMIN = 28;
+    const SM_CYMIN = 29;
+    const SM_CXSIZE = 30;
+    const SM_CYSIZE = 31;
+    const SM_CXFRAME = 32;
+    const SM_CYFRAME = 33;
+    const SM_CXMINTRACK = 34;
+    const SM_CYMINTRACK = 35;
+    const SM_CMOUSEBUTTONS = 43;
+    const SM_CXEDGE = 45;
+    const SM_CYEDGE = 46;
+    const SM_CXSMICON = 49;
+    const SM_CYSMICON = 50;
+    const SM_CXMAXTRACK = 59;
+    const SM_CYMAXTRACK = 60;
+    const SM_CXMENUCHECK = 71;
+    const SM_CYMENUCHECK = 72;
+    const SM_MOUSEWHEELPRESENT = 75;
+
+    assert.deepEqual([SM_CXICON, SM_CYICON, SM_CXCURSOR, SM_CYCURSOR].map(gsm), [32, 32, 32, 32]);
+    assert.deepEqual([SM_CXSMICON, SM_CYSMICON].map(gsm), [16, 16]);
+    assert.deepEqual([SM_CXEDGE, SM_CYEDGE].map(gsm), [2, 2]);
+    assert.equal(gsm(SM_CYSIZE), gsm(SM_CYCAPTION) - 1, 'a caption button is the caption less one');
+    assert.equal(gsm(SM_CXSIZE), gsm(SM_CYSIZE));
+    assert.equal(gsm(SM_CYMIN), gsm(SM_CYCAPTION) + 2 * gsm(SM_CYFRAME));
+    assert.ok(gsm(SM_CXMIN) > 0);
+    assert.deepEqual([gsm(SM_CXMINTRACK), gsm(SM_CYMINTRACK)], [gsm(SM_CXMIN), gsm(SM_CYMIN)]);
+    assert.equal(gsm(SM_CXMAXTRACK), SCREEN.width + 4 + 2 * gsm(SM_CXFRAME));
+    assert.equal(gsm(SM_CYMAXTRACK), SCREEN.height + 4 + 2 * gsm(SM_CYFRAME));
+    const SM_CYFULLSCREEN = 17;
+    const SM_CYMAXIMIZED = 62;
+    assert.equal(gsm(SM_CYFULLSCREEN), gsm(SM_CYMAXIMIZED) - gsm(SM_CYMIN),
+        'a maximised window\'s client height');
+    assert.deepEqual([SM_CXMENUCHECK, SM_CYMENUCHECK].map(gsm), [13, 13]);
+    assert.equal(gsm(SM_MOUSEPRESENT), 1, 'there is a mouse');
+    assert.equal(gsm(SM_CMOUSEBUTTONS), 3, 'with three buttons');
+    assert.equal(gsm(SM_MOUSEWHEELPRESENT), 1, 'and a wheel');
+});
+
 test('the display enumeration ends', ()=>{
     // A caller walks this until it returns FALSE. One that never does is a hang
     // with no error anywhere.
