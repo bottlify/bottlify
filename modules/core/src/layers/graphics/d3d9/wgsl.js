@@ -116,6 +116,15 @@ export const HYBRID_CONSTANTS = Object.freeze({
 export const FOG_RANGE_LOCATION = 11;
 
 /**
+ * The interpolation a varying at a location is declared with: flat for the
+ * two colours under D3DSHADE_FLAT, which both stages must agree on.
+ *
+ * @param {number} location @param {boolean | undefined} flat
+ */
+export const colourInterpolation = (location, flat)=>
+    (flat && location <= 1 ? ' @interpolate(flat)' : '');
+
+/**
  * Where a varying of a given usage travels between the two stages: colours
  * first, then the coordinate sets, then everything else.
  *
@@ -282,7 +291,7 @@ function moduleHeader(options){
  *
  * @param {import('./shader.js').ParsedShader} parsed
  * @param {{ inputs?: Map<number, InputShape>, alsoWrite?: readonly number[],
- *     fog?: number, fogSource?: number }} [options]
+ *     fog?: number, fogSource?: number, flatColours?: boolean }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
  *        by register. Absent means every declared input arrives as four
  *        floats; present, a declared register it does not name reads as the
@@ -298,6 +307,8 @@ function moduleHeader(options){
  *        is the fixed one can promise the varying, so only it is fogged.
  *        `fogSource` FOG_SOURCE.TABLE evaluates the curve per pixel instead,
  *        over the range the vertex stage carries at `FOG_RANGE_LOCATION`.
+ *        `flatColours` declares the two colour varyings flat, for
+ *        D3DSHADE_FLAT; the stage paired with this one must say the same.
  * @returns {TranslatedShader}
  */
 export function translateShader(parsed, options = {}){
@@ -1040,7 +1051,8 @@ export function translateShader(parsed, options = {}){
         outputFields.push('    @builtin(position) @invariant oPos: vec4f,');
         /** @param {number} location @param {string} name */
         const emits = (location, name)=>{
-            outputFields.push(`    @location(${location}) ${name}: vec4f,`);
+            outputFields.push(`    @location(${location})`
+                + `${colourInterpolation(location, options.flatColours)} ${name}: vec4f,`);
             outputs.push(location);
         };
         if (major >= 3)
@@ -1109,7 +1121,8 @@ export function translateShader(parsed, options = {}){
             const location = declaration
                 ? varyingLocation(declaration.usage, declaration.usageIndex)
                 : varyingLocation(D3DDECLUSAGE.COLOR, input);
-            inputFields.push(`    @location(${location}) v${input}: vec4f,`);
+            inputFields.push(`    @location(${location})`
+                + `${colourInterpolation(location, options.flatColours)} v${input}: vec4f,`);
             reads.push(location);
         }
         for (const output of [...pixelOutputs].sort((a, b)=>a - b))
@@ -1220,10 +1233,12 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        the specular alpha for a pre-transformed vertex or with no mode set,
  *        and for table fog the colour alone, with the curve's range beside it
  *        for the pixel shader to evaluate per pixel.
+ * @param {boolean} [flatColours]  The two colour varyings flat, for
+ *        D3DSHADE_FLAT, as the pixel shader must read them.
  * @returns {TranslatedShader}
  */
 export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [], fog = 0,
-    fogSource = fog === 0 ? FOG_SOURCE.NONE : FOG_SOURCE.VERTEX)
+    fogSource = fog === 0 ? FOG_SOURCE.NONE : FOG_SOURCE.VERTEX, flatColours = false)
 {
     /** @type {string[]} */
     const inputFields = [];
@@ -1276,7 +1291,8 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
                 specularAlpha = `${value}.w`;
             }
             const location = varyingLocation(element.usage, element.usageIndex);
-            outputFields.push(`    @location(${location}) o${location}: vec4f,`);
+            outputFields.push(`    @location(${location})`
+                + `${colourInterpolation(location, flatColours)} o${location}: vec4f,`);
             outputs.push(location);
             body.push(`    out.o${location} = ${value};`);
         }
@@ -1344,7 +1360,8 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     {
         if (!outputs.includes(location))
         {
-            outputFields.push(`    @location(${location}) o${location}: vec4f,`);
+            outputFields.push(`    @location(${location})`
+                + `${colourInterpolation(location, flatColours)} o${location}: vec4f,`);
             outputs.push(location);
             const colour = location === varyingLocation(D3DDECLUSAGE.COLOR, 0)
                 || location === varyingLocation(D3DDECLUSAGE.COLOR, 1);

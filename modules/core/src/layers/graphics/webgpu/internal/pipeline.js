@@ -195,6 +195,9 @@ function lookUp(table, value, what){
  * @property {boolean} [normalizeNormals]
  *     D3DRS_NORMALIZENORMALS: whether a normal is renormalised after its
  *     transform, for lighting and for a coordinate generated from it.
+ * @property {boolean} [flatShading]
+ *     D3DSHADE_FLAT: the two vertex colours are the provoking vertex's over
+ *     the whole primitive.
  * @property {import('./vertexformat.js').VertexLayout} [vertexLayout]
  *     The vertex layout when the vertex format cannot spell it -- a declaration
  *     read by the fixed-function stage -- with `vertexLayoutKey` naming it.
@@ -255,6 +258,7 @@ export function pipelineKey(state){
         // each named so that no two optional parts can be read as each other.
         ...(state.vertexLayoutKey === undefined ? [] : [state.vertexLayoutKey]),
         ...(state.normalizeNormals ? ['normalize'] : []),
+        ...(state.flatShading ? ['flat'] : []),
     ].join('|');
 }
 

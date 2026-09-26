@@ -635,11 +635,16 @@ test('a texture in a luminance format is created rather than refused', ()=>{
 });
 
 test('byte-exact: strips and fans expand to the lists they draw, winding kept', ()=>{
+    // Each triangle starts at the vertex a flat-shaded one takes its colours
+    // from: a fan's first after the hub, which EXT_provoking_vertex (issue 7)
+    // records as DirectX 9's, and a strip triangle's own first -- Wine's
+    // test_shademode has the second triangle of a strip coloured by vertex 1.
     assert.deepEqual([...listIndices(D3DPT.TRIANGLEFAN, [0, 1, 2, 3, 4])],
-        [0, 1, 2, 0, 2, 3, 0, 3, 4]);
-    // The odd triangle is flipped so the strip faces one way throughout.
+        [1, 2, 0, 2, 3, 0, 3, 4, 0]);
+    // The odd triangle is turned so the strip faces one way throughout, and
+    // rotated so it still starts at its first vertex.
     assert.deepEqual([...listIndices(D3DPT.TRIANGLESTRIP, [0, 1, 2, 3])],
-        [0, 1, 2, 2, 1, 3]);
+        [0, 1, 2, 1, 3, 2]);
     assert.deepEqual([...listIndices(D3DPT.LINESTRIP, [5, 6, 7])], [5, 6, 6, 7]);
     assert.ok(listIndices(D3DPT.TRIANGLEFAN, [0, 1, 70000]) instanceof Uint32Array,
         'an index past sixteen bits widens the list');
@@ -1372,7 +1377,7 @@ test('recorded: an indexed strip is expanded to a list from the bytes the progra
     const scratch = gpu.of('writeBuffer').find((/** @type {any} */ call)=>
         call.buffer === bound[0].buffer);
     assert.deepEqual([...new Uint16Array(scratch.bytes.buffer, scratch.bytes.byteOffset, 6)],
-        [3, 2, 1, 1, 2, 0], 'the strip the program wrote, as a list');
+        [3, 2, 1, 2, 0, 1], 'the strip the program wrote, as a list');
     const pipelines = gpu.of('createRenderPipeline').map((/** @type {any} */ call)=>
         call.descriptor.primitive.topology);
     assert.deepEqual(pipelines, ['triangle-list'], 'one pipeline serves both');
@@ -1788,6 +1793,45 @@ test('a state with no lighting in its shape is unlit, and still reads the specul
     assert.equal(state.lighting, null, 'nothing asked for lighting, so there is none');
     assert.equal(state.specularEnable, true, 'but the specular state is read from the device');
 });
+
+test('recorded: a flat-shaded strip is drawn as a list, each triangle from its first vertex',
+    async()=>{
+        // Wine's d3d8 and d3d9 test_shademode: under D3DSHADE_FLAT the second
+        // triangle of a strip takes the colour of vertex 1. WebGPU's own strip
+        // starts its odd triangles at the vertex after -- it reorders them to
+        // keep the winding -- so a flat-shaded strip is rewritten as a list
+        // whose triangles start where Direct3D's do; Gouraud keeps the strip.
+        const drawStrip = async(/** @type {number} */ shade)=>{
+            const h = harness();
+            const { device } = h;
+            assert.equal(device.SetRenderState(D3DRS.LIGHTING, 0), D3D_OK);
+            assert.equal(device.SetRenderState(D3DRS.SHADEMODE, shade), D3D_OK);
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.SetVertexShader(FVF.XYZ | FVF.DIFFUSE), D3D_OK);
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLESTRIP, 2, new Uint8Array(16 * 4),
+                16), D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+            await h.present();
+            const draw = h.device.diagnostics().lastFrame
+                .find((/** @type {any} */ c)=>c.kind === 'draw');
+            return { h, draw };
+        };
+        const flat = await drawStrip(1);
+        assert.equal(flat.draw.state.flatShading, true);
+        assert.equal(flat.draw.state.topology, 'triangle-list');
+        const scratch = flat.h.gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
+            call.buffer.descriptor.label.startsWith('scratch-indices'));
+        assert.ok(scratch.length > 0);
+        const written = scratch[scratch.length - 1].bytes;
+        assert.deepEqual([...new Uint16Array(written.buffer, written.byteOffset, 6)],
+            [0, 1, 2, 1, 3, 2]);
+        const code = generateFixedFunction(flat.draw.state, decodeFvf(FVF.XYZ | FVF.DIFFUSE)).code;
+        assert.ok(code.includes('@location(0) @interpolate(flat) diffuse: vec4f,'));
+
+        const gouraud = await drawStrip(2);
+        assert.equal(gouraud.draw.state.flatShading, false);
+        assert.equal(gouraud.draw.state.topology, 'triangle-strip');
+    });
 
 test('a state renormalises its normals only when NORMALIZENORMALS asks', ()=>{
     const model = /** @type {any} */ ({

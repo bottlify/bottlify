@@ -469,6 +469,35 @@ test('a vertex stage\'s position is invariant, shader-written or fixed', ()=>{
     assertLine(fixed.wgsl, '@builtin(position) @invariant oPos: vec4f,');
 });
 
+test('flat shading makes the two colour varyings flat on both sides, and nothing else', ()=>{
+    // D3DSHADE_FLAT holds for shader-drawn geometry too (Wine's d3d9
+    // test_shademode, vs_1_1 to vs_3_0 with and without a pixel shader), and
+    // WebGPU requires the two stages to agree on a varying's interpolation.
+    const vertex = translateShader(parseShader([VS_2_0, ...dclInput(0, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.ATTROUT, 0), src(REGISTER.INPUT, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 0), src(REGISTER.INPUT, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 0), src(REGISTER.INPUT, 0), END_TOKEN]),
+    { flatColours: true, alsoWrite: [1] });
+    assertLine(vertex.wgsl, '@location(0) @interpolate(flat) oD0: vec4f,');
+    assertLine(vertex.wgsl, '@location(1) @interpolate(flat) oX1: vec4f,');
+    assertLine(vertex.wgsl, `@location(${varyingLocation(D3DDECLUSAGE.TEXCOORD, 0)}) oT0: vec4f,`);
+    const pixel = translateShader(parseShader([PS_2_0,
+        ...dclInput(0, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(REGISTER.INPUT, 0), END_TOKEN]),
+    { flatColours: true });
+    assertLine(pixel.wgsl, '@location(0) @interpolate(flat) v0: vec4f,');
+    const hybrid = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
+        { usage: D3DDECLUSAGE.COLOR, usageIndex: 0, register: 1 },
+    ], new Map([[0, { components: 3, scalar: 'f32', bgra: false }],
+        [1, { components: 4, scalar: 'f32', bgra: true }]]), [1], [], 0, undefined, true);
+    assertLine(hybrid.wgsl, '@location(0) @interpolate(flat) o0: vec4f,');
+    assertLine(hybrid.wgsl, '@location(1) @interpolate(flat) o1: vec4f,');
+    assert.ok(!translateShader(parseShader([PS_2_0, ...dclInput(0, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(REGISTER.INPUT, 0), END_TOKEN]))
+        .wgsl.includes('interpolate'), 'Gouraud declares nothing');
+});
+
 test('a vertex shader\'s position lands on the centre of the pixel it names', ()=>{
     // Direct3D 9 and before put a pixel's centre on its integer coordinate
     // and WebGPU half a pixel further on, so what the shader wrote to oPos is

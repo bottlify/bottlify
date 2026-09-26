@@ -292,15 +292,16 @@ export function argumentsRead(op, arg1, arg2){
  * @param {number} arg
  * @param {number} stageIndex
  * @param {string} coordinate  the expression this stage samples with
+ * @param {string} [specular]  the expression the specular colour is read as
  * @returns {string}
  */
-function argument(arg, stageIndex, coordinate){
+function argument(arg, stageIndex, coordinate, specular = 'input.specular'){
     const source = {
         [D3DTA.DIFFUSE]: 'input.diffuse',
         [D3DTA.CURRENT]: 'current',
         [D3DTA.TEXTURE]: `sampleStage${stageIndex}(${coordinate})`,
         [D3DTA.TFACTOR]: 'uniforms.textureFactor',
-        [D3DTA.SPECULAR]: 'input.specular',
+        [D3DTA.SPECULAR]: specular,
     }[arg & D3DTA.SELECTMASK];
 
     if (source === undefined)
@@ -327,12 +328,13 @@ function argument(arg, stageIndex, coordinate){
  * @param {number} stageIndex
  * @param {string} coordinate
  * @param {number} arg1 @param {number} arg2
+ * @param {string} [specular]  as `argument` reads it
  * @returns {string | null}
  */
-function combine(op, stageIndex, coordinate, arg1, arg2){
+function combine(op, stageIndex, coordinate, arg1, arg2, specular = 'input.specular'){
     const read = argumentsRead(op, arg1, arg2);
-    const a = read.length > 0 ? argument(read[0], stageIndex, coordinate) : '';
-    const b = read.length > 1 ? argument(read[1], stageIndex, coordinate) : '';
+    const a = read.length > 0 ? argument(read[0], stageIndex, coordinate, specular) : '';
+    const b = read.length > 1 ? argument(read[1], stageIndex, coordinate, specular) : '';
     switch (op)
     {
         case D3DTOP.DISABLE:
@@ -566,8 +568,18 @@ export function generateFixedFunction(state, layout){
     // A colour the vertex did not carry is opaque white, so a modulate against
     // it is an identity. That is the documented default and it matters: the
     // alternative, black, multiplies the scene away.
-    varyings.push(`    @location(${location++}) diffuse: vec4f,`);
-    varyings.push(`    @location(${location++}) specular: vec4f,`);
+    //
+    // Flat shading takes both colours from the primitive's provoking vertex
+    // -- its first, as Direct3D's is -- except the specular alpha, which
+    // D3DSHADE_FLAT still interpolates, and which travels smooth beside them.
+    const flat = state.flatShading === true;
+    const interpolation = flat ? ' @interpolate(flat)' : '';
+    varyings.push(`    @location(${location++})${interpolation} diffuse: vec4f,`);
+    varyings.push(`    @location(${location++})${interpolation} specular: vec4f,`);
+    if (flat)
+    {
+        varyings.push(`    @location(${location++}) specularAlpha: f32,`);
+    }
     if (lighting)
     {
         assignments.push(lightingBody(lighting, has, specularEnable, normalizeNormals));
@@ -581,6 +593,11 @@ export function generateFixedFunction(state, layout){
         assignments.push(has('specular')
             ? '    out.specular = vertex.specular.bgra;'
             : '    out.specular = vec4f(0.0, 0.0, 0.0, 0.0);');
+    }
+
+    if (flat)
+    {
+        assignments.push('    out.specularAlpha = out.specular.a;');
     }
 
     for (let set = 0; set < layout.texCoordSets; set++)
@@ -699,7 +716,8 @@ ${[...assignments, ...fogAmount].join('\n')}
 
 @fragment
 fn fragmentMain(input: VertexOut) -> @location(0) vec4f {
-${fragmentBody(state, specularEnable)}
+${fragmentBody(state, specularEnable, undefined, undefined,
+        flat ? 'vec4f(input.specular.rgb, input.specularAlpha)' : 'input.specular')}
     return current;
 }
 `;
@@ -784,9 +802,11 @@ function tableFog(position){
  * @param {boolean[]} [generated]  Which stages sample a coordinate the
  *     vertex stage generated (`generated{n}`) rather than a carried set.
  * @param {string} [position]  The fragment's position builtin, for table fog.
+ * @param {string} [specular]  What a stage reads the specular colour as.
  */
 function fragmentBody(state, specularEnable, generated = state.stages.map(
-    stage=>generates(stage.texCoordIndex)), position = 'input.position')
+    stage=>generates(stage.texCoordIndex)), position = 'input.position',
+specular = 'input.specular')
 {
     const stages = state.stages.length === 0
         ? '    var current = input.diffuse;'
@@ -799,13 +819,13 @@ function fragmentBody(state, specularEnable, generated = state.stages.map(
                 ? `input.generated${index}`
                 : `input.texCoord${stage.texCoordIndex & COORD_SET_MASK}`;
             const color = combine(
-                stage.colorOp, index, coordinate, stage.colorArg1, stage.colorArg2);
+                stage.colorOp, index, coordinate, stage.colorArg1, stage.colorArg2, specular);
             if (color === null)
             {
                 return `    // stage ${index} disabled`;
             }
             const alpha = combine(
-                stage.alphaOp, index, coordinate, stage.alphaArg1, stage.alphaArg2);
+                stage.alphaOp, index, coordinate, stage.alphaArg1, stage.alphaArg2, specular);
             // Each stage's result is held to [0, 1] before the next reads it,
             // as the fixed function's registers hold it: a sum past one or a
             // difference below zero is not carried into the stage after.
@@ -816,7 +836,7 @@ function fragmentBody(state, specularEnable, generated = state.stages.map(
     // The specular colour is added after the cascade and before the fog, which
     // is where the fixed-function pipeline adds it: a highlight is light
     // reflected off the surface, not light that went through its texture.
-    const specular = specularEnable
+    const highlight = specularEnable
         ? '\n    current = vec4f(current.rgb + input.specular.rgb, current.a);'
         : '';
 
@@ -834,7 +854,7 @@ function fragmentBody(state, specularEnable, generated = state.stages.map(
         ? `\n    if (!(${compareExpression(state.alphaFunc, 'current.a', 'uniforms.alphaRef')}))`
             + '\n    {\n        discard;\n    }'
         : '';
-    return `${stages}${specular}${fog}${alphaTest}`;
+    return `${stages}${highlight}${fog}${alphaTest}`;
 }
 
 /**
@@ -863,16 +883,18 @@ export function fixedFragmentStage(state, written){
     /** @type {string[]} */
     const carried = [];
     // The programmable convention: colours at 0 and 1, coordinate set n at
-    // 2 + n, fog at 10 (`varyingLocation` in the translator).
+    // 2 + n, fog at 10 (`varyingLocation` in the translator). Flat shading
+    // makes the two colours flat, as the shader was translated to write them.
+    const interpolation = state.flatShading ? ' @interpolate(flat)' : '';
     carried.push(`    input.diffuse = ${has(0) ? 'in.v0' : 'vec4f(1.0)'};`);
     if (has(0))
     {
-        fields.push('    @location(0) v0: vec4f,');
+        fields.push(`    @location(0)${interpolation} v0: vec4f,`);
     }
     carried.push(`    input.specular = ${has(1) ? 'in.v1' : 'vec4f(0.0)'};`);
     if (has(1))
     {
-        fields.push('    @location(1) v1: vec4f,');
+        fields.push(`    @location(1)${interpolation} v1: vec4f,`);
     }
     const sets = state.stages.reduce(
         (most, stage)=>Math.max(most, (stage.texCoordIndex & COORD_SET_MASK) + 1), 0);

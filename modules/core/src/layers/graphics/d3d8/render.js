@@ -37,7 +37,8 @@
 
 import {
     COLORWRITEENABLE_ALPHA, COORD_SET_MASK, D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFMT,
-    D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPT, D3DRS, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS,
+    D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPT, D3DRS, D3DSHADE, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP,
+    D3DTS,
     D3DTSS, D3DUSAGE, D3DZB, D3D_OK, FORMAT_INFO, argumentsRead, dwordToFloat, isCompressed,
     surfaceBytes,
 } from './constants.js';
@@ -393,6 +394,12 @@ const LIST_OF = Object.freeze({
  * rewrite keeps that, because a cull mode that discards half the strip is not
  * something a test on a list would notice.
  *
+ * Each triangle also starts at the vertex Direct3D takes a flat-shaded
+ * triangle's colours from, since the list's first vertex is the one flat
+ * interpolation reads: a strip triangle's first, and a fan triangle's first
+ * after the hub (EXT_provoking_vertex, issue 7, records the latter as
+ * DirectX 9's). Rotating a triangle's vertices keeps its winding.
+ *
  * @param {number} type
  * @param {ArrayLike<number>} indices  The vertex indices in strip or fan order.
  * @returns {Uint16Array | Uint32Array}
@@ -418,14 +425,14 @@ export function listIndices(type, indices){
                 }
                 else
                 {
-                    out.push(indices[index + 1], indices[index], indices[index + 2]);
+                    out.push(indices[index], indices[index + 2], indices[index + 1]);
                 }
             }
             break;
         case D3DPT.TRIANGLEFAN:
             for (let index = 1; index + 1 < count; index++)
             {
-                out.push(indices[0], indices[index], indices[index + 1]);
+                out.push(indices[index], indices[index + 1], indices[0]);
             }
             break;
         default:
@@ -1287,6 +1294,15 @@ export function fogOf(model, applied = true){
 }
 
 /**
+ * Whether the vertex colours are flat over each primitive: D3DSHADE_FLAT.
+ * Gouraud is the default, and Phong, which no device implements, draws as it.
+ *
+ * @param {RenderModel} model
+ */
+export const isFlatShaded = model=>
+    (model.renderStates.get(D3DRS.SHADEMODE) ?? 0) === D3DSHADE.FLAT;
+
+/**
  * Whether a projection is affine -- its fourth column (0, 0, 0, 1) -- which is
  * Direct3D's test for taking table fog over the pixel's z rather than its w.
  *
@@ -1369,6 +1385,7 @@ export function pipelineStateOf(model, shape){
         specularEnable: rs('SPECULARENABLE') !== 0,
         lighting: shape.lighting ?? null,
         normalizeNormals: rs('NORMALIZENORMALS') !== 0,
+        flatShading: isFlatShaded(model),
         ...(shape.vertexLayout ? {
             vertexLayout: shape.vertexLayout,
             vertexLayoutKey: shape.vertexLayoutKey,
@@ -3469,10 +3486,17 @@ export function createRenderer(options){
         const fog = program.vertex
             ? { source: FOG_SOURCE.NONE, mode: D3DFOG.NONE }
             : fogOf(model, fogApplied);
-        const pixel = translationOf(pixelShader, `ps|fog${fog.source}/${fog.mode}`,
+        // Flat shading is declared on both sides of the two colour varyings,
+        // so every translation of the pair is made for it.
+        const flat = isFlatShaded(model);
+        const pixel = translationOf(pixelShader,
+            `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}`,
             ()=>translateShader(
-                /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel),
-                fog.source === FOG_SOURCE.NONE ? {} : { fog: fog.mode, fogSource: fog.source }));
+                /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel), {
+                    ...(fog.source === FOG_SOURCE.NONE
+                        ? {} : { fog: fog.mode, fogSource: fog.source }),
+                    flatColours: flat,
+                }));
         if (pixel.error)
         {
             skip('program');
@@ -3539,14 +3563,14 @@ export function createRenderer(options){
                     && varyingLocation(D3DDECLUSAGE.TEXCOORD, set) === location));
         const vertex = program.vertex
             ? translationOf(/** @type {object} */ (program.vertexShader),
-                `vs:${shapes}|w${missing.join(',')}`,
+                `vs:${shapes}|w${missing.join(',')}${flat ? '|flat' : ''}`,
                 ()=>translateShader(
                     /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
-                    { inputs: layout.shapes, alsoWrite: missing }))
+                    { inputs: layout.shapes, alsoWrite: missing, flatColours: flat }))
             : hybridStageFor(
                 `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`
-                    + `|f${fog.source}/${fog.mode}`,
-                wanted, layout.shapes, missing, generated, fog);
+                    + `|f${fog.source}/${fog.mode}${flat ? '|flat' : ''}`,
+                wanted, layout.shapes, missing, generated, fog, flat);
         if (vertex.error)
         {
             skip('program');
@@ -3616,11 +3640,12 @@ export function createRenderer(options){
         }
         const layout = laid.layout;
         const shapes = shapeKey(layout);
+        const flat = isFlatShaded(model);
         /** @type {import('../d3d9/wgsl.js').TranslatedShader} */
         const vertex = translationOf(/** @type {object} */ (program.vertexShader),
-            `vs:${shapes}`, ()=>translateShader(
+            `vs:${shapes}${flat ? '|flat' : ''}`, ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
-                { inputs: layout.shapes }));
+                { inputs: layout.shapes, flatColours: flat }));
         if (vertex.error)
         {
             skip('program');
@@ -3702,14 +3727,16 @@ export function createRenderer(options){
      * @param {number[]} alsoWrite
      * @param {number[]} generated
      * @param {{ source: number, mode: number }} fog  See `fogOf`.
+     * @param {boolean} flat  D3DSHADE_FLAT.
      */
-    const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog)=>{
+    const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog, flat)=>{
         const existing = hybridStages.get(key);
         if (existing)
         {
             return existing;
         }
-        const made = fixedVertexStage(wanted, shapes, alsoWrite, generated, fog.mode, fog.source);
+        const made = fixedVertexStage(wanted, shapes, alsoWrite, generated, fog.mode, fog.source,
+            flat);
         hybridStages.set(key, made);
         return made;
     };
@@ -4404,6 +4431,18 @@ export function createRenderer(options){
         };
     };
 
+    /**
+     * Whether a draw from vertices in order is rewritten as a list: a fan
+     * always, and a strip under flat shading, whose odd triangles WebGPU
+     * would otherwise take their colours from the wrong vertex -- its strip
+     * reorders them to keep the winding, and the first vertex is the one flat
+     * interpolation reads.
+     *
+     * @param {RenderModel} model @param {number} type
+     */
+    const listed = (model, type)=>type === D3DPT.TRIANGLEFAN
+        || (type === D3DPT.TRIANGLESTRIP && isFlatShaded(model));
+
     /** The vertices zero to count, which is what a non-indexed fan is a fan of. */
     const ascending = (/** @type {number} */ count)=>
         Uint32Array.from({ length: count }, (_, index)=>index);
@@ -4795,8 +4834,9 @@ export function createRenderer(options){
         drawPrimitive(model, type, startVertex, primitiveCount){
             const stream = model.stream;
             const count = vertexCountOf(type, primitiveCount);
-            const fan = type === D3DPT.TRIANGLEFAN;
-            const prepared = prepare(model, stream.stride, fan ? LIST_OF[type] : TOPOLOGY[type]);
+            const rewrite = listed(model, type);
+            const prepared = prepare(model, stream.stride,
+                rewrite ? LIST_OF[type] : TOPOLOGY[type]);
             if (!prepared)
             {
                 return;
@@ -4807,7 +4847,7 @@ export function createRenderer(options){
             streamBuffer.markRead();
             record(model, prepared, {
                 vertices: { gpu: streamBuffer.gpu, offset: 0 },
-                ...(fan
+                ...(rewrite
                     ? expandedGeometry(type, ascending(count), startVertex)
                     : { indices: null, count, first: startVertex }),
             });
@@ -4903,15 +4943,15 @@ export function createRenderer(options){
          */
         drawPrimitiveUp(model, type, primitiveCount, vertexData, stride){
             const count = vertexCountOf(type, primitiveCount);
-            const list = LIST_OF[type];
-            const topology = type === D3DPT.TRIANGLEFAN ? list : TOPOLOGY[type];
+            const rewrite = listed(model, type);
+            const topology = rewrite ? LIST_OF[type] : TOPOLOGY[type];
             const prepared = prepare(model, stride, topology);
             if (!prepared)
             {
                 return;
             }
             const vertices = scratchVertices.write(vertexData.subarray(0, count * stride));
-            const geometry = type === D3DPT.TRIANGLEFAN
+            const geometry = rewrite
                 ? expandedGeometry(type, ascending(count), 0)
                 : { indices: null, count, first: 0 };
             record(model, prepared, { vertices, ...geometry });

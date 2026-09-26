@@ -244,6 +244,35 @@ test('the position is invariant, so two passes over the same geometry meet exact
     }
 });
 
+test('flat shading takes both colours from the provoking vertex, but not the fog', ()=>{
+    // D3DSHADE_FLAT (Wine's test_shademode; Microsoft's D3DSHADEMODE): the
+    // colour and specular of the first vertex hold over the triangle, while
+    // the specular alpha is still interpolated -- test_fog_interpolation
+    // fogs a flat quad as smoothly as a Gouraud one.
+    const code = generate(baseState({
+        fvf: FVF.XYZ | FVF.DIFFUSE | FVF.SPECULAR,
+        flatShading: true,
+        fogMode: D3DFOG.NONE,
+        fogSource: FOG_SOURCE.SPECULAR,
+        stages: [{
+            colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.DIFFUSE, colorArg2: D3DTA.CURRENT,
+            alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.SPECULAR, alphaArg2: D3DTA.CURRENT,
+            texCoordIndex: 0,
+        }],
+    })).code;
+    assert.ok(code.includes('@location(0) @interpolate(flat) diffuse: vec4f,'));
+    assert.ok(code.includes('@location(1) @interpolate(flat) specular: vec4f,'));
+    assert.ok(code.includes('@location(2) specularAlpha: f32,'));
+    assert.ok(code.includes('out.specularAlpha = out.specular.a;'));
+    assert.match(code, /@location\(\d+\) fogAmount: f32,/, 'the fog is not flat');
+    assert.ok(code.includes('saturate((vec4f(input.specular.rgb, input.specularAlpha)).a)'),
+        'a stage reading the specular alpha reads the interpolated one');
+
+    const gouraud = generate(baseState({ fvf: FVF.XYZ | FVF.DIFFUSE })).code;
+    assert.doesNotMatch(gouraud, /interpolate/);
+    assert.doesNotMatch(gouraud, /specularAlpha/);
+});
+
 test('a pre-transformed vertex gives its RHW back as the clip w', ()=>{
     // The RHW is what the rasteriser interpolates by: Microsoft's "Viewports
     // and Clipping" has a pre-transformed vertex taken back to clip space by
