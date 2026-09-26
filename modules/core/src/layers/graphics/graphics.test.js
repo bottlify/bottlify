@@ -708,6 +708,53 @@ test('dispose releases this machine\'s backend and leaves the run\'s presenter u
         assert.ok(presenter.diagnostics().presents >= 1, 'its counters are untouched');
     });
 
+test('a child\'s machine that goes leaves its parent drawing from its own memory', async()=>{
+    // A child started beside its parent is a second machine on the run's
+    // presenter, and it goes while the parent stands. What the parent
+    // presents afterwards is read from the parent's address space and shown
+    // through the parent's backend; the child's went with the child.
+    const gpu = createFakeDevice();
+    const presenter = createPresenter({
+        device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+        now: ()=>0,
+    });
+    const device = {
+        device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+        presentTo: (/** @type {any} */ frame)=>presenter.show(frame),
+    };
+    /** @param {Uint8Array} ram */
+    const memoryOf = ram=>({
+        readBytes: (/** @type {number} */ at, /** @type {number} */ n)=>ram.slice(at, at + n),
+        writeBytes: ()=>{},
+        window: (/** @type {number} */ at, /** @type {number} */ n)=>ram.subarray(at, at + n),
+    });
+    const parentRam = new Uint8Array(0x100);
+    parentRam.set([0x56, 0x34, 0x12, 0xff]);
+    const childRam = new Uint8Array(0x100);
+    childRam.set([0x11, 0x22, 0x33, 0xff]);
+    const pixel = { buffer: 0, width: 1, height: 1, pitch: 4, bitCount: 32, palette: null };
+    const settled = ()=>new Promise(resolve=>setImmediate(resolve));
+
+    const parent = await graphicsModule.create({ presenter, device },
+        hostWith(memoryOf(parentRam)));
+    const child = await graphicsModule.create({ presenter, device },
+        hostWith(memoryOf(childRam)));
+    child.present(pixel);
+    await settled();
+    assert.deepEqual([...gpu.of('writeTexture').at(-1).bytes], [0x11, 0x22, 0x33, 0xff],
+        'the child showed its own frame');
+
+    // The child's lifetime ends; the most recently created instance is its.
+    await graphicsModule.dispose();
+    parent.present(pixel);
+    await settled();
+
+    assert.deepEqual([...gpu.of('writeTexture').at(-1).bytes], [0x56, 0x34, 0x12, 0xff],
+        'the parent\'s frame came from the parent\'s memory');
+    assert.deepEqual(presenter.diagnostics().failures, []);
+    assert.equal(presenter.diagnostics().shown, 2);
+});
+
 test('a second instance in one realm does not take the first one\'s backend', async()=>{
     // A process replacement runs `create()` again in the same realm, and the
     // plan for two machines in one worker needs two live at once. The backend

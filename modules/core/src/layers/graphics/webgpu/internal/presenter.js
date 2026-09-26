@@ -189,24 +189,38 @@ export function createPresenter(options = {}){
         ? (/** @type {() => void} */ flush)=>pacer.request(flush)
         : (options.schedule ?? (flush=>queueMicrotask(flush)));
 
-    // What belongs to the process being drawn for. The graphics layer attaches
-    // its own backend and memory reader on every lifetime, because a rebuilt
-    // machine has a new address space and a new backend -- and the presenter
-    // has neither: it is the same object across both.
-    /** @type {(() => any) | null} */
-    let backend = options.backend ?? null;
-    /** @type {(address: number, length: number) => Uint8Array} */
-    let readMemory = options.readMemory ?? (()=>new Uint8Array(0));
+    /**
+     * What one machine brought: its backend, its address space, and the
+     * addresses whose picture its GPU owns. The graphics layer attaches its
+     * own on every lifetime, because a machine has an address space and a
+     * backend of its own and the presenter has neither -- and a machine goes
+     * while the presenter stays: a child started beside its parent ends and
+     * the parent draws on, a process is replaced. So each attachment is kept
+     * apart, a surface is read through the one that presented it, and one
+     * that has gone is never reached again.
+     *
+     * @typedef {{ backend: (() => any) | null,
+     *     readMemory: (address: number, length: number) => Uint8Array,
+     *     claims: Map<number, () => void>, live: boolean }} Attachment
+     */
+    /** @type {Attachment[]} the construction's own first, the newest last */
+    const attachments = [{
+        backend: options.backend ?? null,
+        readMemory: options.readMemory ?? (()=>new Uint8Array(0)),
+        claims: new Map(),
+        live: true,
+    }];
+    const newest = ()=>attachments[attachments.length - 1];
 
     /** @type {any} the backend surface, remade when the primary changes shape */
     let texture = null;
     /** What the texture holds: the label of the guest surface last uploaded into it. */
     let uploadedLabel = 'guest bytes';
-    /** @type {PresentableSurface | null} what to show at the next flush */
+    /** @type {{ surface: PresentableSurface, from: Attachment } | null} what to show at the next flush */
     let pending = null;
     /** @type {Uint8Array | null} */
     let converted = null;
-    const counters = { presents: 0, uploads: 0, bytes: 0, shownByOwner: 0, shown: 0 };
+    const counters = { presents: 0, uploads: 0, bytes: 0, shownByOwner: 0, shown: 0, dropped: 0 };
     /**
      * Canvas copies by the label of the surface shown: a Direct3D target, a
      * GL swapchain, or the guest bytes of a primary or the desktop. A picture
@@ -219,8 +233,6 @@ export function createPresenter(options = {}){
     let lastBuffer = 0;
     /** @type {string[]} */
     const failures = [];
-    /** @type {Map<number, () => void>} buffer address -> who shows it */
-    const claims = new Map();
     /** The format the canvas was configured in, so it is configured once. */
     let screenFormat = '';
     /** @type {any[]} every canvas copy, for the host's `presented()` */
@@ -245,13 +257,21 @@ export function createPresenter(options = {}){
     };
 
     const flush = ()=>{
-        const surface = pending;
+        const held = pending;
         pending = null;
-        if (!surface)
+        if (!held)
         {
             return;
         }
-        const owner = claims.get(surface.buffer);
+        const { surface, from } = held;
+        if (!from.live)
+        {
+            // Presented by a machine that has gone since: the address named a
+            // place in its address space, which went with it.
+            counters.dropped++;
+            return;
+        }
+        const owner = from.claims.get(surface.buffer);
         if (owner)
         {
             counters.shownByOwner++;
@@ -261,7 +281,7 @@ export function createPresenter(options = {}){
         let using;
         try
         {
-            const accessor = backend;
+            const accessor = from.backend;
             if (!accessor)
             {
                 throw new Error('graphics: no process backend was attached to the presenter');
@@ -289,7 +309,7 @@ export function createPresenter(options = {}){
         // pixels: the padding is not part of the picture.
         for (let y = 0; y < surface.height; y++)
         {
-            const row = readMemory(surface.buffer + y * surface.pitch,
+            const row = from.readMemory(surface.buffer + y * surface.pitch,
                 surface.width * (surface.bitCount >>> 3));
             expandRow(row, surface.width, surface.bitCount, surface.palette,
                 converted.subarray(y * rowBytes, (y + 1) * rowBytes));
@@ -394,20 +414,13 @@ export function createPresenter(options = {}){
         }
     };
 
-    return {
-        /**
-         * This process's backend and memory. Called by the graphics layer when
-         * it is assembled, once per machine: the presenter is the run's, the
-         * address space and the GPU resources it draws into are not.
-         *
-         * @param {{ backend: () => any, readMemory: (address: number, length: number)
-         *     => Uint8Array }} deps
-         */
-        attach({ backend: accessor, readMemory: reader }){
-            backend = accessor;
-            readMemory = reader;
-        },
-
+    /**
+     * What one machine does with the presenter: present a surface of its own
+     * address space, and say which of its addresses its GPU owns.
+     *
+     * @param {Attachment} from
+     */
+    const machineView = from=>({
         /**
          * The primary surface may have changed. Nothing travels yet: the
          * burst this call is part of is flushed once, afterwards.
@@ -418,7 +431,7 @@ export function createPresenter(options = {}){
             counters.presents++;
             lastBuffer = surface.buffer;
             const first = pending === null;
-            pending = surface;
+            pending = { surface, from };
             if (first)
             {
                 schedule(flush);
@@ -428,9 +441,6 @@ export function createPresenter(options = {}){
         /** Shows whatever is pending now, rather than after the burst. */
         flush,
 
-        /** The canvas copy, used as the backend's `presentTo`. @param {any} frame */
-        show,
-
         /**
          * A GPU owns the picture at this address. Presenting the address
          * calls `show` instead of reading guest memory, until released.
@@ -438,16 +448,61 @@ export function createPresenter(options = {}){
          * @param {number} buffer @param {() => void} owner
          */
         claim(buffer, owner){
-            claims.set(buffer >>> 0, owner);
+            from.claims.set(buffer >>> 0, owner);
         },
 
         /** @param {number} buffer */
         release(buffer){
-            claims.delete(buffer >>> 0);
+            from.claims.delete(buffer >>> 0);
         },
 
         /** Whether a GPU owns the picture at this address. @param {number} buffer */
-        isClaimed: buffer=>claims.has(buffer >>> 0),
+        isClaimed: (/** @type {number} */ buffer)=>from.claims.has(buffer >>> 0),
+    });
+
+    return {
+        /**
+         * This process's backend and memory. Called by the graphics layer when
+         * it is assembled, once per machine: the presenter is the run's, the
+         * address space and the GPU resources it draws into are not.
+         *
+         * Answers the machine's own view, through which it presents and
+         * claims; `detach` ends it. A surface it presented and that was not
+         * shown yet is dropped then rather than read, and the addresses it
+         * claimed are no longer its GPU's.
+         *
+         * @param {{ backend: () => any, readMemory: (address: number, length: number)
+         *     => Uint8Array }} deps
+         */
+        attach({ backend: accessor, readMemory: reader }){
+            /** @type {Attachment} */
+            const own = { backend: accessor, readMemory: reader, claims: new Map(), live: true };
+            attachments.push(own);
+            return {
+                ...machineView(own),
+                detach(){
+                    own.live = false;
+                    own.claims.clear();
+                    const at = attachments.indexOf(own);
+                    if (at >= 0)
+                    {
+                        attachments.splice(at, 1);
+                    }
+                },
+            };
+        },
+
+        // The same, for whoever attached last: a build that made this
+        // presenter for itself and holds nothing else.
+        present: (/** @type {PresentableSurface} */ surface)=>machineView(newest()).present(surface),
+        flush,
+        claim: (/** @type {number} */ buffer, /** @type {() => void} */ owner)=>
+            machineView(newest()).claim(buffer, owner),
+        release: (/** @type {number} */ buffer)=>machineView(newest()).release(buffer),
+        isClaimed: (/** @type {number} */ buffer)=>machineView(newest()).isClaimed(buffer),
+
+        /** The canvas copy, used as the backend's `presentTo`. @param {any} frame */
+        show,
 
         /** The delivery rhythm, when the assembling caller gave a clock and a schedule. */
         pacing: ()=>pacer ? pacer.diagnostics() : null,
@@ -464,7 +519,8 @@ export function createPresenter(options = {}){
                 shownBy: { ...shownBy },
                 lastBuffer,
                 pending: pending !== null,
-                claimed: claims.size,
+                claimed: attachments.reduce((sum, attached)=>sum + attached.claims.size, 0),
+                attached: attachments.length - 1,
                 failures: [...failures],
                 disposed,
             };
@@ -480,7 +536,10 @@ export function createPresenter(options = {}){
             texture = null;
             converted = null;
             pending = null;
-            claims.clear();
+            for (const attached of attachments)
+            {
+                attached.claims.clear();
+            }
         },
     };
 }
