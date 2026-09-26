@@ -173,18 +173,30 @@ export function noteStore(e, size){
 function noteCodeStore(e, size){
     const { b } = e;
     // This engine's own code, to the granule: the page's flag and then its
-    // range, for the store's first byte and its last.
+    // range, for the store's first byte, its last, and one byte in every
+    // granule between -- a state save (`fnsave`) spans several.
     b.localGet(Local.addr).call(e.context.codeHit);
+    const granule = 1 << Tables.CODE_GRANULE_SHIFT;
+    for (let at = granule; at < size - 1; at += granule)
+    {
+        b.localGet(Local.addr).i32const(at).op(I32.add).call(e.context.codeHit).op(I32.or);
+    }
     if (size > 1)
     {
         b.localGet(Local.addr).i32const(size - 1).op(I32.add).call(e.context.codeHit).op(I32.or);
     }
     if (e.layout.codePages >= 0)
     {
-        // The other executor's own table too: its compiled page is as much
-        // code as this engine's, and the runtime dirties its cache.
+        // The other executor's own table too, for the store's first page and
+        // its last: its compiled page is as much code as this engine's, and
+        // the runtime dirties its cache.
         b.localGet(Local.addr).i32const(12).op(I32.shrU)
             .load('i32_8u', { offset: e.layout.codePages }).op(I32.or);
+        if (size > 1)
+        {
+            b.localGet(Local.addr).i32const(size - 1).op(I32.add).i32const(12).op(I32.shrU)
+                .load('i32_8u', { offset: e.layout.codePages }).op(I32.or);
+        }
     }
     e.openGuard('code', EMPTY);
     b.i32const(1).localSet(Local.stale);

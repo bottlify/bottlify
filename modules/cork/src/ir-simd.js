@@ -116,6 +116,7 @@ function writeVector(state, operand, width, address, value){
             word = word << 8n | BigInt(value[i] & 0xff);
         }
         state.f80bits[/** @type {number} */ (operand.reg)] = BigInt.asIntN(64, word);
+        state.x87Exact &= ~(1 << /** @type {number} */ (operand.reg));
         return;
     }
     if (operand.kind === 'reg')

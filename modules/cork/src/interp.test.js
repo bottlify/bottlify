@@ -273,7 +273,7 @@ test('blockState keeps its fields fast and sees code rewritten in place', ()=>{
     // The step's fields are the object's own and the accessors its
     // prototype's: one literal holding both fell into V8's dictionary mode.
     assert.deepEqual(Object.keys(state).sort(), ['eflags', 'eip', 'faultEip', 'halted',
-        'memory', 'rdtsc', 'reg', 'retired', 'trapped']);
+        'memory', 'rdtsc', 'reg', 'retired', 'trapped', 'x87Exact', 'x87Shadow']);
     // mov eax, imm32 across a page boundary, then hlt; run, rewrite the
     // immediate's byte in the second page, run again.
     const at = 0x1ffe;
@@ -296,6 +296,40 @@ test('blockState keeps its fields fast and sees code rewritten in place', ()=>{
     state.halted = false;
     interpret(state, 10);
     assert.equal(state.reg[0], 7);
+});
+
+test('a quadword fild\'s exact value does not outlive a sync, where other code may write it', ()=>{
+    // fild qword [0x2000] of 2^53 + 1 interpreted; then the register rewritten
+    // in the block to 2^53, the double the quadword rounds to, as translated
+    // code may; then fistp qword [0x2008] interpreted: 2^53, not the quadword.
+    const layout = ownLayout({ ramSize: 1 << 20 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const view = new DataView(memory.buffer);
+    const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
+    view.setUint8(layout.x87Empty, 0xff);
+    view.setUint16(layout.x87Control, 0x37f, true);
+    view.setBigInt64(layout.ramBase + 0x2000, (1n << 53n) + 1n, true);
+    ram.set([0xdf, 0x2d, 0x00, 0x20, 0, 0, 0xf4, 0xdf, 0x3d, 0x08, 0x20, 0, 0, 0xf4], 0x1000);
+    const state = blockState({ memory, layout });
+    state.syncIn();
+    state.eip = 0x1000;
+    interpret(state, 10);
+    state.syncOut();
+    view.setFloat64(layout.x87 + 7 * 16, 2 ** 53, true);
+    state.syncIn();
+    state.eip = 0x1007;
+    state.halted = false;
+    interpret(state, 10);
+    state.syncOut();
+    assert.equal(view.getBigInt64(layout.ramBase + 0x2008, true), 1n << 53n);
+    // In one run, the quadword itself.
+    ram.set([0xdf, 0x2d, 0x00, 0x20, 0, 0, 0xdf, 0x3d, 0x08, 0x20, 0, 0, 0xf4], 0x1100);
+    state.syncIn();
+    state.eip = 0x1100;
+    state.halted = false;
+    interpret(state, 20);
+    state.syncOut();
+    assert.equal(view.getBigInt64(layout.ramBase + 0x2008, true), (1n << 53n) + 1n);
 });
 
 test('fxsave writes the x87 and SSE image and fxrstor reads it back', ()=>{

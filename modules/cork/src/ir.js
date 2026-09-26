@@ -69,6 +69,9 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @property {number} control      the x87 control word
  * @property {Float64Array} f80    the eight physical x87 registers, as doubles
  * @property {BigInt64Array} f80bits  the same bytes, for an MMX read or write
+ * @property {number} x87Exact     the physical registers holding what a quadword `fild`
+ *     loaded, unwritten since (`exactWrites` in `ir-x87.js`): the quadword is in `x87Shadow`
+ * @property {BigInt64Array} x87Shadow
  * @property {Uint32Array} xmm     the eight XMM registers, four words each
  * @property {number} mxcsr
  */
@@ -91,6 +94,8 @@ export function createState(memory, { eip = 0, esp = 0, fsBase = 0 } = {}){
         top: 0, empty: 0xff, status: 0, control: 0x37f,
         f80: new Float64Array(f80Bytes),
         f80bits: new BigInt64Array(f80Bytes),
+        x87Exact: 0,
+        x87Shadow: new BigInt64Array(8),
         xmm: new Uint32Array(32),
         mxcsr: 0x1f80,
     };
@@ -575,6 +580,16 @@ export function evaluate(instruction, state){
         {
             const width = operands[0].kind === 'seg' ? size : operands[0].size;
             const value = pop(width);
+            if (operands[0].kind === 'mem')
+            {
+                // `pop [esp+x]` addresses with esp moved, and a store that
+                // faults leaves the pop undone.
+                const at = address(operands[0]);
+                state.reg[4] = (state.reg[4] - width) >>> 0;
+                state.memory.write(at, width, value & MASK[width]);
+                state.reg[4] = (state.reg[4] + width) >>> 0;
+                return;
+            }
             write(operands[0], value);
             return;
         }
@@ -609,8 +624,10 @@ export function evaluate(instruction, state){
             // The reserved bit 1 always reads set; IF, IOPL and the rest of
             // the system bits are not a user program's to change here. AC
             // and ID are: a program finds CPUID by flipping ID, and one that
-            // cannot sees no CPUID and takes its generic code.
-            const writable = 0xcd5 | DF | (1 << 11) | (1 << 18) | (1 << 21);
+            // cannot sees no CPUID and takes its generic code. The word form
+            // writes the low sixteen bits alone.
+            const writable = (0xcd5 | DF | (1 << 11) | (1 << 18) | (1 << 21))
+                & (size === 2 ? 0xffff : -1);
             state.eflags = ((state.eflags & ~writable) | (value & writable) | 2) >>> 0;
             return;
         }

@@ -128,7 +128,9 @@ A fault
 translated code detects (a divide by zero, an undefined instruction, an access the page
 table refuses) leaves before the instruction with the registers as they were, and the
 emulator re-executes it and raises it through the same vector and report a program on the
-emulator alone gets. The same hash is given to the
+emulator alone gets. A `pop` into memory checks its destination before esp moves (the moved esp
+that `pop [esp+x]` addresses with folded into the displacement), so a fault on the destination
+leaves esp as it was -- both tiers had left it past the value. The same hash is given to the
 emulator (`handoffHash`, the fork's `bottlify_handoff_hash`): its slice then returns only at
 an address the hash holds, not anywhere in a flagged page, which would otherwise hand a page
 half translated back one instruction at a time. A page flagged for handoff is one the
@@ -272,7 +274,14 @@ formed at, whatever other path reaches it, so a join two tops meet at still publ
 for each -- the edge that arrives at the entry with the other top leaves, and the runtime forms
 a region there for the top the machine has. The translator keeps every x87 value as a double, as the emulator does; the
 emulator's tagged-double form is read and written directly, a true 80-bit register it left is
-converted inline. The stack-fault checks -- a register read that is empty, a push into one
+converted inline. The one exception is the quadword a `fild m64` loads: the processor's 64-bit
+mantissa holds it whole and `fild m64; fistp m64` is a way programs copy eight bytes, so within a
+block the translator keeps the loaded quadword in an i64 local beside the register's double, carried
+by `fxch` and the register copies (`fld st(i)`, `fst st(i)`) and dropped by any other write, and a
+`fistp`/`fisttp m64` of such a register stores the quadword (`0x0123456789abcdef` had come back
+`...cdf0`, `INT64_MAX` the integer indefinite with IE); the interpreter keeps the same shadow per
+physical register (`exactWrites` in `ir-x87.js`, one rule for both), dropped at every sync with the
+state block. The stack-fault checks -- a register read that is empty, a push into one
 that is held: IE and SF (and C1 for the push), and the indefinite for the value -- are decided
 at translation wherever the empty mask is known there (`planStack` in `emit/x87.js`). A
 region's function is entered from outside only through its head (the host, or another region
@@ -383,7 +392,17 @@ cork-bench, one host per tree in one process, the x87 transform loop 137.8 -> 11
 iteration, the SSE one 122.1 -> 85.4, the x87 entity update 171.2 -> 162.1, the SSE one
 156.4 -> 135.2, the integer workloads the same code as before. The transcendentals (`fsin`, `fcos`, `fsincos`,
 `fptan`, `fpatan`, `f2xm1`, `fyl2x`, `fyl2xp1`) go through the host's `Math`, imported by every
-translated module, as the emulator's do, so the two agree on one engine. `fnstenv` and
+translated module, as the emulator's do, so the two agree on one engine. Out of the reduction range
+(|x| >= 2^63) they leave the operand as it was and set C2, as the processor does, and `fptan` and
+`fsincos` push nothing there: the region leaves past the instruction with the stack as it was, where
+it had moved the top for the push the tracker counts on and pushed no value. `fprem` and `fprem1` go
+through the host too (the `fprem` and `fpremStatus` imports, the interpreter's own `remainder` in
+`ir-x87.js`), exactly: JS's `%` is the IEEE fmod, `fprem1`'s quotient rounded to nearest moves that
+remainder by the divisor exactly, and the quotient's low bits for C0, C3 and C1 come from the
+remainder of eight times the divisor; both tiers had computed `a - trunc(a / c) * c` in doubles, so a
+quotient that rounded up gave a remainder of the wrong sign and bits off by one, and one past 2^53 lost
+the remainder. Past an exponent difference of 63 the reduction is partial, C2 set, by 32 plus the
+difference mod 32 bits, so a loop of them ends at the exact remainder. `fnstenv` and
 `fnsave` write the protected-mode environment as the emulator does (the instruction and data
 pointers zero, which neither keeps); `fldenv` and `frstor` read it back into the locals and
 leave for the next block, since the top they set is known only at run time and every block
@@ -405,7 +424,7 @@ that form, the MMX one (the exponent and sign all ones, as the processor leaves 
 relaxed double. An MMX instruction
 holds every x87 register with the top at zero, as the processor does, and `emms` empties them
 again, whichever order the two come in within one run, and leaves the top at the zero the MMX
-instruction set -- leaving the MMX state does not undo it. `fxsave`, `fxrstor` and `fbld` still end a region and run on the fallback -- under cork the interpreter, whose model writes and reads `fxsave`'s 512-byte image (control, status with the top, the abridged tag byte, MXCSR with a mask of 0xffbf since the SSE model has no DAZ, ST(0)..ST(7) and XMM0..XMM7; the pointers zero), the first thing Doom 3 runs once it finds CPUID; `fbstp` writes its packed BCD through the BCD helper the shared helpers module carries. The stubs cork answers itself -- `cpuid` (the pinned emulator's own leaves, `src/cpuid.js`, the subleaf in ECX read where a leaf has them -- 4's cache parameters, 7's extended features -- and every leaf the emulator answers listed, 4, 5, 7, 0x15 and 0x40000000 among them, which cork had answered with zeros; `v86-host.itest.js` holds the table to the emulator's answer leaf by leaf and subleaf by subleaf. The answer keeps the emulator's hypervisor bit and its VMware leaf so the two engines agree; dropping them is a change to the fork first. `rdrand`, which leaf 1 advertises, is decoded and interpreted -- the host's `crypto.getRandomValues`, CF set, a memory operand #UD -- where it had stopped a program under cork; `popf` lets a program flip EFLAGS' ID and AC bits, since a program finds CPUID by flipping ID -- one that could not saw no CPUID, and Doom 3 took its generic x87 SIMD over SSE), `rdtsc` (the host's counter through the `rdtsc` import: the emulator's own `read_tsc` under hybrid; under cork nanoseconds of the guest's clock -- the one QueryPerformanceCounter and GetTickCount read, which the kernel hands the cpu layer (`useGuestClock`) -- going on at the page's rate inside a slice by at most a credit (16 ms) and never backward, so a program calibrating the counter against QueryPerformanceCounter measures the 1 GHz CPUID states whatever the host did meanwhile, where the page's own clock ran on through every stall the guest's is not credited for), `xlat`, `addsubps`/`addsubpd` -- are lowered in the emitter and modelled in the interpreter, as `int n`/`int3`/`into`, `bound`, `hlt`, `ud2` and the string forms are. A store translated code makes into a page the emulator's own compiler compiled is
+instruction set -- leaving the MMX state does not undo it. `fxsave`, `fxrstor` and `fbld` still end a region and run on the fallback -- under cork the interpreter, whose model writes and reads `fxsave`'s 512-byte image (control, status with the top, the abridged tag byte, MXCSR with a mask of 0xffbf since the SSE model has no DAZ, ST(0)..ST(7) and XMM0..XMM7; the pointers zero), the first thing Doom 3 runs once it finds CPUID; `fbstp` writes its packed BCD through the BCD helper the shared helpers module carries. The stubs cork answers itself -- `cpuid` (the pinned emulator's own leaves, `src/cpuid.js`, the subleaf in ECX read where a leaf has them -- 4's cache parameters, 7's extended features -- and every leaf the emulator answers listed, 4, 5, 7, 0x15 and 0x40000000 among them, which cork had answered with zeros; `v86-host.itest.js` holds the table to the emulator's answer leaf by leaf and subleaf by subleaf. The answer keeps the emulator's hypervisor bit and its VMware leaf so the two engines agree; dropping them is a change to the fork first. `rdrand`, which leaf 1 advertises, is decoded and interpreted -- the host's `crypto.getRandomValues`, CF set, a memory operand #UD -- where it had stopped a program under cork; `popf` lets a program flip EFLAGS' ID and AC bits, since a program finds CPUID by flipping ID -- one that could not saw no CPUID, and Doom 3 took its generic x87 SIMD over SSE, while `popfw` writes the low sixteen bits alone and leaves AC and ID as they were, which both tiers had cleared), `rdtsc` (the host's counter through the `rdtsc` import: the emulator's own `read_tsc` under hybrid; under cork nanoseconds of the guest's clock -- the one QueryPerformanceCounter and GetTickCount read, which the kernel hands the cpu layer (`useGuestClock`) -- going on at the page's rate inside a slice by at most a credit (16 ms) and never backward, so a program calibrating the counter against QueryPerformanceCounter measures the 1 GHz CPUID states whatever the host did meanwhile, where the page's own clock ran on through every stall the guest's is not credited for), `xlat`, `addsubps`/`addsubpd` -- are lowered in the emitter and modelled in the interpreter, as `int n`/`int3`/`into`, `bound`, `hlt`, `ud2` and the string forms are. A store translated code makes into a page the emulator's own compiler compiled is
 seen too: the store checks the emulator's byte-per-page "has code" table beside the
 translator's own flags (`layout.codePages`, the fork's `bottlify_page_has_code_ptr`) and
 leaves `stale` with the address and width, and the runtime dirties the emulator's cache for
@@ -421,7 +440,11 @@ code with a `stale` exit right after the instruction, so the runtime can drop wh
 translated there -- a store into the code's own bytes, that is: beside the flag the table
 keeps, per page, the first and last 32-byte granule holding translated code, and a store
 into the page's data next to its code (a small image keeps both in one page, and a loop
-storing into its own page went volatile after eight such stores) is no store into code.
+storing into its own page went volatile after eight such stores) is no store into code. A
+store is tested at its first byte, its last and one byte in every granule between, since a state
+save spans several (`fnsave`'s 108 bytes over code that lay in neither end's granule went
+unnoticed), and the emulator's "has code" table above is read for the store's last page as well as
+its first.
 The common case is one test per access: the flags of the access's page and of the next one,
 read as one halfword (the last byte of an access lies in one of the two), against
 inaccessible -- and, for an access that is only written (`mov` to memory, a push, `stos`, an SSE
@@ -519,7 +542,14 @@ of those pages (inaccessible, and code for the destination), then one `memory.co
 pointers, the count and the budget moved by the whole run. DF set, an element across a page,
 a flagged page, and a copy whose destination lies just ahead of its source (which the
 processor fills with the source's first elements, where a memmove does not) take the
-per-element path. `rep movsd` 5.2 -> 0.7 ns an element, `rep stosd` 2.9 -> 0.6.
+per-element path. `rep movsd` 5.2 -> 0.7 ns an element, `rep stosd` 2.9 -> 0.6. Each
+iteration of a `rep` counts against the slice's budget, and a `rep cmps` or `rep scas` tests its
+stop condition before the budget: a slice that runs out on the iteration that stops it leaves the
+instruction done, where it had left on it and the instruction run again scanned on past the match
+(a `repne scasb` strlen of "abc" answered 9). The source of `lods`, `movs` and `cmps` takes an
+`fs:` override as any memory operand does, the thread block's base added to esi, where translated
+code had read linear esi; the destination is es:[edi] whatever the prefix, and a `rep movs` with an
+`fs:` source takes the per-element path.
 
 The null page is *not* marked, because the emulator lets a program read
 address 0 today and the two engines must agree; marking it, and projecting the memory

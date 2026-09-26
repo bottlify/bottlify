@@ -538,6 +538,8 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
         syncIn(){
             x87In = false;
             xmmIn = false;
+            // Translated code may have written the registers since.
+            state.x87Exact = 0;
             // The record a region left is folded into the word the steps use.
             state.eflags = eflagsOf(view, layout);
         },
@@ -582,6 +584,8 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
         hit: false,
     };
     state.memory = memoryApi;
+    state.x87Exact = 0;
+    state.x87Shadow = new BigInt64Array(8);
     state.halted = false;
     state.retired = 0;
     state.trapped = [];

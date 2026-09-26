@@ -24,7 +24,7 @@
 
 import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
 import { CPUID_LEAVES } from '../cpuid.js';
-import { EMPTY, ValType } from '../wasm/encoder.js';
+import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { Exit, Local } from './region.js';
 import { checkAccess, emitStaleExit, noteStore, stackAccess } from './memory.js';
@@ -185,14 +185,11 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         case 'xlat':
         {
-            // AL = [EBX + AL], BX + AL with the address-size prefix, through
-            // DS unless an fs: override says otherwise.
+            // AL = [EBX + AL], through DS unless an fs: override says
+            // otherwise (the address-size form is refused above, as every
+            // 16-bit memory form is).
             b.localGet(Local.reg + 3);
             b.localGet(Local.reg).i32const(0xff).op(I32.and).op(I32.add);
-            if (instruction.operands[0].addressSize === 16)
-            {
-                b.i32const(0xffff).op(I32.and);
-            }
             if (instruction.operands[0].segment === 4)
             {
                 b.i32const(0).load('i32', { offset: e.layout.fsBase }).op(I32.add);
@@ -251,6 +248,9 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'mov':
             if (dst.kind === 'seg')
             {
+                // Flat segments: a load of a segment register changes no base
+                // this engine keeps (fs's is the thread block's, set by the
+                // host), and the selector reads back as the constant below.
                 return true;
             }
             if (src.kind === 'seg')
@@ -416,18 +416,28 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'pop':
             if (dst.kind === 'seg')
             {
+                // As `mov` to a segment register: the value goes nowhere.
                 b.localGet(Local.reg + 4).i32const(size).op(I32.add).localSet(Local.reg + 4);
                 return true;
             }
             // The value is read before the increment, and the write comes
             // after it: `pop esp` then holds the value, `pop [esp+x]`
-            // addresses with the incremented esp.
+            // addresses with the incremented esp -- folded into the
+            // displacement, so the destination is checked before esp moves
+            // and a fault on it leaves the pop undone.
             stackAccess(e, dst.size);
             b.localGet(Local.addr)
                 .load(dst.size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase })
                 .localSet(Local.t1);
+            if (dst.kind === 'mem')
+            {
+                prepare(e, dst.base === 4 ? { ...dst, disp: ((dst.disp ?? 0) + dst.size) | 0 }
+                    : dst, { store: true });
+                writeOp(e, dst, ()=>b.localGet(Local.t1));
+                b.localGet(Local.reg + 4).i32const(dst.size).op(I32.add).localSet(Local.reg + 4);
+                return true;
+            }
             b.localGet(Local.reg + 4).i32const(dst.size).op(I32.add).localSet(Local.reg + 4);
-            prepare(e, dst);
             writeOp(e, dst, ()=>b.localGet(Local.t1));
             return true;
         case 'pushad':
@@ -472,8 +482,10 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         case 'popf':
         {
-            // As the model's: AC and ID too, which the CPUID probe flips.
-            const writable = 0xcd5 | DF | 1 << 11 | 1 << 18 | 1 << 21;
+            // As the model's: AC and ID too, which the CPUID probe flips; the
+            // word form writes the low sixteen bits alone.
+            const writable = (0xcd5 | DF | 1 << 11 | 1 << 18 | 1 << 21)
+                & (size === 2 ? 0xffff : -1);
             e.materialise();
             stackAccess(e, size);
             b.localGet(Local.addr)
@@ -878,6 +890,8 @@ export function emitAddress(e, operand, withSegment){
     {
         b.i32const(0xffff).op(I32.and);
     }
+    // Only fs has a base, the thread block's; gs adds none, as in the
+    // interpreter: nothing here gives it one.
     if (withSegment && operand.segment === 4)
     {
         b.i32const(0).load('i32', { offset: e.layout.fsBase }).op(I32.add);
@@ -2067,6 +2081,8 @@ function bulkString(e, instruction){
             .localGet(Local.t1).op(0xfc, [0x0b, 0x00]); // memory.fill
         b.else();
         b.localGet(edi).localSet(Local.addr);
+        // The run's end, in the page-flags local: no access is checked
+        // until the loop is done, and the next check sets it afresh.
         b.localGet(edi).localGet(Local.t1).op(I32.add).localSet(Local.pflags);
         e.openLoop('words');
         b.localGet(Local.addr).localGet(Local.reg);
@@ -2100,11 +2116,11 @@ function bulkString(e, instruction){
 function stringInstruction(e, instruction){
     const { b } = e;
     const { op, size, prefixes } = instruction;
-    if (prefixes.address)
-    {
-        return false;
-    }
     const repeat = prefixes.rep || prefixes.repne;
+    // The source, [esi], takes a segment override; the destination, es:[edi],
+    // does not. Of the segments only fs has a base.
+    const fsSource = instruction.operands.some(operand=>operand.kind === 'mem'
+        && operand.base === 6 && operand.segment === 4);
     // The step: -size when DF is set, +size otherwise, in t2 (select takes
     // its two values first and the condition last).
     b.i32const(-size).i32const(size);
@@ -2118,17 +2134,20 @@ function stringInstruction(e, instruction){
     const compare = op === 'cmps' || op === 'scas';
     if (repeat)
     {
-        // Each iteration is counted as one instruction, the instruction itself
-        // as none: the budget is looked at every iteration, and a slice that
-        // runs out in the middle leaves with EIP on the instruction, whose
-        // remaining count is what ecx, esi and edi then hold.
+        // Each iteration is counted as one instruction, and the instruction
+        // itself once more when it completes: N + 1 for N iterations, where a
+        // slice that stops it has charged the iterations it ran alone (and the
+        // interpreter counts a whole rep as one). The budget is looked at every
+        // iteration, and a slice that runs out in the middle leaves with EIP on
+        // the instruction, whose remaining count is what ecx, esi and edi then
+        // hold.
         e.blockRetired--;
         e.open('done', EMPTY);
         e.openLoop('again');
         b.localGet(ecx).op(I32.eqz);
         b.brIf(e.depthOf('done'));
         if ((op === 'movs' || op === 'stos') && e.context.undo === undefined
-            && e.layout.codePages < 0)
+            && e.layout.codePages < 0 && !fsSource)
         {
             bulkString(e, instruction);
         }
@@ -2143,7 +2162,12 @@ function stringInstruction(e, instruction){
     const counted = !repeat;
     /** @param {number} pointer */
     const checkedLoad = pointer=>{
-        b.localGet(pointer).localSet(Local.addr);
+        b.localGet(pointer);
+        if (pointer === esi && fsSource)
+        {
+            b.i32const(0).load('i32', { offset: e.layout.fsBase }).op(I32.add);
+        }
+        b.localSet(Local.addr);
         checkAccess(e, size, { counted });
         b.localGet(Local.addr).load(loadKind(size), { offset: e.layout.ramBase });
     };
@@ -2209,13 +2233,11 @@ function stringInstruction(e, instruction){
         b.localGet(ecx).i32const(1).op(I32.sub).localSet(ecx);
         b.localGet(Local.retired).i32const(1).op(I32.add).localSet(Local.retired);
         b.localGet(Local.budget).i32const(1).op(I32.sub).localSet(Local.budget);
-        b.localGet(Local.budget).i32const(0).op(I32.leS);
-        e.openGuard('spent', EMPTY);
-        e.exitAt(instruction.eip, Exit.BUDGET);
-        e.close();
         if (compare)
         {
-            // rep: stop when not equal; repne: stop when equal.
+            // rep: stop when not equal; repne: stop when equal. Before the
+            // budget: an iteration that met its stop has ended the
+            // instruction, and a slice leaving on it would resume the scan.
             b.localGet(Local.res).op(I32.eqz);
             if (prefixes.rep)
             {
@@ -2223,6 +2245,10 @@ function stringInstruction(e, instruction){
             }
             b.brIf(e.depthOf('done'));
         }
+        b.localGet(Local.budget).i32const(0).op(I32.leS);
+        e.openGuard('spent', EMPTY);
+        e.exitAt(instruction.eip, Exit.BUDGET);
+        e.close();
         b.br(e.depthOf('again'));
         e.close();
         e.close();
@@ -2231,8 +2257,6 @@ function stringInstruction(e, instruction){
     }
     return true;
 }
-
-export { AF, PF, SF, ValType };
 
 /**
  * A switch's jump (`SwitchTable`, the target already in `eip`): the index picks

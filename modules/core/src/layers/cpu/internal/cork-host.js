@@ -48,7 +48,13 @@ const TSC_DRIFT_MS = 16;
 const DEFAULT_CONTROL_WORD = 0x037f;
 /** The default MXCSR: every SIMD exception masked. */
 const DEFAULT_MXCSR = 0x1f80;
-/** eflags after boot: bit 1 is reserved and always set. */
+/**
+ * eflags after boot: bit 1 is reserved and always set. IF stays clear although
+ * a Windows thread reads it set from pushfd: the boot ROM clears it so that no
+ * device interrupt ever reaches the emulator's guest (threads are switched on
+ * retired instructions, not a timer), and the two engines must show a guest the
+ * same flags.
+ */
 const DEFAULT_EFLAGS = 0x2;
 /** The flat 32-bit code selector the segments are implicit at. */
 const FLAT_CS = 0x08;

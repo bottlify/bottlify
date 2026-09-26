@@ -466,6 +466,34 @@ function le(value){
     return [value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255];
 }
 
+test('a pop into memory whose destination faults leaves esp as it was', ()=>{
+    // pop dword [0x5000], and pop dword [esp+0xffc], whose address takes esp
+    // as the pop leaves it, into an inaccessible page: the fault is before the
+    // instruction, with the stack as it was.
+    /** @type {[number[], number][]} */
+    const pops = [
+        [[0x8f, 0x05, 0x00, 0x50, 0, 0], 0x8000],
+        [[0x8f, 0x84, 0x24, 0xfc, 0x0f, 0, 0], 0x4000],
+    ];
+    for (const [bytes, esp] of pops)
+    {
+        const r = both([...bytes, 0xf4], { regs: { esp }, memory: [[esp, [1, 2, 3, 4]]],
+            mark: [[0x5000, 0x1000, PageFlag.INACCESSIBLE]] });
+        assert.equal(r.exit.kind, Exit.FAULT);
+        assert.equal(r.exit.eip, CODE, 'at the pop');
+        assert.equal(r.machine.reg('esp'), esp, 'esp as before the pop');
+        agree(r);
+    }
+    // Where the page is there, pop dword [esp+4] stores at the moved esp + 4.
+    const r = both([0x8f, 0x44, 0x24, 0x04, 0xf4], { regs: { esp: 0x8000 },
+        memory: [[0x8000, [1, 2, 3, 4]]] });
+    assert.equal(r.exit.kind, Exit.HALT);
+    assert.equal(r.machine.reg('esp'), 0x8004);
+    assert.equal(r.state.reg[4], 0x8004);
+    assert.equal(r.machine.readU32(0x8008), 0x04030201);
+    sameBytes(r, 0x8008, 4);
+});
+
 test('an MMX instruction whose memory operand faults leaves its register as before', ()=>{
     const program = [
         0x0f, 0x6f, 0x05, 0x00, 0x20, 0, 0, // movq mm0, [0x2000]

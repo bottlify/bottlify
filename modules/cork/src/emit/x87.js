@@ -35,14 +35,14 @@
  * arithmetic would differ the difference is the `x87.precision` class the
  * plan names and counts (the emulator computes in f64 as well). The control
  * word is honoured at run time: its rounding control rounds the integer
- * stores and `frndint`, and precision control set to single rounds every
- * arithmetic result to a float (extended is treated as double) -- a region
- * compiled for single (`narrow`) or for the others (`wide`) tests the word
- * once a block and rounds, or does not, with no test of its own. Exception
- * masks are not honoured: an exception behaves as masked. The
- * transcendentals go through the host's `Math`, as the emulator's do, so
- * the two agree bit for bit on one engine; the environment forms end a
- * region.
+ * stores and `frndint` -- the arithmetic itself rounds to nearest whatever
+ * it says, as the host's f64 operations do -- and precision control set to
+ * single rounds every arithmetic result to a float (extended is treated as
+ * double); a region compiled for single (`narrow`) or for the others (`wide`)
+ * tests the word once a block and rounds, or does not, with no test of its
+ * own. Exception masks are not honoured: an exception behaves as masked. The
+ * transcendentals go through the host's `Math`, as the emulator's do, so the
+ * two agree bit for bit on one engine; the environment forms end a region.
  *
  * Unless the module is `precise`, the sticky exception flags are not
  * computed -- no IE from an invalid operation, a NaN compared or a signalling
@@ -58,9 +58,10 @@ import { CF, PF, ZF, AF, SF, OF } from '../decode/table.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { I32 } from './flags.js';
 import { Local, Exit, STATE_PARAMS } from './region.js';
-import { prepare, writeReg, readOp } from './integer.js';
+import { prepare, writeReg } from './integer.js';
 import { PRECISION, noteStore } from './memory.js';
 import { inlineReturns } from '../region.js';
+import { exactWrites } from '../ir-x87.js';
 
 /** @typedef {import('./region.js').RegionEmitter} E */
 /** @typedef {import('../decode/decoder.js').Instruction} Instruction */
@@ -116,8 +117,6 @@ const LEFT_OUT = new Set([
     'fxsave', 'fxrstor', 'fbld',
 ]);
 
-/** x87 operations whose only effect on the empty mask is their pushes and pops
- * (the emitter's push and popN), so what a block knows of the mask survives them. */
 /** The forms precision control rounds (`byPrecision`): the arithmetic and the square root. */
 const ROUNDS = new Set([
     'fadd', 'fsub', 'fsubr', 'fmul', 'fdiv', 'fdivr',
@@ -125,6 +124,8 @@ const ROUNDS = new Set([
     'fiadd', 'fisub', 'fisubr', 'fimul', 'fidiv', 'fidivr', 'fsqrt',
 ]);
 
+/** x87 operations whose only effect on the empty mask is their pushes and pops
+ * (the emitter's push and popN), so what a block knows of the mask survives them. */
 const MASK_SAFE = new Set([
     'fld', 'fild', 'fld1', 'fldz', 'fldpi', 'fldl2e', 'fldln2', 'fldlg2', 'fldl2t',
     'fst', 'fstp', 'fist', 'fistp', 'fisttp',
@@ -786,6 +787,14 @@ export function planStack(region, states, cut, speculate){
  * @property {number} guards  stack-fault checks emitted, for the tests
  * @property {number} relaxedReads  status-word reads through which a module that is not
  *     `precise` lets the program see what it does not keep (`readsRelaxed`)
+ * @property {boolean} tracksExact  the region has a quadword `fild` and a quadword `fistp` or
+ *     `fisttp`, and no MMX: the pair copies eight bytes, which a double does not hold
+ * @property {number} exact  the x87 locals, by their index 0-7 (which an exchange moves with
+ *     the value), holding what a quadword `fild` of this block loaded and nothing has written
+ *     since: the integer itself is in the local's `shadow`
+ * @property {number} exactNaN  those of them that may hold the indefinite instead, where the
+ *     push or the copy that made them was not known to find its registers as it needed
+ * @property {number[]} shadow  the i64 local shadowing each x87 local, -1 until one is needed
  */
 
 /**
@@ -850,10 +859,15 @@ export function prepareX87(e, entryTop, checked = false){
             active: false, hasMmx: false, base: 0, form: -1, temp: 0, temp2: 0, temp3: 0,
             states: [], ends: [], cut: new Set(), current: null, controlWritten: false,
             checkedPrecision: -1, known: unknown(), shapes: [], needs: [], stack: NOTHING,
-            guards: 0, relaxedReads: 0,
+            guards: 0, relaxedReads: 0, tracksExact: false, exact: 0, exactNaN: 0, shadow: [],
         };
     }
     const hasMmx = regionHasMmx(region, e.context.leaveOut);
+    /** @param {(instruction: Instruction) => boolean} test */
+    const any = test=>region.blocks.some(block=>block.instructions.some(test));
+    const tracksExact = !hasMmx
+        && any(({ op, operands })=>op === 'fild' && operands[1].size === 8)
+        && any(({ op, operands })=>(op === 'fistp' || op === 'fisttp') && operands[0].size === 8);
     const { states, cut, ends } = trackRegion(region, entryTop);
     const { known: shapes, needs } = hasMmx
         ? { known: region.blocks.map(()=>NOTHING), needs: [] }
@@ -874,6 +888,7 @@ export function prepareX87(e, entryTop, checked = false){
         active: true, hasMmx, base, form, temp: base + 8, temp2: base + 9, temp3: base + 10,
         states, ends, cut, current: null, controlWritten: false, checkedPrecision: -1,
         known: unknown(), shapes, needs, stack: NOTHING, guards: 0, relaxedReads: 0,
+        tracksExact, exact: 0, exactNaN: 0, shadow: new Array(8).fill(-1),
     };
 }
 
@@ -1083,6 +1098,8 @@ export function x87BlockStart(e, index){
     // what is known of the stack words there is the plan's.
     x.known = unknown();
     x.stack = x.shapes[index] ?? NOTHING;
+    x.exact = 0;
+    x.exactNaN = 0;
     if (x.current !== null)
     {
         e.b.i32const(x.current.top).localSet(Local.x87Top);
@@ -1188,6 +1205,8 @@ export function x87Forget(e){
     x87Flush(e, true);
     e.x87.known.block = -1;
     e.x87.stack = NOTHING;
+    e.x87.exact = 0;
+    e.x87.exactNaN = 0;
 }
 
 /**
@@ -1360,7 +1379,6 @@ export function emitX87(e, instruction, flagsLive){
         b.localGet(stLocal).op(I64.reinterpretF64).localSet(e.mmLocal(physical));
         b.localGet(x.form).i32const(~(1 << physical)).op(I32.and).localSet(x.form);
     };
-    /** Marks ST(i) written. @param {number} i */
     /** Marks a physical register dirty, unless the block has already. @param {number} physical */
     const markDirty = physical=>{
         if (safe && (known.dirty & (1 << physical)) !== 0)
@@ -1437,6 +1455,39 @@ export function emitX87(e, instruction, flagsLive){
             setTop(top);
         }
     };
+    /** The index of the local ST(i) is held in. @param {number} i */
+    const localOf = i=>state.slot[(state.top + i) & 7];
+    // The exact quadwords this instruction makes, from a load or a copy.
+    let madeExact = 0;
+    let madeNaN = 0;
+    /** The i64 local beside x87 local k. @param {number} k */
+    const shadowOf = k=>{
+        if (x.shadow[k] < 0)
+        {
+            x.shadow[k] = e.localTypes.length + STATE_PARAMS;
+            e.localTypes.push(ValType.i64);
+        }
+        return x.shadow[k];
+    };
+    /**
+     * Carries an exact quadword from one local to another with its value; after
+     * the guard, whose `clear` says whether the value copied may be the
+     * indefinite instead.
+     *
+     * @param {number} from @param {number} to
+     */
+    const copyExact = (from, to)=>{
+        if ((x.exact & 1 << from) === 0)
+        {
+            return;
+        }
+        b.localGet(x.shadow[from]).localSet(shadowOf(to));
+        madeExact |= 1 << to;
+        if ((x.exactNaN & 1 << from) !== 0 || !clear)
+        {
+            madeNaN |= 1 << to;
+        }
+    };
     const finish = ()=>{
         x.current = next;
         if (!safe)
@@ -1445,6 +1496,14 @@ export function emitX87(e, instruction, flagsLive){
             known.block = -1;
         }
         x.stack = x.hasMmx ? NOTHING : advance(x.stack, use, state);
+        if (x.tracksExact)
+        {
+            const writes = exactWrites(instruction, state.top, state.slot);
+            const kept = writes === null ? 0 : ~writes.written;
+            const popped = writes === null ? 0 : writes.popped;
+            x.exact = ((x.exact & kept) | madeExact) & ~popped;
+            x.exactNaN = ((x.exactNaN & kept) | madeNaN) & x.exact;
+        }
         return true;
     };
     /** Sets the status bits given. @param {number} mask */
@@ -1682,6 +1741,7 @@ export function emitX87(e, instruction, flagsLive){
             {
                 guard();
                 b.localGet(st(/** @type {number} */ (src.reg)));
+                copyExact(localOf(Number(src.reg)), localOf(-1));
             }
             else
             {
@@ -1697,6 +1757,15 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(Local.addr);
             b.load(src.size === 2 ? 'i64_16s' : src.size === 4 ? 'i64_32s' : 'i64',
                 { offset: e.layout.ramBase });
+            if (src.size === 8 && x.tracksExact)
+            {
+                // The quadword beside the double it rounds to, for a quadword
+                // store of it to copy the eight bytes the processor's 64-bit
+                // mantissa keeps.
+                b.localTee(shadowOf(localOf(-1)));
+                madeExact = 1 << localOf(-1);
+                madeNaN = clear ? 0 : madeExact;
+            }
             b.op(F64.convertI64S);
             orIndefinite();
             push();
@@ -1722,6 +1791,7 @@ export function emitX87(e, instruction, flagsLive){
                 dirty(i);
                 // The destination is held from here on, whatever it was.
                 mark((state.top + i) & 7, true);
+                copyExact(localOf(0), localOf(i));
             }
             else
             {
@@ -1737,10 +1807,54 @@ export function emitX87(e, instruction, flagsLive){
             return finish();
         case 'fist': case 'fistp': case 'fisttp':
             guard();
-            b.localGet(st(0));
-            orIndefinite();
-            b.localSet(x.temp2);
-            storeInt(e, dst, x.temp2, op === 'fisttp');
+            if (dst.size === 8 && (x.exact & 1 << localOf(0)) !== 0)
+            {
+                // A quadword `fild` loaded ST0 and nothing has written it: the
+                // quadword itself, which needs no rounding and is in range.
+                // Where ST0 may be the indefinite -- the guard's fault, or one
+                // that came with the value -- that is stored instead, as the
+                // rounding path does.
+                const checkNaN = (x.exactNaN & 1 << localOf(0)) !== 0;
+                const exact = ()=>{
+                    if (!clear)
+                    {
+                        b.localGet(Local.t1).op(I32.eqz);
+                    }
+                    if (checkNaN)
+                    {
+                        b.localGet(st(0)).localGet(st(0)).op(F64.eq);
+                        if (!clear)
+                        {
+                            b.op(I32.and);
+                        }
+                    }
+                };
+                prepare(e, dst);
+                noteStore(e, 8);
+                b.localGet(Local.addr).localGet(x.shadow[localOf(0)]);
+                if (!clear || checkNaN)
+                {
+                    b.i64const(-0x8000000000000000n);
+                    exact();
+                    b.select();
+                }
+                b.store('i64', { offset: e.layout.ramBase });
+                if (!clear || checkNaN)
+                {
+                    exact();
+                    b.op(I32.eqz);
+                    e.openGuard('indefinite', EMPTY);
+                    setStatus(Status.IE);
+                    e.close();
+                }
+            }
+            else
+            {
+                b.localGet(st(0));
+                orIndefinite();
+                b.localSet(x.temp2);
+                storeInt(e, dst, x.temp2, op === 'fisttp');
+            }
             if (op !== 'fist')
             {
                 popN(1);
@@ -1978,14 +2092,15 @@ export function emitX87(e, instruction, flagsLive){
             }
             b.else();
             setStatus(Status.C2);
-            e.close();
-            e.close();
-            // The tracker's state is the one with the push; the no-push path
-            // is left on an exit with C2, which a program does not take.
             if (op === 'fsincos' || op === 'fptan')
             {
-                b.i32const(next.top).localSet(Local.x87Top);
+                // Nothing pushed, where the tracker's state after it has the
+                // push: the region leaves past the instruction with the stack
+                // as it was, and the host enters the next at its top.
+                e.exitAt(instruction.eip + instruction.length, Exit.UNTRANSLATED);
             }
+            e.close();
+            e.close();
             return finish();
         }
         case 'fpatan':
@@ -2050,10 +2165,14 @@ export function emitX87(e, instruction, flagsLive){
         }
         case 'fprem': case 'fprem1':
         {
-            // The partial remainder: ST0 - Q * ST1 with Q the quotient rounded
-            // toward zero (fprem) or to nearest (fprem1); when the quotient
-            // would not fit 64 bits only a partial reduction is done and C2
-            // says so. C0, C3 and C1 carry the quotient's bits 2, 1 and 0.
+            // The partial remainder: ST0 - Q * ST1 with Q the quotient
+            // rounded toward zero (fprem) or to nearest (fprem1), exact, and
+            // C0, C3 and C1 its bits 2, 1 and 0; past an exponent difference of
+            // 63 a partial reduction and C2. The host's (`remainder` in
+            // `ir-x87.js`, the interpreter's too), since its `%` is the exact
+            // IEEE fmod, where a quotient in doubles rounds.
+            const math = e.context.math;
+            const nearest = op === 'fprem1' ? 1 : 0;
             guard();
             b.localGet(st(0)).localSet(x.temp);
             b.localGet(st(1)).localSet(x.temp2);
@@ -2069,31 +2188,11 @@ export function emitX87(e, instruction, flagsLive){
             indefinite();
             b.localSet(st(0));
             b.else();
+            b.localGet(x.temp).localGet(x.temp2).i32const(nearest).call(math.fpremStatus);
             b.localGet(Local.x87Status).i32const(~(Status.C2 | Status.C0 | Status.C3 | Status.C1))
-                .op(I32.and).localSet(Local.x87Status);
-            // The quotient, and whether its magnitude fits.
-            b.localGet(x.temp).localGet(x.temp2).op(F64.div).localSet(x.temp3);
-            b.localGet(x.temp3).op(F64.abs).f64const(2 ** 63).op(F64.lt);
-            e.openIf('fits', EMPTY);
-            b.localGet(x.temp3).op(op === 'fprem' ? F64.trunc : F64.nearest).localSet(x.temp3);
-            b.localGet(x.temp).localGet(x.temp3).localGet(x.temp2).op(F64.mul).op(F64.sub)
+                .op(I32.and).op(I32.or).localSet(Local.x87Status);
+            b.localGet(x.temp).localGet(x.temp2).i32const(nearest).call(math.fprem)
                 .localSet(st(0));
-            // The low three bits of the quotient into C0 (bit 2), C3 (bit 1), C1 (bit 0).
-            b.localGet(x.temp3).op(F64.abs).op(TRUNC_SAT_I64[0], [TRUNC_SAT_I64[1]]).op(I64.wrap)
-                .localSet(Local.t2);
-            b.localGet(Local.t2).i32const(4).op(I32.and).i32const(Status.C0 / 4).op(0x6c);
-            b.localGet(Local.t2).i32const(2).op(I32.and).i32const(Status.C3 / 2).op(0x6c)
-                .op(I32.or);
-            b.localGet(Local.t2).i32const(1).op(I32.and).i32const(Status.C1).op(0x6c).op(I32.or);
-            b.localGet(Local.x87Status).op(I32.or).localSet(Local.x87Status);
-            b.else();
-            // Partial: reduce by the quotient scaled down to fit, C2 set.
-            b.localGet(x.temp3).f64const(2 ** -32).op(F64.mul).op(F64.trunc).f64const(2 ** 32)
-                .op(F64.mul).localSet(x.temp3);
-            b.localGet(x.temp).localGet(x.temp3).localGet(x.temp2).op(F64.mul).op(F64.sub)
-                .localSet(st(0));
-            setStatus(Status.C2);
-            e.close();
             e.close();
             dirty(0);
             return finish();
@@ -2324,6 +2423,9 @@ export function emitX87(e, instruction, flagsLive){
             // which this engine does not keep (zero, as the other executor
             // has them). fnsave follows with the eight registers in stack
             // order as ten-byte values, and leaves the unit as fninit does.
+            // After fnstenv the processor masks every exception; the control
+            // word stays as it was here, since an exception behaves as masked
+            // whatever the masks say (see the head of the file).
             const save = op === 'fnsave';
             if (!precise)
             {
@@ -3125,5 +3227,3 @@ export function addBcdHelper(m){
         [ValType.i64, ValType.i32, ValType.f64, ValType.i64, ValType.i64, ValType.i32,
             ValType.i64, ValType.i64], b.toBytes());
 }
-
-export { Exit, readOp };

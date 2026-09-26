@@ -40,7 +40,7 @@
  * for an instruction whose flags nothing reads before the next writer.
  */
 
-import { CF, DF, OF, ARITH_FLAGS } from '../decode/table.js';
+import { CF, DF, ARITH_FLAGS } from '../decode/table.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import {
     ARITH, CARRY_IN_WORD, I32, Kind, eagerFlagsOf, emitCondition, emitFlag, kindOf, widthCode,
@@ -54,6 +54,7 @@ import { importHelpers } from './helpers.js';
 import { Tables, blockSlot } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
 import { inlineReturns } from '../region.js';
+import { fpremStatus, fpremValue } from '../ir-x87.js';
 import {
     floatCondition, isX87, prepareX87, regionHasMmx, sameState, x87BlockEnd, x87BlockStart,
     x87Edge, x87EntryCheck, x87Epilogue, x87LoadRegisters, x87Normalise,
@@ -61,11 +62,12 @@ import {
 } from './x87.js';
 
 /**
- * The host functions a module imports for the transcendentals, by name; an
- * instantiation supplies each from `Math` (`mathImports()`).
+ * The host functions a module imports for the transcendentals and the partial
+ * remainder, by name; an instantiation supplies each (`mathImports()`), the
+ * transcendentals from `Math`.
  */
 export const MATH_IMPORTS = Object.freeze([
-    'sin', 'cos', 'tan', 'atan2', 'exp2m1', 'log2', 'log1p',
+    'sin', 'cos', 'tan', 'atan2', 'exp2m1', 'log2', 'log1p', 'fprem', 'fpremStatus',
 ]);
 
 /**
@@ -81,9 +83,9 @@ export const MATH_IMPORTS = Object.freeze([
  * @returns {number} the exit code
  */
 export function enterRegion(fn, label, budget, view, layout){
-    // The reads are written out rather than put in helpers: the closures a
-    // helper takes were most of the garbage a call into a page left to the
-    // interpreter made, entered again once per call.
+    // The reads are written out rather than put in helpers: a helper's
+    // closures would be most of the garbage a call into a page left to the
+    // interpreter makes, entered again once per call.
     const { regs } = layout;
     const record = layout.flagRecord ?? -1;
     return fn(label, budget,
@@ -106,6 +108,7 @@ export function mathImports(){
         /** @param {number} x */
         exp2m1: x=>Math.expm1(x * Math.LN2),
         log2: Math.log2, log1p: Math.log1p,
+        fprem: fpremValue, fpremStatus,
     };
 }
 
@@ -262,21 +265,31 @@ export function prepareModule(m, layout, features, memory = {},
     // cork's clock under cork -- so `rdtsc` needs no crossing and the two agree.
     const rdtsc = m.importFunction('env', 'rdtsc',
         m.type({ params: [], results: [ValType.i64] }));
-    // The transcendentals wasm has no operation for, as the host's Math.
+    // The transcendentals wasm has no operation for, as the host's Math, and
+    // the partial remainder, whose exact fmod is the host's `%`.
     const unary = m.type({ params: [ValType.f64], results: [ValType.f64] });
-    const binary = m.type({ params: [ValType.f64, ValType.f64], results: [ValType.f64] });
+    /** @type {Record<string, number>} the others' types, by name */
+    const types = {
+        atan2: m.type({ params: [ValType.f64, ValType.f64], results: [ValType.f64] }),
+        fprem: m.type({
+            params: [ValType.f64, ValType.f64, ValType.i32], results: [ValType.f64],
+        }),
+        fpremStatus: m.type({
+            params: [ValType.f64, ValType.f64, ValType.i32], results: [ValType.i32],
+        }),
+    };
     /** @type {Record<string, number>} */
     const math = {};
     for (const name of MATH_IMPORTS)
     {
-        math[name] = m.importFunction('env', name, name === 'atan2' ? binary : unary);
+        math[name] = m.importFunction('env', name, types[name] ?? unary);
     }
     const regionType = m.type({
         params: new Array(STATE_PARAMS).fill(ValType.i32), results: [ValType.i32],
     });
-    // The helpers are one shared module every region imports, rather
-    // than a copy in each; the host instantiates it once with the same
-    // memory (they are defined in `./helpers.js`).
+    // The helpers are one shared module every region imports, rather than a
+    // copy in each; the host instantiates it once with the same memory (they
+    // are defined in `./helpers.js`).
     const { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid } =
         importHelpers(m);
     /** @type {ModuleContext} */
@@ -991,9 +1004,9 @@ export class RegionEmitter {
         const { b, layout } = this;
         if (this.flagRecord >= 0)
         {
-            // The record goes as it is: the helper at every exit was a fifth of
-            // a call-heavy loop, and the next region mostly writes the flags
-            // before it reads them. Whoever reads the word folds it.
+            // The record goes as it is: the helper at every exit would be a
+            // fifth of a call-heavy loop, and the next region mostly writes the
+            // flags before it reads them. Whoever reads the word folds it.
             for (const [i, local] of RECORD_LOCALS.entries())
             {
                 b.i32const(0).localGet(local).store('i32', { offset: this.flagRecord + i * 4 });
@@ -2264,9 +2277,12 @@ export class RegionEmitter {
         {
             // The block's first instruction is the other executor's: the
             // block retires nothing, so it must not be an entry (see
-            // `leaving`). Every untranslated exit before an instruction is
-            // unconditional; a fault's is not, and a block that may fault
-            // first still runs when it does not.
+            // `leaving`). So also where the exit is conditional, as an `out`
+            // to a port other than the trap port's is: entered at such an
+            // `out`, the block would leave through the hash for its own
+            // start and tail-call itself forever. A fault's exit is not
+            // counted here: a block that may fault first still runs when it
+            // does not.
             this.leaving.add(this.blockIndex);
         }
         this.blockRetired--;
@@ -2584,5 +2600,3 @@ function shiftCount(instruction){
     const count = instruction.operands[instruction.operands.length - 1];
     return count.kind === 'imm' ? (/** @type {number} */ (count.value) & 31) : -1;
 }
-
-export { CF, OF, ARITH, EMPTY };

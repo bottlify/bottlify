@@ -28,10 +28,12 @@ import { CACHE_VERSION } from './cache.js';
 /** The digest of the emitted set, by the cache version that emitted it. */
 const EMITTED = {
     40: 'e17f16d74ecb4c98',
+    41: 'c5230bdf119b527f',
     44: '554b022d79a6d89f',
     45: '6484cc2a873ec56d',
     46: 'ab4be65a98ba9a5d',
     47: 'cafc8d6a7e3bb1dd',
+    48: 'be8866386ec313a4',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */

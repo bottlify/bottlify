@@ -73,3 +73,19 @@ test('code marked on a page keeps a range of granules; data beside it is outside
     assert.deepEqual(pages.codeRange(1), [0, 0]);
     assert.deepEqual(pages.codeRange(2), [0, 1], 'the other page keeps its range');
 });
+
+test('the table reads and writes the same bytes after the memory grows', ()=>{
+    const { layout, memory, pages } = machine();
+    pages.markCode(0x41000, 16);
+    const before = memory.buffer;
+    memory.grow(1);
+    assert.equal(before.byteLength, 0, 'growing detached the buffer the views were over');
+    assert.equal(pages.get(0x41), PageFlag.HAS_CODE);
+    assert.deepEqual(pages.codeRange(0x41), [0, 1]);
+    pages.set(0x42, PageFlag.VOLATILE);
+    const raw = new Uint8Array(memory.buffer, layout.tables + Tables.PAGE_FLAGS,
+        Tables.PAGE_FLAGS_SIZE);
+    assert.equal(raw[0x42], PageFlag.VOLATILE, 'the write reached the grown memory');
+    new DataView(memory.buffer).setUint32(layout.tables + Tables.STALE_ADDRESS, 0x41008, true);
+    assert.equal(pages.staleAddress(), 0x41008);
+});
