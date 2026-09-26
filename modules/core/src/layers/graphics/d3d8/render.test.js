@@ -836,6 +836,41 @@ test('recorded: a DISCARD lock renames, and the earlier draw reads the old gener
     out.buffer.release();
 });
 
+test('recorded: NOOVERWRITE with DISCARD is NOOVERWRITE, and the buffer is not renamed', async()=>{
+    // Wine's d3d8 and d3d9 test_map_synchronisation have
+    // D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD lock unsynchronised, as
+    // NOOVERWRITE alone does: the program promises not to touch what a draw
+    // reads, and the contents outside the locked range are kept. Taken as a
+    // DISCARD the buffer was renamed and everything outside the range lost.
+    const h = harness();
+    const { device, gpu } = h;
+    /** @type {{ buffer?: any }} */
+    const out = {};
+    assert.equal(device.CreateVertexBuffer(1024, 0, FVF_QUAD, D3DPOOL.DEFAULT, out), D3D_OK);
+    /** @param {number} at @param {number} value @param {number} flags */
+    const fill = (at, value, flags)=>{
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(out.buffer.Lock(at, 60, locked, flags), D3D_OK);
+        h.write(/** @type {number} */ (locked.pBits), new Uint8Array(60).fill(value));
+        assert.equal(out.buffer.Unlock(), D3D_OK);
+    };
+
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.SetStreamSource(0, out.buffer, 20), D3D_OK);
+    fill(0, 1, D3DLOCK.DISCARD);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    fill(60, 2, D3DLOCK.DISCARD | D3DLOCK.NOOVERWRITE);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 3, 1), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const bound = gpu.of('setVertexBuffer').map((/** @type {any} */ call)=>call.buffer);
+    assert.equal(bound[0], bound[1], 'one generation serves both draws');
+    out.buffer.release();
+});
+
 test('recorded: a lock with neither flag sends only the locked range when no draw has read it',
     async()=>{
         // A program that fills a range and then draws from it is the ordinary

@@ -1523,18 +1523,21 @@ export const HARDWARE_SAMPLER = Object.freeze({
 });
 
 /**
+ * NOOVERWRITE wins when both are given: the lock is unsynchronised, and what
+ * lies outside the locked range is kept rather than discarded.
+ *
  * @param {number} flags D3DLOCK
  * @param {any} LockFlags the backend's
  * @returns {number}
  */
 const lockFlagsOf = (flags, LockFlags)=>{
-    if ((flags & D3DLOCK.DISCARD) !== 0)
-    {
-        return LockFlags.DISCARD;
-    }
     if ((flags & D3DLOCK.NOOVERWRITE) !== 0)
     {
         return LockFlags.NOOVERWRITE;
+    }
+    if ((flags & D3DLOCK.DISCARD) !== 0)
+    {
+        return LockFlags.DISCARD;
     }
     return LockFlags.NONE;
 };
