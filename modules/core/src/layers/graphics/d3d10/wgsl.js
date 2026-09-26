@@ -34,6 +34,7 @@
  * reports, which is the most expensive kind of wrong there is.
  */
 
+import { DXGI_FORMAT } from './constants.js';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 import {
     CUSTOMDATA, MODIFIER, OPCODE, OPERAND, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE,
@@ -45,6 +46,10 @@ export const BINDING = Object.freeze({
     CONSTANT_BUFFER: 0,
     TEXTURE: 16,
     SAMPLER: 144,
+    // A buffer bound as a shader resource is storage at its texture binding,
+    // and the view over it -- format, first element, element count, element
+    // size -- a uniform here.
+    BUFFER_VIEW: 160,
 });
 
 /** WebGPU's `GPUShaderStage` bits, spelled out so nothing here reads a global. */
@@ -54,6 +59,98 @@ export const STAGE = Object.freeze({ VERTEX: 1, FRAGMENT: 2 });
 const REG = 'vec4<u32>';
 
 const COMPONENT = ['x', 'y', 'z', 'w'];
+
+/**
+ * How a buffer view's element of each format becomes register bits, given
+ * the four dwords from the one it starts in (`w`) and, for an element
+ * narrower than a dword, the bit it starts at (`s`). A float format answers
+ * float bits and an integer one integers; components the format lacks read
+ * as zero, and its alpha as one.
+ */
+function bufferElement(){
+    const F = DXGI_FORMAT;
+    const ONE = '0x3f800000u';
+    /** @param {string} value a vec4<f32> */
+    const floats = value=>`bitcast<${REG}>(${value})`;
+    /** @param {string} value an i32 */
+    const bits = value=>`bitcast<u32>(${value})`;
+    /** @param {string} value a u32 holding a 16-bit integer */
+    const signed16 = value=>bits(`bitcast<i32>(${value} << 16u) >> 16u`);
+    /** @param {string} value a u32 holding an 8-bit integer */
+    const signed8 = value=>bits(`bitcast<i32>(${value} << 24u) >> 24u`);
+    const half = '((w.x >> s) & 0xffffu)';
+    const pair = half;
+    const byte = '((w.x >> s) & 0xffu)';
+    /** @type {[number[], string][]} */
+    const cases = [
+        [[F.R32G32B32A32_FLOAT, F.R32G32B32A32_UINT, F.R32G32B32A32_SINT], 'w'],
+        [[F.R32G32B32_FLOAT], `${REG}(w.xyz, ${ONE})`],
+        [[F.R32G32B32_UINT, F.R32G32B32_SINT], `${REG}(w.xyz, 1u)`],
+        [[F.R32G32_FLOAT], `${REG}(w.xy, 0u, ${ONE})`],
+        [[F.R32G32_UINT, F.R32G32_SINT], `${REG}(w.xy, 0u, 1u)`],
+        [[F.R32_FLOAT], `${REG}(w.x, 0u, 0u, ${ONE})`],
+        [[F.R32_UINT, F.R32_SINT], `${REG}(w.x, 0u, 0u, 1u)`],
+        [[F.R16G16B16A16_FLOAT],
+            floats('vec4<f32>(unpack2x16float(w.x), unpack2x16float(w.y))')],
+        [[F.R16G16B16A16_UNORM], floats('vec4<f32>(unpack2x16unorm(w.x), unpack2x16unorm(w.y))')],
+        [[F.R16G16B16A16_SNORM], floats('vec4<f32>(unpack2x16snorm(w.x), unpack2x16snorm(w.y))')],
+        [[F.R16G16B16A16_UINT], `${REG}(w.x & 0xffffu, w.x >> 16u, w.y & 0xffffu, w.y >> 16u)`],
+        [[F.R16G16B16A16_SINT], `${REG}(${signed16('w.x')}, ${bits('bitcast<i32>(w.x) >> 16u')},`
+            + ` ${signed16('w.y')}, ${bits('bitcast<i32>(w.y) >> 16u')})`],
+        [[F.R16G16_FLOAT], floats('vec4<f32>(unpack2x16float(w.x), 0.0, 1.0)')],
+        [[F.R16G16_UNORM], floats('vec4<f32>(unpack2x16unorm(w.x), 0.0, 1.0)')],
+        [[F.R16G16_SNORM], floats('vec4<f32>(unpack2x16snorm(w.x), 0.0, 1.0)')],
+        [[F.R16G16_UINT], `${REG}(w.x & 0xffffu, w.x >> 16u, 0u, 1u)`],
+        [[F.R16G16_SINT],
+            `${REG}(${signed16('w.x')}, ${bits('bitcast<i32>(w.x) >> 16u')}, 0u, 1u)`],
+        [[F.R16_FLOAT], floats(`vec4<f32>(unpack2x16float(${half}).x, 0.0, 0.0, 1.0)`)],
+        [[F.R16_UNORM], floats(`vec4<f32>(unpack2x16unorm(${half}).x, 0.0, 0.0, 1.0)`)],
+        [[F.R16_SNORM], floats(`vec4<f32>(unpack2x16snorm(${half}).x, 0.0, 0.0, 1.0)`)],
+        [[F.R16_UINT], `${REG}(${half}, 0u, 0u, 1u)`],
+        [[F.R16_SINT], `${REG}(${signed16(half)}, 0u, 0u, 1u)`],
+        [[F.R8G8B8A8_UNORM], floats('unpack4x8unorm(w.x)')],
+        [[F.B8G8R8A8_UNORM], floats('unpack4x8unorm(w.x).zyxw')],
+        [[F.R8G8B8A8_SNORM], floats('unpack4x8snorm(w.x)')],
+        [[F.R8G8B8A8_UINT],
+            `(${REG}(w.x) >> ${REG}(0u, 8u, 16u, 24u)) & ${REG}(0xffu)`],
+        [[F.R8G8B8A8_SINT], `bitcast<${REG}>(bitcast<vec4<i32>>(${REG}(w.x)`
+            + ` << ${REG}(24u, 16u, 8u, 0u)) >> ${REG}(24u))`],
+        [[F.R8G8_UNORM], floats(`vec4<f32>(unpack4x8unorm(${pair}).xy, 0.0, 1.0)`)],
+        [[F.R8G8_SNORM], floats(`vec4<f32>(unpack4x8snorm(${pair}).xy, 0.0, 1.0)`)],
+        [[F.R8G8_UINT], `${REG}(${pair} & 0xffu, ${pair} >> 8u, 0u, 1u)`],
+        [[F.R8G8_SINT], `${REG}(${signed8(`(${pair} & 0xffu)`)}, ${signed8(`(${pair} >> 8u)`)},`
+            + ' 0u, 1u)'],
+        [[F.R8_UNORM], floats(`vec4<f32>(unpack4x8unorm(${byte}).x, 0.0, 0.0, 1.0)`)],
+        [[F.R8_SNORM], floats(`vec4<f32>(unpack4x8snorm(${byte}).x, 0.0, 0.0, 1.0)`)],
+        [[F.R8_UINT], `${REG}(${byte}, 0u, 0u, 1u)`],
+        [[F.R8_SINT], `${REG}(${signed8(byte)}, 0u, 0u, 1u)`],
+        [[F.R10G10B10A2_UNORM], floats(`vec4<f32>((${REG}(w.x) >> ${REG}(0u, 10u, 20u, 30u))`
+            + ` & ${REG}(0x3ffu, 0x3ffu, 0x3ffu, 3u)) / vec4<f32>(1023.0, 1023.0, 1023.0, 3.0)`)],
+        [[F.R10G10B10A2_UINT], `(${REG}(w.x) >> ${REG}(0u, 10u, 20u, 30u))`
+            + ` & ${REG}(0x3ffu, 0x3ffu, 0x3ffu, 3u)`],
+    ];
+    return {
+        formats: new Set(cases.flatMap(([formats])=>formats)),
+        text: [
+            `fn bufferElement(format: u32, w: ${REG}, s: u32) -> ${REG} {`,
+            '    switch (format) {',
+            ...cases.map(([formats, value])=>`        case ${
+                formats.map(format=>`${format}u`).join(', ')}: { return ${value}; }`),
+            `        default: { return ${REG}(0u); }`,
+            '    }',
+            '}',
+        ],
+    };
+}
+
+const BUFFER_ELEMENT = bufferElement();
+
+/**
+ * The formats a buffer view can be read in.
+ *
+ * @type {ReadonlySet<number>}
+ */
+export const BUFFER_VIEW_FORMATS = BUFFER_ELEMENT.formats;
 
 /**
  * Functions a translation may call, written into the module of a stage that
@@ -81,6 +178,7 @@ export const HELPERS = Object.freeze({
             '}',
         ],
     },
+    bufferElement: { needs: [], text: BUFFER_ELEMENT.text },
     imulhi: {
         needs: ['umulhi'],
         text: [
@@ -673,6 +771,10 @@ export function translateShader(container){
                     returnType: (instruction.extra[0] ?? 0) & 0xf,
                     comparison: false,
                 });
+                if ((instruction.control & 0x1f) === RESOURCE_DIMENSION.BUFFER)
+                {
+                    need('bufferElement');
+                }
                 break;
             case OPCODE.DCL_INPUT:
             case OPCODE.DCL_INPUT_SIV:
@@ -1074,6 +1176,13 @@ export function translateShader(container){
             case OPCODE.LD_MS: {
                 const [target, address, resource, sampleIndex] = instruction.operands;
                 const texture = textureOf(resource.indices[0].value);
+                if (texture?.dimension === RESOURCE_DIMENSION.BUFFER
+                    && instruction.opcode === OPCODE.LD)
+                {
+                    store(target, `(loadt${texture.slot}(${u(address)}.x))`
+                        + `.${swizzleText(resource.swizzle)}`);
+                    break;
+                }
                 const shaped = texture ? coordinateFor(texture, i(address), true) : null;
                 if (!texture || !shaped
                     || texture.dimension === RESOURCE_DIMENSION.TEXTURECUBE
@@ -1253,6 +1362,30 @@ function declarations(shader, group, visibility){
     }
     for (const texture of shader.textures)
     {
+        if (texture.dimension === RESOURCE_DIMENSION.BUFFER)
+        {
+            // The element is found and bounds-checked here, where the
+            // binding's name is known, and decoded by the shared helper. An
+            // index past the view reads zero, as Direct3D defines it.
+            const binding = BINDING.TEXTURE + texture.slot;
+            const view = BINDING.BUFFER_VIEW + texture.slot;
+            const name = `t${texture.slot}`;
+            text.push(
+                `@group(${group}) @binding(${binding}) var<storage, read> ${name}: array<u32>;`,
+                `@group(${group}) @binding(${view}) var<uniform> ${name}view: ${REG};`,
+                `fn load${name}(index: u32) -> ${REG} {`,
+                `    if (index >= ${name}view.z) { return ${REG}(0u); }`,
+                `    let byte = (${name}view.y + index) * ${name}view.w;`,
+                '    let at = byte / 4u;',
+                `    let last = arrayLength(&${name}) - 1u;`,
+                `    let words = ${REG}(${name}[min(at, last)], ${name}[min(at + 1u, last)],`
+                    + ` ${name}[min(at + 2u, last)], ${name}[min(at + 3u, last)]);`,
+                `    return bufferElement(${name}view.x, words, (byte % 4u) * 8u);`,
+                '}');
+            entries.push({ binding, visibility, buffer: { type: 'read-only-storage' } });
+            entries.push({ binding: view, visibility, buffer: { type: 'uniform' } });
+            continue;
+        }
         const type = textureType(texture);
         if (!type)
         {

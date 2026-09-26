@@ -42,7 +42,9 @@ import {
     isDepthFormat, textureStorage, viewFormatOf,
 } from './gpuformats.js';
 import { levelExtent } from './validity.js';
-import { BINDING, STAGE, linkProgram, translateShader } from './wgsl.js';
+import {
+    BINDING, BUFFER_VIEW_FORMATS, STAGE, linkProgram, translateShader,
+} from './wgsl.js';
 import { LockFlags } from '../webgpu/internal/buffers.js';
 
 /**
@@ -318,6 +320,8 @@ export function createRenderer(services){
     const backings = new WeakMap();
     /** @type {WeakMap<object, any>} view -> GPU texture view */
     const views = new WeakMap();
+    /** @type {WeakMap<object, any>} buffer view -> the uniform describing it */
+    const bufferViews = new WeakMap();
     /** @type {WeakMap<object, any>} sampler state -> GPU sampler */
     const samplers = new WeakMap();
     /** @type {WeakMap<object, any>} shader -> translation */
@@ -480,7 +484,10 @@ export function createRenderer(services){
                     label: `d3d10:buffer#${desc.ByteWidth}`,
                     size: desc.ByteWidth,
                     usage: BufferUsage.VERTEX | BufferUsage.INDEX | BufferUsage.UNIFORM
-                        | BufferUsage.COPY_DST | BufferUsage.COPY_SRC,
+                        | BufferUsage.COPY_DST | BufferUsage.COPY_SRC
+                        | ((desc.BindFlags & D3D10_BIND.SHADER_RESOURCE) !== 0
+                            ? BufferUsage.STORAGE
+                            : 0),
                 });
             }
         }
@@ -858,6 +865,12 @@ export function createRenderer(services){
             size: 16,
             usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST,
         });
+        // An unbound buffer view: its zeroed uniform above says no elements.
+        const storage = backend.createDynamicBuffer({
+            label: 'd3d10:unbound-buffer-view',
+            size: 16,
+            usage: BufferUsage.STORAGE | BufferUsage.COPY_DST,
+        });
         /** @type {Map<string, any>} */
         const textures = new Map();
         /** @type {Record<string, string>} */
@@ -867,6 +880,7 @@ export function createRenderer(services){
         };
         placeholders = {
             buffer,
+            storage,
             /** @param {{ sampleType: string, viewDimension: string }} kind */
             view(kind){
                 const key = `${kind.sampleType}:${kind.viewDimension}`;
@@ -894,6 +908,75 @@ export function createRenderer(services){
             comparison: createSampler({ label: 'd3d10:unbound-comparison', compare: 'never' }),
         };
         return placeholders;
+    };
+
+    /**
+     * A buffer bound through a shader resource view: its bytes as storage at
+     * the view's texture binding, and at its view binding a uniform of the
+     * view's format, first element, element count and element size, which the
+     * shader decodes the element with.
+     *
+     * @param {any} stage
+     * @param {import('./wgsl.js').BindGroupLayoutEntry} entry
+     * @param {any} fallback
+     */
+    const bufferViewBinding = (stage, entry, fallback)=>{
+        const isView = entry.binding >= BINDING.BUFFER_VIEW;
+        const slot = entry.binding - (isView ? BINDING.BUFFER_VIEW : BINDING.TEXTURE);
+        const view = stage.shaderResources[slot] ?? null;
+        /** @type {{ resource?: any }} */
+        const held = {};
+        view?.GetResource(held);
+        held.resource?.release();
+        const backing = view?.dimensionName === 'BUFFER' && held.resource
+            ? backingOf(held.resource)
+            : null;
+        /** @type {{ desc?: any }} */
+        const described = {};
+        view?.GetDesc(described);
+        const format = described.desc?.Format ?? 0;
+        const decodable = backing?.gpu && BUFFER_VIEW_FORMATS.has(format);
+        if (!isView && view && !decodable)
+        {
+            diverge(backing?.gpu
+                ? `a buffer view of format ${format} is read as zeros: no decoding is kept for it`
+                : 'a texture view bound where the shader reads a buffer is read as zeros');
+        }
+        if (!decodable)
+        {
+            return {
+                binding: entry.binding,
+                resource: { buffer: (isView ? fallback.buffer : fallback.storage).gpu,
+                    offset: 0, size: 16 },
+            };
+        }
+        if (!isView)
+        {
+            backing.gpu.markRead();
+            return {
+                binding: entry.binding,
+                resource: { buffer: backing.gpu.gpu, offset: 0,
+                    size: Math.ceil(held.resource.desc.ByteWidth / 4) * 4 },
+            };
+        }
+        let uniform = bufferViews.get(view);
+        if (!uniform)
+        {
+            uniform = backend.createDynamicBuffer({
+                label: 'd3d10:buffer-view',
+                size: 16,
+                usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST,
+            });
+            const lock = uniform.lock(0, 16, LockFlags.NONE);
+            const words = new DataView(lock.data.buffer, lock.data.byteOffset, 16);
+            words.setUint32(0, format, true);
+            words.setUint32(4, described.desc.ElementOffset ?? 0, true);
+            words.setUint32(8, described.desc.ElementWidth ?? 0, true);
+            words.setUint32(12, FORMAT_INFO[format].bytesPerPixel, true);
+            uniform.unlock(lock);
+            bufferViews.set(view, uniform);
+        }
+        return { binding: entry.binding, resource: { buffer: uniform.gpu, offset: 0, size: 16 } };
     };
 
     /**
@@ -1298,6 +1381,10 @@ export function createRenderer(services){
     const bindingsFor = (stage, entries)=>{
         const fallback = placeholdersOf();
         return entries.map(entry=>{
+            if (entry.buffer && entry.binding >= BINDING.TEXTURE)
+            {
+                return bufferViewBinding(stage, entry, fallback);
+            }
             if (entry.buffer)
             {
                 const buffer = stage.constantBuffers[entry.binding] ?? null;

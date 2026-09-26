@@ -19,7 +19,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, parseDxbc } from './dxbc.js';
 import { MODIFIER, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE } from './sm4.js';
-import { BINDING, HELPERS, STAGE, linkProgram, translateShader } from './wgsl.js';
+import {
+    BINDING, BUFFER_VIEW_FORMATS, HELPERS, STAGE, linkProgram, translateShader,
+} from './wgsl.js';
+import { DXGI_FORMAT } from './constants.js';
 import {
     add, addSat, and, assemble, breakOut, breakcNz, call, callcNz, caseOf, cb,
     colouredPixelShader, colouredVertexShader, defaultCase, endswitch, label, switchOn,
@@ -575,6 +578,52 @@ test('ld_ms reads the one sample every texture here has, and zero for any other'
     });
     assert.equal(bodyOf(plain), `r0 = ${U}((textureLoad(t0, ${I}(r1.xyzw).xy, `
         + `${I}(r1.xyzw).z, 0)).xyzw);`);
+});
+
+test('ld from a buffer view reads storage, checked against the view and decoded by it', ()=>{
+    const translated = translate([ld(r(0), r(1, 'x'), t(2, 'zyxw'))], {
+        declarations: [dclResource(2, RESOURCE_DIMENSION.BUFFER, RETURN_TYPE.FLOAT)],
+    });
+    assert.equal(bodyOf(translated), 'r0 = (loadt2(r1.xxxx.x)).zyxw;');
+    assert.deepEqual(translated.unsupported, []);
+    assert.deepEqual(translated.helpers, ['bufferElement']);
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const linked = linkProgram(vs, translated);
+    assert.match(linked.fragment, /@binding\(18\) var<storage, read> t2: array<u32>;/);
+    assert.match(linked.fragment, /@binding\(162\) var<uniform> t2view: vec4<u32>;/);
+    assert.match(linked.fragment, /if \(index >= t2view\.z\) \{ return vec4<u32>\(0u\); \}/,
+        'an element past the view reads zero');
+    assert.match(linked.fragment, /return bufferElement\(t2view\.x, words, \(byte % 4u\) \* 8u\);/);
+    assert.deepEqual(linked.groups[1], [
+        { binding: BINDING.TEXTURE + 2, visibility: STAGE.FRAGMENT,
+            buffer: { type: 'read-only-storage' } },
+        { binding: BINDING.BUFFER_VIEW + 2, visibility: STAGE.FRAGMENT,
+            buffer: { type: 'uniform' } },
+    ]);
+});
+
+test('a buffer element is decoded by the view\'s format', ()=>{
+    const text = HELPERS.bufferElement.text.join('\n');
+    const FORMAT = DXGI_FORMAT;
+    /** @param {number} format */
+    const clauseOf = format=>text.split('\n').find(line=>line.includes(` ${format}u:`)
+        || line.includes(` ${format}u,`)) ?? '';
+    assert.match(clauseOf(FORMAT.R32G32B32A32_FLOAT), /return w;/, 'four dwords as they are');
+    assert.match(clauseOf(FORMAT.R32_FLOAT), /vec4<u32>\(w\.x, 0u, 0u, 0x3f800000u\)/,
+        'a missing component is zero and a missing alpha one');
+    assert.match(clauseOf(FORMAT.R32_UINT), /vec4<u32>\(w\.x, 0u, 0u, 1u\)/);
+    assert.match(clauseOf(FORMAT.R8G8B8A8_UNORM), /unpack4x8unorm\(w\.x\)/);
+    assert.match(clauseOf(FORMAT.B8G8R8A8_UNORM), /unpack4x8unorm\(w\.x\)\.zyxw/);
+    assert.match(clauseOf(FORMAT.R16_UINT), /\(\(w\.x >> s\) & 0xffffu\)/,
+        'a narrow element from the bit it starts at');
+    for (const format of [FORMAT.R32G32B32A32_FLOAT, FORMAT.R32G32B32_UINT,
+        FORMAT.R16G16B16A16_FLOAT, FORMAT.R16G16_SNORM, FORMAT.R16_FLOAT, FORMAT.R8G8B8A8_SINT,
+        FORMAT.R8G8_UINT, FORMAT.R8_UNORM, FORMAT.R10G10B10A2_UNORM])
+    {
+        assert.ok(BUFFER_VIEW_FORMATS.has(format), `format ${format}`);
+    }
+    assert.ok(!BUFFER_VIEW_FORMATS.has(FORMAT.R11G11B10_FLOAT), 'one it does not decode');
+    assert.match(text, /default: \{ return vec4<u32>\(0u\); \}/);
 });
 
 test('gather4 gathers the first component of four texels', ()=>{

@@ -36,8 +36,8 @@ import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
 import { SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 import {
     assemble, cb, colouredPixelShader, colouredVertexShader, dclConstantBuffer, dclInputPs,
-    dclOutput, dclResource, dclSampler, ld, mov, o, passThroughVertexShader, r, ret, s, sample,
-    solidPixelShader, t, v,
+    dclOutput, dclResource, dclSampler, ld, lu, mov, o, passThroughVertexShader, r, ret, s,
+    sample, solidPixelShader, t, v,
 } from './shader-fixtures.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
@@ -983,6 +983,94 @@ test('a GPU with BC sampling keeps the blocks, sent through a staging buffer', a
     assert.equal(h.device.CreateShaderResourceView(texture.resource,
         { Format: DXGI_FORMAT.BC1_UNORM_SRGB, ViewDimension: 4, MostDetailedMip: 0,
             MipLevels: 1 }, view), S_OK);
+});
+
+test('a buffer bound as a shader resource is storage, read through a uniform of its view',
+    async()=>{
+        const h = harness();
+        const { device } = h;
+        bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+        /** @type {{ resource?: any }} */
+        const data = {};
+        assert.equal(device.CreateBuffer({
+            ByteWidth: 48, Usage: D3D10_USAGE.DEFAULT, BindFlags: D3D10_BIND.SHADER_RESOURCE,
+            CPUAccessFlags: 0, MiscFlags: 0,
+        }, { pSysMem: floatBytes([0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1]) }, data), S_OK);
+        const made = h.gpu.of('createBuffer').at(-1);
+        assert.ok((made.descriptor.usage & 0x80) !== 0, 'STORAGE');
+        /** @type {{ view?: any }} */
+        const view = {};
+        assert.equal(device.CreateShaderResourceView(data.resource, {
+            Format: DXGI_FORMAT.R32G32B32A32_FLOAT, ViewDimension: 1, ElementOffset: 1,
+            ElementWidth: 2,
+        }, view), S_OK);
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(device.CreatePixelShader(assemble({
+            kind: SHADER_KIND.PIXEL,
+            outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+            instructions: [
+                dclResource(0, RESOURCE_DIMENSION.BUFFER, RETURN_TYPE.FLOAT),
+                dclOutput(o(0)),
+                ld(o(0), lu(0), t(0)),
+                ret(),
+            ],
+        }), ps), S_OK);
+        device.PSSetShader(ps.shader);
+        device.PSSetShaderResources(0, [view.view]);
+        device.Draw(3, 0);
+        await h.present();
+        assert.deepEqual(h.divergences, []);
+        assert.equal(h.gpu.count('draw'), 1);
+        const layout = h.gpu.of('createBindGroupLayout').find((/** @type {any} */ call)=>
+            call.descriptor.label === 'd3d10:ps');
+        assert.deepEqual(layout.descriptor.entries, [
+            { binding: 16, visibility: 2, buffer: { type: 'read-only-storage' } },
+            { binding: 160, visibility: 2, buffer: { type: 'uniform' } },
+        ]);
+        const group = h.gpu.of('createBindGroup').find((/** @type {any} */ call)=>
+            call.descriptor.layout === layout.createBindGroupLayout);
+        const [storage, uniform] = group.descriptor.entries;
+        assert.equal(storage.resource.buffer, made.createBuffer, 'the buffer itself');
+        assert.equal(storage.resource.size, 48);
+        assert.deepEqual([...new Uint32Array(queuedBytes(h, uniform.resource.buffer).slice()
+            .buffer)], [DXGI_FORMAT.R32G32B32A32_FLOAT, 1, 2, 16],
+        'format, first element, element count, element size');
+    });
+
+test('a buffer view in a format with no decoding reads zeros and says so', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ resource?: any }} */
+    const data = {};
+    assert.equal(device.CreateBuffer({
+        ByteWidth: 16, Usage: D3D10_USAGE.DEFAULT, BindFlags: D3D10_BIND.SHADER_RESOURCE,
+        CPUAccessFlags: 0, MiscFlags: 0,
+    }, { pSysMem: new Uint8Array(16) }, data), S_OK);
+    /** @type {{ view?: any }} */
+    const view = {};
+    assert.equal(device.CreateShaderResourceView(data.resource, {
+        Format: DXGI_FORMAT.R11G11B10_FLOAT, ViewDimension: 1, ElementOffset: 0, ElementWidth: 4,
+    }, view), S_OK);
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [
+            dclResource(0, RESOURCE_DIMENSION.BUFFER, RETURN_TYPE.FLOAT),
+            dclOutput(o(0)),
+            ld(o(0), lu(0), t(0)),
+            ret(),
+        ],
+    }), ps), S_OK);
+    device.PSSetShader(ps.shader);
+    device.PSSetShaderResources(0, [view.view]);
+    device.Draw(3, 0);
+    await h.present();
+    assert.ok(diverged(h, 'no decoding is kept'), h.divergences.join('\n'));
+    assert.equal(h.gpu.count('draw'), 1, 'the draw still happens');
 });
 
 test('a one-dimensional texture is kept as one row of a two-dimensional one', ()=>{
