@@ -62,6 +62,7 @@ import { createCommonDialogFunctions } from './comdlg32/functions.js';
 import { createImmFunctions } from './imm32/functions.js';
 import { createShlwapiFunctions } from './shlwapi/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
+import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
 import { createNetworkFunctions } from './mpr/functions.js';
@@ -1293,6 +1294,8 @@ export const win32Module = {
                 isAdministrator: ()=>isTokenMember(ADMINISTRATORS_SID),
             }),
 
+            'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
+
             // The maths half of the Direct3D helper: pure vector and matrix
             // functions, here for their stack width as much as their answers,
             // since d3dx9 exports them undecorated though they are stdcall.
@@ -1674,6 +1677,7 @@ export const win32Module = {
                 // number: a framework's start-up calls it and nothing else.
                 'COMCTL32.dll': COMCTL32_ORDINALS,
                 'WINMM.dll': WINMM_ORDINALS,
+                'SFC.dll': SFC_ORDINALS,
             }),
 
             /**
