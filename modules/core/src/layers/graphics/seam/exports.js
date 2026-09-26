@@ -180,6 +180,10 @@ export function createGraphicsLibraries(
     {
         for (const name of names)
         {
+            // Resolved at the first call, not looked up by name on every one:
+            // the runtime's table is fixed once it is built.
+            /** @type {((args: number[]) => number) | null} */
+            let resolved = null;
             openglTable[name] = {
                 argBytes: Number(words) * 4,
                 // GL reports through glGetError and touches nothing of
@@ -187,7 +191,7 @@ export function createGraphicsLibraries(
                 // API and may set the thread's last error.
                 ...(name.startsWith('gl') ? { lastError: false } : {}),
                 /** @param {number[]} args */
-                handler: args=>openglRuntime().table[name].handler(args),
+                handler: args=>(resolved ??= openglRuntime().table[name].handler)(args),
             };
         }
     }
