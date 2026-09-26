@@ -7,6 +7,7 @@
 import { createDirectInput, GUID_SysKeyboard, GUID_SysMouse } from './dinput/seam.js';
 import { createInputRouter } from './router.js';
 import { createDomInput } from './dom.js';
+import { createXInput } from './xinput.js';
 
 /**
  * input -- the devices a program reads, and the one way events get in.
@@ -16,7 +17,8 @@ import { createDomInput } from './dom.js';
  * lives in `win32` because that is where `GetMessage` is, and DirectInput,
  * which a program polls or drains rather than waiting for. This layer owns the
  * second and posts into the first, so that one event reaches a program both
- * ways and the two readings cannot disagree.
+ * ways and the two readings cannot disagree. XInput is answered here too, for
+ * the two system libraries no program brings (`xinput.js`).
  *
  * `send` is the whole input side of this module. What it takes is a normalised
  * event -- a physical key, a pointer motion, a button, a focus change -- and
@@ -65,6 +67,8 @@ export const inputModule = {
                     /** @type {any} */ thread)=>bridge.callGuest({ entry, args, thread })),
             callerThread: config?.callerThread ?? (()=>bridge.callerThread()),
         });
+
+        const xinput = createXInput();
 
         // The queue is win32's, and this is the seam it exists for: a keystroke
         // is not a window operation, so it arrives from outside and is posted
@@ -125,7 +129,7 @@ export const inputModule = {
              * assembling caller merges these with win32's and hands the lot to
              * the loader.
              */
-            libraries: ()=>dinput.libraries,
+            libraries: ()=>({ ...dinput.libraries, ...xinput.libraries }),
 
             /**
              * Feeds one host event in: it becomes a window message and a change
@@ -237,6 +241,7 @@ export const inputModule = {
             device: guid=>dinput.device(guid),
 
             dinput: ()=>dinput,
+            xinput: ()=>xinput,
             router: ()=>router,
         };
         return current;
@@ -252,6 +257,9 @@ export const inputModule = {
                 libraries: current ? Object.keys(current.libraries()) : [],
                 ...(current ? current.dinput().diagnostics() : {}),
                 ...(current ? current.router().diagnostics() : {}),
+                // How often a program asked XInput about a pad, every answer
+                // being that there is none.
+                ...(current ? { xinput: current.xinput().diagnostics() } : {}),
             },
         };
     },
