@@ -231,6 +231,49 @@ export function fakeVolume(files, { late = false, directories = [], modified = 0
 }
 
 /**
+ * kernel32's handle table as far as files go: what CreateFile files there,
+ * and a CloseHandle that gives the file's node back to the volume.
+ *
+ * @param {ReturnType<typeof fakeVolume>} files
+ */
+export function fakeHandles(files){
+    /** @type {Map<number, any>} */
+    const table = new Map();
+    let next = 0x100;
+    /** @param {any} file */
+    const open = file=>{
+        const handle = next;
+        next += 4;
+        table.set(handle, file);
+        return handle;
+    };
+    return {
+        table,
+        open,
+        /** @param {number} handle */
+        file: handle=>table.get(handle >>> 0) ?? null,
+        /** @param {number} handle */
+        close: handle=>{
+            const file = table.get(handle >>> 0);
+            if (!file)
+            {
+                return false;
+            }
+            table.delete(handle >>> 0);
+            files.close(file.node);
+            return true;
+        },
+        /**
+         * CreateFile's answer for a path already on the volume.
+         *
+         * @param {string} path @param {boolean} [read] @param {boolean} [write]
+         */
+        create: (path, read = true, write = true)=>
+            open({ path, node: files.open(path, {}), read, write, position: 0 }),
+    };
+}
+
+/**
  * The double a cdecl caller pushed, as the two slots a handler receives.
  *
  * @param {number} value

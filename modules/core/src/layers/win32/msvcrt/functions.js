@@ -89,6 +89,10 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  * @property {() => number} [systemTimeMs]  Guest wall clock, milliseconds.
  * @property {() => number} [now]           Guest running time, milliseconds.
  * @property {any} [files]                  The volume, for the path functions.
+ * @property {import('./io.js').FileHandles} [handles]
+ *           kernel32's handle table, as far as files go: what `_get_osfhandle`
+ *           hands out and `_open_osfhandle` takes. Absent, the two stay
+ *           unexported.
  * @property {() => string[]} [drives]      Letters the filesystem has mounted.
  * @property {() => number} [iob]           Where the runtime's `_iob` was placed, once it has been.
  * @property {import('./float.js').FloatHost} [fpu]
@@ -836,6 +840,7 @@ export function createMsvcrtFunctions(host){
     const descriptors = host.files
         ? createDescriptors({
             files: host.files, write: host.write, errno, fmode: ()=>globals.get('fmode'),
+            handles: host.handles,
         })
         : null;
 

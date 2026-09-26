@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStdioFunctions } from './stdio.js';
 import { createDescriptors, createIoFunctions } from './io.js';
-import { fakeMemory, fakeVolume } from './harness.test.js';
+import { fakeHandles, fakeMemory, fakeVolume } from './harness.test.js';
 
 // The volume fake lives with the rest of the harness; other layers' tests
 // import it from here.
@@ -720,6 +720,39 @@ test('_flushall forgets what ungetc gave back and counts the streams open', ()=>
     assert.equal(fns._flushall.handler([]), 4);
     fns.fputs.handler([memory.put('still open'), IOB + 32]);
     assert.equal(fns._flushall.handler([]), 4);
+});
+
+test('a stream on a descriptor on a handle: fclose closes all three', ()=>{
+    // The way a program puts stdio over a file it opened with CreateFile, or
+    // over the console handle AllocConsole gave it.
+    const memory = fakeMemory();
+    const files = fakeVolume({ 'C:\\save.dat': new Uint8Array(0) });
+    const handles = fakeHandles(files);
+    /** @type {[number, string][]} */
+    const console = [];
+    const descriptors = createDescriptors({
+        files, handles, write: (handle, text)=>console.push([handle, text]),
+    });
+    const host = { ...memory, free: ()=>true, files, iob: ()=>IOB };
+    const fns = /** @type {Record<string, any>} */ ({
+        ...createIoFunctions(host, descriptors),
+        ...createStdioFunctions({ ...host, descriptors }),
+    });
+
+    const handle = handles.create('C:\\save.dat');
+    const stream = fns._fdopen.handler([fns._open_osfhandle.handler([handle, 0]), memory.put('w')]);
+    assert.equal(fns.fputs.handler([memory.put('level 3\n'), stream]), 0);
+    assert.equal(handles.file(handle).position, 8, 'the handle is where the stream is');
+    assert.equal(fns.fclose.handler([stream]), 0);
+    assert.equal(handles.file(handle), null);
+    assert.equal(String.fromCharCode(...files.files['C:\\save.dat']), 'level 3\n');
+
+    const STD_OUTPUT = 2;
+    const O_TEXT = 0x4000;
+    const out = fns._fdopen.handler([fns._open_osfhandle.handler([STD_OUTPUT, O_TEXT]),
+        memory.put('w')]);
+    fns.fprintf.handler([out, memory.put('%d'), 42]);
+    assert.deepEqual(console, [[2, '42']]);
 });
 
 test('the stream calls are cdecl with the argument count each reads', ()=>{

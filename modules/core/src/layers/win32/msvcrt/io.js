@@ -13,6 +13,11 @@
  * `_fstat` accept, and the position is one position whichever of the two
  * moves it. 0, 1 and 2 are the console, open from the start and never closed.
  *
+ * A descriptor's open file is the same record a kernel32 file handle holds,
+ * which is how `_get_osfhandle` hands one out as the other and
+ * `_open_osfhandle` takes a handle in: the two share one position, and the
+ * descriptor, which owns the handle, closes it.
+ *
  * Text mode belongs to the descriptor: a read folds CR LF into LF and stops at
  * a ^Z, a write puts CR before every LF. Which mode a file opens in is the
  * caller's `_O_TEXT` or `_O_BINARY`, and when it names neither, the runtime's
@@ -39,6 +44,12 @@ const O_UNICODE = [0x10000, 0x20000, 0x40000];
 
 /** msvcrt's own ceiling on open descriptors. */
 const MAX_DESCRIPTORS = 2048;
+
+/** 0, 1 and 2: stdin, stdout and stderr. */
+const STANDARD_DESCRIPTORS = 3;
+
+/** What `_get_osfhandle` answers for a number not open. */
+const INVALID_HANDLE_VALUE = -1;
 
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
@@ -113,21 +124,98 @@ export function latin1(bytes){
 }
 
 /**
- * @typedef {Object} Descriptor
+ * An open file as a kernel32 file handle holds it, and as a descriptor reads
+ * and writes through it: a handle and a descriptor on one file share this,
+ * and so share its position.
+ *
+ * @typedef {Object} OpenFile
  * @property {any} node          The volume's open file; null for the console.
  * @property {string} path
  * @property {number} position   The file offset the next read or write starts at.
  * @property {boolean} read
  * @property {boolean} write
+ */
+
+/**
+ * @typedef {Object} Descriptor
+ * @property {OpenFile} file
+ * @property {any} node          The file's, as are the four below: see `over`.
+ * @property {string} path
+ * @property {number} position
+ * @property {boolean} read
+ * @property {boolean} write
+ * @property {number} handle     The kernel32 handle that stands for the file,
+ *           once one has been asked for or the descriptor was made from one;
+ *           0 before. Closing the descriptor closes it.
  * @property {boolean} append    Every write goes to the end of the file first.
  * @property {boolean} text
  * @property {boolean} ended     A ^Z was read: reads answer nothing until a seek.
- * @property {boolean} [temporary]  The file is removed when the descriptor closes.
+ * @property {boolean} temporary The file is removed when the descriptor closes.
  * @property {number} [console]  The standard handle a console descriptor stands for.
  * @property {{ offset: number, bytes: Uint8Array, whole: boolean } | null} ahead
  *           What a stream read last took from the volume; `whole` when that
  *           read reached the end of the file.
  */
+
+/**
+ * kernel32's handle table, as far as files go.
+ *
+ * @typedef {Object} FileHandles
+ * @property {(file: OpenFile) => number} open  Files an open file under a new handle.
+ * @property {(handle: number) => OpenFile | null} file
+ *           The open file a handle names; null for one that names none.
+ * @property {(handle: number) => boolean} close  CloseHandle, the file's node with it.
+ */
+
+/**
+ * A descriptor over an open file. The node, the access and the position are
+ * the file's, read through rather than copied: a kernel32 handle on the same
+ * file moves the one position both of them stand at.
+ *
+ * @param {OpenFile} file
+ * @param {{ text: boolean, append?: boolean, temporary?: boolean, handle?: number,
+ *           console?: number }} settings
+ * @returns {Descriptor}
+ */
+const over = (file, settings)=>({
+    file,
+    get node(){
+        return file.node;
+    },
+    get path(){
+        return file.path;
+    },
+    get read(){
+        return file.read;
+    },
+    get write(){
+        return file.write;
+    },
+    get position(){
+        return file.position;
+    },
+    set position(value){
+        file.position = value;
+    },
+    handle: settings.handle ?? 0,
+    append: Boolean(settings.append),
+    text: settings.text,
+    ended: false,
+    temporary: Boolean(settings.temporary),
+    console: settings.console,
+    ahead: null,
+});
+
+/**
+ * A descriptor on the console, for the standard handle it stands for.
+ *
+ * @param {number} handle @param {{ text: boolean, append?: boolean }} settings
+ */
+const onConsole = (handle, settings)=>{
+    const read = handle === HANDLE_STDIN;
+    return over({ node: null, path: '', position: 0, read, write: !read },
+        { ...settings, handle, console: handle });
+};
 
 /**
  * @typedef {Object} OpenRequest
@@ -143,10 +231,13 @@ export function latin1(bytes){
 
 /**
  * @typedef {Object} DescriptorHost
- * @property {any} files  The volume: open, read, write, close, stat.
+ * @property {any} files  The volume: open, read, write, close, stat, remove.
  * @property {(handle: number, text: string) => void} [write]  The console.
  * @property {(code: number) => void} [errno]
  * @property {() => number} [fmode]  The runtime's `_fmode`.
+ * @property {FileHandles} [handles]
+ *           Where a descriptor's file becomes a handle and a handle a
+ *           descriptor. Absent, neither is asked for.
  */
 
 /**
@@ -162,19 +253,40 @@ export function createDescriptors(host){
     /** @type {Map<number, Descriptor>} */
     const table = new Map();
 
-    /** @param {number} handle @param {boolean} read */
-    const console = (handle, read)=>({
-        node: null, path: '', position: 0, read, write: !read, append: false, text: true,
-        ended: false, console: handle, ahead: null,
-    });
-    table.set(0, console(HANDLE_STDIN, true));
-    table.set(1, console(HANDLE_STDOUT, false));
-    table.set(2, console(HANDLE_STDERR, false));
+    table.set(0, onConsole(HANDLE_STDIN, { text: true }));
+    table.set(1, onConsole(HANDLE_STDOUT, { text: true }));
+    table.set(2, onConsole(HANDLE_STDERR, { text: true }));
 
     /** @param {number} code */
     const fail = code=>{
         host.errno?.(code);
     };
+
+    /** The lowest number free, or -1 with EMFILE past the runtime's ceiling. */
+    const lowestFree = ()=>{
+        let fd = 0;
+        while (table.has(fd))
+        {
+            fd++;
+        }
+        if (fd >= MAX_DESCRIPTORS)
+        {
+            fail(EMFILE);
+            return -1;
+        }
+        return fd;
+    };
+
+    /**
+     * Whether a descriptor's file is still open. The handle is the file's
+     * for a descriptor that has one, and a program that closed the handle
+     * itself -- which the documentation tells it not to -- has closed the
+     * file under the descriptor, as it would on Windows.
+     *
+     * @param {Descriptor} descriptor
+     */
+    const alive = descriptor=>descriptor.handle === 0 || descriptor.console !== undefined
+        || host.handles?.file(descriptor.handle) === descriptor.file;
 
     /** @param {Descriptor} descriptor */
     const sizeOf = descriptor=>host.files.stat(descriptor.path)?.size ?? 0;
@@ -204,8 +316,19 @@ export function createDescriptors(host){
     };
 
     return {
-        /** @param {number} fd @returns {Descriptor | null} */
-        get: fd=>table.get(fd | 0) ?? null,
+        /**
+         * The descriptor a number is, or null for one not open -- or whose
+         * file closed under it.
+         *
+         * @param {number} fd @returns {Descriptor | null}
+         */
+        get: fd=>{
+            const descriptor = table.get(fd | 0) ?? null;
+            return descriptor && alive(descriptor) ? descriptor : null;
+        },
+
+        /** Whether descriptors and kernel32 handles can be made of each other. */
+        handles: host.handles !== undefined,
 
         /**
          * Opens a file and answers with the lowest number free, or -1 with
@@ -215,14 +338,9 @@ export function createDescriptors(host){
          * @param {string} path @param {OpenRequest} request
          */
         open(path, request){
-            let fd = 0;
-            while (table.has(fd))
+            const fd = lowestFree();
+            if (fd < 0)
             {
-                fd++;
-            }
-            if (fd >= MAX_DESCRIPTORS)
-            {
-                fail(EMFILE);
                 return -1;
             }
             const node = path === '' ? null : host.files.open(path, {
@@ -235,21 +353,65 @@ export function createDescriptors(host){
                 fail(!there ? ENOENT : (request.exclusive ? EEXIST : EACCES));
                 return -1;
             }
-            table.set(fd, {
-                node, path, position: 0, read: request.read, write: request.write,
-                append: Boolean(request.append),
+            const file = { node, path, position: 0, read: request.read, write: request.write };
+            table.set(fd, over(file, {
+                append: request.append,
                 text: request.text ?? ((host.fmode?.() ?? 0) & O_BINARY) === 0,
-                ended: false, temporary: Boolean(request.temporary), ahead: null,
-            });
+                temporary: request.temporary,
+            }));
             return fd;
         },
 
         /**
-         * Gives a descriptor back. The console's three stay: they are the
-         * runtime's, and a program that closes one to silence it still has
-         * its standard streams. A temporary file is removed once its node is
-         * let go -- when the descriptor that asked for that closes, which
-         * with one descriptor on the file, the usual case, is the last.
+         * The kernel32 handle a descriptor's file is: the standard handle for
+         * the console, and for a file the one it was made from or first
+         * asked for, filed then. From then on the handle is what holds the
+         * file open, so the descriptor closes through it.
+         *
+         * @param {Descriptor} descriptor
+         */
+        handleOf(descriptor){
+            if (descriptor.handle === 0 && host.handles)
+            {
+                descriptor.handle = host.handles.open(descriptor.file);
+            }
+            return descriptor.handle;
+        },
+
+        /**
+         * A descriptor on a kernel32 handle, which the descriptor owns from
+         * then on: the lowest number free, or -1 with EBADF for a handle
+         * that is not an open file. A standard handle is the console.
+         *
+         * @param {number} handle @param {{ text: boolean, append: boolean }} settings
+         */
+        adopt(handle, settings){
+            const standard = handle === HANDLE_STDIN || handle === HANDLE_STDOUT
+                || handle === HANDLE_STDERR;
+            const file = standard ? null : host.handles?.file(handle) ?? null;
+            if (!standard && !file)
+            {
+                fail(EBADF);
+                return -1;
+            }
+            const fd = lowestFree();
+            if (fd >= 0)
+            {
+                table.set(fd, file
+                    ? over(file, { ...settings, handle })
+                    : onConsole(handle, settings));
+            }
+            return fd;
+        },
+
+        /**
+         * Gives a descriptor back, closing its file: through its handle when
+         * it has one, which answers false when the program closed that handle
+         * itself. The console's three stay: they are the runtime's, and a
+         * program that closes one to silence it still has its standard
+         * streams. A temporary file is removed when the descriptor that asked
+         * for that closes, which with one descriptor on the file, the usual
+         * case, is the last.
          *
          * @param {number} fd @returns {boolean} false for a number not open
          */
@@ -259,16 +421,29 @@ export function createDescriptors(host){
             {
                 return false;
             }
-            if (descriptor.node !== null)
+            if ((fd | 0) < STANDARD_DESCRIPTORS)
             {
-                table.delete(fd | 0);
-                host.files.close(descriptor.node);
-                if (descriptor.temporary)
-                {
-                    host.files.remove(descriptor.path);
-                }
+                return true;
             }
-            return true;
+            table.delete(fd | 0);
+            if (descriptor.console !== undefined)
+            {
+                return true;
+            }
+            const live = alive(descriptor);
+            if (live && descriptor.handle !== 0)
+            {
+                host.handles?.close(descriptor.handle);
+            }
+            else if (live)
+            {
+                host.files.close(descriptor.node);
+            }
+            if (descriptor.temporary)
+            {
+                host.files.remove(descriptor.path);
+            }
+            return live;
         },
 
         size: sizeOf,
@@ -546,7 +721,61 @@ export function createIoFunctions(host, descriptors){
         return { out, filled, ended: false, trailingCr: false };
     };
 
+    /**
+     * The two calls that cross between descriptors and kernel32's handles,
+     * exported only where the handle table is reachable: without it a handle
+     * handed out would be one no kernel32 call knows.
+     */
+    const osHandles = descriptors.handles
+        ? {
+            /**
+             * intptr_t _get_osfhandle(int fd)
+             *
+             * The handle a descriptor's file is -- one ReadFile, SetEndOfFile
+             * or CreateFileMapping take, at the descriptor's own position --
+             * which stays the descriptor's to close. INVALID_HANDLE_VALUE with
+             * EBADF for a number not open (Wine's msvcrt test_get_osfhandle).
+             */
+            _get_osfhandle: cdecl(4, ([fd])=>{
+                const descriptor = descriptors.get(fd | 0);
+                if (!descriptor)
+                {
+                    fail(EBADF);
+                    return INVALID_HANDLE_VALUE;
+                }
+                return descriptors.handleOf(descriptor);
+            }),
+
+            /**
+             * int _open_osfhandle(intptr_t osfhandle, int flags)
+             *
+             * A descriptor on a handle, which it owns from then on: `_close`
+             * closes the handle, and a second descriptor on it finds it closed
+             * (Wine's msvcrt test__open_osfhandle and test_close). Binary
+             * unless `_O_TEXT` is named; the access is the handle's. -1 with
+             * EBADF for a handle that is not an open file. A Unicode
+             * translation is refused as `_setmode` refuses it.
+             */
+            _open_osfhandle: cdecl(8, ([handle, flags])=>{
+                const unicode = O_UNICODE.find(mode=>((flags >>> 0) & mode) !== 0);
+                if (unicode !== undefined)
+                {
+                    host.divergence?.('_open_osfhandle',
+                        `Unicode translation 0x${unicode.toString(16)} is not carried`);
+                    fail(EINVAL);
+                    return -1;
+                }
+                return descriptors.adopt(handle >>> 0, {
+                    text: ((flags >>> 0) & O_TEXT) !== 0,
+                    append: ((flags >>> 0) & O_APPEND) !== 0,
+                });
+            }),
+        }
+        : {};
+
     return {
+        ...osHandles,
+
         /**
          * int _open(const char *filename, int oflag [, int pmode])
          *

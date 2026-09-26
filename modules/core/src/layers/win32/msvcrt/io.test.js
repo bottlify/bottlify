@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDescriptors, createIoFunctions } from './io.js';
-import { fakeMemory, fakeVolume } from './harness.test.js';
+import { fakeHandles, fakeMemory, fakeVolume } from './harness.test.js';
 
 const O_RDONLY = 0x0000;
 const O_WRONLY = 0x0001;
@@ -453,6 +453,146 @@ test('_filelength is the size of the file, and leaves the position where it was'
     assert.equal(tell(fd), 2);
     assert.equal(fns._filelength.handler([77]), -1);
     assert.deepEqual(errno, [EBADF]);
+});
+
+/** @param {Record<string, Uint8Array>} [contents] */
+function withHandles(contents = {}){
+    const memory = fakeMemory();
+    const files = fakeVolume(contents, { directories: ['C:\\', 'C:\\game'] });
+    const handles = fakeHandles(files);
+    /** @type {number[]} */
+    const errno = [];
+    /** @type {[number, string][]} */
+    const console = [];
+    /** @type {string[]} */
+    const divergences = [];
+    const descriptors = createDescriptors({
+        files, handles, errno: code=>errno.push(code),
+        write: (handle, text)=>console.push([handle, text]),
+    });
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({
+        ...memory, files, errno: code=>errno.push(code), divergence: api=>divergences.push(api),
+    }, descriptors));
+    /** @param {string} path @param {number} flags */
+    const open = (path, flags)=>fns._open.handler([memory.put(path), flags, 0x180]);
+    /** @param {string} name */
+    const text = name=>String.fromCharCode(...files.files[name]);
+    return { memory, files, handles, errno, console, divergences, fns, open, text };
+}
+
+const INVALID_HANDLE_VALUE = -1;
+
+test('_get_osfhandle hands out a kernel32 handle standing at the descriptor\'s position', ()=>{
+    // Wine's msvcrt test_get_osfhandle: what is written through the handle
+    // is in the file, and a descriptor closed has no handle.
+    const { memory, handles, errno, fns, open, text, files } = withHandles();
+    const fd = open('C:\\game\\t_get_osfhandle', O_CREAT | O_RDWR | O_BINARY);
+    const handle = fns._get_osfhandle.handler([fd]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE);
+    assert.equal(fns._get_osfhandle.handler([fd]), handle, 'the same one every time');
+
+    const file = handles.file(handle);
+    file.position += files.write(file.node, file.position, bytesOf('bar'));
+    assert.equal(text('C:\\game\\t_get_osfhandle'), 'bar');
+    assert.equal(fns._tell.handler([fd]), 3, 'a write through the handle moved the descriptor');
+    fns._lseek.handler([fd, 1, SEEK_SET]);
+    assert.equal(file.position, 1, 'and a seek of the descriptor moves the handle');
+    assert.equal(fns._write.handler([fd, memory.put('X'), 1]), 1);
+    assert.equal(text('C:\\game\\t_get_osfhandle'), 'bXr');
+
+    assert.equal(fns._close.handler([fd]), 0);
+    assert.equal(handles.file(handle), null, 'closing the descriptor closed the handle');
+    assert.deepEqual(files.closed, ['C:\\game\\t_get_osfhandle'], 'and the file, once');
+    assert.equal(fns._get_osfhandle.handler([fd]), INVALID_HANDLE_VALUE);
+    assert.deepEqual(errno, [EBADF]);
+});
+
+test('_get_osfhandle of the console\'s three is the standard handle each stands for', ()=>{
+    const { fns } = withHandles();
+    assert.deepEqual([0, 1, 2].map(fd=>fns._get_osfhandle.handler([fd])), [1, 2, 3]);
+});
+
+test('_open_osfhandle makes a descriptor of a handle, which _close closes', ()=>{
+    // Wine's msvcrt test__open_osfhandle: INVALID_HANDLE_VALUE and a handle
+    // closed already are EBADF; the descriptor is binary unless told text.
+    const { memory, handles, errno, fns, text } = withHandles({
+        'C:\\game\\open_osfhandle.tst': new Uint8Array(0),
+    });
+    assert.equal(fns._open_osfhandle.handler([INVALID_HANDLE_VALUE, 0]), -1);
+    assert.deepEqual(errno.splice(0), [EBADF]);
+
+    const handle = handles.create('C:\\game\\open_osfhandle.tst', false, true);
+    const fd = fns._open_osfhandle.handler([handle, 0]);
+    assert.ok(fd > 2);
+    assert.equal(fns._get_osfhandle.handler([fd]), handle);
+    assert.equal(fns._write.handler([fd, memory.put('a\n'), 2]), 2);
+    assert.equal(text('C:\\game\\open_osfhandle.tst'), 'a\n', 'binary');
+    assert.equal(handles.file(handle).position, 2, 'the handle moved with the descriptor');
+    assert.equal(fns._read.handler([fd, memory.allocate(4), 1]), -1, 'the handle\'s access');
+    assert.equal(fns._close.handler([fd]), 0);
+    assert.equal(handles.file(handle), null);
+    assert.equal(fns._open_osfhandle.handler([handle, 0]), -1);
+    assert.deepEqual(errno.splice(0), [EBADF, EBADF]);
+
+    const textual = fns._open_osfhandle.handler(
+        [handles.create('C:\\game\\open_osfhandle.tst'), O_TEXT | O_APPEND]);
+    assert.equal(fns._write.handler([textual, memory.put('b\n'), 2]), 2);
+    assert.equal(text('C:\\game\\open_osfhandle.tst'), 'a\nb\r\n', 'text, at the end');
+    assert.deepEqual(errno, []);
+});
+
+test('two descriptors on one handle: the first _close closes it, the second fails', ()=>{
+    // Wine's msvcrt test_close.
+    const { handles, errno, fns } = withHandles({ 'C:\\game\\fdopen.tst': new Uint8Array(0) });
+    const handle = handles.create('C:\\game\\fdopen.tst');
+    const fd1 = fns._open_osfhandle.handler([handle, 0]);
+    const fd2 = fns._open_osfhandle.handler([handle, 0]);
+    assert.notEqual(fd1, fd2);
+    assert.deepEqual([fd1, fd2].map(fd=>fns._get_osfhandle.handler([fd])), [handle, handle]);
+    assert.equal(fns._close.handler([fd1]), 0);
+    assert.equal(handles.file(handle), null);
+    assert.equal(fns._close.handler([fd2]), -1);
+    assert.equal(fns._close.handler([fd1]), -1);
+    assert.deepEqual(errno, [EBADF, EBADF]);
+});
+
+test('a descriptor whose handle the program closed itself answers EBADF', ()=>{
+    const { memory, handles, errno, fns, open, files } = withHandles();
+    const fd = open('C:\\game\\closed.bin', O_CREAT | O_RDWR);
+    handles.close(fns._get_osfhandle.handler([fd]));
+    assert.equal(fns._read.handler([fd, memory.allocate(4), 1]), -1);
+    assert.equal(fns._write.handler([fd, memory.put('x'), 1]), -1);
+    assert.equal(fns._close.handler([fd]), -1);
+    assert.deepEqual(errno, [EBADF, EBADF, EBADF]);
+    assert.deepEqual(files.closed, ['C:\\game\\closed.bin'], 'the file closed once, not twice');
+});
+
+test('_open_osfhandle of a standard handle is a descriptor on the console', ()=>{
+    const { memory, console, fns } = withHandles();
+    const fd = fns._open_osfhandle.handler([2, O_TEXT]);
+    assert.ok(fd > 2);
+    assert.equal(fns._write.handler([fd, memory.put('hi'), 2]), 2);
+    assert.deepEqual(console, [[2, 'hi']]);
+    assert.equal(fns._get_osfhandle.handler([fd]), 2);
+    assert.equal(fns._close.handler([fd]), 0);
+    assert.equal(fns._open_osfhandle.handler([2, 0]), fd, 'the number is free again');
+});
+
+test('_open_osfhandle refuses the Unicode translations, as _setmode does', ()=>{
+    const { handles, errno, divergences, fns } = withHandles({
+        'C:\\game\\u.txt': new Uint8Array(0),
+    });
+    assert.equal(fns._open_osfhandle.handler([handles.create('C:\\game\\u.txt'), O_WTEXT]), -1);
+    assert.deepEqual(errno, [EINVAL]);
+    assert.deepEqual(divergences, ['_open_osfhandle']);
+});
+
+test('without a handle table the two are not exported', ()=>{
+    const { fns } = build();
+    assert.equal(fns._get_osfhandle, undefined);
+    assert.equal(fns._open_osfhandle, undefined);
+    const { fns: joined } = withHandles();
+    assert.deepEqual([joined._get_osfhandle.argBytes, joined._open_osfhandle.argBytes], [4, 8]);
 });
 
 test('every entry is cdecl with the argument count it reads', ()=>{
