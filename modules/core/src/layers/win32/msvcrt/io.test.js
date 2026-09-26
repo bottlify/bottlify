@@ -280,6 +280,48 @@ test('_stat: device, mode and the names Windows refuses', ()=>{
     assert.deepEqual(errno, [ENOENT, ENOENT, ENOENT, ENOENT]);
 });
 
+/**
+ * `struct _stati64` as msvcrt.dll lays it out: `_stat`'s fields with a 64-bit
+ * size, which its alignment puts at 24, and the three 32-bit times after it.
+ */
+const STATI64 = { DEV: 0, MODE: 6, NLINK: 8, RDEV: 16, SIZE: 24, TIMES: [32, 36, 40], BYTES: 48 };
+
+test('_stati64 answers as _stat does, into the record with the 64-bit size', ()=>{
+    const { memory, fns, errno } = build({ 'C:\\game\\data.bin': bytesOf('12345') });
+    const stat = memory.allocate(STATI64.BYTES);
+    memory.writeMemory(stat, new Uint8Array(STATI64.BYTES).fill(0xcc));
+    const view = new DataView(memory.bytes.buffer, stat, STATI64.BYTES);
+
+    assert.equal(fns._stati64.handler([memory.put('C:\\game\\data.bin'), stat]), 0);
+    assert.equal(view.getUint16(STATI64.MODE, true), 0x8000 | 0o666);
+    assert.deepEqual([view.getUint32(STATI64.DEV, true), view.getUint32(STATI64.RDEV, true)],
+        [2, 2], 'drive C');
+    assert.equal(view.getInt16(STATI64.NLINK, true), 1);
+    assert.equal(view.getBigInt64(STATI64.SIZE, true), 5n);
+    assert.deepEqual(STATI64.TIMES.map(at=>view.getUint32(at, true)),
+        Array(3).fill(Date.UTC(2001, 0, 2) / 1000));
+    assert.equal(view.getUint32(20, true), 0, 'the padding before the size is written too');
+    assert.equal(view.getUint32(44, true), 0, 'and after the times');
+
+    assert.equal(fns._stati64.handler([memory.put('C:\\game\\'), stat]), -1);
+    assert.equal(fns._stati64.handler([memory.put('C:\\game\\none'), stat]), -1);
+    assert.equal(fns._stati64.handler([0, stat]), -1);
+    assert.deepEqual(errno, [ENOENT, ENOENT, EINVAL]);
+});
+
+test('_stati64 reports a size past 4 GiB whole', ()=>{
+    const memory = fakeMemory();
+    const files = fakeVolume({});
+    const big = 5 * 2 ** 30;
+    files.stat = ()=>({ exists: true, isDirectory: false, size: big, modified: 0 });
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({ ...memory, files },
+        createDescriptors({ files })));
+    const stat = memory.allocate(STATI64.BYTES);
+    assert.equal(fns._stati64.handler([memory.put('C:\\movie.bik'), stat]), 0);
+    const view = new DataView(memory.bytes.buffer, stat, STATI64.BYTES);
+    assert.equal(view.getBigInt64(STATI64.SIZE, true), BigInt(big));
+});
+
 test('a stream\'s read folds text as the program reads it and consumes only that', ()=>{
     // Wine's msvcrt test_asciimode: CR CR LF is CR LF, and "foo" then ^Z is
     // three bytes and then the end.

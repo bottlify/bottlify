@@ -56,8 +56,17 @@ const READ_AHEAD = 4096;
 
 /** `struct _stat` with msvcrt.dll's 32-bit times: 36 bytes. */
 const STAT = Object.freeze({
-    DEV: 0, INO: 4, MODE: 6, NLINK: 8, UID: 10, GID: 12, RDEV: 16, SIZE: 20,
+    DEV: 0, INO: 4, MODE: 6, NLINK: 8, UID: 10, GID: 12, RDEV: 16, SIZE: 20, WIDE_SIZE: false,
     ATIME: 24, MTIME: 28, CTIME: 32, BYTES: 36,
+});
+
+/**
+ * `struct _stati64`: the same fields with a 64-bit size, which the structure's
+ * 8-byte alignment puts at 24 rather than 20, and the whole rounded up to 48.
+ */
+const STATI64 = Object.freeze({
+    DEV: 0, INO: 4, MODE: 6, NLINK: 8, UID: 10, GID: 12, RDEV: 16, SIZE: 24, WIDE_SIZE: true,
+    ATIME: 32, MTIME: 36, CTIME: 40, BYTES: 48,
 });
 
 /** `st_mode` bits, as sys/stat.h numbers them. */
@@ -433,26 +442,70 @@ export function createIoFunctions(host, descriptors){
     };
 
     /**
-     * Fills a whole `struct _stat`, so no field keeps what the caller's
-     * buffer held. The volume keeps one time per file, the last write, and
-     * it stands for all three.
+     * Fills a whole `struct _stat` or `_stati64`, so no field keeps what the
+     * caller's buffer held. The volume keeps one time per file, the last
+     * write, and it stands for all three.
      *
      * @param {number} address
      * @param {{ device: number, mode: number, size: number, modified: number }} entry
+     * @param {typeof STAT | typeof STATI64} [layout]
      */
-    const writeStat = (address, entry)=>{
-        const bytes = new Uint8Array(STAT.BYTES);
+    const writeStat = (address, entry, layout = STAT)=>{
+        const bytes = new Uint8Array(layout.BYTES);
         const view = new DataView(bytes.buffer);
-        view.setUint32(STAT.DEV, entry.device, true);
-        view.setUint16(STAT.MODE, entry.mode, true);
-        view.setInt16(STAT.NLINK, 1, true);
-        view.setUint32(STAT.RDEV, entry.device, true);
-        view.setUint32(STAT.SIZE, entry.size >>> 0, true);
+        view.setUint32(layout.DEV, entry.device, true);
+        view.setUint16(layout.MODE, entry.mode, true);
+        view.setInt16(layout.NLINK, 1, true);
+        view.setUint32(layout.RDEV, entry.device, true);
+        if (layout.WIDE_SIZE)
+        {
+            view.setBigUint64(layout.SIZE, BigInt(entry.size), true);
+        }
+        else
+        {
+            view.setUint32(layout.SIZE, entry.size >>> 0, true);
+        }
         const time = seconds(entry.modified);
-        view.setUint32(STAT.ATIME, time, true);
-        view.setUint32(STAT.MTIME, time, true);
-        view.setUint32(STAT.CTIME, time, true);
+        view.setUint32(layout.ATIME, time, true);
+        view.setUint32(layout.MTIME, time, true);
+        view.setUint32(layout.CTIME, time, true);
         host.writeMemory(address >>> 0, bytes);
+    };
+
+    /**
+     * The body `_stat` and `_stati64` share: -1 and ENOENT for a name that
+     * is not there, for a bare "C:", and for a name with a separator after
+     * it that is not a drive's root -- as Windows answers, trailing spaces
+     * aside. The device is the drive's number, A being 0; a directory and a
+     * program are executable.
+     *
+     * @param {number} path @param {number} buffer
+     * @param {typeof STAT | typeof STATI64} layout
+     */
+    const statPath = (path, buffer, layout)=>{
+        if ((path >>> 0) === 0 || (buffer >>> 0) === 0)
+        {
+            fail(EINVAL);
+            return -1;
+        }
+        const name = host.readCString(path >>> 0, MAX_STRING).replace(/ +$/, '');
+        const bare = /^[A-Za-z]:$/.test(name);
+        const trailing = /[\\/]$/.test(name) && !/^[A-Za-z]:[\\/]$/.test(name);
+        const entry = bare || trailing || name === '' ? null : host.files.stat(name);
+        if (!entry)
+        {
+            fail(ENOENT);
+            return -1;
+        }
+        const drive = /^[A-Za-z]:/.test(name) ? name : host.files.currentDirectory();
+        const mode = entry.isDirectory
+            ? S_IFDIR | ALL_READ | ALL_WRITE | ALL_EXEC
+            : S_IFREG | ALL_READ | ALL_WRITE | (EXECUTABLE.test(name) ? ALL_EXEC : 0);
+        writeStat(buffer, {
+            device: drive.toUpperCase().charCodeAt(0) - 0x41,
+            mode, size: entry.size ?? 0, modified: entry.modified ?? 0,
+        }, layout);
+        return 0;
     };
 
     /**
@@ -717,38 +770,14 @@ export function createIoFunctions(host, descriptors){
             return 0;
         }),
 
+        /** int _stat(const char *path, struct _stat *buffer) */
+        _stat: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT)),
+
         /**
-         * int _stat(const char *path, struct _stat *buffer)
+         * int _stati64(const char *path, struct _stati64 *buffer)
          *
-         * -1 and ENOENT for a name that is not there, for a bare "C:", and for
-         * a name with a separator after it that is not a drive's root -- as
-         * Windows answers, trailing spaces aside. The device is the drive's
-         * number, A being 0; a directory and a program are executable.
+         * `_stat` with a size that goes past 4 GiB, and the same answers.
          */
-        _stat: cdecl(8, ([path, buffer])=>{
-            if ((path >>> 0) === 0 || (buffer >>> 0) === 0)
-            {
-                fail(EINVAL);
-                return -1;
-            }
-            const name = host.readCString(path >>> 0, MAX_STRING).replace(/ +$/, '');
-            const bare = /^[A-Za-z]:$/.test(name);
-            const trailing = /[\\/]$/.test(name) && !/^[A-Za-z]:[\\/]$/.test(name);
-            const entry = bare || trailing || name === '' ? null : host.files.stat(name);
-            if (!entry)
-            {
-                fail(ENOENT);
-                return -1;
-            }
-            const drive = /^[A-Za-z]:/.test(name) ? name : host.files.currentDirectory();
-            const mode = entry.isDirectory
-                ? S_IFDIR | ALL_READ | ALL_WRITE | ALL_EXEC
-                : S_IFREG | ALL_READ | ALL_WRITE | (EXECUTABLE.test(name) ? ALL_EXEC : 0);
-            writeStat(buffer, {
-                device: drive.toUpperCase().charCodeAt(0) - 0x41,
-                mode, size: entry.size ?? 0, modified: entry.modified ?? 0,
-            });
-            return 0;
-        }),
+        _stati64: cdecl(8, ([path, buffer])=>statPath(path, buffer, STATI64)),
     };
 }
