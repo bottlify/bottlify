@@ -20,8 +20,10 @@
  * regions are dropped, and a page dropped too often is marked volatile and
  * never translated again. A region is stamped with its pages' generation at
  * formation and dropped at publication when an invalidation moved one of
- * them in between, so a batch never publishes code for bytes that changed
- * while it was being compiled.
+ * them in between; one the guest ran past before its publication (its store
+ * lookups out, its batch on the worker) is hashed again as well, since a page
+ * with no code published on it moves no generation. So a batch never
+ * publishes code for bytes that changed while it was being compiled.
  */
 
 import { formRegion, formShared, hashRegion } from '../region.js';
