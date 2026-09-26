@@ -18,7 +18,8 @@ import {
     PSPCB_CREATE, PSH, PSH_MODELESS, PSH_USECALLBACK, PSH_PROPSHEETPAGE, PSH_WIZARD,
     PSH_NOAPPLYNOW, PSCB_INITIALIZED, PSCB_PRECREATE,
     PSN_SETACTIVE, PSN_KILLACTIVE, PSN_APPLY, PSN_RESET, PSN_QUERYCANCEL,
-    PSN_QUERYINITIALFOCUS, PSN_WIZNEXT, PSN_WIZBACK,
+    PSN_QUERYINITIALFOCUS, PSN_WIZNEXT, PSN_WIZBACK, PSN_WIZFINISH, PSM_SETTITLEA,
+    PSM_SETWIZBUTTONS, PSWIZB_BACK, PSWIZB_NEXT, PSWIZB_FINISH, PSBTN_FINISH,
     PSM_SETCURSEL, PSM_REMOVEPAGE, PSM_ADDPAGE, PSM_CHANGED, PSM_UNCHANGED, PSM_QUERYSIBLINGS,
     PSM_PRESSBUTTON, PSM_GETTABCONTROL, PSM_GETCURRENTPAGEHWND, PSM_INSERTPAGE,
     PSM_HWNDTOINDEX, PSM_INDEXTOHWND, PSM_PAGETOINDEX, PSM_INDEXTOPAGE, PSM_IDTOINDEX,
@@ -240,7 +241,46 @@ const TEMPLATES = new Map([
  * @typedef {(args: number[]) => number | Promise<number>} Procedure
  */
 
-function setup({ modal = false } = {}){
+/**
+ * @param {{ modal?: boolean, guest?: boolean }} [options]  With `guest`, the
+ *     program's procedures run as the machine runs them: on the one thread,
+ *     once the host code that called has let go of it, so each answers
+ *     later. A call made while an earlier one has still to begin, or an
+ *     answer given while a call made inside it has, is one the machine
+ *     cannot follow -- the thread is sent to the newer place and the older
+ *     is never run -- and is recorded in `overlaps`.
+ */
+function setup({ modal = false, guest = false } = {}){
+    /** @type {string[]} */
+    const overlaps = [];
+    /** @type {{ what: string } | null} */
+    let waiting = null;
+    /** @param {Procedure} procedure @param {number[]} args @returns {any} */
+    const run = (procedure, args)=>{
+        if (!guest)
+        {
+            return procedure(args);
+        }
+        const call = { what: `0x${(args[1] >>> 0).toString(16)} to ${args[0] >>> 0}` };
+        if (waiting)
+        {
+            overlaps.push(`${call.what} made while ${waiting.what} had not begun`);
+        }
+        waiting = call;
+        return new Promise((resolve, reject)=>setImmediate(()=>{
+            if (waiting === call)
+            {
+                waiting = null;
+            }
+            Promise.resolve(procedure(args)).then(answer=>{
+                if (waiting)
+                {
+                    overlaps.push(`${call.what} answered while ${waiting.what} had not begun`);
+                }
+                resolve(answer);
+            }, reject);
+        }));
+    };
     const memory = fakeMemory();
     const handles = fakeHandles();
     const queue = createMessageQueue();
@@ -301,7 +341,7 @@ function setup({ modal = false } = {}){
             const procedure = procedures.get(wndProc >>> 0);
             if (procedure)
             {
-                return procedure([message.hwnd, message.message, message.wParam,
+                return run(procedure, [message.hwnd, message.message, message.wParam,
                     message.lParam]);
             }
             return table.DefWindowProcA.handler(
@@ -346,7 +386,7 @@ function setup({ modal = false } = {}){
             {
                 throw new Error(`no callback at 0x${entry.toString(16)}`);
             }
-            return procedure(args);
+            return run(procedure, args);
         },
         callerThread: ()=>THREAD,
         procedure: (name, handler)=>register(handler),
@@ -558,7 +598,7 @@ function setup({ modal = false } = {}){
 
     return { memory, desktop, fns: table, comctl, send, pump, heard, register, pageProc,
         description, descriptions, header, createPage, result, string, windowRect, textOf,
-        makeOwner, press, keysDown };
+        makeOwner, press, keysDown, overlaps };
 }
 
 test('CreatePropertySheetPage copies the description, refuses one older than the first '
@@ -1257,4 +1297,61 @@ test('a modal sheet turns its pages from the keyboard in its own loop, Ctrl+PgDn
     assert.equal(answer, 0);
     assert.deepEqual(context.heard.filter(([, code])=>code === PSN_SETACTIVE)
         .map(([name])=>name), ['one', 'two', 'one', 'two']);
+});
+
+test('a sheet waits for the answer to each message it sends before it goes on, as a program\'s '
+    + 'procedures on the one thread need', { timeout: 10000 }, async()=>{
+    // A modal Wizard97 sheet over a window of the program's: the owner is
+    // disabled and enabled again, the caption of each page's template is
+    // sent to the sheet, the page left is hidden, and the sheet asks itself
+    // for its default button for a page with no tab stop. Each page asks
+    // for a title and for its buttons, which the sheet answers by sending
+    // itself its default.
+    const PSH_WIZARD97 = 0x01000000;
+    const context = setup({ modal: true, guest: true });
+    const { memory, send, heard } = context;
+    const owner = await context.makeOwner();
+    /** @param {string} name @param {number} buttons */
+    const proc = (name, buttons)=>context.register(async([hwnd, message, , lParam])=>{
+        if (message === WM_INITDIALOG)
+        {
+            heard.push([name, message]);
+            return 1;
+        }
+        if (message !== WM_NOTIFY)
+        {
+            return 0;
+        }
+        const code = memory.i32(lParam + 8);
+        heard.push([name, code]);
+        if (code === PSN_SETACTIVE)
+        {
+            const sheet = memory.u32(lParam);
+            await send([sheet, PSM_SETTITLEA, 0, context.string(name)]);
+            await send([sheet, PSM_SETWIZBUTTONS, 0, buttons]);
+        }
+        return context.result(hwnd, 0);
+    });
+    const callback = context.register(([hwnd, message])=>{
+        if (message === PSCB_INITIALIZED)
+        {
+            context.fns.PostMessageA.handler([hwnd, PSM_PRESSBUTTON, PSBTN_NEXT, 0]);
+            context.fns.PostMessageA.handler([hwnd, PSM_PRESSBUTTON, PSBTN_FINISH, 0]);
+        }
+        return 0;
+    });
+    const pages = [
+        await context.createPage(context.description({ template: IDD_PROP_PAGE_INTRO,
+            proc: proc('first', PSWIZB_NEXT) })),
+        await context.createPage(context.description({ template: IDD_PROP_PAGE_EXIT,
+            proc: proc('last', PSWIZB_BACK | PSWIZB_FINISH) })),
+    ];
+    const answer = await context.comctl.PropertySheetA.handler([context.header({
+        flags: PSH_WIZARD97 | PSH_USECALLBACK, parent: owner, pages, callback })]);
+    assert.deepEqual(context.overlaps, []);
+    assert.equal(answer, 1, 'Finish ends it');
+    assert.deepEqual(heard.filter(([, code])=>code === PSN_SETACTIVE || code === PSN_WIZNEXT
+        || code === PSN_WIZFINISH), [['first', PSN_SETACTIVE], ['first', PSN_WIZNEXT],
+        ['last', PSN_SETACTIVE], ['last', PSN_WIZFINISH]]);
+    assert.equal(context.fns.IsWindowEnabled.handler([owner]), 1, 'the owner is given back');
 });
