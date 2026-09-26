@@ -578,6 +578,7 @@ export const pointOf = lParam=>({
  * @param {ControlHost} host
  * @returns {{ procedures: Record<string, ControlProcedure>,
  *     helpers: { dialogProc: ControlProcedure,
+ *         markDefault: (dialog: any, focused: number) => void,
  *         paintScrollBar: (hdc: number, rect: Rect, vertical: boolean,
  *             held: ScrollBarState) => void,
  *         scrollHit: (rect: Rect, vertical: boolean, held: ScrollBarState,
@@ -2862,6 +2863,37 @@ export function createControlProcedures(host){
 
     // --- The dialog class ---------------------------------------------------
 
+    /** @param {any} record  Whether it is a push button: one Enter can press. */
+    const isPushButton = record=>record.className === 'Button'
+        && PUSH_KINDS.has(record.style & BS_TYPEMASK);
+
+    /** @param {any} button @param {number} kind  BS_PUSHBUTTON or BS_DEFPUSHBUTTON. */
+    const restyle = (button, kind)=>{
+        if ((button.style & BS_TYPEMASK) !== kind)
+        {
+            button.style = ((button.style & ~BS_TYPEMASK) | kind) >>> 0;
+            host.invalidate(button);
+        }
+    };
+
+    /**
+     * Styles the push button Enter presses as the default, as the dialog
+     * manager does each time it moves the focus: the one with the focus when
+     * the focus is on a push button, the dialog's default id's otherwise.
+     * The default id itself does not change.
+     *
+     * @param {any} dialog @param {number} focused
+     */
+    const markDefault = (dialog, focused)=>{
+        const buttons = host.children(dialog).filter(isPushButton);
+        const chosen = buttons.find(button=>button.hwnd === focused)
+            ?? buttons.find(button=>button.id === dialog.defaultId);
+        for (const button of buttons)
+        {
+            restyle(button, button === chosen ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON);
+        }
+    };
+
     /**
      * The messages whose answer is the dialog procedure's own return value
      * rather than DWLP_MSGRESULT.
@@ -2881,7 +2913,6 @@ export function createControlProcedures(host){
      * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
      */
     const defDlgProc = (record, message, thread)=>{
-        const state = stateOf(record);
         switch (message.message){
             case WM_ERASEBKGND: {
                 if (!host.draw)
@@ -2906,13 +2937,30 @@ export function createControlProcedures(host){
             case WM_CTLCOLOREDIT:
             case WM_CTLCOLORLISTBOX:
                 return 0;
+            // The default id is the template's default push button's until a
+            // program names another; the dialog manager keeps it on the
+            // dialog's record, where making the dialog sets it.
             case DM_GETDEFID:
-                return state.defaultId !== undefined
-                    ? ((DC_HASDEFID << 16) | state.defaultId & 0xffff) >>> 0
+                return record.defaultId !== undefined
+                    ? ((DC_HASDEFID << 16) | record.defaultId & 0xffff) >>> 0
                     : 0;
-            case DM_SETDEFID:
-                state.defaultId = message.wParam & 0xffff;
+            case DM_SETDEFID: {
+                // The style moves with it: off the old default, onto the new
+                // one if it is a push button.
+                const buttons = host.children(record).filter(isPushButton);
+                const old = buttons.find(button=>button.id === record.defaultId);
+                if (old)
+                {
+                    restyle(old, BS_PUSHBUTTON);
+                }
+                record.defaultId = message.wParam & 0xffff;
+                const chosen = buttons.find(button=>button.id === record.defaultId);
+                if (chosen)
+                {
+                    restyle(chosen, BS_DEFPUSHBUTTON);
+                }
                 return 1;
+            }
             case WM_SETFONT:
                 record.font = message.wParam >>> 0;
                 return 0;
@@ -2931,7 +2979,10 @@ export function createControlProcedures(host){
                 return after(host.send(first.hwnd, WM_GETDLGCODE, 0, 0, thread), code=>after(
                     ((code >>> 0) & DLGC_HASSETSEL) !== 0
                         ? host.send(first.hwnd, EM_SETSEL, 0, -1 >>> 0, thread) : 0,
-                    ()=>after(host.setFocus(first.hwnd, thread), ()=>0)));
+                    ()=>after(host.setFocus(first.hwnd, thread), ()=>{
+                        markDefault(record, first.hwnd);
+                        return 0;
+                    })));
             }
             case WM_CLOSE:
                 // Closing a dialog is Cancel: what the person could have
@@ -2993,7 +3044,7 @@ export function createControlProcedures(host){
             ScrollBar: scrollBarProc,
             '#32770': dialogProc,
         },
-        helpers: { dialogProc, paintScrollBar, scrollHit },
+        helpers: { dialogProc, markDefault, paintScrollBar, scrollHit },
         // The drawing and messaging the classes above share, handed out whole
         // so the common controls paint and tell their parent with the same
         // helpers: one look, and a change to it is one change.

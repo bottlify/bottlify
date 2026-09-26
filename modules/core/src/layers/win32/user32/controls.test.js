@@ -658,6 +658,64 @@ test('Enter fires the default button and Escape is IDCANCEL', async()=>{
     assert.equal(context.commands().at(-1)?.[0], 101);
 });
 
+test('the default push button follows the dialog manager\'s focus, and DM_SETDEFID', async()=>{
+    // user32's dialog tests (WM_NEXTDLGCTL): the push button the dialog
+    // manager moves the focus to is styled BS_DEFPUSHBUTTON and the default
+    // one BS_PUSHBUTTON, DM_GETDEFID staying what it was -- the template's
+    // default push button until DM_SETDEFID names another -- and a control
+    // that is no push button taking the focus gives the default its style
+    // back. DM_SETDEFID moves the style from the old default to the new.
+    // Enter presses the push button with the focus only while it is the
+    // default; otherwise the default id.
+    const BS_TYPEMASK = 0x0f;
+    const IDOK = 1;
+    const page = { ...WIZARD_PAGE, controls: [
+        { id: 10, className: 'Edit', title: '', x: 4, y: 4, cx: 60, cy: 12,
+            style: WS_CHILD | WS_VISIBLE | WS_TABSTOP },
+        { id: IDOK, className: 'Button', title: 'OK', x: 4, y: 40, cx: 40, cy: 14,
+            style: WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON },
+        { id: IDCANCEL, className: 'Button', title: 'Cancel', x: 50, y: 40, cx: 40, cy: 14,
+            style: WS_CHILD | WS_VISIBLE | WS_TABSTOP },
+    ] };
+    const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
+    const dialog = await openDialog(context, page);
+    const [edit, ok, cancel] = [10, IDOK, IDCANCEL]
+        .map(id=>context.fns.GetDlgItem.handler([dialog, id]));
+    /** The two buttons' types, OK's then Cancel's. */
+    const kinds = ()=>[ok, cancel]
+        .map(hwnd=>context.fns.GetWindowLongA.handler([hwnd, -16]) & BS_TYPEMASK);
+    const defaultId = ()=>context.fns.SendMessageA.handler([dialog, DM_GETDEFID, 0, 0]);
+    assert.equal(context.fns.GetFocus.handler([]), edit);
+    assert.equal(defaultId(), (0x534b << 16 | IDOK) >>> 0, 'the template\'s default push button');
+
+    context.key(WM_KEYDOWN, VK_TAB);
+    context.key(WM_KEYDOWN, VK_TAB);
+    await context.pump(dialog);
+    assert.equal(context.fns.GetFocus.handler([]), cancel);
+    assert.deepEqual(kinds(), [0, BS_DEFPUSHBUTTON], 'the focus took the default style');
+    assert.equal(defaultId() & 0xffff, IDOK, 'but not the default id');
+    context.key(WM_KEYDOWN, VK_RETURN);
+    await context.pump(dialog);
+    assert.deepEqual(context.commands().at(-1), [IDCANCEL, BN_CLICKED, cancel]);
+
+    context.key(WM_KEYDOWN, VK_TAB);
+    await context.pump(dialog);
+    assert.equal(context.fns.GetFocus.handler([]), edit);
+    assert.deepEqual(kinds(), [BS_DEFPUSHBUTTON, 0], 'the default has its style back');
+
+    context.fns.SendMessageA.handler([dialog, DM_SETDEFID, IDCANCEL, 0]);
+    assert.deepEqual(kinds(), [0, BS_DEFPUSHBUTTON]);
+    context.key(WM_KEYDOWN, VK_TAB);
+    await context.pump(dialog);
+    assert.equal(context.fns.GetFocus.handler([]), ok);
+    context.fns.SendMessageA.handler([dialog, DM_SETDEFID, IDCANCEL, 0]);
+    context.fns.SendMessageA.handler([ok, 0x00f4, 0, 1]);
+    context.key(WM_KEYDOWN, VK_RETURN);
+    await context.pump(dialog);
+    assert.deepEqual(context.commands().at(-1), [IDCANCEL, BN_CLICKED, cancel],
+        'a push button with the focus that is not the default is not what Enter presses');
+});
+
 test('an auto check box toggles on a click and on Space, and answers BM_GETCHECK', async()=>{
     const context = setup();
     const dialog = await openDialog(context);

@@ -48,7 +48,7 @@ import { ANY_WINDOW, WM_QUIT } from './messages.js';
 import { readMessage, readRect, writeRect } from './structs.js';
 import { WS_VISIBLE, frameOf } from './frame.js';
 import {
-    DLGC_BUTTON, DLGC_DEFPUSHBUTTON, DLGC_HASSETSEL, DLGC_UNDEFPUSHBUTTON, DLGC_WANTALLKEYS,
+    DLGC_BUTTON, DLGC_DEFPUSHBUTTON, DLGC_HASSETSEL, DLGC_WANTALLKEYS,
     DLGC_WANTTAB, DLGWINDOWEXTRA, DWLP_DLGPROC, IDCANCEL, IDOK, WM_GETDLGCODE, WM_SETFONT,
     WM_SETTEXT, after,
 } from './controls.js';
@@ -216,6 +216,9 @@ const MAX_RESOURCE_NAME = 256;
  * @property {(message: { hwnd: number, message: number, wParam: number, lParam: number })
  *     => number} [translate]  What TranslateMessage does with a key message.
  * @property {(record: any) => any[]} children
+ * @property {(dialog: any, focused: number) => void} [markDefault]
+ *           Styles the push button Enter would press as the default, as the
+ *           dialog manager does when it moves the focus.
  * @property {(key: number) => boolean} keyDown
  * @property {{ clientOrigin: (record: any) => { x: number, y: number } }} geometry
  * @property {{ baseUnits?: () => { width: number, height: number } | null,
@@ -576,6 +579,12 @@ export function createDialogFunctions(options){
                     ? { extra: new DataView(new ArrayBuffer(Math.max(cls.windowExtra, 0))) }
                     : {}),
             });
+            // The template's default push button is the dialog's default id
+            // until DM_SETDEFID names another.
+            if (record.className === 'Button' && (record.style & BS_TYPEMASK) === BS_DEFPUSHBUTTON)
+            {
+                dialog.defaultId = control.id & 0xffff;
+            }
             if (cls)
             {
                 // The class and title are in the template, not in guest
@@ -790,21 +799,23 @@ export function createDialogFunctions(options){
                     return 1;
                 }
                 // Tabbing into an edit selects its text, which is what the
-                // control asks for with DLGC_HASSETSEL.
-                return after(host.setFocus(next.hwnd, thread), ()=>after(
-                    host.send(next.hwnd, WM_GETDLGCODE, 0, 0, thread), asks=>after(
+                // control asks for with DLGC_HASSETSEL; tabbing onto a push
+                // button makes it the one Enter presses.
+                return after(host.setFocus(next.hwnd, thread), ()=>{
+                    host.markDefault?.(record, next.hwnd);
+                    return after(host.send(next.hwnd, WM_GETDLGCODE, 0, 0, thread), asks=>after(
                         ((asks >>> 0) & DLGC_HASSETSEL) !== 0
                             ? host.send(next.hwnd, EM_SETSEL, 0, -1 >>> 0, thread) : 0,
-                        ()=>1)));
+                        ()=>1));
+                });
             }
             if (key === VK_ESCAPE)
             {
                 return after(command(dialog, IDCANCEL, thread), ()=>1);
             }
-            // Enter: a push button with the focus is the one clicked; any
-            // other control leaves it to the default button.
-            if ((wants & DLGC_BUTTON) !== 0
-                && (wants & (DLGC_DEFPUSHBUTTON | DLGC_UNDEFPUSHBUTTON)) !== 0)
+            // Enter: the push button with the focus when it is the default --
+            // tabbing onto one makes it so -- and the default id otherwise.
+            if ((wants & DLGC_BUTTON) !== 0 && (wants & DLGC_DEFPUSHBUTTON) !== 0)
             {
                 return after(host.send(focused, BM_CLICK, 0, 0, thread), ()=>1);
             }

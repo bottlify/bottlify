@@ -2971,7 +2971,8 @@ export function createWindowFunctions(host){
         ...createDialogFunctions({
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, send, callProcedure, geometry, children: childrenOf,
-                defDlgProc: controls.helpers.dialogProc, keyDown: (/** @type {number} */ key)=>
+                defDlgProc: controls.helpers.dialogProc, markDefault: controls.helpers.markDefault,
+                keyDown: (/** @type {number} */ key)=>
                     ((host.keyState?.(key) ?? 0) & 0x8000) !== 0,
                 show: (/** @type {number} */ hwnd)=>{
                     const record = live(hwnd);
