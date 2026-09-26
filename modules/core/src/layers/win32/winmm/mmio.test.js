@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMmioFunctions } from './mmio.js';
 import { fakeVolume } from '../msvcrt/stdio.test.js';
-import { fakeMemory } from '../msvcrt/harness.test.js';
+import { fakeHandles, fakeMemory } from '../msvcrt/harness.test.js';
 
 const MMIO_READ = 0;
 const MMIO_WRITE = 1;
@@ -59,6 +59,7 @@ function waveFile(){
 function build(options = {}){
     const memory = fakeMemory();
     const files = fakeVolume({ 'C:\\click.wav': waveFile() }, options);
+    const handles = fakeHandles(files);
     /** @type {number[]} */
     const freed = [];
     /** @type {string[]} */
@@ -68,6 +69,7 @@ function build(options = {}){
         writeMemory: memory.writeMemory,
         readCString: memory.readCString,
         files,
+        handles,
         divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
         ...(options.allocator === false ? {} : {
             allocate: memory.allocate,
@@ -80,7 +82,7 @@ function build(options = {}){
     const info = at=>Object.fromEntries(Object.entries(INFO)
         .filter(([name])=>name !== 'size')
         .map(([name, offset])=>[name, memory.u32(at + offset)]));
-    return { memory, files, fns, freed, diverged, info };
+    return { memory, files, handles, fns, freed, diverged, info };
 }
 
 /**
@@ -652,6 +654,54 @@ test('the wide four-character code and procedure calls are the ANSI ones', ()=>{
         'one table for both');
     assert.equal(fns.mmioInstallIOProcW.handler([fourcc('XYZ '), 0, MMIO_REMOVEPROC]), proc);
     assert.equal(fns.mmioInstallIOProcW.handler([fourcc('XYZ '), 0, MMIO_FINDPROC]), 0);
+});
+
+test('a file already open is read through its handle, from where the handle stands', async()=>{
+    // mmio.c test_mmioSeek: OpenFile, _llseek to 16, and mmioOpen with no
+    // name and the handle in adwInfo[0] stands at 16.
+    const MMIO_DENYWRITE = 0x20;
+    const MMIO_FHOPEN = 0x10;
+    const { memory, files, handles, fns, info } = build();
+    const image = riffImage();
+    files.files['C:\\riff.avi'] = image;
+    const hfile = handles.create('C:\\riff.avi', true, false);
+    handles.file(hfile).position = 16;
+    const record = memory.allocate(INFO.size);
+    memory.setU32(record + INFO.fccIOProc, fourcc('DOS '));
+    memory.setU32(record + INFO.adwInfo, hfile);
+    const handle = fns.mmioOpenA.handler([0, record, MMIO_READ | MMIO_DENYWRITE | MMIO_ALLOCBUF]);
+    assert.notEqual(handle, 0);
+    assert.equal(memory.u32(record + INFO.wErrorRet), 0);
+    assert.equal(fns.mmioSeek.handler([handle, 0, SEEK_CUR]), 16);
+    const into = memory.allocate(8);
+    assert.equal(await fns.mmioRead.handler([handle, into, 8]), 8);
+    assert.deepEqual([...memory.bytes.subarray(into, into + 8)], [...image.subarray(16, 24)]);
+    assert.equal(fns.mmioSeek.handler([handle, 0, SEEK_END]), image.length);
+
+    // MMIO_FHOPEN leaves the handle open, standing where mmio left the file.
+    fns.mmioSeek.handler([handle, 40, SEEK_SET]);
+    const got = memory.allocate(INFO.size);
+    fns.mmioGetInfo.handler([handle, got, 0]);
+    assert.equal(fns.mmioClose.handler([handle, MMIO_FHOPEN]), 0);
+    assert.equal(handles.file(hfile)?.position, info(got).lDiskOffset);
+    assert.deepEqual(files.closed, [], 'the file is still open');
+
+    // With no procedure named at all the handle is still the file, and a
+    // plain close closes the handle with it.
+    memory.setU32(record + INFO.fccIOProc, 0);
+    const again = fns.mmioOpenA.handler([0, record, MMIO_READ]);
+    assert.notEqual(again, 0);
+    assert.equal(fns.mmioSeek.handler([again, 0, SEEK_CUR]), info(got).lDiskOffset,
+        'where the first left the handle');
+    assert.equal(fns.mmioSeek.handler([again, 0, SEEK_SET]), 0);
+    assert.equal(await fns.mmioRead.handler([again, into, 4]), 4);
+    assert.equal(memory.u32(into), fourcc('RIFF'));
+    assert.equal(fns.mmioClose.handler([again, 0]), 0);
+    assert.equal(handles.file(hfile), null, 'the handle is closed');
+    assert.deepEqual(files.closed, ['C:\\riff.avi']);
+
+    assert.equal(fns.mmioOpenA.handler([0, record, MMIO_READ]), 0, 'a handle no longer open');
+    assert.equal(memory.u32(record + INFO.wErrorRet), 257, 'MMIOERR_FILENOTFOUND');
 });
 
 test('every entry pops what the guest pushed', ()=>{

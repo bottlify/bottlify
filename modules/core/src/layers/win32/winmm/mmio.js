@@ -16,7 +16,8 @@
  * The positions a program sees are the file's own: what `mmioSeek` reports is
  * where the next read begins, chunk arithmetic included.
  *
- * Two kinds of file open. A DOS file is a file on the volume; a memory file
+ * Two kinds of file open. A DOS file is a file on the volume, by its name or
+ * by the handle of one the program already has open; a memory file
  * (an `fccIOProc` of `MEM `) is a block of guest memory, the caller's or one
  * mmio allocates, and the block is the whole file. Either may be buffered, and
  * the buffer is guest memory too: mmioGetInfo hands its pointers to the
@@ -53,6 +54,7 @@ const MMIO_CREATERIFF = 0x0020;
 const MMIO_CREATELIST = 0x0040;
 const MMIO_TOUPPER = 0x0010;
 const MMIO_EMPTYBUF = 0x0010;
+const MMIO_FHOPEN = 0x0010;
 const MMIO_INSTALLPROC = 0x10000;
 const MMIO_REMOVEPROC = 0x20000;
 const MMIO_FINDPROC = 0x40000;
@@ -114,6 +116,10 @@ const MAX_PATH = 260;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {any} files  The volume: open, read, write, close, stat.
+ * @property {{ file: (handle: number) => { path: string, node: any, position: number } | null,
+ *              close: (handle: number) => boolean }} [handles]
+ *           kernel32's file handles, for a file a program opened itself and
+ *           hands mmio by its handle. Absent, no such file opens.
  * @property {(bytes: number) => number} [allocate]
  *           Guest memory for a buffer mmio makes itself: the address, or 0
  *           when nothing fits. Absent in a build that cannot allocate, and a
@@ -140,6 +146,8 @@ const MAX_PATH = 260;
  * @property {number} handle
  * @property {boolean} memory
  * @property {any} node       The volume's open file, for a DOS file.
+ * @property {number} hfile   The program's own handle the file was opened by,
+ *                            which it shares; zero for a file mmio opened.
  * @property {string} path
  * @property {number} flags   The open flags as mmioGetInfo reports them.
  * @property {number} fcc
@@ -624,12 +632,24 @@ export function createMmioFunctions(host){
                 + 'program installed in its place');
         }
         let node = null;
-        if (!memory)
+        // With no name and no procedure, adwInfo[0] is a file the program
+        // already has open, and it is read from where its handle stands.
+        let hfile = 0;
+        let start = 0;
+        if (!memory && path === null)
         {
-            if (path === null)
+            hfile = record === 0 ? 0 : field(record, MMIOINFO.adwInfo);
+            const shared = hfile === 0 ? null : host.handles?.file(hfile) ?? null;
+            if (!shared)
             {
                 return refuse(MMIOERR_FILENOTFOUND);
             }
+            node = shared.node;
+            path = shared.path;
+            start = shared.position;
+        }
+        else if (!memory)
+        {
             if ((flags & MMIO_EXIST) !== 0)
             {
                 return host.files.stat(path) ? 1 : refuse(MMIOERR_FILENOTFOUND);
@@ -661,7 +681,7 @@ export function createMmioFunctions(host){
             buffer = host.allocate(size) >>> 0;
             if (buffer === 0)
             {
-                if (node)
+                if (node && hfile === 0)
                 {
                     host.files.close(node);
                 }
@@ -684,17 +704,18 @@ export function createMmioFunctions(host){
             handle,
             memory,
             node,
+            hfile,
             path: path ?? '',
             flags: flags & ~MMIO_ONCE | (owned ? MMIO_ALLOCBUF : 0),
             fcc: memory ? FOURCC_MEM : FOURCC_DOS,
             buffer,
             size,
             owned,
-            origin: 0,
+            origin: start,
             next: 0,
             end: memory ? size : 0,
             dirty: false,
-            disk: 0,
+            disk: start,
             info: [0, 1, 2].map(index=>(record === 0 ? 0
                 : field(record, MMIOINFO.adwInfo + index * 4))),
         });
@@ -753,18 +774,36 @@ export function createMmioFunctions(host){
                 (name >>> 0) === 0 ? null : wideAt(name >>> 0, MAX_PATH), info, flags >>> 0),
         },
 
-        /** MMRESULT mmioClose(HMMIO hmmio, UINT wFlags) */
+        /**
+         * MMRESULT mmioClose(HMMIO hmmio, UINT wFlags)
+         *
+         * A file opened by the program's own handle closes that handle too,
+         * unless MMIO_FHOPEN keeps it open for the program -- standing where
+         * mmio left the file, as a handle mmio read through would.
+         */
         mmioClose: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([handle])=>{
+            handler: ([handle, flags])=>{
                 const file = fileOf(handle);
                 if (!file)
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
                 const written = flush(file);
-                if (file.node)
+                if (file.hfile !== 0 && ((flags >>> 0) & MMIO_FHOPEN) !== 0)
+                {
+                    const shared = host.handles?.file(file.hfile);
+                    if (shared)
+                    {
+                        shared.position = file.disk;
+                    }
+                }
+                else if (file.hfile !== 0)
+                {
+                    host.handles?.close(file.hfile);
+                }
+                else if (file.node)
                 {
                     host.files.close(file.node);
                 }
