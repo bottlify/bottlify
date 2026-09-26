@@ -65,6 +65,12 @@ import { FOG_SOURCE, fogSourceOf, pipelineKey } from '../webgpu/internal/pipelin
  */
 const D3DRENDERSTATE_COLORKEYENABLE = 41;
 
+/**
+ * The buffer a stream with nothing bound reads from: WebGPU's default
+ * largest stride, so any member read at a stride of zero lies inside it.
+ */
+const ZERO_STREAM_BYTES = 2048;
+
 /** A stage state's DWORD, as the D3D8 header lays it out. */
 const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
 
@@ -993,7 +999,10 @@ export function eyePosition(view){
  * @property {Map<number, number>} renderStates
  * @property {(stage: number)=>Map<number, number>} stageStates
  * @property {Map<number, any>} textures
- * @property {{ buffer: any, stride: number }} stream       Stream zero.
+ * @property {{ buffer: any, stride: number, offset?: number }} stream       Stream zero.
+ * @property {(index: number) => { buffer: any, stride: number, offset?: number }} [streamAt]
+ *     Any stream by its number, where the API has more than one: a
+ *     declaration may read members from streams past zero.
  * @property {{ left: number, top: number, right: number, bottom: number }} [scissor]
  *     The scissor rectangle, where the API has one; D3DRS_SCISSORTESTENABLE
  *     says whether draws are cut to it.
@@ -1727,6 +1736,11 @@ export function createRenderer(options){
              * declaration the fixed-function path cannot read as a format.
              */
             layout: 0,
+            /**
+             * A draw whose further stream is bound at an offset its vertex
+             * buffer cannot start at.
+             */
+            stream: 0,
         },
         /** Draws that ran through a program rather than the fixed-function pipeline. */
         programmable: 0,
@@ -2714,10 +2728,18 @@ export function createRenderer(options){
      *
      * @param {import('../d3d9/declaration.js').FixedFunctionLayout} declared
      * @param {number} stride
+     * @param {RenderModel} model  whose further streams' strides it reads
      * @returns {import('../webgpu/internal/vertexformat.js').VertexLayout | null}
      */
-    const layoutOfDeclaration = (declared, stride)=>{
-        if (declared.attributes.some(attribute=>attribute.offset + attribute.bytes > stride))
+    const layoutOfDeclaration = (declared, stride, model)=>{
+        const streams = declared.streams.map(stream=>({ stream, stride: strideOf(model, stream) }));
+        /** @param {number} stream */
+        const own = stream=>(stream === 0 ? stride
+            : /** @type {{ stride: number }} */ (streams.find(one=>one.stream === stream)).stride);
+        // A stream of stride zero is read at its start for every vertex, and
+        // what it holds is only as long as its longest member.
+        if (declared.attributes.some(attribute=>own(attribute.stream) !== 0
+            && attribute.offset + attribute.bytes > own(attribute.stream)))
         {
             return null;
         }
@@ -2728,11 +2750,99 @@ export function createRenderer(options){
                 offset: attribute.offset,
                 format: attribute.format,
                 shaderLocation: index,
+                ...(attribute.stream === 0 ? {} : { stream: attribute.stream }),
             })),
             preTransformed: declared.preTransformed,
             texCoordSets: declared.texCoordSets,
             blendWeights: 0,
+            ...(streams.length === 0 ? {} : { streams }),
         };
+    };
+
+    /**
+     * The stride a further stream is read at: its binding's, or zero with
+     * nothing bound -- every vertex then reads the start of a buffer of
+     * zeros, which is what a member in an empty stream reads as (Wine's
+     * d3d9 test_color_vertex draws such a colour black).
+     *
+     * @param {RenderModel} model @param {number} stream
+     */
+    const strideOf = (model, stream)=>{
+        const source = model.streamAt?.(stream);
+        return source?.buffer ? source.stride : 0;
+    };
+
+    /** @type {any} a buffer of zeros for a stream with nothing bound */
+    let zeroStream = null;
+
+    /**
+     * How many vertices stream zero's offset was folded into the first
+     * vertex as, which a device with offsets does before a buffer draw.
+     *
+     * @param {RenderModel} model
+     */
+    const streamZeroBias = model=>(model.stream.stride > 0
+        ? Math.floor((model.stream.offset ?? 0) / model.stream.stride) : 0);
+
+    /**
+     * The further streams a layout reads and their strides, for a key: a
+     * stride is the pipeline's.
+     *
+     * @param {{ streams?: readonly { stream: number, stride: number }[] }} layout
+     */
+    const streamsKey = layout=>(layout.streams ?? [])
+        .map(one=>`|s${one.stream}:${one.stride}`).join('');
+
+    /**
+     * Binds a recorded draw's further streams, after stream zero's.
+     *
+     * @param {any} pass @param {any} command
+     */
+    const bindStreams = (pass, command)=>{
+        for (const bound of command.streams ?? [])
+        {
+            pass.setVertexBuffer(bound.slot, bound.gpu, bound.offset);
+        }
+    };
+
+    /**
+     * The vertex buffers a draw binds past stream zero's, slot by slot, or
+     * null when one of them cannot be bound as it lies: WebGPU starts a
+     * vertex buffer at a multiple of four bytes, and stream zero's offset is
+     * folded into the first vertex (`bias` of them), which a further stream
+     * has to take back from its own.
+     *
+     * @param {RenderModel} model
+     * @param {readonly { stream: number, stride: number }[] | undefined} streams
+     * @param {number} bias
+     * @returns {{ slot: number, gpu: any, offset: number }[] | null}
+     */
+    const streamBindings = (model, streams, bias)=>{
+        /** @type {{ slot: number, gpu: any, offset: number }[]} */
+        const bound = [];
+        for (const [index, { stream }] of (streams ?? []).entries())
+        {
+            const source = model.streamAt?.(stream);
+            if (!source?.buffer)
+            {
+                zeroStream ??= backend.createDynamicBuffer({
+                    size: ZERO_STREAM_BYTES,
+                    usage: BufferUsage.VERTEX | BufferUsage.COPY_DST,
+                    label: 'zero-stream',
+                });
+                bound.push({ slot: index + 1, gpu: zeroStream.gpu, offset: 0 });
+                continue;
+            }
+            const offset = (source.offset ?? 0) - bias * source.stride;
+            if (offset < 0 || offset % 4 !== 0)
+            {
+                return null;
+            }
+            const buffer = bufferFor(source.buffer).gpu;
+            buffer.markRead();
+            bound.push({ slot: index + 1, gpu: buffer.gpu, offset });
+        }
+        return bound;
     };
 
     let layoutReported = false;
@@ -2743,8 +2853,8 @@ export function createRenderer(options){
             layoutReported = true;
             divergence('Direct3D 8',
                 'a fixed-function draw over a vertex declaration the fixed-function stage'
-                + ' cannot read (a second stream, blend weights, a colour that is not a'
-                + ' D3DCOLOR, or a member past the vertex) is not drawn');
+                + ' cannot read (blend weights, a colour that is not a D3DCOLOR, or a member'
+                + ' past the vertex) is not drawn');
         }
     };
 
@@ -3620,7 +3730,8 @@ export function createRenderer(options){
                     register: index,
                 }));
         }
-        const laid = vertexLayoutOf(program.declaration, wanted, stride);
+        const laid = vertexLayoutOf(program.declaration, wanted, stride,
+            stream=>strideOf(model, stream));
         if (!laid.layout)
         {
             skip('program');
@@ -3690,7 +3801,7 @@ export function createRenderer(options){
             state,
             source: {
                 key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
-                    + `/${shapes}/${stride}`,
+                    + `/${shapes}/${stride}${streamsKey(layout)}`,
                 vertex, pixel, layout,
             },
         };
@@ -3723,7 +3834,8 @@ export function createRenderer(options){
         }
         const declaration = /** @type {readonly import('../webgpu/internal/programmable.js')
             .VertexElement[]} */ (program.declaration);
-        const laid = vertexLayoutOf(declaration, base.inputs, stride);
+        const laid = vertexLayoutOf(declaration, base.inputs, stride,
+            stream=>strideOf(model, stream));
         if (!laid.layout)
         {
             skip('program');
@@ -3802,7 +3914,7 @@ export function createRenderer(options){
             program: {
                 source: {
                     key: `${state.vertexShader}/ffp/${program.declarationId}/${shapes}/${stride}`
-                        + `/${pipelineKey(state)}`,
+                        + `${streamsKey(layout)}/${pipelineKey(state)}`,
                     vertex, pixel, layout,
                 },
                 declarationId: program.declarationId,
@@ -3927,12 +4039,22 @@ export function createRenderer(options){
      * @param {RenderModel} model
      * @param {PreparedDraw} prepared
      * @param {any} geometry
-     * @param {boolean} [scissored]  False for a draw that sets its own
-     *     scissor -- a partial clear, cut to its area already.
+     * @param {{ scissored?: boolean, bias?: number }} [drawing]
+     *     `scissored` false for a draw that sets its own scissor -- a partial
+     *     clear, cut to its area already; `bias` the vertices stream zero's
+     *     offset was folded into the first vertex as.
      */
-    const record = (model, prepared, geometry, scissored = true)=>{
+    const record = (model, prepared, geometry, drawing = {})=>{
         if (maxDraws >= 0 && kept >= maxDraws)
         {
+            return;
+        }
+        const streams = streamBindings(model,
+            prepared.layout?.streams ?? prepared.program?.source?.layout?.streams,
+            drawing.bias ?? 0);
+        if (!streams)
+        {
+            skip('stream');
             return;
         }
         kept++;
@@ -3954,7 +4076,7 @@ export function createRenderer(options){
             }
         }
         const frame = ensureViewport(model);
-        if (scissored)
+        if (drawing.scissored !== false)
         {
             ensureScissor(model, frame);
         }
@@ -3974,6 +4096,7 @@ export function createRenderer(options){
             stageBindings: prepared.stageBindings,
             program: prepared.program,
             ...geometry,
+            ...(streams.length === 0 ? {} : { streams }),
         });
     };
 
@@ -4160,7 +4283,8 @@ export function createRenderer(options){
      * draw's own shape are not in it: see `preparationKeyOf`, which adds them.
      *
      * @param {RenderModel} model
-     * @param {{ fvf: number, fixedFunctionLayout?: { id: number } | null }} processing
+     * @param {{ fvf: number, fixedFunctionLayout?: { id: number, streams?: number[] } | null }}
+     *     processing
      * @returns {number}
      */
     const stateNumberOf = (model, processing)=>{
@@ -4177,8 +4301,13 @@ export function createRenderer(options){
         };
         put(slowStateOf(model));
         put(processing.fvf);
-        // A declaration read without a format is told apart by its own id.
+        // A declaration read without a format is told apart by its own id,
+        // and by the strides its further streams are bound at.
         put(processing.fixedFunctionLayout?.id ?? 0);
+        for (const stream of processing.fixedFunctionLayout?.streams ?? [])
+        {
+            put(strideOf(model, stream));
+        }
         put(model.renderStates.size);
         for (const [state, value] of model.renderStates)
         {
@@ -4259,7 +4388,8 @@ export function createRenderer(options){
      * bytes, which change without the device hearing of it.
      *
      * @param {RenderModel} model
-     * @param {{ fvf: number, fixedFunctionLayout?: { id: number } | null }} processing
+     * @param {{ fvf: number, fixedFunctionLayout?: { id: number, streams?: number[] } | null }}
+     *     processing
      * @param {number} stride
      * @param {string} topology
      * @returns {string}
@@ -4431,7 +4561,7 @@ export function createRenderer(options){
             // counted -- the program was already told it succeeded -- and never
             // raised into the program's thread.
             const declared = processing.fixedFunctionLayout
-                ? layoutOfDeclaration(processing.fixedFunctionLayout, stride)
+                ? layoutOfDeclaration(processing.fixedFunctionLayout, stride, model)
                 : null;
             if (!declared)
             {
@@ -4441,8 +4571,9 @@ export function createRenderer(options){
             }
             layout = declared;
             vertexLayoutKey = `d${stride}:${declared.attributes
-                .map(attribute=>`${attribute.name}@${attribute.offset}:${attribute.format}`)
-                .join(',')}`;
+                .map(attribute=>`${attribute.name}@${attribute.stream ?? 0}.${attribute.offset}`
+                    + `:${attribute.format}`)
+                .join(',')}${streamsKey(declared)}`;
         }
         else
         {
@@ -4986,7 +5117,7 @@ export function createRenderer(options){
                     indices: null,
                     count: 6,
                     first: 0,
-                }, false);
+                }, { scissored: false });
             }
             frame.commands.push({ kind: 'scissor', rect: {
                 x: rect.x, y: rect.y, width: rect.width, height: rect.height,
@@ -5020,7 +5151,7 @@ export function createRenderer(options){
                 ...(rewrite
                     ? expandedGeometry(type, ascending(count), startVertex, fill)
                     : { indices: null, count, first: startVertex }),
-            });
+            }, { bias: streamZeroBias(model) });
             if (dumpDraws && prepared.program)
             {
                 dumpProgram(model, prepared, count);
@@ -5077,7 +5208,7 @@ export function createRenderer(options){
                     count,
                     first: 0,
                     baseVertex: model.baseVertexIndex,
-                });
+                }, { bias: streamZeroBias(model) });
                 if (dumpDraws && prepared.program)
                 {
                     dumpProgram(model, prepared, count);
@@ -5096,7 +5227,7 @@ export function createRenderer(options){
             record(model, prepared, {
                 vertices,
                 ...expandedGeometry(type, order, model.baseVertexIndex, fill),
-            });
+            }, { bias: streamZeroBias(model) });
             if (dumpDraws && prepared.program)
             {
                 dumpProgram(model, prepared, count);
@@ -5516,6 +5647,7 @@ export function createRenderer(options){
         });
         pass.setBindings(2, pipeline.bindGroupLayouts[2], sampled);
         pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
+        bindStreams(pass, command);
         if (command.indices)
         {
             pass.setIndexBuffer(command.indices.gpu, command.indices.format,
@@ -5684,6 +5816,7 @@ export function createRenderer(options){
             });
             pass.setBindings(0, pipeline.bindGroupLayout, entries);
             pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
+            bindStreams(pass, command);
             if (command.indices)
             {
                 pass.setIndexBuffer(command.indices.gpu, command.indices.format,
@@ -5717,6 +5850,7 @@ export function createRenderer(options){
                 pass.setPipeline(pipeline.gpu);
                 pass.setBindings(0, pipeline.bindGroupLayout, entries);
                 pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
+                bindStreams(pass, command);
                 if (command.indices)
                 {
                     pass.setIndexBuffer(command.indices.gpu, command.indices.format,
@@ -5874,6 +6008,7 @@ export function createRenderer(options){
                     pass.setBindings(0, drawPipeline.bindGroupLayout, drawEntries);
                     pass.setVertexBuffer(0, variant.vertices ?? command.vertices.gpu,
                         variant.vertices ? 0 : command.vertices.offset);
+                    bindStreams(pass, command);
                     if (command.indices)
                     {
                         if (variant.indices)

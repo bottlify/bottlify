@@ -202,7 +202,10 @@ test('a declaration the program made reports no format, even when it describes o
     assert.equal(device.release(), 0);
 });
 
-test('a draw through a declaration with no format succeeds and is reported once', ()=>{
+test('a draw through a declaration the fixed stage cannot read succeeds, reported once', ()=>{
+    // A colour of four bytes read R, G, B, A: the fixed-function stage reads
+    // D3DCOLOR alone. A declaration it can read -- a tangent beside the
+    // position, a member in another stream -- is drawn, and not reported.
     /** @type {string[]} */
     const reports = [];
     const { device } = make({ services: { divergence: (/** @type {string} */ _api,
@@ -211,7 +214,7 @@ test('a draw through a declaration with no format succeeds and is reported once'
     const made = {};
     device.CreateVertexDeclaration([
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
-        element(D3DDECLUSAGE.TANGENT, D3DDECLTYPE.FLOAT3, 12),
+        element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.UBYTE4N, 12),
     ], made);
     device.SetVertexDeclaration(made.declaration);
     /** @type {{ buffer?: any }} */

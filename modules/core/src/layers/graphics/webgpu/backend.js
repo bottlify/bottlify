@@ -156,7 +156,7 @@ export function createBackend(options){
                     vertex: {
                         module,
                         entryPoint: 'vertexMain',
-                        buffers: [descriptor.vertexLayout],
+                        buffers: descriptor.vertexBuffers,
                     },
                     fragment: {
                         module,

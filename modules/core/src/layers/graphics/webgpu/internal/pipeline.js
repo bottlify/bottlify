@@ -306,6 +306,32 @@ export function colorWriteMask(bits){
 }
 
 /**
+ * The vertex buffers a layout reads: stream zero's first, then one per
+ * further stream in the order the layout lists them, each with the
+ * attributes read from it.
+ *
+ * @param {number} stride  Stream zero's.
+ * @param {readonly { shaderLocation: number, offset: number, format: string,
+ *     stream?: number }[]} attributes
+ * @param {readonly { stream: number, stride: number }[]} [streams]
+ * @returns {{ arrayStride: number, stepMode: string,
+ *     attributes: { shaderLocation: number, offset: number, format: string }[] }[]}
+ */
+export function vertexBuffersOf(stride, attributes, streams = []){
+    return [{ stream: 0, stride }, ...streams].map(buffer=>({
+        arrayStride: buffer.stride,
+        stepMode: 'vertex',
+        attributes: attributes
+            .filter(attribute=>(attribute.stream ?? 0) === buffer.stream)
+            .map(attribute=>({
+                shaderLocation: attribute.shaderLocation,
+                offset: attribute.offset,
+                format: attribute.format,
+            })),
+    }));
+}
+
+/**
  * The descriptor for the state, less the shader modules and layout, which the
  * caller supplies because it owns compilation and binding.
  *
@@ -342,6 +368,9 @@ export function pipelineDescriptor(state, layout){
         }
         : undefined;
 
+    const vertexBuffers = layout === null
+        ? undefined
+        : vertexBuffersOf(layout.stride, layout.attributes, layout.streams);
     return {
         primitive: {
             topology: state.topology === undefined ? 'triangle-list' : state.topology,
@@ -350,17 +379,8 @@ export function pipelineDescriptor(state, layout){
         },
         depthStencil: depth,
         multisample: { count: state.sampleCount === undefined ? 1 : state.sampleCount },
-        vertexLayout: layout === null
-            ? undefined
-            : {
-                arrayStride: layout.stride,
-                stepMode: 'vertex',
-                attributes: layout.attributes.map(attribute=>({
-                    shaderLocation: attribute.shaderLocation,
-                    offset: attribute.offset,
-                    format: attribute.format,
-                })),
-            },
+        vertexLayout: vertexBuffers?.[0],
+        vertexBuffers,
         target: {
             format: state.targetFormat,
             blend,

@@ -1070,6 +1070,7 @@ function createDeviceObject(parameters, caps, services, identity){
         get stream(){
             return stream(0);
         },
+        streamAt: stream,
         get scissor(){
             return scissor;
         },
@@ -1230,11 +1231,11 @@ function createDeviceObject(parameters, caps, services, identity){
             // The renderer builds the program and says what it could not.
             return;
         }
-        if (vertexDeclaration.declaration && effectiveFvf() === 0)
+        if (vertexDeclaration.declaration && effectiveFvf() === 0 && !fixedFunctionLayout())
         {
             report('declaration',
-                'a draw through a vertex declaration that describes no flexible vertex'
-                + ' format was not drawn: the fixed-function renderer reads formats only');
+                'a draw through a vertex declaration the fixed-function stage cannot read'
+                + ' was not drawn');
         }
     };
 

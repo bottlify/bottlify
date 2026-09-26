@@ -25,7 +25,7 @@
  *   its blocks into the same groups.
  */
 
-import { pipelineDescriptor, pipelineKey } from './pipeline.js';
+import { pipelineDescriptor, pipelineKey, vertexBuffersOf } from './pipeline.js';
 
 /**
  * D3DDECLTYPE → the WebGPU vertex format, and the shape the shader reads.
@@ -77,8 +77,11 @@ export const DECLTYPE_ATTRIBUTE = Object.freeze({
 
 /**
  * @typedef {Object} VertexInputLayout
- * @property {number} stride
- * @property {{ shaderLocation: number, offset: number, format: string }[]} attributes
+ * @property {number} stride  Stream zero's.
+ * @property {{ shaderLocation: number, offset: number, format: string,
+ *     stream?: number }[]} attributes
+ * @property {{ stream: number, stride: number }[]} [streams]
+ *     The further streams read, each a vertex buffer after stream zero's.
  * @property {Map<number, { components: number, scalar: 'f32' | 'u32' | 'i32', bgra: boolean }>}
  *           shapes   By register, for the inputs the declaration supplies.
  */
@@ -86,19 +89,24 @@ export const DECLTYPE_ATTRIBUTE = Object.freeze({
 /**
  * The vertex layout a declaration gives the inputs a shader declares.
  *
- * Only stream zero is read: the renderer binds one vertex buffer. An input
- * the declaration has no element for is left out, and the shader reads it as
- * the default vertex; an element of a type WebGPU cannot deliver, or one in
- * another stream, refuses the whole layout.
+ * Each element is read from its own stream, a vertex buffer per stream at the
+ * stride that stream is bound with. An input the declaration has no element
+ * for is left out, and the shader reads it as the default vertex; an element
+ * of a type WebGPU cannot deliver, or past its stream's stride, refuses the
+ * whole layout.
  *
  * @param {readonly VertexElement[]} elements
  * @param {readonly DeclaredInput[]} wanted
- * @param {number} stride  The bound stream's.
+ * @param {number} stride  Stream zero's.
+ * @param {(stream: number) => number} [strideOf]
+ *     A further stream's stride; zero reads every vertex from its start.
  * @returns {{ layout: VertexInputLayout | null, error: string | null }}
  */
-export function vertexLayoutOf(elements, wanted, stride){
+export function vertexLayoutOf(elements, wanted, stride, strideOf = ()=>0){
     /** @type {VertexInputLayout} */
     const layout = { stride, attributes: [], shapes: new Map() };
+    /** @type {Map<number, number>} */
+    const streams = new Map();
     for (const input of wanted)
     {
         const element = elements.find(one=>
@@ -107,25 +115,33 @@ export function vertexLayoutOf(elements, wanted, stride){
         {
             continue;
         }
-        if (element.Stream !== 0)
-        {
-            return { layout: null, error: `element in stream ${element.Stream}` };
-        }
         const attribute = DECLTYPE_ATTRIBUTE[element.Type];
         if (!attribute)
         {
             return { layout: null, error: `element type ${element.Type}` };
         }
-        if (element.Offset + attribute.bytes > stride)
+        const own = element.Stream === 0 ? stride : strideOf(element.Stream);
+        if (element.Stream !== 0)
         {
-            return { layout: null, error: `element past the stride of ${stride}` };
+            streams.set(element.Stream, own);
+        }
+        if (own !== 0 && element.Offset + attribute.bytes > own)
+        {
+            return { layout: null, error: `element past the stride of ${own}` };
         }
         layout.attributes.push({
             shaderLocation: input.location, offset: element.Offset, format: attribute.format,
+            ...(element.Stream === 0 ? {} : { stream: element.Stream }),
         });
         layout.shapes.set(input.register, {
             components: attribute.components, scalar: attribute.scalar, bgra: attribute.bgra,
         });
+    }
+    if (streams.size > 0)
+    {
+        layout.streams = [...streams.entries()]
+            .sort(([left], [right])=>left - right)
+            .map(([stream, own])=>({ stream, stride: own }));
     }
     return { layout, error: null };
 }
@@ -262,11 +278,8 @@ export function createProgramCache({ backend }){
                         vertex: {
                             module: vertexModule,
                             entryPoint: program.vertex.entry,
-                            buffers: [{
-                                arrayStride: program.layout.stride,
-                                stepMode: 'vertex',
-                                attributes: program.layout.attributes,
-                            }],
+                            buffers: vertexBuffersOf(program.layout.stride,
+                                program.layout.attributes, program.layout.streams),
                         },
                         fragment: {
                             module: pixelModule,

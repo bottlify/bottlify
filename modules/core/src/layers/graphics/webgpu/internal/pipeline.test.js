@@ -100,6 +100,33 @@ test('every field the descriptor reads is a field the key folds', ()=>{
     }
 });
 
+test('a layout over several streams is one vertex buffer per stream, in stream order', ()=>{
+    // Direct3D binds up to sixteen streams and a declaration reads each
+    // member from its own; WebGPU's vertex buffers are the same idea, one slot
+    // per stream the layout reads, stream zero first.
+    const descriptor = pipelineDescriptor(/** @type {any} */ (baseState()), {
+        stride: 16,
+        attributes: [
+            { name: 'position', shaderLocation: 0, offset: 0, format: 'float32x3' },
+            { name: 'diffuse', shaderLocation: 1, offset: 4, format: 'unorm8x4', stream: 3 },
+            { name: 'specular', shaderLocation: 2, offset: 0, format: 'unorm8x4', stream: 1 },
+        ],
+        streams: [{ stream: 1, stride: 0 }, { stream: 3, stride: 8 }],
+        preTransformed: false,
+        texCoordSets: 0,
+        blendWeights: 0,
+    });
+    assert.deepEqual(descriptor.vertexBuffers, [
+        { arrayStride: 16, stepMode: 'vertex',
+            attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] },
+        { arrayStride: 0, stepMode: 'vertex',
+            attributes: [{ shaderLocation: 2, offset: 0, format: 'unorm8x4' }] },
+        { arrayStride: 8, stepMode: 'vertex',
+            attributes: [{ shaderLocation: 1, offset: 4, format: 'unorm8x4' }] },
+    ]);
+    assert.deepEqual(descriptor.vertexLayout, descriptor.vertexBuffers[0]);
+});
+
 test('the same state gives the same key, every time', ()=>{
     assert.equal(pipelineKey(baseState()), pipelineKey(baseState()));
     // Exact, because a key is compared by value and a diagnostic prints it.

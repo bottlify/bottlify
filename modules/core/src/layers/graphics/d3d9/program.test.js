@@ -742,6 +742,56 @@ test('a declaration the GPU cannot deliver is declined with the reason', async()
     assert.equal(h.device.release(), 0);
 });
 
+test('a shader pair reads a member of another stream from that stream\'s buffer', async()=>{
+    // A declaration may put each member in a stream of its own; the shader
+    // reads the colour from stream 1, bound at its own stride, as a second
+    // vertex buffer after stream zero's.
+    const h = harness();
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    h.device.CreateVertexShader(VERTEX_SHADER, vs);
+    h.device.CreatePixelShader(PIXEL_SHADER, ps);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    /** @type {{ declaration?: any }} */
+    const split = {};
+    assert.equal(h.device.CreateVertexDeclaration([
+        { Stream: 0, Offset: 0, Type: D3DDECLTYPE.FLOAT3, Method: 0,
+            Usage: D3DDECLUSAGE.POSITION, UsageIndex: 0 },
+        { Stream: 1, Offset: 0, Type: D3DDECLTYPE.D3DCOLOR, Method: 0,
+            Usage: D3DDECLUSAGE.COLOR, UsageIndex: 0 },
+    ], split), D3D_OK);
+    h.device.SetVertexDeclaration(split.declaration);
+    /** @type {{ buffer?: any }} */
+    const colours = {};
+    assert.equal(h.device.CreateVertexBuffer(12, 0, 0, D3DPOOL.MANAGED, colours), D3D_OK);
+    assert.equal(h.device.SetStreamSource(1, colours.buffer, 0, 4), D3D_OK);
+    await h.draw();
+    assert.deepEqual(h.reports, []);
+    assert.equal(h.device.diagnostics().skipped.program, 0);
+    const [pipeline] = h.gpu.of('createRenderPipeline').map(call=>call.descriptor);
+    assert.deepEqual(pipeline.vertex.buffers.map((/** @type {any} */ buffer)=>
+        [buffer.arrayStride, buffer.attributes.map((/** @type {any} */ a)=>a.format)]),
+    [[STRIDE, ['float32x3']], [4, ['unorm8x4']]]);
+    assert.equal(h.gpu.of('setVertexBuffer').filter(call=>call.slot === 1).length, 1);
+
+    h.device.SetVertexShader(null);
+    h.device.SetPixelShader(null);
+    h.device.SetVertexDeclaration(null);
+    h.device.SetStreamSource(0, null, 0, 0);
+    h.device.SetStreamSource(1, null, 0, 0);
+    vs.shader.release();
+    ps.shader.release();
+    split.declaration.release();
+    colours.buffer.release();
+    h.texture.release();
+    h.declaration.release();
+    h.vb.release();
+    assert.equal(h.device.release(), 0);
+});
+
 test('draws that change only their constants share a preparation and read their own', async()=>{
     // The shape of a shader-drawn frame: constants set before every draw and
     // nothing else. The translations and pipeline state are made once for the

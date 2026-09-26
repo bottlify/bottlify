@@ -769,14 +769,73 @@ test('a fixed-function draw reads a declaration no format spells at its offsets'
 });
 
 test('a declaration the fixed-function stage cannot read is dropped, not raised', async()=>{
-    // A colour in a second stream: this stage reads one stream. The draw must
-    // not throw into the program's thread; it is counted and said once.
+    // A colour of four bytes read as R, G, B, A: this stage reads D3DCOLOR.
+    // The draw must not throw into the program's thread; it is counted and
+    // said once.
     const h = harness();
     const { device } = h;
-    colourFirstDeclaration(device, 1);
+    /** @type {{ declaration?: any }} */
+    const made = {};
+    assert.equal(device.CreateVertexDeclaration([
+        { Stream: 0, Offset: 0, Type: D3DDECLTYPE.UBYTE4N, Method: 0,
+            Usage: D3DDECLUSAGE.COLOR, UsageIndex: 0 },
+        { Stream: 0, Offset: 4, Type: D3DDECLTYPE.FLOAT4, Method: 0,
+            Usage: D3DDECLUSAGE.POSITIONT, UsageIndex: 0 },
+    ], made), D3D_OK);
+    assert.equal(device.SetVertexDeclaration(made.declaration), D3D_OK);
     assert.equal(device.BeginScene(), D3D_OK);
     assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK);
     assert.equal(device.EndScene(), D3D_OK);
     await h.present();
     assert.equal(device.diagnostics().skipped.layout, 1);
+});
+
+test('a fixed-function draw reads a member in another stream from that stream', async()=>{
+    // Wine's d3d9 test_color_vertex: a declaration with its diffuse colour in
+    // stream 1 draws through the fixed-function stage; with stream 1 bound the
+    // colour is read from that buffer at its stride, and with nothing bound
+    // there -- the Wine test's DrawPrimitiveUP -- it reads as zero, which is
+    // what the test's lit colours come out as.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    colourFirstDeclaration(device, 1);
+    const positions = new DataView(new ArrayBuffer(60));
+    [[1, 1], [7, 1], [1, 4]].forEach(([x, y], index)=>{
+        positions.setFloat32(index * 20 + 4, x, true);
+        positions.setFloat32(index * 20 + 8, y, true);
+        positions.setFloat32(index * 20 + 12, 0.5, true);
+        positions.setFloat32(index * 20 + 16, 1, true);
+    });
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1,
+        new Uint8Array(positions.buffer), 20), D3D_OK);
+    /** @type {{ buffer?: any }} */
+    const colours = {};
+    assert.equal(device.CreateVertexBuffer(12, 0, 0, D3DPOOL.MANAGED, colours), D3D_OK);
+    assert.equal(device.SetStreamSource(1, colours.buffer, 0, 4), D3D_OK);
+    /** @type {{ buffer?: any }} */
+    const vertices = {};
+    assert.equal(device.CreateVertexBuffer(60, 0, 0, D3DPOOL.MANAGED, vertices), D3D_OK);
+    assert.equal(device.SetStreamSource(0, vertices.buffer, 0, 20), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    assert.equal(device.diagnostics().skipped.layout, 0);
+    const pipelines = h.gpu.of('createRenderPipeline')
+        .map((/** @type {any} */ call)=>call.descriptor.vertex.buffers)
+        .filter((/** @type {any[]} */ buffers)=>buffers.length === 2);
+    assert.deepEqual(pipelines.map((/** @type {any[]} */ buffers)=>buffers.map(buffer=>
+        [buffer.arrayStride, buffer.attributes.map((/** @type {any} */ a)=>a.offset)])), [
+        [[20, [4]], [0, [0]]],
+        [[20, [4]], [4, [0]]],
+    ], 'stream 1 as its own buffer: unbound at a stride of nothing, then at its own');
+    const bound = h.gpu.of('setVertexBuffer')
+        .filter((/** @type {any} */ call)=>call.slot === 1)
+        .map((/** @type {any} */ call)=>call.buffer.descriptor.label);
+    assert.equal(bound.length, 2);
+    assert.match(bound[0], /zero/, 'nothing bound reads as zero');
+    assert.doesNotMatch(bound[1], /zero/, 'and the bound buffer after');
+    colours.buffer.release();
+    vertices.buffer.release();
 });
