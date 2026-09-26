@@ -515,13 +515,32 @@ test('a target smaller than the bound depth surface gets a depth of its own size
     small.surface.release();
 });
 
-test('a viewport wider than its target is refused', ()=>{
+test('a viewport past its target is taken, and draws keep its mapping', async()=>{
+    // Wine's d3d9 test_viewport: (0, 0, 1280, 960) and (100, 100, 640, 480) on
+    // a 640x480 target are D3D_OK, and the picture is the viewport's mapping
+    // cut to the target. Direct3D 8 refuses the same viewports.
     const h = harness({ width: 8, height: 8 });
+    const wide = { X: 4, Y: 2, Width: 8, Height: 16, MinZ: 0, MaxZ: 1 };
+    assert.equal(h.device.SetViewport(wide), D3D_OK);
+    /** @type {{ viewport?: any }} */
+    const out = {};
+    assert.equal(h.device.GetViewport(out), D3D_OK);
+    assert.deepEqual(out.viewport, wide);
+    assert.notEqual(
+        h.device.SetViewport({ X: 0, Y: 0, Width: 0, Height: 8, MinZ: 0, MaxZ: 1 }), D3D_OK,
+        'an empty one is still refused');
 
-    assert.notEqual(
-        h.device.SetViewport({ X: 4, Y: 0, Width: 8, Height: 8, MinZ: 0, MaxZ: 1 }), D3D_OK);
-    assert.notEqual(
-        h.device.SetViewport({ X: 0, Y: 0, Width: 0, Height: 8, MinZ: 0, MaxZ: 1 }), D3D_OK);
+    assert.equal(h.device.SetFVF(FVF_TRIANGLE), D3D_OK);
+    assert.equal(h.device.BeginScene(), D3D_OK);
+    assert.equal(h.device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, Uint8Array.from([
+        ...vertex(4, 2, argb(255, 0, 0)), ...vertex(12, 2, argb(255, 0, 0)),
+        ...vertex(4, 18, argb(255, 0, 0)),
+    ]), TRIANGLE_STRIDE), D3D_OK);
+    assert.equal(h.device.EndScene(), D3D_OK);
+    await h.present();
+    const viewports = h.gpu.of('setViewport').map((/** @type {any} */ call)=>call.rect);
+    assert.ok(viewports.some((/** @type {number[]} */ args)=>args[0] === 4 && args[1] === 2
+        && args[2] === 8 && args[3] === 16), 'the viewport reaches the pass as it was set');
 });
 
 test('a stream whose offset straddles the stride is refused rather than drawn wrong', ()=>{

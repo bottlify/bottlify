@@ -2683,10 +2683,10 @@ function createDeviceObject(parameters, caps, services, identity){
          *           MinZ?: number, MaxZ?: number }} value
          */
         SetViewport(value){
-            const target = describe(renderTargets.get(0));
-            if (!value || !(value.Width > 0) || !(value.Height > 0) || value.X < 0 || value.Y < 0
-                || value.X + value.Width > target.Width
-                || value.Y + value.Height > target.Height)
+            // A viewport may reach past the target: what falls outside it is
+            // not drawn, and what falls inside keeps the viewport's mapping.
+            // Direct3D 8 refuses the same rectangle; this version takes it.
+            if (!value || !(value.Width > 0) || !(value.Height > 0) || value.X < 0 || value.Y < 0)
             {
                 return D3DERR_INVALIDCALL;
             }
