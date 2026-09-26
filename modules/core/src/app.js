@@ -72,11 +72,12 @@ import { loadZstdWasm } from './zstd-wasm.js';
  *           machine and not something a caller supplies.
  * @property {Object} [system]            The engine's own read-only volume.
  * @property {{ path: string, bytes: Uint8Array }[]} [system.files]
- *           Files to mount under `C:\WINDOWS\system32\`, a name each: the
- *           DirectX runtime a title links against. Absent, the volume has no
- *           system layer and a `d3dx9_*` name answers from the engine's own
- *           table, as it did before this existed. The bytes are handed in the
- *           same way the decoder's are, because which build carries them is the
+ *           Files to mount read-only under `C:\WINDOWS\system32\`, a name
+ *           each, as though the machine had always had them. The engine carries
+ *           none of its own: a library a title's installer puts there (the
+ *           DirectX setup's `d3dx9_*`) is written to the drive like any other
+ *           file. Absent, the volume has no system layer. The bytes are handed
+ *           in the way the decoder's are, because what a build carries is the
  *           assembling caller's decision.
  * @property {number} [stackSize]
  * @property {number} [memorySize]   Guest RAM in bytes; a power of two.
@@ -1221,8 +1222,7 @@ export const SYSTEM_VOLUME_DIRECTORY = 'WINDOWS\\system32';
  * The paths the caller gave are bare names -- `d3dx9_26.dll` -- because that is
  * what a runtime directory is; where they appear is this engine's decision and
  * is the same place Windows keeps them. Absent any files the volume has no
- * system layer at all, and a `d3dx9_*` name is answered by the engine's own
- * table, exactly as it was before this route existed.
+ * system layer at all.
  *
  * @param {any} system  The `system` option, or nothing.
  * @returns {import('./layers/filesystem/internal/memory-store.js').SourceStore | null}
@@ -1273,8 +1273,8 @@ export function libraryCandidates(name, imagePath){
  *
  * The order matters because the bytes decide whether a real PE is mapped or a
  * synthesised table stands in for one, and the two answer different exports.
- * A title that shipped its own `d3dx9_26.dll` gets that file; one that did not
- * gets the runtime the engine mounted in `C:\WINDOWS\system32\`.
+ * A title that shipped its own `d3dx9_26.dll` gets that file; one whose
+ * installer put the runtime in `C:\WINDOWS\system32\` gets that one.
  *
  * @param {any} filesystem
  * @param {any} blocks       The bundle fetcher, or null when there is no bundle.
@@ -1672,8 +1672,8 @@ export async function mapShippedLibraries(options){
      * The first place a bare library name is on the volume: beside the program,
      * then the system directories. Where it was found is what the module is
      * recorded as living at, so a program reading its own loaded path off a
-     * library gets the directory it is really in -- a `d3dx9_26` off the
-     * system volume belongs in `system32`, not beside the executable.
+     * library gets the directory it is really in -- a `d3dx9_26` an installer
+     * put in `system32` belongs there, not beside the executable.
      *
      * @param {string} name
      * @returns {string}
@@ -1759,9 +1759,9 @@ export async function mapShippedLibraries(options){
             // Where it came from. A program asks a library where it lives and
             // then looks for its own data beside it, so this has to be the
             // directory the file was really found in -- a library the program
-            // brought lives beside it, and one the engine supplied out of the
-            // system volume lives in `system32`, where a program that walks
-            // its own installation expects to find it.
+            // brought lives beside it, and one found in `system32` lives
+            // there, where a program that walks its own installation expects
+            // to find it.
             path: placeOf(name),
         };
         byName.set(name.toLowerCase().replace(/\.dll$/, ''), held);
@@ -2731,10 +2731,9 @@ async function buildApp(options){
 
     const core = await assembleModules({
         filesystem: {
-            // The runtime lives in the volume before the bundle is mounted, so
-            // every drive gets it: a title finds a `d3dx9_*` in `system32` the
-            // way it does on a real machine, and the bundle's own copy, when it
-            // has one, still wins.
+            // The host's own files live in the volume before the bundle is
+            // mounted, so every drive gets them, and the bundle's own copy of
+            // one, when it has one, still wins.
             system: systemVolume(options.system),
         },
         kernel: {

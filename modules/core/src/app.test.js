@@ -436,9 +436,9 @@ test('a redistributable runtime is answered by the engine whoever brought a copy
 });
 
 test('a library missing beside the program is read from the system volume', async()=>{
-    // The runtime a title links against lives in `system32`, put there by the
-    // engine the way `DXSETUP` puts it there on a real machine. A search that
-    // stopped beside the executable would report every one of them missing.
+    // The runtime a title links against lives in `system32`, where its
+    // installer's `DXSETUP` put it. A search that stopped beside the
+    // executable would report every one of them missing.
     const d3dx = new Uint8Array([1, 2, 3, 4]);
     const filesystem = await filesystemModule.create({
         system: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }),

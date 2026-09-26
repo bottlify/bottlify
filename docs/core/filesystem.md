@@ -184,15 +184,14 @@ engine; `src/bundle.js` (`@bottlify/core/bundle`) publishes the constants and ch
 
 ### The system volume
 
-A second read-only layer sits under the bundle: the engine's own volume, mounted at
-`C:\WINDOWS\system32\`. It is where the DirectX End-User Runtime's side-by-side DLLs live — the
-`d3dx9_*`, `d3dx10_*`, `d3dx11_*`, `d3dcompiler_*`, `xinput*`, `x3daudio*`, `xactengine*`,
-`xapofx*` and `xaudio2_*` set — because on a real machine DXSETUP puts them in `system32` and a
-title finds them there. The engine plays that role: `createApp` builds this layer from the files it
-is handed (`system.files`, bare names) and the layer prefixes them with the system directory. A
-title's own file of the same name, in the bundle, still wins; the runtime is the fallback that lets
-a title that only ever imported `D3DXCreateEffect` from the redistributable run without the DLL
-being added to its bundle. The layer is refused for writing as a volume, not merely as a source.
+A second read-only layer can sit under the bundle: the engine's own volume, mounted at
+`C:\WINDOWS\system32\`, holding whatever files the host hands `createApp` as `system.files` (bare
+names, which the layer prefixes with the system directory) as though the machine had always had
+them. The engine carries none of its own, and the build packages none: the DirectX End-User
+Runtime's side-by-side DLLs (`d3dx9_*`, `d3dcompiler_*` and the rest) are put in `system32` by the
+setup a title's installer runs, as on a machine that never had them, and land in the writable
+layer like any other file an installer writes. A title's own file of the same name, in the bundle,
+still wins over this layer. The layer is refused for writing as a volume, not merely as a source.
 
 ### The session (what the program wrote)
 

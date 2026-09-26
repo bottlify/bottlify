@@ -156,9 +156,9 @@ are answered from the table the same way, whoever's copy the program brought: th
 that such a runtime is ours (`roadmap/decisions.md`), and a copy found first runs the whole decoder
 as emulated x86 (`answeredByEngine` in `src/app.js`). The
 search order is `libraryCandidates` in `src/app.js`: the program's own directory first, then
-`C:\WINDOWS\system32\` and `C:\WINDOWS\`, which is where the engine mounts the DirectX runtime —
-so a title that imported `d3dx9_26.dll` without shipping one is bound to the real redistributable
-in the system volume, not to the engine's `d3dx9_*` table. The run-time `LoadLibrary` path makes
+`C:\WINDOWS\system32\` and `C:\WINDOWS\`, which is where a title's DirectX setup puts the runtime —
+so a title that imported `d3dx9_26.dll` without shipping one, once its installer has run, is bound
+to the real redistributable in `system32`, not to the engine's `d3dx9_*` table. The run-time `LoadLibrary` path makes
 the same choice. Then the assembler places a `process-startup` arena. The name/base module table
 (`byName`, `byBase`, `addressOf`, `addressOfOrdinal`, `attached`) lives in `src/app.js`, not in
 this layer; `list()` here is the flat record of what was placed.

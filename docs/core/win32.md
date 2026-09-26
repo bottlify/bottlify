@@ -122,7 +122,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `WSOCK32.dll`, `WS2_32.dll` | `wsock32/` | 38 each | One socket registry under both names, over an injected adapter (loopback by default); readiness delivered as a window message (`WSAAsyncSelect`) or a signalled kernel event (`WSAEventSelect`/`WSAEnumNetworkEvents`), and name resolution the same way (`WSAAsyncGetHostByName`/`WSACancelAsyncRequest`). |
 | `SHELL32.dll` | `shell32/` | 21 | Launching a program (`ShellExecute`, `ShellExecuteEx`, `FindExecutable`), documented refusals where a registry or a person is needed (a document's handler, folder browse), the drag-and-drop truths, the namespace (`namespace.js`: `IShellFolder`/`IEnumIDList` over the volume), and `CLSID_ShellLink` (`IShellLinkA/W`, `IPersistFile`). |
 | `COMCTL32.dll` | `comctl32/` | 17 | Image lists (indices only), mouse tracking, and `msctls_progress32`/`SysTreeView32` as built-in window classes. |
-| `d3dx9_25.dll`, `d3dx9_26.dll`, `d3dx9_27.dll` | `d3dx9/` | 13 each | Stub tables for the D3DX helper libraries, shadowed by the real DLL whenever the DirectX system volume is mounted and a program does not ship its own ([`decisions.md`](../../roadmap/decisions.md)). |
+| `d3dx9_25.dll`, `d3dx9_26.dll`, `d3dx9_27.dll` | `d3dx9/` | 13 each | Stub tables for the D3DX helper libraries, shadowed by the real DLL wherever the program ships one or its installer put one in `system32` ([`decisions.md`](../../roadmap/decisions.md)). |
 | `WININET.dll` | `wininet/` | 12 | HTTP as a handle tree; a request parks the caller. |
 | `IMM32.dll` | `imm32/` | 10 | "There is no input method" — which is the state a game asks for. |
 | `RPCRT4.dll` | `rpcrt4/` | 6 | `UuidCreate` and the other GUID/status helpers a COM-adjacent program links directly. |
@@ -484,14 +484,14 @@ implements).
   procedure runs after every control exists and has set itself up, and before a template's
   `WS_VISIBLE` shows the window — so a program that fills in a control from that handler finds it
   already filled when the window first appears (`user32/dialogs.js`).
-- **A redistributable installer is a child that has already finished.** `CreateProcess` on
-  `DXSETUP.exe`/`DXWebSetup.exe`, a `vcredist*`/`vc_redist*`, a `dotnetfx*`/`ndp*`/`netfx*`, or
-  anything under a `DirectX\` directory answers a process record created `completed`: exit code 0
-  from the start, and never the process this one hands over to. `WaitForSingleObject`,
-  `WaitForMultipleObjects` and `GetExitCodeProcess` on it all return at once rather than parking for
-  a runtime the engine already carries itself — the DirectX DLLs on its system volume, the C
-  runtime under `msvcrt` — and would otherwise wait for a child that never runs
-  (`kernel32/spawn.js`, `isRedistributableInstaller`).
+- **A redistributable installer is a child that has already finished.** `CreateProcess` on a
+  `vcredist*`/`vc_redist*`, a `dotnetfx*`/`ndp*`/`netfx*` or `oalinst.exe` answers a process record
+  created `completed`: exit code 0 from the start, and never the process this one hands over to.
+  `WaitForSingleObject`, `WaitForMultipleObjects` and `GetExitCodeProcess` on it all return at once
+  rather than parking for a runtime the engine answers for itself — the C runtime under `msvcrt`
+  (`kernel32/spawn.js`, `isRedistributableInstaller`). The DirectX setup (`DXSETUP.exe`) is not
+  one of them: the engine carries no copy of the `d3dx`/`d3dcompiler` libraries it installs, so it
+  runs as the child it is and puts them in `system32`.
 
 ## 4. Limitations and divergences
 

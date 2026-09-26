@@ -68,7 +68,7 @@ test('diagnostics name what is waiting to run', ()=>{
 test('a completed child is never what this process hands over to', ()=>{
     const table = createProcessTable();
     const done = table.create({
-        imagePath: 'DXSETUP.exe', commandLine: 'DXSETUP.exe', completed: true,
+        imagePath: 'vcredist_x86.exe', commandLine: 'vcredist_x86.exe', completed: true,
     });
     const ready = table.create({ imagePath: 'game.exe', commandLine: 'game' });
 
@@ -82,7 +82,7 @@ test('a completed child is never what this process hands over to', ()=>{
     // Even resumed, a completed child does not become pending: there is nothing
     // to run.
     table.create({
-        imagePath: 'DXSETUP.exe', commandLine: 'DXSETUP.exe',
+        imagePath: 'vcredist_x86.exe', commandLine: 'vcredist_x86.exe',
         suspended: true, completed: true,
     });
     assert.equal(table.pending(), ready);

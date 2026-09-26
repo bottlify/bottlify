@@ -68,27 +68,29 @@ const isQualified = path=>/^[A-Za-z]:[\\/]/.test(path) || /^[\\/]/.test(path);
  * The redistributables whose job the engine already does.
  *
  * On a real machine these put side-by-side runtimes into `system32` and the
- * registry: the DirectX End-User Runtime's `DXSETUP`, the Visual C++
- * redistributable, the .NET runtime. The engine carries those itself -- the
- * DirectX DLLs on its system volume, the C runtime under `msvcrt` -- so there
- * is nothing for the child to install, and a game that starts one and waits
- * for it would otherwise wait for ever on a process this engine never runs.
- * The request is answered as a process that has run and exited 0, which is the
- * same decision already made for a shortcut.
+ * registry: the Visual C++ redistributable, the .NET runtime, OpenAL's
+ * installer. The engine answers for those itself -- the C runtime under
+ * `msvcrt` -- so there is nothing for the child to install. The request is
+ * answered as a process that has run and exited 0, which is the same decision
+ * already made for a shortcut.
+ *
+ * The DirectX End-User Runtime's `DXSETUP` is not one of them. What it
+ * installs beyond the interfaces the drawing layer answers for -- the `d3dx`
+ * helpers, the shader compilers -- is Microsoft's code the engine does not
+ * carry, so the setup a title brings runs like any other child and puts them in
+ * `system32`, where the loader finds them.
  *
  * The name is what the child is, and never the title that started it, so an
- * installer is treated the same whatever bundle it came in. `DirectX\*.exe` is
- * the redistributable's own subdirectory, which is where `DXSETUP` sits.
+ * installer is treated the same whatever bundle it came in.
  */
-const REDISTRIBUTABLE = /(^|[\\/])(dxsetup|dxwebsetup|directx(_[^\\/]*)?|vcredist[^\\/]*|vc_redist[^\\/]*|dotnetfx[^\\/]*|ndp[^\\/]*|netfx[^\\/]*|oalinst)\.exe$/i;
-const IN_DIRECTX_DIRECTORY = /[\\/]directx[\\/][^\\/]+\.exe$/i;
+const REDISTRIBUTABLE = /(^|[\\/])(vcredist[^\\/]*|vc_redist[^\\/]*|dotnetfx[^\\/]*|ndp[^\\/]*|netfx[^\\/]*|oalinst)\.exe$/i;
 
 /**
  * @param {string} path
  * @returns {boolean}
  */
 export function isRedistributableInstaller(path){
-    return REDISTRIBUTABLE.test(path) || IN_DIRECTX_DIRECTORY.test(path);
+    return REDISTRIBUTABLE.test(path);
 }
 
 /** @param {string} path The directory part, separator included. */

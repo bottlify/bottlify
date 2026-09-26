@@ -127,11 +127,10 @@ export const filesystemModule = {
             }
             state.drives.set(key, createOverlay({
                 source: stores?.source ?? null,
-                // The engine's own volume, beneath every bundle: the runtime a
-                // title links against lives here the way it lives in `system32`
-                // on a real machine, and no title may write to it. A per-mount
-                // store overrides the configured one, which is how a test drives
-                // it without a module around it.
+                // The engine's own volume, beneath every bundle: what a host
+                // mounts in `system32` as the machine's own, which no title may
+                // write to. A per-mount store overrides the configured one,
+                // which is how a test drives it without a module around it.
                 system: stores?.system ?? config?.system ?? null,
                 writable: stores?.writable ?? createMemoryStore(),
                 now: config?.now,

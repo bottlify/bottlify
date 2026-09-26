@@ -19,7 +19,6 @@
     "fetch:corpus": "npm run fetch:corpus -w @bottlify/cork",
     "fetch:video-decoder": "npm run fetch:video-decoder -w @bottlify/core",
     "fetch:zstd": "npm run fetch:zstd -w @bottlify/core",
-    "fetch:directx-runtime": "npm run fetch:directx-runtime -w @bottlify/core",
     "verify:reproducibility": "npm run verify:reproducibility -w @bottlify/core",
     "typecheck": "npm run typecheck -w @bottlify/core && npm run typecheck -w @bottlify/networking && npm run typecheck -w @bottlify/installer && npm run typecheck -w @bottlify/cork",
     "lint": "eslint . --max-warnings 0",

@@ -396,3 +396,11 @@ the engine ships the June 2010 DirectX End-User Runtime as a read-only system vo
 loader runs the real `d3dx9_24…43.dll` from it whenever a program doesn't bring its own; the
 engine's own `d3dx9_25`/`26`/`27` stub tables (`layers/win32/d3dx9/`) still answer a program that
 ships neither — the fallback now, not the primary path. *2026-09-07, `42e8e9bc`.*
+Reconsidered: the engine no longer carries the DirectX End-User Runtime. It was Microsoft's binary
+fetched into every build to stand in for a setup the engine answered as already run, so a title's
+installer never ran the `DXSETUP` it brought, and whatever that setup could not do here stayed
+hidden behind a runtime nobody installed. The setup a title brings now runs as the child it is
+and puts the `d3dx`/`d3dcompiler` libraries in `system32`, where the loader already looks; the
+engine's `d3dx9_*` stub tables answer a program whose installer never ran. The Visual C++ and
+.NET redistributables are still answered as already run, since the engine carries the C runtime
+itself. *2026-09-26.*

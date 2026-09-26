@@ -11,7 +11,7 @@
  *
  * There are two read-only layers. `source` is the bundle, and a title owns the
  * files in it: writing one copies it up, and deleting one leaves a tombstone.
- * `system` is the engine's own volume -- the DirectX runtime under
+ * `system` is the engine's own volume -- files a host mounts under
  * `C:\WINDOWS\system32\` -- and it is genuinely read-only: a write is refused,
  * the way writing a system directory is refused on a machine where the program
  * is not an administrator. The bundle wins where both name a file.
@@ -239,8 +239,8 @@ export function createOverlay({
 
     /**
      * A node that only the engine's volume holds. Its bytes are not a title's
-     * to change: the runtime was put there by the engine the way `DXSETUP`
-     * puts it in `system32`, and a write is a mistake rather than a save.
+     * to change: the host put them in `system32` as the machine's own, and a
+     * write is a mistake rather than a save.
      *
      * @param {Node} node
      */

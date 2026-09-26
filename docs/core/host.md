@@ -63,7 +63,7 @@ replaced by what it is built from. The worker rebuilds the object it needs.
 | `v86` | `{ moduleUrl: string, wasmBytes: ArrayBuffer }` | The emulator module and binary. Both are subpath exports of the package (`@bottlify/core/libv86.mjs`, `@bottlify/core/v86.wasm`). |
 | `zstd` | `{ wasmUrl?: string, wasmBytes?: ArrayBuffer }` | The bundle decoder's wasm build (`vendor/zstd.wasm` beside the module by default). Optional: absent, the JavaScript decoder decodes, or the emulator's while it is loaded (`docs/core/cpu.md`, "zstd"). |
 | `media` | `{ wasmBytes?: ArrayBuffer }` | The video decoder (`@bottlify/core/video-decoder.wasm`). Absent, the media layer comes up and reports that nothing can be played. |
-| `system` | `{ files: { path: string, bytes: Uint8Array }[] }` | The engine's own read-only volume, mounted under `C:\WINDOWS\system32\`. Each `path` is a bare DLL name and each `bytes` its contents — the DirectX End-User Runtime the engine plays DXSETUP's role for. Absent (or empty), the volume has no system layer and a `d3dx9_*` name is answered by the engine's own table. |
+| `system` | `{ files: { path: string, bytes: Uint8Array }[] }` | The engine's own read-only volume, mounted under `C:\WINDOWS\system32\`. Each `path` is a bare file name and each `bytes` its contents, present as though the machine had always had them. The engine carries none of its own. Absent (or empty), the volume has no system layer. |
 | `bundle` | `{ url, store?, id?, prefix?, prefetch?, indexSha256?, retry? }` | A `.btl` mounted as the volume's read-only source, fetched by HTTP byte range from `url` (a `206` is the only accepted answer). `store: 'local'` (default) caches blocks in OPFS; `null` keeps nothing. `id` names the cache. `prefix` is where the bundle appears in the volume. `prefetch` (default on) fills the cache when idle. `indexSha256` is checked against the bundle's index. `retry: { attempts, baseDelayMs, maxDelayMs }` defaults to 6 / 250 / 10000. A zstd-compressed block is decoded synchronously by the engine's decoder: the emulator's wasm one under `emulator`/`hybrid` (it is loaded and several times faster), this project's own (`src/zstd.js`) under `cork`, which has no emulator. |
 | `storage` | `'opfs' \| 'local' \| { files: { path, bytes }[] } \| null` | Where the session — files the program wrote plus the registry — is loaded from and saved to. `'opfs'` persists in the origin's private file system. `'local'` means `localStorage`, which a worker does not have (see section 9). An object seeds the volume and saves nothing. |
 | `id` | `string` | Names the session and the bundle cache when neither option does. |
@@ -320,17 +320,13 @@ loaded by URL rather than imported and each has to carry what it needs. The outp
 | `dist/worklet.js` | copied from `src/layers/audio/output/worklet.js` | `@bottlify/core/worklet.js` |
 | `dist/vendor/libv86.mjs`, `v86.wasm` | copied from `vendor/prebuilt/` | `@bottlify/core/libv86.mjs`, `@bottlify/core/v86.wasm` |
 | `dist/vendor/video-decoder.wasm` | copied from `vendor/prebuilt/` | `@bottlify/core/video-decoder.wasm` |
-| `dist/vendor/directx/*.dll` | copied from `vendor/prebuilt/directx/`, when fetched | the DirectX runtime, handed to `createApp` as `system.files` |
 | `dist/vendor/manifest.json` | written | checksums and source release of each vendor artifact |
 | `dist/checksums.json` | written | SHA-256 of every file under `dist/` |
 
 The build is minified, without source maps, targets `es2022`, and stops if a vendor artifact is
 missing from `vendor/prebuilt/` (`npm run fetch:v86`, `npm run fetch:video-decoder` put them
-there, verified against `vendor-lock.json` and `video-decoder-lock.json`). The DirectX runtime is
-the one optional artifact: `npm run fetch:directx-runtime` fills `vendor/prebuilt/directx/` and
-the build then copies it into `dist/vendor/directx/`, verified against
-`directx-runtime-lock.json`; absent, the build still succeeds and the package simply has no system
-volume. `import.meta.env.BOTTLIFY_VENDOR` is defined as `./vendor/` so the built module finds its
+there, verified against `vendor-lock.json` and `video-decoder-lock.json`).
+`import.meta.env.BOTTLIFY_VENDOR` is defined as `./vendor/` so the built module finds its
 emulator beside itself.
 `createApp` finds `engine.worker.js` the same way, relative to `import.meta.url`; `workerUrl`
 overrides that. `npm run check:package` (run by `prepublishOnly`) asserts the tarball carries every

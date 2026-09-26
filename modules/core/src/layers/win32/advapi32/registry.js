@@ -285,7 +285,8 @@ const MACHINE_KEYS = Object.freeze(/** @type {MachineKey[]} */ ([
     // library consults first. 9.0c, the newest of the interfaces the drawing
     // layer answers for, and every earlier one is inside it, so an installer
     // asking for 8.1 is satisfied. An installer that finds no version here
-    // offers to install one, and the redistributable it carries cannot run.
+    // treats the machine as having none and installs the whole runtime over
+    // the interfaces the drawing layer answers for.
     { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\DirectX', values: {
         Version: DIRECTX_VERSION,
         InstalledVersion: Uint8Array.of(0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x09, 0x04),
