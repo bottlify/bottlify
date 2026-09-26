@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVersionFunctions } from './functions.js';
+import { WINDOWS_VERSIONS } from '../kernel32/versions.js';
 
 /**
  * Builds a VS_VERSIONINFO block by hand.
@@ -260,6 +261,34 @@ test('a system library the engine answers for has the version of the system it b
         assert.equal(version.GetFileVersionInfoSizeA.handler([put('notalibrary.dll'), 0]), 0);
         assert.deepEqual(errors, [2, 2], 'ERROR_FILE_NOT_FOUND, as for any file not there');
     });
+
+test('a system library carries the version of the Windows the machine is', ()=>{
+    // The file's own version, which is the truth even where GetVersionEx is
+    // told to answer an older Windows.
+    for (const windows of Object.values(WINDOWS_VERSIONS))
+    {
+        const memory = new Uint8Array(0x4000);
+        const view = new DataView(memory.buffer);
+        const version = /** @type {any} */ (createVersionFunctions({
+            readMemory: (a, n)=>memory.slice(a, a + n),
+            writeMemory: (a, b)=>memory.set(b, a),
+            readCString: a=>String.fromCharCode(...memory.subarray(a, memory.indexOf(0, a))),
+            setLastError: ()=>{},
+            versionInfo: ()=>null,
+            files: /** @type {any} */ (fakeFiles()),
+            systemLibrary: name=>name.toLowerCase() === 'kernel32.dll',
+            windows,
+        }));
+        memory.set([...'kernel32.dll'].map(c=>c.charCodeAt(0)).concat([0]), 0x10);
+        memory.set([...'\\'].map(c=>c.charCodeAt(0)).concat([0]), 0x20);
+        const size = version.GetFileVersionInfoSizeA.handler([0x10, 0]);
+        assert.equal(version.GetFileVersionInfoA.handler([0x10, 0, size, 0x400]), 1);
+        assert.equal(version.VerQueryValueA.handler([0x400, 0x20, 0x30, 0x34]), 1);
+        const root = view.getUint32(0x30, true);
+        assert.deepEqual([8, 12].map(offset=>view.getUint32(root + offset, true)),
+            [(windows.major << 16 | windows.minor) >>> 0, windows.build << 16 >>> 0], windows.name);
+    }
+});
 
 test('the block is copied whole, and a short buffer is refused', ()=>{
     const m = machine();
