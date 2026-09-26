@@ -46,6 +46,11 @@ const ERROR_NOT_SUPPORTED = 50;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 
+/** The Ex creators' flags. */
+const CREATE_EVENT_MANUAL_RESET = 0x1;
+const CREATE_EVENT_INITIAL_SET = 0x2;
+const CREATE_MUTEX_INITIAL_OWNER = 0x1;
+
 /** CreateThread's flag that makes dwStackSize the stack's reserve, not its commit. */
 const STACK_SIZE_PARAM_IS_A_RESERVATION = 0x00010000;
 
@@ -373,6 +378,19 @@ export function createThreadingFunctions(host){
         return handle;
     });
 
+    // The Ex forms: what the plain ones take as BOOLs arrives as flags, and an
+    // access mask follows that nothing here checks, since every handle here
+    // can do everything.
+    const createEventEx = bothNamedForms(16, ([security, namePointer, flags], wide)=>
+        (wide ? createEvent.wide : createEvent.ansi).handler([security,
+            flags & CREATE_EVENT_MANUAL_RESET, flags & CREATE_EVENT_INITIAL_SET, namePointer]));
+    const createMutexEx = bothNamedForms(16, ([security, namePointer, flags], wide)=>
+        (wide ? createMutex.wide : createMutex.ansi).handler(
+            [security, flags & CREATE_MUTEX_INITIAL_OWNER, namePointer]));
+    const createSemaphoreEx = bothNamedForms(24, ([security, initial, maximum, namePointer], wide)=>
+        (wide ? createSemaphore.wide : createSemaphore.ansi).handler(
+            [security, initial, maximum, namePointer]));
+
     const createWaitableTimer = bothNamedForms(12, ([, manualReset, namePointer], wide)=>{
         const name = nameOf(namePointer, wide);
         const found = existing(name, 'timer');
@@ -520,6 +538,14 @@ export function createThreadingFunctions(host){
         CreateSemaphoreW: createSemaphore.wide,
 
         /**
+         * HANDLE CreateSemaphoreExA/W(LPSECURITY_ATTRIBUTES, LONG lInitialCount,
+         *     LONG lMaximumCount, LPCSTR/LPCWSTR lpName, DWORD dwFlags,
+         *     DWORD dwDesiredAccess)
+         */
+        CreateSemaphoreExA: createSemaphoreEx.ansi,
+        CreateSemaphoreExW: createSemaphoreEx.wide,
+
+        /**
          * BOOL ReleaseSemaphore(HANDLE, LONG lReleaseCount, LPLONG lpPreviousCount)
          *
          * Releasing past the maximum fails and releases nothing -- it does not
@@ -643,6 +669,10 @@ export function createThreadingFunctions(host){
         CreateMutexA: createMutex.ansi,
         CreateMutexW: createMutex.wide,
 
+        /** HANDLE CreateMutexExA/W(LPSECURITY_ATTRIBUTES, LPCSTR/LPCWSTR, DWORD dwFlags, DWORD) */
+        CreateMutexExA: createMutexEx.ansi,
+        CreateMutexExW: createMutexEx.wide,
+
         /** BOOL ReleaseMutex(HANDLE) */
         ReleaseMutex: {
             argBytes: 4,
@@ -663,6 +693,10 @@ export function createThreadingFunctions(host){
          */
         CreateEventA: createEvent.ansi,
         CreateEventW: createEvent.wide,
+
+        /** HANDLE CreateEventExA/W(LPSECURITY_ATTRIBUTES, LPCSTR/LPCWSTR, DWORD dwFlags, DWORD) */
+        CreateEventExA: createEventEx.ansi,
+        CreateEventExW: createEventEx.wide,
 
         /** BOOL SetEvent(HANDLE) */
         SetEvent: {

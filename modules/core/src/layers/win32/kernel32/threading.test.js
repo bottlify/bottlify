@@ -578,6 +578,40 @@ test('an unnamed CreateSemaphore still validates its counts', ()=>{
     assert.notEqual(fns.CreateSemaphoreA.handler([0, 1, 4, 0]), 0);
 });
 
+test('the Ex creators take their options as flags, and make the same objects', ()=>{
+    const CREATE_EVENT_MANUAL_RESET = 0x1;
+    const CREATE_EVENT_INITIAL_SET = 0x2;
+    const CREATE_MUTEX_INITIAL_OWNER = 0x1;
+    const ALL_ACCESS = 0x1f0003;
+    const NAME = 0x2000;
+    const { kernel, fns, errors, current } = setup({ [NAME]: 'Ready' });
+
+    const event = fns.CreateEventExW.handler(
+        [0, NAME, CREATE_EVENT_MANUAL_RESET | CREATE_EVENT_INITIAL_SET, ALL_ACCESS]);
+    const made = kernel.handles.resolve(event, 'event');
+    assert.equal(made.manualReset, true);
+    assert.equal(made.signalled, true);
+    assert.equal(kernel.handles.resolve(fns.CreateEventA.handler([0, 0, 0, NAME]), 'event'), made,
+        'the name is the one CreateEvent uses');
+    assert.equal(errors.at(-1), ERROR_ALREADY_EXISTS);
+    assert.equal(kernel.handles.resolve(fns.CreateEventExA.handler([0, 0, 0, ALL_ACCESS]),
+        'event').manualReset, false, 'no flags is an auto-reset event, not signalled');
+
+    const mutex = kernel.handles.resolve(
+        fns.CreateMutexExA.handler([0, 0, CREATE_MUTEX_INITIAL_OWNER, ALL_ACCESS]), 'mutex');
+    assert.deepEqual(kernel.state.waits.at(-1).object, mutex);
+    assert.equal(kernel.state.waits.at(-1).thread, current, 'taken by the caller');
+
+    const semaphore = fns.CreateSemaphoreExW.handler([0, 1, 4, 0, 0, ALL_ACCESS]);
+    assert.equal(kernel.handles.resolve(semaphore, 'semaphore').maximum, 4);
+    assert.equal(fns.CreateSemaphoreExA.handler([0, 5, 4, 0, 0, ALL_ACCESS]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+
+    assert.deepEqual([fns.CreateEventExA, fns.CreateEventExW, fns.CreateMutexExA,
+        fns.CreateMutexExW, fns.CreateSemaphoreExA, fns.CreateSemaphoreExW]
+        .map(fn=>fn.argBytes), [16, 16, 16, 16, 24, 24]);
+});
+
 test('OpenSemaphoreA reports no such thing for a name nothing created', ()=>{
     const NAME = 0x2000;
     const { fns, errors } = setup({ [NAME]: 'Warcraft III' });
