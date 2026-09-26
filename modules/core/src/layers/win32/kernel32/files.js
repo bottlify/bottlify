@@ -729,6 +729,27 @@ export function createFileFunctions(host){
     const moveFile = bothForms(8, ([from, to], text)=>
         renamePath(text.path(from), text.path(to), false));
 
+    /**
+     * The move an installer makes when it puts an unpacked file in its
+     * final place. MOVEFILE_REPLACE_EXISTING is the flag that matters: a
+     * second install over the first replaces rather than failing, and
+     * without honouring it the second run stops on the first file it
+     * already wrote.
+     *
+     * MOVEFILE_DELAY_UNTIL_REBOOT names a file to move when the machine
+     * next starts. There is no next start here, so it is refused rather
+     * than accepted and forgotten -- a caller told it succeeded would
+     * believe a file it still needs has been scheduled.
+     */
+    const moveFileEx = bothForms(12, ([from, to, flags], text)=>{
+        if ((flags >>> 0 & MOVEFILE_DELAY_UNTIL_REBOOT) !== 0)
+        {
+            return fail(ERROR_NOT_SUPPORTED);
+        }
+        return renamePath(text.path(from), text.path(to),
+            (flags >>> 0 & MOVEFILE_REPLACE_EXISTING) !== 0);
+    });
+
     /** @param {number[]} args @param {TextForm} text */
     const searchPathBody = ([pathList, fileName, extension, size, buffer, filePart], text)=>{
         let name = text.raw(fileName);
@@ -1501,32 +1522,11 @@ export function createFileFunctions(host){
         },
 
         /**
-         * BOOL MoveFileExA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName,
-         *                 DWORD dwFlags)
-         *
-         * The move an installer makes when it puts an unpacked file in its
-         * final place. MOVEFILE_REPLACE_EXISTING is the flag that matters: a
-         * second install over the first replaces rather than failing, and
-         * without honouring it the second run stops on the first file it
-         * already wrote.
-         *
-         * MOVEFILE_DELAY_UNTIL_REBOOT names a file to move when the machine
-         * next starts. There is no next start here, so it is refused rather
-         * than accepted and forgotten -- a caller told it succeeded would
-         * believe a file it still needs has been scheduled.
+         * BOOL MoveFileEx(LPCSTR lpExistingFileName, LPCSTR lpNewFileName,
+         *                 DWORD dwFlags) -- one body, both spellings.
          */
-        MoveFileExA: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([from, to, flags])=>{
-                if ((flags >>> 0 & MOVEFILE_DELAY_UNTIL_REBOOT) !== 0)
-                {
-                    return fail(ERROR_NOT_SUPPORTED);
-                }
-                return renamePath(pathArgument(from), pathArgument(to),
-                    (flags >>> 0 & MOVEFILE_REPLACE_EXISTING) !== 0);
-            },
-        },
+        MoveFileExA: moveFileEx.ansi,
+        MoveFileExW: moveFileEx.wide,
 
         /** HANDLE FindFirstFile(LPCSTR, LPWIN32_FIND_DATA) -- one body, both spellings. */
         FindFirstFileA: findFirstFile.ansi,

@@ -925,6 +925,21 @@ test('a file made one spelling is found by the other', ()=>{
     assert.equal(fns.GetFileAttributesA.handler([at(NAME, 'C:\\GAME\\WIDE.DAT')]), 0xffffffff);
 });
 
+test('MoveFileExW is the same move in wide names, flags and all', ()=>{
+    const { files, memory, fns, error } = setup();
+    files.put('C:\\GAME\\NEW.DLL', 'fresh');
+    files.put('C:\\GAME\\OLD.DLL', 'stale');
+    const from = putWide(memory, NAME, 'C:\\GAME\\NEW.DLL');
+    const to = putWide(memory, NAME2, 'C:\\GAME\\OLD.DLL');
+
+    assert.equal(fns.MoveFileExW.handler([from, to, 0]), 0, 'no overwrite without the flag');
+    assert.equal(error.code, ERROR_ALREADY_EXISTS);
+    assert.equal(fns.MoveFileExW.handler([from, to, 1]), 1);
+    assert.equal(files.text('C:\\GAME\\OLD.DLL'), 'fresh');
+    assert.equal(files.stat('C:\\GAME\\NEW.DLL')?.exists, undefined);
+    assert.equal(fns.MoveFileExW.argBytes, 12);
+});
+
 test('a wide directory listing writes twice as wide a name, at the same offset', ()=>{
     // WIN32_FIND_DATAW shares every offset up to cFileName with the ANSI form
     // and then does not, which is exactly why the tail is easy to get wrong.
