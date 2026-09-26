@@ -2948,6 +2948,10 @@ async function buildApp(options){
             // build composes below -- the device, the presenter, the screen --
             // is the run's and wins over a caller's value of the same name.
             ...options.graphics,
+            // The display's raster -- the vertical blank, the scan line --
+            // runs on the guest's clock, which only this assembly can reach:
+            // a program times its spin on the blank with its own timers.
+            guestNow: ()=>core.api('kernel').clock.virtualTime(),
             // Where a COM interface goes when a program asks for one. Without
             // it the drawing entry points refuse rather than publishing into
             // nowhere, which is what a build with no bridge should do.
