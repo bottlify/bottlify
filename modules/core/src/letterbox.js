@@ -58,3 +58,16 @@ export function fitFrame(picture, out, width, height){
         }
     }
 }
+
+/**
+ * Whether a film frame belongs on the screen at all. A program that hides its
+ * video window (IVideoWindow's Visible) still plays the film -- its sound runs
+ * and its clock advances -- and expects nothing drawn; a frame from a source
+ * with no window record is shown as it always was.
+ *
+ * @param {Picture & { window?: { visible: boolean } }} frame
+ * @returns {boolean}
+ */
+export function isShown(frame){
+    return frame.window?.visible !== false;
+}

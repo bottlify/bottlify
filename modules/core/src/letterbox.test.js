@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fitFrame } from './letterbox.js';
+import { fitFrame, isShown } from './letterbox.js';
 
 /** @param {number} width @param {number} height @param {number[]} colour */
 function picture(width, height, colour){
@@ -53,4 +53,13 @@ test('nothing is written outside the buffer, whatever the film claims to be', ()
     const small = new Uint8Array(8 * 8 * 4);
     fitFrame(picture(1920, 1080, [4, 5, 6, 0]), small, 8, 8);
     assert.equal(small.length, 8 * 8 * 4);
+});
+
+test('a frame of a hidden video window is not shown; one with no window record is', ()=>{
+    // IVideoWindow's Visible: a program that hides the window still plays the
+    // film -- its sound, its clock -- and expects nothing on the screen.
+    const frame = { bgra: new Uint8Array(4), width: 1, height: 1 };
+    assert.equal(isShown({ ...frame, window: { visible: false } }), false);
+    assert.equal(isShown({ ...frame, window: { visible: true } }), true);
+    assert.equal(isShown(frame), true);
 });

@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { fitFrame } from './letterbox.js';
+import { fitFrame, isShown } from './letterbox.js';
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 import { captureTrace, describeAddress, formatTrace } from './trace.js';
@@ -4863,7 +4863,7 @@ async function buildApp(options){
      * says nothing arrived cannot tell them apart.
      */
     const film = {
-        ticks: 0, frames: 0, silent: 0, noScreen: 0, noRoom: 0, shown: 0,
+        ticks: 0, frames: 0, silent: 0, hidden: 0, noScreen: 0, noRoom: 0, shown: 0,
         // How far the picture is ahead of the sound, in milliseconds of the
         // film's own timeline. A film has one timeline and two ways to advance
         // along it, and nothing else in a report says whether they agree.
@@ -4871,6 +4871,8 @@ async function buildApp(options){
     };
 
     /** @param {{ hwnd: number, width: number, height: number, bgra: Uint8Array | null,
+     *            window?: { left: number, top: number, width: number, height: number,
+     *                       visible: boolean },
      *            audio: Int16Array[], sampleRate: number, channels: number,
      *            positionMs: number, film: number } | null} shown */
     /** @param {any} shown  What a filter graph handed back for this tick. */
@@ -4928,6 +4930,11 @@ async function buildApp(options){
             return;
         }
         film.frames++;
+        if (!isShown(shown))
+        {
+            film.hidden++;
+            return;
+        }
         const screen = core.api('graphics');
         if (!screen?.present)
         {
