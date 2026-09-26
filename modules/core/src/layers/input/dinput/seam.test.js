@@ -1019,7 +1019,9 @@ test('EnumDevices describes the mouse and the keyboard to the callback', async()
         DIDEVICEINSTANCE.SIZE_W);
     assert.equal(readGuid(f.memory, mouseInstance + DIDEVICEINSTANCE.guidInstance),
         GUID_SysMouse);
-    assert.equal(f.memory.u32(mouseInstance + DIDEVICEINSTANCE.dwDevType), 0x0212);
+    // DI8DEVTYPEMOUSE_UNKNOWN, what joystick8.c's enumeration expects of the
+    // system mouse on Windows and what GetCapabilities and GetDeviceInfo say.
+    assert.equal(f.memory.u32(mouseInstance + DIDEVICEINSTANCE.dwDevType), 0x0112);
     assert.equal(readWide(f.memory,
         mouseInstance + DIDEVICEINSTANCE.tszInstanceName, 260), 'Mouse');
     assert.equal(readWide(f.memory,
@@ -1061,7 +1063,7 @@ test('an interface before 8 uses the older device-type codes', async()=>{
     const mouseInstance = f.calls[0].args[0];
     assert.equal(f.memory.u32(mouseInstance + DIDEVICEINSTANCE.dwSize),
         DIDEVICEINSTANCE.SIZE_A);
-    assert.equal(f.memory.u32(mouseInstance + DIDEVICEINSTANCE.dwDevType), 0x0202);
+    assert.equal(f.memory.u32(mouseInstance + DIDEVICEINSTANCE.dwDevType), 0x0102);
     assert.equal(readAnsi(f.memory,
         mouseInstance + DIDEVICEINSTANCE.tszInstanceName, 260), 'Mouse');
     assert.equal(f.memory.u32(f.calls[1].args[0] + DIDEVICEINSTANCE.dwDevType), 0x0403);
@@ -1079,7 +1081,7 @@ test('the pointer class names the mouse, and nothing else', async()=>{
     const f = fixture();
     assert.equal(await f.bridge.callAsync(f.root, 'EnumDevices', [2, 0x20, 0, 0]), DI_OK);
     assert.equal(f.calls.length, 1);
-    assert.equal(f.memory.u32(f.calls[0].args[0] + DIDEVICEINSTANCE.dwDevType), 0x0202);
+    assert.equal(f.memory.u32(f.calls[0].args[0] + DIDEVICEINSTANCE.dwDevType), 0x0102);
 });
 
 test('a specific device type asks for one device rather than a class', async()=>{

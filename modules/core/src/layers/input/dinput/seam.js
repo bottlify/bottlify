@@ -66,7 +66,6 @@ const DI8DEVTYPE_MOUSE = 0x12;
 const DI8DEVTYPE_KEYBOARD = 0x13;
 const DIDEVTYPE_MOUSE = 2;
 const DIDEVTYPE_KEYBOARD = 3;
-const DI8DEVTYPEMOUSE_TRADITIONAL = 2;
 /** The same value in both generations' subtype tables, as PCENH is. */
 const DEVTYPEMOUSE_UNKNOWN = 1;
 const DI8DEVTYPEKEYBOARD_PCENH = 4;
@@ -189,6 +188,21 @@ const DIPH_BYUSAGE = 3;
  * nothing on a system keyboard or mouse does.
  */
 const DIDFT_ATTRIBUTES = 0x1f000000;
+
+/**
+ * What a device says it is, to EnumDevices, GetCapabilities and GetDeviceInfo
+ * alike: its family in the low byte, in the codes of the generation the
+ * interface belongs to, and its subtype above that. The system mouse's
+ * subtype is unknown, not traditional -- the answer Windows gives in Wine's
+ * device8.c and joystick8.c, where Wine's own differs.
+ *
+ * @param {'keyboard' | 'mouse'} kind @param {boolean} legacy
+ */
+function devTypeOf(kind, legacy){
+    return kind === KEYBOARD
+        ? (legacy ? DIDEVTYPE_KEYBOARD : DI8DEVTYPE_KEYBOARD) | DI8DEVTYPEKEYBOARD_PCENH << 8
+        : (legacy ? DIDEVTYPE_MOUSE : DI8DEVTYPE_MOUSE) | DEVTYPEMOUSE_UNKNOWN << 8;
+}
 
 /**
  * A string as it sits in one of the inline name arrays, with its terminator.
@@ -518,18 +532,6 @@ export function createDirectInput(
     const devices = new Map();
 
     /**
-     * What a device says it is: its family in the low byte, in the codes of
-     * the generation the interface belongs to, and its subtype above that.
-     * The system mouse's subtype is unknown, not traditional -- the answer
-     * Windows gives in Wine's device8.c, where Wine's own differs.
-     *
-     * @param {any} device @param {boolean} legacy
-     */
-    const devTypeOf = (device, legacy)=>(device.kind === KEYBOARD
-        ? (legacy ? DIDEVTYPE_KEYBOARD : DI8DEVTYPE_KEYBOARD) | DI8DEVTYPEKEYBOARD_PCENH << 8
-        : (legacy ? DIDEVTYPE_MOUSE : DI8DEVTYPE_MOUSE) | DEVTYPEMOUSE_UNKNOWN << 8);
-
-    /**
      * Fills a structure the caller sized, in one of the two sizes its width
      * allows -- the DirectX 3 one or the whole one -- and never past it. The
      * caller's own dwSize stays as it wrote it.
@@ -805,7 +807,7 @@ export function createDirectInput(
             const keyboard = device.kind === KEYBOARD;
             writeU32(caps + DIDEVCAPS.dwFlags, DIDC_ATTACHED | DIDC_EMULATED);
             writeU32(caps + DIDEVCAPS.dwDevType,
-                devTypeOf(device, descriptor?.legacy === true));
+                devTypeOf(device.kind, descriptor?.legacy === true));
             writeU32(caps + DIDEVCAPS.dwAxes, keyboard ? 0 : 3);
             writeU32(caps + DIDEVCAPS.dwButtons, keyboard ? KEYBOARD_KEYS : MOUSE_BUTTONS);
             writeU32(caps + DIDEVCAPS.dwPOVs, 0);
@@ -826,7 +828,7 @@ export function createDirectInput(
             const keyboard = device.kind === KEYBOARD;
             const name = keyboard ? 'Keyboard' : 'Mouse';
             const whole = deviceInstanceBytes(keyboard ? GUID_SysKeyboard : GUID_SysMouse,
-                devTypeOf(device, descriptor?.legacy === true), name, name, wide);
+                devTypeOf(device.kind, descriptor?.legacy === true), name, name, wide);
             return fillSized(info, whole, wide
                 ? [DIDEVICEINSTANCE.SIZE_DX3_W, DIDEVICEINSTANCE.SIZE_W]
                 : [DIDEVICEINSTANCE.SIZE_DX3_A, DIDEVICEINSTANCE.SIZE_A]);
@@ -1021,8 +1023,7 @@ export function createDirectInput(
                 guid: GUID_SysMouse,
                 name: 'Mouse',
                 product: 'Mouse',
-                devType: (legacy ? DIDEVTYPE_MOUSE : DI8DEVTYPE_MOUSE)
-                    | (DI8DEVTYPEMOUSE_TRADITIONAL << 8),
+                devType: devTypeOf(MOUSE, legacy),
             });
         }
         if (deviceClass === DI8DEVCLASS_ALL || deviceClass === DI8DEVCLASS_KEYBOARD)
@@ -1031,8 +1032,7 @@ export function createDirectInput(
                 guid: GUID_SysKeyboard,
                 name: 'Keyboard',
                 product: 'Keyboard',
-                devType: (legacy ? DIDEVTYPE_KEYBOARD : DI8DEVTYPE_KEYBOARD)
-                    | (DI8DEVTYPEKEYBOARD_PCENH << 8),
+                devType: devTypeOf(KEYBOARD, legacy),
             });
         }
 
