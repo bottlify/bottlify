@@ -7,6 +7,7 @@
 import { expand } from '../lz32/expand.js';
 import { windowsVersion } from '../kernel32/versions.js';
 import { DIRECTX_VERSION } from '../advapi32/registry.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 
 /**
  * version — what a file says about itself.
@@ -462,9 +463,9 @@ export function createVersionFunctions(host){
         let answer = base + node.value;
         if (ansi && node.type === 1)
         {
-            // Characters the code page has no byte for are what WideCharToMultiByte
-            // puts in their place.
-            const text = new Uint8Array(node.valueLength);
+            // In the ANSI page, as WideCharToMultiByte(CP_ACP) writes it, a
+            // character the page has no byte for as the default character.
+            let units = '';
             for (let index = 0; index < node.valueLength; index++)
             {
                 const unit = u16(block, node.value + index * 2);
@@ -472,8 +473,10 @@ export function createVersionFunctions(host){
                 {
                     break;
                 }
-                text[index] = unit < 0x100 ? unit : 0x3f;
+                units += String.fromCharCode(unit);
             }
+            const text = new Uint8Array(node.valueLength);
+            text.set(encodeAnsi(units));
             const mark = host.readMemory(base + total, ROOM_MARK.length);
             const roomy = mark.every((byte, index)=>byte === ROOM_MARK[index]);
             answer = roomy ? base + total + ROOM_MARK.length + (node.value >>> 1) : answer;
@@ -505,13 +508,7 @@ export function createVersionFunctions(host){
         const needed = text.length + 1;
         if ((buffer >>> 0) !== 0 && have > 0)
         {
-            const kept = text.slice(0, have - 1);
-            const bytes = new Uint8Array(kept.length + 1);
-            for (let at = 0; at < kept.length; at++)
-            {
-                bytes[at] = kept.charCodeAt(at) & 0xff;
-            }
-            host.writeMemory(buffer >>> 0, bytes);
+            host.writeMemory(buffer >>> 0, encodeAnsi(`${text.slice(0, have - 1)}\0`));
         }
         host.writeMemory(lengthAt >>> 0, dword(needed));
         return needed > have ? VFF_BUFFTOOSMALL : 0;

@@ -496,6 +496,36 @@ test('VerFindFileA recommends the program directory, and reports a copy that liv
     assert.equal(version.VerFindFileA.argBytes, 32);
 });
 
+test('the ANSI answers are in the ANSI page: a string value, and a directory', ()=>{
+    // A text value is UTF-16 and reaches an ANSI caller as
+    // WideCharToMultiByte(CP_ACP) writes it, where the trade mark is 0x99,
+    // the euro sign 0x80 and an em dash 0x97, and a character the page lacks
+    // is the default character; a directory VerFindFileA was given goes back
+    // in the bytes it was read from.
+    const m = machine(node('VS_VERSION_INFO', {
+        value: fixedInfo(),
+        children: [node('StringFileInfo', {
+            children: [node('040904b0', {
+                children: [node('LegalTrademarks', { text: 'X\u2122 \u20ac\u2014\u0416' })],
+            })],
+        })],
+    }));
+    m.putString(0x10, 'C:\\thing.exe');
+    m.version.GetFileVersionInfoA.handler([0x10, 0, 0x400, 0x400]);
+    m.putString(0x20, '\\StringFileInfo\\040904b0\\LegalTrademarks');
+    assert.equal(m.version.VerQueryValueA.handler([0x400, 0x20, 0x30, 0x34]), 1);
+    const at = m.get32(0x30);
+    assert.deepEqual([...m.memory.subarray(at, at + 7)], [0x58, 0x99, 0x20, 0x80, 0x97, 0x3f, 0]);
+
+    m.host.readCString = (/** @type {number} */ a)=>new TextDecoder('latin1')
+        .decode(m.memory.subarray(a, m.memory.indexOf(0, a)));
+    m.memory.set([0x44, 0x2e, 0x64, 0x6c, 0x6c, 0], 0x40);
+    m.memory.set([0x43, 0x3a, 0x5c, 0x80, 0x99, 0], 0x50);
+    m.memory.set([0x04, 1, 0, 0], 0x1f00);
+    assert.equal(m.version.VerFindFileA.handler([0, 0x40, 0x50, 0x50, 0, 0, 0x1e00, 0x1f00]), 0);
+    assert.deepEqual([...m.memory.subarray(0x1e00, 0x1e06)], [0x43, 0x3a, 0x5c, 0x80, 0x99, 0]);
+});
+
 test('VerInstallFileA expands a compressed source into the destination directory', ()=>{
     const memory = new Uint8Array(0x2000);
     /** @param {number} at @param {string} text */
