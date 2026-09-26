@@ -1190,12 +1190,18 @@ test('viewports and scissor rectangles are lists, and an empty one is legal', ()
     assert.equal(rects.count, 1);
     assert.deepEqual(rects.rects[0], { left: 1, top: 2, right: 3, bottom: 4 });
 
-    // More than the pipeline has room for is truncated, not refused: these
-    // setters have no way to report anything.
-    device.RSSetViewports(new Array(D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS + 4).fill(
-        { TopLeftX: 0, TopLeftY: 0, Width: 1, Height: 1, MinDepth: 0, MaxDepth: 1 }));
+    // More viewports than the pipeline has room for is a call Windows ignores
+    // whole, as Wine's d3d10core tests show: what was set before stays.
+    device.RSSetViewports(new Array(D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS + 1).fill(
+        { TopLeftX: 1, TopLeftY: 0, Width: 1, Height: 1, MinDepth: 0, MaxDepth: 1 }));
     device.RSGetViewports(viewports);
-    assert.equal(viewports.count, D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS);
+    assert.equal(viewports.count, 2);
+    assert.equal(viewports.viewports[0].TopLeftX, 0);
+    device.RSSetViewports(new Array(D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS).fill(
+        { TopLeftX: 1, TopLeftY: 0, Width: 1, Height: 1, MinDepth: 0, MaxDepth: 1 }));
+    device.RSGetViewports(viewports);
+    assert.equal(viewports.count, D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS,
+        'exactly as many is taken');
 
     device.RSSetViewports([]);
     device.RSGetViewports(viewports);

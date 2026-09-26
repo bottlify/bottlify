@@ -30,8 +30,8 @@ import { describe as describeSlots } from './vtables.js';
 import { readGuid } from './ddraw.js';
 import { createFields } from './structs.js';
 import {
-    D3D10_RESOURCE_DIMENSION, DXGI_ERROR_INVALID_CALL, E_INVALIDARG, E_NOTIMPL, FORMAT_INFO, IID,
-    S_OK,
+    D3D10_LIMITS, D3D10_RESOURCE_DIMENSION, DXGI_ERROR_INVALID_CALL, E_INVALIDARG, E_NOTIMPL,
+    FORMAT_INFO, IID, S_OK,
 } from '../d3d10/constants.js';
 import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain } from '../d3d10/device.js';
 import { CreateDXGIFactory } from '../d3d10/dxgi.js';
@@ -1734,11 +1734,19 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             },
             /** @param {any} device @param {number[]} args */
             RSSetViewports: (device, [count, viewports])=>{
+                // More than the pipeline has slots for is a call ignored
+                // whole, so there is nothing to read.
+                if ((count >>> 0) > D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS)
+                {
+                    return;
+                }
                 device.RSSetViewports(readViewports(viewports, count >>> 0));
             },
             /**
-             * A null array asks how many there are; otherwise the count is
-             * both what the caller has room for and what it gets.
+             * A null array asks how many there are. Otherwise the count is
+             * what the caller has room for: every slot of that room is
+             * written, those past the bound viewports with zeroes, and the
+             * count comes back as the number bound.
              *
              * @param {any} device @param {number[]} args
              */
@@ -1752,10 +1760,15 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                     fields.writeU32(countAt, held.count ?? 0);
                     return;
                 }
-                (held.viewports ?? []).slice(0, room).forEach((viewport, index)=>{
+                const bound = (held.viewports ?? []).slice(0, room);
+                bound.forEach((viewport, index)=>{
                     fields.writeStruct(out + index * D3D10_VIEWPORT.SIZE, D3D10_VIEWPORT,
                         viewport, ['MinDepth', 'MaxDepth']);
                 });
+                memory.writeMemory(out + bound.length * D3D10_VIEWPORT.SIZE,
+                    new Uint8Array((Math.min(room, D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS)
+                        - Math.min(bound.length, room)) * D3D10_VIEWPORT.SIZE));
+                fields.writeU32(countAt, bound.length);
             },
             /** @param {any} device @param {number[]} args */
             RSSetScissorRects: (device, [count, rects])=>{
@@ -1772,9 +1785,14 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                     fields.writeU32(countAt, held.count ?? 0);
                     return;
                 }
-                (held.rects ?? []).slice(0, room).forEach((rect, index)=>{
+                const bound = (held.rects ?? []).slice(0, room);
+                bound.forEach((rect, index)=>{
                     fields.writeStruct(out + index * RECT.SIZE, RECT, rect);
                 });
+                memory.writeMemory(out + bound.length * RECT.SIZE,
+                    new Uint8Array((Math.min(room, D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS)
+                        - Math.min(bound.length, room)) * RECT.SIZE));
+                fields.writeU32(countAt, bound.length);
             },
 
             /** @param {any} device @param {number[]} args */

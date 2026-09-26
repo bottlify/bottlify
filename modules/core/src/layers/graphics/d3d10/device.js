@@ -1148,9 +1148,13 @@ export function createDevice(options = {}){
 
         /** @param {readonly any[]} viewports */
         RSSetViewports(viewports){
-            pipeline.viewports = (viewports ?? [])
-                .slice(0, D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS)
-                .map(viewport=>({ ...viewport }));
+            // More than the pipeline has slots for is ignored whole, not cut
+            // down to what fits.
+            if ((viewports?.length ?? 0) > D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS)
+            {
+                return;
+            }
+            pipeline.viewports = (viewports ?? []).map(viewport=>({ ...viewport }));
         },
 
         /** @param {{ count?: number, viewports?: any[] }} out */

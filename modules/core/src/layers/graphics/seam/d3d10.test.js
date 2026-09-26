@@ -377,6 +377,24 @@ test('a triangle: buffer, layout and shaders from guest memory draw through the 
         assert.equal(h.box.memory.readU32(shaderBack), ps);
     });
 
+test('more viewports than the pipeline has slots for is a call ignored whole', ()=>{
+    // After Wine's d3d10core test_clear_render_target_view's tail.
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    h.device(device, 'RSSetViewports', [1, h.box.place([0, 0, 8, 8, ...floatBits([0, 1])])]);
+    const many = h.box.place(Array.from({ length: 17 },
+        ()=>[1, 0, 8, 8, ...floatBits([0, 1])]).flat());
+    h.device(device, 'RSSetViewports', [17, many]);
+    const countAt = h.box.place([17]);
+    const out = h.box.place(new Array(17 * 6).fill(0x55555555));
+    h.device(device, 'RSGetViewports', [countAt, out]);
+    assert.equal(h.box.memory.readU32(countAt), 1, 'the count comes back as the number bound');
+    assert.equal(h.box.memory.readU32(out), 0, 'the viewport set before is the one there');
+    assert.equal(h.box.memory.readU32(out + 8), 8);
+    assert.deepEqual([0, 1, 2, 3, 4, 5].map(k=>h.box.memory.readU32(out + 24 + k * 4)),
+        [0, 0, 0, 0, 0, 0], 'and a slot past it reads as empty');
+});
+
 test('a map hands the program guest memory and the unmap reads it back', async()=>{
     const h = seamed();
     const { device, swapChain } = h.createDeviceAndSwapChain();
