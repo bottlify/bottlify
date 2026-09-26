@@ -1004,32 +1004,38 @@ export function createDirectSound(
         },
     };
 
-    /**
-     * The one object a program is handed by the entry point.
-     *
-     * There is only ever one: DirectSoundCreate on a machine with one device
-     * hands out the same device, and a program that creates two and compares
-     * them is entitled to find them equal.
-     */
-    const root = { addRef: ()=>1, release: ()=>0 };
-    const rootInterfaces = [
-        describe(IID_IDirectSound, IDIRECTSOUND_SLOTS, soundMethods),
+    const soundInterfaces = [describe(IID_IDirectSound, IDIRECTSOUND_SLOTS, soundMethods)];
+    const sound8Interfaces = [
+        ...soundInterfaces,
         describe(IID_IDirectSound8, IDIRECTSOUND8_SLOTS, soundMethods),
     ];
 
     /**
-     * Published as the interface the entry point promises: a program holding
-     * what DirectSoundCreate8 returned calls it through IDirectSound8's table,
-     * slot eleven included, without asking for it again.
+     * A new object for every call, as on Windows, each counting its own
+     * references. DirectSoundCreate's is IDirectSound and refuses
+     * IDirectSound8; DirectSoundCreate8's is both, published as the one the
+     * entry point promises, so a program calls it through IDirectSound8's
+     * table, slot eleven included, without asking for it again.
      *
-     * @param {number} out @param {string} id
+     * The count is a real one: the bridge frees an interface pointer whose
+     * release answers zero, so a zero while the program holds another
+     * reference frees a pointer it is still using.
+     *
+     * @param {number} out @param {boolean} eight
      */
-    const createInto = (out, id)=>{
+    const createInto = (out, eight)=>{
         if ((out >>> 0) === 0)
         {
             return DSERR_INVALIDPARAM;
         }
-        writeU32(out, publisher.publish(root, rootInterfaces, id));
+        let references = 1;
+        const device = {
+            addRef: ()=>++references,
+            release: ()=>(references = Math.max(0, references - 1)),
+        };
+        writeU32(out, eight
+            ? publisher.publish(device, sound8Interfaces, IID_IDirectSound8)
+            : publisher.publish(device, soundInterfaces, IID_IDirectSound));
         return DS_OK;
     };
 
@@ -1116,7 +1122,6 @@ export function createDirectSound(
     };
 
     return {
-        root,
         publisher,
         /** How many times a program asked what sound devices there are. */
         enumerations: ()=>enumerations,
@@ -1149,13 +1154,13 @@ export function createDirectSound(
                 DirectSoundCreate: {
                     argBytes: 12,
                     /** @param {number[]} args */
-                    handler: ([, out])=>createInto(out, IID_IDirectSound),
+                    handler: ([, out])=>createInto(out, false),
                 },
                 /** HRESULT DirectSoundCreate8(LPCGUID, LPDIRECTSOUND8*, IUnknown*) */
                 DirectSoundCreate8: {
                     argBytes: 12,
                     /** @param {number[]} args */
-                    handler: ([, out])=>createInto(out, IID_IDirectSound8),
+                    handler: ([, out])=>createInto(out, true),
                 },
                 /**
                  * HRESULT DirectSoundEnumerateA(LPDSENUMCALLBACKA, LPVOID)

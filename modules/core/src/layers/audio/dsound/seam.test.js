@@ -260,12 +260,42 @@ test('every slot is present, including the ones nothing implements', ()=>{
     assert.equal(method.invoke, undefined);
 });
 
-test('one object has one identity however many times it is published', ()=>{
+test('one object has one identity however many times it is asked for', ()=>{
+    const f = createRoot();
+    assert.equal(f.bridge.query(f.root, IID_IDirectSound), f.root,
+        'a second pointer is a second object to a program comparing them');
+});
+
+test('each DirectSoundCreate makes an object of its own, counting its own references', ()=>{
+    // Wine's dsound tests release every object they create and expect zero
+    // back, and two objects' primary buffers are independent.
     const f = createRoot();
     const again = 0x1004;
     f.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, again, 0]);
-    assert.equal(f.memory.u32(again), f.root,
-        'a second pointer is a second object to a program comparing them');
+    assert.notEqual(f.memory.u32(again), f.root);
+
+    const device = f.bridge.recordAt(f.root).object;
+    assert.equal(device.addRef(), 2);
+    assert.equal(device.release(), 1);
+    assert.equal(device.release(), 0);
+    assert.equal(device.release(), 0, 'and never below');
+});
+
+test('DirectSoundCreate\'s object is IDirectSound alone; DirectSoundCreate8\'s is both', ()=>{
+    // Wine's dsound IDirectSound_test: QueryInterface for IID_IDirectSound8 on
+    // what DirectSoundCreate returned is E_NOINTERFACE; its dsound8 counterpart
+    // answers both on what DirectSoundCreate8 returned.
+    const f = createRoot();
+    const device = f.bridge.recordAt(f.root).object;
+    assert.ok(device.interfaceFor(IID_IDirectSound));
+    assert.equal(device.interfaceFor(IID_IDirectSound8), null);
+    assert.equal(f.bridge.query(f.root, IID_IDirectSound8), 0);
+
+    const out = 0x1008;
+    f.dsound.libraries['DSOUND.dll'].DirectSoundCreate8.handler([0, out, 0]);
+    const eight = f.memory.u32(out);
+    assert.notEqual(f.bridge.query(eight, IID_IDirectSound), 0);
+    assert.equal(f.bridge.query(eight, IID_IDirectSound8), eight);
 });
 
 test('an object answers QueryInterface for what it has and refuses what it has not', ()=>{
@@ -280,9 +310,11 @@ test('an object answers QueryInterface for what it has and refuses what it has n
         'a short vtable is worse than E_NOINTERFACE');
 });
 
-test('the root answers to both IDirectSound and IDirectSound8', ()=>{
-    const f = createRoot();
-    const adapter = f.bridge.recordAt(f.root).object;
+test('IDirectSound8 is IDirectSound with one slot more', ()=>{
+    const f = fixture();
+    const out = 0x1000;
+    f.dsound.libraries['DSOUND.dll'].DirectSoundCreate8.handler([0, out, 0]);
+    const adapter = f.bridge.recordAt(f.memory.u32(out)).object;
     assert.equal(adapter.interfaceFor(IID_IDirectSound8).methods.length,
         adapter.interfaceFor(IID_IDirectSound).methods.length + 1,
         'IDirectSound8 is IDirectSound with VerifyCertification appended');
