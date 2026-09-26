@@ -830,6 +830,50 @@ test('_wfopen is fopen with a wide name and a wide mode', ()=>{
     assert.deepEqual(errno, [ENOENT, 22, 22]);
 });
 
+test('fopen\'s ccs= opens a file in a Unicode translation, and b overrides it', ()=>{
+    // Wine's msvcrt test_fopen_s: each ccs= writes the mark of its encoding
+    // into a new file; read back, the mark is skipped and says how the rest
+    // is kept whatever ccs= names; with b the bytes are what they are.
+    const { memory, fns, open, files } = runtime({});
+    const name = 'C:\\empty1';
+    const buffer = memory.allocate(16);
+    /** @param {string} mode @param {number} count */
+    const read = (mode, count)=>{
+        const stream = open(name, mode);
+        const got = fns.fread.handler([buffer, 1, count, stream]);
+        fns.fclose.handler([stream]);
+        return [...memory.bytes.subarray(buffer, buffer + got)];
+    };
+
+    const stream = open(name, 'w,  ccs=UNIcode');
+    assert.equal(fns.fwrite.handler([memory.put('a'), 1, 2, stream]), 2);
+    fns.fclose.handler([stream]);
+    assert.ok(files.files[name], 'the D in UNICODE does not make the file temporary');
+    assert.deepEqual(read('r', 2), [0xff, 0xfe]);
+    assert.deepEqual(read('r,ccs=unicode', 2), [0x61, 0]);
+    assert.deepEqual(read('rb,ccs=unicode', 2), [0xff, 0xfe]);
+    assert.deepEqual(read('r,ccs=utf-16le', 2), [0x61, 0]);
+    assert.deepEqual(read('r,ccs=utf-8', 2), [0x61, 0], 'the mark over what ccs= names');
+
+    fns.fclose.handler([open(name, 'w,ccs=utf-16le')]);
+    assert.deepEqual(read('r', 3), [0xff, 0xfe]);
+    fns.fclose.handler([open(name, 'w,ccs=utf-8')]);
+    assert.deepEqual(read('r', 4), [0xef, 0xbb, 0xbf]);
+    const binary = open(name, 'wb, ccs=utf-8');
+    fns.fwrite.handler([memory.put('test'), 1, 4, binary]);
+    fns.fclose.handler([binary]);
+    assert.deepEqual(read('rb', 16), [...'test'].map(character=>character.charCodeAt(0)));
+});
+
+test('fopen refuses a ccs= that names no encoding, and anything else after a comma', ()=>{
+    const { fns, open, errno } = runtime({ 'C:\\in.txt': 'x' });
+    assert.equal(open('C:\\in.txt', 'r,ccs=latin1'), 0);
+    assert.equal(open('C:\\in.txt', 'r,shared'), 0);
+    assert.deepEqual(errno, [22, 22]);
+    assert.notEqual(open('C:\\in.txt', 'r, ccs=UTF-8'), 0);
+    assert.equal(fns._fcloseall.handler([]), 1);
+});
+
 test('the stream calls are cdecl with the argument count each reads', ()=>{
     const { fns } = runtime({});
     const expected = {

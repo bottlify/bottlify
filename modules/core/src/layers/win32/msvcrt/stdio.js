@@ -8,7 +8,7 @@ import { formatToString } from './format.js';
 import { VARIADIC_SLOTS } from './scan.js';
 import { EBADF, EINVAL } from './globals.js';
 import { createDescriptors, LF, settle } from './io.js';
-import { wideStringAt } from './widetext.js';
+import { O_U16TEXT, O_U8TEXT, O_WTEXT, wideStringAt } from './widetext.js';
 
 /**
  * Buffered file streams: fopen and the calls that take what it hands out.
@@ -99,32 +99,45 @@ export const standardRecords = iob=>(iob === 0 ? []
  * @property {number[]} pushback  What ungetc gave back, the next to read last.
  */
 
+/** fopen's `ccs=` names, case aside, and the Unicode translation each opens in. */
+const CCS = new Map([['unicode', O_WTEXT], ['utf-8', O_U8TEXT], ['utf-16le', O_U16TEXT]]);
+
 /**
  * The mode string, read as the runtime reads it: the first letter says what,
  * `+` widens it, and `b` or `t` names the translation; neither leaves it to
  * the runtime's `_fmode`. `D` makes the file temporary, removed when the
- * stream closes.
+ * stream closes. After a comma, `ccs=` names a Unicode translation --
+ * UNICODE, UTF-8 or UTF-16LE -- which `b` overrides (Wine's msvcrt
+ * test_fopen_s); anything else there makes it no mode at all.
  *
  * @param {string} mode
  * @returns {{ read: boolean, write: boolean, create: boolean, truncate: boolean,
  *            append: boolean, flags: number, text: boolean | null,
- *            temporary: boolean } | null}
+ *            temporary: boolean, unicode: number } | null}
  */
 function parseMode(mode){
-    const rest = mode.slice(1);
+    const comma = mode.indexOf(',');
+    const named = comma < 0 ? null : /^ *ccs=([\w-]+) *$/i.exec(mode.slice(comma + 1));
+    const ccs = named ? CCS.get(named[1].toLowerCase()) ?? 0 : 0;
+    if (comma >= 0 && ccs === 0)
+    {
+        return null;
+    }
+    const rest = mode.slice(1, comma < 0 ? mode.length : comma);
     const plus = rest.includes('+');
     const text = /[bt]/.test(rest) ? rest.lastIndexOf('t') > rest.lastIndexOf('b') : null;
     const temporary = rest.includes('D');
+    const unicode = text === false ? 0 : ccs;
     switch (mode[0]){
         case 'r':
             return { read: true, write: plus, create: false, truncate: false, append: false,
-                flags: plus ? IORW : IOREAD, text, temporary };
+                flags: plus ? IORW : IOREAD, text, temporary, unicode };
         case 'w':
             return { read: plus, write: true, create: true, truncate: true, append: false,
-                flags: plus ? IORW : IOWRT, text, temporary };
+                flags: plus ? IORW : IOWRT, text, temporary, unicode };
         case 'a':
             return { read: plus, write: true, create: true, truncate: false, append: true,
-                flags: plus ? IORW : IOWRT, text, temporary };
+                flags: plus ? IORW : IOWRT, text, temporary, unicode };
         default:
             return null;
     }
@@ -475,6 +488,7 @@ export function createStdioFunctions(host){
      * descriptor saying why a name could not be opened.
      *
      * @param {string} name @param {string | null} mode
+     * @returns {number | Promise<number>}
      */
     const openStream = (name, mode)=>{
         const parsed = mode === null ? null : parseMode(mode);
@@ -483,17 +497,18 @@ export function createStdioFunctions(host){
             fail(EINVAL);
             return 0;
         }
-        const fd = descriptors.open(name, parsed);
-        if (fd < 0)
-        {
-            return 0;
-        }
-        const record = attach(fd, parsed.flags);
-        if (record === 0)
-        {
-            descriptors.close(fd);
-        }
-        return record;
+        return settle(descriptors.open(name, parsed), fd=>{
+            if (fd < 0)
+            {
+                return 0;
+            }
+            const record = attach(fd, parsed.flags);
+            if (record === 0)
+            {
+                descriptors.close(fd);
+            }
+            return record;
+        });
     };
 
     /** @param {Stream} stream @param {number} c */
@@ -599,14 +614,15 @@ export function createStdioFunctions(host){
                 return 0;
             }
             descriptors.close(stream.fd);
-            const fd = descriptors.open(text, parsed);
-            if (fd < 0)
-            {
-                forget(stream);
-                return 0;
-            }
-            standOn(stream, fd, parsed.flags);
-            return stream.record;
+            return settle(descriptors.open(text, parsed), fd=>{
+                if (fd < 0)
+                {
+                    forget(stream);
+                    return 0;
+                }
+                standOn(stream, fd, parsed.flags);
+                return stream.record;
+            });
         }),
 
         /**

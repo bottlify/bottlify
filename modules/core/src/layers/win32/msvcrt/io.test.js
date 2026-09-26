@@ -545,6 +545,33 @@ test('in a Unicode mode _read hands back UTF-16, the file\'s BOM saying how it i
     assert.deepEqual(errno, []);
 });
 
+test('a file opened in a Unicode mode only to append to is added to as its mark says', ()=>{
+    // "If _open is called with _O_WRONLY | _O_APPEND (append mode) and
+    // _O_WTEXT, _O_U16TEXT, or _O_U8TEXT, it first tries to open the file for
+    // reading and writing, read the BOM, then reopen it for writing only."
+    const { memory, files, fns, open, errno } = build({
+        'C:\\game\\w.txt': Uint8Array.of(0xff, 0xfe, 0x61, 0),
+    });
+    const fd = open('C:\\game\\w.txt', O_WRONLY | O_APPEND | O_U8TEXT);
+    assert.equal(fns._write.handler([fd, memory.put('\u263a&'), 2]), 2);
+    assert.equal(fns._read.handler([fd, memory.allocate(2), 2]), -1, 'still only to write');
+    fns._close.handler([fd]);
+    assert.equal(hex(files.files['C:\\game\\w.txt']), 'ff fe 61 00 3a 26');
+    assert.deepEqual(errno, [EBADF]);
+});
+
+test('a Unicode open waits for the file\'s mark while its bytes are on their way', async()=>{
+    const { fns, open, memory, buffer } = build({
+        'C:\\game\\w.txt': Uint8Array.of(0xff, 0xfe, 0x61, 0, 0x0d, 0, 0x0a, 0),
+    }, { late: true });
+    const opening = open('C:\\game\\w.txt', O_RDONLY | O_U8TEXT);
+    assert.equal(typeof opening.then, 'function', 'the caller parks on it');
+    const fd = await opening;
+    assert.equal(await fns._read.handler([fd, buffer, 8]), 4);
+    assert.equal(hex(memory.bytes.subarray(buffer, buffer + 4)), '61 00 0a 00',
+        'read the way the mark says, from past it');
+});
+
 test('a console descriptor in a Unicode mode writes the characters its UTF-16 spells', ()=>{
     const { memory, fns, console } = build();
     assert.equal(fns._setmode.handler([1, O_U16TEXT]), O_TEXT);

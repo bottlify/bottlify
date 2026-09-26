@@ -162,9 +162,6 @@ export function latin1(bytes){
  *           `_O_WTEXT`, `_O_U16TEXT` or `_O_U8TEXT`; 0 for none.
  * @property {import('./widetext.js').Encoding} encoding
  *           How the file keeps the UTF-16 of a Unicode translation.
- * @property {Promise<void> | null} ready
- *           The file's mark being read, when the volume has not got the
- *           bytes yet; a read waits for it.
  * @property {boolean} ended     A ^Z was read: reads answer nothing until a seek.
  * @property {boolean} temporary The file is removed when the descriptor closes.
  * @property {number} [console]  The standard handle a console descriptor stands for.
@@ -218,7 +215,6 @@ const over = (file, settings)=>({
     text: settings.text || Boolean(settings.unicode),
     unicode: settings.unicode ?? 0,
     encoding: encodingOf(settings.unicode ?? 0),
-    ready: null,
     ended: false,
     temporary: Boolean(settings.temporary),
     console: settings.console,
@@ -315,12 +311,17 @@ export function createDescriptors(host){
     /**
      * A file opened in a Unicode translation: an empty one open for writing
      * starts with the mark of the translation's encoding, and one with
-     * something in it that is open for reading is read the way its own mark
-     * says -- skipped, so the first read is of the text -- or, with no mark,
-     * the way the translation reads such a file (Wine's msvcrt
-     * test_file_write_read).
+     * something in it is read and written the way its own mark says -- the
+     * mark skipped, so the first read is of the text -- or, with no mark, the
+     * way the translation reads such a file (Wine's msvcrt
+     * test_file_write_read and test_fgetwc_unicode). A file opened only to
+     * append to is looked at through a read of its own, as `_open` and fopen
+     * are documented to, so what is added matches what is there; when that
+     * cannot be opened the translation's own encoding stands. The answer
+     * waits for the file's first bytes when the volume has not got them yet.
      *
      * @param {Descriptor} descriptor
+     * @returns {void | Promise<void>}
      */
     const markFile = descriptor=>{
         const size = sizeOf(descriptor);
@@ -330,11 +331,18 @@ export function createDescriptors(host){
             descriptor.position = host.files.write(descriptor.node, 0, mark);
             return;
         }
-        if (size === 0 || !descriptor.read)
+        const own = descriptor.read;
+        const look = size === 0 ? null : own ? descriptor.node
+            : host.files.open(descriptor.path, { read: true, write: false });
+        if (!look)
         {
             return;
         }
-        const reading = settle(host.files.read(descriptor.node, 0, 3), head=>{
+        return settle(host.files.read(look, 0, 3), head=>{
+            if (!own)
+            {
+                host.files.close(look);
+            }
             const mark = markIn(head);
             descriptor.encoding = mark?.encoding ?? unmarkedEncodingOf(descriptor.unicode);
             if (mark && descriptor.position === 0)
@@ -342,12 +350,6 @@ export function createDescriptors(host){
                 descriptor.position = mark.length;
             }
         });
-        if (reading instanceof Promise)
-        {
-            descriptor.ready = reading.then(()=>{
-                descriptor.ready = null;
-            });
-        }
     };
 
     /**
@@ -355,8 +357,7 @@ export function createDescriptors(host){
      * Unicode translation: the file's units, CR LF folded to LF, and the
      * position moved past the bytes of the file they came from. As many
      * bytes are asked for as the units could take, and a unit more, which
-     * says whether a CR is the first half of a CR LF. A read waits for the
-     * file's mark when that is still on its way.
+     * says whether a CR is the first half of a CR LF.
      *
      * @param {Descriptor} descriptor @param {number} limit
      * @returns {Uint8Array | Promise<Uint8Array>}
@@ -364,16 +365,12 @@ export function createDescriptors(host){
     const pullUnicode = (descriptor, limit)=>{
         const units = Math.floor(limit / 2);
         const widest = descriptor.encoding === 'utf16' ? 2 : descriptor.encoding === 'utf8' ? 3 : 1;
-        /** @returns {Uint8Array | Promise<Uint8Array>} */
-        const read = ()=>{
-            const start = descriptor.position;
-            return settle(host.files.read(descriptor.node, start, (units + 2) * widest + 2), raw=>{
-                const folded = foldUnits(decodeUnits(raw, descriptor.encoding), units);
-                descriptor.position = start + folded.consumed;
-                return bytesOfUnits(folded.units);
-            });
-        };
-        return descriptor.ready ? descriptor.ready.then(read) : read();
+        const start = descriptor.position;
+        return settle(host.files.read(descriptor.node, start, (units + 2) * widest + 2), raw=>{
+            const folded = foldUnits(decodeUnits(raw, descriptor.encoding), units);
+            descriptor.position = start + folded.consumed;
+            return bytesOfUnits(folded.units);
+        });
     };
 
     /**
@@ -418,9 +415,12 @@ export function createDescriptors(host){
         /**
          * Opens a file and answers with the lowest number free, or -1 with
          * errno saying why: the name is not there, it is and was to be made
-         * new, or it is and cannot be opened this way.
+         * new, or it is and cannot be opened this way. In a Unicode
+         * translation the answer waits for the file's mark, when that is
+         * still on its way.
          *
          * @param {string} path @param {OpenRequest} request
+         * @returns {number | Promise<number>}
          */
         open(path, request){
             const fd = lowestFree();
@@ -446,11 +446,7 @@ export function createDescriptors(host){
                 unicode: request.unicode,
             });
             table.set(fd, descriptor);
-            if (descriptor.unicode !== 0)
-            {
-                markFile(descriptor);
-            }
-            return fd;
+            return descriptor.unicode === 0 ? fd : settle(markFile(descriptor), ()=>fd);
         },
 
         /**
