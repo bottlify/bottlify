@@ -278,18 +278,32 @@ export function createVtables({ memory, register, heap }){
      * says it can still be reached; and every interface kept that way before
      * is asked again, because whatever kept it may be what was released.
      *
+     * An object model that knows the object itself is over says so with
+     * `destroyed`, and then every interface it was published as goes the
+     * same way: a pointer from an earlier QueryInterface would otherwise
+     * keep finding the released object, and its words would never go back.
+     * Without that word a zero ends only the interface it came through,
+     * which is true of every way of counting -- DirectDraw counts each
+     * generation apart, and one reaching zero leaves the others held.
+     *
      * @param {any} object @param {string} interfaceId
      */
     function releasedToZero(object, interfaceId){
-        if (object.reachable?.(interfaceId))
+        const ended = object.destroyed === true
+            ? [...published.get(object)?.keys() ?? []]
+            : [interfaceId];
+        for (const id of ended)
         {
-            const ids = heldAtZero.get(object) ?? new Set();
-            ids.add(interfaceId);
-            heldAtZero.set(object, ids);
-        }
-        else
-        {
-            forget(object, interfaceId);
+            if (object.reachable?.(id))
+            {
+                const ids = heldAtZero.get(object) ?? new Set();
+                ids.add(id);
+                heldAtZero.set(object, ids);
+            }
+            else
+            {
+                forget(object, id);
+            }
         }
     }
 

@@ -344,3 +344,203 @@ test('an object still reachable at a count of zero keeps its pointer until it is
     assert.equal(addRef([pointer]) >>> 0, 0x80004003, 'now it is forgotten');
     assert.equal(table.diagnostics().comInterfaces, 1);
 });
+
+/** @param {string} guid  Braced, as the object models key interfaces. */
+function guidBytes(guid){
+    const hex = guid.replace(/[{}-]/g, '');
+    const at = (/** @type {number} */ from, /** @type {number} */ count)=>Array.from(
+        { length: count }, (_, i)=>parseInt(hex.slice(from + i * 2, from + i * 2 + 2), 16));
+    return new Uint8Array([
+        ...at(0, 4).reverse(), ...at(8, 2).reverse(), ...at(12, 2).reverse(), ...at(16, 8),
+    ]);
+}
+
+const IID_B = '{00000002-0000-0000-C000-000000000046}';
+const IID_C = '{00000003-0000-0000-C000-000000000046}';
+
+/**
+ * A publisher over memory that keeps what is written to it, so that a
+ * QueryInterface finds the GUID it was asked for and a test can call any
+ * interface pointer through the shared stubs as a guest would.
+ */
+function interfaces(){
+    /** @type {Map<string, any>} */
+    const handlers = new Map();
+    /** @type {Map<number, number>} */
+    const words = new Map();
+    /** @type {Map<number, Uint8Array>} */
+    const guids = new Map();
+    /** @type {number[]} */
+    const freed = [];
+    let next = 0x2000;
+    const table = createVtables({
+        memory: {
+            /** @param {number} address @param {number} value */
+            writeU32: (address, value)=>words.set(address, value),
+            /** @param {number} address @param {number} length */
+            readBytes: (address, length)=>guids.get(address) ?? new Uint8Array(length),
+        },
+        /** @param {string} name @param {any} fn */
+        register: (name, fn)=>{
+            handlers.set(name, fn);
+            return 0x1000 + handlers.size * 0x10;
+        },
+        heap: {
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += bytes;
+                return at;
+            },
+            free: (/** @type {number} */ address)=>freed.push(address),
+        },
+    });
+    /** @param {string} name @param {number} pointer @param {number[]} [args] */
+    const call = (name, pointer, args = [])=>handlers.get(`${IID}::${name}`).handler(
+        [pointer, ...args]) >>> 0;
+    return {
+        table,
+        freed,
+        call,
+        /** @param {number} pointer @param {string} iid @returns {number} the pointer answered */
+        query(pointer, iid){
+            const riid = 0x9000 + guids.size * 0x10;
+            guids.set(riid, guidBytes(iid));
+            assert.equal(call('QueryInterface', pointer, [riid, 0x8000]), 0);
+            return /** @type {number} */ (words.get(0x8000));
+        },
+    };
+}
+
+/** Every interface an object has, sharing one method list as a real vtable would. */
+const EVERY = [IID, IID_B, IID_C];
+
+test('the last reference to an object forgets every interface it was published as', ()=>{
+    // A pointer from an earlier QueryInterface must not outlive the object:
+    // through it the stub would find the released object, and its words
+    // would never go back to the heap.
+    const f = interfaces();
+    let count = 1;
+    const methods = [...METHODS.slice(0, 3),
+        { name: 'Draw', argBytes: 8, invoke: ()=>0 }];
+    const counted = {
+        /** @param {string} id */
+        interfaceFor: id=>(EVERY.includes(id) ? { id, methods } : null),
+        addRef: ()=>++count,
+        release: ()=>--count,
+        get destroyed(){
+            return count === 0;
+        },
+    };
+    const first = f.table.publish(counted, IID);
+    const second = f.query(first, IID_B);
+    assert.notEqual(second, first);
+    assert.equal(f.call('Release', first), 1);
+    assert.equal(f.call('Draw', second, [1]), 0, 'the object lives while the second is held');
+    assert.equal(f.call('Release', second), 0);
+
+    assert.equal(f.call('Draw', first, [1]), 0x80004003, 'the first interface went with it');
+    assert.equal(f.call('Draw', second, [1]), 0x80004003);
+    assert.deepEqual(f.freed.sort(), [first, second].sort(), 'and both blocks went back');
+    assert.equal(f.table.diagnostics().comInterfaces, 0);
+});
+
+test('an object counting per interface loses only the interface whose count went', ()=>{
+    // DirectDraw's generations each keep a count, and one reaching zero says
+    // nothing about the others: their pointers are still the program's. An
+    // older Direct3D interface shares a generation's count, and goes when it
+    // does -- with everything else, once the object says it is over.
+    const f = interfaces();
+    /** @type {Map<string, number>} */
+    const counts = new Map([[IID, 1]]);
+    /** @param {string} id */
+    const generation = id=>(id === IID_C ? IID_B : id);
+    const methods = [...METHODS.slice(0, 3),
+        { name: 'Draw', argBytes: 8, invoke: ()=>0 }];
+    const counted = {
+        /** @param {string} id */
+        interfaceFor: id=>(EVERY.includes(id) ? { id, methods } : null),
+        /** @param {string} id */
+        addRef: id=>{
+            counts.set(generation(id), (counts.get(generation(id)) ?? 0) + 1);
+            return counts.get(generation(id));
+        },
+        /** @param {string} id */
+        release: id=>{
+            counts.set(generation(id), (counts.get(generation(id)) ?? 0) - 1);
+            return counts.get(generation(id));
+        },
+        get destroyed(){
+            return [...counts.values()].every(count=>count === 0);
+        },
+    };
+    const first = f.table.publish(counted, IID);
+    const second = f.query(first, IID_B);
+    const shared = f.query(second, IID_C);
+
+    assert.equal(f.call('Release', first), 0);
+    assert.equal(f.call('Draw', first, [1]), 0x80004003, 'its own generation went');
+    assert.equal(f.call('Draw', second, [1]), 0, 'another generation is still held');
+    assert.equal(f.call('Draw', shared, [1]), 0);
+
+    assert.equal(f.call('Release', second), 1);
+    assert.equal(f.call('Release', shared), 0);
+    assert.equal(f.call('Draw', second, [1]), 0x80004003,
+        'the object is over, and so is the generation that shared the count');
+    assert.equal(f.call('Draw', shared, [1]), 0x80004003);
+    assert.equal(f.table.diagnostics().comInterfaces, 0);
+});
+
+test('an object that does not say it is over loses only the interface released through', ()=>{
+    // Without the word, a zero is the end of the interface it came through,
+    // which is true of every way of counting.
+    const f = interfaces();
+    const counted = {
+        /** @param {string} id */
+        interfaceFor: id=>(EVERY.includes(id) ? { id, methods: METHODS } : null),
+        addRef: ()=>1,
+        release: ()=>0,
+    };
+    const first = f.table.publish(counted, IID);
+    const second = f.query(first, IID_B);
+    assert.equal(f.call('Release', second), 0);
+    assert.equal(f.call('AddRef', second), 0x80004003);
+    assert.equal(f.call('AddRef', first), 1);
+});
+
+test('an object that is over keeps each interface still reachable, and only those', ()=>{
+    const f = interfaces();
+    let count = 1;
+    let kept = true;
+    const counted = {
+        /** @param {string} id */
+        interfaceFor: id=>(EVERY.includes(id) ? { id, methods: METHODS } : null),
+        addRef: ()=>++count,
+        release: ()=>(count = Math.max(0, count - 1)),
+        get destroyed(){
+            return count === 0;
+        },
+        /** @param {string} id */
+        reachable: id=>count > 0 || (kept && id === IID_B),
+    };
+    const other = {
+        /** @param {string} id */
+        interfaceFor: id=>(id === IID ? { id, methods: METHODS } : null),
+        addRef: ()=>2,
+        release: ()=>1,
+    };
+    const first = f.table.publish(counted, IID);
+    const second = f.query(first, IID_B);
+    const third = f.query(first, IID_C);
+    const elsewhere = f.table.publish(other, IID);
+    assert.equal(f.call('Release', second), 2);
+    assert.equal(f.call('Release', third), 1);
+    assert.equal(f.call('Release', first), 0);
+
+    assert.equal(f.call('AddRef', first), 0x80004003, 'nothing keeps the first');
+    assert.equal(f.call('AddRef', third), 0x80004003, 'nor the third');
+    assert.equal(f.call('Release', second), 0, 'the second is kept, and answers');
+    kept = false;
+    f.call('Release', elsewhere);
+    assert.equal(f.call('Release', second), 0x80004003, 'until nothing keeps it either');
+    assert.equal(f.table.diagnostics().comInterfaces, 1);
+});
