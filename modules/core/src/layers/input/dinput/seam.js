@@ -73,6 +73,7 @@ const DI8DEVTYPEKEYBOARD_PCENH = 4;
 const DIDC_ATTACHED = 0x00000001;
 const DIDC_EMULATED = 0x00000004;
 const DIEDFL_FORCEFEEDBACK = 0x00000100;
+const DISCL_EXCLUSIVE = 0x00000001;
 
 /** The devices a program creates, named by the GUIDs it was compiled with. */
 export const GUID_SysKeyboard = '{6F1D2B61-D5A0-11CF-BFC7-444553540000}';
@@ -637,13 +638,16 @@ export function createDirectInput(
          * HRESULT SetCooperativeLevel(HWND, DWORD)
          *
          * Like the buffer size, a level is settled before the device is
-         * taken: a held device refuses a new one with DIERR_ACQUIRED.
+         * taken: a held device refuses a new one with DIERR_ACQUIRED. The
+         * one part of it anything here acts on is DISCL_EXCLUSIVE -- see
+         * `exclusive` below for what holding a device that way takes away.
          */
-        SetCooperativeLevel(device){
+        SetCooperativeLevel(device, [, flags]){
             if (device.acquired)
             {
                 return DIERR_ACQUIRED;
             }
+            device.setExclusive((flags & DISCL_EXCLUSIVE) !== 0);
             return DI_OK;
         },
 
@@ -1222,6 +1226,20 @@ export function createDirectInput(
 
         /** @param {string} guid */
         device: guid=>devices.get(guid) ?? null,
+
+        /**
+         * Whether a program holds this device exclusively right now: acquired
+         * at a cooperative level with DISCL_EXCLUSIVE. While it does, the
+         * device's input reaches the program through DirectInput alone --
+         * Windows takes it as raw input with RIDEV_NOLEGACY, and the window's
+         * own mouse or key messages stop, so one click is not read twice.
+         *
+         * @param {'keyboard' | 'mouse'} kind
+         */
+        exclusive(kind){
+            const device = devices.get(kind === KEYBOARD ? GUID_SysKeyboard : GUID_SysMouse);
+            return device !== undefined && device.acquired && device.exclusive;
+        },
 
         libraries: {
             'DINPUT.dll': {

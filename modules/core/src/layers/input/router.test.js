@@ -29,9 +29,10 @@ const WM_XBUTTONDOWN = 0x020b;
  * a fake device would test half of it.
  *
  * @param {{ bounds?: (() => { width: number, height: number }) | null,
- *           window?: () => number }} [options]
+ *           window?: () => number,
+ *           exclusive?: (device: 'keyboard' | 'mouse') => boolean }} [options]
  */
-function harness({ bounds = null, window = ()=>HWND } = {}){
+function harness({ bounds = null, window = ()=>HWND, exclusive } = {}){
     /** @type {any[]} */
     const messages = [];
     /** @type {any[]} */
@@ -59,6 +60,7 @@ function harness({ bounds = null, window = ()=>HWND } = {}){
         target: ()=>window(),
         bounds,
         trace: press=>presses.push(press),
+        exclusive,
     });
 
     return {
@@ -791,4 +793,46 @@ test('a press nothing recognises is written down nowhere', ()=>{
     const h = harness();
     assert.equal(h.send({ kind: 'pointerButton', button: 'thumb', down: true }), false);
     assert.deepEqual(h.presses(), []);
+});
+
+test('a mouse DirectInput holds exclusively sends the window no mouse messages', ()=>{
+    // device8.c test_mouse_keyboard: an exclusive foreground Acquire takes
+    // the mouse as raw input with RIDEV_NOLEGACY, which stops it generating
+    // the legacy messages -- so one click does not reach a program twice.
+    let held = true;
+    const h = harness({ exclusive: device=>held && device === 'mouse' });
+    h.send({ kind: 'pointerMove', x: 10, y: 10, dx: 10, dy: 10 });
+    h.send({ kind: 'pointerButton', button: 'left', down: true });
+    h.send({ kind: 'pointerButton', button: 'left', down: false });
+    h.send({ kind: 'wheel', delta: 120 });
+    assert.deepEqual(h.all(), [], 'not a move, a button, a wheel or a cursor question');
+    assert.deepEqual(h.raw.map(event=>event.kind),
+        ['mouseMove', 'mouseButton', 'mouseButton', 'mouseWheel'],
+        'every one of them reached DirectInput');
+    assert.deepEqual(h.presses().map(press=>press.withheld), [true, true]);
+    assert.deepEqual(h.router.cursor(), { x: 10, y: 10 }, 'the cursor still follows');
+
+    h.send({ kind: 'key', code: 'KeyA', down: true });
+    assert.deepEqual(h.drain().map(message=>message.message), [WM.KEYDOWN],
+        'the keyboard is not the mouse');
+
+    held = false;
+    h.send({ kind: 'pointerButton', button: 'left', down: true });
+    assert.deepEqual(h.drain().map(message=>message.message), [WM_LBUTTONDOWN],
+        'and once it lets go, the window hears the mouse again');
+    assert.deepEqual(h.presses().map(press=>press.withheld), [false]);
+});
+
+test('a keyboard DirectInput holds exclusively sends the window no key messages', ()=>{
+    // RIDEV_NOHOTKEYS | RIDEV_NOLEGACY for the keyboard, in the same test.
+    const h = harness({ exclusive: device=>device === 'keyboard' });
+    h.send({ kind: 'key', code: 'KeyA', down: true });
+    h.send({ kind: 'text', text: 'a' });
+    h.send({ kind: 'key', code: 'AltLeft', down: true });
+    h.send({ kind: 'key', code: 'AltLeft', down: false });
+    h.send({ kind: 'key', code: 'KeyA', down: false });
+    assert.deepEqual(h.all(), []);
+    assert.deepEqual(h.composed(), [], 'no WM_KEYDOWN, so nothing for TranslateMessage');
+    assert.equal(h.raw.filter(event=>event.kind === 'key').length, 4);
+    assert.equal(h.router.keyState(0x41), 0, 'the key state still follows the keys');
 });

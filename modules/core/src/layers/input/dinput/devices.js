@@ -189,6 +189,8 @@ export function createInputDevice({ kind, now }){
     let overflowed = false;
     let sequence = 0;
     let notifyEvent = 0;
+    /** Whether the cooperative level asked for DISCL_EXCLUSIVE. */
+    let exclusive = false;
     let references = 1;
     /** What SetDataFormat settled on, and zero until it is called. */
     let dataSize = 0;
@@ -268,6 +270,13 @@ export function createInputDevice({ kind, now }){
         },
         get bufferSize(){
             return bufferSize;
+        },
+        get exclusive(){
+            return exclusive;
+        },
+        /** @param {boolean} value */
+        setExclusive(value){
+            exclusive = value;
         },
         get notifyEvent(){
             return notifyEvent;

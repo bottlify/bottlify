@@ -10,6 +10,8 @@ import { inputModule } from './module.js';
 import { WM } from './router.js';
 import { createMessageQueue, ANY_WINDOW } from '../win32/user32/messages.js';
 import { createStubApi } from '../../system/stub.js';
+import { writeGuid } from '../win32/ole32/guid.js';
+import { IID_IDirectInput8A, GUID_SysMouse } from './dinput/seam.js';
 
 const HWND = 0x40;
 
@@ -40,6 +42,7 @@ async function open({ win32, config } = {}){
     return {
         api,
         queue,
+        memory,
         /** Everything waiting, in order. */
         drain(){
             /** @type {any[]} */
@@ -110,4 +113,65 @@ test('diagnostics report both halves of the layer', async()=>{
 
     await inputModule.dispose();
     assert.equal(inputModule.diagnostics().status, 'created');
+});
+
+test('a mouse a program holds exclusively through DirectInput stops reaching the window', async()=>{
+    // The route a program takes, through the layer's own seam: the device's
+    // cooperative level and Acquire decide whether a click is a window message
+    // as well as a DirectInput event. device8.c test_mouse_keyboard: an
+    // exclusive foreground Acquire registers the mouse with RIDEV_NOLEGACY.
+    /** @type {Map<number, { object: any, id: string }>} */
+    const published = new Map();
+    const { api, memory, drain } = await open({ config: {
+        publishInterface: (/** @type {any} */ object, /** @type {string} */ id)=>{
+            const pointer = 0x10000 + published.size * 4;
+            published.set(pointer, { object, id });
+            return pointer;
+        },
+    } });
+    const guids = {
+        readMemory: memory.readBytes,
+        writeMemory: memory.writeBytes,
+    };
+    const u32 = (/** @type {number} */ at)=>new DataView(memory.readBytes(at, 4).slice().buffer)
+        .getUint32(0, true);
+    /** @param {number} pointer @param {string} name @param {number[]} args */
+    const call = (pointer, name, args = [])=>{
+        const entry = /** @type {{ object: any, id: string }} */ (published.get(pointer));
+        const method = entry.object.interfaceFor(entry.id).methods
+            .find((/** @type {any} */ m)=>m.name === name);
+        return method.invoke(entry.object, args) | 0;
+    };
+
+    writeGuid(guids, 0x100, IID_IDirectInput8A);
+    assert.equal(api.libraries()['DINPUT8.dll'].DirectInput8Create
+        .handler([0, 0x0800, 0x100, 0x200, 0]), 0);
+    writeGuid(guids, 0x120, GUID_SysMouse);
+    assert.equal(call(u32(0x200), 'CreateDevice', [0x120, 0x204, 0]), 0);
+    const mouse = u32(0x204);
+    memory.writeBytes(0x300, new Uint8Array([0x18, 0, 0, 0, 0x10, 0, 0, 0, 2, 0, 0, 0, 16]));
+    assert.equal(call(mouse, 'SetDataFormat', [0x300]), 0);
+    const DISCL_EXCLUSIVE = 0x1;
+    const DISCL_NONEXCLUSIVE = 0x2;
+    const DISCL_FOREGROUND = 0x4;
+    assert.equal(call(mouse, 'SetCooperativeLevel', [HWND, DISCL_EXCLUSIVE | DISCL_FOREGROUND]), 0);
+    assert.equal(call(mouse, 'Acquire'), 0);
+
+    api.send({ kind: 'pointerMove', x: 10, y: 10, dx: 10, dy: 10 });
+    api.send({ kind: 'pointerButton', button: 'left', down: true });
+    api.send({ kind: 'pointerButton', button: 'left', down: false });
+    api.send({ kind: 'key', code: 'KeyW', down: true });
+    assert.deepEqual(drain().map(message=>message.message), [WM.KEYDOWN],
+        'the click reaches the program once, through DirectInput');
+    assert.equal(api.device(GUID_SysMouse).mouseState().x, 10);
+
+    assert.equal(call(mouse, 'Unacquire'), 0);
+    assert.equal(call(mouse, 'SetCooperativeLevel', [HWND, DISCL_NONEXCLUSIVE | DISCL_FOREGROUND]),
+        0);
+    assert.equal(call(mouse, 'Acquire'), 0);
+    api.send({ kind: 'pointerButton', button: 'left', down: true });
+    assert.ok(drain().some(message=>message.message === 0x0201),
+        'held without DISCL_EXCLUSIVE, the window hears it too');
+
+    await inputModule.dispose();
 });

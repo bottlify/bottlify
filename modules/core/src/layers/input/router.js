@@ -132,6 +132,9 @@ const BUTTONS = Object.freeze({
  * @property {number} message   The window message synthesised from it.
  * @property {number} wParam
  * @property {number} lParam
+ * @property {boolean} withheld  The message was kept from the window, because
+ *           DirectInput holds the mouse exclusively; the press reached the
+ *           program through that alone.
  */
 
 /**
@@ -157,12 +160,19 @@ const BUTTONS = Object.freeze({
  * @property {(text: string) => void} [paste]
  *     Where pasted text goes: the clipboard, for a program to read. Absent
  *     in a build with no clipboard, where a paste is dropped.
+ * @property {(device: 'keyboard' | 'mouse') => boolean} [exclusive]
+ *     Whether DirectInput holds that device exclusively, in which case its
+ *     events reach the program through DirectInput and the window gets none
+ *     of its messages. Absent, the window always gets them.
  */
 
 /**
  * @param {RouterDeps} deps
  */
-export function createInputRouter({ post, device, now, target, bounds, compose, trace, paste }){
+export function createInputRouter(
+    { post, device, now, target, bounds, compose, trace, paste, exclusive },
+)
+{
     /** The configured screen, or nothing: what the cursor falls back to. */
     const screen = bounds ?? null;
     // Where the cursor may go. The configured screen until something wires a
@@ -174,6 +184,15 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
     const clock = now ?? (()=>0);
     const targetWindow = target ?? (()=>0);
     const composeCharacter = compose ?? (()=>{});
+    /**
+     * Whether the window is told what this device does. An exclusive
+     * DirectInput device is taken as raw input with RIDEV_NOLEGACY, which
+     * stops the legacy messages -- a program that reads a click both ways
+     * would otherwise act on it twice.
+     *
+     * @param {'keyboard' | 'mouse'} kind
+     */
+    const windowHears = kind=>exclusive?.(kind) !== true;
 
     /**
      * Virtual keys that are down as the thread sees them: what GetKeyState
@@ -378,7 +397,10 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         const messages = event.down
             ? [WM.KEYDOWN, WM.SYSKEYDOWN]
             : [WM.KEYUP, WM.SYSKEYUP];
-        emit(messages[system ? 1 : 0], mapping.vk, lParam);
+        if (windowHears('keyboard'))
+        {
+            emit(messages[system ? 1 : 0], mapping.vk, lParam);
+        }
         device({ kind: 'key', code: dikOf(mapping), down: event.down === true });
         return true;
     };
@@ -386,6 +408,11 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
     /** @param {HostInputEvent} event */
     const text = event=>{
         const string = event.text ?? '';
+        if (!windowHears('keyboard'))
+        {
+            // No key message went out for TranslateMessage to find this by.
+            return false;
+        }
         for (let index = 0; index < string.length; index++)
         {
             // Handed over, not posted. Windows makes a WM_CHAR inside
@@ -475,7 +502,7 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         cursor.x = nx;
         cursor.y = ny;
 
-        if (cursor.x !== px || cursor.y !== py)
+        if ((cursor.x !== px || cursor.y !== py) && windowHears('mouse'))
         {
             announceCursor(WM.MOUSEMOVE);
             emit(WM.MOUSEMOVE, mask(), point());
@@ -517,12 +544,18 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         // A button is the moment a program is most likely to want a different
         // cursor, so the question is always asked again here.
         cursorDirty = true;
-        announceCursor(message);
         const wParam = (extra << 16 | mask()) >>> 0;
         const lParam = point();
-        emit(message, wParam, lParam);
+        const withheld = !windowHears('mouse');
+        if (!withheld)
+        {
+            announceCursor(message);
+            emit(message, wParam, lParam);
+        }
         // After the message, so a record exists only for a press the guest was
-        // actually told about, and its absence means the press never got here.
+        // actually told about -- by the message, or by DirectInput alone when
+        // that holds the mouse -- and its absence means the press never got
+        // here.
         trace?.({
             button: String(event.button),
             down: event.down === true,
@@ -532,6 +565,7 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
             message,
             wParam,
             lParam,
+            withheld,
         });
         device({ kind: 'mouseButton', code: index, down: event.down === true });
         return true;
@@ -548,7 +582,10 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         // ones. There is no desktop for a window to sit somewhere on, so the
         // two spaces are the same space, and this will need the window's own
         // origin the moment one is not at zero.
-        emit(WM.MOUSEWHEEL, (delta & 0xffff) << 16 | mask(), point());
+        if (windowHears('mouse'))
+        {
+            emit(WM.MOUSEWHEEL, (delta & 0xffff) << 16 | mask(), point());
+        }
         device({ kind: 'mouseWheel', wheel: delta });
         return true;
     };

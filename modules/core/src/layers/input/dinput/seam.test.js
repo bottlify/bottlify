@@ -677,6 +677,22 @@ test('an acquired device refuses a new buffer size or cooperative level', ()=>{
     assert.equal(f.dinput.device(GUID_SysKeyboard).bufferSize, 64);
 });
 
+test('a device is held exclusively only while acquired at an exclusive level', ()=>{
+    const f = fixture();
+    const device = createDevice(f, GUID_SysMouse);
+    f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 16)]);
+    assert.equal(f.bridge.call(device, 'SetCooperativeLevel', [0x1234, 0x1 | 0x4]), DI_OK);
+    assert.equal(f.dinput.exclusive('mouse'), false, 'asked for, not yet acquired');
+    f.bridge.call(device, 'Acquire', []);
+    assert.equal(f.dinput.exclusive('mouse'), true);
+    assert.equal(f.dinput.exclusive('keyboard'), false);
+    f.bridge.call(device, 'Unacquire', []);
+    assert.equal(f.dinput.exclusive('mouse'), false);
+    assert.equal(f.bridge.call(device, 'SetCooperativeLevel', [0x1234, 0x2 | 0x4]), DI_OK);
+    f.bridge.call(device, 'Acquire', []);
+    assert.equal(f.dinput.exclusive('mouse'), false, 'DISCL_NONEXCLUSIVE shares it');
+});
+
 test('GetCapabilities fills DIDEVCAPS and needs a header that declares its size', ()=>{
     const f = keyboard();
     assert.equal(f.bridge.call(f.device, 'GetCapabilities', [AT.caps]),

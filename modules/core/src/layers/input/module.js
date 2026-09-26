@@ -100,6 +100,9 @@ export const inputModule = {
             // assembled the process has a journal, and because a build that
             // wants no record should pay for none.
             trace: config?.trace,
+            // A device a program holds exclusively is read through
+            // DirectInput alone, and the window hears nothing of it.
+            exclusive: kind=>dinput.exclusive(kind),
             // Pasted text is the clipboard's, which is win32's; a build
             // without it has no clipboard to paste into.
             paste: text=>{
@@ -126,7 +129,9 @@ export const inputModule = {
 
             /**
              * Feeds one host event in: it becomes a window message and a change
-             * of DirectInput state, both or neither.
+             * of DirectInput state, both or neither -- except that a device a
+             * program holds exclusively through DirectInput reaches it there
+             * alone, as on Windows, where the window's messages then stop.
              *
              * @param {import('./router.js').HostInputEvent} event
              */
