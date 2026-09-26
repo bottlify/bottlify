@@ -1626,6 +1626,17 @@ export const win32Module = {
                     remove: (window, name)=>
                         libraries['USER32.dll'].RemovePropA.handler([window, name]),
                 },
+                // A BSTR or a SAFEARRAY a PROPVARIANT holds is oleaut32's to
+                // copy and to free, in its own layout.
+                bstr: {
+                    copy: bstr=>libraries['OLEAUT32.dll'].SysAllocString.handler([bstr]),
+                    free: bstr=>libraries['OLEAUT32.dll'].SysFreeString.handler([bstr]),
+                },
+                safeArray: {
+                    copy: (array, out)=>
+                        libraries['OLEAUT32.dll'].SafeArrayCopy.handler([array, out]),
+                    destroy: array=>libraries['OLEAUT32.dll'].SafeArrayDestroy.handler([array]),
+                },
             }),
 
             'RPCRT4.dll': createRpcFunctions({

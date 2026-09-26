@@ -701,3 +701,44 @@ test('a drop target is the property user32 answers for its window', async()=>{
     assert.equal(user32.GetPropA.handler([window, name]), 0);
     await win32Module.dispose();
 });
+
+test('a PROPVARIANT\'s BSTR and SAFEARRAY are copied and freed by oleaut32\'s own calls', async()=>{
+    // propvariant.c test_copy: a BSTR copy is SysAllocString's, so it stops
+    // at an embedded NUL, and an array is SafeArrayCopy's.
+    const { bytes, view, libraries } = await build();
+    const ole32 = libraries['ole32.dll'];
+    const oleaut32 = libraries['OLEAUT32.dll'];
+    const VT_I4 = 3;
+    const VT_BSTR = 8;
+    const VT_ARRAY = 0x2000;
+    [...'Test Str\0ing'].forEach((ch, index)=>view.setUint16(0x1000 + index * 2,
+        ch.charCodeAt(0), true));
+    const bstr = oleaut32.SysAllocStringLen.handler([0x1000, 12]);
+    const source = 0x2000;
+    const dest = 0x2100;
+    view.setUint16(source, VT_BSTR, true);
+    view.setUint32(source + 8, bstr, true);
+    assert.equal(await ole32.PropVariantCopy.handler([dest, source]), 0);
+    const copy = view.getUint32(dest + 8, true);
+    assert.ok(copy !== 0 && copy !== bstr);
+    assert.equal(oleaut32.SysStringLen.handler([copy]), 8);
+    assert.equal(await ole32.PropVariantClear.handler([dest]), 0);
+    assert.equal(await ole32.PropVariantClear.handler([source]), 0);
+    assert.deepEqual([...bytes.subarray(source, source + 16)], new Array(16).fill(0));
+
+    const bound = 0x3000;
+    view.setUint32(bound, 2, true);
+    view.setInt32(bound + 4, 0, true);
+    const array = oleaut32.SafeArrayCreate.handler([VT_I4, 1, bound]);
+    assert.notEqual(array, 0);
+    view.setUint16(source, VT_ARRAY | VT_I4, true);
+    view.setUint32(source + 8, array, true);
+    assert.equal(await ole32.PropVariantCopy.handler([dest, source]), 0);
+    const copied = view.getUint32(dest + 8, true);
+    assert.ok(copied !== 0 && copied !== array);
+    assert.equal(oleaut32.SafeArrayGetUBound.handler([copied, 1, 0x3100]), 0);
+    assert.equal(view.getInt32(0x3100, true), 1, 'two elements, as the source has');
+    assert.equal(await ole32.PropVariantClear.handler([dest]), 0);
+    assert.equal(await ole32.PropVariantClear.handler([source]), 0);
+    await win32Module.dispose();
+});
