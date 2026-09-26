@@ -39,6 +39,7 @@ const DSERR_OUTOFMEMORY = 0x8007000e | 0;
 const DSERR_UNSUPPORTED = 0x80004001 | 0;
 const DSERR_INVALIDCALL = 0x88780032 | 0;
 const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
+const DSERR_NODRIVER = 0x88780078 | 0;
 
 /** DSBCAPS flags a program sets when it describes a buffer it wants. */
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
@@ -190,9 +191,34 @@ export const DSOUND_ORDINALS = Object.freeze({
     2: 'DirectSoundEnumerateA',
     3: 'DirectSoundEnumerateW',
     6: 'DirectSoundCaptureCreate',
+    9: 'GetDeviceID',
     11: 'DirectSoundCreate8',
     12: 'DirectSoundCaptureCreate8',
 });
+
+/**
+ * The one device's GUID, as a program reads it: what enumeration hands out
+ * and GetDeviceID answers. Every GUID opens the same output here, so its value
+ * only has to be stable and not null.
+ */
+const DEVICE_GUID = Object.freeze([
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+]);
+
+/**
+ * dsound.h's DSDEVID_Default* aliases, {DEF0000n-9C6D-47ED-AAF1-4DDA8F2B5C03},
+ * as the sixteen bytes a GUID is in memory: n = 0 and 2 are DefaultPlayback
+ * and DefaultVoicePlayback, 1 and 3 DefaultCapture and DefaultVoiceCapture.
+ *
+ * @param {number} which
+ */
+const defaultDeviceId = which=>Object.freeze([
+    which, 0x00, 0xf0, 0xde, 0x6d, 0x9c, 0xed, 0x47,
+    0xaa, 0xf1, 0x4d, 0xda, 0x8f, 0x2b, 0x5c, 0x03,
+]);
+const DEFAULT_PLAYBACK_IDS = Object.freeze([0, 2].map(defaultDeviceId));
+const DEFAULT_CAPTURE_IDS = Object.freeze([1, 3].map(defaultDeviceId));
 
 /** DSBPOSITIONNOTIFY, one per position a program wants to be told about. */
 export const DSBPOSITIONNOTIFY = Object.freeze({
@@ -1180,13 +1206,9 @@ export function createDirectSound(
         const blank = stringForGuest('', wide);
         const device = stringForGuest('Bottlify Audio', wide);
         // A GUID is sixteen bytes and a program keeps it to open that device by
-        // name later; every guid opens the same output here, so its contents
-        // only have to be stable and not null.
+        // name later.
         const guid = allocate(16);
-        memory.writeMemory(guid, new Uint8Array([
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        ]));
+        memory.writeMemory(guid, new Uint8Array(DEVICE_GUID));
         // Named once, before the loop's first await -- see the parameter doc.
         const thread = callerThread?.();
         return (async()=>{
@@ -1264,6 +1286,38 @@ export function createDirectSound(
                     argBytes: 8,
                     /** @param {number[]} args */
                     handler: ([callback, context])=>enumerate(callback, context, true),
+                },
+                /**
+                 * HRESULT GetDeviceID(LPCGUID src, LPGUID dest)
+                 *
+                 * Which device a default names. A playback default names the
+                 * one device there is, and a device names itself; a capture
+                 * default names a device that is not there, which is
+                 * DSERR_NODRIVER as DirectSoundCreate answers for one; anything
+                 * else is no device.
+                 */
+                GetDeviceID: {
+                    argBytes: 8,
+                    /** @param {number[]} args */
+                    handler: ([source, dest])=>{
+                        if ((source >>> 0) === 0 || (dest >>> 0) === 0)
+                        {
+                            return DSERR_INVALIDPARAM;
+                        }
+                        const asked = memory.readMemory(source >>> 0, 16);
+                        const names = (/** @type {readonly number[]} */ guid)=>
+                            guid.every((byte, at)=>asked[at] === byte);
+                        if (DEFAULT_CAPTURE_IDS.some(names))
+                        {
+                            return DSERR_NODRIVER;
+                        }
+                        if (!names(DEVICE_GUID) && !DEFAULT_PLAYBACK_IDS.some(names))
+                        {
+                            return DSERR_INVALIDPARAM;
+                        }
+                        memory.writeMemory(dest >>> 0, new Uint8Array(DEVICE_GUID));
+                        return DS_OK;
+                    },
                 },
                 /** HRESULT DirectSoundCaptureCreate(...) — there is no capture device. */
                 DirectSoundCaptureCreate: { argBytes: 12, handler: ()=>DSERR_UNSUPPORTED },
