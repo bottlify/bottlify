@@ -149,6 +149,39 @@ export function unpackRegion(bytes){
 }
 
 /**
+ * Of a store's records, the ones a seed for this emitter needs: every region
+ * record of this version and the modules they name. A batch's module whose
+ * regions a relink has moved since is named by none of them -- on a load of
+ * fifteen hundred functions that was half the store's bytes -- and a record
+ * of another version could never be read back; both stay behind.
+ *
+ * @param {Iterable<[string, Uint8Array]>} records  the store's names and bytes
+ * @param {(key: string) => string} nameOf  the name the store keeps a key under
+ * @returns {[string, Uint8Array][]}
+ */
+export function seedRecords(records, nameOf){
+    const all = [...records];
+    /** @type {Set<string>} */
+    const named = new Set();
+    /** @type {Set<string>} */
+    const regions = new Set();
+    for (const [name, bytes] of all)
+    {
+        const region = unpackRegion(bytes);
+        // A module's record has no labels; a region's has one per block.
+        if (region !== null && region.labels.length > 0)
+        {
+            regions.add(name);
+            if (region.moduleKey !== undefined)
+            {
+                named.add(nameOf(region.moduleKey));
+            }
+        }
+    }
+    return all.filter(([name])=>regions.has(name) || named.has(name));
+}
+
+/**
  * A store in memory: for tests, and for a run whose host has nowhere to
  * keep translations across starts.
  *

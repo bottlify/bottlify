@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    CACHE_VERSION, cacheKey, memoryTranslationStore, moduleKey, packRegion, unpackRegion,
+    CACHE_VERSION, cacheKey, memoryTranslationStore, moduleKey, packRegion, seedRecords,
+    unpackRegion,
 } from './cache.js';
 
 test('a record round-trips, and bytes of another version or shape are a miss', ()=>{
@@ -70,4 +71,23 @@ test('a module\'s key sees its bytes past 32 bits, and the emitting settings', (
     assert.match(key, /^cork\/1st-\/abc\/game\/module\/[0-9a-f]{9,16}-3$/);
     assert.notEqual(moduleKey(of, new Uint8Array([1, 2, 4])), key);
     assert.notEqual(moduleKey({ ...of, variant: 'S' }, new Uint8Array([1, 2, 3])), key);
+});
+
+test('a seed takes the region records and the modules they name, and nothing else', ()=>{
+    const nameOf = (/** @type {string} */ key)=>`name(${key})`;
+    const module = (/** @type {number} */ fill)=>packRegion({ module: new Uint8Array(8).fill(fill),
+        labels: [], cut: [], entryTop: 0, instructions: 0 });
+    const region = (/** @type {string} */ key, linked = false)=>packRegion({
+        module: new Uint8Array(0), moduleKey: key, labels: [[0x1000, 0]], cut: [], entryTop: 0,
+        instructions: 3, exportName: 'r0', ...(linked ? { linked: true } : {}) });
+    const otherVersion = region('batch');
+    new DataView(otherVersion.buffer).setUint32(4, CACHE_VERSION - 1, true);
+    /** @type {[string, Uint8Array][]} */
+    const records = [
+        ['a', region('relinked', true)], ['b', region('batch')],
+        ['name(batch)', module(1)], ['name(relinked)', module(2)],
+        ['name(gone)', module(3)], ['old', otherVersion],
+    ];
+    assert.deepEqual(seedRecords(records, nameOf).map(([name])=>name),
+        ['a', 'b', 'name(batch)', 'name(relinked)']);
 });

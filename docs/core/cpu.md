@@ -297,7 +297,41 @@ generation (`records.<g>`, `index.<g>`, named by a `current` file written last, 
 goes away mid-copy leaves the old generation current and whole), and live records past 1 GiB go,
 the least recently used first (layout version 3). An index past 4 MB and four times what its live records need is rewritten the same way even with the records small: a warm run touches every record it reads, a line each, and the whole index is read at every open; `flush` before the run ends and `close` after
 let go of the handle. A record of another emitter
-version, feature set or layout is a miss. A region with x87 instructions in it is compiled for the x87 stack top it is entered
+version, feature set or layout is a miss. A store travels as a seed: `exportSeed()` packs the live
+records -- each name's later place, used within the last four sessions -- into one blob (magic
+`CORKSEED`, the seed format, the `STORE_VERSION` its names were made under, then each record's name
+and length and the records back to back, in the order of their names, so the same records make the
+same bytes), and `seed(bytes, identity)` appends the records a store lacks, names them in its index
+as used in this session and keeps `identity` (`seededWith()`), all before any lookup of that
+opening is answered, since every `get` waits for a seed on its way. A name the store holds already
+stays as it is, so a second seed adds nothing; a seed of another format or layout version, or one
+cut short, adds nothing. A seed is wasm the engine instantiates: its reach is the engine's wasm
+memory and cork's imports (the trap, the flags and clock reads, the math and helper functions, the
+shared function table) -- what the modules cork emits from the guest's own code reach -- and nothing
+outside the engine's thread. Nothing in a seed is trusted to fit: a record is under the name of its
+key, and the key carries the region's code bytes (their 64-bit hash), its entry, the bundle's id,
+the emitter's version, the host's features, the layout and the emitting settings, so a record
+another engine, another bundle or other code bytes made is one no lookup here names.
+`translation-store.itest.js` seeds a fresh store from runs with the default NaN's sign flipped,
+without tail calls (no entry hash, so no tier resumed from it), with another layout, with
+`structure` off and with it unset against a run with it off, with `precise`, with another trap
+port, under another precision control (wide, narrow and mixed against each other, on one program's
+code bytes), and from the program with one code byte changed: none answers a lookup, and each run's
+checksum is the one a run without a seed computes. `seedRecords` (cork's `runtime/cache.js`) is the
+`select` an export takes to keep only the region records of this emitter and the modules they name:
+a batch's module whose regions a relink moved is named by none, and on the benchmark's load of
+fifteen hundred functions that was nearly half the store (10.0 MB against 5.4).
+`tools/cork-bench/bench.mjs --capture DIR` writes a benchmark program's seed, `--seed DIR` starts
+every rep from one and `--store fresh` from an empty store, the event loop turning between slices
+so the store's answers come back. A seeded first iteration against an empty store, the median of
+seven processes a workload, each five hosts (the first host, the engine's own JavaScript cold as at
+a launch, and `coldMs`, hosts three to five): over the thirteen original workloads the first host
+159 -> 85 ms and `coldMs` 33 -> 21 by geometric mean, load-x87 1178 -> 401 and 454 -> 145, the
+checksums the empty store's. What is left is not the emitting: a region is still formed to find its
+key, and a batch's records come back a turn of the event loop after it is formed and no batch is
+formed meanwhile, which costs a first run more than the emitting -- with no store at all the first
+host is 83 ms by the same mean, and on a small program a seed's is still above it (vcall-x87 56 ms
+with none, 129 seeded). A region with x87 instructions in it is compiled for the x87 stack top it is entered
 with, and its entries are keyed by address and top (`entryOf(eip, x87Top)`, the top read off
 the emulator's `fpu_stack_ptr` before every turn); a region without them is entered with any
 top. A lookup that misses at an address compiled for another top queues that top for the

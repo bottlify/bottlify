@@ -18,7 +18,7 @@
  * host with no emulator, as a launch under `engine: 'cork'` runs a program.
  *
  *   node tools/cork-bench/bench.mjs [name...] [--warm N] [--iters N] [--reps N]
- *       [--cork JSON] [--root DIR] [--json]
+ *       [--cork JSON] [--root DIR] [--json] [--store fresh | --seed DIR | --capture DIR]
  *
  * Each rep makes a fresh host, times its first iteration (`coldMs`: the
  * interpreter, the translator and the tier-up, what a new stretch of code
@@ -34,10 +34,18 @@
  * a checkout whose engine to run, so one tree compares against another
  * (`compare.mjs`). A steady-state figure moves by five to ten per cent between
  * processes; `node --no-liftoff` takes the baseline tier out of it.
+ *
+ * With a translation store every rep's host gets a fresh one in memory and
+ * the event loop turns between slices, as a launch's frames let the store's
+ * answers come back: `--store fresh` is an empty store (a bottle's first run),
+ * `--seed DIR` one seeded from `DIR/<name>.seed` before the host starts (the
+ * rows say `hits` in the first iteration and the seeding's `seedMs`), and
+ * `--capture DIR` writes the first rep's store, once its iterations are done,
+ * to `DIR/<name>.seed`.
  */
 
-import { readFileSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const args = process.argv.slice(2);
@@ -50,9 +58,16 @@ const cork = JSON.parse(flag('--cork', '{}'));
 const root = pathToFileURL(resolve(flag('--root', new URL('../..', import.meta.url).pathname)) + '/');
 const only = args.filter((one, at)=>!one.startsWith('--') && !args[at - 1]?.startsWith('--'));
 
+const seedDir = flag('--seed', '');
+const captureDir = flag('--capture', '');
+const withStore = flag('--store', '') === 'fresh' || seedDir !== '' || captureDir !== '';
+
 const { createCorkHost } = await import(
     new URL('modules/core/src/layers/cpu/internal/cork-host.js', root).href);
 const engine = await import(new URL('modules/cork/src/index.js', root).href);
+const stores = withStore ? await import(
+    new URL('modules/core/src/layers/cpu/internal/translation-store.js', root).href) : null;
+const { seedRecords } = await import(new URL('modules/cork/src/runtime/cache.js', root).href);
 
 const IMAGE_BASE = 0x401000;
 const ENTRY_VECTOR = 0x7000;
@@ -61,11 +76,11 @@ const names = readdirSync(images).filter(file=>file.endsWith('.bin'))
     .map(file=>file.slice(0, -4)).filter(name=>only.length === 0
         || only.some(prefix=>name.startsWith(prefix))).sort();
 
-/** @param {Uint8Array} image */
-function makeHost(image){
+/** @param {Uint8Array} image @param {any} store */
+function makeHost(image, store){
     const host = createCorkHost({
         engine, memorySize: 16 << 20, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
-        initialStack: 0x800000, cork,
+        initialStack: 0x800000, cork: store === null ? cork : { ...cork, store },
     });
     host.writePhysical(IMAGE_BASE, image);
     const vector = new Uint8Array(4);
@@ -90,6 +105,26 @@ function iteration(host){
     return retired;
 }
 
+/**
+ * The same with a store: the event loop turns between slices, so a batch's
+ * lookups come back and are published, as between a launch's frames.
+ *
+ * @param {ReturnType<typeof makeHost>} host
+ */
+async function storedIteration(host){
+    let retired = host.runSlice(100_000);
+    while (!host.halted())
+    {
+        host.cork().translatePending().catch(()=>{});
+        await new Promise(turned=>setImmediate(turned));
+        retired += host.runSlice(100_000);
+    }
+    return retired;
+}
+
+/** A host's iteration, with or without a store. @param {ReturnType<typeof makeHost>} host */
+const run = async host=>(withStore ? storedIteration(host) : iteration(host));
+
 /** @param {number[]} values */
 const median = values=>[...values].sort((a, b)=>a - b)[values.length >> 1];
 
@@ -97,20 +132,37 @@ const rows = [];
 for (const name of names)
 {
     const image = readFileSync(new URL(`${name}.bin`, images));
+    const seed = seedDir === '' ? null : readFileSync(join(seedDir, `${name}.seed`));
     /** @type {number[]} */
     const steady = [];
     /** @type {number[]} */
     const colds = [];
+    /** @type {number[]} */
+    const hits = [];
+    /** @type {number[]} */
+    const seedings = [];
     let summary = null;
     for (let rep = 0; rep < reps; rep++)
     {
-        const host = makeHost(image);
+        const store = stores === null ? null
+            : await stores.createDirectoryTranslationStore(stores.createMemoryDirectory(), 'bench');
+        if (seed !== null)
+        {
+            const seedAt = performance.now();
+            await store.seed(new Uint8Array(seed));
+            seedings.push(performance.now() - seedAt);
+        }
+        const host = makeHost(image, store);
         const coldAt = performance.now();
-        iteration(host);
+        await run(host);
         colds.push(performance.now() - coldAt);
+        if (store !== null)
+        {
+            hits.push(host.cork().diagnostics().cacheHits);
+        }
         for (let i = 1; i < warm; i++)
         {
-            iteration(host);
+            await run(host);
         }
         const before = host.cork().counters();
         const exits = /** @type {Record<string, number>} */ ({ ...before.exits });
@@ -118,9 +170,16 @@ for (const name of names)
         let retired = 0;
         for (let i = 0; i < iters; i++)
         {
-            retired += iteration(host);
+            retired += await run(host);
         }
         steady.push((performance.now() - startedAt) * 1000 / iters);
+        if (captureDir !== '' && rep === 0)
+        {
+            await host.cork().flush();
+            mkdirSync(captureDir, { recursive: true });
+            writeFileSync(join(captureDir, `${name}.seed`), await store.exportSeed(
+                { select: (/** @type {any} */ records)=>seedRecords(records, stores.fileNameOf) }));
+        }
         const after = host.cork().counters();
         summary = {
             instructions: retired / iters,
@@ -149,6 +208,8 @@ for (const name of names)
         regions: summary.regions,
         exits: JSON.stringify(summary.exits),
         eax: summary.eax,
+        ...(hits.length > 0 ? { hits: median(hits) } : {}),
+        ...(seedings.length > 0 ? { seedMs: Number(median(seedings).toFixed(2)) } : {}),
     });
 }
 if (args.includes('--json'))
