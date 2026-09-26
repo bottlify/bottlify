@@ -78,6 +78,7 @@ builds its renderer without them; the first four also reach the OpenGL device re
 | `apis()` | The six names above. |
 | `libraries()` | `{ 'OPENGL32.dll', 'D3D8.dll', 'D3D9.dll', 'D3D10.dll', 'DXGI.dll', 'vulkan-1.dll', 'DDRAW.dll' }`, each a `{ Name: { argBytes, handler } }` table shaped like a `win32` library's, for the loader. |
 | `opengl()` | The pixel-format negotiation (`size`, `count`, `choose`, `describe`) and `swapBuffers(hdc)` whose entry points `gdi32` exports; the assembling caller hands these down to `win32`; and `entry(name)`, one named `OPENGL32.dll` handler with its raw-dword convention, for a caller already on this side of the boundary. |
+| `gdiDrawing()` | GDI's own drawing for the device contexts `win32` keeps (`create`, `fontMetrics`, `textWidth`, `surfaceFor`, `desktop`, `presentDesktop`), and the display's gamma ramp for `gdi32`'s `SetDeviceGammaRamp` and `GetDeviceGammaRamp`: `setDisplayGamma(ramp)` sets it (`{ red, green, blue }`, 256 sixteen-bit entries each; `null` takes it back), `displayGamma()` answers the ramp the display shows through, whoever set it, or `null` when none was (the identity), and `appliesGamma()` whether a ramp reaches the picture at all. A ramp a full-screen Direct3D 8 or 9 device or a DirectDraw primary sets afterwards is shown instead until that one is taken back; the display's own outlives the process, and a machine's devices take theirs with them when it is disposed. |
 
 An instance owns its GPU work. `create()` may run more than once in the same realm (a process
 replacement runs it again; the plan for two machines in one worker needs two at once), so the
@@ -100,7 +101,7 @@ reading each table:
 |---|---|---|
 | `OPENGL32.dll` | 507 | The whole of OpenGL 1.1, all of WGL, and every extension function this implementation answers. Every name is bound, implemented or not, because a stdcall stub that pops the wrong number of bytes loses the process far from the call. Unimplemented names answer zero and are counted. |
 | `vulkan-1.dll` | 149 | Every command with its 32-bit argument size (`src/layers/graphics/vulkan/commands.js`). 65 are implemented (20 instance-level, 45 device-level); the rest answer `VK_ERROR_FEATURE_NOT_PRESENT` and are counted by name. |
-| `DDRAW.dll` | 4 | `DirectDrawCreate`, `DirectDrawCreateEx`, `DirectDrawEnumerateA`, `DirectDrawCreateClipper`. |
+| `DDRAW.dll` | 7 | `DirectDrawCreate`, `DirectDrawCreateEx` and `DirectDrawCreateClipper`; `DirectDrawEnumerateA` and `DirectDrawEnumerateExA`, which call the program's callback once, for the primary display driver (a null GUID, `"Primary Display Driver"`, `"display"`, and a null monitor in the Ex form); and `DirectDrawEnumerateW` and `DirectDrawEnumerateExW`, which the runtime never implemented and which answer `DDERR_UNSUPPORTED` having called nothing. A null callback is `DDERR_INVALIDPARAMS` in every form but `DirectDrawEnumerateExW`. |
 | `D3D10.dll` | 27 | `D3D10CreateDevice` and `D3D10CreateDeviceAndSwapChain`; blobs and reflection (`D3D10CreateBlob`, the three signature-blob functions, `D3D10GetShaderDebugInfo`, `D3D10ReflectShader`); the three profile names; the state block (`D3D10CreateStateBlock` and the eight `D3D10StateBlockMask*` functions); and seven that refuse by name, each reporting why: the two compilers answer `E_FAIL` with the reason in the error blob, the two disassemblers, `D3D10PreprocessShader` and the two effect constructors `E_NOTIMPL`. |
 | `D3D10_1.dll` | 27 | `D3D10CreateDevice1` and `D3D10CreateDeviceAndSwapChain1`, which make an `ID3D10Device1` at feature level 10.0 and answer `DXGI_ERROR_UNSUPPORTED` for 10.1 and the 9.x levels, and the other 25 of `D3D10.dll`. |
 | `DXGI.dll` | 2 | `CreateDXGIFactory`, and `CreateDXGIFactory1`, whose factory and adapters answer as DXGI 1.1's. |
@@ -110,9 +111,10 @@ reading each table:
 The COM entry points are thin on purpose: each makes one object and publishes one interface, and
 everything a program does afterwards goes through the vtable. The vtable slot lists are in
 `src/layers/graphics/seam/vtables.js` (DirectDraw, Direct3D 7 and 8, and `IDirect3D9`: 27 lists,
-582 slots), `src/layers/graphics/d3d9/interfaces.js` (18 lists, three of them 9Ex's) and
-`src/layers/graphics/seam/d3d10.js` (29 lists for DXGI and Direct3D 10, three of them the shader
-reflection's tables without `IUnknown`).
+582 slots), `src/layers/graphics/seam/vtables-ddraw.js` (the Direct3D of DirectX 3, 5 and 6 and
+`IDirectDrawGammaControl`: 18 lists, 192 slots), `src/layers/graphics/d3d9/interfaces.js` (18
+lists, three of them 9Ex's) and `src/layers/graphics/seam/d3d10.js` (29 lists for DXGI and
+Direct3D 10, three of them the shader reflection's tables without `IUnknown`).
 
 ### `diagnostics()`
 
@@ -253,7 +255,16 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
   presented stays until the child presents its first: no reconfigure, which would clear the
   canvas, and no black frame at the swap. The presenter's third job is the canvas copy the backend
   calls `presentTo`: every frame, whatever API produced it, is copied into the canvas in the
-  frame's own format, configured once.
+  frame's own format, configured once. **Gamma** is applied there, the one place every frame
+  passes: `setGammaRamp(owner, ramp)` takes a ramp (256 sixteen-bit entries a channel) by owner --
+  the display's own through `gdiDrawing()`, a DirectDraw primary, a full-screen Direct3D 8 or 9
+  device -- and the latest set is in effect; `null` takes an owner's back, and the one set before
+  it is in effect again. While a ramp other than the identity is in effect, a frame is drawn onto
+  the canvas by a one-triangle pass that loads each texel and looks its channels up in a 256-row
+  uniform table, written when the ramp changes, instead of copied. An entry counts by its high
+  byte, so both identities programs write (index times 257, index shifted up by eight) keep the
+  plain copy. A frame texture the pass cannot read is copied as it is, and a presenter with no
+  canvas says it applies no ramp (`appliesGamma()`), which is what the gamma capabilities follow.
 - **Profiler** (`internal/profiler.js`) keeps per-frame phase timings (`uploads`, `passes`,
   `submit`, `present`), counters, and a per-label upload breakdown rather than a top-N.
 - **Reference rasteriser** (`internal/reference.js`). The fixed-function formula written a second
@@ -312,10 +323,25 @@ Per API:
   `D3DCAPS_READ_SCANLINE`. Surfaces here and Direct3D 8 and 9 resources keep private data
   (`seam/privatedata.js`): an interface entry holds a reference until it is replaced, freed or its
   object goes, Direct3D's read of one takes a reference and DirectDraw's does not, and a
-  `DDSPD_VOLATILE` entry expires with the surface's contents.
+  `DDSPD_VOLATILE` entry expires with the surface's contents. `TestCooperativeLevel`
+  (`IDirectDraw4` and `7`) follows `win32.applicationDeactivated()`: an object in exclusive mode
+  answers `DDERR_NOEXCLUSIVEMODE` from the application's `WM_ACTIVATEAPP(0)` until its
+  `WM_ACTIVATEAPP(1)`, as ddraw's `test_lost_device` has it, and `DD_OK` otherwise; an object in
+  normal mode answers `DD_OK` wherever the foreground is, and `DDERR_EXCLUSIVEMODEALREADYSET`
+  while another object of the process holds exclusive mode, as the method is documented to.
+  `GetDeviceIdentifier` describes the adapter exactly as Direct3D 8 and 9's `GetAdapterIdentifier`
+  do -- one vendor table, description rule and GUID, in `seam/adapter.js` -- because a program
+  asking through two of them compares the answers.
 - **`d3d7.js`** publishes no root; it hands the DirectDraw seam the `IDirect3D7` descriptor to put
   beside its own, and keeps one Direct3D 7 object per DirectDraw object. A draw takes its vertex
   format as an argument and its indices by pointer.
+- **`d3dlegacy.js`** publishes no root either: `IDirect3D`, `IDirect3D2` and `IDirect3D3` are
+  more tables on the DirectDraw object, and `IDirect3DTexture`, `IDirect3DTexture2` and DirectX 3's
+  `IDirect3DDevice` more tables on a surface. Most structures carry a size and the size is the
+  version, so a device description is read and written only as far as the caller's size; a
+  viewport answers its three generations with one count, as a material does; and a call whose
+  arguments did not change since is the Direct3D 7 seam's own translation, handed the device
+  underneath.
 - **`d3d8.js`** publishes `IDirect3D8`, `IDirect3DDevice8`, additional swap chains, surfaces,
   textures, cube and volume textures and their volumes, vertex and index buffers; a vertex or pixel
   shader is a handle, as Direct3D 8 has it, not an interface. Modes are offered in
@@ -380,6 +406,27 @@ the source's palette entries and colour key; `ProcessVertices` and `ProcessVerti
 `ComputeSphereVisibility` answers each sphere against the view volume and the enabled user clip
 planes. Three devices are enumerated (RGB, HAL, T&L HAL) over one renderer; `caps.js` claims only
 what the shader generator implements.
+
+**Direct3D of DirectX 3, 5 and 6** (`src/layers/graphics/d3d7/legacy.js`, `execute.js`). The
+older versions draw what the seventh draws, through objects the seventh folded into its device, so
+each of their devices -- `IDirect3DDevice3`, `IDirect3DDevice2` and DirectX 3's `IDirect3DDevice`
+-- wraps one Direct3D 7 device (RGB or HAL; the transform-and-lighting device is Direct3D 7's
+alone) and translates. A viewport is an object the device keeps a list of: the current one sets
+the viewport rectangle, and its clip volume -- these versions let a viewport show any part of the
+unit cube -- rides on the projection, kept as the program set it and handed on multiplied by the
+volume's map. A light belongs to a viewport, and a draw is lit by the current viewport's active
+lights. Lighting has no render state: a draw is lit when a material handle is set, its vertices
+carry normals and no transformed position, and it did not pass `D3DDP_DONOTLIGHT`. Materials and
+textures are named by handles; the legacy render states that name texturing -- the texture
+handle, the map blend, the filters, the address modes -- become the stage states that do the same
+on stage zero. `IDirect3DDevice2` draws `D3DVERTEXTYPE` vertices and swaps texture handles, and
+`IDirect3D2` describes its devices at DirectX 5's size. DirectX 3's device is part of its surface,
+as Windows makes it -- asked of a render target for `IID_IDirect3DHALDevice` or
+`IID_IDirect3DRGBDevice`, it answers the surface's interfaces with the surface's count -- and
+draws through execute buffers: a block of guest memory holding vertices and then a stream of
+`D3DINSTRUCTION`s that set render, light and transform states, load and multiply matrices by
+handle, process vertices into the device's transformed-vertex array (the Direct3D 7
+`ProcessVertices`, lighting and all), and draw points, lines and triangles indexed into it.
 
 **Direct3D 8** (`src/layers/graphics/d3d8/`). `device.js` models what a program observes between
 draws and decides whether a call is legal; `render.js` is what happens underneath when there is a
@@ -773,7 +820,10 @@ carried coordinate set -- is accepted and reported (see *Limitations*). Direct3D
 both stages, cube and volume maps, generated mipmaps (`D3DCAPS2_CANAUTOGENMIPMAP`), eight lights, no
 user clip planes, no anisotropy, no stencil operations, the same combiner-derived texture
 operations, the same fog, the scissor test and a readable scan line. Direct3D 7's (`d3d7/caps.js`)
-claim range fog and point and linear mip filtering among the rest.
+claim range fog and point and linear mip filtering among the rest. DirectDraw's `GetCaps` claims
+`DDCAPS2_PRIMARYGAMMA` only where the presenter applies a ramp: a primary surface's
+`IDirectDrawGammaControl` ramp is then the display's, set through the presenter and taken back when
+the primary goes, and another surface's gamma control keeps its ramp and reads it back.
 
 ### The divergence rule
 
@@ -830,7 +880,12 @@ Refused (the program is told no):
 - DirectDraw: a blit between different pixel depths; a descriptor whose `dwSize` is not exactly the
   layout's own; a colour-space colour key (`DDERR_NOCOLORKEYHW`); a colour fill on a Z-buffer; a
   palette or a colour key on a mip sublevel; the event form of `WaitForVerticalBlank`
-  (`DDERR_UNSUPPORTED`).
+  (`DDERR_UNSUPPORTED`); an overlay surface (`DDERR_NOOVERLAYHW`), the overlay calls then
+  answering `DDERR_NOTAOVERLAYSURFACE`. `TestCooperativeLevel` never answers `DDERR_WRONGMODE`,
+  nothing here changing the display mode under a normal-mode object, and losing exclusive mode
+  does not lose the video-memory surfaces the way the runtime does.
+- Direct3D of DirectX 3, 5 and 6: the ramp and MMX devices are not made (only RGB and HAL);
+  `Pick`, `GetPickRecords`, `TransformVertices` and `LightElements` are absent.
 - GDI: a run-length encoded DIB written back by `GetDIBits`, or top-down (`ERROR_INVALID_PARAMETER`,
   as Windows answers); a DIB section backed by a file mapping. `StretchDIBits` draws 1- and
   4-bit DIBs, and `GetDIBits` writes 1-, 4- and 8-bit ones with their colour table: a section's own at
@@ -905,9 +960,11 @@ buffer cannot start at) and `program`; Direct3D 10 draws skipped for `noViewport
 
 Known ceilings the code names: the OpenGL rasteriser's depth buffer is a float per pixel and a
 mipmapped minification filter samples the base level; Direct3D 7's capability lists claim no
-stencil, bump mapping, cube maps or W-buffer; WebGPU cannot cull a line or a point, so a culled
-wireframe also draws its back faces' edges, where Direct3D culls the triangle first; the D3D 9
-translator does not translate predication, subroutines or vertex-shader texture reads, holds a 1.x
+stencil, bump mapping, cube maps or W-buffer; an execute buffer's `D3DOP_SPAN` (a software
+rasteriser's run of pixels) is skipped, and the extents `D3DPROCESSVERTICES_UPDATEEXTENTS` asks for
+are not accumulated into its status, neither reported; WebGPU cannot cull a line or a point, so a
+culled wireframe also draws its back faces' edges, where Direct3D culls the triangle first; the
+D3D 9 translator does not translate predication, subroutines or vertex-shader texture reads, holds a 1.x
 shader's constants but not its arithmetic to the range of its registers, and carries a register's
 alpha across a `ps_1_4` phase marker, which Direct3D does not promise; no signed texture format
 (`D3DFMT_V8U8` and the like) is offered for a bump map. WebGPU lets an implementation report any
