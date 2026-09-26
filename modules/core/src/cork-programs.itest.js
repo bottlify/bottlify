@@ -231,18 +231,21 @@ test('a loop calling an import runs and translates under cork',
         const warm = await run(buildLoopExe(ITERATIONS / 2), 'cork');
         const twice = await run(buildLoopExe(ITERATIONS * 2), 'cork');
         // Same regions and modules on four times the iterations: the
-        // translator does nothing on the slice path after warm-up. The
-        // translateMs bound is loose only because the wasm engine's own JIT
-        // warms in those milliseconds; a per-slice toll would be thousands.
+        // translator does nothing on the slice path after warm-up. Its time is
+        // held to a share of the run's rather than to a figure of milliseconds:
+        // the warm-up is a percent or two of the run, and a machine others load
+        // stretches both, where a per-slice toll would be a large part of it.
         assert.equal(twice.cork.regions, warm.cork.regions,
             'the longer run forms no further regions: the translator is done at warm-up');
         assert.equal(twice.cork.modules, warm.cork.modules,
             'no further module is emitted or instantiated after warm-up');
-        assert.ok(twice.cork.translateMs < 20,
-            `translateMs ${twice.cork.translateMs.toFixed(2)} ms for ${ITERATIONS * 2} iterations`);
+        assert.ok(twice.cork.translateMs < 0.05 * twice.ms,
+            `translateMs ${twice.cork.translateMs.toFixed(2)} ms for ${ITERATIONS * 2} iterations`
+            + ` of a ${twice.ms.toFixed(0)} ms run`);
         console.log(`cork translateMs: ${warm.cork.translateMs.toFixed(2)} ms at`
             + ` ${ITERATIONS / 2} iterations, ${twice.cork.translateMs.toFixed(2)} ms at`
-            + ` ${ITERATIONS * 2}, regions ${twice.cork.regions},`
+            + ` ${ITERATIONS * 2} (runs of ${warm.ms.toFixed(0)} and ${twice.ms.toFixed(0)} ms),`
+            + ` regions ${twice.cork.regions},`
             + ` modules ${twice.cork.modules}`);
     });
 
