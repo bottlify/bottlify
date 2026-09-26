@@ -573,6 +573,8 @@ export class RegionEmitter {
         this.returns = inlineReturns(region);
         /** @type {string[]} the open control labels, innermost last */
         this.controls = [];
+        /** @type {Map<string, number[]>} by label, where in `controls` it is open */
+        this.openAt = new Map();
         /**
          * What the flag record holds at this point of the block, when known:
          * the unfolded kind and width code, or null when the block was
@@ -828,21 +830,39 @@ export class RegionEmitter {
 
     // --- control structure bookkeeping ---
 
+    /**
+     * A control onto the stack of open ones, and onto its name's own stack of
+     * places: a region of a hundred blocks keeps a hundred open, and a branch's
+     * depth by a search of the names was a quadratic share of emitting.
+     *
+     * @param {string} name
+     */
+    push(name){
+        let places = this.openAt.get(name);
+        if (places === undefined)
+        {
+            places = [];
+            this.openAt.set(name, places);
+        }
+        places.push(this.controls.length);
+        this.controls.push(name);
+    }
+
     /** @param {string} name @param {number} type */
     open(name, type){
-        this.controls.push(name);
+        this.push(name);
         this.b.block(type);
     }
 
     /** @param {string} name */
     openLoop(name){
-        this.controls.push(name);
+        this.push(name);
         this.b.loop(EMPTY);
     }
 
     /** @param {string} name @param {number} type */
     openIf(name, type = EMPTY){
-        this.controls.push(name);
+        this.push(name);
         this.b.if(type);
     }
 
@@ -857,23 +877,27 @@ export class RegionEmitter {
      * @param {string} name @param {number} type
      */
     openGuard(name, type = EMPTY){
-        this.controls.push(name);
+        this.push(name);
         this.b.unlikely().if(type);
     }
 
     close(){
-        this.controls.pop();
+        const name = this.controls.pop();
+        if (name !== undefined)
+        {
+            this.openAt.get(name)?.pop();
+        }
         this.b.end();
     }
 
     /** The branch depth of an open control by name. @param {string} name */
     depthOf(name){
-        const index = this.controls.lastIndexOf(name);
-        if (index < 0)
+        const places = this.openAt.get(name);
+        if (places === undefined || places.length === 0)
         {
             throw new Error(`emit: no open control "${name}"`);
         }
-        return this.controls.length - 1 - index;
+        return this.controls.length - 1 - places[places.length - 1];
     }
 
     // --- state block access ---
@@ -1108,23 +1132,24 @@ export class RegionEmitter {
      */
     fillDeferred(){
         const main = this.b;
-        const { used, written } = main;
         const { layout } = this;
         // Under cork's layout the registers a region did not load came in as
         // parameters, so the block does not hold them: every one is stored,
         // and a reload (after a trap's handler) takes every one back.
         const all = this.flagRecord >= 0;
+        /** @type {{ at: number, body: Body }[]} */
+        const pieces = [];
         for (const { at, kind, regs, x87 } of this.deferred.reverse())
         {
             const b = this.b = new Body();
             for (let r = 0; r < (regs ? 8 : 0); r++)
             {
                 const offset = layout.regs + r * 4;
-                if (kind === 'load' && (all || used.has(Local.reg + r)))
+                if (kind === 'load' && (all || main.uses(Local.reg + r)))
                 {
                     b.i32const(0).load('i32', { offset }).localSet(Local.reg + r);
                 }
-                if (kind === 'store' && (all || written.has(Local.reg + r)))
+                if (kind === 'store' && (all || main.writes(Local.reg + r)))
                 {
                     b.i32const(0).localGet(Local.reg + r).store('i32', { offset });
                 }
@@ -1133,15 +1158,16 @@ export class RegionEmitter {
             {
                 if (kind === 'load')
                 {
-                    x87LoadRegisters(this, k=>used.has(this.x87.base + k));
+                    x87LoadRegisters(this, k=>main.uses(this.x87.base + k));
                 }
                 else
                 {
-                    x87StoreRegisters(this, k=>written.has(this.x87.base + k));
+                    x87StoreRegisters(this, k=>main.writes(this.x87.base + k));
                 }
             }
-            main.insert(at, b);
+            pieces.push({ at, body: b });
         }
+        main.insertAll(pieces.reverse());
         this.b = main;
     }
 

@@ -104,10 +104,28 @@ export function leb128s64(value){
     }
 }
 
+const UTF8 = new TextEncoder();
+
 /** @param {string} text @returns {number[]} a name as the format writes one */
 function name(text){
-    const bytes = [...new TextEncoder().encode(text)];
-    return [...leb128u(bytes.length), ...bytes];
+    // A batch names every function and export: ASCII, the names cork makes, is
+    // its own UTF-8 without an encoder's round trip.
+    let ascii = true;
+    for (let i = 0; i < text.length && ascii; i++)
+    {
+        ascii = text.charCodeAt(i) < 0x80;
+    }
+    if (!ascii)
+    {
+        const bytes = [...UTF8.encode(text)];
+        return [...leb128u(bytes.length), ...bytes];
+    }
+    const out = leb128u(text.length);
+    for (let i = 0; i < text.length; i++)
+    {
+        out.push(text.charCodeAt(i));
+    }
+    return out;
 }
 
 /** @param {number[]} bytes @param {number} count @returns {number[]} a vector with its count */
@@ -126,6 +144,9 @@ const STORES = Object.freeze({
     i32: [0x36, 2], i64: [0x37, 3], f32: [0x38, 2], f64: [0x39, 3],
     i32_8: [0x3a, 0], i32_16: [0x3b, 1], i64_8: [0x3c, 0], i64_16: [0x3d, 1], i64_32: [0x3e, 2],
 });
+/** A float constant's little-endian bytes, written here and copied out. */
+const FLOAT_BYTES = new Uint8Array(8);
+const FLOAT_VIEW = new DataView(FLOAT_BYTES.buffer);
 /** v128 memory access, as SIMD opcodes: `v128.load` and `v128.store`. */
 const SIMD_LOAD = 0;
 const SIMD_STORE = 11;
@@ -140,16 +161,39 @@ const SIMD_STORE = 11;
  */
 export class Body {
     constructor(){
+        // Sixty-four bytes to start, which V8 keeps in the object itself: a
+        // larger typed array is a separate allocation the collector tracks,
+        // and a region makes a body for every exit's register stores.
         /** @type {Uint8Array} */
-        this.buffer = new Uint8Array(256);
+        this.buffer = new Uint8Array(64);
         /** Bytes written. */
         this.length = 0;
         this.depth = 0;
-        /** Every local the body reads or writes, and those it writes. */
-        this.used = new Set();
-        this.written = new Set();
+        /** By local index: 1 when the body reads or writes it, 2 when it writes it. */
+        this.touched = new Uint8Array(64);
         /** Where the branches marked unlikely start, in bytes. @type {number[]} */
         this.hints = [];
+    }
+
+    /** Whether the body reads or writes a local. @param {number} index */
+    uses(index){
+        return index < this.touched.length && (this.touched[index] & 1) !== 0;
+    }
+
+    /** Whether the body writes a local. @param {number} index */
+    writes(index){
+        return index < this.touched.length && (this.touched[index] & 2) !== 0;
+    }
+
+    /** @param {number} index @param {number} how  1 read, 3 written */
+    touch(index, how){
+        if (index >= this.touched.length)
+        {
+            const grown = new Uint8Array(Math.max(index + 1, this.touched.length * 2));
+            grown.set(this.touched);
+            this.touched = grown;
+        }
+        this.touched[index] |= how;
     }
 
     /** The next instruction, an `if` or a `br_if`, is a branch rarely taken. */
@@ -162,20 +206,28 @@ export class Body {
     reserve(count){
         if (this.length + count > this.buffer.length)
         {
-            let size = this.buffer.length * 2;
-            while (size < this.length + count)
-            {
-                size *= 2;
-            }
-            const grown = new Uint8Array(size);
-            grown.set(this.buffer.subarray(0, this.length));
-            this.buffer = grown;
+            this.grow(count);
         }
+    }
+
+    /** @param {number} count */
+    grow(count){
+        let size = this.buffer.length * 2;
+        while (size < this.length + count)
+        {
+            size *= 2;
+        }
+        const grown = new Uint8Array(size);
+        grown.set(this.buffer.subarray(0, this.length));
+        this.buffer = grown;
     }
 
     /** @param {number} value */
     byte(value){
-        this.reserve(1);
+        if (this.length === this.buffer.length)
+        {
+            this.grow(1);
+        }
         this.buffer[this.length++] = value;
         return this;
     }
@@ -235,6 +287,55 @@ export class Body {
                 this.hints[i] += other.length;
             }
         }
+        return this;
+    }
+
+    /**
+     * Other bodies put in at the places this one kept for them, in one pass:
+     * what `insert` of each would leave, from the last place to the first,
+     * where each `insert` moved the whole rest of the body along.
+     *
+     * @param {{ at: number, body: Body }[]} pieces  by place, and where two share one,
+     *     in the order they are to follow each other
+     */
+    insertAll(pieces){
+        let added = 0;
+        for (const { body } of pieces)
+        {
+            added += body.length;
+        }
+        const out = new Uint8Array(Math.max(this.buffer.length, this.length + added));
+        /** @type {number[]} */
+        const hints = [];
+        let from = 0;
+        let written = 0;
+        let hint = 0;
+        for (const { at, body } of pieces)
+        {
+            out.set(this.buffer.subarray(from, at), written);
+            // The body's own hints before the ones at its place: an insert puts
+            // what was there after what it puts in.
+            for (; hint < this.hints.length && this.hints[hint] < at; hint++)
+            {
+                hints.push(this.hints[hint] + written - from);
+            }
+            written += at - from;
+            from = at;
+            out.set(body.buffer.subarray(0, body.length), written);
+            for (const one of body.hints)
+            {
+                hints.push(one + written);
+            }
+            written += body.length;
+        }
+        out.set(this.buffer.subarray(from, this.length), written);
+        for (; hint < this.hints.length; hint++)
+        {
+            hints.push(this.hints[hint] + written - from);
+        }
+        this.buffer = out;
+        this.length += added;
+        this.hints = hints;
         return this;
     }
 
@@ -371,21 +472,19 @@ export class Body {
 
     /** @param {number} index */
     localGet(index){
-        this.used.add(index);
+        this.touch(index, 1);
         return this.byte(0x20).u32(index);
     }
 
     /** @param {number} index */
     localSet(index){
-        this.used.add(index);
-        this.written.add(index);
+        this.touch(index, 3);
         return this.byte(0x21).u32(index);
     }
 
     /** @param {number} index */
     localTee(index){
-        this.used.add(index);
-        this.written.add(index);
+        this.touch(index, 3);
         return this.byte(0x22).u32(index);
     }
 
@@ -439,16 +538,26 @@ export class Body {
 
     /** @param {number} value */
     f32const(value){
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setFloat32(0, value, true);
-        return this.op(0x43, [...bytes]);
+        FLOAT_VIEW.setFloat32(0, value, true);
+        this.reserve(5);
+        this.buffer[this.length++] = 0x43;
+        for (let i = 0; i < 4; i++)
+        {
+            this.buffer[this.length++] = FLOAT_BYTES[i];
+        }
+        return this;
     }
 
     /** @param {number} value */
     f64const(value){
-        const bytes = new Uint8Array(8);
-        new DataView(bytes.buffer).setFloat64(0, value, true);
-        return this.op(0x44, [...bytes]);
+        FLOAT_VIEW.setFloat64(0, value, true);
+        this.reserve(9);
+        this.buffer[this.length++] = 0x44;
+        for (let i = 0; i < 8; i++)
+        {
+            this.buffer[this.length++] = FLOAT_BYTES[i];
+        }
+        return this;
     }
 
     /** Sixteen bytes as a v128 constant. @param {Uint8Array | number[]} lanes */
@@ -642,7 +751,13 @@ export class ModuleBuilder {
 
     /** @param {string} field @param {number} functionIndex */
     exportFunction(field, functionIndex){
-        this.exports.push([...name(field), 0x00, ...leb128u(functionIndex)]);
+        const entry = name(field);
+        entry.push(0x00);
+        for (const byte of leb128u(functionIndex))
+        {
+            entry.push(byte);
+        }
+        this.exports.push(entry);
         return this;
     }
 
@@ -666,41 +781,56 @@ export class ModuleBuilder {
 
     /** @returns {Uint8Array<ArrayBuffer>} */
     toBytes(){
-        /** @param {number} id @param {number[]} content */
-        const section = (id, content)=>(content.length === 0
-            ? []
-            : [id, ...leb128u(content.length), ...content]);
-        /** @param {number[][]} entriesOf */
-        const entries = entriesOf=>vector(entriesOf.flat(), entriesOf.length);
-
-        /**
-         * Pieces concatenated once: a body is a typed array and stays one,
-         * never spread through a JavaScript array (a large region's module
-         * spent longer being assembled than compiled).
-         *
-         * @param {(number[] | Uint8Array)[]} pieces
-         */
-        const concat = pieces=>{
-            let length = 0;
-            for (const piece of pieces)
+        // The module's pieces, laid out once into its bytes at the end: a body is
+        // a typed array and stays one, never spread through a JavaScript array
+        // nor copied into a buffer of its own function's first (a batch of
+        // hundreds of regions spent longer being assembled than compiled).
+        /** @type {(number[] | Uint8Array)[]} */
+        const parts = [];
+        let total = 0;
+        /** @param {number[] | Uint8Array} piece */
+        const put = piece=>{
+            parts.push(piece);
+            total += piece.length;
+        };
+        /** @param {number[]} out @param {ArrayLike<number>} bytes */
+        const append = (out, bytes)=>{
+            for (let i = 0; i < bytes.length; i++)
             {
-                length += piece.length;
-            }
-            const out = new Uint8Array(length);
-            let at = 0;
-            for (const piece of pieces)
-            {
-                out.set(piece, at);
-                at += piece.length;
+                out.push(bytes[i]);
             }
             return out;
         };
+        /** A section with its id and size, or nothing when its content is empty.
+         * @param {number} id @param {number[]} content */
+        const section = (id, content)=>{
+            if (content.length > 0)
+            {
+                put(append([id], leb128u(content.length)));
+                put(content);
+            }
+        };
+        /** @param {number[][]} entriesOf */
+        const entries = entriesOf=>{
+            const out = leb128u(entriesOf.length);
+            for (const entry of entriesOf)
+            {
+                append(out, entry);
+            }
+            return out;
+        };
+
         // The branch hints, by function: its index and count, then an offset, a size of
         // 1 and 0 (unlikely) each -- written into one buffer, as a region can have
         // hundreds and a batch hundreds of regions.
         const hints = new Body();
         let hinted = 0;
-        const codes = this.functions.map(({ locals, body, hints: marked }, at)=>{
+        /** Each function's size, local declarations and body, in order. @type {(number[] | Uint8Array)[]} */
+        const codes = [];
+        let codeLength = 0;
+        for (let at = 0; at < this.functions.length; at++)
+        {
+            const { locals, body, hints: marked } = this.functions[at];
             // Runs of one type are one entry: "3 × i32, 1 × f64".
             /** @type {number[][]} */
             const runs = [];
@@ -716,8 +846,11 @@ export class ModuleBuilder {
                     runs.push([1, local]);
                 }
             }
-            const declared = vector(
-                runs.flatMap(([count, type])=>[...leb128u(count), type]), runs.length);
+            const declared = leb128u(runs.length);
+            for (const [count, type] of runs)
+            {
+                append(declared, leb128u(count)).push(type);
+            }
             if (marked.length > 0)
             {
                 // In the order the body was written, which inserts keep; an offset
@@ -729,30 +862,15 @@ export class ModuleBuilder {
                     hints.u32(declared.length + offset).byte(1).byte(0);
                 }
             }
-            return concat([leb128u(declared.length + body.length), declared, body]);
-        });
-        // Custom, but before the code section: an engine reads it while it compiles.
-        const hintSection = hinted === 0 ? new Uint8Array(0) : (()=>{
-            const title = name('metadata.code.branch_hint');
-            const count = leb128u(hinted);
-            const content = hints.buffer.subarray(0, hints.length);
-            return concat([[0x00], leb128u(title.length + count.length + content.length), title,
-                count, content]);
-        })();
-        const codeSection = codes.length === 0 ? new Uint8Array(0) : (()=>{
-            const content = concat([leb128u(codes.length), ...codes]);
-            return concat([[10], leb128u(content.length), content]);
-        })();
-
-        // The custom `name` section, last: its function-names subsection (1)
-        // maps indices to names.
-        const nameSection = this.functionNames.length === 0 ? new Uint8Array(0) : (()=>{
-            const map = vector(this.functionNames.flatMap(
-                ([index, functionName])=>[...leb128u(index), ...name(functionName)]),
-            this.functionNames.length);
-            const content = [...name('name'), 0x01, ...leb128u(map.length), ...map];
-            return concat([[0x00], leb128u(content.length), content]);
-        })();
+            const size = leb128u(declared.length + body.length);
+            codes.push(size, declared, body);
+            codeLength += size.length + declared.length + body.length;
+        }
+        const functionTypes = leb128u(this.functions.length);
+        for (const { typeIndex } of this.functions)
+        {
+            append(functionTypes, leb128u(typeIndex));
+        }
         const table = this.tableMin === null
             ? []
             : [ValType.funcref, 0x00, ...leb128u(this.tableMin)];
@@ -761,19 +879,57 @@ export class ModuleBuilder {
             ...vector(functions.flatMap(index=>leb128u(index)), functions.length),
         ]);
 
-        return concat([
-            [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00],
-            section(1, entries(this.typeBytes)),
-            section(2, entries(this.imports)),
-            section(3, vector(
-                this.functions.flatMap(f=>leb128u(f.typeIndex)), this.functions.length)),
-            section(4, this.tableMin === null ? [] : vector(table, 1)),
-            section(6, entries(this.globals)),
-            section(7, entries(this.exports)),
-            section(9, entries(elements)),
-            hintSection,
-            codeSection,
-            nameSection,
-        ]);
+        put([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+        section(1, entries(this.typeBytes));
+        section(2, entries(this.imports));
+        section(3, functionTypes);
+        section(4, this.tableMin === null ? [] : vector(table, 1));
+        section(6, entries(this.globals));
+        section(7, entries(this.exports));
+        section(9, entries(elements));
+        if (hinted > 0)
+        {
+            // Custom, but before the code section: an engine reads it while it compiles.
+            const title = name('metadata.code.branch_hint');
+            const count = leb128u(hinted);
+            const content = hints.buffer.subarray(0, hints.length);
+            put(append([0x00], leb128u(title.length + count.length + content.length)));
+            put(title);
+            put(count);
+            put(content);
+        }
+        if (this.functions.length > 0)
+        {
+            const count = leb128u(this.functions.length);
+            put(append([10], leb128u(count.length + codeLength)));
+            put(count);
+            for (const piece of codes)
+            {
+                put(piece);
+            }
+        }
+        if (this.functionNames.length > 0)
+        {
+            // The custom `name` section, last: its function-names subsection (1)
+            // maps indices to names.
+            const map = leb128u(this.functionNames.length);
+            for (const [index, functionName] of this.functionNames)
+            {
+                append(append(map, leb128u(index)), name(functionName));
+            }
+            const head = append(append(name('name'), [0x01]), leb128u(map.length));
+            put(append([0x00], leb128u(head.length + map.length)));
+            put(head);
+            put(map);
+        }
+
+        const out = new Uint8Array(total);
+        let at = 0;
+        for (const piece of parts)
+        {
+            out.set(piece, at);
+            at += piece.length;
+        }
+        return out;
     }
 }

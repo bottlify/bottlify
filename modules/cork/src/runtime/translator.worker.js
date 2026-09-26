@@ -21,7 +21,11 @@
  * which differ only in how the scope receives and sends messages.
  */
 
-import { emitBatch, relinkBatch } from './emit-built.js';
+import { createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
+
+/** The functions this worker emitted, which a relink or a merge takes again: the
+ * worker serves one runtime, whose layout, features and options key them. */
+const cache = createEmitCache();
 
 /**
  * A batch of formed regions (`jobs`), or a relink of running ones (`relink`:
@@ -36,8 +40,8 @@ function handle(data, send){
     try
     {
         const batch = relink
-            ? relinkBatch(relink, layout, features, options)
-            : emitBatch(jobs ?? [], layout, features, options);
+            ? relinkBatch(relink, layout, features, options, cache)
+            : emitBatch(jobs ?? [], layout, features, options, cache);
         // Compiled here too: a WebAssembly.Module travels in the message
         // (structured clone shares the compiled code), so the engine thread
         // only instantiates -- the compile was most of its cost on a loading

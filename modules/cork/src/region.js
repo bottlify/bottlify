@@ -90,10 +90,12 @@ const LEAF_BYTES = 512;
  * it unless `calls`, when the callee's own callees leave through the hash as
  * any call does and come back to the block after their call.
  *
- * @param {(address: number) => number} read @param {number} target
+ * @param {(address: number) => import('./decode/decoder.js').Instruction
+ *     | import('./decode/decoder.js').Refusal} decodeAt
+ * @param {number} target
  * @param {(eip: number) => boolean} translatable @param {boolean} [calls]
  */
-function isLeaf(read, target, translatable, calls = false){
+function isLeaf(decodeAt, target, translatable, calls = false){
     const seen = new Set();
     const work = [target];
     let bytes = 0;
@@ -111,7 +113,7 @@ function isLeaf(read, target, translatable, calls = false){
         seen.add(start);
         for (let eip = start; ;)
         {
-            const decoded = decode(read, eip);
+            const decoded = decodeAt(eip);
             if ('refused' in decoded)
             {
                 return false;
@@ -333,20 +335,49 @@ function switchTable(read, block, blocks){
 }
 
 /**
+ * What forming learns of bytes that stay as they are while several regions are
+ * formed over them -- a batch on the engine thread, a relink over its copy of
+ * the pages -- so each instruction is decoded, and each callee's leaf test
+ * made, once for all of them: a loading phase's regions call the same small
+ * functions, and each region decoded every callee again to test it.
+ *
+ * @typedef {{ decoded: Map<number, import('./decode/decoder.js').Instruction
+ *     | import('./decode/decoder.js').Refusal>, leaves: Map<number, boolean> }} FormShared
+ */
+
+/** @returns {FormShared} */
+export function formShared(){
+    return { decoded: new Map(), leaves: new Map() };
+}
+
+/**
  * @param {(address: number) => number} read
  * @param {number} entry
  * @param {{ maxBlocks?: number, maxBytes?: number,
  *     translatable?: (eip: number) => boolean, leafCalls?: boolean,
- *     callTargets?: Map<number, number[]> }} [options]
+ *     callTargets?: Map<number, number[]>, shared?: FormShared }} [options]
  *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`); callTargets:
  *     by the address of an indirect call, the callees it has been seen to go to, formed in
- *     as a direct call's small callee is -- the call compares its target with each
+ *     as a direct call's small callee is -- the call compares its target with each;
+ *     shared: what forming found, for other regions formed over the same bytes with the
+ *     same `translatable` (`formShared`)
  * @returns {Region}
  */
 export function formRegion(read, entry,
     { maxBlocks = 128, maxBytes = 8192, translatable = ()=>true, leafCalls = true,
-        callTargets } = {})
+        callTargets, shared } = {})
 {
+    /** @param {number} address */
+    const decodeAt = shared === undefined ? (/** @type {number} */ address)=>decode(read, address)
+        : (/** @type {number} */ address)=>{
+            let decoded = shared.decoded.get(address);
+            if (decoded === undefined)
+            {
+                decoded = decode(read, address);
+                shared.decoded.set(address, decoded);
+            }
+            return decoded;
+        };
     /** @type {Map<number, Block>} by start */
     const blocks = new Map();
     /** The starts still to decode, by how many callees deep they were reached:
@@ -370,16 +401,17 @@ export function formRegion(read, entry,
     const refused = new Map();
     /** The switch tables the region's jumps go through, read as data. @type {SwitchTable[]} */
     const tables = [];
-    /** `isLeaf` by callee and form, once a region: a function called from many
-     * places is decoded once. @type {Map<string, boolean>} */
-    const leaves = new Map();
+    /** `isLeaf` by callee and form, once a region (or once for every region
+     * sharing it): a function called from many places is decoded once.
+     * @type {Map<number, boolean>} */
+    const leaves = shared?.leaves ?? new Map();
     /** @param {number} target @param {boolean} calls */
     const leafAt = (target, calls)=>{
-        const key = `${target}:${calls}`;
+        const key = target * 2 + (calls ? 1 : 0);
         let leaf = leaves.get(key);
         if (leaf === undefined)
         {
-            leaf = isLeaf(read, target, translatable, calls);
+            leaf = isLeaf(decodeAt, target, translatable, calls);
             leaves.set(key, leaf);
         }
         return leaf;
@@ -506,7 +538,7 @@ export function formRegion(read, entry,
                 block.exit = { kind: 'cut', targets: [], next: eip, backEdge: false };
                 break;
             }
-            const decoded = decode(read, eip);
+            const decoded = decodeAt(eip);
             if ('refused' in decoded)
             {
                 refused.set(decoded.opcode, (refused.get(decoded.opcode) ?? 0) + 1);

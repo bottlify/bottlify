@@ -207,6 +207,17 @@ again, kept only when its bytes hash as they did, emitted into one module per ch
 switched in place -- the entries it made take the new function and its index in the new
 module's range of the table (below), the labels being the same. A title's regions then live in tens of modules rather than hundreds; the
 store keeps the relinked records (`linked`), so the next launch starts from the big modules.
+The emitter keeps what it emitted (`createEmitCache`, 48 MB, the least recently used out first;
+the worker's own, and one a runtime emitting inline keeps): a region's function is a pure
+function of the formed region, the top and shape test it is compiled for and a module prepared
+with the same layout, features and options, whatever else the module holds, so a relink or a
+merge takes each region that forms again to the same blocks and bytes from there and emits only
+what is new -- the same bytes as emitting it again. The regions a batch or a relink forms share
+their decoded instructions and callees' leaf tests (`formShared`): nothing writes their bytes
+while they are formed, and a loading phase's regions call the same small functions. The messages
+a Doom 3 run posted its worker in its first 35 s (8 596 regions, 17 243 emitted, merges
+emitting a module of hundreds again for every few regions they gathered), replayed in node by
+`tools/cork-bench/translate.mjs`, took the worker's work from 34.1 to 19.4 s.
 A transfer between regions is one function a module, not code in every region: an untranslated
 exit with budget left tail-calls its module's transfer function with its EIP in the label's
 place and the state it carries, and that function probes the entry hash (the first slot before
