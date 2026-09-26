@@ -1270,6 +1270,13 @@ to its end: tens of microseconds each, which ran a title's scene at 240 ns an in
     and PF of `bt`, all but ZF of `bsf`/`bsr`): they count as written, so an earlier
     instruction's result is no longer kept for them and they hold whatever an older record
     folds to; real processors differ among themselves on them.
+  - an instruction that only reads memory is not tested against the page flags: its address
+    is wrapped into guest RAM (whose size is a power of two) instead, one `and` where the test
+    was a shift, a load and a branch. The only flag a read can find is INACCESSIBLE, which only
+    the pages past RAM carry, so what goes is the #GP of a read past the end of guest memory --
+    it reads RAM there instead. Stores, and every access under `precise`, are tested as before.
+    Doom 3's GUI text measure, its own bytes under node with branch hints, went 2.6-2.7 ->
+    2.1-2.3 ns a character.
 
   C0, C2 and C3, the stack, its faults, precision and rounding control, every value (but for
   single precision's rounding at the ends of the range), and every defined flag a branch,

@@ -207,7 +207,8 @@ const LOCAL_TYPES = [
  *     gives them, which costs the record before it, and single precision rounded in the
  *     double's bits (`roundSingle` in `x87.js`); without it the x87 bookkeeping is not
  *     computed, an undefined flag is as the cheapest code leaves it, which no program can
- *     rely on (real processors differ there), and single is rounded by Veltkamp's split
+ *     rely on (real processors differ there), single is rounded by Veltkamp's split, and an
+ *     instruction that only reads memory is not tested against the page flags (`checkAccess`)
  * @property {number} codeHit         the helper telling whether a byte lies in translated code
  * @property {number} [getEflags]      the host's flag fold, imported when the layout keeps
  *                                     lazy flags (the emulator's `flags_changed`)

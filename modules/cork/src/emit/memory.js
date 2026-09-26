@@ -77,6 +77,18 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
     {
         return;
     }
+    // Outside `precise` an instruction that only reads is not tested: the
+    // one page flag a read can find is INACCESSIBLE, which only the pages past
+    // RAM carry, so its address is wrapped into RAM instead (a power of two),
+    // one `and` for a shift, a load and a branch. A read past the end of
+    // guest memory then reads RAM where it raised #GP.
+    const { ramSize } = e.layout;
+    if (!store && e.context.precise !== true && (ramSize & ramSize - 1) === 0
+        && e.layout.codePages < 0 && accessOf(e.current)?.store === false)
+    {
+        b.localGet(Local.addr).i32const(ramSize - 1).op(I32.and).localSet(Local.addr);
+        return;
+    }
     const table = e.layout.tables + Tables.PAGE_FLAGS;
     const noting = store && e.layout.codePages < 0 && size <= 16;
     const bits = PageFlag.INACCESSIBLE | (noting ? PageFlag.HAS_CODE : 0);

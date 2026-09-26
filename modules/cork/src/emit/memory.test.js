@@ -621,6 +621,29 @@ test('an SSE store checks its page and code in one test, exact at both edges', (
     assert.equal(over.exit.eip, CODE);
 });
 
+test('outside precise a read past RAM wraps into it; a store, or precise, faults', ()=>{
+    const read = [0xa1, 0x10, 0x00, 0x10, 0x00];   // mov eax, [0x100010]: 1 MiB of RAM, 16 past it
+    const store = [0xa3, 0x10, 0x00, 0x10, 0x00];  // mov [0x100010], eax
+    /** @param {number[]} bytes @param {boolean} precise */
+    const runAt = (bytes, precise)=>{
+        const m = createTestMachine({ precise });
+        m.write(CODE, [...bytes, 0xf4]);
+        m.write(0x10, [0x78, 0x56, 0x34, 0x12]);
+        m.setReg('esp', STACK);
+        return { m, exit: m.runProgram(CODE) };
+    };
+    const wrapped = runAt(read, false);
+    assert.equal(wrapped.exit.kind, Exit.HALT);
+    assert.equal(wrapped.m.reg('eax'), 0x12345678, 'the read found RAM at 0x10');
+    const faulting = /** @type {[number[], boolean][]} */ ([[read, true], [store, false], [store, true]]);
+    for (const [bytes, precise] of faulting)
+    {
+        const { exit } = runAt(bytes, precise);
+        assert.equal(exit.kind, Exit.FAULT, `${bytes[0].toString(16)} precise ${precise}`);
+        assert.equal(exit.eip, CODE);
+    }
+});
+
 /** The region formed at CODE over `bytes`, a `hlt` past them. @param {number[]} bytes */
 function regionOf(bytes){
     return formRegion(a=>(a >= CODE && a < CODE + bytes.length ? bytes[a - CODE] : 0xf4), CODE);
@@ -638,7 +661,7 @@ function translateWith(m, entry, structure){
     const bytes = new Uint8Array(m.memory.buffer);
     const region = formRegion(a=>bytes[m.layout.ramBase + a], entry);
     const builder = new ModuleBuilder();
-    const context = prepareModule(builder, m.layout, features(), {}, { structure });
+    const context = prepareModule(builder, m.layout, features(), {}, { structure, precise: true });
     const translation = emitRegion(context, region);
     builder.exportFunction('region', translation.functionIndex);
     const helpers = new WebAssembly.Instance(new WebAssembly.Module(
