@@ -399,6 +399,46 @@ test('a shift by cl whose flags nothing reads folds no record, whatever the coun
     }
 });
 
+test('a loop head reads the flags its latch left, and those it is entered with', ()=>{
+    // A tree's find: mov eax, DATA; mov edx, key; jmp C; B: mov edi, [eax];
+    // cmovae edi, [eax+4]; test edi, edi; mov eax, edi; je out; C: cmp edx, [eax+8];
+    // jne B; out: hlt -- the head's cmovae reads the CF of the latch's cmp, the record
+    // it expects there; entered at the head from outside, it reads whatever came in.
+    const program = [0xb8, ...u32(DATA), 0xba, ...u32(0), 0xeb, 0x0c,
+        0x8b, 0x38, 0x0f, 0x43, 0x78, 0x04, 0x85, 0xff, 0x89, 0xf8, 0x74, 0x05,
+        0x3b, 0x50, 0x08, 0x75, 0xef, 0xf4];
+    const B = CODE + 0x0c;
+    /** Nodes of {left, right, key}: 0 is 50 over 1 (20) and 2 (80); 3 (90) right of 2. */
+    const nodes = [[1, 2, 50], [-1, -1, 20], [-1, 3, 80], [-1, -1, 90]];
+    const machine = ()=>{
+        const m = createTestMachine();
+        m.write(CODE, program);
+        nodes.forEach(([left, right, key], i)=>{
+            m.writeU32(DATA + i * 16, left < 0 ? 0 : DATA + left * 16);
+            m.writeU32(DATA + i * 16 + 4, right < 0 ? 0 : DATA + right * 16);
+            m.writeU32(DATA + i * 16 + 8, key);
+        });
+        return m;
+    };
+    for (const [key, found] of [[50, 0], [20, 1], [90, 3], [85, -1], [10, -1]])
+    {
+        const m = machine();
+        m.write(CODE + 6, u32(key));
+        assert.equal(m.translate(CODE).run(CODE, 1000).kind, Exit.HALT);
+        assert.equal(m.reg('eax'), found < 0 ? 0 : DATA + found * 16, `key ${key}`);
+    }
+    for (const carry of [0, 1])
+    {
+        // At the head from outside, with CF in the flags word: left when set, right when not.
+        const m = machine();
+        m.setReg('eax', DATA);
+        m.setReg('edx', 20);
+        m.setEflags(2 | carry);
+        m.translate(CODE).run(B, 3);
+        assert.equal(m.reg('edi'), DATA + (carry ? 1 : 2) * 16, `entered with CF ${carry}`);
+    }
+});
+
 test('a spent budget on a jump back leaves the flags its target reads', ()=>{
     // mov ecx, 6; clc; H: jnc S; add eax, 100; S: add eax, 1; cmp ecx, 4; dec ecx;
     // jnz H; hlt -- the head reads the CF the cmp left through the dec, across the

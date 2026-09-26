@@ -1433,24 +1433,36 @@ export class RegionEmitter {
      */
     emitBlock(block, index){
         // The record's kind at the end of the block before, and the hint for
-        // this one: what an earlier block that goes on here left. Only a guess
-        // -- the block is entered from elsewhere too -- so a read checks it.
+        // this one: what an earlier block that goes on here left, or else what
+        // a later one that jumps back here is expected to leave -- a loop's head
+        // reading the flags its latch set. Only a guess -- the block is entered
+        // from elsewhere too -- so a read checks it.
         if (index > 0)
         {
             this.ends[index - 1] = this.pending;
         }
         this.hint = null;
         const blocks = this.region.blocks;
+        /** @param {import('../region.js').Block} from */
+        const flowsHere = from=>{
+            const { kind, next, targets } = from.exit;
+            return kind === 'fallthrough' || kind === 'jcc' || kind === 'loop'
+                ? next === block.start || targets.includes(block.start)
+                : kind === 'jump' && targets[0] === block.start;
+        };
         for (let i = 0; i < index && this.hint === null; i++)
         {
             const end = this.ends[i];
-            const { kind, next, targets } = blocks[i].exit;
-            const flows = kind === 'fallthrough' || kind === 'jcc' || kind === 'loop'
-                ? next === block.start || targets.includes(block.start)
-                : kind === 'jump' && targets[0] === block.start;
-            if (flows && end && end.kind !== Kind.EAGER)
+            if (flowsHere(blocks[i]) && end && end.kind !== Kind.EAGER)
             {
                 this.hint = end;
+            }
+        }
+        for (let i = index; i < blocks.length && this.hint === null; i++)
+        {
+            if (flowsHere(blocks[i]))
+            {
+                this.hint = recordAtEnd(blocks[i]);
             }
         }
         this.pending = null;
@@ -2210,6 +2222,33 @@ function killedBy(instruction, precise){
     }
     return precise ? instruction.flagsWritten & ~instruction.flagsUndefined
         : instruction.flagsWritten | instruction.flagsUndefined;
+}
+
+/** The kinds the instructions that leave a record of their own record, by op. */
+const RECORDED = new Map([
+    ['add', Kind.ADD], ['xadd', Kind.ADD], ['adc', Kind.ADC], ['sub', Kind.SUB], ['cmp', Kind.SUB],
+    ['sbb', Kind.SBB], ['and', Kind.LOGIC], ['or', Kind.LOGIC], ['xor', Kind.LOGIC],
+    ['test', Kind.LOGIC], ['inc', Kind.INC], ['dec', Kind.DEC], ['neg', Kind.NEG],
+]);
+
+/**
+ * The record a block is expected to end with, before it is emitted: that of its
+ * last instruction to write a flag, when that one leaves a record of its own.
+ *
+ * @param {import('../region.js').Block} block
+ * @returns {{ kind: number, width: number } | null}
+ */
+function recordAtEnd(block){
+    for (let k = block.instructions.length - 1; k >= 0; k--)
+    {
+        const instruction = block.instructions[k];
+        if ((instruction.flagsWritten | instruction.flagsUndefined) !== 0)
+        {
+            const kind = RECORDED.get(instruction.op);
+            return kind === undefined ? null : { kind, width: widthCode(instruction.size) };
+        }
+    }
+    return null;
 }
 
 /**
