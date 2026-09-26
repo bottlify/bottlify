@@ -1432,12 +1432,16 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                if (!BIT_COUNTS.has((planes >>> 0) * (bitCount >>> 0)))
+                // A depth between two a bitmap can have is rounded up to the
+                // next, as Windows rounds it: three bits is four, and only
+                // past 32 is there none.
+                const depth = [...BIT_COUNTS].find(known=>known >= (bitCount >>> 0));
+                if ((bitCount >>> 0) === 0 || depth === undefined
+                    || !BIT_COUNTS.has((planes >>> 0) * depth))
                 {
                     return 0;
                 }
-                const attributes = deviceBitmap(width | 0, height | 0, bitCount >>> 0,
-                    planes >>> 0);
+                const attributes = deviceBitmap(width | 0, height | 0, depth, planes >>> 0);
                 if (!attributes)
                 {
                     return 0;

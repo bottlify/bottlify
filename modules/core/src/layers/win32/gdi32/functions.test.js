@@ -547,8 +547,24 @@ test('CreateBitmap keeps the format it was given', ()=>{
     assert.ok(fns.CreateBitmap.handler([8, 8, 1, 24, 0x12000]) > 0);
     assert.equal(fns.CreateBitmap.handler([0, 8, 1, 1, 0]), 0,
         'unlike CreateCompatibleBitmap, this one has no device to fall back on');
-    assert.equal(fns.CreateBitmap.handler([8, 8, 1, 7, 0]), 0,
-        'seven bits per pixel is not a format');
+});
+
+test('CreateBitmap rounds a depth up to the next one a bitmap can have', ()=>{
+    // Wine's test_CreateBitmap: every depth from 1 to 32 makes a bitmap, of
+    // 1, 4, 8, 16, 24 or 32 bits, and anything deeper makes none.
+    const { fns, memory } = setup();
+    for (let depth = 1; depth <= 33; depth++)
+    {
+        const bitmap = fns.CreateBitmap.handler([1, 1, 1, depth, 0]);
+        if (depth > 32)
+        {
+            assert.equal(bitmap, 0, `${depth} bits`);
+            continue;
+        }
+        const expected = [1, 4, 8, 16, 24, 32].find(bits=>bits >= depth);
+        assert.equal(fns.GetObjectA.handler([bitmap, 24, OUT]), 24);
+        assert.equal(memory.u32(OUT + 16) >>> 16, expected, `${depth} bits: bmBitsPixel`);
+    }
 });
 
 test('GetBitmapBits sizes a bitmap\'s bits, then hands back WORD-padded rows', ()=>{
