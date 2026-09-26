@@ -56,6 +56,9 @@ const WM_LBUTTONDOWN = 0x0201;
 const WM_KEYDOWN = 0x0100;
 const VK_TAB = 0x09;
 const VK_SHIFT = 0x10;
+const VK_CONTROL = 0x11;
+const VK_PRIOR = 0x21;
+const VK_NEXT = 0x22;
 const WM_QUIT = 0x0012;
 const DM_GETDEFID = 0x0400;
 const DC_HASDEFID = 0x534b;
@@ -1054,4 +1057,42 @@ test('Tab walks from the sheet into the page on show and through its controls, a
     assert.equal(focus(), edit(IDC_PS_EDIT1), 'and round into the page again');
     await context.press(hwnd, VK_TAB, [VK_SHIFT]);
     assert.equal(focus(), walked.at(-1), 'Shift+Tab back to the sheet\'s control before it');
+});
+
+test('PSM_ISDIALOGMESSAGE takes Ctrl+PgDn and Ctrl+Tab to the next page, Ctrl+PgUp and '
+    + 'Ctrl+Shift+Tab to the one before, and hands anything else to the dialog manager',
+async()=>{
+    // comctl32's property sheet tests (test_hotkey_navigation): the keys move
+    // a wizard of two pages from the first to the second and back, twice.
+    const context = setup();
+    const pages = [];
+    for (const name of ['one', 'two'])
+    {
+        pages.push(await context.createPage(context.description({
+            proc: context.pageProc(name) })));
+    }
+    const hwnd = await context.comctl.PropertySheetA.handler([context.header({
+        flags: PSH_MODELESS | PSH_WIZARD, caption: 'A Wizard', pages })]);
+    const active = ()=>context.send([hwnd, PSM_HWNDTOINDEX,
+        context.send([hwnd, PSM_GETCURRENTPAGEHWND, 0, 0]), 0]);
+    assert.equal(active(), 0);
+    /** @type {[number, number[], number][]} the key, the keys held with it, the page after */
+    const steps = [[VK_NEXT, [VK_CONTROL], 1], [VK_PRIOR, [VK_CONTROL], 0],
+        [VK_TAB, [VK_CONTROL], 1], [VK_TAB, [VK_CONTROL, VK_SHIFT], 0]];
+    for (const [key, held, page] of steps)
+    {
+        context.heard.length = 0;
+        assert.equal(await context.press(hwnd, key, held, true), 1, `key ${key} taken`);
+        assert.equal(active(), page, `key ${key} with ${held}`);
+        assert.deepEqual(context.heard.filter(([, code])=>code === PSN_KILLACTIVE
+            || code === PSN_SETACTIVE).map(([, code])=>code), [PSN_KILLACTIVE, PSN_SETACTIVE],
+        'the page on show is asked to let go, as a click on a tab asks it');
+    }
+
+    const focused = context.fns.GetFocus.handler([]);
+    assert.equal(await context.press(hwnd, VK_TAB, [], true), 1, 'a plain Tab');
+    assert.notEqual(context.fns.GetFocus.handler([]), focused, 'moves the focus');
+    assert.equal(active(), 0, 'and not the page');
+    assert.equal(await context.press(hwnd, VK_NEXT, [], true), 0,
+        'PgDn alone is not the sheet\'s');
 });

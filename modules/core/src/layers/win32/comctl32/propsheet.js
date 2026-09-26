@@ -140,13 +140,22 @@ const PRESSED = Object.freeze([IDC_BACK_BUTTON, IDC_NEXT_BUTTON, IDC_FINISH_BUTT
     IDC_APPLY_BUTTON, IDCANCEL, IDHELP]);
 
 const WM_NCDESTROY = 0x0082;
+const WM_GETDLGCODE = 0x0087;
+const WM_KEYDOWN = 0x0100;
 const WM_NOTIFY = 0x004e;
 const WM_INITDIALOG = 0x0110;
 const WM_COMMAND = 0x0111;
 const DM_GETDEFID = 0x0400;
 const DM_SETDEFID = 0x0401;
 const DWLP_MSGRESULT = 0;
+const GWL_STYLE = -16;
 const BN_CLICKED = 0;
+const DLGC_WANTMESSAGE = 0x0004;
+const VK_TAB = 0x09;
+const VK_SHIFT = 0x10;
+const VK_CONTROL = 0x11;
+const VK_PRIOR = 0x21;
+const VK_NEXT = 0x22;
 const TCM_DELETEITEM = 0x1308;
 const TCM_GETCURSEL = 0x130b;
 const TCM_SETCURSEL = 0x130c;
@@ -1187,6 +1196,61 @@ export function createPropertySheetFunctions(host){
         : sheet.entries.findIndex(entry=>entry.hwnd === hwnd));
 
     /**
+     * Whether a window is the sheet or one of the windows inside it.
+     *
+     * @param {Sheet} sheet @param {number} hwnd
+     */
+    const inside = (sheet, hwnd)=>{
+        for (let at = hwnd >>> 0, depth = 0; at !== 0 && depth < 64; depth++)
+        {
+            if (at === sheet.hwnd)
+            {
+                return true;
+            }
+            if (((api('GetWindowLongA', [at, GWL_STYLE]) >>> 0) & WS_CHILD) === 0)
+            {
+                return false;
+            }
+            at = api('GetParent', [at]) >>> 0;
+        }
+        return false;
+    };
+
+    /**
+     * The keys the sheet itself answers in a message loop: with Ctrl held,
+     * PgDn and Tab turn to the next page and PgUp and Shift+Tab to the one
+     * before, round from either end, the page on show asked to let go as a
+     * click on a tab asks it. A control that asks for every key keeps them.
+     *
+     * @param {Sheet} sheet @param {number} msg  The MSG's address.
+     * @param {unknown} thread
+     * @returns {boolean | Promise<boolean>} whether the key was the sheet's
+     */
+    const pageKey = (sheet, msg, thread)=>{
+        const target = u32(msg);
+        const key = u32(msg + 8);
+        const held = (/** @type {number} */ vk)=>(api('GetKeyState', [vk]) & 0x8000) !== 0;
+        const turn = key === VK_NEXT ? 1 : key === VK_PRIOR ? -1
+            : key === VK_TAB ? (held(VK_SHIFT) ? -1 : 1) : 0;
+        if (u32(msg + 4) !== WM_KEYDOWN || turn === 0 || !held(VK_CONTROL)
+            || !inside(sheet, target))
+        {
+            return false;
+        }
+        return after(api('SendMessageA', [target, WM_GETDLGCODE, key, msg]), wants=>{
+            const count = sheet.entries.length;
+            if (((wants >>> 0) & DLGC_WANTMESSAGE) !== 0)
+            {
+                return false;
+            }
+            // With no page on show, the first or the last is the one turned to.
+            const from = sheet.current >= 0 ? sheet.current : turn > 0 ? -1 : count;
+            return count === 0 ? true : after(select(sheet, (from + turn + count) % count,
+                thread, { direction: turn }), ()=>true);
+        });
+    };
+
+    /**
      * The sheet's dialog procedure.
      *
      * @param {number[]} args
@@ -1358,8 +1422,9 @@ export function createPropertySheetFunctions(host){
             case PSM_GETTABCONTROL:
                 return answer(sheet, sheet.tab);
             case PSM_ISDIALOGMESSAGE:
-                return after(api('IsDialogMessageA', [sheet.hwnd, handle]), taken=>
-                    answer(sheet, taken));
+                return after(pageKey(sheet, handle, thread), turned=>(turned ? answer(sheet, 1)
+                    : after(api('IsDialogMessageA', [sheet.hwnd, handle]), taken=>
+                        answer(sheet, taken))));
             case PSM_GETCURRENTPAGEHWND:
                 return answer(sheet, sheet.ended ? 0 : sheet.entries[sheet.current]?.hwnd ?? 0);
             case PSM_HWNDTOINDEX:
