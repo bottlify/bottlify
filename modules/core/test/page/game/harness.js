@@ -1446,6 +1446,13 @@ export function createHarness(canvas, how = {}){
             result.trace = failure.traceText;
         }
         result.elapsedMs = Math.round(performance.now() - started);
+        if (request.exportTranslations)
+        {
+            // The run's translations as the seed a bundle carries, for the
+            // driver to write out (`--export-translations`).
+            const seed = await app.exportTranslations().catch(()=>null);
+            result.translations = seed === null ? null : toBase64(seed);
+        }
 
         result.snaps = [];
         for (const [frameAfter, pending] of snaps)

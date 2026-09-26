@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    SEGMENT_FS, captureContext, diffContexts, restoreContext, setThreadBase,
+    SEGMENT_FS, THREAD_CONTROL_WORD, THREAD_MXCSR, captureContext, diffContexts,
+    freshThreadFpu, restoreContext, setThreadBase,
 } from './context.js';
 
 /**
@@ -139,4 +140,23 @@ test('the thread base is part of the context, not the caller of the switch', ()=
 
     assert.equal(cpu.segment_offsets[SEGMENT_FS], 0x7ffdf000,
         'FS follows the thread; forgetting it is how a thread reads another thread TEB');
+});
+
+test('a new thread starts with Windows\' floating-point environment, not its creator\'s', ()=>{
+    // Wine's thread tests: a thread starts at 0x27f whatever precision the
+    // thread that created it set.
+    const context = captureContext(fillDistinctly(fakeCpu(), 3));
+    const registers = [...context.reg32];
+    const segments = [...context.segmentOffsets];
+    freshThreadFpu(context);
+    assert.equal(THREAD_CONTROL_WORD, 0x27f);
+    assert.equal(context.fpuControlWord, THREAD_CONTROL_WORD);
+    assert.equal(context.fpuStatusWord, 0);
+    assert.equal(context.fpuStackPtr, 0);
+    assert.equal(context.fpuStackEmpty, 0xff, 'every x87 register empty');
+    assert.ok(context.fpuSt.every((/** @type {number} */ word)=>word === 0));
+    assert.equal(context.mxcsr, THREAD_MXCSR);
+    assert.ok(context.regXmm.every((/** @type {number} */ word)=>word === 0));
+    assert.deepEqual(context.reg32, registers, 'the rest of the template stays');
+    assert.deepEqual(context.segmentOffsets, segments);
 });

@@ -192,7 +192,8 @@ export function watchDispatch(host, message, answer){
         return answer;
     }
     const handed = {
-        hwnd: message.hwnd >>> 0, message: message.message >>> 0, at: Date.now(),
+        hwnd: message.hwnd >>> 0, message: message.message >>> 0,
+        at: import.meta.BOTTLIFY_DIAGNOSTICS !== false ? Date.now() : 0,
     };
     open.push(handed);
     const done = ()=>{

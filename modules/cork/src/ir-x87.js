@@ -65,6 +65,77 @@ const INDEFINITE = fromBits(0xfff8000000000000n);
 /** Pushes the indefinite when the guard fired. @param {number} value @param {number} t1 */
 const orIndefinite = (value, t1)=>t1 !== 0 ? INDEFINITE : value;
 
+/** The forms that write no register: what a quadword `fild` left stays exact across them. */
+const KEEPS_EXACT = new Set([
+    'fwait', 'fnop', 'fnclex', 'fldcw', 'fnstsw', 'fnstcw', 'fnstenv', 'fxch', 'fcom', 'fucom',
+    'ftst', 'ficom', 'fxam', 'fcomi', 'fucomi', 'fist',
+]);
+/** The forms that write no register and pop ST(0), or ST(0) and ST(1). */
+const POPS_EXACT = new Set([
+    'fcomp', 'fucomp', 'ficomp', 'fcomip', 'fucomip', 'fistp', 'fisttp', 'fcompp', 'fucompp',
+]);
+/** The forms that push and write nothing else. */
+const PUSHES_EXACT = new Set([
+    'fld', 'fild', 'fld1', 'fldz', 'fldpi', 'fldl2e', 'fldln2', 'fldlg2', 'fldl2t',
+]);
+/** The arithmetic, which writes its destination and pops in its `p` forms. */
+const ARITHMETIC = new Set([
+    'fadd', 'fsub', 'fsubr', 'fmul', 'fdiv', 'fdivr', 'faddp', 'fsubp', 'fsubrp', 'fmulp',
+    'fdivp', 'fdivrp', 'fiadd', 'fisub', 'fisubr', 'fimul', 'fidiv', 'fidivr',
+]);
+
+/**
+ * What an x87 instruction does to the registers holding an exact quadword
+ * (`fild m64`, whose 64 bits a double does not keep): the registers it writes
+ * and the ones it pops, as masks of `slot`'s entries for ST(i) at `top` -- the
+ * translator's locals, or the physical registers with `slot` the identity.
+ * Null for any form not listed, after which none is exact. A quadword `fistp`
+ * or `fisttp` of an exact register stores the quadword; everything else reads
+ * the double as before. An exchange writes nothing here: the translator's
+ * tracker swaps which locals are the two places, and the evaluator moves the
+ * mark with the value it swaps.
+ *
+ * @param {import('./decode/decoder.js').Instruction} instruction
+ * @param {number} top @param {readonly number[]} slot
+ * @returns {{ written: number, popped: number } | null}
+ */
+export function exactWrites(instruction, top, slot){
+    const { op, operands } = instruction;
+    const [dst] = operands;
+    /** @param {number} i */
+    const bit = i=>1 << slot[(top + i) & 7];
+    if (KEEPS_EXACT.has(op) || op === 'fst' && dst.kind !== 'x87')
+    {
+        return { written: 0, popped: 0 };
+    }
+    if (POPS_EXACT.has(op) || op === 'fstp' && dst.kind !== 'x87')
+    {
+        return { written: 0, popped: op.endsWith('pp') ? bit(0) | bit(1) : bit(0) };
+    }
+    if (PUSHES_EXACT.has(op))
+    {
+        return { written: bit(-1), popped: 0 };
+    }
+    if (op === 'fst' || op === 'fstp')
+    {
+        return { written: bit(Number(dst.reg)), popped: op === 'fstp' ? bit(0) : 0 };
+    }
+    if (ARITHMETIC.has(op))
+    {
+        return {
+            written: bit(dst.kind === 'x87' ? Number(dst.reg) : 0),
+            popped: op.endsWith('p') ? bit(0) : 0,
+        };
+    }
+    return null;
+}
+
+/** The physical registers as their own slots. */
+const IDENTITY = Object.freeze([0, 1, 2, 3, 4, 5, 6, 7]);
+
+/** The registers the instruction being evaluated made exact: a quadword load, or a copy. */
+let made = 0;
+
 /**
  * The stack-fault check: t1 is set when a source ST(i) is empty or a push
  * finds its register held, and IE and SF are raised. A push that overflowed
@@ -160,6 +231,95 @@ function roundBy(value, control){
     return floor % 2 === 0 ? floor : floor + 1;
 }
 
+/**
+ * The exponent of a finite nonzero double as the 80-bit format has it, a
+ * subnormal's normalised.
+ *
+ * @param {number} value
+ * @returns {number}
+ */
+function exponentOf(value){
+    scratchF[0] = value;
+    const field = scratchU32[1] >>> 20 & 0x7ff;
+    return field !== 0 ? field - 1023 : exponentOf(value * 2 ** 64) - 64;
+}
+
+/** The condition bits of the last `remainder`. */
+let remainderBits = 0;
+
+/**
+ * `fprem` (`nearest` false) and `fprem1` on doubles, exactly, for a finite
+ * `a` and a nonzero `c` that is not a NaN: the remainder, and in
+ * `remainderBits` C2 and the quotient's low three bits in C0, C3 and C1.
+ *
+ * JS's `%` is the IEEE fmod, exact: the remainder of a quotient truncated
+ * toward zero, which `fprem`'s is. `fprem1` rounds the quotient to nearest,
+ * even on a tie, which moves the remainder by `c` exactly where it is past
+ * half of `c` -- the two lie within a factor of two of each other, so the
+ * difference is exact. The quotient's low bits come from the remainder of
+ * `8c`, which the quotient mod 8 times `c` separates from the one of `c`.
+ * Past an exponent difference of 63 the processor reduces partially: C2 set,
+ * and the exponent brought down by 32 to 63, here 32 plus the difference mod
+ * 32 -- a multiple of `c` by a power of two, so a loop of them ends at the
+ * exact remainder.
+ *
+ * @param {number} a @param {number} c @param {boolean} nearest
+ * @returns {number}
+ */
+function remainder(a, c, nearest){
+    if (a === 0 || !Number.isFinite(c))
+    {
+        remainderBits = 0;
+        return a;
+    }
+    const d = exponentOf(a) - exponentOf(c);
+    if (d >= 64)
+    {
+        // c scaled by 2^(d - n) in steps a double holds; it stays below a.
+        let scaled = c;
+        for (let k = d - 32 - d % 32; k > 0; k -= 1000)
+        {
+            scaled *= 2 ** Math.min(k, 1000);
+        }
+        remainderBits = Status.C2;
+        return a % scaled;
+    }
+    const r = a % c;
+    // The quotient is below 8 where 8c overflows.
+    const c8 = c * 8;
+    let low = Math.round(Math.abs((Number.isFinite(c8) ? a % c8 - r : a - r) / c));
+    let value = r;
+    if (nearest)
+    {
+        const twice = Math.abs(r) * 2;
+        const magnitude = Math.abs(c);
+        if (twice > magnitude || (twice === magnitude && (low & 1) !== 0))
+        {
+            value = r > 0 ? r - magnitude : r + magnitude;
+            low = (low + 1) & 7;
+        }
+    }
+    remainderBits = ((low & 4) !== 0 ? Status.C0 : 0) | ((low & 2) !== 0 ? Status.C3 : 0)
+        | ((low & 1) !== 0 ? Status.C1 : 0);
+    return value;
+}
+
+/**
+ * `remainder` as the translator's host import: `fprem` for `nearest` 0,
+ * `fprem1` otherwise, and the status bits by the second import.
+ *
+ * @param {number} a @param {number} c @param {number} nearest
+ */
+export function fpremValue(a, c, nearest){
+    return remainder(a, c, nearest !== 0);
+}
+
+/** @param {number} a @param {number} c @param {number} nearest */
+export function fpremStatus(a, c, nearest){
+    remainder(a, c, nearest !== 0);
+    return remainderBits;
+}
+
 /** @param {number} value @param {number[]} inputs */
 function hostNaN(value, inputs){
     if (!Number.isNaN(value) || inputs.some(input=>Number.isNaN(input)))
@@ -169,9 +329,74 @@ function hostNaN(value, inputs){
     return fromBits(bits(value) | -0x8000000000000000n);
 }
 
+/**
+ * A double's two words, into `scratchU32`. A NaN's bits are taken from its value
+ * this way before anything asks whether it is one: once the optimizer knows a
+ * value is a NaN it may use the canonical NaN in its place, and the payload is
+ * lost -- the same instruction then gave another result once its code was
+ * optimized.
+ *
+ * @param {number} value
+ * @returns {boolean} whether it is a NaN
+ */
+function nanWords(value){
+    scratchF[0] = value;
+    return (scratchU32[1] & 0x7ff00000) === 0x7ff00000
+        && ((scratchU32[1] & 0xfffff) !== 0 || scratchU32[0] !== 0);
+}
+
 /** @param {number} value */
 function signalling(value){
-    return Number.isNaN(value) && (bits(value) & (1n << 51n)) === 0n;
+    return nanWords(value) && (scratchU32[1] & 0x80000) === 0;
+}
+
+/**
+ * A NaN the host's `Math` made, quieted: its log2 and log1p of a negative NaN
+ * are signalling ones, which come back quieted when wasm calls the same
+ * function, and the processor makes none.
+ *
+ * @param {number} value
+ */
+function quiet(value){
+    if (!nanWords(value))
+    {
+        return value;
+    }
+    scratchU32[1] |= 0x80000;
+    return scratchF[0];
+}
+
+/**
+ * The NaN an operation of two NaN operands gives, chosen as the x87 chooses it:
+ * a quiet one over a signalling one, then the larger significand, then the
+ * positive, quieted. The host's own operation returns the one its compiler
+ * happened to put first, which is not the same from one compiled version of
+ * this code to the next.
+ *
+ * @param {number} value the operation's result @param {number} a @param {number} c
+ */
+function twoNaN(value, a, c){
+    if (!nanWords(a))
+    {
+        return value;
+    }
+    const aHigh = scratchU32[1];
+    const aLow = scratchU32[0];
+    if (!nanWords(c))
+    {
+        return value;
+    }
+    const cHigh = scratchU32[1];
+    const cLow = scratchU32[0];
+    const aQuiet = (aHigh & 0x80000) !== 0;
+    const cQuiet = (cHigh & 0x80000) !== 0;
+    const aFraction = (aHigh & 0xfffff) * 4294967296 + aLow;
+    const cFraction = (cHigh & 0xfffff) * 4294967296 + cLow;
+    const pickA = aQuiet !== cQuiet ? aQuiet
+        : aFraction !== cFraction ? aFraction > cFraction : (aHigh & 0x80000000) === 0;
+    scratchU32[1] = (pickA ? aHigh : cHigh) | 0x80000;
+    scratchU32[0] = pickA ? aLow : cLow;
+    return scratchF[0];
 }
 
 /** @param {import('./ir.js').EvalState} state @param {number} address @param {number} size */
@@ -240,7 +465,10 @@ function writeQuad(state, address, value){
 function f80ToF64(low, high){
     if ((high & 0x7fff) === 0x7fff)
     {
-        return low << 1n === 0n ? Infinity : NaN;
+        // The fraction without the integer bit tells an infinity from a NaN,
+        // and either keeps the sign -- as the translator's reader has them.
+        const special = (low & 0x7fffffffffffffffn) === 0n ? Infinity : NaN;
+        return (high & 0x8000) !== 0 ? -special : special;
     }
     if (low === 0n)
     {
@@ -316,7 +544,9 @@ function loadFloat(state, address, size){
     {
         const high = state.memory.read(address + 8, 2);
         const low = BigInt.asUintN(64, readMem(state, address, 8));
-        if ((high & 0x7fff) === 0x7fff && (low & 0x7fffffffffffffffn) > 0x4000000000000000n)
+        // A signalling NaN: the quiet bit (62) clear, some other fraction bit set.
+        if ((high & 0x7fff) === 0x7fff && (low & 0x4000000000000000n) === 0n
+            && (low & 0x3fffffffffffffffn) !== 0n)
         {
             state.status |= Status.IE;
         }
@@ -478,6 +708,7 @@ export function fxrstor(state, where){
     state.top = (word >>> 11) & 7;
     state.empty = ~state.memory.read(where + 4, 1) & 0xff;
     state.mxcsr = state.memory.read(where + 24, 4) >>> 0;
+    state.x87Exact = 0;
     for (let i = 0; i < 8; i++)
     {
         const low = readMem(state, where + 32 + 16 * i, 8);
@@ -499,6 +730,29 @@ export function fxrstor(state, where){
  * @returns {boolean}
  */
 export function evaluateX87(instruction, state, address){
+    const { op, operands } = instruction;
+    if (state.x87Exact === 0 && (op !== 'fild' || operands[1].size !== 8))
+    {
+        return stepX87(instruction, state, address);
+    }
+    // The exact quadwords (`exactWrites`): kept where the step writes no
+    // register, and what it made itself added.
+    const top = state.top;
+    made = 0;
+    const done = stepX87(instruction, state, address);
+    const writes = exactWrites(instruction, top, IDENTITY);
+    state.x87Exact = writes === null ? 0
+        : ((state.x87Exact & ~writes.written) | made) & ~writes.popped;
+    return done;
+}
+
+/**
+ * @param {import('./decode/decoder.js').Instruction} instruction
+ * @param {import('./ir.js').EvalState} state
+ * @param {(operand: import('./decode/decoder.js').Operand) => number} address
+ * @returns {boolean}
+ */
+function stepX87(instruction, state, address){
     const { op, operands } = instruction;
     /** ST(i). @param {number} i */
     const st = i=>state.f80[(state.top + i) & 7];
@@ -524,6 +778,14 @@ export function evaluateX87(instruction, state, address){
     };
     /** @param {import('./decode/decoder.js').Operand} operand */
     const at = operand=>address(operand);
+    /** Carries an exact quadword with its value, between physical registers. @param {number} from @param {number} to */
+    const copyExact = (from, to)=>{
+        if ((state.x87Exact >>> from & 1) !== 0)
+        {
+            state.x87Shadow[to] = state.x87Shadow[from];
+            made |= 1 << to;
+        }
+    };
 
     switch (op)
     {
@@ -541,7 +803,13 @@ export function evaluateX87(instruction, state, address){
         case 'fld':
             if (src.kind === 'x87')
             {
-                pushValue(orIndefinite(st(Number(src.reg)), guard(state, [Number(src.reg)], true)));
+                const from = (state.top + Number(src.reg)) & 7;
+                const t1 = guard(state, [Number(src.reg)], true);
+                pushValue(orIndefinite(st(Number(src.reg)), t1));
+                if (t1 === 0)
+                {
+                    copyExact(from, state.top);
+                }
             }
             else
             {
@@ -555,7 +823,15 @@ export function evaluateX87(instruction, state, address){
             const signed = src.size === 2 ? Number(BigInt.asIntN(16, value))
                 : src.size === 4 ? Number(BigInt.asIntN(32, value))
                     : Number(BigInt.asIntN(64, value));
-            pushValue(orIndefinite(signed, guard(state, [], true)));
+            const t1 = guard(state, [], true);
+            pushValue(orIndefinite(signed, t1));
+            if (src.size === 8 && t1 === 0)
+            {
+                // The quadword beside the double it rounds to, for a quadword
+                // store of it to copy the eight bytes the processor keeps.
+                state.x87Shadow[state.top] = BigInt.asIntN(64, value);
+                made = 1 << state.top;
+            }
             return true;
         }
         case 'fld1': case 'fldz': case 'fldpi': case 'fldl2e': case 'fldln2': case 'fldlg2':
@@ -570,11 +846,16 @@ export function evaluateX87(instruction, state, address){
         }
         case 'fst': case 'fstp':
         {
-            const value = orIndefinite(st(0), guard(state, [0], false));
+            const t1 = guard(state, [0], false);
+            const value = orIndefinite(st(0), t1);
             if (dst.kind === 'x87')
             {
                 setSt(Number(dst.reg), value);
                 state.empty &= ~(1 << ((state.top + Number(dst.reg)) & 7));
+                if (t1 === 0)
+                {
+                    copyExact(state.top, (state.top + Number(dst.reg)) & 7);
+                }
             }
             else
             {
@@ -588,8 +869,21 @@ export function evaluateX87(instruction, state, address){
         }
         case 'fist': case 'fistp': case 'fisttp':
         {
-            const value = orIndefinite(st(0), guard(state, [0], false));
-            storeInt(state, at(dst), dst.size, value, op === 'fisttp');
+            const t1 = guard(state, [0], false);
+            const value = orIndefinite(st(0), t1);
+            const k = state.top;
+            // A quadword `fild` loaded ST0 and nothing has written it: the
+            // quadword itself, which needs no rounding and is in range. The
+            // compare is a second guard on what the marks promise.
+            if (dst.size === 8 && t1 === 0 && (state.x87Exact >>> k & 1) !== 0
+                && value === Number(state.x87Shadow[k]))
+            {
+                writeMem(state, at(dst), 8, state.x87Shadow[k]);
+            }
+            else
+            {
+                storeInt(state, at(dst), dst.size, value, op === 'fisttp');
+            }
             if (op !== 'fist')
             {
                 popN(1);
@@ -605,6 +899,18 @@ export function evaluateX87(instruction, state, address){
             const swap = state.f80[a];
             state.f80[a] = state.f80[c];
             state.f80[c] = swap;
+            // An exact quadword's mark and shadow go with its value.
+            const exact = state.x87Exact;
+            if (((exact >>> a | exact >>> c) & 1) !== 0)
+            {
+                const shadow = state.x87Shadow[a];
+                state.x87Shadow[a] = state.x87Shadow[c];
+                state.x87Shadow[c] = shadow;
+                if (((exact >>> a ^ exact >>> c) & 1) !== 0)
+                {
+                    state.x87Exact = exact ^ (1 << a | 1 << c);
+                }
+            }
             return true;
         }
         case 'ffree': case 'ffreep':
@@ -748,7 +1054,8 @@ export function evaluateX87(instruction, state, address){
                 {
                     state.status |= Status.IE;
                 }
-                result = st(1) * Math.log2(st(0));
+                const log = quiet(Math.log2(st(0)));
+                result = twoNaN(st(1) * log, st(1), log);
             }
             else
             {
@@ -756,7 +1063,8 @@ export function evaluateX87(instruction, state, address){
                 {
                     state.status |= Status.IE;
                 }
-                result = st(1) * (Math.log1p(st(0)) / Math.LN2);
+                const log = quiet(Math.log1p(st(0))) / Math.LN2;
+                result = twoNaN(st(1) * log, st(1), log);
             }
             setSt(1, orIndefinite(result, t1));
             popN(1);
@@ -775,30 +1083,8 @@ export function evaluateX87(instruction, state, address){
                 return true;
             }
             state.status &= ~(Status.C2 | Status.C0 | Status.C3 | Status.C1);
-            let q = a / c;
-            if (Math.abs(q) < 2 ** 63)
-            {
-                q = op === 'fprem' ? Math.trunc(q) : roundBy(q, 0);
-                setSt(0, a - q * c);
-                const low = BigInt.asIntN(32, BigInt(Math.trunc(Math.abs(q))));
-                if ((low & 4n) !== 0n)
-                {
-                    state.status |= Status.C0;
-                }
-                if ((low & 2n) !== 0n)
-                {
-                    state.status |= Status.C3;
-                }
-                if ((low & 1n) !== 0n)
-                {
-                    state.status |= Status.C1;
-                }
-            }
-            else
-            {
-                setSt(0, a - Math.trunc(q * 2 ** -32) * 2 ** 32 * c);
-                state.status |= Status.C2;
-            }
+            setSt(0, remainder(a, c, op === 'fprem1'));
+            state.status |= remainderBits;
             return true;
         }
         case 'fadd': case 'fsub': case 'fsubr': case 'fmul': case 'fdiv': case 'fdivr':
@@ -845,7 +1131,7 @@ export function evaluateX87(instruction, state, address){
             {
                 result = a / c;
             }
-            result = hostNaN(byPrecision(result, state), [a0, c0]);
+            result = twoNaN(hostNaN(byPrecision(result, state), [a0, c0]), a0, c0);
             setSt(target, orIndefinite(result, t1));
             if (t1 === 0)
             {
@@ -984,6 +1270,8 @@ export function evaluateX87(instruction, state, address){
             return true;
         case 'fnstenv': case 'fnsave':
         {
+            // As the translator's: the control word stays after fnstenv,
+            // where the processor masks every exception (`emit/x87.js`).
             const save = op === 'fnsave';
             const where = at(dst);
             state.memory.write(where, 4, (state.control | 0xffff0000) >>> 0);

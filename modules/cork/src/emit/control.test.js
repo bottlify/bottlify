@@ -16,10 +16,19 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../testing/machine.js';
 import { features } from '../wasm/features.js';
+import { Body, ModuleBuilder, ValType } from '../wasm/encoder.js';
+import { I32 } from './flags.js';
+import { Exit, TIER_ENTRY } from './region.js';
+import { WasmExit } from '../interp-wasm.js';
 
 const CODE = 0x1000;
 const DATA = 0x2000;
 const STACK = 0x80000;
+/** Where the tier's stand-in sends a region on, where nothing is translated, and where it
+ * keeps what it found. */
+const AFTER = CODE + 0x40;
+const ELSEWHERE = 0x3000;
+const SEEN = DATA + 0x100;
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 const tailCalls = features().tailCalls;
@@ -269,6 +278,50 @@ test('a small leaf callee is formed into its caller: the call and the return are
     assert.equal(r.retired, 1 + 4 * 5 + 1);
 });
 
+test('an indirect call jumps to a predicted callee formed into its region, and leaves for'
+    + ' any other', { skip: !tailCalls }, ()=>{
+    const F = CODE + 21;
+    const G = CODE + 25;
+    const program = [
+        0xb9, ...u32(4),                    //     mov ecx, 4
+        0x89, 0xc8,                         // L:  mov eax, ecx
+        0x83, 0xe0, 0x01,                   //     and eax, 1
+        0xff, 0x14, 0x85, ...u32(DATA),     //     call [DATA + eax*4]
+        0x49,                               //     dec ecx
+        0x75, 0xf1,                         //     jnz L
+        0xf4,                               //     hlt
+        0x83, 0xc3, 0x01, 0xc3,             // F:  add ebx, 1; ret
+        0x83, 0xc3, 0x10, 0xc3,             // G:  add ebx, 16; ret
+    ];
+    const call = CODE + 10;
+    for (const [predicted, regions] of /** @type {[number[], number][]} */ ([[[F], 2], [[F, G], 1]]))
+    {
+        const m = machine(program, [...u32(F), ...u32(G)]);
+        const r = m.runProgram(CODE, { callTargets: new Map([[call, predicted]]) });
+        assert.equal(r.kind, 3);
+        assert.equal(r.regions, regions, `${predicted.length} predicted: G a region or a block`);
+        assert.equal(m.reg('ebx'), 2 * 1 + 2 * 16);
+        assert.equal(m.reg('esp'), STACK);
+        assert.equal(r.retired, 1 + 4 * 7 + 1);
+    }
+});
+
+test('an indirect call whose push lands in code leaves stale at its target, predicted or not',
+    { skip: !tailCalls }, ()=>{
+        const F = CODE + 7;
+        const m = machine([
+            0xff, 0x15, ...u32(DATA),       //     call [DATA]
+            0xf4,                           //     hlt
+            0x83, 0xe4, 0xff,               // F:  and esp, -1
+            0xc3,                           //     ret
+        ], u32(F));
+        m.pages.markCode(STACK - 4, 4);
+        const r = m.runProgram(CODE, { callTargets: new Map([[CODE, [F]]]) });
+        assert.equal(r.kind, 5, 'stale');
+        assert.equal(m.eip(), F);
+        assert.equal(m.reg('esp'), STACK - 4, 'with the return address pushed');
+    });
+
 test('a formed-in callee that returns elsewhere leaves by the address it popped', ()=>{
     // F replaces its return address: the ret goes to T, not after the call.
     const T = CODE + 0x40;
@@ -288,16 +341,26 @@ test('a formed-in callee that returns elsewhere leaves by the address it popped'
 });
 
 test('a call into a formed-in callee whose push lands in code leaves stale at the callee', ()=>{
+    // The callee's `and esp, -1` gives its return's pop a window of its own,
+    // so the push is tested, and noted, alone.
     const m = machine([
         0xe8, ...u32(1),            //     call F
         0xf4,                       //     hlt
-        0xc3,                       // F:  ret
+        0x83, 0xe4, 0xff,           // F:  and esp, -1
+        0xc3,                       //     ret
     ]);
     m.pages.markCode(STACK - 4, 4);
     const r = m.runProgram(CODE);
     assert.equal(r.kind, 5, 'stale');
     assert.equal(m.eip(), CODE + 6, 'past the call, at the callee');
     assert.equal(m.reg('esp'), STACK - 4, 'with the return address pushed');
+    // A pop off the esp the push left is in the push's window, which leaves
+    // before the call: the other executor runs it.
+    const n = machine([0xe8, ...u32(1), 0xf4, 0xc3]);
+    n.pages.markCode(STACK - 4, 4);
+    assert.equal(n.runProgram(CODE).kind, -2, 'held at the call');
+    assert.equal(n.eip(), CODE);
+    assert.equal(n.reg('esp'), STACK, 'nothing pushed');
 });
 
 /**
@@ -354,4 +417,98 @@ test('a switch whose table is rewritten after forming goes where the table now s
     const r = m.runProgram(CODE);
     assert.equal(r.kind, 3);
     assert.equal(m.reg('ebx'), 20 - 2 * 1 + 2 * 4);
+});
+
+/**
+ * A stand-in for the interpreter tier in wasm at `TIER_SLOT`: a wasm function over
+ * the machine's memory that keeps what it found -- the flags word, the record's kind
+ * and its budget, at `SEEN` -- moves EIP to `to`, adds `ran` to the counter word as
+ * the tier does, and answers `code` with `ran` above it.
+ *
+ * @param {ReturnType<typeof createTestMachine>} m
+ * @param {{ to: number, ran: number, code: number }} answer
+ */
+function tierStandIn(m, { to, ran, code }){
+    const { layout } = m;
+    const b = new Body();
+    b.i32const(0).i32const(0).load('i32', { offset: layout.eflags })
+        .store('i32', { offset: layout.ramBase + SEEN });
+    b.i32const(0).i32const(0).load('i32', { offset: /** @type {number} */ (layout.flagRecord) })
+        .store('i32', { offset: layout.ramBase + SEEN + 4 });
+    b.i32const(0).localGet(0).store('i32', { offset: layout.ramBase + SEEN + 8 });
+    b.i32const(0).i32const(to).store('i32', { offset: layout.eip });
+    b.i32const(0).i32const(0).load('i32', { offset: layout.counter }).i32const(ran)
+        .op(I32.add).store('i32', { offset: layout.counter });
+    b.i32const(code | ran << 8);
+    const builder = new ModuleBuilder();
+    builder.importMemory('env', 'memory', { min: 1 });
+    builder.function(builder.type({ params: [ValType.i32], results: [ValType.i32] }), [],
+        b.toBytes(), { exportAs: 'enter' });
+    const bytes = /** @type {Uint8Array<ArrayBuffer>} */ (builder.toBytes());
+    const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes),
+        { env: { memory: m.memory } });
+    return /** @type {Function} */ (instance.exports.enter);
+}
+
+/**
+ * A region that sets a lazy record (`cmp eax, eax`) and jumps through a table to an
+ * address with no entry, and one at `AFTER` the stand-in may send it on to.
+ */
+function resumeMachine(){
+    const m = createTestMachine({ resume: true });
+    m.write(CODE, [
+        0xb8, ...u32(5),                    // mov eax, 5
+        0x39, 0xc0,                         // cmp eax, eax
+        0xff, 0x25, ...u32(DATA),           // jmp [DATA]
+    ]);
+    m.write(AFTER, [
+        0xbb, ...u32(7),                    // mov ebx, 7
+        0xf4,                               // hlt
+    ]);
+    m.write(DATA, u32(ELSEWHERE));
+    m.setReg('esp', STACK);
+    const unit = m.translate(CODE, { hash: true });
+    m.translate(AFTER, { hash: true });
+    return { m, unit };
+}
+
+test('under resume a miss runs the tier in place and goes on at the entry it stopped at',
+    { skip: !tailCalls }, ()=>{
+        const { m, unit } = resumeMachine();
+        m.setTier(tierStandIn(m, { to: AFTER, ran: 4, code: TIER_ENTRY }));
+        assert.deepEqual(unit.run(CODE, 1000), { kind: 3, vector: 0 }, 'halted in the other');
+        assert.equal(m.reg('ebx'), 7);
+        // mov, cmp, jmp; the tier's four; mov and hlt.
+        assert.equal(m.counter(), 3 + 4 + 2);
+        assert.equal(m.readU32(SEEN) & 0x40, 0x40, 'the tier read ZF folded into the word');
+        assert.equal(m.readU32(SEEN + 4), 0, 'with the record cleared');
+        assert.equal(m.readU32(SEEN + 8), 1000 - 3, 'and the budget left');
+    });
+
+test('under resume what else the tier stops for leaves with its code for the host',
+    { skip: !tailCalls }, ()=>{
+        for (const code of [WasmExit.HOT, TIER_ENTRY])
+        {
+            const { m, unit } = resumeMachine();
+            // An entry with the budget spent is the host's to take, as a hot start is.
+            const ran = code === TIER_ENTRY ? 1000 - 3 : 0;
+            m.setTier(tierStandIn(m, { to: AFTER, ran, code }));
+            assert.deepEqual(unit.run(CODE, 1000), { kind: Exit.INTERPRETED, vector: code });
+            assert.equal(m.eip(), AFTER);
+            assert.equal(m.reg('ebx'), 0, 'the other region did not run');
+            assert.equal(m.counter(), 3 + ran);
+        }
+    });
+
+test('under resume a tier that answers 0 is none: the miss leaves untranslated as before',
+    { skip: !tailCalls }, ()=>{
+        const { m, unit } = resumeMachine();
+        m.setTier(tierStandIn(m, { to: ELSEWHERE, ran: 0, code: 0 }));
+        assert.deepEqual(unit.run(CODE, 1000), { kind: Exit.UNTRANSLATED, vector: 0 });
+        assert.equal(m.eip(), ELSEWHERE);
+        assert.equal(m.counter(), 3);
+    });
+
+test('the tier\'s code the transfer goes on at is the tier\'s own', ()=>{
+    assert.equal(TIER_ENTRY, WasmExit.ENTRY);
 });

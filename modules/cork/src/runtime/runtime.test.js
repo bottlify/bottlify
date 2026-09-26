@@ -9,6 +9,8 @@ import assert from 'node:assert/strict';
 import { Tables, ownLayout, pagesFor } from './layout.js';
 import { PageFlag } from './pages.js';
 import { createCorkRuntime } from './runtime.js';
+import { eflagsOf } from '../emit/flags.js';
+import { features as probeFeatures } from '../wasm/features.js';
 
 const CODE = 0x1000;
 
@@ -19,6 +21,9 @@ function machine(config = {}, ramSize = 4 << 20){
         Tables.SIZE + (/** @type {any} */ (config).blockProfile ? Tables.BLOCK_PROFILE_SIZE : 0)) });
     const bytes = ()=>new Uint8Array(memory.buffer);
     const view = ()=>new DataView(memory.buffer);
+    // The x87 as a fresh processor has it: every register empty, the default control word.
+    view().setUint8(layout.x87Empty, 0xff);
+    view().setUint16(layout.x87Control, 0x37f, true);
     const runtime = createCorkRuntime({
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
@@ -56,12 +61,13 @@ test('single precision seen leaves a wide x87 region once, and the address is tr
     const m = machine();
     const view = new DataView(m.memory.buffer);
     view.setUint8(m.layout.x87Empty, 0xff);
-    view.setUint16(m.layout.x87Control, 0x07f, true);
-    // fld1; fld1; fadd st0, st1; fstp st0; fstp st0; hlt -- a rounding block.
+    // fld1; fld1; fadd st0, st1; fstp st0; fstp st0; hlt -- a rounding block, translated
+    // under double precision and run under single.
     m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
     m.runtime.noteHot(CODE, 0);
     await m.runtime.translatePending();
     assert.equal(m.runtime.diagnostics().wide, true);
+    view.setUint16(m.layout.x87Control, 0x07f, true);
     const exit = m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
     assert.equal(exit.kind, 'untranslated');
     assert.equal(exit.retired, 2, 'the two fld1 ran, the fadd did not');
@@ -78,6 +84,63 @@ test('single precision seen leaves a wide x87 region once, and the address is tr
     await m.runtime.translatePending();
     assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
     assert.equal(m.runtime.diagnostics().precisionSwitches, 1, 'once');
+    assert.equal(m.runtime.diagnostics().precision, 'narrow');
+});
+
+test('a batch formed while the machine has single set is compiled for single at once', async()=>{
+    const m = machine();
+    const view = new DataView(m.memory.buffer);
+    view.setUint8(m.layout.x87Empty, 0xff);
+    view.setUint16(m.layout.x87Control, 0x07f, true);
+    m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
+    m.runtime.noteHot(CODE, 0);
+    await m.runtime.translatePending();
+    const before = m.runtime.diagnostics();
+    assert.equal(before.precision, 'narrow');
+    assert.equal(before.precisionSwitches, 1);
+    assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
+    assert.equal(m.runtime.diagnostics().exits.untranslated, 0, 'no wide region to leave');
+});
+
+test('a region compiled for single leaves once another precision is seen, and the address is'
+    + ' translated again with a test at every rounding instruction', async()=>{
+    const m = machine();
+    const view = new DataView(m.memory.buffer);
+    const restart = ()=>{
+        view.setUint32(m.layout.eip, CODE, true);
+        view.setUint8(m.layout.x87Empty, 0xff);
+        view.setUint8(m.layout.x87Top, 0);
+    };
+    view.setUint16(m.layout.x87Control, 0x07f, true);
+    m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
+    restart();
+    m.runtime.noteHot(CODE, 0);
+    await m.runtime.translatePending();
+    m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
+    restart();
+    m.runtime.noteHot(CODE, 0);
+    await m.runtime.translatePending();
+    assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
+    assert.equal(m.runtime.diagnostics().precision, 'narrow');
+    // Double precision under the single region: it leaves before the fadd.
+    view.setUint16(m.layout.x87Control, 0x27f, true);
+    restart();
+    const exit = m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
+    assert.equal(exit.kind, 'untranslated');
+    assert.equal(m.eip(), CODE + 4);
+    const after = m.runtime.diagnostics();
+    assert.equal(after.precisionSwitches, 2);
+    assert.equal(after.precision, 'mixed');
+    assert.equal(m.runtime.entryOf(CODE, 0), -1, 'the single region went');
+    for (const control of [0x27f, 0x07f])
+    {
+        view.setUint16(m.layout.x87Control, control, true);
+        restart();
+        m.runtime.noteHot(CODE, 0);
+        await m.runtime.translatePending();
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
+    }
+    assert.equal(m.runtime.diagnostics().precisionSwitches, 2, 'and no further');
 });
 
 test('a formed-in leaf two tops reach takes an exchanged stack as it is', async()=>{
@@ -205,7 +268,7 @@ test('a forced step is counted in the diagnostics', ()=>{
 });
 
 test('a hot address becomes a region after translatePending, and runs under a budget', async()=>{
-    const m = machine();
+    const m = machine({ timings: true });
     m.write(CODE, COUNTDOWN);
     m.setReg(4, 0x80000);
     assert.equal(m.runtime.entryOf(CODE), -1);
@@ -243,6 +306,34 @@ test('a hot address becomes a region after translatePending, and runs under a bu
     assert.equal(d.exits.halt, 1);
     assert.equal(d.translatedShare, 1, 'everything retired so far was in cork');
     assert.ok(d.translateMs > 0 && d.moduleBytes > 100, 'the cost of translating is reported');
+});
+
+test('the translator reads the clock for its own account only when asked (timings)', async()=>{
+    // A shipped build leaves the timings off: its milliseconds stay 0 and no
+    // long hold is recorded. A diagnostic run asks for both.
+    for (const timings of [false, true])
+    {
+        const m = machine({ timings });
+        m.write(CODE, COUNTDOWN);
+        m.runtime.noteHot(CODE);
+        assert.equal(await m.runtime.translatePending(), 1);
+        m.runtime.noteStall?.('held', 0, 0);
+        const d = /** @type {any} */ (m.runtime.diagnostics());
+        if (timings)
+        {
+            assert.ok(d.formingMs > 0 && d.emitMs > 0 && d.translateMs > 0, JSON.stringify(d));
+            assert.deepEqual(d.stalls.map((/** @type {{ what: string }} */ one)=>one.what), ['held']);
+        }
+        else
+        {
+            for (const key of ['translateMs', 'formingMs', 'lookupMs', 'emitMs', 'encodeMs',
+                'storeMs', 'instantiateMs', 'publishMs', 'workerMs'])
+            {
+                assert.equal(d[key], 0, key);
+            }
+            assert.deepEqual(d.stalls, []);
+        }
+    }
 });
 
 test('two regions land in one batch, in one module, and both run; an entry is asked by'
@@ -435,8 +526,24 @@ test('the runtime refuses a memory that has no room for its tables', ()=>{
     }), /before the tables/);
 });
 
-test('a hot region\'s direct callee lands in the same batch, and the call transfers', async()=>{
+test('a jump to address 0 misses the entry hash, whose empty slots are keyed 0', async()=>{
+    // A call through a null pointer: EIP 0 has no translation, so the run
+    // leaves for it untranslated, where the fetch there faults as the
+    // processor's would, rather than taking an empty slot's label and index.
     const m = machine();
+    // xor eax, eax; jmp eax
+    m.write(CODE, [0x31, 0xc0, 0xff, 0xe0]);
+    m.runtime.noteHot(CODE);
+    assert.ok(await m.runtime.translatePending() >= 1);
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
+    assert.equal(exit.kind, 'untranslated');
+    assert.equal(m.eip(), 0);
+    assert.equal(exit.retired, 2);
+});
+
+test('a hot region\'s direct callee lands in the same batch, and the call transfers', async()=>{
+    // The callee kept out of its caller, so the call is a transfer.
+    const m = machine({ leafCalls: false });
     // mov ecx, 1000; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret
     m.write(CODE, [
         0xb9, 0xe8, 0x03, 0, 0,
@@ -622,6 +729,122 @@ test('with a store, a second runtime takes its regions from the store; a changed
         await settle();
         assert.equal(fourth.runtime.diagnostics().cacheMisses, 1);
         assert.equal(store.size(), 6);
+    });
+
+test('precise keeps the x87 exception flags, in a store entry of its own; the default counts'
+    + ' the status reads that may see them', async()=>{
+    const { memoryTranslationStore } = await import('./cache.js');
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const store = memoryTranslationStore();
+    // fld1; fldz; fdivp st1, st0 (1 / 0: ZE); fnstsw [0x2000]; fstp st0; hlt
+    const program = [0xd9, 0xe8, 0xd9, 0xee, 0xde, 0xf9, 0xdd, 0x3d, 0x00, 0x20, 0, 0,
+        0xdd, 0xd8, 0xf4];
+    /** @param {boolean} precise */
+    const status = async precise=>{
+        const m = machine({ store, bundleId: 'test', precise });
+        new DataView(m.memory.buffer).setUint16(m.layout.x87Control, 0x37f, true);
+        m.write(CODE, program);
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE, 0);
+        await m.runtime.translatePending();
+        await settle();
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
+        const d = m.runtime.diagnostics();
+        return { word: new DataView(m.memory.buffer).getUint16(m.layout.ramBase + 0x2000, true),
+            hits: d.cacheHits, reads: d.x87RelaxedReads };
+    };
+    const fast = await status(false);
+    assert.equal(fast.word & 4, 0, 'fast: no ZE');
+    assert.equal(fast.reads, 1, 'the fnstsw into memory is counted');
+    const precise = await status(true);
+    assert.equal(precise.hits, 0, 'the fast translation is not taken from the store');
+    assert.equal(precise.word & 4, 4, 'precise: ZE');
+    assert.equal(precise.reads, 0);
+    assert.equal((await status(false)).hits, 1, 'the fast one is, for a fast run');
+});
+
+test('a region whose code is written while its lookups are out is not published for the old bytes',
+    async()=>{
+        const { memoryTranslationStore } = await import('./cache.js');
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const store = memoryTranslationStore();
+        // mov eax, imm32; hlt
+        const program = (/** @type {number} */ value)=>[0xb8, value, 0, 0, 0, 0xf4];
+        /**
+         * A batch formed over `before`, its code made `after` while the store
+         * answers -- as a guest store does into a page with no translated code
+         * on it yet, which nothing watches -- and what then runs at the entry.
+         *
+         * @param {number[]} before @param {number[]} after
+         */
+        const formedThenWritten = async(before, after)=>{
+            const m = machine({ store, bundleId: 'test' });
+            m.write(CODE, before);
+            m.setReg(4, 0x80000);
+            m.runtime.noteHot(CODE);
+            await m.runtime.translatePending();
+            m.write(CODE, after);
+            await settle();
+            const published = m.runtime.entryOf(CODE) >= 0;
+            const eax = published ? (m.runtime.run(m.runtime.entryOf(CODE), 100), m.reg(0)) : null;
+            return { published, eax, d: m.runtime.diagnostics() };
+        };
+        // Emitted after the write: from the region formed before it.
+        const emitted = await formedThenWritten(program(1), program(2));
+        assert.equal(emitted.d.cacheMisses, 1);
+        assert.deepEqual([emitted.published, emitted.eax], [false, null],
+            'not published: it would return 1 where the code now says 2');
+        // Taken from the store after the write: a record for the old bytes.
+        const stored = await formedThenWritten(program(3), program(3));
+        assert.equal(stored.eax, 3);
+        const taken = await formedThenWritten(program(3), program(4));
+        assert.equal(taken.d.cacheHits, 1, 'found by the bytes it was formed from');
+        assert.deepEqual([taken.published, taken.eax], [false, null], 'and not published');
+    });
+
+test('structure left unset is structure on, in the store\'s key as in the code', async()=>{
+    const { memoryTranslationStore } = await import('./cache.js');
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const store = memoryTranslationStore();
+    /** @param {{ structure?: boolean }} setting */
+    const hits = async setting=>{
+        const m = machine({ store, bundleId: 'test', ...setting });
+        m.write(CODE, COUNTDOWN);
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        await settle();
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+        return m.runtime.diagnostics().cacheHits;
+    };
+    assert.equal(await hits({ structure: undefined }), 0);
+    assert.equal(await hits({ structure: false }), 0,
+        'the loop emitted as a wasm loop is not taken for a run without structure');
+    assert.equal(await hits({ structure: true }), 1, 'unset and on emit the same code');
+    assert.equal(await hits({ structure: false }), 1);
+});
+
+test('a store does not answer at an entry for other bytes that agree in 32 bits of their hash',
+    async()=>{
+        const { memoryTranslationStore } = await import('./cache.js');
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const store = memoryTranslationStore();
+        // mov eax, imm32; hlt: the two programs' bytes collide in FNV-1a's 32 bits.
+        const run = async(/** @type {number[]} */ code)=>{
+            const m = machine({ store, bundleId: 'test' });
+            m.write(CODE, code);
+            m.setReg(4, 0x80000);
+            m.runtime.noteHot(CODE);
+            await m.runtime.translatePending();
+            await settle();
+            const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
+            assert.equal(exit.kind, 'halt');
+            return { eax: m.reg(0), hits: m.runtime.diagnostics().cacheHits };
+        };
+        assert.deepEqual(await run([0xb8, 0xbf, 0x20, 0x50, 0x13, 0xf4]),
+            { eax: 0x135020bf, hits: 0 });
+        assert.deepEqual(await run([0xb8, 0x9b, 0xb1, 0xb4, 0x1a, 0xf4]),
+            { eax: 0x1ab4b19b, hits: 0 }, 'the other bytes ran, not the stored translation');
     });
 
 test('a flood of distinct misses does not stop a later address reaching the threshold',
@@ -827,6 +1050,31 @@ test('a batch the worker forms from a copy of its pages runs as the one formed h
     await m.runtime.flush();
 });
 
+test('a worker that cannot load is dropped and the batches are emitted inline', async()=>{
+    // A worker file that throws as it loads: the worker is made, and fails after.
+    const m = machine({ workerUrl: 'data:text/javascript,throw new Error("cannot load")' });
+    m.write(CODE, COUNTDOWN);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE, 0, 2);
+    let published = false;
+    for (let i = 0; i < 200 && !published; i++)
+    {
+        await m.runtime.translatePending();
+        await new Promise(resolve=>setTimeout(resolve, 10));
+        published = m.runtime.entryOf(CODE) >= 0;
+    }
+    assert.ok(published, 'translated inline, the worker never answering');
+    /** @returns {string[]} */
+    const lost = ()=>Object.keys(m.runtime.diagnostics().refused ?? {})
+        .filter(reason=>reason.startsWith('worker: '));
+    for (let i = 0; i < 200 && lost().length === 0; i++)
+    {
+        await new Promise(resolve=>setTimeout(resolve, 10));
+    }
+    assert.match(lost().join(', '), /cannot load/, 'the loss is reported, not thrown');
+    await m.runtime.flush();
+});
+
 test('a region loads and stores only the registers it names, and a register written on one'
     + ' path keeps its value on the other', async()=>{
     const m = machine();
@@ -977,4 +1225,364 @@ test('without a block profile a run counts nothing and says nothing of blocks', 
     await m.runtime.translatePending();
     m.runtime.run(m.runtime.entryOf(CODE), 100_000);
     assert.equal(/** @type {any} */ (m.runtime.diagnostics()).blockCounts, undefined);
+});
+
+test('a candidate a region of the same batch already holds is not formed again', async()=>{
+    const m = machine();
+    // mov ecx, 1000; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret -- the
+    // callee is formed into the loop, and a candidate at it finds it there.
+    m.write(CODE, [
+        0xb9, 0xe8, 0x03, 0, 0,
+        0xe8, 0x04, 0, 0, 0,
+        0x49, 0x75, 0xf8,
+        0xf4,
+        0x42, 0xc3,
+    ]);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE);
+    m.runtime.noteHot(CODE + 14);
+    m.runtime.noteHot(CODE + 5);
+    assert.equal(await m.runtime.translatePending(), 1, 'the loop, with its callee in it');
+    assert.ok(m.runtime.entryOf(CODE + 5) >= 0, 'the loop\'s head is an entry');
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+    assert.equal(exit.kind, 'halt');
+    assert.equal(m.reg(2), 1000);
+});
+
+test('a block inside a region\'s loop has an entry once translated code keeps leaving for it',
+    async()=>{
+        const m = machine();
+        // mov ecx, 1000; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret -- F is a block
+        // of the loop, which the region is formed with no entry into.
+        m.write(CODE, [
+            0xb9, 0xe8, 0x03, 0, 0,
+            0xe8, 0x04, 0, 0, 0,
+            0x49, 0x75, 0xf8,
+            0xf4,
+            0x42, 0xc3,
+        ]);
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE);
+        assert.equal(await m.runtime.translatePending(), 1);
+        assert.equal(m.runtime.entryOf(CODE + 14), -1, 'none at first');
+        // Its page says so to the interpreter tier in wasm, which leaves a miss
+        // there to the host rather than run it in place, so the misses count.
+        const page = (CODE + 14) >>> 12;
+        assert.equal(m.runtime.pages.get(page) & PageFlag.CLOSED, PageFlag.CLOSED);
+        // Nor is it a candidate of its own, however hot the interpreter finds it.
+        m.runtime.noteHot(CODE + 14, 0, 128);
+        assert.equal(m.runtime.diagnostics().queued, 0);
+        for (let i = 0; i < 64; i++)
+        {
+            m.runtime.missAt(CODE + 14);
+        }
+        await m.runtime.translatePending();
+        assert.equal(m.runtime.diagnostics().copied, 1, 'the region formed again');
+        assert.ok(m.runtime.entryOf(CODE + 14) >= 0, 'its copy is an entry');
+        assert.equal(m.runtime.pages.get(page) & PageFlag.CLOSED, 0, 'and the page no longer');
+        // Called with its return address on the stack, F comes back to the hlt.
+        m.setReg(4, 0x80000 - 4);
+        new DataView(m.memory.buffer).setUint32(m.layout.ramBase + 0x80000 - 4, CODE + 13, true);
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 14), 1000).kind, 'halt');
+        assert.equal(m.reg(2), 1);
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+        assert.equal(m.reg(2), 1001);
+    });
+
+/**
+ * mov ecx, n; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret
+ * @param {number} n
+ */
+const callLoop = n=>[
+    0xb9, n & 0xff, n >>> 8 & 0xff, n >>> 16 & 0xff, 0,
+    0xe8, 0x04, 0, 0, 0,
+    0x49, 0x75, 0xf8,
+    0xf4,
+    0x42, 0xc3,
+];
+
+test('a transfer to a region of its own module is not a crossing; one into another module'
+    + ' is, and is counted', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return; // no hash: every transfer is the host's
+    }
+    // The loop and its callee in one batch: one module.
+    const one = machine({ leafCalls: false, dispatch: true });
+    one.write(CODE, callLoop(1000));
+    one.setReg(4, 0x80000);
+    one.runtime.noteHot(CODE);
+    assert.equal(await one.runtime.translatePending(), 2);
+    assert.equal(one.runtime.run(one.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+    assert.equal(one.reg(2), 1000);
+    assert.equal(one.runtime.diagnostics().crossings, 0);
+    // The callee first, in a batch of its own: each call and each return crosses.
+    const two = machine({ leafCalls: false, mergeAfter: 0, dispatch: true });
+    two.write(CODE, callLoop(1000));
+    two.setReg(4, 0x80000);
+    two.runtime.noteHot(CODE + 14);
+    assert.equal(await two.runtime.translatePending(), 1, 'the callee');
+    two.runtime.noteHot(CODE);
+    assert.equal(await two.runtime.translatePending(), 1, 'the loop, its callee translated');
+    assert.equal(two.runtime.run(two.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+    assert.equal(two.reg(2), 1000);
+    assert.equal(two.runtime.diagnostics().crossings, 2000);
+});
+
+test('a placed module whose regions have all gone gives its range of the table back', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    // The callee and the loop in modules of their own, dropped and made again
+    // three hundred times, as a program rewriting its code in place has them:
+    // six hundred ranges, where the table starts with 256 indices.
+    const m = machine({ leafCalls: false, mergeAfter: 0, volatileAfter: 1000, dispatch: true });
+    for (let round = 0; round < 300; round++)
+    {
+        m.write(CODE, callLoop(100));
+        m.setReg(2, 0);
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE + 14);
+        assert.equal(await m.runtime.translatePending(), 1, `the callee, round ${round}`);
+        m.runtime.noteHot(CODE);
+        assert.equal(await m.runtime.translatePending(), 1, `the loop, round ${round}`);
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+        assert.equal(m.reg(2), 100, `round ${round}`);
+        assert.equal(m.runtime.diagnostics().crossings, 200, 'each call and return crosses');
+        m.runtime.invalidatePage(CODE >>> 12);
+        assert.equal(m.runtime.diagnostics().regions, 0);
+    }
+    assert.equal(m.runtime.diagnostics().tableSize, 256, 'the ranges were taken again');
+});
+
+test('two modules that keep transferring into each other are gathered into one, on the'
+    + ' worker', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    const m = machine({ leafCalls: false, mergeAfter: 1000, worker: true, dispatch: true });
+    // Enough calls for the crossings to be read (every 2^20 translated instructions).
+    m.write(CODE, callLoop(300_000));
+    m.setReg(4, 0x80000);
+    /** Translates until the condition holds, the worker answering on its own turns.
+     * @param {() => boolean} done */
+    const until = async done=>{
+        for (let i = 0; i < 300 && !done(); i++)
+        {
+            await m.runtime.translatePending();
+            await new Promise(resolve=>setTimeout(resolve, 10));
+        }
+        assert.ok(done());
+    };
+    m.runtime.noteHot(CODE + 14);
+    await until(()=>m.runtime.entryOf(CODE + 14) >= 0);
+    m.runtime.noteHot(CODE);
+    await until(()=>m.runtime.entryOf(CODE) >= 0);
+    assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 10_000_000).kind, 'halt');
+    assert.equal(m.runtime.diagnostics().crossings, 600_000);
+    await until(()=>(m.runtime.diagnostics().relinked ?? 0) >= 2);
+    const d = m.runtime.diagnostics();
+    assert.equal(d.merges, 1);
+    assert.equal(d.relinked, 2, 'the loop and its callee, in one module');
+    assert.equal(d.crossings, 0, 'the two modules have no running regions left');
+    m.setReg(2, 0);
+    m.setReg(4, 0x80000);
+    assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 10_000_000).kind, 'halt');
+    assert.equal(m.reg(2), 300_000);
+    assert.equal(m.runtime.diagnostics().crossings, 0, 'every transfer a direct tail call');
+    await m.runtime.flush();
+});
+
+test('after a merge, the next waits for translated instructions in proportion to the regions'
+    + ' it built', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    const m = machine({ leafCalls: false, mergeAfter: 100_000, worker: true, dispatch: true,
+        batchRegions: 128 });
+    // Two loops, each calling a callee of its own; the first one's batch has
+    // sixty-four more regions, so its merge with its callee builds 66.
+    const OTHER = CODE + 0x200;
+    const STUBS = CODE + 0x100;
+    m.write(CODE, callLoop(300_000));
+    m.write(STUBS, new Array(64).fill(0xc3));
+    m.write(OTHER, callLoop(3_000_000));
+    /** @param {() => boolean} done */
+    const until = async done=>{
+        for (let i = 0; i < 300 && !done(); i++)
+        {
+            await m.runtime.translatePending();
+            await new Promise(resolve=>setTimeout(resolve, 10));
+        }
+        assert.ok(done());
+    };
+    /** Runs a loop to its halt, then lets the translator read the crossings. @param {number} at */
+    const loop = async at=>{
+        m.setReg(4, 0x80000);
+        assert.equal(m.runtime.run(m.runtime.entryOf(at), 100_000_000).kind, 'halt');
+        await m.runtime.translatePending();
+        await new Promise(resolve=>setTimeout(resolve, 50));
+    };
+    try
+    {
+        m.runtime.noteHot(CODE + 14);
+        await until(()=>m.runtime.entryOf(CODE + 14) >= 0);
+        m.runtime.noteHot(CODE);
+        for (let i = 0; i < 64; i++)
+        {
+            m.runtime.noteHot(STUBS + i);
+        }
+        await until(()=>m.runtime.entryOf(CODE) >= 0 && m.runtime.entryOf(STUBS + 63) >= 0);
+        m.runtime.noteHot(OTHER + 14);
+        await until(()=>m.runtime.entryOf(OTHER + 14) >= 0);
+        m.runtime.noteHot(OTHER);
+        await until(()=>m.runtime.entryOf(OTHER) >= 0);
+        await loop(CODE);
+        await until(()=>(m.runtime.diagnostics().relinked ?? 0) >= 66);
+        assert.equal(m.runtime.diagnostics().merges, 1);
+        // Three million crossings each way, fifteen million instructions: the
+        // other pair would merge after 2^23, and waits for 66 x 2^19.
+        await loop(OTHER);
+        await loop(OTHER);
+        assert.equal(m.runtime.diagnostics().merges, 1);
+        await loop(OTHER);
+        await until(()=>(m.runtime.diagnostics().relinked ?? 0) >= 68);
+        assert.equal(m.runtime.diagnostics().merges, 2);
+    }
+    finally
+    {
+        await m.runtime.flush();
+    }
+});
+
+/**
+ * mov ecx, n; L: mov eax, ecx; and eax, 15; call [TABLE + eax*4]; dec ecx; jnz L; hlt;
+ * F: add edx, 1; ret; G: add edx, 3; ret; H: add edx, 100; ret -- the table F and G in
+ * turn, H in its last slot: F and G an indirect call's usual callees, H a rare one.
+ * @param {number} n
+ */
+const dispatchLoop = n=>{
+    const table = CODE + 0x100;
+    const code = [
+        0xb9, n & 0xff, n >>> 8 & 0xff, n >>> 16 & 0xff, 0,
+        0x89, 0xc8,
+        0x83, 0xe0, 0x0f,
+        0xff, 0x14, 0x85, table & 0xff, table >>> 8 & 0xff, 0, 0,
+        0x49, 0x75, 0xf1,
+        0xf4,
+        0x83, 0xc2, 0x01, 0xc3,
+        0x83, 0xc2, 0x03, 0xc3,
+        0x83, 0xc2, 0x64, 0xc3,
+    ];
+    const [f, g, h] = [CODE + 21, CODE + 25, CODE + 29];
+    const slots = Array.from({ length: 16 }, (_, k)=>(k === 15 ? h : k % 2 === 1 ? g : f));
+    return { code, table, slots, f, g, h };
+};
+
+test('an indirect call sampled going to a few small callees has them formed into its region,'
+    + ' and a call to another still leaves', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return; // no hash, no transfers to count
+    }
+    const m = machine({ countTransfers: true, callTargets: true });
+    const { code, table, slots, f, g, h } = dispatchLoop(1600);
+    m.write(CODE, code);
+    m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
+    for (const at of [f, g, h, CODE])
+    {
+        m.runtime.noteHot(at);
+    }
+    await m.runtime.translatePending();
+    /** The loop from its start, 1600 calls: F 800 times, G 700, H 100. */
+    const run = ()=>{
+        m.setReg(1, 1600);
+        m.setReg(2, 0);
+        m.setReg(4, 0x80000);
+        const before = m.runtime.diagnostics().transfers ?? 0;
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 5), 1_000_000).kind, 'halt');
+        assert.equal(m.reg(2), 800 + 700 * 3 + 100 * 100);
+        return (m.runtime.diagnostics().transfers ?? 0) - before;
+    };
+    assert.equal(run(), 3200, 'every call and every return a transfer');
+    // Sixteen calls a reading, one translatePending in two.
+    for (let i = 0; i < 16 && m.runtime.diagnostics().reforms === 0; i++)
+    {
+        run();
+        await m.runtime.translatePending();
+    }
+    assert.equal(m.runtime.diagnostics().reforms, 1);
+    // Only H leaves: its call, its return into the copy of the block after the call, which
+    // is inside the loop (`emitCopies`), and the copy's way on to the loop's head.
+    assert.equal(run(), 300, 'only H leaves, and its return comes back');
+});
+
+test('callTargets and dispatch are off unless a run asks for them', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return; // no hash: no transfers, no placing
+    }
+    // Each is worth a lot on the benchmarks and cost games on real hardware
+    // their frame rate while on (see the settings); a default that turns one
+    // back on unnoticed is what this holds.
+    const calls = machine({ countTransfers: true });
+    const { code, table, slots, f, g, h } = dispatchLoop(1600);
+    calls.write(CODE, code);
+    calls.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
+    for (const at of [f, g, h, CODE])
+    {
+        calls.runtime.noteHot(at);
+    }
+    await calls.runtime.translatePending();
+    for (let i = 0; i < 16; i++)
+    {
+        calls.setReg(1, 1600);
+        calls.setReg(2, 0);
+        calls.setReg(4, 0x80000);
+        assert.equal(calls.runtime.run(calls.runtime.entryOf(CODE + 5), 1_000_000).kind, 'halt');
+        await calls.runtime.translatePending();
+    }
+    assert.equal(calls.runtime.diagnostics().reforms, 0,
+        'no indirect call sampled, no region formed again with its callees');
+    // The callee in a module of its own: unplaced, a transfer between the two
+    // goes through the table and is no crossing of a placed module's range.
+    const modules = machine({ leafCalls: false, mergeAfter: 0 });
+    modules.write(CODE, callLoop(1000));
+    modules.setReg(4, 0x80000);
+    modules.runtime.noteHot(CODE + 14);
+    assert.equal(await modules.runtime.translatePending(), 1);
+    modules.runtime.noteHot(CODE);
+    assert.equal(await modules.runtime.translatePending(), 1);
+    assert.equal(modules.runtime.run(modules.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+    assert.equal(modules.reg(2), 1000);
+    assert.equal(modules.runtime.diagnostics().crossings, 0, 'no module placed');
+});
+
+test('a transfer that finds no entry leaves with the carried state written back', async()=>{
+    const m = machine();
+    // mov ebx, 7; mov edx, -1; add edx, 1; mov eax, CODE+0x800; jmp eax -- nothing is
+    // translated at the target, so the transfer misses and the run leaves there.
+    m.write(CODE, [
+        0xbb, 7, 0, 0, 0,
+        0xba, 0xff, 0xff, 0xff, 0xff,
+        0x83, 0xc2, 0x01,
+        0xb8, 0x00, 0x18, 0, 0,
+        0xff, 0xe0,
+    ]);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    const before = m.counter();
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
+    assert.equal(exit.kind, 'untranslated');
+    assert.equal(exit.retired, 5);
+    assert.equal(m.counter() - before, 5);
+    assert.equal(m.eip(), CODE + 0x800);
+    assert.equal(m.reg(0), CODE + 0x800);
+    assert.equal(m.reg(3), 7);
+    assert.equal(m.reg(2), 0);
+    const flags = eflagsOf(new DataView(m.memory.buffer), m.layout);
+    assert.equal(flags & 0x41, 0x41, 'CF and ZF of the add');
 });

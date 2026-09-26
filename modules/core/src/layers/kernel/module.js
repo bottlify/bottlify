@@ -136,6 +136,10 @@ export function createKernelModule(){
 
             state.switcher = createSwitcher({ cpu });
             state.clock = createClock(config?.clock);
+            // The time-stamp counter counts the same time QueryPerformanceCounter
+            // reads, so a program calibrating one against the other measures the
+            // frequency CPUID states.
+            cpu.useGuestClock?.(()=>state.clock.virtualTime());
             state.scheduler = createScheduler({
                 cpu,
                 switcher: state.switcher,

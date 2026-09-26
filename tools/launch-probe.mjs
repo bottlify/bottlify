@@ -24,8 +24,10 @@
 
 import { createWriteStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { openBundle } from './btl.mjs';
 import { createApp } from '../modules/core/src/app.js';
+import { DEFAULT_ENGINE } from '../modules/core/src/layers/cpu/module.js';
 import { peekBytes } from '../modules/core/src/trace.js';
 
 const PREBUILT = new URL('../modules/core/vendor/prebuilt/', import.meta.url);
@@ -44,9 +46,19 @@ function parse(argv){
         // bundle -- a launcher is a different program from the game it starts,
         // and only running it says whether it runs.
         which: argv.includes('--which') ? argv[argv.indexOf('--which') + 1] : null,
-        // The execution engine (emulator by default), so a title's own code can
-        // be measured on the translator outside a browser.
+        // The execution engine (the translator by default), so a title's own code
+        // can be measured on either engine outside a browser.
         engine: argv.includes('--engine') ? argv[argv.indexOf('--engine') + 1] : undefined,
+        // The translator's settings for the run, merged over the probe's own
+        // (`feed: 'slice'`, `timings: true`, a translation worker), so two
+        // settings compare on one title.
+        corkConfig: argv.includes('--cork-config')
+            ? JSON.parse(argv[argv.indexOf('--cork-config') + 1]) : {},
+        // Seconds between rows of the run's time series (0: none). A game is no
+        // benchmark's loop that settles once: new code keeps arriving and the
+        // translator's relinks, merges and reforms may never settle, which only
+        // a row per window shows.
+        series: argv.includes('--series') ? Number(argv[argv.indexOf('--series') + 1]) : 0,
         // Which calls to print with their arguments. A name, or a fragment of
         // one, narrows a long trace to the handful that answer the question.
         grep: argv.includes('--grep') ? argv[argv.indexOf('--grep') + 1] : null,
@@ -324,9 +336,58 @@ function report(app, { grep = null, calls = 24 } = {}){
     }
 }
 
+/**
+ * @typedef {Object} SeriesPoint
+ * @property {number} at  wall milliseconds since the run began
+ * @property {number} instructions
+ * @property {Record<string, number>} cork  the translator's cumulative counts
+ */
+
+/** The translator's counts a row takes the difference of. */
+const SERIES_COUNTS = ['regions', 'relinks', 'relinked', 'merges', 'reforms', 'copied',
+    'invalidations', 'workerMs', 'translateMs'];
+
+/**
+ * Prints one row of the run's time series -- what the guest ran and what the
+ * translator did since the row before -- and answers the point it was taken at.
+ *
+ * @param {any} app
+ * @param {SeriesPoint | null} last
+ * @param {number} began  `performance.now()` when the run began
+ * @returns {SeriesPoint}
+ */
+function seriesRow(app, last, began){
+    const layers = app.diagnostics();
+    /** @param {string} name */
+    const metricsOf = name=>layers.find((/** @type {any} */ layer)=>layer.name === name)
+        ?.metrics ?? {};
+    const cpu = metricsOf('cpu');
+    const kernel = metricsOf('kernel');
+    const corkNow = cpu.cork ?? {};
+    /** @type {Record<string, number>} */
+    const cork = { untranslated: corkNow.exits?.untranslated ?? 0 };
+    for (const name of SERIES_COUNTS)
+    {
+        cork[name] = Number(corkNow[name] ?? 0);
+    }
+    const point = { at: performance.now() - began, instructions: Number(cpu.instructions ?? 0),
+        cork };
+    const seconds = (point.at - (last?.at ?? 0)) / 1000;
+    const ran = point.instructions - (last?.instructions ?? 0);
+    /** @param {string} name */
+    const grew = name=>cork[name] - (last?.cork[name] ?? 0);
+    console.log(`  series t=${(point.at / 1000).toFixed(0)}s`
+        + ` mips=${(ran / seconds / 1e6).toFixed(1)}`
+        + ` untranslatedPerM=${ran > 0 ? (grew('untranslated') / ran * 1e6).toFixed(0) : '-'}`
+        + ` share=${((corkNow.translatedShare ?? 0) * 100).toFixed(1)}%`
+        + SERIES_COUNTS.map(name=>` ${name}+${Math.round(grew(name))}`).join('')
+        + ` worstSliceMs=${kernel.worstSliceMs ?? '-'}`);
+    return point;
+}
+
 async function main(){
-    const { id, turns, map, grep, calls, heap, profile, log, watch, peek, which, engine }
-        = parse(process.argv.slice(2));
+    const { id, turns, map, grep, calls, heap, profile, log, watch, peek, which, engine,
+        corkConfig, series } = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N] '
@@ -337,7 +398,7 @@ async function main(){
     const directory = new URL(`${id}/`, BUNDLES);
     const manifest = JSON.parse(
         await readFile(new URL('manifest.json', directory), 'utf8'));
-    const path = new URL('bundle.btl', directory).pathname.replace(/^\//, '');
+    const path = fileURLToPath(new URL('bundle.btl', directory));
 
     const handle = await (await import('node:fs/promises')).open(path, 'r');
     /** @param {number} offset @param {number} length */
@@ -383,7 +444,13 @@ async function main(){
         engine,
         // No frames here to feed the translator between: it takes its
         // candidates inside the slice.
-        ...(engine === 'cork' ? { cork: { config: { feed: 'slice' } } } : {}),
+        ...((engine ?? DEFAULT_ENGINE) === 'cork'
+            ? { cork: { config: { feed: 'slice', timings: true,
+                // Emitting on a translation worker, as a page does: inline, the
+                // engine thread would carry the whole emission a browser moves off it.
+                worker: true, workerUrl: new URL('../modules/cork/src/runtime/translator.worker.js',
+                    import.meta.url).href,
+                ...corkConfig } } } : {}),
         heapSize: heap,
         quantum: profile > 0 ? profile : undefined,
         sample: profile > 0 ? (/** @type {number} */ eip)=>samples.push(eip) : undefined,
@@ -487,6 +554,14 @@ async function main(){
     }
 
     let stopped;
+    const began = performance.now();
+    /** @type {SeriesPoint | null} */
+    let last = null;
+    const timer = series > 0
+        ? setInterval(()=>{
+            last = seriesRow(app, last, began);
+        }, series * 1000)
+        : null;
     try
     {
         const code = await app.run({ maxTurns: turns });
@@ -494,6 +569,14 @@ async function main(){
     }
     catch (e){
         stopped = /** @type {any} */ (e).message;
+    }
+    finally
+    {
+        if (timer !== null)
+        {
+            clearInterval(timer);
+            seriesRow(app, last, began);
+        }
     }
 
     console.log(`stopped: ${stopped}`);

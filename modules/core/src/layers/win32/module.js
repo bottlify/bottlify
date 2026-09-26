@@ -2001,7 +2001,7 @@ export function createWin32Module(){
                 windowProcedures: ()=>dispatching.map(held=>({
                     hwnd: `0x${held.hwnd.toString(16)}`,
                     message: `0x${held.message.toString(16)}`,
-                    forMs: Date.now() - held.at,
+                    forMs: held.at ? Date.now() - held.at : 0,
                 })),
 
                 /**

@@ -601,7 +601,12 @@ TWO_BYTE[0xc3] = I('movnti', 'Md,Gy');
 TWO_BYTE[0xc4] = S({ '': I('pinsrw', 'Pq,Ew,Ib'), 66: I('pinsrw', 'Vdq,Ew,Ib') });
 TWO_BYTE[0xc5] = S({ '': I('pextrw', 'Gy,Nq,Ib'), 66: I('pextrw', 'Gy,Udq,Ib') });
 TWO_BYTE[0xc6] = S({ '': I('shufps', 'Vps,Wps,Ib'), 66: I('shufpd', 'Vpd,Wpd,Ib') });
-TWO_BYTE[0xc7] = G([null, I('cmpxchg8b', 'Mq', 'cmpxchg8b'), null, null, null, null, null, null]);
+// rdrand: CPUID leaf 1 advertises it (the emulator's answer), so it is decoded;
+// a memory operand is #UD, and it leaves CF set and the other five clear.
+TWO_BYTE[0xc7] = G([
+    null, I('cmpxchg8b', 'Mq', 'cmpxchg8b'), null, null, null, null,
+    I('rdrand', 'Ev', { r: 0, w: ARITH_FLAGS, u: 0 }), null,
+]);
 for (let reg = 0; reg < 8; reg++)
 {
     TWO_BYTE[0xc8 + reg] = I('bswap', 'Zd');

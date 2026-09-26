@@ -103,6 +103,17 @@ test('onStep says which starts a jump reached, and a resumed run starts mid-bloc
     assert.deepEqual(entered, [true], 'a run entered at a jump target counts its first start');
 });
 
+test('xadd writes the sum where its destination was before the source register changed', ()=>{
+    // mov ebx, 0x2010; mov byte [ebx], 5; xadd [ebx], bh; hlt -- bh (0x20) takes the old
+    // byte, which moves ebx; the sum still lands at 0x2010.
+    const m = machine();
+    m.ram.set([0xbb, 0x10, 0x20, 0, 0, 0xc6, 0x03, 5, 0x0f, 0xc0, 0x3b, 0xf4], 0x1000);
+    interpret(m.state, 100);
+    assert.equal(m.ram[0x2010], 0x25);
+    assert.equal(m.state.reg[3], 0x0510);
+    assert.equal(m.ram[0x0510], 0, 'nothing written where ebx points now');
+});
+
 test('xorps xors the two XMM operands and movd reaches a register', ()=>{
     // movd xmm0, eax; movd xmm1, ecx; xorps xmm0, xmm1; movd eax, xmm0; hlt
     const m = machine();
@@ -132,6 +143,29 @@ test('force runs the first instruction whatever shouldStop answers', ()=>{
     assert.equal(m.state.reg[0] >>> 0, 7);
     assert.equal(interpret(m.state, 100, { shouldStop: ()=>true, force: true }), 1);
     assert.equal(m.state.reg[0] >>> 0, 8);
+});
+
+test('asked runs the first run without the question and asks from the next on', ()=>{
+    // mov eax, 7; inc eax; mov ecx, 1; hlt
+    const m = machine();
+    m.ram.set([0xb8, 7, 0, 0, 0, 0x40, 0xb9, 1, 0, 0, 0, 0xf4], 0x1000);
+    /** @type {number[]} */
+    const asked = [];
+    const shouldStop = ()=>{
+        asked.push(m.state.eip);
+        return m.state.eip === 0x1006;
+    };
+    // The host has just looked at 0x1000 itself: the first run goes ahead
+    // without the question, and it is asked again from the next run on.
+    assert.equal(interpret(m.state, 100, { shouldStop, asked: true }), 2);
+    assert.equal(asked[0], 0x1005);
+    assert.equal(asked.at(-1), 0x1006);
+    assert.equal(m.state.reg[0] >>> 0, 8);
+    assert.equal(m.state.reg[1], 0, 'the stop held');
+    // Not asked, the first run is asked like any other.
+    asked.length = 0;
+    assert.equal(interpret(m.state, 100, { shouldStop }), 0);
+    assert.deepEqual(asked, [0x1006]);
 });
 
 test('an instruction with no model throws Unsupported', ()=>{
@@ -239,7 +273,7 @@ test('blockState keeps its fields fast and sees code rewritten in place', ()=>{
     // The step's fields are the object's own and the accessors its
     // prototype's: one literal holding both fell into V8's dictionary mode.
     assert.deepEqual(Object.keys(state).sort(), ['eflags', 'eip', 'faultEip', 'halted',
-        'memory', 'rdtsc', 'reg', 'retired', 'trapped']);
+        'memory', 'rdtsc', 'reg', 'retired', 'trapped', 'x87Exact', 'x87Shadow']);
     // mov eax, imm32 across a page boundary, then hlt; run, rewrite the
     // immediate's byte in the second page, run again.
     const at = 0x1ffe;
@@ -262,6 +296,40 @@ test('blockState keeps its fields fast and sees code rewritten in place', ()=>{
     state.halted = false;
     interpret(state, 10);
     assert.equal(state.reg[0], 7);
+});
+
+test('a quadword fild\'s exact value does not outlive a sync, where other code may write it', ()=>{
+    // fild qword [0x2000] of 2^53 + 1 interpreted; then the register rewritten
+    // in the block to 2^53, the double the quadword rounds to, as translated
+    // code may; then fistp qword [0x2008] interpreted: 2^53, not the quadword.
+    const layout = ownLayout({ ramSize: 1 << 20 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const view = new DataView(memory.buffer);
+    const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
+    view.setUint8(layout.x87Empty, 0xff);
+    view.setUint16(layout.x87Control, 0x37f, true);
+    view.setBigInt64(layout.ramBase + 0x2000, (1n << 53n) + 1n, true);
+    ram.set([0xdf, 0x2d, 0x00, 0x20, 0, 0, 0xf4, 0xdf, 0x3d, 0x08, 0x20, 0, 0, 0xf4], 0x1000);
+    const state = blockState({ memory, layout });
+    state.syncIn();
+    state.eip = 0x1000;
+    interpret(state, 10);
+    state.syncOut();
+    view.setFloat64(layout.x87 + 7 * 16, 2 ** 53, true);
+    state.syncIn();
+    state.eip = 0x1007;
+    state.halted = false;
+    interpret(state, 10);
+    state.syncOut();
+    assert.equal(view.getBigInt64(layout.ramBase + 0x2008, true), 1n << 53n);
+    // In one run, the quadword itself.
+    ram.set([0xdf, 0x2d, 0x00, 0x20, 0, 0, 0xdf, 0x3d, 0x08, 0x20, 0, 0, 0xf4], 0x1100);
+    state.syncIn();
+    state.eip = 0x1100;
+    state.halted = false;
+    interpret(state, 20);
+    state.syncOut();
+    assert.equal(view.getBigInt64(layout.ramBase + 0x2008, true), (1n << 53n) + 1n);
 });
 
 test('fxsave writes the x87 and SSE image and fxrstor reads it back', ()=>{
@@ -310,6 +378,42 @@ test('a run of instructions sees a store into its own bytes decoded before it', 
     assert.equal(state.reg[1], 8, 'the immediate as the second store left it');
     assert.deepEqual(starts, [0x1000, 0x1006], 'the run ended after the store and resumed');
 });
+
+test('a compiled lea step with an fs: override leaves the segment out', ()=>{
+    const layout = ownLayout({ ramSize: 1 << 20 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
+    ram.set([0x64, 0x8d, 0x43, 0x18, 0xf4], 0x1000); // lea eax, fs:[ebx+0x18]; hlt
+    const state = blockState({ memory, layout });
+    state.eip = 0x1000;
+    state.reg[3] = 0x100;
+    state.fsBase = 0x7000;
+    interpret(state, 10);
+    assert.equal(state.reg[0], 0x118);
+});
+
+test('a cached run over a page made inaccessible since runs up to that page and faults there',
+    ()=>{
+        const layout = ownLayout({ ramSize: 1 << 20 });
+        const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+        const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
+        const flags = new Uint8Array(
+            memory.buffer, layout.tables + Tables.PAGE_FLAGS, Tables.PAGE_FLAGS_SIZE);
+        // At 0x1ffc: inc eax; inc eax; nop; nop | 0x2000: inc eax; hlt -- a run over two pages.
+        ram.set([0x40, 0x40, 0x90, 0x90, 0x40, 0xf4], 0x1ffc);
+        const state = blockState({ memory, layout });
+        state.eip = 0x1ffc;
+        interpret(state, 100);
+        assert.equal(state.reg[0], 3, 'the run ran whole once, and is cached');
+        flags[0x2] = PageFlag.INACCESSIBLE;
+        state.eip = 0x1ffc;
+        state.halted = false;
+        state.reg[0] = 0;
+        assert.throws(()=>interpret(state, 100),
+            e=>e instanceof Fault && e.vector === 13 && e.eip === 0x2000,
+            'the fault names the instruction on the page, not the run\'s start');
+        assert.equal(state.reg[0], 2, 'the instructions before the page ran');
+    });
 
 test('a run is reported once, at its start, and a fetch from an inaccessible page faults there',
     ()=>{

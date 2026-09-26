@@ -34,7 +34,7 @@ test('a countdown loop forms three blocks with one back-edge into the loop head'
     assert.equal(tail.exit.backEdge, false);
     assert.equal(region.bytes, 9);
     assert.deepEqual([...region.pages], [1]);
-    assert.equal(region.hash.length, 8);
+    assert.equal(region.hash.length, 16);
 });
 
 test('a diamond forms four blocks and no back-edge', ()=>{
@@ -76,6 +76,19 @@ test('a target inside an instruction gets a block of its own: overlapping code',
     const overlapping = region.blocks.find(b=>b.start === 0x1003);
     assert.equal(overlapping?.exit.kind, 'jump');
     assert.deepEqual(overlapping?.exit.targets, [0x1006]);
+});
+
+test('once code overlaps, a block that runs into another block\'s bytes falls through to it', ()=>{
+    // 1000: mov eax, 0x01eb0000 (b8 00 00 eb 01)
+    // 1005: jmp 1001            (eb fa)
+    // 1001, inside the mov: add [eax], al (00 00), then 1003 is inside the mov's
+    // block too -- the first block made holds it -- so the block ends there.
+    const region = regionOf([0xb8, 0x00, 0x00, 0xeb, 0x01, 0xeb, rel8(-6)]);
+    const inside = region.blocks.find(b=>b.start === 0x1001);
+    assert.equal(inside?.instructions.length, 1);
+    assert.equal(inside?.exit.kind, 'fallthrough');
+    assert.deepEqual(inside?.exit.targets, [0x1003]);
+    assert.ok(region.entries.includes(0x1003), 'and 1003 a block of its own');
 });
 
 test('a region is cut at an indirect jump, a return, a call, a trap and a fault', ()=>{
@@ -150,6 +163,16 @@ test('the hash follows the bytes, not the address the region was formed at', ()=
     assert.notEqual(a.hash, c.hash);
 });
 
+test('two regions whose bytes agree in 32 bits of FNV-1a still hash apart', ()=>{
+    // mov eax, imm32; hlt -- the two immediates were found by a birthday
+    // search, a second's work: 32 bits cannot keep a stored translation to
+    // the bytes it was made from.
+    const a = regionOf([0xb8, 0xbf, 0x20, 0x50, 0x13, 0xf4]);
+    const b = regionOf([0xb8, 0x9b, 0xb1, 0xb4, 0x1a, 0xf4]);
+    assert.notEqual(a.hash, b.hash);
+    assert.equal(a.hash.length, 16);
+});
+
 test('a run of zero bytes past a call ends the region as data, not as four thousand adds', ()=>{
     // call [table]; then the page's zero fill
     const region = regionOf([0xff, 0x15, 0x00, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -179,6 +202,32 @@ test('a small leaf callee is formed into its caller, and only its rets return in
     const deeper = regionOf([0xe8, 1, 0, 0, 0, 0xc3, 0xe8, 1, 0, 0, 0, 0xc3,
         0xe8, 0xef, 0x0f, 0, 0, 0xc3]);
     assert.deepEqual(deeper.entries, [0x1000, 0x1005, 0x1006, 0x100b]);
+});
+
+test('an indirect call\'s predicted callees are formed in as a direct call\'s are, and'
+    + ' only then', ()=>{
+    // 1000: call eax (ff d0)   1002: ret   F = 1003: inc eax; ret   G = 1005: dec eax; ret
+    const code = [0xff, 0xd0, 0xc3, 0x40, 0xc3, 0x48, 0xc3];
+    const plain = regionOf(code);
+    assert.deepEqual(plain.entries, [0x1000, 0x1002]);
+    assert.equal(plain.blocks[0].exit.kind, 'indirect');
+    assert.equal(plain.blocks[0].exit.predicted, undefined);
+    const predicted = regionOf(code, 0x1000,
+        { callTargets: new Map([[0x1000, [0x1003, 0x1005]]]) });
+    assert.deepEqual(predicted.entries, [0x1000, 0x1002, 0x1003, 0x1005]);
+    const call = predicted.blocks[0].exit;
+    assert.equal(call.kind, 'indirect');
+    assert.equal(call.predicted, true);
+    assert.deepEqual(call.targets, [0x1003, 0x1005]);
+    assert.deepEqual([...inlineReturns(predicted)].sort((x, y)=>x[0] - y[0]),
+        [[0x1003, [0x1002]], [0x1005, [0x1002]]],
+        'each callee\'s ret comes back after the call');
+    assert.notEqual(predicted.hash, plain.hash, 'the prediction is part of what the region is');
+    // Another call's prediction, or none with leaf calls off, forms nothing in.
+    assert.deepEqual(regionOf(code, 0x1000, { callTargets: new Map([[0x2000, [0x1003]]]) })
+        .entries, [0x1000, 0x1002]);
+    assert.deepEqual(regionOf(code, 0x1000, { leafCalls: false,
+        callTargets: new Map([[0x1000, [0x1003]]]) }).entries, [0x1000, 0x1002]);
 });
 
 test('a jump through a bounded table takes the table\'s cases into the region', ()=>{
