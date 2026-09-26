@@ -119,6 +119,23 @@ export function settle(value, then){
 }
 
 /**
+ * How many bytes run to the end of the first line: through its LF, a byte or
+ * the two of a UTF-16 unit, or all of them when there is none.
+ *
+ * @param {Uint8Array} raw @param {1 | 2} width
+ */
+function lineEnd(raw, width){
+    for (let at = 0; at < raw.length; at += width)
+    {
+        if (raw[at] === LF && (width === 1 || raw[at + 1] === 0))
+        {
+            return Math.min(raw.length, at + width);
+        }
+    }
+    return raw.length;
+}
+
+/**
  * Bytes as the string the console sink takes, a byte to a character.
  *
  * @param {Uint8Array} bytes
@@ -354,20 +371,21 @@ export function createDescriptors(host){
 
     /**
      * Up to `limit` bytes of the program's UTF-16 from a descriptor in a
-     * Unicode translation: the file's units, CR LF folded to LF, and the
-     * position moved past the bytes of the file they came from. As many
-     * bytes are asked for as the units could take, and a unit more, which
-     * says whether a CR is the first half of a CR LF.
+     * Unicode translation: the file's units, CR LF folded to LF, stopping
+     * after an LF when `line` says so, and the position moved past the bytes
+     * of the file they came from. As many bytes are asked for as the units
+     * could take, and a unit more, which says whether a CR is the first half
+     * of a CR LF.
      *
-     * @param {Descriptor} descriptor @param {number} limit
+     * @param {Descriptor} descriptor @param {number} limit @param {boolean} line
      * @returns {Uint8Array | Promise<Uint8Array>}
      */
-    const pullUnicode = (descriptor, limit)=>{
+    const pullUnicode = (descriptor, limit, line)=>{
         const units = Math.floor(limit / 2);
         const widest = descriptor.encoding === 'utf16' ? 2 : descriptor.encoding === 'utf8' ? 3 : 1;
         const start = descriptor.position;
         return settle(host.files.read(descriptor.node, start, (units + 2) * widest + 2), raw=>{
-            const folded = foldUnits(decodeUnits(raw, descriptor.encoding), units);
+            const folded = foldUnits(decodeUnits(raw, descriptor.encoding), units, line);
             descriptor.position = start + folded.consumed;
             return bytesOfUnits(folded.units);
         });
@@ -568,25 +586,27 @@ export function createDescriptors(host){
          * seen; in text mode a CR LF is one LF that consumed two bytes, a CR
          * not before an LF is itself, and a ^Z ends the data, the position
          * going to the end of the file since nothing after it is data. In a
-         * Unicode translation the bytes are the program's UTF-16.
+         * Unicode translation the bytes are the program's UTF-16. `units`
+         * says the caller reads a binary file as UTF-16, so a line ends
+         * after an LF unit rather than after an LF byte.
          *
          * @param {Descriptor} descriptor @param {number} limit @param {boolean} line
+         * @param {boolean} [units]
          * @returns {Uint8Array | Promise<Uint8Array>}
          */
-        pull(descriptor, limit, line){
+        pull(descriptor, limit, line, units = false){
             if (descriptor.node === null || descriptor.ended || limit <= 0)
             {
                 return new Uint8Array(0);
             }
             if (descriptor.unicode !== 0)
             {
-                return pullUnicode(descriptor, limit);
+                return pullUnicode(descriptor, limit, line);
             }
             if (!descriptor.text)
             {
                 return settle(readAhead(descriptor, descriptor.position, limit), raw=>{
-                    const stop = line ? raw.indexOf(LF) : -1;
-                    const taken = raw.slice(0, stop < 0 ? raw.length : stop + 1);
+                    const taken = raw.slice(0, line ? lineEnd(raw, units ? 2 : 1) : raw.length);
                     descriptor.position += taken.length;
                     return taken;
                 });

@@ -300,13 +300,14 @@ export function bytesOfUnits(units){
 }
 
 /**
- * Up to `limit` units of what `decodeUnits` found, CR LF folded to LF, and
- * the offset just past what they took. A character's two units go together
- * or not at all.
+ * Up to `limit` units of what `decodeUnits` found, CR LF folded to LF --
+ * stopping after the first LF when `line` says so -- and the offset just past
+ * what they took. A character's two units go together or not at all.
  *
  * @param {{ units: number[], ends: number[] }} decoded @param {number} limit
+ * @param {boolean} [line]
  */
-export function foldUnits({ units, ends }, limit){
+export function foldUnits({ units, ends }, limit, line = false){
     /** @type {number[]} */
     const out = [];
     let consumed = 0;
@@ -317,16 +318,22 @@ export function foldUnits({ units, ends }, limit){
             out.push(LF);
             consumed = ends[at + 1];
             at += 2;
-            continue;
         }
-        const whole = at + 1 < units.length && ends[at] === ends[at + 1] ? 2 : 1;
-        if (out.length + whole > limit)
+        else
+        {
+            const whole = at + 1 < units.length && ends[at] === ends[at + 1] ? 2 : 1;
+            if (out.length + whole > limit)
+            {
+                break;
+            }
+            out.push(...units.slice(at, at + whole));
+            consumed = ends[at + whole - 1];
+            at += whole;
+        }
+        if (line && out[out.length - 1] === LF)
         {
             break;
         }
-        out.push(...units.slice(at, at + whole));
-        consumed = ends[at + whole - 1];
-        at += whole;
     }
     return { units: out, consumed };
 }

@@ -60,6 +60,12 @@ test('a wide string is read to its terminator and not past the line it ends in',
     assert.ok(reads.every(([at, length])=>Math.floor(at / 64) === Math.floor((at + length - 1) / 64)));
 });
 
+test('folding a line stops after its LF, a CR LF counted whole', ()=>{
+    const decoded = decodeUnits(Uint8Array.of(0x61, 0x0d, 0x0a, 0x62, 0x0a), 'utf8');
+    assert.deepEqual(foldUnits(decoded, 8, true), { units: [0x61, 0x0a], consumed: 3 });
+    assert.deepEqual(foldUnits(decoded, 8), { units: [0x61, 0x0a, 0x62, 0x0a], consumed: 5 });
+});
+
 test('the mark names the encoding, UTF-8 before UTF-16', ()=>{
     assert.deepEqual(markIn(Uint8Array.of(0xef, 0xbb, 0xbf)), { encoding: 'utf8', length: 3 });
     assert.deepEqual(markIn(Uint8Array.of(0xff, 0xfe, 0x61)), { encoding: 'utf16', length: 2 });

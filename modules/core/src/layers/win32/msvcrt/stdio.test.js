@@ -874,13 +874,197 @@ test('fopen refuses a ccs= that names no encoding, and anything else after a com
     assert.equal(fns._fcloseall.handler([]), 1);
 });
 
+const WEOF = 0xffff;
+const EILSEQ = 42;
+
+test('fputwc writes a byte in text mode, and UTF-16 or UTF-8 after the mark under ccs=', ()=>{
+    // Wine's msvcrt test_fputwc, and test_fopen_s's b over ccs=: in binary
+    // mode the character goes out as the two bytes it is.
+    const { memory, fns, open, files } = runtime({});
+    const name = 'C:\\put.txt';
+    for (const [mode, expected] of /** @type {[string, number[]][]} */ ([
+        ['w', [0x61, 0x0d, 0x0a]],
+        ['w,ccs=unicode', [0xff, 0xfe, 0x61, 0, 0x0d, 0, 0x0a, 0]],
+        ['w,ccs=utf-8', [0xef, 0xbb, 0xbf, 0x61, 0x0d, 0x0a]],
+        ['wb, ccs=utf-8', [0x61, 0, 0x0a, 0]],
+    ]))
+    {
+        const stream = open(name, mode);
+        assert.equal(fns.fputwc.handler([0x61, stream]), 0x61, mode);
+        assert.equal(fns.putwc.handler([0x0a, stream]), 0x0a, mode);
+        fns.fclose.handler([stream]);
+        assert.deepEqual([...files.files[name]], expected, mode);
+    }
+    assert.equal(fns.fputwc.handler([0x61, 0]), WEOF);
+    const input = fns.fopen.handler([memory.put(name), memory.put('r')]);
+    assert.equal(fns.fputwc.handler([0x61, input]), WEOF, 'not open for writing');
+});
+
+test('fgetws reads a byte a character in text mode and UTF-16 in binary mode', ()=>{
+    // Wine's msvcrt test_fgetwc, with the runtime's BUFSIZ of 512: in text
+    // mode CR LF is one LF, in binary mode it is two characters, and ftell
+    // counts the bytes of the file either way.
+    const BUFSIZ = 512;
+    const LLEN = 512;
+    const mytext = 'This is test_fgetwc\r\n';
+    const { memory, fns, open, files } = runtime({});
+    const name = 'C:\\wne';
+    files.files[name] = bytesOf(`${'a'.repeat(BUFSIZ - 4)}\r\n${mytext}`);
+    const line = memory.allocate((BUFSIZ + LLEN + 1) * 2);
+
+    let stream = open(name, 'rt');
+    assert.equal(fns.fgetws.handler([line, LLEN, stream]), line);
+    assert.equal(fns.ftell.handler([stream]), BUFSIZ - 2);
+    fns.fgetws.handler([line, LLEN, stream]);
+    assert.equal(fns.ftell.handler([stream]), BUFSIZ - 2 + mytext.length);
+    assert.equal(memory.wide(line), 'This is test_fgetwc\n', 'the carriage return skipped');
+    fns.fclose.handler([stream]);
+
+    stream = open(name, 'wb');
+    for (let count = 0; count < BUFSIZ - 3 - mytext.length * 2; count++)
+    {
+        fns.fputc.handler([0x61, stream]);
+    }
+    fns.fputwc.handler([0x0d, stream]);
+    fns.fputwc.handler([0x0a, stream]);
+    assert.equal(fns.fputws.handler([line, stream]), 0);
+    fns.fputws.handler([line, stream]);
+    fns.fclose.handler([stream]);
+
+    stream = open(name, 'rb');
+    let j = (BUFSIZ - 2) / 2 - mytext.length;
+    fns.fgetws.handler([line, j, stream]);
+    j = (j - 1) * 2;
+    assert.equal(fns.ftell.handler([stream]), j);
+    assert.equal(fns.fgetc.handler([stream]), 0x61);
+    assert.equal(fns.ftell.handler([stream]), ++j);
+    fns.fgetws.handler([line, 3, stream]);
+    assert.equal(memory.wide(line), '\r\n');
+    j += 4;
+    assert.equal(fns.ftell.handler([stream]), j);
+    fns.fgetws.handler([line, LLEN, stream]);
+    j += (mytext.length - 1) * 2;
+    assert.equal(fns.ftell.handler([stream]), j);
+    assert.equal(memory.wide(line), 'This is test_fgetwc\n');
+    fns.fgetws.handler([line, LLEN, stream]);
+    assert.equal(memory.wide(line), 'This is test_fgetwc\n', 'the second copy, to the end');
+    assert.equal(fns.fgetws.handler([line, LLEN, stream]), 0, 'nothing left');
+});
+
+test('fgetwc reads a stream in a Unicode mode the way its mark, or else its ccs=, says', ()=>{
+    // Wine's msvcrt test_fgetwc_unicode.
+    const { fns, open, files } = runtime({});
+    const name = 'C:\\u.txt';
+    /** @param {string} mode */
+    const units = mode=>{
+        const stream = open(name, mode);
+        /** @type {number[]} */
+        const got = [];
+        while (got.at(-1) !== WEOF && got.length < 8)
+        {
+            got.push(fns.fgetwc.handler([stream]));
+        }
+        fns.fclose.handler([stream]);
+        return got;
+    };
+    files.files[name] = Uint8Array.of(0xff, 0xfe, 0x1f, 0xff, 0x21, 0);
+    assert.deepEqual(units('rt,ccs=unicode'), [0xff1f, 0x21, WEOF]);
+    assert.deepEqual(units('r,ccs=utf-8'), [0xff1f, 0x21, WEOF]);
+    const append = open(name, 'a,ccs=utf-16le');
+    assert.equal(fns.fputwc.handler([0x61, append]), 0x61);
+    fns.fclose.handler([append]);
+    assert.deepEqual(units('a+,ccs=utf-8'), [0xff1f, 0x21, 0x61, WEOF]);
+
+    files.files[name] = Uint8Array.of(0xef, 0xbb, 0xbf, 0xef, 0xbc, 0x9f, 0x21);
+    assert.deepEqual(units('rt, ccs=UTF-8'), [0xff1f, 0x21, WEOF]);
+    files.files[name] = Uint8Array.of(0x1f, 0xff, 0x21, 0, 0);
+    assert.deepEqual(units('rt,ccs=utf-16le'), [0xff1f, 0x21, WEOF]);
+    files.files[name] = Uint8Array.of(0xef, 0xbc, 0x9f, 0x21);
+    assert.deepEqual(units('rt, ccs=UTF-8'), [0xff1f, 0x21, WEOF]);
+    assert.deepEqual(units('rt, ccs=unicode'), [0xef, 0xbc, 0x9f, 0x21, WEOF],
+        'with no mark, UNICODE reads a byte to a character');
+});
+
+test('the wide calls take a character to a byte in text mode, and none past U+00FF', ()=>{
+    // Under the C locale a character past U+00FF has no multibyte form:
+    // Wine's msvcrt test__wcstombs_s_l finds L"\xfffd" EILSEQ there.
+    const { memory, fns, open, text, errno } = runtime({ 'C:\\in.txt': 'r\xe9\r\n' });
+    const out = open('C:\\t.txt', 'w');
+    assert.equal(fns.fputwc.handler([0xe9, out]), 0xe9);
+    assert.equal(fns.fputwc.handler([0x263a, out]), WEOF);
+    assert.equal(fns.fputws.handler([memory.putWide('ok\n'), out]), 0);
+    assert.equal(fns.fputws.handler([memory.putWide('a\u263ab'), out]), EOF);
+    fns.fclose.handler([out]);
+    assert.equal(text('C:\\t.txt'), '\xe9ok\r\na', 'what came before the character is written');
+    assert.deepEqual(errno.splice(0), [EILSEQ, EILSEQ]);
+
+    const input = open('C:\\in.txt', 'r');
+    assert.deepEqual([0, 1, 2, 3].map(()=>fns.getwc.handler([input])), [0x72, 0xe9, 0x0a, WEOF]);
+    assert.notEqual(fns.feof.handler([input]), 0);
+});
+
+test('ungetwc gives a character back to be read again, WEOF never', ()=>{
+    const { memory, fns, open, files, errno } = runtime({ 'C:\\n.txt': 'yz' });
+    files.files['C:\\u.txt'] = Uint8Array.of(0xef, 0xbb, 0xbf, 0xe2, 0x98, 0xba, 0x0d, 0x0a);
+    const stream = open('C:\\u.txt', 'r,ccs=utf-8');
+    const line = memory.allocate(16);
+    assert.equal(fns.fgetwc.handler([stream]), 0x263a);
+    assert.equal(fns.ungetwc.handler([0x263a, stream]), 0x263a);
+    assert.equal(fns.ungetwc.handler([WEOF, stream]), WEOF);
+    assert.equal(fns.fgetws.handler([line, 8, stream]), line);
+    assert.equal(memory.wide(line), '\u263a\n');
+    assert.equal(fns.fgetwc.handler([stream]), WEOF);
+    assert.notEqual(fns.feof.handler([stream]), 0);
+    assert.equal(fns.ungetwc.handler([0x41, stream]), 0x41);
+    assert.equal(fns.feof.handler([stream]), 0, 'the end of the file cleared');
+
+    const narrow = open('C:\\n.txt', 'r');
+    assert.equal(fns.ungetwc.handler([0x263a, narrow]), WEOF, 'no byte for it');
+    assert.equal(fns.ungetwc.handler([0x78, narrow]), 0x78);
+    assert.equal(fns.fgetc.handler([narrow]), 0x78);
+    assert.equal(fns.fgetc.handler([narrow]), 0x79);
+
+    assert.equal(fns.fgetws.handler([0, 8, narrow]), 0);
+    assert.equal(fns.fgetws.handler([line, 0, narrow]), 0);
+    assert.equal(fns.fputws.handler([0, narrow]), EOF);
+    assert.deepEqual(errno, [22, 22, 22]);
+});
+
+test('fwprintf, wprintf, their va_list forms and _putws write wide text to the stream', ()=>{
+    // "fwprintf returns the number of wide characters written"; in the wide
+    // family %s is a wide string and %S a narrow one.
+    const { memory, fns, open, files, console, errno } = runtime({});
+    const out = open('C:\\w.txt', 'w,ccs=utf-8');
+    const format = memory.putWide('%s \u263a %d\n');
+    assert.equal(fns.fwprintf.handler([out, format, memory.putWide('x'), 7]), 6);
+    const list = memory.allocate(8);
+    memory.setU32(list, memory.putWide('y'));
+    memory.setU32(list + 4, 8);
+    assert.equal(fns.vfwprintf.handler([out, memory.putWide('%s=%d'), list]), 3);
+    fns.fclose.handler([out]);
+    assert.deepEqual([...files.files['C:\\w.txt']], [0xef, 0xbb, 0xbf,
+        0x78, 0x20, 0xe2, 0x98, 0xba, 0x20, 0x37, 0x0d, 0x0a, 0x79, 0x3d, 0x38]);
+
+    assert.equal(fns.wprintf.handler([memory.putWide('%S!\n'), memory.put('hi')]), 4);
+    assert.equal(fns.vwprintf.handler([memory.putWide('%d'), list + 4]), 1);
+    assert.equal(fns._putws.handler([memory.putWide('end')]), 0);
+    assert.equal(fns.wprintf.handler([memory.putWide('\u263a')]), -1, 'no byte for it');
+    assert.deepEqual(console, [[2, 'hi!\n'], [2, '8'], [2, 'end\n']]);
+
+    const stdout = IOB + 32;
+    assert.equal(fns.fwprintf.handler([stdout, 0]), -1);
+    assert.equal(fns._putws.handler([0]), WEOF);
+    assert.deepEqual(errno, [EILSEQ, 22, 22]);
+});
+
 test('the stream calls are cdecl with the argument count each reads', ()=>{
     const { fns } = runtime({});
     const expected = {
         fflush: 4, feof: 4, ferror: 4, clearerr: 4, fgetc: 4, getc: 4, _filbuf: 4,
         fgets: 12, fputc: 8, putc: 8, _flsbuf: 8, fputs: 8, ungetc: 8, rewind: 4, _fileno: 4,
         fgetpos: 8, fsetpos: 8, freopen: 12, _fdopen: 8, _fcloseall: 0, _flushall: 0,
-        vfprintf: 12, _wfopen: 8,
+        vfprintf: 12, _wfopen: 8, fgetwc: 4, getwc: 4, fputwc: 8, putwc: 8, ungetwc: 8,
+        fgetws: 12, fputws: 8, _putws: 4, vfwprintf: 12, vwprintf: 8,
     };
     for (const [name, argBytes] of Object.entries(expected))
     {

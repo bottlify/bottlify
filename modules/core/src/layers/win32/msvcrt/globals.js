@@ -29,6 +29,7 @@ export const EMFILE = 24;
 export const ENOSPC = 28;
 export const ERANGE = 34;
 export const ENOTEMPTY = 41;
+export const EILSEQ = 42;
 
 /**
  * @typedef {Object} GlobalsHost

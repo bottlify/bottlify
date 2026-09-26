@@ -6,9 +6,11 @@
 
 import { formatToString } from './format.js';
 import { VARIADIC_SLOTS } from './scan.js';
-import { EBADF, EINVAL } from './globals.js';
+import { EBADF, EILSEQ, EINVAL } from './globals.js';
 import { createDescriptors, LF, settle } from './io.js';
-import { O_U16TEXT, O_U8TEXT, O_WTEXT, wideStringAt } from './widetext.js';
+import {
+    O_U16TEXT, O_U8TEXT, O_WTEXT, bytesOfUnits, unitsOf, wideStringAt,
+} from './widetext.js';
 
 /**
  * Buffered file streams: fopen and the calls that take what it hands out.
@@ -55,7 +57,13 @@ const SEEK_CUR = 1;
 const SEEK_END = 2;
 const EOF = -1;
 
+/** A `wint_t` is sixteen bits, and this is the one no character read is. */
+const WEOF = 0xffff;
+
 const MAX_STRING = 1 << 20;
+
+/** @param {string} text */
+const unitsOfText = text=>Array.from({ length: text.length }, (_, at)=>text.charCodeAt(at));
 
 /** `setvbuf`'s mode argument, at the values msvcrt gives them. */
 const IOFBF = 0x0000;
@@ -357,8 +365,8 @@ export function createStdioFunctions(host){
      * narrow character calls do not read or write -- "fputc doesn't
      * currently support output into a UNICODE stream", and the runtime
      * asserts on a narrow print into one; here it is an error on the stream
-     * and EINVAL. fread and fwrite are not refused: in a Unicode translation
-     * their bytes are UTF-16.
+     * and EINVAL. Such a stream is for the wide calls, and for fread and
+     * fwrite, whose bytes in a Unicode translation are UTF-16.
      *
      * @param {Stream} stream
      */
@@ -374,19 +382,21 @@ export function createStdioFunctions(host){
 
     /**
      * Up to `limit` bytes as the program reads them: what ungetc gave back
-     * first, then the file, stopping after a line feed when `line` says so.
+     * first, then the file, stopping after a line feed when `line` says so --
+     * with `width` 2, after the two bytes of an LF in UTF-16.
      *
      * @param {Stream} stream @param {number} limit @param {boolean} line
+     * @param {1 | 2} [width]
      * @returns {Uint8Array | Promise<Uint8Array>}
      */
-    const take = (stream, limit, line)=>{
+    const take = (stream, limit, line, width = 1)=>{
         /** @type {number[]} */
         const head = [];
         while (stream.pushback.length > 0 && head.length < limit)
         {
-            const byte = /** @type {number} */ (stream.pushback.pop());
-            head.push(byte);
-            if (line && byte === LF)
+            head.push(/** @type {number} */ (stream.pushback.pop()));
+            if (line && head.length % width === 0 && head[head.length - width] === LF
+                && head[head.length - 1] === (width === 1 ? LF : 0))
             {
                 return Uint8Array.from(head);
             }
@@ -396,7 +406,7 @@ export function createStdioFunctions(host){
         {
             return Uint8Array.from(head);
         }
-        return settle(descriptors.pull(descriptor, limit - head.length, line), rest=>{
+        return settle(descriptors.pull(descriptor, limit - head.length, line, width === 2), rest=>{
             if (head.length === 0)
             {
                 return rest;
@@ -511,6 +521,95 @@ export function createStdioFunctions(host){
         });
     };
 
+    /**
+     * How many bytes of the stream a wide call takes to a character: the
+     * two of a UTF-16 unit in a Unicode translation, where the descriptor
+     * deals in them, and in binary mode, where they are what the file holds;
+     * one in text mode, where a character is a multibyte one and the C
+     * locale, this runtime's only locale, makes it a byte to U+00FF.
+     *
+     * @param {Stream} stream @returns {1 | 2}
+     */
+    const widthOf = stream=>{
+        const descriptor = descriptorOf(stream);
+        return descriptor && (descriptor.unicode !== 0 || !descriptor.text) ? 2 : 1;
+    };
+
+    /**
+     * The character `fgetwc` answers with, or WEOF, the end of the file
+     * marking the stream so `feof` sees it.
+     *
+     * @param {Stream} stream
+     * @returns {number | Promise<number>}
+     */
+    const nextUnit = stream=>{
+        if (!readable(stream))
+        {
+            raise(stream, IOERR);
+            return WEOF;
+        }
+        const width = widthOf(stream);
+        return settle(take(stream, width, false, width), bytes=>{
+            if (bytes.length < width)
+            {
+                raise(stream, IOEOF);
+                return WEOF;
+            }
+            return width === 2 ? bytes[0] | bytes[1] << 8 : bytes[0];
+        });
+    };
+
+    /**
+     * Writes UTF-16 units as the stream takes them (see `widthOf`) and
+     * answers with how many went, or -1: for a stream not open for writing,
+     * a short write, and a character text mode has no byte for, which is
+     * EILSEQ with what came before it written.
+     *
+     * @param {Stream} stream @param {number[]} units
+     */
+    const putUnits = (stream, units)=>{
+        if (!writable(stream))
+        {
+            refuseWrite(stream);
+            return -1;
+        }
+        if (widthOf(stream) === 2)
+        {
+            return emit(stream, bytesOfUnits(units)) === units.length * 2 ? units.length : -1;
+        }
+        const unfit = units.findIndex(unit=>unit > 0xff);
+        const bytes = Uint8Array.from(unfit < 0 ? units : units.slice(0, unfit));
+        if (bytes.length > 0 && emit(stream, bytes) !== bytes.length)
+        {
+            return -1;
+        }
+        if (unfit >= 0)
+        {
+            fail(EILSEQ);
+            return -1;
+        }
+        return units.length;
+    };
+
+    /** @param {number} pointer */
+    const readWide = pointer=>wideStringAt(host.readMemory, pointer);
+
+    /**
+     * fwprintf's body: the count of wide characters written, or -1.
+     *
+     * @param {Stream} stream @param {number} format @param {number[]} values
+     */
+    const printWide = (stream, format, values)=>{
+        if ((format >>> 0) === 0)
+        {
+            fail(EINVAL);
+            return -1;
+        }
+        const text = formatToString(readWide(format), values, readString,
+            { readWideString: readWide, wide: true });
+        return putUnits(stream, unitsOfText(text)) < 0 ? -1 : text.length;
+    };
+
     /** @param {Stream} stream @param {number} c */
     const putByte = (stream, c)=>{
         if (narrowRefused(stream))
@@ -544,6 +643,18 @@ export function createStdioFunctions(host){
     const fputc = cdecl(8, ([c, pointer])=>{
         const stream = argument(pointer);
         return stream ? putByte(stream, c) : EOF;
+    });
+
+    /** wint_t fgetwc(FILE *stream) / wint_t getwc(FILE *stream) */
+    const fgetwc = cdecl(4, ([pointer])=>{
+        const stream = argument(pointer);
+        return stream ? nextUnit(stream) : WEOF;
+    });
+
+    /** wint_t fputwc(wchar_t c, FILE *stream) / wint_t putwc(wchar_t c, FILE *stream) */
+    const fputwc = cdecl(8, ([c, pointer])=>{
+        const stream = argument(pointer);
+        return stream && putUnits(stream, [c & 0xffff]) === 1 ? c & 0xffff : WEOF;
     });
 
     return {
@@ -1019,6 +1130,117 @@ export function createStdioFunctions(host){
             return c & 0xff;
         }),
 
+        fgetwc,
+        getwc: fgetwc,
+        fputwc,
+        putwc: fputwc,
+
+        /**
+         * wchar_t *fgetws(wchar_t *buffer, int count, FILE *stream)
+         *
+         * fgets in characters: a line, its LF kept, of at most `count - 1`,
+         * and the terminator; NULL when the stream was already at its end.
+         * In binary mode CR LF is two characters, in the other modes one LF
+         * (Wine's msvcrt test_fgetwc).
+         */
+        fgetws: cdecl(12, ([buffer, count, pointer])=>{
+            const stream = argument(pointer);
+            if (stream && ((buffer >>> 0) === 0 || (count | 0) <= 0))
+            {
+                fail(EINVAL);
+            }
+            if (!stream || (buffer >>> 0) === 0 || (count | 0) <= 0)
+            {
+                return 0;
+            }
+            if (!readable(stream))
+            {
+                raise(stream, IOERR);
+                return 0;
+            }
+            const limit = (count | 0) - 1;
+            const width = widthOf(stream);
+            return settle(take(stream, limit * width, true, width), bytes=>{
+                const units = width === 2 ? unitsOf(bytes) : [...bytes];
+                if (units.length < limit && units[units.length - 1] !== LF)
+                {
+                    raise(stream, IOEOF);
+                }
+                if (units.length === 0 && limit > 0)
+                {
+                    return 0;
+                }
+                host.writeMemory(buffer >>> 0, bytesOfUnits([...units, 0]));
+                return buffer >>> 0;
+            });
+        }),
+
+        /** int fputws(const wchar_t *str, FILE *stream) -- 0, or EOF on an error. */
+        fputws: cdecl(8, ([string, pointer])=>{
+            const stream = argument(pointer);
+            if (stream && (string >>> 0) === 0)
+            {
+                fail(EINVAL);
+            }
+            if (!stream || (string >>> 0) === 0)
+            {
+                return EOF;
+            }
+            return putUnits(stream, unitsOfText(readWide(string))) < 0 ? EOF : 0;
+        }),
+
+        /**
+         * wint_t ungetwc(wint_t c, FILE *stream)
+         *
+         * ungetc for a character, given back as the bytes the stream reads it
+         * from; WEOF, and one text mode has no byte for, change nothing.
+         */
+        ungetwc: cdecl(8, ([c, pointer])=>{
+            const stream = argument(pointer);
+            const unit = c & 0xffff;
+            if (!stream || unit === WEOF || !readable(stream))
+            {
+                return WEOF;
+            }
+            const width = widthOf(stream);
+            if (width === 1 && unit > 0xff)
+            {
+                return WEOF;
+            }
+            stream.pushback.push(...(width === 2 ? [unit >>> 8, unit & 0xff] : [unit]));
+            setFlags(stream, stream.flags & ~IOEOF);
+            return unit;
+        }),
+
+        /** int _putws(const wchar_t *str) -- the string and an LF on stdout: 0, or WEOF. */
+        _putws: cdecl(4, ([string])=>{
+            const stream = standardStream(1);
+            if ((string >>> 0) === 0)
+            {
+                fail(EINVAL);
+                return WEOF;
+            }
+            return stream && putUnits(stream, [...unitsOfText(readWide(string)), LF]) >= 0
+                ? 0 : WEOF;
+        }),
+
+        /**
+         * int fwprintf(FILE *stream, const wchar_t *format, ...)
+         *
+         * The count of wide characters written, or -1. In this family %s is a
+         * wide string and %S a narrow one.
+         */
+        fwprintf: cdecl(8 + VARIADIC_SLOTS * 4, args=>{
+            const stream = argument(args[0]);
+            return stream ? printWide(stream, args[1], args.slice(2)) : -1;
+        }),
+
+        /** int wprintf(const wchar_t *format, ...) -- fwprintf on stdout. */
+        wprintf: cdecl(4 + VARIADIC_SLOTS * 4, args=>{
+            const stream = standardStream(1);
+            return stream ? printWide(stream, args[0], args.slice(1)) : -1;
+        }),
+
         /** int _fileno(FILE *stream) -- the descriptor, as the macro reads `_file`. */
         _fileno: cdecl(4, ([pointer])=>argument(pointer)?.fd ?? -1),
 
@@ -1061,8 +1283,8 @@ export function createStdioFunctions(host){
         }),
 
         // A `va_list` carries no count, so it is read through whoever knows
-        // how far the caller's stack reaches; without that, vprintf and
-        // vfprintf stay unexported.
+        // how far the caller's stack reaches; without that, the four below
+        // stay unexported.
         ...(host.varargs
             ? {
                 /** int vprintf(const char *format, va_list args) -- printf from a list. */
@@ -1077,6 +1299,20 @@ export function createStdioFunctions(host){
                     const stream = argument(pointer);
                     const values = /** @type {(list: number) => number[]} */ (host.varargs);
                     return stream ? printTo(stream, format, values(list)) : EOF;
+                }),
+
+                /** int vfwprintf(FILE *stream, const wchar_t *format, va_list args) */
+                vfwprintf: cdecl(12, ([pointer, format, list])=>{
+                    const stream = argument(pointer);
+                    const values = /** @type {(list: number) => number[]} */ (host.varargs);
+                    return stream ? printWide(stream, format, values(list)) : -1;
+                }),
+
+                /** int vwprintf(const wchar_t *format, va_list args) */
+                vwprintf: cdecl(8, ([format, list])=>{
+                    const stream = standardStream(1);
+                    const values = /** @type {(list: number) => number[]} */ (host.varargs);
+                    return stream ? printWide(stream, format, values(list)) : -1;
                 }),
             }
             : {}),
