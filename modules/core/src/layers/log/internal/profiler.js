@@ -611,7 +611,10 @@ export function createProfiler(options){
             {
                 totalMs += frame.ms;
                 hostMs += frame.byKind.host + frame.sampled.host;
-                guestMs += frame.byKind.guest;
+                // The untimed crossings ran inside the guest's slices and the
+                // clock gave their time to the guest; `sampled` takes back
+                // what the timed ones stand for, as it adds it to the host.
+                guestMs += frame.byKind.guest + frame.sampled.guest;
             }
             return {
                 frames: frameIndex,

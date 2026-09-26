@@ -102,7 +102,7 @@ figures nobody keeps as they change are copied into their tables.
 | `averageFrameMs` | Mean wall time over the history. |
 | `unbalancedPhases`, `imbalances` | Count of `end` calls that did not pair, and the first eight described by name. |
 | `topPhases` | The sixteen phases with the most self time, as `name kind xcount self=… worst=…`. |
-| `averageGuestMs`, `averageHostMs` | Over the same recent frames: the program's own code a frame, and ours -- the figure a translator is judged by, apart from a load's frames. |
+| `averageGuestMs`, `averageHostMs` | Over the same recent frames: the program's own code a frame, and ours -- the figure a translator is judged by, apart from a load's frames. Both include the weighted estimate (`sampled`): the crossings a sampled phase stands for ran inside the guest's slices, so what the host gains the guest gives back and the two add up to the frame; without the guest's half, the untimed crossings were counted twice, as ours and as the program's. |
 | `slowFrames` | The eight slowest frames of the whole run, slowest first, as `#index ms host=… guest=… longest=phase:ms slice=ms/instructions` -- a freeze long gone from the ring of recent frames, with what held it longest. |
 
 `issues` carries the "no clock configured" notice when `now` was not a function.

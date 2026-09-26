@@ -411,6 +411,24 @@ test('the slowest frames of the whole run are kept after the ring has lapped the
     assert.deepEqual(slowestFrames[0].longest, { name: 'glCompressedTexImage2DARB', ms: 300 });
 });
 
+test('a window\'s guest time leaves out the crossings a timed one stands for', ()=>{
+    // A hundred-millisecond slice made eight crossings of five milliseconds
+    // and one was timed, standing for all eight: forty of the hundred were
+    // ours. The clock gave the other seven to the guest, and the window's
+    // guest time takes them back as its host time adds them.
+    const { profiler, at } = harness({ frames: 1 });
+    at(0).beginFrame();
+    at(0).begin('run', PhaseKind.GUEST);
+    at(10).begin('trap');
+    at(15).end('trap', { weight: 8 });
+    at(100).end('run');
+    at(100).endFrame();
+    const snapshot = profiler.snapshot();
+    assert.equal(snapshot.averageHostMs, 40);
+    assert.equal(snapshot.averageGuestMs, 60);
+    assert.equal(snapshot.averageHostMs + snapshot.averageGuestMs, snapshot.averageFrameMs);
+});
+
 test('the recent frames\' guest and host time are averaged apart', ()=>{
     const { profiler, at } = harness({ frames: 4 });
     for (let index = 0; index < 4; index++)

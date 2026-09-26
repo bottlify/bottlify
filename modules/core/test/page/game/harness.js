@@ -791,7 +791,7 @@ export function seriesRow(app, count, at){
     {
         ms += frame.ms;
         host += frame.byKind.host + frame.sampled.host;
-        guest += frame.byKind.guest;
+        guest += frame.byKind.guest + frame.sampled.guest;
     }
     const layers = Object.fromEntries(app.diagnostics()
         .map((/** @type {any} */ layer)=>[layer.name, layer.metrics ?? {}]));
