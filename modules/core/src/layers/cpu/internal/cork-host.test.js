@@ -360,3 +360,26 @@ test('a fresh thread\'s block starts at 0x27f and MXCSR 0x1f80, not its creator\
     assert.equal(h.readMxcsr(), 0x1f80);
     assert.equal(h.readReg32('ebx'), 0x1234, 'the rest of the template stays');
 });
+
+test('rdtsc counts the guest\'s clock once one is given, in nanoseconds, never backward', ()=>{
+    const h = host();
+    let ms = 5000;
+    h.useGuestClock(()=>ms);
+    /** @returns {bigint} edx:eax after rdtsc; hlt */
+    const read = ()=>{
+        load(h, 0x1000, [0x0f, 0x31, 0xf4]);
+        h.writeReg32('eip', 0x1000);
+        h.wake?.();
+        h.runSlice(10);
+        return BigInt(h.readReg32('edx') >>> 0) << 32n | BigInt(h.readReg32('eax') >>> 0);
+    };
+    const first = read();
+    assert.ok(first >= 5_000_000_000n && first < 5_016_000_001n,
+        `the guest's 5 s in nanoseconds, within a credit: ${first}`);
+    ms = 5100;
+    const second = read();
+    assert.ok(second - first >= 99_000_000n && second - first < 116_000_001n,
+        `a tenth of a second of guest time reads as 1e8 ticks: ${second - first}`);
+    const third = read();
+    assert.ok(third > second, 'the guest clock standing still, the counter still moves on');
+});

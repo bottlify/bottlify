@@ -164,7 +164,8 @@ export const cpuModule = {
          *          cork: import('./engine.js').Runtime | null,
          *          corkFrame: { instructions: number, retired: number, translateMs: number,
          *              leaves: number },
-         *          faultHandler: ((fault: any) => boolean) | null }}
+         *          faultHandler: ((fault: any) => boolean) | null,
+         *          guestClock: (() => number) | null }}
          */
         const state = {
             host: null, thunks: null, running: false, tableWritten: false,
@@ -172,6 +173,8 @@ export const cpuModule = {
             lastFault: null, disposed: false, samples: createSampleTable(), engine,
             cork: null,
             faultHandler: null,
+            // The guest's clock once the kernel gives it (`useGuestClock`).
+            guestClock: null,
             // The translator's figures at the last frame, for the frame's own columns.
             corkFrame: { instructions: 0, retired: 0, translateMs: 0, leaves: 0 },
         };
@@ -428,6 +431,10 @@ export const cpuModule = {
                         cork: settings.cork,
                     });
                     state.cork = state.host.cork();
+                    if (state.guestClock !== null)
+                    {
+                        state.host.useGuestClock(state.guestClock);
+                    }
                 }
                 else
                 {
@@ -781,6 +788,21 @@ export const cpuModule = {
                     }
                 }
                 return instructions;
+            },
+
+            /**
+             * The guest's clock, for the time-stamp counter: under cork `rdtsc`
+             * then counts nanoseconds of the time QueryPerformanceCounter reads.
+             * The emulator's counter is its own and is not moved by this.
+             *
+             * @param {() => number} readMs  milliseconds of guest time
+             */
+            useGuestClock(readMs){
+                state.guestClock = readMs;
+                if (typeof state.host?.useGuestClock === 'function')
+                {
+                    state.host.useGuestClock(readMs);
+                }
             },
 
             /** @returns {any} the running thread's full CPU state */

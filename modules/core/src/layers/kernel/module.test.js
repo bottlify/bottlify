@@ -333,3 +333,24 @@ test('alert ends an alertable wait with the answer given, and leaves any other a
     assert.deepEqual(event.waiters, [], 'and it is no longer queued on the event');
     assert.equal(kernel.alert(thread, 0xc0), false, 'a thread not waiting is left alone');
 });
+
+test('the cpu layer is given the guest\'s clock, for the time-stamp counter', async()=>{
+    /** @type {(() => number) | null} */
+    let given = null;
+    const cpu = { ...fakeCpu(), useGuestClock: (/** @type {() => number} */ readMs)=>{
+        given = readMs;
+    } };
+    const kernel = await kernelModule.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE } },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? cpu : fakeMemory()),
+            provide: ()=>{},
+        }),
+    );
+    assert.ok(given !== null, 'the kernel hands its clock over');
+    kernel.clock.advance(250);
+    assert.equal(/** @type {() => number} */ (given)(), kernel.clock.virtualTime());
+    assert.equal(kernel.clock.virtualTime(), 250);
+    await kernelModule.dispose();
+});

@@ -38,6 +38,12 @@ import { captureBlockContext, restoreBlockContext } from './context.js';
 /** Register names in the state block's reg32 view, in index order. */
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 
+/**
+ * How far the counter runs ahead of the guest's clock inside a slice: the
+ * clock's own ceiling on one credit, so the two never drift further apart.
+ */
+const TSC_DRIFT_MS = 16;
+
 /** The default x87 control word: double-extended precision, round to nearest. */
 const DEFAULT_CONTROL_WORD = 0x037f;
 /** The default MXCSR: every SIMD exception masked. */
@@ -210,10 +216,36 @@ export function createCorkHost(config){
      */
     let interpreter = null;
 
-    // Cork's own time-stamp counter: nanoseconds of the page's clock since the
-    // host was made, monotonic, at the scale the emulator's counter has.
+    // Cork's own time-stamp counter, at the 1 GHz CPUID's leaves 0x15 and 0x16
+    // state: nanoseconds of the guest's clock once one is given (`useGuestClock`,
+    // the clock QueryPerformanceCounter and GetTickCount read), so a program
+    // that calibrates the counter against them measures 1 GHz whatever the host
+    // did meanwhile; the page's clock since the host was made until then. The
+    // guest's clock moves between slices, so within one the counter goes on at
+    // the page's rate from its last move, at most a credit's worth, and never
+    // backward.
     const tscBase = performance.now();
-    const readTsc = ()=>BigInt(Math.floor((performance.now() - tscBase) * 1e6));
+    /** @type {(() => number) | null} milliseconds of guest time */
+    let guestClock = null;
+    let guestMs = 0;
+    let guestMovedAt = 0;
+    let lastTsc = 0;
+    const readTsc = ()=>{
+        const now = performance.now();
+        let ns = (now - tscBase) * 1e6;
+        if (guestClock !== null)
+        {
+            const ms = guestClock();
+            if (ms !== guestMs)
+            {
+                guestMs = ms;
+                guestMovedAt = now;
+            }
+            ns = (guestMs + Math.min(now - guestMovedAt, TSC_DRIFT_MS)) * 1e6;
+        }
+        lastTsc = Math.max(lastTsc + 1, Math.floor(ns));
+        return BigInt(lastTsc);
+    };
     // A slow slice's account of itself reads the clock around every range the
     // interpreter runs -- a tenth of a crossing's cost -- so only a run that
     // asked for the translator's timings keeps one, and a production bundle
@@ -936,6 +968,14 @@ export function createCorkHost(config){
         },
     };
 
+    /**
+     * Runs the time-stamp counter on the guest's clock from here on.
+     *
+     * @param {() => number} readMs  milliseconds of guest time
+     */
+    host.useGuestClock = readMs=>{
+        guestClock = readMs;
+    };
     host.captureContext = ()=>captureBlockContext(host);
     host.restoreContext = (/** @type {any} */ context)=>{
         restoreBlockContext(host, context);
