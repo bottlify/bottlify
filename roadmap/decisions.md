@@ -132,10 +132,14 @@ pass on the wall clock without moving virtual time, so a device paced by that cl
 Capped at a quarter second so a genuine stall (a fetch, a hidden tab) isn't handed to the program
 as time it spent. *2026-09-08, `33f251d6`.*
 
-**A22 — `WM_CREATE` is sent when a window is made; `WM_NCCREATE` deliberately is not.** A window
-procedure does its real setup in `WM_CREATE`; without it a window looks real and does nothing.
-`WM_NCCREATE` would mean running guest code twice from one host call, with the second starting
-while the first unwinds — left out until a program is seen to need it. *2026-09-08, `33f251d6`.*
+**A22 — `WM_NCCREATE` and then `WM_CREATE` are sent when a window is made.** A window procedure
+does its real setup in `WM_CREATE`; without it a window looks real and does nothing. `WM_NCCREATE`
+was at first left out, because it meant running guest code twice from one host call with the
+second starting while the first unwound; creation has since come to chain the CBT hook,
+`WM_CREATE`, `WM_SIZE` and `WM_MOVE` each after the previous one's answer, so that no longer held,
+and a procedure that keeps `lpCreateParams` from `WM_NCCREATE` -- a common way to bind a window to
+its object -- never got it. It is sent first now, and `FALSE` from it refuses the window, as user32's
+message tests pin. *2026-09-08, `33f251d6`; revised 2026-09-26, `54c1d1f`.*
 
 **A23 — `DefWindowProc` does nothing with `WM_DESTROY`**, rather than posting a quit. Windows
 programs destroy windows constantly (dialogs, tooltips, splash screens) and pass `WM_DESTROY` to
