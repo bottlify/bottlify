@@ -1078,6 +1078,9 @@ export function translateShader(parsed, options = {}){
                 {
                     emits(varyingLocation(D3DDECLUSAGE.COLOR, output - 100),
                         `oD${output - 100}`);
+                    // Below model 3 a colour output leaves the shader held to
+                    // [0, 1]; a model 3 output is whatever the shader wrote.
+                    body.push(`    out.oD${output - 100} = saturate(out.oD${output - 100});`);
                 }
                 else if (output === 1)
                 {

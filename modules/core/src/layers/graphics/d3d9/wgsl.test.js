@@ -340,6 +340,37 @@ test('a whole pixel shader reads the varyings the vertex shader wrote and writes
     assertLine(translated.wgsl, 'out.oDepth = oDepth.x;');
 });
 
+test('a vertex shader below model 3 hands on its colours held to [0, 1]', ()=>{
+    // Wine's d3d9 test_color_clamping: vs_1_1 and vs_2_0 write 2.0 to oD0 and
+    // oD1, a ps_1_1 / ps_2_0 adds the two and quarters the sum, and Windows
+    // draws 0x7f7f7f -- each colour arrived as one. Under vs_3_0 and ps_3_0
+    // the same arithmetic draws white: a model 3 output is not clamped.
+    const vs2 = translateShader(parseShader([VS_2_0, ...dclInput(0, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 0), src(REGISTER.INPUT, 0),
+        op(OPCODE.ADD, 3), dst(REGISTER.ATTROUT, 0), src(REGISTER.CONST, 0),
+        src(REGISTER.CONST, 0),
+        op(OPCODE.ADD, 3), dst(REGISTER.ATTROUT, 1), src(REGISTER.CONST, 0),
+        src(REGISTER.CONST, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 0), src(REGISTER.CONST, 0), END_TOKEN]));
+    assert.equal(vs2.error, null);
+    const lines = vs2.wgsl.split('\n').map(line=>line.trim());
+    const held = [lines.indexOf('out.oD0 = saturate(out.oD0);'),
+        lines.indexOf('out.oD1 = saturate(out.oD1);')];
+    assert.ok(held.every(at=>at > lines.indexOf('out.oD1 = (c[0] + c[0]);')), vs2.wgsl);
+    assert.ok(!vs2.wgsl.includes('saturate(out.oT0)'), 'a coordinate set is not a colour');
+
+    const vs3 = translateShader(parseShader([VS_3_0,
+        ...dclInput(D3DDECLUSAGE.POSITION, 0),
+        op(OPCODE.DCL, 2), (0x80000000 | D3DDECLUSAGE.POSITION) >>> 0, dst(REGISTER.OUTPUT, 0),
+        op(OPCODE.DCL, 2), (0x80000000 | D3DDECLUSAGE.COLOR) >>> 0, dst(REGISTER.OUTPUT, 1),
+        op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 0), src(REGISTER.INPUT, 0),
+        op(OPCODE.ADD, 3), dst(REGISTER.OUTPUT, 1), src(REGISTER.CONST, 0),
+        src(REGISTER.CONST, 0),
+        END_TOKEN]));
+    assert.equal(vs3.error, null);
+    assert.ok(!vs3.wgsl.includes('saturate'), vs3.wgsl);
+});
+
 test('model 3 names its outputs and inputs by declared semantic', ()=>{
     const vs = translateShader(parseShader([VS_3_0,
         ...dclInput(D3DDECLUSAGE.POSITION, 0),
