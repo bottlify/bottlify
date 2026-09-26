@@ -204,6 +204,41 @@ relies on `Present` to throttle its loop runs that loop faster than the display,
 time on frames nobody sees. *Recorded 2026-09-26; the choice predates this repository's history
 (`7a469c3`).*
 
+**A31 — The Windows a machine reports is a bottle's setting, one of four, and XP SP3 by default.**
+Some programs refuse a Windows older than they were written for and some one newer, so no single
+answer serves every title: `createApp`'s `windows` option (and a bottle manifest's `windows` field)
+picks one of `win2000`, `winxp`, `win7` and `win10`, each at the last service pack its release
+had, and every place a program reads the version from answers that one (`docs/core/win32.md`'s
+"The version a program is told"):
+
+| choice | version | service pack | suite | profile layout |
+|--------|---------|--------------|-------|----------------|
+| `win2000` | 5.0.2195 | 4 | none | `Documents and Settings` |
+| `winxp` | 5.1.2600 | 3 | `VER_SUITE_SINGLEUSERTS` | `Documents and Settings` |
+| `win7` | 6.1.7601 | 1 | `VER_SUITE_SINGLEUSERTS` | `Users`, `ProgramData` |
+| `win10` | 10.0.19045 | none | `VER_SUITE_SINGLEUSERTS` | `Users`, `ProgramData` |
+
+All four are workstations (`VER_NT_WORKSTATION`) on `VER_PLATFORM_WIN32_NT`, a Professional
+edition rather than a Home one (no `VER_SUITE_PERSONAL`), and 32-bit: `IsWow64Process` stays
+FALSE and there is no `Program Files (x86)`. The Windows directory is `C:\WINDOWS` for all four,
+2000 included, whose own setup chose `C:\WINNT`: a program asks `GetWindowsDirectory` rather than
+assuming either, and one directory keeps the system volume and every path under it the same.
+`win10` answers `GetVersion`, `GetVersionEx` and `VerifyVersionInfo` with the newest Windows the
+program declares, 6.2 when it declares nothing newer, as Windows 8.1 and later do; the process
+block, `RtlGetVersion`, the registry and a system library's file version keep the truth. A system
+library's file version is `major.minor.build.0`: the service pack's own revision number is not
+modelled. A hive restored from a run under another setting has its version values and shell
+folders written over at start (a bottle's setting can change between runs), where every other
+value a program wrote is kept.
+
+XP SP3 is the default because the installers a title of the era carries accept it and the engine
+already is it: the DirectX June 2010 redistributable's setup refuses anything below XP SP2, and
+kernel32 already exports SP2's additions, such as `EncodePointer` and `IsWow64Process` -- a
+machine exporting SP2's interface while claiming no service pack contradicts itself. It is also
+old enough that a program written for 2000 or 98 still recognises it, where a version check
+written before 7 existed may not recognise 7 or 10. *2026-09-26, the commit adding
+`kernel32/versions.js`.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
