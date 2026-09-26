@@ -780,6 +780,55 @@ test('CreateDIBSection refuses what it cannot back with plain memory', ()=>{
     assert.deepEqual(surfaces.allocated, [], 'a refused section allocates nothing');
 });
 
+test('CreateDIBSection takes the formats, planes, masks and usages Windows does', ()=>{
+    // Wine's test_dib_formats: BI_BITFIELDS only at 16 and 32 bits and never
+    // with DIB_PAL_COLORS; planes 1, or any count whose product with the
+    // depth is at most 16, but never zero; every mask non-zero, though masks
+    // that are not a run of bits are accepted; DIB_PAL_COLORS + 1 refused;
+    // and a width or height that is negative or zero refused.
+    const { fns, memory, hdc } = withDC();
+    /**
+     * @param {{ bitCount?: number, compression?: number, planes?: number,
+     *           masks?: number[], usage?: number, width?: number, height?: number }} format
+     */
+    const made = ({ bitCount = 16, compression = BI_RGB, planes = 1, masks = [0xaaaaaaaa,
+        0xaaaaaaaa, 0xaaaaaaaa], usage = 0, width = 2, height = 2 })=>{
+        putBitmapInfo(memory, { width, height, bitCount, compression });
+        memory.putU16(STRUCT + BITMAPINFOHEADER.biPlanes, planes);
+        memory.putU32s(STRUCT + BITMAPINFOHEADER.SIZE, masks);
+        const section = fns.CreateDIBSection.handler([hdc, STRUCT, usage, BITS_POINTER, 0, 0]);
+        if (section)
+        {
+            fns.DeleteObject.handler([section]);
+        }
+        return section !== 0;
+    };
+    const BI_BITFIELDS = 3;
+    for (const bitCount of [1, 4, 8, 16, 24, 32])
+    {
+        for (const usage of [0, 1])
+        {
+            assert.equal(made({ bitCount, usage }), true, `${bitCount} BI_RGB ${usage}`);
+            assert.equal(made({ bitCount, usage, compression: BI_BITFIELDS }),
+                (bitCount === 16 || bitCount === 32) && usage === 0,
+                `${bitCount} BI_BITFIELDS ${usage}`);
+        }
+        for (const planes of [0, 2, 3, 16])
+        {
+            assert.equal(made({ bitCount, planes }), planes > 0 && planes * bitCount <= 16,
+                `${bitCount} bits, ${planes} planes`);
+        }
+    }
+    assert.equal(made({ compression: BI_BITFIELDS, masks: [0, 0, 0] }), false, 'no masks');
+    assert.equal(made({ compression: BI_BITFIELDS, masks: [3, 0, 7] }), false, 'one empty');
+    assert.equal(made({ compression: BI_BITFIELDS, masks: [0x55, 0x44, 0x33] }), true,
+        'garbage is ok though');
+    assert.equal(made({ bitCount: 1, usage: 2 }), false, 'DIB_PAL_COLORS + 1');
+    assert.equal(made({ bitCount: 32, width: -2 }), false, 'negative width');
+    assert.equal(made({ bitCount: 32, width: 0 }), false, 'zero width');
+    assert.equal(made({ bitCount: 32, height: 0 }), false, 'zero height');
+});
+
 test('deleting a DIB section gives its memory back', ()=>{
     const { fns, memory, surfaces, hdc } = withDC();
     putBitmapInfo(memory);

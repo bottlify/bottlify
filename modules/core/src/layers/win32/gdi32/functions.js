@@ -1831,8 +1831,25 @@ export function createGdiFunctions(host){
                     // is no pointer to hand back.
                     return 0;
                 }
-                if (!BIT_COUNTS.has(header.bitCount) || header.width <= 0 || header.height === 0)
+                if (!BIT_COUNTS.has(header.bitCount) || header.width <= 0 || header.height === 0
+                    || (usage >>> 0) > DIB_PAL_COLORS)
                 {
+                    return 0;
+                }
+                // Windows refuses no planes, and several whose product with the
+                // depth passes sixteen, and ignores the rest (Wine's
+                // test_dib_formats).
+                if (header.planes === 0
+                    || (header.planes > 1 && header.planes * header.bitCount > 16))
+                {
+                    return 0;
+                }
+                if (header.compression === BI_BITFIELDS && ((header.bitCount !== 16
+                    && header.bitCount !== 32) || (usage >>> 0) === DIB_PAL_COLORS
+                    || [0, 4, 8].some(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at) === 0)))
+                {
+                    // Every mask has to name some bits, though not necessarily
+                    // the one run of them the documentation asks for.
                     return 0;
                 }
                 if ((section >>> 0) !== 0)
