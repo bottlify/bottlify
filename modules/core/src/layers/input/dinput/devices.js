@@ -27,6 +27,8 @@
  *   believes the player let go of everything and carries on.
  */
 
+import { KNOWN_KEYS, keyFor, dikOf, characterOf } from '../../win32/user32/keys.js';
+
 /** Which device this is. Both are the identity a program creates by GUID. */
 export const KEYBOARD = 'keyboard';
 export const MOUSE = 'mouse';
@@ -45,8 +47,116 @@ export const DIMOUSE_OFS = Object.freeze({
     BUTTON0: 0x0c,
 });
 
+/** How many buttons the mouse has: DIMOUSESTATE2's eight. */
+export const MOUSE_BUTTONS = 8;
+
 /** A buffer size of zero means the device is not buffered at all. */
 const UNBUFFERED = 0;
+
+/** DIDFT_* object types: the byte of an object's type below its instance number. */
+const DIDFT = Object.freeze({
+    RELAXIS: 0x01,
+    PSHBUTTON: 0x04,
+});
+const DIDOI_ASPECTPOSITION = 0x00000100;
+
+const GUID_XAxis = '{A36D02E0-C9F3-11CF-BFC7-444553540000}';
+const GUID_YAxis = '{A36D02E1-C9F3-11CF-BFC7-444553540000}';
+const GUID_ZAxis = '{A36D02E2-C9F3-11CF-BFC7-444553540000}';
+const GUID_Button = '{A36D02F0-C9F3-11CF-BFC7-444553540000}';
+const GUID_Key = '{55728220-D33C-11CF-BFC7-444553540000}';
+
+/**
+ * What a key that types nothing is called, by DIK code, on the one US layout
+ * this build has. A key that types a character is called by that character.
+ *
+ * @type {ReadonlyMap<number, string>}
+ */
+const KEY_NAMES = new Map(/** @type {[number, string][]} */ ([
+    [0x01, 'Esc'], [0x0e, 'Backspace'], [0x0f, 'Tab'], [0x1c, 'Enter'], [0x1d, 'Ctrl'],
+    [0x2a, 'Shift'], [0x36, 'Right Shift'], [0x37, 'Num *'], [0x38, 'Alt'],
+    [0x39, 'Space'], [0x3a, 'Caps Lock'],
+    [0x3b, 'F1'], [0x3c, 'F2'], [0x3d, 'F3'], [0x3e, 'F4'], [0x3f, 'F5'], [0x40, 'F6'],
+    [0x41, 'F7'], [0x42, 'F8'], [0x43, 'F9'], [0x44, 'F10'], [0x57, 'F11'], [0x58, 'F12'],
+    [0x45, 'Num Lock'], [0x46, 'Scroll Lock'],
+    [0x47, 'Num 7'], [0x48, 'Num 8'], [0x49, 'Num 9'], [0x4a, 'Num -'],
+    [0x4b, 'Num 4'], [0x4c, 'Num 5'], [0x4d, 'Num 6'], [0x4e, 'Num +'],
+    [0x4f, 'Num 1'], [0x50, 'Num 2'], [0x51, 'Num 3'], [0x52, 'Num 0'], [0x53, 'Num Del'],
+    [0x56, '\\'],
+    [0x9c, 'Num Enter'], [0x9d, 'Right Ctrl'], [0xb5, 'Num /'], [0xb7, 'Prnt Scrn'],
+    [0xb8, 'Right Alt'], [0xc5, 'Pause'], [0xc7, 'Home'], [0xc8, 'Up'], [0xc9, 'Page Up'],
+    [0xcb, 'Left'], [0xcd, 'Right'], [0xcf, 'End'], [0xd0, 'Down'], [0xd1, 'Page Down'],
+    [0xd2, 'Insert'], [0xd3, 'Delete'], [0xdb, 'Left Windows'], [0xdc, 'Right Windows'],
+    [0xdd, 'Application'],
+]));
+
+/**
+ * One object of a device -- an axis or a button -- as DirectInput describes
+ * it to EnumObjects and GetObjectInfo.
+ *
+ * @typedef {Object} DeviceObject
+ * @property {string} guidType
+ * @property {number} offset  Where its value sits in the device's data format.
+ * @property {number} type    DIDFT_* with the instance number above it.
+ * @property {number} flags   DIDOI_*.
+ * @property {string} name
+ */
+
+/**
+ * The mouse's three axes and its buttons, at their DIMOUSESTATE2 offsets,
+ * numbered in that order.
+ *
+ * @type {readonly DeviceObject[]}
+ */
+const MOUSE_OBJECTS = Object.freeze([
+    ...[[GUID_XAxis, 'X-axis'], [GUID_YAxis, 'Y-axis'], [GUID_ZAxis, 'Wheel']]
+        .map(([guidType, name], index)=>({
+            guidType,
+            offset: index * 4,
+            type: DIDFT.RELAXIS | index << 8,
+            flags: DIDOI_ASPECTPOSITION,
+            name,
+        })),
+    ...Array.from({ length: MOUSE_BUTTONS }, (_, index)=>({
+        guidType: GUID_Button,
+        offset: DIMOUSE_OFS.BUTTON0 + index,
+        type: DIDFT.PSHBUTTON | 3 + index << 8,
+        flags: 0,
+        name: `Button ${index}`,
+    })),
+]);
+
+/**
+ * One button per key a host can press, in DIK order. A key's offset in
+ * c_dfDIKeyboard and its instance number are both its DIK code.
+ *
+ * @type {readonly DeviceObject[]}
+ */
+const KEYBOARD_OBJECTS = Object.freeze(KNOWN_KEYS
+    .map(code=>/** @type {import('../../win32/user32/keys.js').KeyMapping} */ (keyFor(code)))
+    .map(mapping=>{
+        const dik = dikOf(mapping);
+        const typed = characterOf(mapping.vk);
+        return {
+            guidType: GUID_Key,
+            offset: dik,
+            type: DIDFT.PSHBUTTON | dik << 8,
+            flags: 0,
+            name: KEY_NAMES.get(dik)
+                ?? (typed === null ? '' : String.fromCharCode(typed).toUpperCase()),
+        };
+    })
+    .sort((a, b)=>a.offset - b.offset));
+
+/**
+ * What a device of this kind is made of.
+ *
+ * @param {'keyboard' | 'mouse'} kind
+ * @returns {readonly DeviceObject[]}
+ */
+export function objectsOf(kind){
+    return kind === KEYBOARD ? KEYBOARD_OBJECTS : MOUSE_OBJECTS;
+}
 
 /**
  * @typedef {Object} InputEvent
@@ -67,7 +177,7 @@ const UNBUFFERED = 0;
  */
 export function createInputDevice({ kind, now }){
     const keys = new Uint8Array(KEYBOARD_KEYS);
-    const buttons = new Uint8Array(8);
+    const buttons = new Uint8Array(MOUSE_BUTTONS);
     let deltaX = 0;
     let deltaY = 0;
     let deltaWheel = 0;
