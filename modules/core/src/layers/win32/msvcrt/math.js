@@ -24,7 +24,6 @@ import { readDouble, returningDouble } from './float.js';
  * @typedef {Object} MathHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {import('./float.js').FloatHost} fpu
- * @property {(values: Record<string, number>) => void} [setRegisters]
  */
 
 /** @param {number} value */
@@ -67,6 +66,10 @@ const BINARY = {
     _hypot: Math.hypot,
     hypot: Math.hypot,
 };
+
+/** `_ftol`'s body: fisttp qword [esp-8]; mov eax, [esp-8]; mov edx, [esp-4]; ret. */
+export const FTOL_CODE = Uint8Array.of(
+    0xdd, 0x4c, 0x24, 0xf8, 0x8b, 0x44, 0x24, 0xf8, 0x8b, 0x54, 0x24, 0xfc, 0xc3);
 
 /**
  * @param {MathHost} host
@@ -119,27 +122,14 @@ export function createMathFunctions(host){
     /**
      * __int64 _ftol(double value)
      *
-     * The cast every `(int)` in compiled C goes through. It truncates towards
-     * zero -- not the rounding the FPU's own control word asks for, which is
-     * exactly why the compiler calls a function instead of emitting `fistp`.
-     * The answer is an __int64 in EDX:EAX, so a cast to `__int64` goes through
-     * it too; a value past that range, or NaN, is the integer indefinite that
-     * `fistp` stores for it. Without the register seam only EAX is answered,
-     * which is still right for a cast to `int`.
+     * The cast every `(int)` in compiled C goes through: ST0 truncated toward
+     * zero into EDX:EAX, the integer indefinite for NaN and out of range. It is
+     * code in the guest's own module rather than a handler -- `fisttp` and the
+     * two halves read back -- so a cast costs an instruction, not a crossing,
+     * and the high half is there. `fisttp` stores below ESP, where the call has
+     * just written its return address: bytes the program gave up.
      */
-    const ftol = {
-        convention: 'cdecl',
-        argBytes: 0,
-        handler: ()=>{
-            const value = fpu.get(0);
-            fpu.pop();
-            const bits = value >= -(2 ** 63) && value < 2 ** 63
-                ? BigInt.asUintN(64, BigInt(Math.trunc(value)))
-                : 1n << 63n;
-            host.setRegisters?.({ edx: Number(bits >> 32n) });
-            return Number(BigInt.asIntN(32, bits));
-        },
-    };
+    const ftol = { data: ()=>FTOL_CODE };
 
     return {
         ...table,

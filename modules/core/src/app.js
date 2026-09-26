@@ -6280,9 +6280,18 @@ export async function createApp(options){
         })
         : null);
 
+    // The translation store is the run's as well: a child's machine is built
+    // beside its paused parent's, and a second store opened on the same
+    // directory cannot write while the first holds its records file's
+    // synchronous handle -- the child stopped at its first append.
+    const translationStore = await resolveTranslationStore(
+        options.cork?.config?.store === undefined ? 'local' : options.cork.config.store,
+        options.bundle?.id ?? options.id ?? 'bundle');
+
     /** @param {any} [extra] */
     const machine = extra=>({
         ...options,
+        cork: { ...options.cork, config: { ...options.cork?.config, store: translationStore } },
         events,
         spawned: remember,
         logSinks,

@@ -5,14 +5,14 @@
  */
 
 /**
- * Phase 3 acceptance for calls in the other direction: the guest hands us a
- * function pointer and we call it.
+ * A C runtime sorting with the program's own comparator: the fixture sorts six
+ * integers through msvcrt's qsort.
  *
- * The fixture asks the C runtime to sort six integers with a comparator of its
- * own. Every ordering decision is made by guest code, the host cannot get past
- * one without an answer, and it happens many times inside a single host call --
- * so a bridge that builds the frame wrong, resumes onto the wrong stack, or
- * loses the answer produces a differently-wrong array rather than nothing.
+ * qsort is code in the guest's msvcrt, so the comparator is called with a
+ * `call` and nothing crosses to the host for it; the array comes back sorted,
+ * the same every time. Calling the guest from the host -- what this fixture
+ * once exercised, when qsort was a handler -- is held by the bridge's own
+ * tests and by every window procedure and APC.
  */
 
 import { test } from 'node:test';
@@ -88,16 +88,12 @@ test('a guest comparator decides the order, and the array comes back sorted',
         assert.equal(exitCode, 0);
     });
 
-test('the comparator really ran, many times, inside one host call',
+test('the comparator runs in the guest: no call back from the host',
     { timeout: 15000 }, async()=>{
         const { diagnostics } = await runFixture();
         const bridge = diagnostics.find((/** @type {any} */ d)=>d.name === 'bridge');
-
-        // Insertion sort over six elements cannot decide anything in fewer than
-        // five comparisons; a bridge that answered them itself would show none.
-        assert.ok(bridge.metrics.callbacks >= 5,
-            `the guest was called back (${bridge.metrics.callbacks} times)`);
-        assert.equal(bridge.metrics.deepestCallback, 1, 'one at a time, none nested');
+        assert.equal(bridge.metrics.callbacks, 0,
+            'qsort calls the comparator itself, where a handler called it from the host');
         assert.equal(bridge.metrics.failure, null);
     });
 
