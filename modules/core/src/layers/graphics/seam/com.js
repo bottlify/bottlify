@@ -34,8 +34,12 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
  * @property {{ name: string, argBytes: number,
  *              invoke?: (target: any, args: number[]) => number,
  *              guest?: (builder: { trap: number }) => number }[]} methods
- *           In vtable order, after IUnknown's three. `target` is the API object,
+ *           In vtable order, after IUnknown's three unless `bare`. `target` is the API object,
  *           not the adapter: an implementation never sees this file.
+ * @property {boolean} [bare]
+ *           The interface does not derive from IUnknown, so its table starts
+ *           with its own first method. Nothing can Release such a pointer: it
+ *           lives as long as whatever handed it out says it does.
  * @property {(target: any, pointers: Iterable<number>) => void} [released]
  *           Told when the program lets go of the object's last reference,
  *           while its pointers still name it: state the guest set by pointer
@@ -63,7 +67,7 @@ function methodsFor(descriptor){
     if (!methods)
     {
         methods = [
-            ...IUNKNOWN_METHODS,
+            ...(descriptor.bare ? [] : IUNKNOWN_METHODS),
             ...descriptor.methods.map((/** @type {any} */ method)=>({
                 name: method.name,
                 argBytes: method.argBytes,

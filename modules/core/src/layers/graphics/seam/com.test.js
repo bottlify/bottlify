@@ -239,3 +239,23 @@ test('a descriptor is told of the last release while the pointers still resolve'
     assert.deepEqual(seen, [`true ${pointer.toString(16)} true`]);
     assert.equal(seam.objectAt(pointer), null, 'and then it is gone');
 });
+
+test('an interface without IUnknown lists its own methods from the first slot', ()=>{
+    // A reflection's constant buffer and an effect's technique are such
+    // interfaces: their first slot is their own first method, and a table
+    // that began with QueryInterface would shift every call by three.
+    const p = publisher();
+    const methods = [
+        { name: 'GetDesc', argBytes: 8, invoke: ()=>0 },
+        { name: 'GetType', argBytes: 4, invoke: ()=>0 },
+    ];
+    const bare = { id: IID_ONE, bare: true, methods };
+    const full = { id: IID_TWO, methods };
+    const api = counted();
+    p.publish(api, [bare, full], IID_ONE);
+    const adapter = p.adapterFor(api);
+    /** @param {string} id */
+    const names = id=>adapter.interfaceFor(id).methods.map((/** @type {any} */ m)=>m.name);
+    assert.deepEqual(names(IID_ONE), ['GetDesc', 'GetType']);
+    assert.deepEqual(names(IID_TWO), ['QueryInterface', 'AddRef', 'Release', 'GetDesc', 'GetType']);
+});
