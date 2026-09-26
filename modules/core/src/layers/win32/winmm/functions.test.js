@@ -956,6 +956,80 @@ test('MCI answers a command string as a machine with no MCI device does', ()=>{
         MCIERR_CANNOT_LOAD_DRIVER);
 });
 
+test('the wide MCI command, the element-id lookups and the error strings', ()=>{
+    const m = machine();
+    const MCI_OPEN = 0x0803;
+    const MCI_PLAY = 0x0806;
+    const MCI_OPEN_ELEMENT = 0x0200;
+    const MCI_OPEN_TYPE_ID = 0x1000;
+    const MCI_OPEN_TYPE = 0x2000;
+    const MCIERR_INVALID_DEVICE_ID = 257;
+    const MCIERR_CANNOT_LOAD_DRIVER = 266;
+    const MCIERR_EXTENSION_NOT_FOUND = 281;
+    const MCIERR_NULL_PARAMETER_BLOCK = 297;
+    const MCIERR_CUSTOM_DRIVER_BASE = 512;
+    /** @param {string} text @param {number} at */
+    const putWide = (text, at)=>{
+        [...text, '\0'].forEach((c, index)=>m.memory.set([c.charCodeAt(0) & 0xff,
+            c.charCodeAt(0) >>> 8], at + index * 2));
+        return at;
+    };
+    /** @param {number} at */
+    const wideAt = at=>{
+        const units = [];
+        for (let unit = at; m.memory[unit] | m.memory[unit + 1]; unit += 2)
+        {
+            units.push(m.memory[unit] | m.memory[unit + 1] << 8);
+        }
+        return String.fromCharCode(...units);
+    };
+
+    // MCI_OPEN_PARMSW: the type at 8, the element at 12, both UTF-16.
+    const parms = 0x500;
+    m.put32(parms + 8, putWide('cdaudio', 0x400));
+    assert.equal(m.winmm.mciSendCommandW.handler([0, MCI_OPEN, MCI_OPEN_TYPE, parms]),
+        MCIERR_CANNOT_LOAD_DRIVER, 'as the ANSI command answers for the same type');
+    m.put32(parms + 12, putWide('C:\\music\\song.mid', 0x600));
+    assert.equal(m.winmm.mciSendCommandW.handler([0, MCI_OPEN, MCI_OPEN_ELEMENT, parms]),
+        MCIERR_CANNOT_LOAD_DRIVER);
+    m.put32(parms + 12, putWide('C:\\thing.xyz', 0x600));
+    assert.equal(m.winmm.mciSendCommandW.handler([0, MCI_OPEN, MCI_OPEN_ELEMENT, parms]),
+        MCIERR_EXTENSION_NOT_FOUND);
+    m.put32(parms + 8, 0x204);
+    assert.equal(m.winmm.mciSendCommandW.handler(
+        [0, MCI_OPEN, MCI_OPEN_TYPE | MCI_OPEN_TYPE_ID, parms]), MCIERR_CANNOT_LOAD_DRIVER);
+    assert.equal(m.winmm.mciSendCommandW.handler([0, MCI_OPEN, MCI_OPEN_TYPE, 0]),
+        MCIERR_NULL_PARAMETER_BLOCK);
+    assert.equal(m.winmm.mciSendCommandW.handler([1, MCI_PLAY, 0, parms]),
+        MCIERR_INVALID_DEVICE_ID, 'no device is open to play');
+
+    m.memory.set([...'cdaudio'].map(c=>c.charCodeAt(0)).concat([0]), 0x480);
+    assert.equal(m.winmm.mciGetDeviceIDFromElementIDA.handler([1, 0x480]), 0,
+        'no device of the type holds the element');
+    assert.equal(m.winmm.mciGetDeviceIDFromElementIDW.handler([1, putWide('cdaudio', 0x400)]), 0);
+
+    // TRUE with the text for an MCI error, FALSE for a code MCI has none for.
+    m.memory.fill(0x55, 0x700, 0x800);
+    assert.equal(m.winmm.mciGetErrorStringA.handler([MCIERR_CANNOT_LOAD_DRIVER, 0x700, 128]), 1);
+    const text = String.fromCharCode(...m.memory.slice(0x700, m.memory.indexOf(0, 0x700)));
+    assert.ok(text.length > 10, `MCIERR_CANNOT_LOAD_DRIVER reads as "${text}"`);
+    assert.equal(m.winmm.mciGetErrorStringW.handler([MCIERR_CANNOT_LOAD_DRIVER, 0x800, 128]), 1);
+    assert.equal(wideAt(0x800), text, 'the same text in UTF-16');
+    m.memory.fill(0x55, 0x700, 0x710);
+    assert.equal(m.winmm.mciGetErrorStringA.handler([MCIERR_CANNOT_LOAD_DRIVER, 0x700, 5]), 1);
+    assert.deepEqual([...m.memory.slice(0x700, 0x706)],
+        [...text.slice(0, 4)].map(c=>c.charCodeAt(0)).concat([0, 0x55]), 'cut to the buffer');
+    for (const unknown of [5, 256 + 27, MCIERR_CUSTOM_DRIVER_BASE + 1])
+    {
+        m.memory.fill(0x55, 0x700, 0x710);
+        assert.equal(m.winmm.mciGetErrorStringA.handler([unknown, 0x700, 128]), 0, `${unknown}`);
+        assert.equal(m.memory[0x700], 0x55, 'and the buffer is left alone');
+    }
+    assert.deepEqual(['mciSendCommandW', 'mciGetDeviceIDFromElementIDA',
+        'mciGetDeviceIDFromElementIDW', 'mciGetErrorStringA', 'mciGetErrorStringW']
+        .map(name=>m.winmm[name].argBytes), [16, 8, 8, 12, 12]);
+});
+
 test('a machine with no MIDI input and no joystick says so on every call', ()=>{
     // midi.c: midiInOpen past the last device, the mapper included, is
     // MMSYSERR_BADDEVICEID; joystick.c: an id no slot answers to is JOYERR_PARMS.
