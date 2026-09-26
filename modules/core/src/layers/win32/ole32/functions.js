@@ -124,6 +124,11 @@ const MAX_PROGID = 255;
  *           Whether a handle names a window that exists, as user32's IsWindow
  *           answers. Absent, no handle is known to be one, and a drop target
  *           is refused for want of a window to hang it on.
+ * @property {{ set: (window: number, name: number, value: number) => number,
+ *              remove: (window: number, name: number) => number }} [windowProperty]
+ *           user32's SetPropA and RemovePropA, the name an ANSI string in
+ *           guest memory: a drop target is also a property of its window,
+ *           where a program finds it. Absent, the target is kept here alone.
  * @property {{ publish: (object: import('./objects.js').ComObject,
  *                        interfaceId: string) => number }} vtables
  *           Puts an interface into guest memory and answers with the interface
@@ -312,6 +317,39 @@ export function createOleFunctions(host){
      * @type {Map<number, number>}
      */
     const dropTargets = new Map();
+
+    /**
+     * Sets a window's drop-target property through user32, or removes it
+     * for a null target. The name is lent guest memory for the call alone,
+     * since user32 keeps a copy of it.
+     *
+     * @param {number} window @param {number | null} target
+     * @returns {boolean} false when there was no memory to lend the name
+     */
+    const dropTargetProperty = (window, target)=>{
+        const property = host.windowProperty;
+        if (!property)
+        {
+            return true;
+        }
+        const text = 'OleDropTargetInterface';
+        const name = host.heap.allocate(text.length + 1) >>> 0;
+        if (name === 0)
+        {
+            return false;
+        }
+        host.writeMemory(name, Uint8Array.from([...text].map(c=>c.charCodeAt(0)).concat(0)));
+        if (target === null)
+        {
+            property.remove(window, name);
+        }
+        else
+        {
+            property.set(window, name, target);
+        }
+        host.heap.free(name);
+        return true;
+    };
 
     /**
      * Whether OleInitialize ever succeeded in this process. A thread outside
@@ -729,9 +767,10 @@ export function createOleFunctions(host){
          * HRESULT RegisterDragDrop(HWND hwnd, LPDROPTARGET pDropTarget)
          *
          * The window accepts drops, and the target is kept with a reference
-         * of its own until RevokeDragDrop. Nothing ever drags onto a window
-         * here, so it is never called -- the same as on a desktop where
-         * nobody drags anything.
+         * of its own until RevokeDragDrop, and is the window's
+         * "OleDropTargetInterface" property meanwhile. Nothing ever drags
+         * onto a window here, so it is never called -- the same as on a
+         * desktop where nobody drags anything.
          */
         RegisterDragDrop: {
             argBytes: 8,
@@ -752,6 +791,10 @@ export function createOleFunctions(host){
                 if (dropTargets.has(window >>> 0))
                 {
                     return DRAGDROP_E_ALREADYREGISTERED;
+                }
+                if (!dropTargetProperty(window >>> 0, target >>> 0))
+                {
+                    return E_OUTOFMEMORY;
                 }
                 dropTargets.set(window >>> 0, target >>> 0);
                 return host.call
@@ -779,6 +822,7 @@ export function createOleFunctions(host){
                     return DRAGDROP_E_NOTREGISTERED;
                 }
                 dropTargets.delete(window >>> 0);
+                dropTargetProperty(window >>> 0, null);
                 return host.call
                     ? callMethod(target, SLOT_RELEASE, [], host.callerThread?.()).then(()=>S_OK)
                     : S_OK;
