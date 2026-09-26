@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loaderModule } from './module.js';
+import { createLoaderModule, loaderModule } from './module.js';
 import { bridgeModule } from '../bridge/module.js';
 import { parseHexBytes } from './internal/hooks.js';
 
@@ -73,6 +73,23 @@ test('a good sidecar entry writes the registered stub address into the slot', as
         { name: 'vector.dot', argBytes: 20, target: IMAGE.base + TARGET_RVA });
     assert.equal(memory.readU32(IMAGE.base + SLOT_RVA), 0x00900010,
         'the slot now points at the registered stub, not the original function');
+});
+
+test('what one graph\'s loader bound is its own: a second graph\'s loader starts empty', async()=>{
+    // A child started beside its parent has a loader of its own, made while
+    // the parent's stands; making it does not reset what the parent bound, and
+    // the child does not report the parent's hooks as its own.
+    const parentModule = createLoaderModule();
+    const childModule = createLoaderModule();
+    const parent = await parentModule.create({}, machine(IMAGE.base + TARGET_RVA).host);
+    parent.bindHooks({ hooks: [GOOD_HOOK] }, IMAGE, ()=>0x00900010, ()=>()=>true);
+    await childModule.create({}, machine(IMAGE.base + TARGET_RVA).host);
+
+    assert.deepEqual(/** @type {any} */ (parentModule.diagnostics().metrics).hooksBound,
+        ['vector.dot']);
+    assert.deepEqual(/** @type {any} */ (childModule.diagnostics().metrics).hooksBound, []);
+    await childModule.dispose();
+    await parentModule.dispose();
 });
 
 test('a registration that yields no address is refused and the slot stays as it was', async()=>{

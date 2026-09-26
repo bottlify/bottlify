@@ -33,15 +33,24 @@ The other typedefs:
 ### A module's live state belongs to its instance
 
 `create()` may run more than once in the same realm: a process replacement runs it again on the
-same worker, and the plan for more than one machine in one worker needs two `create()` calls live
-at once. Every layer under `src/layers/` follows the same shape so that this is safe: one `state`
-object is built inside `create()`, every method the returned api hands out closes over that
-object rather than over a module-level binding, and a single file-scope `current` — reassigned to
-the new `state` at the end of each `create()` — exists only so that `diagnostics()`, which the
-contract puts on the module rather than on the api, has something to read. Nothing outside
-`create()` ever holds the state itself, so a second `create()` cannot take the first instance's
-memory, threads, decoder, volume or GPU backend out from under it, and `diagnostics()` always
-answers for the most recently created instance rather than whichever one happened to run last.
+same worker, a child started beside its parent is a second graph built while the parent's stands,
+and the plan for more than one machine in one worker needs two live at once. Every layer under
+`src/layers/` follows the same shape so that this is safe: one `state` object is built inside
+`create()`, every method the returned api hands out closes over that object rather than over a
+module-level binding, and a `current` — reassigned to the new `state` at the end of each
+`create()` — exists only so that `diagnostics()` and `dispose()`, which the contract puts on the
+module rather than on the api, have something to reach. Nothing outside `create()` ever holds the
+state itself, so a second `create()` cannot take the first instance's memory, threads, decoder,
+volume or GPU backend out from under it.
+
+`current` belongs to a module object, and every graph has module objects of its own: each layer's
+`module.js` exports `create<Layer>Module()`, and `defaultModules()` calls every one of them for
+each `assembleModules`. A child's graph therefore has its own `current` in every layer, and its
+creation and its `dispose()` reach its own instances only — the parent's `diagnostics()` still
+answers for the parent's, and the parent's `dispose()` still releases them. The `<layer>Module`
+export is one graph's worth, made once, for the boundary check and for a test that builds one
+layer alone; a build never shares it. What stays at file scope is what may be shared: tables,
+constants, and caches of code already built.
 
 `dispose()` marks its instance's `state.disposed` and drops `current`; it never reaches into a
 different instance's state, so disposing the second machine leaves the first exactly as it was.

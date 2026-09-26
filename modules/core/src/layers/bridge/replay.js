@@ -27,7 +27,7 @@
  * a game is then a test that either throws or does not.
  */
 
-import { bridgeModule } from './module.js';
+import { createBridgeModule } from './module.js';
 
 /**
  * @typedef {Object} SessionEvent
@@ -141,7 +141,7 @@ export async function replaySession(session){
         log: { begin: ()=>{}, end: ()=>{} },
     };
 
-    const bridge = await bridgeModule.create({}, /** @type {any} */ ({
+    const bridge = await createBridgeModule().create({}, /** @type {any} */ ({
         /** @param {string} name */
         requireApi: name=>apis[name],
     }));

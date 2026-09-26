@@ -26,8 +26,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
-import { cpuModule } from './layers/cpu/module.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
+
+/**
+ * A layer's report from the app's own graph: every graph has module objects of
+ * its own, so the exported module is not the one the app's machine was made by.
+ *
+ * @param {any} app @param {string} name
+ * @returns {any}
+ */
+const layerOf = (app, name)=>app.diagnostics()
+    .find((/** @type {any} */ layer)=>layer.name === name);
 
 const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 // Enough iterations that the warm-up -- two slices of exits while the return
@@ -299,7 +308,7 @@ async function run(executable, engine, config = {}){
         const began = performance.now();
         const code = await app.run({ timeoutMs: 60000 });
         const ms = performance.now() - began;
-        const { metrics } = cpuModule.diagnostics();
+        const { metrics } = layerOf(app, 'cpu');
         return { code, ms, instructions: /** @type {any} */ (metrics).instructions,
             cork: /** @type {any} */ (metrics).cork };
     }

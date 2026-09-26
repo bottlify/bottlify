@@ -22,9 +22,17 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
-import { cpuModule } from './layers/cpu/module.js';
-import { bridgeModule } from './layers/bridge/module.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
+
+/**
+ * A layer's report from the app's own graph: every graph has module objects of
+ * its own, so the exported module is not the one the app's machine was made by.
+ *
+ * @param {any} app @param {string} name
+ * @returns {any}
+ */
+const layerOf = (app, name)=>app.diagnostics()
+    .find((/** @type {any} */ layer)=>layer.name === name);
 
 const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 /** @param {string} name */
@@ -112,17 +120,17 @@ async function run(executable, engine){
         const began = performance.now();
         const code = await app.run({ timeoutMs: 30000 });
         const ms = performance.now() - began;
-        const { metrics } = cpuModule.diagnostics();
-        return { code, output: output.join(''), diagnostics: cpuModule.diagnostics(), ms,
+        const { metrics } = layerOf(app, 'cpu');
+        return { code, output: output.join(''), diagnostics: layerOf(app, 'cpu'), ms,
             instructions: /** @type {any} */ (metrics).instructions,
             trapsHot: /** @type {[string, number][]} */ (
-                /** @type {any} */ (bridgeModule.diagnostics().metrics).hot ?? []),
+                /** @type {any} */ (layerOf(app, 'bridge').metrics).hot ?? []),
             cork: /** @type {any} */ (metrics).cork };
     }
     catch (e){
         // The translator's report goes with the rejection: the machine is gone
         // once the app is disposed.
-        const { metrics } = cpuModule.diagnostics();
+        const { metrics } = layerOf(app, 'cpu');
         /** @type {any} */ (e).cork = /** @type {any} */ (metrics).cork;
         throw e;
     }

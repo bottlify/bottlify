@@ -20,12 +20,21 @@ import { mkdtemp, writeFile, rm, open, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from './app.js';
-import { cpuModule } from './layers/cpu/module.js';
 import { openBundle, writeBundle } from './bundle-node.js';
 import {
     createDirectoryTranslationStore, createMemoryDirectory, unpackSeed,
 } from './layers/cpu/internal/translation-store.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
+
+/**
+ * A layer's report from the app's own graph: every graph has module objects of
+ * its own, so the exported module is not the one the app's machine was made by.
+ *
+ * @param {any} app @param {string} name
+ * @returns {any}
+ */
+const layerOf = (app, name)=>app.diagnostics()
+    .find((/** @type {any} */ layer)=>layer.name === name);
 
 const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 const missing = ['v86.wasm', 'libv86.mjs']
@@ -121,7 +130,7 @@ async function run(engine, store, source){
     try
     {
         const code = await app.run({ timeoutMs: 30000 });
-        const { metrics } = cpuModule.diagnostics();
+        const { metrics } = layerOf(app, 'cpu');
         return { code, cork: /** @type {any} */ (metrics).cork, seeded,
             exported: await app.exportTranslations() };
     }

@@ -96,3 +96,31 @@ test('dispose resolves and keeps the instance queryable', async()=>{
     await core.dispose();
     assert.equal(core.diagnostics().length, ALL_LAYERS.length);
 });
+
+test('two graphs in one realm each answer for their own layers, and one going leaves the other '
+    + 'whole', async()=>{
+    // A child started beside its parent is a second graph in the same realm,
+    // built after the parent's and disposed while the parent goes on. Each
+    // layer's diagnostics and dispose belong to the graph that made it: the
+    // child's going neither empties the parent's report nor takes away what
+    // the parent's own dispose has to release.
+    // What a layer reports on, not the values: the clock's wall time moves.
+    /** @param {any} core */
+    const shape = core=>core.diagnostics().map((/** @type {any} */ layer)=>
+        [layer.name, layer.status, Object.keys(layer.metrics ?? {}).sort()]);
+    const parent = await assembleModules({});
+    const before = shape(parent);
+    const child = await assembleModules({});
+    child.api('graphics');
+
+    await child.dispose();
+    assert.deepEqual(shape(parent), before,
+        'the parent\'s report is what it was before the child came and went');
+    assert.doesNotThrow(()=>parent.api('graphics').available(),
+        'and its layers still answer');
+
+    await parent.dispose();
+    assert.throws(()=>parent.api('graphics').available(),
+        (/** @type {any} */ error)=>error.code === 'NOT_IMPLEMENTED',
+        'the parent\'s own dispose reached the parent\'s instance');
+});
