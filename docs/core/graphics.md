@@ -813,11 +813,12 @@ point and linear filtering with no anisotropy, wrap, mirror and clamp addressing
 textures, the texture operations the combiner draws (derived from its own list, so the two cannot
 part), vertex, table, range, Z-based and W-based fog, a readable scan line, `TEXGEN`, cube and
 volume maps, vertex shader 1.1 with 256 constants and pixel shader 1.4 with a `MaxPixelShaderValue`
-of 1, and no stencil operations, user clip planes, blend matrices, full-screen gamma or alpha in a
-palette; what is left beyond the renderer -- `TEXGEN`'s sphere map, a projected transform over a
+of 1, `D3DCAPS2_FULLSCREENGAMMA` only where the presenter applies a ramp (a canvas to draw it on),
+and no stencil operations, user clip planes, blend matrices or alpha in a palette; what is left beyond the renderer -- `TEXGEN`'s sphere map, a projected transform over a
 carried coordinate set -- is accepted and reported (see *Limitations*). Direct3D 9's
 `DEFAULT_CAPS` (`d3d9/device.js`) and `capabilityWords` (`d3d9/caps.js`) claim shader model 2.0 for
-both stages, cube and volume maps, generated mipmaps (`D3DCAPS2_CANAUTOGENMIPMAP`), eight lights, no
+both stages, cube and volume maps, generated mipmaps (`D3DCAPS2_CANAUTOGENMIPMAP`), full-screen gamma on
+the same condition as Direct3D 8's, eight lights, no
 user clip planes, no anisotropy, no stencil operations, the same combiner-derived texture
 operations, the same fog, the scissor test and a readable scan line. Direct3D 7's (`d3d7/caps.js`)
 claim range fog and point and linear mip filtering among the rest. DirectDraw's `GetCaps` claims
