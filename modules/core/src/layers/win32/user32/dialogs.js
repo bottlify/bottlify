@@ -119,6 +119,17 @@ const SHELL_FONT_FACE = 'MS Shell Dlg';
  * @property {number} charSet
  */
 
+/**
+ * Asked first of each message a modal loop takes, before the dialog manager:
+ * true when it took the message, which goes no further. It sends through the
+ * `send` it is handed, which names the loop's own thread.
+ *
+ * @typedef {(message: { hwnd: number, message: number, wParam: number, lParam: number,
+ *     time?: number, x?: number, y?: number },
+ *     send: (hwnd: number, message: number, wParam: number, lParam: number)
+ *         => number | Promise<number>) => boolean | Promise<boolean>} ModalHook
+ */
+
 /** The style bits a dialog's own window carries. */
 const WS_CHILD = 0x40000000;
 const WS_DISABLED = 0x08000000;
@@ -277,6 +288,9 @@ const MAX_RESOURCE_NAME = 256;
  *     Whether a class of that name, or `#atom`, is the program's or the system's.
  * @param {(record: any, args: number[]) => number | Promise<number>} options.announce
  *     Tells a new window's procedure that it exists, as CreateWindowEx does.
+ * @param {(run: (hwnd: number, thread: unknown, first?: ModalHook) => Promise<number>)
+ *     => void} [options.modalLoop]  Handed the modal loop, for a dialog another
+ *     library made to be run the way DialogBox runs one.
  */
 export function createDialogFunctions(options){
     const {
@@ -815,12 +829,13 @@ export function createDialogFunctions(options){
      * quit belongs to the loop outside this one, which has not seen it yet.
      *
      * @param {number} hwnd
+     * @param {unknown} thread  Whose loop it is, read when its call was made:
+     *     afterwards the thread on the processor may be another, and every
+     *     delivery below has to name this one.
+     * @param {ModalHook} [first]
      * @returns {Promise<number>}
      */
-    const runModal = async hwnd=>{
-        // Read before the first await: afterwards the thread on the processor
-        // may be another, and every delivery below has to name this one.
-        const thread = host.callerThread?.();
+    const runModal = async(hwnd, thread, first)=>{
         const record = windows.get(hwnd);
         if (!record)
         {
@@ -861,6 +876,11 @@ export function createDialogFunctions(options){
                 await destroyWindow(hwnd, thread);
                 break;
             }
+            if (first && await first(entry, (target, message, wParam, lParam)=>
+                host.send(target, message, wParam, lParam, thread)))
+            {
+                continue;
+            }
             const taken = dialogKey(hwnd, entry, thread);
             if (taken !== null)
             {
@@ -880,6 +900,8 @@ export function createDialogFunctions(options){
         }
         return record.dialogResult ?? 0;
     };
+
+    options.modalLoop?.(runModal);
 
     /**
      * The address of a dialog template named in a module's resources, or zero.
@@ -937,9 +959,11 @@ export function createDialogFunctions(options){
         DialogBoxIndirectParamA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([instance, template, parent, dialogFunc, initParam])=>
-                once(createDialog(instance, template, parent, dialogFunc, initParam),
-                    hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd))),
+            handler: ([instance, template, parent, dialogFunc, initParam])=>{
+                const thread = host.callerThread?.();
+                return once(createDialog(instance, template, parent, dialogFunc, initParam),
+                    hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd, thread)));
+            },
         },
 
         /**
@@ -949,10 +973,12 @@ export function createDialogFunctions(options){
         DialogBoxParamA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([instance, name, parent, dialogFunc, initParam])=>
-                once(createDialog(instance, templateAddress(instance, name), parent,
+            handler: ([instance, name, parent, dialogFunc, initParam])=>{
+                const thread = host.callerThread?.();
+                return once(createDialog(instance, templateAddress(instance, name), parent,
                     dialogFunc, initParam),
-                hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd))),
+                hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd, thread)));
+            },
         },
 
         /**

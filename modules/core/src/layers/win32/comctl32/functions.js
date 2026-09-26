@@ -52,6 +52,8 @@ const FAILED = -1;
  *     => ({ rva: number } | null)} [findResource]
  * @property {(instance: number) => number} [moduleBase]
  * @property {(instance: number, id: number) => string | null} [loadString]
+ * @property {(hwnd: number, options: { thread: unknown,
+ *     first?: import('../user32/dialogs.js').ModalHook }) => number | Promise<number>} [modal]
  *           The rest of what a property sheet needs; see propsheet.js.
  */
 

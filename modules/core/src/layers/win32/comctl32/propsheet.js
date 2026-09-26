@@ -241,6 +241,8 @@ const HEADER = 50;
 const HEADER_TITLE = Object.freeze({ x: 2 * MARGIN, y: MARGIN, height: 10 });
 const HEADER_SUBTITLE = Object.freeze({ x: 3 * MARGIN, y: MARGIN + 12, height: 20 });
 
+/** A MSG: the window, the message, its two parameters, the time and the point. */
+const MSG_SIZE = 28;
 /** NMHDR and the lParam PSHNOTIFY adds to it. */
 const PSHNOTIFY_SIZE = 16;
 /** Guest memory each sheet keeps for the structures it hands user32. */
@@ -277,6 +279,11 @@ const wizardFlags = flags=>(flags & (PSH_WIZARD | PSH_WIZARD_LITE | PSH_WIZARD97
  * @property {(instance: number) => number} [moduleBase]
  * @property {(instance: number, id: number) => string | null} [loadString]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(hwnd: number, options: { thread: unknown,
+ *     first?: import('../user32/dialogs.js').ModalHook }) => number | Promise<number>} [modal]
+ *     user32's modal loop for a dialog made modeless, run on the thread named
+ *     with each message offered to `first` before the dialog manager.
+ *     Absent, a modal sheet is a DialogBox and hears its keys only as one.
  */
 
 /**
@@ -1356,10 +1363,12 @@ export function createPropertySheetFunctions(host){
      * click on a tab asks it. A control that asks for every key keeps them.
      *
      * @param {Sheet} sheet @param {number} msg  The MSG's address.
-     * @param {unknown} thread
+     * @param {(hwnd: number, message: number, wParam: number, lParam: number)
+     *     => number | Promise<number>} send  Sends on the loop's thread.
+     * @param {(index: number, direction: number) => unknown} turnTo
      * @returns {boolean | Promise<boolean>} whether the key was the sheet's
      */
-    const pageKey = (sheet, msg, thread)=>{
+    const pageKey = (sheet, msg, send, turnTo)=>{
         const target = u32(msg);
         const key = u32(msg + 8);
         const held = (/** @type {number} */ vk)=>(api('GetKeyState', [vk]) & 0x8000) !== 0;
@@ -1370,7 +1379,7 @@ export function createPropertySheetFunctions(host){
         {
             return false;
         }
-        return after(api('SendMessageA', [target, WM_GETDLGCODE, key, msg]), wants=>{
+        return after(send(target, WM_GETDLGCODE, key, msg), wants=>{
             const count = sheet.entries.length;
             if (((wants >>> 0) & DLGC_WANTMESSAGE) !== 0)
             {
@@ -1378,8 +1387,40 @@ export function createPropertySheetFunctions(host){
             }
             // With no page on show, the first or the last is the one turned to.
             const from = sheet.current >= 0 ? sheet.current : turn > 0 ? -1 : count;
-            return count === 0 ? true : after(select(sheet, (from + turn + count) % count,
-                thread, { direction: turn }), ()=>true);
+            return count === 0 ? true
+                : after(turnTo((from + turn + count) % count, turn), ()=>true);
+        });
+    };
+
+    /**
+     * A modal sheet's loop, run by the dialog manager on the thread that
+     * called PropertySheet: each message is the sheet's to look at first, as
+     * PSM_ISDIALOGMESSAGE looks at it in a modeless sheet's loop. The page
+     * is turned by PSM_SETCURSEL, sent on that thread.
+     *
+     * @param {Sheet} sheet @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const runSheet = (sheet, thread)=>{
+        const msg = place(new Uint8Array(MSG_SIZE));
+        return after(/** @type {NonNullable<SheetHost['modal']>} */ (host.modal)(sheet.hwnd, {
+            thread,
+            first: (message, send)=>{
+                if (msg === 0)
+                {
+                    return false;
+                }
+                const bytes = new Uint8Array(MSG_SIZE);
+                const view = new DataView(bytes.buffer);
+                [message.hwnd, message.message, message.wParam, message.lParam,
+                    message.time ?? 0, message.x ?? 0, message.y ?? 0].forEach((value, index)=>
+                    view.setUint32(index * 4, value >>> 0, true));
+                host.writeMemory(msg, bytes);
+                return pageKey(sheet, msg, send, index=>send(sheet.hwnd, PSM_SETCURSEL, index, 0));
+            },
+        }), result=>{
+            free(msg);
+            return result;
         });
     };
 
@@ -1555,7 +1596,9 @@ export function createPropertySheetFunctions(host){
             case PSM_GETTABCONTROL:
                 return answer(sheet, sheet.tab);
             case PSM_ISDIALOGMESSAGE:
-                return after(pageKey(sheet, handle, thread), turned=>(turned ? answer(sheet, 1)
+                return after(pageKey(sheet, handle, (...args)=>api('SendMessageA', args),
+                    (to, direction)=>select(sheet, to, thread, { direction })), turned=>(turned
+                    ? answer(sheet, 1)
                     : after(api('IsDialogMessageA', [sheet.hwnd, handle]), taken=>
                         answer(sheet, taken))));
             case PSM_GETCURRENTPAGEHWND:
@@ -1727,14 +1770,23 @@ export function createPropertySheetFunctions(host){
                 {
                     api('EnableWindow', [owner, 0]);
                 }
-                return after(api('DialogBoxIndirectParamA', args), result=>{
+                /** @param {number} result */
+                const ended = result=>{
                     pending.delete(key);
                     if (owner !== 0)
                     {
                         api('EnableWindow', [owner, 1]);
                     }
                     return result | 0;
-                });
+                };
+                // The sheet runs its own loop, as it does on Windows, where
+                // user32 lends one; a DialogBox's otherwise.
+                if (!host.modal)
+                {
+                    return after(api('DialogBoxIndirectParamA', args), ended);
+                }
+                return after(api('CreateDialogIndirectParamA', args), made=>((made >>> 0) === 0
+                    ? ended(-1) : after(runSheet(sheet, thread), ended)));
             });
         });
     };

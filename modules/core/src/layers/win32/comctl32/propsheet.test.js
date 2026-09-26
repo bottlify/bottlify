@@ -252,6 +252,8 @@ function setup({ modal = false } = {}){
     let stringNext = STRINGS;
     /** The keys held down, as GetKeyState reads them. @type {Set<number>} */
     const keysDown = new Set();
+    /** What the window manager hands the machine, a modal loop among it. @type {any} */
+    let windowService = null;
     /** @param {number} bytes */
     const allocate = bytes=>{
         const at = heapNext;
@@ -309,6 +311,9 @@ function setup({ modal = false } = {}){
         park: ()=>({ parked: true }),
         idle: modal ? ()=>new Promise(resolve=>setImmediate(resolve)) : ()=>new Promise(()=>{}),
         keyState: key=>(keysDown.has(key) ? 0x8000 : 0),
+        windowService: service=>{
+            windowService = service;
+        },
         dc: ()=>({
             /** @param {number} hwnd @param {any} bounds */
             get: (hwnd, bounds = null)=>gdi.windowContext(hwnd, bounds),
@@ -345,6 +350,7 @@ function setup({ modal = false } = {}){
         },
         callerThread: ()=>THREAD,
         procedure: (name, handler)=>register(handler),
+        modal: (hwnd, options)=>windowService.modalLoop(hwnd, options),
         findResource: (instance, type, name)=>{
             const rva = type === 5 && instance === HINSTANCE && typeof name === 'number'
                 ? resources.get(name) : undefined;
@@ -552,7 +558,7 @@ function setup({ modal = false } = {}){
 
     return { memory, desktop, fns: table, comctl, send, pump, heard, register, pageProc,
         description, descriptions, header, createPage, result, string, windowRect, textOf,
-        makeOwner, press };
+        makeOwner, press, keysDown };
 }
 
 test('CreatePropertySheetPage copies the description, refuses one older than the first '
@@ -1219,4 +1225,36 @@ async()=>{
     await context.send([hwnd, PSM_PRESSBUTTON, PSBTN_BACK, 0]);
     assert.equal(shown(IDC_HEADER_TITLE), 0);
     assert.equal(page().top, top, 'the exterior page where the header was');
+});
+
+test('a modal sheet turns its pages from the keyboard in its own loop, Ctrl+PgDn and Ctrl+Tab '
+    + 'forward and Ctrl+PgUp back', { timeout: 10000 }, async()=>{
+    // comctl32's property sheet tests (test_hotkey_navigation) press the keys
+    // at a modal wizard of two pages: its loop hands each message to the
+    // sheet before the dialog manager, which would take Ctrl+Tab for Tab.
+    const context = setup({ modal: true });
+    const callback = context.register(([hwnd, message])=>{
+        if (message === PSCB_INITIALIZED)
+        {
+            for (const key of [VK_NEXT, VK_PRIOR, VK_TAB])
+            {
+                context.fns.PostMessageA.handler([hwnd, WM_KEYDOWN, key, 1]);
+            }
+            context.fns.PostMessageA.handler([hwnd, PSM_PRESSBUTTON, PSBTN_CANCEL, 0]);
+        }
+        return 0;
+    });
+    const pages = [];
+    for (const name of ['one', 'two'])
+    {
+        pages.push(await context.createPage(context.description({
+            proc: context.pageProc(name) })));
+    }
+    context.keysDown.add(VK_CONTROL);
+    const answer = await context.comctl.PropertySheetA.handler([context.header({
+        flags: PSH_WIZARD | PSH_USECALLBACK, pages, callback })]);
+    context.keysDown.clear();
+    assert.equal(answer, 0);
+    assert.deepEqual(context.heard.filter(([, code])=>code === PSN_SETACTIVE)
+        .map(([name])=>name), ['one', 'two', 'one', 'two']);
 });
