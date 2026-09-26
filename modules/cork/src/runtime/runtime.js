@@ -1533,6 +1533,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 return 0;
             }
+            // Single set as the batch is formed: the wide regions it would make
+            // would each leave at its first rounding block. A program under
+            // Direct3D has had it set since the device was made.
+            if (precision === 'wide'
+                && (view().getUint16(layout.x87Control, true) & 0x300) === 0)
+            {
+                precisionSeen();
+            }
             // A deep queue -- a loading phase, where every start met twice is
             // a candidate and one batch is in flight at a time -- takes a bigger
             // batch, a quarter of what waits up to `maxBatchRegions`, so the

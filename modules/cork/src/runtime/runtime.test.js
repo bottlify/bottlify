@@ -19,8 +19,9 @@ function machine(config = {}, ramSize = 4 << 20){
         Tables.SIZE + (/** @type {any} */ (config).blockProfile ? Tables.BLOCK_PROFILE_SIZE : 0)) });
     const bytes = ()=>new Uint8Array(memory.buffer);
     const view = ()=>new DataView(memory.buffer);
-    // The x87 as a fresh processor has it: every register empty.
+    // The x87 as a fresh processor has it: every register empty, the default control word.
     view().setUint8(layout.x87Empty, 0xff);
+    view().setUint16(layout.x87Control, 0x37f, true);
     const runtime = createCorkRuntime({
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
@@ -58,12 +59,13 @@ test('single precision seen leaves a wide x87 region once, and the address is tr
     const m = machine();
     const view = new DataView(m.memory.buffer);
     view.setUint8(m.layout.x87Empty, 0xff);
-    view.setUint16(m.layout.x87Control, 0x07f, true);
-    // fld1; fld1; fadd st0, st1; fstp st0; fstp st0; hlt -- a rounding block.
+    // fld1; fld1; fadd st0, st1; fstp st0; fstp st0; hlt -- a rounding block, translated
+    // under double precision and run under single.
     m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
     m.runtime.noteHot(CODE, 0);
     await m.runtime.translatePending();
     assert.equal(m.runtime.diagnostics().wide, true);
+    view.setUint16(m.layout.x87Control, 0x07f, true);
     const exit = m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
     assert.equal(exit.kind, 'untranslated');
     assert.equal(exit.retired, 2, 'the two fld1 ran, the fadd did not');
@@ -81,6 +83,21 @@ test('single precision seen leaves a wide x87 region once, and the address is tr
     assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
     assert.equal(m.runtime.diagnostics().precisionSwitches, 1, 'once');
     assert.equal(m.runtime.diagnostics().precision, 'narrow');
+});
+
+test('a batch formed while the machine has single set is compiled for single at once', async()=>{
+    const m = machine();
+    const view = new DataView(m.memory.buffer);
+    view.setUint8(m.layout.x87Empty, 0xff);
+    view.setUint16(m.layout.x87Control, 0x07f, true);
+    m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
+    m.runtime.noteHot(CODE, 0);
+    await m.runtime.translatePending();
+    const before = m.runtime.diagnostics();
+    assert.equal(before.precision, 'narrow');
+    assert.equal(before.precisionSwitches, 1);
+    assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
+    assert.equal(m.runtime.diagnostics().exits.untranslated, 0, 'no wide region to leave');
 });
 
 test('a region compiled for single leaves once another precision is seen, and the address is'

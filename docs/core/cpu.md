@@ -275,7 +275,12 @@ rounds every arithmetic result with no test of its own and leaves the same way w
 finds another precision set, and the runtime then drops the single ones and compiles every x87
 region with a test at each rounding operation for good (`precision` in the diagnostics:
 `wide`, `narrow`, `mixed`; `precisionSwitches` at most 2) -- Direct3D sets single at
-`CreateDevice` and keeps it, so a program under it moves once. The rounding in a module that is
+`CreateDevice` and keeps it, so a program under it moves once. A batch formed while the machine
+has single set moves at once, rather than making wide regions that would only leave at their
+first rounding block to be dropped: on cork-bench's single-precision builds, which set it before
+anything is translated, the transform loop's first iteration took 54.2 -> 38.4 ms and the entity
+update's 85.6 -> 63.0 (fresh hosts in one process, interleaved, median of 30), the transform's
+translation 62.6 -> 50.9 KB of modules with nothing invalidated. The rounding in a module that is
 not `precise` is Veltkamp's split -- c = x * (2^29 + 1), x rounded is c - (c - x), and a NaN
 out of it (an infinity, a NaN, or a magnitude from 2^995 - 2^966 up, where c overflows) keeps
 the value -- three floating operations where the double's bits took ten and a trip through the
