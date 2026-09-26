@@ -371,6 +371,35 @@ test('a primary buffer needs neither a size nor a format', ()=>{
     assert.equal(f.dsound.buffers()[0].primary, true);
 });
 
+test('through DirectSound 8, a 3D buffer is mono and has no pan', ()=>{
+    // Wine's ds3d8 test_secondary8: a stereo DSBCAPS_CTRL3D buffer, and a mono
+    // one with CTRLPAN as well, are DSERR_INVALIDPARAM; a mono one is made.
+    const f = fixture();
+    const out = 0x1000;
+    f.dsound.libraries['DSOUND.dll'].DirectSoundCreate8.handler([0, out, 0]);
+    const eight = { ...f, root: f.memory.u32(out) };
+    const at = 0x1800;
+    /** @param {any} on @param {any} spec */
+    const create = (on, spec)=>{
+        f.memory.setU32(at, 0xdeadbeef);
+        const result = f.bridge.call(on.root, 'CreateSoundBuffer',
+            [describeBuffer(f.memory, spec), at, 0]);
+        return { result, pointer: f.memory.u32(at) };
+    };
+    const DSBCAPS_CTRL3D = 0x00000010;
+    const stereo3d = create(eight, { flags: DSBCAPS_CTRL3D, channels: 2 });
+    assert.deepEqual(stereo3d, { result: DSERR_INVALIDPARAM, pointer: 0 });
+    const panned3d = create(eight, { flags: DSBCAPS_CTRL3D | DSBCAPS_CTRLPAN, channels: 1 });
+    assert.deepEqual(panned3d, { result: DSERR_INVALIDPARAM, pointer: 0 });
+    assert.equal(create(eight, { flags: DSBCAPS_CTRL3D, channels: 1 }).result, DS_OK);
+
+    // Wine's ds3d test_secondary makes both through DirectSoundCreate's object:
+    // the rule is DirectSound 8's.
+    const older = createRoot(f);
+    const both = create(older, { flags: DSBCAPS_CTRL3D | DSBCAPS_CTRLPAN, channels: 2 });
+    assert.equal(both.result, DS_OK);
+});
+
 test('a primary buffer described with a format is refused', ()=>{
     // Wine's dsound test_primary: DSBCAPS_PRIMARYBUFFER with a non-null
     // lpwfxFormat is DSERR_INVALIDPARAM and a null pointer back -- its format

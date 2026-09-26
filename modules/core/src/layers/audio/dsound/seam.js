@@ -44,6 +44,7 @@ const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
 const DSBCAPS_LOCHARDWARE = 0x00000004;
 const DSBCAPS_LOCSOFTWARE = 0x00000008;
+const DSBCAPS_CTRL3D = 0x00000010;
 const DSBCAPS_CTRLFREQUENCY = 0x00000020;
 const DSBCAPS_CTRLPAN = 0x00000040;
 const DSBCAPS_CTRLVOLUME = 0x00000080;
@@ -879,6 +880,15 @@ export function createDirectSound(
                 writeU32(out, 0);
                 return DSERR_INVALIDPARAM;
             }
+            // DirectSound 8's rule, not the older interface's, which makes
+            // both: a sound placed in space is one point, so it is mono and
+            // has no pan of its own.
+            if (root.eight && !primary && (flags & DSBCAPS_CTRL3D) !== 0
+                && ((flags & DSBCAPS_CTRLPAN) !== 0 || format?.channels !== 1))
+            {
+                writeU32(out, 0);
+                return DSERR_INVALIDPARAM;
+            }
 
             const resolved = format ?? normaliseFormat({});
             // Up to a whole frame, as DirectSound does: every cursor and every
@@ -1063,6 +1073,7 @@ export function createDirectSound(
         const device = {
             addRef: ()=>++references,
             release: ()=>(references = Math.max(0, references - 1)),
+            eight,
             /**
              * This object's primary buffer, once asked for: another object's
              * is another buffer (Wine's dsound test_primary_independent).
