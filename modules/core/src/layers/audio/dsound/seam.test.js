@@ -1230,6 +1230,31 @@ test('the primary buffer keeps every pointer it was asked for while its device l
     assert.equal(g.call(unknown, ADDREF) >>> 0, 0x80004003);
 });
 
+test('a pointer the bridge let go of names no buffer any more, and a kept one still does', ()=>{
+    // DuplicateSoundBuffer and SetNotificationPositions take pointers back:
+    // one whose words went back to the heap must not find the released
+    // buffer, while a primary buffer its device keeps is still that buffer.
+    const g = guestMachine();
+    g.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, 0x1000, 0]);
+    const device = g.memory.u32(0x1000);
+    assert.equal(g.call(device, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [describeBuffer(g.memory, { bytes: 4096 }), 0x1100, 0]), DS_OK);
+    const buffer = g.memory.u32(0x1100);
+    assert.equal(g.call(device, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [describeBuffer(g.memory, { flags: DSBCAPS_PRIMARYBUFFER }), 0x1100, 0]), DS_OK);
+    const primary = g.memory.u32(0x1100);
+    const { publisher } = g.dsound;
+    const RELEASE = 2;
+
+    assert.equal(g.call(buffer, RELEASE), 0);
+    assert.equal(publisher.objectAt(buffer), null);
+    assert.equal(g.call(primary, RELEASE), 0);
+    assert.notEqual(publisher.objectAt(primary), null, 'the device keeps its primary');
+    assert.equal(g.call(device, RELEASE), 0);
+    assert.equal(publisher.objectAt(primary), null);
+    assert.equal(publisher.objectAt(device), null);
+});
+
 test('a method reaches the arguments the guest pushed, at the offsets it pushed them', ()=>{
     const g = guestMachine();
     const out = 0x1000;

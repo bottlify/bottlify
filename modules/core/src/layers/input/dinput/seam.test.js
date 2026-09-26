@@ -1589,6 +1589,32 @@ test('a device goes on working after the DirectInput object that made it is rele
     assert.equal(g.call(device, 2), 0);
 });
 
+test('a pointer the bridge let go of names no device any more', ()=>{
+    // Its words go back to the heap: a pointer handed to SetCooperativeLevel
+    // or kept by a program past its Release must not find the released device.
+    const g = guestMachine();
+    assert.equal(g.dinput.libraries['DINPUT.dll']
+        .DirectInputCreateA.handler([0, 0x0500, AT.out, 0]), DI_OK);
+    const root = g.memory.u32(AT.out);
+    writeGuid(g.memory, AT.guid, GUID_SysMouse);
+    assert.equal(g.call(root, slotOf(IDIRECTINPUT_SLOTS, 'CreateDevice'),
+        [AT.guid, AT.out, 0]), DI_OK);
+    const device = g.memory.u32(AT.out);
+    writeGuid(g.memory, AT.iid, '{5944E682-C92E-11CF-BFC7-444553540000}');
+    assert.equal(g.call(device, 0, [AT.iid, AT.state]), 0);
+    const second = g.memory.u32(AT.state);
+    const { publisher } = g.dinput;
+
+    const held = publisher.objectAt(device);
+    assert.notEqual(held, null);
+    assert.equal(g.call(device, 2), 1);
+    assert.equal(publisher.objectAt(device), held, 'still held, through the second');
+    assert.equal(g.call(second, 2), 0);
+    assert.equal(publisher.objectAt(device), null);
+    assert.equal(g.call(root, 2), 0);
+    assert.equal(publisher.objectAt(root), null);
+});
+
 test('diagnostics report what a run actually did', ()=>{
     const f = keyboard();
     setBufferSize(f, f.device, 8);

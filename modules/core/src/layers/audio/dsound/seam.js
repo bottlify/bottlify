@@ -374,6 +374,14 @@ export function createPublisher({ publishInterface }){
                 get destroyed(){
                     return api.destroyed === true;
                 },
+                // The bridge let the pointer go, and its words with it.
+                /** @param {number} pointer */
+                forgotten: pointer=>{
+                    if (byPointer.get(pointer) === api)
+                    {
+                        byPointer.delete(pointer);
+                    }
+                },
             };
             adapters.set(api, adapter);
         }

@@ -544,3 +544,42 @@ test('an object that is over keeps each interface still reachable, and only thos
     assert.equal(f.call('Release', second), 0x80004003, 'until nothing keeps it either');
     assert.equal(f.table.diagnostics().comInterfaces, 1);
 });
+
+test('an object is told each pointer of its that the bridge forgets, as it forgets it', ()=>{
+    // A map an object model keeps from pointers back to objects has to drop
+    // the entry then: the words go back to the heap, and the next interface
+    // laid there is another object's.
+    const f = interfaces();
+    let count = 1;
+    let kept = true;
+    /** @type {[number, string][]} */
+    const told = [];
+    const counted = {
+        /** @param {string} id */
+        interfaceFor: id=>(EVERY.includes(id) ? { id, methods: METHODS } : null),
+        addRef: ()=>++count,
+        release: ()=>(count = Math.max(0, count - 1)),
+        get destroyed(){
+            return count === 0;
+        },
+        /** @param {string} id */
+        reachable: id=>kept && id === IID_B,
+        /** @param {number} pointer @param {string} id */
+        forgotten: (pointer, id)=>told.push([pointer, id]),
+    };
+    const first = f.table.publish(counted, IID);
+    const second = f.query(first, IID_B);
+    assert.equal(f.call('Release', second), 1);
+    assert.deepEqual(told, [], 'nothing is forgotten while the object is held');
+    assert.equal(f.call('Release', first), 0);
+    assert.deepEqual(told, [[first, IID]], 'the one nothing keeps goes at once');
+
+    kept = false;
+    f.call('Release', f.table.publish({
+        /** @param {string} id */
+        interfaceFor: id=>(id === IID ? { id, methods: METHODS } : null),
+        addRef: ()=>2,
+        release: ()=>1,
+    }, IID));
+    assert.deepEqual(told, [[first, IID], [second, IID_B]], 'and the kept one once it is not');
+});

@@ -469,6 +469,13 @@ export function createPublisher({ publishInterface }){
                 get destroyed(){
                     return api.destroyed === true;
                 },
+                /** @param {number} pointer */
+                forgotten: pointer=>{
+                    if (byPointer.get(pointer) === api)
+                    {
+                        byPointer.delete(pointer);
+                    }
+                },
             };
             adapters.set(api, adapter);
         }
