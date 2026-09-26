@@ -616,3 +616,26 @@ test('a 5-6-5 DIB draws as 5-6-5, from StretchDIBits and in a section of its own
     const at = view.getUint32(BITS_OUT, true);
     assert.deepEqual([...bytes.subarray(at, at + 2)], [0xe0, 0x07]);
 });
+
+test('GetDIBits into BI_BITFIELDS writes the masks it packs the pixels by', ()=>{
+    // Wine's test_GetDIBits_BI_BITFIELDS: with bits, the masks come back
+    // filled in, and biSizeImage with them.
+    const { fns, view } = wiredGdi();
+    const BI_BITFIELDS = 3;
+    const screen = fns.GetDC.handler([0]);
+    const dc = fns.CreateCompatibleDC.handler([screen]);
+    const bitmap = fns.CreateCompatibleBitmap.handler([screen, 2, 1]);
+    fns.SelectObject.handler([dc, bitmap]);
+    fns.SetPixel.handler([dc, 0, 0, 0x0000ff]);
+    fns.SetPixel.handler([dc, 1, 0, 0x00ff00]);
+
+    putInfo(view, { width: 2, height: 1, bitCount: 16, compression: BI_BITFIELDS,
+        table: [0, 0, 0] });
+    view.setUint32(WIRED_INFO + BITMAPINFOHEADER.biSizeImage, 0xdeadbeef, true);
+    assert.equal(fns.GetDIBits.handler([dc, bitmap, 0, 1, WIRED_BITS, WIRED_INFO, 0]), 1);
+    assert.deepEqual([0, 4, 8].map(at=>view.getUint32(WIRED_INFO + 40 + at, true)),
+        [0xf800, 0x07e0, 0x001f]);
+    assert.equal(view.getUint32(WIRED_INFO + BITMAPINFOHEADER.biSizeImage, true), 4);
+    assert.deepEqual([view.getUint16(WIRED_BITS, true), view.getUint16(WIRED_BITS + 2, true)],
+        [0xf800, 0x07e0], 'red and green, packed by those masks');
+});

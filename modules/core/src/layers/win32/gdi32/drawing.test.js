@@ -861,22 +861,61 @@ test('the drawing entry points reach the service, and fail without one', ()=>{
 });
 
 test('GetDIBits describes a bitmap before it copies one', ()=>{
-    // A null buffer asks for the shape, which is bookkeeping and answerable
-    // without any pixels at all -- and is how a caller sizes the buffer it will
-    // ask with next.
+    // A null buffer and a biBitCount of zero ask for the bitmap's own shape,
+    // which is bookkeeping and answerable without any pixels at all -- and is
+    // how a caller sizes the buffer it will ask with next. Wine's
+    // test_GetDIBits_BI_BITFIELDS: a sixteen- or thirty-two-bit bitmap is
+    // described as BI_BITFIELDS, its masks not yet written, and the answer is 1.
     const { memory, fns, hdc } = setup();
     const bitmap = fns.CreateCompatibleBitmap.handler([hdc, 64, 48]);
 
-    memory.putU32s(STRUCT, new Array(10).fill(0));
-    assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 48, 0, STRUCT, 0]), 48);
+    memory.putU32s(STRUCT, [40, ...new Array(12).fill(0)]);
+    assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 48, 0, STRUCT, 0]), 1);
     assert.equal(memory.u32(STRUCT), 40, 'biSize');
     assert.equal(memory.u32(STRUCT + 4), 64, 'biWidth');
     assert.equal(memory.u32(STRUCT + 8), 48, 'biHeight');
     assert.equal(memory.u16(STRUCT + 12), 1, 'biPlanes');
+    assert.equal(memory.u16(STRUCT + 14), 32, 'biBitCount');
+    assert.equal(memory.u32(STRUCT + 16), 3, 'biCompression: BI_BITFIELDS');
+    assert.equal(memory.u32(STRUCT + 20), 64 * 4 * 48, 'biSizeImage');
+    assert.deepEqual([40, 44, 48].map(at=>memory.u32(STRUCT + at)), [0, 0, 0]);
 
     // The rows themselves are pixels, and without a drawing service there are
     // none to copy.
     assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 48, OUT, STRUCT, 0]), 0);
+});
+
+test('GetDIBits keeps the format asked for, sizes the image in it, and names its masks', ()=>{
+    // Wine's test_GetDIBits_selected_DDB fills biSizeImage this way before
+    // allocating; test_GetDIBits_BI_BITFIELDS reads the masks back.
+    const { memory, fns, hdc } = setup();
+    const bitmap = fns.CreateCompatibleBitmap.handler([hdc, 10, 4]);
+
+    memory.putU32s(STRUCT, [40, 10, 4, 1 | (24 << 16), 0, 0xdeadbeef, 0, 0, 37, 0]);
+    assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 4, 0, STRUCT, 0]), 1);
+    assert.equal(memory.u16(STRUCT + 14), 24, 'the depth asked for, not the bitmap\'s');
+    assert.equal(memory.u32(STRUCT + 16), 0, 'nor its compression');
+    assert.equal(memory.u32(STRUCT + 20), 32 * 4, 'thirty bytes a row, padded to a DWORD');
+    assert.equal(memory.u32(STRUCT + 32), 0, 'biClrUsed');
+
+    memory.putU32s(STRUCT, [40, 10, -4, 1 | (16 << 16), 3, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 0, OUT, STRUCT, 0]), 1,
+        'no lines asks the same question a null buffer does');
+    assert.equal(memory.u32(STRUCT + 20), 20 * 4, 'a negative height is still four rows');
+    assert.deepEqual([40, 44, 48].map(at=>memory.u32(STRUCT + at)), [0xf800, 0x07e0, 0x001f],
+        'sixteen bits read out of a device-dependent bitmap are 5-6-5');
+    memory.putU32s(STRUCT + 12, [1 | (32 << 16), 3]);
+    fns.GetDIBits.handler([hdc, bitmap, 0, 4, 0, STRUCT, 0]);
+    assert.deepEqual([40, 44, 48].map(at=>memory.u32(STRUCT + at)),
+        [0x00ff0000, 0x0000ff00, 0x000000ff]);
+
+    // Wine's test_dib_formats: seven bits is no format, and neither is a
+    // usage past DIB_PAL_COLORS.
+    memory.putU32s(STRUCT, [40, 10, 4, 1 | (7 << 16), 0, 0, 0, 0, 0, 0]);
+    assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 4, 0, STRUCT, 0]), 0);
+    assert.equal(memory.u16(STRUCT + 14), 7, 'and a refused header is left as it was');
+    memory.putU32s(STRUCT, [40, 10, 4, 1 | (24 << 16), 0, 0, 0, 0, 0, 0]);
+    assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 4, 0, STRUCT, 2]), 0);
 });
 
 test('TextOutW reads code units and draws through the same engine as the narrow twin', ()=>{

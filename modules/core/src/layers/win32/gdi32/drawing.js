@@ -49,8 +49,15 @@ import {
     readU32,
 } from './structs.js';
 
-/** iUsage of the DIB functions: a colour table of RGBQUADs, not palette indices. */
+/**
+ * iUsage of the DIB functions: a colour table of RGBQUADs, or of WORD
+ * indices into the palette the DC has selected. Nothing else is a usage.
+ */
 const DIB_RGB_COLORS = 0;
+const DIB_PAL_COLORS = 1;
+
+/** The drawing layer's name for a sixteen-bit surface made in 5-6-5. */
+const RGB_565 = '565';
 /**
  * The compressions the DIB decoder reads: none, and BI_BITFIELDS -- no
  * compression either, the three channels named by masks -- at 16 and 32 bits.
@@ -178,6 +185,30 @@ export function combine(first, second, mode){
         default:
             return null;
     }
+}
+
+/**
+ * The masks GetDIBits reads a bitmap out in when it is asked for BI_BITFIELDS:
+ * the bitmap's own at its own depth -- a section's masks, 5-6-5 for a
+ * device-dependent bitmap or a surface made in it, 5-5-5 for any other
+ * sixteen-bit section -- and otherwise the layout a display has at that depth.
+ *
+ * @param {any} shape  The bitmap's attributes.
+ * @param {number} bitCount  The depth asked for, 16 or 32.
+ * @returns {number[]} red, green and blue
+ */
+function masksFor(shape, bitCount){
+    if (shape.bitCount === bitCount && shape.compression === BI_BITFIELDS && shape.bitfields)
+    {
+        return [...shape.bitfields];
+    }
+    if (bitCount === 32)
+    {
+        return [0x00ff0000, 0x0000ff00, 0x000000ff];
+    }
+    return shape.bitCount === 16 && (shape.section >>> 0) !== 0 && shape.format !== RGB_565
+        ? [0x7c00, 0x03e0, 0x001f]
+        : [0xf800, 0x07e0, 0x001f];
 }
 
 /**
@@ -667,10 +698,13 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
          * int GetDIBits(HDC hdc, HBITMAP hbm, UINT start, UINT cLines,
          *   LPVOID lpvBits, LPBITMAPINFO lpbmi, UINT usage)
          *
-         * A null lpvBits asks for the header to be filled in and nothing else,
-         * which is how a program discovers a bitmap shape before allocating for
-         * it. That path answers even when there is nothing to draw with, because
-         * the shape is bookkeeping and the pixels are not.
+         * A null lpvBits, or no lines, asks for the header to be filled in and
+         * nothing else, which is how a program discovers a bitmap's shape
+         * before allocating for it; that answers 1, and answers even when
+         * there is nothing to draw with, because the shape is bookkeeping and
+         * the pixels are not. A biBitCount of zero asks for the bitmap's own
+         * format; any other is the format the caller wants, which is kept and
+         * has its image size, and for BI_BITFIELDS its masks, filled in.
          *
          * The pixels are the bitmap's, wherever it is selected: the DC only
          * says which device the format is converted for. Windows documents
@@ -680,24 +714,61 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
         GetDIBits: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([handle, bitmap, start, lines, bits, info])=>{
+            handler: ([handle, bitmap, start, lines, bits, info, usage])=>{
                 const record = objects.get(bitmap);
                 const dc = dcOf(handle);
-                if (!record || record.type !== 'bitmap' || !dc || (info >>> 0) === 0)
+                if (!record || record.type !== 'bitmap' || !dc || (info >>> 0) === 0
+                    || (usage >>> 0) > DIB_PAL_COLORS)
                 {
                     return 0;
                 }
                 const shape = record.attributes;
-                if ((bits >>> 0) === 0)
-                {
-                    writeU32s(host, info + BITMAPINFOHEADER.biSize,
-                        [BITMAPINFOHEADER.SIZE, shape.width, shape.height]);
-                    writeU16(host, info + BITMAPINFOHEADER.biPlanes, 1);
-                    writeU16(host, info + BITMAPINFOHEADER.biBitCount, shape.bitCount);
-                    writeU32s(host, info + BITMAPINFOHEADER.biCompression, [0, 0, 0, 0, 0, 0]);
-                    return shape.height;
-                }
                 const header = readBitmapInfoHeader(host, info);
+                if (header.size < BITMAPINFOHEADER.SIZE)
+                {
+                    // A BITMAPCOREHEADER's fields are WORDs at other offsets,
+                    // and forty bytes written over its twelve would land on
+                    // the program's colour table.
+                    return 0;
+                }
+                const describing = (bits >>> 0) === 0 || (lines >>> 0) === 0;
+                if (header.bitCount === 0)
+                {
+                    if (!describing)
+                    {
+                        return 0;
+                    }
+                    const depth = shape.bitCount;
+                    writeU32s(host, info + BITMAPINFOHEADER.biWidth, [shape.width, shape.height]);
+                    writeU16(host, info + BITMAPINFOHEADER.biPlanes, 1);
+                    writeU16(host, info + BITMAPINFOHEADER.biBitCount, depth);
+                    writeU32s(host, info + BITMAPINFOHEADER.biCompression, [
+                        depth === 16 || depth === 32 ? BI_BITFIELDS : BI_RGB,
+                        dibStride(shape.width, depth) * shape.height, 0, 0, 0, 0,
+                    ]);
+                    return 1;
+                }
+                const masked = header.compression === BI_BITFIELDS
+                    && (header.bitCount === 16 || header.bitCount === 32);
+                if (!DIB_BIT_COUNTS.has(header.bitCount)
+                    || (header.compression !== BI_RGB && !masked)
+                    || header.width <= 0 || header.height === 0
+                    || (header.planes === 0 && (lines >>> 0) !== 0))
+                {
+                    return 0;
+                }
+                writeU32s(host, info + BITMAPINFOHEADER.biSizeImage,
+                    [dibStride(header.width, header.bitCount) * Math.abs(header.height)]);
+                writeU32s(host, info + BITMAPINFOHEADER.biClrUsed, [0]);
+                const masks = masked ? masksFor(shape, header.bitCount) : [];
+                if (masked)
+                {
+                    writeU32s(host, info + BITMAPINFOHEADER.SIZE, masks);
+                }
+                if (describing)
+                {
+                    return 1;
+                }
                 const wanted = Math.min(lines >>> 0, shape.height);
                 const buffer = new Uint8Array(
                     (((header.width * header.bitCount + 31) / 32 | 0) * 4) * wanted);
@@ -708,6 +779,7 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                         ? interfaces.getDIBits(source >>> 0, {
                             header,
                             bits: buffer,
+                            masks,
                             startScan: start >>> 0,
                             scanLines: wanted,
                         })
