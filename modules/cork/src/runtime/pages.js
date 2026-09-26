@@ -46,11 +46,42 @@ export const GUEST_PAGE = 4096;
  * @returns {PageTable}
  */
 export function createPageTable(memory, layout){
-    // The buffer object changes when the memory grows: the view is taken afresh.
-    const flags = ()=>new Uint8Array(memory.buffer, layout.tables + Tables.PAGE_FLAGS,
-        Tables.PAGE_FLAGS_SIZE);
-    const ranges = ()=>new Uint8Array(memory.buffer, layout.tables + Tables.CODE_RANGES,
-        1 << 21);
+    // Growing a memory detaches its old buffer, and a view over a detached
+    // buffer has no bytes: the views are taken afresh then, and only then. A
+    // view made per call costs more than the lookup it serves, and the runtime
+    // asks once per untranslated start. A shared memory's old buffer is not
+    // detached, and its views still cover the table, which never moves.
+    let flagView = new Uint8Array(0);
+    let rangeView = flagView;
+    let words = new DataView(new ArrayBuffer(0));
+    const fresh = ()=>{
+        const buffer = memory.buffer;
+        flagView = new Uint8Array(buffer, layout.tables + Tables.PAGE_FLAGS,
+            Tables.PAGE_FLAGS_SIZE);
+        rangeView = new Uint8Array(buffer, layout.tables + Tables.CODE_RANGES, 1 << 21);
+        words = new DataView(buffer);
+    };
+    const flags = ()=>{
+        if (flagView.byteLength === 0)
+        {
+            fresh();
+        }
+        return flagView;
+    };
+    const ranges = ()=>{
+        if (rangeView.byteLength === 0)
+        {
+            fresh();
+        }
+        return rangeView;
+    };
+    const tableWords = ()=>{
+        if (words.byteLength === 0)
+        {
+            fresh();
+        }
+        return words;
+    };
     const GRANULE = Tables.CODE_GRANULE_SHIFT;
     const ramPages = Math.ceil(layout.ramSize / GUEST_PAGE);
     flags().fill(PageFlag.INACCESSIBLE, ramPages);
@@ -119,12 +150,10 @@ export function createPageTable(memory, layout){
             }
         },
         staleAddress(){
-            return new DataView(memory.buffer)
-                .getUint32(layout.tables + Tables.STALE_ADDRESS, true);
+            return tableWords().getUint32(layout.tables + Tables.STALE_ADDRESS, true);
         },
         staleSize(){
-            return new DataView(memory.buffer)
-                .getUint32(layout.tables + Tables.STALE_SIZE, true);
+            return tableWords().getUint32(layout.tables + Tables.STALE_SIZE, true);
         },
     };
 }
