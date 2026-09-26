@@ -369,6 +369,11 @@ export function createPublisher({ publishInterface }){
                 // Whether the bridge keeps the pointer at a count of zero: a
                 // primary buffer lives as long as its device does.
                 reachable: ()=>api.reachable?.() ?? false,
+                // One count for every interface an object answers to, so its
+                // last reference ends them all; `reachable` still keeps each.
+                get destroyed(){
+                    return api.destroyed === true;
+                },
             };
             adapters.set(api, adapter);
         }
@@ -1089,6 +1094,9 @@ export function createDirectSound(
             release: ()=>(references = Math.max(0, references - 1)),
             get references(){
                 return references;
+            },
+            get destroyed(){
+                return references === 0;
             },
             eight,
             /**

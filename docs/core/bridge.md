@@ -394,12 +394,13 @@ way of counting (DirectDraw's generations each end apart). A pointer is kept ins
 answers an optional `reachable(interfaceId)` with yes: something besides the program keeps it (a
 DirectSound device keeps its primary buffer), so the pointer stays, and every such pointer is asked
 again after each later release and forgotten once the answer is no. `ole32`'s objects,
-DirectInput's devices and the drawing APIs' adapter (`graphics/seam/com.js`: true when the release
-ended the object -- a count of zero on an object that does not say it outlives it, which a
-DirectDraw object says while another generation is held) report `destroyed`; the DirectSound and `oleaut32` adapters do not yet, so
-theirs still end one interface at a time. A method without `invoke` answers `E_NOTIMPL`; a call
-through an unpublished pointer answers `E_POINTER`. A method's `invoke` may return a promise, and
-the caller is parked on it.
+DirectInput's devices, DirectSound's devices and buffers (a primary buffer's pointers then held by
+`reachable` while its device lives) and the drawing APIs' adapter (`graphics/seam/com.js`: true
+when the release ended the object -- a count of zero on an object that does not say it outlives
+it, which a DirectDraw object says while another generation is held) report `destroyed`; the
+`oleaut32` adapter does not yet, so its objects still end one interface at a time. A method
+without `invoke` answers `E_NOTIMPL`; a call through an unpublished pointer answers `E_POINTER`. A
+method's `invoke` may return a promise, and the caller is parked on it.
 
 A table that cannot be built — stub table full, or the arena refusing — is counted as a refusal
 with its reason, and the guest gets a failure code rather than a null pointer with `S_OK`.

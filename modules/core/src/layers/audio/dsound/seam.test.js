@@ -1182,6 +1182,54 @@ test('the primary buffer answers through its pointer after its last release', ()
     assert.equal(g.call(primary, ADDREF) >>> 0, 0x80004003, 'E_POINTER');
 });
 
+/** IID_IUnknown, as a program lays it out for QueryInterface. */
+const IUNKNOWN_BYTES = new Uint8Array([
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+]);
+
+test('a buffer whose last reference goes is gone through every interface it was asked for', ()=>{
+    // Released first through the pointer CreateSoundBuffer answered, then
+    // through the IUnknown asked for later: neither may reach it after.
+    const g = guestMachine();
+    g.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, 0x1000, 0]);
+    const device = g.memory.u32(0x1000);
+    assert.equal(g.call(device, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [describeBuffer(g.memory, { bytes: 4096 }), 0x1100, 0]), DS_OK);
+    const buffer = g.memory.u32(0x1100);
+    g.memory.writeMemory(0x1200, IUNKNOWN_BYTES);
+    assert.equal(g.call(buffer, 0, [0x1200, 0x1300]), DS_OK);
+    const unknown = g.memory.u32(0x1300);
+    const [ADDREF, RELEASE] = [1, 2];
+
+    assert.equal(g.call(buffer, RELEASE), 1);
+    assert.equal(g.call(unknown, RELEASE), 0);
+    assert.equal(g.call(buffer, ADDREF) >>> 0, 0x80004003, 'E_POINTER');
+    assert.equal(g.call(unknown, ADDREF) >>> 0, 0x80004003);
+});
+
+test('the primary buffer keeps every pointer it was asked for while its device lives', ()=>{
+    const g = guestMachine();
+    g.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, 0x1000, 0]);
+    const device = g.memory.u32(0x1000);
+    assert.equal(g.call(device, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [describeBuffer(g.memory, { flags: DSBCAPS_PRIMARYBUFFER }), 0x1100, 0]), DS_OK);
+    const primary = g.memory.u32(0x1100);
+    g.memory.writeMemory(0x1200, IUNKNOWN_BYTES);
+    assert.equal(g.call(primary, 0, [0x1200, 0x1300]), DS_OK);
+    const unknown = g.memory.u32(0x1300);
+    const [ADDREF, RELEASE] = [1, 2];
+
+    assert.equal(g.call(primary, RELEASE), 1);
+    assert.equal(g.call(unknown, RELEASE), 0);
+    assert.equal(g.call(unknown, ADDREF), 1, 'the device keeps it');
+    assert.equal(g.call(unknown, RELEASE), 0);
+
+    assert.equal(g.call(device, RELEASE), 0);
+    assert.equal(g.call(primary, ADDREF) >>> 0, 0x80004003, 'and then neither pointer is kept');
+    assert.equal(g.call(unknown, ADDREF) >>> 0, 0x80004003);
+});
+
 test('a method reaches the arguments the guest pushed, at the offsets it pushed them', ()=>{
     const g = guestMachine();
     const out = 0x1000;
