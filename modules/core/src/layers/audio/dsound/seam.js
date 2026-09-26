@@ -845,11 +845,20 @@ export function createDirectSound(
             const flags = readU32(descriptor + DSBUFFERDESC.dwFlags);
             const primary = (flags & DSBCAPS_PRIMARYBUFFER) !== 0;
             const wanted = readU32(descriptor + DSBUFFERDESC.dwBufferBytes);
-            const format = readFormat(readU32(descriptor + DSBUFFERDESC.lpwfxFormat));
+            const formatAt = readU32(descriptor + DSBUFFERDESC.lpwfxFormat);
+            const format = readFormat(formatAt);
             const asked = `CreateSoundBuffer flags=0x${(flags >>> 0).toString(16)} bytes=${wanted}`
                 + ` fmt=${format ? `${format.sampleRate}/${format.bitsPerSample}/${format.channels}` : '-'}`;
             record(asked);
             creations.push(asked);
+
+            // The primary buffer's format is the device's, set afterwards
+            // through SetFormat; a description that names one is refused.
+            if (primary && formatAt !== 0)
+            {
+                writeU32(out, 0);
+                return DSERR_INVALIDPARAM;
+            }
 
             // A device has one primary buffer, and asking again hands it out
             // again with its count raised; the new description is ignored, as

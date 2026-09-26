@@ -371,6 +371,28 @@ test('a primary buffer needs neither a size nor a format', ()=>{
     assert.equal(f.dsound.buffers()[0].primary, true);
 });
 
+test('a primary buffer described with a format is refused', ()=>{
+    // Wine's dsound test_primary: DSBCAPS_PRIMARYBUFFER with a non-null
+    // lpwfxFormat is DSERR_INVALIDPARAM and a null pointer back -- its format
+    // is set afterwards, through SetFormat.
+    const f = createRoot();
+    const out = 0x1800;
+    f.memory.setU32(out, 0xdeadbeef);
+    const descriptor = describeBuffer(f.memory,
+        { flags: DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME });
+    f.memory.setU32(descriptor + DSBUFFERDESC.lpwfxFormat, 0x2000);
+    assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]),
+        DSERR_INVALIDPARAM);
+    assert.equal(f.memory.u32(out), 0);
+    assert.equal(f.dsound.buffers().length, 0, 'nothing was made');
+
+    // And not handed the one that exists either.
+    createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER, descriptor: 0x2200 });
+    assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]),
+        DSERR_INVALIDPARAM);
+    assert.equal(f.memory.u32(out), 0);
+});
+
 test('a device has one primary buffer, handed out again with its count raised', ()=>{
     // Wine's dsound test_primary and test_hw_buffers: a second primary is the
     // first, whatever the second description says, and releasing it leaves
