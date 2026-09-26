@@ -392,6 +392,13 @@ export function createGpuRenderer(services){
      * @type {Map<string, ReturnType<typeof generateDraw>>}
      */
     const generatedDraws = new Map();
+    /**
+     * A draw's bind plan by the same key: the units it samples and its program
+     * stages are folded into the key, so the plan is the key's as the source is.
+     *
+     * @type {Map<string, BindPlan>}
+     */
+    const plans = new Map();
     /** @type {Map<string, any>} */
     const samplers = new Map();
     const stats = {
@@ -1706,7 +1713,12 @@ export function createGpuRenderer(services){
             }
             return;
         }
-        const plan = bindPlanOf(state, generated.programs);
+        let plan = plans.get(key);
+        if (plan === undefined)
+        {
+            plan = bindPlanOf(state, generated.programs);
+            plans.set(key, plan);
+        }
         const sampled = plan.textures.map(entry=>({
             entry,
             texture: textureForBinding(scene, entry, plan.fragmentBlock),
@@ -1735,7 +1747,10 @@ export function createGpuRenderer(services){
             sampler: samplerFor(texture),
             texture,
         }));
-        const pipeline = pipelineFor(key, generated, drawDescriptor(state), plan);
+        // The descriptor only when the key has no pipeline yet: it is a dozen
+        // objects a draw, for a state that repeats all frame.
+        const pipeline = pipelines.get(key)
+            ?? pipelineFor(key, generated, drawDescriptor(state), plan);
         // One draw, one MVP: shared with any program stage that reads the
         // same state matrix, instead of each reader multiplying it out again
         // -- and, when the view and the object are both what the previous
