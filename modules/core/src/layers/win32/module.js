@@ -98,6 +98,9 @@ import { registerQuartzClasses } from './quartz/graph.js';
  */
 const CDECL_LIBRARIES = /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase)\.dll$/i;
 
+/** The reason a DllMain is called with when its library is unloaded, or the process ends. */
+const DLL_PROCESS_DETACH = 0;
+
 /**
  * The libraries Windows keeps under
  * `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs`.
@@ -696,6 +699,51 @@ export const win32Module = {
             },
         });
 
+        /** Set once the process has begun to end, so that it ends only once. */
+        let ending = false;
+        /**
+         * ExitProcess, and the C runtime's exits that end in it: every other
+         * thread ends, each library still attached is called with
+         * DLL_PROCESS_DETACH on this thread -- the last attached first, and
+         * lpvReserved non-NULL because the process is ending -- and only then
+         * is the code recorded, which is what stops the machine. With nothing
+         * to tell, nothing else would run, so the code is recorded at once.
+         * An ExitProcess from inside one of those DllMains ends it there.
+         *
+         * @param {number} code
+         */
+        const endProcess = code=>{
+            const attached = ending ? [] : (modules.attachedLibraries?.() ?? []);
+            ending = true;
+            if (attached.length === 0)
+            {
+                exitCode = code;
+                return bridge.park();
+            }
+            const self = kernel.currentThread();
+            for (const thread of kernel.threads())
+            {
+                if (thread !== self && thread.state !== kernel.ThreadState?.TERMINATED)
+                {
+                    kernel.exitThread(thread, code);
+                }
+            }
+            /** @type {Promise<any>} */
+            let told = Promise.resolve(0);
+            for (const library of attached)
+            {
+                told = told.then(()=>bridge.callGuest({
+                    entry: library.entryPoint,
+                    args: [library.base, DLL_PROCESS_DETACH, 1],
+                    thread: self,
+                }));
+            }
+            return told.then(()=>{
+                exitCode = code;
+                return 0;
+            });
+        };
+
         libraries = {
             'KERNEL32.dll': {
                 ...createConsoleFunctions({
@@ -704,6 +752,7 @@ export const win32Module = {
                         exitCode = code;
                     },
                     park: ()=>bridge.park(),
+                    end: code=>endProcess(code),
                 }),
                 ...createThreadingFunctions({
                     kernel,
@@ -1028,10 +1077,7 @@ export const win32Module = {
                     // `exit` does not come back, so like ExitProcess it records
                     // the code and parks the calling thread rather than
                     // returning to a caller that no longer exists.
-                    exitProcess: (/** @type {number} */ code)=>{
-                        exitCode = code;
-                        return bridge.park();
-                    },
+                    exitProcess: (/** @type {number} */ code)=>endProcess(code),
                     exit: (/** @type {number} */ code)=>{
                         exitCode = code;
                     },

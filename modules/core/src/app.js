@@ -2515,6 +2515,13 @@ async function buildApp(options){
      * @type {Map<number, any>}
      */
     const dataFiles = new Map();
+    /**
+     * Every library whose DllMain has been told DLL_PROCESS_ATTACH, in the
+     * order it was: ExitProcess tells them of the detach the other way round.
+     *
+     * @type {any[]}
+     */
+    const attachOrder = [];
     /** @type {any} */
     let mainModule = null;
 
@@ -3272,6 +3279,11 @@ async function buildApp(options){
                 load: (name, flags)=>loadLibraryAtRuntime(name, flags),
                 /** @param {number} handle */
                 dataFile: handle=>dataFiles.get(handle >>> 0) ?? null,
+                /** The libraries still attached, the last attached first. */
+                attachedLibraries: ()=>attachOrder
+                    .filter(held=>held.loaded !== false && held.attached !== false)
+                    .reverse()
+                    .map(held=>({ name: held.name, base: held.base, entryPoint: held.entryPoint })),
                 /** @param {any} asked */
                 resolved: asked=>events.emit('resolved', asked),
                 ...resourceLookup(()=>mainModule, byBase, dataFiles),
@@ -3937,6 +3949,11 @@ async function buildApp(options){
         }
         const unload = ()=>{
             threadBlocks?.removeModule(held.base);
+            const at = attachOrder.indexOf(held);
+            if (at >= 0)
+            {
+                attachOrder.splice(at, 1);
+            }
             if (held.file)
             {
                 byName.delete(moduleKeyOf(held.name));
@@ -4217,6 +4234,7 @@ async function buildApp(options){
                             args: [base, DLL_PROCESS_ATTACH, 0],
                             thread: asked,
                         });
+                        attachOrder.push(held);
                     }
                     events.emit('library-loaded', { name, base });
                     return base;
@@ -4243,7 +4261,10 @@ async function buildApp(options){
                 entry: loaded.entryPoint,
                 args: [loaded.base, DLL_PROCESS_ATTACH, 0],
                 thread: asked,
-            }).then(()=>loaded.base);
+            }).then(()=>{
+                attachOrder.push(loaded);
+                return loaded.base;
+            });
         }
         // Said out loud, because this is the failure a program reports as
         // "could not open" and then exits on. Without it the only trace is a
@@ -4687,6 +4708,14 @@ async function buildApp(options){
             set: kernel32.addressOf('TlsSetValue') ?? 0,
         },
     });
+    for (const name of startup.attached)
+    {
+        const held = shipped.find(library=>library.name === name);
+        if (held)
+        {
+            attachOrder.push(held);
+        }
+    }
     // Inside the same span the blocks came from, rather than beside it: it is
     // written once, before anything runs, and giving it a region of its own
     // only creates a boundary two allocations can land on either side of.

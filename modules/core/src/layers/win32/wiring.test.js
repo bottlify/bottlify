@@ -98,6 +98,7 @@ function hostOver(replace = {}){
         filesystem: replace.filesystem ?? { drives: ()=>[], stat: ()=>null },
     };
     Object.assign(apis.kernel, replace.kernel ?? {});
+    Object.assign(apis.bridge, replace.bridge ?? {});
     const host = /** @type {any} */ ({
         /** @param {string} name */
         requireApi: name=>apis[name],
@@ -121,7 +122,10 @@ async function build(replace){
             ...replace?.modules,
         },
     }), host));
-    return { bytes, view, libraries: api.libraries(), lastError: ()=>api.lastError() };
+    return {
+        bytes, view, libraries: api.libraries(), lastError: ()=>api.lastError(),
+        exitCode: ()=>api.exitCode(),
+    };
 }
 
 test('SHLWAPI\'s wide spellings read wide strings', async()=>{
@@ -241,5 +245,71 @@ test('LoadLibraryEx\'s flags reach whoever assembled the process', async()=>{
     assert.deepEqual(asked, [['probe.dll', LOAD_LIBRARY_AS_DATAFILE]]);
     assert.equal(libraries['KERNEL32.dll'].FreeLibrary.handler([0x10000001]), 1,
         'and the data file is given back by its handle');
+    await win32Module.dispose();
+});
+
+test('ExitProcess ends the other threads and tells each attached library, last first', async()=>{
+    // What Microsoft documents for ExitProcess: every other thread ends, then
+    // each attached DLL's entry point is called with DLL_PROCESS_DETACH on the
+    // calling thread -- lpvReserved non-NULL, since the process is ending --
+    // and only then does the process end with the code.
+    const DLL_PROCESS_DETACH = 0;
+    const self = { id: 1, state: 'running' };
+    const other = { id: 2, state: 'blocked' };
+    const gone = { id: 3, state: 'terminated' };
+    /** @type {any[][]} */
+    const ended = [];
+    /** @type {any[]} */
+    const called = [];
+    const { libraries, exitCode } = await build({
+        kernel: {
+            currentThread: ()=>self,
+            threads: ()=>[self, other, gone],
+            ThreadState: { TERMINATED: 'terminated' },
+            /** @param {any} thread @param {number} code */
+            exitThread: (thread, code)=>ended.push([thread.id, code]),
+        },
+        bridge: {
+            /** @param {any} call */
+            callGuest: call=>{
+                called.push({ ...call, exitCode: exitCode() });
+                return Promise.resolve(1);
+            },
+        },
+        modules: {
+            attachedLibraries: ()=>[
+                { name: 'late.dll', base: 0x10100000, entryPoint: 0x10101000 },
+                { name: 'early.dll', base: 0x10000000, entryPoint: 0x10001000 },
+            ],
+        },
+    });
+
+    const answer = libraries['KERNEL32.dll'].ExitProcess.handler([7]);
+    assert.ok(answer instanceof Promise, 'the libraries run before the process ends');
+    assert.deepEqual(ended, [[2, 7]], 'the other live thread is ended first');
+    await answer;
+    assert.deepEqual(called.map(call=>[call.entry, call.args, call.thread, call.exitCode]), [
+        [0x10101000, [0x10100000, DLL_PROCESS_DETACH, 1], self, null],
+        [0x10001000, [0x10000000, DLL_PROCESS_DETACH, 1], self, null],
+    ]);
+    assert.equal(exitCode(), 7);
+    await win32Module.dispose();
+});
+
+test('ExitProcess with no library to tell ends the process at once', async()=>{
+    /** @type {any[]} */
+    const ended = [];
+    const { libraries, exitCode } = await build({
+        kernel: {
+            currentThread: ()=>({ id: 1 }),
+            threads: ()=>[{ id: 2 }],
+            exitThread: (/** @type {any} */ thread)=>ended.push(thread),
+        },
+        modules: { attachedLibraries: ()=>[] },
+    });
+
+    libraries['KERNEL32.dll'].ExitProcess.handler([3]);
+    assert.equal(exitCode(), 3);
+    assert.deepEqual(ended, [], 'nothing runs after it, so nothing else is ended');
     await win32Module.dispose();
 });

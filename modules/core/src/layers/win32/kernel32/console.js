@@ -28,6 +28,9 @@ export const HANDLE_STDERR = 3;
  * @property {(handle: number, text: string) => void} write   Where guest output goes.
  * @property {(code: number) => void} exit                    Ends the process.
  * @property {() => any} park                 Stops the caller; returns the parked token.
+ * @property {(code: number) => any} [end]
+ *           Ends the process as ExitProcess does, telling the libraries first;
+ *           answers what the call answers. Absent, `exit` and `park` stand in.
  */
 
 /**
@@ -104,6 +107,10 @@ export function createConsoleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([code])=>{
+                if (host.end)
+                {
+                    return host.end(code >>> 0);
+                }
                 host.exit(code >>> 0);
                 // It does not return, so there is no value to return: the stub's
                 // own `ret` is redirected to the park loop instead.
