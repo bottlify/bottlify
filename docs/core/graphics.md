@@ -975,7 +975,10 @@ every Direct3D 8 and 9 device made on it -- `TestCooperativeLevel` and `Present`
 being no second GPU device to rebuild on; a 9Ex device, which is never lost, answers
 `D3DERR_DEVICEREMOVED` from `Present`, `PresentEx` and `CheckDeviceState` instead. The raster's
 position is read from the guest's clock, but `WaitForVerticalBlank` waits the time to the edge on a
-host timer, the layer having no hook into the kernel's scheduler.
+host timer, the layer having no hook into the kernel's scheduler. A GDI `StretchDIBits` whose
+destination alone is mirrored places its pixels as a mirror would, where Wine's tests find Windows
+placing one that no mirroring gives, though it answers as Windows does; and a 32-bit DIB's top byte,
+which Windows carries through `StretchDIBits`, is not kept.
 
 ## Tests
 

@@ -11,14 +11,19 @@ import {
     CLOCK, TLS_SLOTS, createProcessFunctions, getLastErrorCode, queryPerformanceCounterCode,
     queryPerformanceFrequencyCode, setLastErrorCode, tickCountCode, tlsGetValueCode,
 } from './process.js';
+import { VER, WINDOWS_VERSIONS, setCondition } from './versions.js';
 
 const TLS_OUT_OF_INDEXES = 0xffffffff;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_MOD_NOT_FOUND = 126;
+const ERROR_BAD_ARGUMENTS = 160;
+const ERROR_OLD_WIN_VERSION = 1150;
 const VER_PLATFORM_WIN32_NT = 2;
 const OSVERSIONINFOA_SIZE = 148;
 const OSVERSIONINFOEXA_SIZE = 156;
+const OSVERSIONINFOW_SIZE = 276;
+const OSVERSIONINFOEXW_SIZE = 284;
 const IMAGE_BASE = 0x00400000;
 
 /** 100ns units between 1601-01-01 and 1970-01-01, the FILETIME epoch shift. */
@@ -123,9 +128,21 @@ function fakeHost({ arena = 0 } = {}){
 /** The token a parked call answers with; identity is all that matters. */
 const PARKED = Symbol('parked');
 
-/** @param {{ arena?: number }} [options] */
+/**
+ * @param {{ arena?: number,
+ *           version?: import('./versions.js').WindowsVersion }} [options]
+ */
 function setup(options = {}){
     const host = fakeHost(options);
+    /** @type {Record<string, number>} */
+    const registers = {};
+    // Added to the host itself rather than to a copy: a test may change the
+    // host after the table is built, and the table has to see it.
+    Object.assign(host, {
+        ...options.version ? { version: options.version } : {},
+        /** @param {Record<string, number>} values */
+        setRegisters: values=>Object.assign(registers, values),
+    });
     const fns = createProcessFunctions(host);
 
     /** @param {number} address @param {string} text */
@@ -141,7 +158,7 @@ function setup(options = {}){
     /** @param {number} address */
     const u64 = address=>host.view.getBigUint64(address, true);
 
-    return { host, fns, put, u64 };
+    return { host, fns, put, u64, registers };
 }
 
 test('the last error belongs to the thread that set it', ()=>{
@@ -251,7 +268,8 @@ test('GetVersionExA fills the structure it was handed', ()=>{
     assert.equal(host.view.getUint32(address + 8, true), 1);
     assert.equal(host.view.getUint32(address + 12, true), 2600);
     assert.equal(host.view.getUint32(address + 16, true), VER_PLATFORM_WIN32_NT);
-    assert.equal(host.bytes[address + 20], 0, 'no service pack, so an empty string');
+    assert.equal(host.readCString(address + 20, 128), 'Service Pack 3',
+        'XP is answered with its last service pack');
 });
 
 test('GetVersionExA refuses a size it does not recognise', ()=>{
@@ -265,7 +283,7 @@ test('GetVersionExA refuses a size it does not recognise', ()=>{
     assert.equal(host.bytes[address + 4], 0x77, 'nothing is written into a structure we refused');
 });
 
-test('GetVersionExA zeroes the extended fields when the caller asks for them', ()=>{
+test('GetVersionExA fills the extended fields when the caller asks for them', ()=>{
     const { host, fns } = setup();
     const address = 0x300;
     host.bytes.fill(0xcd, address, address + OSVERSIONINFOEXA_SIZE);
@@ -273,10 +291,112 @@ test('GetVersionExA zeroes the extended fields when the caller asks for them', (
 
     assert.equal(fns.GetVersionExA.handler([address]), 1);
 
-    assert.equal(host.view.getUint16(address + 148, true), 0, 'wServicePackMajor');
+    assert.equal(host.readCString(address + 20, 128), 'Service Pack 3');
+    assert.equal(host.bytes[address + 20 + 'Service Pack 3'.length + 1], 0,
+        'the rest of the string is cleared, not left as it was');
+    assert.equal(host.view.getUint16(address + 148, true), 3, 'wServicePackMajor');
     assert.equal(host.view.getUint16(address + 150, true), 0, 'wServicePackMinor');
-    assert.equal(host.view.getUint16(address + 152, true), 0, 'wSuiteMask');
+    assert.equal(host.view.getUint16(address + 152, true), 0x100,
+        'wSuiteMask is VER_SUITE_SINGLEUSERTS');
     assert.equal(host.bytes[address + 154], 1, 'wProductType is VER_NT_WORKSTATION');
+    assert.equal(host.bytes[address + 155], 0, 'wReserved');
+});
+
+test('each Windows is answered by GetVersion and GetVersionExA alike', ()=>{
+    for (const version of Object.values(WINDOWS_VERSIONS))
+    {
+        const { host, fns } = setup({ version });
+        const packed = fns.GetVersion.handler() >>> 0;
+        assert.equal(packed & 0xff, version.major, version.name);
+        assert.equal(packed >>> 8 & 0xff, version.minor, version.name);
+        assert.equal(packed >>> 16, version.build, version.name);
+
+        const address = 0x300;
+        host.view.setUint32(address, OSVERSIONINFOEXA_SIZE, true);
+        assert.equal(fns.GetVersionExA.handler([address]), 1);
+        assert.deepEqual([4, 8, 12].map(at=>host.view.getUint32(address + at, true)),
+            [version.major, version.minor, version.build], version.name);
+        assert.equal(host.readCString(address + 20, 128), version.csdVersion, version.name);
+        assert.equal(host.view.getUint16(address + 148, true), version.servicePackMajor);
+        assert.equal(host.view.getUint16(address + 152, true), version.suiteMask, version.name);
+    }
+});
+
+test('GetVersionExW fills the wide structures and refuses any other size', ()=>{
+    const { host, fns } = setup({ version: WINDOWS_VERSIONS.win7 });
+    const address = 0x400;
+    host.bytes.fill(0xcd, address, address + OSVERSIONINFOEXW_SIZE);
+    host.view.setUint32(address, OSVERSIONINFOEXW_SIZE, true);
+
+    assert.equal(fns.GetVersionExW.handler([address]), 1);
+    assert.equal(host.view.getUint32(address, true), OSVERSIONINFOEXW_SIZE);
+    assert.deepEqual([4, 8, 12, 16].map(at=>host.view.getUint32(address + at, true)),
+        [6, 1, 7601, VER_PLATFORM_WIN32_NT]);
+    assert.equal(host.readWideString(address + 20, 128), 'Service Pack 1');
+    assert.equal(host.view.getUint16(address + 20 + 'Service Pack 1'.length * 2 + 2, true), 0);
+    assert.equal(host.view.getUint16(address + 276, true), 1, 'wServicePackMajor');
+    assert.equal(host.view.getUint16(address + 278, true), 0, 'wServicePackMinor');
+    assert.equal(host.view.getUint16(address + 280, true), 0x100, 'wSuiteMask');
+    assert.equal(host.bytes[address + 282], 1, 'wProductType');
+
+    const plain = 0x600;
+    host.bytes.fill(0xcd, plain, plain + OSVERSIONINFOEXW_SIZE);
+    host.view.setUint32(plain, OSVERSIONINFOW_SIZE, true);
+    assert.equal(fns.GetVersionExW.handler([plain]), 1);
+    assert.equal(host.readWideString(plain + 20, 128), 'Service Pack 1');
+    assert.equal(host.bytes[plain + OSVERSIONINFOW_SIZE], 0xcd,
+        'nothing past the smaller structure is written');
+
+    for (const size of [0, OSVERSIONINFOA_SIZE, OSVERSIONINFOEXA_SIZE, OSVERSIONINFOW_SIZE * 2])
+    {
+        host.view.setUint32(plain, size, true);
+        fns.SetLastError.handler([0]);
+        assert.equal(fns.GetVersionExW.handler([plain]), 0, `size ${size}`);
+        assert.equal(fns.GetLastError.handler(), ERROR_INSUFFICIENT_BUFFER);
+    }
+});
+
+test('VerifyVersionInfo compares against what GetVersionEx answers', ()=>{
+    const { host, fns } = setup();
+    const request = 0x300;
+    const atLeast = [VER.MAJORVERSION, VER.MINORVERSION, VER.SERVICEPACKMAJOR]
+        .reduce((mask, type)=>setCondition(mask, type, 3), 0n);
+    const types = VER.MAJORVERSION | VER.MINORVERSION | VER.SERVICEPACKMAJOR
+        | VER.SERVICEPACKMINOR;
+    const low = Number(atLeast & 0xffffffffn);
+    const high = Number(atLeast >> 32n);
+
+    /** @param {number} major @param {number} minor @param {number} pack @param {boolean} wide */
+    const ask = (major, minor, pack, wide)=>{
+        host.bytes.fill(0, request, request + OSVERSIONINFOEXW_SIZE);
+        // The size field is not looked at: Wine's kernel32 version tests pass
+        // a structure whose size is zero and expect an answer.
+        host.view.setUint32(request + 4, major, true);
+        host.view.setUint32(request + 8, minor, true);
+        host.view.setUint16(request + (wide ? 276 : 148), pack, true);
+        fns.SetLastError.handler([0]);
+        return (wide ? fns.VerifyVersionInfoW : fns.VerifyVersionInfoA)
+            .handler([request, types, low, high]);
+    };
+
+    assert.equal(ask(5, 1, 2, false), 1, 'XP SP3 is at least XP SP2');
+    assert.equal(ask(5, 1, 2, true), 1);
+    assert.equal(ask(5, 1, 4, false), 0);
+    assert.equal(fns.GetLastError.handler(), ERROR_OLD_WIN_VERSION);
+    assert.equal(ask(6, 0, 0, true), 0);
+    assert.equal(fns.GetLastError.handler(), ERROR_OLD_WIN_VERSION);
+
+    assert.equal(fns.VerifyVersionInfoA.handler([request, 0, low, high]), 0);
+    assert.equal(fns.GetLastError.handler(), ERROR_BAD_ARGUMENTS);
+});
+
+test('VerSetConditionMask answers a 64-bit mask in EDX:EAX', ()=>{
+    const { fns, registers } = setup();
+    // The product type's three bits sit at bit 21; whatever the caller's mask
+    // already held, in either half, is kept.
+    const eax = fns.VerSetConditionMask.handler([0x12, 0x80000000, VER.PRODUCT_TYPE, 1]);
+    assert.equal(eax >>> 0, (0x12 | 1 << 21) >>> 0);
+    assert.equal(registers.edx >>> 0, 0x80000000);
 });
 
 test('time comes from the injected clock, not from the host', ()=>{
@@ -378,6 +498,10 @@ test('every function declares the stack it pops', ()=>{
     assert.equal(fns.GetModuleHandleA.argBytes, 4);
     assert.equal(fns.GetVersion.argBytes, 0);
     assert.equal(fns.GetVersionExA.argBytes, 4);
+    assert.equal(fns.GetVersionExW.argBytes, 4);
+    assert.equal(fns.VerifyVersionInfoA.argBytes, 16);
+    assert.equal(fns.VerifyVersionInfoW.argBytes, 16);
+    assert.equal(fns.VerSetConditionMask.argBytes, 16);
     assert.equal(fns.GetTickCount.argBytes, 0);
     assert.equal(fns.GetSystemTimeAsFileTime.argBytes, 4);
     assert.equal(fns.QueryPerformanceCounter.argBytes, 4);

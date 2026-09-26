@@ -5,7 +5,7 @@
  */
 
 import { expand } from '../lz32/expand.js';
-import { VERSION_BUILD, VERSION_MAJOR, VERSION_MINOR } from '../kernel32/process.js';
+import { windowsVersion } from '../kernel32/versions.js';
 import { DIRECTX_VERSION } from '../advapi32/registry.js';
 
 /**
@@ -95,6 +95,10 @@ const FIXED_FILE_VERSION_LS = 12;
  *           Whether the engine answers for a library of this file name
  *           itself, with no file behind it. Absent, it answers for none, and
  *           such a library reads as a file that is not there.
+ * @property {import('../kernel32/versions.js').WindowsVersion} [windows]
+ *           The Windows the machine is, whose version its own libraries carry
+ *           -- the real one, even where GetVersionEx is told to answer an older
+ *           one, since a file's version is the file's. Absent, the default.
  */
 
 /**
@@ -103,9 +107,6 @@ const FIXED_FILE_VERSION_LS = 12;
  */
 const DIRECTX_LIBRARY =
     /^(ddraw|d3d\w*|dsound|dinput8?|dplay\w*|dpn\w*|dm\w+|dswave|dxdiag\w*|xinput\w*)\.dll$/i;
-
-/** The system's own version, as GetVersionEx reports it: XP, no service pack. */
-const SYSTEM_VERSION = [VERSION_MAJOR, VERSION_MINOR, VERSION_BUILD, 0];
 
 /** VS_FIXEDFILEINFO's constants: its version, the flags it may set, NT, a DLL. */
 const VS_FFI_STRUCVERSION = 0x00010000;
@@ -163,12 +164,14 @@ function buildNode(key, value, children = []){
  * the answer it would have got from the registry.
  *
  * @param {string} name  The file name, extension included.
+ * @param {import('../kernel32/versions.js').WindowsVersion} [windows]  The system.
  * @returns {Uint8Array}
  */
-export function systemVersionResource(name){
+export function systemVersionResource(name, windows = windowsVersion()){
     const directX = DIRECTX_LIBRARY.test(name);
-    const quad = directX ? DIRECTX_VERSION.split('.').map(part=>Number(part)) : SYSTEM_VERSION;
-    const spelled = directX ? DIRECTX_VERSION : SYSTEM_VERSION.join('.');
+    const system = [windows.major, windows.minor, windows.build, 0];
+    const quad = directX ? DIRECTX_VERSION.split('.').map(part=>Number(part)) : system;
+    const spelled = directX ? DIRECTX_VERSION : system.join('.');
     const fixed = new Uint8Array(FIXED_FILE_INFO_SIZE);
     const view = new DataView(fixed.buffer);
     const most = (quad[0] << 16 | quad[1]) >>> 0;
@@ -359,7 +362,7 @@ export function createVersionFunctions(host){
         const library = exists ? null : systemName(path);
         if (library !== null)
         {
-            return systemVersionResource(library);
+            return systemVersionResource(library, host.windows);
         }
         host.setLastError(exists ? ERROR_RESOURCE_DATA_NOT_FOUND : ERROR_FILE_NOT_FOUND);
         return null;

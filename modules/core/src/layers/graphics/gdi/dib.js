@@ -403,21 +403,24 @@ export function encodeDib(surface, image){
 }
 
 /**
- * The top-down row a DIB source coordinate names.
+ * The top-down row a DIB source rectangle is anchored at, for a blit that
+ * takes its height signed.
  *
- * `SetDIBitsToDevice` and `StretchDIBits` both take the source origin in the
- * DIB's own coordinates, which for the usual bottom-up DIB means the *lower*
- * left corner. Converting that once, here, is what keeps the sign out of the
- * blit.
+ * StretchDIBits takes the source origin in the DIB's own coordinates, which
+ * count from the picture's bottom: rows ySrc up to ySrc + srcHeight, and with
+ * a negative height the rows below ySrc, as a negative extent runs everywhere
+ * else in GDI. A copy at its own size of a top-down DIB counts from the top
+ * instead (Wine's test_StretchDIBits). Converting that once, here, is what
+ * keeps the sign out of the blit.
  *
  * @param {number} ySrc
- * @param {number} rows      Height of the source rectangle.
- * @param {number} height    Height of the whole DIB.
- * @param {boolean} topDown
+ * @param {number} srcHeight  Signed.
+ * @param {number} height     Height of the whole DIB.
+ * @param {boolean} fromTop
  * @returns {number}
  */
-function sourceTop(ySrc, rows, height, topDown){
-    return topDown ? ySrc : height - ySrc - rows;
+function sourceRow(ySrc, srcHeight, height, fromTop){
+    return fromTop ? ySrc : height - ySrc - srcHeight;
 }
 
 /**
@@ -535,27 +538,39 @@ export function setDIBitsToDevice(options){
  */
 
 /**
+ * StretchDIBits, answering as Windows does (Wine's bitmap and dib tests).
+ *
+ * A copy at the source's own size under SRCCOPY is SetDIBitsToDevice's: a
+ * top-down DIB's ySrc counts from its top, and the answer is the lines from
+ * the DIB's first to the rectangle's far edge. Anything else is a stretch,
+ * whose ySrc counts from the bottom whichever way the DIB is stored, and
+ * which answers the DIB's height -- as signed in the header, so negative for
+ * a top-down DIB, under any operation but SRCCOPY. A source rectangle that
+ * begins before the DIB's first column or row draws nothing and answers 0.
+ *
  * @param {StretchDibOptions} options
- * @returns {number} how many scan lines were transferred, or zero on failure
+ * @returns {number}
  */
 export function stretchDIBits(options){
-    if (isRle(options.image.header))
-    {
-        return stretchRle(options);
-    }
-    const source = decodeDib(options.image);
-    if (!source)
+    const header = options.image.header;
+    const source = isRle(header) ? null : decodeDib(options.image);
+    if (!source && !isRle(header))
     {
         return 0;
     }
-    const rows = Math.abs(options.srcHeight | 0);
-    const top = sourceTop(options.ySrc | 0, rows,
-        Math.abs(options.image.header.height), options.image.header.height < 0);
-    // The source rectangle is handed on with its sign intact -- a negative
-    // height still mirrors -- but anchored at the row the conversion above
-    // worked out, so the flip and the bottom-up order do not cancel silently.
-    const anchored = (options.srcHeight | 0) < 0 ? top + rows : top;
-    const drawn = stretchBlt({
+    const xSrc = options.xSrc | 0;
+    const ySrc = options.ySrc | 0;
+    const across = options.srcWidth | 0;
+    const down = options.srcHeight | 0;
+    if (Math.min(xSrc, xSrc + across) < 0 || Math.min(ySrc, ySrc + down) < 0)
+    {
+        return 0;
+    }
+    const rop = options.rop ?? SRCCOPY;
+    const copy = rop === SRCCOPY && across > 0 && down > 0
+        && (options.destWidth | 0) === across && (options.destHeight | 0) === down;
+    const height = Math.abs(header.height);
+    const drawn = !source ? stretchRle(options) : stretchBlt({
         dest: options.dest,
         clip: options.clip,
         x: options.xDest | 0,
@@ -563,15 +578,23 @@ export function stretchDIBits(options){
         width: options.destWidth | 0,
         height: options.destHeight | 0,
         src: source,
-        srcX: options.xSrc | 0,
-        srcY: anchored,
-        srcWidth: options.srcWidth | 0,
-        srcHeight: options.srcHeight | 0,
-        rop: options.rop ?? SRCCOPY,
+        srcX: xSrc,
+        srcY: sourceRow(ySrc, down, height, copy && header.height < 0),
+        srcWidth: across,
+        srcHeight: down,
+        rop,
         mode: options.mode,
         pattern: options.pattern,
     });
-    return drawn ? rows : 0;
+    if (!drawn)
+    {
+        return 0;
+    }
+    if (copy)
+    {
+        return Math.min(height, ySrc + down);
+    }
+    return rop === SRCCOPY ? height : header.height;
 }
 
 /**
@@ -580,7 +603,7 @@ export function stretchDIBits(options){
  * run reached -- stretched the same way, a pixel at a time -- are put back.
  *
  * @param {StretchDibOptions} options
- * @returns {number}
+ * @returns {boolean} whether the source rectangle met the DIB
  */
 function stretchRle(options){
     const { surface, written } = decodeRle(options.image);
@@ -601,10 +624,9 @@ function stretchRle(options){
     const top = Math.max(y, clip.top, 0);
     const right = Math.min(x + Math.abs(options.destWidth | 0), clip.right, dest.width);
     const bottom = Math.min(y + Math.abs(options.destHeight | 0), clip.bottom, dest.height);
-    const rows = Math.abs(options.srcHeight | 0);
     if (right <= left || bottom <= top)
     {
-        return rows;
+        return true;
     }
     const scratch = createSurface({ width: right - left, height: bottom - top });
     const reached = createSurface({ width: right - left, height: bottom - top });
@@ -615,7 +637,6 @@ function stretchRle(options){
             scratch.write(column - left, row - top, dest.read(column, row));
         }
     }
-    const srcTop = sourceTop(options.ySrc | 0, rows, header.height, false);
     const pattern = options.pattern;
     const geometry = {
         x: (options.xDest | 0) - left,
@@ -623,7 +644,7 @@ function stretchRle(options){
         width: options.destWidth | 0,
         height: options.destHeight | 0,
         srcX: options.xSrc | 0,
-        srcY: (options.srcHeight | 0) < 0 ? srcTop + rows : srcTop,
+        srcY: sourceRow(options.ySrc | 0, options.srcHeight | 0, header.height, false),
         srcWidth: options.srcWidth | 0,
         srcHeight: options.srcHeight | 0,
     };
@@ -637,7 +658,7 @@ function stretchRle(options){
     });
     if (!drawn)
     {
-        return 0;
+        return false;
     }
     stretchBlt({ ...geometry, dest: reached, src: mask, rop: SRCCOPY, mode: COLORONCOLOR });
     for (let row = top; row < bottom; row++)
@@ -650,5 +671,5 @@ function stretchRle(options){
             }
         }
     }
-    return rows;
+    return true;
 }

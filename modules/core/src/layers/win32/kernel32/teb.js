@@ -60,7 +60,9 @@ export const PEB = Object.freeze({
     OS_MAJOR_VERSION: 0xa4,
     OS_MINOR_VERSION: 0xa8,
     OS_BUILD_NUMBER: 0xac,
+    OS_CSD_VERSION: 0xae,
     OS_PLATFORM_ID: 0xb0,
+    CSD_VERSION: 0x1f0,
     SIZE: 0x230,
 });
 
@@ -164,7 +166,10 @@ export const TLS_SLOTS = 64;
  * @param {(bytes: number) => number} options.allocate  Guest memory, zeroed.
  * @param {(address: number, bytes: Uint8Array) => void} options.writeMemory
  * @param {number} options.processId
- * @param {{ major: number, minor: number, build: number }} options.version
+ * @param {{ major: number, minor: number, build: number, servicePackMajor?: number,
+ *     servicePackMinor?: number, csdVersion?: string }} options.version
+ *        The Windows the machine is: the numbers, and the service pack as a
+ *        pair and as text, which is how the block keeps it.
  * @param {number} options.imageBase
  * @param {string} [options.imagePath]
  * @param {string} [options.commandLine]
@@ -199,7 +204,11 @@ export function createProcessBlocks(options){
     write(peb + PEB.PROCESS_PARAMETERS, params);
     write(peb + PEB.OS_MAJOR_VERSION, version.major);
     write(peb + PEB.OS_MINOR_VERSION, version.minor);
-    write(peb + PEB.OS_BUILD_NUMBER, version.build);
+    // Two WORDs, written as the DWORD they make up: the build, then the
+    // service pack with its major number in the high byte.
+    write(peb + PEB.OS_BUILD_NUMBER, (version.build & 0xffff
+        | ((version.servicePackMajor ?? 0) & 0xff) << 24
+        | ((version.servicePackMinor ?? 0) & 0xff) << 16) >>> 0);
     write(peb + PEB.OS_PLATFORM_ID, 2); // VER_PLATFORM_WIN32_NT
     // Read directly by a runtime sizing its thread pool, without a call.
     write(peb + PEB.NUMBER_OF_PROCESSORS, PROCESSOR.count);
@@ -233,6 +242,20 @@ export function createProcessBlocks(options){
         writeMemory(at, descriptor);
         strings += bytes.length + 2 & ~1;
     };
+
+    // The service pack's name, in the room between the block and its
+    // parameters rather than in the arena the parameters' strings share.
+    // Empty when there is none: a reader copies it without looking first.
+    const csdVersion = version.csdVersion ?? '';
+    const csdText = new Uint8Array(csdVersion.length * 2 + 2);
+    for (let index = 0; index < csdVersion.length; index++)
+    {
+        csdText[index * 2] = csdVersion.charCodeAt(index) & 0xff;
+        csdText[index * 2 + 1] = csdVersion.charCodeAt(index) >>> 8;
+    }
+    writeMemory(peb + PEB.SIZE, csdText);
+    write(peb + PEB.CSD_VERSION, (csdVersion.length * 2 | csdText.length << 16) >>> 0);
+    write(peb + PEB.CSD_VERSION + 4, peb + PEB.SIZE);
 
     write(params + PARAMS.MAXIMUM_LENGTH, PARAMS.SIZE + STRING_ARENA);
     write(params + PARAMS.LENGTH, PARAMS.SIZE);

@@ -19,6 +19,7 @@
  *
  *     node tools/cdp_test/frames.mjs <bundle-id> [--seconds 60] [--settle 20]
  *                                    [--video] [--no-trace] [--command-line STRING]
+ *                                    [--windows NAME]
  */
 
 import { existsSync } from 'node:fs';
@@ -30,6 +31,7 @@ import { CdpEndpoint } from './cdp.mjs';
 import { serveStatic } from './server.mjs';
 import { frameSpread } from './frame-window.mjs';
 import { openBundle } from '../btl.mjs';
+import { windowsVersion } from '../../modules/core/src/layers/win32/kernel32/versions.js';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const REPO_ROOT = resolve(TOOL_ROOT, '..', '..');
@@ -50,6 +52,8 @@ function parse(argv){
         commandLine: argv.includes('--command-line')
             ? argv[argv.indexOf('--command-line') + 1]
             : null,
+        // The Windows the title runs under, over the one its manifest names.
+        windows: argv.includes('--windows') ? argv[argv.indexOf('--windows') + 1] : null,
         /** How long to watch once the title is up. */
         seconds: number('--seconds', 60),
         // How long to let it start first. Measuring through loading measures
@@ -419,6 +423,10 @@ if (!existsSync(join(directory, 'bundle.btl')))
 }
 
 const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'));
+// The Windows the bottle runs under, refused here by name, as createApp would
+// refuse it, before a browser starts.
+const windows = options.windows ?? manifest.windows ?? undefined;
+windowsVersion(windows);
 const opened = await openBundle(join(directory, 'bundle.btl'));
 const executable = await opened.read(manifest.entry);
 await opened.close();
@@ -481,6 +489,7 @@ try
         // `--command-line` overrides them.
         commandLine: options.commandLine
             ?? (manifest.commandLine ? `"${imagePath}" ${manifest.commandLine}` : undefined),
+        windows,
         maxTurns: Number.MAX_SAFE_INTEGER,
         video: options.video,
         quantum: options.quantum || undefined,

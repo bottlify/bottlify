@@ -43,6 +43,36 @@ const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
  */
 
 /**
+ * The variables a process starts with: where Windows is, the scratch
+ * directory GetTempPath answers, and the profile folders of the machine's
+ * layout -- ALLUSERSPROFILE, APPDATA and USERPROFILE everywhere, and from
+ * Vista's layout on LOCALAPPDATA, ProgramData and PUBLIC too. The folders are
+ * the ones the registry and the shell name, so a program that joins %APPDATA%
+ * and one that asks SHGetFolderPath arrive at the same directory. In the order
+ * Windows keeps the block, sorted without regard to case.
+ *
+ * @param {import('./versions.js').WindowsVersion} windows
+ * @param {Readonly<Record<string, string>>} folders  That Windows's shell folders.
+ * @returns {Record<string, string>}
+ */
+export function defaultEnvironment(windows, folders){
+    const { allUsers, public: shared } = windows.profiles;
+    return {
+        ALLUSERSPROFILE: allUsers,
+        APPDATA: folders.AppData,
+        ...shared === null ? {} : {
+            LOCALAPPDATA: folders['Local AppData'],
+            ProgramData: folders['Common AppData'],
+            PUBLIC: shared,
+        },
+        SystemRoot: WINDOWS_DIRECTORY,
+        TEMP: `${WINDOWS_DIRECTORY}\\TEMP`,
+        USERPROFILE: folders.Profile,
+        windir: WINDOWS_DIRECTORY,
+    };
+}
+
+/**
  * @param {EnvironmentHost} host
  */
 export function createEnvironmentFunctions(host){

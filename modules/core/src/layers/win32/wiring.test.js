@@ -509,3 +509,58 @@ test('MsgWaitForMultipleObjectsEx with MWMO_INPUTAVAILABLE wakes for a message s
             [0, 0, 0, QS_POSTMESSAGE, MWMO_INPUTAVAILABLE]), WAIT_OBJECT_0, 'but something there');
         await win32Module.dispose();
     });
+
+test('SETUPAPI finds an INF on the volume by bare name and registers into advapi32\'s hive',
+    async()=>{
+        const filesystem = await filesystemModule.create({});
+        const thread = { id: 1 };
+        const { bytes, view, libraries, lastError } = await build({
+            filesystem,
+            kernel: { currentThread: ()=>thread },
+            bridge: { callerThread: ()=>thread },
+        });
+        const kernel32 = libraries['KERNEL32.dll'];
+        const setupapi = libraries['SETUPAPI.dll'];
+        let next = 0x1000;
+        /** @param {string} text */
+        const narrow = text=>{
+            const at = next;
+            bytes.set([...text, '\0'].map(ch=>ch.charCodeAt(0)), at);
+            next += text.length + 0x10;
+            return at;
+        };
+        const INF_STYLE_WIN4 = 2;
+        const INVALID_HANDLE_VALUE = 0xffffffff;
+        kernel32.CreateDirectoryA.handler([narrow('C:\\WINDOWS'), 0]);
+        kernel32.CreateDirectoryA.handler([narrow('C:\\WINDOWS\\inf'), 0]);
+        assert.equal(kernel32.WritePrivateProfileStringA.handler([narrow('Version'),
+            narrow('Signature'), narrow('"$Chicago$"'), narrow('C:\\WINDOWS\\inf\\wired.inf')]), 1,
+        `written, last error ${lastError()}`);
+
+        const inf = await setupapi.SetupOpenInfFileA.handler(
+            [narrow('wired.inf'), 0, INF_STYLE_WIN4, 0]);
+        assert.notEqual(inf, INVALID_HANDLE_VALUE, `found, last error ${lastError()}`);
+        const context = 0x3000;
+        assert.equal(await setupapi.SetupFindFirstLineA.handler(
+            [inf, narrow('Version'), narrow('Signature'), context]), 1);
+        assert.equal(await setupapi.SetupGetLineTextA.handler([context, 0, 0, 0, 0x3100, 64, 0]),
+            1);
+        assert.equal(String.fromCharCode(...bytes.subarray(0x3100, 0x3109)), '$Chicago$');
+        setupapi.SetupCloseInfFile.handler([inf]);
+
+        const data = 0x4000;
+        const exception = 0x5000;
+        view.setUint32(data, 0xdc, true);
+        bytes.set([0x78, 0x56, 0x34, 0x12, 0x34, 0x12, 0x78, 0x56, 1, 2, 3, 4, 5, 6, 7, 8],
+            data + 4);
+        view.setUint32(exception, 0x454, true);
+        assert.equal(setupapi.SetupRegisterOsComponent.handler([data, exception]), 1,
+            `registered, last error ${lastError()}`);
+        const HKEY_LOCAL_MACHINE = 0x80000002;
+        const KEY_READ = 0x20019;
+        assert.equal(libraries['ADVAPI32.dll'].RegOpenKeyExA.handler([HKEY_LOCAL_MACHINE,
+            narrow('SYSTEM\\CurrentControlSet\\Control\\Setup\\OsComponents\\'
+                + '{12345678-1234-5678-0102-030405060708}'), 0, KEY_READ, 0x6000]), 0);
+        await win32Module.dispose();
+        await filesystemModule.dispose();
+    });

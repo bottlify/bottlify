@@ -20,7 +20,7 @@
  *                                  [--dump-draws] [--skip-texture tN] [--no-video] [--no-hooks]
  *                                  [--keep-images N,M]
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
- *                                  [--command-line STRING]
+ *                                  [--command-line STRING] [--windows NAME]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
  *                                  [--exact] [--cpu-profile SECONDS]
@@ -37,6 +37,7 @@ import { reportTimeout } from './timeout-report.mjs';
 import { serveStatic } from './server.mjs';
 import { describeProfile, profileWorkers, summarise } from './profile.mjs';
 import { openBundle } from '../btl.mjs';
+import { windowsVersion } from '../../modules/core/src/layers/win32/kernel32/versions.js';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 
@@ -139,6 +140,8 @@ function parse(argv){
         commandLine: argv.includes('--command-line')
             ? argv[argv.indexOf('--command-line') + 1]
             : null,
+        // The Windows the title runs under, over the one its manifest names.
+        windows: argv.includes('--windows') ? argv[argv.indexOf('--windows') + 1] : null,
         // Files put on the volume before the program starts, as `HOST=GUEST`:
         // what one run wrote, handed to the next.
         files: argv.flatMap((flag, index)=>{
@@ -1019,6 +1022,10 @@ export async function game(options){
 
     const manifest = JSON.parse(
         await readFile(join(directory, 'manifest.json'), 'utf8'));
+    // The Windows the bottle runs under, which createApp would refuse by name
+    // if it were not one of its four -- refused here, before a browser starts.
+    const windows = options.windows ?? manifest.windows ?? undefined;
+    windowsVersion(windows);
 
     // A bundle's own hooks.json/hooks.mjs, beside its manifest.json and never
     // inside the bundle: read here, the same way this driver already reads
@@ -1111,6 +1118,7 @@ export async function game(options){
             // unless `--command-line` overrides them.
             commandLine: options.commandLine
                 ?? (manifest.commandLine ? `"${imagePath}" ${manifest.commandLine}` : undefined),
+            windows,
             sidecarHooks,
             maxTurns: options.turns,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,

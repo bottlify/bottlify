@@ -54,7 +54,7 @@ Source: `src/layers/audio/module.js`. The DirectSound seam imports `IUNKNOWN_MET
 | member | what it is |
 |---|---|
 | `libraries()` | `{ 'DSOUND.dll', 'Mp3dec.asi' }` (the second only when `mp3 !== false`), shaped like a `win32` library's tables. |
-| `ordinals()` | `{ 'DSOUND.dll': { 1, 2, 3, 6, 11, 12 } }`, for a program that imports by number; the assembling caller merges it with `win32`'s and `media`'s and synthesises each library with those numbers. |
+| `ordinals()` | `{ 'DSOUND.dll': { 1, 2, 3, 6, 9, 11, 12 } }`, for a program that imports by number; the assembling caller merges it with `win32`'s and `media`'s and synthesises each library with those numbers. |
 | `output()` | The mixer: `open(format)`, `pump(frames?)`, `sampleRate`, `channels`, `capacityFrames`, `consumed()`, `diagnostics()`, plus `ring`/`memory` (engine backend) or `table`/`memory` (shared backend). Handed down to `win32` by the assembling caller because `win32` sits below this layer. |
 | `pump(frames?)` | Mixes ahead into the ring; called once a scheduler turn by whoever drives the machine, before the turn yields. |
 | `available()` | `config.drained`. |
@@ -68,7 +68,7 @@ Source: `src/layers/audio/module.js`. The DirectSound seam imports `IUNKNOWN_MET
 
 | library | entry points | what they are |
 |---|---|---|
-| `DSOUND.dll` | 7 | `DirectSoundCreate`, `DirectSoundCreate8`, `DirectSoundEnumerateA/W`, `DirectSoundCaptureCreate`, `DirectSoundCaptureCreate8` (both `DSERR_UNSUPPORTED`: there is no capture device), `DllCanUnloadNow`. Six carry Windows' ordinals (`dsound.spec`): `DirectSoundCreate` 1, `DirectSoundEnumerateA` 2, `DirectSoundEnumerateW` 3, `DirectSoundCaptureCreate` 6, `DirectSoundCreate8` 11, `DirectSoundCaptureCreate8` 12; `DllCanUnloadNow` is numbered above them. |
+| `DSOUND.dll` | 8 | `DirectSoundCreate`, `DirectSoundCreate8`, `DirectSoundEnumerateA/W`, `GetDeviceID`, `DirectSoundCaptureCreate`, `DirectSoundCaptureCreate8` (both `DSERR_UNSUPPORTED`: there is no capture device), `DllCanUnloadNow`. Seven carry Windows' ordinals (`dsound.spec`): `DirectSoundCreate` 1, `DirectSoundEnumerateA` 2, `DirectSoundEnumerateW` 3, `DirectSoundCaptureCreate` 6, `GetDeviceID` 9, `DirectSoundCreate8` 11, `DirectSoundCaptureCreate8` 12; `DllCanUnloadNow` is numbered above them. |
 | `Mp3dec.asi` | 11 | `DllMain`, `PROVIDER_query_attribute`, `ASI_startup`, `ASI_shutdown`, `ASI_error`, `ASI_stream_open`, `ASI_stream_process`, `ASI_stream_seek`, `ASI_stream_close`, `ASI_stream_attribute`, `ASI_stream_set_preference`. Nothing is imported by name; the middleware finds these through the tables `DllMain` registers. |
 
 Interfaces published (`src/layers/audio/dsound/seam.js`): `IDirectSound` (8 slots after
@@ -236,18 +236,21 @@ a chain is `DS_OK`. `SetFormat` succeeds on the primary and is refused on a seco
 
 `DirectSoundEnumerateA/W` call the guest's callback twice -- the primary driver with a null GUID,
 then one device -- and stop early if the callback returns FALSE; without `callGuest` they succeed
-having named nothing. The module's `feedBuffers` runs before every mix: it drains every buffer's
-notifications and signals them whether or not anything is listening (a program that waits on a
-position must be woken even in a silent build). Then, when `drained`, it closes and drops the track
-of any buffer the program has fully released (`references` at zero) before anything else, so a
-released buffer's slot is not held for the rest of the session, opens a mixer track per secondary
-buffer on first play and writes the drained byte ranges from guest memory into it, resetting a track
-whose backlog exceeds the ring's capacity and counting that under `behind`. Every fill hands the
-track the buffer's current `gain` and `balance`, and retunes it when the buffer's frequency has
-changed since, so a program's `SetFrequency` is heard as a change of pitch and the track consumes
-bytes at the rate the cursor drains them. Last, drained or not, it drops the released buffers -- and
-any primary nothing can reach -- from the seam's walk, so the walk it makes before every mix stays
-the size of what the program holds.
+having named nothing. `GetDeviceID` answers that device's GUID for `DSDEVID_DefaultPlayback` and
+`DefaultVoicePlayback` and for the GUID itself; `DefaultCapture` and `DefaultVoiceCapture` answer
+`DSERR_NODRIVER`, because there is no capture device; any other GUID, or a null pointer, is
+`DSERR_INVALIDPARAM`; nothing is written on a failure. The module's `feedBuffers` runs before every
+mix: it drains every buffer's notifications and signals them whether or not anything is listening (a
+program that waits on a position must be woken even in a silent build). Then, when `drained`, it
+closes and drops the track of any buffer the program has fully released (`references` at zero)
+before anything else, so a released buffer's slot is not held for the rest of the session, opens a
+mixer track per secondary buffer on first play and writes the drained byte ranges from guest memory
+into it, resetting a track whose backlog exceeds the ring's capacity and counting that under
+`behind`. Every fill hands the track the buffer's current `gain` and `balance`, and retunes it when
+the buffer's frequency has changed since, so a program's `SetFrequency` is heard as a change of
+pitch and the track consumes bytes at the rate the cursor drains them. Last, drained or not, it
+drops the released buffers -- and any primary nothing can reach -- from the seam's walk, so the walk
+it makes before every mix stays the size of what the program holds.
 
 ### The hosted MPEG provider
 
@@ -336,7 +339,7 @@ All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`).
 | `src/layers/audio/output/worklet.test.js` | Unit, over a loaded copy of the real `worklet.js` | The `WORKLET-SHARED` region is textually identical to `mix.js`'s, `export` aside; two tracks at different gains come out summed; a balance reaches the audio thread one side at a time; a silent block counts `STARVED_BLOCKS`/`STARVED_FRAMES`; `MIXED_FRAMES` and `READ` advance by exactly what was mixed. |
 | `src/layers/audio/output/ring.test.js` | Unit | Fill and room, short writes, silence on a short read, starvation counters, `clear`. |
 | `src/layers/audio/dsound/buffers.test.js` | Contract | Cursor motion against the clock, write lead and stopped margin, wrapped locks, volume/pan bounds and the pan law, notifications (the start position passed first, a one-shot's last frame as it ends, `DSBPN_OFFSETSTOP` on a stop and never on a lap), duplicates, `drainPlayed` ranges. |
-| `src/layers/audio/dsound/seam.test.js` | Contract, over a flat guest memory | Every slot's argument count, `IDirectSound8`'s twelfth slot, structure layouts (`WAVEFORMATEX`, `DSBUFFERDESC` in both sizes and no other, `DSCAPS` at 96 bytes), device and buffer caps flags, a size rounded to whole frames, controls refused without their flags, `SetFX`, which interfaces each object answers, one object per create with its own count and one primary that outlives its last release while its device lives and is pruned after, a primary described with a format refused, DirectSound 8's rules for 3D buffers, `Stop` setting `DSBPN_OFFSETSTOP`, refusals, enumeration through a guest callback, identity through the publisher, the ordinals through the real synthesiser. |
+| `src/layers/audio/dsound/seam.test.js` | Contract, over a flat guest memory | Every slot's argument count, `IDirectSound8`'s twelfth slot, structure layouts (`WAVEFORMATEX`, `DSBUFFERDESC` in both sizes and no other, `DSCAPS` at 96 bytes), device and buffer caps flags, a size rounded to whole frames, controls refused without their flags, `SetFX`, which interfaces each object answers, one object per create with its own count and one primary that outlives its last release while its device lives and is pruned after, a primary described with a format refused, DirectSound 8's rules for 3D buffers, `Stop` setting `DSBPN_OFFSETSTOP`, refusals, enumeration through a guest callback, `GetDeviceID` resolving the playback defaults and the enumerated device to one GUID and refusing the capture defaults, identity through the publisher, the ordinals through the real synthesiser. |
 | `src/layers/audio/asi/provider.test.js` | Contract, with a substitute decoder | Table registration through `RIB`, chunked continuing fetch, lead decoding, immediate answers, seek forward and back, preferences, a frameless stream, a failing decoder, a platform with none. |
 | `src/layers/audio/asi/mp3.test.js` | Unit | Frame-header parsing for each MPEG version, ID3 skipping, frame scanning, `interleave16` over planar and interleaved `AudioData`. |
 

@@ -232,23 +232,27 @@ test('StretchDIBits scales and honours the stretch mode', ()=>{
     assert.equal(dest.read(3, 3), 0x0000ff00);
 });
 
-test('a negative source height in StretchDIBits mirrors what a positive one draws', ()=>{
+test('a negative source height in StretchDIBits mirrors the rows below ySrc', ()=>{
+    // As a negative extent runs everywhere in GDI: ySrc 2 and a height of -2
+    // are the same two rows as ySrc 0 and 2, upside down; ySrc 0 and -2 lie
+    // before the DIB, which draws nothing.
     const bits = twoByTwo24();
-    /** @param {number} srcHeight */
-    const draw = srcHeight=>{
+    /** @param {number} ySrc @param {number} srcHeight */
+    const draw = (ySrc, srcHeight)=>{
         const dest = createSurface({ width: 2, height: 2 });
         clearSurface(dest, BACKGROUND);
         stretchDIBits({
             dest,
             xDest: 0, yDest: 0, destWidth: 2, destHeight: 2,
-            xSrc: 0, ySrc: 0, srcWidth: 2, srcHeight,
+            xSrc: 0, ySrc, srcWidth: 2, srcHeight,
             image: { header: header(2, 2, 24), bits },
             mode: COLORONCOLOR,
         });
         return [dest.read(0, 0), dest.read(0, 1)];
     };
-    assert.deepEqual(draw(2), [0x000000ff, 0x00ff0000]);
-    assert.deepEqual(draw(-2), [0x00ff0000, 0x000000ff]);
+    assert.deepEqual(draw(0, 2), [0x000000ff, 0x00ff0000]);
+    assert.deepEqual(draw(2, -2), [0x00ff0000, 0x000000ff]);
+    assert.deepEqual(draw(0, -2), [BACKGROUND, BACKGROUND]);
 });
 
 test('GetDIBits writes the surface back out in the caller format', ()=>{

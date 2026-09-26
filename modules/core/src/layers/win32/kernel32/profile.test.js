@@ -339,3 +339,19 @@ test('a structure is kept as hex with a checksum, and read back only whole and i
     assert.equal(fns.GetPrivateProfileStructA.argBytes, 20);
     assert.equal(fns.WritePrivateProfileStructA.argBytes, 20);
 });
+
+test('a section read whole keeps its lines that have no =, as Windows returns them', ()=>{
+    // Wine's kernel32 test_profile_sections: section1 comes back as
+    // "name1=val1", "name2=", "name3", "name4=val4" -- the bare "name3"
+    // included -- and a section of one "=val5" as that line.
+    const { memory, files, fns } = setup();
+    files.put('C:\\WINDOWS\\TEMP\\list.ini', ['[section1]', 'name1=val1', 'name2=', 'name3',
+        'name4=val4', '; a comment', '', '[section3]', '=val5', ''].join('\r\n'));
+    memory.put(FILE, 'C:\\WINDOWS\\TEMP\\list.ini');
+    memory.put(SECTION, 'section1');
+    assert.equal(fns.GetPrivateProfileSectionA.handler([SECTION, OUT, 100, FILE]), 35);
+    assert.equal(memory.raw(OUT, 36), 'name1=val1\0name2=\0name3\0name4=val4\0\0');
+    memory.put(SECTION, 'section3');
+    assert.equal(fns.GetPrivateProfileSectionA.handler([SECTION, OUT, 100, FILE]), 6);
+    assert.equal(memory.raw(OUT, 7), '=val5\0\0');
+});

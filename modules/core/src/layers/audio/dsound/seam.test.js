@@ -22,6 +22,7 @@ import { DSBSTATUS_PLAYING, DSBPLAY_LOOPING, DSBLOCK_ENTIREBUFFER } from './buff
 const DSERR_INVALIDPARAM = 0x80070057 | 0;
 const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
 const DSERR_INVALIDCALL = 0x88780032 | 0;
+const DSERR_NODRIVER = 0x88780078 | 0;
 const DS_UNCERTIFIED = 1;
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
 const DSBCAPS_LOCHARDWARE = 0x00000004;
@@ -1012,7 +1013,8 @@ test('the library\'s entry points keep the ordinals Windows gives them', ()=>{
     const pinned = f.dsound.ordinals['DSOUND.dll'];
     assert.deepEqual(pinned, {
         1: 'DirectSoundCreate', 2: 'DirectSoundEnumerateA', 3: 'DirectSoundEnumerateW',
-        6: 'DirectSoundCaptureCreate', 11: 'DirectSoundCreate8', 12: 'DirectSoundCaptureCreate8',
+        6: 'DirectSoundCaptureCreate', 9: 'GetDeviceID', 11: 'DirectSoundCreate8',
+        12: 'DirectSoundCaptureCreate8',
     });
     for (const name of Object.values(pinned))
     {
@@ -1391,6 +1393,54 @@ test('enumerating devices describes the primary driver first, with no guid', asy
     assert.equal(textAt(f.memory, primary.args[1]), 'Primary Sound Driver');
     assert.equal(primary.args[3], 0xabcd, 'and the context it was given comes back to it');
     assert.notEqual(device.args[0], 0, 'a device of its own carries a guid');
+});
+
+test('GetDeviceID answers the device a default names, and a device as itself', async()=>{
+    // dsound.h's DSDEVID_Default{Playback,Capture,VoicePlayback,VoiceCapture}
+    // are aliases for whichever device is the default; this machine has one
+    // playback device, the one DirectSoundEnumerate describes after the
+    // primary driver, and no capture device at all.
+    const f = withGuest([1, 1]);
+    await f.dsound.libraries['DSOUND.dll'].DirectSoundEnumerateA.handler([0x9000, 0]);
+    const enumerated = [...f.memory.bytes.subarray(f.calls[1].args[0], f.calls[1].args[0] + 16)];
+    const getDeviceID = f.dsound.libraries['DSOUND.dll'].GetDeviceID;
+    assert.equal(getDeviceID.argBytes, 8);
+
+    const source = 0x3000;
+    const dest = 0x3100;
+    /** @param {number[]} bytes */
+    const ask = bytes=>{
+        f.memory.writeMemory(source, new Uint8Array(bytes));
+        f.memory.bytes.fill(0xcc, dest, dest + 16);
+        return getDeviceID.handler([source, dest]);
+    };
+    const answered = ()=>[...f.memory.bytes.subarray(dest, dest + 16)];
+    /** @param {number} which  DEF0000n: Playback, Capture, VoicePlayback, VoiceCapture */
+    const alias = which=>[which, 0x00, 0xf0, 0xde, 0x6d, 0x9c, 0xed, 0x47,
+        0xaa, 0xf1, 0x4d, 0xda, 0x8f, 0x2b, 0x5c, 0x03];
+    for (const which of [0, 2])
+    {
+        assert.equal(ask(alias(which)), DS_OK, `DSDEVID playback default ${which}`);
+        assert.deepEqual(answered(), enumerated);
+    }
+    // As Wine's dsound test expects DirectSoundCreate to answer for a capture
+    // default: the default names a device that is not there.
+    for (const which of [1, 3])
+    {
+        assert.equal(ask(alias(which)), DSERR_NODRIVER, `DSDEVID capture default ${which}`);
+        assert.ok(answered().every(byte=>byte === 0xcc), 'and nothing is written');
+    }
+    assert.equal(ask(enumerated), DS_OK, 'a device is its own id');
+    assert.deepEqual(answered(), enumerated);
+
+    // Anything else is no device: GUID_NULL, a default with one byte off.
+    for (const other of [new Array(16).fill(0), alias(4)])
+    {
+        assert.equal(ask(other), DSERR_INVALIDPARAM);
+        assert.ok(answered().every(byte=>byte === 0xcc), 'and nothing is written');
+    }
+    assert.equal(getDeviceID.handler([0, dest]), DSERR_INVALIDPARAM);
+    assert.equal(getDeviceID.handler([source, 0]), DSERR_INVALIDPARAM);
 });
 
 test('a program that has seen enough is not handed the rest', async()=>{

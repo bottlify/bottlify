@@ -17,7 +17,8 @@ import { createSyncFunctions } from './kernel32/sync.js';
 import { createCodeArena } from './kernel32/code-arena.js';
 import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions } from './kernel32/locale.js';
-import { createEnvironmentFunctions } from './kernel32/environment.js';
+import { createEnvironmentFunctions, defaultEnvironment } from './kernel32/environment.js';
+import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions } from './kernel32/system.js';
 import { createSpawner, createSpawnFunctions } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
@@ -40,7 +41,7 @@ import { createRegistryFunctions } from './advapi32/functions.js';
 import { ADMINISTRATORS_SID, createTokenFunctions, isTokenMember } from './advapi32/tokens.js';
 import { createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
-import { createHive, SHELL_FOLDERS } from './advapi32/registry.js';
+import { createHive, shellFolders } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
@@ -64,6 +65,7 @@ import { createImmFunctions } from './imm32/functions.js';
 import { createShlwapiFunctions } from './shlwapi/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
+import { createSetupapiFunctions } from './setupapi/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
 import { createNetworkFunctions } from './mpr/functions.js';
@@ -163,6 +165,14 @@ export const win32Module = {
      * @returns {Promise<any>}
      */
     async create(config, host){
+        // Before anything else: a Windows that is not one of the four is a
+        // configuration error, not a machine to build.
+        const windows = windowsVersion(config?.windows);
+        // What the running program is told, which Windows 10 decides from
+        // what the program says it knows; everything else keeps the truth.
+        const reported = reportedVersion(windows, config?.compatibility);
+        const folders = shellFolders(windows);
+
         const memory = host.requireApi('memory');
         const kernel = host.requireApi('kernel');
         const bridge = host.requireApi('bridge');
@@ -272,7 +282,7 @@ export const win32Module = {
         // Absent unless a bundle is mounted, in which case a read of a block
         // that is not here yet becomes a wait rather than a fault.
         const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
-        const hive = createHive({ processorMhz: config?.processorMhz });
+        const hive = createHive({ processorMhz: config?.processorMhz, windows });
         // The guest's clock, because a timer is due against the clock the
         // program itself reads, and the input layer's key state, because a
         // hot key fires on a combination and only the layer that sees the
@@ -862,6 +872,8 @@ export const win32Module = {
                     // reads it answers what a call would have answered.
                     publishClock: refresh=>kernel.clock.whenMoved(refresh),
                     moduleHandle: name=>modules.find(name)?.base ?? 0,
+                    version: reported,
+                    setRegisters,
                     // Actually waiting is the scheduler's, and there is no timed
                     // wait yet. Crediting the clock is what we can honour, and
                     // it is what keeps a guest from believing no time passed.
@@ -994,11 +1006,7 @@ export const win32Module = {
                     // What a program believes it was started with. Kept stable
                     // because the pointer is handed out once and callers keep it.
                     commandLine: ()=>config?.commandLine ?? `"${modules.imagePath()}"`,
-                    environment: ()=>config?.environment ?? {
-                        SystemRoot: 'C:\\WINDOWS',
-                        TEMP: 'C:\\WINDOWS\\TEMP',
-                        windir: 'C:\\WINDOWS',
-                    },
+                    environment: ()=>config?.environment ?? defaultEnvironment(windows, folders),
                 }),
                 ...createSystemFunctions({
                     readMemory,
@@ -1287,7 +1295,7 @@ export const win32Module = {
                 // with CoTaskMemFree, which is this same heap.
                 /** @param {number} bytes */
                 allocate: bytes=>heap.allocate(bytes),
-                folders: SHELL_FOLDERS,
+                folders,
                 // The namespace a folder browser walks is the volume every
                 // file call uses, published through the same vtables COM uses.
                 volume: { ...volume, drives: ()=>filesystem.drives() },
@@ -1309,6 +1317,7 @@ export const win32Module = {
                 // Where VerInstallFile reads a compressed source and writes the
                 // expanded file: the same volume every other file call uses.
                 files: volume,
+                windows,
             }),
 
             'LZ32.dll': createLzFunctions({ readCString, writeMemory, files: volume }),
@@ -1324,6 +1333,31 @@ export const win32Module = {
             }),
 
             'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
+
+            // An installer's INF files, cabinets and file queues, over the
+            // volume every file call uses; a queue's notifications go to the
+            // program's own callback on the thread that asked.
+            'SETUPAPI.dll': createSetupapiFunctions({
+                readMemory,
+                writeMemory,
+                readCString,
+                readWideString,
+                setLastError: setError,
+                setLastErrorFor: setErrorOn,
+                files: volume,
+                /** @param {string} path */
+                fullPath: path=>filesystem.resolve(path).path,
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
+                /** @param {number} address */
+                free: address=>heap.free(address),
+                call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                callerThread: ()=>bridge.callerThread(),
+                handles,
+                folders,
+                registry: hive,
+                divergence: config?.divergence,
+            }),
 
             // The maths half of the Direct3D helper: pure vector and matrix
             // functions, here for their stack width as much as their answers,
@@ -1594,7 +1628,11 @@ export const win32Module = {
             }),
 
             'RPCRT4.dll': createRpcFunctions({
-                writeMemory, readCString, divergence: config?.divergence,
+                writeMemory, readCString, readMemory, divergence: config?.divergence,
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
+                /** @param {number} address */
+                free: address=>heap.free(address),
             }),
 
             'OLEAUT32.dll': createAutomationFunctions({
@@ -1642,6 +1680,7 @@ export const win32Module = {
             teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
             arena,
             setRegisters,
+            windows,
         });
 
         /** Every function, whichever library exports it. */

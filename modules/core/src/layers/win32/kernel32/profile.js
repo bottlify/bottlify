@@ -464,9 +464,11 @@ export function createProfileFunctions(host){
          * DWORD GetPrivateProfileSectionA(LPCSTR lpAppName, LPSTR lpReturnedString,
          *   DWORD nSize, LPCSTR lpFileName)
          *
-         * Every entry of the section as `key=value`, as it stands in the
-         * file, in one NUL-separated list -- the shape a caller walks with
-         * the same loop it walks the key list with.
+         * Every line of the section as it stands in the file, in one
+         * NUL-separated list -- the shape a caller walks with the same loop
+         * it walks the key list with. A line with no `=` is one of them: an
+         * installer keeps plain lists in sections and reads them this way.
+         * Blank lines and comments are not.
          */
         GetPrivateProfileSectionA: {
             argBytes: 16,
@@ -480,8 +482,8 @@ export function createProfileFunctions(host){
                     const entries = span === null
                         ? []
                         : lines.slice(span.start + 1, span.end)
-                            .filter(line=>line.key !== null)
-                            .map(line=>line.text.trim());
+                            .map(line=>line.text.trim())
+                            .filter(line=>line !== '' && !line.startsWith(';'));
                     return writeList(buffer, size, entries);
                 };
                 const loaded = path === null ? [] : load(path);
