@@ -194,6 +194,73 @@ test('GetFileVersionInfoSizeA tells a missing file from one with no version reso
         'ERROR_RESOURCE_DATA_NOT_FOUND: present, but carries no version resource');
 });
 
+test('a system library the engine answers for has the version of the system it belongs to',
+    ()=>{
+        // info.c: GetFileVersionInfoSizeA("kernel32.dll") is not zero, and a
+        // block copied from it answers the root and the translation. Here
+        // kernel32 is a table, not a file, and so is DirectX's ddraw -- which
+        // carries the DirectX version the registry reports.
+        const memory = new Uint8Array(0x4000);
+        /** @type {number[]} */
+        const errors = [];
+        const files = /** @type {any} */ (fakeFiles());
+        const view = new DataView(memory.buffer);
+        const version = /** @type {any} */ (createVersionFunctions({
+            readMemory: (a, n)=>memory.slice(a, a + n),
+            writeMemory: (a, b)=>memory.set(b, a),
+            readCString: a=>{
+                let text = '';
+                for (let at = a; memory[at] !== 0; at++)
+                {
+                    text += String.fromCharCode(memory[at]);
+                }
+                return text;
+            },
+            setLastError: code=>errors.push(code),
+            versionInfo: ()=>null,
+            files,
+            systemLibrary: name=>['kernel32.dll', 'ddraw.dll'].includes(name.toLowerCase()),
+        }));
+        /** @param {string} path @param {number} [at] */
+        const put = (path, at = 0x10)=>{
+            memory.set([...path].map(c=>c.charCodeAt(0)).concat([0]), at);
+            return at;
+        };
+        /** @param {string} query */
+        const ask = query=>{
+            assert.equal(version.VerQueryValueA.handler([0x400, put(query, 0x300), 0x30, 0x34]), 1,
+                query);
+            return { at: view.getUint32(0x30, true), size: view.getUint32(0x34, true) };
+        };
+        /** @param {number} at */
+        const text = at=>String.fromCharCode(...memory.subarray(at, memory.indexOf(0, at)));
+
+        for (const [path, ms, ls, spelled] of /** @type {[string, number, number, string][]} */ ([
+            ['kernel32.dll', 5 << 16 | 1, 2600 << 16 | 0, '5.1.2600.0'],
+            ['KERNEL32', 5 << 16 | 1, 2600 << 16 | 0, '5.1.2600.0'],
+            ['C:\\WINDOWS\\system32\\ddraw.dll', 4 << 16 | 9, 0 << 16 | 904, '4.09.00.0904'],
+        ]))
+        {
+            const size = version.GetFileVersionInfoSizeA.handler([put(path), 0]);
+            assert.ok(size > 0, `${path} has version information`);
+            assert.equal(version.GetFileVersionInfoA.handler([put(path), 0, size, 0x400]), 1);
+            const root = ask('\\');
+            assert.equal(root.size, 52);
+            assert.equal(view.getUint32(root.at, true), 0xfeef04bd);
+            const fileVersion = [8, 12].map(offset=>view.getUint32(root.at + offset, true));
+            assert.deepEqual(fileVersion, [ms, ls], path);
+            const translation = ask('\\VarFileInfo\\Translation');
+            assert.equal(view.getUint32(translation.at, true), 0x04b00409, 'US English, UTF-16');
+            assert.equal(text(ask('\\StringFileInfo\\040904b0\\FileVersion').at), spelled);
+        }
+        assert.deepEqual(errors, [], 'no error on the way');
+
+        assert.equal(version.GetFileVersionInfoSizeA.handler([put('C:\\Game\\ddraw.dll'), 0]), 0,
+            'not where the system keeps it');
+        assert.equal(version.GetFileVersionInfoSizeA.handler([put('notalibrary.dll'), 0]), 0);
+        assert.deepEqual(errors, [2, 2], 'ERROR_FILE_NOT_FOUND, as for any file not there');
+    });
+
 test('the block is copied whole, and a short buffer is refused', ()=>{
     const m = machine();
     m.putString(0x10, 'C:\\thing.exe');

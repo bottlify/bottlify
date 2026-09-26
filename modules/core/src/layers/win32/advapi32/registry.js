@@ -220,6 +220,12 @@ export const SHELL_FOLDERS = Object.freeze({
 });
 
 /**
+ * The DirectX this machine has, as its own setup library reads it back: 9.0c,
+ * the newest of the interfaces the drawing layer answers for.
+ */
+export const DIRECTX_VERSION = '4.09.00.0904';
+
+/**
  * @param {Readonly<Record<string, string>>} table @param {string[]} names
  * @returns {Record<string, string>}
  */
@@ -281,7 +287,7 @@ const MACHINE_KEYS = Object.freeze(/** @type {MachineKey[]} */ ([
     // asking for 8.1 is satisfied. An installer that finds no version here
     // offers to install one, and the redistributable it carries cannot run.
     { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\DirectX', values: {
-        Version: '4.09.00.0904',
+        Version: DIRECTX_VERSION,
         InstalledVersion: Uint8Array.of(0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x09, 0x04),
         InstalledCount: 1,
         RC: 0,
