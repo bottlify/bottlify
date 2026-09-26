@@ -641,6 +641,21 @@ test('ShowWindow answers with the visibility it found, not the one it set', ()=>
     assert.equal(fns.ShowWindow.handler([0x9999, SW_SHOW]), 0, 'no window, nothing to report');
 });
 
+test('SW_SHOWNA tells a visible window it is shown, where SW_SHOW tells it nothing', ()=>{
+    // user32's message tests: WmSHOWNATopVisible is WM_SHOWWINDOW(1) for a
+    // top-level window that was already visible, with no activation.
+    const SW_SHOWNA = 8;
+    const { fns, hwnd, dispatched } = withWindow();
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    dispatched.length = 0;
+
+    assert.equal(fns.ShowWindow.handler([hwnd, SW_SHOW]), 1);
+    assert.deepEqual(dispatched, [], 'nothing changed, so nothing is said');
+    assert.equal(fns.ShowWindow.handler([hwnd, SW_SHOWNA]), 1, 'it was visible');
+    assert.deepEqual(dispatched.map(({ message, wParam, lParam })=>[message, wParam, lParam]),
+        [[WM_SHOWWINDOW, 1, 0]]);
+});
+
 test('WS_VISIBLE at creation shows in the style and in ShowWindow', ()=>{
     const { fns, memory } = withWindow();
     const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
@@ -1490,8 +1505,11 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     // call, as the real CreateWindowEx sends them once WM_CREATE is answered:
     // a program that never calls ShowWindow measures the screen it lays itself
     // out and rasterises its text for from what it is told here.
-    assert.deepEqual(dispatched.map(entry=>entry.message), [WM_CREATE, WM_SIZE, WM_MOVE]);
-    const [message] = dispatched;
+    assert.deepEqual(dispatched.map(entry=>entry.message),
+        [WM_NCCREATE, WM_CREATE, WM_SIZE, WM_MOVE, WM_SHOWWINDOW]);
+    assert.equal(dispatched[0].lParam, dispatched[1].lParam,
+        'WM_NCCREATE carries the same structure');
+    const message = dispatched[1];
     assert.equal(message.message, WM_CREATE);
     assert.equal(message.wndProc, WNDPROC);
     assert.equal(message.hwnd, hwnd);
@@ -1513,7 +1531,7 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     assert.equal(memory.u32(at + CREATESTRUCT.lpszClass), CLASS_NAME);
     assert.equal(memory.u32(at + CREATESTRUCT.dwExStyle), 0x200);
 
-    const size = dispatched[1];
+    const size = dispatched[2];
     assert.equal(size.hwnd, hwnd);
     assert.equal(size.wParam, 0, 'SIZE_RESTORED');
     fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
@@ -1523,22 +1541,69 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
         - memory.u32(RECT_BUFFER + RECT.top);
     assert.equal(size.lParam >>> 16, clientHeight, 'the client height, not the frame');
     assert.equal(size.lParam & 0xffff, clientWidth, 'and the client width');
-    const place = dispatched[2];
+    const place = dispatched[3];
     assert.equal(place.hwnd, hwnd);
     assert.equal(place.lParam >>> 16, 20, 'the y it was created at');
     assert.equal(place.lParam & 0xffff, 10, 'and the x');
+    assert.deepEqual([dispatched[4].wParam, dispatched[4].lParam], [1, 0], 'shown');
 });
 
-test('a window created hidden hears only WM_CREATE', ()=>{
-    // WM_NCCREATE is the one to leave out: its default answer is TRUE and its
-    // structure arrives again a moment later. A hidden window is told nothing
-    // about a size or a place it does not have on screen yet.
+test('a window created hidden hears only that it is being created', ()=>{
+    // A hidden window is told nothing about a size or a place it does not
+    // have on screen yet, nor that it is shown.
     const { memory, fns, dispatched } = setup({ heap: true });
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     createWindow(fns, memory);
 
-    assert.deepEqual(dispatched.map(m=>m.message), [WM_CREATE], 'hidden: the create only');
+    assert.deepEqual(dispatched.map(m=>m.message), [WM_NCCREATE, WM_CREATE],
+        'hidden: the two creates only');
+});
+
+test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s message '
+    + 'tests pin', ()=>{
+    // WmCreateOverlappedSeq and WmCreatePopupSeq, less what this layer does
+    // not send (WM_GETMINMAXINFO, WM_NCCALCSIZE, the WM_WINDOWPOS pair, the
+    // painting): HCBT_CREATEWND, WM_NCCREATE, WM_CREATE, and for a window
+    // created visible WM_SIZE (SIZE_RESTORED), WM_MOVE and WM_SHOWWINDOW(1).
+    /** @type {string[]} */
+    const log = [];
+    const { memory, fns } = setup({
+        heap: true,
+        reply: message=>{
+            log.push(`0x${message.message.toString(16)}:${message.wParam}`);
+            return message.message === WM_NCCREATE ? 1 : 0;
+        },
+        hookReply: (entry, args)=>{
+            log.push(`hook:${args[0]}`);
+            return 0;
+        },
+    });
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+
+    createWindow(fns, memory, { style: 0x80000000 });
+    assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0'], 'hidden');
+
+    log.length = 0;
+    createWindow(fns, memory, { style: 0x80000000 | WS_VISIBLE });
+    assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0', '0x5:0', '0x3:0',
+        '0x18:1'], 'visible');
+});
+
+test('WM_NCCREATE answered FALSE refuses the window, which hears WM_NCDESTROY alone', ()=>{
+    // As documented for WM_NCCREATE: FALSE and CreateWindowEx answers NULL.
+    const { memory, fns, dispatched } = setup({
+        heap: true, reply: message=>(message.message === WM_NCCREATE ? 0 : 1),
+    });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+
+    const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+    assert.equal(hwnd, 0);
+    assert.deepEqual(dispatched.map(m=>m.message), [WM_NCCREATE, WM_NCDESTROY]);
+    assert.equal(fns.IsWindow.handler([dispatched[0].hwnd]), 0, 'and nothing is left behind');
 });
 
 test('the CREATESTRUCT is freed once the procedure has seen it', ()=>{
@@ -1576,7 +1641,8 @@ test('a procedure that answers late leaves the caller a promise to park on', asy
     const result = createWindow(fns, memory);
     assert.equal(typeof result.then, 'function', 'sending is running guest code, which waits');
 
-    answer(0);
+    // TRUE to WM_NCCREATE, and anything but -1 to WM_CREATE.
+    answer(1);
     assert.notEqual(await result, 0, 'and the handle arrives when the procedure is done');
 });
 
@@ -1796,8 +1862,9 @@ test('a CBT hook is told of a window before its procedure is, and can refuse it'
     // procedure is then handed.
     assert.equal(memory.u32(args[2]), dispatched[0].lParam);
     assert.equal(memory.u32(dispatched[0].lParam + CREATESTRUCT.lpszClass), CLASS_NAME);
-    assert.equal(dispatched[0].message, WM_CREATE);
-    assert.equal(dispatched[0].thread, THREAD);
+    assert.deepEqual(dispatched.map(m=>m.message), [WM_NCCREATE, WM_CREATE]);
+    assert.equal(dispatched[1].lParam, dispatched[0].lParam);
+    assert.equal(dispatched[1].thread, THREAD);
 });
 
 test('a CBT hook answering non-zero refuses the window before WM_CREATE', ()=>{
@@ -1811,7 +1878,7 @@ test('a CBT hook answering non-zero refuses the window before WM_CREATE', ()=>{
     assert.deepEqual(dispatched, [], 'the procedure never hears of a window the hook refused');
 });
 
-test('a hook that answers late leaves the caller a promise, and WM_CREATE follows it', async()=>{
+test('a hook that answers late leaves a promise, and the creation follows it', async()=>{
     /** @type {(value: number) => void} */
     let answer = ()=>{};
     const pending = new Promise(resolve=>{
@@ -1827,7 +1894,8 @@ test('a hook that answers late leaves the caller a promise, and WM_CREATE follow
     assert.deepEqual(dispatched, [], 'not yet');
     answer(0);
     assert.notEqual(await result, 0);
-    assert.equal(/** @type {any} */ (dispatched[0]).message, WM_CREATE);
+    assert.deepEqual(/** @type {any[]} */ (dispatched).map(m=>m.message),
+        [WM_NCCREATE, WM_CREATE]);
 });
 
 test('the newest hook is called first and reaches the older through CallNextHookEx', ()=>{

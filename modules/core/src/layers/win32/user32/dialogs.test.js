@@ -618,11 +618,13 @@ test('a control of a class the program registered is the window of that class', 
     const CLASS_NAME = 0x10900;
     /** @type {{ wndProc: number, message: number, lParam: number }[]} */
     const seen = [];
+    const WM_NCCREATE = 0x0081;
     const { memory, fns } = setup({
         allocate: ()=>0x13000,
         dispatch: (wndProc, message)=>{
             seen.push({ wndProc, message: message.message, lParam: message.lParam });
-            return 0;
+            // TRUE to WM_NCCREATE, as the default procedure answers it.
+            return message.message === WM_NCCREATE ? 1 : 0;
         },
     });
     memory.putString(CLASS_NAME, 'meter');
@@ -641,7 +643,7 @@ test('a control of a class the program registered is the window of that class', 
     assert.notEqual(meter, 0);
     const WM_CREATE = 0x0001;
     assert.deepEqual(seen.map(call=>[call.wndProc, call.message]),
-        [[METER_PROC, WM_CREATE], [DIALOGPROC, WM_INITDIALOG]],
+        [[METER_PROC, WM_NCCREATE], [METER_PROC, WM_CREATE], [DIALOGPROC, WM_INITDIALOG]],
         'the control was told it exists, then the dialog initialised, all during the call');
     assert.equal(memory.u32(seen[0].lParam + 12), dialog, 'CREATESTRUCT.hwndParent');
     assert.equal(memory.u32(seen[0].lParam + 8), 201, 'CREATESTRUCT.hMenu is the id');

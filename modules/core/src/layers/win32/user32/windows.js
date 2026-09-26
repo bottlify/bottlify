@@ -238,6 +238,7 @@ const WS_VISIBLE = 0x10000000;
 const SW_HIDE = 0;
 const SW_SHOW = 5;
 const SW_MINIMIZE = 6;
+const SW_SHOWNA = 8;
 /** The show commands that leave the window minimised. */
 const MINIMISING = new Set([2, SW_MINIMIZE, 7]);
 const WS_MINIMIZE = 0x20000000;
@@ -1425,43 +1426,44 @@ export function createWindowFunctions(host){
 
         // The CBT hook first, before the window's own procedure has run: a
         // framework attaches its object to the window here and subclasses the
-        // procedure, so the WM_CREATE that follows reaches the framework and
-        // not the class. A hook that answers non-zero refuses the window.
-        //
-        // Only WM_CREATE after it, and deliberately: WM_NCCREATE is the
-        // message a procedure is least likely to need -- its default answer is
-        // TRUE and the structure it carries arrives again a moment later with
-        // WM_CREATE -- so it is the one to leave out until a program is seen
-        // to want it.
+        // procedure, so the messages that follow reach the framework and not
+        // the class. A hook that answers non-zero refuses the window.
         const cbt = callHook(WH_CBT, null,
             [HCBT_CREATEWND, record.hwnd, create + CREATESTRUCTA.SIZE], thread);
+        /** @returns {number | Promise<number>} */
+        const refuse = ()=>andThen(destroyWindow(record.hwnd, thread, 'ncdestroy'), ()=>done(0));
         return andThen(cbt, refused=>{
             if ((refused | 0) !== 0)
             {
                 return andThen(destroyWindow(record.hwnd, thread, 'none'), ()=>done(0));
             }
-            return andThen(tell(WM_CREATE), created=>{
-                if ((created | 0) === -1)
-                {
-                    return andThen(destroyWindow(record.hwnd, thread, 'ncdestroy'), ()=>done(0));
-                }
-                // A window created visible hears its own size and place inside
-                // this call, as the real CreateWindowEx sends them once
-                // WM_CREATE has been answered: a program that never calls
-                // ShowWindow measures the screen it lays itself out and
-                // rasterises its text for from the size it is told here.
-                if ((style & WS_VISIBLE) === 0)
-                {
-                    return done(record.hwnd);
-                }
-                const client = geometry.clientRect(record);
-                return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
-                    ((((client.bottom - client.top) & 0xffff) << 16)
-                        | ((client.right - client.left) & 0xffff)) >>> 0, thread),
-                ()=>andThen(send(record.hwnd, WM_MOVE, 0,
-                    (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
-                ()=>done(record.hwnd)));
-            });
+            // WM_NCCREATE before WM_CREATE, with the same structure: a
+            // procedure that keeps lpCreateParams takes it from the first.
+            return andThen(tell(WM_NCCREATE), accepted=>((accepted | 0) === 0 ? refuse()
+                : andThen(tell(WM_CREATE), created=>{
+                    if ((created | 0) === -1)
+                    {
+                        return refuse();
+                    }
+                    // A window created visible hears its own size, its place
+                    // and that it is shown inside this call, as the real
+                    // CreateWindowEx sends them once WM_CREATE has been
+                    // answered: a program that never calls ShowWindow
+                    // measures the screen it lays itself out and rasterises
+                    // its text for from the size it is told here.
+                    if ((style & WS_VISIBLE) === 0)
+                    {
+                        return done(record.hwnd);
+                    }
+                    const client = geometry.clientRect(record);
+                    return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
+                        ((((client.bottom - client.top) & 0xffff) << 16)
+                            | ((client.right - client.left) & 0xffff)) >>> 0, thread),
+                    ()=>andThen(send(record.hwnd, WM_MOVE, 0,
+                        (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
+                    ()=>andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread),
+                        ()=>done(record.hwnd))));
+                })));
         });
     };
 
@@ -2476,13 +2478,14 @@ export function createWindowFunctions(host){
         // message is *sent* -- the procedure runs before this call returns --
         // and only when this call changes the visibility, because SW_SHOW on
         // an already-visible window says nothing happened and nothing did.
+        // SW_SHOWNA is the exception, told whatever it found (WmSHOWNATopVisible).
         //
         // Sent, and then chained onto whatever follows it: a procedure the
         // bridge has to run answers with a promise, so returning this call's
         // own result before it has answered hands the host call back to the
         // guest while the guest's procedure is still pending -- and the guest
         // reuses its own stack under it.
-        const greeting = wasVisible === hide
+        const greeting = wasVisible === hide || cmdShow === SW_SHOWNA
             ? send(record.hwnd, WM_SHOWWINDOW, hide ? 0 : 1, 0, host.callerThread?.())
             : 0;
         record.style = hide
@@ -2706,8 +2709,8 @@ export function createWindowFunctions(host){
          *   DWORD dwStyle, int X, int Y, int nWidth, int nHeight, HWND hWndParent,
          *   HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam)
          *
-         * lpParam is what WM_NCCREATE and WM_CREATE carry, and both of those are
-         * calls into the window procedure, so it goes nowhere yet.
+         * lpParam reaches the window procedure as the CREATESTRUCT's
+         * lpCreateParams, with WM_NCCREATE and again with WM_CREATE.
          */
         CreateWindowExA: {
             argBytes: 48,
