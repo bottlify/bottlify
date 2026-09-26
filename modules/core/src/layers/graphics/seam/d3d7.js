@@ -29,13 +29,14 @@ import {
 } from './iids.js';
 import {
     D3DCLIPSTATUS, D3DDEVICEDESC7, D3DLIGHT7, D3DPRIMCAPS, D3DRECT, D3DVERTEXBUFFERDESC,
-    D3DVIEWPORT7, createFields,
+    D3DVIEWPORT7, RECT, createFields,
 } from './structs.js';
 import { readGuid } from './ddraw.js';
 import { writePixelFormat } from '../ddraw/structs.js';
 import { depthFormatForDepth, pixelFormatForDepth } from '../ddraw/objects.js';
 import { DDERR_INVALIDPARAMS, D3D_OK } from '../d3d7/constants.js';
 import { createDirect3D7 } from '../d3d7/device.js';
+import { loadTexture } from '../d3d7/load.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 
 /** What an enumeration callback answers to stop. */
@@ -713,6 +714,28 @@ export function createDirect3D7Seam(
             }
             return hr;
         },
+
+        /**
+         * The flags name cube faces, and no surface here is a cube map.
+         *
+         * @param {any} device @param {number[]} args
+         */
+        Load: (device, [dest, point, src, rect])=>loadTexture({
+            memory,
+            dest: publisher.objectAt(dest),
+            destPoint: (point >>> 0) === 0
+                ? null
+                : { x: fields.readU32(point >>> 0) | 0, y: fields.readU32((point >>> 0) + 4) | 0 },
+            src: publisher.objectAt(src),
+            srcRect: (rect >>> 0) === 0
+                ? null
+                : {
+                    left: fields.readU32((rect >>> 0) + RECT.left) | 0,
+                    top: fields.readU32((rect >>> 0) + RECT.top) | 0,
+                    right: fields.readU32((rect >>> 0) + RECT.right) | 0,
+                    bottom: fields.readU32((rect >>> 0) + RECT.bottom) | 0,
+                },
+        }),
 
         /** @param {any} device @param {number[]} args */
         ComputeSphereVisibility: (device, [centers, radii, count, , results])=>{

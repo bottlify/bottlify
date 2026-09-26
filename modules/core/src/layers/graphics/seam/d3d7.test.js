@@ -37,8 +37,8 @@ import { guidBytes } from './d3d7.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import { DDSURFACEDESC2, writeSurfaceDesc } from '../ddraw/structs.js';
 import {
-    DDPF_RGB, DDPF_ZBUFFER, DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCL_NORMAL, DDSD_CAPS,
-    DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
+    DDPF_RGB, DDPF_ZBUFFER, DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_TEXTURE,
+    DDSCL_NORMAL, DDSD_CAPS, DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
 import {
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DERR_INVALIDVERTEXFORMAT,
@@ -339,6 +339,45 @@ test('ComputeSphereVisibility reads the spheres and writes a status word for eac
     assert.equal(h.device(device, 'ComputeSphereVisibility', [centers, radii, 2, 0, 0]),
         DDERR_INVALIDPARAMS >>> 0);
 
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('Load reads the destination point and the source rectangle, either of which may be null', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const device = h.createDevice(d3d, target).device;
+    const src = h.surface(ddraw, DDSCAPS_TEXTURE);
+    const dest = h.surface(ddraw, DDSCAPS_TEXTURE);
+    const srcAt = h.publisher.objectAt(src).buffer;
+    const destAt = h.publisher.objectAt(dest).buffer;
+    for (let index = 0; index < 64; index++)
+    {
+        h.box.memory.writeU32(srcAt + index * 4, 0x100 + index);
+    }
+
+    const rect = 0x6100;
+    const point = 0x6200;
+    [1, 2, 3, 4].forEach((value, k)=>h.box.memory.writeU32(rect + k * 4, value));
+    h.box.memory.writeU32(point, 5);
+    h.box.memory.writeU32(point + 4, 6);
+    assert.equal(h.device(device, 'Load', [dest, point, src, rect, 0]), D3D_OK);
+    assert.equal(h.box.memory.readU32(destAt + (6 * 8 + 5) * 4), 0x100 + 2 * 8 + 1,
+        'the rectangle\'s corner lands on the point');
+    assert.equal(h.box.memory.readU32(destAt + (7 * 8 + 6) * 4), 0x100 + 3 * 8 + 2);
+    assert.equal(h.box.memory.readU32(destAt + (5 * 8 + 5) * 4), 0, 'and nothing outside it');
+
+    assert.equal(h.device(device, 'Load', [dest, 0, src, 0, 0]), D3D_OK);
+    assert.equal(h.box.memory.readU32(destAt + 63 * 4), 0x100 + 63, 'the whole of it');
+    assert.equal(h.device(device, 'Load', [dest, 0, 0, 0, 0]), DDERR_INVALIDPARAMS >>> 0);
+
+    h.release(src);
+    h.release(dest);
     assert.equal(h.release(device), 0);
     h.release(d3d);
     h.release(target);
