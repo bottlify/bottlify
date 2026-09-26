@@ -1210,12 +1210,32 @@ export const win32Module = {
                 // The files a program reads its sounds from are the volume's.
                 ...createMmioFunctions({
                     readMemory, writeMemory, readCString, files: volume,
+                    // A file the program opened itself and hands mmio by its
+                    // handle is kernel32's, and closes as CloseHandle closes it.
+                    handles: {
+                        file: handle=>{
+                            try
+                            {
+                                return handles.resolve(handle, 'file') ?? null;
+                            }
+                            catch (e){
+                                void e;
+                                return null;
+                            }
+                        },
+                        close: handle=>
+                            libraries['KERNEL32.dll'].CloseHandle.handler([handle]) !== 0,
+                    },
                     // A buffer mmio makes is guest memory, because mmioGetInfo
                     // hands its pointers to the program.
                     allocate: bytes=>heap.allocate(bytes),
                     free: address=>{
                         heap.free(address);
                     },
+                    // A file through the program's own I/O procedure is read
+                    // and written by calling it.
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
                     divergence: config?.divergence,
                 }),
             },
@@ -1552,9 +1572,16 @@ export const win32Module = {
                         libraries['KERNEL32.dll'].GetProcAddress.handler([module, name]),
                 },
                 makeObject: createComObject,
-                // A drop target hangs on a window, which user32 knows.
+                // A drop target hangs on a window, which user32 knows, and is
+                // the window's property as well.
                 /** @param {number} window */
                 isWindow: window=>libraries['USER32.dll'].IsWindow.handler([window]) === 1,
+                windowProperty: {
+                    set: (window, name, value)=>
+                        libraries['USER32.dll'].SetPropA.handler([window, name, value]),
+                    remove: (window, name)=>
+                        libraries['USER32.dll'].RemovePropA.handler([window, name]),
+                },
             }),
 
             'RPCRT4.dll': createRpcFunctions({
