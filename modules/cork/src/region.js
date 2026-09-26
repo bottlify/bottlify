@@ -533,7 +533,21 @@ export function formRegion(read, entry,
 
     const ordered = [...blocks.values()].sort((a, b)=>a.start - b.start);
     const pages = new Set();
-    let hash = 0x811c9dc5;
+    // Two FNV lanes, 64 bits: the hash is what a stored translation is found
+    // by, and a store -- a bundle's seed above all, made on another machine
+    // from a build of the program that may differ -- must not answer for
+    // other bytes at the same entry. Thirty-two bits met that at one pair in
+    // four billion, and a birthday search finds such a pair in a second.
+    let low = 0x811c9dc5;
+    let high = 0x050c5d1f;
+    let at = 0;
+    /** @param {number} address */
+    const take = address=>{
+        const byte = read(address);
+        low = Math.imul(low ^ byte, 0x01000193);
+        high = Math.imul(high ^ byte ^ at++ & 0xff, 0x01000193);
+        pages.add(address >>> 12);
+    };
     for (const block of ordered)
     {
         for (const target of block.exit.targets)
@@ -545,8 +559,7 @@ export function formRegion(read, entry,
         }
         for (let address = block.start; address < block.end; address++)
         {
-            hash = Math.imul(hash ^ read(address), 0x01000193) >>> 0;
-            pages.add(address >>> 12);
+            take(address);
         }
     }
     // A table's entries decide the region's blocks: they are hashed with the
@@ -557,8 +570,7 @@ export function formRegion(read, entry,
         const end = table.address + table.entries.length * 4;
         for (let address = table.address; address < end; address++)
         {
-            hash = Math.imul(hash ^ read(address), 0x01000193) >>> 0;
-            pages.add(address >>> 12);
+            take(address);
         }
     }
     return {
@@ -567,7 +579,8 @@ export function formRegion(read, entry,
         entries: ordered.map(block=>block.start),
         bytes,
         pages,
-        hash: hash.toString(16).padStart(8, '0'),
+        hash: (high >>> 0).toString(16).padStart(8, '0')
+            + (low >>> 0).toString(16).padStart(8, '0'),
         refused,
     };
 }

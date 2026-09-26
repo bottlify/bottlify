@@ -655,6 +655,29 @@ test('with a store, a second runtime takes its regions from the store; a changed
         assert.equal(store.size(), 6);
     });
 
+test('a store does not answer at an entry for other bytes that agree in 32 bits of their hash',
+    async()=>{
+        const { memoryTranslationStore } = await import('./cache.js');
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const store = memoryTranslationStore();
+        // mov eax, imm32; hlt: the two programs' bytes collide in FNV-1a's 32 bits.
+        const run = async(/** @type {number[]} */ code)=>{
+            const m = machine({ store, bundleId: 'test' });
+            m.write(CODE, code);
+            m.setReg(4, 0x80000);
+            m.runtime.noteHot(CODE);
+            await m.runtime.translatePending();
+            await settle();
+            const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
+            assert.equal(exit.kind, 'halt');
+            return { eax: m.reg(0), hits: m.runtime.diagnostics().cacheHits };
+        };
+        assert.deepEqual(await run([0xb8, 0xbf, 0x20, 0x50, 0x13, 0xf4]),
+            { eax: 0x135020bf, hits: 0 });
+        assert.deepEqual(await run([0xb8, 0x9b, 0xb1, 0xb4, 0x1a, 0xf4]),
+            { eax: 0x1ab4b19b, hits: 0 }, 'the other bytes ran, not the stored translation');
+    });
+
 test('a flood of distinct misses does not stop a later address reaching the threshold',
     async()=>{
         const m = machine({ missThreshold: 64 });

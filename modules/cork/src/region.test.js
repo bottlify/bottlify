@@ -34,7 +34,7 @@ test('a countdown loop forms three blocks with one back-edge into the loop head'
     assert.equal(tail.exit.backEdge, false);
     assert.equal(region.bytes, 9);
     assert.deepEqual([...region.pages], [1]);
-    assert.equal(region.hash.length, 8);
+    assert.equal(region.hash.length, 16);
 });
 
 test('a diamond forms four blocks and no back-edge', ()=>{
@@ -148,6 +148,16 @@ test('the hash follows the bytes, not the address the region was formed at', ()=
     assert.equal(a.hash, b.hash);
     const c = regionOf([0xb9, 0x0b, 0, 0, 0, 0x49, 0x75, rel8(-3), 0xc3], 0x1000);
     assert.notEqual(a.hash, c.hash);
+});
+
+test('two regions whose bytes agree in 32 bits of FNV-1a still hash apart', ()=>{
+    // mov eax, imm32; hlt -- the two immediates were found by a birthday
+    // search, a second's work: 32 bits cannot keep a stored translation to
+    // the bytes it was made from.
+    const a = regionOf([0xb8, 0xbf, 0x20, 0x50, 0x13, 0xf4]);
+    const b = regionOf([0xb8, 0x9b, 0xb1, 0xb4, 0x1a, 0xf4]);
+    assert.notEqual(a.hash, b.hash);
+    assert.equal(a.hash.length, 16);
 });
 
 test('a run of zero bytes past a call ends the region as data, not as four thousand adds', ()=>{

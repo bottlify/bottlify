@@ -192,7 +192,10 @@ hash; what is saved is the emitting and the encoding, and the report says
 host's features, the default NaN's sign among them (`n`), and the emitting settings (`structure`
 `S`, `countTransfers` `T`, the trap port `p<port>`) -- a run with `structure` on a store a run
 without it wrote took the other code; a batch module is named by 64 bits of its bytes' hash (two
-FNV lanes), since every batch of a bundle shares one namespace. `CACHE_VERSION` moves by hand
+FNV lanes), since every batch of a bundle shares one namespace, and so is a region's own hash, the
+key's record of its code bytes and its tables' entries: with 32 bits a search of a second found two
+`mov eax, imm32; hlt` whose bytes hash alike, and a store holding one answered at the same entry
+for the other, which then returned the first one's immediate. `CACHE_VERSION` moves by hand
 when the emitter's output does; `runtime/emitted.test.js` emits a fixed set of regions (the
 benchmark's programs at their entries, under fixed features) and holds the digest to the one
 recorded for the current version, so a change to the emitted code fails it until the version is
