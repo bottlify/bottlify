@@ -441,6 +441,7 @@ export const win32Module = {
             // A font enumeration's callback is the program's own code.
             call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
             callerThread: ()=>bridge.callerThread(),
+            setLastError: setError,
         });
 
         // The transport is injected, as the GPU device and the block store are.
