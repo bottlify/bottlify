@@ -21,6 +21,7 @@
  * that cannot.
  */
 
+const D3DCAPS_READ_SCANLINE = 0x00020000;
 const D3DCAPS2_DYNAMICTEXTURES = 0x20000000;
 
 const D3DPRESENT_INTERVAL_ONE = 0x00000001;
@@ -131,8 +132,8 @@ export function capabilityWords(caps, identity = {}){
     return {
         DeviceType: identity.deviceType ?? 1,
         AdapterOrdinal: identity.adapterOrdinal ?? 0,
-        // No scanline to read, no overlay.
-        Caps: 0,
+        // The raster the clock gives can be read; there is no overlay.
+        Caps: D3DCAPS_READ_SCANLINE,
         // Textures may be made dynamic, and are uploaded when they change.
         // Gamma is kept and not applied, so it is not claimed.
         Caps2: D3DCAPS2_DYNAMICTEXTURES,

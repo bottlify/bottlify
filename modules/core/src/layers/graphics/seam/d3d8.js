@@ -46,6 +46,7 @@ import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
 import { vertexCountOf } from '../d3d8/render.js';
 import { createCursorTeller } from './cursor.js';
+import { createRaster, rasterStatus } from './raster.js';
 import {
     createShadow, getSurfaceLevelCode, lockCode, materialFloats, materialOf, setIndicesCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
@@ -59,6 +60,7 @@ import {
  * blob is unreviewable: nobody can tell a claim we can honour from one we
  * cannot, and every one of these is a claim a program acts on.
  */
+const D3DCAPS_READ_SCANLINE = 0x00020000;
 const D3DCAPS2_FULLSCREENGAMMA = 0x00020000;
 // A colour cursor at any resolution: the device keeps the bitmap a program
 // hands it and the host shows it over the frame. A device that claims neither
@@ -244,13 +246,17 @@ const S_FALSE = 1;
  *        The client area of a window, which is the size a back buffer asked
  *        for as zero by zero takes. Without it the configured display is the
  *        nearest size this layer knows.
+ * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
  */
 export function createDirect3D8Seam(
     { publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution, identity,
-        windowClientSize },
+        windowClientSize, now = ()=>performance.now() },
 )
 {
     const fields = createFields(memory);
+    const raster = createRaster({
+        now, refresh: ()=>REFRESH_HZ, height: ()=>screen().height,
+    });
 
     /**
      * Each device's block of state the guest sets without crossing, and the
@@ -1066,18 +1072,15 @@ export function createDirect3D8Seam(
             return hr;
         },
 
-        // Nothing here scans a frame out, so there is no beam to be behind and
-        // no blanking interval to be inside: both fields read as the start of a
-        // frame, which is what DirectDraw's scan line reports for the same
-        // reason. A program polling this to pace itself sees a display that
-        // never moves, and one that reads it once sees a legal answer.
+        // The raster the clock gives, the one DirectDraw reports: a program
+        // polling this for the blank sees it come round once a refresh.
         /** @param {any} device @param {number[]} args */
         GetRasterStatus: (device, [out])=>{
             if ((out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
-            fields.writeStruct(out >>> 0, D3DRASTER_STATUS, { InVBlank: 0, ScanLine: 0 });
+            fields.writeStruct(out >>> 0, D3DRASTER_STATUS, rasterStatus(raster));
             return D3D_OK;
         },
 
@@ -1785,7 +1788,7 @@ export function createDirect3D8Seam(
         memory.writeMemory(address, new Uint8Array(D3DCAPS8.SIZE));
         fields.writeStruct(address, D3DCAPS8, {
             DeviceType: D3DDEVTYPE.HAL,
-            // D3DCAPS_READ_SCANLINE is not claimed: there is no scanline.
+            Caps: D3DCAPS_READ_SCANLINE,
             Caps2: D3DCAPS2_CANRENDERWINDOWED | D3DCAPS2_FULLSCREENGAMMA,
             PresentationIntervals: D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE,
             CursorCaps: D3DCURSORCAPS_COLOR | D3DCURSORCAPS_LOWRES,

@@ -171,10 +171,13 @@ function seamed(options = {}){
         return window === HWND ? { width: 640, height: 480 } : null;
     };
     const windowClientSize = options.windowClientSize ?? measure;
+    /** The display's clock, which a test moves. */
+    const clock = { time: 0 };
     const seam = createDirect3D9Seam({
         publisher,
         memory: box.services,
         screen: ()=>SCREEN,
+        now: ()=>clock.time,
         windowClientSize,
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
@@ -197,6 +200,7 @@ function seamed(options = {}){
     return {
         box,
         fields,
+        clock,
         publisher,
         seam,
         root,
@@ -288,6 +292,31 @@ test('the root makes a device and describes itself in the shape the header gives
     assert.equal(h.object(device), null);
     h.release(root);
     assert.equal(h.root.refCount, 0);
+});
+
+test('the raster status follows the display\'s clock, which the caps say can be read', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const caps = 0x3000;
+    assert.equal(h.device(device, 'GetDeviceCaps', [caps]), D3D_OK);
+    assert.equal(h.fields.readU32(caps + D3DCAPS9.Caps) & 0x00020000, 0x00020000,
+        'D3DCAPS_READ_SCANLINE');
+
+    const status = 0x3100;
+    const read = ()=>[h.fields.readU32(status), h.fields.readU32(status + 4)];
+    const period = 1000 / 60;
+    h.clock.time = period / 2;
+    assert.equal(h.device(device, 'GetRasterStatus', [0, status]), D3D_OK);
+    assert.deepEqual(read(), [0, 328], 'half of 600 visible lines and 56 blank ones');
+    h.clock.time = period - 0.1;
+    assert.equal(h.device(device, 'GetRasterStatus', [0, status]), D3D_OK);
+    assert.deepEqual(read(), [1, 0], 'in the blank, with the line to be ignored');
+    assert.equal(h.device(device, 'GetRasterStatus', [1, status]), D3DERR_INVALIDCALL,
+        'one swap chain');
+
+    assert.equal(h.release(device), 0);
+    h.release(root);
 });
 
 test('a fullscreen device names the window it takes with it', ()=>{

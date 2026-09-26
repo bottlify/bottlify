@@ -58,6 +58,7 @@ import { D3DCREATE, D3DDEVTYPE, PALETTE_BYTES } from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
+import { createRaster, rasterStatus } from './raster.js';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c | 0;
@@ -135,13 +136,17 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     The client area of a window, which is the size a back buffer asked for
  *     as zero by zero takes. Without it the configured display is the nearest
  *     size this layer knows.
+ * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
  */
 export function createDirect3D9Seam(
     { publisher, memory, screen, divergence, cursor, resolution, identity,
-        windowClientSize },
+        windowClientSize, now = ()=>performance.now() },
 )
 {
     const fields = createFields(memory);
+    const raster = createRaster({
+        now, refresh: ()=>REFRESH_HZ, height: ()=>screen().height,
+    });
 
     /**
      * The device each resource was made by, for GetDevice. Weak, so this map
@@ -748,9 +753,7 @@ export function createDirect3D9Seam(
 
     /** @param {number} address */
     const writeRasterStatus = address=>{
-        // Nothing scans a frame out, so there is no beam to be behind and no
-        // blanking interval to be inside: both read as the start of a frame.
-        fields.writeStruct(address, D3DRASTER_STATUS, { InVBlank: 0, ScanLine: 0 });
+        fields.writeStruct(address, D3DRASTER_STATUS, rasterStatus(raster));
     };
 
     const swapChainInterfaces = [describe(IID_IDirect3DSwapChain9, IDIRECT3DSWAPCHAIN9_SLOTS, {

@@ -115,6 +115,17 @@ function machine(){
             assert.ok(entry, `slot ${index} has an implementation`);
             return entry.fn.handler([pointer, ...args]) >>> 0;
         },
+        /**
+         * The same, with the answer as the method gave it: a promise stays one.
+         *
+         * @param {number} pointer @param {number} index @param {number[]} args
+         * @returns {Promise<number>}
+         */
+        async callParked(pointer, index, args){
+            const table = memory.readU32(pointer);
+            const entry = registered.get(memory.readU32(table + index * 4));
+            return (await entry.fn.handler([pointer, ...args])) >>> 0;
+        },
         /** @param {number} pointer @param {number} index */
         argBytesOf(pointer, index){
             const table = memory.readU32(pointer);
@@ -145,6 +156,9 @@ function machine(){
  */
 function seamed(){
     const box = machine();
+    let time = 0;
+    /** @type {{ at: number, run: () => void }[]} */
+    const timers = [];
     /** @type {any[]} */
     const roots = [];
     /** @type {any[]} */
@@ -171,6 +185,10 @@ function seamed(){
         memory: box.services,
         publishInterface: box.publishInterface,
         screen: ()=>SCREEN,
+        now: ()=>time,
+        schedule: (ms, run)=>{
+            timers.push({ at: time + ms, run });
+        },
         publisher,
         gdi: {
             createSurfaceDc: attributes=>{
@@ -191,6 +209,34 @@ function seamed(){
         box,
         fields,
         roots,
+        /** The display's clock, with what was waiting on it run as it passes. */
+        clock: {
+            now: ()=>time,
+            /** @param {number} ms */
+            set(ms){
+                time = ms;
+            },
+            /** @param {number} ms */
+            advance(ms){
+                time += ms;
+                for (const timer of timers.filter(t=>t.at <= time))
+                {
+                    timers.splice(timers.indexOf(timer), 1);
+                    timer.run();
+                }
+            },
+            pending: ()=>timers.length,
+            /** Moves the clock to the first wait's time and wakes it. */
+            wakeNext(){
+                timers.sort((a, b)=>a.at - b.at);
+                const timer = timers.shift();
+                if (timer)
+                {
+                    time = timer.at;
+                    timer.run();
+                }
+            },
+        },
         dcs,
         presented,
         publisher,
@@ -721,6 +767,66 @@ test('the GDI surface is the primary: none without one, flipped to only on a fli
     assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();
 });
+
+// --- the raster ---
+
+test('the vertical blank comes round once a refresh, and a wait for it lasts until it does',
+    async()=>{
+        const DDWAITVB_BLOCKBEGIN = 1;
+        const DDWAITVB_BLOCKBEGINEVENT = 2;
+        const DDWAITVB_BLOCKEND = 4;
+        const h = seamed();
+        const ddraw = h.create7();
+        const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+            h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, name), args);
+        const out = 0x7900;
+        const period = 1000 / 60;
+        const blank = ()=>{
+            assert.equal(call('GetVerticalBlankStatus', [out]), DD_OK);
+            return h.box.memory.readU32(out);
+        };
+
+        h.clock.set(1);
+        assert.equal(blank(), 0, 'the top of a frame is not the blank');
+        h.clock.set(period - 0.1);
+        assert.equal(blank(), 1, 'its last lines are');
+        h.clock.set(period + 1);
+        assert.equal(blank(), 0, 'and the next frame has started');
+        assert.equal(call('GetScanLine', [out]), DD_OK);
+        assert.ok(h.box.memory.readU32(out) > 0, 'a scan line that moves with the clock');
+
+        // A wait is a promise the bridge parks the caller on until the clock
+        // reaches the edge it names.
+        let settled = false;
+        const begun = h.box.callParked(ddraw, slot(IDIRECTDRAW7_SLOTS, 'WaitForVerticalBlank'),
+            [DDWAITVB_BLOCKBEGIN, 0]).then(hr=>{
+            settled = true;
+            return hr;
+        });
+        await Promise.resolve();
+        assert.equal(settled, false, 'nothing returns before the blank');
+        h.clock.advance(period / 2);
+        await Promise.resolve();
+        assert.equal(settled, false, 'nor half a frame later, in the frame\'s visible part');
+        h.clock.wakeNext();
+        assert.equal(await begun, DD_OK);
+        assert.ok(h.clock.now() < 2 * period, 'woken in the frame it was waiting in');
+        assert.equal(blank(), 1, 'and on return the blank is on');
+
+        const toEnd = h.box.callParked(ddraw, slot(IDIRECTDRAW7_SLOTS, 'WaitForVerticalBlank'),
+            [DDWAITVB_BLOCKEND, 0]);
+        h.clock.wakeNext();
+        assert.equal(await toEnd, DD_OK);
+        assert.equal(blank(), 0, 'the end of the blank is the top of the next frame');
+
+        assert.equal(call('WaitForVerticalBlank', [DDWAITVB_BLOCKBEGINEVENT, 0]),
+            0x80004001, 'the event form the documentation says is unsupported');
+        assert.equal(call('WaitForVerticalBlank', [0x80, 0]), DDERR_INVALIDPARAMS);
+        assert.equal(h.clock.pending(), 0);
+
+        assert.equal(h.release(ddraw), 0);
+        h.assertAllReleased();
+    });
 
 test('a palette round-trips its entries and is owned by the surface it is set on', ()=>{
     const h = seamed();

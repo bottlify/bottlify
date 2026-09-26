@@ -83,6 +83,12 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *     [deps.windowClientSize]
  *        A window's client area, which is the size a back buffer asked for as
  *        zero by zero takes.
+ * @param {() => number} [deps.now]
+ *        The clock the display's raster runs on, in milliseconds; the host's
+ *        when none is given.
+ * @param {(ms: number, run: () => void) => void} [deps.schedule]
+ *        How a wait for the vertical blank is woken; a host timer when none is
+ *        given.
  * @returns {{ libraries: Record<string, Record<string, any>>,
  *             opengl: { pixelFormat: { size: () => number, count: () => number,
  *                                      choose: (bytes: Uint8Array) => number,
@@ -99,18 +105,21 @@ export function createGraphicsLibraries(
     { graphics, memory, publishInterface, screen, gdi, present, publisher: shared, callGuest,
         free, exportAddress,
         currentThread,
-        scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize },
+        scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
+        now = ()=>performance.now(), schedule = (ms, run)=>{
+            setTimeout(run, ms);
+        } },
 )
 {
     const publisher = shared ?? createPublisher({ publishInterface });
     const fields = createFields(memory);
     const d3d8 = createDirect3D8Seam({
         publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution,
-        windowClientSize,
+        windowClientSize, now,
         identity: ()=>graphics.adapter?.() ?? null,
     });
     const d3d9 = createDirect3D9Seam({
-        publisher, memory, screen, divergence, cursor, resolution, windowClientSize,
+        publisher, memory, screen, divergence, cursor, resolution, windowClientSize, now,
         identity: ()=>graphics.adapter?.() ?? null,
     });
     const d3d10 = createDirect3D10Seam({
@@ -123,7 +132,7 @@ export function createGraphicsLibraries(
         publisher, memory, render, callGuest, currentThread, scratch,
     });
     const ddraw = createDirectDrawSeam({
-        publisher, memory, screen, gdi, present, callGuest, currentThread, scratch,
+        publisher, memory, screen, gdi, present, callGuest, currentThread, scratch, now, schedule,
         extraInterfaces: [d3d7.interface],
     });
 

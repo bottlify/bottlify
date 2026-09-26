@@ -72,6 +72,13 @@ import {
 } from '../ddraw/constants.js';
 import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { blt, bltFast } from '../ddraw/blit.js';
+import { createRaster } from './raster.js';
+import { REFRESH_HZ } from '../../win32/user32/display.js';
+
+/** WaitForVerticalBlank: which edge of the blank to return at. */
+const DDWAITVB_BLOCKBEGIN = 0x00000001;
+const DDWAITVB_BLOCKBEGINEVENT = 0x00000002;
+const DDWAITVB_BLOCKEND = 0x00000004;
 
 /** The Direct3D 7 interface, whose count is IDirectDraw7's. */
 const IID_IDirect3D7 = '{F5049E77-4861-11D2-A407-00A0C90629A8}';
@@ -207,13 +214,23 @@ export function versionOf(id){
  * @param {import('./com.js').InterfaceDescriptor[]} [deps.extraInterfaces]
  *        Interfaces other seams put on the DirectDraw object -- IDirect3D7 is
  *        reached by QueryInterface from it, not made by an entry point.
+ * @param {() => number} [deps.now]  The clock the raster runs on, in milliseconds.
+ * @param {(ms: number, run: () => void) => void} [deps.schedule]
+ *        How a wait for the vertical blank is woken.
  */
 export function createDirectDrawSeam(
     { publisher, memory, screen, gdi, present, callGuest, currentThread, scratch,
-        extraInterfaces = [] },
+        extraInterfaces = [], now = ()=>performance.now(), schedule = (ms, run)=>{
+            setTimeout(run, ms);
+        } },
 )
 {
     const fields = createFields(memory);
+
+    /** The raster of a DirectDraw object's display mode. @param {any} root */
+    const rasterOf = root=>createRaster({
+        now, refresh: ()=>REFRESH_HZ, height: ()=>root.displayMode.height,
+    });
 
     /** @type {number} the descriptor block, taken on the first enumeration */
     let descriptorBlock = 0;
@@ -1208,17 +1225,19 @@ export function createDirectDrawSeam(
             {
                 return DDERR_INVALIDPARAMS;
             }
-            fields.writeU32(out >>> 0, 60);
+            fields.writeU32(out >>> 0, REFRESH_HZ);
             return DD_OK;
         },
 
+        // The scan line counts on through the blank, past the last visible
+        // line, the way the documentation's example numbers it.
         /** @param {any} root @param {number[]} args */
         GetScanLine: (root, [out])=>{
             if ((out >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
             }
-            fields.writeU32(out >>> 0, 0);
+            fields.writeU32(out >>> 0, rasterOf(root).position().line);
             return DD_OK;
         },
 
@@ -1228,7 +1247,7 @@ export function createDirectDrawSeam(
             {
                 return DDERR_INVALIDPARAMS;
             }
-            fields.writeU32(out >>> 0, 0);
+            fields.writeU32(out >>> 0, rasterOf(root).position().inBlank ? 1 : 0);
             return DD_OK;
         },
 
@@ -1247,7 +1266,25 @@ export function createDirectDrawSeam(
         SetDisplayMode: (root, [width, height, depth, refresh])=>root.setDisplayMode(
             width >>> 0, height >>> 0, depth >>> 0, version === 1 ? 0 : (refresh >>> 0)),
 
-        WaitForVerticalBlank: ()=>DD_OK,
+        /**
+         * Parks the caller until the blank begins, or ends. The event form is
+         * the one the documentation says is not supported.
+         *
+         * @param {any} root @param {number[]} args
+         */
+        WaitForVerticalBlank: (root, [flags])=>{
+            const edge = (flags >>> 0) === DDWAITVB_BLOCKBEGIN ? 'begin'
+                : (flags >>> 0) === DDWAITVB_BLOCKEND ? 'end' : null;
+            if (edge === null)
+            {
+                return (flags >>> 0) === DDWAITVB_BLOCKBEGINEVENT
+                    ? DDERR_UNSUPPORTED
+                    : DDERR_INVALIDPARAMS;
+            }
+            return new Promise(resolve=>{
+                schedule(rasterOf(root).untilBlank(edge), ()=>resolve(DD_OK));
+            });
+        },
 
         /** @param {any} root @param {number[]} args */
         GetAvailableVidMem: (root, [, total, free])=>{

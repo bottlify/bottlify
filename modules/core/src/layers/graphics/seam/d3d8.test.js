@@ -194,6 +194,8 @@ function machine(){
  */
 function seamed({ shadow = false, windowClientSize, allocateCode } = {}){
     const box = machine();
+    /** The display's clock, which the test moves. */
+    const clock = { time: 0 };
     /** @type {string[]} */
     const divergences = [];
     /** @type {any[]} */
@@ -239,11 +241,13 @@ function seamed({ shadow = false, windowClientSize, allocateCode } = {}){
         resolution: (/** @type {number} */ w, /** @type {number} */ h,
             /** @type {{ window?: number, fullscreen?: boolean } | undefined} */ where)=>
             resolutions.push([w, h, where?.window, where?.fullscreen]),
+        now: ()=>clock.time,
     });
     const fields = createFields(box.services);
 
     const h = {
         box,
+        clock,
         fields,
         publisher,
         roots,
@@ -323,15 +327,25 @@ test('the interrogation a program does before it draws is answered from facts', 
     assert.ok(memory > 0, 'some texture memory is reported');
     assert.equal(h.device(device, 'ResourceManagerDiscardBytes', [1 << 20]), D3D_OK);
 
-    // Nothing scans out here, so both fields of the raster status read as the
-    // start of a frame -- and both are written, so which of the two a program
-    // reads does not matter.
+    // The raster runs on the display's clock: at the top of a frame both
+    // fields read zero -- and both are written, so which of the two a program
+    // reads does not matter -- and in the frame's last lines it is in the blank.
     const status = 0x3100;
     h.box.services.writeMemory(status, new Uint8Array([0xcd, 0xcd, 0xcd, 0xcd,
         0xcd, 0xcd, 0xcd, 0xcd]));
     assert.equal(h.device(device, 'GetRasterStatus', [status]), D3D_OK);
     assert.equal(h.fields.readU32(status + D3DRASTER_STATUS.InVBlank), 0);
     assert.equal(h.fields.readU32(status + D3DRASTER_STATUS.ScanLine), 0);
+    h.clock.time = 1000 / REFRESH_HZ / 2;
+    assert.equal(h.device(device, 'GetRasterStatus', [status]), D3D_OK);
+    assert.equal(h.fields.readU32(status + D3DRASTER_STATUS.InVBlank), 0);
+    assert.equal(h.fields.readU32(status + D3DRASTER_STATUS.ScanLine), 328,
+        'half of a frame of 600 visible lines and 56 blank ones');
+    h.clock.time = 1000 / REFRESH_HZ - 0.1;
+    assert.equal(h.device(device, 'GetRasterStatus', [status]), D3D_OK);
+    assert.equal(h.fields.readU32(status + D3DRASTER_STATUS.InVBlank), 1);
+    assert.equal(h.fields.readU32(status + D3DRASTER_STATUS.ScanLine), 0,
+        'no line is being drawn in the blank');
 
     // The display mode a device reports is the screen it was configured for.
     const mode = 0x3200;
@@ -1137,6 +1151,7 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
     // handed and the host shows it. A title was measured drawing its own
     // cursor, from the wrong cell of its sheet, when this field read zero.
     assert.equal(caps.CursorCaps, 0x3, 'D3DCURSORCAPS_COLOR | D3DCURSORCAPS_LOWRES');
+    assert.equal(caps.Caps, 0x00020000, 'D3DCAPS_READ_SCANLINE: the raster can be read');
     assert.equal(caps.Caps3, 0, 'nothing was written into the field before the intervals');
 
     assert.equal(h.release(device), 0);
