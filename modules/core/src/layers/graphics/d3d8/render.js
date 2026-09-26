@@ -3405,7 +3405,7 @@ export function createRenderer(options){
         });
         const take = ensureFrame().arena.take;
         const vertexBlocks = program.vertex
-            ? constantBlocks(program.vertexConstants, vertex.constants, take)
+            ? shaderVertexBlocks(model, program, vertex, take)
             : hybridBlocks(model, take);
         const pixelBlocks = constantBlocks(program.pixelConstants, pixel.constants, take);
         return {
@@ -3662,7 +3662,7 @@ export function createRenderer(options){
             };
         });
         const take = ensureFrame().arena.take;
-        const vertexBlocks = constantBlocks(program.vertexConstants, vertex.constants, take);
+        const vertexBlocks = shaderVertexBlocks(model, program, vertex, take);
         const pixelBlocks = [uniformsOf(model, null, take, mipsApplied), take(64), take(16)];
         counters.prepared.built++;
         return {
@@ -3738,6 +3738,23 @@ export function createRenderer(options){
             modes.pop();
         }
         return modes;
+    };
+
+    /**
+     * The constant blocks a vertex shader reads: its file, and the viewport's
+     * scale in the register past it, for the half-pixel move of its position.
+     *
+     * @param {RenderModel} model @param {ProgramState} program
+     * @param {import('../d3d9/wgsl.js').TranslatedShader} vertex
+     * @param {(floats: number) => Float32Array} take
+     */
+    const shaderVertexBlocks = (model, program, vertex, take)=>{
+        const blocks = constantBlocks(program.vertexConstants, vertex.constants, take);
+        if (vertex.viewportRegister !== undefined)
+        {
+            blocks[0].set(model.viewport.scale, vertex.viewportRegister * 4);
+        }
+        return blocks;
     };
 
     /**

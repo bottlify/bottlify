@@ -645,6 +645,13 @@ export function generateFixedFunction(state, layout){
             + '    out.position = vec4f(screen.x - 1.0, screen.y + 1.0, '
             + 'vertex.position.z, 1.0) * clipW;'
         : '    out.position = uniforms.worldViewProjection * vec4f(vertex.position, 1.0);';
+    // Direct3D puts a pixel's centre on its integer coordinate and WebGPU
+    // half a pixel further on, so every position moves by half a pixel: half
+    // the viewport's scale in clip space, times w. A quad drawn at pixel edges
+    // covers the same pixels either way; what moves is where a sample and an
+    // interpolated value are taken.
+    const pixelCentre = '    out.position = vec4f(out.position.xy'
+        + ' + out.position.w * uniforms.viewportScale * 0.5, out.position.zw);';
 
     // How much of the fragment survives vertex fog, interpolated across the
     // triangle. The distance is the magnitude of the camera-space z, not the
@@ -680,6 +687,7 @@ ${varyings.join('\n')}
 fn vertexMain(vertex: VertexIn) -> VertexOut {
     var out: VertexOut;
 ${position}
+${pixelCentre}
 ${[...assignments, ...fogAmount].join('\n')}
     return out;
 }

@@ -306,9 +306,9 @@ test('a whole vertex shader declares its inputs by location and its outputs by s
         `@location(${varyingLocation(D3DDECLUSAGE.TEXCOORD, 2)}) oT2: vec4f,`);
     assertLine(translated.wgsl, `@location(${varyingLocation(D3DDECLUSAGE.FOG, 0)}) oFog: vec4f,`);
     // The float file is declared only as far as the shader reaches: c0..c3
-    // for the matrix and c4 for the fog.
-    assertLine(translated.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 5>;');
-    assert.equal(translated.constants, 5);
+    // for the matrix and c4 for the fog, and c5 past them for the viewport.
+    assertLine(translated.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 6>;');
+    assert.equal(translated.constants, 6);
     assertLine(translated.wgsl, 'fn vs_main(in: VsIn) -> VsOut {');
     assertLine(translated.wgsl, 'let v3 = in.v3;');
     assertLine(translated.wgsl, 'out.oT2 = v3;');
@@ -450,8 +450,31 @@ test('a relatively addressed constant file is declared whole', ()=>{
         op(OPCODE.MOV, 3), dst(REGISTER.TEMP, 0), (src(REGISTER.CONST, 4) | RELATIVE) >>> 0,
         src(REGISTER.ADDR, 0, 0x00),
     ]);
-    assert.equal(translated.constants, 256);
-    assertLine(translated.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 256>;');
+    // The whole file, and past it the register the viewport's scale rides in.
+    assert.equal(translated.constants, 257);
+    assert.equal(translated.viewportRegister, 256);
+    assertLine(translated.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 257>;');
+});
+
+test('a vertex shader\'s position lands on the centre of the pixel it names', ()=>{
+    // Direct3D 9 and before put a pixel's centre on its integer coordinate
+    // and WebGPU half a pixel further on, so what the shader wrote to oPos is
+    // moved by half a pixel -- half the viewport's scale, times w -- carried
+    // in the register past the ones the shader reads.
+    const translated = vertexBody([
+        op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 0), src(REGISTER.CONST, 2),
+    ]);
+    assert.equal(translated.error, null);
+    assert.equal(translated.viewportRegister, 3);
+    assert.equal(translated.constants, 4);
+    const lines = translated.wgsl.split('\n').map(line=>line.trim());
+    const fixup = lines.indexOf(
+        'out.oPos = vec4f(out.oPos.xy + out.oPos.w * c[3].xy * 0.5, out.oPos.zw);');
+    assert.ok(fixup > lines.findIndex(line=>line.startsWith('out.oPos = c[2]')),
+        translated.wgsl);
+    assert.equal(lines[fixup + 1], 'return out;');
+    // A pixel shader has no position to move and no such register.
+    assert.equal(translateShader(parseShader([PS_2_0, END_TOKEN])).viewportRegister, undefined);
 });
 
 test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes the varyings', ()=>{
@@ -523,6 +546,11 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assertLine(transformed.wgsl, 'let clipW = select(1.0, 1.0 / vertex.w, vertex.w > 0.0);');
     assertLine(transformed.wgsl,
         'return vec4f(screen.x - 1.0, screen.y + 1.0, vertex.z, 1.0) * clipW;');
+    // And, as every Direct3D position, half a pixel on to WebGPU's centres.
+    assertLine(transformed.wgsl, `out.oPos = vec4f(out.oPos.xy + out.oPos.w`
+        + ` * c[${HYBRID_CONSTANTS.VIEWPORT}].zw * 0.5, out.oPos.zw);`);
+    assertLine(stage.wgsl, `out.oPos = vec4f(out.oPos.xy + out.oPos.w`
+        + ` * c[${HYBRID_CONSTANTS.VIEWPORT}].zw * 0.5, out.oPos.zw);`);
 
     const none = fixedVertexStage([
         { usage: D3DDECLUSAGE.COLOR, usageIndex: 0, register: 0 },
@@ -546,7 +574,7 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
         + ' c[7], c[8]) * vec4f(vec4f(in.v0, 1.0).xyz, 1.0)).z)),'
         + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
     assertLine(fogged.wgsl, `let scaled = c[${HYBRID_CONSTANTS.FOG}].z * dist;`);
-    assert.ok(!fogged.wgsl.includes('oPos.w'));
+    assert.ok(!fogged.wgsl.includes('fogFactorOf(out.oPos.w)'));
 
     // With no mode set, or for a pre-transformed vertex, the factor is the
     // specular alpha the declaration carries, and no curve is declared.

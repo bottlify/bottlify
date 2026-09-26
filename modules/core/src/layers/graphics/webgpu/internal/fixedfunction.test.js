@@ -73,7 +73,7 @@ test('the same state generates the same source, byte for byte', ()=>{
     const second = generate(baseState()).code;
 
     assert.equal(first, second);
-    assert.equal(digest(first), '6a0927659438da0f');
+    assert.equal(digest(first), 'ef13ce84a53559a0');
 });
 
 test('a stage generating its coordinates takes them from the vertex in camera space', ()=>{
@@ -208,6 +208,27 @@ test('a pre-transformed vertex goes through the viewport, not the matrices', ()=
     assert.match(positionOf(ordinary),
         /uniforms\.worldViewProjection \* vec4f\(vertex\.position, 1\.0\)/);
     assert.doesNotMatch(ordinary, /let screen =/);
+});
+
+test('a Direct3D screen coordinate lands on the centre of the pixel it names', ()=>{
+    // Direct3D 9 and before put a pixel's centre on its integer coordinate
+    // (Microsoft's "Directly Mapping Texels to Pixels": (0, 0) is the centre
+    // of the top-left pixel); WebGPU puts it half a pixel further on. So
+    // every position, transformed or not, is moved by half a pixel -- half
+    // the viewport scale in clip space, times w -- and a quad drawn at pixel
+    // edges still covers exactly the pixels it covered.
+    const fixup = 'out.position = vec4f(out.position.xy'
+        + ' + out.position.w * uniforms.viewportScale * 0.5, out.position.zw);';
+    for (const fvf of [FVF.XYZ | FVF.DIFFUSE, FVF.XYZRHW | FVF.DIFFUSE])
+    {
+        const code = generate(baseState({ fvf })).code;
+        const body = code.slice(code.indexOf('fn vertexMain'), code.indexOf('@fragment'));
+        const lines = body.split('\n').map(line=>line.trim());
+        const at = lines.indexOf(fixup);
+        assert.ok(at > 0, body);
+        assert.ok(lines.slice(0, at).some(line=>line.startsWith('out.position = ')),
+            'after the position is computed');
+    }
 });
 
 test('a pre-transformed vertex gives its RHW back as the clip w', ()=>{
@@ -450,7 +471,7 @@ test('vertex fog fades by the magnitude of the camera-space z, not the clip w', 
     })).code;
     assert.ok(code.includes('out.fogAmount = fogFactorOf(abs((uniforms.worldView'
         + ' * vec4f(vertex.position, 1.0)).z));'));
-    assert.doesNotMatch(code, /position\.w/);
+    assert.doesNotMatch(code, /fogFactorOf\(out\.position\.w\)/);
 });
 
 test('table fog is the pixel\'s: the curve over its z or its w, in the fragment stage', ()=>{

@@ -233,7 +233,8 @@ test('a shader pair draws: layout from the declaration, modules, constants, text
         assert.ok(vertexModule.code.includes('@location(0) v0: vec3<f32>,'));
         assert.ok(vertexModule.code.includes('@location(1) v1: vec4<f32>,'));
         assert.ok(vertexModule.code.includes('let v1 = in.v1.zyxw;'));
-        assert.ok(vertexModule.code.includes('c: array<vec4f, 6>;'), 'up to c5');
+        assert.ok(vertexModule.code.includes('c: array<vec4f, 7>;'),
+            'up to c5, and the viewport register past it');
         assert.ok(pixelModule.code.includes('textureSample(tex0, samp0, in.t0.xy)'));
         assert.ok(pixelModule.code.includes('c: array<vec4f, 3>;'), 'up to c2');
 
@@ -256,10 +257,12 @@ test('a shader pair draws: layout from the declaration, modules, constants, text
         assert.equal(pipeline.layout.descriptor.bindGroupLayouts.length, 3);
 
         // The constants each stage was bound to, byte for byte: the vertex
-        // floats to c5 and no further, all sixteen integers, the booleans.
+        // floats to c5 and then the viewport's scale for the half-pixel move
+        // of the position, all sixteen integers, the booleans.
         const groups = h.groupsOfDraw();
+        const viewport = h.device.viewportState.scale;
         assert.deepEqual([...new Float32Array(h.boundBytes(groups.get(0), 0).buffer)],
-            [...matrix, 0, 0, 0, 0, 0.5, 0.5, 0.5, 1]);
+            [...matrix, 0, 0, 0, 0, 0.5, 0.5, 0.5, 1, ...viewport, 0, 0].map(Math.fround));
         const ints = new Int32Array(h.boundBytes(groups.get(0), 1).buffer);
         assert.deepEqual([...ints.subarray(4, 8)], [3, 4, 5, 6]);
         assert.equal(ints.length, 64);

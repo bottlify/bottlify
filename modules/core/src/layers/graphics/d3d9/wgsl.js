@@ -165,6 +165,9 @@ export function varyingLocation(usage, index){
  *     reads: what the vertex stage paired with it has to write.
  * @property {{ index: number, type: string }[]} samplers
  * @property {number} constants   How many float registers the shader reaches.
+ * @property {number} [viewportRegister]
+ *     A vertex shader's: the float register past the ones it reads, where the
+ *     viewport's scale is carried for the half-pixel move of its position.
  * @property {string | null} error
  */
 
@@ -1002,6 +1005,8 @@ export function translateShader(parsed, options = {}){
     const prologue = [];
     /** @type {string[]} module-scope declarations the fog stage adds */
     const fogCurve = [];
+    /** @type {number | undefined} */
+    let viewportRegister;
     let entry;
     if (vertex)
     {
@@ -1077,6 +1082,12 @@ export function translateShader(parsed, options = {}){
                 body.push(`    out.oX${location} = vec4f(0.0);`);
             }
         }
+        // Direct3D puts a pixel's centre on its integer coordinate and WebGPU
+        // half a pixel further on, so the position the shader wrote moves by
+        // half a pixel: half the viewport's scale in clip space, times w.
+        viewportRegister = constants === Infinity ? 256 : constants;
+        body.push(`    out.oPos = vec4f(out.oPos.xy + out.oPos.w * c[${viewportRegister}].xy`
+            + ' * 0.5, out.oPos.zw);');
         entry = 'vs_main';
     }
     else
@@ -1144,11 +1155,11 @@ export function translateShader(parsed, options = {}){
         entry = 'ps_main';
     }
 
-    const reach = constants === Infinity ? Infinity : constants;
+    const reach = viewportRegister !== undefined ? viewportRegister + 1
+        : constants === Infinity ? 224 : constants;
     const wgsl = [
         ...moduleHeader({
-            vertex, constants: reach === Infinity ? (vertex ? 256 : 224) : reach, samplers,
-            inputFields, outputFields,
+            vertex, constants: reach, samplers, inputFields, outputFields,
         }),
         ...fogCurve,
         vertex ? '@vertex' : '@fragment',
@@ -1163,8 +1174,8 @@ export function translateShader(parsed, options = {}){
     ].join('\n');
 
     return {
-        wgsl, entry, inputs, outputs, reads, samplers,
-        constants: reach === Infinity ? (vertex ? 256 : 224) : reach,
+        wgsl, entry, inputs, outputs, reads, samplers, constants: reach,
+        ...(viewportRegister === undefined ? {} : { viewportRegister }),
         error,
     };
 }
@@ -1337,7 +1348,10 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             body.push(`    out.o${location} = vec4f(${colour ? '1.0' : '0.0'});`);
         }
     }
-    body.unshift(`    out.oPos = ${position ?? 'vec4f(0.0, 0.0, 0.0, 1.0)'};`);
+    // Half a pixel on to WebGPU's pixel centres, as every Direct3D position.
+    body.unshift(`    out.oPos = ${position ?? 'vec4f(0.0, 0.0, 0.0, 1.0)'};`,
+        `    out.oPos = vec4f(out.oPos.xy + out.oPos.w * c[${HYBRID_CONSTANTS.VIEWPORT}].zw`
+            + ' * 0.5, out.oPos.zw);');
     const wgsl = [
         ...moduleHeader({
             vertex: true, constants: HYBRID_CONSTANTS.COUNT, samplers: [], inputFields,

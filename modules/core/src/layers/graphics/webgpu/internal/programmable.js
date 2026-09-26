@@ -150,15 +150,20 @@ export function shapeKey(layout){
  * packed four to a vector. Each is taken from the frame's arena, so a draw's
  * constants stay what they were when it was recorded.
  *
+ * The float block is as long as the shader declares, which may run past the
+ * file -- the register a vertex shader's viewport scale rides in does -- and
+ * reads as zero there until the caller fills it: a block shorter than the
+ * declaration fails the binding.
+ *
  * @param {{ floats: Float32Array, ints: Int32Array, bools: Uint32Array }} file
- * @param {number} reach   Float registers the shader reads.
+ * @param {number} reach   Float registers the shader declares.
  * @param {(floats: number) => Float32Array} take
  * @returns {Float32Array[]}
  */
 export function constantBlocks(file, reach, take){
-    const count = Math.max(1, Math.min(reach, file.floats.length / 4));
+    const count = Math.max(1, reach);
     const floats = take(count * 4);
-    floats.set(file.floats.subarray(0, count * 4));
+    floats.set(file.floats.subarray(0, Math.min(count * 4, file.floats.length)));
     const ints = take(16 * 4);
     new Int32Array(ints.buffer, ints.byteOffset, ints.length).set(file.ints.subarray(0, 64));
     const bools = take(16);
