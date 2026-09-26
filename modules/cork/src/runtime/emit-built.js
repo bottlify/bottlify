@@ -74,8 +74,8 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
  *     blockProfile?: boolean, timings?: boolean, place?: boolean,
- *     leaveOut?: Set<string> | string[], wide?: boolean, structure?: boolean,
- *     precise?: boolean, profileCalls?: boolean }} [options]
+ *     leaveOut?: Set<string> | string[], wide?: boolean, narrow?: boolean,
+ *     structure?: boolean, precise?: boolean, profileCalls?: boolean }} [options]
  *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0;
  *     precise: nothing relaxed (the runtime's `precise`); place: job i's function goes at
  *     the module's range of the table plus i, a transfer into the range a direct tail call
@@ -95,6 +95,7 @@ export function emitBatch(jobs, layout, features, options = {}){
         countTransfers: options.countTransfers === true,
         blockProfile: options.blockProfile === true,
         wide: options.wide === true,
+        narrow: options.narrow === true,
         structure: options.structure === true,
         precise: options.precise === true,
         place: options.place === true ? jobs.length : 0,

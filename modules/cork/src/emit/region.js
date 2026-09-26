@@ -179,12 +179,16 @@ const LOCAL_TYPES = [
  *     the region's structure gives
  * @property {boolean} [wide]  compiled for the wide precision controls (double, extended):
  *     no rounding to single, and a block leaves with `PRECISION` if it finds single set
+ * @property {boolean} [narrow]  compiled for single precision: every rounding instruction
+ *     rounds to single with no test of its own, and a block leaves with `PRECISION` if it
+ *     finds another precision set
  * @property {boolean} [precise]  every relaxation off (the runtime's `precise`): the x87
  *     exception flags, the signalling-NaN tests, the underflow test and C1 kept as the processor
- *     keeps them, and the flags an instruction leaves undefined keeping the values the emulator
- *     gives them, which costs the record before it; without it the x87 bookkeeping is not
- *     computed and an undefined flag is as the cheapest code leaves it, which no program can
- *     rely on (real processors differ there)
+ *     keeps them, the flags an instruction leaves undefined keeping the values the emulator
+ *     gives them, which costs the record before it, and single precision rounded in the
+ *     double's bits (`roundSingle` in `x87.js`); without it the x87 bookkeeping is not
+ *     computed, an undefined flag is as the cheapest code leaves it, which no program can
+ *     rely on (real processors differ there), and single is rounded by Veltkamp's split
  * @property {number} codeHit         the helper telling whether a byte lies in translated code
  * @property {number} [getEflags]      the host's flag fold, imported when the layout keeps
  *                                     lazy flags (the emulator's `flags_changed`)
@@ -217,8 +221,9 @@ const LOCAL_TYPES = [
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
- *     countTransfers?: boolean, wide?: boolean, blockProfile?: boolean, structure?: boolean,
- *     precise?: boolean, place?: number, profileCalls?: boolean }} [options]  undoLog:
+ *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
+ *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean }}
+ *     [options]  undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
  *     tail calls); trapPort: `out dx, eax` to it leaves with a trap exit; place: with
@@ -230,8 +235,8 @@ const LOCAL_TYPES = [
  */
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
-        wide = false, blockProfile = false, structure = false, precise = false, place = 0,
-        profileCalls = false } = {})
+        wide = false, narrow = false, blockProfile = false, structure = false, precise = false,
+        place = 0, profileCalls = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -300,6 +305,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (wide)
     {
         context.wide = true;
+    }
+    else if (narrow)
+    {
+        context.narrow = true;
     }
     if (precise)
     {

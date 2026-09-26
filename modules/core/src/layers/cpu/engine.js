@@ -213,8 +213,11 @@
  * @property {number} retired          Instructions retired in the engine, for a frame's share.
  * @property {number} cacheHits        Regions taken from the store.
  * @property {number} cacheMisses
- * @property {number} [precisionSwitches]  Times x87 regions went from wide precision to rounding.
+ * @property {number} [precisionSwitches]  Times x87 regions went to another precision control:
+ *     from the wide ones to single, and from single to a test at every rounding operation.
  * @property {boolean} [wide]  Whether x87 regions are still compiled for wide precision.
+ * @property {'wide' | 'narrow' | 'mixed'} [precision]  The precision control new x87 regions are
+ *     compiled for: the wide ones, single, or either (a test at every rounding operation).
  * @property {number} [shapeMisses]  Entries that found the x87 stack in another shape than
  *     their block was compiled for, and left for the host.
  * @property {number} [shapeChecked]  x87 regions translated again checked for it.

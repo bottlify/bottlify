@@ -21,8 +21,9 @@ function machine(config = {}, ramSize = 4 << 20){
         Tables.SIZE + (/** @type {any} */ (config).blockProfile ? Tables.BLOCK_PROFILE_SIZE : 0)) });
     const bytes = ()=>new Uint8Array(memory.buffer);
     const view = ()=>new DataView(memory.buffer);
-    // The x87 as a fresh processor has it: every register empty.
+    // The x87 as a fresh processor has it: every register empty, the default control word.
     view().setUint8(layout.x87Empty, 0xff);
+    view().setUint16(layout.x87Control, 0x37f, true);
     const runtime = createCorkRuntime({
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
@@ -60,12 +61,13 @@ test('single precision seen leaves a wide x87 region once, and the address is tr
     const m = machine();
     const view = new DataView(m.memory.buffer);
     view.setUint8(m.layout.x87Empty, 0xff);
-    view.setUint16(m.layout.x87Control, 0x07f, true);
-    // fld1; fld1; fadd st0, st1; fstp st0; fstp st0; hlt -- a rounding block.
+    // fld1; fld1; fadd st0, st1; fstp st0; fstp st0; hlt -- a rounding block, translated
+    // under double precision and run under single.
     m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
     m.runtime.noteHot(CODE, 0);
     await m.runtime.translatePending();
     assert.equal(m.runtime.diagnostics().wide, true);
+    view.setUint16(m.layout.x87Control, 0x07f, true);
     const exit = m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
     assert.equal(exit.kind, 'untranslated');
     assert.equal(exit.retired, 2, 'the two fld1 ran, the fadd did not');
@@ -82,6 +84,63 @@ test('single precision seen leaves a wide x87 region once, and the address is tr
     await m.runtime.translatePending();
     assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
     assert.equal(m.runtime.diagnostics().precisionSwitches, 1, 'once');
+    assert.equal(m.runtime.diagnostics().precision, 'narrow');
+});
+
+test('a batch formed while the machine has single set is compiled for single at once', async()=>{
+    const m = machine();
+    const view = new DataView(m.memory.buffer);
+    view.setUint8(m.layout.x87Empty, 0xff);
+    view.setUint16(m.layout.x87Control, 0x07f, true);
+    m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
+    m.runtime.noteHot(CODE, 0);
+    await m.runtime.translatePending();
+    const before = m.runtime.diagnostics();
+    assert.equal(before.precision, 'narrow');
+    assert.equal(before.precisionSwitches, 1);
+    assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
+    assert.equal(m.runtime.diagnostics().exits.untranslated, 0, 'no wide region to leave');
+});
+
+test('a region compiled for single leaves once another precision is seen, and the address is'
+    + ' translated again with a test at every rounding instruction', async()=>{
+    const m = machine();
+    const view = new DataView(m.memory.buffer);
+    const restart = ()=>{
+        view.setUint32(m.layout.eip, CODE, true);
+        view.setUint8(m.layout.x87Empty, 0xff);
+        view.setUint8(m.layout.x87Top, 0);
+    };
+    view.setUint16(m.layout.x87Control, 0x07f, true);
+    m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
+    restart();
+    m.runtime.noteHot(CODE, 0);
+    await m.runtime.translatePending();
+    m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
+    restart();
+    m.runtime.noteHot(CODE, 0);
+    await m.runtime.translatePending();
+    assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
+    assert.equal(m.runtime.diagnostics().precision, 'narrow');
+    // Double precision under the single region: it leaves before the fadd.
+    view.setUint16(m.layout.x87Control, 0x27f, true);
+    restart();
+    const exit = m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
+    assert.equal(exit.kind, 'untranslated');
+    assert.equal(m.eip(), CODE + 4);
+    const after = m.runtime.diagnostics();
+    assert.equal(after.precisionSwitches, 2);
+    assert.equal(after.precision, 'mixed');
+    assert.equal(m.runtime.entryOf(CODE, 0), -1, 'the single region went');
+    for (const control of [0x27f, 0x07f])
+    {
+        view.setUint16(m.layout.x87Control, control, true);
+        restart();
+        m.runtime.noteHot(CODE, 0);
+        await m.runtime.translatePending();
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
+    }
+    assert.equal(m.runtime.diagnostics().precisionSwitches, 2, 'and no further');
 });
 
 test('a spent budget at an inlined return charges the callee once', async()=>{
