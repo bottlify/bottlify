@@ -1192,13 +1192,16 @@ export function createWindowFunctions(host){
         return atom;
     };
 
-    /** @param {number} address  Where a NUL-terminated string goes. @param {string} text */
+    /**
+     * A window's text back into the program's memory, NUL-terminated, in the
+     * ANSI page it was read in: a caption holds the euro sign where the
+     * program wrote 0x80, and 0x80 is what it reads back.
+     *
+     * @param {number} address @param {string} text
+     */
     const writeString = (address, text)=>{
         const bytes = new Uint8Array(text.length + 1);
-        for (let index = 0; index < text.length; index++)
-        {
-            bytes[index] = text.charCodeAt(index) & 0xff;
-        }
+        bytes.set(encodeAnsi(text));
         host.writeMemory(address, bytes);
     };
 
