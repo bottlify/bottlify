@@ -623,6 +623,48 @@ test('a hot region\'s direct callee lands in the same batch, and the call transf
     }
 });
 
+test('a region\'s direct callees land in its batch past `batchRegions`, up to the batch\'s'
+    + ' ceiling', async()=>{
+    const m = machine({ leafCalls: false, batchRegions: 32, maxBatchRegions: 256 });
+    // call F0; call F1; ... call F39; hlt; Fi: inc edx; ret -- a loader's function calling
+    // forty others, each once.
+    const CALLS = 40;
+    const hlt = CODE + CALLS * 5;
+    /** @param {number} i */
+    const callee = i=>hlt + 1 + i * 2;
+    /** @type {number[]} */
+    const code = [];
+    for (let i = 0; i < CALLS; i++)
+    {
+        const rel = callee(i) - (CODE + i * 5 + 5);
+        code.push(0xe8, rel & 0xff, rel >>> 8 & 0xff, rel >>> 16 & 0xff, rel >>> 24 & 0xff);
+    }
+    code.push(0xf4);
+    for (let i = 0; i < CALLS; i++)
+    {
+        code.push(0x42, 0xc3);
+    }
+    m.write(CODE, code);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 1 + CALLS, 'the caller and all its callees');
+    for (let i = 0; i < CALLS; i++)
+    {
+        assert.ok(m.runtime.entryOf(callee(i)) >= 0, `callee ${i} is an entry`);
+    }
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+    if (m.runtime.diagnostics().exits.untranslated === 0)
+    {
+        assert.equal(exit.kind, 'halt');
+        assert.equal(m.reg(2), CALLS, 'every call ran its callee');
+    }
+    // A cap of eight takes seven.
+    const small = machine({ leafCalls: false, batchRegions: 4, maxBatchRegions: 8 });
+    small.write(CODE, code);
+    small.runtime.noteHot(CODE);
+    assert.equal(await small.runtime.translatePending(), 8);
+});
+
 test('a callee lands in the batch at the top its call site has, not at the entry top', async()=>{
     const m = machine();
     // fld1; call F; hlt; F: fld1; ret -- the region is entered with the x87
@@ -1117,6 +1159,20 @@ test('a candidate whose batch is still out is not queued again when it is met ag
     assert.equal(m.runtime.diagnostics().queued, 0, 'not a second translation of it');
     await new Promise(resolve=>setTimeout(resolve, 0));
     assert.ok(m.runtime.entryOf(CODE) >= 0, 'published when its batch came back');
+});
+
+test('a callee its caller took into a batch still out is not queued again when met', async()=>{
+    const { memoryTranslationStore } = await import('./cache.js');
+    const m = machine({ store: memoryTranslationStore(), bundleId: 'test', leafCalls: false });
+    // call F; hlt; F: inc edx; ret
+    m.write(CODE, [0xe8, 0x01, 0, 0, 0, 0xf4, 0x42, 0xc3]);
+    const F = CODE + 6;
+    m.runtime.noteHot(CODE, 0, 2);
+    assert.equal(await m.runtime.translatePending(), 0, 'the batch waits on the store');
+    m.runtime.noteHot(F, 0, 2);
+    assert.equal(m.runtime.diagnostics().queued, 0, 'the callee is in the batch already');
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    assert.ok(m.runtime.entryOf(F) >= 0, 'published with its caller');
 });
 
 test('a batch the worker forms from a copy of its pages runs as the one formed here', async()=>{

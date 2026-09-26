@@ -2521,7 +2521,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // callee at the top the call site has, which the tracker
                 // knows wherever it reached the block: batching it at the
                 // entry's top compiled a callee nobody calls for a region
-                // whose own x87 moved the stack before the call.
+                // whose own x87 moved the stack before the call. Up to the
+                // batch's ceiling, not its usual size: a loader's function
+                // calls dozens, each of which the interpreter otherwise ran
+                // and whose loop, hot first, became a region of its own
+                // headed there rather than at the function's start.
                 const tracked = usesX87(region) ? trackRegion(region, entryTop) : null;
                 for (let at = 0; at < region.blocks.length; at++)
                 {
@@ -2533,13 +2537,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     const [callee] = block.exit.targets;
                     const end = tracked === null ? null : tracked.ends[at];
                     const top = end === null ? entryTop : end.top;
-                    if (batch.length < settings.batchRegions
+                    if (batch.length < settings.maxBatchRegions
                         && entries.entryOf(callee, top) < 0 && translatable(callee)
                         && !batch.some(([queued])=>queued === keyOf(callee, top)))
                     {
                         batch.push([keyOf(callee, top), callee]);
                         unqueue(keyOf(callee, top));
                         dropKey(keyOf(callee, top));
+                        inFlight.set(keyOf(callee, top), takenAt);
                     }
                 }
                 for (const [opcode, times] of region.refused)
