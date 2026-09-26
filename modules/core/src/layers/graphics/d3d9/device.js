@@ -66,6 +66,8 @@ import {
 } from './resources.js';
 import { SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters } from './validity.js';
 import { validateStages } from '../d3d8/validity.js';
+import { processStreams } from '../d3d8/process.js';
+import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import {
     MAX_STREAMS, createVertexDeclaration, elementsOfFvf, fixedFunctionLayoutOf, fvfOfElements,
@@ -2540,11 +2542,60 @@ function createDeviceObject(parameters, caps, services, identity){
         DrawTriPatch: ()=>D3DERR_INVALIDCALL,
         DeletePatch: ()=>D3DERR_INVALIDCALL,
 
-        // Transforming happens inside a draw, on the backend's device. There is
-        // no path that transforms vertices and writes them back into a buffer
-        // the program can read, and a call that answered success while leaving
-        // the destination untouched would draw whatever that buffer held.
-        ProcessVertices: ()=>D3DERR_INVALIDCALL,
+        /**
+         * The fixed-function transform and lighting of `vertices` vertices from
+         * `start`, read through the bound declaration as a draw reads them,
+         * into a vertex buffer from `destinationIndex`, laid out as
+         * `declaration` describes or, without one, as the buffer's own format
+         * (Wine's d3d9 visual.c test_sysmem_draw). A vertex shader would run
+         * in software here, which nothing does, so it is refused.
+         *
+         * @param {number} start @param {number} destinationIndex @param {number} vertices
+         * @param {any} destination @param {any} declaration @param {number} flags D3DPV
+         */
+        ProcessVertices(start, destinationIndex, vertices, destination, declaration, flags){
+            if (!destination || destination.type !== D3DRTYPE.VERTEXBUFFER)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (vertexShader || !services.readMemory || !services.writeMemory)
+            {
+                report('process', vertexShader
+                    ? 'ProcessVertices through a vertex shader was refused: no shader runs on'
+                        + ' the processor'
+                    : 'ProcessVertices was refused: this build cannot write guest memory');
+                return D3DERR_INVALIDCALL;
+            }
+            const fvf = effectiveFvf();
+            const attributes = fvf !== 0
+                ? decodeFvf(fvf).attributes.map(attribute=>({ ...attribute, stream: 0 }))
+                : fixedFunctionLayout()?.attributes ?? null;
+            if (!attributes)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            return processStreams({
+                memory: { readMemory: services.readMemory, writeMemory: services.writeMemory },
+                model,
+                attributes,
+                streamAt: index=>{
+                    const source = streams.get(index);
+                    return source?.buffer && source.stride > 0
+                        ? {
+                            base: source.buffer.base + source.offset,
+                            stride: source.stride,
+                            vertices: Math.floor(
+                                (source.buffer.length - source.offset) / source.stride),
+                        }
+                        : null;
+                },
+                start, count: vertices, destination, destinationIndex, flags,
+                destinationFvf: declaration
+                    ? declaration.fvf || fvfOfElements(declaration.elements)
+                    : destination.fvf ?? 0,
+                renderer,
+            });
+        },
 
         /** @param {any} buffer */
         SetIndices(buffer){

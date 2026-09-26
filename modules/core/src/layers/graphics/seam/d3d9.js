@@ -1753,8 +1753,10 @@ export function createDirect3D9Seam(
                 readArray(vertices, (numVertices >>> 0) * (stride >>> 0)),
                 stride >>> 0),
 
-        /** @param {any} device */
-        ProcessVertices: (/** @type {any} */ device)=>device.ProcessVertices(),
+        /** @param {any} device @param {number[]} args */
+        ProcessVertices: (device, [start, index, count, destination, declaration, flags])=>
+            device.ProcessVertices(start >>> 0, index >>> 0, count >>> 0,
+                publisher.objectAt(destination), publisher.objectAt(declaration), flags >>> 0),
 
         // --- declarations ---
 

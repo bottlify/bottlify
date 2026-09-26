@@ -1667,11 +1667,16 @@ export function createDirect3D8Seam(
             return hr;
         },
 
-        // Transforming happens inside a draw, on the backend's device. There is
-        // no path that transforms vertices and writes them back into a buffer
-        // the program can read, and a call that answered success while leaving
-        // the destination untouched would draw whatever that buffer held.
-        ProcessVertices: ()=>D3DERR_INVALIDCALL,
+        /** @param {any} device @param {number[]} args */
+        ProcessVertices: (device, [start, index, count, destination, flags])=>{
+            // The guest's own writes into the source and destination are in
+            // guest memory already; a lock it holds in the guest is settled
+            // first, so the renderer sees one lock.
+            const buffer = publisher.objectAt(destination);
+            resourceShadows.get(buffer)?.settleBuffer(buffer);
+            return device.ProcessVertices(start >>> 0, index >>> 0, count >>> 0, buffer,
+                flags >>> 0);
+        },
 
         // CreateVertexShader and CreatePixelShader are absent on purpose, and
         // this is the one absence here that is a decision rather than a gap.

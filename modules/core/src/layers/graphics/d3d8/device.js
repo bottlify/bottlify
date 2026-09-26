@@ -52,6 +52,8 @@ import { DEFAULT_RENDER_STATES, createDefaultRenderStates } from './renderstates
 import { createDefaultStageStates } from './stagestates.js';
 import { IDENTITY, STAGE_COUNT, createRenderer, vertexCountOf } from './render.js';
 import { applyBlock, captureBlock, emptyBlock, fillBlock } from './stateblock.js';
+import { processStreams } from './process.js';
+import { POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import {
     SURFACE_TYPE, copyRectsResult, createResult, imageSurfaceCreateResult,
     reportedBackBufferCount, targetPairResult, validatePresentParameters, validateStages,
@@ -2592,6 +2594,50 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             }
             out.moves = moves;
             return D3D_OK;
+        },
+
+        /**
+         * The fixed-function transform and lighting of `vertices` vertices of
+         * stream zero, from `start`, into a vertex buffer from
+         * `destinationIndex`, in the format the buffer was made with (Wine's
+         * d3d8 visual.c test_sysmem_draw). A vertex shader would run in
+         * software here, which nothing does, so it is refused.
+         *
+         * @param {number} start @param {number} destinationIndex @param {number} vertices
+         * @param {any} destination @param {number} flags D3DPV
+         */
+        ProcessVertices(start, destinationIndex, vertices, destination, flags){
+            const processing = device.stageProcessing;
+            if (!destination || destination.type !== D3DRTYPE.VERTEXBUFFER
+                || (processing.fvf & POSITION_MASK) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (processing.vertexShader !== 0 || !services.readMemory || !services.writeMemory)
+            {
+                reportOnce('process', processing.vertexShader !== 0
+                    ? 'ProcessVertices through a vertex shader was refused: no shader runs on'
+                        + ' the processor'
+                    : 'ProcessVertices was refused: this build cannot write guest memory');
+                return D3DERR_INVALIDCALL;
+            }
+            const source = stream(0);
+            return processStreams({
+                memory: { readMemory: services.readMemory, writeMemory: services.writeMemory },
+                model,
+                attributes: decodeFvf(processing.fvf).attributes
+                    .map(attribute=>({ ...attribute, stream: 0 })),
+                streamAt: index=>(index === 0 && source.buffer && source.stride > 0
+                    ? {
+                        base: source.buffer.base,
+                        stride: source.stride,
+                        vertices: Math.floor(source.buffer.length / source.stride),
+                    }
+                    : null),
+                start, count: vertices, destination, destinationIndex, flags,
+                destinationFvf: destination.fvf ?? 0,
+                renderer,
+            });
         },
 
         // --- shaders, which in this version are handles rather than objects ---
