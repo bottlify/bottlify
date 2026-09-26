@@ -24,6 +24,7 @@ import { createGdiObjects } from './objects.js';
 import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
 import { FACES, faceNamed } from './faces.js';
 import {
+    BITMAP,
     BITMAPINFOHEADER,
     LF_FACESIZE,
     LOGFONTA,
@@ -1615,6 +1616,39 @@ export function createGdiFunctions(host){
                 }
                 return objects.create('bitmap', attributes);
             },
+        },
+
+        /**
+         * HBITMAP CreateBitmapIndirect(const BITMAP *pbm)
+         *
+         * CreateBitmap with its arguments in a BITMAP, whose bmType must be zero.
+         * bmWidthBytes is not read: the rows are as wide as the width and depth
+         * make them (Wine's test_CreateBitmap).
+         */
+        CreateBitmapIndirect: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([bitmap])=>{
+                if ((bitmap >>> 0) === 0 || readU32(host, bitmap + BITMAP.bmType) !== 0)
+                {
+                    return 0;
+                }
+                const layout = readU32(host, bitmap + BITMAP.bmPlanes);
+                return table.CreateBitmap.handler([
+                    readU32(host, bitmap + BITMAP.bmWidth),
+                    readU32(host, bitmap + BITMAP.bmHeight),
+                    layout & 0xffff,
+                    layout >>> 16,
+                    readU32(host, bitmap + BITMAP.bmBits),
+                ]);
+            },
+        },
+
+        /** HBITMAP CreateDiscardableBitmap(HDC hdc, int cx, int cy): CreateCompatibleBitmap. */
+        CreateDiscardableBitmap: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>table.CreateCompatibleBitmap.handler(args),
         },
 
         /**

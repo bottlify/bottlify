@@ -547,6 +547,38 @@ test('CreateBitmap keeps the format it was given', ()=>{
     assert.ok(fns.CreateBitmap.handler([8, 8, 1, 24, 0x12000]) > 0);
 });
 
+test('CreateBitmapIndirect is CreateBitmap from a BITMAP; CreateDiscardableBitmap, compatible',
+    ()=>{
+        // Wine's test_CreateBitmap: the BITMAP's bmWidthBytes is ignored, its
+        // depth rounds up as CreateBitmap's does, and no size is the stock
+        // pixel from either call; the documentation adds that bmType must be 0.
+        const { fns, memory, hdc } = withDC();
+        assert.deepEqual([fns.CreateBitmapIndirect.argBytes, fns.CreateDiscardableBitmap.argBytes],
+            [4, 12]);
+        /** @param {number} width @param {number} bitsPixel @param {number} [type] */
+        const indirect = (width, bitsPixel, type = 0)=>{
+            memory.putU32s(STRUCT, [type, width, 1, 28, 1 | (bitsPixel << 16), 0]);
+            return fns.CreateBitmapIndirect.handler([STRUCT]);
+        };
+        const bitmap = indirect(1, 7);
+        assert.ok(bitmap > 0);
+        assert.equal(fns.GetObjectA.handler([bitmap, 24, OUT]), 24);
+        assert.deepEqual([memory.u32(OUT + 12), memory.u32(OUT + 16) >>> 16], [2, 8],
+            'its own stride, not the 28 it was handed, and seven bits made eight');
+        assert.equal(indirect(1, 33), 0);
+        assert.equal(indirect(1, 1, 1), 0, 'bmType is always zero');
+        assert.equal(fns.CreateBitmapIndirect.handler([0]), 0);
+
+        const memoryDC = fns.CreateCompatibleDC.handler([hdc]);
+        const stock = fns.CreateCompatibleBitmap.handler([memoryDC, 0, 0]);
+        assert.equal(indirect(0, 1), stock);
+        assert.equal(fns.CreateDiscardableBitmap.handler([memoryDC, 0, 0]), stock);
+        const discardable = fns.CreateDiscardableBitmap.handler([hdc, 4, 2]);
+        assert.equal(fns.GetObjectA.handler([discardable, 24, OUT]), 24);
+        assert.deepEqual([memory.u32(OUT + 4), memory.u32(OUT + 8), memory.u32(OUT + 16) >>> 16],
+            [4, 2, 32], 'the DC\'s depth, as CreateCompatibleBitmap gives it');
+    });
+
 test('a bitmap of no size is the one stock monochrome pixel every memory DC starts with', ()=>{
     // Wine's test_CreateBitmap, and both calls' documentation: a zero width
     // or height is the 1-by-1 monochrome bitmap, and it is the very bitmap a
