@@ -1530,7 +1530,8 @@ test('a dumped draw carries its state, its textures and its uniform blocks', asy
     assert.match(line, /triangle-list count=3 first=0 base=0/);
     assert.match(line, new RegExp(`blend=0x1,0x1`), 'the additive blend, as the enums say');
     assert.match(line, /depth=0x202(?!\+write)/, 'GL_EQUAL, and the depth mask is off');
-    assert.match(line, /tex=\[1:t1\]/, 'the fragment program samples t1 at binding 1');
+    assert.match(line, /tex=\[1:t1:4x4\/1\]/,
+        'the fragment program samples t1, 4x4 with one level, at binding 1');
     assert.match(line, /vp=p1\.1 fp=p2\.1/, 'both programs, by name and version');
     assert.match(line, /attrs=\[position@0\+0:float32x3 color@0\+12:float32x4/);
     assert.match(line, /vuni=\[[^\]]*0\.25[^\]]*\]/, 'the vertex block: the MVP, then env[2]');

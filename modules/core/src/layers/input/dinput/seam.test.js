@@ -682,6 +682,27 @@ test('unacquiring stops a device taking events, and acquiring resumes it', ()=>{
     assert.equal(f.dinput.post({ kind: 'key', code: DIK_A, down: true }), true);
 });
 
+test('a key held across Unacquire and Acquire reads up', ()=>{
+    // device8.c test_sys_keyboard: unacquiring resets the device state, so the
+    // key still held when the device is taken back is not reported down.
+    const f = keyboard();
+    f.dinput.post({ kind: 'key', code: DIK_A, down: true });
+    assert.equal(f.bridge.call(f.device, 'GetDeviceState', [256, AT.state]), DI_OK);
+    assert.equal(f.memory.bytes[AT.state + DIK_A], KEY_DOWN);
+
+    assert.equal(f.bridge.call(f.device, 'Unacquire', []), DI_OK);
+    assert.equal(f.bridge.call(f.device, 'Acquire', []), DI_OK);
+    f.memory.bytes.fill(0xcd, AT.state, AT.state + 256);
+    assert.equal(f.bridge.call(f.device, 'GetDeviceState', [256, AT.state]), DI_OK);
+    const state = [...f.memory.bytes.subarray(AT.state, AT.state + 256)];
+    assert.deepEqual(state.flatMap((value, key)=>(value === 0 ? [] : [[key, value]])), []);
+
+    f.dinput.post({ kind: 'key', code: DIK_A, down: false });
+    f.dinput.post({ kind: 'key', code: DIK_A, down: true });
+    assert.equal(f.bridge.call(f.device, 'GetDeviceState', [256, AT.state]), DI_OK);
+    assert.equal(f.memory.bytes[AT.state + DIK_A], KEY_DOWN, 'and a new press is seen');
+});
+
 test('the buffer outlives Unacquire, and before 8 it can be read while let go', ()=>{
     // device8.c test_sys_mouse with a buffer of five, move for move. Before
     // DirectInput 8 a read between Unacquire and Acquire is DI_OK and takes

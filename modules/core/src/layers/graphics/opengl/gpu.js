@@ -1810,8 +1810,11 @@ export function createGpuRenderer(services){
                         : ''}`
                     + `:gen[${unit.generation
                         .map(g=>(g === null ? '-' : hex(g))).join('.')}]`).join(' ')}]`
-                + ` tex=[${sampled.map(({ entry }, i)=>`${entry.binding}:${dumpIds[i]}`)
-                    .join(' ')}]`
+                + ` tex=[${sampled.map(({ entry, texture }, i)=>{
+                    const copy = textures.get(texture);
+                    return `${entry.binding}:${dumpIds[i]}`
+                        + (copy ? `:${copy.width}x${copy.height}/${copy.levels}` : '');
+                }).join(' ')}]`
                 + dumpPrograms(recording, state)
                 + dumpBound(scene)
                 + ` uni=${describeBlock(uniforms)}`

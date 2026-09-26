@@ -50,6 +50,7 @@ import {
 } from './pixelformat.js';
 import { createWgl } from './wgl.js';
 import { createGpuRenderer } from './gpu.js';
+import { compressedDigest, imageDigests, imageTimes, keptImages } from './context-textures.js';
 import { imageBytes, unpackImage } from './texture.js';
 import { packImage } from './context-pixels.js';
 import { PFD } from './constants.js';
@@ -327,6 +328,8 @@ const LIST_TYPES = new Map([
  * @property {string | null} [probeTexture]
  *           A texture id whose draws are read around: the colour target
  *           before and after each one, on that draw's dump line.
+ * @property {number[]} [keepImages]
+ *           Indices of uncompressed uploads whose texels the diagnostics carry.
  * @property {boolean} [compressedTextures]
  *           The device has `texture-compression-bc`: an S3TC texture whose
  *           every level kept its blocks uploads them as blocks instead of
@@ -337,6 +340,10 @@ const LIST_TYPES = new Map([
  * @param {OpenglServices} services
  */
 export function createOpengl(services){
+    for (const index of services.keepImages ?? [])
+    {
+        keptImages.at.add(index);
+    }
     const screen = services.screen ?? (()=>({ width: 640, height: 480 }));
     const describeDrawable = services.describeDrawable ?? (
         /** @param {number} hdc */
@@ -1734,6 +1741,22 @@ export function createOpengl(services){
             // thing this layer can say about a run that drew nothing.
             unimplemented: Object.fromEntries(unimplemented),
             gpu: gpu ? gpu.diagnostics() : null,
+            compressed: `${compressedDigest.count}:${compressedDigest.bytes}:`
+                + compressedDigest.hash.toString(16),
+            images: imageDigests.slice(),
+            imageTimes: imageTimes.slice(),
+            kept: keptImages.images.map(image=>({ index: image.index, width: image.width,
+                height: image.height, rgba: base64Of(image.texels) })),
         }),
     };
+}
+
+/** @param {Uint8Array} bytes @returns {string} */
+function base64Of(bytes){
+    let text = '';
+    for (let at = 0; at < bytes.length; at += 0x8000)
+    {
+        text += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+    }
+    return btoa(text);
 }

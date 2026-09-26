@@ -757,11 +757,13 @@ export function scheduleKeyTimes(app, request){
  * @param {any} app
  * @param {{ pointer?: { x: number, y: number, dx?: number, dy?: number, down?: boolean },
  *           clicks?: { x: number, y: number, after: number, afterSeconds?: number }[],
- *           keys?: { code: string, after: number, afterSeconds?: number }[],
+ *           keys?: { code: string, after: number, afterSeconds?: number, frames?: number }[],
+ *           looks?: { dx: number, dy: number, after: number, afterSeconds?: number,
+ *               frames: number }[],
  *           typed?: { text: string, after: number, afterSeconds?: number }[],
  *           pasted?: { text: string, after: number, afterSeconds?: number }[],
  *           steadyFrames?: number, snapFrame?: number, snapEvery?: number,
- *           snapCount?: number }} request
+ *           snapCount?: number, snapFromStart?: boolean }} request
  * @param {PresentState} state
  * @param {any} frame
  */
@@ -832,7 +834,8 @@ export function presentFrame(app, request, state, frame){
         state.firstPresent = now;
     }
     state.lastPresent = now;
-    for (const timed of [request.clicks, request.keys, request.typed, request.pasted])
+    for (const timed of [request.clicks, request.keys, request.typed, request.pasted,
+        request.looks])
     {
         for (const action of timed ?? [])
         {
@@ -889,9 +892,20 @@ export function presentFrame(app, request, state, frame){
         {
             app.input.send({ kind: 'key', code: key.code, down: true });
         }
-        if (state.presents === key.after + 1)
+        if (state.presents === key.after + (key.frames ?? 1))
         {
             app.input.send({ kind: 'key', code: key.code, down: false });
+        }
+    }
+    // Mouse motion without a button, the same every frame for a stretch: how
+    // a program that turns its view by relative motion is turned.
+    for (const turn of request.looks ?? [])
+    {
+        if (turn.after >= 0 && state.presents >= turn.after
+            && state.presents < turn.after + turn.frames)
+        {
+            app.input.send({ kind: 'pointerMove', x: state.pointerAt.x, y: state.pointerAt.y,
+                dx: turn.dx, dy: turn.dy });
         }
     }
     // Typed text: one character a frame, each a key press with its character
@@ -1309,6 +1323,7 @@ export function createHarness(canvas, how = {}){
                 // Fog off is the other half of a pair of runs: a wash that goes
                 // with it was fog, and one that stays was not.
                 probeTexture: request.probeTexture ?? null,
+                keepImages: request.keepImages ?? [],
                 fog: request.fog !== false,
                 mips: request.mips !== false,
                 /** @param {any} frame */
@@ -1317,18 +1332,23 @@ export function createHarness(canvas, how = {}){
                     // The frame `snapFrame` frames after the last long stall, read
                     // back as it was presented; a later stall takes it again, so a
                     // demo's frame N is the same frame in every run.
-                    if (request.snapFrame && presentState.sinceStall === 0)
+                    // Counted from the first present instead, when a program whose
+                    // clock steps once per frame is to be caught at the same game
+                    // moment by two engines whose stalls fall in different places.
+                    const counted = request.snapFromStart
+                        ? presentState.presents : presentState.sinceStall ?? 0;
+                    if (request.snapFrame && !request.snapFromStart && counted === 0)
                     {
                         snaps.clear();
                     }
                     // `snapCount` frames from it, `snapEvery` apart: a series
                     // tells a scene that changes by itself from one drawn wrong.
-                    const since = (presentState.sinceStall ?? 0) - (request.snapFrame ?? 0);
+                    const since = counted - (request.snapFrame ?? 0);
                     const every = request.snapEvery ?? 1;
                     if (request.snapFrame && since >= 0 && since % every === 0
                         && since / every < (request.snapCount ?? 1))
                     {
-                        snaps.set(presentState.sinceStall ?? 0,
+                        snaps.set(counted,
                             readBack(handle.device, frame.surface));
                     }
                 },
@@ -1478,6 +1498,11 @@ export function createHarness(canvas, how = {}){
         const graphics = metrics('graphics');
         result.graphics = {
             created: graphics.created ?? [],
+            // count:bytes:hash of every compressed block handed to OpenGL.
+            compressedTextures: graphics.seam?.compressedTextures ?? null,
+            imageDigests: graphics.seam?.imageDigests ?? [],
+            keptImages: graphics.seam?.keptImages ?? [],
+            imageTimes: graphics.seam?.imageTimes ?? [],
             libraries: graphics.libraries ?? [],
             // `lastFrame` is dropped: it is the recorded commands, kept for a test
             // that replays them here, and it holds backend objects and a uniform

@@ -313,14 +313,17 @@ export function createInputDevice({ kind, now }){
         },
         unacquire(){
             acquired = false;
-            // The motion since the last read is dropped: a program taking the
-            // device back reads its state afresh. The buffer is not -- the
-            // events in it happened while the program held the device, and
-            // Windows keeps them, overflow and all, for the next read. What
-            // arrives while nobody holds it is never buffered (`post`).
+            // The motion since the last read is dropped, and so are the keys:
+            // a program taking the device back reads its state afresh, and a
+            // key held across that reads up until it is pressed again (Wine's
+            // device8.c, test_sys_keyboard). The buffer is not -- the events
+            // in it happened while the program held the device, and Windows
+            // keeps them, overflow and all, for the next read. What arrives
+            // while nobody holds it is never buffered (`post`).
             deltaX = 0;
             deltaY = 0;
             deltaWheel = 0;
+            keys.fill(0);
         },
 
         /** @param {number} size */

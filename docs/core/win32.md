@@ -459,6 +459,13 @@ implements).
   drawn and the launcher starts a game's executable directly; every method that stands in for work
   this build does not do reports so through the divergence channel, and the strings a program sets
   are kept and handed back verbatim (`shell32/shelllink.js`).
+- **WMI is `CLSID_WbemLocator` and one class** (`ole32/wbem.js`): `ConnectServer` to `root\cimv2`,
+  then `CreateInstanceEnum` or a WQL `ExecQuery` over `Win32_VideoController`, whose one instance
+  answers `AdapterRAM` (256 MB, the figure Direct3D's `GetAvailableTextureMem` reports) and its
+  name strings. A program refused the locator does not fail; it assumes the least video memory it
+  supports and picks its lowest settings without saying so. Any other class enumerates empty, a
+  `WHERE` is ignored, and every other method is refused, each through the divergence channel.
+  `CoSetProxyBlanket` and `CoInitializeSecurity` succeed: every object lives in the caller's process.
 - **`_control87` is `_controlfp` under its older name** — the same word, the same mask arithmetic,
   one piece of state — because a program may set the FPU control word through one entry point and
   read it back through the other, and answering from two separate words would make that read-back a
