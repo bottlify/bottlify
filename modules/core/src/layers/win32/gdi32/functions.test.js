@@ -531,6 +531,65 @@ test('CreateBitmap keeps the format it was given', ()=>{
         'seven bits per pixel is not a format');
 });
 
+test('GetBitmapBits sizes a bitmap\'s bits, then hands back WORD-padded rows', ()=>{
+    // Wine's test_bitmap: a fresh 15x15 monochrome bitmap is two zero bytes a
+    // row. A null buffer asks the size whatever the count; with a buffer, a
+    // negative count means all of it and a zero one means none.
+    const { fns, memory } = setup();
+    const mono = fns.CreateBitmap.handler([15, 15, 1, 1, 0]);
+    for (const count of [0, -1, -1000, 30, 4096])
+    {
+        assert.equal(fns.GetBitmapBits.handler([mono, count, 0]), 30);
+    }
+    memory.fill(OUT, 16);
+    assert.equal(fns.GetBitmapBits.handler([mono, 0, OUT]), 0);
+    assert.equal(memory.u32(OUT), UNTOUCHED);
+    assert.equal(fns.GetBitmapBits.handler([mono, -1, OUT]), 30);
+    assert.deepEqual([...memory.bytes.subarray(OUT, OUT + 32)],
+        [...new Array(30).fill(0), 0xa5, 0xa5], 'zeroed, and not a byte past the image');
+    assert.equal(fns.GetBitmapBits.handler([mono, 12, OUT]), 12);
+    assert.equal(fns.GetBitmapBits.handler([0x9999, 30, OUT]), 0, 'not a bitmap');
+});
+
+test('CreateBitmap copies lpBits, and SetBitmapBits writes as GetBitmapBits reads', ()=>{
+    const { fns, memory } = setup();
+    memory.putU32s(STRUCT, [0x44332211, 0x88776655]);
+    const bitmap = fns.CreateBitmap.handler([2, 1, 1, 32, STRUCT]);
+    memory.putU32s(STRUCT, [0, 0]);
+    assert.equal(fns.GetBitmapBits.handler([bitmap, 8, OUT]), 8);
+    assert.deepEqual([memory.u32(OUT), memory.u32(OUT + 4)], [0x44332211, 0x88776655],
+        'the bits as they were passed, not the caller\'s buffer as it is now');
+
+    memory.putU32s(STRUCT, [0x00abcdef, 0x00123456, 0xdeadbeef]);
+    assert.equal(fns.SetBitmapBits.handler([bitmap, 12, STRUCT]), 8, 'no more than the image');
+    assert.equal(fns.GetBitmapBits.handler([bitmap, 8, OUT]), 8);
+    assert.deepEqual([memory.u32(OUT), memory.u32(OUT + 4)], [0x00abcdef, 0x00123456]);
+    assert.equal(fns.SetBitmapBits.handler([bitmap, 4, 0]), 0, 'no bits to set from');
+    assert.deepEqual([fns.GetBitmapBits.argBytes, fns.SetBitmapBits.argBytes], [12, 12]);
+});
+
+test('a DIB section\'s bits come and go as top-down WORD-padded rows', ()=>{
+    // Three 24-bit pixels are nine bytes: a device-dependent row pads them to
+    // ten, a DIB row to twelve, and a bottom-up section keeps its top row last.
+    const { fns, memory, hdc } = withDC();
+    putBitmapInfo(memory, { width: 3, height: 2, bitCount: 24 });
+    const section = fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]);
+    const bits = memory.u32(BITS_POINTER);
+    memory.bytes.fill(0x11, bits, bits + 12);
+    memory.bytes.fill(0x22, bits + 12, bits + 24);
+
+    assert.equal(fns.GetBitmapBits.handler([section, 0, 0]), 20);
+    memory.fill(OUT, 6);
+    assert.equal(fns.GetBitmapBits.handler([section, 20, OUT]), 20);
+    assert.deepEqual([...memory.bytes.subarray(OUT, OUT + 20)],
+        [...new Array(10).fill(0x22), ...new Array(10).fill(0x11)]);
+
+    memory.bytes.fill(0x33, STRUCT + 0x100, STRUCT + 0x100 + 10);
+    assert.equal(fns.SetBitmapBits.handler([section, 10, STRUCT + 0x100]), 10);
+    assert.deepEqual([...memory.bytes.subarray(bits + 12, bits + 24)],
+        [...new Array(10).fill(0x33), 0x22, 0x22], 'the top row, padding left alone');
+});
+
 test('CreateDIBSection asks for DWORD-aligned rows and hands back the pointer', ()=>{
     const { fns, memory, surfaces, hdc } = withDC();
     putBitmapInfo(memory, { width: 10, height: 4, bitCount: 24 });

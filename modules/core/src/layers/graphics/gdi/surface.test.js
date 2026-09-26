@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    MONOCHROME,
     RGB_555,
     RGB_565,
     clearSurface,
@@ -20,6 +21,7 @@ import {
     narrow16,
     pixelToColor,
     surfaceBounds,
+    surfaceForDdb,
     surfaceForDibSection,
     viewOf,
 } from './surface.js';
@@ -203,6 +205,44 @@ test('a DIB section at any drawable depth is a surface, and the rest are not', (
         null);
     assert.equal(surfaceForDibSection({ width: 2, height: 2, bitCount: 32, bits: 0 }, memory),
         null);
+});
+
+test('byte-exact: a one-bit surface packs its leftmost pixel into the top bit', ()=>{
+    const surface = createSurface({ width: 10, height: 2, bitCount: 1, palette: [...MONOCHROME],
+        pitch: ddbPitch(10, 1) });
+    assert.equal(surface.pitch, 2);
+    surface.write(0, 0, 0x00ffffff);
+    surface.write(9, 0, 0x00c0c0c0);
+    surface.write(1, 1, 0x00404040);
+    surface.write(2, 1, 0x00ff00ff);
+    assert.deepEqual([...surface.bytes], [0x80, 0x40, 0x20, 0x00],
+        'the nearer of black and white, bit by bit');
+    assert.equal(surface.read(0, 0), 0x00ffffff);
+    assert.equal(surface.read(1, 0), 0x00000000);
+    surface.write(0, 0, 0);
+    assert.equal(surface.bytes[0], 0, 'and a bit is cleared as well as set');
+    assert.throws(()=>createSurface({ width: 1, height: 1, bitCount: 1 }), RangeError,
+        'one bit without a palette');
+});
+
+test('a device-dependent bitmap\'s own bytes are a surface with WORD-padded rows', ()=>{
+    const pixels = new Uint8Array(ddbPitch(3, 32) * 2);
+    const colour = surfaceForDdb({ width: 3, height: 2, bitCount: 32, pixels });
+    assert.ok(colour);
+    colour.write(2, 1, 0x00abcdef);
+    assert.deepEqual([...pixels.subarray(12 + 8, 12 + 12)], [0xef, 0xcd, 0xab, 0x00],
+        'rows top-down, BGRX');
+
+    const bits = new Uint8Array(ddbPitch(17, 1) * 2);
+    const mono = surfaceForDdb({ width: 17, height: 2, bitCount: 1, pixels: bits });
+    assert.ok(mono);
+    mono.write(16, 1, 0x00ffffff);
+    assert.equal(bits[4 + 2], 0x80, 'seventeen pixels take a WORD and a bit: four bytes a row');
+
+    assert.equal(surfaceForDdb({ width: 3, height: 2, bitCount: 32 }), null,
+        'a bitmap with no bytes of its own');
+    assert.equal(surfaceForDdb({ width: 3, height: 2, bitCount: 8, pixels }), null,
+        'eight bits would need a palette a device bitmap does not carry');
 });
 
 test('clearing a surface reaches every pixel including the last', ()=>{

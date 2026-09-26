@@ -131,10 +131,13 @@ export function pixelToColor(pixel){
  * @property {number} [pitch]      Overrides the DIB rule for a surface someone else strided.
  * @property {Uint8Array} [bytes]  Existing memory to draw into, rather than fresh memory.
  * @property {number} [offset]     Where row zero starts inside `bytes`.
- * @property {number} [bitCount]   8, 16 or 32; the operations still see 32.
- * @property {number[]} [palette]  What an index means, for 8 bits: 32-bit pixels.
+ * @property {number} [bitCount]   1, 8, 16 or 32; the operations still see 32.
+ * @property {number[]} [palette]  What an index means, for 1 and 8 bits: 32-bit pixels.
  * @property {string} [format]     RGB_555 (default) or RGB_565, for 16 bits.
  */
+
+/** What a monochrome bitmap's two bit values mean: black, and white. */
+export const MONOCHROME = Object.freeze([0x00000000, 0x00ffffff]);
 
 /**
  * A surface that also says how deep it is. The operations need only the
@@ -156,14 +159,14 @@ export function createSurface(options){
         throw new RangeError('A surface needs a positive width and height');
     }
     const bitCount = options.bitCount ?? SURFACE_BIT_COUNT;
-    if (bitCount !== 8 && bitCount !== 16 && bitCount !== 32)
+    if (bitCount !== 1 && bitCount !== 8 && bitCount !== 16 && bitCount !== 32)
     {
         throw new RangeError(`A surface cannot be ${bitCount} bits deep`);
     }
     const palette = options.palette ?? null;
-    if (bitCount === 8 && !palette)
+    if (bitCount <= 8 && !palette)
     {
-        throw new RangeError('An eight-bit surface needs a palette');
+        throw new RangeError('An indexed surface needs a palette');
     }
     const format = options.format ?? RGB_555;
     const pitch = options.pitch ?? dibPitch(width, bitCount);
@@ -259,6 +262,12 @@ export function createSurface(options){
 
         /** @param {number} x @param {number} y */
         read(x, y){
+            if (bitCount === 1)
+            {
+                // The leftmost pixel is the byte's top bit.
+                const bit = (bytes[rowOffset(y) + (x >>> 3)] >>> (7 - (x & 7))) & 1;
+                return (/** @type {number[]} */ (palette)[bit] ?? 0) >>> 0;
+            }
             if (bitCount === 8)
             {
                 return (/** @type {number[]} */ (palette)[bytes[rowOffset(y) + x]] ?? 0) >>> 0;
@@ -279,6 +288,13 @@ export function createSurface(options){
 
         /** @param {number} x @param {number} y @param {number} pixel */
         write(x, y, pixel){
+            if (bitCount === 1)
+            {
+                const at = rowOffset(y) + (x >>> 3);
+                const mask = 0x80 >>> (x & 7);
+                bytes[at] = (indexOf(pixel >>> 0) & 1) !== 0 ? bytes[at] | mask : bytes[at] & ~mask;
+                return;
+            }
             if (bitCount === 8)
             {
                 bytes[rowOffset(y) + x] = indexOf(pixel >>> 0);
@@ -341,6 +357,37 @@ export function surfaceForDibSection(attributes, memory, base = 0){
         bitCount: depth,
         palette: attributes.palette,
         format: attributes.format,
+    });
+}
+
+/**
+ * The pixels of a device-dependent bitmap, as a surface.
+ *
+ * Its bits are not in guest memory: Windows keeps them where the program
+ * cannot address them, and the bookkeeping half hands them over as bytes of
+ * their own, in the layout GetBitmapBits exchanges -- rows top-down, each
+ * padded to a WORD. One bit is monochrome, black and white; sixteen is the
+ * 5-6-5 a display mode of that depth has. A depth that needs a palette the
+ * bitmap does not carry has no surface.
+ *
+ * @param {{ width: number, height: number, bitCount: number, pixels?: Uint8Array }} attributes
+ * @returns {DepthSurface | null}
+ */
+export function surfaceForDdb(attributes){
+    const depth = attributes.bitCount;
+    if (!attributes.pixels || (depth !== 1 && depth !== 16 && depth !== 32))
+    {
+        return null;
+    }
+    return createSurface({
+        width: attributes.width,
+        height: attributes.height,
+        topDown: true,
+        pitch: ddbPitch(attributes.width, depth),
+        bytes: attributes.pixels,
+        bitCount: depth,
+        palette: depth === 1 ? [...MONOCHROME] : undefined,
+        format: RGB_565,
     });
 }
 

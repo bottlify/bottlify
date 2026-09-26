@@ -182,11 +182,14 @@ export function combine(first, second, mode){
  * @param {(handle: number) => any | null} options.dcOf
  * @param {(dc: any) => any} options.surfaceOf   What the DC reports about its size.
  * @param {(dc: any) => any} options.currentMetrics
+ * @param {<T>(bitmap: number, action: (hdc: number) => T) => T} options.lend
+ *        Runs `action` over a context of the bookkeeping half's own with the
+ *        bitmap in it, wherever else the bitmap is selected.
  * @returns The entry points, and `bound`: the drawing interface a context is
  *     bound to, for the window manager, which paints its own controls through
  *     the same engine without a guest string to read.
  */
-export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, currentMetrics }){
+export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, currentMetrics, lend }){
     /** @type {DrawingServices} */
     const services = host.graphics ?? {};
 
@@ -655,10 +658,10 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
          * it. That path answers even when there is nothing to draw with, because
          * the shape is bookkeeping and the pixels are not.
          *
-         * The pixels come from the device context, so the bitmap asked about has
-         * to be the one selected into it. Any other bitmap has no surface this
-         * layer can reach, and reporting rows that came from somewhere else
-         * would be worse than reporting none.
+         * The pixels are the bitmap's, wherever it is selected: the DC only
+         * says which device the format is converted for. Windows documents
+         * the bitmap as not selected into any DC for this call, and a program
+         * that follows the rule has just taken it out of the one it drew in.
          */
         GetDIBits: {
             argBytes: 28,
@@ -680,22 +683,27 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                     writeU32s(host, info + BITMAPINFOHEADER.biCompression, [0, 0, 0, 0, 0, 0]);
                     return shape.height;
                 }
-                const interfaces = dc.bitmap === (bitmap >>> 0) ? bound(handle) : null;
-                if (!interfaces)
-                {
-                    return 0;
-                }
                 const header = readBitmapInfoHeader(host, info);
                 const wanted = Math.min(lines >>> 0, shape.height);
                 const buffer = new Uint8Array(
                     (((header.width * header.bitCount + 31) / 32 | 0) * 4) * wanted);
-                const written = interfaces.getDIBits(handle >>> 0, {
-                    header,
-                    bits: buffer,
-                    startScan: start >>> 0,
-                    scanLines: wanted,
-                });
-                host.writeMemory(bits >>> 0, buffer);
+                /** @param {number} source */
+                const read = source=>{
+                    const interfaces = bound(source, false);
+                    return interfaces
+                        ? interfaces.getDIBits(source >>> 0, {
+                            header,
+                            bits: buffer,
+                            startScan: start >>> 0,
+                            scanLines: wanted,
+                        })
+                        : 0;
+                };
+                const written = dc.bitmap === (bitmap >>> 0) ? read(handle) : lend(bitmap, read);
+                if (written > 0)
+                {
+                    host.writeMemory(bits >>> 0, buffer);
+                }
                 return written;
             },
         },

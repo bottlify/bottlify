@@ -24,6 +24,8 @@ import { createGdiObjects } from './objects.js';
 import { createDrawingFunctions } from './drawing.js';
 import {
     BITMAPINFOHEADER,
+    ddbStride,
+    dibStride,
     readBitmapInfoHeader,
     readLogBrush,
     readLogFont,
@@ -858,7 +860,110 @@ export function createGdiFunctions(host){
     const dibSize = (width, height, bitCount)=>
         (((((width * bitCount) + 31) / 32) | 0) * 4) * Math.abs(height);
 
-    const drawing = createDrawingFunctions({ host, objects, dcOf, surfaceOf, currentMetrics });
+    /**
+     * A device-dependent bitmap's attributes, its bits among them: rows
+     * top-down and WORD-padded, the layout CreateBitmap's lpBits and
+     * GetBitmapBits' buffer are in, zeroed. Windows keeps these bits where
+     * the program has no address for them -- GetObject's bmBits is NULL --
+     * so they are memory of their own here too, not the guest's: a buffer
+     * the program passed in is copied and is the program's to reuse.
+     *
+     * Null when the bits cannot be had, which the caller reports as the
+     * failure it is.
+     *
+     * @param {number} width @param {number} height @param {number} bitCount
+     * @param {number} [planes]
+     */
+    const deviceBitmap = (width, height, bitCount, planes = 1)=>{
+        let pixels;
+        try
+        {
+            pixels = new Uint8Array(ddbStride(width, bitCount) * height);
+        }
+        catch {
+            return null;
+        }
+        return { width, height, planes, bitCount, bits: 0, section: 0, pixels };
+    };
+
+    /**
+     * A bitmap's bits as GetBitmapBits and SetBitmapBits exchange them, or
+     * null for a handle that is not a bitmap with bits.
+     *
+     * @param {number} handle
+     * @returns {{ size: number, read: () => Uint8Array,
+     *             write: (bytes: Uint8Array) => void } | null}
+     */
+    const bitsOf = handle=>{
+        const record = objects.get(handle);
+        const attributes = record?.type === 'bitmap' ? record.attributes : null;
+        if (!attributes)
+        {
+            return null;
+        }
+        const stride = ddbStride(attributes.width, attributes.bitCount);
+        const size = stride * attributes.height;
+        if (attributes.pixels)
+        {
+            const pixels = /** @type {Uint8Array} */ (attributes.pixels);
+            return { size, read: ()=>pixels, write: bytes=>pixels.set(bytes) };
+        }
+        if ((attributes.section >>> 0) === 0)
+        {
+            return null;
+        }
+        const pitch = dibStride(attributes.width, attributes.bitCount);
+        /** @param {number} y */
+        const rowAt = y=>attributes.section + pitch
+            * (attributes.topDown ? y : attributes.height - 1 - y);
+        return {
+            size,
+            read(){
+                const bytes = new Uint8Array(size);
+                for (let y = 0; y < attributes.height; y++)
+                {
+                    bytes.set(host.readMemory(rowAt(y), stride), y * stride);
+                }
+                return bytes;
+            },
+            write(bytes){
+                for (let y = 0; y * stride < bytes.length; y++)
+                {
+                    host.writeMemory(rowAt(y), bytes.subarray(y * stride, (y + 1) * stride));
+                }
+            },
+        };
+    };
+
+    /**
+     * Runs `action` over a memory context of this layer's own with `bitmap`
+     * in it, whether or not a program has the bitmap selected somewhere: a
+     * bitmap read back or drawn for the window manager is not a selection,
+     * and the rule that a bitmap is in one DC at a time is the program's.
+     *
+     * @template T
+     * @param {number} bitmap @param {(hdc: number) => T} action
+     * @returns {T}
+     */
+    const lend = (bitmap, action)=>{
+        const dc = createContext(0, 'memory');
+        objects.retain(bitmap);
+        dc.bitmap = bitmap >>> 0;
+        try
+        {
+            return action(dc.hdc);
+        }
+        finally
+        {
+            objects.release(dc.bitmap);
+            dc.bitmap = 0;
+            destroyContext(dc);
+        }
+    };
+
+    const drawing = createDrawingFunctions({
+        host, objects, dcOf, surfaceOf, currentMetrics, lend,
+    });
 
     /**
      * Solid brushes by colour, for the window manager's own painting and for
@@ -956,9 +1061,7 @@ export function createGdiFunctions(host){
                 // Documented exactly: a memory DC starts out one monochrome pixel
                 // wide and one pixel high, so that it always has a surface.
                 const dc = createContext(0, 'memory');
-                dc.defaultBitmap = objects.create('bitmap', {
-                    width: 1, height: 1, planes: 1, bitCount: 1, bits: 0, section: 0,
-                });
+                dc.defaultBitmap = objects.create('bitmap', deviceBitmap(1, 1, 1));
                 select(dc, dc.defaultBitmap);
                 return dc.hdc;
             },
@@ -1258,20 +1361,21 @@ export function createGdiFunctions(host){
                 // Documented exactly: a zero extent yields a one-pixel monochrome
                 // bitmap rather than a failure.
                 const empty = (cx | 0) <= 0 || (cy | 0) <= 0;
-                return objects.create('bitmap', {
-                    width: empty ? 1 : cx | 0,
-                    height: empty ? 1 : cy | 0,
-                    planes: 1,
-                    bitCount: empty ? 1 : surfaceOf(dc).bitCount,
-                    // The bits arrive with whoever draws into them; this half only
-                    // decides what shape they have to be.
-                    bits: 0,
-                    section: 0,
-                });
+                const attributes = empty
+                    ? deviceBitmap(1, 1, 1)
+                    : deviceBitmap(cx | 0, cy | 0, surfaceOf(dc).bitCount);
+                return attributes ? objects.create('bitmap', attributes) : 0;
             },
         },
 
-        /** HBITMAP CreateBitmap(int nWidth, int nHeight, UINT nPlanes, UINT nBitCount, const VOID *lpBits) */
+        /**
+         * HBITMAP CreateBitmap(int nWidth, int nHeight, UINT nPlanes, UINT nBitCount,
+         *                      const VOID *lpBits)
+         *
+         * lpBits, when there are any, is the whole image in the bitmap's own
+         * layout, and it is copied: the buffer is the caller's, free to be
+         * reused or freed the moment this returns.
+         */
         CreateBitmap: {
             argBytes: 20,
             /** @param {number[]} args */
@@ -1284,17 +1388,62 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                return objects.create('bitmap', {
-                    width: width | 0,
-                    height: height | 0,
-                    planes: planes >>> 0,
-                    bitCount: bitCount >>> 0,
-                    // The initial bits belong to the caller, who is free to reuse
-                    // the buffer the moment this returns; nothing is read from it
-                    // until there is something to read it into.
-                    bits: bits >>> 0,
-                    section: 0,
-                });
+                const attributes = deviceBitmap(width | 0, height | 0, bitCount >>> 0,
+                    planes >>> 0);
+                if (!attributes)
+                {
+                    return 0;
+                }
+                if ((bits >>> 0) !== 0)
+                {
+                    attributes.pixels.set(host.readMemory(bits >>> 0, attributes.pixels.length));
+                }
+                return objects.create('bitmap', attributes);
+            },
+        },
+
+        /**
+         * LONG GetBitmapBits(HBITMAP hbit, LONG cb, LPVOID lpvBits)
+         * LONG SetBitmapBits(HBITMAP hbm, DWORD cb, const VOID *pvBits)
+         *
+         * A bitmap's bits in the device-dependent layout, rows top-down and
+         * each padded to a WORD, whatever the bitmap is: a DIB section's
+         * DWORD-padded rows, bottom-up or not, are converted on the way. A
+         * null buffer asks for the size, and GetBitmapBits reads a negative
+         * count as all of it, as Windows does. Each answers with how many
+         * bytes it moved.
+         */
+        GetBitmapBits: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, count, out])=>{
+                const bits = bitsOf(handle);
+                if (!bits)
+                {
+                    return 0;
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return bits.size;
+                }
+                const wanted = (count | 0) < 0 ? bits.size : Math.min(count | 0, bits.size);
+                host.writeMemory(out >>> 0, bits.read().subarray(0, wanted));
+                return wanted;
+            },
+        },
+
+        SetBitmapBits: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, count, source])=>{
+                const bits = bitsOf(handle);
+                if (!bits || (source >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const wanted = Math.min(count >>> 0, bits.size);
+                bits.write(host.readMemory(source >>> 0, wanted).slice());
+                return wanted;
             },
         },
 
@@ -2229,22 +2378,13 @@ export function createGdiFunctions(host){
              */
             bitmap(hdc, x, y, bitmap){
                 const record = objects.get(bitmap);
-                if (!record || record.type !== 'bitmap' || !record.attributes.bits)
+                const shape = record?.type === 'bitmap' ? record.attributes : null;
+                if (!shape || (!shape.bits && !shape.pixels))
                 {
                     return false;
                 }
-                const source = createContext(0, 'memory');
-                source.defaultBitmap = objects.create('bitmap', {
-                    width: 1, height: 1, planes: 1, bitCount: 1, bits: 0, section: 0,
-                });
-                select(source, source.defaultBitmap);
-                const selected = select(source, bitmap >>> 0) !== 0;
-                const shape = record.attributes;
-                const drawn = selected && table.BitBlt.handler([hdc >>> 0, x | 0, y | 0,
-                    shape.width | 0, shape.height | 0, source.hdc, 0, 0, SRCCOPY]) === 1;
-                select(source, source.defaultBitmap);
-                destroyContext(source);
-                return drawn;
+                return lend(bitmap, source=>table.BitBlt.handler([hdc >>> 0, x | 0, y | 0,
+                    shape.width | 0, shape.height | 0, source, 0, 0, SRCCOPY]) === 1);
             },
         },
 

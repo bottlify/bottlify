@@ -274,22 +274,22 @@ test('a memory context is bound to the bitmap selected into it, and rebound on a
     /** @type {any[]} */
     const asked = [];
     graphics.services.surfaceFor = (/** @type {any} */ dc, /** @type {any} */ bitmap)=>{
-        asked.push({ kind: dc.kind, bits: bitmap.bits });
+        asked.push({ kind: dc.kind, width: bitmap.width });
         return { width: bitmap.width, height: bitmap.height };
     };
     const { fns, hdc } = setup(graphics.services);
     const memoryDc = fns.CreateCompatibleDC.handler([hdc]);
-    const first = fns.CreateBitmap.handler([8, 8, 1, 32, 0x1000]);
-    const second = fns.CreateBitmap.handler([8, 8, 1, 32, 0x2000]);
+    const first = fns.CreateBitmap.handler([8, 8, 1, 32, 0]);
+    const second = fns.CreateBitmap.handler([9, 8, 1, 32, 0]);
 
     fns.SelectObject.handler([memoryDc, first]);
     assert.equal(fns.LineTo.handler([memoryDc, 1, 1]), 1);
     assert.equal(fns.LineTo.handler([memoryDc, 2, 2]), 1);
-    assert.deepEqual(asked, [{ kind: 'memory', bits: 0x1000 }], 'bound once while nothing changes');
+    assert.deepEqual(asked, [{ kind: 'memory', width: 8 }], 'bound once while nothing changes');
 
     fns.SelectObject.handler([memoryDc, second]);
     assert.equal(fns.LineTo.handler([memoryDc, 3, 3]), 1);
-    assert.deepEqual(asked.at(-1), { kind: 'memory', bits: 0x2000 });
+    assert.deepEqual(asked.at(-1), { kind: 'memory', width: 9 });
     assert.equal(graphics.calls.filter(call=>call[0] === 'bind').length, 2,
         'once per bitmap');
 });
@@ -874,8 +874,8 @@ test('GetDIBits describes a bitmap before it copies one', ()=>{
     assert.equal(memory.u32(STRUCT + 8), 48, 'biHeight');
     assert.equal(memory.u16(STRUCT + 12), 1, 'biPlanes');
 
-    // Without the bitmap selected into the context there is no surface to read,
-    // and rows from somewhere else would be worse than none.
+    // The rows themselves are pixels, and without a drawing service there are
+    // none to copy.
     assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 48, OUT, STRUCT, 0]), 0);
 });
 

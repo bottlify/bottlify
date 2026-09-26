@@ -15,7 +15,8 @@ import { createPresenter, expandRow } from './webgpu/internal/presenter.js';
 import { createGdiDrawing } from './gdi/context.js';
 import { createFontEngine } from './gdi/fonts.js';
 import {
-    createSurface, dibPitch, intersectRect, isEmptyRect, surfaceForDibSection, viewOf,
+    createSurface, dibPitch, intersectRect, isEmptyRect, surfaceForDdb, surfaceForDibSection,
+    viewOf,
 } from './gdi/surface.js';
 import { textExtent } from './gdi/text.js';
 
@@ -795,7 +796,10 @@ export const graphicsModule = {
              *     A window context names the screen rectangle it may
              *     draw in, in screen coordinates; absent, the whole screen.
              * @param {{ width: number, height: number, bitCount: number, bits?: number,
-             *     topDown?: boolean, palette?: number[], format?: string }} bitmap
+             *     topDown?: boolean, palette?: number[], format?: string,
+             *     pixels?: Uint8Array }} bitmap
+             *     A device-dependent bitmap carries its own `pixels`; a DIB
+             *     section's `bits` are a guest address.
              */
             surfaceFor: (dc, bitmap)=>{
                 if (dc.kind !== 'memory')
@@ -808,6 +812,10 @@ export const graphicsModule = {
                     return viewOf(screen.surface, dc.bounds ?? {
                         left: 0, top: 0, right: screen.width, bottom: screen.height,
                     });
+                }
+                if (bitmap.pixels)
+                {
+                    return surfaceForDdb(bitmap);
                 }
                 const bits = bitmap.bits ?? 0;
                 if (bits === 0)
