@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createAtomFunctions } from './atoms.js';
+import { decodeAnsi } from './locale.js';
 
 const NAME = 0x10000;
 const NAME2 = 0x10100;
@@ -24,7 +25,7 @@ function setup(){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         setLastError(){},
     });

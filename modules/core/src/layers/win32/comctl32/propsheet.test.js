@@ -13,6 +13,7 @@ import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import { createSurface, surfaceForDibSection, viewOf } from '../../graphics/gdi/surface.js';
 import { createCommonControls } from './controls.js';
 import { createComctlFunctions } from './functions.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 import {
     PSP, PSP_USETITLE, PSP_USECALLBACK, PSP_PREMATURE, PSPCB_ADDREF, PSPCB_RELEASE,
     PSPCB_CREATE, PSH, PSH_MODELESS, PSH_USECALLBACK, PSH_PROPSHEETPAGE, PSH_WIZARD,
@@ -110,7 +111,7 @@ function fakeMemory(size = 0x80000){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         /** @param {number} address @param {string} text */
         putString(address, text){

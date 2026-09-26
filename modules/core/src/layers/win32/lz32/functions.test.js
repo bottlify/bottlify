@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLzFunctions } from './functions.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 const OF_READ = 0x0000;
 const OF_CREATE = 0x1000;
@@ -38,7 +39,7 @@ function setup(initial){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(memory.subarray(address, end));
+            return decodeAnsi(memory.subarray(address, end));
         },
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         files: {

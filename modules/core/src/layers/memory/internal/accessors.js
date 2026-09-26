@@ -50,6 +50,37 @@ const SCAN_CHUNK = 256;
 const NO_BYTES = new Uint8Array(256);
 
 /**
+ * Windows-1252 from 0x80 to 0x9F, where it parts from Latin-1: the character
+ * each byte stands for, 0 where the page defines none and the byte reads as
+ * its own code point.
+ */
+const CP1252_C1 = [
+    0x20ac, 0x0000, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+    0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0x0000, 0x017d, 0x0000,
+    0x0000, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+    0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x0000, 0x017e, 0x0178,
+];
+const LATIN1 = new TextDecoder('latin1');
+const C1 = /[\u0080-\u009f]/;
+const C1_ALL = /[\u0080-\u009f]/g;
+
+/**
+ * Bytes of the ANSI page as text. The encoding standard makes 'latin1' a
+ * label of windows-1252, and Chrome decodes it so; Node 22 decodes it -- and
+ * 'windows-1252' itself -- as ISO-8859-1, reading 0x80 to 0x9F as C1
+ * controls, so what those come back as is mapped here and both hosts agree.
+ *
+ * @param {Uint8Array} bytes
+ */
+export const decodeAnsiBytes = bytes=>{
+    const text = LATIN1.decode(bytes);
+    return C1.test(text)
+        ? text.replace(C1_ALL, c=>String.fromCharCode(CP1252_C1[c.charCodeAt(0) - 0x80]
+            || c.charCodeAt(0)))
+        : text;
+};
+
+/**
  * @param {Object} options
  * @param {RawMemory} options.raw            Physical memory, normally the cpu layer.
  * @param {ReturnType<import('./regions.js').createRegionMap>} options.regions
@@ -369,7 +400,7 @@ export function createAccessors({ raw, regions, charge = null }){
                 throw new Error(
                     `No NUL within ${limit} bytes of 0x${address.toString(16)}`);
             }
-            return new TextDecoder('latin1').decode(read(address, length));
+            return decodeAnsiBytes(read(address, length));
         },
 
         /**

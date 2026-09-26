@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createProfileFunctions } from './profile.js';
+import { decodeAnsi } from './locale.js';
 
 /** Addresses the fixtures use; nothing about them matters but that they differ. */
 const SECTION = 0x100;
@@ -34,7 +35,7 @@ function fakeMemory(){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         /** @param {number} address @param {string} text */
         put(address, text){

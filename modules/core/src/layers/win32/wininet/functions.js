@@ -585,8 +585,7 @@ export function createWininetFunctions(host){
                     ? ''
                     : length === 0xffffffff
                         ? readText(headers)
-                        : new TextDecoder('latin1')
-                            .decode(host.readMemory(headers >>> 0, length));
+                        : decodeAnsi(host.readMemory(headers >>> 0, length));
 
                 const bodyLength = optionalLength >>> 0;
                 const body = optional !== 0 && bodyLength > 0
@@ -808,7 +807,7 @@ export function createWininetFunctions(host){
                 // explicit length, and the string need not be terminated at all.
                 const text = length === 0
                     ? readText(address, MAX_TEXT)
-                    : new TextDecoder('latin1').decode(host.readMemory(address, length));
+                    : decodeAnsi(host.readMemory(address, length));
 
                 const cracked = crackUrl(text);
                 if (!cracked)

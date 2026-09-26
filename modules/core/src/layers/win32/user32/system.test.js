@@ -21,6 +21,7 @@ import {
 } from './structs.js';
 import { createWindowFunctions } from './windows.js';
 import { createInputRouter } from '../../input/router.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 const CLASS_NAME = 0x10000;
 const CLASS_STRUCT = 0x10100;
@@ -84,7 +85,7 @@ function fakeMemory(size = 0x14000){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         /** @param {number} address @param {string} text */
         putString(address, text){

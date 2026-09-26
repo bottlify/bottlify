@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createEnvironmentFunctions, defaultEnvironment } from './environment.js';
 import { WINDOWS_VERSIONS } from './versions.js';
 import { shellFolders } from '../advapi32/registry.js';
+import { decodeAnsi } from './locale.js';
 
 const ERROR_ENVVAR_NOT_FOUND = 203;
 const STARTUPINFOA_SIZE = 68;
@@ -320,7 +321,7 @@ test('text in the upper half of the ANSI page goes back as the bytes it was read
     // euro sign, 0x99 the trade mark and 0x97 an em dash; a variable, the block
     // and the command line are written back in that page.
     const host = fakeHost({ commandLine: ()=>'C:\\\u20ac\\game.exe' });
-    host.readCString = (address, maxLength)=>new TextDecoder('latin1').decode(
+    host.readCString = (address, maxLength)=>decodeAnsi(
         host.bytes.subarray(address, host.bytes.indexOf(0, address)).subarray(0, maxLength));
     const fns = createEnvironmentFunctions(host);
     const value = [0x80, 0x99, 0x97, 0xe9];

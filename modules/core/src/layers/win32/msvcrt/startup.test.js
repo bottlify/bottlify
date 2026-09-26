@@ -15,6 +15,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStartupFunctions, splitCommandLine } from './startup.js';
 import { windowsVersion } from '../kernel32/versions.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 const HEAP_BASE = 0x00500000;
 
@@ -55,7 +56,7 @@ function fakeMachine(commandLine = '"C:\\App\\Game.exe"', { version } = {}){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         /** The vector at `address`, as the strings it points at. */
         /** @param {number} address */

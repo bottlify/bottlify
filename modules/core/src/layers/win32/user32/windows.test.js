@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createMessageQueue } from './messages.js';
 import { MSG, RECT, WNDCLASSA, WNDCLASSEXA } from './structs.js';
 import { createWindowFunctions, watchDispatch } from './windows.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 /**
  * Guest addresses the fixtures use: far enough apart that nothing overlaps, and
@@ -87,7 +88,7 @@ function fakeMemory(size = 0x13000){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         /** @param {number} address */
         readU32: address=>(bytes[address] | (bytes[address + 1] << 8)

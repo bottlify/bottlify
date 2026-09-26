@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMsvcrtFunctions } from './functions.js';
 import { doubleSlots, fakeMemory, fakeVolume } from './harness.test.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 /**
  * A stand-in for guest memory, with the same contract as the real one.
@@ -77,7 +78,7 @@ function fakeHost(size = 0x1000){
                 }
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         /**
          * @param {number} address @param {number} limit

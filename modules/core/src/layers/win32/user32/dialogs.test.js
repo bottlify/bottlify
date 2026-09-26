@@ -20,6 +20,7 @@ import assert from 'node:assert/strict';
 import { createMessageQueue } from './messages.js';
 import { createWindowFunctions } from './windows.js';
 import { DIALOG_LAYOUT } from './dialogs.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 const TEMPLATE = 0x12000;
 const TEXT = 0x10400;
@@ -47,7 +48,7 @@ function fakeMemory(size = 0x14000){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         /** @param {number} address @param {string} text */
         putString(address, text){

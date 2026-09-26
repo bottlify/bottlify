@@ -30,7 +30,7 @@
 
 import { HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR } from './console.js';
 import { msToFileTime } from './filetime.js';
-import { encodeAnsi } from './locale.js';
+import { decodeAnsi, encodeAnsi } from './locale.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
@@ -1139,7 +1139,7 @@ export function createFileFunctions(host){
                 if (isStandardHandle(handle >>> 0))
                 {
                     const bytes = host.readMemory(buffer >>> 0, count);
-                    host.writeConsole(handle >>> 0, new TextDecoder('latin1').decode(bytes));
+                    host.writeConsole(handle >>> 0, decodeAnsi(bytes));
                     writeDwordIf(written >>> 0, count);
                     return 1;
                 }

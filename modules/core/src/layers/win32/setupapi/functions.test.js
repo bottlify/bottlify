@@ -17,6 +17,7 @@ import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
 import { createHive, shellFolders } from '../advapi32/registry.js';
 import { FILEOP, SPFILENOTIFY, createSetupapiFunctions } from './functions.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -69,7 +70,7 @@ async function machine(){
         {
             end++;
         }
-        return new TextDecoder('latin1').decode(bytes.subarray(at, end));
+        return decodeAnsi(bytes.subarray(at, end));
     };
     const fns = createSetupapiFunctions({
         readMemory: (at, length)=>bytes.subarray(at, at + length),

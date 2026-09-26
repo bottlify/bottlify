@@ -19,7 +19,7 @@
  * uses them cannot drift apart.
  */
 
-import { encodeAnsi } from '../kernel32/locale.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /** LOGPEN. Its width is a POINT, of which only the x is ever meaningful. */
 export const LOGPEN = Object.freeze({
@@ -338,7 +338,7 @@ export function readLogFont(memory, address){
     }
     return {
         ...readLogFontFields(memory, address),
-        faceName: new TextDecoder('latin1').decode(name.subarray(0, end)),
+        faceName: decodeAnsi(name.subarray(0, end)),
     };
 }
 

@@ -247,12 +247,6 @@ const MAPVK_VK_TO_VSC_EX = 4;
  */
 const EXTENDED_SCAN_OF_VK = new Map([[0x2c, 0x54], [0x13, 0xe11d]]);
 
-/**
- * The ANSI page as text, for the calls that classify one of its characters.
- * Its five unassigned bytes decode as C1 controls, which no category but a
- * control's claims.
- */
-const ANSI_TEXT = new TextDecoder('windows-1252');
 
 /** @param {number} vk @returns {import('./keys.js').KeyMapping | null} */
 function mappingForVk(vk){
@@ -778,7 +772,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
         /** @param {number[]} args */
         handler: ([code])=>(category.test(wide
             ? String.fromCharCode(code & 0xffff)
-            : ANSI_TEXT.decode(new Uint8Array([code & 0xff]))) ? 1 : 0),
+            : decodeAnsi(new Uint8Array([code & 0xff]))) ? 1 : 0),
     });
 
     /** @param {number} hwnd @returns {any | null} the class a window was made from */

@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVersionFunctions } from './functions.js';
 import { WINDOWS_VERSIONS } from '../kernel32/versions.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 /**
  * Builds a VS_VERSIONINFO block by hand.
@@ -517,8 +518,7 @@ test('the ANSI answers are in the ANSI page: a string value, and a directory', (
     const at = m.get32(0x30);
     assert.deepEqual([...m.memory.subarray(at, at + 7)], [0x58, 0x99, 0x20, 0x80, 0x97, 0x3f, 0]);
 
-    m.host.readCString = (/** @type {number} */ a)=>new TextDecoder('latin1')
-        .decode(m.memory.subarray(a, m.memory.indexOf(0, a)));
+    m.host.readCString = (/** @type {number} */ a)=>decodeAnsi(m.memory.subarray(a, m.memory.indexOf(0, a)));
     m.memory.set([0x44, 0x2e, 0x64, 0x6c, 0x6c, 0], 0x40);
     m.memory.set([0x43, 0x3a, 0x5c, 0x80, 0x99, 0], 0x50);
     m.memory.set([0x04, 1, 0, 0], 0x1f00);

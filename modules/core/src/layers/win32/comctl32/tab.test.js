@@ -14,6 +14,7 @@ import { createSurface, surfaceForDdb, surfaceForDibSection, viewOf }
     from '../../graphics/gdi/surface.js';
 import { createCommonControls } from './controls.js';
 import { createImageLists } from './imagelist.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 import {
     TAB_CLASS, TCS_BUTTONS, TCS_FIXEDWIDTH, TCS_FOCUSNEVER, TCS_VERTICAL, TCS_MULTILINE,
     TCM_GETITEMCOUNT, TCM_INSERTITEMA, TCM_INSERTITEMW, TCM_GETITEMA, TCM_SETITEMA,
@@ -78,7 +79,7 @@ function fakeMemory(size = 0x20000){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         /** @param {number} address @param {string} text */
         putString(address, text){

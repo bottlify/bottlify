@@ -22,6 +22,7 @@ import {
     WSAHOST_NOT_FOUND, WSANOTINITIALISED, WSA_IO_PENDING, WS2_32_ORDINALS, WSOCK32_ORDINALS,
 } from './constants.js';
 import { SOCKADDR_IN_SIZE, writeSockaddr } from './sockaddr.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 const PORT = 6112;
 
@@ -68,7 +69,7 @@ function fixture(){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         currentThread: ()=>thread,
         heap: {

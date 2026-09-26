@@ -15,6 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 /** How much the fake's scan reads at a time, as the real memory layer does. */
 const SCAN_CHUNK = 256;
@@ -63,7 +64,7 @@ export function fakeMemory(base = 0x10000, size = 1 << 20){
                 memory.asked++;
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
 
         /**

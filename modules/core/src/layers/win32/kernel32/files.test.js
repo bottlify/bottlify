@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createFileFunctions, WIN32_FIND_DATAA } from './files.js';
 import { HANDLE_STDOUT } from './console.js';
+import { decodeAnsi } from './locale.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -1379,7 +1380,7 @@ test('a name in the upper half of the ANSI page goes back as the bytes it was re
     // calls hand back are written in the same page, so a program finds the
     // bytes it named a file with.
     const { memory, files, fns } = setup();
-    memory.readCString = (address, maxLength)=>new TextDecoder('latin1').decode(
+    memory.readCString = (address, maxLength)=>decodeAnsi(
         memory.bytes.subarray(address, memory.bytes.indexOf(0, address)).subarray(0, maxLength));
     const bytesOf = (/** @type {string} */ text)=>Array.from(text, unit=>unit.charCodeAt(0));
     const name = [0x80, 0x99, 0x97, 0xe9];

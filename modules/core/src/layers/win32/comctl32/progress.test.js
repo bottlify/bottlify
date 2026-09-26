@@ -12,6 +12,7 @@ import { createGdiFunctions } from '../gdi32/functions.js';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import { createSurface, surfaceForDibSection, viewOf } from '../../graphics/gdi/surface.js';
 import { createCommonControls } from './controls.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 import {
     PBM_SETRANGE, PBM_SETPOS, PBM_DELTAPOS, PBM_SETSTEP, PBM_STEPIT, PBM_SETRANGE32,
     PBM_GETRANGE, PBM_GETPOS, PBM_SETBARCOLOR, PBM_SETBKCOLOR, PBS_SMOOTH, PBS_VERTICAL,
@@ -57,7 +58,7 @@ function fakeMemory(size = 0x20000){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         /** @param {number} address @param {string} text */
         putString(address, text){

@@ -21,6 +21,7 @@ import {
     TVIF_TEXT, TVIF_STATE, TVIF_CHILDREN, TVIS_STATEIMAGEMASK,
 } from '../comctl32/treeview.js';
 import { decodePng, encodePng } from './png.fixture.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 /**
  * These tests assemble the window manager over the real drawing engine: a
@@ -152,7 +153,7 @@ function fakeMemory(size = 0x20000){
             {
                 throw new Error(`No NUL within ${maxLength} bytes of 0x${address.toString(16)}`);
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         /** @param {number} address @param {string} text */
         putString(address, text){

@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createShellFunctions } from './functions.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 /** @param {number} [allocator]  The IMalloc pointer ole32 would hand out, if any. */
 function machine(allocator){
@@ -51,7 +52,7 @@ function machineWithFolders(){
         folders: { Desktop: 'C:\\Desk', ProgramFiles: 'C:\\Program Files' },
     };
     /** @param {number} at */
-    const string = at=>new TextDecoder('latin1').decode(memory.subarray(at, memory.indexOf(0, at)));
+    const string = at=>decodeAnsi(memory.subarray(at, memory.indexOf(0, at)));
     return { memory, string, shell: /** @type {any} */ (createShellFunctions(host)) };
 }
 
@@ -295,7 +296,7 @@ function machineWithPaths(cwd, extra){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(memory.subarray(address, end));
+            return decodeAnsi(memory.subarray(address, end));
         },
         resolve: (/** @type {string} */ path)=>{
             return /^[A-Za-z]:[\\/]/.test(path) ? path : `${cwd}\\${path}`;
@@ -303,7 +304,7 @@ function machineWithPaths(cwd, extra){
         ...extra,
     };
     /** @param {number} at */
-    const string = at=>new TextDecoder('latin1').decode(memory.subarray(at, memory.indexOf(0, at)));
+    const string = at=>decodeAnsi(memory.subarray(at, memory.indexOf(0, at)));
     return { memory, put, string, shell: /** @type {any} */ (createShellFunctions(host)) };
 }
 
@@ -440,7 +441,7 @@ async function machineWithVolume(){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(memory.subarray(address, end));
+            return decodeAnsi(memory.subarray(address, end));
         },
         resolve: path=>fs.resolve(path).path,
         volume: { ...volume, drives: ()=>['C'] },

@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createShellFunctions } from './functions.js';
 import { IID_IENUMIDLIST, IID_ISHELLFOLDER, MY_COMPUTER, itemsOf } from './namespace.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -90,7 +91,7 @@ function machine(){
     /** @param {number} at @param {number} value */
     const put = (at, value)=>view.setUint32(at, value >>> 0, true);
     /** @param {number} at */
-    const string = at=>new TextDecoder('latin1').decode(memory.subarray(at, memory.indexOf(0, at)));
+    const string = at=>decodeAnsi(memory.subarray(at, memory.indexOf(0, at)));
     /** @param {string} text */
     const wide = text=>{
         const at = host.allocate(text.length * 2 + 2);

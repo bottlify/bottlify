@@ -19,6 +19,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { combine } from './drawing.js';
 import { createGdiFunctions } from './functions.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 const HWND = 0x2000;
 const STRUCT = 0x30000;
@@ -51,7 +52,7 @@ function fakeMemory(size = 0x33000){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         /** @param {number} address @param {number[]} values */
         putU32s(address, values){
@@ -609,7 +610,7 @@ test('GetObject hands a font back as the LOGFONT it was made from, in either spe
     assert.deepEqual([0, 4, 16].map(at=>memory.u32(OUT + at) | 0), [-12, 5, 700]);
     assert.deepEqual([...memory.bytes.subarray(OUT + 20, OUT + 28)],
         [1, 0, 0, 0xcc, 3, 2, 4, 0x22]);
-    assert.equal(new TextDecoder('latin1').decode(memory.bytes.subarray(OUT + 28, OUT + 34)),
+    assert.equal(decodeAnsi(memory.bytes.subarray(OUT + 28, OUT + 34)),
         'Arial\0');
     assert.equal(memory.bytes[OUT + 60], 0xee, 'nothing past the structure');
 

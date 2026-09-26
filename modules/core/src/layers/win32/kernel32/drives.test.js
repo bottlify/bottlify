@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDriveFunctions } from './drives.js';
+import { decodeAnsi } from './locale.js';
 
 const DRIVE_NO_ROOT_DIR = 1;
 const DRIVE_FIXED = 3;
@@ -25,7 +26,7 @@ function setup(mounted = ['C']){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         readWideString: (address, maxLength)=>{
             let text = '';

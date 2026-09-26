@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createShlwapiFunctions } from './functions.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 const AT = 0x100;
 
@@ -96,7 +97,7 @@ function strings(){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(memory.subarray(address, end));
+            return decodeAnsi(memory.subarray(address, end));
         },
         readWideString: (address, maxLength)=>{
             let text = '';

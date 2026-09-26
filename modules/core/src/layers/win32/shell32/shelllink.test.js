@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createComRegistry } from '../ole32/objects.js';
 import { createOleFunctions } from '../ole32/functions.js';
 import { parseGuid } from '../ole32/guid.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 import {
     CLSID_SHELL_LINK, IID_IPERSIST_FILE, IID_ISHELL_LINK_A, IID_ISHELL_LINK_W,
     registerShellLinkClasses,
@@ -65,7 +66,7 @@ function setup(){
         {
             end++;
         }
-        return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+        return decodeAnsi(bytes.subarray(address, end));
     };
     /** @param {number} address @param {number} maxLength */
     const readWideString = (address, maxLength)=>{

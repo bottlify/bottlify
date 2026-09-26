@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { canonicalizeUrl, createWininetFunctions } from './functions.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
@@ -44,7 +45,7 @@ function fixture(){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         /** @param {number} code */
         setLastError: code=>errors.push(code),

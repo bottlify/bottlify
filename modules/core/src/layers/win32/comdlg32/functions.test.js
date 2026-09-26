@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCommonDialogFunctions } from './functions.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 function machine(){
     const memory = new Uint8Array(0x100);
@@ -93,7 +94,7 @@ test('GetFileTitleA gives the name back in the bytes the path had', ()=>{
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(memory.subarray(address, end));
+            return decodeAnsi(memory.subarray(address, end));
         },
         writeMemory: (address, bytes)=>memory.set(bytes, address),
     });

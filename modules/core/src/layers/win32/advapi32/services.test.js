@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServiceFunctions } from './services.js';
 import { createHive, HKEY_LOCAL_MACHINE, REG_DWORD, REG_EXPAND_SZ, REG_SZ } from './registry.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 const NAME = 0x100;
 const DISPLAY = 0x200;
@@ -39,7 +40,7 @@ function setup(){
             {
                 end++;
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
+            return decodeAnsi(bytes.subarray(address, end));
         },
         hive,
         setLastError: code=>{

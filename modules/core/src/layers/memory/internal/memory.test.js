@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Access, RegionKind, createRegionMap } from './regions.js';
-import { createAccessors } from './accessors.js';
+import { createAccessors, decodeAnsiBytes } from './accessors.js';
 
 /**
  * A stand-in for guest physical memory.
@@ -645,4 +645,15 @@ test('a fill is refused where the region map refuses a write', ()=>{
     assert.throws(()=>accessors.fillBytes(0x3000, 1, 4), /Unmapped write/);
     assert.throws(()=>accessors.fillBytes(0x7ff8, 1, 16), /runs past the end/);
     assert.deepEqual(raw.took, [], 'and nothing was written by either');
+});
+
+test('a program\'s bytes read as the ANSI page on every host, 0x80 to 0x9F as Windows-1252', ()=>{
+    // Node 22 decodes the 'latin1' label as ISO-8859-1 where Chrome follows the
+    // encoding standard's windows-1252; the reader agrees with Chrome on both.
+    assert.equal(decodeAnsiBytes(Uint8Array.of(0x80, 0x99, 0x97, 0x41, 0xe9)),
+        '\u20ac\u2122\u2014A\u00e9');
+    assert.equal(decodeAnsiBytes(Uint8Array.of(0x81, 0x8d, 0x8f, 0x90, 0x9d)),
+        '\u0081\u008d\u008f\u0090\u009d',
+        'the five positions the page leaves undefined read as their own code points');
+    assert.equal(decodeAnsiBytes(new Uint8Array(0)), '');
 });
