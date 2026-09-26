@@ -312,7 +312,10 @@ read the MXCSR rounding control the same way; a NaN an operation makes carries t
 processor's negative sign whatever the host's default NaN is; exception masks are not
 honoured, an exception behaves as masked. The transcendentals (`fsin`, `fcos`, `fsincos`,
 `fptan`, `fpatan`, `f2xm1`, `fyl2x`, `fyl2xp1`) go through the host's `Math`, imported by every
-translated module, as the emulator's do, so the two agree on one engine. `fprem` and `fprem1` go
+translated module, as the emulator's do, so the two agree on one engine. Out of the reduction range
+(|x| >= 2^63) they leave the operand as it was and set C2, as the processor does, and `fptan` and
+`fsincos` push nothing there: the region leaves past the instruction with the stack as it was, where
+it had moved the top for the push the tracker counts on and pushed no value. `fprem` and `fprem1` go
 through the host too (the `fprem` and `fpremStatus` imports, the interpreter's own `remainder` in
 `ir-x87.js`), exactly: JS's `%` is the IEEE fmod, `fprem1`'s quotient rounded to nearest moves that
 remainder by the divisor exactly, and the quotient's low bits for C0, C3 and C1 come from the

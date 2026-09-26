@@ -2063,14 +2063,15 @@ export function emitX87(e, instruction, flagsLive){
             }
             b.else();
             setStatus(Status.C2);
-            e.close();
-            e.close();
-            // The tracker's state is the one with the push; the no-push path
-            // is left on an exit with C2, which a program does not take.
             if (op === 'fsincos' || op === 'fptan')
             {
-                b.i32const(next.top).localSet(Local.x87Top);
+                // Nothing pushed, where the tracker's state after it has the
+                // push: the region leaves past the instruction with the stack
+                // as it was, and the host enters the next at its top.
+                e.exitAt(instruction.eip + instruction.length, Exit.UNTRANSLATED);
             }
+            e.close();
+            e.close();
             return finish();
         }
         case 'fpatan':
