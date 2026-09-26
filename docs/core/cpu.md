@@ -656,9 +656,11 @@ interpreter does, and leaves MMX and the rare and system forms unexecuted at eip
 interpreter runs one run from there and the wasm tier goes on. It counts hotness at the
 targets of the jumps it takes, in the same table the JavaScript interpreter counts in (moved into
 the memory past the tables, with the ring of recent starts), and looks each target up in the
-entry hash translated code probes, so a range still ends at a start with a region; a store into
-translated code ends it after the store for the host to invalidate, and `out` to the trap port
-after the write. Its data and stack sit in the page below guest RAM, past the state block, which
+entry hash translated code probes, so a range still ends at a start with a region (a jump to
+address 0, a call through a null pointer, finds none: the probe takes an empty slot, whose key is
+0, for a miss before it compares the key with the target); a store into translated code
+ends it after the store for the host to invalidate, and `out` to the trap port after the write.
+Its data and stack sit in the page below guest RAM, past the state block, which
 nothing else in cork's layout writes. `wasmInterpreter: false` runs the JavaScript interpreter
 alone. The records, closures and garbage of the JavaScript interpreter's first visits were most
 of what code met a handful of times cost (a loading phase's forty thousand decodes kept 42 MB,
@@ -706,7 +708,8 @@ with the tree before it (eleven rounds), an x87 transform, normalise and cull lo
 an iteration (16.7x), its SSE form 289.6 -> 6.4 (49x) and its single-precision form 107.4 -> 6.1
 (17.5x), the entity updates 27.2 -> 2.6 (10.2x), 45.1 -> 2.3 (SSE, 19.7x) and 28.2 -> 2.7
 (single, 10.2x); the integer workloads 0.94-1.01x, 0.975 by geomean, where a second copy of the
-tree before reads 0.96-1.04x: the helpers' calls cost the integer loop a little in TurboFan. A
+tree before reads 0.96-1.04x: the helpers' calls cost the integer loop a little in TurboFan, which
+the entry hash's probe taking an empty slot first gives back (1.00 by geomean). A
 later host's first iteration (`coldMs`), which starts on the tier, 1.10-1.89x on the six float
 workloads (the SSE transform 59.0 -> 31.2 ms); a process's first host, whose float loops are
 translated by the time the JavaScript interpreter's stretch ends, as before (0.89-1.17x a

@@ -503,6 +503,16 @@ test('the entry translated code calls counts its target, runs and adds to the co
     assert.equal(m.view.getUint32(m.layout.counter, true), 103);
 });
 
+test('a jump to address 0 finds no entry in the hash\'s empty slots', ()=>{
+    const m = machine();
+    // xor eax, eax; jmp eax -- a call through a null pointer's jump. An empty slot's key is
+    // 0, which a probe for 0 must not take for an entry.
+    reset(m, [0x31, 0xc0, 0xff, 0xe0], random(10));
+    assert.equal(m.tier.run(2), WasmExit.BUDGET);
+    assert.equal(m.view.getUint32(m.layout.eip, true), 0);
+    assert.equal(m.tier.retired(), 2);
+});
+
 test('a miss on a page with a block closed in a translated loop is left to the host', ()=>{
     const m = machine();
     // inc eax; hlt

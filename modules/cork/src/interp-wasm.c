@@ -2999,12 +2999,14 @@ static u32 runInteger(u32 budget)
             for (;;)
             {
                 u32 key = *(u32 *)(hash + slot * 12);
+                /* An empty slot's key is 0: a jump to address 0 (a call through a null
+                 * pointer) meets one and has no entry. */
+                if (key == 0) break;
                 if (key == target)
                 {
                     code = W_ENTRY;
                     goto done;
                 }
-                if (key == 0) break;
                 slot = (slot + 1) & ((1u << (32 - hashShift)) - 1);
             }
         }
