@@ -1215,3 +1215,90 @@ test('a DIB pattern brush paints its DIB, a palette-relative one through the DC\
     assert.deepEqual([0, 1, 2, 3].map(x=>fns.GetPixel.handler([dc, x, 0])),
         [0x0000ff, 0xff0000, 0x0000ff, 0xff0000], 'red, blue, as COLORREFs');
 });
+
+test('a BITMAPCOREHEADER DIB is read, drawn and handed back as Windows does', ()=>{
+    // Wine's test_dibsections: GetDIBits fills a BITMAPCOREHEADER with the
+    // bitmap's shape, and its colour table as RGBTRIPLEs, and CreateDIBSection
+    // takes one. The header's WORD fields -- the height unsigned, so the rows
+    // bottom-up -- and three-byte table go through every call that reads a
+    // DIB: StretchDIBits, SetDIBitsToDevice, CreateDIBitmap's SetDIBits and
+    // a DIB pattern brush.
+    const { fns, view, bytes } = wiredGdi();
+    const CORE = 0x4000;
+    const OUT = 0x5000;
+    const DIB = 0x6000;
+    /**
+     * @param {number} width @param {number} height @param {number} bitCount
+     * @param {number[]} [triples]
+     */
+    const putCore = (width, height, bitCount, triples = [])=>{
+        view.setUint32(CORE, 12, true);
+        [width, height, 1, bitCount].forEach((value, index)=>
+            view.setUint16(CORE + 4 + index * 2, value, true));
+        bytes.set(triples, CORE + 12);
+    };
+    const dc = fns.CreateCompatibleDC.handler([0]);
+
+    putInfo(view, { width: 16, height: 16, bitCount: 1, table: [0x00ff0000, 0x000000ff] });
+    view.setUint32(WIRED_INFO + 32, 2, true);
+    const section = fns.CreateDIBSection.handler([dc, WIRED_INFO, 0, WIRED_POINTER, 0, 0]);
+    const at = view.getUint32(WIRED_POINTER, true);
+    for (let index = 0; index < 64; index++)
+    {
+        bytes[at + index] = index * 37 & 0xff;
+    }
+    putCore(0, 0, 0);
+    assert.ok(fns.GetDIBits.handler([dc, section, 0, 16, 0, CORE, 0]));
+    assert.deepEqual([4, 6, 8, 10].map(offset=>view.getUint16(CORE + offset, true)),
+        [16, 16, 1, 1], 'bcWidth, bcHeight, bcPlanes, bcBitCount');
+    bytes.fill(0xaa, CORE + 12, CORE + 18);
+    assert.equal(fns.GetDIBits.handler([dc, section, 0, 16, OUT, CORE, 0]), 16);
+    assert.deepEqual([...bytes.subarray(CORE + 12, CORE + 18)], [0, 0, 0xff, 0xff, 0, 0],
+        'red and blue, as RGBTRIPLEs');
+    /** @param {number} from @returns {number[]} each row's two bytes of pixels */
+    const rows = from=>[...Array(16).keys()].flatMap(row=>[bytes[from + row * 4],
+        bytes[from + row * 4 + 1]]);
+    assert.deepEqual(rows(OUT), rows(at));
+
+    const core = fns.CreateDIBSection.handler([dc, CORE, 0, WIRED_POINTER, 0, 0]);
+    assert.notEqual(core, 0, 'CreateDIBSection takes a BITMAPCOREINFO');
+    bytes.fill(0, CORE + 12, CORE + 18);
+    assert.equal(fns.GetDIBits.handler([dc, core, 0, 16, OUT, CORE, 0]), 16);
+    assert.deepEqual([...bytes.subarray(CORE + 12, CORE + 18)], [0, 0, 0xff, 0xff, 0, 0]);
+
+    putInfo(view, { width: 2, height: -2, bitCount: 32 });
+    const target = fns.CreateDIBSection.handler([dc, WIRED_INFO, 0, WIRED_POINTER, 0, 0]);
+    const pixels = view.getUint32(WIRED_POINTER, true);
+    fns.SelectObject.handler([dc, target]);
+    const read = ()=>[0, 1, 2, 3].map(index=>view.getUint32(pixels + index * 4, true));
+    const RED = 0xff0000;
+    const BLUE = 0x0000ff;
+
+    putCore(2, 2, 1, [0, 0, 0xff, 0xff, 0, 0]);
+    bytes.set([0b01000000, 0, 0, 0, 0b10000000, 0, 0, 0], DIB);
+    assert.equal(fns.StretchDIBits.handler([dc, 0, 0, 2, 2, 0, 0, 2, 2, DIB, CORE, 0,
+        0x00cc0020]), 2);
+    assert.deepEqual(read(), [BLUE, RED, RED, BLUE], 'the first row of the bits at the bottom');
+
+    putCore(2, 2, 24);
+    bytes.set([0x33, 0x22, 0x11, 0x66, 0x55, 0x44, 0, 0,
+        0x99, 0x88, 0x77, 0xcc, 0xbb, 0xaa, 0, 0], DIB);
+    assert.equal(fns.SetDIBitsToDevice.handler([dc, 0, 0, 2, 2, 0, 0, 0, 2, DIB, CORE, 0]), 2);
+    assert.deepEqual(read(), [0x778899, 0xaabbcc, 0x112233, 0x445566]);
+
+    putCore(2, 1, 1, [0, 0, 0xff, 0xff, 0, 0]);
+    bytes.set([0b01000000, 0, 0, 0], CORE + 18);
+    fns.SelectObject.handler([dc, fns.CreateDIBPatternBrushPt.handler([CORE, 0])]);
+    fns.PatBlt.handler([dc, 0, 0, 2, 2, PATCOPY]);
+    assert.deepEqual(read(), [RED, BLUE, RED, BLUE], 'a packed BITMAPCOREINFO as a brush');
+
+    putCore(2, 1, 8, [0x10, 0x20, 0x30, 0x40, 0x50, 0x60]);
+    bytes.set([1, 0, 0, 0], DIB);
+    const screen = fns.GetDC.handler([0]);
+    const ddb = fns.CreateDIBitmap.handler([screen, CORE, 4, DIB, CORE, 0]);
+    assert.notEqual(ddb, 0);
+    const other = fns.CreateCompatibleDC.handler([screen]);
+    fns.SelectObject.handler([other, ddb]);
+    assert.deepEqual([0, 1].map(x=>fns.GetPixel.handler([other, x, 0])), [0x405060, 0x102030],
+        'CBM_INIT through the three-byte table, as COLORREFs');
+});

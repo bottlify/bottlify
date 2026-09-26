@@ -77,6 +77,16 @@ export const BITMAPINFOHEADER = Object.freeze({
     SIZE: 40,
 });
 
+/** BITMAPCOREHEADER, the OS/2 header: bcSize, then four WORDs. */
+export const BITMAPCOREHEADER = Object.freeze({
+    bcSize: 0,
+    bcWidth: 4,
+    bcHeight: 6,
+    bcPlanes: 8,
+    bcBitCount: 10,
+    SIZE: 12,
+});
+
 /**
  * BITMAP, as GetObject writes it. bmPlanes and bmBitsPixel are WORDs; bmBits
  * is the DIB section's pointer and NULL for a device-dependent bitmap, whose
@@ -427,11 +437,49 @@ function readLogFontFields(memory, address){
  */
 
 /**
+ * Whether a DIB header's first DWORD names a header there is: a
+ * BITMAPCOREHEADER's exact twelve, or forty or more, which is a
+ * BITMAPINFOHEADER and whatever a later version appends (Wine's
+ * test_bitmapinfoheadersize).
+ *
+ * @param {number} size
+ */
+export const isDibHeaderSize = size=>size === BITMAPCOREHEADER.SIZE
+    || size >= BITMAPINFOHEADER.SIZE;
+
+/**
+ * The bytes of one colour table entry behind a header: a BITMAPCOREINFO's
+ * are RGBTRIPLEs, every other's RGBQUADs.
+ *
+ * @param {BitmapInfoHeaderFields} header
+ */
+export const colorEntryBytes = header=>(header.size === BITMAPCOREHEADER.SIZE ? 3 : 4);
+
+/**
+ * A DIB's header, read as the BITMAPINFOHEADER fields whichever header it
+ * is. A BITMAPCOREHEADER's sides are unsigned WORDs, so it is bottom-up; it
+ * is always BI_RGB, and its table always full; `size` says it is one.
+ *
  * @param {StructMemory} memory
  * @param {number} address
  * @returns {BitmapInfoHeaderFields}
  */
 export function readBitmapInfoHeader(memory, address){
+    if (readU32(memory, address) === BITMAPCOREHEADER.SIZE)
+    {
+        return {
+            size: BITMAPCOREHEADER.SIZE,
+            width: readU16(memory, address + BITMAPCOREHEADER.bcWidth),
+            height: readU16(memory, address + BITMAPCOREHEADER.bcHeight),
+            planes: readU16(memory, address + BITMAPCOREHEADER.bcPlanes),
+            bitCount: readU16(memory, address + BITMAPCOREHEADER.bcBitCount),
+            compression: 0,
+            sizeImage: 0,
+            xPelsPerMeter: 0,
+            yPelsPerMeter: 0,
+            clrUsed: 0,
+        };
+    }
     return {
         size: readU32(memory, address + BITMAPINFOHEADER.biSize),
         width: readI32(memory, address + BITMAPINFOHEADER.biWidth),

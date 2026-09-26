@@ -794,15 +794,44 @@ test('CreateDIBSection refuses what it cannot back with plain memory', ()=>{
     assert.equal(fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]), 0,
         'a run-length encoded DIB has no addressable rows to hand out');
 
-    putBitmapInfo(memory, { size: 12 });
+    putBitmapInfo(memory, { size: 20 });
     assert.equal(fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]), 0,
-        'biSize says which header the guest compiled, and 12 is a different one');
+        'biSize says which header the guest compiled, and 20 is none of them');
 
     putBitmapInfo(memory);
     assert.equal(fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0x1234, 0]), 0,
         'a file mapping is the filesystem\'s, and there is none to map');
 
     assert.deepEqual(surfaces.allocated, [], 'a refused section allocates nothing');
+});
+
+test('CreateDIBSection takes a BITMAPCOREHEADER or a header of forty bytes or more', ()=>{
+    // Wine's test_bitmapinfoheadersize: a BITMAPINFOHEADER of 39 bytes is
+    // refused and one of 40, 41, 44, BITMAPV4HEADER's 108 or BITMAPV5HEADER's
+    // 124 taken; a BITMAPCOREHEADER of exactly 12 bytes is taken, and 11, 13
+    // or BITMAPCOREINFO's 16 refused.
+    const { fns, memory, hdc } = withDC();
+    /** @returns {number[] | null} the section's width, height and depth */
+    const made = ()=>{
+        const section = fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]);
+        if (!section)
+        {
+            return null;
+        }
+        assert.equal(fns.GetObjectA.handler([section, 24, OUT]), 24);
+        return [memory.u32(OUT + 4), memory.u32(OUT + 8), memory.u32(OUT + 16) >>> 16];
+    };
+    for (const size of [39, 40, 41, 44, 108, 124])
+    {
+        putBitmapInfo(memory, { size, width: 512, height: 100, bitCount: 24 });
+        assert.deepEqual(made(), size < 40 ? null : [512, 100, 24], `${size}`);
+    }
+    for (const size of [11, 12, 13, 16])
+    {
+        memory.putU32s(STRUCT, [size]);
+        [512, 100, 1, 24].forEach((value, index)=>memory.putU16(STRUCT + 4 + index * 2, value));
+        assert.deepEqual(made(), size === 12 ? [512, 100, 24] : null, `core ${size}`);
+    }
 });
 
 test('CreateDIBSection takes the formats, planes, masks and usages Windows does', ()=>{

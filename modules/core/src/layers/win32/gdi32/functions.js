@@ -29,8 +29,10 @@ import {
     LF_FACESIZE,
     LOGFONTA,
     LOGFONTW_SIZE,
+    colorEntryBytes,
     ddbStride,
     dibStride,
+    isDibHeaderSize,
     logFontBytes,
     readBitmapInfoHeader,
     readLogBrush,
@@ -347,9 +349,11 @@ export function createGdiFunctions(host){
      * @param {number} at @param {number} count @param {number} usage @param {any} dc
      * @param {boolean} [live]  False for a table read once and dropped, which
      *        the palette need not keep up to date.
+     * @param {number} [entryBytes]  How far apart a table of colours' entries
+     *        are: an RGBQUAD's four, or a BITMAPCOREINFO's RGBTRIPLE's three.
      * @returns {number[]}
      */
-    const readColorTable = (at, count, usage, dc, live = true)=>{
+    const readColorTable = (at, count, usage, dc, live = true, entryBytes = 4)=>{
         const colors = [];
         if (usage === DIB_PAL_COLORS || usage === DIB_PAL_INDICES)
         {
@@ -377,11 +381,11 @@ export function createGdiFunctions(host){
             }
             return colors;
         }
-        const quads = host.readMemory(at, count * 4);
-        for (let index = 0; index < count; index++)
+        const entries = host.readMemory(at, count * entryBytes);
+        for (let offset = 0; offset < count * entryBytes; offset += entryBytes)
         {
-            colors.push((quads[index * 4] | quads[index * 4 + 1] << 8
-                | quads[index * 4 + 2] << 16) >>> 0);
+            colors.push((entries[offset] | entries[offset + 1] << 8
+                | entries[offset + 2] << 16) >>> 0);
         }
         return colors;
     };
@@ -1093,7 +1097,7 @@ export function createGdiFunctions(host){
         const { width, bitCount, compression } = header;
         const height = Math.abs(header.height);
         const masked = compression === BI_BITFIELDS && (bitCount === 16 || bitCount === 32);
-        if (header.size < BITMAPINFOHEADER.SIZE || !BIT_COUNTS.has(bitCount)
+        if (!isDibHeaderSize(header.size) || !BIT_COUNTS.has(bitCount)
             || (compression !== BI_RGB && !masked) || width <= 0 || height === 0)
         {
             return 0;
@@ -1105,7 +1109,8 @@ export function createGdiFunctions(host){
                 : Math.min(header.clrUsed || size, size);
         const table = packed + header.size
             + (masked && header.size === BITMAPINFOHEADER.SIZE ? 12 : 0);
-        const bitsAt = table + entries * (usage === DIB_PAL_COLORS ? 2 : 4);
+        const entryBytes = colorEntryBytes(header);
+        const bitsAt = table + entries * (usage === DIB_PAL_COLORS ? 2 : entryBytes);
         const stride = ddbStride(width, bitCount);
         const pitch = dibStride(width, bitCount);
         const pixels = new Uint8Array(stride * height);
@@ -1137,7 +1142,7 @@ export function createGdiFunctions(host){
                 pixels,
                 dib: true,
                 palette: indexed && !indices
-                    ? [...readColorTable(table, entries, DIB_RGB_COLORS, null, false),
+                    ? [...readColorTable(table, entries, DIB_RGB_COLORS, null, false, entryBytes),
                         ...new Array(size - entries).fill(0)]
                     : undefined,
                 indices,
@@ -1178,7 +1183,8 @@ export function createGdiFunctions(host){
     const drawing = createDrawingFunctions({
         host, objects, dcOf, surfaceOf, currentMetrics, lend,
         /** @param {number} at @param {number} count @param {number} usage @param {any} dc */
-        readColorTable: (at, count, usage, dc)=>readColorTable(at, count, usage, dc, false),
+        readColorTable: (at, count, usage, dc, entryBytes)=>
+            readColorTable(at, count, usage, dc, false, entryBytes),
     });
 
     /**
@@ -1861,10 +1867,8 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([hdc, info, usage, bitsOut, section])=>{
                 const header = readBitmapInfoHeader(host, info);
-                if (header.size < 40)
+                if (!isDibHeaderSize(header.size))
                 {
-                    // Anything smaller is a BITMAPCOREHEADER, whose fields are at
-                    // different offsets and are not the ones read above.
                     return 0;
                 }
                 if (header.compression !== BI_RGB && header.compression !== BI_BITFIELDS)
@@ -1916,7 +1920,7 @@ export function createGdiFunctions(host){
                     ? readColorTable(info + header.size,
                         Math.min(header.clrUsed || colorTableSize(header.bitCount),
                             colorTableSize(header.bitCount)),
-                        usage >>> 0, dcOf(hdc))
+                        usage >>> 0, dcOf(hdc), true, colorEntryBytes(header))
                     : undefined;
                 if (palette)
                 {
@@ -2023,7 +2027,7 @@ export function createGdiFunctions(host){
                 }
                 const header = readBitmapInfoHeader(host, infoHeader);
                 const dc = (hdc >>> 0) === 0 ? null : dcOf(hdc);
-                if (header.size < BITMAPINFOHEADER.SIZE
+                if (!isDibHeaderSize(header.size)
                     || IMAGE_COMPRESSIONS.has(header.compression)
                     || header.width < 0 || ((hdc >>> 0) !== 0 && !dc))
                 {

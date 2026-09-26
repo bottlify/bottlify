@@ -38,11 +38,14 @@
 import { readRect, writeU16, writeU32s } from '../user32/structs.js';
 import {
     BITMAP,
+    BITMAPCOREHEADER,
     BITMAPINFOHEADER,
     DIBSECTION,
     PALETTEENTRY_SIZE,
+    colorEntryBytes,
     ddbStride,
     dibStride,
+    isDibHeaderSize,
     logFontBytes,
     paletteEntryToPixel,
     readBitmapInfoHeader,
@@ -273,9 +276,10 @@ function masksFor(shape, bitCount){
  * @param {<T>(bitmap: number, action: (hdc: number) => T) => T} options.lend
  *        Runs `action` over a context of the bookkeeping half's own with the
  *        bitmap in it, wherever else the bitmap is selected.
- * @param {(at: number, count: number, usage: number, dc: any) => number[]}
- *        options.readColorTable
- *        A DIB's colour table as colours, whatever its usage says it holds.
+ * @param {(at: number, count: number, usage: number, dc: any, entryBytes?: number)
+ *        => number[]} options.readColorTable
+ *        A DIB's colour table as colours, whatever its usage says it holds;
+ *        a table of colours has entries `entryBytes` apart, four by default.
  * @returns The entry points; `bound`, the drawing interface a context is
  *     bound to, for the window manager, which paints its own controls through
  *     the same engine without a guest string to read; and `setDIBits`, which
@@ -394,7 +398,7 @@ export function createDrawingFunctions(
         const header = readBitmapInfoHeader(host, info);
         const masked = header.compression === BI_BITFIELDS
             && (header.bitCount === 16 || header.bitCount === 32);
-        if (header.size < BITMAPINFOHEADER.SIZE || header.width <= 0 || header.height === 0
+        if (!isDibHeaderSize(header.size) || header.width <= 0 || header.height === 0
             || !DIB_BIT_COUNTS.has(header.bitCount)
             || (header.compression !== BI_RGB && !masked) || usage > DIB_PAL_INDICES)
         {
@@ -409,7 +413,7 @@ export function createDrawingFunctions(
         const size = 1 << header.bitCount;
         const count = usage === DIB_PAL_INDICES ? size : Math.min(header.clrUsed || size, size);
         const colors = header.bitCount <= 8
-            ? readColorTable(info + header.size, count, usage, dc)
+            ? readColorTable(info + header.size, count, usage, dc, colorEntryBytes(header))
             : [];
         return { header, bits: host.readMemory(bits, stride * rows), colors, masks };
     };
@@ -868,13 +872,14 @@ export function createDrawingFunctions(
                 }
                 const shape = record.attributes;
                 const header = readBitmapInfoHeader(host, info);
-                if (header.size < BITMAPINFOHEADER.SIZE)
+                if (!isDibHeaderSize(header.size))
                 {
-                    // A BITMAPCOREHEADER's fields are WORDs at other offsets,
-                    // and forty bytes written over its twelve would land on
-                    // the program's colour table.
                     return 0;
                 }
+                // A BITMAPCOREHEADER has WORD fields and none past bcBitCount,
+                // and its table is RGBTRIPLEs: forty bytes written over its
+                // twelve would land on the program's colour table.
+                const core = header.size === BITMAPCOREHEADER.SIZE;
                 const describing = (bits >>> 0) === 0 || (lines >>> 0) === 0;
                 if (header.bitCount === 0)
                 {
@@ -883,6 +888,12 @@ export function createDrawingFunctions(
                         return 0;
                     }
                     const depth = shape.bitCount;
+                    if (core)
+                    {
+                        [shape.width, shape.height, 1, depth].forEach((value, index)=>
+                            writeU16(host, info + BITMAPCOREHEADER.bcWidth + index * 2, value));
+                        return 1;
+                    }
                     writeU32s(host, info + BITMAPINFOHEADER.biWidth, [shape.width, shape.height]);
                     writeU16(host, info + BITMAPINFOHEADER.biPlanes, 1);
                     writeU16(host, info + BITMAPINFOHEADER.biBitCount, depth);
@@ -901,9 +912,12 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                writeU32s(host, info + BITMAPINFOHEADER.biSizeImage,
-                    [dibStride(header.width, header.bitCount) * Math.abs(header.height)]);
-                writeU32s(host, info + BITMAPINFOHEADER.biClrUsed, [0]);
+                if (!core)
+                {
+                    writeU32s(host, info + BITMAPINFOHEADER.biSizeImage,
+                        [dibStride(header.width, header.bitCount) * Math.abs(header.height)]);
+                    writeU32s(host, info + BITMAPINFOHEADER.biClrUsed, [0]);
+                }
                 const masks = masked ? masksFor(shape, header.bitCount) : [];
                 if (masked)
                 {
@@ -916,6 +930,11 @@ export function createDrawingFunctions(
                     // the identity is the table that matches.
                     colors.forEach((_, index)=>
                         writeU16(host, info + header.size + index * 2, index));
+                }
+                else if (core)
+                {
+                    host.writeMemory(info + header.size, Uint8Array.from(colors.flatMap(color=>
+                        [color & 0xff, (color >>> 8) & 0xff, (color >>> 16) & 0xff])));
                 }
                 else if (colors.length > 0)
                 {
