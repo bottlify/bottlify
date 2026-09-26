@@ -1365,6 +1365,43 @@ test('with a font engine a string is as wide as the engine draws it', ()=>{
     assert.equal(fns.GetCharWidth32A.handler([hdc, 0x43, 0x41, OUT]), 0, 'a backwards range');
 });
 
+test('an ANSI string is measured, and its face named, as its bytes are in the ANSI page', ()=>{
+    // 0x80 is the euro sign in Windows-1252, 0x99 the trade mark and 0x97 an
+    // em dash: those characters are what GetTextExtentPoint32A and
+    // GetCharWidth32A measure, not the control characters of the same codes,
+    // and a face name read in that page goes back to GetObjectA in it.
+    const context = setup();
+    /** @type {string[]} */
+    const measured = [];
+    const fns = createGdiFunctions({
+        readMemory: (address, length)=>context.memory.readMemory(address, length),
+        writeMemory: (address, data)=>context.memory.writeMemory(address, data),
+        readCString: (address, maxLength)=>context.memory.readCString(address, maxLength),
+        handles: context.handles,
+        surfaces: context.surfaces,
+        graphics: {
+            fontMetrics: ()=>({ height: 13, ascent: 11, descent: 2, internalLeading: 2,
+                externalLeading: 0, aveCharWidth: 6, maxCharWidth: 9 }),
+            textWidth: (font, text)=>{
+                measured.push(text);
+                return text.length * 6;
+            },
+        },
+    }).table;
+    const hdc = fns.GetDC.handler([HWND]);
+    context.memory.bytes.set([0x80, 0x99, 0x97], FACE_NAME);
+    assert.equal(fns.GetTextExtentPoint32A.handler([hdc, FACE_NAME, 3, OUT]), 1);
+    assert.equal(fns.GetCharWidth32A.handler([hdc, 0x99, 0x99, OUT]), 1);
+    assert.deepEqual(measured.slice(-2), ['€™—', '™']);
+
+    putLogFont(context.memory);
+    context.memory.bytes.set([0x80, 0x99, 0x97, 0], STRUCT + LOGFONTA.lfFaceName);
+    const font = fns.CreateFontIndirectA.handler([STRUCT]);
+    assert.equal(fns.GetObjectA.handler([font, LOGFONTA.SIZE, OUT]), LOGFONTA.SIZE);
+    assert.deepEqual([...context.memory.bytes.subarray(OUT + LOGFONTA.lfFaceName,
+        OUT + LOGFONTA.lfFaceName + 4)], [0x80, 0x99, 0x97, 0]);
+});
+
 test('without a font engine GetCharWidth32A is the estimate\'s fixed pitch', ()=>{
     const { fns, memory, hdc } = withDC();
     putLogFont(memory, { height: -12, width: 8 });

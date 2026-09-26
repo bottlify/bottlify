@@ -963,6 +963,29 @@ test('the drawing entry points reach the service, and fail without one', ()=>{
     assert.equal(bare.fns.ExtTextOutA.handler([bare.hdc, 0, 0, 0, 0, 0, 0, 0]), 0);
 });
 
+test('ANSI text is drawn as the characters its bytes are in the ANSI page', ()=>{
+    // 0x80 is the euro sign in Windows-1252, 0x99 the trade mark and 0x97 an
+    // em dash, as DrawTextA and every other ANSI string read them; the glyphs
+    // drawn are those, not the control characters of the same codes.
+    const drawing = fakeDrawing();
+    /** @type {string[]} */
+    const drawn = [];
+    const service = /** @type {any} */ (drawing.drawing);
+    service.extTextOutA = (/** @type {any[]} */ ...args)=>{
+        drawn.push(args[5]);
+        return true;
+    };
+    service.textOutA = (/** @type {any[]} */ ...args)=>{
+        drawn.push(args[3]);
+        return true;
+    };
+    const { memory, fns, hdc } = setup(drawing.services);
+    memory.bytes.set([0x80, 0x99, 0x97, 0xe9], STRUCT);
+    assert.equal(fns.ExtTextOutA.handler([hdc, 0, 0, 0, 0, STRUCT, 4, 0]), 1);
+    assert.equal(fns.TextOutA.handler([hdc, 0, 0, STRUCT, 4]), 1);
+    assert.deepEqual(drawn, ['€™—é', '€™—é']);
+});
+
 test('GetDIBits describes a bitmap before it copies one', ()=>{
     // A null buffer and a biBitCount of zero ask for the bitmap's own shape,
     // which is bookkeeping and answerable without any pixels at all -- and is

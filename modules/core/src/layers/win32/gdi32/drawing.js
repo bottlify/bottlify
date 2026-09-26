@@ -36,6 +36,7 @@
  */
 
 import { readRect, writeU16, writeU32s } from '../user32/structs.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 import {
     BITMAP,
     BITMAPCOREHEADER,
@@ -779,7 +780,9 @@ export function createDrawingFunctions(
          * The count is authoritative and the string need not be terminated:
          * a program draws a piece of a longer buffer by passing the buffer
          * and the length of the piece, and reading to a terminator would
-         * read past the piece -- or off the end of what is mapped.
+         * read past the piece -- or off the end of what is mapped. The bytes
+         * are the characters they are in the ANSI page, as every ANSI string
+         * is read.
          */
         TextOutA: {
             argBytes: 20,
@@ -793,7 +796,7 @@ export function createDrawingFunctions(
                 const length = Math.max(count | 0, 0);
                 const text = (string >>> 0) === 0 || length === 0
                     ? ''
-                    : String.fromCharCode(...host.readMemory(string >>> 0, length));
+                    : decodeAnsi(host.readMemory(string >>> 0, length));
                 interfaces.textOutA(handle >>> 0, x | 0, y | 0, text);
                 return 1;
             },
@@ -1627,9 +1630,9 @@ export function createDrawingFunctions(
     };
 
     /**
-     * ExtTextOut, spelt once: the string read as bytes or as UTF-16 code
-     * units, `c` of them either way and unterminated, and lpDx one advance per
-     * character, which is how justified text is positioned.
+     * ExtTextOut, spelt once: the string read as bytes in the ANSI page or as
+     * UTF-16 code units, `c` of them either way and unterminated, and lpDx one
+     * advance per character, which is how justified text is positioned.
      *
      * @param {number[]} args @param {boolean} wide
      */
@@ -1644,9 +1647,16 @@ export function createDrawingFunctions(
             ? new Uint8Array(0)
             : host.readMemory(string >>> 0, wide ? length * 2 : length);
         let text = '';
-        for (let at = 0; at < length && (wide ? at * 2 + 1 : at) < bytes.length; at++)
+        if (!wide)
         {
-            text += String.fromCharCode(wide ? bytes[at * 2] | bytes[at * 2 + 1] << 8 : bytes[at]);
+            text = decodeAnsi(bytes.subarray(0, length));
+        }
+        else
+        {
+            for (let at = 0; at < length && at * 2 + 1 < bytes.length; at++)
+            {
+                text += String.fromCharCode(bytes[at * 2] | bytes[at * 2 + 1] << 8);
+            }
         }
         const advances = (dx >>> 0) === 0 || length === 0
             ? undefined

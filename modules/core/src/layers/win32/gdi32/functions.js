@@ -23,6 +23,7 @@
 import { createGdiObjects } from './objects.js';
 import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
 import { FACES, faceNamed } from './faces.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 import {
     BITMAP,
     BITMAPINFOHEADER,
@@ -750,7 +751,8 @@ export function createGdiFunctions(host){
      * @param {number} out @param {number} stride
      * @param {(width: number) => number[]} record
      * @param {number} mask  What of a code is a character: a byte for the A
-     *        spellings, a code unit for the W ones.
+     *        spellings, the character it is in the ANSI page, and a code unit
+     *        for the W ones.
      */
     const writeWidths = (handle, first, last, out, stride, record, mask)=>{
         const dc = dcOf(handle);
@@ -760,8 +762,10 @@ export function createGdiFunctions(host){
         }
         for (let code = first; code <= last; code++)
         {
+            const character = mask === 0xff
+                ? decodeAnsi(Uint8Array.of(code & mask)) : String.fromCharCode(code & mask);
             writeU32s(host, (out >>> 0) + (code - first) * stride,
-                record(widthOf(dc, String.fromCharCode(code & mask))));
+                record(widthOf(dc, character)));
         }
         return 1;
     };
@@ -2688,7 +2692,7 @@ export function createGdiFunctions(host){
                 }
                 const text = (string >>> 0) === 0 || (count | 0) === 0
                     ? ''
-                    : String.fromCharCode(...host.readMemory(string >>> 0, count | 0));
+                    : decodeAnsi(host.readMemory(string >>> 0, count | 0));
                 writeSize(host, out, { cx: widthOf(dc, text), cy: currentMetrics(dc).height });
                 return 1;
             },
