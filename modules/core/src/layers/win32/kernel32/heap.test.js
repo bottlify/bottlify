@@ -20,6 +20,7 @@ const MEM_RELEASE = 0x8000;
 const INVALID_SIZE = 0xffffffff;
 const PAGE_SIZE = 4096;
 const MEM_FREE = 0x10000;
+const MEM_PRIVATE = 0x20000;
 const PAGE_NOACCESS = 0x01;
 /** `lpMaximumApplicationAddress`: where a free gap with nothing above it ends. */
 const USER_ADDRESS_SPACE_TOP = 0x7fff0000;
@@ -899,9 +900,10 @@ test('FlushInstructionCache succeeds, because a program that has written code ch
     assert.equal(fns.FlushInstructionCache.argBytes, 12);
 });
 
-test('VirtualQuery on a free gap answers the whole run up to the next region, page-aligned', ()=>{
-    // A crash reporter or heap manager walking free space with
-    // `addr += RegionSize` must see the whole gap, not one page of it.
+test('VirtualQuery on a gap outside the arena answers the whole run up to the next region', ()=>{
+    // A crash reporter or heap manager walking the address space with
+    // `addr += RegionSize` must see the whole gap, not one page of it. It is
+    // reserved rather than free: nothing can be reserved there.
     const host = regionHost([
         { base: 0x10000, size: 0x1000 },
         { base: 0x20000, size: 0x1000 },
@@ -914,13 +916,13 @@ test('VirtualQuery on a free gap answers the whole run up to the next region, pa
     const view = new DataView(host.bytes.buffer);
     assert.equal(view.getUint32(buffer + MBI.BaseAddress, true), 0x11000,
         'BaseAddress rounded down to the page the query address is in');
-    assert.equal(view.getUint32(buffer + MBI.AllocationBase, true), 0);
-    assert.equal(view.getUint32(buffer + MBI.AllocationProtect, true), 0);
+    assert.equal(view.getUint32(buffer + MBI.AllocationBase, true), 0x11000);
+    assert.equal(view.getUint32(buffer + MBI.AllocationProtect, true), PAGE_NOACCESS);
     assert.equal(view.getUint32(buffer + MBI.RegionSize, true), 0x20000 - 0x11000,
         'the gap coalesced into one region, up to the next mapped base');
-    assert.equal(view.getUint32(buffer + MBI.State, true), MEM_FREE);
-    assert.equal(view.getUint32(buffer + MBI.Protect, true), PAGE_NOACCESS);
-    assert.equal(view.getUint32(buffer + MBI.Type, true), 0);
+    assert.equal(view.getUint32(buffer + MBI.State, true), MEM_RESERVE);
+    assert.equal(view.getUint32(buffer + MBI.Protect, true), 0);
+    assert.equal(view.getUint32(buffer + MBI.Type, true), MEM_PRIVATE);
 });
 
 test('VirtualQuery above the last region answers up to the top of user address space', ()=>{
@@ -933,7 +935,7 @@ test('VirtualQuery above the last region answers up to the top of user address s
     const view = new DataView(host.bytes.buffer);
     assert.equal(view.getUint32(buffer + MBI.BaseAddress, true), 0x50000);
     assert.equal(view.getUint32(buffer + MBI.RegionSize, true), USER_ADDRESS_SPACE_TOP - 0x50000);
-    assert.equal(view.getUint32(buffer + MBI.State, true), MEM_FREE);
+    assert.equal(view.getUint32(buffer + MBI.State, true), MEM_RESERVE);
 });
 
 test('a free-space walker crosses three regions and stops at the top, never with a RegionSize of 0',
@@ -971,6 +973,78 @@ test('a free-space walker crosses three regions and stops at the top, never with
         assert.equal(ret, 0,
             'the walker is refused at the top of address space, never left spinning there');
     });
+
+/**
+ * The heap functions over an arena the memory layer maps as one region, as the
+ * machine maps it, with somewhere below it for the answers to be written.
+ */
+function arenaQuery(){
+    const host = {
+        ...fakeHost(RESERVING_ARENA),
+        /** @param {number} address */
+        regionAt: address=>address >= RESERVING_ARENA.base
+            && address < RESERVING_ARENA.base + RESERVING_ARENA.size ? RESERVING_ARENA : null,
+        /** @param {number} address */
+        nextRegionAfter: address=>address < RESERVING_ARENA.base ? RESERVING_ARENA : null,
+    };
+    const fns = createHeapFunctions(host);
+    const buffer = 0x100;
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} address */
+    const query = address=>{
+        assert.equal(fns.VirtualQuery.handler([address, buffer, MBI.SIZE]), MBI.SIZE);
+        return {
+            base: view.getUint32(buffer + MBI.BaseAddress, true),
+            allocationBase: view.getUint32(buffer + MBI.AllocationBase, true),
+            size: view.getUint32(buffer + MBI.RegionSize, true),
+            state: view.getUint32(buffer + MBI.State, true),
+            protect: view.getUint32(buffer + MBI.Protect, true),
+        };
+    };
+    return { fns, query };
+}
+
+test('VirtualQuery inside a reservation answers the reservation, page by page as committed',
+    ()=>{
+        // Wine's VirtualAlloc test: a reservation is its own allocation, its
+        // pages are reserved until committed, and a query answers the run of
+        // pages that share the state of the one asked about.
+        const { fns, query } = arenaQuery();
+        const reserved = fns.VirtualAlloc.handler([0, 2 * GRANULARITY, MEM_RESERVE, 1]);
+        assert.notEqual(reserved, 0);
+        assert.equal(fns.VirtualAlloc.handler([reserved + 0x1000, 0x1000, MEM_COMMIT, 4]),
+            reserved + 0x1000);
+
+        assert.deepEqual(query(reserved), { base: reserved, allocationBase: reserved,
+            size: 0x1000, state: MEM_RESERVE, protect: 0 });
+        assert.deepEqual(query(reserved + 0x1234), { base: reserved + 0x1000,
+            allocationBase: reserved, size: 0x1000, state: MEM_COMMIT, protect: 0x40 });
+        assert.deepEqual(query(reserved + 0x8000), { base: reserved + 0x8000,
+            allocationBase: reserved, size: 2 * GRANULARITY - 0x8000, state: MEM_RESERVE,
+            protect: 0 });
+
+        assert.equal(fns.VirtualFree.handler([reserved + 0x1000, 0x1000, MEM_DECOMMIT]), 1);
+        assert.equal(query(reserved).size, 2 * GRANULARITY, 'decommitted, it is reserved again');
+
+        const committed = fns.VirtualAlloc.handler([0, 0x1000, MEM_COMMIT, 4]);
+        assert.deepEqual(query(committed), { base: committed, allocationBase: committed,
+            size: 0x1000, state: MEM_COMMIT, protect: 0x40 });
+    });
+
+test('VirtualQuery says free only where VirtualAlloc can reserve', ()=>{
+    // "Free pages ... available to be allocated": an address the arena does
+    // not reach cannot be reserved, and a walker looking for room to reserve
+    // must not be sent there.
+    const { fns, query } = arenaQuery();
+    const inside = RESERVING_ARENA.base + 2 * GRANULARITY;
+    assert.equal(query(inside).state, MEM_FREE);
+    assert.equal(fns.VirtualAlloc.handler([inside, GRANULARITY, MEM_RESERVE, 1]), inside);
+
+    const above = RESERVING_ARENA.base + RESERVING_ARENA.size + GRANULARITY;
+    assert.equal(query(above).state, MEM_RESERVE);
+    assert.equal(fns.VirtualAlloc.handler([above, GRANULARITY, MEM_RESERVE, 1]), 0);
+    assert.equal(query(0x3000).state, MEM_RESERVE, 'below the arena too');
+});
 
 test('VirtualQuery at or above the top of user address space is refused, not answered as free',
     ()=>{
