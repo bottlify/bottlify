@@ -1096,6 +1096,7 @@ export function createHarness(canvas, how = {}){
      *
      * @param {{ exe: string, bundleUrl: string, imagePath: string,
      *           commandLine?: string,
+     *           windows?: 'win2000' | 'winxp' | 'win7' | 'win10',
      *           sidecarHooks?: { spec: any, source: string },
      *           logCategories?: Record<string, string>,
      *           logCapacity?: number, logBytes?: number,
@@ -1272,6 +1273,9 @@ export function createHarness(canvas, how = {}){
             // What the program believes it was started with, so a run can set
             // a command-line-only cvar without touching the bundle.
             commandLine: request.commandLine,
+            // The Windows the bottle runs under, from its manifest; absent is
+            // the engine's default, and a name it does not know fails the run.
+            windows: request.windows,
             // A bundle's own hooks.json/hooks.mjs, read by the tool that
             // started this run from beside the bundle -- never from the
             // bundle itself.
