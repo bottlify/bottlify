@@ -336,7 +336,12 @@ Per API:
   `GetAttachedSurface` and a blit into or out of it, until `Restore` or `RestoreAllSurfaces`,
   which answer `DDERR_WRONGMODE` while the application is still in the background. `Restore`
   brings back the surfaces created with the one restored (a flip chain's buffers, a texture's
-  levels), not one attached later; taking exclusive mode loses video memory the same way.
+  levels), not one attached later; taking exclusive mode loses video memory the same way, and so
+  does a change of display mode -- `SetDisplayMode` to another size or depth, or
+  `RestoreDisplayMode` back from one -- at any cooperative level. A primary and its buffers are
+  the screen in the mode they were made in: in another, `Restore` answers `DDERR_WRONGMODE`
+  (ddraw7's `test_coop_level_mode_set` and `test_primary_palette`). `RestoreAllSurfaces` restores
+  every surface that can come back and answers the first refusal.
   `GetDeviceIdentifier` describes the adapter exactly as Direct3D 8 and 9's `GetAdapterIdentifier`
   do -- one vendor table, description rule and GUID, in `seam/adapter.js` -- because a program
   asking through two of them compares the answers.

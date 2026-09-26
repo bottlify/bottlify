@@ -369,6 +369,17 @@ function rectIsValid(rect, width, height){
 }
 
 /**
+ * Whether two display modes are one: the same size and depth. The refresh
+ * rate is left out, zero standing for whatever rate the display runs at.
+ *
+ * @param {{ width: number, height: number, bitCount: number }} a
+ * @param {{ width: number, height: number, bitCount: number }} b
+ */
+function sameMode(a, b){
+    return a.width === b.width && a.height === b.height && a.bitCount === b.bitCount;
+}
+
+/**
  * @param {Rect} a
  * @param {Rect} b
  * @returns {boolean}
@@ -550,6 +561,21 @@ export function createDirectDraw(options = {}){
     };
     /** Whether the screen is out of this object's hands: exclusive, and in the background. */
     const screenWithheld = ()=>exclusive() && options.application?.deactivated() === true;
+    /**
+     * Makes `next` the display mode. A change of size or depth takes the
+     * display's memory back from every surface, whichever cooperative level
+     * the object is at; setting the mode already in effect takes nothing.
+     *
+     * @param {{ width: number, height: number, bitCount: number, refreshRate: number }} next
+     */
+    const changeDisplayMode = next=>{
+        const changed = !sameMode(next, displayMode);
+        displayMode = next;
+        if (changed)
+        {
+            loseVideoMemory();
+        }
+    };
 
     function destroyIfUnreferenced(){
         if (destroyed)
@@ -846,7 +872,9 @@ export function createDirectDraw(options = {}){
     /**
      * @param {{ caps: number, caps2: number, width: number, height: number,
      *   backBufferCount: number, pixelFormat: import("./structs.js").PixelFormatFields,
-     *   owner: string | null, implicit: boolean, mipMapCount?: number }} spec
+     *   owner: string | null, implicit: boolean, mipMapCount?: number,
+     *   mode?: { width: number, height: number, bitCount: number } }} spec
+     *   `mode` is the display mode a primary and its buffers are the screen in.
      * @returns {Surface}
      */
     function makeSurface(spec){
@@ -1142,6 +1170,10 @@ export function createDirectDraw(options = {}){
                     return DD_OK;
                 }
                 if (screenWithheld())
+                {
+                    return DDERR_WRONGMODE;
+                }
+                if (spec.mode && !sameMode(spec.mode, displayMode))
                 {
                     return DDERR_WRONGMODE;
                 }
@@ -1760,6 +1792,12 @@ export function createDirectDraw(options = {}){
             addRef(owner);
         }
 
+        // A primary is the screen in the mode it was made in, and its
+        // buffers with it: in another mode it cannot be restored.
+        const primaryMode = (validity.caps & DDSCAPS_PRIMARYSURFACE) !== 0
+            ? { mode: { width: displayMode.width, height: displayMode.height,
+                bitCount: displayMode.bitCount } }
+            : {};
         const front = makeSurface({
             caps: validity.caps,
             caps2,
@@ -1770,6 +1808,7 @@ export function createDirectDraw(options = {}){
             owner,
             implicit: false,
             mipMapCount: levels,
+            ...primaryMode,
         });
 
         // Each level holds the one below it, so the chain goes with its top.
@@ -1807,6 +1846,7 @@ export function createDirectDraw(options = {}){
                     pixelFormat,
                     owner: null,
                     implicit: true,
+                    ...primaryMode,
                 });
                 previous.setFlipNext(back, true);
                 back.setFlipPrev(previous);
@@ -1937,12 +1977,12 @@ export function createDirectDraw(options = {}){
             {
                 return DDERR_INVALIDMODE;
             }
-            displayMode = { width, height, bitCount, refreshRate };
+            changeDisplayMode({ width, height, bitCount, refreshRate });
             return DD_OK;
         },
 
         restoreDisplayMode(){
-            displayMode = { ...nativeMode };
+            changeDisplayMode({ ...nativeMode });
             return DD_OK;
         },
 
@@ -1992,11 +2032,16 @@ export function createDirectDraw(options = {}){
             {
                 return DDERR_WRONGMODE;
             }
+            // Every surface that can come back does; the first that cannot
+            // is what the program is told, so it does not take a lost
+            // primary for a restored one.
+            let answer = DD_OK;
             for (const surface of surfaces)
             {
-                surface.restore();
+                const hr = surface.restore();
+                answer = answer === DD_OK ? hr : answer;
             }
-            return DD_OK;
+            return answer;
         },
 
         /**

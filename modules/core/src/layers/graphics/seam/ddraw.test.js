@@ -2086,3 +2086,61 @@ test('an exclusive owner loses its video memory when deactivated, and restores i
         assert.equal(h.release(ddraw), 0);
         h.assertAllReleased();
     });
+
+test('a mode change loses video memory, and a primary made in another mode cannot be restored',
+    ()=>{
+        // Wine's ddraw7 test_coop_level_mode_set (3400-3405, 3664-3674,
+        // 3723-3728): setting or restoring the display mode loses the
+        // primary, in normal mode as in exclusive, and the primary answers
+        // Restore with DDERR_WRONGMODE while the mode is not the one it was
+        // made in; test_primary_palette (8738-8756): a depth is part of the mode.
+        const h = seamed();
+        const ddraw = h.create7();
+        const setMode = (/** @type {number} */ width, /** @type {number} */ height,
+            /** @type {number} */ depth)=>
+            h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetDisplayMode'),
+                [width, height, depth, 0, 0]);
+        /** @param {number} surface */
+        const isLost = surface=>h.surface7(surface, 'IsLost', []);
+        const primary = h.createSurface7(ddraw, { caps: DDSCAPS_PRIMARYSURFACE });
+        const vidmem = h.createSurface7(ddraw,
+            { caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, width: 8, height: 8 });
+        const sysmem = h.createSurface7(ddraw,
+            { caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY, width: 8, height: 8 });
+
+        assert.equal(setMode(640, 480, 32), DD_OK);
+        assert.deepEqual([primary, vidmem, sysmem].map(isLost),
+            [DDERR_SURFACELOST, DDERR_SURFACELOST, DD_OK]);
+        assert.equal(h.surface7(primary, 'Restore', []), DDERR_WRONGMODE);
+        assert.equal(isLost(primary), DDERR_SURFACELOST);
+        assert.equal(h.surface7(vidmem, 'Restore', []), DD_OK,
+            'a surface of its own size and format is not the mode\'s');
+        assert.equal(setMode(640, 480, 32), DD_OK);
+        assert.equal(isLost(vidmem), DD_OK, 'setting the mode in effect changes nothing');
+
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'RestoreDisplayMode'), []), DD_OK);
+        assert.equal(isLost(vidmem), DDERR_SURFACELOST, 'restoring the mode is a change too');
+        assert.equal(h.surface7(primary, 'Restore', []), DD_OK, 'back in the primary\'s own mode');
+        assert.equal(isLost(primary), DD_OK);
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'RestoreAllSurfaces'), []), DD_OK);
+        assert.equal(h.release(primary), 0);
+
+        assert.equal(setMode(640, 480, 8), DD_OK);
+        const indexed = h.createSurface7(ddraw, { caps: DDSCAPS_PRIMARYSURFACE });
+        assert.equal(setMode(640, 480, 32), DD_OK);
+        assert.equal(isLost(indexed), DDERR_SURFACELOST);
+        assert.equal(h.surface7(indexed, 'Restore', []), DDERR_WRONGMODE,
+            'the same size at another depth is another mode');
+        assert.equal(setMode(320, 240, 32), DD_OK);
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'RestoreAllSurfaces'), []),
+            DDERR_WRONGMODE, 'what cannot come back is said');
+        assert.deepEqual([vidmem, indexed].map(isLost), [DD_OK, DDERR_SURFACELOST],
+            'and what can came back');
+
+        for (const surface of [indexed, sysmem, vidmem])
+        {
+            assert.equal(h.release(surface), 0);
+        }
+        assert.equal(h.release(ddraw), 0);
+        h.assertAllReleased();
+    });
