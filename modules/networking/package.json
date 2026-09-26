@@ -17,7 +17,7 @@
     "src"
   ],
   "scripts": {
-    "test": "node --test \"src/**/*.test.js\"",
+    "test": "node --test --test-timeout=60000 --test-force-exit \"src/**/*.test.js\"",
     "typecheck": "tsc -p jsconfig.json",
     "relay": "node src/server/cli.js"
   }
