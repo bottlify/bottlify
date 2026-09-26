@@ -8,6 +8,7 @@ import { formatToString } from './format.js';
 import { VARIADIC_SLOTS } from './scan.js';
 import { EBADF, EINVAL } from './globals.js';
 import { createDescriptors, LF, settle } from './io.js';
+import { wideStringAt } from './widetext.js';
 
 /**
  * Buffered file streams: fopen and the calls that take what it hands out.
@@ -468,6 +469,33 @@ export function createStdioFunctions(host){
         return emit(stream, bytesOf(text)) === text.length ? text.length : EOF;
     };
 
+    /**
+     * fopen's body, for a name and a mode already read: the new record, or
+     * NULL -- with EINVAL for an empty name or a mode that is not one, and the
+     * descriptor saying why a name could not be opened.
+     *
+     * @param {string} name @param {string | null} mode
+     */
+    const openStream = (name, mode)=>{
+        const parsed = mode === null ? null : parseMode(mode);
+        if (!parsed || name === '')
+        {
+            fail(EINVAL);
+            return 0;
+        }
+        const fd = descriptors.open(name, parsed);
+        if (fd < 0)
+        {
+            return 0;
+        }
+        const record = attach(fd, parsed.flags);
+        if (record === 0)
+        {
+            descriptors.close(fd);
+        }
+        return record;
+    };
+
     /** @param {Stream} stream @param {number} c */
     const putByte = (stream, c)=>{
         if (narrowRefused(stream))
@@ -539,26 +567,14 @@ export function createStdioFunctions(host){
          * or empty name and a mode that is not one are EINVAL; the descriptor
          * says why a name could not be opened.
          */
-        fopen: cdecl(8, ([path, mode])=>{
-            const parsed = (mode >>> 0) === 0 ? null : parseMode(readString(mode));
-            const text = (path >>> 0) === 0 ? '' : readString(path);
-            if (!parsed || text === '')
-            {
-                fail(EINVAL);
-                return 0;
-            }
-            const fd = descriptors.open(text, parsed);
-            if (fd < 0)
-            {
-                return 0;
-            }
-            const record = attach(fd, parsed.flags);
-            if (record === 0)
-            {
-                descriptors.close(fd);
-            }
-            return record;
-        }),
+        fopen: cdecl(8, ([path, mode])=>openStream(
+            (path >>> 0) === 0 ? '' : readString(path),
+            (mode >>> 0) === 0 ? null : readString(mode))),
+
+        /** FILE *_wfopen(const wchar_t *filename, const wchar_t *mode) -- fopen, wide. */
+        _wfopen: cdecl(8, ([path, mode])=>openStream(
+            (path >>> 0) === 0 ? '' : wideStringAt(host.readMemory, path),
+            (mode >>> 0) === 0 ? null : wideStringAt(host.readMemory, mode))),
 
         /**
          * FILE *freopen(const char *filename, const char *mode, FILE *stream)
@@ -1029,13 +1045,20 @@ export function createStdioFunctions(host){
         }),
 
         // A `va_list` carries no count, so it is read through whoever knows
-        // how far the caller's stack reaches; without that, vprintf stays
-        // unexported.
+        // how far the caller's stack reaches; without that, vprintf and
+        // vfprintf stay unexported.
         ...(host.varargs
             ? {
                 /** int vprintf(const char *format, va_list args) -- printf from a list. */
                 vprintf: cdecl(8, ([format, list])=>{
                     const stream = standardStream(1);
+                    const values = /** @type {(list: number) => number[]} */ (host.varargs);
+                    return stream ? printTo(stream, format, values(list)) : EOF;
+                }),
+
+                /** int vfprintf(FILE *stream, const char *format, va_list args) */
+                vfprintf: cdecl(12, ([pointer, format, list])=>{
+                    const stream = argument(pointer);
                     const values = /** @type {(list: number) => number[]} */ (host.varargs);
                     return stream ? printTo(stream, format, values(list)) : EOF;
                 }),

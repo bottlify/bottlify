@@ -339,6 +339,37 @@ test('_wfindfirsti64 and _wfindnexti64 take a wide pattern and write wide names'
     assert.deepEqual([table._wfindfirsti64.argBytes, table._wfindnexti64.argBytes], [8, 8]);
 });
 
+/** `struct _wfinddata_t`: `_finddata_t` with 260 wide characters of name. */
+const WFIND = { ATTRIB: 0, CREATE: 4, SIZE: 16, NAME: 20, BYTES: 540 };
+
+test('_wfindfirst and _wfindnext take a wide pattern and write the 32-bit record', ()=>{
+    // "The fields of this data type are the same as the fields of the
+    // _finddata_t data type, except that in _wfinddata_t the name field is of
+    // type wchar_t instead of type char."
+    const { memory, table, errno, written } = finder();
+    const data = memory.allocate(WFIND.BYTES);
+    memory.writeMemory(data, new Uint8Array(WFIND.BYTES).fill(0xcc));
+    const view = new DataView(memory.bytes.buffer, data, WFIND.BYTES);
+
+    const handle = table._wfindfirst.handler([memory.putWide('C:\\game\\*.dat'), data]);
+    assert.notEqual(handle, -1);
+    assert.equal(memory.wide(data + WFIND.NAME), 'a.dat');
+    assert.equal(view.getUint32(WFIND.ATTRIB, true), 0x20);
+    assert.equal(view.getUint32(WFIND.CREATE, true), written / 1000);
+    assert.equal(view.getUint32(WFIND.SIZE, true), 3);
+    assert.equal(view.getUint8(WFIND.BYTES - 1), 0, 'the whole record is written');
+
+    assert.equal(table._wfindnext.handler([handle, data]), 0);
+    assert.equal(memory.wide(data + WFIND.NAME), 'b.dat');
+    assert.equal(view.getUint32(WFIND.SIZE, true), 5);
+    assert.equal(table._wfindnext.handler([handle, data]), -1);
+    assert.equal(table._findclose.handler([handle]), 0);
+    assert.equal(table._wfindfirst.handler([memory.putWide('C:\\game\\*.exe'), data]), -1);
+    assert.equal(table._wfindfirst.handler([0, data]), -1);
+    assert.deepEqual(errno, [2, 2, 22]);
+    assert.deepEqual([table._wfindfirst.argBytes, table._wfindnext.argBytes], [8, 8]);
+});
+
 test('_findfirsti64 reports a size past 4 GiB whole', ()=>{
     const memory = fakeMemory();
     const big = 5 * 2 ** 30;

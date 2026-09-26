@@ -270,6 +270,8 @@ function runtime(contents, { fmode = 0 } = {}){
     const host = {
         ...memory, free: (/** @type {number} */ at)=>freed.push(at) > 0, files, iob: ()=>IOB,
         errno: record,
+        varargs: (/** @type {number} */ list)=>
+            Array.from({ length: 8 }, (_, slot)=>memory.u32(list + slot * 4)),
     };
     const fns = /** @type {Record<string, any>} */ ({
         ...createIoFunctions(host, descriptors),
@@ -795,12 +797,46 @@ test('fwrite and fread on a stream in a Unicode mode carry UTF-16 through the tr
     assert.deepEqual(errno, []);
 });
 
+test('vfprintf is fprintf from a va_list', ()=>{
+    const { memory, fns, open, text } = runtime({});
+    const out = open('C:\\log.txt', 'w');
+    const list = memory.allocate(8);
+    memory.setU32(list, memory.put('level'));
+    memory.setU32(list + 4, 3);
+    assert.equal(fns.vfprintf.handler([out, memory.put('%s %d\n'), list]), 8);
+    assert.equal(fns.vfprintf.handler([0, memory.put('x'), list]), EOF);
+    fns.fclose.handler([out]);
+    assert.equal(text('C:\\log.txt'), 'level 3\r\n');
+});
+
+test('_wfopen is fopen with a wide name and a wide mode', ()=>{
+    const { memory, fns, errno, text } = runtime({ 'C:\\in.txt': 'a\r\nb' });
+    /** @param {string} name @param {string} mode */
+    const open = (name, mode)=>fns._wfopen.handler([memory.putWide(name), memory.putWide(mode)]);
+    const out = open('C:\\caf\u00e9.txt', 'w');
+    assert.notEqual(out, 0);
+    assert.equal(fns.fputs.handler([memory.put('x\n'), out]), 0);
+    fns.fclose.handler([out]);
+    assert.equal(text('C:\\caf\u00e9.txt'), 'x\r\n', 'a name past ASCII kept whole');
+
+    const input = open('C:\\in.txt', 'rb');
+    assert.equal(fns.fgetc.handler([input]), 0x61);
+    assert.equal(fns.fgetc.handler([input]), 0x0d, 'the mode read from the wide string');
+
+    assert.equal(open('C:\\none.txt', 'r'), 0);
+    assert.equal(fns._wfopen.handler([0, memory.putWide('r')]), 0);
+    assert.equal(fns._wfopen.handler([memory.putWide('C:\\in.txt'), 0]), 0);
+    const ENOENT = 2;
+    assert.deepEqual(errno, [ENOENT, 22, 22]);
+});
+
 test('the stream calls are cdecl with the argument count each reads', ()=>{
     const { fns } = runtime({});
     const expected = {
         fflush: 4, feof: 4, ferror: 4, clearerr: 4, fgetc: 4, getc: 4, _filbuf: 4,
         fgets: 12, fputc: 8, putc: 8, _flsbuf: 8, fputs: 8, ungetc: 8, rewind: 4, _fileno: 4,
         fgetpos: 8, fsetpos: 8, freopen: 12, _fdopen: 8, _fcloseall: 0, _flushall: 0,
+        vfprintf: 12, _wfopen: 8,
     };
     for (const [name, argBytes] of Object.entries(expected))
     {
