@@ -6,6 +6,7 @@
 
 
 import { TEB } from './teb.js';
+import { setCondition, verifyVersion, windowsVersion } from './versions.js';
 
 /**
  * The kernel32 surface a program touches before it does anything interesting:
@@ -27,6 +28,8 @@ const ERROR_SUCCESS = 0;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_MOD_NOT_FOUND = 126;
+const ERROR_BAD_ARGUMENTS = 160;
+const ERROR_OLD_WIN_VERSION = 1150;
 
 /** What TlsAlloc returns when every slot is taken. */
 const TLS_OUT_OF_INDEXES = 0xffffffff;
@@ -51,21 +54,22 @@ export const TLS_SLOTS = 1088;
 const TLS_SLOTS_IN_BLOCK = 64;
 
 /**
- * The version reported to the guest: Windows XP, build 2600.
- *
- * A single answer has to be chosen, and this is the one an application of the
- * era both understands and is willing to run on -- old enough that nothing
- * demands a feature we do not have, new enough that an NT check passes.
+ * The default Windows's numbers, for what reads a version without a process
+ * to ask; a process answers the one its bottle chose (`versions.js`).
  */
-export const VERSION_MAJOR = 5;
-export const VERSION_MINOR = 1;
-export const VERSION_BUILD = 2600;
-const VER_PLATFORM_WIN32_NT = 2;
-const VER_NT_WORKSTATION = 1;
+const DEFAULT_VERSION = windowsVersion();
+export const VERSION_MAJOR = DEFAULT_VERSION.major;
+export const VERSION_MINOR = DEFAULT_VERSION.minor;
+export const VERSION_BUILD = DEFAULT_VERSION.build;
 
-/** sizeof(OSVERSIONINFOA) and sizeof(OSVERSIONINFOEXA). */
-const OSVERSIONINFOA_SIZE = 148;
-const OSVERSIONINFOEXA_SIZE = 156;
+/**
+ * OSVERSIONINFO and OSVERSIONINFOEX in each spelling: the two sizes a caller
+ * may declare, and where the extended fields start, past a szCSDVersion of 128
+ * characters at offset 20.
+ */
+const OSVERSIONINFO_A = Object.freeze({ SIZE: 148, EX_SIZE: 156, EXTENDED: 148 });
+const OSVERSIONINFO_W = Object.freeze({ SIZE: 276, EX_SIZE: 284, EXTENDED: 276 });
+const CSD_VERSION = 20;
 
 /** The pseudo-handle GetCurrentProcess returns; it is -1 on every Windows. */
 const CURRENT_PROCESS = 0xffffffff;
@@ -138,6 +142,12 @@ const NORMAL_PRIORITY_CLASS = 0x20;
  *           the guest runs again. Without it the clocks stay traps: a block
  *           nobody refreshes would freeze a program's notion of time.
  * @property {number} [processId]
+ * @property {import('./versions.js').WindowsVersion} [version]
+ *           The Windows a program is told it runs on, by GetVersion,
+ *           GetVersionEx and VerifyVersionInfo alike. Absent, the default.
+ * @property {(values: Record<string, number>) => void} [setRegisters]
+ *           Where an answer wider than EAX puts its high half. Absent, the
+ *           functions that answer 64 bits are not exported.
  */
 
 /**
@@ -565,6 +575,86 @@ export function createProcessFunctions(host){
     const readU32 = address=>new DataView(
         host.readMemory(address, 4).slice().buffer).getUint32(0, true);
 
+    const told = host.version ?? DEFAULT_VERSION;
+
+    /**
+     * GetVersionEx in either spelling. The size field is how the caller says
+     * which of the two structures it allocated, and an unrecognised one means
+     * writing past the end of something, so nothing is written.
+     *
+     * @param {number} address @param {boolean} wide
+     */
+    const versionEx = (address, wide)=>{
+        const layout = wide ? OSVERSIONINFO_W : OSVERSIONINFO_A;
+        const declared = readU32(address);
+        if (declared !== layout.SIZE && declared !== layout.EX_SIZE)
+        {
+            setError(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+
+        // Built whole and written from the second field on, so the caller's
+        // own size field survives and the rest of szCSDVersion is cleared
+        // rather than left as whatever was there.
+        const struct = new Uint8Array(declared);
+        const view = new DataView(struct.buffer);
+        view.setUint32(4, told.major, true);
+        view.setUint32(8, told.minor, true);
+        view.setUint32(12, told.build, true);
+        view.setUint32(16, told.platformId, true);
+        for (let at = 0; at < told.csdVersion.length; at++)
+        {
+            const code = told.csdVersion.charCodeAt(at);
+            if (wide)
+            {
+                view.setUint16(CSD_VERSION + at * 2, code, true);
+            }
+            else
+            {
+                struct[CSD_VERSION + at] = code & 0xff;
+            }
+        }
+        if (declared === layout.EX_SIZE)
+        {
+            view.setUint16(layout.EXTENDED, told.servicePackMajor, true);
+            view.setUint16(layout.EXTENDED + 2, told.servicePackMinor, true);
+            view.setUint16(layout.EXTENDED + 4, told.suiteMask, true);
+            struct[layout.EXTENDED + 6] = told.productType;
+        }
+        host.writeMemory(address + 4, struct.subarray(4));
+        return 1;
+    };
+
+    /**
+     * VerifyVersionInfo in either spelling: the request's fields, read
+     * whatever its size field says, against the version GetVersionEx answers.
+     *
+     * @param {number[]} args @param {boolean} wide
+     */
+    const verify = ([pointer, typeMask, maskLow, maskHigh], wide)=>{
+        const at = pointer >>> 0;
+        const extended = host.readMemory(
+            at + (wide ? OSVERSIONINFO_W : OSVERSIONINFO_A).EXTENDED, 8).slice();
+        const fields = new DataView(extended.buffer);
+        const answer = verifyVersion(told, {
+            major: readU32(at + 4),
+            minor: readU32(at + 8),
+            build: readU32(at + 12),
+            platformId: readU32(at + 16),
+            servicePackMajor: fields.getUint16(0, true),
+            servicePackMinor: fields.getUint16(2, true),
+            suiteMask: fields.getUint16(4, true),
+            productType: fields.getUint8(6),
+        }, typeMask, BigInt(maskLow >>> 0) | BigInt(maskHigh >>> 0) << 32n);
+        if (answer === 'met')
+        {
+            return 1;
+        }
+        setError(answer === 'invalid' ? ERROR_BAD_ARGUMENTS : ERROR_OLD_WIN_VERSION);
+        return 0;
+    };
+    const { setRegisters } = host;
+
     // Named, because the fibre-local entry points below are the thread-local
     // ones under different names and call them rather than repeating them.
     /**
@@ -636,45 +726,61 @@ export function createProcessFunctions(host){
             // Major in the low byte, minor in the next, build in the high word.
             // The top bit stays clear: set, it means Windows 9x, and code that
             // sees it takes a different path entirely.
-            handler: ()=>(VERSION_MAJOR
-                | (VERSION_MINOR << 8)
-                | ((VERSION_BUILD & 0x7fff) << 16)) >>> 0,
+            handler: ()=>(told.major
+                | (told.minor << 8)
+                | ((told.build & 0x7fff) << 16)) >>> 0,
         },
 
         /** BOOL GetVersionExA(LPOSVERSIONINFOA lpVersionInformation) */
         GetVersionExA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([pointer])=>{
-                const address = pointer >>> 0;
-                const declared = readU32(address);
-                // The size field is how the caller says which of the two
-                // structures it allocated. An unrecognised one means we would be
-                // writing past the end of something, so nothing is written.
-                if (declared !== OSVERSIONINFOA_SIZE && declared !== OSVERSIONINFOEXA_SIZE)
-                {
-                    setError(ERROR_INSUFFICIENT_BUFFER);
-                    return 0;
-                }
-
-                // Built whole and written from the second field on, so the
-                // caller's own size field survives untouched.
-                const struct = new Uint8Array(declared);
-                const view = new DataView(struct.buffer);
-                view.setUint32(4, VERSION_MAJOR, true);
-                view.setUint32(8, VERSION_MINOR, true);
-                view.setUint32(12, VERSION_BUILD, true);
-                view.setUint32(16, VER_PLATFORM_WIN32_NT, true);
-                // szCSDVersion stays zeroed: no service pack is installed, and
-                // the string has to be empty rather than whatever was there.
-                if (declared === OSVERSIONINFOEXA_SIZE)
-                {
-                    struct[154] = VER_NT_WORKSTATION;
-                }
-                host.writeMemory(address + 4, struct.subarray(4));
-                return 1;
-            },
+            handler: ([pointer])=>versionEx(pointer >>> 0, false),
         },
+
+        /** BOOL GetVersionExW(LPOSVERSIONINFOW lpVersionInformation) */
+        GetVersionExW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>versionEx(pointer >>> 0, true),
+        },
+
+        /**
+         * BOOL VerifyVersionInfoA(LPOSVERSIONINFOEXA lpVersionInformation,
+         *                         DWORD dwTypeMask, DWORDLONG dwlConditionMask)
+         */
+        VerifyVersionInfoA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>verify(args, false),
+        },
+
+        /**
+         * BOOL VerifyVersionInfoW(LPOSVERSIONINFOEXW lpVersionInformation,
+         *                         DWORD dwTypeMask, DWORDLONG dwlConditionMask)
+         */
+        VerifyVersionInfoW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>verify(args, true),
+        },
+
+        /**
+         * ULONGLONG VerSetConditionMask(ULONGLONG ConditionMask, DWORD TypeMask,
+         *                               BYTE Condition)
+         */
+        ...setRegisters ? {
+            VerSetConditionMask: {
+                argBytes: 16,
+                /** @param {number[]} args */
+                handler: ([low, high, typeMask, condition])=>{
+                    const mask = setCondition(BigInt(low >>> 0) | BigInt(high >>> 0) << 32n,
+                        typeMask, condition & 0xff);
+                    setRegisters({ edx: Number(mask >> 32n) });
+                    return Number(mask & 0xffffffffn);
+                },
+            },
+        } : {},
 
         /** DWORD GetTickCount(VOID) */
         GetTickCount: {
