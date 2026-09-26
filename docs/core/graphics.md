@@ -654,7 +654,7 @@ against (`GetTextMetricsA`, `GetTextExtentPoint32A`, `GetCharWidth32A`, `DrawTex
 units) are the engine's measurements when there is one and the bookkeeping half's estimate
 otherwise. A memory context draws into the bytes of the bitmap selected into it -- a DIB section's
 own bytes in guest memory, or a device-dependent bitmap's rows, which it keeps outside guest memory
-(1-bit monochrome, 16-bit 5-6-5, 24 or 32 bits); a window context draws into a view (`viewOf`) of
+(1-bit monochrome, 16-bit 5-6-5, 24 or 32 bits; a `BI_BITFIELDS` section is read by its masks, 5-6-5 or 5-5-5); a window context draws into a view (`viewOf`) of
 the **desktop** — one 32-bit surface the size of the display, allocated from the guest heap so the
 presenter can show it the way it shows a DirectDraw primary — at the rectangle `win32` names for the
 window. `gdi32` calls `presentDesktop` after every drawing entry point (`BitBlt`, `TextOutA`,
@@ -732,9 +732,11 @@ Refused (the program is told no):
   layout's own; a colour-space colour key (`DDERR_NOCOLORKEYHW`); a colour fill on a Z-buffer; a
   palette or a colour key on a mip sublevel; the event form of `WaitForVerticalBlank`
   (`DDERR_UNSUPPORTED`).
-- GDI: `StretchDIBits` from a 1- or 4-bit DIB, and `GetDIBits` into a 1-, 4- or 8-bit one
-  (choosing an index for every colour would be a quantiser). A DIB section of those depths is drawn
-  into and blitted from.
+- GDI: a 16-bit `BI_BITFIELDS` DIB whose masks are neither 5-6-5 nor 5-5-5 (no surface is made);
+  `StretchDIBits` with `DIB_PAL_COLORS`; a `BITMAPCOREHEADER`. `StretchDIBits` draws 1- and 4-bit
+  DIBs, and `GetDIBits` writes 1-, 4- and 8-bit ones with their colour table: a section's own at
+  its own depth, otherwise black and white, the sixteen VGA colours, or the twenty default-palette
+  colours around a 3-3-2 cube, each pixel given its nearest.
 
 Accepted and reported through `divergence`:
 

@@ -72,6 +72,36 @@ export function narrow16(pixel, format){
     return ((red >>> 3) << 10) | ((green >>> 3) << 5) | (blue >>> 3);
 }
 
+/** biCompression for a DIB whose channels are named by three masks. */
+export const BI_BITFIELDS = 3;
+
+/**
+ * Which sixteen-bit layout a bitmap's pixels are in: the one it was given,
+ * else the one its BI_BITFIELDS masks name, else 5-5-5, which is what a
+ * BI_RGB DIB means by sixteen bits. Null for masks that are neither of the
+ * two, which no surface here draws by.
+ *
+ * @param {{ bitCount: number, format?: string, compression?: number,
+ *           bitfields?: number[] }} attributes
+ * @returns {string | null}
+ */
+export function formatOf(attributes){
+    if (attributes.format)
+    {
+        return attributes.format;
+    }
+    if (attributes.bitCount !== 16 || attributes.compression !== BI_BITFIELDS)
+    {
+        return RGB_555;
+    }
+    const [red, green, blue] = (attributes.bitfields ?? []).map(mask=>mask >>> 0);
+    if (red === 0xf800 && green === 0x07e0 && blue === 0x001f)
+    {
+        return RGB_565;
+    }
+    return red === 0x7c00 && green === 0x03e0 && blue === 0x001f ? RGB_555 : null;
+}
+
 /**
  * Bytes per row for a DIB: each row starts on a four-byte boundary. A loop that
  * multiplies width by bytes-per-pixel instead is right at every width divisible
@@ -142,6 +172,37 @@ export const MONOCHROME = Object.freeze([0x00000000, 0x00ffffff]);
 
 /** The depths a surface can have. */
 const DEPTHS = new Set([1, 4, 8, 16, 24, 32]);
+
+/**
+ * The entry of a colour table nearest a pixel, by squared distance in RGB:
+ * the first that matches it exactly, else the closest.
+ *
+ * @param {number[]} entries  32-bit pixels, at most 256 of them consulted.
+ * @param {number} pixel
+ * @returns {{ index: number, exact: boolean }}
+ */
+export function nearestEntry(entries, pixel){
+    let best = 0;
+    let bestDistance = Infinity;
+    for (let index = 0; index < entries.length && index < 256; index++)
+    {
+        const entry = entries[index] >>> 0;
+        if ((entry & 0xffffff) === (pixel & 0xffffff))
+        {
+            return { index, exact: true };
+        }
+        const dr = ((entry >>> 16) & 0xff) - ((pixel >>> 16) & 0xff);
+        const dg = ((entry >>> 8) & 0xff) - ((pixel >>> 8) & 0xff);
+        const db = (entry & 0xff) - (pixel & 0xff);
+        const distance = dr * dr + dg * dg + db * db;
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            best = index;
+        }
+    }
+    return { index: best, exact: false };
+}
 
 /**
  * A surface that also says how deep it is. The operations need only the
@@ -217,41 +278,20 @@ export function createSurface(options){
         {
             return remembered;
         }
-        let best = 0;
-        let bestDistance = Infinity;
-        let exact = false;
-        for (let index = 0; index < entries.length && index < 256; index++)
-        {
-            const entry = entries[index] >>> 0;
-            if ((entry & 0xffffff) === (pixel & 0xffffff))
-            {
-                best = index;
-                exact = true;
-                break;
-            }
-            const dr = ((entry >>> 16) & 0xff) - ((pixel >>> 16) & 0xff);
-            const dg = ((entry >>> 8) & 0xff) - ((pixel >>> 8) & 0xff);
-            const db = (entry & 0xff) - (pixel & 0xff);
-            const distance = dr * dr + dg * dg + db * db;
-            if (distance < bestDistance)
-            {
-                bestDistance = distance;
-                best = index;
-            }
-        }
+        const found = nearestEntry(entries, pixel);
         if (nearest.size >= 4096)
         {
             nearest.clear();
         }
-        if (exact)
+        if (found.exact)
         {
-            nearest.set(pixel, best);
+            nearest.set(pixel, found.index);
         }
         else
         {
             nearest.delete(pixel);
         }
-        return best;
+        return found.index;
     };
 
     return {
@@ -380,10 +420,11 @@ export function createSurface(options){
  *
  * One, four and eight bits need the colour table the indices mean -- a
  * one-bit section is two colours of its own, not a monochrome bitmap --
- * and sixteen bits is 5-5-5 unless the attributes say 5-6-5.
+ * and sixteen bits is laid out as `formatOf` says.
  *
  * @param {{ width: number, height: number, bitCount: number, bits: number,
- *           topDown?: boolean, palette?: number[], format?: string }} attributes
+ *           topDown?: boolean, palette?: number[], format?: string,
+ *           compression?: number, bitfields?: number[] }} attributes
  *        A bitmap object's own attributes.
  * @param {Uint8Array} memory   Guest memory, or the window of it holding the bits.
  * @param {number} [base]       The guest address `memory` starts at.
@@ -391,8 +432,9 @@ export function createSurface(options){
  */
 export function surfaceForDibSection(attributes, memory, base = 0){
     const depth = attributes.bitCount;
+    const format = formatOf(attributes);
     if (!DEPTHS.has(depth) || (attributes.bits >>> 0) === 0
-        || (depth <= 8 && !attributes.palette))
+        || (depth <= 8 && !attributes.palette) || format === null)
     {
         return null;
     }
@@ -405,7 +447,7 @@ export function surfaceForDibSection(attributes, memory, base = 0){
         offset: (attributes.bits >>> 0) - base,
         bitCount: depth,
         palette: attributes.palette,
-        format: attributes.format,
+        format,
     });
 }
 
@@ -439,6 +481,41 @@ export function surfaceForDdb(attributes){
         palette: depth === 1 ? [...MONOCHROME] : undefined,
         format: RGB_565,
         mono: depth === 1,
+    });
+}
+
+/**
+ * The picture a pattern brush repeats, as a surface: the copy of its bitmap
+ * the brush was made with, in the layout GetBitmapBits hands out -- rows
+ * top-down, each padded to a WORD -- whichever kind of bitmap it came from.
+ * A copy of a device-dependent bitmap reads as that bitmap does, a single bit
+ * being monochrome; a copy of a DIB section keeps the section's colours.
+ *
+ * @param {{ width: number, height: number, bitCount: number, pixels: Uint8Array,
+ *           dib?: boolean, palette?: number[], format?: string,
+ *           compression?: number, bitfields?: number[] }} pattern
+ * @returns {DepthSurface | null}
+ */
+export function surfaceForPattern(pattern){
+    const depth = pattern.bitCount;
+    if (!pattern.dib)
+    {
+        return surfaceForDdb(pattern);
+    }
+    const format = formatOf(pattern);
+    if (!DEPTHS.has(depth) || (depth <= 8 && !pattern.palette) || format === null)
+    {
+        return null;
+    }
+    return createSurface({
+        width: pattern.width,
+        height: pattern.height,
+        topDown: true,
+        pitch: ddbPitch(pattern.width, depth),
+        bytes: pattern.pixels,
+        bitCount: depth,
+        palette: pattern.palette,
+        format,
     });
 }
 

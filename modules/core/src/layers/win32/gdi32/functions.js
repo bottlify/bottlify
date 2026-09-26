@@ -22,10 +22,15 @@
 
 import { createGdiObjects } from './objects.js';
 import { createDrawingFunctions } from './drawing.js';
+import { FACES, faceNamed } from './faces.js';
 import {
     BITMAPINFOHEADER,
+    LF_FACESIZE,
+    LOGFONTA,
+    LOGFONTW_SIZE,
     ddbStride,
     dibStride,
+    logFontBytes,
     readBitmapInfoHeader,
     readLogBrush,
     readLogFont,
@@ -180,6 +185,9 @@ const SURFACE_DC_DEPTHS = new Set([8, 16, 32]);
 const BI_RGB = 0;
 const BI_BITFIELDS = 3;
 
+/** BI_JPEG and BI_PNG: an image file for a printer, never a bitmap's rows. */
+const IMAGE_COMPRESSIONS = new Set([4, 5]);
+
 /** iUsage: the colour table is palette indices, not colours. */
 const DIB_PAL_COLORS = 1;
 
@@ -241,6 +249,23 @@ const BREAK_CHAR = 0x20;
 const MAX_FACE_NAME = 64;
 
 /**
+ * ENUMLOGFONTEX: a LOGFONT, then the full name, the style and the script, in
+ * characters of the LOGFONT's own width.
+ */
+const LF_FULLFACESIZE = 64;
+/** NEWTEXTMETRICEX, the larger of the two structures an enumeration's second pointer names. */
+const NEWTEXTMETRICEXA_SIZE = 96;
+const NEWTEXTMETRICEXW_SIZE = 100;
+
+/**
+ * An enumerated face's FontType: none of RASTER_FONTTYPE, DEVICE_FONTTYPE and
+ * TRUETYPE_FONTTYPE, which is what a vector font is. Every face here is drawn
+ * at any size, and none has tables a program could read, as TEXTMETRIC and
+ * GetTextCharsetInfo already say.
+ */
+const SCALABLE_FONTTYPE = 0;
+
+/**
  * @typedef {Object} GdiHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -257,6 +282,11 @@ const MAX_FACE_NAME = 64;
  * @property {import('./drawing.js').DrawingServices} [graphics]
  *           Where pixels go. Absent in a build that cannot draw, and every
  *           entry point that needs it then fails truthfully.
+ * @property {(entry: number, args: number[], thread?: any) => Promise<number>} [call]
+ *           Calls the program back, as an enumeration's callback is called.
+ *           Absent in a build that cannot, where nothing is enumerated.
+ * @property {() => any} [callerThread]
+ *           The thread whose call is being answered, which a callback runs on.
  */
 
 /**
@@ -285,9 +315,11 @@ export function createGdiFunctions(host){
      * bitmap keeps colours, not a reference to a palette that may change.
      *
      * @param {number} at @param {number} count @param {number} usage @param {any} dc
+     * @param {boolean} [live]  False for a table read once and dropped, which
+     *        the palette need not keep up to date.
      * @returns {number[]}
      */
-    const readColorTable = (at, count, usage, dc)=>{
+    const readColorTable = (at, count, usage, dc, live = true)=>{
         const colors = [];
         if (usage === DIB_PAL_COLORS)
         {
@@ -308,7 +340,7 @@ export function createGdiFunctions(host){
             // is now, not as it was when the bitmap was made. So the resolved
             // array is kept alive on the palette and refreshed in place -- the
             // same array the surface already holds a reference to.
-            if (record && record.type === 'palette')
+            if (live && record && record.type === 'palette')
             {
                 (record.attributes.dependents ??= []).push({ indices, table: colors });
             }
@@ -460,7 +492,7 @@ export function createGdiFunctions(host){
              * @type {{ left: number, top: number, right: number, bottom: number } | null}
              */
             bounds: null,
-            /** The bitmap a memory DC brought with it, and takes away again. */
+            /** The bitmap a surface's DC brought with it, and takes away again. */
             defaultBitmap: 0,
             pen: stockObject(BLACK_PEN),
             brush: stockObject(WHITE_BRUSH),
@@ -501,7 +533,7 @@ export function createGdiFunctions(host){
             forEachSelection(state, handle=>objects.release(handle));
         }
         dc.saved.length = 0;
-        // The one-pixel bitmap a memory DC starts with is the DC's own, not the
+        // The bitmap over somebody else's surface is the DC's own, not the
         // program's: nobody else can have a handle to delete it.
         objects.remove(dc.defaultBitmap);
         contexts.delete(dc.hdc);
@@ -549,8 +581,9 @@ export function createGdiFunctions(host){
         {
             // Two DCs sharing one bitmap means two sets of drawing state writing
             // the same pixels, so Windows lets exactly one of them have it -- and
-            // a display DC already draws to the screen.
-            if (dc.kind !== 'memory' || record.selectCount > 0)
+            // a display DC already draws to the screen. The stock pixel every
+            // memory DC starts with is the one bitmap in all of them at once.
+            if (dc.kind !== 'memory' || (record.selectCount > 0 && !record.stock))
             {
                 return 0;
             }
@@ -906,6 +939,19 @@ export function createGdiFunctions(host){
         return { width, height, planes, bitCount, bits: 0, section: 0, pixels };
     };
 
+    /** @type {number} */
+    let stockBitmap = 0;
+    /**
+     * The 1-by-1 monochrome bitmap: what CreateBitmap and CreateCompatibleBitmap
+     * answer for a zero width or height, and what every memory DC has selected
+     * before the program selects anything -- one stock object, the same handle
+     * for all of them (Wine's test_CreateBitmap).
+     */
+    const defaultBitmap = ()=>{
+        stockBitmap ||= objects.defineStock('bitmap', deviceBitmap(1, 1, 1));
+        return stockBitmap;
+    };
+
     /**
      * A bitmap's bits as GetBitmapBits and SetBitmapBits exchange them, or
      * null for a handle that is not a bitmap with bits.
@@ -956,6 +1002,43 @@ export function createGdiFunctions(host){
     };
 
     /**
+     * A pattern brush over a bitmap, or zero for a handle that is not one.
+     *
+     * The brush keeps a copy of the bitmap's bits, taken now: Windows paints
+     * with the bitmap as it was when the brush was made, and goes on painting
+     * with it once the bitmap is deleted (Wine's brush tests). The copy is in
+     * the layout GetBitmapBits hands out, with what a DIB section's values
+     * mean carried alongside; LOGBRUSH still names the bitmap and no colour.
+     *
+     * @param {number} handle
+     */
+    const patternBrush = handle=>{
+        const bits = bitsOf(handle);
+        if (!bits)
+        {
+            return 0;
+        }
+        const shape = /** @type {import('./objects.js').GdiObject} */ (
+            objects.get(handle)).attributes;
+        return objects.create('brush', {
+            style: BS_PATTERN,
+            color: 0,
+            hatch: handle >>> 0,
+            pattern: {
+                width: shape.width,
+                height: shape.height,
+                bitCount: shape.bitCount,
+                pixels: bits.read().slice(),
+                dib: (shape.section >>> 0) !== 0,
+                palette: shape.palette ? [...shape.palette] : undefined,
+                format: shape.format,
+                compression: shape.compression,
+                bitfields: shape.bitfields,
+            },
+        });
+    };
+
+    /**
      * Runs `action` over a memory context of this layer's own with `bitmap`
      * in it, whether or not a program has the bitmap selected somewhere: a
      * bitmap read back or drawn for the window manager is not a selection,
@@ -1003,6 +1086,140 @@ export function createGdiFunctions(host){
             solidBrushes.set(key, handle);
         }
         return handle;
+    };
+
+    /**
+     * A DIB converted into a bitmap's own format across the whole bitmap, the
+     * DIB's bottom row on the bitmap's bottom row, as SetDIBits from scan line
+     * zero lays it. False when the DIB is not one this build reads, or there
+     * is nothing to draw with.
+     *
+     * @param {number} bitmap @param {number} bits @param {number} info
+     * @param {number} usage @param {any} dc  Whose palette DIB_PAL_COLORS indexes.
+     */
+    const setBits = (bitmap, bits, info, usage, dc)=>{
+        const header = readBitmapInfoHeader(host, info);
+        if (header.size < BITMAPINFOHEADER.SIZE || !BIT_COUNTS.has(header.bitCount)
+            || header.width <= 0 || header.height === 0 || usage > DIB_PAL_COLORS)
+        {
+            return false;
+        }
+        const table = colorTableSize(header.bitCount);
+        const image = {
+            header,
+            bits: host.readMemory(bits, dibStride(header.width, header.bitCount)
+                * Math.abs(header.height)),
+            colors: header.bitCount <= 8
+                ? readColorTable(info + header.size, Math.min(header.clrUsed || table, table),
+                    usage, dc, false)
+                : [],
+            masks: header.compression === BI_BITFIELDS
+                ? [0, 4, 8].map(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at))
+                : [],
+        };
+        const shape = /** @type {import('./objects.js').GdiObject} */ (
+            objects.get(bitmap)).attributes;
+        return lend(bitmap, target=>(drawing.bound(target, false)?.setDIBitsToDevice(target, {
+            xDest: 0, yDest: 0, width: shape.width, height: shape.height, xSrc: 0, ySrc: 0,
+            image,
+        }) ?? 0) > 0);
+    };
+
+    /**
+     * A string into a fixed-size field of a structure being built, NUL-padded:
+     * bytes for the A spellings, UTF-16 for the W ones.
+     *
+     * @param {Uint8Array} bytes @param {number} at @param {string} text @param {boolean} wide
+     */
+    const putText = (bytes, at, text, wide)=>{
+        for (let index = 0; index < text.length; index++)
+        {
+            const code = text.charCodeAt(index);
+            if (wide)
+            {
+                bytes[at + index * 2] = code & 0xff;
+                bytes[at + index * 2 + 1] = code >>> 8;
+            }
+            else
+            {
+                bytes[at + index] = code & 0xff;
+            }
+        }
+    };
+
+    /**
+     * EnumFontFamiliesExA and W: each face the LOGFONT asks for, handed to the
+     * program's callback until it answers zero, and the last answer returned.
+     *
+     * No name lists every face once, substitutes aside; a name finds that face
+     * whatever its case, a substitute under the name asked for with the face it
+     * stands for as its full name (Wine's test_EnumFonts_subst). The engine
+     * draws one character set, so DEFAULT_CHARSET and ANSI_CHARSET find the
+     * faces and every other set none. Each is described as it would realise:
+     * the LOGFONT's height, width and weight are the TEXTMETRIC's, which is
+     * GetTextMetrics' own answer for it. Nothing enumerated answers 1, which
+     * is how a program learns a face is not installed.
+     *
+     * @param {number[]} args @param {boolean} wide
+     */
+    const enumerateFaces = ([hdc, logfont, proc, lParam], wide)=>{
+        if (!dcOf(hdc))
+        {
+            return 0;
+        }
+        const request = (logfont >>> 0) === 0 ? null
+            : (wide ? readLogFontW : readLogFont)(host, logfont >>> 0);
+        const charSet = request ? request.charSet : DEFAULT_CHARSET;
+        const named = request && request.faceName !== '' ? faceNamed(request.faceName) : null;
+        const faces = charSet !== DEFAULT_CHARSET && charSet !== ANSI_CHARSET ? []
+            : request && request.faceName !== '' ? (named ? [named] : [])
+                : FACES.filter(face=>!face.substitute);
+        const call = host.call;
+        if (!call || (proc >>> 0) === 0 || faces.length === 0)
+        {
+            return 1;
+        }
+        // Read before the first await: after it the processor is whoever's
+        // the scheduler chose.
+        const thread = host.callerThread?.();
+        const logSize = wide ? LOGFONTW_SIZE : LOGFONTA.SIZE;
+        const unit = wide ? 2 : 1;
+        const enumSize = logSize + (LF_FULLFACESIZE + 2 * LF_FACESIZE) * unit;
+        const metricSize = wide ? NEWTEXTMETRICEXW_SIZE : NEWTEXTMETRICEXA_SIZE;
+        const block = host.surfaces.allocate(enumSize + metricSize);
+        return (async()=>{
+            let answer = 1;
+            try
+            {
+                for (const face of faces)
+                {
+                    const font = logFont({ faceName: face.name, charSet: ANSI_CHARSET,
+                        pitchAndFamily: face.family | face.pitch });
+                    const metrics = metricsOf(font);
+                    const bytes = new Uint8Array(enumSize);
+                    bytes.set(logFontBytes({ ...font, height: metrics.height,
+                        width: metrics.aveCharWidth, weight: metrics.weight }, wide));
+                    putText(bytes, logSize, face.substitute ?? face.name, wide);
+                    putText(bytes, logSize + LF_FULLFACESIZE * unit, 'Regular', wide);
+                    putText(bytes, logSize + (LF_FULLFACESIZE + LF_FACESIZE) * unit, 'Western',
+                        wide);
+                    host.writeMemory(block, bytes);
+                    host.writeMemory(block + enumSize, new Uint8Array(metricSize));
+                    (wide ? writeTextMetricsW : writeTextMetrics)(host, block + enumSize, metrics);
+                    answer = (await call(proc >>> 0,
+                        [block, block + enumSize, SCALABLE_FONTTYPE, lParam >>> 0], thread)) | 0;
+                    if (answer === 0)
+                    {
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                host.surfaces.free(block);
+            }
+            return answer;
+        })();
     };
 
     const table = {
@@ -1081,8 +1298,7 @@ export function createGdiFunctions(host){
                 // Documented exactly: a memory DC starts out one monochrome pixel
                 // wide and one pixel high, so that it always has a surface.
                 const dc = createContext(0, 'memory');
-                dc.defaultBitmap = objects.create('bitmap', deviceBitmap(1, 1, 1));
-                select(dc, dc.defaultBitmap);
+                select(dc, defaultBitmap());
                 return dc.hdc;
             },
         },
@@ -1266,7 +1482,9 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                return objects.create('brush', fields);
+                return fields.style === BS_PATTERN
+                    ? patternBrush(fields.hatch)
+                    : objects.create('brush', fields);
             },
         },
 
@@ -1280,16 +1498,7 @@ export function createGdiFunctions(host){
         CreatePatternBrush: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([bitmap])=>{
-                const record = objects.get(bitmap);
-                if (!record || record.type !== 'bitmap')
-                {
-                    return 0;
-                }
-                return objects.create('brush', {
-                    style: BS_PATTERN, color: 0, hatch: bitmap >>> 0,
-                });
-            },
+            handler: ([bitmap])=>patternBrush(bitmap),
         },
 
         /** HBRUSH CreateHatchBrush(int iHatch, COLORREF color) */
@@ -1378,12 +1587,13 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                // Documented exactly: a zero extent yields a one-pixel monochrome
-                // bitmap rather than a failure.
-                const empty = (cx | 0) <= 0 || (cy | 0) <= 0;
-                const attributes = empty
-                    ? deviceBitmap(1, 1, 1)
-                    : deviceBitmap(cx | 0, cy | 0, surfaceOf(dc).bitCount);
+                // Documented exactly: a zero extent yields the one-pixel
+                // monochrome bitmap rather than a failure.
+                if ((cx | 0) <= 0 || (cy | 0) <= 0)
+                {
+                    return defaultBitmap();
+                }
+                const attributes = deviceBitmap(cx | 0, cy | 0, surfaceOf(dc).bitCount);
                 return attributes ? objects.create('bitmap', attributes) : 0;
             },
         },
@@ -1394,22 +1604,31 @@ export function createGdiFunctions(host){
          *
          * lpBits, when there are any, is the whole image in the bitmap's own
          * layout, and it is copied: the buffer is the caller's, free to be
-         * reused or freed the moment this returns.
+         * reused or freed the moment this returns. A zero width or height is
+         * the one-pixel monochrome bitmap, whatever the rest says.
          */
         CreateBitmap: {
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([width, height, planes, bitCount, bits])=>{
-                if ((width | 0) <= 0 || (height | 0) <= 0 || (planes >>> 0) === 0)
+                if ((width | 0) === 0 || (height | 0) === 0)
+                {
+                    return defaultBitmap();
+                }
+                if ((width | 0) < 0 || (height | 0) < 0 || (planes >>> 0) === 0)
                 {
                     return 0;
                 }
-                if (!BIT_COUNTS.has((planes >>> 0) * (bitCount >>> 0)))
+                // A depth between two a bitmap can have is rounded up to the
+                // next, as Windows rounds it: three bits is four, and only
+                // past 32 is there none.
+                const depth = [...BIT_COUNTS].find(known=>known >= (bitCount >>> 0));
+                if ((bitCount >>> 0) === 0 || depth === undefined
+                    || !BIT_COUNTS.has((planes >>> 0) * depth))
                 {
                     return 0;
                 }
-                const attributes = deviceBitmap(width | 0, height | 0, bitCount >>> 0,
-                    planes >>> 0);
+                const attributes = deviceBitmap(width | 0, height | 0, depth, planes >>> 0);
                 if (!attributes)
                 {
                     return 0;
@@ -1607,43 +1826,45 @@ export function createGdiFunctions(host){
          * HBITMAP CreateDIBitmap(HDC hdc, const BITMAPINFOHEADER *pbmih,
          *   DWORD flInit, const VOID *pjBits, const BITMAPINFO *pbmi, UINT iUsage)
          *
-         * The bitmap it produces is device-dependent by name and a DIB by
-         * construction, exactly as CreateDIBSection's is: one storage format
-         * downstream means one code path, and a program cannot observe the
-         * difference through any call this library offers.
-         *
-         * CBM_INIT copies the caller's rows in as they are, which is only
-         * correct because the two formats are the same one -- the header the
-         * bits were described by is the header the bitmap is created with.
+         * A device-dependent bitmap, as CreateCompatibleBitmap makes one: the
+         * header gives its size and nothing else, and its depth is the DC's
+         * -- one bit with no DC at all (Wine's test_createdibitmap, which also
+         * finds no check on the header but its compression). With CBM_INIT
+         * the bits are converted in as pbmi describes them, which need not be
+         * the format the header names; bits that cannot be converted make no
+         * bitmap rather than a black one.
          */
         CreateDIBitmap: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([, infoHeader, init, bits])=>{
+            handler: ([hdc, infoHeader, init, bits, info, usage])=>{
                 const CBM_INIT = 4;
-                const header = readBitmapInfoHeader(host, infoHeader);
-                if (header.size < BITMAPINFOHEADER.SIZE
-                    || (header.compression !== BI_RGB && header.compression !== BI_BITFIELDS)
-                    || !BIT_COUNTS.has(header.bitCount)
-                    || header.width <= 0 || header.height === 0)
+                if ((infoHeader >>> 0) === 0)
                 {
                     return 0;
                 }
-                const bytes = dibSize(header.width, header.height, header.bitCount);
-                const address = host.surfaces.allocate(bytes);
-                if ((init & CBM_INIT) !== 0 && (bits >>> 0) !== 0)
+                const header = readBitmapInfoHeader(host, infoHeader);
+                const dc = (hdc >>> 0) === 0 ? null : dcOf(hdc);
+                if (header.size < BITMAPINFOHEADER.SIZE
+                    || IMAGE_COMPRESSIONS.has(header.compression)
+                    || header.width <= 0 || header.height === 0 || ((hdc >>> 0) !== 0 && !dc))
                 {
-                    host.writeMemory(address, host.readMemory(bits >>> 0, bytes));
+                    return 0;
                 }
-                return objects.create('bitmap', {
-                    width: header.width,
-                    height: Math.abs(header.height),
-                    planes: 1,
-                    bitCount: header.bitCount,
-                    topDown: header.height < 0,
-                    bits: address,
-                    section: address,
-                });
+                const attributes = deviceBitmap(header.width, Math.abs(header.height),
+                    dc ? surfaceOf(dc).bitCount : 1);
+                if (!attributes)
+                {
+                    return 0;
+                }
+                const bitmap = objects.create('bitmap', attributes);
+                if ((init & CBM_INIT) === 0 || (bits >>> 0) === 0 || (info >>> 0) === 0
+                    || setBits(bitmap, bits >>> 0, info >>> 0, usage >>> 0, dc))
+                {
+                    return bitmap;
+                }
+                objects.remove(bitmap);
+                return 0;
             },
         },
 
@@ -1947,6 +2168,24 @@ export function createGdiFunctions(host){
         DeleteMetaFile: {
             argBytes: 4,
             handler: ()=>0,
+        },
+
+        /**
+         * int EnumFontFamiliesExA(HDC hdc, LPLOGFONTA lpLogfont, FONTENUMPROCA lpProc,
+         *                         LPARAM lParam, DWORD dwFlags)
+         * int EnumFontFamiliesExW(HDC hdc, LPLOGFONTW lpLogfont, FONTENUMPROCW lpProc,
+         *                         LPARAM lParam, DWORD dwFlags)
+         */
+        EnumFontFamiliesExA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>enumerateFaces(args, false),
+        },
+
+        EnumFontFamiliesExW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>enumerateFaces(args, true),
         },
 
         /**

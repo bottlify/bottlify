@@ -12,7 +12,9 @@ import { DSTINVERT, PATCOPY, SRCCOPY } from './rop.js';
 import { BS_HATCHED, BS_SOLID, HS_HORIZONTAL, OPAQUE, TRANSPARENT } from './brush.js';
 import { PS_NULL, PS_SOLID } from './shapes.js';
 import { TA_CENTER, TA_UPDATECP } from './text.js';
-import { clearSurface, createSurface, surfaceForDibSection } from './surface.js';
+import {
+    clearSurface, createSurface, surfaceForDdb, surfaceForDibSection,
+} from './surface.js';
 import { createGdiObjects } from '../../win32/gdi32/objects.js';
 import { createGdiFunctions } from '../../win32/gdi32/functions.js';
 import { BITMAPINFOHEADER } from '../../win32/gdi32/structs.js';
@@ -448,4 +450,357 @@ test('a partial lock points at the same bytes a context wrote through', ()=>{
     assert.equal(pool[at], 0xab, 'blue');
     assert.equal(pool[at + 1], 0xcd, 'green');
     assert.equal(pool[at + 2], 0xef, 'red');
+});
+
+// --- gdi32 over this drawing, end to end ---
+
+/** A 16-by-16 32-bit screen, the depth a compatible bitmap then has. */
+const WIRED_SCREEN = Object.freeze({ width: 16, height: 16, bitsPerPixel: 32 });
+
+/**
+ * gdi32's bookkeeping over this layer's drawing, wired as the graphics module
+ * wires them: a memory context draws into its bitmap's own bits, a DIB
+ * section's in guest memory and a device-dependent bitmap's in bytes of its
+ * own, and a window's context into the screen.
+ */
+function wiredGdi(){
+    const bytes = new Uint8Array(0x40000);
+    let next = 0x10000;
+    const screen = createSurface({ width: WIRED_SCREEN.width, height: WIRED_SCREEN.height });
+    const gdi = createGdiFunctions({
+        readMemory: (address, length)=>bytes.slice(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        readCString: ()=>'',
+        handles: fakeHandles(),
+        surfaces: {
+            /** @param {number} size */
+            allocate(size){
+                const address = next;
+                next += (size + 0xff) & ~0xff;
+                return address;
+            },
+            free: ()=>undefined,
+        },
+        screen: WIRED_SCREEN,
+        graphics: {
+            createDrawing: options=>createGdiDrawing(options),
+            surfaceFor(dc, bitmap){
+                if (dc.kind !== 'memory')
+                {
+                    return screen;
+                }
+                return bitmap.pixels
+                    ? surfaceForDdb(bitmap)
+                    : surfaceForDibSection(bitmap, bytes, MEMORY_BASE);
+            },
+        },
+    });
+    // The handlers declare only the arguments they read; a guest call always
+    // carries the whole list.
+    const fns = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
+        /** @type {unknown} */ (gdi.table));
+    const view = new DataView(bytes.buffer);
+    return { bytes, view, fns, screen };
+}
+
+test('a pattern brush paints the bitmap it was made from, even once that bitmap is gone', ()=>{
+    // Wine's test_pattern_brush: the brush keeps the bitmap's pixels as they
+    // were when it was made, and outlives the bitmap itself.
+    const { fns } = wiredGdi();
+    const screen = fns.GetDC.handler([0]);
+    const dc = fns.CreateCompatibleDC.handler([screen]);
+    const bitmap = fns.CreateCompatibleBitmap.handler([screen, 16, 16]);
+    const other = fns.CreateCompatibleBitmap.handler([screen, 16, 16]);
+    fns.SelectObject.handler([dc, bitmap]);
+    fns.SelectObject.handler([dc, fns.CreateSolidBrush.handler([0xff5511])]);
+    assert.equal(fns.PatBlt.handler([dc, 0, 0, 16, 16, PATCOPY]), 1);
+    assert.equal(fns.GetPixel.handler([dc, 10, 10]), 0xff5511);
+
+    const brush = fns.CreatePatternBrush.handler([bitmap]);
+    assert.notEqual(brush, 0);
+    fns.SelectObject.handler([dc, other]);
+    assert.equal(fns.DeleteObject.handler([bitmap]), 1);
+
+    fns.SelectObject.handler([dc, fns.CreateSolidBrush.handler([0xabcdef])]);
+    fns.PatBlt.handler([dc, 0, 0, 16, 16, PATCOPY]);
+    assert.equal(fns.GetPixel.handler([dc, 10, 10]), 0xabcdef);
+
+    fns.SelectObject.handler([dc, brush]);
+    assert.equal(fns.PatBlt.handler([dc, 0, 0, 16, 16, PATCOPY]), 1);
+    assert.equal(fns.GetPixel.handler([dc, 10, 10]), 0xff5511,
+        'the deleted bitmap\'s content, not black and not the brush colour');
+});
+
+test('a monochrome pattern brush takes the context\'s colours, and keeps its bits in a mask', ()=>{
+    // The documented rule: a 0 bit is drawn in the text colour and a 1 bit in
+    // the background colour. Into a monochrome bitmap the bits go as they
+    // are, whatever the colours (Wine's test_bitmap_colors).
+    const { fns, view } = wiredGdi();
+    const PATTERN = 0x100;
+    for (let row = 0; row < 8; row++)
+    {
+        view.setUint16(PATTERN + row * 2, 0x5555, true);
+    }
+    const bitmap = fns.CreateBitmap.handler([16, 8, 1, 1, PATTERN]);
+    const brush = fns.CreatePatternBrush.handler([bitmap]);
+
+    const screen = fns.GetDC.handler([0]);
+    const colour = fns.CreateCompatibleDC.handler([screen]);
+    fns.SelectObject.handler([colour, fns.CreateCompatibleBitmap.handler([screen, 4, 1])]);
+    fns.SelectObject.handler([colour, brush]);
+    fns.SetTextColor.handler([colour, 0x0000ff]);
+    fns.SetBkColor.handler([colour, 0xff0000]);
+    fns.PatBlt.handler([colour, 0, 0, 4, 1, PATCOPY]);
+    assert.deepEqual([0, 1, 2, 3].map(x=>fns.GetPixel.handler([colour, x, 0])),
+        [0x0000ff, 0xff0000, 0x0000ff, 0xff0000]);
+
+    const mono = fns.CreateCompatibleDC.handler([0]);
+    const mask = fns.CreateBitmap.handler([16, 1, 1, 1, 0]);
+    fns.SelectObject.handler([mono, mask]);
+    fns.SelectObject.handler([mono, brush]);
+    fns.SetTextColor.handler([mono, 0x123456]);
+    fns.SetBkColor.handler([mono, 0x654321]);
+    fns.PatBlt.handler([mono, 0, 0, 16, 1, PATCOPY]);
+    fns.SelectObject.handler([mono, fns.CreateBitmap.handler([1, 1, 1, 1, 0])]);
+    assert.equal(fns.GetBitmapBits.handler([mask, 2, 0x200]), 2);
+    assert.equal(view.getUint16(0x200, true), 0x5555);
+});
+
+/**
+ * Where the wired tests below put a BITMAPINFO -- room for a full table of
+ * 256 behind it -- the bits it describes, and a pointer handed back.
+ */
+const WIRED_INFO = 0x300;
+const WIRED_BITS = 0x800;
+const WIRED_POINTER = 0x2f0;
+
+/**
+ * A BITMAPINFOHEADER and what follows it: a colour table of RGBQUADs, or a
+ * BI_BITFIELDS DIB's three masks.
+ *
+ * @param {DataView} view
+ * @param {{ width: number, height: number, bitCount: number, compression?: number,
+ *           table?: number[] }} fields
+ */
+function putInfo(view, { width, height, bitCount, compression = 0, table = [] }){
+    view.setUint32(WIRED_INFO + BITMAPINFOHEADER.biSize, BITMAPINFOHEADER.SIZE, true);
+    view.setInt32(WIRED_INFO + BITMAPINFOHEADER.biWidth, width, true);
+    view.setInt32(WIRED_INFO + BITMAPINFOHEADER.biHeight, height, true);
+    view.setUint16(WIRED_INFO + BITMAPINFOHEADER.biPlanes, 1, true);
+    view.setUint16(WIRED_INFO + BITMAPINFOHEADER.biBitCount, bitCount, true);
+    view.setUint32(WIRED_INFO + BITMAPINFOHEADER.biCompression, compression, true);
+    for (let at = BITMAPINFOHEADER.biSizeImage; at < BITMAPINFOHEADER.SIZE; at += 4)
+    {
+        view.setUint32(WIRED_INFO + at, 0, true);
+    }
+    table.forEach((entry, index)=>view.setUint32(WIRED_INFO + 40 + index * 4, entry, true));
+}
+
+test('a 5-6-5 DIB draws as 5-6-5, from StretchDIBits and in a section of its own', ()=>{
+    const { fns, view, bytes } = wiredGdi();
+    const BI_BITFIELDS = 3;
+    const screen = fns.GetDC.handler([0]);
+    const dc = fns.CreateCompatibleDC.handler([screen]);
+    fns.SelectObject.handler([dc, fns.CreateCompatibleBitmap.handler([screen, 2, 1])]);
+
+    putInfo(view, { width: 2, height: -1, bitCount: 16, compression: BI_BITFIELDS,
+        table: [0xf800, 0x07e0, 0x001f] });
+    view.setUint16(WIRED_BITS, 0x07e0, true);
+    view.setUint16(WIRED_BITS + 2, 0xf800, true);
+    assert.equal(fns.StretchDIBits.handler([dc, 0, 0, 2, 1, 0, 0, 2, 1,
+        WIRED_BITS, WIRED_INFO, 0, 0x00cc0020]), 1);
+    assert.deepEqual([fns.GetPixel.handler([dc, 0, 0]), fns.GetPixel.handler([dc, 1, 0])],
+        [0x00ff00, 0x0000ff], 'full green and full red, as COLORREFs');
+
+    const BITS_OUT = WIRED_POINTER;
+    const section = fns.CreateDIBSection.handler([dc, WIRED_INFO, 0, BITS_OUT, 0, 0]);
+    assert.notEqual(section, 0);
+    fns.SelectObject.handler([dc, section]);
+    fns.SetPixel.handler([dc, 0, 0, 0x00ff00]);
+    const at = view.getUint32(BITS_OUT, true);
+    assert.deepEqual([...bytes.subarray(at, at + 2)], [0xe0, 0x07]);
+});
+
+test('GetDIBits into BI_BITFIELDS writes the masks it packs the pixels by', ()=>{
+    // Wine's test_GetDIBits_BI_BITFIELDS: with bits, the masks come back
+    // filled in, and biSizeImage with them.
+    const { fns, view } = wiredGdi();
+    const BI_BITFIELDS = 3;
+    const screen = fns.GetDC.handler([0]);
+    const dc = fns.CreateCompatibleDC.handler([screen]);
+    const bitmap = fns.CreateCompatibleBitmap.handler([screen, 2, 1]);
+    fns.SelectObject.handler([dc, bitmap]);
+    fns.SetPixel.handler([dc, 0, 0, 0x0000ff]);
+    fns.SetPixel.handler([dc, 1, 0, 0x00ff00]);
+
+    putInfo(view, { width: 2, height: 1, bitCount: 16, compression: BI_BITFIELDS,
+        table: [0, 0, 0] });
+    view.setUint32(WIRED_INFO + BITMAPINFOHEADER.biSizeImage, 0xdeadbeef, true);
+    assert.equal(fns.GetDIBits.handler([dc, bitmap, 0, 1, WIRED_BITS, WIRED_INFO, 0]), 1);
+    assert.deepEqual([0, 4, 8].map(at=>view.getUint32(WIRED_INFO + 40 + at, true)),
+        [0xf800, 0x07e0, 0x001f]);
+    assert.equal(view.getUint32(WIRED_INFO + BITMAPINFOHEADER.biSizeImage, true), 4);
+    assert.deepEqual([view.getUint16(WIRED_BITS, true), view.getUint16(WIRED_BITS + 2, true)],
+        [0xf800, 0x07e0], 'red and green, packed by those masks');
+});
+
+/** @param {DataView} view @param {number} count @returns {number[]} the table after the header */
+const tableOf = (view, count)=>[...Array(count).keys()]
+    .map(index=>view.getUint32(WIRED_INFO + 40 + index * 4, true));
+
+test('GetDIBits reads a monochrome bitmap out as one bit, black and white, bottom-up', ()=>{
+    // Wine's test_GetDIBits: a 16x16 bitmap of alternate rows, read back as a
+    // one-bit DIB; the table is two entries and nothing past them is touched.
+    const { fns, view, bytes } = wiredGdi();
+    const screen = fns.GetDC.handler([0]);
+    const ROWS = 0x600;
+    for (let y = 0; y < 16; y++)
+    {
+        view.setUint16(ROWS + y * 2, y % 2 === 0 ? 0xffff : 0, true);
+    }
+    const mono = fns.CreateBitmap.handler([16, 16, 1, 1, ROWS]);
+    putInfo(view, { width: 16, height: 16, bitCount: 1, table: new Array(4).fill(0xaaaaaaaa) });
+    view.setUint32(WIRED_INFO + BITMAPINFOHEADER.biClrUsed, 37, true);
+
+    assert.equal(fns.GetDIBits.handler([screen, mono, 0, 16, WIRED_BITS, WIRED_INFO, 0]), 16);
+    assert.deepEqual(tableOf(view, 4), [0, 0x00ffffff, 0xaaaaaaaa, 0xaaaaaaaa]);
+    assert.equal(view.getUint32(WIRED_INFO + BITMAPINFOHEADER.biClrUsed, true), 0);
+    assert.equal(view.getUint32(WIRED_INFO + BITMAPINFOHEADER.biSizeImage, true), 64);
+    assert.deepEqual([...bytes.subarray(WIRED_BITS, WIRED_BITS + 8)],
+        [0, 0, 0, 0, 0xff, 0xff, 0, 0], 'the last row first, each padded to a DWORD');
+
+    view.setUint32(WIRED_INFO + 40, 0xaaaaaaaa, true);
+    view.setUint32(WIRED_INFO + 44, 0xaaaaaaaa, true);
+    fns.GetDIBits.handler([screen, mono, 0, 0, 0, WIRED_INFO, 1]);
+    assert.deepEqual(tableOf(view, 2), [0x00010000, 0xaaaaaaaa],
+        'DIB_PAL_COLORS: the table is the indices 0 and 1, as WORDs');
+});
+
+test('GetDIBits reads colour out as four and eight bits against the default palette', ()=>{
+    // Wine's test_GetDIBits: at four bits the sixteen VGA colours, at eight the
+    // default palette's twenty around a 3-3-2 cube, and each pixel the index
+    // of its colour there.
+    const { fns, view, bytes } = wiredGdi();
+    const screen = fns.GetDC.handler([0]);
+    const dc = fns.CreateCompatibleDC.handler([screen]);
+    const bitmap = fns.CreateCompatibleBitmap.handler([screen, 2, 1]);
+    fns.SelectObject.handler([dc, bitmap]);
+    fns.SetPixel.handler([dc, 0, 0, 0x0000ff]);
+    fns.SetPixel.handler([dc, 1, 0, 0x804020]);
+    fns.SelectObject.handler([dc, fns.CreateBitmap.handler([1, 1, 1, 1, 0])]);
+
+    putInfo(view, { width: 2, height: 1, bitCount: 4 });
+    assert.equal(fns.GetDIBits.handler([screen, bitmap, 0, 1, WIRED_BITS, WIRED_INFO, 0]), 1);
+    assert.deepEqual(tableOf(view, 16), [
+        0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0x808080,
+        0xc0c0c0, 0xff0000, 0x00ff00, 0xffff00, 0x0000ff, 0xff00ff, 0x00ffff, 0xffffff,
+    ]);
+    assert.equal(bytes[WIRED_BITS] >>> 4, 9, 'red is the ninth');
+
+    putInfo(view, { width: 2, height: 1, bitCount: 8 });
+    assert.equal(fns.GetDIBits.handler([screen, bitmap, 0, 1, WIRED_BITS, WIRED_INFO, 0]), 1);
+    const table = tableOf(view, 256);
+    assert.deepEqual(table.slice(0, 10), [0x000000, 0x800000, 0x008000, 0x808000, 0x000080,
+        0x800080, 0x008080, 0xc0c0c0, 0xc0dcc0, 0xa6caf0]);
+    assert.deepEqual(table.slice(246), [0xfffbf0, 0xa0a0a4, 0x808080, 0xff0000, 0x00ff00,
+        0xffff00, 0x0000ff, 0xff00ff, 0x00ffff, 0xffffff]);
+    assert.equal(table[145], 0x204080,
+        'red (145 & 7) << 5, green (145 & 0x38) << 2, blue 145 & 0xc0');
+    assert.deepEqual([bytes[WIRED_BITS], bytes[WIRED_BITS + 1]], [249, 145]);
+});
+
+test('GetDIBits hands an indexed section back in its own table and its own indices', ()=>{
+    // Wine's test_GetDIBits_selected_DIB, at eight and four bits.
+    for (const bitCount of [8, 4])
+    {
+        const { fns, view, bytes } = wiredGdi();
+        const ramp = [...Array(1 << bitCount).keys()].map(index=>{
+            const grey = index * (1 << (8 - bitCount));
+            return (grey << 16) | (grey << 8) | grey;
+        });
+        putInfo(view, { width: 32, height: 32, bitCount, table: ramp });
+        const OUT = WIRED_POINTER;
+        const section = fns.CreateDIBSection.handler([0, WIRED_INFO, 0, OUT, 0, 0]);
+        const bits = view.getUint32(OUT, true);
+        const size = (bitCount * 32 * 32) / 8;
+        for (let index = 0; index < size; index++)
+        {
+            bytes[bits + index] = index % 256;
+        }
+        const dc = fns.CreateCompatibleDC.handler([0]);
+        putInfo(view, { width: 32, height: 32, bitCount, table: ramp.map(()=>0xcccccccc) });
+        assert.equal(fns.GetDIBits.handler([dc, section, 0, 32, WIRED_BITS, WIRED_INFO, 0]), 32);
+        assert.deepEqual(tableOf(view, 1 << bitCount), ramp);
+        assert.deepEqual([...bytes.subarray(WIRED_BITS, WIRED_BITS + size)],
+            [...bytes.subarray(bits, bits + size)], `${bitCount} bits`);
+    }
+});
+
+test('StretchDIBits draws one- and four-bit DIBs through their colour tables', ()=>{
+    const { fns, view } = wiredGdi();
+    const screen = fns.GetDC.handler([0]);
+    const dc = fns.CreateCompatibleDC.handler([screen]);
+    fns.SelectObject.handler([dc, fns.CreateCompatibleBitmap.handler([screen, 3, 1])]);
+    /** @returns {number[]} */
+    const row = ()=>[0, 1, 2].map(x=>fns.GetPixel.handler([dc, x, 0]));
+
+    putInfo(view, { width: 3, height: -1, bitCount: 1, table: [0x00ff0000, 0x000000ff] });
+    view.setUint8(WIRED_BITS, 0b10100000);
+    assert.equal(fns.StretchDIBits.handler([dc, 0, 0, 3, 1, 0, 0, 3, 1,
+        WIRED_BITS, WIRED_INFO, 0, 0x00cc0020]), 1);
+    assert.deepEqual(row(), [0xff0000, 0x0000ff, 0xff0000], 'blue, red, blue as COLORREFs');
+
+    putInfo(view, { width: 3, height: -1, bitCount: 4,
+        table: [0, 0x00ff0000, 0x0000ff00, 0x000000ff] });
+    view.setUint16(WIRED_BITS, 0x1023, false);
+    assert.equal(fns.StretchDIBits.handler([dc, 0, 0, 3, 1, 0, 0, 3, 1,
+        WIRED_BITS, WIRED_INFO, 0, 0x00cc0020]), 1);
+    assert.deepEqual(row(), [0x0000ff, 0x000000, 0x00ff00]);
+});
+
+test('CreateDIBitmap with CBM_INIT converts the bits it is given into the DC\'s format', ()=>{
+    // Wine's test_createdibitmap: a one-bit header for the bitmap, a 24-bit
+    // BITMAPINFO for the bits, and the white pixel reads back white at 32.
+    const { fns, view } = wiredGdi();
+    const CBM_INIT = 4;
+    const HEADER = 0x1000;
+    /** @param {number} width @param {number} bitCount */
+    const putHeader = (width, bitCount)=>{
+        view.setUint32(HEADER, 40, true);
+        view.setInt32(HEADER + 4, width, true);
+        view.setInt32(HEADER + 8, 1, true);
+        view.setUint16(HEADER + 12, 1, true);
+        view.setUint16(HEADER + 14, bitCount, true);
+    };
+    /** @param {number} bitmap @param {number} width @returns {number[]} */
+    const pixelsOf = (bitmap, width)=>{
+        putInfo(view, { width, height: 1, bitCount: 32 });
+        assert.equal(fns.GetDIBits.handler([screen, bitmap, 0, 1, WIRED_BITS, WIRED_INFO, 0]), 1);
+        return [...Array(width).keys()].map(x=>view.getUint32(WIRED_BITS + x * 4, true));
+    };
+    const screen = fns.GetDC.handler([0]);
+
+    putHeader(1, 1);
+    putInfo(view, { width: 1, height: 1, bitCount: 24 });
+    view.setUint32(WIRED_BITS, 0xffffffff, true);
+    const white = fns.CreateDIBitmap.handler([screen, HEADER, CBM_INIT, WIRED_BITS, WIRED_INFO, 0]);
+    assert.ok(white > 0);
+    assert.deepEqual(pixelsOf(white, 1), [0x00ffffff]);
+
+    // DIB_PAL_COLORS: the table is indices into the palette the DC has.
+    const LOGPALETTE = 0x1100;
+    view.setUint16(LOGPALETTE, 0x300, true);
+    view.setUint16(LOGPALETTE + 2, 2, true);
+    view.setUint32(LOGPALETTE + 4, 0x00332211, true);
+    view.setUint32(LOGPALETTE + 8, 0x00ccbbaa, true);
+    const dc = fns.CreateCompatibleDC.handler([screen]);
+    fns.SelectObject.handler([dc, fns.CreateCompatibleBitmap.handler([screen, 1, 1])]);
+    fns.SelectPalette.handler([dc, fns.CreatePalette.handler([LOGPALETTE]), 0]);
+    putHeader(2, 8);
+    putInfo(view, { width: 2, height: 1, bitCount: 8, table: [0x00000001] });
+    view.setUint32(WIRED_INFO + BITMAPINFOHEADER.biClrUsed, 2, true);
+    view.setUint16(WIRED_BITS, 0x0100, true);
+    const indexed = fns.CreateDIBitmap.handler([dc, HEADER, CBM_INIT, WIRED_BITS, WIRED_INFO, 1]);
+    assert.ok(indexed > 0);
+    assert.deepEqual(pixelsOf(indexed, 2), [0x00aabbcc, 0x00112233]);
 });

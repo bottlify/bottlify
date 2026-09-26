@@ -20,7 +20,7 @@
  * is the difference between a hatch and a solid block.
  */
 
-import { colorToPixel } from './surface.js';
+import { colorToPixel, surfaceForPattern } from './surface.js';
 
 /** Brush styles, as wingdi.h numbers them. */
 export const BS_SOLID = 0;
@@ -82,6 +82,8 @@ function hatchCovers(style, x, y){
  * @property {number} bkMode
  * @property {number} bkColor
  * @property {{ x: number, y: number }} origin The brush origin, in surface coordinates.
+ * @property {number} [textColor]  What a monochrome pattern's 0 bits are drawn in.
+ * @property {boolean} [mono]      Whether the destination is monochrome.
  */
 
 /**
@@ -108,16 +110,22 @@ export function createPattern(options){
             ? foreground
             : background;
     }
-    if (style === BS_PATTERN && attributes.surface)
+    const tile = style === BS_PATTERN && attributes.pattern
+        ? surfaceForPattern(attributes.pattern)
+        : null;
+    if (tile)
     {
-        // The bookkeeping half records which bitmap a pattern brush was made
-        // from; whether that bitmap has pixels behind it yet is not its
-        // question, so a pattern brush with none falls back to its colour.
-        const tile = attributes.surface;
+        // A monochrome bitmap has no colours of its own: a 0 bit is the text
+        // colour and a 1 bit the background colour, whatever the background
+        // mode, and into a monochrome destination the bits go as they are.
+        const colours = tile.mono && !options.mono
+            ? [colorToPixel(options.textColor ?? 0), colorToPixel(options.bkColor)]
+            : null;
         return (x, y)=>{
             const column = (((x - originX) % tile.width) + tile.width) % tile.width;
             const row = (((y - originY) % tile.height) + tile.height) % tile.height;
-            return tile.read(column, row);
+            const pixel = tile.read(column, row);
+            return colours ? colours[(pixel & 0xffffff) === 0 ? 0 : 1] : pixel;
         };
     }
     return ()=>foreground;

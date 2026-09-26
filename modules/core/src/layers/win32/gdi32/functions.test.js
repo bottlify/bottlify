@@ -472,6 +472,26 @@ test('the three brush constructors all make brushes', ()=>{
     assert.equal(fns.CreatePatternBrush.handler([0]), 0);
 });
 
+test('a pattern brush names its bitmap and no colour, and outlives the bitmap', ()=>{
+    // Wine's test_pattern_brush: LOGBRUSH reads back BS_PATTERN, a zero
+    // colour whatever was asked for, and the bitmap's handle even once the
+    // bitmap is deleted -- the brush paints from a copy it took.
+    const { fns, memory } = setup();
+    const bitmap = fns.CreateBitmap.handler([20, 20, 1, 1, 0]);
+    memory.putU32s(STRUCT, [3, 0x12345, bitmap]);
+    const brush = fns.CreateBrushIndirect.handler([STRUCT]);
+    assert.ok(brush > 0);
+    assert.equal(fns.DeleteObject.handler([bitmap]), 1);
+
+    memory.fill(OUT, 3);
+    assert.equal(fns.GetObjectA.handler([brush, LOGBRUSH.SIZE, OUT]), LOGBRUSH.SIZE);
+    assert.deepEqual([memory.u32(OUT), memory.u32(OUT + 4), memory.u32(OUT + 8)],
+        [3, 0, bitmap]);
+
+    memory.putU32s(STRUCT, [3, 0, 0x9999]);
+    assert.equal(fns.CreateBrushIndirect.handler([STRUCT]), 0, 'no bitmap, no pattern');
+});
+
 test('CreateFontIndirectA reads LOGFONTA at the documented offsets', ()=>{
     const { fns, memory, hdc } = withDC();
     putLogFont(memory, { height: -20, weight: 700, italic: 1, charSet: 0xcc });
@@ -525,10 +545,57 @@ test('CreateBitmap keeps the format it was given', ()=>{
 
     assert.ok(fns.CreateBitmap.handler([8, 8, 1, 1, 0]) > 0);
     assert.ok(fns.CreateBitmap.handler([8, 8, 1, 24, 0x12000]) > 0);
-    assert.equal(fns.CreateBitmap.handler([0, 8, 1, 1, 0]), 0,
-        'unlike CreateCompatibleBitmap, this one has no device to fall back on');
-    assert.equal(fns.CreateBitmap.handler([8, 8, 1, 7, 0]), 0,
-        'seven bits per pixel is not a format');
+});
+
+test('a bitmap of no size is the one stock monochrome pixel every memory DC starts with', ()=>{
+    // Wine's test_CreateBitmap, and both calls' documentation: a zero width
+    // or height is the 1-by-1 monochrome bitmap, and it is the very bitmap a
+    // memory DC has before anything is selected into it.
+    const { fns, memory, hdc } = withDC();
+    const memoryDC = fns.CreateCompatibleDC.handler([hdc]);
+    const stock = fns.CreateCompatibleBitmap.handler([memoryDC, 0, 0]);
+    assert.ok(stock > 0);
+    assert.equal(fns.CreateCompatibleBitmap.handler([hdc, 0, 0]), stock);
+    assert.equal(fns.CreateBitmap.handler([0, 1, 0, 0, 0]), stock);
+    assert.equal(fns.GetCurrentObject.handler([memoryDC, OBJ_BITMAP]), stock);
+    assert.notEqual(fns.GetCurrentObject.handler([hdc, OBJ_BITMAP]), stock);
+
+    const one = fns.CreateCompatibleBitmap.handler([memoryDC, 1, 1]);
+    const other = fns.CreateBitmap.handler([1, 1, 1, 1, 0]);
+    assert.ok(one !== stock && other !== stock, 'a pixel asked for is a bitmap of its own');
+    assert.equal(fns.SelectObject.handler([memoryDC, one]), stock);
+    const second = fns.CreateCompatibleDC.handler([hdc]);
+    assert.equal(fns.GetCurrentObject.handler([second, OBJ_BITMAP]), stock);
+    assert.equal(fns.SelectObject.handler([memoryDC, stock]), one,
+        'and it goes back in, though another DC has it too');
+
+    for (const bitmap of [stock, one, other])
+    {
+        memory.fill(OUT, 6);
+        assert.equal(fns.GetObjectA.handler([bitmap, 24, OUT]), 24);
+        assert.deepEqual([0, 4, 8, 12, 16, 20].map(at=>memory.u32(OUT + at)),
+            [0, 1, 1, 2, 1 | (1 << 16), 0], 'type, 1x1, two bytes a row, one plane of one bit');
+    }
+    assert.equal(fns.DeleteObject.handler([stock]), 1);
+    assert.equal(fns.GetObjectA.handler([stock, 24, OUT]), 24, 'a stock object stays');
+});
+
+test('CreateBitmap rounds a depth up to the next one a bitmap can have', ()=>{
+    // Wine's test_CreateBitmap: every depth from 1 to 32 makes a bitmap, of
+    // 1, 4, 8, 16, 24 or 32 bits, and anything deeper makes none.
+    const { fns, memory } = setup();
+    for (let depth = 1; depth <= 33; depth++)
+    {
+        const bitmap = fns.CreateBitmap.handler([1, 1, 1, depth, 0]);
+        if (depth > 32)
+        {
+            assert.equal(bitmap, 0, `${depth} bits`);
+            continue;
+        }
+        const expected = [1, 4, 8, 16, 24, 32].find(bits=>bits >= depth);
+        assert.equal(fns.GetObjectA.handler([bitmap, 24, OUT]), 24);
+        assert.equal(memory.u32(OUT + 16) >>> 16, expected, `${depth} bits: bmBitsPixel`);
+    }
 });
 
 test('GetBitmapBits sizes a bitmap\'s bits, then hands back WORD-padded rows', ()=>{
@@ -638,6 +705,49 @@ test('deleting a DIB section gives its memory back', ()=>{
 
     assert.equal(fns.DeleteObject.handler([bitmap]), 1);
     assert.deepEqual(surfaces.freed, [HEAP]);
+});
+
+test('CreateDIBitmap makes a device-dependent bitmap at the depth of the DC it is given', ()=>{
+    // Wine's test_createdibitmap: the header's own depth does not matter, the
+    // DC's does -- the screen's, a fresh memory DC's single bit, the depth of
+    // the bitmap a memory DC has selected, and one bit with no DC at all --
+    // and the result is a DDB: no bits pointer, WORD rows, zeroed.
+    const { fns, memory, surfaces, hdc } = withDC();
+    assert.equal(fns.CreateDIBitmap.handler([hdc, 0, 4, 0, 0, 0]), 0, 'no header, no bitmap');
+    assert.equal(fns.CreateDIBitmap.handler([hdc, 0, 0, 0, 0, 0]), 0);
+
+    const memoryDC = fns.CreateCompatibleDC.handler([hdc]);
+    /** @param {number} dc @param {number} bitCount */
+    const depthOf = (dc, bitCount)=>{
+        putBitmapInfo(memory, { width: 10, height: 10, bitCount });
+        const bitmap = fns.CreateDIBitmap.handler([dc, STRUCT, 0, 0, 0, 0]);
+        assert.ok(bitmap > 0);
+        memory.fill(OUT, 6);
+        assert.equal(fns.GetObjectA.handler([bitmap, 24, OUT]), 24);
+        assert.deepEqual([4, 8, 20].map(at=>memory.u32(OUT + at)), [10, 10, 0],
+            'the header\'s size, and no bits pointer');
+        const depth = memory.u32(OUT + 16) >>> 16;
+        assert.equal(memory.u32(OUT + 12), Math.ceil(10 * depth / 16) * 2, 'WORD-padded rows');
+        return depth;
+    };
+    assert.deepEqual([32, 16, 1].map(bitCount=>depthOf(hdc, bitCount)), [32, 32, 32]);
+    assert.deepEqual([32, 16, 1].map(bitCount=>depthOf(memoryDC, bitCount)), [1, 1, 1]);
+    assert.equal(depthOf(0, 32), 1);
+    fns.SelectObject.handler([memoryDC, fns.CreateCompatibleBitmap.handler([hdc, 10, 10])]);
+    assert.equal(depthOf(memoryDC, 1), 32);
+    assert.deepEqual(surfaces.allocated, [], 'nothing in guest memory: a DDB\'s bits are its own');
+
+    putBitmapInfo(memory, { width: 2, height: 2, bitCount: 24 });
+    const bitmap = fns.CreateDIBitmap.handler([hdc, STRUCT, 0, 0, 0, 0]);
+    memory.fill(OUT, 4);
+    assert.equal(fns.GetBitmapBits.handler([bitmap, 16, OUT]), 16);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(OUT + at)), [0, 0, 0, 0]);
+
+    // "No sanity checks in CreateDIBitmap except compression."
+    putBitmapInfo(memory, { width: 2, height: 2, bitCount: 7 });
+    assert.ok(fns.CreateDIBitmap.handler([hdc, STRUCT, 0, 0, 0, 0]) > 0);
+    putBitmapInfo(memory, { width: 2, height: 2, bitCount: 8, compression: 4 });
+    assert.equal(fns.CreateDIBitmap.handler([hdc, STRUCT, 0, 0, 0, 0]), 0, 'BI_JPEG');
 });
 
 test('CreatePalette reads its entries out of the structure that carries them', ()=>{
@@ -1071,6 +1181,178 @@ test('the extents a DC has are read back, and a metafile is refused', ()=>{
     assert.equal(fns.DeleteMetaFile.handler(), 0);
     assert.deepEqual([fns.GetViewportExtEx, fns.GetWindowExtEx, fns.SetMetaFileBitsEx,
         fns.PlayMetaFile, fns.DeleteMetaFile].map(fn=>fn.argBytes), [8, 8, 8, 8, 4]);
+});
+
+// --- enumerating the faces ---
+
+/** The program's EnumFontFamExProc, and the thread that asked. */
+const ENUMPROC = 0x405000;
+const THREAD = { id: 7 };
+
+/**
+ * gdi32 with a guest to call back. Each call records what the program's
+ * callback would read -- the ENUMLOGFONTEX and the TEXTMETRIC the two
+ * pointers name, at the moment it is called -- and answers `reply`.
+ *
+ * @param {boolean} wide
+ * @param {(seen: any) => number} [reply]
+ */
+function withEnumeration(wide, reply = ()=>1){
+    const memory = fakeMemory();
+    const surfaces = fakeSurfaces();
+    /** @type {any[]} */
+    const seen = [];
+    /** @param {number} at @param {number} units */
+    const text = (at, units)=>{
+        let value = '';
+        for (let index = 0; index < units; index++)
+        {
+            const unit = wide ? memory.bytes[at + index * 2] | memory.bytes[at + index * 2 + 1] << 8
+                : memory.bytes[at + index];
+            if (unit === 0)
+            {
+                break;
+            }
+            value += String.fromCharCode(unit);
+        }
+        return value;
+    };
+    const logFontSize = wide ? 92 : 60;
+    const unit = wide ? 2 : 1;
+    const gdi = createGdiFunctions({
+        readMemory: (address, length)=>memory.readMemory(address, length),
+        writeMemory: (address, data)=>memory.writeMemory(address, data),
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        handles: fakeHandles(),
+        surfaces,
+        call: (entry, [logfont, metric, type, lParam], thread)=>{
+            const one = {
+                entry, type, lParam, thread,
+                face: text(logfont + LOGFONTA.lfFaceName, 32),
+                fullName: text(logfont + logFontSize, 64),
+                style: text(logfont + logFontSize + 64 * unit, 32),
+                script: text(logfont + logFontSize + 96 * unit, 32),
+                height: memory.i32(logfont + LOGFONTA.lfHeight),
+                weight: memory.i32(logfont + LOGFONTA.lfWeight),
+                charSet: memory.u8(logfont + LOGFONTA.lfCharSet),
+                pitchAndFamily: memory.u8(logfont + LOGFONTA.lfPitchAndFamily),
+                tmHeight: memory.i32(metric + TEXTMETRICA.tmHeight),
+                tmWeight: memory.i32(metric + TEXTMETRICA.tmWeight),
+            };
+            seen.push(one);
+            return Promise.resolve(reply(one));
+        },
+        callerThread: ()=>THREAD,
+    });
+    const fns = /** @type {Record<string, { argBytes: number,
+        handler: (args: number[]) => any }>} */ (/** @type {unknown} */ (gdi.table));
+    return { memory, surfaces, seen, fns, hdc: fns.GetDC.handler([HWND]) };
+}
+
+test('EnumFontFamiliesEx lists every face offered, once each, in the one set drawn', async()=>{
+    const { fns, memory, seen, surfaces, hdc } = withEnumeration(false);
+    assert.equal(fns.EnumFontFamiliesExA.argBytes, 20);
+
+    // Wine's test_EnumFonts_subst passes no LOGFONT at all: everything.
+    assert.equal(await fns.EnumFontFamiliesExA.handler([hdc, 0, ENUMPROC, 0x77, 0]), 1);
+    const faces = seen.map(one=>one.face);
+    assert.ok(['Arial', 'Times New Roman', 'Courier New', 'MS Sans Serif']
+        .every(face=>faces.includes(face)));
+    assert.equal(new Set(faces).size, faces.length, 'each face once');
+    assert.ok(!faces.includes('MS Shell Dlg') && !faces.includes('Helv'),
+        'a substitute is found by name and never listed');
+    for (const one of seen)
+    {
+        assert.equal(one.entry, ENUMPROC);
+        assert.equal(one.thread, THREAD, 'called back on the thread that asked');
+        assert.equal(one.lParam, 0x77);
+        assert.equal(one.charSet, 0, 'ANSI_CHARSET, the one set the engine draws');
+        assert.equal(one.height, one.tmHeight, 'Wine\'s arial_enum_proc: lfHeight is tmHeight');
+        assert.equal(one.weight, one.tmWeight, 'and its enum_fonts_proc: lfWeight is tmWeight');
+        assert.equal(one.type, 0, 'scalable, and not TrueType, as TEXTMETRIC says');
+        assert.equal(one.script, 'Western');
+    }
+    assert.deepEqual(surfaces.freed, surfaces.allocated.map(block=>block.address),
+        'what the callback was pointed at is given back');
+
+    // DEFAULT_CHARSET and no name is the same question.
+    seen.length = 0;
+    putLogFont(memory, { faceName: '', charSet: 1 });
+    await fns.EnumFontFamiliesExA.handler([hdc, STRUCT, ENUMPROC, 0, 0]);
+    assert.deepEqual(seen.map(one=>one.face), faces);
+
+    seen.length = 0;
+    putLogFont(memory, { faceName: '', charSet: 128 });
+    assert.equal(await fns.EnumFontFamiliesExA.handler([hdc, STRUCT, ENUMPROC, 0, 0]), 1,
+        'a set nothing here draws has no faces, and nothing enumerated is not a stop');
+    assert.equal(seen.length, 0);
+});
+
+test('EnumFontFamiliesEx finds a face by name in any case, and a substitute by its own', async()=>{
+    const { fns, memory, seen, hdc } = withEnumeration(false);
+    /** @param {string} faceName @param {number} charSet */
+    const enumerate = async(faceName, charSet)=>{
+        seen.length = 0;
+        putLogFont(memory, { faceName, charSet });
+        const answer = await fns.EnumFontFamiliesExA.handler([hdc, STRUCT, ENUMPROC, 0, 0]);
+        return { answer, seen: seen.map(({ face, fullName, style, pitchAndFamily })=>
+            ({ face, fullName, style, pitchAndFamily })) };
+    };
+
+    assert.deepEqual((await enumerate('arial', 1)).seen, [{
+        face: 'Arial', fullName: 'Arial', style: 'Regular', pitchAndFamily: 0x22,
+    }], 'FF_SWISS | VARIABLE_PITCH');
+    assert.deepEqual((await enumerate('Courier New', 0)).seen.map(one=>one.pitchAndFamily),
+        [0x31], 'FF_MODERN | FIXED_PITCH');
+
+    // Wine's test_EnumFonts_subst: the name asked for, and not as the full name.
+    const substitute = (await enumerate('MS Shell Dlg', 1)).seen;
+    assert.equal(substitute.length, 1);
+    assert.equal(substitute[0].face, 'MS Shell Dlg');
+    assert.equal(substitute[0].fullName, 'Microsoft Sans Serif');
+
+    // Wine's is_font_installed: a face nobody has answers nonzero.
+    assert.deepEqual(await enumerate('Wingdings', 1), { answer: 1, seen: [] });
+});
+
+test('EnumFontFamiliesEx stops at a zero and answers what the callback last answered', async()=>{
+    const stopping = withEnumeration(false, ()=>0);
+    assert.equal(await stopping.fns.EnumFontFamiliesExA.handler(
+        [stopping.hdc, 0, ENUMPROC, 0, 0]), 0);
+    assert.equal(stopping.seen.length, 1);
+
+    // Wine's test_EnumFonts: the callback's own value comes back.
+    const magic = withEnumeration(false, one=>one.lParam);
+    assert.equal(await magic.fns.EnumFontFamiliesExA.handler(
+        [magic.hdc, 0, ENUMPROC, 0xcafe, 0]), 0xcafe);
+    assert.ok(magic.seen.length > 1);
+});
+
+test('EnumFontFamiliesExW reads a wide LOGFONT and hands back wide names', async()=>{
+    const { fns, memory, seen, hdc } = withEnumeration(true);
+    assert.equal(fns.EnumFontFamiliesExW.argBytes, 20);
+    const name = 'Tahoma';
+    memory.putU32s(STRUCT, new Array(23).fill(0));
+    memory.putU8(STRUCT + LOGFONTA.lfCharSet, 1);
+    for (let index = 0; index < name.length; index++)
+    {
+        memory.putU8(STRUCT + LOGFONTA.lfFaceName + index * 2, name.charCodeAt(index));
+    }
+    assert.equal(await fns.EnumFontFamiliesExW.handler([hdc, STRUCT, ENUMPROC, 0, 0]), 1);
+    assert.deepEqual(
+        seen.map(({ face, fullName, style, script })=>({ face, fullName, style, script })),
+        [{ face: 'Tahoma', fullName: 'Tahoma', style: 'Regular', script: 'Western' }]);
+    assert.equal(seen[0].height, seen[0].tmHeight, 'a TEXTMETRICW has the same LONGs');
+});
+
+test('EnumFontFamiliesEx calls nothing when it cannot, and refuses what is not a DC', async()=>{
+    const { fns, hdc } = withDC();
+    assert.equal(await fns.EnumFontFamiliesExA.handler([hdc, 0, ENUMPROC, 0, 0]), 1,
+        'with no way to call the program back nothing is enumerated');
+    const enumeration = withEnumeration(false);
+    assert.equal(await enumeration.fns.EnumFontFamiliesExA.handler([0x9999, 0, ENUMPROC, 0, 0]),
+        0);
+    assert.equal(enumeration.seen.length, 0);
 });
 
 test('a font file cannot be added to the fixed font table, with the stack intact', ()=>{
