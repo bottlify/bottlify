@@ -17,13 +17,15 @@ function setup(mounted = ['C']){
     /** @type {number[]} */
     const errors = [];
     const fns = createDriveFunctions({
+        // As the memory layer reads an ANSI string: in Windows-1252, which is
+        // what the Encoding standard calls latin1.
         readCString: (address, maxLength)=>{
-            let text = '';
-            for (let at = 0; at < maxLength && bytes[address + at] !== 0; at++)
+            let end = address;
+            while (end - address < maxLength && bytes[end] !== 0)
             {
-                text += String.fromCharCode(bytes[address + at]);
+                end++;
             }
-            return text;
+            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
         },
         readWideString: (address, maxLength)=>{
             let text = '';
@@ -185,4 +187,16 @@ test('a label set on a volume is the one its information reads back', ()=>{
     plant(bytes, 0x140, 'Q:\\');
     assert.equal(fns.SetVolumeLabelA.handler([0x140, 0x120]), 0);
     assert.equal(errors.at(-1), 87);
+});
+
+test('a label in the upper half of the ANSI page reads back as the bytes it was set as', ()=>{
+    // The label is kept as the memory layer read it, where 0x80 is the euro
+    // sign, 0x99 the trade mark and 0x97 an em dash, and goes back in that page.
+    const { fns, bytes } = setup(['C']);
+    plant(bytes, 0x100, 'C:\\');
+    const label = [0x80, 0x99, 0x97, 0xe9];
+    bytes.set([...label, 0], 0x120);
+    assert.equal(fns.SetVolumeLabelA.handler([0x100, 0x120]), 1);
+    assert.equal(fns.GetVolumeInformationA.handler([0x100, 0x200, 32, 0, 0, 0, 0, 0]), 1);
+    assert.deepEqual([...bytes.subarray(0x200, 0x200 + label.length + 1)], [...label, 0]);
 });

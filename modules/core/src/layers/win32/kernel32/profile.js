@@ -29,7 +29,11 @@
  * - A name with no directory in it lives in the Windows directory. That is
  *   where the system's own profile files are, and where an installer that
  *   names its file bare expects to find it again.
+ * - The file is text in the ANSI page, the page a program's own strings are
+ *   read in, so a name it asks for is found by the bytes it was written with.
  */
+
+import { decodeAnsi, encodeAnsi } from './locale.js';
 
 /** Where a profile file with no directory of its own is. */
 const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
@@ -54,19 +58,6 @@ const MAX_VALUE = 0x10000;
 const ERROR_INVALID_DATA = 13;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_INVALID_FUNCTION = 1;
-
-/** @param {string} text */
-const latin1 = text=>Uint8Array.from(text, character=>character.charCodeAt(0) & 0xff);
-
-/** @param {Uint8Array} bytes */
-const fromLatin1 = bytes=>{
-    let text = '';
-    for (const byte of bytes)
-    {
-        text += String.fromCharCode(byte);
-    }
-    return text;
-};
 
 /** @param {string} left @param {string} right */
 const sameName = (left, right)=>left.toLowerCase() === right.toLowerCase();
@@ -171,7 +162,7 @@ export function createProfileFunctions(host){
         /** @param {Uint8Array} bytes */
         const parse = bytes=>{
             files.close(node);
-            const whole = fromLatin1(bytes);
+            const whole = decodeAnsi(bytes);
             const lines = whole.split(/\r?\n/);
             // A trailing newline is the end of the last line, not an empty one.
             if (lines.length > 0 && lines[lines.length - 1] === '')
@@ -192,7 +183,7 @@ export function createProfileFunctions(host){
             return false;
         }
         const body = lines.map(line=>`${line.text}\r\n`).join('');
-        files.write(node, 0, latin1(body));
+        files.write(node, 0, encodeAnsi(body));
         files.close(node);
         return true;
     };
@@ -234,12 +225,12 @@ export function createProfileFunctions(host){
         const whole = names.map(name=>`${name}\0`).join('');
         if (whole.length + 1 <= room)
         {
-            host.writeMemory(buffer >>> 0, latin1(`${whole}\0`));
+            host.writeMemory(buffer >>> 0, encodeAnsi(`${whole}\0`));
             return whole.length;
         }
         // Cut two short: one NUL to end the name it cut, one to end the list.
         const kept = room >= 2 ? whole.slice(0, room - 2) : '';
-        host.writeMemory(buffer >>> 0, latin1(`${kept}\0\0`.slice(0, room)));
+        host.writeMemory(buffer >>> 0, encodeAnsi(`${kept}\0\0`.slice(0, room)));
         return Math.max(room - 2, 0);
     };
 
@@ -254,7 +245,7 @@ export function createProfileFunctions(host){
             return 0;
         }
         const kept = value.slice(0, room - 1);
-        host.writeMemory(buffer >>> 0, latin1(`${kept}\0`));
+        host.writeMemory(buffer >>> 0, encodeAnsi(`${kept}\0`));
         return kept.length;
     };
 

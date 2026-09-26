@@ -22,14 +22,19 @@ function fakeMemory(){
         bytes,
         /** @param {number} address @param {Uint8Array} data */
         writeMemory: (address, data)=>bytes.set(data, address),
-        /** @param {number} address @param {number} maxLength */
+        /**
+         * As the memory layer reads an ANSI string: in Windows-1252, which is
+         * what the Encoding standard calls latin1.
+         *
+         * @param {number} address @param {number} maxLength
+         */
         readCString(address, maxLength){
-            let text = '';
-            for (let i = 0; i < maxLength && bytes[address + i] !== 0; i++)
+            let end = address;
+            while (end - address < maxLength && bytes[end] !== 0)
             {
-                text += String.fromCharCode(bytes[address + i]);
+                end++;
             }
-            return text;
+            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
         },
         /** @param {number} address @param {string} text */
         put(address, text){
@@ -354,4 +359,23 @@ test('a section read whole keeps its lines that have no =, as Windows returns th
     memory.put(SECTION, 'section3');
     assert.equal(fns.GetPrivateProfileSectionA.handler([SECTION, OUT, 100, FILE]), 6);
     assert.equal(memory.raw(OUT, 7), '=val5\0\0');
+});
+
+test('a file\'s upper-half bytes are the ANSI page, as a program\'s own strings are', ()=>{
+    // 0x80 is the euro sign, 0x99 the trade mark and 0x97 an em dash, both in
+    // the file and in the names a program asks for, so a key spelled with them
+    // is found, and a value written with them is in the file as those bytes.
+    const { memory, files, fns } = setup();
+    files.nodes.set('C:\\WINDOWS\\TEMP\\page.ini', Uint8Array.of(
+        0x5b, 0x53, 0x99, 0x5d, 0x0d, 0x0a, 0x4b, 0x80, 0x3d, 0x97, 0xe9, 0x0d, 0x0a));
+    memory.put(FILE, 'C:\\WINDOWS\\TEMP\\page.ini');
+    memory.bytes.set([0x53, 0x99, 0], SECTION);
+    memory.bytes.set([0x4b, 0x80, 0], KEY);
+    assert.equal(fns.GetPrivateProfileStringA.handler([SECTION, KEY, 0, OUT, 64, FILE]), 2);
+    assert.deepEqual([...memory.bytes.subarray(OUT, OUT + 3)], [0x97, 0xe9, 0]);
+
+    memory.bytes.set([0x99, 0x80, 0], VALUE);
+    assert.equal(fns.WritePrivateProfileStringA.handler([SECTION, KEY, VALUE, FILE]), 1);
+    assert.deepEqual([.../** @type {Uint8Array} */ (files.nodes.get('C:\\WINDOWS\\TEMP\\page.ini'))],
+        [0x5b, 0x53, 0x99, 0x5d, 0x0d, 0x0a, 0x4b, 0x80, 0x3d, 0x99, 0x80, 0x0d, 0x0a]);
 });

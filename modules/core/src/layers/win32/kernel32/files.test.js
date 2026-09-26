@@ -1372,3 +1372,27 @@ test('the directories the machine promises exist before a program asks', ()=>{
         assert.equal(fns.SetCurrentDirectoryA.handler([at(NAME, path)]), 1, path);
     }
 });
+
+test('a name in the upper half of the ANSI page goes back as the bytes it was read from', ()=>{
+    // The memory layer reads an ANSI string as Windows-1252, where 0x80 is the
+    // euro sign, 0x99 the trade mark and 0x97 an em dash; the names the ANSI
+    // calls hand back are written in the same page, so a program finds the
+    // bytes it named a file with.
+    const { memory, files, fns } = setup();
+    memory.readCString = (address, maxLength)=>new TextDecoder('latin1').decode(
+        memory.bytes.subarray(address, memory.bytes.indexOf(0, address)).subarray(0, maxLength));
+    const bytesOf = (/** @type {string} */ text)=>Array.from(text, unit=>unit.charCodeAt(0));
+    const name = [0x80, 0x99, 0x97, 0xe9];
+    const path = [...bytesOf('C:\\GAME\\'), ...name];
+    memory.bytes.set([...path, 0], NAME);
+
+    assert.equal(fns.GetFullPathNameA.handler([NAME, 0x40, OUT_TEXT, OUT_PART]), path.length);
+    assert.deepEqual([...memory.bytes.subarray(OUT_TEXT, OUT_TEXT + path.length + 1)],
+        [...path, 0]);
+
+    files.put('C:\\GAME\\\u20ac\u2122\u2014\u00e9', 'x');
+    memory.bytes.set([...bytesOf('C:\\GAME\\*'), 0], NAME);
+    assert.notEqual(fns.FindFirstFileA.handler([NAME, FIND_DATA]), INVALID_HANDLE_VALUE);
+    const found = FIND_DATA + WIN32_FIND_DATAA.cFileName;
+    assert.deepEqual([...memory.bytes.subarray(found, found + name.length + 1)], [...name, 0]);
+});

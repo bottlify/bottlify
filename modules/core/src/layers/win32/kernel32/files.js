@@ -30,6 +30,7 @@
 
 import { HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR } from './console.js';
 import { msToFileTime } from './filetime.js';
+import { encodeAnsi } from './locale.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
@@ -356,21 +357,13 @@ export function createFileFunctions(host){
         return 1;
     };
 
-    /** @param {string} text */
-    const latin1 = text=>{
-        const bytes = new Uint8Array(text.length);
-        for (let i = 0; i < text.length; i++)
-        {
-            bytes[i] = text.charCodeAt(i) & 0xff;
-        }
-        return bytes;
-    };
-
     /**
      * The two-call protocol every path-returning function here shares: called
      * with a buffer too small (or none at all) it reports the size it needs
      * *including* the terminator, and having written it reports the length
-     * *without* one. Callers switch on exactly that difference.
+     * *without* one. Callers switch on exactly that difference. The path goes
+     * back in the ANSI page the memory layer read it in, so a name a program
+     * gave comes back in its own bytes.
      *
      * @param {number} buffer @param {number} size @param {string} text
      * @returns {number} what the function returns
@@ -380,7 +373,7 @@ export function createFileFunctions(host){
         {
             return text.length + 1;
         }
-        host.writeMemory(buffer, latin1(text + '\0'));
+        host.writeMemory(buffer, encodeAnsi(text + '\0'));
         return text.length;
     };
 
@@ -562,7 +555,7 @@ export function createFileFunctions(host){
         const size = entry.size ?? 0;
         view.setUint32(WIN32_FIND_DATAA.nFileSizeHigh, high(size), true);
         view.setUint32(WIN32_FIND_DATAA.nFileSizeLow, low(size), true);
-        data.set(latin1(entry.name.slice(0, MAX_PATH - 1)), WIN32_FIND_DATAA.cFileName);
+        data.set(encodeAnsi(entry.name.slice(0, MAX_PATH - 1)), WIN32_FIND_DATAA.cFileName);
         host.writeMemory(address, data);
     };
 
@@ -1670,7 +1663,7 @@ export function createFileFunctions(host){
 
                 if ((out >>> 0) !== 0)
                 {
-                    const bytes = latin1(path.slice(0, MAX_PATH - 1));
+                    const bytes = encodeAnsi(path.slice(0, MAX_PATH - 1));
                     const buffer = new Uint8Array(bytes.length + 1);
                     buffer.set(bytes);
                     host.writeMemory(out >>> 0, buffer);
@@ -1764,7 +1757,7 @@ export function createFileFunctions(host){
                     const data = new Uint8Array(OFSTRUCT_SIZE);
                     data[0] = OFSTRUCT_SIZE;
                     data[1] = 1;
-                    data.set(latin1(path.slice(0, OFSTRUCT_PATH_MAX - 1)), OFSTRUCT_PATH);
+                    data.set(encodeAnsi(path.slice(0, OFSTRUCT_PATH_MAX - 1)), OFSTRUCT_PATH);
                     host.writeMemory(reopen >>> 0, data);
                 }
 

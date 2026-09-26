@@ -16,13 +16,15 @@ function setup(){
     const bytes = new Uint8Array(0x10400);
     const fns = createAtomFunctions({
         writeMemory: (address, data)=>bytes.set(data, address),
+        // As the memory layer reads an ANSI string: in Windows-1252, which is
+        // what the Encoding standard calls latin1.
         readCString(address, maxLength){
-            let text = '';
-            for (let i = 0; i < maxLength && bytes[address + i] !== 0; i++)
+            let end = address;
+            while (end - address < maxLength && bytes[end] !== 0)
             {
-                text += String.fromCharCode(bytes[address + i]);
+                end++;
             }
-            return text;
+            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
         },
         setLastError(){},
     });
@@ -78,4 +80,15 @@ test('a buffer too small truncates, and the global spelling shares the table', (
     assert.equal(String.fromCharCode(...read(OUT, 4)), 'Lon\0');
 
     assert.equal(fns.DeleteAtom.handler([0xd999]), 0xd999, 'an atom nobody added is returned back');
+});
+
+test('a name in the upper half of the ANSI page reads back as the bytes it was added as', ()=>{
+    // The name is kept as the memory layer read it, where 0x80 is the euro
+    // sign, 0x99 the trade mark and 0x97 an em dash, and goes back in that page.
+    const { fns, read } = setup();
+    const bytes = read(NAME, 5);
+    bytes.set([0x80, 0x99, 0x97, 0xe9, 0]);
+    const atom = fns.AddAtomA.handler([NAME]);
+    assert.equal(fns.GetAtomNameA.handler([atom, OUT, 64]), 4);
+    assert.deepEqual([...read(OUT, 5)], [0x80, 0x99, 0x97, 0xe9, 0]);
 });

@@ -213,3 +213,23 @@ test('FreeLibrary takes back a data file by the handle LoadLibraryEx gave out', 
     assert.equal(fns.FreeLibrary.handler([0x10001231]), 0);
     assert.equal(f.lastError(), 193, 'ERROR_BAD_EXE_FORMAT');
 });
+
+test('the program\'s file name is written in the ANSI page', ()=>{
+    // The euro sign is 0x80 there, the trade mark 0x99 and an em dash 0x97,
+    // as the ANSI calls read those bytes; a program installed under such a
+    // name finds the same bytes in its own path.
+    const f = hostFor({});
+    const host = /** @type {any} */ (f.host);
+    host.find = (/** @type {string | null} */ name)=>(name === null
+        ? record('app.exe', 0x400000) : null);
+    host.imagePath = ()=>'C:\\\u20ac\u2122\u2014\u00e9\\app.exe';
+    /** @type {Uint8Array[]} */
+    const written = [];
+    host.writeMemory = (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
+        written.push(bytes.slice());
+    };
+    const fns = createModuleFunctions(f.host);
+
+    assert.equal(fns.GetModuleFileNameA.handler([0, 0x1000, 64]), 15);
+    assert.deepEqual([...written[0].subarray(3, 8)], [0x80, 0x99, 0x97, 0xe9, 0x5c]);
+});

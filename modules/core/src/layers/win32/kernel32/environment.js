@@ -21,6 +21,8 @@
  * read past its end.
  */
 
+import { encodeAnsi } from './locale.js';
+
 /** Error codes this file can produce. */
 const ERROR_ENVVAR_NOT_FOUND = 203;
 
@@ -88,13 +90,14 @@ export function createEnvironmentFunctions(host){
     const blocks = new Map();
     const variables = new Map(Object.entries(host.environment()));
 
-    /** @param {string} text */
+    /**
+     * Text in the ANSI page, which is how the memory layer reads what a
+     * program sets: a value goes back in the bytes it was read from.
+     *
+     * @param {string} text
+     */
     const writeAnsi = text=>{
-        const bytes = new Uint8Array(text.length + 1);
-        for (let at = 0; at < text.length; at++)
-        {
-            bytes[at] = text.charCodeAt(at) & 0xff;
-        }
+        const bytes = encodeAnsi(`${text}\0`);
         const address = host.allocate(bytes.length);
         host.writeMemory(address, bytes);
         return address;
@@ -131,14 +134,13 @@ export function createEnvironmentFunctions(host){
 
         const entries = [...variables].map(([name, value])=>`${name}=${value}`);
         const text = `${entries.map(entry=>`${entry}\0`).join('')}\0`;
-        const unit = wide ? 2 : 1;
-        const bytes = new Uint8Array(text.length * unit);
-        for (let at = 0; at < text.length; at++)
+        const bytes = wide ? new Uint8Array(text.length * 2) : encodeAnsi(text);
+        if (wide)
         {
-            const code = text.charCodeAt(at);
-            bytes[at * unit] = code & 0xff;
-            if (wide)
+            for (let at = 0; at < text.length; at++)
             {
+                const code = text.charCodeAt(at);
+                bytes[at * 2] = code & 0xff;
                 bytes[at * 2 + 1] = code >> 8;
             }
         }
@@ -162,8 +164,7 @@ export function createEnvironmentFunctions(host){
         {
             return path.length + 1;
         }
-        host.writeMemory(buffer >>> 0, new Uint8Array(
-            [...path].map(character=>character.charCodeAt(0) & 0xff).concat(0)));
+        host.writeMemory(buffer >>> 0, encodeAnsi(`${path}\0`));
         return path.length;
     };
 
