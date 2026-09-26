@@ -401,7 +401,7 @@ export function createSoundBuffer(
         },
 
         addRef: ()=>++references,
-        release: ()=>Math.max(0, --references),
+        release: ()=>(references = Math.max(0, references - 1)),
         get references(){
             return references;
         },

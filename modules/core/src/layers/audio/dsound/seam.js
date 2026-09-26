@@ -538,9 +538,12 @@ export function createDirectSound(
      */
     const bufferInterfaces = buffer=>{
         const { buffer: base, buffer8, notify } = bufferDescriptors();
-        return (buffer.capabilities & DSBCAPS_CTRLPOSITIONNOTIFY) !== 0
-            ? [base, buffer8, notify]
-            : [base, buffer8];
+        return [
+            base,
+            // The primary buffer is the one IDirectSoundBuffer8 is not.
+            ...buffer.primary ? [] : [buffer8],
+            ...(buffer.capabilities & DSBCAPS_CTRLPOSITIONNOTIFY) !== 0 ? [notify] : [],
+        ];
     };
 
     /** @type {Record<string, (target: any, args: number[]) => number>} */
@@ -848,6 +851,16 @@ export function createDirectSound(
             record(asked);
             creations.push(asked);
 
+            // A device has one primary buffer, and asking again hands it out
+            // again with its count raised; the new description is ignored, as
+            // DirectSound's own debug output says it is.
+            if (primary && root.primary)
+            {
+                root.primary.addRef();
+                writeU32(out, publishBuffer(root.primary));
+                return DS_OK;
+            }
+
             // A primary buffer names no size and no format: it is the mix
             // target, and a program creates one only to set the format the
             // hardware runs at. A secondary one without a size is a caller's
@@ -876,6 +889,10 @@ export function createDirectSound(
                 bytes, address, format: resolved, now, primary, capabilities: flags,
             });
             buffers.push(buffer);
+            if (primary)
+            {
+                root.primary = buffer;
+            }
             writeU32(out, publishBuffer(buffer));
             return DS_OK;
         },
@@ -886,6 +903,11 @@ export function createDirectSound(
             if (!source || (out >>> 0) === 0)
             {
                 return DSERR_INVALIDPARAM;
+            }
+            // The primary buffer is the device's output, and there is one.
+            if (source.primary)
+            {
+                return DSERR_INVALIDCALL;
             }
             // A duplicate shares its original's samples and has its own
             // cursors and volume. Sharing the address is the whole point: a
@@ -1032,6 +1054,13 @@ export function createDirectSound(
         const device = {
             addRef: ()=>++references,
             release: ()=>(references = Math.max(0, references - 1)),
+            /**
+             * This object's primary buffer, once asked for: another object's
+             * is another buffer (Wine's dsound test_primary_independent).
+             *
+             * @type {any}
+             */
+            primary: null,
         };
         writeU32(out, eight
             ? publisher.publish(device, sound8Interfaces, IID_IDirectSound8)

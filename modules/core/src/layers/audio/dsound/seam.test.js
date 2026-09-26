@@ -371,6 +371,54 @@ test('a primary buffer needs neither a size nor a format', ()=>{
     assert.equal(f.dsound.buffers()[0].primary, true);
 });
 
+test('a device has one primary buffer, handed out again with its count raised', ()=>{
+    // Wine's dsound test_primary and test_hw_buffers: a second primary is the
+    // first, whatever the second description says, and releasing it leaves
+    // one reference; the primary is no IDirectSoundBuffer8 and cannot be
+    // duplicated.
+    const f = createRoot();
+    const primary = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME });
+    const second = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER | DSBCAPS_LOCSOFTWARE });
+    assert.equal(second, primary);
+    const buffer = f.bridge.recordAt(primary).object;
+    assert.equal(buffer.release(), 1);
+    assert.equal(f.dsound.buffers().filter(b=>b.primary).length, 1);
+
+    const caps = 0x1a00;
+    f.memory.setU32(caps + DSBCAPS.dwSize, DSBCAPS.SIZE);
+    f.bridge.call(primary, 'GetCaps', [caps]);
+    assert.equal(f.memory.u32(caps + DSBCAPS.dwFlags),
+        DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME, 'the first description stands');
+
+    assert.equal(buffer.interfaceFor(IID_IDirectSoundBuffer8), null);
+    assert.equal(f.bridge.query(primary, IID_IDirectSoundBuffer8), 0);
+    assert.equal(f.bridge.call(f.root, 'DuplicateSoundBuffer', [primary, 0x1e00, 0]),
+        DSERR_INVALIDCALL);
+
+    // Released to nothing and never below; asked for again, it is the same
+    // buffer with the format it was given.
+    assert.equal(buffer.release(), 0);
+    assert.equal(buffer.release(), 0);
+    assert.equal(buffer.addRef(), 1);
+    assert.equal(buffer.release(), 0);
+    createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER });
+    assert.equal(f.dsound.buffers().filter(b=>b.primary).length, 1);
+    assert.equal(f.dsound.buffers().find(b=>b.primary).references, 1);
+});
+
+test('two DirectSound objects have primary buffers of their own', ()=>{
+    // Wine's dsound test_primary_independent.
+    const f = createRoot();
+    const first = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER });
+    const other = 0x1004;
+    f.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, other, 0]);
+    const second = createBuffer({ ...f, root: f.memory.u32(other) },
+        { flags: DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME });
+    assert.notEqual(second, first);
+    assert.equal(f.bridge.call(second, 'GetVolume', [0x1c00]), DS_OK);
+    assert.equal(f.bridge.call(first, 'GetVolume', [0x1c00]), DSERR_CONTROLUNAVAIL);
+});
+
 test('CreateSoundBuffer refuses null pointers rather than dereferencing them', ()=>{
     const f = createRoot();
     assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [0, 0x1800, 0]),
