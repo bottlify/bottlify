@@ -29,6 +29,7 @@ import { CACHE_VERSION } from './cache.js';
 const EMITTED = {
     40: 'e17f16d74ecb4c98',
     41: 'c5230bdf119b527f',
+    42: 'c5230bdf119b527f',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */

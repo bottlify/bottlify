@@ -359,6 +359,7 @@ export const graphicsModule = {
                 maxDraws: device?.maxDraws,
                 skipTexture: device?.skipTexture,
                 probeTexture: device?.probeTexture,
+                keepImages: device?.keepImages,
                 // Which window a DC belongs to is GDI's knowledge, and the
                 // pixel format belongs to the window: without this every DC
                 // would be a drawable of its own and a format set on one

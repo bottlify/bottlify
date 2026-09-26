@@ -364,6 +364,11 @@ export function createGraphicsLibraries(
             // renderer is made lazily, so it is asked only if it exists.
             device: d3d8.diagnostics() ?? d3d9.diagnostics()
                 ?? (opengl ? opengl.diagnostics().gpu : null),
+            // Every compressed block the program handed OpenGL, as a digest.
+            compressedTextures: opengl ? opengl.diagnostics().compressed : null,
+            imageDigests: opengl ? opengl.diagnostics().images : [],
+            keptImages: opengl ? opengl.diagnostics().kept : [],
+            imageTimes: opengl ? opengl.diagnostics().imageTimes : [],
             vulkan: vulkan.diagnostics(),
         }),
 
