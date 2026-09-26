@@ -545,8 +545,39 @@ test('CreateBitmap keeps the format it was given', ()=>{
 
     assert.ok(fns.CreateBitmap.handler([8, 8, 1, 1, 0]) > 0);
     assert.ok(fns.CreateBitmap.handler([8, 8, 1, 24, 0x12000]) > 0);
-    assert.equal(fns.CreateBitmap.handler([0, 8, 1, 1, 0]), 0,
-        'unlike CreateCompatibleBitmap, this one has no device to fall back on');
+});
+
+test('a bitmap of no size is the one stock monochrome pixel every memory DC starts with', ()=>{
+    // Wine's test_CreateBitmap, and both calls' documentation: a zero width
+    // or height is the 1-by-1 monochrome bitmap, and it is the very bitmap a
+    // memory DC has before anything is selected into it.
+    const { fns, memory, hdc } = withDC();
+    const memoryDC = fns.CreateCompatibleDC.handler([hdc]);
+    const stock = fns.CreateCompatibleBitmap.handler([memoryDC, 0, 0]);
+    assert.ok(stock > 0);
+    assert.equal(fns.CreateCompatibleBitmap.handler([hdc, 0, 0]), stock);
+    assert.equal(fns.CreateBitmap.handler([0, 1, 0, 0, 0]), stock);
+    assert.equal(fns.GetCurrentObject.handler([memoryDC, OBJ_BITMAP]), stock);
+    assert.notEqual(fns.GetCurrentObject.handler([hdc, OBJ_BITMAP]), stock);
+
+    const one = fns.CreateCompatibleBitmap.handler([memoryDC, 1, 1]);
+    const other = fns.CreateBitmap.handler([1, 1, 1, 1, 0]);
+    assert.ok(one !== stock && other !== stock, 'a pixel asked for is a bitmap of its own');
+    assert.equal(fns.SelectObject.handler([memoryDC, one]), stock);
+    const second = fns.CreateCompatibleDC.handler([hdc]);
+    assert.equal(fns.GetCurrentObject.handler([second, OBJ_BITMAP]), stock);
+    assert.equal(fns.SelectObject.handler([memoryDC, stock]), one,
+        'and it goes back in, though another DC has it too');
+
+    for (const bitmap of [stock, one, other])
+    {
+        memory.fill(OUT, 6);
+        assert.equal(fns.GetObjectA.handler([bitmap, 24, OUT]), 24);
+        assert.deepEqual([0, 4, 8, 12, 16, 20].map(at=>memory.u32(OUT + at)),
+            [0, 1, 1, 2, 1 | (1 << 16), 0], 'type, 1x1, two bytes a row, one plane of one bit');
+    }
+    assert.equal(fns.DeleteObject.handler([stock]), 1);
+    assert.equal(fns.GetObjectA.handler([stock, 24, OUT]), 24, 'a stock object stays');
 });
 
 test('CreateBitmap rounds a depth up to the next one a bitmap can have', ()=>{

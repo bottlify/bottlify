@@ -460,7 +460,7 @@ export function createGdiFunctions(host){
              * @type {{ left: number, top: number, right: number, bottom: number } | null}
              */
             bounds: null,
-            /** The bitmap a memory DC brought with it, and takes away again. */
+            /** The bitmap a surface's DC brought with it, and takes away again. */
             defaultBitmap: 0,
             pen: stockObject(BLACK_PEN),
             brush: stockObject(WHITE_BRUSH),
@@ -501,7 +501,7 @@ export function createGdiFunctions(host){
             forEachSelection(state, handle=>objects.release(handle));
         }
         dc.saved.length = 0;
-        // The one-pixel bitmap a memory DC starts with is the DC's own, not the
+        // The bitmap over somebody else's surface is the DC's own, not the
         // program's: nobody else can have a handle to delete it.
         objects.remove(dc.defaultBitmap);
         contexts.delete(dc.hdc);
@@ -549,8 +549,9 @@ export function createGdiFunctions(host){
         {
             // Two DCs sharing one bitmap means two sets of drawing state writing
             // the same pixels, so Windows lets exactly one of them have it -- and
-            // a display DC already draws to the screen.
-            if (dc.kind !== 'memory' || record.selectCount > 0)
+            // a display DC already draws to the screen. The stock pixel every
+            // memory DC starts with is the one bitmap in all of them at once.
+            if (dc.kind !== 'memory' || (record.selectCount > 0 && !record.stock))
             {
                 return 0;
             }
@@ -906,6 +907,19 @@ export function createGdiFunctions(host){
         return { width, height, planes, bitCount, bits: 0, section: 0, pixels };
     };
 
+    /** @type {number} */
+    let stockBitmap = 0;
+    /**
+     * The 1-by-1 monochrome bitmap: what CreateBitmap and CreateCompatibleBitmap
+     * answer for a zero width or height, and what every memory DC has selected
+     * before the program selects anything -- one stock object, the same handle
+     * for all of them (Wine's test_CreateBitmap).
+     */
+    const defaultBitmap = ()=>{
+        stockBitmap ||= objects.defineStock('bitmap', deviceBitmap(1, 1, 1));
+        return stockBitmap;
+    };
+
     /**
      * A bitmap's bits as GetBitmapBits and SetBitmapBits exchange them, or
      * null for a handle that is not a bitmap with bits.
@@ -1116,8 +1130,7 @@ export function createGdiFunctions(host){
                 // Documented exactly: a memory DC starts out one monochrome pixel
                 // wide and one pixel high, so that it always has a surface.
                 const dc = createContext(0, 'memory');
-                dc.defaultBitmap = objects.create('bitmap', deviceBitmap(1, 1, 1));
-                select(dc, dc.defaultBitmap);
+                select(dc, defaultBitmap());
                 return dc.hdc;
             },
         },
@@ -1406,12 +1419,13 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                // Documented exactly: a zero extent yields a one-pixel monochrome
-                // bitmap rather than a failure.
-                const empty = (cx | 0) <= 0 || (cy | 0) <= 0;
-                const attributes = empty
-                    ? deviceBitmap(1, 1, 1)
-                    : deviceBitmap(cx | 0, cy | 0, surfaceOf(dc).bitCount);
+                // Documented exactly: a zero extent yields the one-pixel
+                // monochrome bitmap rather than a failure.
+                if ((cx | 0) <= 0 || (cy | 0) <= 0)
+                {
+                    return defaultBitmap();
+                }
+                const attributes = deviceBitmap(cx | 0, cy | 0, surfaceOf(dc).bitCount);
                 return attributes ? objects.create('bitmap', attributes) : 0;
             },
         },
@@ -1422,13 +1436,18 @@ export function createGdiFunctions(host){
          *
          * lpBits, when there are any, is the whole image in the bitmap's own
          * layout, and it is copied: the buffer is the caller's, free to be
-         * reused or freed the moment this returns.
+         * reused or freed the moment this returns. A zero width or height is
+         * the one-pixel monochrome bitmap, whatever the rest says.
          */
         CreateBitmap: {
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([width, height, planes, bitCount, bits])=>{
-                if ((width | 0) <= 0 || (height | 0) <= 0 || (planes >>> 0) === 0)
+                if ((width | 0) === 0 || (height | 0) === 0)
+                {
+                    return defaultBitmap();
+                }
+                if ((width | 0) < 0 || (height | 0) < 0 || (planes >>> 0) === 0)
                 {
                     return 0;
                 }
