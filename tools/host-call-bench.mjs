@@ -105,6 +105,7 @@ else
         const loop = await run(false);
         const calls = await run(true);
         console.log(`round ${round}: loop ${loop.ms.toFixed(0)} ms, ${calls.calls} host calls `
-            + `${calls.ms.toFixed(0)} ms -> ${((calls.ms - loop.ms) * 1e6 / N).toFixed(0)} ns a call`);
+            + `${calls.ms.toFixed(0)} ms -> `
+            + `${((calls.ms - loop.ms) * 1e6 / N).toFixed(0)} ns a call`);
     }
 }
