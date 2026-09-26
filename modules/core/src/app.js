@@ -17,6 +17,7 @@ import { planDependencies } from './layers/loader/internal/dependencies.js';
 import { findResource, listResources, loadString } from './layers/loader/internal/resources.js';
 import { readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
+import { mangledCall } from './layers/loader/internal/mangling.js';
 import { createProcessBlocks } from './layers/win32/kernel32/teb.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH }
@@ -560,6 +561,35 @@ export function describeEvent(payload){
 }
 
 /**
+ * What a call to an import nothing claims may do: return to its caller, taking
+ * the arguments it was passed off the stack as the caller expects, or not
+ * return at all -- the stack is the one thing a stub must get right.
+ *
+ * A C++ name says its own convention and, mostly, its argument bytes: a C
+ * runtime's classes are `thiscall` whatever the rest of the library is. A
+ * `_name@N` name is stdcall with N bytes. Anything else is cdecl when its
+ * library is, and otherwise stdcall with a count nobody knows. A library the
+ * program brought is a mismatch between two of its own files, and answers
+ * as its name says.
+ *
+ * @param {string | null} name
+ * @param {{ own: boolean, cdeclLibrary: boolean }} library
+ * @returns {{ returns: boolean, argBytes: number }}
+ */
+export function missingImportCall(name, { own, cdeclLibrary }){
+    const mangled = name === null ? null : mangledCall(name);
+    if (mangled)
+    {
+        return { returns: mangled.argBytes !== null || own, argBytes: mangled.argBytes ?? 0 };
+    }
+    const decorated = name === null ? null : /@(\d+)$/.exec(name);
+    return {
+        returns: decorated !== null || own || cdeclLibrary,
+        argBytes: decorated ? Number(decorated[1]) : 0,
+    };
+}
+
+/**
  * Binds an import nothing implements, once per label, and bounds what a
  * program that calls it in a loop does to the engine.
  *
@@ -570,13 +600,13 @@ export function describeEvent(payload){
  * the name.
  *
  * Whether the stub may return is decided by the one thing that must be right
- * for the program to go on: what the caller expects of the callee's stack. A
- * decorated `_name@N` name is stdcall with N argument bytes, and a name from a
- * library `classify` calls cdecl cleans up in its caller; both answer zero and
- * return. An undecorated name from any other library is stdcall with a count
- * nobody knows -- no stub can return from it without leaving the stack short --
- * so the first call goes to `fault`, which names the import and its caller and
- * ends the run. That branch cannot flood, since it happens once.
+ * for the program to go on: what the caller expects of the callee's stack
+ * (`missingImportCall`). Where that is known the stub answers zero and returns;
+ * where nobody knows the count -- an undecorated name from a stdcall library,
+ * a C++ name whose arguments the name does not size -- no stub can return
+ * without leaving the stack short, so the first call goes to `fault`, which
+ * names the import and its caller and ends the run. That branch cannot flood,
+ * since it happens once.
  *
  * The branch that can flood is the returning one. A program calls a missing
  * classifier once per character of every string, and announcing every call puts
@@ -3751,19 +3781,16 @@ async function buildApp(options){
         events,
         journal,
         classify: (dll, name)=>{
-            const decorated = name === null ? null : /@(\d+)$/.exec(name);
             const own = !systemLibraries.has(moduleKeyOf(dll)) && findModule(dll) !== null;
+            // A name a library the program brought does not export is a
+            // mismatch between two of its own files, not a gap in this build:
+            // it is reported as the program's own. The full list of what
+            // nothing claims is already said at bind time, as
+            // `import-unresolved`; the call is the one that matters.
             return {
                 own,
-                // A name a library the program brought does not export is a
-                // mismatch between two of its own files, not a gap in this
-                // build: it answers as the decoration says and is reported as
-                // the program's own. The full list of what nothing claims is
-                // already said at bind time, as `import-unresolved`; the call
-                // is the one that matters.
-                returns: decorated !== null || own
-                    || win32.libraryConvention(dll) === 'cdecl',
-                argBytes: decorated ? Number(decorated[1]) : 0,
+                ...missingImportCall(name,
+                    { own, cdeclLibrary: win32.libraryConvention(dll) === 'cdecl' }),
             };
         },
         fault: (label, frame)=>{

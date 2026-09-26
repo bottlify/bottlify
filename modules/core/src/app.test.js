@@ -31,6 +31,7 @@ import {
     answeredByEngine,
     mapShippedLibraries,
     placeLibrary,
+    missingImportCall,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
@@ -1043,6 +1044,28 @@ test('two missing imports are two announcements, each counted on its own', ()=>{
     assert.equal(missing.calls.get('KERNEL32.dll!iswspace'), 2);
     assert.equal(missing.calls.get('USER32.dll!NoSuchThing'), 1);
 });
+
+test('a missing C++ import returns as its name says, and not at all when the name cannot say',
+    ()=>{
+        const crt = { own: false, cdeclLibrary: true };
+        const system = { own: false, cdeclLibrary: false };
+
+        assert.deepEqual(missingImportCall('??4__non_rtti_object@@QAEAAV0@ABV0@@Z', crt),
+            { returns: true, argBytes: 4 }, 'a thiscall member of a cdecl library pops its own');
+        assert.deepEqual(missingImportCall('?what@exception@@UBEPBDXZ', crt),
+            { returns: true, argBytes: 0 });
+        assert.deepEqual(missingImportCall('?f@@YGXHN_J@Z', system),
+            { returns: true, argBytes: 20 }, 'the name sizes what an undecorated one cannot');
+        assert.equal(missingImportCall('??0exception@@QAE@ABQBD@Z', crt).returns, false,
+            'a constructor may take an argument its name does not show');
+        assert.deepEqual(missingImportCall('??0exception@@QAE@ABQBD@Z',
+            { own: true, cdeclLibrary: false }), { returns: true, argBytes: 0 },
+        'a library the program brought answers as before');
+
+        assert.deepEqual(missingImportCall('_stat', crt), { returns: true, argBytes: 0 });
+        assert.deepEqual(missingImportCall('_Thing@8', system), { returns: true, argBytes: 8 });
+        assert.equal(missingImportCall('Thing', system).returns, false);
+    });
 
 test('a missing import is bound once, however often it is asked for', ()=>{
     const { handlers, missing } = missingImportsHarness();
