@@ -317,14 +317,17 @@ export function colorWriteMask(bits){
  * @param {number} stride  Stream zero's.
  * @param {readonly { shaderLocation: number, offset: number, format: string,
  *     stream?: number }[]} attributes
- * @param {readonly { stream: number, stride: number }[]} [streams]
+ * @param {readonly { stream: number, stride: number, instanced?: boolean }[]} [streams]
+ *        A stream `instanced` steps once an instance.
  * @returns {{ arrayStride: number, stepMode: string,
  *     attributes: { shaderLocation: number, offset: number, format: string }[] }[]}
  */
 export function vertexBuffersOf(stride, attributes, streams = []){
-    return [{ stream: 0, stride }, ...streams].map(buffer=>({
+    /** @type {readonly { stream: number, stride: number, instanced?: boolean }[]} */
+    const buffers = [{ stream: 0, stride }, ...streams];
+    return buffers.map(buffer=>({
         arrayStride: buffer.stride,
-        stepMode: 'vertex',
+        stepMode: buffer.instanced ? 'instance' : 'vertex',
         attributes: attributes
             .filter(attribute=>(attribute.stream ?? 0) === buffer.stream)
             .map(attribute=>({

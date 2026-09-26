@@ -1163,6 +1163,8 @@ function createDeviceObject(parameters, caps, services, identity){
         },
         stageStates: stageStatesFor,
         textures,
+        // Which streams step by instance, and how many instances a draw has.
+        streamFrequencies,
         get stream(){
             return stream(0);
         },

@@ -1056,6 +1056,8 @@ export function eyePosition(view){
  * @property {Map<number, any>} textures
  * @property {{ buffer: any, stride: number, offset?: number }} stream       Stream zero.
  * @property {(index: number) => { buffer: any, stride: number, offset?: number }} [streamAt]
+ * @property {Map<number, number>} [streamFrequencies]
+ *           D3DSTREAMSOURCE frequencies by stream, Direct3D 9's; none steps by instance.
  *     Any stream by its number, where the API has more than one: a
  *     declaration may read members from streams past zero.
  * @property {{ left: number, top: number, right: number, bottom: number }} [scissor]
@@ -1549,6 +1551,11 @@ const ADDRESS = Object.freeze({
 /** GPUShaderStage.FRAGMENT. */
 const FRAGMENT_VISIBILITY = 2;
 
+/** D3DSTREAMSOURCE_INDEXEDDATA and _INSTANCEDATA, and the count beside them. */
+const STREAMSOURCE_INDEXEDDATA = 0x40000000;
+const STREAMSOURCE_INSTANCEDATA = 0x80000000;
+const STREAMSOURCE_COUNT = 0x3fffffff;
+
 /**
  * One level from the level above: a triangle over the target, and each pixel
  * the sampler's reading of the source at the pixel's centre, which for a
@@ -1914,6 +1921,11 @@ export function createRenderer(options){
              * buffer cannot start at.
              */
             stream: 0,
+            /**
+             * An instanced draw with a stream stepping once every several
+             * instances, which a WebGPU vertex buffer cannot.
+             */
+            instancing: 0,
         },
         /** Draws that ran through a program rather than the fixed-function pipeline. */
         programmable: 0,
@@ -2930,8 +2942,66 @@ export function createRenderer(options){
             preTransformed: declared.preTransformed,
             texCoordSets: declared.texCoordSets,
             blendWeights: 0,
-            ...(streams.length === 0 ? {} : { streams }),
+            ...(streams.length === 0 ? {} : { streams: stepped({ streams }, model).streams }),
         };
+    };
+
+    /**
+     * A layout whose further streams say which step once an instance rather
+     * than once a vertex: those whose frequency D3DSTREAMSOURCE_INSTANCEDATA
+     * marks. Stream zero always steps by vertex; a device that sets no
+     * frequency has every stream do so.
+     *
+     * @template {{ streams?: { stream: number, stride: number, instanced?: boolean }[] }} L
+     * @param {L} layout @param {RenderModel} model
+     * @returns {L}
+     */
+    const stepped = (layout, model)=>{
+        const frequencies = model.streamFrequencies;
+        if (!layout.streams || !frequencies || frequencies.size === 0)
+        {
+            return layout;
+        }
+        return {
+            ...layout,
+            streams: layout.streams.map(one=>(
+                ((frequencies.get(one.stream) ?? 1) & STREAMSOURCE_INSTANCEDATA) !== 0
+                    ? { ...one, instanced: true }
+                    : one)),
+        };
+    };
+
+    /**
+     * How many instances an indexed draw draws: the count stream zero's
+     * frequency carries, when D3DSTREAMSOURCE_INDEXEDDATA marks it or a
+     * further stream steps by instance (Wine's d3d9 stream_test reads it
+     * from stream zero either way); one otherwise. Zero when a stream steps
+     * once every several instances, which is not drawn.
+     *
+     * @param {RenderModel} model
+     */
+    const instancesOf = model=>{
+        const frequencies = model.streamFrequencies;
+        if (!frequencies || frequencies.size === 0)
+        {
+            return 1;
+        }
+        let instanced = false;
+        for (const [stream, frequency] of frequencies)
+        {
+            if (stream !== 0 && (frequency & STREAMSOURCE_INSTANCEDATA) !== 0)
+            {
+                if ((frequency & STREAMSOURCE_COUNT) !== 1)
+                {
+                    return 0;
+                }
+                instanced = true;
+            }
+        }
+        const zero = frequencies.get(0) ?? 1;
+        return instanced || (zero & STREAMSOURCE_INDEXEDDATA) !== 0
+            ? Math.max(1, zero & STREAMSOURCE_COUNT)
+            : 1;
     };
 
     /**
@@ -2963,10 +3033,11 @@ export function createRenderer(options){
      * The further streams a layout reads and their strides, for a key: a
      * stride is the pipeline's.
      *
-     * @param {{ streams?: readonly { stream: number, stride: number }[] }} layout
+     * @param {{ streams?: readonly { stream: number, stride: number,
+     *     instanced?: boolean }[] }} layout
      */
     const streamsKey = layout=>(layout.streams ?? [])
-        .map(one=>`|s${one.stream}:${one.stride}`).join('');
+        .map(one=>`|s${one.stream}:${one.stride}${one.instanced ? 'i' : ''}`).join('');
 
     /**
      * Binds a recorded draw's further streams, after stream zero's.
@@ -2988,14 +3059,15 @@ export function createRenderer(options){
      * has to take back from its own.
      *
      * @param {RenderModel} model
-     * @param {readonly { stream: number, stride: number }[] | undefined} streams
+     * @param {readonly { stream: number, stride: number, instanced?: boolean }[] | undefined}
+     *        streams
      * @param {number} bias
      * @returns {{ slot: number, gpu: any, offset: number }[] | null}
      */
     const streamBindings = (model, streams, bias)=>{
         /** @type {{ slot: number, gpu: any, offset: number }[]} */
         const bound = [];
-        for (const [index, { stream }] of (streams ?? []).entries())
+        for (const [index, { stream, instanced }] of (streams ?? []).entries())
         {
             const source = model.streamAt?.(stream);
             if (!source?.buffer)
@@ -3008,7 +3080,9 @@ export function createRenderer(options){
                 bound.push({ slot: index + 1, gpu: zeroStream.gpu, offset: 0 });
                 continue;
             }
-            const offset = (source.offset ?? 0) - bias * source.stride;
+            // Stream zero's first vertex moves the streams that step with it;
+            // one stepping by instance starts at its first instance.
+            const offset = (source.offset ?? 0) - (instanced ? 0 : bias * source.stride);
             if (offset < 0 || offset % 4 !== 0)
             {
                 return null;
@@ -3021,6 +3095,7 @@ export function createRenderer(options){
     };
 
     let layoutReported = false;
+    let instancingReported = false;
     /** Says once that fixed-function draws were dropped for want of a format. */
     const reportLayout = ()=>{
         if (divergence && !layoutReported)
@@ -4064,7 +4139,7 @@ export function createRenderer(options){
                 `a draw through declaration ${program.declarationId} was not drawn: ${laid.error}`);
             return null;
         }
-        const layout = laid.layout;
+        const layout = stepped(laid.layout, model);
         const shapes = shapeKey(layout);
         // A varying the pixel stage reads and the vertex shader never writes
         // is zero, as the vertex stage's own output: a fragment input with
@@ -4173,7 +4248,7 @@ export function createRenderer(options){
                 `a draw through declaration ${program.declarationId} was not drawn: ${laid.error}`);
             return null;
         }
-        const layout = laid.layout;
+        const layout = stepped(laid.layout, model);
         const shapes = shapeKey(layout);
         const flat = isFlatShaded(model);
         /** @type {import('../d3d9/wgsl.js').TranslatedShader} */
@@ -4533,6 +4608,18 @@ export function createRenderer(options){
             skip('stream');
             return;
         }
+        const instances = geometry.indices ? instancesOf(model) : 1;
+        if (instances === 0)
+        {
+            skip('instancing');
+            if (divergence && !instancingReported)
+            {
+                instancingReported = true;
+                divergence('Direct3D 9', 'an instanced draw with a stream stepping once every'
+                    + ' several instances is not drawn: a vertex buffer steps every instance');
+            }
+            return;
+        }
         kept++;
         frameStats.draws++;
         if (model.renderTarget !== model.backBuffer)
@@ -4577,6 +4664,7 @@ export function createRenderer(options){
             program: prepared.program,
             ...geometry,
             ...(streams.length === 0 ? {} : { streams }),
+            ...(instances === 1 ? {} : { instances }),
         });
     };
 
@@ -6397,7 +6485,8 @@ export function createRenderer(options){
         {
             pass.setIndexBuffer(command.indices.gpu, command.indices.format,
                 command.indices.offset);
-            pass.drawIndexed(command.count, 1, command.first, command.baseVertex);
+            pass.drawIndexed(command.count, command.instances ?? 1, command.first,
+                command.baseVertex);
         }
         else
         {
@@ -6614,7 +6703,8 @@ export function createRenderer(options){
             {
                 pass.setIndexBuffer(command.indices.gpu, command.indices.format,
                     command.indices.offset);
-                pass.drawIndexed(command.count, 1, command.first, command.baseVertex);
+                pass.drawIndexed(command.count, command.instances ?? 1, command.first,
+                    command.baseVertex);
             }
             else
             {

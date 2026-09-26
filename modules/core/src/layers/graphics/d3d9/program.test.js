@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from './constants.js';
-import { D3DPT, D3DRS, D3DTS, D3DTSS } from '../d3d8/constants.js';
+import { D3DFMT_INDEX, D3DPT, D3DRS, D3DTS, D3DTSS } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
 import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, versionToken } from './shader.js';
@@ -875,6 +875,85 @@ test('a shader pair reads a member of another stream from that stream\'s buffer'
     h.vb.release();
     assert.equal(h.device.release(), 0);
 });
+
+test('an indexed draw is instanced by stream zero\'s count, a stream stepping by instance',
+    async()=>{
+        // D3D9 instancing: stream zero carries D3DSTREAMSOURCE_INDEXEDDATA and
+        // the count, a further stream D3DSTREAMSOURCE_INSTANCEDATA | 1, and an
+        // indexed draw draws the geometry once an instance with the further
+        // stream read once an instance (Wine's d3d9 stream_test).
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        h.device.CreateVertexShader(VERTEX_SHADER, vs);
+        h.device.CreatePixelShader(PIXEL_SHADER, ps);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        /** @type {{ declaration?: any }} */
+        const split = {};
+        assert.equal(h.device.CreateVertexDeclaration([
+            { Stream: 0, Offset: 0, Type: D3DDECLTYPE.FLOAT3, Method: 0,
+                Usage: D3DDECLUSAGE.POSITION, UsageIndex: 0 },
+            { Stream: 1, Offset: 0, Type: D3DDECLTYPE.D3DCOLOR, Method: 0,
+                Usage: D3DDECLUSAGE.COLOR, UsageIndex: 0 },
+        ], split), D3D_OK);
+        h.device.SetVertexDeclaration(split.declaration);
+        /** @type {{ buffer?: any }} */
+        const colours = {};
+        assert.equal(h.device.CreateVertexBuffer(16, 0, 0, D3DPOOL.MANAGED, colours), D3D_OK);
+        assert.equal(h.device.SetStreamSource(1, colours.buffer, 4, 4), D3D_OK);
+        /** @type {{ buffer?: any }} */
+        const indices = {};
+        assert.equal(h.device.CreateIndexBuffer(6, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.MANAGED,
+            indices), D3D_OK);
+        assert.equal(h.device.SetIndices(indices.buffer), D3D_OK);
+        assert.equal(h.device.SetStreamSourceFreq(0, (0x40000000 | 3) >>> 0), D3D_OK);
+        assert.equal(h.device.SetStreamSourceFreq(1, (0x80000000 | 1) >>> 0), D3D_OK);
+        const draw = async()=>{
+            assert.equal(h.device.BeginScene(), D3D_OK);
+            assert.equal(h.device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 0, 3, 0, 1),
+                D3D_OK);
+            assert.equal(h.device.EndScene(), D3D_OK);
+            assert.equal(h.device.Present(), D3D_OK);
+            await h.device.idle();
+        };
+        await draw();
+        assert.deepEqual(h.reports, []);
+        const [pipeline] = h.gpu.of('createRenderPipeline').map(call=>call.descriptor);
+        assert.deepEqual(pipeline.vertex.buffers.map((/** @type {any} */ buffer)=>
+            [buffer.arrayStride, buffer.stepMode]), [[STRIDE, 'vertex'], [4, 'instance']]);
+        assert.deepEqual(h.gpu.of('drawIndexed').map(call=>call.args[1]), [3], 'three instances');
+        assert.deepEqual(h.gpu.of('setVertexBuffer').filter(call=>call.slot === 1)
+            .map(call=>call.offset), [4], 'the instance stream at its own offset');
+
+        // A stream stepping every second instance is not what a vertex
+        // buffer can do: the draw is not drawn, and that is said.
+        assert.equal(h.device.SetStreamSourceFreq(1, (0x80000000 | 2) >>> 0), D3D_OK);
+        await draw();
+        assert.equal(h.gpu.of('drawIndexed').length, 1);
+        assert.equal(h.device.diagnostics().skipped.instancing, 1);
+        assert.equal(h.reports.length, 1);
+
+        h.device.SetStreamSourceFreq(0, 1);
+        h.device.SetStreamSourceFreq(1, 1);
+        h.device.SetVertexShader(null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        h.device.SetStreamSource(1, null, 0, 0);
+        h.device.SetIndices(null);
+        vs.shader.release();
+        ps.shader.release();
+        split.declaration.release();
+        colours.buffer.release();
+        indices.buffer.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
 
 test('draws that change only their constants share a preparation and read their own', async()=>{
     // The shape of a shader-drawn frame: constants set before every draw and
