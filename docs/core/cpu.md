@@ -161,7 +161,11 @@ where a
 `cork.workerUrl` names the file), which takes the formed region out of the message and
 answers the module bytes and the record, so the engine thread never waits: a batch not back
 is simply published on a later frame, and `workerMs` reports the worker's share apart from
-`translateMs`, which is the engine thread's own. The encoder writes a body's bytes straight
+`translateMs`, which is the engine thread's own. A worker that cannot load (a browser makes it
+and reports the failure later, as an error event) or dies is dropped (`refused` names why,
+`worker: ...`), the batch it held is given up and emitting goes back inline; so is a batch the
+worker has held past the in-flight limit (ten seconds). Before, the failure was an uncaught
+exception and the batch stayed outstanding, so nothing was translated for the rest of the run. The encoder writes a body's bytes straight
 into a buffer that grows by doubling, each number LEB128-encoded in place (a signed constant
 without a BigInt): building each instruction's bytes as an array of its own was half of
 emitting, and a program of 1 500 small functions run a few times each emitted in 531 ms where

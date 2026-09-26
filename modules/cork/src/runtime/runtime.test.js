@@ -822,6 +822,31 @@ test('a batch the worker forms from a copy of its pages runs as the one formed h
     await m.runtime.flush();
 });
 
+test('a worker that cannot load is dropped and the batches are emitted inline', async()=>{
+    // A worker file that throws as it loads: the worker is made, and fails after.
+    const m = machine({ workerUrl: 'data:text/javascript,throw new Error("cannot load")' });
+    m.write(CODE, COUNTDOWN);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE, 0, 2);
+    let published = false;
+    for (let i = 0; i < 200 && !published; i++)
+    {
+        await m.runtime.translatePending();
+        await new Promise(resolve=>setTimeout(resolve, 10));
+        published = m.runtime.entryOf(CODE) >= 0;
+    }
+    assert.ok(published, 'translated inline, the worker never answering');
+    /** @returns {string[]} */
+    const lost = ()=>Object.keys(m.runtime.diagnostics().refused ?? {})
+        .filter(reason=>reason.startsWith('worker: '));
+    for (let i = 0; i < 200 && lost().length === 0; i++)
+    {
+        await new Promise(resolve=>setTimeout(resolve, 10));
+    }
+    assert.match(lost().join(', '), /cannot load/, 'the loss is reported, not thrown');
+    await m.runtime.flush();
+});
+
 test('a region loads and stores only the registers it names, and a register written on one'
     + ' path keeps its value on the other', async()=>{
     const m = machine();

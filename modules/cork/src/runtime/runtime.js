@@ -681,7 +681,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      *     terminate: () => void } | null} */
     let worker = null;
     let workerClosed = false;
-    /** @type {{ id: number, metas?: any[], relink?: RegionRecord[], store: any } | null} */
+    /** @type {{ id: number, metas?: any[], relink?: RegionRecord[], store: any,
+     *     at: number } | null} */
     let outstanding = null;
     // A batch's store lookups are in flight: its bytes come back between
     // frames, and until then no new batch is formed, so the batches publish in
@@ -1118,7 +1119,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         };
         if (worker !== null)
         {
-            outstanding = { id: ++workerRequest, relink: chunk, store };
+            outstanding = { id: ++workerRequest, relink: chunk, store, at: performance.now() };
             worker.post({ id: outstanding.id, relink, layout, features: found,
                 options: emitOptions() }, [...copies.values()].map(bytes=>bytes.buffer));
             return true;
@@ -1172,6 +1173,20 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 return;
             }
             adapter.onMessage(onWorkerResults);
+            adapter.onLost(reason=>{
+                // A worker that cannot load or has died answers nothing
+                // again: emitting goes back inline, and a batch it held is
+                // given up so the next one is not held behind it.
+                if (worker !== adapter)
+                {
+                    return;
+                }
+                refused[`worker: ${reason}`] = 1;
+                worker = null;
+                outstanding = null;
+                inFlight.clear();
+                adapter.terminate();
+            });
             worker = adapter;
         }, ()=>{});
     }
@@ -1236,7 +1251,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // The worker forms the regions again from a copy of their pages, as
             // a relink does, and keeps each one only when its bytes hash as they
             // did here.
-            outstanding = { id: ++workerRequest, metas: unbuilt, store };
+            outstanding = { id: ++workerRequest, metas: unbuilt, store, at: performance.now() };
             const copies = copyPages(unbuilt.map(one=>one.region.pages));
             worker.post({
                 id: outstanding.id,
@@ -1485,6 +1500,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // formed in the meantime stay queued for the next call. A
             // batch's store lookups are likewise in flight: the next batch
             // waits for them, so the pending ones publish in order.
+            // A batch the worker has held past the in-flight limit is given
+            // up: its answer, should it come, no longer matches, and the
+            // candidates it held are free to be taken again.
+            if (outstanding !== null && performance.now() - outstanding.at > IN_FLIGHT_MS)
+            {
+                refused['worker: no answer'] = (refused['worker: no answer'] ?? 0) + 1;
+                outstanding = null;
+                inFlight.clear();
+            }
             if (outstanding !== null || storePending)
             {
                 return 0;
