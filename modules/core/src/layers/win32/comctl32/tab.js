@@ -18,8 +18,8 @@
  * In the tab form the focus is the selection: moving one moves the other.
  * The button form (TCS_BUTTONS) keeps them apart -- the focus walks the
  * buttons and the parent hears TCN_FOCUSCHANGE -- and is drawn as a row of
- * push buttons over a pane with no border. Images are kept as indices and
- * not drawn.
+ * push buttons over a pane with no border. A tab's image, from the image list
+ * TCM_SETIMAGELIST names, is drawn at its left, its label beside it.
  */
 
 import {
@@ -149,9 +149,23 @@ const PANE_INSET = 4;
  * @property {number} extendedStyle
  * @property {number} width  A fixed-width tab's width.
  * @property {number} height  The row's height, 0 to follow the font.
- * @property {{ x: number, y: number }} padding
+ * @property {{ x: number, y: number }} padding  As TCM_SETPADDING last set it.
+ * @property {{ x: number, y: number }} applied  The padding the tabs are laid
+ *           out with: TCM_SETPADDING's, from the next time the list, the item
+ *           size or the items change (Wine's tab tests).
  * @property {boolean} unicode
  * @property {number} pressed  The tab a button press landed on.
+ */
+
+/**
+ * The image lists a tab control draws from: an image's size, and an image
+ * drawn through its mask. Absent in a build without comctl32's image lists,
+ * and then a tab has no image.
+ *
+ * @typedef {Object} TabImages
+ * @property {(list: number) => { cx: number, cy: number } | null} size
+ * @property {(list: number, index: number, hdc: number, x: number, y: number)
+ *     => boolean} draw
  */
 
 /**
@@ -159,10 +173,11 @@ const PANE_INSET = 4;
  *
  * @param {ControlHost} host
  * @param {any} tk  The drawing helpers the system classes share.
+ * @param {TabImages} [images]
  * @returns {(record: any, message: ControlMessage, thread?: unknown)
  *     => number | Promise<number>}
  */
-export function createTabProcedure(host, tk){
+export function createTabProcedure(host, tk, images){
     /** @param {any} record @returns {TabState} */
     const state = record=>{
         const held = tk.stateOf(record);
@@ -176,6 +191,7 @@ export function createTabProcedure(host, tk){
         held.width ??= FIXED_WIDTH;
         held.height ??= 0;
         held.padding ??= { ...PADDING };
+        held.applied ??= { ...held.padding };
         held.unicode ??= false;
         held.pressed ??= -1;
         return held;
@@ -323,10 +339,22 @@ export function createTabProcedure(host, tk){
     };
 
     /**
+     * The size of the images a tab shows, or null with no image list.
+     *
+     * @param {any} record
+     */
+    const iconOf = record=>{
+        const list = state(record).imageList;
+        return list !== 0 && images ? images.size(list) : null;
+    };
+
+    /**
      * Where each tab sits in the row, left to right, as it is drawn when not
-     * selected. A fixed-width tab is as wide as it was set; any other is its
-     * label and padding wide, and no narrower than the minimum -- six average
-     * characters and the padding, unless TCM_SETMINTABWIDTH named one.
+     * selected. A fixed-width tab is as wide as it was set, and with an image
+     * list no narrower than an image and four; any other is its label and
+     * two paddings wide, or with an image the image and three, and no
+     * narrower than the minimum -- six average characters and two paddings,
+     * unless TCM_SETMINTABWIDTH named one (Wine's test_tab).
      *
      * @param {any} record
      * @returns {Rect[]}
@@ -334,26 +362,42 @@ export function createTabProcedure(host, tk){
     const layout = record=>{
         const held = state(record);
         const measured = measures(record);
-        const height = held.height > 0 ? held.height
-            : measured.line + 2 * held.padding.y - 1;
+        const icon = iconOf(record);
+        const padding = held.applied;
+        const height = rowHeight(record);
         const least = held.minWidth < 0
-            ? measured.average * MIN_CHARACTERS + 2 * held.padding.x
+            ? measured.average * MIN_CHARACTERS + 2 * padding.x
             : held.minWidth;
         let left = RAISE;
-        return measured.labels.map(label=>{
-            const width = (record.style & TCS_FIXEDWIDTH) !== 0 ? held.width
-                : Math.max(least, label + 2 * held.padding.x);
+        return measured.labels.map((label, index)=>{
+            const imaged = icon !== null && held.items[index].image >= 0;
+            const width = (record.style & TCS_FIXEDWIDTH) !== 0
+                ? Math.max(held.width, imaged ? icon.cx + 4 : 0)
+                : Math.max(least, imaged ? label + icon.cx + 3 * padding.x
+                    : label + 2 * padding.x);
             const rect = { left, top: ROW_TOP, right: left + width, bottom: ROW_TOP + height };
             left += width;
             return rect;
         });
     };
 
-    /** The row's height as it stands. @param {any} record */
+    /**
+     * The row's height as it stands: as set, or the label's line -- or the
+     * image, when that is taller -- and two paddings.
+     *
+     * @param {any} record
+     */
     const rowHeight = record=>{
         const held = state(record);
+        const icon = iconOf(record);
         return held.height > 0 ? held.height
-            : measures(record).line + 2 * held.padding.y - 1;
+            : Math.max(measures(record).line, icon ? icon.cy : 0) + 2 * held.applied.y - 1;
+    };
+
+    /** A new padding takes effect when the tabs are next laid out. @param {any} record */
+    const relayout = record=>{
+        const held = state(record);
+        held.applied = { ...held.padding };
     };
 
     /** The pane under the row, border included. @param {any} record */
@@ -454,6 +498,27 @@ export function createTabProcedure(host, tk){
     const itemAt = (record, x, y)=>layout(record).findIndex(rect=>x >= rect.left
         && x < rect.right && y >= rect.top - RAISE && y < rect.bottom);
 
+    /**
+     * A tab's image at its left, a padding in and centred on its height, and
+     * the rectangle left for its label.
+     *
+     * @param {any} record @param {number} hdc @param {number} index @param {Rect} rect
+     * @returns {Rect}
+     */
+    const drawImage = (record, hdc, index, rect)=>{
+        const held = state(record);
+        const icon = iconOf(record);
+        const item = held.items[index];
+        if (!icon || !images || item.image < 0)
+        {
+            return rect;
+        }
+        const x = rect.left + held.applied.x;
+        images.draw(held.imageList, item.image, hdc, x,
+            rect.top + ((rect.bottom - rect.top - icon.cy) >> 1));
+        return { ...rect, left: x + icon.cx };
+    };
+
     /** @param {any} record @param {number} hdc */
     const paintTabs = (record, hdc)=>{
         const draw = /** @type {any} */ (host.draw);
@@ -476,8 +541,10 @@ export function createTabProcedure(host, tk){
                     tk.buttonEdge(hdc, rect, pressed);
                 }
                 const shift = pressed ? 1 : 0;
-                const label = { left: rect.left + shift, top: rect.top + shift,
-                    right: rect.right + shift, bottom: rect.bottom + shift };
+                const label = drawImage(record, hdc, index, {
+                    left: rect.left + shift, top: rect.top + shift,
+                    right: rect.right + shift, bottom: rect.bottom + shift,
+                });
                 tk.drawText(hdc, held.items[index].text, label,
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE, ink);
             });
@@ -502,7 +569,7 @@ export function createTabProcedure(host, tk){
                 bottom: tab.bottom }, shadow);
             draw.fill(hdc, { left: tab.right - 1, top: tab.top + 2, right: tab.right,
                 bottom: tab.bottom }, dark);
-            tk.drawText(hdc, held.items[index].text, tab,
+            tk.drawText(hdc, held.items[index].text, drawImage(record, hdc, index, tab),
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE, ink);
         });
     };
@@ -571,6 +638,7 @@ export function createTabProcedure(host, tk){
                 readItem(record, item, message.lParam >>> 0, wide, false);
                 const index = Math.max(0, Math.min(held.items.length, message.wParam | 0));
                 held.items.splice(index, 0, item);
+                relayout(record);
                 if (held.selected >= index)
                 {
                     held.selected++;
@@ -697,8 +765,14 @@ export function createTabProcedure(host, tk){
                 held.extra = message.wParam | 0;
                 return 1;
             case TCM_SETITEMSIZE: {
-                // A fixed-width tab takes both; any other only the height.
+                // A fixed-width tab takes both; any other only the height. The
+                // same size again lays nothing out anew.
                 const answer = ((rowHeight(record) & 0xffff) << 16 | held.width & 0xffff) >>> 0;
+                if ((message.lParam & 0xffff) !== held.width
+                    || message.lParam >>> 16 !== held.height)
+                {
+                    relayout(record);
+                }
                 held.width = message.lParam & 0xffff;
                 held.height = message.lParam >>> 16;
                 host.invalidate(record);
@@ -721,6 +795,8 @@ export function createTabProcedure(host, tk){
             case TCM_SETIMAGELIST: {
                 const previous = held.imageList;
                 held.imageList = message.lParam >>> 0;
+                relayout(record);
+                host.invalidate(record);
                 return previous;
             }
             case TCM_REMOVEIMAGE: {
