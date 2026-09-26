@@ -730,3 +730,177 @@ test('PlaySound plays a WAVE image from memory, loops it, and null stops it', as
     assert.equal(winmm.PlaySoundA.argBytes, 12);
     assert.equal(winmm.sndPlaySoundA.argBytes, 8);
 });
+
+test('the timer reports the periods timeSetEvent accepts', ()=>{
+    // timer.c test_timeGetDevCaps.
+    const m = machine();
+    const TIMERR_NOCANDO = 97;
+    assert.equal(m.winmm.timeGetDevCaps.handler([0x400, 0]), TIMERR_NOCANDO);
+    assert.equal(m.winmm.timeGetDevCaps.handler([0, 8]), TIMERR_NOCANDO);
+    assert.equal(m.winmm.timeGetDevCaps.handler([0, 0]), TIMERR_NOCANDO);
+    assert.equal(m.winmm.timeGetDevCaps.handler([0x400, 8]), 0);
+    assert.deepEqual([m.get32(0x400), m.get32(0x404)], [1, 1000000],
+        'wPeriodMin and wPeriodMax, the delays timeSetEvent takes');
+    assert.equal(m.winmm.timeGetDevCaps.argBytes, 8);
+});
+
+test('the wave-out volume is one level for the device, heard through every track', ()=>{
+    const memory = new Uint8Array(0x1000);
+    /** @type {{ gain: number }[]} */
+    const tracks = [];
+    const wave = /** @type {any} */ (createWinmmFunctions({
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        /** @param {number} address @param {Uint8Array} bytes */
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        now: ()=>0,
+        output: ()=>({
+            open(){
+                const track = {
+                    gain: 1, playedBytes: ()=>0, write: ()=>0, close(){}, reset(){},
+                };
+                tracks.push(track);
+                return track;
+            },
+        }),
+    }));
+    const winmm = wave.table;
+    const view = new DataView(memory.buffer);
+    view.setUint32(0x100, 1 | 2 << 16, true);
+    view.setUint32(0x104, 22050, true);
+    view.setUint32(0x108, 22050 * 4, true);
+    view.setUint32(0x10c, 4 | 16 << 16, true);
+    assert.equal(winmm.waveOutOpen.handler([0x200, 0, 0x100, 0, 0, 0]), 0);
+    const device = view.getUint32(0x200, true);
+
+    assert.equal(winmm.waveOutGetVolume.handler([device, 0]), 11, 'MMSYSERR_INVALPARAM');
+    assert.equal(winmm.waveOutGetVolume.handler([device, 0x300]), 0);
+    assert.equal(view.getUint32(0x300, true), 0xffffffff, 'full volume to start with');
+
+    // One level: the low word, which is what a device without separate left
+    // and right control takes, and what it says it has.
+    assert.equal(winmm.waveOutSetVolume.handler([device, 0x2000_8000]), 0);
+    assert.equal(tracks[0].gain, 0x8000 / 0xffff);
+    assert.equal(winmm.waveOutGetVolume.handler([0, 0x300]), 0, 'the device by its id');
+    assert.equal(view.getUint32(0x300, true), 0x8000_8000);
+    assert.equal(winmm.waveOutGetDevCapsA.handler([0, 0x400, 52]), 0);
+    assert.equal(view.getUint32(0x400 + 48, true) & 0x0008, 0, 'no WAVECAPS_LRVOLUME');
+    assert.equal(view.getUint32(0x400 + 48, true) & 0x0001, 1, 'but WAVECAPS_VOLUME');
+
+    // A device opened later plays at the level already set.
+    assert.equal(winmm.waveOutSetVolume.handler([0xffffffff, 0x4000]), 0, 'WAVE_MAPPER');
+    assert.equal(winmm.waveOutOpen.handler([0x204, 0, 0x100, 0, 0, 0]), 0);
+    assert.deepEqual(tracks.map(track=>track.gain), [0x4000 / 0xffff, 0x4000 / 0xffff]);
+
+    assert.equal(winmm.waveOutSetVolume.handler([1, 0]), 2, 'MMSYSERR_BADDEVICEID');
+    assert.equal(winmm.waveOutSetVolume.handler([0x7fff0000, 0]), 5, 'MMSYSERR_INVALHANDLE');
+    assert.deepEqual([winmm.waveOutGetVolume.argBytes, winmm.waveOutSetVolume.argBytes], [8, 8]);
+});
+
+test('an error code reads as text, cut to the buffer, and an unknown one is refused', ()=>{
+    const m = machine();
+    const MMSYSERR_BADERRNUM = 9;
+    assert.equal(m.winmm.waveOutGetErrorTextA.handler([2, 0x400, 256]), 0);
+    const text = String.fromCharCode(...m.memory.slice(0x400, m.memory.indexOf(0, 0x400)));
+    assert.ok(text.length > 10, `MMSYSERR_BADDEVICEID reads as "${text}"`);
+    assert.equal(m.winmm.waveOutGetErrorTextA.handler([34, 0x500, 256]), 0, 'WAVERR_UNPREPARED');
+    assert.notEqual(m.memory[0x500], 0);
+
+    m.memory.fill(0xaa, 0x600, 0x610);
+    assert.equal(m.winmm.waveOutGetErrorTextA.handler([2, 0x600, 5]), 0);
+    assert.deepEqual([...m.memory.slice(0x600, 0x606)],
+        [...text.slice(0, 4)].map(c=>c.charCodeAt(0)).concat([0, 0xaa]),
+        'four characters and the terminator');
+    assert.equal(m.winmm.waveOutGetErrorTextA.handler([2, 0x600, 0]), 0, 'no room, no text');
+    assert.equal(m.winmm.waveOutGetErrorTextA.handler([200, 0x600, 256]), MMSYSERR_BADERRNUM);
+
+    assert.equal(m.winmm.waveOutGetErrorTextW.handler([2, 0x700, 256]), 0);
+    const wide = [];
+    for (let at = 0x700; m.memory[at] | m.memory[at + 1]; at += 2)
+    {
+        wide.push(m.memory[at] | m.memory[at + 1] << 8);
+    }
+    assert.equal(String.fromCharCode(...wide), text, 'the same text in UTF-16');
+    assert.deepEqual([m.winmm.waveOutGetErrorTextA.argBytes, m.winmm.waveOutGetErrorTextW.argBytes],
+        [12, 12]);
+});
+
+test('MCI answers a command string as a machine with no MCI device does', ()=>{
+    // mci.c test_mciParser for the parse errors; mcicda.c for what opening the
+    // CD player gives where it cannot load; and nothing ever opens here.
+    const m = machine();
+    const MCIERR_UNRECOGNIZED_COMMAND = 261;
+    const MCIERR_INVALID_DEVICE_NAME = 263;
+    const MCIERR_CANNOT_LOAD_DRIVER = 266;
+    const MCIERR_MISSING_COMMAND_STRING = 267;
+    const MCIERR_CANNOT_USE_ALL = 279;
+    const MCIERR_EXTENSION_NOT_FOUND = 281;
+    const MCIERR_MISSING_DEVICE_NAME = 292;
+    /** @param {string} command */
+    const send = command=>{
+        m.memory.set([...command].map(c=>c.charCodeAt(0)).concat([0]), 0x400);
+        m.memory.fill(0x55, 0x600, 0x640);
+        return m.winmm.mciSendStringA.handler([0x400, 0x600, 0x40, 0]);
+    };
+    /** The answer the return buffer holds. */
+    const returned = ()=>String.fromCharCode(...m.memory.slice(0x600, m.memory.indexOf(0, 0x600)));
+
+    assert.equal(send(''), MCIERR_MISSING_COMMAND_STRING);
+    assert.equal(send('open'), MCIERR_MISSING_DEVICE_NAME);
+    assert.equal(send('open cdaudio alias c notify shareable'), MCIERR_CANNOT_LOAD_DRIVER);
+    assert.equal(returned(), '', 'the return buffer is emptied on an error');
+    assert.equal(send('OPEN new type waveaudio alias mysound'), MCIERR_CANNOT_LOAD_DRIVER);
+    assert.equal(send('open "C:\\Music\\track one.mid" alias music'), MCIERR_CANNOT_LOAD_DRIVER,
+        'a sequence, by its extension');
+    assert.equal(send('open C:\\data\\thing.xyz'), MCIERR_EXTENSION_NOT_FOUND);
+    assert.equal(send('open nosuchdevice'), MCIERR_INVALID_DEVICE_NAME);
+    assert.equal(send('play cdaudio from 1 to 2'), MCIERR_CANNOT_LOAD_DRIVER,
+        'a command to a device by its type opens it first');
+    assert.equal(send('play c'), MCIERR_INVALID_DEVICE_NAME, 'an alias nothing opened');
+    assert.equal(send('status all time format'), MCIERR_CANNOT_USE_ALL);
+    assert.equal(send('frobnicate c'), MCIERR_UNRECOGNIZED_COMMAND);
+    assert.equal(send('close all'), 0, 'nothing open is nothing to close');
+    assert.equal(send('sysinfo all quantity'), 0);
+    assert.equal(returned(), '0');
+    assert.equal(send('sysinfo cdaudio quantity open'), 0);
+    assert.equal(returned(), '0');
+
+    m.memory.set([...'cdaudio'].map(c=>c.charCodeAt(0)).concat([0]), 0x400);
+    assert.equal(m.winmm.mciGetDeviceIDA.handler([0x400]), 0, 'no device of that name is open');
+    assert.deepEqual([m.winmm.mciSendStringA.argBytes, m.winmm.mciGetDeviceIDA.argBytes], [16, 4]);
+
+    // The command form's open agrees with the string form.
+    const MCI_OPEN = 0x0803;
+    const MCI_OPEN_TYPE = 0x2000;
+    m.memory.set([...'cdaudio'].map(c=>c.charCodeAt(0)).concat([0]), 0x480);
+    m.put32(0x500 + 8, 0x480);
+    assert.equal(m.winmm.mciSendCommandA.handler([0, MCI_OPEN, MCI_OPEN_TYPE, 0x500]),
+        MCIERR_CANNOT_LOAD_DRIVER);
+});
+
+test('a machine with no MIDI input and no joystick says so on every call', ()=>{
+    // midi.c: midiInOpen past the last device, the mapper included, is
+    // MMSYSERR_BADDEVICEID; joystick.c: an id no slot answers to is JOYERR_PARMS.
+    const m = machine();
+    const MMSYSERR_BADDEVICEID = 2;
+    const MMSYSERR_INVALHANDLE = 5;
+    const JOYERR_PARMS = 165;
+    assert.equal(m.winmm.midiInGetNumDevs.handler([]), 0);
+    assert.equal(m.winmm.midiInOpen.handler([0x400, 0, 0, 0, 0]), MMSYSERR_BADDEVICEID);
+    assert.equal(m.winmm.midiInOpen.handler([0x400, 0xffffffff, 0, 0, 0]), MMSYSERR_BADDEVICEID,
+        'MIDIMAPPER');
+    assert.equal(m.winmm.midiInGetDevCapsA.handler([0, 0x400, 76]), MMSYSERR_BADDEVICEID);
+    assert.equal(m.winmm.midiInGetDevCapsW.handler([0, 0x400, 76]), MMSYSERR_BADDEVICEID);
+    for (const name of ['midiInClose', 'midiInStart', 'midiInStop', 'midiInReset',
+        'midiInAddBuffer', 'midiInPrepareHeader', 'midiInUnprepareHeader', 'midiInGetID',
+        'midiInMessage'])
+    {
+        assert.equal(m.winmm[name].handler([0x1234, 0, 0, 0]), MMSYSERR_INVALHANDLE, name);
+    }
+    assert.equal(m.winmm.joyGetPos.handler([0, 0x400]), JOYERR_PARMS);
+    assert.deepEqual(['midiInGetNumDevs', 'midiInOpen', 'midiInGetDevCapsA', 'midiInGetDevCapsW',
+        'midiInClose', 'midiInStart', 'midiInStop', 'midiInReset', 'midiInAddBuffer',
+        'midiInPrepareHeader', 'midiInUnprepareHeader', 'midiInGetID', 'midiInMessage',
+        'joyGetPos'].map(name=>m.winmm[name].argBytes),
+    [0, 20, 12, 12, 4, 4, 4, 4, 12, 12, 12, 8, 16, 8]);
+});
