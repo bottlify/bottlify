@@ -50,7 +50,7 @@ import {
 } from './pixelformat.js';
 import { createWgl } from './wgl.js';
 import { createGpuRenderer } from './gpu.js';
-import { compressedDigest, imageDigests, keptImages } from './context-textures.js';
+import { compressedDigest, imageDigests, imageTimes, keptImages } from './context-textures.js';
 import { imageBytes, unpackImage } from './texture.js';
 import { packImage } from './context-pixels.js';
 import { PFD } from './constants.js';
@@ -1744,6 +1744,7 @@ export function createOpengl(services){
             compressed: `${compressedDigest.count}:${compressedDigest.bytes}:`
                 + compressedDigest.hash.toString(16),
             images: imageDigests.slice(),
+            imageTimes: imageTimes.slice(),
             kept: keptImages.images.map(image=>({ index: image.index, width: image.width,
                 height: image.height, rgba: base64Of(image.texels) })),
         }),

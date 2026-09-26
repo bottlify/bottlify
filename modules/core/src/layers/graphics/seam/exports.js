@@ -368,6 +368,7 @@ export function createGraphicsLibraries(
             compressedTextures: opengl ? opengl.diagnostics().compressed : null,
             imageDigests: opengl ? opengl.diagnostics().images : [],
             keptImages: opengl ? opengl.diagnostics().kept : [],
+            imageTimes: opengl ? opengl.diagnostics().imageTimes : [],
             vulkan: vulkan.diagnostics(),
         }),
 

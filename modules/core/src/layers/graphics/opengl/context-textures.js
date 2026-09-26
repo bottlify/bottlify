@@ -48,6 +48,9 @@ export const compressedDigest = { count: 0, bytes: 0, hash: 0x811c9dc5 };
  */
 export const imageDigests = [];
 
+/** When each of `imageDigests` was uploaded, in epoch ms, as the harness times presents. @type {number[]} */
+export const imageTimes = [];
+
 /**
  * The texels of chosen uploads, by their index in `imageDigests`: which ones
  * a run asked for, and those it got. A digest says two images differ; this
@@ -541,7 +544,7 @@ export function installTextureCalls(context, kernel){
         // The data is read before the list decides anything: a compiled
         // glTexImage2D holds the pixels as they were, not the pointer.
         const texels = readPixels(pixels, width, height, format, type);
-        if (texels instanceof Uint8Array && imageDigests.length < 4000)
+        if (texels instanceof Uint8Array && imageDigests.length < 20000)
         {
             if (keptImages.at.has(imageDigests.length))
             {
@@ -550,6 +553,7 @@ export function installTextureCalls(context, kernel){
             }
             imageDigests.push(
                 `${target.toString(16)}:${level}:${width}x${height}:${hashOf(texels)}`);
+            imageTimes.push(Math.round(performance.timeOrigin + performance.now()));
         }
         if (texels === 'refused')
         {

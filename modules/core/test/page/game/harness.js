@@ -1536,6 +1536,7 @@ export function createHarness(canvas, how = {}){
             compressedTextures: graphics.seam?.compressedTextures ?? null,
             imageDigests: graphics.seam?.imageDigests ?? [],
             keptImages: graphics.seam?.keptImages ?? [],
+            imageTimes: graphics.seam?.imageTimes ?? [],
             libraries: graphics.libraries ?? [],
             // `lastFrame` is dropped: it is the recorded commands, kept for a test
             // that replays them here, and it holds backend objects and a uniform
