@@ -188,6 +188,25 @@ export function createEntries({ memory, hashBase = -1, shift = 16 } = {}){
             }
             return entry;
         },
+        /**
+         * Moves an entry to another function-table index -- its region's function
+         * in a relinked module -- in the map and in the hash translated code probes.
+         *
+         * @param {number} index @param {Entry['fn']} fn @param {number} table
+         */
+        retable(index, fn, table){
+            const entry = slots[index];
+            if (!entry)
+            {
+                return;
+            }
+            entry.fn = fn;
+            entry.table = table;
+            if (entry.slot >= 0)
+            {
+                view().setUint32(hashBase + entry.slot * Tables.HASH_SLOT + 4, table, true);
+            }
+        },
         /** Removes one entry. @param {number} index */
         remove(index){
             const entry = slots[index];

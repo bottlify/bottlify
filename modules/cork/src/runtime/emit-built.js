@@ -18,7 +18,7 @@
  * clone carries.
  */
 
-import { emitRegion, prepareModule } from '../emit/region.js';
+import { emitRegion, finishModule, prepareModule } from '../emit/region.js';
 import { formRegion } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 
@@ -67,9 +67,11 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
- *     blockProfile?: boolean, timings?: boolean,
+ *     blockProfile?: boolean, timings?: boolean, place?: boolean,
  *     leaveOut?: Set<string> | string[], wide?: boolean, structure?: boolean }} [options]
- *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0
+ *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0;
+ *     place: job i's function goes at the module's range of the table plus i, a transfer
+ *     into the range a direct tail call and one out of it counted (`finishModule`)
  * @returns {BuiltBatch}
  */
 export function emitBatch(jobs, layout, features, options = {}){
@@ -86,10 +88,13 @@ export function emitBatch(jobs, layout, features, options = {}){
         blockProfile: options.blockProfile === true,
         wide: options.wide === true,
         structure: options.structure === true,
+        place: options.place === true ? jobs.length : 0,
         leaveOut,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
     });
     const emitAt = clock();
+    /** Each job's function, for the dispatcher. @type {(number | null)[]} */
+    const functions = jobs.map(()=>null);
     /** @type {BuiltBatch['results']} */
     const results = jobs.map(({ region, entryTop, checked }, index)=>{
         try
@@ -100,6 +105,7 @@ export function emitBatch(jobs, layout, features, options = {}){
                 { entryTop, checked: checked === true });
             const exportName = `r${index}`;
             m.exportFunction(exportName, translation.functionIndex);
+            functions[index] = translation.functionIndex;
             // Named by its address, so a browser's CPU profile of the engine
             // says which regions the time went to.
             m.nameFunction(translation.functionIndex,
@@ -119,6 +125,7 @@ export function emitBatch(jobs, layout, features, options = {}){
                 message: (e instanceof Error ? e.message : String(e)).slice(0, 160) };
         }
     });
+    finishModule(context, functions);
     const encodedAt = clock();
     const module = m.toBytes();
     return { module, results, emitMs: encodedAt - emitAt, encodeMs: clock() - encodedAt };

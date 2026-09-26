@@ -189,6 +189,10 @@
  * @property {number} modules          Wasm modules instantiated.
  * @property {number} [relinks]        Relinks begun: the running regions gathered into big modules.
  * @property {number} [relinked]       Regions switched to a relinked module's function.
+ * @property {number} [merges]         Two modules gathered into one because one kept
+ *     transferring into the other (`mergeAfter`).
+ * @property {number} [crossings]      Transfers out of a running module into another,
+ *     through the function table: the rest are direct tail calls.
  * @property {number} [transfers]      Transfers between regions, when counted (`countTransfers`).
  * @property {number} translatedShare  Instructions retired in the engine / retired, 0..1.
  * @property {number} retired          Instructions retired in the engine, for a frame's share.

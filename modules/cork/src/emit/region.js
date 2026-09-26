@@ -189,6 +189,12 @@ const LOCAL_TYPES = [
  * @property {Record<string, number>} math  the transcendentals imported from the host
  * @property {boolean} hash            an untranslated exit probes the entry hash and
  *                                     tail-calls the region found, through the host's table
+ * @property {number} [transfer]       with hash, the module's transfer function
+ *     (`finishModule`), which an untranslated exit tail-calls with its EIP for the label
+ * @property {{ base: number, arms: number, crossings: number, crossedTo: number }} [placed]
+ *     the globals of the module's range of the table (`base`, `arms` long, job i's function
+ *     at `base + i` -- the host's `placeModule`), and of what left the range: a count and
+ *     the last index
  * @property {number} [trapPort]       the port a write to which is the host's call channel
  * @property {Set<string>} leaveOut    instruction classes (x87, mmx, sse) a region exits before
  * @property {number} [trap]           the host's trap import, called from inside a region
@@ -203,16 +209,20 @@ const LOCAL_TYPES = [
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
- *     countTransfers?: boolean, wide?: boolean, blockProfile?: boolean, structure?: boolean }}
+ *     countTransfers?: boolean, wide?: boolean, blockProfile?: boolean, structure?: boolean,
+ *     place?: number }}
  *     [options]  undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
- *     tail calls); trapPort: `out dx, eax` to it leaves with a trap exit
+ *     tail calls); trapPort: `out dx, eax` to it leaves with a trap exit; place: with
+ *     hash, the number of regions the module will hold, which the host places in a range
+ *     of the table: a transfer into the range is a direct tail call, and one out of it is
+ *     counted (`finishModule`)
  * @returns {ModuleContext}
  */
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
-        wide = false, blockProfile = false, structure = false } = {})
+        wide = false, blockProfile = false, structure = false, place = 0 } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -290,7 +300,177 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.blockProfile = true;
     }
+    if (hashed)
+    {
+        // The transfer's index is taken before any region's, which call it;
+        // its body waits for the module's last region (`finishModule`).
+        context.transfer = m.function(regionType, [], new Uint8Array([0x00, 0x0b]));
+    }
+    if (hashed && place > 0)
+    {
+        // The base starts where no table index minus it lands in the range,
+        // so the module transfers through the table until the host places it.
+        const base = m.global(ValType.i32, true, 0x80000000 | 0);
+        m.exportGlobal('base', base).exportGlobal('arms', m.global(ValType.i32, false, place));
+        // What left the module through the table, for the host to gather a
+        // module and the one it keeps transferring into (the runtime's merges).
+        const crossings = m.global(ValType.i32, true, 0);
+        const crossedTo = m.global(ValType.i32, true, -1);
+        m.exportGlobal('crossings', crossings).exportGlobal('crossedTo', crossedTo);
+        context.placed = { base, arms: place, crossings, crossedTo };
+    }
     return context;
+}
+
+/**
+ * Writes the module's transfer function, once every region is in it: what an
+ * untranslated exit with budget left tail-calls, with its EIP in the label's
+ * place and the state the regions carry. It probes the entry hash for the EIP
+ * and, on a slot compiled for this x87 top or for any, tail-calls that
+ * region's function with the slot's label and the budget that remains: a
+ * return, an indirect jump or a call into translated code costs no crossing.
+ * A miss (an empty slot met) leaves as the region would have, the carried
+ * state written back. In a placed module, job i's function is at the range's
+ * start plus i, and a slot naming an index of the range is a direct tail call
+ * of that job's function; one outside it goes through the table, counted.
+ *
+ * One function a module rather than the probe in every region: the regions
+ * are the smaller -- a loading phase compiles thousands of them -- and the
+ * hop into it is a direct tail call, a fraction of the indirect one.
+ *
+ * @param {ModuleContext} context
+ * @param {(number | null)[]} functions  each job's function index, null for one not emitted
+ */
+export function finishModule(context, functions){
+    const { transfer, placed, m, regionType, layout } = context;
+    if (transfer === undefined)
+    {
+        return;
+    }
+    if (placed !== undefined && functions.length !== placed.arms)
+    {
+        throw new Error(`emit: ${functions.length} functions for ${placed.arms} arms`);
+    }
+    const eip = 0; // the label's parameter, the label once the slot is found
+    const index = STATE_PARAMS; // the slot's index, then the arm
+    const slotAt = STATE_PARAMS + 1;
+    const key = STATE_PARAMS + 2;
+    const hashBase = layout.tables + Tables.HASH;
+    const carried = (layout.flagRecord ?? -1) >= 0;
+    const b = new Body();
+    const pass = ()=>{
+        for (let local = 0; local < STATE_PARAMS; local++)
+        {
+            b.localGet(local);
+        }
+    };
+    b.block(EMPTY); // miss
+    b.block(EMPTY); // found
+    b.localGet(eip).i32const(0x9e3779b1 | 0).op(I32.mul).i32const(layout.hashShift ?? 16)
+        .op(I32.shrU)
+        .localSet(index);
+    // The first slot before the probe's loop, which only a collision enters:
+    // V8 checks the stack at every loop's head.
+    const slot = (/** @type {number} */ depth)=>{
+        b.localGet(index).i32const(Tables.HASH_SLOT).op(I32.mul).i32const(hashBase).op(I32.add)
+            .localSet(slotAt);
+        b.localGet(slotAt).load('i32').localTee(key).localGet(eip).op(I32.eq);
+        b.if(EMPTY);
+        // Compiled for any top, or for the one the machine has.
+        b.localGet(slotAt).load('i32_8u', { offset: 10 }).localTee(key)
+            .i32const(ANY_TOP).op(I32.eq);
+        b.if(ValType.i32);
+        b.i32const(1);
+        b.else();
+        b.localGet(key).i32const(0).load('i32_8u', { offset: layout.x87Top }).op(I32.eq);
+        b.end();
+        b.brIf(depth + 1);
+        b.localGet(eip).localSet(key);
+        b.end();
+        b.localGet(key).op(I32.eqz);
+        b.brIf(depth + 1);
+    };
+    slot(0);
+    b.loop(EMPTY);
+    b.localGet(index).i32const(1).op(I32.add).i32const(Tables.HASH_SLOTS - 1).op(I32.and)
+        .localSet(index);
+    slot(1);
+    b.br(0);
+    b.end(); // loop
+    b.end(); // found
+    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.countTransfers)
+    {
+        const at = layout.tables + Tables.TRANSFERS;
+        b.i32const(0).i32const(0).load('i32', { offset: at }).i32const(1).op(I32.add)
+            .store('i32', { offset: at });
+    }
+    b.localGet(slotAt).load('i32_16u', { offset: 8 }).localSet(eip);
+    if (placed !== undefined)
+    {
+        // V8's indirect tail call costs several times a direct one, and more
+        // the more modules there are.
+        const { arms } = placed;
+        b.localGet(slotAt).load('i32', { offset: 4 }).globalGet(placed.base).op(I32.sub)
+            .localTee(index).i32const(arms).op(I32.ltU);
+        b.if(EMPTY);
+        b.block(EMPTY); // the table's way, for a job not emitted
+        for (let i = 0; i < arms; i++)
+        {
+            b.block(EMPTY);
+        }
+        b.localGet(index);
+        b.brTable(functions.map((fn, i)=>(fn === null ? arms : i)), arms);
+        for (let i = 0; i < arms; i++)
+        {
+            b.end();
+            const fn = functions[i];
+            if (fn !== null)
+            {
+                pass();
+                b.returnCall(fn);
+            }
+        }
+        b.end(); // the table's way
+        b.else();
+        b.globalGet(placed.crossings).i32const(1).op(I32.add).globalSet(placed.crossings);
+        b.localGet(slotAt).load('i32', { offset: 4 }).globalSet(placed.crossedTo);
+        b.end();
+    }
+    pass();
+    b.localGet(slotAt).load('i32', { offset: 4 });
+    b.returnCallIndirect(regionType, 0);
+    b.end(); // miss
+    if (carried)
+    {
+        // As the region's epilogue writes it (`storeCarriedState`): the
+        // registers, the flag record, the flags word, EIP and the count.
+        const record = /** @type {number} */ (layout.flagRecord);
+        for (let r = 0; r < 8; r++)
+        {
+            b.i32const(0).localGet(Local.reg + r).store('i32', { offset: layout.regs + r * 4 });
+        }
+        for (const [i, local] of RECORD_LOCALS.entries())
+        {
+            b.i32const(0).localGet(local).store('i32', { offset: record + i * 4 });
+        }
+        b.i32const(0).localGet(Local.flags).store('i32', { offset: layout.eflags });
+        if (layout.flagsChanged >= 0)
+        {
+            b.i32const(0).i32const(0).store('i32', { offset: layout.flagsChanged });
+        }
+        b.i32const(0).localGet(eip).store('i32', { offset: layout.eip });
+        if (layout.previousIp >= 0)
+        {
+            b.i32const(0).localGet(eip).store('i32', { offset: layout.previousIp });
+        }
+        b.i32const(0);
+        b.i32const(0).load('i32', { offset: layout.counter }).localGet(Local.retired).op(I32.add);
+        b.store('i32', { offset: layout.counter });
+    }
+    b.i32const(Exit.UNTRANSLATED);
+    m.functions[transfer - m.importedFunctions] = {
+        typeIndex: regionType, locals: [ValType.i32, ValType.i32, ValType.i32], body: b.toBytes(),
+    };
 }
 
 /**
@@ -920,40 +1100,18 @@ export class RegionEmitter {
 
 
     /**
-     * An untranslated exit with budget left probes the entry hash for the
-     * address it leaves at and, on a slot compiled for this x87 top or for
-     * any, tail-calls that region's function with the label and the budget
-     * that remains: a return, an indirect jump or a call into translated
-     * code costs no crossing. The state block is complete at this point,
-     * so the callee's prologue reads what this epilogue wrote. A miss
-     * (an empty slot met) leaves as before.
+     * An untranslated exit with budget left tail-calls the module's transfer
+     * function (`finishModule`) with its EIP and the state a transfer carries:
+     * the entry hash names the region to go on in, or the transfer leaves as
+     * this epilogue would have. The state block is complete but for what the
+     * parameters carry, so the callee's prologue reads what this epilogue wrote.
      */
     transfer(){
-        const { b, layout } = this;
-        const base = layout.tables + Tables.HASH;
+        const { b } = this;
         b.localGet(Local.t0).i32const(Exit.UNTRANSLATED).op(I32.eq)
             .localGet(Local.budget).i32const(0).op(I32.gtS).op(I32.and);
-        this.openIf('lookup');
-        b.localGet(Local.eip).i32const(0x9e3779b1 | 0).op(I32.mul).i32const(layout.hashShift ?? 16)
-            .op(I32.shrU)
-            .localSet(Local.t1);
-        this.openLoop('probe');
-        b.localGet(Local.t1).i32const(Tables.HASH_SLOT).op(I32.mul).i32const(base).op(I32.add)
-            .localSet(Local.t2);
-        b.localGet(Local.t2).load('i32').localTee(Local.addr).localGet(Local.eip).op(I32.eq);
-        this.openIf('hit');
-        b.localGet(Local.t2).load('i32_8u', { offset: 10 }).localTee(Local.addr)
-            .i32const(ANY_TOP).op(I32.eq);
-        b.localGet(Local.addr).i32const(0).load('i32_8u', { offset: layout.x87Top }).op(I32.eq);
-        b.op(I32.or);
-        this.openIf('top');
-        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.countTransfers)
-        {
-            const at = layout.tables + Tables.TRANSFERS;
-            b.i32const(0).i32const(0).load('i32', { offset: at }).i32const(1).op(I32.add)
-                .store('i32', { offset: at });
-        }
-        b.localGet(Local.t2).load('i32_16u', { offset: 8 });
+        this.openIf('transfer');
+        b.localGet(Local.eip);
         b.localGet(Local.budget);
         for (let local = Local.budget + 1; local < STATE_PARAMS; local++)
         {
@@ -969,17 +1127,7 @@ export class RegionEmitter {
                 b.i32const(0);
             }
         }
-        b.localGet(Local.t2).load('i32', { offset: 4 });
-        b.returnCallIndirect(this.context.regionType, 0);
-        this.close();
-        b.localGet(Local.t2).load('i32').localSet(Local.addr);
-        this.close();
-        b.localGet(Local.addr).op(I32.eqz);
-        b.brIf(this.depthOf('lookup'));
-        b.localGet(Local.t1).i32const(1).op(I32.add).i32const(Tables.HASH_SLOTS - 1).op(I32.and)
-            .localSet(Local.t1);
-        b.br(this.depthOf('probe'));
-        this.close();
+        b.returnCall(/** @type {number} */ (this.context.transfer));
         this.close();
     }
 

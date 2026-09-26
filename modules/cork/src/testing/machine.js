@@ -14,7 +14,7 @@
 import { formRegion } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 import { features } from '../wasm/features.js';
-import { emitRegion, enterRegion, prepareModule, mathImports } from '../emit/region.js';
+import { emitRegion, enterRegion, finishModule, prepareModule, mathImports } from '../emit/region.js';
 import { buildHelpersModule } from '../emit/helpers.js';
 import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
 import { createPageTable } from '../runtime/pages.js';
@@ -138,6 +138,7 @@ export function createTestMachine(given = {}){
                 ...(trapPort === undefined ? {} : { trapPort }), leaveOut: new Set(leaveOut),
             });
             const translation = emitRegion(context, region, { entryTop, checked: !speculate });
+            finishModule(context, [translation.functionIndex]);
             m.exportFunction('region', translation.functionIndex);
             const built = m.toBytes();
             if (!WebAssembly.validate(built))

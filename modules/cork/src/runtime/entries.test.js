@@ -205,3 +205,24 @@ test('a title\'s hundred thousand entries spread over the whole hash, with no lo
     assert.ok(last > Tables.HASH_SLOTS * 0.9, `the last slot used is ${last}`);
     assert.ok(longest < 100, `the longest run of used slots is ${longest}`);
 });
+
+test('retable moves an entry to another function-table index, in the map and in the hash',
+    ()=>{
+        const memory = new WebAssembly.Memory({
+            initial: Math.ceil(Tables.HASH_SLOTS * Tables.HASH_SLOT / 65536) + 1,
+        });
+        const entries = createEntries({ memory, hashBase: 0, shift: 14 });
+        const before = ()=>1;
+        const after = ()=>2;
+        const index = entries.add(0x401000, before, 3, 8, 17);
+        entries.retable(index, after, 512);
+        const entry = entries.at(index);
+        assert.equal(entry.fn, after);
+        assert.equal(entry.table, 512);
+        assert.equal(entry.label, 3, 'the label stands');
+        const at = entry.slot * Tables.HASH_SLOT;
+        const view = new DataView(memory.buffer);
+        assert.equal(view.getUint32(at, true), 0x401000);
+        assert.equal(view.getUint32(at + 4, true), 512, 'the slot names the new index');
+        assert.equal(view.getUint16(at + 8, true), 3);
+    });

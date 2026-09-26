@@ -90,6 +90,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
+        // Transfers from one module's regions into another's before the two
+        // are gathered into one module on the translation worker (0: never;
+        // never without a worker): a relink's cost against the direct tail
+        // calls it buys.
+        mergeAfter: 1 << 16,
+        // Each module is placed in a range of the table, and a transfer to a
+        // function of the same module is a direct tail call, the table's
+        // indirect one only another module's (false: every transfer through
+        // the table).
+        dispatch: true,
         // x87 regions compiled for the wide precision controls (double,
         // extended) until the program is seen with single set: a block tests
         // precision control once rather than every operation rounding by it
@@ -153,8 +163,25 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const table = found.tailCalls
         ? new WebAssembly.Table({ element: 'anyfunc', initial: 256 })
         : null;
-    /** @type {number[]} table indices of dropped regions */
+    /** @type {number[]} table indices of dropped regions, reused where modules are not
+     * placed: a placed module's range is its own for good (`placeModule`) */
     const freeTable = [];
+    /**
+     * A module placed in the table (`placeModule`): its range's start and
+     * length, its counts of what left it through the table, and its running
+     * regions.
+     *
+     * @typedef {{ base: number, arms: number, crossings: WebAssembly.Global,
+     *     crossedTo: WebAssembly.Global, seen: number, records: Set<RegionRecord>,
+     *     toward: Map<Placed, number> }} Placed
+     *   seen: `crossings` when last read; toward: crossings into each other module
+     */
+    /** @type {WeakMap<WebAssembly.Instance, Placed>} */
+    const placedOf = new WeakMap();
+    /** The placed modules with running regions. @type {Set<Placed>} */
+    const placedLive = new Set();
+    /** The running region at each table index. @type {Map<number, RegionRecord>} */
+    const recordAt = new Map();
     const entries = createEntries(
         table
             ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16 }
@@ -353,6 +380,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {boolean} [linked]  its function is in a relinked module already
      * @property {boolean} [wide]  an x87 region compiled for the wide precision controls
      * @property {boolean} [checked]  an x87 region whose entries test nothing of the stack's shape
+     * @property {Placed} [module]  the placed module its table index is in (`placeModule`)
+     * @property {boolean} [movedAlone]  a merge took it alone into the module calling it
      * @property {number} [shapeMisses]  its entries' tests that failed
      */
     /** @type {Set<RegionRecord>} */
@@ -375,7 +404,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
-        relinks: 0, relinked: 0,
+        relinks: 0, relinked: 0, merges: 0,
         formingMs: 0, lookupMs: 0, emitMs: 0, encodeMs: 0, storeMs: 0, instantiateMs: 0,
         publishMs: 0,
         // Emitting and encoding the worker did: reported apart from
@@ -471,8 +500,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // The entries are out of the hash first: nothing finds
                 // the slot before it is emptied.
                 table.set(record.table, null);
-                freeTable.push(record.table);
+                recordAt.delete(record.table);
+                if (record.module === undefined)
+                {
+                    freeTable.push(record.table);
+                }
             }
+            leaveModule(record);
             for (const p of record.pages)
             {
                 byPage.get(p)?.delete(record);
@@ -703,6 +737,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             && settings.countTransfers === true,
         blockProfile: profiling,
         hash: table !== null,
+        place: table !== null && settings.dispatch === true,
         wide,
         structure: settings.structure,
         leaveOut,
@@ -720,6 +755,60 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         for (const [key, times] of built.refusals ?? [])
         {
             refusedWhy[key] = (refusedWhy[key] ?? 0) + times;
+        }
+    };
+
+    /**
+     * A placed module (`finishModule`) takes a range of the table, one index
+     * per job, job i's function at the range's start plus i; the range is the
+     * module's for as long as the run, since its transfer function reaches the
+     * functions of that range directly, whatever the table holds.
+     *
+     * @param {WebAssembly.Instance} instance
+     */
+    const placeModule = instance=>{
+        const exported = /** @type {any} */ (instance.exports);
+        if (!table || !(exported.arms instanceof WebAssembly.Global))
+        {
+            return;
+        }
+        const arms = exported.arms.value;
+        const base = nextTable;
+        nextTable += arms;
+        if (nextTable > table.length)
+        {
+            table.grow(Math.max(256, nextTable - table.length));
+        }
+        exported.base.value = base;
+        placedOf.set(instance, { base, arms, crossings: exported.crossings,
+            crossedTo: exported.crossedTo, seen: 0, records: new Set(), toward: new Map() });
+    };
+
+    /** A record into its placed module. @param {RegionRecord} record @param {Placed} placed */
+    const joinModule = (record, placed)=>{
+        record.module = placed;
+        placed.records.add(record);
+        if (!placedLive.has(placed))
+        {
+            placed.seen = placed.crossings.value;
+            placedLive.add(placed);
+        }
+    };
+    /** A record out of its placed module, dropped or moved. @param {RegionRecord} record */
+    const leaveModule = record=>{
+        const placed = record.module;
+        if (placed === undefined)
+        {
+            return;
+        }
+        placed.records.delete(record);
+        if (placed.records.size === 0)
+        {
+            placedLive.delete(placed);
+            for (const other of placedLive)
+            {
+                other.toward.delete(placed);
+            }
         }
     };
 
@@ -747,6 +836,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 },
             });
             counts.modules++;
+            placeModule(instance);
             return instance;
         }
         catch (e){
@@ -831,9 +921,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             linked: built.linked === true, wide: one.wide === true,
             checked: one.checked === true,
         };
+        const placed = placedOf.get(instance);
         if (table)
         {
-            let index = freeTable.pop();
+            let index = placed === undefined ? freeTable.pop()
+                : placed.base + Number((built.exportName ?? 'r0').slice(1));
             if (index === undefined)
             {
                 index = nextTable++;
@@ -844,6 +936,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             table.set(index, fn);
             record.table = index;
+            recordAt.set(index, record);
+        }
+        if (placed !== undefined)
+        {
+            joinModule(record, placed);
         }
         for (const [start, label] of starts)
         {
@@ -1028,13 +1125,33 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             const fn = /** @type {(label: number, budget: number) => number} */ (
                 instance.exports[result.region.exportName]);
+            const placed = placedOf.get(instance);
             if (table && record.table >= 0)
             {
-                table.set(record.table, fn);
+                if (placed === undefined)
+                {
+                    table.set(record.table, fn);
+                }
+                else
+                {
+                    // Its index in the relinked module's range, which that
+                    // module's transfers reach directly.
+                    table.set(record.table, null);
+                    recordAt.delete(record.table);
+                    if (record.module === undefined)
+                    {
+                        freeTable.push(record.table);
+                    }
+                    leaveModule(record);
+                    record.table = placed.base + Number(result.region.exportName.slice(1));
+                    table.set(record.table, fn);
+                    recordAt.set(record.table, record);
+                    joinModule(record, placed);
+                }
             }
             for (const slot of record.slots)
             {
-                entries.at(slot).fn = fn;
+                entries.retable(slot, fn, record.table);
             }
             record.linked = true;
             counts.relinked++;
@@ -1085,6 +1202,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const relinkStep = store=>{
         if (relinkQueue === null)
         {
+            if (mergeStep(store))
+            {
+                return true;
+            }
             if (settings.relinkAfter <= 0 || modulesSinceRelink < settings.relinkAfter)
             {
                 return false;
@@ -1101,6 +1222,97 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             relinkQueue = null;
         }
+        return relinkChunk(chunk, store);
+    };
+
+    /** Translated instructions between two readings of the modules' crossings. */
+    const MERGE_SAMPLE = 1 << 20;
+    let sampledAt = 0;
+    // At most one merge in this many: its module is instantiated on the
+    // engine thread, 23 ms for a whole chunk of `relinkRegions`.
+    const MERGE_EVERY = 1 << 23;
+    let mergedAt = -MERGE_EVERY;
+    /**
+     * The two placed modules one of which transfers into the other most,
+     * gathered into one module on the worker once it has crossed `mergeAfter`
+     * times: a transfer between them is then a direct tail call. The whole of
+     * both when they fit in `relinkRegions`, else the region crossed into
+     * last, alone, into the module it is called from. Each module's count of
+     * transfers out of it is read here, and its last one's index names where
+     * they went.
+     *
+     * @param {any} store
+     * @returns {boolean} whether a merge was taken this call
+     */
+    const mergeStep = store=>{
+        // Only on the worker: a merge is a relink after the warm-up, which on
+        // the engine thread would be a slice's toll. Read every so many
+        // translated instructions, not every call: a loading phase has
+        // hundreds of modules and calls here between slices.
+        if (settings.mergeAfter <= 0 || worker === null || corkRetired - sampledAt < MERGE_SAMPLE)
+        {
+            return false;
+        }
+        sampledAt = corkRetired;
+        const due = corkRetired - mergedAt >= MERGE_EVERY;
+        /** @type {[Placed, Placed] | null} */
+        let pair = null;
+        let most = 0;
+        for (const placed of placedLive)
+        {
+            const now = placed.crossings.value;
+            const crossed = (now - placed.seen) >>> 0;
+            placed.seen = now;
+            const into = crossed === 0 ? undefined
+                : recordAt.get(placed.crossedTo.value >>> 0)?.module;
+            if (into === undefined || into === placed)
+            {
+                continue;
+            }
+            const weight = (placed.toward.get(into) ?? 0) + crossed;
+            placed.toward.set(into, weight);
+            if (weight > most)
+            {
+                most = weight;
+                pair = [placed, into];
+            }
+        }
+        if (pair === null || most < settings.mergeAfter || !due)
+        {
+            return false;
+        }
+        const [from, into] = pair;
+        from.toward.delete(into);
+        into.toward.delete(from);
+        const target = recordAt.get(from.crossedTo.value >>> 0);
+        /** @type {RegionRecord[]} */
+        let chunk = [...from.records, ...into.records];
+        if (chunk.length > settings.relinkRegions)
+        {
+            // A region moved alone goes nowhere again: two callers in two
+            // full modules would otherwise take it from each other for good.
+            if (target === undefined || target.movedAlone
+                || from.records.size >= settings.relinkRegions)
+            {
+                return false;
+            }
+            target.movedAlone = true;
+            chunk = [...from.records, target];
+        }
+        counts.merges++;
+        mergedAt = corkRetired;
+        return relinkChunk(chunk, store);
+    };
+
+    /**
+     * Running regions formed again from a copy of their pages and emitted
+     * into one module -- on the worker if there is one -- which takes their
+     * table indices and entries over when it comes back (`applyRelink`).
+     *
+     * @param {RegionRecord[]} chunk @param {any} store
+     * @returns {boolean} whether the chunk was taken
+     */
+    const relinkChunk = (chunk, store)=>{
         if (chunk.length === 0)
         {
             return false;
@@ -1706,6 +1918,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 transfers: view().getUint32(layout.tables + Tables.TRANSFERS, true),
                 relinks: counts.relinks,
                 relinked: counts.relinked,
+                merges: counts.merges,
+                // Transfers that left a placed module through the table, as it
+                // counts them (running modules only).
+                crossings: [...placedLive].reduce((sum, placed)=>sum + placed.crossings.value, 0),
                 entries: table ? entries.hashed() : entries.count(),
                 translateMs: counts.formingMs + counts.lookupMs + counts.emitMs
                     + counts.encodeMs + counts.storeMs + counts.instantiateMs + counts.publishMs,
