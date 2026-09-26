@@ -621,6 +621,70 @@ test('a 5-6-5 DIB draws as 5-6-5, from StretchDIBits and in a section of its own
     assert.deepEqual([...bytes.subarray(at, at + 2)], [0xe0, 0x07]);
 });
 
+test('a BI_BITFIELDS section of any masks is drawn and read by them', ()=>{
+    // Wine's test_simple_graphics draws into 32-bit sections whose masks put
+    // blue high (a8b8g8r8), are ten bits wide (r10g10b10) and six bits wide
+    // (r6g6b6), and into a 16-bit r4g4b4 one. Each channel goes into its mask
+    // as its top bits, and comes back widened to eight by repeating them.
+    const { fns, view } = wiredGdi();
+    const BI_BITFIELDS = 3;
+    const dc = fns.CreateCompatibleDC.handler([0]);
+    const colour = 0x563412;
+    const cases = [
+        { bitCount: 32, masks: [0x0000ff, 0x00ff00, 0xff0000], stored: 0x00563412,
+            back: colour, raw: 0x00ff0080, rawColour: 0xff0080 },
+        { bitCount: 32, masks: [0x3ff00000, 0x000ffc00, 0x000003ff],
+            stored: (0x12 << 22) | (0x34 << 12) | (0x56 << 2), back: colour,
+            raw: 0x3ff003ff, rawColour: 0xff00ff },
+        { bitCount: 32, masks: [0x0003f000, 0x00000fc0, 0x0000003f],
+            stored: (0x04 << 12) | (0x0d << 6) | 0x15, back: 0x553410,
+            raw: 0x0003f03f, rawColour: 0xff00ff },
+        { bitCount: 16, masks: [0x0f00, 0x00f0, 0x000f], stored: 0x0135, back: 0x553311,
+            raw: 0x0f0f, rawColour: 0xff00ff },
+    ];
+    for (const { bitCount, masks, stored, back, raw, rawColour } of cases)
+    {
+        const name = masks.map(mask=>mask.toString(16)).join('/');
+        putInfo(view, { width: 4, height: -1, bitCount, compression: BI_BITFIELDS, table: masks });
+        const section = fns.CreateDIBSection.handler([dc, WIRED_INFO, 0, WIRED_POINTER, 0, 0]);
+        assert.notEqual(section, 0, name);
+        const at = view.getUint32(WIRED_POINTER, true);
+        /** @param {number} x */
+        const pixel = x=>(bitCount === 32 ? view.getUint32(at + x * 4, true)
+            : view.getUint16(at + x * 2, true));
+        const previous = fns.SelectObject.handler([dc, section]);
+        assert.equal(fns.SetPixel.handler([dc, 0, 0, colour]), back, `${name} SetPixel`);
+        assert.equal(pixel(0) >>> 0, stored >>> 0, `${name} stored`);
+        assert.equal(fns.GetPixel.handler([dc, 0, 0]), back, `${name} GetPixel`);
+        if (bitCount === 32)
+        {
+            view.setUint32(at + 4, raw, true);
+        }
+        else
+        {
+            view.setUint16(at + 2, raw, true);
+        }
+        assert.equal(fns.GetPixel.handler([dc, 1, 0]), rawColour, `${name} read`);
+
+        // A fill and a blit out to plain 32 bits go through the masks too.
+        const brush = fns.CreateSolidBrush.handler([colour]);
+        fns.SelectObject.handler([dc, brush]);
+        fns.PatBlt.handler([dc, 2, 0, 1, 1, PATCOPY]);
+        assert.equal(pixel(2) >>> 0, stored >>> 0, `${name} filled`);
+        putInfo(view, { width: 4, height: -1, bitCount: 32 });
+        const plain = fns.CreateDIBSection.handler([dc, WIRED_INFO, 0, WIRED_POINTER, 0, 0]);
+        const plainAt = view.getUint32(WIRED_POINTER, true);
+        const other = fns.CreateCompatibleDC.handler([0]);
+        fns.SelectObject.handler([other, plain]);
+        assert.equal(fns.BitBlt.handler([other, 0, 0, 4, 1, dc, 0, 0, 0x00cc0020]), 1);
+        assert.deepEqual([0, 1].map(x=>view.getUint32(plainAt + x * 4, true)),
+            [back, rawColour].map(value=>((value & 0xff) << 16 | value & 0xff00
+                | value >>> 16) >>> 0), `${name} blitted`);
+        fns.DeleteDC.handler([other]);
+        fns.SelectObject.handler([dc, previous]);
+    }
+});
+
 test('GetDIBits into BI_BITFIELDS writes the masks it packs the pixels by', ()=>{
     // Wine's test_GetDIBits_BI_BITFIELDS: with bits, the masks come back
     // filled in, and biSizeImage with them.

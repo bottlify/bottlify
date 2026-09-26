@@ -13,6 +13,8 @@
  * whether a byte offset lands on the pixel it was meant to.
  */
 
+import { channelsOf, packPixel, unpackPixel } from './channels.js';
+
 /**
  * The depth a surface has unless told otherwise, and the one every raster
  * operation is written for. A surface of any other depth converts at `read`
@@ -77,29 +79,46 @@ export const BI_BITFIELDS = 3;
 
 /**
  * Which sixteen-bit layout a bitmap's pixels are in: the one it was given,
- * else the one its BI_BITFIELDS masks name, else 5-5-5, which is what a
- * BI_RGB DIB means by sixteen bits. Null for masks that are neither of the
- * two, which no surface here draws by.
+ * else 5-6-5 when its BI_BITFIELDS masks name that, else 5-5-5, which is what
+ * a BI_RGB DIB means by sixteen bits. Masks that are neither are `masksOf`'s.
  *
  * @param {{ bitCount: number, format?: string, compression?: number,
  *           bitfields?: number[] }} attributes
- * @returns {string | null}
+ * @returns {string}
  */
 export function formatOf(attributes){
     if (attributes.format)
     {
         return attributes.format;
     }
-    if (attributes.bitCount !== 16 || attributes.compression !== BI_BITFIELDS)
-    {
-        return RGB_555;
-    }
     const [red, green, blue] = (attributes.bitfields ?? []).map(mask=>mask >>> 0);
-    if (red === 0xf800 && green === 0x07e0 && blue === 0x001f)
+    return attributes.bitCount === 16 && attributes.compression === BI_BITFIELDS
+        && red === 0xf800 && green === 0x07e0 && blue === 0x001f
+        ? RGB_565
+        : RGB_555;
+}
+
+/**
+ * The masks a BI_BITFIELDS bitmap's pixels are drawn and read by, or null
+ * when they are the layout its depth has natively -- 8-8-8 at thirty-two
+ * bits, `formatOf`'s at sixteen -- or it has none.
+ *
+ * @param {{ bitCount: number, format?: string, compression?: number,
+ *           bitfields?: number[] }} attributes
+ * @returns {number[] | null}
+ */
+export function masksOf(attributes){
+    const depth = attributes.bitCount;
+    if (attributes.format || attributes.compression !== BI_BITFIELDS
+        || (depth !== 16 && depth !== 32))
     {
-        return RGB_565;
+        return null;
     }
-    return red === 0x7c00 && green === 0x03e0 && blue === 0x001f ? RGB_555 : null;
+    const masks = [0, 1, 2].map(index=>(attributes.bitfields?.[index] ?? 0) >>> 0);
+    const native = depth === 32 ? [0xff0000, 0x00ff00, 0x0000ff]
+        : formatOf(attributes) === RGB_565 ? [0xf800, 0x07e0, 0x001f]
+            : [0x7c00, 0x03e0, 0x001f];
+    return masks.every((mask, index)=>mask === native[index]) ? null : masks;
 }
 
 /**
@@ -164,6 +183,8 @@ export function pixelToColor(pixel){
  * @property {number} [bitCount]   1, 4, 8, 16, 24 or 32; the operations still see 32.
  * @property {number[]} [palette]  What an index means, up to 8 bits: 32-bit pixels.
  * @property {string} [format]     RGB_555 (default) or RGB_565, for 16 bits.
+ * @property {number[]} [masks]    Red, green and blue masks, for 16 or 32 bits,
+ *                                 in place of the depth's own layout.
  * @property {boolean} [mono]      A monochrome device bitmap, not a DIB: see the contract.
  */
 
@@ -235,6 +256,9 @@ export function createSurface(options){
         throw new RangeError('An indexed surface needs a palette');
     }
     const format = options.format ?? RGB_555;
+    const channels = options.masks && (bitCount === 16 || bitCount === 32)
+        ? channelsOf(options.masks)
+        : null;
     const pitch = options.pitch ?? dibPitch(width, bitCount);
     const offset = options.offset ?? 0;
     const bytes = options.bytes ?? new Uint8Array(pitch * height);
@@ -328,7 +352,8 @@ export function createSurface(options){
             if (bitCount === 16)
             {
                 const at = rowOffset(y) + (x * 2);
-                return expand16(bytes[at] | (bytes[at + 1] << 8), format);
+                const value = bytes[at] | (bytes[at + 1] << 8);
+                return channels ? unpackPixel(value, channels) : expand16(value, format);
             }
             if (bitCount === 24)
             {
@@ -336,12 +361,9 @@ export function createSurface(options){
                 return (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16)) >>> 0;
             }
             const at = rowOffset(y) + (x * 4);
-            if (words)
-            {
-                return words[(at - offset) >>> 2] >>> 0;
-            }
-            return (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16)
-                | (bytes[at + 3] << 24)) >>> 0;
+            const value = words ? words[(at - offset) >>> 2]
+                : bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16) | (bytes[at + 3] << 24);
+            return channels ? unpackPixel(value, channels) : value >>> 0;
         },
 
         /** @param {number} x @param {number} y @param {number} pixel */
@@ -370,7 +392,9 @@ export function createSurface(options){
             if (bitCount === 16)
             {
                 const at = rowOffset(y) + (x * 2);
-                const value = narrow16(pixel >>> 0, format);
+                const value = channels
+                    ? packPixel(pixel >>> 0, channels)
+                    : narrow16(pixel >>> 0, format);
                 bytes[at] = value & 0xff;
                 bytes[at + 1] = (value >>> 8) & 0xff;
                 return;
@@ -384,15 +408,16 @@ export function createSurface(options){
                 return;
             }
             const at = rowOffset(y) + (x * 4);
+            const value = channels ? packPixel(pixel >>> 0, channels) : pixel >>> 0;
             if (words)
             {
-                words[(at - offset) >>> 2] = pixel >>> 0;
+                words[(at - offset) >>> 2] = value;
                 return;
             }
-            bytes[at] = pixel & 0xff;
-            bytes[at + 1] = (pixel >>> 8) & 0xff;
-            bytes[at + 2] = (pixel >>> 16) & 0xff;
-            bytes[at + 3] = (pixel >>> 24) & 0xff;
+            bytes[at] = value & 0xff;
+            bytes[at + 1] = (value >>> 8) & 0xff;
+            bytes[at + 2] = (value >>> 16) & 0xff;
+            bytes[at + 3] = (value >>> 24) & 0xff;
         },
 
         /** @param {number} pixel @returns {number} what a write of it reads back as */
@@ -400,6 +425,10 @@ export function createSurface(options){
             if (bitCount <= 8)
             {
                 return (/** @type {number[]} */ (palette)[indexOf(pixel >>> 0)] ?? 0) >>> 0;
+            }
+            if (channels)
+            {
+                return unpackPixel(packPixel(pixel >>> 0, channels), channels);
             }
             if (bitCount === 16)
             {
@@ -420,7 +449,8 @@ export function createSurface(options){
  *
  * One, four and eight bits need the colour table the indices mean -- a
  * one-bit section is two colours of its own, not a monochrome bitmap --
- * and sixteen bits is laid out as `formatOf` says.
+ * and sixteen and thirty-two bits are laid out as `formatOf` and `masksOf`
+ * say.
  *
  * @param {{ width: number, height: number, bitCount: number, bits: number,
  *           topDown?: boolean, palette?: number[], format?: string,
@@ -432,9 +462,8 @@ export function createSurface(options){
  */
 export function surfaceForDibSection(attributes, memory, base = 0){
     const depth = attributes.bitCount;
-    const format = formatOf(attributes);
     if (!DEPTHS.has(depth) || (attributes.bits >>> 0) === 0
-        || (depth <= 8 && !attributes.palette) || format === null)
+        || (depth <= 8 && !attributes.palette))
     {
         return null;
     }
@@ -447,7 +476,8 @@ export function surfaceForDibSection(attributes, memory, base = 0){
         offset: (attributes.bits >>> 0) - base,
         bitCount: depth,
         palette: attributes.palette,
-        format,
+        format: formatOf(attributes),
+        masks: masksOf(attributes) ?? undefined,
     });
 }
 
@@ -505,14 +535,13 @@ export function surfaceForPattern(pattern, colors = []){
     {
         return surfaceForDdb(pattern);
     }
-    const format = formatOf(pattern);
     const palette = pattern.indices
         ? Array.from({ length: 1 << depth }, (_, index)=>colors.length
             && index < /** @type {number[]} */ (pattern.indices).length
             ? colors[/** @type {number[]} */ (pattern.indices)[index] % colors.length]
             : 0)
         : pattern.palette;
-    if (!DEPTHS.has(depth) || (depth <= 8 && !palette) || format === null)
+    if (!DEPTHS.has(depth) || (depth <= 8 && !palette))
     {
         return null;
     }
@@ -524,7 +553,8 @@ export function surfaceForPattern(pattern, colors = []){
         bytes: pattern.pixels,
         bitCount: depth,
         palette,
-        format,
+        format: formatOf(pattern),
+        masks: masksOf(pattern) ?? undefined,
     });
 }
 
