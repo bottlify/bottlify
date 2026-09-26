@@ -707,6 +707,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
     const expected = {
         CoInitialize: 4,
         CoInitializeEx: 8,
+        CoInitializeSecurity: 36,
         CoUninitialize: 0,
         OleInitialize: 4,
         OleUninitialize: 0,
@@ -718,6 +719,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoGetClassObject: 20,
         CoRegisterClassObject: 20,
         CoRevokeClassObject: 4,
+        CoSetProxyBlanket: 32,
         CoCreateGuid: 4,
         CoTaskMemAlloc: 4,
         CoTaskMemFree: 4,

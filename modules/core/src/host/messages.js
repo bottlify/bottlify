@@ -37,7 +37,7 @@
  *         prefetch?: boolean, indexSha256?: string,
  *         retry?: { attempts?: number, baseDelayMs?: number, maxDelayMs?: number } },
  *     storage?: 'opfs' | 'local' | { files: { path: string, bytes: Uint8Array }[] } | null,
- *     device?: { skipTexture?: string | null, probeTexture?: string | null,
+ *     device?: { skipTexture?: string | null, probeTexture?: string | null, keepImages?: number[],
  *         fog?: boolean, mips?: boolean, dumpDraws?: boolean, maxDraws?: number },
  *     watch?: { libraries: Record<string, number[] | null>, strings: number[] },
  *     hooks?: HookSpec[],
