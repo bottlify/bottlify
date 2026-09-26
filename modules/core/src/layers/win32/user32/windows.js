@@ -1001,7 +1001,7 @@ export function createWindowFunctions(host){
         // it. A caller that placed the focus itself -- SetFocus -- tells it.
         const current = focusWindow();
         const moved = active !== 0
-            && (current === 0 || topLevelOf(windows.get(current)).hwnd !== active);
+            && (current === 0 || topLevelOf(live(current)).hwnd !== active);
         if (moved)
         {
             focus = active;
@@ -1018,14 +1018,18 @@ export function createWindowFunctions(host){
             told.push([previous, WM_NCACTIVATE, 0, 0],
                 [previous, WM_ACTIVATE, WA_INACTIVE, gained]);
         }
-        else
+        // The program is the active application or stops being it when the
+        // activation comes from, or goes to, nothing or the desktop -- the
+        // one window here that is not the program's. lParam names the thread
+        // on the other side: another program's, which here is none.
+        /** @param {number} which */
+        const programs = which=>which !== 0 && which !== desktop?.hwnd;
+        if (programs(previous) !== programs(gained))
         {
-            // lParam names the thread that had the activation: another
-            // program's, which here is none.
             for (const top of [...windows.values()]
                 .filter(each=>!each.destroyed && !isChild(each)).reverse())
             {
-                told.push([top.hwnd, WM_ACTIVATEAPP, 1, 0]);
+                told.push([top.hwnd, WM_ACTIVATEAPP, programs(gained) ? 1 : 0, 0]);
             }
         }
         if (gained !== 0)

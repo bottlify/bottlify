@@ -905,6 +905,41 @@ test('a window that takes the activation is told, and the one it replaced is tol
     assert.equal(context.queue.depth(), 0, 'sent before the call returns, none of it posted');
 });
 
+test('activation leaving the application for the desktop tells it WM_ACTIVATEAPP(0), and '
+    + 'coming back WM_ACTIVATEAPP(1)', ()=>{
+    // user32's message tests (SetForegroundWindowSeq): SetForegroundWindow
+    // of the desktop away from the application's foreground window sends
+    // that window WM_NCACTIVATE(0), WM_ACTIVATE(WA_INACTIVE),
+    // WM_ACTIVATEAPP(0) and WM_KILLFOCUS. WM_ACTIVATEAPP is documented as
+    // sent to the application whose window is being activated and to the
+    // one whose window is being deactivated -- here, to each of its
+    // top-level windows, as when it first became active.
+    const WM_ACTIVATEAPP = 0x001c;
+    const WM_ACTIVATE = 0x0006;
+    const WM_SETFOCUS = 0x0007;
+    const WM_KILLFOCUS = 0x0008;
+    const context = setup();
+    const { fns, memory, dispatched } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+    const hidden = createWindow(fns, memory);
+    fns.SetForegroundWindow.handler([hwnd]);
+    const told = ()=>dispatched.filter(entry=>entry.hwnd === hwnd || entry.hwnd === hidden)
+        .map(({ hwnd: to, message, wParam })=>[to, message,
+            message === WM_KILLFOCUS || message === WM_SETFOCUS ? 0 : wParam]);
+    dispatched.length = 0;
+
+    fns.SetForegroundWindow.handler([fns.GetDesktopWindow.handler()]);
+    assert.deepEqual(told(), [[hwnd, WM_NCACTIVATE, 0], [hwnd, WM_ACTIVATE, 0],
+        [hwnd, WM_ACTIVATEAPP, 0], [hidden, WM_ACTIVATEAPP, 0], [hwnd, WM_KILLFOCUS, 0]]);
+
+    dispatched.length = 0;
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.deepEqual(told(), [[hwnd, WM_ACTIVATEAPP, 1], [hidden, WM_ACTIVATEAPP, 1],
+        [hwnd, WM_NCACTIVATE, 1], [hwnd, WM_ACTIVATE, 1], [hwnd, WM_SETFOCUS, 0]]);
+});
+
 test('SetFocus into another window sends the activation set, then the focus', ()=>{
     const context = setup();
     putClass(context.memory);
