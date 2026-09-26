@@ -130,6 +130,17 @@ function fakeHandles(){
         },
         /** @param {number} handle */
         close: handle=>entries.delete(handle),
+        /** @param {number} handle */
+        typeOf: handle=>entries.get(handle)?.type ?? null,
+        /** @param {number} handle @param {string} type */
+        resolve(handle, type){
+            const entry = entries.get(handle);
+            if (!entry || entry.type !== type)
+            {
+                throw new Error('Invalid handle');
+            }
+            return entry.object;
+        },
     };
 }
 
@@ -182,10 +193,13 @@ function fakeContexts(){
  *        the notice and answering nothing.
  * @param {(region: number) => any} [options.regionBox]
  *        The rectangle a GDI region holds, for the calls that name one.
+ * @param {(instance: number) => number} [options.moduleBase]
+ *        Where a module is mapped, for a resource read in place.
  */
 function setup(
     { cursor, keyState, asyncKeyState, keyboardState, setKeyboardState,
-        findResource, loadString, dispatch = ()=>0, screen, messageBox, regionBox } = {})
+        findResource, loadString, dispatch = ()=>0, screen, messageBox, regionBox,
+        moduleBase } = {})
 {
     screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
     const memory = fakeMemory();
@@ -203,7 +217,7 @@ function setup(
     /** @type {number[]} */
     const errors = [];
     /** The cursor pictures user32 handed up, oldest first. */
-    /** @type {{ shown: boolean }[]} */
+    /** @type {any[]} */
     const cursors = [];
     /** Where user32 put the cursor, oldest first. */
     /** @type {{ x: number, y: number }[]} */
@@ -230,6 +244,7 @@ function setup(
         keyboardState,
         setKeyboardState,
         findResource,
+        moduleBase,
         loadString,
         regionBox,
         /** @param {any} notice */
@@ -242,7 +257,7 @@ function setup(
         divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
         /** @param {number} code */
         setLastError: code=>errors.push(code),
-        /** @param {{ shown: boolean }} picture */
+        /** @param {any} picture */
         reportCursor: picture=>cursors.push(picture),
         /** @param {number} x @param {number} y */
         placeCursor: (x, y)=>placed.push({ x, y }),
@@ -574,6 +589,86 @@ test('a per-frame ShowCursor(FALSE) under a negative count never reports', ()=>{
         assert.equal(fns.ShowCursor.handler([0]), -2 - frame);
     }
     assert.equal(cursors.length, 0, 'a hundred more FALSE calls report nothing');
+});
+
+test('a cursor a program made is shown to the page as its picture and hot spot', ()=>{
+    // SetCursor is documented as setting the cursor's shape; a shape the
+    // program made with CreateCursor is handed up with its bitmap, once per
+    // change, and a standard cursor is handed up with none -- the page's own.
+    const { memory, fns, cursors } = setup();
+    const AND = OUT_BUFFER;
+    const XOR = OUT_BUFFER + 4;
+    memory.putU32s(AND, [0b0110_0000]);
+    memory.putU32s(XOR, [0b0101_0000]);
+    const made = fns.CreateCursor.handler([HINSTANCE, 1, 0, 4, 1, AND, XOR]);
+    assert.notEqual(made, 0);
+
+    fns.SetCursor.handler([made]);
+    assert.deepEqual(cursors, [{ shown: true, width: 4, height: 1, hotSpot: { x: 1, y: 0 },
+        bgra: Uint8Array.of(0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 0, 255, 255, 255, 255) }]);
+    fns.SetCursor.handler([made]);
+    assert.equal(cursors.length, 1, 'the same cursor again is no change');
+
+    const IDC_ARROW = 0x7f00;
+    fns.SetCursor.handler([IDC_ARROW]);
+    assert.deepEqual(cursors.at(-1), { shown: true }, 'the standard arrow is the page\'s own');
+    fns.SetCursor.handler([made]);
+    fns.ShowCursor.handler([0]);
+    fns.ShowCursor.handler([1]);
+    assert.deepEqual(cursors.slice(-2).map(picture=>[picture.shown, picture.width]),
+        [[false, undefined], [true, 4]], 'shown again as the picture it was');
+});
+
+test('a cursor out of the program\'s resources is shown as the image its group offers', ()=>{
+    // RT_GROUP_CURSOR names the images by id; RT_CURSOR is the hot spot, then
+    // a DIB whose height counts both masks. A 32x32 image is the one a cursor
+    // of the standard size is loaded from.
+    const BASE = 0x400000;
+    const GROUP = 0x12a00;
+    const IMAGE = 0x12b00;
+    const RT_CURSOR = 1;
+    const RT_GROUP_CURSOR = 12;
+    const width = 32;
+    const group = new Uint8Array(6 + 2 * 14);
+    const groupView = new DataView(group.buffer);
+    groupView.setUint16(2, 2, true);
+    groupView.setUint16(4, 2, true);
+    [[16, 7], [width, 8]].forEach(([size, id], index)=>{
+        groupView.setUint16(6 + index * 14, size, true);
+        groupView.setUint16(6 + index * 14 + 6, 32, true);
+        groupView.setUint16(6 + index * 14 + 12, id, true);
+    });
+    const pixelsSize = width * width * 4;
+    const image = new Uint8Array(4 + 40 + pixelsSize + width * 4);
+    const imageView = new DataView(image.buffer);
+    imageView.setUint16(0, 5, true);
+    imageView.setUint16(2, 9, true);
+    imageView.setUint32(4, 40, true);
+    imageView.setInt32(8, width, true);
+    imageView.setInt32(12, width * 2, true);
+    imageView.setUint16(18, 32, true);
+    // The bottom-left pixel, the first stored: half-transparent blue.
+    image.set([255, 0, 0, 128], 4 + 40);
+    const { fns, memory, cursors } = setup({
+        moduleBase: instance=>(instance === HINSTANCE ? BASE : 0),
+        findResource: (instance, type, name)=>{
+            if (type === RT_GROUP_CURSOR && name === 101)
+            {
+                return { rva: GROUP - BASE, size: group.length };
+            }
+            return type === RT_CURSOR && name === 8 ? { rva: IMAGE - BASE, size: image.length }
+                : null;
+        },
+    });
+    memory.writeMemory(GROUP, group);
+    memory.writeMemory(IMAGE, image);
+
+    fns.SetCursor.handler([fns.LoadCursorA.handler([HINSTANCE, 101])]);
+    const [picture] = cursors;
+    assert.deepEqual([picture.width, picture.height, picture.hotSpot], [width, width,
+        { x: 5, y: 9 }]);
+    assert.deepEqual([...picture.bgra.subarray((width - 1) * width * 4, (width - 1) * width * 4
+        + 4)], [255, 0, 0, 128], 'the image\'s first row is the picture\'s last');
 });
 
 test('SendMessageTimeoutA is a send whose answer goes out through the pointer', async()=>{

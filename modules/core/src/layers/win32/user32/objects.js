@@ -29,6 +29,8 @@
  *   to open it.
  */
 
+import { planesToBgra } from './cursors.js';
+
 /** The resource directories a cursor and an icon are named in. */
 export const RT_GROUP_CURSOR = 12;
 export const RT_GROUP_ICON = 14;
@@ -46,9 +48,9 @@ const MAX_RESOURCE_NAME = 256;
  * A standard one is named by a small integer on a null instance and exists
  * everywhere, so its number is its handle. One out of a module's own image
  * exists when the module carries the resource -- and then a program is owed a
- * handle it can put in a window class or pass to SetCursor, whether or not
- * anything here ever draws it. The bits are not decoded: no path consumes
- * them, and a program that gets null back concludes its own image is short
+ * handle it can put in a window class or pass to SetCursor. The bits are
+ * decoded when SetCursor first shows it, not here: most loaded cursors are
+ * never set. A program that gets null back concludes its own image is short
  * of a resource it was built with.
  *
  * @param {{ handles: { open: (type: string, object: any) => number },
@@ -1564,22 +1566,30 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
          * HCURSOR CreateCursor(HINSTANCE hInst, int xHotSpot, int yHotSpot,
          *   int nWidth, int nHeight, const VOID *pvANDPlane, const VOID *pvXORPlane)
          *
-         * The bits are not read. Nothing draws a cursor, and copying two masks
-         * to hold them would be storing pixels that no path consumes; what a
-         * program needs back is a handle it can pass to SetCursor and destroy.
+         * The two planes are read now, as the call documents copying them:
+         * the picture is what SetCursor hands the page.
          */
         CreateCursor: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([, x, y, width, height])=>{
-                if ((width | 0) <= 0 || (height | 0) <= 0)
+            handler: ([, x, y, width, height, and, xor])=>{
+                const MAX_SIDE = 256;
+                const across = width | 0;
+                const down = height | 0;
+                if (across <= 0 || down <= 0 || across > MAX_SIDE || down > MAX_SIDE)
                 {
                     return 0;
                 }
+                const size = ((across + 15) >>> 4) * 2 * down;
+                // A plane not given is a bitmap made without bits: all zero.
+                /** @param {number} plane */
+                const read = plane=>((plane >>> 0) === 0
+                    ? new Uint8Array(size) : host.readMemory(plane >>> 0, size));
+                const hotSpot = { x: x | 0, y: y | 0 };
                 return host.handles.open('cursor', {
-                    hotSpot: { x: x | 0, y: y | 0 },
-                    width: width | 0,
-                    height: height | 0,
+                    hotSpot, width: across, height: down,
+                    picture: { width: across, height: down, hotSpot,
+                        bgra: planesToBgra(across, down, read(and), read(xor)) },
                 });
             },
         },

@@ -23,6 +23,7 @@ import {
     ANSI_PAGE, LANGID_EN_US, OEM_PAGE, mapCaseAnsi, transcodeSingleByte,
 } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
+import { dibToBgra, groupImageId } from './cursors.js';
 import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './keys.js';
 import { REFRESH_HZ, displayModes } from './display.js';
 import {
@@ -488,7 +489,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
     // Names a message box for as long as it is up, so the page can answer the
     // one it was shown rather than whichever box is standing now.
     let nextMessageBoxId = 1;
-    /** The cursor SetCursor last set; nothing draws it, but it is read back. */
+    /** The cursor SetCursor last set, which GetCursor reads back. */
     let currentCursor = 0;
     /** ShowCursor's display count: the cursor is shown while it is not below zero. */
     let cursorShowCount = 0;
@@ -496,27 +497,104 @@ export function createSystemFunctions({ host, live, windows, classes }){
     let cursorIsNull = false;
     /** The last picture handed up, so only a change is ever reported. */
     let cursorShown = true;
+    /** @type {import('./cursors.js').CursorPicture | null} */
+    let cursorShape = null;
     /** What SetMessageExtraInfo last set, for GetMessageExtraInfo. */
     let messageExtraInfo = 0;
 
     /**
-     * The cursor as the page should show it, derived from the two facts Windows
-     * keeps it from: the display count and the current cursor. Reported only on
-     * a change of that picture -- a program hides the cursor inside its frame
-     * loop, and a per-call report buries the one event that arms the pointer
-     * lock. The bitmap is not decoded, so a report carries no image: this is
+     * The image a program's cursor or icon handle stands for, decoded the
+     * first time it is asked for and kept on the object: CreateCursor's is
+     * made with it, one out of a module's resources is read where the loader
+     * mapped it. Null for a standard cursor, which is the page's own, and for
+     * an image this cannot read.
+     *
+     * @param {number} handle
+     * @returns {import('./cursors.js').CursorPicture | null}
+     */
+    const cursorPicture = handle=>{
+        const kind = host.handles.typeOf?.(handle) ?? null;
+        if (kind !== 'cursor' && kind !== 'icon')
+        {
+            return null;
+        }
+        let object = null;
+        try
+        {
+            object = host.handles.resolve?.(handle, kind) ?? null;
+        }
+        catch (e){
+            void e;
+        }
+        if (!object)
+        {
+            return null;
+        }
+        object.picture ??= resourcePicture(object.instance, object.name, kind === 'cursor');
+        return object.picture;
+    };
+
+    /**
+     * A cursor's or icon's picture out of a module: the image of the standard
+     * size its group directory offers, a cursor's led by its hot spot, an
+     * icon's hot spot its centre.
+     *
+     * @param {number | undefined} instance @param {number | string | undefined} name
+     * @param {boolean} cursor
+     * @returns {import('./cursors.js').CursorPicture | null}
+     */
+    const resourcePicture = (instance, name, cursor)=>{
+        const RT_CURSOR = 1;
+        const RT_ICON = 3;
+        const SM_CXCURSOR = 13;
+        const base = instance === undefined ? 0 : host.moduleBase?.(instance) ?? 0;
+        /** @param {number} type @param {number | string} key */
+        const read = (type, key)=>{
+            const found = /** @type {{ rva: number, size: number } | null} */ (
+                host.findResource?.(/** @type {number} */ (instance), type, key) ?? null);
+            return found ? host.readMemory((base + found.rva) >>> 0, found.size) : null;
+        };
+        const group = base === 0 || name === undefined
+            ? null : read(cursor ? RT_GROUP_CURSOR : RT_GROUP_ICON, name);
+        const id = group ? groupImageId(group, cursor, metric(SM_CXCURSOR)) : null;
+        const image = id === null ? null : read(cursor ? RT_CURSOR : RT_ICON, id);
+        if (!image || (cursor && image.length < 4))
+        {
+            return null;
+        }
+        const picture = dibToBgra(cursor ? image.subarray(4) : image);
+        if (!picture)
+        {
+            return null;
+        }
+        const hotSpot = cursor
+            ? { x: image[0] | image[1] << 8, y: image[2] | image[3] << 8 }
+            : { x: picture.width >>> 1, y: picture.height >>> 1 };
+        return { ...picture, hotSpot };
+    };
+
+    /**
+     * The cursor as the page should show it, derived from the facts Windows
+     * keeps it from: the display count and the current cursor, and that
+     * cursor's picture when the program made or loaded it. Reported only on a
+     * change -- a program hides the cursor inside its frame loop, and a
+     * per-call report buries the one event that arms the pointer lock. A
+     * report with no image is a standard cursor, the page's own: this is also
      * what the Direct3D path sends when a device cursor was never given one.
      * Where both producers speak -- a title that draws a device cursor and also
      * calls ShowCursor -- the last report wins.
      */
     const reportCursor = ()=>{
         const shown = cursorShowCount >= 0 && !cursorIsNull;
-        if (shown === cursorShown)
+        const shape = shown ? cursorPicture(currentCursor) : null;
+        if (shown === cursorShown && shape === cursorShape)
         {
             return;
         }
         cursorShown = shown;
-        host.reportCursor?.({ shown });
+        cursorShape = shape;
+        host.reportCursor?.(shape ? { shown, width: shape.width, height: shape.height,
+            hotSpot: { ...shape.hotSpot }, bgra: shape.bgra } : { shown });
     };
 
     /**

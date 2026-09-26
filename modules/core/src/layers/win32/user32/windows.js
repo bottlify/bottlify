@@ -397,9 +397,11 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           `va_list` window wvsprintfA reads stops at its end.
  * @property {{ open: (type: string, object: any) => number,
  *              close: (handle: number) => any,
- *              typeOf?: (handle: number) => string | null }} handles
+ *              typeOf?: (handle: number) => string | null,
+ *              resolve?: (handle: number, type: string) => any }} handles
  *           typeOf names the kind of object a handle is, which decides how a
- *           wait that also watches the queue can hold it.
+ *           wait that also watches the queue can hold it; resolve hands back
+ *           the object, and throws for a handle of another kind.
  * @property {ReturnType<typeof import('./messages.js').createMessageQueue>} queue
  *           Where messages come from, including the ones the input layer posts.
  * @property {{ hwnd: number, message: number, at: number }[]} [dispatching]
@@ -504,12 +506,16 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           mouse's would, and a key named by virtual key or scan code takes
  *           the same path a real key press does. Absent in a build with no
  *           input, and then the call injects nothing.
- * @property {(picture: { shown: boolean }) => void} [reportCursor]
+ * @property {(picture: { shown: boolean, width?: number, height?: number,
+ *           hotSpot?: { x: number, y: number }, bgra?: Uint8Array }) => void} [reportCursor]
  *           The page's cursor, as user32's own state changed it: shown while
  *           ShowCursor's count is not below zero and SetCursor has not named the
- *           null cursor. Handed up only on a change, through the same event the
- *           Direct3D device methods use. Absent in a build with nothing showing
- *           a cursor, and then the derived picture is kept to ourselves.
+ *           null cursor, with the bitmap -- four bytes a pixel, top row first --
+ *           and the hot spot of a cursor the program made or loaded, and none
+ *           for a standard cursor, which the page shows as its own. Handed up
+ *           only on a change, through the same event the Direct3D device
+ *           methods use. Absent in a build with nothing showing a cursor, and
+ *           then the derived picture is kept to ourselves.
  * @property {(notice: { id: number, text: string, caption: string, type: number,
  *           buttons: { id: number, label: string }[], defaultButton: number,
  *           icon: string | null }) => number | Promise<number> | void} [messageBox]
