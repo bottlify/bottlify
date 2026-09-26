@@ -56,14 +56,19 @@ function fixture(){
         readMemory: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeMemory: (address, data)=>bytes.set(data, address),
-        /** @param {number} address @param {number} maxLength */
+        /**
+         * As the memory layer reads an ANSI string: in Windows-1252, which is
+         * what the Encoding standard calls latin1.
+         *
+         * @param {number} address @param {number} maxLength
+         */
         readCString(address, maxLength){
-            let text = '';
-            for (let at = 0; at < maxLength && bytes[address + at] !== 0; at++)
+            let end = address;
+            while (end - address < maxLength && bytes[end] !== 0)
             {
-                text += String.fromCharCode(bytes[address + at]);
+                end++;
             }
-            return text;
+            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
         },
         currentThread: ()=>thread,
         heap: {
@@ -409,6 +414,18 @@ test('resolution answers for itself and refuses what it cannot know', ()=>{
     fx.put(BUFFER, 'blizzard.example');
     assert.equal(fx.call('gethostbyname', [BUFFER]), 0);
     assert.equal(fx.call('WSAGetLastError', []), WSAHOST_NOT_FOUND);
+});
+
+test('a resolved name is named in the hostent by the bytes it was asked by', async()=>{
+    // The name is read as Windows-1252, where 0x80 is the euro sign and 0x99
+    // the trade mark, and h_name goes back in that page.
+    const fx = fixture();
+    fx.registry.resolve = ()=>Promise.resolve([0x0a000007]);
+    fx.bytes.set([0x80, 0x99, 0x2e, 0x78, 0], BUFFER);
+    const hostent = await fx.call('gethostbyname', [BUFFER]);
+    assert.notEqual(hostent, 0);
+    const name = fx.dword(hostent);
+    assert.deepEqual([...fx.bytes.subarray(name, name + 5)], [0x80, 0x99, 0x2e, 0x78, 0]);
 });
 
 test('inet_addr and inet_ntoa are inverses through guest memory', ()=>{
