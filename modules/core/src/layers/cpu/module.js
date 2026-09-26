@@ -774,18 +774,19 @@ export const cpuModule = {
                     state.worstInterpretedAt = from;
                 }
                 // Where the slice left the guest, weighted by what it retired
-                // getting there -- the only boundary this layer owns, and the
-                // one every slice crosses regardless of what the guest was
-                // doing. Skipped for a slice that retired nothing: a parked
-                // thread's turn says nothing about where the guest's own code
-                // runs hot.
-                if (samplingEnabled && instructions > 0)
+                // getting there -- the only boundary this layer owns. Only a
+                // slice that ran its whole budget is a sample: it stopped
+                // wherever the guest happened to be. One that ended early
+                // stopped where the guest asked to -- a wait it parked in, a
+                // halt -- and crediting that place with everything the slice
+                // retired charged a frame's hot loop to the call ending it.
+                if (samplingEnabled && instructions >= maxInstructions)
                 {
                     creditSample(state.samples, machine.eip(), instructions);
-                    if (settings.cork.feed === 'slice')
-                    {
-                        feedTranslator();
-                    }
+                }
+                if (samplingEnabled && instructions > 0 && settings.cork.feed === 'slice')
+                {
+                    feedTranslator();
                 }
                 return instructions;
             },

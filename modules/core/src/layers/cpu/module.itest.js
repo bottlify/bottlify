@@ -162,6 +162,23 @@ test('the account can be asked where the interpreter ran, exactly', async()=>{
     await cpuModule.dispose();
 });
 
+test('a slice that ends before its budget credits no sample to where it stopped', async()=>{
+    // mov ecx, 50000; L: dec ecx; jnz L; hlt -- the slice ends early at the hlt,
+    // which is where the guest asked to stop, not where it ran.
+    const { api } = await booted(new Uint8Array([0xb9, 0x50, 0xc3, 0, 0, 0x49, 0x75, 0xfd, 0xf4]),
+        GUEST_CODE);
+    const retired = api.runSlice(10_000_000);
+    assert.ok(retired > 50_000 && retired < 10_000_000, `the loop ran and halted: ${retired}`);
+    const metrics = /** @type {any} */ (cpuModule.diagnostics().metrics ?? {});
+    const halt = metrics.samples.top.find((/** @type {any} */ bucket)=>
+        bucket.address <= GUEST_CODE + 8 && GUEST_CODE + 8 < bucket.address + 0x40);
+    // The boot's own first slice, which ran its budget, may sit in the bucket.
+    assert.ok((halt?.instructions ?? 0) < retired,
+        `the hlt is not charged with the loop: ${JSON.stringify(halt)}`);
+    api.stop();
+    await cpuModule.dispose();
+});
+
 test('slices against a real emulator credit the address the guest ran at', async()=>{
     const { api } = await booted(new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE);
 

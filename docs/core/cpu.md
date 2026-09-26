@@ -709,9 +709,12 @@ other.
 
 ### Sampling
 
-Every slice that retires at least one instruction credits the address it ended at
-(`internal/samples.js`) — a slice that retired nothing is a parked thread's turn and says
-nothing about where the guest's own code runs hot, so it is skipped. Addresses are bucketed to
+Every slice that ran its whole budget credits the address it ended at, weighted by what it
+retired (`internal/samples.js`): it stopped wherever the guest happened to be. A slice that ended
+early stopped where the guest asked to -- a wait it parked in, a halt -- so it is skipped: it
+credited that place with everything the slice retired, which charged a frame's hot loop to the
+call that ended the frame (an itest halts a loop inside one slice and finds the `hlt` charged
+nothing). The translator is still fed after any slice that retired something. Addresses are bucketed to
 64 bytes (`eip >>> 6`) in a `Map` capped at 16 384 distinct buckets; a bucket beyond the cap is
 counted as overflow rather than grown into, so a long run's own memory here is bounded no matter
 how much guest code it touches. The register read (`eip`, already needed for other bookkeeping
