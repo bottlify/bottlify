@@ -30,6 +30,7 @@
  */
 
 import { layoutText } from './paint.js';
+import { createTabWalk } from './tabwalk.js';
 
 /** Messages the controls answer. */
 export const WM_CREATE = 0x0001;
@@ -203,6 +204,7 @@ const ES_READONLY = 0x0800;
 const ES_WANTRETURN = 0x1000;
 const EM_GETSEL = 0x00b0;
 const EM_SETSEL = 0x00b1;
+const WM_NEXTDLGCTL = 0x0028;
 const EM_GETRECT = 0x00b2;
 const EM_SCROLL = 0x00b5;
 const EM_LINESCROLL = 0x00b6;
@@ -2984,6 +2986,24 @@ export function createControlProcedures(host){
         }
     };
 
+    const tabWalk = createTabWalk({ children: host.children, recordOf: host.windowOf });
+
+    /**
+     * Gives a control of a dialog the focus as the dialog manager moves it:
+     * an edit's text selected on the way in, as tabbing into one selects
+     * it, and the push buttons restyled after.
+     *
+     * @param {any} dialog @param {any} control @param {unknown} [thread]
+     */
+    const giveFocus = (dialog, control, thread)=>after(
+        host.send(control.hwnd, WM_GETDLGCODE, 0, 0, thread), code=>after(
+            ((code >>> 0) & DLGC_HASSETSEL) !== 0
+                ? host.send(control.hwnd, EM_SETSEL, 0, -1 >>> 0, thread) : 0,
+            ()=>after(host.setFocus(control.hwnd, thread), ()=>{
+                markDefault(dialog, control.hwnd);
+                return 0;
+            })));
+
     /**
      * The messages whose answer is the dialog procedure's own return value
      * rather than DWLP_MSGRESULT.
@@ -3060,21 +3080,18 @@ export function createControlProcedures(host){
                 return record.font ?? 0;
             case WM_SETFOCUS: {
                 // The dialog passes the focus on, to its first control that
-                // stops the Tab key -- selecting an edit's text on the way
-                // in, as tabbing into one does.
+                // stops the Tab key.
                 const first = host.children(record).find(child=>(child.style
                     & (WS_TABSTOP | WS_VISIBLE | WS_DISABLED)) === (WS_TABSTOP | WS_VISIBLE));
-                if (!first)
-                {
-                    return 0;
-                }
-                return after(host.send(first.hwnd, WM_GETDLGCODE, 0, 0, thread), code=>after(
-                    ((code >>> 0) & DLGC_HASSETSEL) !== 0
-                        ? host.send(first.hwnd, EM_SETSEL, 0, -1 >>> 0, thread) : 0,
-                    ()=>after(host.setFocus(first.hwnd, thread), ()=>{
-                        markDefault(record, first.hwnd);
-                        return 0;
-                    })));
+                return first ? giveFocus(record, first, thread) : 0;
+            }
+            case WM_NEXTDLGCTL: {
+                // The control named when lParam's low word says so, else the
+                // next or previous tab stop from the focus; the default id
+                // stays, and only the buttons' look follows the focus.
+                const target = (message.lParam & 0xffff) !== 0 ? host.live(message.wParam)
+                    : tabWalk.nextTabStop(record, host.focus(), message.wParam === 0);
+                return target ? giveFocus(record, target, thread) : 0;
             }
             case WM_CLOSE:
                 // Closing a dialog is Cancel: what the person could have

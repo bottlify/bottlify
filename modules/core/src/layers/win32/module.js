@@ -180,10 +180,11 @@ export const win32Module = {
          *     place: (hwnd: number, x: number, y: number, width: number,
          *     height: number, how?: { announce?: boolean }) => boolean,
          *     active: () => number, refresh: () => void,
-         *     rawInput: (report: import('./user32/rawinput.js').RawInputEvent) => void }} */
+         *     rawInput: (report: import('./user32/rawinput.js').RawInputEvent) => void,
+         *     modalLoop: import('./user32/windows.js').WindowService['modalLoop'] }} */
         let windowService = {
             list: ()=>[], clientRect: ()=>null, place: ()=>false, active: ()=>0,
-            refresh: ()=>{}, rawInput: ()=>{},
+            refresh: ()=>{}, rawInput: ()=>{}, modalLoop: ()=>0,
         };
 
         /** @type {(handle: number, text: string) => void} */
@@ -1217,6 +1218,8 @@ export const win32Module = {
                     modules.findResource?.(instance, type, name) ?? null,
                 moduleBase: instance=>modules.moduleBase?.(instance) ?? 0,
                 loadString: (instance, id)=>modules.loadString?.(instance, id) ?? null,
+                // A modal sheet's own loop, which user32 lends it.
+                modal: (hwnd, options)=>windowService.modalLoop(hwnd, options),
             }),
 
             'SHELL32.dll': createShellFunctions({

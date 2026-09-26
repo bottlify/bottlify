@@ -362,6 +362,11 @@ const MAX_WINDOW_TEXT = 1 << 16;
  * @property {(event: import('./rawinput.js').RawInputEvent) => void} rawInput
  *           One event of the mouse or the keyboard as the device reported it,
  *           posted as WM_INPUT to whoever registered for that device.
+ * @property {(hwnd: number, options: { thread: unknown,
+ *     first?: import('./dialogs.js').ModalHook }) => number | Promise<number>} modalLoop
+ *           Runs a dialog another library made as DialogBox runs one, on the
+ *           thread named, each message offered to `first` before the dialog
+ *           manager: what a property sheet's own loop is on Windows.
  */
 
 /**
@@ -2945,6 +2950,9 @@ export function createWindowFunctions(host){
         /** The window GetForegroundWindow answers with, or zero. */
         active: ()=>activeWindow(),
 
+        modalLoop: (hwnd, { thread, first })=>(runModal
+            ? runModal(hwnd >>> 0, thread, first) : 0),
+
         /**
          * One event of the mouse or the keyboard as the device reported it,
          * for WM_INPUT: what a program that registered for raw input reads,
@@ -3122,6 +3130,14 @@ export function createWindowFunctions(host){
         return andThen(told, ()=>wasVisible ? 1 : 0);
     };
 
+    /**
+     * The dialog manager's modal loop, once the dialog functions below have
+     * made it.
+     *
+     * @type {((hwnd: number, thread: unknown, first?: import('./dialogs.js').ModalHook)
+     *     => Promise<number>) | null}
+     */
+    let runModal = null;
     // Named, because a message for a window with no procedure of its own is
     // handed to the default procedure in this table by `deliver` above.
     const table = {
@@ -3192,6 +3208,8 @@ export function createWindowFunctions(host){
                     return record ? showWindow(record, SW_SHOW) : 0;
                 },
                 translate,
+                take: (/** @type {unknown} */ thread)=>takeThrough(
+                    { hwnd: ANY_WINDOW, first: 0, last: 0, remove: true }, thread),
             }),
             live, windows, makeWindow, destroyWindow, deliver, announce,
             // A class the program registered, by the name a template spells it.
@@ -3200,6 +3218,9 @@ export function createWindowFunctions(host){
                 ? classNamed(name) : null),
             classKnown: name=>classNamed(/^#\d+$/.test(name)
                 ? atoms.get(Number(name.slice(1))) ?? name : name) !== null,
+            modalLoop: run=>{
+                runModal = run;
+            },
         }),
         ...rawInput.table,
 

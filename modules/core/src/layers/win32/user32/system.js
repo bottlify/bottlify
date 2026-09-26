@@ -326,6 +326,11 @@ const GW_HWNDPREV = 3;
 const GW_OWNER = 4;
 const GW_CHILD = 5;
 
+/** GetAncestor's. */
+const GA_PARENT = 1;
+const GA_ROOT = 2;
+const GA_ROOTOWNER = 3;
+
 /**
  * GetClassLong / SetClassLong indices. They are negative for the same reason
  * the window ones are: a non-negative index addresses the class extra bytes,
@@ -457,6 +462,14 @@ const messageBoxDefault = type=>{
  * @param {Map<string, any>} options.classes  Registered classes, by name.
  */
 export function createSystemFunctions({ host, live, windows, classes }){
+    /**
+     * A window as the program is told of it: the desktop, the one window
+     * here that is not the program's, as none.
+     *
+     * @param {number} hwnd
+     */
+    const programs = hwnd=>(hwnd !== 0 && host.isDesktop?.(live(hwnd)) ? 0 : hwnd);
+
     /**
      * ToUnicode and ToAscii, spelt once: the character the key makes under
      * the caller's key state, written as a code unit of `unit` bytes.
@@ -1664,6 +1677,77 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>live(hwnd)?.parent ?? 0,
+        },
+
+        /**
+         * HWND GetAncestor(HWND hwnd, UINT gaFlags)
+         *
+         * GA_PARENT is the parent alone -- the desktop for a window that is
+         * no child, where GetParent names the owner; GA_ROOT is where the
+         * chain of child windows ends; GA_ROOTOWNER goes on from there
+         * through each owner and its root. The desktop has no ancestor.
+         */
+        GetAncestor: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, flags])=>{
+                const record = live(hwnd);
+                if (!record || host.isDesktop(record))
+                {
+                    return 0;
+                }
+                /** @param {any} from */
+                const rootOf = from=>{
+                    let at = from;
+                    for (let depth = 0; host.isChild(at) && live(at.parent) && depth < 256; depth++)
+                    {
+                        at = live(at.parent);
+                    }
+                    return at;
+                };
+                switch (flags >>> 0){
+                    case GA_PARENT:
+                        return host.isChild(record) ? record.parent : host.desktop().hwnd;
+                    case GA_ROOT:
+                        return rootOf(record).hwnd;
+                    case GA_ROOTOWNER: {
+                        let at = rootOf(record);
+                        const seen = new Set([at]);
+                        for (let owner = live(at.parent); owner && !seen.has(rootOf(owner));
+                            owner = live(at.parent))
+                        {
+                            at = rootOf(owner);
+                            seen.add(at);
+                        }
+                        return at.hwnd;
+                    }
+                    default:
+                        return 0;
+                }
+            },
+        },
+
+        /**
+         * BOOL IsChild(HWND hWndParent, HWND hWnd)
+         *
+         * Whether the window is a descendant through WS_CHILD windows alone:
+         * a popup ends the chain, even one made on the window asked about.
+         */
+        IsChild: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([parent, hwnd])=>{
+                let at = live(hwnd);
+                for (let depth = 0; at && host.isChild(at) && depth < 256; depth++)
+                {
+                    if (at.parent === (parent >>> 0))
+                    {
+                        return 1;
+                    }
+                    at = live(at.parent);
+                }
+                return 0;
+            },
         },
 
         /** HWND SetParent(HWND hWndChild, HWND hWndNewParent) */
@@ -3053,16 +3137,21 @@ export function createSystemFunctions({ host, live, windows, classes }){
             },
         },
 
-        /** HWND GetActiveWindow(void) */
+        /**
+         * HWND GetActiveWindow(void) / HWND GetForegroundWindow(void)
+         *
+         * Nothing while the desktop has the activation: it is no window of
+         * the program's, as another program's window would not be.
+         */
         GetActiveWindow: {
             argBytes: 0,
-            handler: ()=>host.active?.() ?? 0,
+            handler: ()=>programs(host.active?.() ?? 0),
         },
 
         /** HWND GetForegroundWindow(void) */
         GetForegroundWindow: {
             argBytes: 0,
-            handler: ()=>host.active?.() ?? 0,
+            handler: ()=>programs(host.active?.() ?? 0),
         },
 
         /**
@@ -3070,11 +3159,12 @@ export function createSystemFunctions({ host, live, windows, classes }){
          *
          * The window the keyboard goes to, which is a control more often
          * than a top-level window -- and nothing at all until something
-         * took it, which is a state a program checks for.
+         * took it, which is a state a program checks for, or while the
+         * desktop has it.
          */
         GetFocus: {
             argBytes: 0,
-            handler: ()=>host.focus?.() ?? 0,
+            handler: ()=>programs(host.focus?.() ?? 0),
         },
 
         /**
@@ -3162,7 +3252,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>{
-                const previous = host.active?.() ?? 0;
+                const previous = programs(host.active?.() ?? 0);
                 if (!live(hwnd))
                 {
                     return 0;

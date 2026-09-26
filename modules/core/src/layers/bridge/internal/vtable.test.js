@@ -285,3 +285,62 @@ test('a method hands its implementation one argument array, until a call answers
     assert.notEqual(given[2], given[3], 'and keeps it: the next call gets another');
     assert.deepEqual(given[2], [5, 6]);
 });
+
+test('an object still reachable at a count of zero keeps its pointer until it is not', ()=>{
+    // A DirectSound device keeps its primary buffer: a program may release every
+    // reference and call it again through the same pointer, and Wine's dsound
+    // test does exactly that. Forgetting the pointer at zero answered E_POINTER,
+    // and the words behind it could by then be another object's.
+    /** @type {Map<string, any>} */
+    const handlers = new Map();
+    let next = 0x2000;
+    const table = createVtables({
+        memory: {
+            writeU32: ()=>{},
+            /** @param {number} address @param {number} length */
+            readBytes: (address, length)=>new Uint8Array(length),
+        },
+        /** @param {string} name @param {any} fn */
+        register: (name, fn)=>{
+            handlers.set(name, fn);
+            return 0x1000 + handlers.size * 0x10;
+        },
+        heap: { allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes;
+            return at;
+        } },
+    });
+    let owned = true;
+    let count = 1;
+    const kept = {
+        /** @param {string} id */
+        interfaceFor: id=>(id === IID ? { id, methods: METHODS } : null),
+        addRef: ()=>++count,
+        release: ()=>(count = Math.max(0, count - 1)),
+        reachable: ()=>count > 0 || owned,
+    };
+    const other = {
+        /** @param {string} id */
+        interfaceFor: id=>(id === IID ? { id, methods: METHODS } : null),
+        addRef: ()=>2,
+        release: ()=>1,
+    };
+    const pointer = table.publish(kept, IID);
+    const elsewhere = table.publish(other, IID);
+    const addRef = handlers.get(`${IID}::AddRef`).handler;
+    const release = handlers.get(`${IID}::Release`).handler;
+
+    assert.equal(release([pointer]), 0);
+    assert.equal(addRef([pointer]), 1, 'still the same object behind the same pointer');
+    assert.equal(release([pointer]), 0);
+    assert.equal(release([pointer]), 0);
+    assert.equal(table.publish(kept, IID), pointer, 'asked for again, the same pointer');
+    assert.equal(table.diagnostics().comInterfaces, 2);
+
+    // Its owner goes; the next release anywhere finds it unreachable.
+    owned = false;
+    release([elsewhere]);
+    assert.equal(addRef([pointer]) >>> 0, 0x80004003, 'now it is forgotten');
+    assert.equal(table.diagnostics().comInterfaces, 1);
+});

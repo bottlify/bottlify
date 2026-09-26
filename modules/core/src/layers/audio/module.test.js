@@ -504,6 +504,23 @@ test('with shared memory, a released DirectSound buffer frees its slot: 40 over 
         'no fallback after releasing every buffer before the next one opened');
 });
 
+test('with nothing listening, a released buffer still leaves the walk', async()=>{
+    // A build with no sound device reads nothing out, but it still walks every
+    // buffer before each mix for its notifications; one that never let go of a
+    // released buffer walked everything the program had ever made.
+    const f = await playing({ drained: false });
+    for (let i = 0; i < 40; i++)
+    {
+        assert.equal(f.call(f.root, 'CreateSoundBuffer', [DESC_AT, OUT_AT + 4, 0]), DS_OK);
+        const pointer = f.view.getUint32(OUT_AT + 4, true);
+        f.call(pointer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+        f.objectAt(pointer).api.release();
+        f.api.pump();
+    }
+    assert.equal(f.api.buffers().length, 1, 'only the buffer the program still holds');
+    assert.equal(f.api.feeding().refusedFills, 40, 'and still nothing was read out');
+});
+
 /** Somewhere to put a DSBPOSITIONNOTIFY the guest would have filled in. */
 const NOTIFY_AT = 0x400;
 

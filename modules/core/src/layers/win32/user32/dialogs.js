@@ -47,6 +47,7 @@
 import { ANY_WINDOW, WM_QUIT } from './messages.js';
 import { readMessage, readRect, writeRect } from './structs.js';
 import { WS_VISIBLE, frameOf } from './frame.js';
+import { createTabWalk } from './tabwalk.js';
 import {
     DLGC_BUTTON, DLGC_DEFPUSHBUTTON, DLGC_HASSETSEL, DLGC_WANTALLKEYS,
     DLGC_WANTTAB, DLGWINDOWEXTRA, DWLP_DLGPROC, IDCANCEL, IDOK, WM_GETDLGCODE, WM_SETFONT,
@@ -118,17 +119,24 @@ const SHELL_FONT_FACE = 'MS Shell Dlg';
  * @property {number} charSet
  */
 
+/**
+ * Asked first of each message a modal loop takes, before the dialog manager:
+ * true when it took the message, which goes no further. It sends through the
+ * `send` it is handed, which names the loop's own thread.
+ *
+ * @typedef {(message: { hwnd: number, message: number, wParam: number, lParam: number,
+ *     time?: number, x?: number, y?: number },
+ *     send: (hwnd: number, message: number, wParam: number, lParam: number)
+ *         => number | Promise<number>) => boolean | Promise<boolean>} ModalHook
+ */
+
 /** The style bits a dialog's own window carries. */
 const WS_CHILD = 0x40000000;
-const WS_TABSTOP = 0x00010000;
-const WS_GROUP = 0x00020000;
 const WS_DISABLED = 0x08000000;
 /** The dialog styles that decide where it goes and what frame it has. */
 const DS_MODALFRAME = 0x0080;
 const DS_CENTER = 0x0800;
 const WS_EX_DLGMODALFRAME = 0x00000001;
-/** A child whose own controls Tab moves between as if they were the dialog's. */
-const WS_EX_CONTROLPARENT = 0x00010000;
 
 /**
  * A DLGTEMPLATEEX begins with a version of 1 and a signature of 0xffff, where
@@ -252,6 +260,12 @@ const MAX_RESOURCE_NAME = 256;
  *           or a dialog's own -- measures as, and the font a template
  *           names. Absent, or answering null, without a font engine.
  * @property {() => unknown} [callerThread]
+ * @property {(thread: unknown) => any} [take]
+ *           The next message for the thread, taken as GetMessage takes it:
+ *           a mouse message placed where the program's procedures say it
+ *           goes, a press having activated its window and the window under
+ *           the pointer asked for its cursor. A promise when that runs the
+ *           program; null when there is nothing.
  * @property {(code: number) => void} [setLastError]
  * @property {(hwnd: number) => void} [created]
  * @property {() => Promise<void>} idle
@@ -274,6 +288,9 @@ const MAX_RESOURCE_NAME = 256;
  *     Whether a class of that name, or `#atom`, is the program's or the system's.
  * @param {(record: any, args: number[]) => number | Promise<number>} options.announce
  *     Tells a new window's procedure that it exists, as CreateWindowEx does.
+ * @param {(run: (hwnd: number, thread: unknown, first?: ModalHook) => Promise<number>)
+ *     => void} [options.modalLoop]  Handed the modal loop, for a dialog another
+ *     library made to be run the way DialogBox runs one.
  */
 export function createDialogFunctions(options){
     const {
@@ -685,112 +702,8 @@ export function createDialogFunctions(options){
         ? /** @type {Promise<number>} */ (created).then(then)
         : then(/** @type {number} */ (created)));
 
-    /**
-     * Whether Tab searches a child's controls rather than the child: one
-     * with WS_EX_CONTROLPARENT, shown and enabled, as a property sheet's
-     * page is inside the sheet.
-     *
-     * @param {any} child
-     */
-    const searchedThrough = child=>(child.exStyle & WS_EX_CONTROLPARENT) !== 0
-        && (child.style & (WS_VISIBLE | WS_DISABLED)) === WS_VISIBLE;
-
-    /** @param {any} child  Whether Tab stops at it. */
-    const stopsTab = child=>!searchedThrough(child)
-        && (child.style & (WS_TABSTOP | WS_VISIBLE | WS_DISABLED)) === (WS_TABSTOP | WS_VISIBLE);
-
-    /**
-     * The windows inside a dialog in the order Tab meets them: each child,
-     * then, for one it searches through, that child's own. The windows
-     * around `from` are laid out too, so a control Tab could not have
-     * reached is searched from where it stands.
-     *
-     * @param {any} dialog @param {number} from
-     * @returns {any[]}
-     */
-    const tabSequence = (dialog, from)=>{
-        const around = new Set();
-        for (let at = windows.get(from); at && at.hwnd !== dialog.hwnd; at = windows.get(at.parent))
-        {
-            around.add(at.hwnd);
-        }
-        /** @type {any[]} */
-        const sequence = [];
-        /** @param {any} parent */
-        const visit = parent=>{
-            for (const child of host.children(parent))
-            {
-                sequence.push(child);
-                if (searchedThrough(child) || around.has(child.hwnd))
-                {
-                    visit(child);
-                }
-            }
-        };
-        visit(dialog);
-        return sequence;
-    };
-
-    /**
-     * The control after -- or before -- one that stops Tab, wrapping round.
-     * From nothing, or from outside the dialog, the first or the last.
-     *
-     * @param {any} dialog @param {number} from  A control's handle, or zero.
-     * @param {boolean} forward
-     * @returns {any | null}
-     */
-    const nextTabStop = (dialog, from, forward)=>{
-        const sequence = tabSequence(dialog, from);
-        const at = from === 0 ? -1 : sequence.findIndex(child=>child.hwnd === from);
-        if (at === -1)
-        {
-            const stops = sequence.filter(stopsTab);
-            return (forward ? stops[0] : stops[stops.length - 1]) ?? null;
-        }
-        for (let step = 1; step <= sequence.length; step++)
-        {
-            const child = sequence[(at + (forward ? step : sequence.length - step))
-                % sequence.length];
-            if (stopsTab(child))
-            {
-                return child;
-            }
-        }
-        return null;
-    };
-
-    /**
-     * The control after -- or before -- one within its group: the run of
-     * siblings from one WS_GROUP to the next, which is what the arrow keys
-     * walk.
-     *
-     * @param {any} dialog @param {number} from @param {boolean} forward
-     * @returns {any | null}
-     */
-    const nextGroupItem = (dialog, from, forward)=>{
-        const all = host.children(dialog);
-        const at = all.findIndex(child=>child.hwnd === from);
-        if (at === -1)
-        {
-            return null;
-        }
-        let first = at;
-        while (first > 0 && (all[first].style & WS_GROUP) === 0)
-        {
-            first--;
-        }
-        let last = at;
-        while (last + 1 < all.length && (all[last + 1].style & WS_GROUP) === 0)
-        {
-            last++;
-        }
-        const group = all.slice(first, last + 1).filter(child=>
-            (child.style & WS_VISIBLE) !== 0 && (child.style & WS_DISABLED) === 0);
-        const index = group.findIndex(child=>child.hwnd === from);
-        return group.length === 0
-            ? null
-            : group[(index + (forward ? 1 : group.length - 1)) % group.length];
-    };
+    const { nextTabStop, nextGroupItem } = createTabWalk({ children: host.children,
+        recordOf: hwnd=>windows.get(hwnd) });
 
     /** @param {number} hwnd @param {number} dialog  Whether hwnd is the dialog or inside it. */
     const within = (hwnd, dialog)=>{
@@ -916,16 +829,23 @@ export function createDialogFunctions(options){
      * quit belongs to the loop outside this one, which has not seen it yet.
      *
      * @param {number} hwnd
+     * @param {unknown} thread  Whose loop it is, read when its call was made:
+     *     afterwards the thread on the processor may be another, and every
+     *     delivery below has to name this one.
+     * @param {ModalHook} [first]
      * @returns {Promise<number>}
      */
-    const runModal = async hwnd=>{
-        // Read before the first await: afterwards the thread on the processor
-        // may be another, and every delivery below has to name this one.
-        const thread = host.callerThread?.();
+    const runModal = async(hwnd, thread, first)=>{
         const record = windows.get(hwnd);
         if (!record)
         {
             return 0;
+        }
+        // Destroyed while it was being made, and not by EndDialog: there is
+        // no dialog to run, as though it could not be made.
+        if (record.destroyed && record.dialogResult === undefined)
+        {
+            return DIALOG_FAILED;
         }
         // The owner is disabled for as long as the dialog is up, as Windows
         // disables it: a program asking IsWindowEnabled of its own frame
@@ -941,7 +861,10 @@ export function createDialogFunctions(options){
         await host.show?.(hwnd);
         while (!record.destroyed)
         {
-            const entry = host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
+            // The program's own loop would have been GetMessage, and what
+            // that does as it takes a message the dialog's loop does too.
+            const entry = host.take ? await host.take(thread)
+                : host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
             if (!entry)
             {
                 await host.idle();
@@ -952,6 +875,11 @@ export function createDialogFunctions(options){
                 host.queue.postQuit(entry.wParam | 0);
                 await destroyWindow(hwnd, thread);
                 break;
+            }
+            if (first && await first(entry, (target, message, wParam, lParam)=>
+                host.send(target, message, wParam, lParam, thread)))
+            {
+                continue;
             }
             const taken = dialogKey(hwnd, entry, thread);
             if (taken !== null)
@@ -972,6 +900,8 @@ export function createDialogFunctions(options){
         }
         return record.dialogResult ?? 0;
     };
+
+    options.modalLoop?.(runModal);
 
     /**
      * The address of a dialog template named in a module's resources, or zero.
@@ -1029,9 +959,11 @@ export function createDialogFunctions(options){
         DialogBoxIndirectParamA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([instance, template, parent, dialogFunc, initParam])=>
-                once(createDialog(instance, template, parent, dialogFunc, initParam),
-                    hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd))),
+            handler: ([instance, template, parent, dialogFunc, initParam])=>{
+                const thread = host.callerThread?.();
+                return once(createDialog(instance, template, parent, dialogFunc, initParam),
+                    hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd, thread)));
+            },
         },
 
         /**
@@ -1041,10 +973,12 @@ export function createDialogFunctions(options){
         DialogBoxParamA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([instance, name, parent, dialogFunc, initParam])=>
-                once(createDialog(instance, templateAddress(instance, name), parent,
+            handler: ([instance, name, parent, dialogFunc, initParam])=>{
+                const thread = host.callerThread?.();
+                return once(createDialog(instance, templateAddress(instance, name), parent,
                     dialogFunc, initParam),
-                hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd))),
+                hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd, thread)));
+            },
         },
 
         /**
@@ -1283,16 +1217,21 @@ export function createDialogFunctions(options){
          * HWND GetNextDlgGroupItem(HWND hDlg, HWND hCtl, BOOL bPrevious)
          *
          * The next control in the same group, which is what the arrow keys
-         * move between.
+         * move between -- inside the children the walk searches through --
+         * or the first from nothing or the dialog itself, before which there
+         * is none.
          */
         GetNextDlgGroupItem: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, from, previous])=>{
                 const dialog = live(hwnd);
-                return dialog
-                    ? nextGroupItem(dialog, from >>> 0, (previous >>> 0) === 0)?.hwnd ?? 0
-                    : 0;
+                const start = (from >>> 0) === (hwnd >>> 0) ? 0 : from >>> 0;
+                if (!dialog || (start === 0 && (previous >>> 0) !== 0))
+                {
+                    return 0;
+                }
+                return nextGroupItem(dialog, start, (previous >>> 0) === 0)?.hwnd ?? 0;
             },
         },
 

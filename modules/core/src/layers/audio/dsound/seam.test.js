@@ -371,6 +371,57 @@ test('a primary buffer needs neither a size nor a format', ()=>{
     assert.equal(f.dsound.buffers()[0].primary, true);
 });
 
+test('through DirectSound 8, a 3D buffer is mono and has no pan', ()=>{
+    // Wine's ds3d8 test_secondary8: a stereo DSBCAPS_CTRL3D buffer, and a mono
+    // one with CTRLPAN as well, are DSERR_INVALIDPARAM; a mono one is made.
+    const f = fixture();
+    const out = 0x1000;
+    f.dsound.libraries['DSOUND.dll'].DirectSoundCreate8.handler([0, out, 0]);
+    const eight = { ...f, root: f.memory.u32(out) };
+    const at = 0x1800;
+    /** @param {any} on @param {any} spec */
+    const create = (on, spec)=>{
+        f.memory.setU32(at, 0xdeadbeef);
+        const result = f.bridge.call(on.root, 'CreateSoundBuffer',
+            [describeBuffer(f.memory, spec), at, 0]);
+        return { result, pointer: f.memory.u32(at) };
+    };
+    const DSBCAPS_CTRL3D = 0x00000010;
+    const stereo3d = create(eight, { flags: DSBCAPS_CTRL3D, channels: 2 });
+    assert.deepEqual(stereo3d, { result: DSERR_INVALIDPARAM, pointer: 0 });
+    const panned3d = create(eight, { flags: DSBCAPS_CTRL3D | DSBCAPS_CTRLPAN, channels: 1 });
+    assert.deepEqual(panned3d, { result: DSERR_INVALIDPARAM, pointer: 0 });
+    assert.equal(create(eight, { flags: DSBCAPS_CTRL3D, channels: 1 }).result, DS_OK);
+
+    // Wine's ds3d test_secondary makes both through DirectSoundCreate's object:
+    // the rule is DirectSound 8's.
+    const older = createRoot(f);
+    const both = create(older, { flags: DSBCAPS_CTRL3D | DSBCAPS_CTRLPAN, channels: 2 });
+    assert.equal(both.result, DS_OK);
+});
+
+test('a primary buffer described with a format is refused', ()=>{
+    // Wine's dsound test_primary: DSBCAPS_PRIMARYBUFFER with a non-null
+    // lpwfxFormat is DSERR_INVALIDPARAM and a null pointer back -- its format
+    // is set afterwards, through SetFormat.
+    const f = createRoot();
+    const out = 0x1800;
+    f.memory.setU32(out, 0xdeadbeef);
+    const descriptor = describeBuffer(f.memory,
+        { flags: DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME });
+    f.memory.setU32(descriptor + DSBUFFERDESC.lpwfxFormat, 0x2000);
+    assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]),
+        DSERR_INVALIDPARAM);
+    assert.equal(f.memory.u32(out), 0);
+    assert.equal(f.dsound.buffers().length, 0, 'nothing was made');
+
+    // And not handed the one that exists either.
+    createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER, descriptor: 0x2200 });
+    assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]),
+        DSERR_INVALIDPARAM);
+    assert.equal(f.memory.u32(out), 0);
+});
+
 test('a device has one primary buffer, handed out again with its count raised', ()=>{
     // Wine's dsound test_primary and test_hw_buffers: a second primary is the
     // first, whatever the second description says, and releasing it leaves
@@ -406,6 +457,35 @@ test('a device has one primary buffer, handed out again with its count raised', 
     assert.equal(f.dsound.buffers().find(b=>b.primary).references, 1);
 });
 
+test('a primary buffer is dropped once nothing can reach it, and not before', ()=>{
+    // Its device holds it: a count of zero is not the end of it while the
+    // device lives. Once both are gone it leaves the walk, or every object a
+    // program creates leaves a buffer behind for the rest of the session.
+    const f = createRoot();
+    const device = f.bridge.recordAt(f.root).object;
+    const primary = f.bridge.recordAt(createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER })).object;
+    const primaries = ()=>f.dsound.buffers().filter(b=>b.primary).length;
+
+    assert.equal(primary.release(), 0);
+    f.dsound.pruneReleased();
+    assert.equal(primaries(), 1, 'its device still has it');
+    assert.equal(device.release(), 0);
+    f.dsound.pruneReleased();
+    assert.equal(primaries(), 0);
+
+    // The other order: the program still holds the primary when the device goes.
+    const other = 0x1004;
+    f.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, other, 0]);
+    const second = { ...f, root: f.memory.u32(other) };
+    const held = f.bridge.recordAt(createBuffer(second, { flags: DSBCAPS_PRIMARYBUFFER })).object;
+    assert.equal(f.bridge.recordAt(second.root).object.release(), 0);
+    f.dsound.pruneReleased();
+    assert.equal(primaries(), 1, 'the program still holds it');
+    assert.equal(held.release(), 0);
+    f.dsound.pruneReleased();
+    assert.equal(primaries(), 0);
+});
+
 test('two DirectSound objects have primary buffers of their own', ()=>{
     // Wine's dsound test_primary_independent.
     const f = createRoot();
@@ -417,6 +497,31 @@ test('two DirectSound objects have primary buffers of their own', ()=>{
     assert.notEqual(second, first);
     assert.equal(f.bridge.call(second, 'GetVolume', [0x1c00]), DS_OK);
     assert.equal(f.bridge.call(first, 'GetVolume', [0x1c00]), DSERR_CONTROLUNAVAIL);
+});
+
+test('CreateSoundBuffer reads a description of either size and refuses any other', ()=>{
+    // Wine's dsound test_primary: a dwSize one short of DSBUFFERDESC is
+    // DSERR_INVALIDPARAM with a null pointer back. The DirectX 3 layout,
+    // DSBUFFERDESC1, is the same without guid3DAlgorithm and is read the same.
+    const f = createRoot();
+    const out = 0x1800;
+    const descriptor = describeBuffer(f.memory, { bytes: 4096 });
+    for (const size of [0, DSBUFFERDESC.SIZE - 1, DSBUFFERDESC.SIZE_DX8 - 1,
+        DSBUFFERDESC.SIZE_DX8 + 1])
+    {
+        f.memory.setU32(out, 0xdeadbeef);
+        f.memory.setU32(descriptor + DSBUFFERDESC.dwSize, size);
+        assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]),
+            DSERR_INVALIDPARAM, `dwSize ${size}`);
+        assert.equal(f.memory.u32(out), 0, `dwSize ${size} writes a null back`);
+    }
+    assert.equal(f.dsound.buffers().length, 0);
+    for (const size of [DSBUFFERDESC.SIZE, DSBUFFERDESC.SIZE_DX8])
+    {
+        f.memory.setU32(descriptor + DSBUFFERDESC.dwSize, size);
+        assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]), DS_OK,
+            `dwSize ${size}`);
+    }
 });
 
 test('CreateSoundBuffer refuses null pointers rather than dereferencing them', ()=>{
@@ -1042,6 +1147,40 @@ const slotOf = (slots, name)=>{
     assert.ok(index >= 0, `${name} is a slot`);
     return 3 + index;
 };
+
+test('the primary buffer answers through its pointer after its last release', ()=>{
+    // Wine's dsound test_primary: Release to zero, AddRef answers one, two
+    // Releases answer zero, and QueryInterface still answers -- E_NOINTERFACE
+    // for IDirectSoundNotify, not E_POINTER -- because the device keeps it.
+    const g = guestMachine();
+    g.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, 0x1000, 0]);
+    const device = g.memory.u32(0x1000);
+    const descriptor = describeBuffer(g.memory, { flags: DSBCAPS_PRIMARYBUFFER });
+    assert.equal(g.call(device, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [descriptor, 0x1100, 0]), DS_OK);
+    const primary = g.memory.u32(0x1100);
+    const [ADDREF, RELEASE] = [1, 2];
+    assert.equal(g.call(primary, RELEASE), 0);
+    assert.equal(g.call(primary, ADDREF), 1);
+    assert.equal(g.call(primary, RELEASE), 0);
+    assert.equal(g.call(primary, RELEASE), 0);
+    const iid = 0x1200;
+    g.memory.writeMemory(iid, new Uint8Array([
+        0x83, 0x07, 0x21, 0xb0, 0xcd, 0x89, 0xd0, 0x11,
+        0xaf, 0x08, 0x00, 0xa0, 0xc9, 0x25, 0xcd, 0x16,
+    ]));
+    assert.equal(g.call(primary, 0, [iid, 0x1300]) >>> 0, 0x80004002, 'E_NOINTERFACE');
+
+    // Asked for again, it is the same buffer behind the same pointer.
+    assert.equal(g.call(device, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [descriptor, 0x1100, 0]), DS_OK);
+    assert.equal(g.memory.u32(0x1100), primary);
+    assert.equal(g.call(primary, RELEASE), 0);
+
+    // Once its device is gone as well, the pointer is let go.
+    assert.equal(g.call(device, RELEASE), 0);
+    assert.equal(g.call(primary, ADDREF) >>> 0, 0x80004003, 'E_POINTER');
+});
 
 test('a method reaches the arguments the guest pushed, at the offsets it pushed them', ()=>{
     const g = guestMachine();

@@ -44,6 +44,7 @@ const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
 const DSBCAPS_LOCHARDWARE = 0x00000004;
 const DSBCAPS_LOCSOFTWARE = 0x00000008;
+const DSBCAPS_CTRL3D = 0x00000010;
 const DSBCAPS_CTRLFREQUENCY = 0x00000020;
 const DSBCAPS_CTRLPAN = 0x00000040;
 const DSBCAPS_CTRLVOLUME = 0x00000080;
@@ -365,6 +366,9 @@ export function createPublisher({ publishInterface }){
                 },
                 addRef: ()=>api.addRef?.() ?? 1,
                 release: ()=>api.release?.() ?? 0,
+                // Whether the bridge keeps the pointer at a count of zero: a
+                // primary buffer lives as long as its device does.
+                reachable: ()=>api.reachable?.() ?? false,
             };
             adapters.set(api, adapter);
         }
@@ -842,14 +846,31 @@ export function createDirectSound(
             {
                 return DSERR_INVALIDPARAM;
             }
+            // One of the two layouts, or a caller that disagrees with us about
+            // where every later field is.
+            const size = readU32(descriptor + DSBUFFERDESC.dwSize);
+            if (size !== DSBUFFERDESC.SIZE && size !== DSBUFFERDESC.SIZE_DX8)
+            {
+                writeU32(out, 0);
+                return DSERR_INVALIDPARAM;
+            }
             const flags = readU32(descriptor + DSBUFFERDESC.dwFlags);
             const primary = (flags & DSBCAPS_PRIMARYBUFFER) !== 0;
             const wanted = readU32(descriptor + DSBUFFERDESC.dwBufferBytes);
-            const format = readFormat(readU32(descriptor + DSBUFFERDESC.lpwfxFormat));
+            const formatAt = readU32(descriptor + DSBUFFERDESC.lpwfxFormat);
+            const format = readFormat(formatAt);
             const asked = `CreateSoundBuffer flags=0x${(flags >>> 0).toString(16)} bytes=${wanted}`
                 + ` fmt=${format ? `${format.sampleRate}/${format.bitsPerSample}/${format.channels}` : '-'}`;
             record(asked);
             creations.push(asked);
+
+            // The primary buffer's format is the device's, set afterwards
+            // through SetFormat; a description that names one is refused.
+            if (primary && formatAt !== 0)
+            {
+                writeU32(out, 0);
+                return DSERR_INVALIDPARAM;
+            }
 
             // A device has one primary buffer, and asking again hands it out
             // again with its count raised; the new description is ignored, as
@@ -866,6 +887,15 @@ export function createDirectSound(
             // hardware runs at. A secondary one without a size is a caller's
             // mistake.
             if (!primary && (wanted === 0 || !format))
+            {
+                writeU32(out, 0);
+                return DSERR_INVALIDPARAM;
+            }
+            // DirectSound 8's rule, not the older interface's, which makes
+            // both: a sound placed in space is one point, so it is mono and
+            // has no pan of its own.
+            if (root.eight && !primary && (flags & DSBCAPS_CTRL3D) !== 0
+                && ((flags & DSBCAPS_CTRLPAN) !== 0 || format?.channels !== 1))
             {
                 writeU32(out, 0);
                 return DSERR_INVALIDPARAM;
@@ -887,6 +917,9 @@ export function createDirectSound(
 
             const buffer = createSoundBuffer({
                 bytes, address, format: resolved, now, primary, capabilities: flags,
+                // The device's own, which the program can ask for again after
+                // releasing every reference it had.
+                kept: primary ? ()=>root.references > 0 : undefined,
             });
             buffers.push(buffer);
             if (primary)
@@ -1054,6 +1087,10 @@ export function createDirectSound(
         const device = {
             addRef: ()=>++references,
             release: ()=>(references = Math.max(0, references - 1)),
+            get references(){
+                return references;
+            },
+            eight,
             /**
              * This object's primary buffer, once asked for: another object's
              * is another buffer (Wine's dsound test_primary_independent).
@@ -1159,7 +1196,8 @@ export function createDirectSound(
 
         /**
          * Drops every buffer the program has fully released (`references`
-         * reached zero) from the walk. Without this, a buffer a program
+         * reached zero, and for a primary buffer its device gone as well)
+         * from the walk. Without this, a buffer a program
          * created, played and released stays in this array for the rest of
          * the session -- harmless on its own, but every caller that walks
          * `buffers()` once a turn was walking a list that only ever grew.
@@ -1167,7 +1205,7 @@ export function createDirectSound(
         pruneReleased(){
             for (let at = buffers.length - 1; at >= 0; at--)
             {
-                if (!buffers[at].primary && buffers[at].references <= 0)
+                if (!buffers[at].reachable())
                 {
                     buffers.splice(at, 1);
                 }

@@ -382,13 +382,16 @@ interface pointer, and an `owners` map takes it to the object. Per object and in
 two-word block: the vtable pointer and a state word (`object.guestState?.()`) for methods that
 run as guest code. The same object and interface always answer the same pointer.
 
-`IUnknown` is the bridge's: `QueryInterface` reads the GUID (three little-endian integers then
-eight raw bytes), asks `interfaceFor`, publishes, `addRef`s the interface asked for, and answers
-`S_OK`, `E_NOINTERFACE` (with `*ppv` zeroed), `E_POINTER` or `E_OUTOFMEMORY`; `AddRef` and
-`Release` are passed to the object with the interface id (some object models count per
-interface generation), and a release to zero forgets the pointer and frees its block. A method
-without `invoke` answers `E_NOTIMPL`; a call through an unpublished pointer answers `E_POINTER`.
-A method's `invoke` may return a promise, and the caller is parked on it.
+`IUnknown` is the bridge's: `QueryInterface` reads the GUID (three little-endian integers then eight
+raw bytes), asks `interfaceFor`, publishes, `addRef`s the interface asked for, and answers `S_OK`,
+`E_NOINTERFACE` (with `*ppv` zeroed), `E_POINTER` or `E_OUTOFMEMORY`; `AddRef` and `Release` are
+passed to the object with the interface id (some object models count per interface generation), and
+a release to zero forgets the pointer and frees its block -- unless the object answers an optional
+`reachable(interfaceId)` with yes: something besides the program keeps it (a DirectSound device
+keeps its primary buffer), so the pointer stays, and every such pointer is asked again after each
+later release and forgotten once the answer is no. A method without `invoke` answers `E_NOTIMPL`; a
+call through an unpublished pointer answers `E_POINTER`. A method's `invoke` may return a promise,
+and the caller is parked on it.
 
 A table that cannot be built — stub table full, or the arena refusing — is counted as a refusal
 with its reason, and the guest gets a failure code rather than a null pointer with `S_OK`.
@@ -450,7 +453,7 @@ Unit tests (`npm test`; filter with `node --test src/layers/bridge/internal/<fil
 | `internal/dispatch.test.js` | unit | Marshal/invoke/EAX, negative results, forwarding stubs, fastcall's registers read from the saved block, a hook that answers vs. one that falls through (EIP/ESP either way), a hook's counters and a reported mismatch, parked calls leaving EAX, the parked token's identity, unimplemented/duplicate traps, a throwing handler, the bounded rings, the sampled `trap` phase, record reuse, the sink; a site hook: all eight registers read off the pushad block into a plain object, an answer writing back every edited register with ESP by `stackAdjust` and EIP to `resume`, a fallthrough restoring every register to the pristine reading even after the handler edited the object, counters and diagnostics shared with a slot hook, and the `call.hook` trace unchanged. |
 | `internal/parking.test.js` | unit | `freeStackFor` per thread, nothing in flight, the token only inside a call. |
 | `internal/callback.test.js` | unit | Suspended-call naming, `answered()`, nested frames below the stack in use, no call in flight, the right thread, address zero refused, `recentlyStarted`; a callback entered with registers of its own; a transfer abandoning every call and frame below its line and keeping the window procedure's above it, and drawing the line at the new ESP when none is given. |
-| `internal/vtable.test.js` | unit | Refusal when stubs or arena run out, pointer identity, guest-code slots, shared tables finding their object. |
+| `internal/vtable.test.js` | unit | Refusal when stubs or arena run out, pointer identity, guest-code slots, shared tables finding their object, a pointer kept at zero while its object is reachable and forgotten once it is not. |
 | `module.test.js` | unit | A handler calling back onto its own thread; a handler that awaited being refused without a thread and building on the named thread's stack; an off-stack frame refused; a second instance in one realm does not take the first one's traps; a disposed bridge answers harmlessly rather than throwing; `diagnostics()` answers for the most recently created instance; a handler answering with a continuation sends the thread there and leaves nothing waiting; a continuation without ESP refused; a thread held for its fault spinning in the park loop until its answer sends it on. |
 | `replay.test.js` | replay | Three sessions built in the test replayed through the real module (unnamed-thread refusal, the same session named replays cleanly, address zero names its sender), plus every `*.json` in `sessions/` — none is checked in today. |
 

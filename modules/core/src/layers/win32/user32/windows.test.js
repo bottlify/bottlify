@@ -940,6 +940,33 @@ test('activation leaving the application for the desktop tells it WM_ACTIVATEAPP
         [hwnd, WM_NCACTIVATE, 1], [hwnd, WM_ACTIVATE, 1], [hwnd, WM_SETFOCUS, 0]]);
 });
 
+test('with the desktop in the foreground the application has no active window, focus or '
+    + 'foreground window, until it takes them back', ()=>{
+    // user32's window tests (test_SetFocus, test_SetForegroundWindow): after
+    // SetForegroundWindow of the desktop, a window of the application shown
+    // with SW_SHOWNA leaves GetFocus, GetActiveWindow and GetForegroundWindow
+    // all answering NULL.
+    const SW_SHOWNA = 8;
+    const context = setup();
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+    fns.SetForegroundWindow.handler([hwnd]);
+    const state = ()=>[fns.GetActiveWindow.handler(), fns.GetForegroundWindow.handler(),
+        fns.GetFocus.handler()];
+    assert.deepEqual(state(), [hwnd, hwnd, hwnd]);
+
+    fns.SetForegroundWindow.handler([fns.GetDesktopWindow.handler()]);
+    assert.deepEqual(state(), [0, 0, 0]);
+    const other = createWindow(fns, memory);
+    fns.ShowWindow.handler([other, SW_SHOWNA]);
+    assert.deepEqual(state(), [0, 0, 0], 'a window shown without activating changes none');
+
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.deepEqual(state(), [hwnd, hwnd, hwnd]);
+});
+
 test('SetFocus into another window sends the activation set, then the focus', ()=>{
     const context = setup();
     putClass(context.memory);

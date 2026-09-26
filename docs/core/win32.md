@@ -112,7 +112,7 @@ instantiation of the module reports (method in "Inventory" below):
 | library | directory | exports | what it covers |
 |---------|-----------|--------:|----------------|
 | `KERNEL32.dll` | `kernel32/` | 365 | Console, threads and waits, heap and virtual memory, process and TLS, modules, files and directories, critical sections, SRW locks, condition variables and one-time initialisation (`slimsync.js`), locale and code pages, environment and command line, system info and time, `CreateProcess`, exceptions and SEH, resources, drives, file mappings and pipes, completion ports, file times, console I/O, APCs and the alertable waits (`apc.js`), overlapped I/O with a completion routine (`ReadFileEx`/`WriteFileEx`). |
-| `USER32.dll` | `user32/` | 285 | Windows and classes, painting, system queries and display settings, objects (cursors -- decoded to the picture the page shows, `cursors.js` -- icons, menus, clipboard), dialogs, hot keys, `SendInput`, raw input (`rawinput.js`), `TrackMouseEvent`, the keyboard-layout family (`GetKeyboardLayout`, `MapVirtualKey` A/W/`Ex`, `ToUnicode`/`Ex`, `ToAscii`/`Ex`, `VkKeyScan` A/W/`Ex`) over the one en-US layout this build has, read from one table in `keys.js` (`characterOf`/`keyForCharacter`) that `TranslateMessage`'s fallback reads too, under the modifiers held at the time. |
+| `USER32.dll` | `user32/` | 287 | Windows and classes, painting, system queries and display settings, objects (cursors -- decoded to the picture the page shows, `cursors.js` -- icons, menus, clipboard), dialogs, hot keys, `SendInput`, raw input (`rawinput.js`), `TrackMouseEvent`, the keyboard-layout family (`GetKeyboardLayout`, `MapVirtualKey` A/W/`Ex`, `ToUnicode`/`Ex`, `ToAscii`/`Ex`, `VkKeyScan` A/W/`Ex`) over the one en-US layout this build has, read from one table in `keys.js` (`characterOf`/`keyForCharacter`) that `TranslateMessage`'s fallback reads too, under the modifiers held at the time. |
 | `msvcrt.dll` | `msvcrt/` | 323 (272 without `fpu`) | The C runtime: strings, multibyte strings, conversion, formatting and scanning, heap, math, paths and directory searches (`_findfirst`/`_findnext`/`_findclose`), the low-level file calls over a descriptor table with text mode (`io.js`: `_open`, `_read`, `_write`, `_lseek`, `_stat`/`_stati64`, `_setmode` for `_O_TEXT`/`_O_BINARY`, `_tell`, `_eof`, `_filelength` and the rest; `_get_osfhandle`/`_open_osfhandle` share one record, and so one position, with a kernel32 file handle; `_O_TEMPORARY` and fopen's `D` delete the file when that descriptor closes), streams standing on those descriptors (`stdio.js`: `fopen` and its family, `freopen` (of a standard stream too) and `_fdopen`, `fgetpos`/`fsetpos`, `_fcloseall`/`_flushall`, `getchar`/`putchar`, `_filbuf`/`_flsbuf` and the macros' `_flag`, and the standard three as `_iob`'s first records, writing to the console), the runtime's variables with `errno` per thread (`globals.js`), threads (`threads.js`: `_beginthread`/`_beginthreadex` through kernel32's `CreateThread`), time, C++ support (`cxx.js`), CRT startup and the exits (`atexit`, `_onexit`, `_cexit`, `exit`), structured and C++ exceptions (`seh.js`, `eh.js`). |
 | `GDI32.dll` | `gdi32/` | 131 | Device contexts, objects and their lifetimes, metrics, drawing entry points. A device-dependent bitmap has rows of its own outside guest memory (`CreateBitmap` copies `lpBits`; `GetBitmapBits`/`SetBitmapBits` move them), and `GetObject`/`GetObjectW` report every object as the program reads it back -- a `BITMAP` with its stride, a whole `DIBSECTION`, a font's `LOGFONT`, a palette's entry count. Text and fonts in both spellings (`CreateFont`/`Indirect`, `GetTextMetrics` with TEXTMETRICW's WCHAR fields, `GetTextExtentPoint`/`32`, `GetCharWidth`/`32`, `GetCharABCWidths`, `TextOut`, `ExtTextOut`); ABC widths are each character's own advance as the black box, with no bearings. Mapping modes set the extents they fix (MM_TEXT one to one, the fixed modes the device's 96-dot inch against their units with y up, MM_ISOTROPIC starting from MM_LOMETRIC's, MM_ANISOTROPIC keeping its own), and `LPtoDP`/`DPtoLP`/`OffsetWindowOrgEx` answer through them; drawing itself is still in device units whatever the mode. Every spelling of adding and removing a font resource answers the documented failure, the font table being fixed; `GetTextCharset(Info)` and `GetFontLanguageInfo` answer for the selected font. `EnumFontFamiliesExA`/`W` call the program's callback on its own thread with each face the table offers (`gdi32/faces.js`), a substitute such as MS Shell Dlg found by name but never listed, for `ANSI_CHARSET` and `DEFAULT_CHARSET`; every face is reported as a vector font (`FontType` 0) rather than TrueType, since none has tables `GetFontData` could read, so a program that lists only TrueType faces finds none. `CreateBitmap` rounds a depth up to 1, 4, 8, 16, 24 or 32; a zero width or height is the one stock 1x1 monochrome bitmap every memory DC starts with; `CreateDIBitmap` makes a device-dependent bitmap at the DC's depth; a pattern brush keeps its own copy of the bitmap's bits. |
 | `ntdll.dll` | `ntdll/` | 96 | Counted strings, status translation, machine queries, 64-bit helpers — and 76 entries that are the same function object kernel32 or msvcrt already publish. |
@@ -122,7 +122,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `OLEAUT32.dll` | `oleaut32/` | 39 | BSTR and VARIANT; imported by ordinal. |
 | `WSOCK32.dll`, `WS2_32.dll` | `wsock32/` | 38 each | One socket registry under both names, over an injected adapter (loopback by default); readiness delivered as a window message (`WSAAsyncSelect`) or a signalled kernel event (`WSAEventSelect`/`WSAEnumNetworkEvents`), and name resolution the same way (`WSAAsyncGetHostByName`/`WSACancelAsyncRequest`). |
 | `SHELL32.dll` | `shell32/` | 24 | Launching a program (`ShellExecute`, `ShellExecuteEx`, `FindExecutable`), file operations on the volume (`fileop.js`: `SHFileOperationA/W` copying, moving, renaming and deleting by the rules shell32's tests check, `SHCreateDirectoryExA/W`), documented refusals where a registry or a person is needed (a document's handler, folder browse), the drag-and-drop truths, the namespace (`namespace.js`: `IShellFolder`/`IEnumIDList` over the volume), and `CLSID_ShellLink` (`IShellLinkA/W`, `IPersistFile`). |
-| `COMCTL32.dll` | `comctl32/` | 22 | Image lists (indices only), `_TrackMouseEvent` (user32's `TrackMouseEvent`), `msctls_progress32`, `SysTreeView32` and `SysTabControl32` (`tab.js`) as built-in window classes, and property sheets and wizards (`propsheet.js`: `PropertySheetA/W`, `CreatePropertySheetPageA/W`, `DestroyPropertySheetPage`) -- a `#32770` dialog built through user32's own calls around a tab control, each page the program's own template and dialog procedure, told the `PSN_*` notifications through `WM_NOTIFY`; Tab walks into a page's controls (`WS_EX_CONTROLPARENT`), `PSM_ISDIALOGMESSAGE` changes page on Ctrl+Tab, Ctrl+Shift+Tab and Ctrl+PgDn/PgUp, `PSH_WIZARD97` and `PSH_WIZARD_LITE` make a wizard whose interior pages stand under a header band with the header title and subtitle, a page that cannot be made is dropped, and a modal sheet answers 1 when changes were saved, 0 when none were, and `ID_PSRESTARTWINDOWS`/`ID_PSREBOOTSYSTEM` only when OK or Finish closed it. |
+| `COMCTL32.dll` | `comctl32/` | 22 | Image lists (indices only), `_TrackMouseEvent` (user32's `TrackMouseEvent`), `msctls_progress32`, `SysTreeView32` and `SysTabControl32` (`tab.js`) as built-in window classes, and property sheets and wizards (`propsheet.js`: `PropertySheetA/W`, `CreatePropertySheetPageA/W`, `DestroyPropertySheetPage`) -- a `#32770` dialog built through user32's own calls around a tab control, each page the program's own template and dialog procedure, told the `PSN_*` notifications through `WM_NOTIFY`; Tab walks into a page's controls (`WS_EX_CONTROLPARENT`), `PSM_ISDIALOGMESSAGE` changes page on Ctrl+Tab, Ctrl+Shift+Tab and Ctrl+PgDn/PgUp, as a modal sheet does in its own loop (user32's, lent through the window service), `PSH_WIZARD97` and `PSH_WIZARD_LITE` make a wizard whose interior pages stand under a header band with the header title and subtitle, a page that cannot be made is dropped, and a modal sheet answers 1 when changes were saved, 0 when none were, and `ID_PSRESTARTWINDOWS`/`ID_PSREBOOTSYSTEM` only when OK or Finish closed it. |
 | `d3dx9_25.dll`, `d3dx9_26.dll`, `d3dx9_27.dll` | `d3dx9/` | 13 each | Stub tables for the D3DX helper libraries, shadowed by the real DLL wherever the program ships one or its installer put one in `system32` ([`decisions.md`](../../roadmap/decisions.md)). |
 | `WININET.dll` | `wininet/` | 12 | HTTP as a handle tree; a request parks the caller. |
 | `IMM32.dll` | `imm32/` | 10 | "There is no input method" — which is the state a game asks for. |
@@ -138,7 +138,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `SHFOLDER.dll` | *(built in `module.js`)* | 2 | A two-export forwarder to shell32's `SHGetFolderPathA`/`SHGetFolderPathW`, sharing shell32's own function objects. |
 | *(no DLL)* | `quartz/` | — | The DirectShow filter graph, reached through `CoCreateInstance(CLSID_FilterGraph)`; registered on the COM registry, not as an import table. |
 
-Total: 1715 table entries across 28 libraries, 1582 distinct functions.
+Total: 1717 table entries across 28 libraries, 1584 distinct functions.
 
 **Inventory method.** `dbg/docs/count-dlls.mjs` (throwaway; not part of the build) creates the
 module against the same stub host `src/layers/win32/module.test.js` uses
@@ -295,7 +295,15 @@ gets its own heap, hive, queue and COM registry.
   `WM_UNDO`, keeping one change to undo. Dialogs are windows of the dialog class: the template is
   walked for real, coordinates are dialog units, the dialog procedure sees every message first and
   `DefDlgProc` -- the dialog class's whole procedure, so a program's own dialog class reaches its
-  `DWLP_DLGPROC` through it -- the rest, and `IsDialogMessage` handles Enter, Escape and Tab. The
+  `DWLP_DLGPROC` through it -- the rest, and `IsDialogMessage` handles Enter, Escape and Tab.
+  Tab, `GetNextDlgTabItem`, `GetNextDlgGroupItem` and `DefDlgProc`'s `WM_NEXTDLGCTL` walk through a
+  shown, enabled child with `WS_EX_CONTROLPARENT` as if its controls were the dialog's own
+  (`user32/tabwalk.js`); a group runs from one `WS_GROUP` control to the next, round the end of the
+  dialog to its start. A modal dialog's loop takes each message as `GetMessage` takes it -- the
+  hit test asked, a press activating, `WM_SETCURSOR` sent -- on the thread `DialogBox` was called
+  on, and `DialogBox` answers -1 for a dialog its procedure destroyed during `WM_INITDIALOG`; the
+  window service lends the same loop to another library, each message offered first to a hook,
+  which is how a modal property sheet runs its own. The
   default push button moves with the focus: a push button the focus reaches is styled
   `BS_DEFPUSHBUTTON` while it has it, `DM_SETDEFID` moves the style from the old default to the new,
   and Enter presses the focused push button only while it is the default. Pointer messages from the
@@ -314,12 +322,16 @@ gets its own heap, hive, queue and COM registry.
   `WM_NCACTIVATE(0)` and `WM_ACTIVATE(WA_INACTIVE)` to the window losing it, `WM_NCACTIVATE(1)` and
   `WM_ACTIVATE` to the one gaining it, then `WM_KILLFOCUS`/`WM_SETFOCUS`. When none of the program's
   windows was active -- its first window shown -- every top-level window of the program hears
-  `WM_ACTIVATEAPP(1)` first, and `WM_ACTIVATEAPP(0)` when the activation goes to the desktop; a window never shown is never activated. A press activates its window
+  `WM_ACTIVATEAPP(1)` first, and `WM_ACTIVATEAPP(0)` when the activation goes to the desktop,
+  after which `GetActiveWindow`, `GetForegroundWindow` and `GetFocus` answer NULL until the program
+  takes the activation back; a window never shown is never activated. A press activates its window
   when the program takes it from the queue (`GetMessage`, `PeekMessage` with `PM_REMOVE`):
   `WM_MOUSEACTIVATE` is sent (a child's default procedure asks its parent), and `MA_ACTIVATE`
   activates with `WA_CLICKACTIVE` and raises, the `NOACTIVATE` answers leave the activation alone,
   and the `ANDEAT` answers drop the press. `GetLastActivePopup` answers the popup of an owner chain
-  that was active last. The input layer's foreground is the active window (`activeWindow()` on the
+  that was active last; `IsChild` is true only through a chain of `WS_CHILD` windows, and
+  `GetAncestor` answers `GA_PARENT` (the desktop for a window that is no child), `GA_ROOT` and
+  `GA_ROOTOWNER`, none for the desktop. The input layer's foreground is the active window (`activeWindow()` on the
   API) -- not simply the last one created, which may be hidden or a child -- and only while none is
   active the last created. `GetWindow` walks top-level windows from the top of the Z order and
   children in creation order, a new child going below its siblings, so a dialog's first control is
@@ -716,9 +728,7 @@ Stated as the code states them.
   edit) is still made, as a window with no procedure. A property sheet's
   windows are made through the ANSI calls, which are what user32 has, so a wide sheet's caption
   and titles are UTF-16 where a template or a tab carries them and Latin-1 where `SetWindowText`
-  does. A modal sheet is pumped by user32's own dialog loop, which does not ask the sheet first, so
-  Ctrl+Tab changes the page only of a modeless one; a wizard's header draws no bitmap, watermark or
-  bold title.
+  does. A wizard's header draws no bitmap, watermark or bold title.
 - **Unimplemented imports** are reported once per name at load. A decorated stdcall name, a
   C++ name that sizes its arguments or a C-runtime name is answered with zero, which reads as
   failure under most conventions but as `S_OK` to a caller expecting an `HRESULT` and as a result

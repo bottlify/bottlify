@@ -546,6 +546,95 @@ test('a quit retrieved inside a modal loop ends the dialog and is put back', asy
     assert.equal(queue.quitPending(), true, 'the loop outside has yet to see it');
 });
 
+test('a modal loop takes a mouse message the way GetMessage takes it, the window under the '
+    + 'pointer asked WM_SETCURSOR first', async()=>{
+    // user32's message tests (WmMove_mouse): WM_SETCURSOR is sent to the
+    // window under the pointer as each mouse message of the input is taken,
+    // whichever loop takes it -- here the dialog manager's own.
+    const WM_USER = 0x0400;
+    const WM_SETCURSOR = 0x0020;
+    const WM_MOUSEMOVE = 0x0200;
+    /** @type {number[]} */
+    const heard = [];
+    /** @type {any} */
+    let table = null;
+    const { memory, queue, fns } = setup({ dispatch: (wndProc, message)=>{
+        heard.push(message.message);
+        if (message.message === WM_INITDIALOG)
+        {
+            table.PostMessageA.handler([message.hwnd, WM_USER, 0, 0]);
+        }
+        else if (message.message === WM_USER)
+        {
+            // Shown by now: the pointer moves over its client area, clear of
+            // the control.
+            table.GetClientRect.handler([message.hwnd, OUT]);
+            const height = memory.u32(OUT + 12);
+            memory.writeMemory(OUT, new Uint8Array(new Uint32Array([2, height - 2]).buffer));
+            table.ClientToScreen.handler([message.hwnd, OUT]);
+            queue.post({ hwnd: 0, message: WM_MOUSEMOVE, wParam: 0, lParam: 0,
+                x: memory.u32(OUT), y: memory.u32(OUT + 4) });
+        }
+        else if (message.message === WM_MOUSEMOVE)
+        {
+            table.EndDialog.handler([message.hwnd, 5]);
+        }
+        return 0;
+    } });
+    table = fns;
+    putTemplate(memory, [{ id: 100, x: 4, y: 2, cx: 20, cy: 6 }]);
+    assert.equal(await fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC,
+        0]), 5);
+    const moved = heard.indexOf(WM_MOUSEMOVE);
+    assert.ok(moved > 0, 'the move reached the dialog');
+    assert.equal(heard.slice(heard.indexOf(WM_USER), moved).includes(WM_SETCURSOR), true,
+        'asked for its cursor before it was handed the move');
+});
+
+test('DialogBox answers -1 for a dialog its procedure destroyed during WM_INITDIALOG, and 0 '
+    + 'for one destroyed later', async()=>{
+    // user32's dialog tests (test_DialogBoxParam): DestroyWindow from
+    // WM_INITDIALOG leaves no dialog to run, and DialogBox answers -1;
+    // destroyed from WM_CLOSE once it runs, it answers 0; EndDialog from
+    // WM_INITDIALOG answers what EndDialog was given.
+    const WM_CLOSE = 0x0010;
+    /** @type {any} */
+    let table = null;
+    let how = 'destroy';
+    const { memory, fns } = setup({ dispatch: (wndProc, message)=>{
+        if (message.message === WM_INITDIALOG)
+        {
+            if (how === 'destroy')
+            {
+                table.DestroyWindow.handler([message.hwnd]);
+            }
+            else if (how === 'end')
+            {
+                table.EndDialog.handler([message.hwnd, 1]);
+            }
+            else
+            {
+                table.PostMessageA.handler([message.hwnd, WM_CLOSE, 0, 0]);
+            }
+            return 1;
+        }
+        if (message.message === WM_CLOSE)
+        {
+            table.DestroyWindow.handler([message.hwnd]);
+            return 1;
+        }
+        return 0;
+    } });
+    table = fns;
+    putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6 }]);
+    const run = ()=>fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    assert.equal(await run(), -1);
+    how = 'end';
+    assert.equal(await run(), 1);
+    how = 'close';
+    assert.equal(await run(), 0);
+});
+
 test('coordinates are dialog units, not pixels', ()=>{
     // Four horizontal units to a character width and eight vertical to a
     // character height. Read as pixels, every control lands in the top-left
@@ -886,6 +975,61 @@ test('DefDlgProcA(WM_SETFOCUS) passes the focus to the first control that stops 
     assert.equal(seen[1].wParam, 0);
 });
 
+test('DefDlgProcA(WM_NEXTDLGCTL) moves the focus to the next tab stop, or the one named, '
+    + 'restyling the push buttons and keeping the default id', ()=>{
+    // user32's dialog tests (test_WM_NEXTDLGCTL): an edit, a push button and
+    // another with IDCANCEL, IDCANCEL the default id. From the edit the
+    // focus moves to the first button, which takes BS_DEFPUSHBUTTON from the
+    // second, then to the second, which takes it back, then round to the
+    // edit, the default id IDCANCEL throughout. As documented, wParam names
+    // the control when lParam's low word is TRUE and says which way to go
+    // otherwise.
+    const DEFDLGPROC = 0x404000;
+    const WM_NEXTDLGCTL = 0x0028;
+    const DM_SETDEFID = 0x0401;
+    const DM_GETDEFID = 0x0400;
+    const GWL_STYLE = -16;
+    const WS_CHILD = 0x40000000;
+    const WS_VISIBLE = 0x10000000;
+    const WS_TABSTOP = 0x00010000;
+    const BS_PUSHBUTTON = 0;
+    const BS_DEFPUSHBUTTON = 1;
+    const IDCANCEL = 2;
+    const context = setup();
+    const { memory, fns } = context;
+    const dialog = customDialog(context, DEFDLGPROC);
+    /** @param {string} name @param {number} id @param {number} style */
+    const control = (name, id, style)=>{
+        memory.putString(TEXT, name);
+        return fns.CreateWindowExA.handler([0, TEXT, 0, WS_CHILD | WS_VISIBLE | WS_TABSTOP
+            | style, 0, 0, 40, 20, dialog, id, HINSTANCE, 0]);
+    };
+    const edit = control('Edit', 101, 0);
+    const first = control('Button', 201, BS_PUSHBUTTON);
+    const second = control('Button', IDCANCEL, BS_PUSHBUTTON);
+    fns.DefDlgProcA.handler([dialog, DM_SETDEFID, IDCANCEL, 0]);
+    /** @param {number} hwnd */
+    const kind = hwnd=>fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) & 0x0f;
+    const defaultId = ()=>fns.DefDlgProcA.handler([dialog, DM_GETDEFID, 0, 0]) & 0xffff;
+    fns.SetFocus.handler([edit]);
+
+    assert.equal(fns.DefDlgProcA.handler([dialog, WM_NEXTDLGCTL, 0, 0]), 0);
+    assert.equal(fns.GetFocus.handler([]), first);
+    assert.equal(defaultId(), IDCANCEL, 'the default id stays');
+    assert.deepEqual([kind(first), kind(second)], [BS_DEFPUSHBUTTON, BS_PUSHBUTTON]);
+    fns.DefDlgProcA.handler([dialog, WM_NEXTDLGCTL, 0, 0]);
+    assert.equal(fns.GetFocus.handler([]), second);
+    assert.deepEqual([kind(first), kind(second)], [BS_PUSHBUTTON, BS_DEFPUSHBUTTON]);
+    fns.DefDlgProcA.handler([dialog, WM_NEXTDLGCTL, 0, 0]);
+    assert.equal(fns.GetFocus.handler([]), edit, 'round to the edit');
+    assert.equal(defaultId(), IDCANCEL);
+
+    fns.DefDlgProcA.handler([dialog, WM_NEXTDLGCTL, 1, 0]);
+    assert.equal(fns.GetFocus.handler([]), second, 'the one before');
+    fns.DefDlgProcA.handler([dialog, WM_NEXTDLGCTL, first, 1]);
+    assert.equal(fns.GetFocus.handler([]), first, 'the one named');
+});
+
 test('a template naming a control of a class nobody has makes no dialog, unless it says '
     + 'DS_NOFAILCREATE', async()=>{
     // user32's dialog tests (test_DialogBoxParam): DialogBoxParam of a
@@ -920,13 +1064,12 @@ test('a template naming a control of a class nobody has makes no dialog, unless 
     assert.notEqual(fns.GetDlgItem.handler([standard, 1]), 0);
 });
 
-test('GetNextDlgTabItem walks into a shown, enabled WS_EX_CONTROLPARENT child as if its '
-    + 'controls were the dialog\'s own', ()=>{
-    // user32's dialog tests (test_GetNextDlgItem) build this hierarchy of
-    // statics and ask for the tab item after or before one: a child with
-    // WS_EX_CONTROLPARENT is searched through, DS_CONTROL alone is not, a
-    // control that could not be reached that way is searched from where it
-    // is, and the item before nothing, or before the dialog itself, is none.
+/**
+ * The hierarchy of statics user32's dialog tests (test_GetNextDlgItem) ask
+ * the tab and group items of, made here window for window: a handle by
+ * Wine's id, and the id of a handle.
+ */
+function dialogHierarchy(){
     const WS_CHILD = 0x40000000;
     const WS_VISIBLE = 0x10000000;
     const WS_DISABLED = 0x08000000;
@@ -1005,6 +1148,17 @@ test('GetNextDlgTabItem walks into a shown, enabled WS_EX_CONTROLPARENT child as
             10, hwnd.get(parent) ?? 0, parent === 0 ? 0 : 2000 + id, HINSTANCE, 0]));
     }
     const idOf = (/** @type {number} */ handle)=>[...hwnd].find(([, each])=>each === handle)?.[0];
+    return { fns, hwnd, idOf };
+}
+
+test('GetNextDlgTabItem walks into a shown, enabled WS_EX_CONTROLPARENT child as if its '
+    + 'controls were the dialog\'s own', ()=>{
+    // user32's dialog tests (test_GetNextDlgItem) ask for the tab item after
+    // or before one: a child with WS_EX_CONTROLPARENT is searched through,
+    // DS_CONTROL alone is not, a control that could not be reached that way
+    // is searched from where it is, and the item before nothing, or before
+    // the dialog itself, is none.
+    const { fns, hwnd, idOf } = dialogHierarchy();
     /** Wine's test number, the dialog, the control, whether before, and the answer. */
     const records = [
         [2, 6, 0, 1, 0], [4, 6, 6, 1, 0], [6, 6, 0, 0, 67], [8, 6, 6, 0, 67],
@@ -1014,6 +1168,32 @@ test('GetNextDlgTabItem walks into a shown, enabled WS_EX_CONTROLPARENT child as
     for (const [number, dialog, control, previous, expected] of records)
     {
         const found = fns.GetNextDlgTabItem.handler([hwnd.get(dialog) ?? 0,
+            hwnd.get(control) ?? 0, previous]);
+        assert.equal(idOf(found), expected, `test ${number}`);
+    }
+});
+
+test('GetNextDlgGroupItem walks a group round, through a shown, enabled WS_EX_CONTROLPARENT '
+    + 'child as if its controls were the dialog\'s own', ()=>{
+    // user32's dialog tests (test_GetNextDlgItem), the group records: a group
+    // runs from one WS_GROUP control to the next, round the end of the
+    // dialog to its start; the next or previous item in it is the next that
+    // is shown and enabled, wrapping within the group, or the control itself
+    // when there is none; a child with WS_EX_CONTROLPARENT is searched
+    // through, DS_CONTROL alone is not; from nothing, or from the dialog,
+    // the first shown and enabled control, and nothing before it.
+    const { fns, hwnd, idOf } = dialogHierarchy();
+    /** Wine's test number, the dialog, the control, whether before, and the answer. */
+    const records = [
+        [1, 6, 0, 1, 0], [3, 6, 6, 1, 0], [5, 6, 0, 0, 66], [7, 6, 6, 0, 66],
+        [10, 4, 83, 0, 5], [12, 5, 81, 0, 66], [14, 5, 82, 1, 79], [15, 6, 70, 0, 72],
+        [16, 6, 72, 0, 25], [17, 6, 75, 0, 26], [18, 6, 77, 0, 76], [19, 6, 79, 0, 66],
+        [20, 6, 71, 0, 72], [21, 6, 64, 0, 66], [22, 6, 25, 0, 70], [23, 6, 68, 0, 68],
+        [24, 6, 25, 1, 72], [25, 1, 70, 0, 72], [35, 2, 0, 0, 60],
+    ];
+    for (const [number, dialog, control, previous, expected] of records)
+    {
+        const found = fns.GetNextDlgGroupItem.handler([hwnd.get(dialog) ?? 0,
             hwnd.get(control) ?? 0, previous]);
         assert.equal(idOf(found), expected, `test ${number}`);
     }
