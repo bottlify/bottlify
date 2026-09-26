@@ -850,7 +850,10 @@ is a basic block: the emulator runs whole blocks, so a slice runs to the end of 
 bound falls in. The bound is in guest instructions rather than wall time, so the preemption
 point does not move with host speed. After every slice the 32-bit instruction counter is folded
 into a JavaScript number (`instructionCount()`), which is exact as long as reads are less than
-2^32 instructions apart.
+2^32 instructions apart. Under `cork` the count is exact too, and translated code looks at the
+budget at every jump back, every turn of a `rep` and every transfer to another region: code
+without a jump back runs through a region at most once, so a slice goes past its bound by at
+most one region's instructions (a region holds at most 8192 bytes of code).
 
 The emulator has no double fault: an exception it cannot deliver — a page fault while pushing
 the frame for a page fault, which paging over a bad directory produces — recurses until the

@@ -483,6 +483,27 @@ test('the count is what a run took off its budget: across transfers, a host call
         }
     });
 
+test('a spent budget is looked at on the next jump back: a run goes past it by one pass at most',
+    ()=>{
+        // mov ecx, 3; L: inc eax, fifty times; dec ecx; jnz L; hlt -- whatever the budget
+        // left, the body runs to its jump back before the run leaves, at the loop's head.
+        const program = [0xb9, 3, 0, 0, 0, ...new Array(50).fill(0x40), 0x49, 0x75, 0xcb, 0xf4];
+        // The mov and whole turns of 52, as many as it takes to spend the budget.
+        for (const [budget, retired] of [[1, 53], [2, 53], [53, 53], [54, 105], [105, 105]])
+        {
+            const m = createTestMachine();
+            m.write(CODE, program);
+            const exit = m.translate(CODE).run(CODE, budget);
+            assert.equal(exit.kind, Exit.BUDGET, `budget ${budget}`);
+            assert.equal(m.eip(), CODE + 5, `budget ${budget}: at the head`);
+            assert.equal(m.counter(), retired, `budget ${budget}`);
+        }
+        const m = createTestMachine();
+        m.write(CODE, program);
+        assert.equal(m.translate(CODE).run(CODE, 1_000_000).kind, Exit.HALT);
+        assert.equal(m.counter(), 1 + 3 * 52 + 1);
+    });
+
 test('a spent budget on a jump back leaves the flags its target reads', ()=>{
     // mov ecx, 6; clc; H: jnc S; add eax, 100; S: add eax, 1; cmp ecx, 4; dec ecx;
     // jnz H; hlt -- the head reads the CF the cmp left through the dec, across the
