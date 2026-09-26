@@ -370,10 +370,165 @@ export function translateShader(container){
         store(instruction.operands[1], low);
     };
 
-    for (const instruction of instructions)
+    /**
+     * The subroutines after the main program, by label. A call is translated
+     * by writing the subroutine's body where the call is: Shader Model 4
+     * forbids recursion, so every call graph unrolls, and the body then works
+     * on the caller's registers as the hardware's does.
+     *
+     * @type {Map<number, import('./sm4.js').Instruction[]>}
+     */
+    const subroutines = new Map();
+    const firstLabel = instructions.findIndex(entry=>entry.opcode === OPCODE.LABEL);
+    /** @type {import('./sm4.js').Instruction[]} */
+    let subroutine = [];
+    for (const entry of firstLabel < 0 ? [] : instructions.slice(firstLabel))
     {
+        if (entry.opcode === OPCODE.LABEL)
+        {
+            subroutine = [];
+            subroutines.set(entry.operands[0]?.indices[0]?.value ?? -1, subroutine);
+            continue;
+        }
+        subroutine.push(entry);
+    }
+    /** @type {Set<number>} */
+    const calling = new Set();
+
+    /**
+     * The switches being written. A run of `case`s with nothing between them
+     * shares one body, so a clause is opened only when its first statement
+     * arrives, with every selector gathered by then.
+     *
+     * @type {{ selectors: string[], open: boolean, hasDefault: boolean }[]}
+     */
+    const switches = [];
+
+    const openClause = ()=>{
+        const current = switches.at(-1);
+        if (!current || current.selectors.length === 0)
+        {
+            return;
+        }
+        emit(current.selectors.length === 1 && current.selectors[0] === 'default'
+            ? 'default: {'
+            : `case ${current.selectors.join(', ')}: {`);
+        depth++;
+        current.selectors = [];
+        current.open = true;
+    };
+
+    const closeClause = ()=>{
+        const current = switches.at(-1);
+        if (current?.open)
+        {
+            depth--;
+            emit('}');
+            current.open = false;
+        }
+    };
+
+    /**
+     * Where a `ret` goes. The main program's returns from the entry point; a
+     * subroutine written in place whose only `ret` is its last needs nothing;
+     * one that returns early runs inside a loop of one pass, and its `ret`
+     * sets a flag and breaks, the flag carried out through every loop and
+     * switch of the subroutine that the break leaves it inside.
+     *
+     * @typedef {{ returned: string | null, main: boolean }} Frame
+     */
+
+    /**
+     * @param {import('./sm4.js').Instruction[]} list
+     * @param {Frame} frame
+     */
+    const translateBlock = (list, frame)=>{
+        for (const instruction of list)
+        {
+            translateOne(instruction, frame);
+        }
+    };
+
+    /** @param {number} index */
+    const callSubroutine = index=>{
+        const body = subroutines.get(index);
+        if (!body)
+        {
+            unsupported(`a call to label ${index}, which the program does not have`);
+            return;
+        }
+        if (calling.has(index))
+        {
+            unsupported('a recursive call');
+            return;
+        }
+        calling.add(index);
+        const block = body.at(-1)?.opcode === OPCODE.RET ? body.slice(0, -1) : body;
+        const early = block.some(entry=>entry.opcode === OPCODE.RET
+            || entry.opcode === OPCODE.RETC);
+        if (!early)
+        {
+            translateBlock(block, { returned: null, main: false });
+        }
+        else
+        {
+            const returned = `returned${nextTemp++}`;
+            emit(`var ${returned} = false;`);
+            emit('loop {');
+            depth++;
+            translateBlock(block, { returned, main: false });
+            emit('break;');
+            depth--;
+            emit('}');
+        }
+        calling.delete(index);
+    };
+
+    /**
+     * After a loop or a switch closes inside a subroutine that returns early:
+     * a `ret` inside it broke out of it and no further.
+     *
+     * @param {Frame} frame
+     */
+    const carryReturn = frame=>{
+        if (frame.returned)
+        {
+            emit(`if (${frame.returned}) { break; }`);
+        }
+    };
+
+    /**
+     * @param {string} test  The condition, as WGSL.
+     * @param {Frame} frame
+     */
+    const conditionalReturn = (test, frame)=>{
+        emit(`if (${test}) {`);
+        depth++;
+        if (frame.main)
+        {
+            result.body.push({ ret: true });
+        }
+        else
+        {
+            emit(`${frame.returned} = true;`);
+            emit('break;');
+        }
+        depth--;
+        emit('}');
+    };
+
+    /**
+     * @param {import('./sm4.js').Instruction} instruction
+     * @param {Frame} frame
+     */
+    const translateOne = (instruction, frame)=>{
         const [dest, a, b, c] = instruction.operands;
         const sat = instruction.saturate;
+        if (instruction.opcode !== OPCODE.CASE && instruction.opcode !== OPCODE.DEFAULT
+            && instruction.opcode !== OPCODE.ENDSWITCH)
+        {
+            openClause();
+        }
         switch (instruction.opcode)
         {
             // --- declarations ---
@@ -648,6 +803,62 @@ export function translateShader(container){
             case OPCODE.ENDLOOP:
                 depth--;
                 emit('}');
+                carryReturn(frame);
+                break;
+            case OPCODE.SWITCH:
+                emit(`switch (${u(dest)}.x) {`);
+                depth++;
+                switches.push({ selectors: [], open: false, hasDefault: false });
+                break;
+            case OPCODE.CASE:
+            case OPCODE.DEFAULT: {
+                const current = switches.at(-1);
+                if (!current)
+                {
+                    unsupported(`${instruction.name} outside a switch`);
+                    break;
+                }
+                closeClause();
+                if (instruction.opcode === OPCODE.DEFAULT)
+                {
+                    current.selectors.push('default');
+                    current.hasDefault = true;
+                }
+                else
+                {
+                    current.selectors.push(u32Literal(dest.immediate[0] ?? 0));
+                }
+                break;
+            }
+            case OPCODE.ENDSWITCH: {
+                const current = switches.at(-1);
+                if (!current)
+                {
+                    unsupported('endswitch outside a switch');
+                    break;
+                }
+                // Trailing cases with no body of their own do nothing.
+                openClause();
+                closeClause();
+                if (!current.hasDefault)
+                {
+                    emit('default: {}');
+                }
+                switches.pop();
+                depth--;
+                emit('}');
+                carryReturn(frame);
+                break;
+            }
+            case OPCODE.CALL:
+                callSubroutine(dest.indices[0]?.value ?? -1);
+                break;
+            case OPCODE.CALLC:
+                emit(`if (${u(dest)}.x ${instruction.testNonZero ? '!=' : '=='} 0u) {`);
+                depth++;
+                callSubroutine(a.indices[0]?.value ?? -1);
+                depth--;
+                emit('}');
                 break;
             case OPCODE.BREAK:
                 emit('break;');
@@ -670,14 +881,19 @@ export function translateShader(container){
                 emit(`if (${u(dest)}.x ${instruction.testNonZero ? '!=' : '=='} 0u) { discard; }`);
                 break;
             case OPCODE.RET:
-                result.body.push({ ret: true });
+                if (frame.main)
+                {
+                    result.body.push({ ret: true });
+                }
+                else
+                {
+                    emit(`${frame.returned} = true;`);
+                    emit('break;');
+                }
                 break;
             case OPCODE.RETC:
-                emit(`if (${u(dest)}.x ${instruction.testNonZero ? '!=' : '=='} 0u) {`);
-                depth++;
-                result.body.push({ ret: true });
-                depth--;
-                emit('}');
+                conditionalReturn(`${u(dest)}.x ${instruction.testNonZero ? '!=' : '=='} 0u`,
+                    frame);
                 break;
 
             // --- textures ---
@@ -781,8 +997,10 @@ export function translateShader(container){
                 unsupported(instruction.name);
                 break;
         }
-    }
+    };
 
+    translateBlock(firstLabel < 0 ? instructions : instructions.slice(0, firstLabel),
+        { returned: null, main: true });
     return result;
 }
 
@@ -1144,7 +1362,11 @@ export function linkProgram(vs, ps){
         '}',
     ].join('\n');
 
+    // Direct3D leaves a derivative taken in divergent flow undefined rather
+    // than refusing the shader, and compilers emit sample instructions inside
+    // branches and loops that WGSL's uniformity analysis would reject.
     const fragment = [
+        'diagnostic(off, derivative_uniformity);',
         ...psDecl.text,
         ...(psIn.length > 0 ? ['struct FragmentIn {', ...psIn, '};'] : []),
         'struct FragmentOut {',

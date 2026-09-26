@@ -117,9 +117,11 @@ function encodeOperand(operand, destination){
         const count = /** @type {number[]} */ (operand.immediate).length;
         token |= count === 1 ? 1 : 2;
     }
-    else if (operand.type === OPERAND.NULL || operand.type === OPERAND.SAMPLER)
+    else if (operand.type === OPERAND.NULL || operand.type === OPERAND.SAMPLER
+        || operand.type === OPERAND.LABEL)
     {
-        // Neither names a component: a sampler is one thing and null is nothing.
+        // None names a component: a sampler or a label is one thing and null
+        // is nothing.
         token |= 0;
     }
     else if (operand.type === OPERAND.OUTPUT_DEPTH)
@@ -325,6 +327,21 @@ export const breakcNz = condition=>
 export const discardNz = condition=>
     op(OPCODE.DISCARD, [condition], { nonZero: true, destinations: 0 });
 export const ret = ()=>op(OPCODE.RET, []);
+/** @param {number} index @returns {AsmOperand} */
+const labelOperand = index=>({ type: OPERAND.LABEL, indices: [index] });
+/** @param {number} index  Where subroutine `index` begins. */
+export const label = index=>op(OPCODE.LABEL, [labelOperand(index)], { destinations: 0 });
+/** @param {number} index */
+export const call = index=>op(OPCODE.CALL, [labelOperand(index)], { destinations: 0 });
+/** @param {AsmOperand} condition @param {number} index */
+export const callcNz = (condition, index)=>op(OPCODE.CALLC, [condition, labelOperand(index)],
+    { nonZero: true, destinations: 0 });
+/** @param {AsmOperand} selector */
+export const switchOn = selector=>op(OPCODE.SWITCH, [selector], { destinations: 0 });
+/** @param {number} value */
+export const caseOf = value=>op(OPCODE.CASE, [lu(value)], { destinations: 0 });
+export const defaultCase = ()=>op(OPCODE.DEFAULT, []);
+export const endswitch = ()=>op(OPCODE.ENDSWITCH, []);
 /** @param {AsmOperand} condition */
 export const retcNz = condition=>op(OPCODE.RETC, [condition], { nonZero: true, destinations: 0 });
 

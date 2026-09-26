@@ -21,7 +21,8 @@ import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, parseDxbc } from './dxbc.js'
 import { MODIFIER, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE } from './sm4.js';
 import { BINDING, STAGE, linkProgram, translateShader } from './wgsl.js';
 import {
-    add, addSat, and, assemble, breakcNz, cb, colouredPixelShader, colouredVertexShader,
+    add, addSat, and, assemble, breakOut, breakcNz, call, callcNz, caseOf, cb,
+    colouredPixelShader, colouredVertexShader, defaultCase, endswitch, label, switchOn,
     dclConstantBuffer, dclIndexableTemp, dclInput, dclInputPs, dclInputPsSiv, dclInputSiv,
     dclOutput, dclOutputSiv, dclResource, dclSampler, dclTemps, discardNz, div, dp3, dp4,
     elseBranch, endif, endloop, eq, exp, frc, ftoi, ftou, ge, iadd, ieq, ifNz, ifZ, ige, ilt, imad,
@@ -249,6 +250,78 @@ test('a conditional return is a return inside an if', ()=>{
     assert.equal(emitted([retcNz(r(0, 'x'))]), 'if (r0.xxxx.x != 0u) {\nRET\n}');
 });
 
+test('a switch gathers the cases that share a body, and has a default whatever happens', ()=>{
+    assert.equal(emitted([
+        switchOn(r(0, 'x')),
+        caseOf(0), caseOf(1), mov(r(1), lu(1)), breakOut(),
+        caseOf(0xffffffff), mov(r(1), lu(2)), breakOut(),
+        defaultCase(), mov(r(1), lu(3)), breakOut(),
+        endswitch(),
+    ]), [
+        'switch (r0.xxxx.x) {',
+        'case 0u, 1u: {', 'r1 = vec4<u32>(1u);', 'break;', '}',
+        'case 4294967295u: {', 'r1 = vec4<u32>(2u);', 'break;', '}',
+        'default: {', 'r1 = vec4<u32>(3u);', 'break;', '}',
+        '}',
+    ].join('\n'));
+    assert.equal(emitted([
+        switchOn(r(0, 'y')), caseOf(3), defaultCase(), mov(r(1), lu(1)), breakOut(),
+        caseOf(4), endswitch(),
+    ]), [
+        'switch (r0.yyyy.x) {',
+        'case 3u, default: {', 'r1 = vec4<u32>(1u);', 'break;', '}',
+        'case 4u: {', '}',
+        '}',
+    ].join('\n'), 'a trailing case with nothing to do, and a default among the selectors');
+    assert.equal(emitted([switchOn(r(0, 'x')), caseOf(2), breakOut(), endswitch()]),
+        'switch (r0.xxxx.x) {\ncase 2u: {\nbreak;\n}\ndefault: {}\n}',
+        'WGSL wants a default and Shader Model 4 does not');
+});
+
+test('a subroutine is written where it is called, on the caller\'s registers', ()=>{
+    // The translator appends the program's last ret, which ends label 0 here.
+    assert.equal(emitted([call(0), mov(r(2), r(1)), ret(), label(0), mov(r(1), lu(7))]),
+        'r1 = vec4<u32>(7u);\nr2 = r1.xyzw;');
+    assert.equal(emitted([callcNz(r(0, 'z'), 0), ret(), label(0), mov(r(1), lu(7))]),
+        'if (r0.zzzz.x != 0u) {\nr1 = vec4<u32>(7u);\n}');
+    const nested = translate([call(0), ret(), label(0), call(1), ret(), label(1),
+        mov(r(3), lu(1))]);
+    assert.equal(bodyOf(nested), 'r3 = vec4<u32>(1u);', 'a call from a subroutine');
+    assert.deepEqual(nested.unsupported, []);
+});
+
+test('a subroutine that returns early runs once through a loop and breaks out of it', ()=>{
+    assert.equal(emitted([call(0), ret(), label(0), retcNz(r(0, 'x')), mov(r(1), lu(5))]), [
+        'var returned0 = false;',
+        'loop {',
+        'if (r0.xxxx.x != 0u) {', 'returned0 = true;', 'break;', '}',
+        'r1 = vec4<u32>(5u);',
+        'break;',
+        '}',
+    ].join('\n'));
+    // A return from inside the subroutine's own loop leaves that loop, and
+    // the flag takes it out of the one around the subroutine.
+    assert.equal(emitted([call(0), ret(), label(0), loop(), retcNz(r(0, 'x')), endloop(),
+        mov(r(1), lu(5))]), [
+        'var returned0 = false;',
+        'loop {',
+        'loop {',
+        'if (r0.xxxx.x != 0u) {', 'returned0 = true;', 'break;', '}',
+        '}',
+        'if (returned0) { break; }',
+        'r1 = vec4<u32>(5u);',
+        'break;',
+        '}',
+    ].join('\n'));
+});
+
+test('a call that recurs, or names no label, is refused', ()=>{
+    assert.deepEqual(translate([call(0), ret(), label(0), call(0)]).unsupported,
+        ['a recursive call']);
+    assert.deepEqual(translate([call(4)]).unsupported,
+        ['a call to label 4, which the program does not have']);
+});
+
 // --- constant buffers and indexable temps ---
 
 test('a constant buffer is indexed directly or by a register', ()=>{
@@ -385,6 +458,15 @@ test('an instruction with no translation is named, and nothing plausible is emit
 
 // --- linking ---
 
+test('the fragment stage lets a derivative be taken in divergent flow, as Direct3D does', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 0, 1, 1]))));
+    const linked = linkProgram(vs, ps);
+    assert.ok(linked.fragment.startsWith('diagnostic(off, derivative_uniformity);\n'),
+        'a directive, before any declaration');
+    assert.ok(!linked.vertex.includes('diagnostic'));
+});
+
 test('a pass-through vertex shader and a solid pixel shader link into two entry points', ()=>{
     const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
     const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 0, 1, 1]))));
@@ -406,6 +488,7 @@ test('a pass-through vertex shader and a solid pixel shader link into two entry 
         '}',
     ].join('\n'));
     assert.equal(linked.fragment, [
+        'diagnostic(off, derivative_uniformity);',
         'struct FragmentOut {',
         '    @location(0) target0: vec4<f32>,',
         '};',
