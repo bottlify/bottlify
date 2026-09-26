@@ -140,6 +140,17 @@ function colorTableFor(shape, bitCount){
  */
 const BI_RGB = 0;
 const BI_BITFIELDS = 3;
+
+/**
+ * Run-length encoded DIBs, each at the one depth it encodes: whole pictures
+ * only, which the calls that draw a DIB decode and GetDIBits never writes.
+ *
+ * @param {import('./structs.js').BitmapInfoHeaderFields} header
+ */
+const isRle = header=>(header.compression === 1 && header.bitCount === 8)
+    || (header.compression === 2 && header.bitCount === 4);
+
+const ERROR_INVALID_PARAMETER = 87;
 /** Bits per pixel the DIB decoder reads. */
 const DIB_BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 
@@ -407,6 +418,9 @@ export function createDrawingFunctions(
      * A BI_BITFIELDS DIB's masks sit where a colour table would, forty bytes
      * in, which in a larger header is inside the header rather than after it.
      * A table shorter than the depth allows leaves the indices past it black.
+     * A run-length encoded DIB is biSizeImage bytes, which it must give, and
+     * bottom-up, a top-down one being ERROR_INVALID_PARAMETER (Wine's
+     * test_dib_formats and RLE tests).
      *
      * @param {number} info @param {number} bits
      * @param {number} usage  What the colour table holds.
@@ -419,9 +433,15 @@ export function createDrawingFunctions(
         const header = readBitmapInfoHeader(host, info);
         const masked = header.compression === BI_BITFIELDS
             && (header.bitCount === 16 || header.bitCount === 32);
+        const rle = isRle(header);
+        if (rle && header.height < 0)
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return null;
+        }
         if (!isDibHeaderSize(header.size) || header.width <= 0 || header.height === 0
-            || !DIB_BIT_COUNTS.has(header.bitCount)
-            || (header.compression !== BI_RGB && !masked) || usage > DIB_PAL_INDICES)
+            || !DIB_BIT_COUNTS.has(header.bitCount) || (rle && header.sizeImage === 0)
+            || (header.compression !== BI_RGB && !masked && !rle) || usage > DIB_PAL_INDICES)
         {
             return null;
         }
@@ -436,7 +456,8 @@ export function createDrawingFunctions(
         const colors = header.bitCount <= 8
             ? readColorTable(info + header.size, count, usage, dc, colorEntryBytes(header))
             : [];
-        return { header, bits: host.readMemory(bits, stride * rows), colors, masks };
+        return { header, bits: host.readMemory(bits, rle ? header.sizeImage : stride * rows),
+            colors, masks };
     };
 
     /**
@@ -469,15 +490,16 @@ export function createDrawingFunctions(
             image.colors = image.colors.map((_, index)=>((index & 1) === 0 ? 0 : 0xffffff));
         }
         const header = image.header;
-        const landed = lend(bitmap, target=>{
-            const interfaces = bound(target, false);
-            interfaces?.setDIBitsToDevice(target, {
-                xDest: 0, yDest: 0, width: header.width, height: Math.abs(header.height),
-                xSrc: 0, ySrc: 0, firstScan: start, scans: lines, image,
-            });
-            return interfaces !== null;
-        });
-        return landed ? lines : 0;
+        const answer = lend(bitmap, target=>bound(target, false)?.setDIBitsToDevice(target, {
+            xDest: 0, yDest: 0, width: header.width, height: Math.abs(header.height),
+            xSrc: 0, ySrc: 0, firstScan: start, scans: lines, image,
+        }) ?? null);
+        // An RLE DIB answers its height, as SetDIBitsToDevice does for one.
+        if (answer === null)
+        {
+            return 0;
+        }
+        return isRle(header) ? answer : lines;
     };
 
     /** @param {any} a @param {any} b */
@@ -934,14 +956,17 @@ export function createDrawingFunctions(
                 }
                 const masked = header.compression === BI_BITFIELDS
                     && (header.bitCount === 16 || header.bitCount === 32);
+                // An RLE DIB can be described, but nothing is written back
+                // run-length encoded (Wine's test_dib_formats).
+                const rle = isRle(header);
                 if (!DIB_BIT_COUNTS.has(header.bitCount)
-                    || (header.compression !== BI_RGB && !masked)
+                    || (header.compression !== BI_RGB && !masked && !(rle && describing))
                     || header.width <= 0 || header.height === 0
                     || (header.planes === 0 && (lines >>> 0) !== 0))
                 {
                     return 0;
                 }
-                if (!core)
+                if (!core && !rle)
                 {
                     writeU32s(host, info + BITMAPINFOHEADER.biSizeImage,
                         [dibStride(header.width, header.bitCount) * Math.abs(header.height)]);
