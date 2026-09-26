@@ -5,6 +5,7 @@
  */
 
 import { enterCode, leaveCode, tryEnterCode } from './critical.js';
+import { createSlimSync } from './slimsync.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -545,5 +546,9 @@ export function createSyncFunctions(host){
                 return thread === host.currentThread() ? host.park(thread) : 1;
             },
         },
+
+        // SRW locks and condition variables; a sleep on one takes a critical
+        // section back through the same guest code EnterCriticalSection is.
+        ...createSlimSync(host, builder=>placed(builder).enter),
     };
 }
