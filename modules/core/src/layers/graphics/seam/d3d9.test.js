@@ -27,7 +27,8 @@ import {
     D3DDISPLAYMODE, D3DLOCKED_BOX, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS9, createFields,
 } from './structs.js';
 import {
-    D3DCAPS9, D3DSURFACE_DESC9, D3DVERTEXELEMENT9, D3DVIEWPORT9, D3DVOLUME_DESC9,
+    D3DCAPS9, D3DDISPLAYMODEEX, D3DDISPLAYMODEFILTER, D3DSURFACE_DESC9, D3DVERTEXELEMENT9,
+    D3DVIEWPORT9, D3DVOLUME_DESC9,
 } from '../d3d9/structs.js';
 import {
     IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS, IDIRECT3DQUERY9_SLOTS,
@@ -35,7 +36,10 @@ import {
     IDIRECT3DSTATEBLOCK9_SLOTS, IDIRECT3DSURFACE9_SLOTS, IDIRECT3DSWAPCHAIN9_SLOTS,
     IDIRECT3DTEXTURE9_SLOTS,
     IDIRECT3DVERTEXDECLARATION9_SLOTS, IDIRECT3DVOLUME9_SLOTS, IDIRECT3DVOLUMETEXTURE9_SLOTS,
+    IDIRECT3D9EX_SLOTS, IDIRECT3DDEVICE9EX_SLOTS, IDIRECT3DSWAPCHAIN9EX_SLOTS, IID_IDirect3D9,
+    IID_IDirect3D9Ex, IID_IDirect3DDevice9Ex, IID_IDirect3DSwapChain9Ex,
 } from '../d3d9/interfaces.js';
+import { guidBytes } from './d3d7.js';
 import { D3DCREATE, D3DDEVTYPE, D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
 import { D3DFMT, D3DPOOL, D3DRS } from '../d3d9/constants.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from '../d3d9/declaration.js';
@@ -46,6 +50,12 @@ import { createSystemFunctions } from '../../win32/user32/system.js';
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
 const D3DERR_NOTAVAILABLE = 0x8876086a;
+const E_NOINTERFACE = 0x80004002;
+
+/** The Ex interfaces' slots, the base interface's first. */
+const EX_ROOT_SLOTS = [...IDIRECT3D9_SLOTS, ...IDIRECT3D9EX_SLOTS];
+const EX_DEVICE_SLOTS = [...IDIRECT3DDEVICE9_SLOTS, ...IDIRECT3DDEVICE9EX_SLOTS];
+const EX_CHAIN_SLOTS = [...IDIRECT3DSWAPCHAIN9_SLOTS, ...IDIRECT3DSWAPCHAIN9EX_SLOTS];
 
 const SCREEN = { width: 800, height: 600, bitsPerPixel: 32, displayWidth: 1280,
     displayHeight: 1024 };
@@ -1326,3 +1336,167 @@ test('an additional swap chain has back buffers of its own, and GetSwapChain nam
         assert.equal(h.release(device), 0);
         h.release(root);
     });
+
+// --- Direct3D 9Ex ---
+
+/** @param {ReturnType<typeof seamed>} h @param {number} at @param {string} iid */
+const writeIid = (h, at, iid)=>h.box.services.writeMemory(at, guidBytes(iid));
+
+test('Direct3DCreate9Ex makes an IDirect3D9Ex that is an IDirect3D9, and the plain one is not',
+    ()=>{
+        // Wine's d3d9ex.c test_qi_base_to_ex and test_qi_ex_to_base.
+        const h = seamed();
+        const out = 0x7000;
+        const iid = 0x7010;
+        const queried = 0x7020;
+        assert.equal(h.seam.publishRootEx(h.root, 0) >>> 0, D3DERR_INVALIDCALL,
+            'nowhere to put it');
+        assert.equal(h.seam.publishRootEx(null, out) >>> 0, D3DERR_NOTAVAILABLE);
+        assert.equal(h.box.memory.readU32(out), 0);
+        assert.equal(h.seam.publishRootEx(h.root, out), D3D_OK);
+        const ex = h.box.memory.readU32(out);
+        writeIid(h, iid, IID_IDirect3D9);
+        assert.equal(h.box.call(ex, 0, [iid, queried]), D3D_OK);
+        const base = h.box.memory.readU32(queried);
+        assert.notEqual(base, 0);
+        assert.equal(h.root.refCount, 2, 'one object, one count');
+        assert.equal(h.release(base), 1);
+
+        // A device made through it, by the plain create, is an Ex device;
+        // its chain answers the Ex interface too.
+        const { hr, device } = h.createDevice(ex);
+        assert.equal(hr, D3D_OK);
+        writeIid(h, iid, IID_IDirect3DDevice9Ex);
+        assert.equal(h.box.call(device, 0, [iid, queried]), D3D_OK);
+        const deviceEx = h.box.memory.readU32(queried);
+        assert.equal(h.box.call(deviceEx, slot(EX_DEVICE_SLOTS, 'GetMaximumFrameLatency'),
+            [0x7030]), D3D_OK);
+        assert.equal(h.box.memory.readU32(0x7030), 3);
+        assert.equal(h.release(deviceEx), 1);
+        assert.equal(h.device(device, 'GetSwapChain', [0, 0x7040]), D3D_OK);
+        const chain = h.box.memory.readU32(0x7040);
+        writeIid(h, iid, IID_IDirect3DSwapChain9Ex);
+        assert.equal(h.box.call(chain, 0, [iid, queried]), D3D_OK);
+        const chainEx = h.box.memory.readU32(queried);
+        assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+        assert.equal(h.box.call(chainEx, slot(EX_CHAIN_SLOTS, 'GetLastPresentCount'), [0x7050]),
+            D3D_OK);
+        assert.equal(h.box.memory.readU32(0x7050), 1);
+        h.release(chainEx);
+        h.release(chain);
+        assert.equal(h.release(device), 0);
+        assert.equal(h.release(ex), 0);
+
+        // The plain root answers none of the three.
+        const plain = seamed();
+        const root = plain.create();
+        writeIid(plain, iid, IID_IDirect3D9Ex);
+        plain.box.memory.writeU32(queried, 0xdeadbeef);
+        assert.equal(plain.box.call(root, 0, [iid, queried]), E_NOINTERFACE);
+        assert.equal(plain.box.memory.readU32(queried), 0);
+        const made = plain.createDevice(root);
+        writeIid(plain, iid, IID_IDirect3DDevice9Ex);
+        assert.equal(plain.box.call(made.device, 0, [iid, queried]), E_NOINTERFACE);
+        assert.equal(plain.device(made.device, 'GetSwapChain', [0, 0x7040]), D3D_OK);
+        const plainChain = plain.box.memory.readU32(0x7040);
+        writeIid(plain, iid, IID_IDirect3DSwapChain9Ex);
+        assert.equal(plain.box.call(plainChain, 0, [iid, queried]), E_NOINTERFACE);
+        plain.release(plainChain);
+        assert.equal(plain.release(made.device), 0);
+        plain.release(root);
+    });
+
+test('IDirect3D9Ex answers modes as D3DDISPLAYMODEEX, its LUID, and makes Ex devices', ()=>{
+    // Wine's d3d9ex.c test_get_adapter_displaymode_ex, test_get_adapter_luid.
+    const h = seamed();
+    const out = 0x7000;
+    assert.equal(h.seam.publishRootEx(h.root, out), D3D_OK);
+    const ex = h.box.memory.readU32(out);
+    const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        h.box.call(ex, slot(EX_ROOT_SLOTS, name), args);
+    const mode = 0x7100;
+    const rotation = 0x7120;
+    h.box.services.writeMemory(mode, new Uint8Array(24));
+    assert.equal(call('GetAdapterDisplayModeEx', [0, mode, rotation]), D3DERR_INVALIDCALL,
+        'a Size of zero');
+    h.fields.writeU32(mode, 24);
+    assert.equal(call('GetAdapterDisplayModeEx', [1, mode, rotation]), D3DERR_INVALIDCALL);
+    h.fields.writeU32(rotation, 0xdeadbeef);
+    assert.equal(call('GetAdapterDisplayModeEx', [0, mode, rotation]), D3D_OK);
+    const read = h.fields.readStruct(mode, D3DDISPLAYMODEEX);
+    assert.deepEqual([read.Size, read.Width, read.Height, read.Format, read.ScanLineOrdering],
+        [24, SCREEN.width, SCREEN.height, D3DFMT.X8R8G8B8, 1]);
+    assert.equal(h.fields.readU32(rotation), 1, 'D3DDISPLAYROTATION_IDENTITY');
+    assert.equal(call('GetAdapterDisplayModeEx', [0, mode, 0]), D3D_OK, 'no rotation asked');
+
+    const filter = 0x7140;
+    h.fields.writeStruct(filter, D3DDISPLAYMODEFILTER,
+        { Size: 12, Format: D3DFMT.X8R8G8B8, ScanLineOrdering: 0 });
+    const count = call('GetAdapterModeCountEx', [0, filter]);
+    assert.equal(count, displayModes(SCREEN).length);
+    assert.equal(call('EnumAdapterModesEx', [0, filter, count - 1, mode]), D3D_OK);
+    assert.equal(h.fields.readU32(mode + D3DDISPLAYMODEEX.Size), 24);
+    assert.equal(call('EnumAdapterModesEx', [0, filter, count, mode]), D3DERR_INVALIDCALL);
+    h.fields.writeU32(filter + D3DDISPLAYMODEFILTER.ScanLineOrdering, 2);
+    assert.equal(call('GetAdapterModeCountEx', [0, filter]), 0, 'none is interlaced');
+
+    const luid = 0x7160;
+    assert.equal(call('GetAdapterLUID', [0, luid]), D3D_OK);
+    assert.notEqual(h.fields.readU32(luid), 0);
+    assert.equal(call('GetAdapterLUID', [1, luid]), D3DERR_INVALIDCALL);
+
+    // CreateDeviceEx: a window takes no mode, fullscreen one of its size.
+    const parameters = 0x2000;
+    h.box.services.writeMemory(parameters, new Uint8Array(D3DPRESENT_PARAMETERS9.SIZE));
+    h.fields.writeStruct(parameters, D3DPRESENT_PARAMETERS9, {
+        BackBufferWidth: 64, BackBufferHeight: 64, BackBufferFormat: D3DFMT.X8R8G8B8,
+        BackBufferCount: 1, SwapEffect: 1, hDeviceWindow: HWND, Windowed: 1,
+    });
+    h.fields.writeStruct(mode, D3DDISPLAYMODEEX,
+        { Size: 24, Width: 64, Height: 64, RefreshRate: 0, Format: D3DFMT.X8R8G8B8 });
+    const device = 0x7180;
+    h.box.memory.writeU32(device, 0xdeadbeef);
+    assert.equal(call('CreateDeviceEx', [0, D3DDEVTYPE.HAL, HWND,
+        D3DCREATE.HARDWARE_VERTEXPROCESSING, parameters, mode, device]), D3DERR_INVALIDCALL);
+    assert.equal(h.box.memory.readU32(device), 0);
+    assert.equal(call('CreateDeviceEx', [0, D3DDEVTYPE.HAL, HWND,
+        D3DCREATE.HARDWARE_VERTEXPROCESSING, parameters, 0, device]), D3D_OK);
+    const made = h.box.memory.readU32(device);
+    const deviceCall = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        h.box.call(made, slot(EX_DEVICE_SLOTS, name), args);
+    assert.equal(deviceCall('CheckDeviceState', [HWND]), D3D_OK);
+    assert.equal(deviceCall('PresentEx', [0, 0, 0, 0, 0]), D3D_OK);
+    assert.equal(deviceCall('SetGPUThreadPriority', [(-3) >>> 0]), D3D_OK);
+    assert.equal(deviceCall('GetGPUThreadPriority', [0x71a0]), D3D_OK);
+    assert.equal(h.fields.readU32(0x71a0) | 0, -3);
+    h.fields.writeU32(mode, 24);
+    assert.equal(deviceCall('GetDisplayModeEx', [0, mode, 0]), D3D_OK);
+    assert.equal(deviceCall('GetDisplayModeEx', [1, mode, 0]), D3DERR_INVALIDCALL);
+
+    // ResetEx: fullscreen needs a mode of the back buffer's size.
+    const [first] = displayModes(SCREEN);
+    h.fields.writeStruct(parameters, D3DPRESENT_PARAMETERS9,
+        { Windowed: 0, BackBufferWidth: first.width, BackBufferHeight: first.height });
+    h.fields.writeStruct(mode, D3DDISPLAYMODEEX, { Width: first.width - 1, Height: first.height });
+    assert.equal(deviceCall('ResetEx', [parameters, 0]), D3DERR_INVALIDCALL);
+    assert.equal(deviceCall('ResetEx', [parameters, mode]), D3DERR_INVALIDCALL);
+    h.fields.writeU32(mode + D3DDISPLAYMODEEX.Width, first.width);
+    assert.equal(deviceCall('ResetEx', [parameters, mode]), D3D_OK);
+    h.fields.writeU32(parameters + D3DPRESENT_PARAMETERS9.Windowed, 1);
+    assert.equal(deviceCall('ResetEx', [parameters, mode]), D3DERR_INVALIDCALL,
+        'a window takes no mode');
+
+    // The depth stencil Ex create hands back through the pointer, and
+    // leaves it alone when it refuses.
+    const surface = 0x71c0;
+    h.box.memory.writeU32(surface, 0xdeadbeef);
+    assert.equal(deviceCall('CreateDepthStencilSurfaceEx', [64, 64, D3DFMT.D24S8, 0, 0, 1,
+        surface, 0, 2]), D3DERR_INVALIDCALL);
+    assert.equal(h.box.memory.readU32(surface), 0xdeadbeef);
+    assert.equal(deviceCall('CreateDepthStencilSurfaceEx', [64, 64, D3DFMT.D24S8, 0, 0, 1,
+        surface, 0, 0]), D3D_OK);
+    h.release(h.box.memory.readU32(surface));
+
+    assert.equal(h.release(made), 0);
+    assert.equal(h.release(ex), 0);
+});

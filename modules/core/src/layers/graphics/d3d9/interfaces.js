@@ -41,6 +41,44 @@ export const IID_IDirect3DVertexShader9 = '{EFC5557E-6265-4613-8A94-43857889EB36
 export const IID_IDirect3DPixelShader9 = '{6D3BDBDC-5B02-4415-B852-CE5E8BCCB289}';
 export const IID_IDirect3DStateBlock9 = '{B07C4FE5-310D-4BA8-A23C-4F0F206F218B}';
 export const IID_IDirect3DQuery9 = '{D9771460-A695-4F26-BBD3-27B840B541CC}';
+export const IID_IDirect3D9Ex = '{02177241-69FC-400C-8FF1-93A44DF6861D}';
+export const IID_IDirect3DDevice9Ex = '{B18B10CE-2649-405A-870F-95F777D4313A}';
+export const IID_IDirect3DSwapChain9Ex = '{91886CAF-1C3D-4D2E-A0AB-3E4C7D8D3303}';
+
+/** IDirect3D9Ex's own slots, after IDirect3D9's fourteen. */
+export const IDIRECT3D9EX_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetAdapterModeCountEx', 2],
+    ['EnumAdapterModesEx', 4],
+    ['GetAdapterDisplayModeEx', 3],
+    ['CreateDeviceEx', 7],
+    ['GetAdapterLUID', 2],
+]);
+
+/** IDirect3DDevice9Ex's own slots, after IDirect3DDevice9's. */
+export const IDIRECT3DDEVICE9EX_SLOTS = /** @type {[string, number][]} */ ([
+    ['SetConvolutionMonoKernel', 4],
+    ['ComposeRects', 8],
+    ['PresentEx', 5],
+    ['GetGPUThreadPriority', 1],
+    ['SetGPUThreadPriority', 1],
+    ['WaitForVBlank', 1],
+    ['CheckResourceResidency', 2],
+    ['SetMaximumFrameLatency', 1],
+    ['GetMaximumFrameLatency', 1],
+    ['CheckDeviceState', 1],
+    ['CreateRenderTargetEx', 9],
+    ['CreateOffscreenPlainSurfaceEx', 7],
+    ['CreateDepthStencilSurfaceEx', 9],
+    ['ResetEx', 2],
+    ['GetDisplayModeEx', 3],
+]);
+
+/** IDirect3DSwapChain9Ex's own slots, after IDirect3DSwapChain9's. */
+export const IDIRECT3DSWAPCHAIN9EX_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetLastPresentCount', 1],
+    ['GetPresentStats', 1],
+    ['GetDisplayModeEx', 2],
+]);
 
 /**
  * IDirect3DDevice9, after IUnknown's three: one hundred and sixteen slots.

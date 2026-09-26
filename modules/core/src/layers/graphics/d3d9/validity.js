@@ -272,6 +272,20 @@ export const SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
 });
 
 /**
+ * The same for a device made through IDirect3D9Ex, which allows thirty and
+ * D3DSWAPEFFECT_FLIPEX; OVERLAY needs hardware no device here claims (Wine's
+ * d3d9ex.c test_swapchain_parameters).
+ *
+ * @type {Readonly<Record<number, number>>}
+ */
+const EX_SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
+    [D3DSWAPEFFECT.DISCARD]: 30,
+    [D3DSWAPEFFECT.FLIP]: 30,
+    [D3DSWAPEFFECT.COPY]: 1,
+    [D3DSWAPEFFECT.FLIPEX]: 30,
+});
+
+/**
  * @typedef {Object} PresentParameters
  * @property {number} swapEffect
  * @property {number} [backBufferCount]  Zero means one, which is what a device reports back.
@@ -286,10 +300,12 @@ export const SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
 
 /**
  * @param {PresentParameters} parameters
+ * @param {boolean} [extended]  For a device made through IDirect3D9Ex.
  * @returns {number} D3D_OK or D3DERR_INVALIDCALL
  */
-export function validatePresentParameters(parameters){
-    const limit = SWAP_EFFECT_MAX_BACK_BUFFERS[parameters.swapEffect];
+export function validatePresentParameters(parameters, extended = false){
+    const limit = (extended ? EX_SWAP_EFFECT_MAX_BACK_BUFFERS
+        : SWAP_EFFECT_MAX_BACK_BUFFERS)[parameters.swapEffect];
     if (limit === undefined)
     {
         return D3DERR_INVALIDCALL;

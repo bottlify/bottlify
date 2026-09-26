@@ -24,6 +24,7 @@ import { describe, IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS } from './vtables.js
 import { IID_IDirect3D8, IID_IDirect3DDevice8 } from './iids.js';
 import { D3DPRESENT_PARAMETERS8, D3DPRESENT_PARAMETERS9, createFields } from './structs.js';
 import { createDirect3D8 } from '../d3d8/device.js';
+import { createDirect3D9 } from '../d3d9/device.js';
 import { createOpengl } from '../opengl/exports.js';
 
 const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
@@ -155,6 +156,42 @@ test('a program reaches Direct3D through a library, not by asking for an object'
     assert.equal(libraries.libraries['D3D8.dll'].Direct3DCreate8.argBytes, 4,
         'one argument, the SDK version');
 });
+
+test('Direct3DCreate9Ex hands its object back through a pointer, and says when there is none',
+    ()=>{
+        // Unlike Direct3DCreate9 it answers an HRESULT and writes the
+        // interface: two arguments, the SDK version and the pointer.
+        for (const made of [true, false])
+        {
+            const box = machine();
+            const { libraries } = createGraphicsLibraries({
+                graphics: {
+                    create: (/** @type {string} */ name)=>(made && name === 'd3d9'
+                        ? createDirect3D9()
+                        : null),
+                    available: ()=>false,
+                },
+                memory: box.services,
+                publishInterface: box.publishInterface,
+                screen: ()=>({ width: 800, height: 600, bitsPerPixel: 32 }),
+            });
+            const entry = libraries['D3D9.dll'].Direct3DCreate9Ex;
+            assert.equal(entry.argBytes, 8);
+            box.memory.writeU32(0x6000, 0xdeadbeef);
+            assert.equal(entry.handler([32, 0]) >>> 0, 0x8876086c, 'D3DERR_INVALIDCALL');
+            const hr = entry.handler([32, 0x6000]) >>> 0;
+            if (made)
+            {
+                assert.equal(hr, 0);
+                assert.notEqual(box.memory.readU32(0x6000), 0);
+            }
+            else
+            {
+                assert.equal(hr, 0x8876086a, 'D3DERR_NOTAVAILABLE');
+                assert.equal(box.memory.readU32(0x6000), 0);
+            }
+        }
+    });
 
 test('an interface pointer points at its vtable, not at itself', ()=>{
     // A program reads *pp to reach the table and then indexes it. Publishing

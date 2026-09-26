@@ -42,6 +42,7 @@ export function createAdditionalChain(options){
         ()=>options.makeBackBuffer(options.count));
     /** @type {any} the back buffer the last present handed over, or null before one */
     let presented = null;
+    let presents = 0;
     return {
         get refCount(){
             return options.count.value;
@@ -64,6 +65,11 @@ export function createAdditionalChain(options){
 
         get presented(){
             return presented;
+        },
+
+        /** Presents that went through, for GetLastPresentCount. */
+        get presentCount(){
+            return presents;
         },
 
         /**
@@ -96,6 +102,7 @@ export function createAdditionalChain(options){
             if (hr === D3D_OK)
             {
                 presented = buffers[0];
+                presents++;
             }
             return hr;
         },

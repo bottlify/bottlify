@@ -186,6 +186,25 @@ export const D3DVIEWPORT9 = Object.freeze({
     SIZE: 0x18,
 });
 
+/** D3DDISPLAYMODEEX, whose first field is its own size, as the caller sets it. */
+export const D3DDISPLAYMODEEX = Object.freeze({
+    Size: 0x00,
+    Width: 0x04,
+    Height: 0x08,
+    RefreshRate: 0x0c,
+    Format: 0x10,
+    ScanLineOrdering: 0x14,
+    SIZE: 0x18,
+});
+
+/** D3DDISPLAYMODEFILTER: which of an adapter's modes an Ex enumeration lists. */
+export const D3DDISPLAYMODEFILTER = Object.freeze({
+    Size: 0x00,
+    Format: 0x04,
+    ScanLineOrdering: 0x08,
+    SIZE: 0x0c,
+});
+
 /**
  * D3DADAPTER_IDENTIFIER9: D3D8's identifier with the device name inserted
  * after the description -- thirty-two bytes, the length of a display device

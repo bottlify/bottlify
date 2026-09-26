@@ -39,7 +39,9 @@ import {
     IDIRECT3DSURFACE9_SLOTS, IDIRECT3DSWAPCHAIN9_SLOTS, IDIRECT3DTEXTURE9_SLOTS,
     IDIRECT3DVERTEXBUFFER9_SLOTS, IDIRECT3DVERTEXDECLARATION9_SLOTS, IDIRECT3DVOLUME9_SLOTS,
     IDIRECT3DVOLUMETEXTURE9_SLOTS, IID_IDirect3D9, IID_IDirect3DVolume9,
-    IID_IDirect3DVolumeTexture9,
+    IID_IDirect3DVolumeTexture9, IDIRECT3D9EX_SLOTS, IDIRECT3DDEVICE9EX_SLOTS,
+    IDIRECT3DSWAPCHAIN9EX_SLOTS, IID_IDirect3D9Ex, IID_IDirect3DDevice9Ex,
+    IID_IDirect3DSwapChain9Ex,
     IID_IDirect3DBaseTexture9, IID_IDirect3DCubeTexture9, IID_IDirect3DDevice9,
     IID_IDirect3DIndexBuffer9, IID_IDirect3DResource9,
     IID_IDirect3DPixelShader9, IID_IDirect3DQuery9, IID_IDirect3DStateBlock9,
@@ -48,6 +50,7 @@ import {
 } from '../d3d9/interfaces.js';
 import {
     D3DADAPTER_IDENTIFIER9, D3DCAPS9, D3DCAPS9_FLOATS, D3DCLIPSTATUS9, D3DDECL_END_STREAM,
+    D3DDISPLAYMODEEX, D3DDISPLAYMODEFILTER,
     D3DINDEXBUFFER_DESC9, D3DSURFACE_DESC9, D3DVERTEXBUFFER_DESC9, D3DVERTEXELEMENT9,
     D3DVIEWPORT9, D3DVOLUME_DESC9,
 } from '../d3d9/structs.js';
@@ -69,6 +72,12 @@ import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c | 0;
+const D3DERR_NOTAVAILABLE = 0x8876086a | 0;
+const D3DSCANLINEORDERING_PROGRESSIVE = 1;
+const D3DSCANLINEORDERING_INTERLACED = 2;
+const D3DDISPLAYROTATION_IDENTITY = 1;
+/** The adapter's LUID, low part; the high part is zero. */
+const ADAPTER_LUID = 0x00000001;
 const D3DERR_OUTOFVIDEOMEMORY = 0x8876017c | 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
 /** D3DENUM_NO_WHQL_LEVEL: skip the certification lookup, which took seconds on real Windows. */
@@ -545,7 +554,8 @@ export function createDirect3D9Seam(
             const container = surface.container ?? null;
             if (container?.GetBackBuffer)
             {
-                return queryAs(publisher, fields, container, swapChainInterfaces, id, out);
+                return queryAs(publisher, fields, container,
+                    chainInterfacesOf(owners.get(surface)), id, out);
             }
             if (container)
             {
@@ -557,7 +567,7 @@ export function createDirect3D9Seam(
             {
                 return D3DERR_INVALIDCALL;
             }
-            return queryAs(publisher, fields, device, deviceInterfaces, id, out);
+            return queryAs(publisher, fields, device, deviceInterfacesOf(device), id, out);
         },
     }, {}, privateData.released)];
 
@@ -997,8 +1007,7 @@ export function createDirect3D9Seam(
         fields.writeStruct(address, D3DRASTER_STATUS, rasterStatus(raster));
     };
 
-    /** @type {import('./com.js').InterfaceDescriptor[]} */
-    const swapChainInterfaces = [describe(IID_IDirect3DSwapChain9, IDIRECT3DSWAPCHAIN9_SLOTS, {
+    const swapChainMethods = {
         // The rectangles and the dirty region are not honoured; the window,
         // the chain's own or the override, decides whether the display
         // shows the picture.
@@ -1058,11 +1067,81 @@ export function createDirect3D9Seam(
             }
             return hr;
         },
-    })];
+    };
+
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
+    const swapChainInterfaces = [
+        describe(IID_IDirect3DSwapChain9, IDIRECT3DSWAPCHAIN9_SLOTS, swapChainMethods),
+    ];
+
+    /**
+     * D3DDISPLAYMODEEX, into a structure whose Size the caller set: anything
+     * else is refused (Wine's d3d9ex.c test_get_adapter_displaymode_ex). The
+     * display's scan lines are progressive and it is not rotated.
+     *
+     * @param {number} address @param {number} rotation  Where the rotation goes, or 0.
+     */
+    const writeDisplayModeEx = (address, rotation)=>{
+        if ((address >>> 0) === 0 || fields.readU32(address >>> 0) !== D3DDISPLAYMODEEX.SIZE)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        const display = screen();
+        fields.writeStruct(address >>> 0, D3DDISPLAYMODEEX, {
+            Width: display.width,
+            Height: display.height,
+            RefreshRate: REFRESH_HZ,
+            Format: D3DFMT.X8R8G8B8,
+            ScanLineOrdering: D3DSCANLINEORDERING_PROGRESSIVE,
+        });
+        if ((rotation >>> 0) !== 0)
+        {
+            fields.writeU32(rotation >>> 0, D3DDISPLAYROTATION_IDENTITY);
+        }
+        return D3D_OK;
+    };
+
+    /**
+     * A chain of a device made through IDirect3D9Ex, which answers
+     * IDirect3DSwapChain9Ex as well (Wine's d3d9ex.c test_qi_ex_to_base).
+     *
+     * @type {import('./com.js').InterfaceDescriptor[]}
+     */
+    const exSwapChainInterfaces = [
+        describe(IID_IDirect3DSwapChain9Ex,
+            [...IDIRECT3DSWAPCHAIN9_SLOTS, ...IDIRECT3DSWAPCHAIN9EX_SLOTS], {
+                ...swapChainMethods,
+                /** @param {any} chain @param {number[]} args */
+                GetLastPresentCount: (chain, [out])=>{
+                    if ((out >>> 0) === 0)
+                    {
+                        return D3DERR_INVALIDCALL;
+                    }
+                    fields.writeU32(out >>> 0, chain.presentCount ?? 0);
+                    return D3D_OK;
+                },
+                // The statistics are the display's refreshes, which nothing
+                // here sees: a FLIPEX chain is refused them as any other is.
+                GetPresentStats: ()=>D3DERR_INVALIDCALL,
+                /** @param {any} chain @param {number[]} args */
+                GetDisplayModeEx: (chain, [mode, rotation])=>writeDisplayModeEx(mode, rotation),
+            }),
+        ...swapChainInterfaces,
+    ];
+
+    /**
+     * The interfaces a device's chain answers.
+     *
+     * @param {any} device
+     */
+    const chainInterfacesOf = device=>(device?.extended
+        ? exSwapChainInterfaces
+        : swapChainInterfaces);
 
     /**
      * A create that ends in a shared-handle pointer, which the plain interface
-     * requires to be null: sharing is the extended interface's.
+     * requires to be null. Sharing is the extended interface's, and nothing
+     * here shares a resource between devices, so it is refused there too.
      *
      * @param {number} shared
      */
@@ -1229,7 +1308,7 @@ export function createDirect3D9Seam(
             }
             writePresentParameters(parameters >>> 0, wanted);
             chainWindows.set(held.swapChain, window);
-            return handBack(held.swapChain, swapChainInterfaces, IID_IDirect3DSwapChain9,
+            return handBack(held.swapChain, chainInterfacesOf(device), IID_IDirect3DSwapChain9,
                 out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
         },
 
@@ -1244,7 +1323,7 @@ export function createDirect3D9Seam(
             const hr = device.GetSwapChain(index >>> 0, held);
             if (hr === D3D_OK && held.swapChain)
             {
-                return handBack(held.swapChain, swapChainInterfaces, IID_IDirect3DSwapChain9,
+                return handBack(held.swapChain, chainInterfacesOf(device), IID_IDirect3DSwapChain9,
                     out >>> 0, E_OUTOFMEMORY, device);
             }
             fields.writeU32(out >>> 0, 0);
@@ -2247,6 +2326,147 @@ export function createDirect3D9Seam(
     ];
 
     /**
+     * An Ex create: the plain one's surface with a usage beside, and the
+     * shared handle the plain interface refuses refused here as well, since
+     * nothing here shares a resource across devices.
+     *
+     * @param {string} method
+     * @param {(args: number[]) => { out: number, shared: number,
+     *     call: (device: any, held: { surface?: any }) => number }} read
+     */
+    const exSurfaceCreate = (method, read)=>
+        (/** @type {any} */ device, /** @type {number[]} */ args)=>{
+            const { out, shared, call } = read(args);
+            if (sharedHandleRefused(shared) || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ surface?: any }} */
+            const held = {};
+            const hr = call(device, held);
+            if (hr === D3D_OK && held.surface)
+            {
+                return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface9,
+                    out >>> 0, method === 'CreateOffscreenPlainSurfaceEx'
+                        ? E_OUTOFMEMORY
+                        : D3DERR_OUTOFVIDEOMEMORY, device);
+            }
+            return hr;
+        };
+
+    /**
+     * IDirect3DDevice9Ex's own slots. SetConvolutionMonoKernel and
+     * ComposeRects, which build a one-bit surface out of another's
+     * rectangles, are absent.
+     */
+    const exDeviceMethods = {
+        // The flags ask not to wait for the display, which nothing here
+        // does, or not to show the frame, which is not honoured.
+        /** @param {any} device */
+        PresentEx: (/** @type {any} */ device)=>deviceMethods.Present(device),
+        /** @param {any} device @param {number[]} args */
+        GetGPUThreadPriority: (device, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ priority?: number }} */
+            const held = {};
+            const hr = device.GetGPUThreadPriority(held);
+            fields.writeU32(out >>> 0, (held.priority ?? 0) >>> 0);
+            return hr;
+        },
+        /** @param {any} device @param {number[]} args */
+        SetGPUThreadPriority: (device, [priority])=>device.SetGPUThreadPriority(priority | 0),
+        /** @param {any} device @param {number[]} args */
+        WaitForVBlank: (device, [chain])=>device.WaitForVBlank(chain >>> 0),
+        /** @param {any} device @param {number[]} args */
+        CheckResourceResidency: (device, [, count])=>device.CheckResourceResidency(count >>> 0),
+        /** @param {any} device @param {number[]} args */
+        SetMaximumFrameLatency: (device, [latency])=>device.SetMaximumFrameLatency(latency >>> 0),
+        /** @param {any} device @param {number[]} args */
+        GetMaximumFrameLatency: (device, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ latency?: number }} */
+            const held = {};
+            const hr = device.GetMaximumFrameLatency(held);
+            fields.writeU32(out >>> 0, held.latency ?? 0);
+            return hr;
+        },
+        /** @param {any} device @param {number[]} args */
+        CheckDeviceState: (device, [window])=>device.CheckDeviceState(window >>> 0),
+        CreateRenderTargetEx: exSurfaceCreate('CreateRenderTargetEx',
+            ([width, height, format, , , lockable, out, shared, usage])=>({
+                out, shared,
+                call: (device, held)=>device.CreateRenderTargetEx(width >>> 0, height >>> 0,
+                    format >>> 0, lockable !== 0, usage >>> 0, held),
+            })),
+        CreateOffscreenPlainSurfaceEx: exSurfaceCreate('CreateOffscreenPlainSurfaceEx',
+            ([width, height, format, pool, out, shared, usage])=>({
+                out, shared,
+                call: (device, held)=>device.CreateOffscreenPlainSurfaceEx(width >>> 0,
+                    height >>> 0, format >>> 0, pool >>> 0, usage >>> 0, held),
+            })),
+        CreateDepthStencilSurfaceEx: exSurfaceCreate('CreateDepthStencilSurfaceEx',
+            ([width, height, format, , , , out, shared, usage])=>({
+                out, shared,
+                call: (device, held)=>device.CreateDepthStencilSurfaceEx(width >>> 0,
+                    height >>> 0, format >>> 0, usage >>> 0, held),
+            })),
+        /** @param {any} device @param {number[]} args */
+        ResetEx: (device, [parameters, mode])=>((parameters >>> 0) === 0
+            || !modeFits(parameters >>> 0, mode >>> 0)
+            ? D3DERR_INVALIDCALL
+            : deviceMethods.Reset(device, [parameters])),
+        /** @param {any} device @param {number[]} args */
+        GetDisplayModeEx: (device, [chain, mode, rotation])=>((chain >>> 0) !== 0
+            ? D3DERR_INVALIDCALL
+            : writeDisplayModeEx(mode, rotation)),
+    };
+
+    /**
+     * A device made through IDirect3D9Ex, which answers IDirect3DDevice9Ex as
+     * well; one made through the plain interface does not (Wine's d3d9ex.c
+     * test_qi_base_to_ex and test_qi_ex_to_base).
+     *
+     * @type {import('./com.js').InterfaceDescriptor[]}
+     */
+    const exDeviceInterfaces = [
+        describe(IID_IDirect3DDevice9Ex, [...IDIRECT3DDEVICE9_SLOTS, ...IDIRECT3DDEVICE9EX_SLOTS],
+            { ...deviceMethods, ...exDeviceMethods }),
+        ...deviceInterfaces,
+    ];
+
+    /** @param {any} device */
+    const deviceInterfacesOf = device=>(device?.extended ? exDeviceInterfaces : deviceInterfaces);
+
+    /**
+     * Whether the display mode an Ex create or reset names fits its
+     * parameters: none for a window, and for fullscreen one of the back
+     * buffer's own size, which may not be zero (Wine's d3d9ex.c test_reset_ex).
+     *
+     * @param {number} parameters @param {number} mode
+     */
+    const modeFits = (parameters, mode)=>{
+        const raw = fields.readStruct(parameters, D3DPRESENT_PARAMETERS9);
+        if (raw.Windowed !== 0)
+        {
+            return mode === 0;
+        }
+        if (mode === 0)
+        {
+            return false;
+        }
+        const asked = fields.readStruct(mode, D3DDISPLAYMODEEX);
+        return asked.Width !== 0 && asked.Height !== 0
+            && asked.Width === (raw.BackBufferWidth >>> 0)
+            && asked.Height === (raw.BackBufferHeight >>> 0);
+    };
+
+    /**
      * @param {number} address
      * @param {number} [window]
      *        The window the device presents into when the parameters name
@@ -2491,58 +2711,143 @@ export function createDirect3D9Seam(
         /** @param {any} root @param {number[]} args */
         GetAdapterMonitor: (root, [adapter])=>((adapter >>> 0) === 0 ? PRIMARY_MONITOR : 0),
 
-        /**
-         * The device, made the way a program makes one. The adapter must be
-         * the one there is, the type one this version names, and the
-         * behaviour must name exactly one kind of vertex processing.
-         *
-         * @param {any} root @param {number[]} args
-         */
-        CreateDevice: (root, [adapter, deviceType, focus, behaviourFlags, parameters, out])=>{
-            if ((out >>> 0) === 0)
+        /** @param {any} root @param {number[]} args */
+        CreateDevice: (root, args)=>createDevice(root, args, IID_IDirect3DDevice9),
+    };
+
+    /**
+     * The device, made the way a program makes one. The adapter must be the
+     * one there is, the type one this version names, and the behaviour must
+     * name exactly one kind of vertex processing. A device made through
+     * IDirect3D9Ex is Direct3D 9Ex's, whichever create made it.
+     *
+     * @param {any} root @param {number[]} args
+     * @param {string} id  The interface the pointer handed back is.
+     */
+    const createDevice = (root, args, id)=>{
+        const [adapter, deviceType, focus, behaviourFlags, parameters, out] = args;
+        if ((out >>> 0) === 0)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        const processing = (behaviourFlags >>> 0) & VERTEX_PROCESSING;
+        if ((adapter >>> 0) !== 0 || !DEVICE_TYPES.has(deviceType >>> 0)
+            || (parameters >>> 0) === 0
+            || processing === 0 || (processing & (processing - 1)) !== 0)
+        {
+            fields.writeU32(out >>> 0, 0);
+            return D3DERR_INVALIDCALL;
+        }
+        const wanted = readPresentParameters(parameters >>> 0, focus >>> 0);
+        /** @type {{ device?: any }} */
+        const held = {};
+        const hr = root.CreateDevice(wanted, held, behaviourFlags >>> 0, {
+            AdapterOrdinal: adapter >>> 0,
+            DeviceType: deviceType >>> 0,
+            hFocusWindow: focus >>> 0,
+        }, exRoots.has(root));
+        if (hr !== D3D_OK || !held.device)
+        {
+            fields.writeU32(out >>> 0, 0);
+            return hr;
+        }
+        writePresentParameters(parameters >>> 0, wanted);
+        lastParameters = wanted;
+        // The window is now this resolution; the reported screen is too.
+        // Fullscreen, the device's window follows the mode, as the real
+        // device moves it; windowed, the window is the program's own. The
+        // window is kept for a later Reset, whose present parameters need
+        // not repeat it.
+        deviceWindow = (wanted.hDeviceWindow >>> 0) || (focus >>> 0);
+        resolution?.(wanted.backBufferWidth >>> 0, wanted.backBufferHeight >>> 0, {
+            window: deviceWindow,
+            fullscreen: !wanted.windowed,
+        });
+        const result = handBack(held.device, deviceInterfacesOf(held.device), id,
+            out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
+        if (result === D3D_OK)
+        {
+            lastDevice = held.device;
+        }
+        return result;
+    };
+
+    /** The roots Direct3DCreate9Ex made. @type {WeakSet<object>} */
+    const exRoots = new WeakSet();
+
+    /**
+     * The modes an Ex enumeration lists: the display's sizes in the format
+     * the filter names, the adapter's own format without one. Every mode is
+     * progressive, so a filter asking for interlaced lines lists none.
+     *
+     * @param {number} filter
+     */
+    const filteredModes = filter=>{
+        if ((filter >>> 0) === 0)
+        {
+            return adapterModes(D3DFMT.X8R8G8B8);
+        }
+        const asked = fields.readStruct(filter >>> 0, D3DDISPLAYMODEFILTER);
+        return asked.ScanLineOrdering === D3DSCANLINEORDERING_INTERLACED
+            ? []
+            : adapterModes(asked.Format >>> 0);
+    };
+
+    /** IDirect3D9Ex's own slots. */
+    const rootExMethods = {
+        /** @param {any} root @param {number[]} args */
+        GetAdapterModeCountEx: (root, [adapter, filter])=>((adapter >>> 0) !== 0
+            ? 0
+            : filteredModes(filter).length),
+        /** @param {any} root @param {number[]} args */
+        EnumAdapterModesEx: (root, [adapter, filter, mode, out])=>{
+            const listed = (adapter >>> 0) === 0 ? filteredModes(filter)[mode >>> 0] : undefined;
+            if (!listed || (out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
-            const processing = (behaviourFlags >>> 0) & VERTEX_PROCESSING;
-            if ((adapter >>> 0) !== 0 || !DEVICE_TYPES.has(deviceType >>> 0)
-                || (parameters >>> 0) === 0
-                || processing === 0 || (processing & (processing - 1)) !== 0)
+            fields.writeStruct(out >>> 0, D3DDISPLAYMODEEX, {
+                Size: D3DDISPLAYMODEEX.SIZE,
+                Width: listed.width,
+                Height: listed.height,
+                RefreshRate: listed.refresh,
+                Format: (filter >>> 0) === 0
+                    ? D3DFMT.X8R8G8B8
+                    : fields.readU32((filter >>> 0) + D3DDISPLAYMODEFILTER.Format),
+                ScanLineOrdering: D3DSCANLINEORDERING_PROGRESSIVE,
+            });
+            return D3D_OK;
+        },
+        /** @param {any} root @param {number[]} args */
+        GetAdapterDisplayModeEx: (root, [adapter, mode, rotation])=>((adapter >>> 0) !== 0
+            ? D3DERR_INVALIDCALL
+            : writeDisplayModeEx(mode, rotation)),
+        /** @param {any} root @param {number[]} args */
+        CreateDeviceEx: (root, args)=>{
+            const [adapter, deviceType, focus, behaviourFlags, parameters, mode, out] = args;
+            if ((parameters >>> 0) !== 0 && !modeFits(parameters >>> 0, mode >>> 0))
             {
-                fields.writeU32(out >>> 0, 0);
+                if ((out >>> 0) !== 0)
+                {
+                    fields.writeU32(out >>> 0, 0);
+                }
                 return D3DERR_INVALIDCALL;
             }
-            const wanted = readPresentParameters(parameters >>> 0, focus >>> 0);
-            /** @type {{ device?: any }} */
-            const held = {};
-            const hr = root.CreateDevice(wanted, held, behaviourFlags >>> 0, {
-                AdapterOrdinal: adapter >>> 0,
-                DeviceType: deviceType >>> 0,
-                hFocusWindow: focus >>> 0,
-            });
-            if (hr !== D3D_OK || !held.device)
+            return createDevice(root,
+                [adapter, deviceType, focus, behaviourFlags, parameters, out],
+                IID_IDirect3DDevice9Ex);
+        },
+        // The one adapter's locally unique identifier: any value that is its
+        // own, and stays so.
+        /** @param {any} root @param {number[]} args */
+        GetAdapterLUID: (root, [adapter, out])=>{
+            if ((adapter >>> 0) !== 0 || (out >>> 0) === 0)
             {
-                fields.writeU32(out >>> 0, 0);
-                return hr;
+                return D3DERR_INVALIDCALL;
             }
-            writePresentParameters(parameters >>> 0, wanted);
-            lastParameters = wanted;
-            // The window is now this resolution; the reported screen is too.
-            // Fullscreen, the device's window follows the mode, as the real
-            // device moves it; windowed, the window is the program's own. The
-            // window is kept for a later Reset, whose present parameters need
-            // not repeat it.
-            deviceWindow = (wanted.hDeviceWindow >>> 0) || (focus >>> 0);
-            resolution?.(wanted.backBufferWidth >>> 0, wanted.backBufferHeight >>> 0, {
-                window: deviceWindow,
-                fullscreen: !wanted.windowed,
-            });
-            const result = handBack(held.device, deviceInterfaces, IID_IDirect3DDevice9,
-                out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
-            if (result === D3D_OK)
-            {
-                lastDevice = held.device;
-            }
-            return result;
+            fields.writeU32(out >>> 0, ADAPTER_LUID);
+            fields.writeU32((out >>> 0) + 4, 0);
+            return D3D_OK;
         },
     };
 
@@ -2550,6 +2855,18 @@ export function createDirect3D9Seam(
     const tellCursor = cursor ? createCursorTeller(cursor, memory.readMemory) : ()=>{};
 
     const rootInterfaces = [describe(IID_IDirect3D9, IDIRECT3D9_SLOTS, rootMethods)];
+
+    /**
+     * The object Direct3DCreate9Ex hands back, which answers IDirect3D9 as
+     * well; the plain one does not answer IDirect3D9Ex.
+     *
+     * @type {import('./com.js').InterfaceDescriptor[]}
+     */
+    const rootExInterfaces = [
+        describe(IID_IDirect3D9Ex, [...IDIRECT3D9_SLOTS, ...IDIRECT3D9EX_SLOTS],
+            { ...rootMethods, ...rootExMethods }),
+        ...rootInterfaces,
+    ];
 
     /** @type {any} */
     let lastDevice = null;
@@ -2571,6 +2888,28 @@ export function createDirect3D9Seam(
          */
         publishRoot: (/** @type {any} */ root)=>publisher.publish(root, rootInterfaces, IID_IDirect3D9),
 
+        /**
+         * What Direct3DCreate9Ex does with the object graphics.create('d3d9')
+         * returned: an IDirect3D9Ex, through the pointer it was handed.
+         *
+         * @param {any} root  Null when this build has no Direct3D 9.
+         * @param {number} out
+         * @returns {number} HRESULT
+         */
+        publishRootEx: (/** @type {any} */ root, /** @type {number} */ out)=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (!root)
+            {
+                fields.writeU32(out >>> 0, 0);
+                return D3DERR_NOTAVAILABLE;
+            }
+            exRoots.add(root);
+            return handBack(root, rootExInterfaces, IID_IDirect3D9Ex, out >>> 0);
+        },
+
         /** What the device this program is drawing through has counted. */
         diagnostics: ()=>lastDevice?.diagnostics?.() ?? null,
 
@@ -2581,7 +2920,8 @@ export function createDirect3D9Seam(
             indexBuffer: indexBufferInterfaces, declaration: declarationInterfaces,
             vertexShader: vertexShaderInterfaces, pixelShader: pixelShaderInterfaces,
             stateBlock: stateBlockInterfaces, query: queryInterfaces,
-            swapChain: swapChainInterfaces,
+            swapChain: swapChainInterfaces, rootEx: rootExInterfaces,
+            deviceEx: exDeviceInterfaces, swapChainEx: exSwapChainInterfaces,
         },
     };
 }

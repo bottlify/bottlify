@@ -249,6 +249,20 @@ export function createGraphicsLibraries(
                     return d3d9.publishRoot(root);
                 },
             },
+
+            /** HRESULT Direct3DCreate9Ex(UINT SDKVersion, IDirect3D9Ex **out) */
+            Direct3DCreate9Ex: {
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([, out])=>{
+                    const root = graphics.create('d3d9');
+                    if (root)
+                    {
+                        created.push('d3d9');
+                    }
+                    return d3d9.publishRootEx(root, out);
+                },
+            },
         },
 
         ...d3d10.libraries,
