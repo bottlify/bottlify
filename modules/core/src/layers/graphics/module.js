@@ -187,7 +187,7 @@ export const graphicsModule = {
          * the run's: a given one is attached, never disposed here.
          *
          * @type {{ backend: any, factories: any, created: string[], seam: any,
-         *     presenter: any, presenterGiven: boolean, disposed: boolean,
+         *     presenter: any, presenterGiven: boolean, shown: any, disposed: boolean,
          *     gammaOwners: Set<any> }}
          */
         const state = {
@@ -197,6 +197,7 @@ export const graphicsModule = {
             seam: null,
             presenter: null,
             presenterGiven: false,
+            shown: null,
             disposed: false,
             gammaOwners: new Set(),
         };
@@ -431,7 +432,7 @@ export const graphicsModule = {
                 // and spare the processor decoding every S3TC texture in the
                 // guest's own code.
                 compressedTextures,
-                presenter: ()=>state.presenter,
+                presenter: ()=>state.shown,
                 // The same per-draw account the Direct3D 8 device takes, on
                 // the device handle for the same reason: only the assembling
                 // caller decides it wants one.
@@ -599,7 +600,9 @@ export const graphicsModule = {
         });
         // The backend is asked for on the first present rather than now, so a
         // build that never shows one of these surfaces never builds a GPU.
-        state.presenter.attach({
+        // Everything this machine presents or claims goes through what the
+        // attachment answers, so none of it outlives the machine.
+        state.shown = state.presenter.attach({
             backend: ()=>api.backend(),
             readMemory: services.readMemory,
         });
@@ -682,19 +685,19 @@ export const graphicsModule = {
             // place on it. The ceiling on this: such a primary is shown as
             // it is, and anything over it is not seen.
             const wholeScreen = { left: 0, top: 0, right: screen.width, bottom: screen.height };
-            const region = state.presenter.isClaimed(surface.buffer)
+            const region = state.shown.isClaimed(surface.buffer)
                 || surface.width !== screen.width || surface.height !== screen.height
                 ? null
                 : uncoveredRegion(win32.windows?.() ?? [], window, exclusive, wholeScreen);
             if (!region || (region.length === 1 && sameRect(region[0], wholeScreen)))
             {
-                state.presenter.present(surface);
+                state.shown.present(surface);
                 return;
             }
             const target = desktop();
             if (!target)
             {
-                state.presenter.present(surface);
+                state.shown.present(surface);
                 return;
             }
             const bytesPerPixel = surface.bitCount >>> 3;
@@ -722,7 +725,7 @@ export const graphicsModule = {
                     }
                 }
             }
-            state.presenter.present(target);
+            state.shown.present(target);
         };
 
         /**
@@ -823,7 +826,7 @@ export const graphicsModule = {
                 createSampler: device
                     ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
                     : undefined,
-                presenter: state.presenter,
+                presenter: state.shown,
             }),
 
             // Enumeration is the one thing here that runs guest code: the
@@ -945,7 +948,7 @@ export const graphicsModule = {
                 const screen = desktop();
                 if (screen)
                 {
-                    state.presenter.present({ ...screen, label: 'desktop' });
+                    state.shown.present({ ...screen, label: 'desktop' });
                 }
             },
             /**
@@ -1065,9 +1068,11 @@ export const graphicsModule = {
             instance.gammaOwners.clear();
             // The presenter belongs to the run, not to this machine: what
             // replaces this process draws into the same canvas and the same
-            // texture, so it is left exactly as it is. Only a presenter this
-            // layer made itself -- a build assembled without one -- is
-            // disposed here.
+            // texture, so it is left as it is but for this machine's
+            // attachment, which goes with it. Only a presenter this layer
+            // made itself -- a build assembled without one -- is disposed
+            // here.
+            instance.shown?.detach();
             if (instance.presenter && !instance.presenterGiven)
             {
                 instance.presenter.dispose?.();

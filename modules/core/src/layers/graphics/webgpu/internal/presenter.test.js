@@ -154,8 +154,8 @@ test('recorded: a burst of changes is one upload, one frame and one present', ()
     assert.equal(h.presented[0].surface.format, 'bgra8unorm');
     assert.deepEqual(h.presenter.diagnostics(), {
         presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, shown: 0, gammaShown: 0,
-        shownBy: {}, lastBuffer: 0x1000, pending: false, claimed: 0, gamma: false,
-        failures: [], disposed: false,
+        dropped: 0, shownBy: {}, lastBuffer: 0x1000, pending: false, claimed: 0,
+        attached: 0, gamma: false, failures: [], disposed: false,
     });
 
     h.presenter.present(surface);
@@ -272,16 +272,16 @@ test('the run\'s presenter serves two machine lifetimes, configures the canvas o
                 device: gpu.device, queue: gpu.queue,
                 presentTo: frame=>presenter.show(frame), now: ()=>0,
             });
-            presenter.attach({
+            const view = presenter.attach({
                 backend: ()=>backend,
                 readMemory: (address, length)=>ram.slice(address, address + length),
             });
-            return backend;
+            return { backend, view };
         };
 
         ram.set([0x56, 0x34, 0x12, 0xff], 0x100);
         const first = presentFrom();
-        presenter.present({ buffer: 0x100, width: 1, height: 1, pitch: 4, bitCount: 32,
+        first.view.present({ buffer: 0x100, width: 1, height: 1, pitch: 4, bitCount: 32,
             palette: null });
         presenter.flush();
         assert.equal(gpu.count('configure'), 1, 'the first frame configured the canvas');
@@ -289,10 +289,11 @@ test('the run\'s presenter serves two machine lifetimes, configures the canvas o
         assert.equal(presenter.diagnostics().shown, 1);
 
         // The replacement: the old backend's resources go, the presenter stays.
-        first.dispose();
+        first.view.detach();
+        first.backend.dispose();
         ram.set([0x11, 0x22, 0x33, 0xff], 0x200);
-        presentFrom();
-        presenter.present({ buffer: 0x200, width: 1, height: 1, pitch: 4, bitCount: 32,
+        const second = presentFrom();
+        second.view.present({ buffer: 0x200, width: 1, height: 1, pitch: 4, bitCount: 32,
             palette: null });
         presenter.flush();
 
@@ -306,6 +307,64 @@ test('the run\'s presenter serves two machine lifetimes, configures the canvas o
         assert.equal(gpu.of('copyTextureToTexture').length, 2,
             'each lifetime showed its own frame');
     });
+
+test('a machine that goes takes its pending frame and its claims with it', ()=>{
+    // A child started beside its parent attaches on top of it and goes while
+    // the parent stands. The parent then presents from its own address space,
+    // through its own backend, and an address the child's GPU owned is guest
+    // bytes to the parent; a frame the child presented and that was not shown
+    // yet is dropped, since the address space it named has gone.
+    const gpu = createFakeDevice();
+    const presenter = createPresenter({
+        device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+        now: ()=>0,
+    });
+    /** @param {Uint8Array} ram */
+    const machine = ram=>{
+        const reached = { backend: 0 };
+        const backend = createBackend({
+            device: gpu.device, queue: gpu.queue,
+            presentTo: frame=>presenter.show(frame), now: ()=>0,
+        });
+        const view = presenter.attach({
+            backend: ()=>{
+                reached.backend++;
+                return backend;
+            },
+            readMemory: (address, length)=>ram.slice(address, address + length),
+        });
+        return { view, reached };
+    };
+    const parentRam = new Uint8Array(0x1000);
+    parentRam.set([0x56, 0x34, 0x12, 0xff], 0x100);
+    const childRam = new Uint8Array(0x1000);
+    childRam.set([0x11, 0x22, 0x33, 0xff], 0x100);
+    const pixel = { buffer: 0x100, width: 1, height: 1, pitch: 4, bitCount: 32, palette: null };
+
+    const parent = machine(parentRam);
+    const child = machine(childRam);
+    assert.equal(presenter.diagnostics().attached, 2);
+    let ownerShown = 0;
+    child.view.claim(0x100, ()=>{
+        ownerShown++;
+    });
+    assert.equal(parent.view.isClaimed(0x100), false, 'a claim is the claiming machine\'s');
+    child.view.present(pixel);
+    child.view.detach();
+    presenter.flush();
+    assert.equal(child.reached.backend, 0, 'the gone machine\'s backend was not reached');
+    assert.equal(gpu.count('writeTexture'), 0, 'nor its address space read');
+    assert.equal(presenter.diagnostics().dropped, 1);
+    assert.equal(presenter.diagnostics().attached, 1);
+    assert.equal(presenter.diagnostics().claimed, 0, 'its claims went with it');
+
+    parent.view.present(pixel);
+    presenter.flush();
+    assert.equal(ownerShown, 0);
+    assert.equal(parent.reached.backend, 1);
+    assert.deepEqual([...gpu.of('writeTexture').at(-1).bytes], [0x56, 0x34, 0x12, 0xff]);
+    assert.equal(presenter.diagnostics().shown, 1);
+});
 
 test('every canvas copy is recorded under the label of what was shown', ()=>{
     // A device draws the picture and something else paints the desktop over
