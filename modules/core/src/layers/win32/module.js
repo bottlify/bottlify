@@ -817,9 +817,11 @@ export const win32Module = {
                     callerThread: ()=>bridge.callerThread(),
                 }),
                 ...createProfileFunctions({
+                    readMemory,
                     writeMemory,
                     readCString,
                     files: volume,
+                    setLastError: setError,
                 }),
                 ...createDriveFunctions({
                     readCString, readWideString, readMemory, writeMemory,

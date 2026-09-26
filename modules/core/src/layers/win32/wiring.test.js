@@ -17,6 +17,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { win32Module } from './module.js';
+import { filesystemModule } from '../filesystem/module.js';
 
 const ARENA = { base: 0x100000, size: 0x200000 };
 
@@ -190,4 +191,30 @@ test('the synchronisation calls leave their failures as the thread\'s last error
         [0x6000, INIT_ONCE_CHECK_ONLY_ASYNC, 0x6004, 0x6008]), 0);
     assert.equal(lastError(), ERROR_INVALID_PARAMETER);
     await win32Module.dispose();
+});
+
+test('a structure written to a profile is read from guest memory and read back', async()=>{
+    const filesystem = await filesystemModule.create({});
+    const thread = { id: 1 };
+    const { bytes, libraries, lastError } = await build({
+        filesystem,
+        kernel: { currentThread: ()=>thread },
+    });
+    const kernel32 = libraries['KERNEL32.dll'];
+    /** @param {number} at @param {string} text */
+    const narrow = (at, text)=>{
+        bytes.set([...text, '\0'].map(ch=>ch.charCodeAt(0)), at);
+        return at;
+    };
+    const section = narrow(0x1000, 'Setup');
+    const key = narrow(0x1100, 'Window');
+    const file = narrow(0x1200, 'C:\\app.ini');
+    bytes.set([0x10, 0x20, 0x30, 0x40], 0x2000);
+
+    assert.equal(kernel32.WritePrivateProfileStructA.handler([section, key, 0x2000, 4, file]),
+        1, `written, last error ${lastError()}`);
+    assert.equal(kernel32.GetPrivateProfileStructA.handler([section, key, 0x3000, 4, file]), 1);
+    assert.deepEqual([...bytes.subarray(0x3000, 0x3004)], [0x10, 0x20, 0x30, 0x40]);
+    await win32Module.dispose();
+    await filesystemModule.dispose();
 });
