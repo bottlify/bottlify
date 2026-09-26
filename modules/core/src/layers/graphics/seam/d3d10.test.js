@@ -43,6 +43,11 @@ import {
     constantBufferShader, passThroughVertexShader, solidPixelShader,
 } from '../d3d10/shader-fixtures.js';
 import { createBackend } from '../webgpu/backend.js';
+import { FX_KIND, effectBinary } from '../d3d10/effect-fixtures.js';
+import {
+    EFFECT_VARIABLE_INTERFACES, ID3D10EFFECTPASS_SLOTS, ID3D10EFFECTTECHNIQUE_SLOTS,
+    ID3D10EFFECTTYPE_SLOTS, ID3D10EFFECTVARIABLE_SLOTS, ID3D10EFFECT_SLOTS,
+} from './d3d10-effect.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 
 const E_NOTIMPL = 0x80004001;
@@ -1350,4 +1355,166 @@ test('what this build cannot do says so in the slot rather than in a crash', ()=
     assert.equal(h.swapChain(swapChain, 'ResizeTarget', [0]), DXGI_ERROR_INVALID_CALL);
     assert.equal(h.device(device, 'ResolveSubresource', [0, 0, 0, 0, 0]), 0);
     assert.ok(h.divergences.some(line=>line.includes('ResolveSubresource')));
+});
+
+// --- the effect framework ---
+
+/**
+ * A method of an effect interface without IUnknown: its first slot is its
+ * own first method.
+ *
+ * @param {[string, number][]} slots @param {string} name
+ */
+const bareSlot = (slots, name)=>{
+    const index = slots.findIndex(([entry])=>entry === name);
+    assert.ok(index >= 0, `${name} is a slot`);
+    return index;
+};
+
+/**
+ * An effect made on a new device through the seam, and ways to call its
+ * interfaces as a program does.
+ *
+ * @param {import('../d3d10/effect-fixtures.js').FixtureEffect} spec
+ */
+function effectOn(spec){
+    const h = seamed();
+    const { device, swapChain } = h.createDeviceAndSwapChain();
+    const bytes = effectBinary(spec);
+    const at = h.box.placeBytes(bytes);
+    const outAt = h.box.place([0xdeadbeef]);
+    /** @param {number} onDevice */
+    const create = onDevice=>h.seam.effects.fromMemory(
+        [at, bytes.length, 0, onDevice, 0, outAt]) >>> 0;
+    assert.equal(create(device), S_OK);
+    const effect = h.box.memory.readU32(outAt);
+    /** @param {[string, number][]} slots */
+    const on = slots=>(/** @type {number} */ pointer, /** @type {string} */ name,
+        /** @type {number[]} */ args = [])=>h.box.call(pointer, bareSlot(slots, name), args);
+    return {
+        h, device, swapChain, effect, bytes, at, outAt, create,
+        /** @param {string} name @param {number[]} [args] */
+        fx: (name, args = [])=>h.box.call(effect, slot(ID3D10EFFECT_SLOTS, name), args),
+        variable: on(ID3D10EFFECTVARIABLE_SLOTS),
+        type: on(ID3D10EFFECTTYPE_SLOTS),
+        technique: on(ID3D10EFFECTTECHNIQUE_SLOTS),
+        pass: on(ID3D10EFFECTPASS_SLOTS),
+        /** @param {string} kind */
+        kind: kind=>on([...ID3D10EFFECTVARIABLE_SLOTS, ...EFFECT_VARIABLE_INTERFACES[kind].slots]),
+        /** @param {number} pointer */
+        text: pointer=>{
+            const read = h.box.services.readMemory(pointer, 64);
+            return String.fromCharCode(...read.subarray(0, read.indexOf(0)));
+        },
+        /** @param {number} pointer @param {number} count */
+        dwords: (pointer, count)=>Array.from({ length: count },
+            (_, index)=>h.box.memory.readU32(pointer + index * 4)),
+        /** @param {string} text */
+        named: text=>h.box.placeString(text),
+    };
+}
+
+test('an effect is made on a device and walked through its interfaces', ()=>{
+    // Wine's d3d10 effect tests, through the vtables a program calls.
+    const E_FAIL = 0x80004005;
+    const E_POINTER = 0x80004003;
+    const vs = passThroughVertexShader();
+    const e = effectOn({
+        buffers: [{ name: 'cb', size: 32, variables: [
+            { name: 'f1', offset: 0, semantic: 'SV_POSITION',
+                type: { name: 'float', numeric: { layout: 'scalar', base: 'float' } } },
+            { name: 'f2', offset: 16, semantic: 'COLOR0',
+                annotations: [{ name: 's', type: { name: 'String', object: FX_KIND.STRING },
+                    strings: ['f2_a'] }],
+                type: { name: 'float4', numeric: { layout: 'vector', base: 'float',
+                    columns: 4 } } },
+        ] }],
+        objects: [{ name: 'tex', type: { name: 'Texture2D', object: FX_KIND.TEXTURE2D } }],
+        techniques: [{ name: 'Render', passes: [
+            { name: 'P0' },
+            { name: 'P1', assignments: [{ state: 6, shader: vs }] },
+        ] }],
+    });
+    const { h, fx, variable, type, technique, pass, text, dwords, named } = e;
+    assert.equal(e.create(0), 0x8876086c, 'D3DERR_INVALIDCALL without a device');
+    assert.equal(h.box.memory.readU32(e.outAt), 0);
+    const desc = h.box.allocate(64);
+
+    assert.equal(fx('IsValid'), 1);
+    assert.equal(fx('IsPool'), 0);
+    assert.equal(fx('GetDesc', [0]), E_INVALIDARG);
+    assert.equal(fx('GetDesc', [desc]), S_OK);
+    assert.deepEqual(dwords(desc, 6), [0, 1, 0, 3, 0, 1]);
+
+    const f2 = fx('GetVariableByName', [named('f2')]);
+    assert.equal(fx('GetVariableBySemantic', [named('color0')]), f2);
+    assert.equal(fx('GetVariableByIndex', [1]), f2);
+    assert.equal(variable(f2, 'IsValid'), 1);
+    assert.equal(variable(f2, 'GetDesc', [desc]), S_OK);
+    assert.deepEqual([text(h.box.memory.readU32(desc)), text(h.box.memory.readU32(desc + 4))],
+        ['f2', 'COLOR0']);
+    assert.deepEqual(dwords(desc + 8, 4), [0, 1, 16, 0], 'flags, annotations, offset, bind point');
+    assert.equal(variable(f2, 'AsVector'), f2, 'one pointer, its most derived interface');
+    const notScalar = variable(f2, 'AsScalar');
+    assert.notEqual(notScalar, f2);
+    assert.equal(variable(notScalar, 'IsValid'), 0);
+    const none = fx('GetVariableByIndex', [99]);
+    assert.equal(fx('GetVariableByName', [0]), none);
+    assert.equal(variable(none, 'GetDesc', [desc]), E_FAIL);
+
+    const f2Type = variable(f2, 'GetType');
+    assert.equal(type(f2Type, 'GetDesc', [desc]), S_OK);
+    assert.equal(text(h.box.memory.readU32(desc)), 'float4');
+    assert.deepEqual(dwords(desc + 4, 9), [1, 3, 0, 0, 1, 4, 16, 16, 16],
+        'D3D10_SVC_VECTOR, D3D10_SVT_FLOAT, one row of four, sixteen bytes');
+    const cb = fx('GetConstantBufferByIndex', [0]);
+    assert.equal(variable(f2, 'GetParentConstantBuffer'), cb);
+    assert.equal(variable(cb, 'GetMemberByIndex', [1]), f2);
+    const cbType = variable(cb, 'GetType');
+    assert.equal(type(cbType, 'GetDesc', [desc]), S_OK);
+    assert.equal(text(h.box.memory.readU32(desc)), 'cbuffer');
+    assert.equal(text(type(cbType, 'GetMemberName', [0])), 'f1');
+    assert.equal(text(type(cbType, 'GetMemberSemantic', [1])), 'COLOR0');
+    assert.equal(type(cbType, 'GetMemberName', [2]), 0);
+    const annotation = variable(f2, 'GetAnnotationByIndex', [0]);
+    assert.equal(variable(annotation, 'AsString'), annotation);
+
+    const render = fx('GetTechniqueByName', [named('Render')]);
+    assert.equal(fx('GetTechniqueByIndex', [0]), render);
+    assert.equal(technique(render, 'GetDesc', [desc]), S_OK);
+    assert.deepEqual([text(h.box.memory.readU32(desc)), ...dwords(desc + 4, 2)], ['Render', 2, 0]);
+    const p1 = technique(render, 'GetPassByName', [named('P1')]);
+    assert.equal(technique(render, 'GetPassByIndex', [1]), p1);
+    assert.equal(pass(p1, 'GetDesc', [desc]), S_OK);
+    assert.equal(text(h.box.memory.readU32(desc)), 'P1');
+    const signature = h.box.memory.readU32(desc + 8);
+    assert.deepEqual([...h.box.services.readMemory(signature, 4)], [0x44, 0x58, 0x42, 0x43],
+        'the vertex shader\'s own bytecode');
+    assert.equal(h.box.memory.readU32(desc + 12), vs.length);
+    assert.equal(pass(p1, 'GetVertexShaderDesc', [desc]), S_OK);
+    const anonymous = h.box.memory.readU32(desc);
+    assert.equal(variable(anonymous, 'GetDesc', [desc]), S_OK);
+    assert.equal(text(h.box.memory.readU32(desc)), '$Anonymous');
+    const invalidPass = technique(render, 'GetPassByIndex', [2]);
+    assert.equal(pass(invalidPass, 'IsValid'), 0);
+
+    const references = ()=>{
+        const count = h.box.call(e.device, 1);
+        h.box.call(e.device, 2);
+        return count - 1;
+    };
+    const held = references();
+    const deviceAt = h.box.place([0]);
+    assert.equal(fx('GetDevice', [deviceAt]), S_OK);
+    assert.equal(h.box.memory.readU32(deviceAt), e.device);
+    assert.equal(references(), held + 1, 'GetDevice hands over a reference');
+    h.box.call(e.device, 2);
+
+    assert.equal(h.box.call(e.effect, 2), 0, 'the last release');
+    assert.equal(references(), held - 1, 'and the effect gave its own back');
+    assert.equal(variable(f2, 'IsValid'), E_POINTER, 'its variables went with it');
+    assert.equal(technique(render, 'IsValid'), E_POINTER);
+    assert.equal(variable(none, 'IsValid'), 0, 'the invalid objects stay');
+    assert.equal(h.d3d10.D3D10CreateEffectFromMemory.handler([e.at, e.bytes.length, 0, e.device,
+        0, e.outAt]) >>> 0, E_NOTIMPL, 'the entry point still refuses');
 });

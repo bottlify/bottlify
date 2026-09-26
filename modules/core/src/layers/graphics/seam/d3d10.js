@@ -27,6 +27,7 @@
  */
 
 import { describe as describeSlots } from './vtables.js';
+import { createEffectSeam } from './d3d10-effect.js';
 import { readGuid } from './ddraw.js';
 import { createFields } from './structs.js';
 import {
@@ -3024,14 +3025,15 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         },
     });
 
-    // An effect is refused where it is made. Its techniques, passes and
-    // variables are tables without IUnknown, which the publisher lays out as
-    // the reflection's are; what does not exist is the effect itself --
-    // reading an effect binary, its variables' typed views and the state a
-    // pass applies -- and an effect that could be walked but whose passes
-    // applied nothing would draw wrongly far from here.
-    const EFFECT_REFUSAL = 'the effect framework is not implemented: an effect binary is not'
-        + ' read, and no pass applies its state';
+    // An effect is still refused where it is made: it is read and can be
+    // walked (`effects.fromMemory`), but its passes apply nothing yet, and an
+    // effect whose passes applied nothing would draw wrongly far from here.
+    const EFFECT_REFUSAL = 'the effect framework is not implemented: no pass applies its state';
+
+    const effects = createEffectSeam({
+        publisher, fields, memory, allocate, free, report, constantString, readCString, handBack,
+        deviceInterfaces: ()=>deviceInterfaces,
+    });
 
     // --- state blocks ---
 
@@ -3425,6 +3427,11 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         deviceInterfaces,
         swapChainInterfaces,
         factoryInterfaces,
+        /**
+         * The effect framework: what D3D10CreateEffectFromMemory will call
+         * once passes can be applied.
+         */
+        effects,
 
         libraries: {
             'D3D10_1.dll': {
