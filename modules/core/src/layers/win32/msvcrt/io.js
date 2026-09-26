@@ -33,6 +33,9 @@ const O_EXCL = 0x0400;
 const O_TEXT = 0x4000;
 export const O_BINARY = 0x8000;
 
+/** The Unicode translations `_setmode` names, which this runtime does not carry. */
+const O_UNICODE = [0x10000, 0x20000, 0x40000];
+
 /** msvcrt's own ceiling on open descriptors. */
 const MAX_DESCRIPTORS = 2048;
 
@@ -390,6 +393,8 @@ export function createDescriptors(host){
  * @property {any} files  The volume: stat and currentDirectory, besides what
  *           the descriptors use.
  * @property {(code: number) => void} [errno]
+ * @property {(api: string, detail: string) => void} [divergence]
+ *           Where a call refuses what real Windows would have done.
  */
 
 /**
@@ -410,6 +415,22 @@ export function createIoFunctions(host, descriptors){
 
     /** @param {number} milliseconds */
     const seconds = milliseconds=>Math.floor((milliseconds ?? 0) / 1000) >>> 0;
+
+    /**
+     * The descriptor of a file, which has a position and a size; null with
+     * EBADF for a number not open and for the console, which has neither.
+     *
+     * @param {number} fd
+     */
+    const fileAt = fd=>{
+        const descriptor = descriptors.get(fd | 0);
+        if (!descriptor || descriptor.node === null)
+        {
+            fail(EBADF);
+            return null;
+        }
+        return descriptor;
+    };
 
     /**
      * Fills a whole `struct _stat`, so no field keeps what the caller's
@@ -589,10 +610,9 @@ export function createIoFunctions(host, descriptors){
          * position before the start, EBADF for a number that is not a file.
          */
         _lseek: cdecl(12, ([fd, offset, origin])=>{
-            const descriptor = descriptors.get(fd | 0);
-            if (!descriptor || descriptor.node === null)
+            const descriptor = fileAt(fd);
+            if (!descriptor)
             {
-                fail(EBADF);
                 return -1;
             }
             const base = origin === SEEK_SET ? 0
@@ -606,6 +626,64 @@ export function createIoFunctions(host, descriptors){
             }
             descriptors.seek(descriptor, position);
             return position;
+        }),
+
+        /** long _tell(int fd) -- the position, as `_lseek(fd, 0, SEEK_CUR)` answers it. */
+        _tell: cdecl(4, ([fd])=>fileAt(fd)?.position ?? -1),
+
+        /**
+         * int _eof(int fd)
+         *
+         * 1 at or past the end of the file, and after a text-mode ^Z, which
+         * ends the data a read will see until a seek; 0 before it.
+         */
+        _eof: cdecl(4, ([fd])=>{
+            const descriptor = fileAt(fd);
+            if (!descriptor)
+            {
+                return -1;
+            }
+            return descriptor.ended || descriptor.position >= descriptors.size(descriptor) ? 1 : 0;
+        }),
+
+        /** long _filelength(int fd) -- the size, the position left where it was. */
+        _filelength: cdecl(4, ([fd])=>{
+            const descriptor = fileAt(fd);
+            return descriptor ? descriptors.size(descriptor) : -1;
+        }),
+
+        /**
+         * int _setmode(int fd, int mode)
+         *
+         * The translation the descriptor had, `_O_TEXT` or `_O_BINARY`. The
+         * mode is checked before the number and must be exactly one mode
+         * (Wine's msvcrt test_setmode). The Unicode translations are refused:
+         * the byte calls here would write their text untranslated, and a
+         * program told -1 knows its wide output is not being converted.
+         */
+        _setmode: cdecl(8, ([fd, mode])=>{
+            const wanted = mode >>> 0;
+            if (wanted !== O_TEXT && wanted !== O_BINARY && !O_UNICODE.includes(wanted))
+            {
+                fail(EINVAL);
+                return -1;
+            }
+            const descriptor = descriptors.get(fd | 0);
+            if (!descriptor)
+            {
+                fail(EBADF);
+                return -1;
+            }
+            if (O_UNICODE.includes(wanted))
+            {
+                host.divergence?.('_setmode',
+                    `Unicode translation 0x${wanted.toString(16)} is not carried`);
+                fail(EINVAL);
+                return -1;
+            }
+            const previous = descriptor.text ? O_TEXT : O_BINARY;
+            descriptor.text = wanted === O_TEXT;
+            return previous;
         }),
 
         /**

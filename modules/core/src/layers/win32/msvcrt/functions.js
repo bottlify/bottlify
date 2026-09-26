@@ -930,6 +930,7 @@ export function createMsvcrtFunctions(host){
                 readCString: host.readCString,
                 files: host.files,
                 errno,
+                divergence: host.divergence,
             }, descriptors)
             : {}),
         ...(host.files && host.allocate && host.free

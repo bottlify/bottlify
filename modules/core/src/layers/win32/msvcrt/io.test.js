@@ -18,6 +18,9 @@ const O_TRUNC = 0x0200;
 const O_EXCL = 0x0400;
 const O_TEXT = 0x4000;
 const O_BINARY = 0x8000;
+const O_WTEXT = 0x10000;
+const O_U16TEXT = 0x20000;
+const O_U8TEXT = 0x40000;
 
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
@@ -303,10 +306,103 @@ test('a stream\'s read folds text as the program reads it and consumes only that
     assert.equal(files.reads - before, 1, 'the second line came from what the first read');
 });
 
+test('_setmode checks the mode, then the number, and answers with the mode it replaced', ()=>{
+    // Wine's msvcrt test_setmode, for the two translations this runtime has.
+    const { memory, files, fns, errno, open } = build();
+    const fd = open('C:\\game\\empty1', O_CREAT | O_WRONLY);
+
+    assert.equal(fns._setmode.handler([-2, 0]), -1);
+    assert.equal(fns._setmode.handler([-2, O_TEXT]), -1);
+    assert.equal(fns._setmode.handler([fd, 0xffffffff]), -1);
+    assert.equal(fns._setmode.handler([fd, 0]), -1);
+    assert.equal(fns._setmode.handler([fd, O_BINARY | O_TEXT]), -1);
+    assert.equal(fns._setmode.handler([fd, O_WTEXT | O_U16TEXT]), -1);
+    assert.deepEqual(errno.splice(0), [EINVAL, EBADF, EINVAL, EINVAL, EINVAL, EINVAL]);
+
+    assert.equal(fns._setmode.handler([fd, O_BINARY]), O_TEXT);
+    assert.equal(fns._write.handler([fd, memory.put('a\n'), 2]), 2);
+    assert.equal(fns._setmode.handler([fd, O_TEXT]), O_BINARY);
+    assert.equal(fns._write.handler([fd, memory.put('b\n'), 2]), 2);
+    assert.equal(fns._setmode.handler([fd, O_TEXT]), O_TEXT);
+    assert.equal(String.fromCharCode(...files.files['C:\\game\\empty1']), 'a\nb\r\n');
+    assert.equal(fns._setmode.handler([1, O_BINARY]), O_TEXT, 'the console\'s too');
+    assert.deepEqual(errno, []);
+});
+
+test('_setmode refuses the Unicode translations it does not carry, and says so', ()=>{
+    const memory = fakeMemory();
+    const files = fakeVolume({});
+    /** @type {number[]} */
+    const errno = [];
+    /** @type {string[]} */
+    const divergences = [];
+    const descriptors = createDescriptors({ files, errno: code=>errno.push(code) });
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({
+        ...memory, files, errno: code=>errno.push(code),
+        divergence: api=>divergences.push(api),
+    }, descriptors));
+
+    for (const mode of [O_WTEXT, O_U16TEXT, O_U8TEXT])
+    {
+        assert.equal(fns._setmode.handler([1, mode]), -1);
+    }
+    assert.deepEqual(errno, [EINVAL, EINVAL, EINVAL]);
+    assert.deepEqual(divergences, ['_setmode', '_setmode', '_setmode']);
+    assert.equal(fns._setmode.handler([1, O_TEXT]), O_TEXT, 'the mode stayed what it was');
+});
+
+test('_tell is where the next byte goes, counted in the file\'s own bytes', ()=>{
+    // Wine's msvcrt test__creat: "a\nb\n" is six bytes written in text mode.
+    const { memory, fns, errno, open } = build();
+    const text = open('C:\\game\\text.tst', O_CREAT | O_RDWR | O_TEXT);
+    fns._write.handler([text, memory.put('a\nb\n'), 4]);
+    assert.equal(fns._tell.handler([text]), 6);
+    const binary = open('C:\\game\\binary.tst', O_CREAT | O_RDWR | O_BINARY);
+    fns._write.handler([binary, memory.put('a\nb\n'), 4]);
+    assert.equal(fns._tell.handler([binary]), 4);
+    fns._lseek.handler([binary, 1, SEEK_SET]);
+    assert.equal(fns._tell.handler([binary]), 1);
+
+    assert.equal(fns._tell.handler([77]), -1);
+    assert.deepEqual(errno, [EBADF]);
+});
+
+test('_eof is 1 at the end of the file, 0 before it, and -1 for a number not open', ()=>{
+    const { fns, errno, open, read } = build({
+        'C:\\game\\two.bin': bytesOf('ab'), 'C:\\game\\z.txt': bytesOf('a\x1ab'),
+    });
+    const fd = open('C:\\game\\two.bin', O_RDONLY | O_BINARY);
+    assert.equal(fns._eof.handler([fd]), 0);
+    read(fd, 1);
+    assert.equal(fns._eof.handler([fd]), 0);
+    read(fd, 1);
+    assert.equal(fns._eof.handler([fd]), 1);
+    fns._lseek.handler([fd, 10, SEEK_SET]);
+    assert.equal(fns._eof.handler([fd]), 1, 'past the end is at it');
+
+    const z = open('C:\\game\\z.txt', O_RDONLY | O_TEXT);
+    assert.equal(read(z, 16), 'a');
+    assert.equal(fns._eof.handler([z]), 1, 'a ^Z ends the data a read will see');
+
+    assert.equal(fns._eof.handler([77]), -1);
+    assert.deepEqual(errno, [EBADF]);
+});
+
+test('_filelength is the size of the file, and leaves the position where it was', ()=>{
+    const { fns, errno, open, tell } = build({ 'C:\\game\\five.bin': bytesOf('12345') });
+    const fd = open('C:\\game\\five.bin', O_RDONLY);
+    fns._lseek.handler([fd, 2, SEEK_SET]);
+    assert.equal(fns._filelength.handler([fd]), 5);
+    assert.equal(tell(fd), 2);
+    assert.equal(fns._filelength.handler([77]), -1);
+    assert.deepEqual(errno, [EBADF]);
+});
+
 test('every entry is cdecl with the argument count it reads', ()=>{
     const { fns } = build();
     const expected = {
         _open: 12, _close: 4, _read: 12, _write: 12, _lseek: 12, _fstat: 8, _stat: 8,
+        _setmode: 8, _tell: 4, _eof: 4, _filelength: 4,
     };
     for (const [name, argBytes] of Object.entries(expected))
     {
