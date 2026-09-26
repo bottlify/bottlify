@@ -769,3 +769,117 @@ test('CheckDlgButton tells the one button, passing the state through', ()=>{
     assert.equal(fns.CheckDlgButton.handler([dialog, 99, 1]), 0, 'no such control');
     assert.equal(fns.CheckDlgButton.handler([0x9999, 10, 1]), 0, 'no such dialog');
 });
+
+/**
+ * A program's own dialog class, as a custom dialog is built: DefDlgProc for
+ * its procedure and the dialog's extra bytes, with a window of it made.
+ *
+ * @param {ReturnType<typeof setup>} context @param {number} wndProc
+ */
+function customDialog({ memory, fns }, wndProc){
+    const DLGWINDOWEXTRA = 30;
+    const WS_POPUP = 0x80000000;
+    const CLASS_STRUCT = 0x10800;
+    const CLASS_NAME = 0x10900;
+    memory.putString(CLASS_NAME, 'TestDialogClass');
+    memory.writeMemory(CLASS_STRUCT, new Uint8Array(new Uint32Array([
+        0, wndProc, 0, DLGWINDOWEXTRA, HINSTANCE, 0, 0, 0, 0, CLASS_NAME,
+    ]).buffer));
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    return fns.CreateWindowExA.handler(
+        [0, CLASS_NAME, 0, WS_POPUP, 0, 0, 100, 100, 0, 0, HINSTANCE, 0]);
+}
+
+test('DefDlgProcA hands a message to the dialog procedure first, as a dialog class does', ()=>{
+    // As documented for DefDlgProc: it forwards to the procedure in
+    // DWLP_DLGPROC and does the default processing only for what that
+    // procedure answers FALSE, the answer of a handled one being
+    // DWLP_MSGRESULT.
+    const DEFDLGPROC = 0x404000;
+    const DWLP_MSGRESULT = 0;
+    const DWLP_DLGPROC = 4;
+    // Past the dialog manager's own DM_ messages, which start at WM_USER.
+    const WM_APP_MESSAGE = 0x0500;
+    const WM_CTLCOLORDLG = 0x0136;
+    /** @type {number[]} */
+    const asked = [];
+    /** @type {ReturnType<typeof setup> | null} */
+    let context = null;
+    context = setup({
+        dispatch: (wndProc, message)=>{
+            if (wndProc !== DIALOGPROC)
+            {
+                return 0;
+            }
+            asked.push(message.message);
+            if (message.message === WM_APP_MESSAGE)
+            {
+                context?.fns.SetWindowLongA.handler([message.hwnd, DWLP_MSGRESULT, 0x55]);
+                return 1;
+            }
+            return 0;
+        },
+    });
+    const { fns } = context;
+    const dialog = customDialog(context, DEFDLGPROC);
+    fns.SetWindowLongA.handler([dialog, DWLP_DLGPROC, DIALOGPROC]);
+
+    assert.equal(fns.DefDlgProcA.handler([dialog, WM_APP_MESSAGE, 1, 2]), 0x55,
+        'handled: the answer is DWLP_MSGRESULT');
+    assert.equal(fns.DefDlgProcA.handler([dialog, WM_APP_MESSAGE + 1, 0, 0]), 0,
+        'unhandled: the default, which has nothing to say about it');
+    assert.equal(fns.DefDlgProcA.handler([dialog, WM_CTLCOLORDLG, 0, dialog]), 0,
+        'an unhandled colour message is the default\'s, a brush where there is a painter');
+    assert.deepEqual(asked, [WM_APP_MESSAGE, WM_APP_MESSAGE + 1, WM_CTLCOLORDLG]);
+});
+
+test('DefDlgProcA(WM_SETFOCUS) passes the focus to the first control that stops Tab', ()=>{
+    // user32's message tests: with the focus taken from everything, a custom
+    // dialog told WM_SETFOCUS gives it to its first tab-stop edit, selecting
+    // that edit's text first, and answers 0.
+    const DEFDLGPROC = 0x404000;
+    const WM_SETFOCUS = 0x0007;
+    const WM_GETDLGCODE = 0x0087;
+    const EM_SETSEL = 0x00b1;
+    const DLGC_HASSETSEL = 0x0008;
+    const WS_CHILD = 0x40000000;
+    const WS_VISIBLE = 0x10000000;
+    const WS_TABSTOP = 0x00010000;
+    const EDITPROC = 0x405000;
+    /** @type {{ hwnd: number, message: number, wParam: number, lParam: number }[]} */
+    const seen = [];
+    const context = setup({
+        dispatch: (wndProc, message)=>{
+            if (wndProc === EDITPROC)
+            {
+                seen.push({ hwnd: message.hwnd, message: message.message,
+                    wParam: message.wParam, lParam: message.lParam });
+            }
+            return wndProc === EDITPROC && message.message === WM_GETDLGCODE
+                ? DLGC_HASSETSEL : 0;
+        },
+    });
+    const { memory, fns } = context;
+    const dialog = customDialog(context, DEFDLGPROC);
+    const CLASS_STRUCT = 0x10a00;
+    const CLASS_NAME = 0x10b00;
+    memory.putString(CLASS_NAME, 'my_edit_class');
+    memory.writeMemory(CLASS_STRUCT, new Uint8Array(new Uint32Array([
+        0, EDITPROC, 0, 0, HINSTANCE, 0, 0, 0, 0, CLASS_NAME,
+    ]).buffer));
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    /** @param {number} id @param {number} y */
+    const edit = (id, y)=>fns.CreateWindowExA.handler([0, CLASS_NAME, 0,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, y, 80, 20, dialog, id, HINSTANCE, 0]);
+    const first = edit(1, 0);
+    const second = edit(2, 40);
+    fns.SetFocus.handler([second]);
+    fns.SetFocus.handler([0]);
+    seen.length = 0;
+
+    assert.equal(fns.DefDlgProcA.handler([dialog, WM_SETFOCUS, 0, 0]), 0);
+    assert.equal(fns.GetFocus.handler([]), first);
+    assert.deepEqual(seen.map(({ message })=>message), [WM_GETDLGCODE, EM_SETSEL, WM_SETFOCUS],
+        'the control is asked what it wants, its text selected, then it has the focus');
+    assert.equal(seen[1].wParam, 0);
+});

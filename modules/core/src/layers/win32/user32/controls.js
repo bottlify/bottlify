@@ -174,6 +174,11 @@ const STN_DBLCLK = 1;
 const IMAGE_BITMAP = 0;
 const IMAGE_ICON = 1;
 
+/** The window styles a dialog's Tab order is read from. */
+const WS_TABSTOP = 0x00010000;
+const WS_DISABLED = 0x08000000;
+const WS_VISIBLE = 0x10000000;
+
 /** Edit styles and messages. */
 const ES_MULTILINE = 0x0004;
 const ES_PASSWORD = 0x0020;
@@ -545,7 +550,7 @@ export const pointOf = lParam=>({
  *
  * @param {ControlHost} host
  * @returns {{ procedures: Record<string, ControlProcedure>,
- *     helpers: { defDlgProc: ControlProcedure,
+ *     helpers: { dialogProc: ControlProcedure,
  *         paintScrollBar: (hdc: number, rect: Rect, vertical: boolean,
  *             held: ScrollBarState) => void,
  *         scrollHit: (rect: Rect, vertical: boolean, held: ScrollBarState,
@@ -2685,6 +2690,21 @@ export function createControlProcedures(host){
                 return 0;
             case WM_GETFONT:
                 return record.font ?? 0;
+            case WM_SETFOCUS: {
+                // The dialog passes the focus on, to its first control that
+                // stops the Tab key -- selecting an edit's text on the way
+                // in, as tabbing into one does.
+                const first = host.children(record).find(child=>(child.style
+                    & (WS_TABSTOP | WS_VISIBLE | WS_DISABLED)) === (WS_TABSTOP | WS_VISIBLE));
+                if (!first)
+                {
+                    return 0;
+                }
+                return after(host.send(first.hwnd, WM_GETDLGCODE, 0, 0, thread), code=>after(
+                    ((code >>> 0) & DLGC_HASSETSEL) !== 0
+                        ? host.send(first.hwnd, EM_SETSEL, 0, -1 >>> 0, thread) : 0,
+                    ()=>after(host.setFocus(first.hwnd, thread), ()=>0)));
+            }
             case WM_CLOSE:
                 // Closing a dialog is Cancel: what the person could have
                 // pressed, sent the way a button would have sent it.
@@ -2745,7 +2765,7 @@ export function createControlProcedures(host){
             ScrollBar: scrollBarProc,
             '#32770': dialogProc,
         },
-        helpers: { defDlgProc, paintScrollBar, scrollHit },
+        helpers: { dialogProc, paintScrollBar, scrollHit },
         // The drawing and messaging the classes above share, handed out whole
         // so the common controls paint and tell their parent with the same
         // helpers: one look, and a change to it is one change.

@@ -209,6 +209,7 @@ const MAX_RESOURCE_NAME = 256;
  *     thread?: unknown) => number | Promise<number>} send
  * @property {(record: any, message: { hwnd: number, message: number, wParam: number,
  *     lParam: number }, thread?: unknown) => number | Promise<number>} defDlgProc
+ *           The dialog class's procedure: DWLP_DLGPROC first, then the default.
  * @property {() => number} focus
  * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} setFocus
  * @property {(hwnd: number) => void} [show]  Shows a window as ShowWindow(SW_SHOW) would.
@@ -954,8 +955,10 @@ export function createDialogFunctions(options){
         /**
          * LRESULT DefDlgProcA(HWND hDlg, UINT Msg, WPARAM wParam, LPARAM lParam)
          *
-         * What a dialog procedure falls through to, and what a program's own
-         * dialog class is built on: the background, the default button, and
+         * The dialog class's own procedure, which a program's own dialog
+         * class is built on: the message goes to the dialog procedure in
+         * DWLP_DLGPROC first, and what that answers FALSE gets the default --
+         * the background, the default button, the focus passed to a control,
          * WM_CLOSE as Cancel.
          */
         DefDlgProcA: {
