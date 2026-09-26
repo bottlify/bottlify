@@ -19,7 +19,7 @@
 import { ANY_WINDOW, WM_PAINT, WM_QUIT, WM_TIMER } from './messages.js';
 import { characterOf } from './keys.js';
 import { createPaintFunctions } from './paint.js';
-import { SYS_COLORS, createSystemFunctions } from './system.js';
+import { HOVER_SIZE, HOVER_TIME, SYS_COLORS, createSystemFunctions } from './system.js';
 import { createObjectFunctions } from './objects.js';
 import { createDialogFunctions } from './dialogs.js';
 import {
@@ -291,6 +291,26 @@ const HWND_THREAD_MESSAGES = 0xffffffff;
 
 /** What PostThreadMessage reports for an identifier that names no thread. */
 const ERROR_INVALID_THREAD_ID = 1444;
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INVALID_WINDOW_HANDLE = 1400;
+
+/** TrackMouseEvent's request, its flags, and the messages its tracking posts. */
+const TRACKMOUSEEVENT_SIZE = 16;
+const TME_HOVER = 0x00000001;
+const TME_LEAVE = 0x00000002;
+const TME_NONCLIENT = 0x00000010;
+const TME_QUERY = 0x40000000;
+const TME_CANCEL = 0x80000000;
+const HOVER_DEFAULT = 0xffffffff;
+const WM_NCMOUSEHOVER = 0x02a0;
+const WM_MOUSEHOVER = 0x02a1;
+const WM_NCMOUSELEAVE = 0x02a2;
+const WM_MOUSELEAVE = 0x02a3;
+/** The queue's key for the hover asked for later: there is one tracking. */
+const HOVER_KEY = 'TrackMouseEvent';
+/** The MK_ bits of a mouse message's wParam, by the virtual key each reads. */
+const MOUSE_KEYS = Object.freeze([[0x01, 0x0001], [0x02, 0x0002], [0x10, 0x0004],
+    [0x11, 0x0008], [0x04, 0x0010], [0x05, 0x0020], [0x06, 0x0040]]);
 
 /** Class atoms come from the range Windows reserves for dynamic atoms. */
 const FIRST_ATOM = 0xc000;
@@ -1176,6 +1196,10 @@ export function createWindowFunctions(host){
                     {
                         captured = 0;
                     }
+                    if (tracking?.hwnd === record.hwnd)
+                    {
+                        stopTracking();
+                    }
                     if (covered)
                     {
                         uncover(covered);
@@ -1987,6 +2011,191 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * What TrackMouseEvent was asked to report: of which window, its hover or
+     * its leaving or both, of its client area or, with TME_NONCLIENT, its
+     * frame, and where the pointer was when the hover time last started.
+     *
+     * @type {{ hwnd: number, flags: number, hoverTime: number, x: number,
+     *     y: number } | null}
+     */
+    let tracking = null;
+
+    /**
+     * Whether the point is over this window's client area, or its frame: a
+     * child over it is not, since the pointer is then over the child.
+     *
+     * @param {number} x @param {number} y @param {number} hwnd @param {boolean} frame
+     */
+    const pointerIn = (x, y, hwnd, frame)=>{
+        const found = windowFromPoint(x, y);
+        return found !== null && found.record.hwnd === hwnd && (found.hit !== HTCLIENT) === frame;
+    };
+
+    const stopTracking = ()=>{
+        tracking = null;
+        host.queue.cancelLater(HOVER_KEY);
+    };
+
+    /** @param {number} hwnd @param {number} flags */
+    const postLeave = (hwnd, flags)=>host.queue.post({ hwnd,
+        message: (flags & TME_NONCLIENT) !== 0 ? WM_NCMOUSELEAVE : WM_MOUSELEAVE,
+        wParam: 0, lParam: 0 });
+
+    /**
+     * The hover, made when its time has come: where the pointer is then, in
+     * client coordinates with the buttons and keys held, or on the frame with
+     * the hit and the screen point. Posting it ends the hover tracking.
+     *
+     * @returns {import('./messages.js').PostedMessage | null}
+     */
+    const hoverMessage = ()=>{
+        const track = tracking;
+        const record = track ? live(track.hwnd) : null;
+        if (!track || !record || (track.flags & TME_HOVER) === 0)
+        {
+            return null;
+        }
+        track.flags &= ~TME_HOVER;
+        if ((track.flags & TME_LEAVE) === 0)
+        {
+            tracking = null;
+        }
+        const at = host.cursor?.() ?? { x: 0, y: 0 };
+        if ((track.flags & TME_NONCLIENT) !== 0)
+        {
+            return { hwnd: record.hwnd, message: WM_NCMOUSEHOVER,
+                wParam: hitTest(record, at.x, at.y) >>> 0,
+                lParam: ((at.y & 0xffff) << 16 | at.x & 0xffff) >>> 0 };
+        }
+        const origin = geometry.clientOrigin(record);
+        let keys = 0;
+        for (const [vk, bit] of MOUSE_KEYS)
+        {
+            keys |= ((host.keyState?.(vk) ?? 0) & 0x8000) !== 0 ? bit : 0;
+        }
+        return { hwnd: record.hwnd, message: WM_MOUSEHOVER, wParam: keys,
+            lParam: (((at.y - origin.y) & 0xffff) << 16 | (at.x - origin.x) & 0xffff) >>> 0 };
+    };
+
+    /** @param {number} x @param {number} y */
+    const armHover = (x, y)=>{
+        if (tracking)
+        {
+            tracking.x = x;
+            tracking.y = y;
+            host.queue.postLater(HOVER_KEY, tracking.hoverTime, hoverMessage);
+        }
+    };
+
+    /**
+     * The tracking, told where the pointer has gone: out of the area tracked
+     * ends it with the leave if one was asked for, and out of the hover
+     * rectangle starts the hover time again from there.
+     *
+     * @param {number} x @param {number} y
+     */
+    const followPointer = (x, y)=>{
+        const track = tracking;
+        if (!track)
+        {
+            return;
+        }
+        if (!pointerIn(x, y, track.hwnd, (track.flags & TME_NONCLIENT) !== 0))
+        {
+            stopTracking();
+            if ((track.flags & TME_LEAVE) !== 0 && live(track.hwnd))
+            {
+                postLeave(track.hwnd, track.flags);
+            }
+            return;
+        }
+        if ((track.flags & TME_HOVER) !== 0 && (Math.abs(x - track.x) > HOVER_SIZE / 2
+            || Math.abs(y - track.y) > HOVER_SIZE / 2))
+        {
+            armHover(x, y);
+        }
+    };
+
+    /**
+     * TrackMouseEvent's request, read from guest memory: a query filled in,
+     * a cancellation of what it names, or tracking of the window the pointer
+     * is over -- and for one it is not over, a leave posted at once.
+     *
+     * @param {number} request
+     */
+    const trackMouseEvent = request=>{
+        const at = request >>> 0;
+        if (at === 0 || readU32(host, at) !== TRACKMOUSEEVENT_SIZE)
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const flags = readU32(host, at + 4);
+        if ((flags & TME_QUERY) !== 0)
+        {
+            const track = tracking && live(tracking.hwnd) ? tracking : null;
+            writeU32s(host, at + 4, track ? [track.flags, track.hwnd, track.hoverTime] : [0, 0, 0]);
+            return 1;
+        }
+        const record = live(readU32(host, at + 8));
+        if (!record || record === desktop)
+        {
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+            return 0;
+        }
+        const asked = flags & (TME_HOVER | TME_LEAVE);
+        const area = flags & TME_NONCLIENT;
+        if ((flags & TME_CANCEL) !== 0)
+        {
+            if (tracking && tracking.hwnd === record.hwnd
+                && (tracking.flags & TME_NONCLIENT) === area)
+            {
+                tracking.flags &= ~asked;
+                if ((tracking.flags & TME_HOVER) === 0)
+                {
+                    host.queue.cancelLater(HOVER_KEY);
+                }
+                if ((tracking.flags & (TME_HOVER | TME_LEAVE)) === 0)
+                {
+                    stopTracking();
+                }
+            }
+            return 1;
+        }
+        const pointer = host.cursor?.() ?? { x: 0, y: 0 };
+        // Whatever was tracked is brought up to where the pointer is first,
+        // so a window it has left hears so before another is tracked.
+        followPointer(pointer.x, pointer.y);
+        if (!pointerIn(pointer.x, pointer.y, record.hwnd, area !== 0))
+        {
+            if ((flags & TME_LEAVE) !== 0)
+            {
+                postLeave(record.hwnd, area);
+            }
+            return 1;
+        }
+        if (asked === 0)
+        {
+            return 1;
+        }
+        if (!tracking || tracking.hwnd !== record.hwnd
+            || (tracking.flags & TME_NONCLIENT) !== area)
+        {
+            stopTracking();
+            tracking = { hwnd: record.hwnd, flags: area, hoverTime: HOVER_TIME,
+                x: pointer.x, y: pointer.y };
+        }
+        tracking.flags |= asked;
+        if ((flags & TME_HOVER) !== 0)
+        {
+            const time = readU32(host, at + 12);
+            tracking.hoverTime = time === 0 || time === HOVER_DEFAULT ? HOVER_TIME : time;
+            armHover(pointer.x, pointer.y);
+        }
+        return 1;
+    };
+
+    /**
      * Where a message from the input layer goes. A mouse message carries the
      * pointer's position on the screen; it goes to the window that has the
      * mouse, or the one under the point, with the position made relative to
@@ -2015,6 +2224,7 @@ export function createWindowFunctions(host){
         }
         const x = message.x | 0;
         const y = message.y | 0;
+        followPointer(x, y);
         if (kind === WM_MOUSEWHEEL)
         {
             const target = focusWindow() || activeWindow();
@@ -3291,6 +3501,21 @@ export function createWindowFunctions(host){
                     return 1;
                 });
             },
+        },
+
+        /**
+         * BOOL TrackMouseEvent(LPTRACKMOUSEEVENT lpEventTrack)
+         *
+         * One window's hover or leaving, or both, reported by message:
+         * WM_MOUSEHOVER once the pointer has rested in a small square for the
+         * hover time, WM_MOUSELEAVE once it leaves the client area -- the NC
+         * pair for the frame with TME_NONCLIENT. Each message ends what it
+         * reports; a TME_QUERY answers what is still being tracked.
+         */
+        TrackMouseEvent: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([request])=>trackMouseEvent(request),
         },
 
         /**

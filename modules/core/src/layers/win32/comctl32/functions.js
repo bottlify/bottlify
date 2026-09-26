@@ -34,6 +34,10 @@ const FAILED = -1;
  *           as the single image it can be sure of.
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a call that does less than the real one says so.
+ * @property {(request: number) => number} [trackMouseEvent]
+ *           user32's TrackMouseEvent, given the request's address. Absent in
+ *           a build without user32 behind it, and then a request of the right
+ *           size is accepted and nothing is tracked.
  */
 
 /** @param {Uint8Array} bytes @param {number} at */
@@ -333,16 +337,21 @@ export function createComctlFunctions(host){
         /**
          * BOOL _TrackMouseEvent(LPTRACKMOUSEEVENT lpEventTrack)
          *
-         * A request to be sent WM_MOUSELEAVE or WM_MOUSEHOVER later. The
-         * request is accepted and recorded; the messages are not delivered,
-         * because delivering them needs an input layer this build does not
-         * have. A program treats those messages as a nicety and a refusal here
-         * as an error, so the honest failure is the worse of the two.
+         * A request to be sent WM_MOUSELEAVE or WM_MOUSEHOVER later, which
+         * is documented as TrackMouseEvent's where the system has one, and is
+         * handed to user32's. Without user32 behind it the request is
+         * accepted and the messages never come: a program treats them as a
+         * nicety and a refusal here as an error, so the honest failure is the
+         * worse of the two.
          */
         _TrackMouseEvent: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([track])=>{
+                if (host.trackMouseEvent)
+                {
+                    return host.trackMouseEvent(track >>> 0);
+                }
                 const size = u32(host.readMemory(track >>> 0, 4), 0);
                 return size === 16 ? 1 : 0;
             },

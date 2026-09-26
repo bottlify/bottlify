@@ -113,6 +113,14 @@ const FIXED_METRICS = new Map([
 ]);
 
 /**
+ * How long, in milliseconds, the pointer rests before TrackMouseEvent's hover
+ * comes, and the side of the square it may wander in meanwhile: the system
+ * defaults SPI_GETMOUSEHOVERTIME and SPI_GETMOUSEHOVERWIDTH/HEIGHT report.
+ */
+export const HOVER_TIME = 400;
+export const HOVER_SIZE = 4;
+
+/**
  * The system colours, as a program reads them: COLORREF, 0x00BBGGRR. The
  * classic scheme, and also what the window manager paints from, so a
  * program that reads them draws in the same colours as its frame.
@@ -1123,19 +1131,35 @@ export function createSystemFunctions({ host, live, windows, classes }){
     };
 
     /**
-     * SystemParametersInfo, both spellings: the work area, and a refusal for
-     * everything else.
+     * SystemParametersInfo, both spellings: the work area and the hover
+     * parameters TrackMouseEvent works by, and a refusal for everything else.
      *
      * @param {number} action @param {number} value
      */
     const systemParameter = (action, value)=>{
         const SPI_GETWORKAREA = 0x0030;
-        if ((action >>> 0) !== SPI_GETWORKAREA || (value >>> 0) === 0)
+        const SPI_GETMOUSEHOVERWIDTH = 0x0062;
+        const SPI_GETMOUSEHOVERHEIGHT = 0x0064;
+        const SPI_GETMOUSEHOVERTIME = 0x0066;
+        if ((value >>> 0) === 0)
         {
             return 0;
         }
-        writeRect(host, value, { left: 0, top: 0, right: screen.width, bottom: screen.height });
-        return 1;
+        switch (action >>> 0){
+            case SPI_GETWORKAREA:
+                writeRect(host, value,
+                    { left: 0, top: 0, right: screen.width, bottom: screen.height });
+                return 1;
+            case SPI_GETMOUSEHOVERWIDTH:
+            case SPI_GETMOUSEHOVERHEIGHT:
+                writeU32s(host, value, [HOVER_SIZE]);
+                return 1;
+            case SPI_GETMOUSEHOVERTIME:
+                writeU32s(host, value, [HOVER_TIME]);
+                return 1;
+            default:
+                return 0;
+        }
     };
 
     /** @param {number} index */
@@ -1281,9 +1305,9 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * BOOL SystemParametersInfoA(UINT uiAction, UINT uiParam, PVOID pvParam,
          *                            UINT fWinIni)
          *
-         * Only the work area is answered, because it is the one a window uses to
-         * place itself. Everything else reports failure rather than a default
-         * that would contradict the screen above.
+         * Only the work area, the one a window uses to place itself, and the
+         * hover parameters are answered. Everything else reports failure
+         * rather than a default that would contradict the screen above.
          */
         SystemParametersInfoA: {
             argBytes: 16,

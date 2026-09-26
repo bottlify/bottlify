@@ -1161,6 +1161,195 @@ test('SetMessageExtraInfo answers with the value it replaced, which GetMessageEx
     assert.equal(fns.GetMessageExtraInfo.argBytes, 0);
 });
 
+/** TrackMouseEvent's flags, and the messages its tracking posts. */
+const TME_HOVER = 0x1;
+const TME_LEAVE = 0x2;
+const TME_NONCLIENT = 0x10;
+const TME_QUERY = 0x40000000;
+const TME_CANCEL = 0x80000000;
+const HOVER_DEFAULT = 0xffffffff;
+const HOVER_TIME = 400;
+const WM_MOUSEMOVE = 0x0200;
+const WM_NCMOUSEHOVER = 0x02a0;
+const WM_MOUSEHOVER = 0x02a1;
+const WM_NCMOUSELEAVE = 0x02a2;
+const WM_MOUSELEAVE = 0x02a3;
+
+/**
+ * A captioned window with a child in its client area, the pointer resting on
+ * the window's client area clear of the child, and the calls a test of the
+ * tracking makes: TrackMouseEvent asked and queried, the pointer moved as the
+ * input layer moves it, and the queue emptied.
+ */
+function trackingSetup(){
+    const WS_CHILD = 0x40000000;
+    const TRACKMOUSEEVENT_SIZE = 16;
+    const POINT = OUT_BUFFER + 0x40;
+    const cursor = { x: 0, y: 0 };
+    const context = setup({ cursor });
+    const { memory, fns, queue } = context;
+    const parent = makeWindow(memory, fns, WS_CAPTION | WS_VISIBLE);
+    const child = fns.CreateWindowExA.handler(
+        [0, CLASS_NAME, TITLE, WS_CHILD | WS_VISIBLE, 50, 50, 100, 100, parent, 0, HINSTANCE, 0]);
+    /** @param {number} hwnd @param {number} x @param {number} y */
+    const onScreen = (hwnd, x, y)=>{
+        memory.putU32s(POINT, [x, y]);
+        fns.ClientToScreen.handler([hwnd, POINT]);
+        return { x: memory.u32(POINT), y: memory.u32(POINT + 4) };
+    };
+    /** @param {{ x: number, y: number }} point */
+    const moveTo = point=>{
+        cursor.x = point.x;
+        cursor.y = point.y;
+        queue.post({ hwnd: 0, message: WM_MOUSEMOVE, wParam: 0, lParam: 0, x: point.x,
+            y: point.y });
+    };
+    /** @param {number} flags @param {number} hwnd @param {number} [hoverTime] */
+    const track = (flags, hwnd, hoverTime = 0)=>{
+        memory.putU32s(OUT_BUFFER, [TRACKMOUSEEVENT_SIZE, flags, hwnd, hoverTime]);
+        return fns.TrackMouseEvent.handler([OUT_BUFFER]);
+    };
+    /** What a TME_QUERY fills in: the flags, the window and the hover time. */
+    const query = ()=>{
+        memory.putU32s(OUT_BUFFER, [TRACKMOUSEEVENT_SIZE, TME_QUERY, 0xdeadbeef, 0xdeadbeef]);
+        assert.equal(fns.TrackMouseEvent.handler([OUT_BUFFER]), 1, 'a query succeeds');
+        assert.equal(memory.u32(OUT_BUFFER), TRACKMOUSEEVENT_SIZE, 'and leaves cbSize alone');
+        return [4, 8, 12].map(at=>memory.u32(OUT_BUFFER + at));
+    };
+    /** Every posted message, up to the paint that stays until it is painted. */
+    const take = ()=>{
+        const WM_PAINT = 0x000f;
+        const taken = [];
+        for (let message = queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
+            message !== null && message.message !== WM_PAINT;
+            message = queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true }))
+        {
+            taken.push([message.hwnd, message.message, message.wParam, message.lParam]);
+        }
+        return taken;
+    };
+    const rest = onScreen(parent, 10, 10);
+    cursor.x = rest.x;
+    cursor.y = rest.y;
+    return { ...context, parent, child, onScreen, moveTo, track, query, take, rest };
+}
+
+test('TrackMouseEvent refuses a wrong cbSize and a window that does not exist', ()=>{
+    // user32's message tests: a query with cbSize 0 fails with
+    // ERROR_INVALID_PARAMETER, and TME_HOVER, cancelled or not, for a handle
+    // naming no window fails with ERROR_INVALID_WINDOW_HANDLE.
+    const ERROR_INVALID_PARAMETER = 87;
+    const ERROR_INVALID_WINDOW_HANDLE = 1400;
+    const { memory, fns, errors, track } = trackingSetup();
+    memory.putU32s(OUT_BUFFER, [0, TME_QUERY, 0xdeadbeef, 0xdeadbeef]);
+
+    assert.equal(fns.TrackMouseEvent.argBytes, 4);
+    assert.equal(fns.TrackMouseEvent.handler([OUT_BUFFER]), 0);
+    assert.equal(track(TME_HOVER, 0xdeadbeef, 0xdeadbeef), 0);
+    assert.equal(track(TME_HOVER | TME_CANCEL, 0xdeadbeef, 0xdeadbeef), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_WINDOW_HANDLE,
+        ERROR_INVALID_WINDOW_HANDLE]);
+});
+
+test('TrackMouseEvent posts WM_MOUSEHOVER once the pointer has rested for the hover time', ()=>{
+    // user32's message tests: nothing is tracked to begin with; hover asked
+    // for a window the pointer is not over is accepted and tracks nothing; a
+    // hover time of 0 or HOVER_DEFAULT is SPI_GETMOUSEHOVERTIME's, which a
+    // query reports; a move of a pixel and back inside the hover rectangle
+    // does not start the time again; WM_MOUSEHOVER arrives with no buttons
+    // down, and the tracking has ended when it does.
+    const { memory, fns, clock, parent, child, rest, moveTo, track, query, take } =
+        trackingSetup();
+    assert.deepEqual(query(), [0, 0, 0], 'nothing tracked');
+    assert.equal(track(TME_HOVER, child), 1);
+    assert.deepEqual(query(), [0, 0, 0], 'the pointer is not over the child');
+
+    assert.equal(track(TME_HOVER, parent, 0), 1);
+    assert.deepEqual(query(), [TME_HOVER, parent, HOVER_TIME]);
+    clock.at = HOVER_TIME / 2;
+    moveTo({ x: rest.x - 1, y: rest.y });
+    moveTo(rest);
+    assert.deepEqual(query(), [TME_HOVER, parent, HOVER_TIME]);
+    clock.at = HOVER_TIME - 1;
+    assert.deepEqual(take().map(entry=>entry[1]), [WM_MOUSEMOVE], 'not yet');
+    clock.at = HOVER_TIME;
+    assert.deepEqual(take(), [[parent, WM_MOUSEHOVER, 0, (10 << 16 | 10) >>> 0]],
+        'where the pointer is, in client coordinates');
+    assert.deepEqual(query(), [0, 0, 0], 'hover tracking stops once it is posted');
+
+    assert.equal(track(TME_HOVER, parent, HOVER_DEFAULT), 1);
+    assert.deepEqual(query(), [TME_HOVER, parent, HOVER_TIME]);
+    clock.at += 100;
+    moveTo({ x: rest.x + 5, y: rest.y });
+    clock.at += HOVER_TIME - 1;
+    assert.deepEqual(take().map(entry=>entry[1]), [WM_MOUSEMOVE],
+        'leaving the hover rectangle starts the time again');
+    clock.at += 1;
+    assert.deepEqual(take(), [[parent, WM_MOUSEHOVER, 0, (10 << 16 | 15) >>> 0]]);
+
+    assert.equal(track(TME_HOVER, parent, 50), 1);
+    assert.deepEqual(query(), [TME_HOVER, parent, 50], 'a time of its own is its own');
+    memory.putU32s(OUT_BUFFER, [16, TME_HOVER | TME_CANCEL, parent, 0xdeadbeef]);
+    assert.equal(fns.TrackMouseEvent.handler([OUT_BUFFER]), 1);
+    assert.deepEqual(query(), [0, 0, 0], 'cancelled');
+    clock.at += 1000;
+    assert.deepEqual(take(), [], 'and nothing is posted');
+});
+
+test('TrackMouseEvent posts WM_MOUSELEAVE when the pointer leaves, or at once if it is out', ()=>{
+    // As documented for TRACKMOUSEEVENT: a leave asked for a window or area
+    // the pointer is not over is posted at once and nothing is tracked, and
+    // WM_MOUSELEAVE, like WM_NCMOUSELEAVE, ends all the tracking asked for.
+    // Moving onto a child is leaving the parent's client area.
+    const { clock, parent, child, onScreen, rest, moveTo, track, query, take } =
+        trackingSetup();
+    assert.equal(track(TME_LEAVE, child), 1);
+    assert.deepEqual(query(), [0, 0, 0]);
+    assert.deepEqual(take(), [[child, WM_MOUSELEAVE, 0, 0]], 'posted at once');
+
+    assert.equal(track(TME_LEAVE | TME_HOVER, parent), 1);
+    assert.deepEqual(query().slice(0, 2), [TME_LEAVE | TME_HOVER, parent]);
+    moveTo(onScreen(child, 5, 5));
+    assert.deepEqual(take(), [[parent, WM_MOUSELEAVE, 0, 0],
+        [child, WM_MOUSEMOVE, 0, (5 << 16 | 5) >>> 0]], 'the leave comes before the move');
+    assert.deepEqual(query(), [0, 0, 0], 'and ends the hover too');
+    clock.at += 1000;
+    assert.deepEqual(take(), []);
+
+    moveTo(rest);
+    take();
+    const caption = onScreen(parent, 10, -5);
+    assert.equal(track(TME_LEAVE | TME_NONCLIENT, parent), 1);
+    assert.deepEqual(take(), [[parent, WM_NCMOUSELEAVE, 0, 0]],
+        'the frame is an area of its own, and the pointer is not on it');
+    moveTo(caption);
+    take();
+    assert.equal(track(TME_LEAVE | TME_HOVER | TME_NONCLIENT, parent), 1);
+    assert.deepEqual(query().slice(0, 2), [TME_LEAVE | TME_HOVER | TME_NONCLIENT, parent]);
+    clock.at += HOVER_TIME;
+    const HTCAPTION = 2;
+    assert.deepEqual(take(), [[parent, WM_NCMOUSEHOVER, HTCAPTION,
+        (caption.y << 16 | caption.x) >>> 0]], 'a frame hover names the hit and the screen point');
+    moveTo(rest);
+    assert.deepEqual(take().map(entry=>entry[1]), [WM_NCMOUSELEAVE, WM_MOUSEMOVE]);
+});
+
+test('SystemParametersInfo answers the hover time and the hover rectangle', ()=>{
+    // user32's message tests read all three before tracking a hover.
+    const { memory, fns } = setup();
+    const SPI_GETMOUSEHOVERWIDTH = 0x0062;
+    const SPI_GETMOUSEHOVERHEIGHT = 0x0064;
+    const SPI_GETMOUSEHOVERTIME = 0x0066;
+    /** @param {number} action */
+    const ask = action=>{
+        memory.fill(OUT_BUFFER, 1);
+        assert.equal(fns.SystemParametersInfoA.handler([action, 0, OUT_BUFFER, 0]), 1);
+        return memory.u32(OUT_BUFFER);
+    };
+    assert.deepEqual([SPI_GETMOUSEHOVERWIDTH, SPI_GETMOUSEHOVERHEIGHT, SPI_GETMOUSEHOVERTIME]
+        .map(ask), [4, 4, HOVER_TIME]);
+});
+
 test('wsprintfA reads its arguments off the stack and pops none of them', ()=>{
     // cdecl: the caller cleans up, so the count declared here says how many
     // slots to read. Declaring too few is a conversion that gets nothing.

@@ -323,6 +323,61 @@ export function createMessageQueue(options = {}){
      */
     let router = null;
 
+    /**
+     * Messages the window half asked to have posted once a moment has come,
+     * by a key a second request replaces the first under. The message is made
+     * at that moment, not when asked for: a hover reports where the pointer
+     * is when it comes due, and a request whose reason has gone makes none.
+     *
+     * @type {Map<string, { due: number, make: () => PostedMessage | null }>}
+     */
+    const later = new Map();
+
+    /** Posts every message asked for later whose moment has come. */
+    const releaseLater = ()=>{
+        if (later.size === 0)
+        {
+            return;
+        }
+        const at = now();
+        for (const [key, entry] of later)
+        {
+            if (entry.due > at)
+            {
+                continue;
+            }
+            later.delete(key);
+            const message = entry.make();
+            if (message)
+            {
+                postMessage(message);
+            }
+        }
+    };
+
+    /**
+     * When the soonest timer or message asked for later comes due, or null:
+     * both are what a thread waiting on an empty queue can be woken by.
+     */
+    const soonestDue = ()=>{
+        let soonest = null;
+        for (const timer of livingTimers())
+        {
+            if (soonest === null || timer.due < soonest)
+            {
+                soonest = timer.due;
+            }
+        }
+        for (const entry of later.values())
+        {
+            if (soonest === null || entry.due < soonest)
+            {
+                soonest = entry.due;
+            }
+        }
+        return soonest;
+    };
+
     /** @param {MessageFilter} filter */
     const takePaint = filter=>{
         const hwnd = dirtyWindow ? dirtyWindow(filter) : 0;
@@ -459,6 +514,7 @@ export function createMessageQueue(options = {}){
 
     /** Every class waiting to be retrieved now, the synthesised ones included. */
     const waiting = ()=>{
+        releaseLater();
         let inQueue = 0;
         for (const entry of pending)
         {
@@ -664,24 +720,16 @@ export function createMessageQueue(options = {}){
          * When the soonest timer comes due, in guest time, or null for none.
          *
          * A thread waiting on an empty queue is waiting for exactly two things:
-         * something posted from outside, and a timer of its own. The first
-         * nobody can predict; the second is written down right here, and
-         * without it whoever drives the machine has to keep looking to find out
-         * -- on a timeout a browser clamps, several thousand times a run.
+         * something posted from outside, and a timer of its own -- or a
+         * message the window half asked for later, which comes due the same
+         * way. The first nobody can predict; the second is written down right
+         * here, and without it whoever drives the machine has to keep looking
+         * to find out -- on a timeout a browser clamps, several thousand times
+         * a run.
          *
          * @returns {number | null}
          */
-        nextTimerDue(){
-            let soonest = null;
-            for (const timer of livingTimers())
-            {
-                if (soonest === null || timer.due < soonest)
-                {
-                    soonest = timer.due;
-                }
-            }
-            return soonest;
-        },
+        nextTimerDue: soonestDue,
 
         /** @param {number} code  The value the program exits with. */
         postQuit(code){
@@ -728,6 +776,7 @@ export function createMessageQueue(options = {}){
          * it was taken.
          */
         news(){
+            releaseLater();
             let arrived = changed;
             const at = now();
             for (const [key, timer] of timers)
@@ -808,20 +857,28 @@ export function createMessageQueue(options = {}){
         },
 
         /**
-         * When the earliest timer is due, or null. Whoever is idling the
-         * process reads this so that a thread waiting for a message wakes at
-         * the right moment rather than at whatever else happens to happen.
+         * When the earliest timer, or message asked for later, is due, or
+         * null. Whoever is idling the process reads this so that a thread
+         * waiting for a message wakes at the right moment rather than at
+         * whatever else happens to happen.
          */
-        nextDue(){
-            let earliest = null;
-            for (const timer of livingTimers())
-            {
-                if (earliest === null || timer.due < earliest)
-                {
-                    earliest = timer.due;
-                }
-            }
-            return earliest;
+        nextDue: soonestDue,
+
+        /**
+         * Posts what `make` answers once `delay` milliseconds of guest time
+         * have passed, replacing whatever was asked for under `key`. It is
+         * posted when the queue is next looked at or waited on from then.
+         *
+         * @param {string} key @param {number} delay
+         * @param {() => PostedMessage | null} make
+         */
+        postLater(key, delay, make){
+            later.set(key, { due: now() + delay, make });
+        },
+
+        /** Forgets what was asked for under `key`. @param {string} key */
+        cancelLater(key){
+            return later.delete(key);
         },
 
         /**
@@ -835,6 +892,7 @@ export function createMessageQueue(options = {}){
             // A look at the queue is a look however it is spelt: GetMessage and
             // PeekMessage clear the news GetQueueStatus reports just as
             // GetQueueStatus itself does.
+            releaseLater();
             changed = 0;
             lookedAt = now();
             const index = pending.findIndex(entry=>accepts(entry, filter));
