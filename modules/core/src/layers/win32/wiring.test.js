@@ -18,6 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { win32Module } from './module.js';
 import { filesystemModule } from '../filesystem/module.js';
+import { certificates, NOW, signedCabinet } from './wintrust/fixtures.test.js';
 
 const ARENA = { base: 0x100000, size: 0x200000 };
 
@@ -122,6 +123,7 @@ async function build(replace){
             ...replace?.modules,
         },
         registers: replace?.registers,
+        trustedRoots: replace?.trustedRoots,
     }), host));
     return {
         bytes, view, libraries: api.libraries(), lastError: ()=>api.lastError(),
@@ -742,3 +744,42 @@ test('a PROPVARIANT\'s BSTR and SAFEARRAY are copied and freed by oleaut32\'s ow
     assert.equal(await ole32.PropVariantClear.handler([source]), 0);
     await win32Module.dispose();
 });
+
+test('WINTRUST reads the file from the volume and judges it against the configured roots',
+    async()=>{
+        const filesystem = await filesystemModule.create({});
+        const thread = { id: 1 };
+        const chain = certificates();
+        const { bytes, view, libraries, lastError } = await build({
+            filesystem,
+            kernel: {
+                currentThread: ()=>thread,
+                clock: { virtualTime: ()=>0, wallClock: ()=>NOW },
+            },
+            bridge: { callerThread: ()=>thread },
+            trustedRoots: [chain.root],
+        });
+        filesystem.apply([{ path: 'C:\\signed.cab', bytes: signedCabinet() },
+            { path: 'C:\\unsigned.cab', bytes: signedCabinet({ unsigned: true }) }]);
+        const action = 0x1000;
+        bytes.set([0x6b, 0xc5, 0xaa, 0x00, 0x44, 0xcd, 0xd0, 0x11,
+            0x8c, 0xc2, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee], action);
+        const data = 0x1100;
+        const file = 0x1200;
+        const path = 0x1300;
+        /** @param {string} name */
+        const verify = name=>{
+            [...name, '\0'].forEach((ch, i)=>view.setUint16(path + i * 2, ch.charCodeAt(0), true));
+            view.setUint32(data, 48, true);
+            view.setUint32(data + 20, 1, true);
+            view.setUint32(data + 24, file, true);
+            view.setUint32(file, 16, true);
+            view.setUint32(file + 4, path, true);
+            return libraries['WINTRUST.dll'].WinVerifyTrust.handler([0xffffffff, action, data]);
+        };
+        assert.equal(await verify('C:\\signed.cab'), 0, `last error ${lastError()}`);
+        assert.equal(await verify('C:\\unsigned.cab'), 0x800b0100, 'TRUST_E_NOSIGNATURE');
+        assert.equal(lastError(), 0x800b0100);
+        await win32Module.dispose();
+        await filesystemModule.dispose();
+    });

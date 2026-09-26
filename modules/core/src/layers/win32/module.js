@@ -66,6 +66,7 @@ import { createShlwapiFunctions } from './shlwapi/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
 import { createSetupapiFunctions } from './setupapi/functions.js';
+import { createWintrustFunctions } from './wintrust/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
 import { createNetworkFunctions } from './mpr/functions.js';
@@ -1360,6 +1361,24 @@ export const win32Module = {
                 handles,
                 folders,
                 registry: hive,
+                divergence: config?.divergence,
+            }),
+
+            // Authenticode: whether a signed file is intact and its publisher
+            // chains to a root this machine trusts -- `trustedRoots`, read when
+            // a program asks, or Microsoft's root when it is not configured.
+            'WINTRUST.dll': createWintrustFunctions({
+                readMemory,
+                writeMemory,
+                readWideString,
+                setLastErrorFor: setErrorOn,
+                callerThread: ()=>bridge.callerThread(),
+                files: volume,
+                /** @param {string} path */
+                fullPath: path=>filesystem.resolve(path).path,
+                handles,
+                trustedRoots: ()=>config?.trustedRoots,
+                now: ()=>kernel.clock.wallClock(),
                 divergence: config?.divergence,
             }),
 

@@ -5,6 +5,7 @@
  */
 
 import { TAKEN } from './named-objects.js';
+import { STATUS, toDosError } from '../ntdll/status.js';
 
 /**
  * The kernel32 surface a threaded program calls.
@@ -45,6 +46,21 @@ const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+
+/** GetOverlappedResult on an operation still in progress, asked not to wait. */
+const ERROR_IO_INCOMPLETE = 996;
+
+/** OVERLAPPED: the operation's status, its byte count, and the event it signals. */
+const OVERLAPPED_INTERNAL = 0;
+const OVERLAPPED_INTERNAL_HIGH = 4;
+const OVERLAPPED_EVENT = 16;
+
+/**
+ * How long SwitchToThread stands aside when only threads of lower priority are
+ * ready, in guest milliseconds: without it the scheduler, which runs the
+ * highest priority ready, would hand the caller its turn straight back.
+ */
+const SWITCH_ASIDE_MS = 1;
 
 /** The Ex creators' flags. */
 const CREATE_EVENT_MANUAL_RESET = 0x1;
@@ -226,6 +242,15 @@ export function createThreadingFunctions(host){
      * @returns {number | any}
      */
     const settle = result=>result === null ? host.park() : result;
+
+    /** @type {any} */
+    let never = null;
+    /** An event nothing ever sets, made the first time it is needed. */
+    const neverSignalled = ()=>{
+        never ??= kernel.createEvent({ manualReset: true, signalled: false,
+            name: 'GetOverlappedResult' });
+        return never;
+    };
 
     /**
      * One entry point, in both spellings. A name is the only thing that ever
@@ -453,6 +478,108 @@ export function createThreadingFunctions(host){
                 // Deliberately no switch: the creator has not necessarily
                 // finished setting up what the new thread is about to read.
                 return thread.handle;
+            },
+        },
+
+        /**
+         * BOOL SwitchToThread(void)
+         *
+         * Gives the rest of the caller's turn to another thread ready to run
+         * and answers whether there was one: zero, at once, when there was
+         * not. Unlike Sleep(0) it yields to a thread of lower priority too, so
+         * with only such threads ready the caller sits out a moment of guest
+         * time; with one of its own priority or higher ready, going behind it
+         * is enough.
+         */
+        SwitchToThread: {
+            argBytes: 0,
+            handler: ()=>{
+                const self = host.currentThread();
+                const ready = (kernel.threads?.() ?? []).filter((/** @type {any} */ thread)=>
+                    thread !== self && thread.state === 'ready' && !thread.awaitingHost);
+                if (ready.length === 0)
+                {
+                    return 0;
+                }
+                const mine = self?.priority ?? 0;
+                const lowerOnly = ready.every((/** @type {any} */ thread)=>
+                    (thread.priority ?? 0) < mine);
+                kernel.block(self, 'SwitchToThread', {
+                    deadline: kernel.clock.virtualTime() + (lowerOnly ? SWITCH_ASIDE_MS : 0),
+                    result: 1,
+                });
+                return host.park();
+            },
+        },
+
+        /**
+         * BOOL GetOverlappedResult(HANDLE hFile, LPOVERLAPPED lpOverlapped,
+         *     LPDWORD lpNumberOfBytesTransferred, BOOL bWait)
+         *
+         * Reads the operation's outcome where the I/O left it, in the
+         * OVERLAPPED: InternalHigh is the byte count, and Internal the status,
+         * an error status answering FALSE with its Win32 error. One still
+         * pending is ERROR_IO_INCOMPLETE without bWait, the count left
+         * unwritten; with it, the call waits for the OVERLAPPED's event (its
+         * low bit is a flag, not part of the handle), or the file's handle
+         * when there is none, and then answers TRUE with the count even if
+         * Internal still says pending (Wine's kernel32 file tests,
+         * test_overlapped).
+         */
+        GetOverlappedResult: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([file, overlapped, transferred, wait])=>{
+                /** @param {number} offset */
+                const field = offset=>{
+                    const bytes = host.readMemory((overlapped + offset) >>> 0, 4);
+                    return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
+                };
+                const count = ()=>{
+                    const bytes = new Uint8Array(4);
+                    new DataView(bytes.buffer).setUint32(0, field(OVERLAPPED_INTERNAL_HIGH), true);
+                    host.writeMemory(transferred >>> 0, bytes);
+                };
+                let status = field(OVERLAPPED_INTERNAL);
+                if (status === STATUS.PENDING)
+                {
+                    if (wait === 0)
+                    {
+                        host.setLastError(ERROR_IO_INCOMPLETE);
+                        return 0;
+                    }
+                    const eventHandle = (field(OVERLAPPED_EVENT) & ~1) >>> 0;
+                    const target = object(eventHandle !== 0 ? eventHandle : file >>> 0);
+                    if (!target)
+                    {
+                        host.setLastError(ERROR_INVALID_HANDLE);
+                        return 0;
+                    }
+                    // A thread woken from a wait on a set resumes answering the
+                    // index of the object that came. Putting the one awaited
+                    // second, behind an event nothing signals, makes that
+                    // answer TRUE -- the answer this call owes once it ends.
+                    const answered = kernel.waitAny([neverSignalled(), target],
+                        host.currentThread());
+                    if (answered === null)
+                    {
+                        count();
+                        return host.park();
+                    }
+                    status = field(OVERLAPPED_INTERNAL);
+                    if (status === STATUS.PENDING)
+                    {
+                        count();
+                        return 1;
+                    }
+                }
+                count();
+                if (status !== STATUS.SUCCESS)
+                {
+                    host.setLastError(toDosError(status));
+                    return 0;
+                }
+                return 1;
             },
         },
 

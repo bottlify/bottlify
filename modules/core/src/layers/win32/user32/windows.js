@@ -18,6 +18,7 @@
 
 import { ANY_WINDOW, WM_PAINT, WM_QUIT, WM_TIMER } from './messages.js';
 import { characterOf } from './keys.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 import { createPaintFunctions } from './paint.js';
 import { HOVER_SIZE, HOVER_TIME, SYS_COLORS, createSystemFunctions } from './system.js';
 import { createObjectFunctions } from './objects.js';
@@ -703,6 +704,58 @@ export function createWindowFunctions(host){
     const andThen = (value, then)=>(typeof value?.then === 'function'
         ? value.then(then)
         : then(value));
+
+    /**
+     * Runs `use` with a wide string turned into the ANSI page, in guest
+     * memory the process heap lends for as long as the call takes; a null
+     * pointer is handed on as null. Without a heap there is nowhere to put
+     * the text, and the call fails.
+     *
+     * @param {number} wide
+     * @param {(ansi: number) => number | Promise<number>} use
+     */
+    const asAnsi = (wide, use)=>{
+        if ((wide >>> 0) === 0)
+        {
+            return use(0);
+        }
+        if (!host.allocate)
+        {
+            return 0;
+        }
+        let text = '';
+        for (let at = wide >>> 0; text.length < 0x8000; at += 256)
+        {
+            const piece = host.readMemory(at, 256);
+            let end = -1;
+            for (let i = 0; i + 1 < piece.length; i += 2)
+            {
+                const unit = piece[i] | piece[i + 1] << 8;
+                if (unit === 0)
+                {
+                    end = i;
+                    break;
+                }
+                text += String.fromCharCode(unit);
+            }
+            if (end >= 0 || piece.length < 256)
+            {
+                break;
+            }
+        }
+        const bytes = new Uint8Array(text.length + 1);
+        bytes.set(encodeAnsi(text));
+        const ansi = host.allocate(bytes.length);
+        if (ansi === 0)
+        {
+            return 0;
+        }
+        host.writeMemory(ansi, bytes);
+        return andThen(use(ansi), result=>{
+            host.release?.(ansi);
+            return result;
+        });
+    };
 
     /**
      * Whether every handle a wait names is one a poll can answer for whichever
@@ -3502,6 +3555,28 @@ export function createWindowFunctions(host){
             },
         },
 
+        /**
+         * BOOL SetWindowTextW(HWND hWnd, LPCWSTR lpString)
+         *
+         * Every window here is an ANSI one, so the text reaches it as a
+         * wide caller's message reaches an ANSI window on Windows: converted
+         * to the ANSI page, in guest memory for as long as WM_SETTEXT takes.
+         */
+        SetWindowTextW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, string])=>asAnsi(string,
+                text=>table.SetWindowTextA.handler([hwnd, text])),
+        },
+
+        /** BOOL SetDlgItemTextW(HWND hDlg, int nIDDlgItem, LPCWSTR lpString) */
+        SetDlgItemTextW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([dialog, id, string])=>asAnsi(string,
+                text=>table.SetDlgItemTextA.handler([dialog, id, text])),
+        },
+
         /** int GetWindowTextA(HWND hWnd, LPSTR lpString, int nMaxCount) */
         GetWindowTextA: {
             argBytes: 12,
@@ -4002,6 +4077,42 @@ export function createWindowFunctions(host){
                         if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
                         {
                             break;
+                        }
+                    }
+                    return 1;
+                })();
+            },
+        },
+
+        /**
+         * BOOL EnumWindows(WNDENUMPROC lpEnumFunc, LPARAM lParam)
+         *
+         * Every top-level window, hidden ones too, topmost first -- the
+         * order they are kept in, reversed -- each handed to the callback
+         * until one answers FALSE, which the call then answers too. The list
+         * is taken first, as EnumChildWindows takes its own.
+         */
+        EnumWindows: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([callback, lParam])=>{
+                const call = host.call;
+                if (!call || (callback >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const thread = host.callerThread?.();
+                const listed = [...windows.values()]
+                    .filter(record=>!record.destroyed && !isChild(record))
+                    .reverse()
+                    .map(record=>record.hwnd);
+                return (async()=>{
+                    for (const hwnd of listed)
+                    {
+                        if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
+                        {
+                            return 0;
                         }
                     }
                     return 1;

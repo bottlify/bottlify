@@ -82,6 +82,27 @@ rebuilding it needs only Docker.
 
 FFmpeg's full license text is in that tree (`COPYING.LGPLv2.1`).
 
+## Microsoft Root Authority certificate — the default Authenticode trust anchor
+
+- What it is: the root certificate "Microsoft Root Authority" (issued 1997-01-10, expired
+  2020-12-31, serial number C1008B3C3C8811D13EF663ECDF40, SHA-1 thumbprint
+  A43489159A520F0D93D032CCAF37E7FE20A8B419), Microsoft Corporation's. The certificates with
+  which Microsoft signed and timestamped its software in those years chain to it.
+- Source: Microsoft's own publication of the roots Windows trusts, the root certificate
+  distribution Windows Update serves
+  (`http://www.download.windowsupdate.com/msdownload/update/v3/static/trustedr/en/A43489159A520F0D93D032CCAF37E7FE20A8B419.crt`),
+  taken unmodified. Before it was committed its thumbprint was checked against the one above,
+  its validity against the dates above, and the "Microsoft Code Signing PCA" and "Microsoft
+  Timestamping PCA" certificates carried in signed Microsoft cabinets were verified against its
+  public key.
+- Location in this repository: `modules/core/src/layers/win32/wintrust/roots.js`, as base64
+  DER.
+- What is used: its names and public key, as data. It is the default content of the root store
+  `WinVerifyTrust` verifies Authenticode signatures against; the store is configuration
+  (`trustedRoots`) and replaces it when given. The certificate is a public document that every
+  Windows installation carries; it is included so that a signature Windows would accept is
+  accepted here, and it grants nothing beyond that.
+
 ## Wine conformance expectations — used as a specification
 
 Wine and the Win32 specifications are used only as a source of knowledge about API behavior;

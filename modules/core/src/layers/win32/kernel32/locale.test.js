@@ -356,6 +356,9 @@ test('the UI language is the language everything else here is in', ()=>{
     assert.equal(fns.GetSystemDefaultUILanguage.handler(),
         fns.GetSystemDefaultLangID.handler());
     assert.equal(fns.GetSystemDefaultUILanguage.argBytes, 0);
+    assert.equal(fns.GetUserDefaultUILanguage.handler(), fns.GetUserDefaultLangID.handler(),
+        'the user\'s UI language too');
+    assert.equal(fns.GetUserDefaultUILanguage.argBytes, 0);
 });
 
 test('a number is grouped and given the locale decimals when no picture is passed', ()=>{

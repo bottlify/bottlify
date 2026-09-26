@@ -383,6 +383,14 @@ export const OEM_PAGE = CP_OEM_437;
 export const ANSI_PAGE = CP_WINDOWS_1252;
 
 /**
+ * Text in the ANSI page, as WideCharToMultiByte(CP_ACP) writes it: what a
+ * wide call's string becomes when it reaches something that reads ANSI.
+ *
+ * @param {string} text
+ */
+export const encodeAnsi = text=>encodeSingleByte(text, ANSI_PAGE).bytes;
+
+/**
  * Bytes of the ANSI page with their case changed, one byte to one byte.
  *
  * What CharUpper and CharLower do to a buffer: a byte whose mapping is not
@@ -861,6 +869,16 @@ export function createLocaleFunctions(host){
          * land on the same table it picks its formats by.
          */
         GetSystemDefaultUILanguage: { argBytes: 0, handler: ()=>LANGID_EN_US },
+
+        /**
+         * LANGID GetUserDefaultUILanguage(VOID)
+         *
+         * The user's choice of the same, and there is one language to choose:
+         * a locale lookup by it answers what one by the user's LCID does, as
+         * Wine's kernel32 locale tests (test_GetLocaleInfoA,
+         * test_ConvertDefaultLocale) require of the pair.
+         */
+        GetUserDefaultUILanguage: { argBytes: 0, handler: ()=>LANGID_EN_US },
 
         /**
          * BOOL IsValidCodePage(UINT CodePage)

@@ -1198,3 +1198,25 @@ test('GetNextDlgGroupItem walks a group round, through a shown, enabled WS_EX_CO
         assert.equal(idOf(found), expected, `test ${number}`);
     }
 });
+
+test('SetDlgItemTextW sets a control\'s text through the ANSI page', ()=>{
+    let next = 0x13000;
+    const { memory, fns } = setup({
+        allocate: bytes=>{
+            const at = next;
+            next += bytes;
+            return at;
+        },
+    });
+    putTemplate(memory, [{ id: 300, x: 0, y: 0, cx: 10, cy: 4, title: 'Ready' }]);
+    const dialog = fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    memory.writeMemory(TEXT, new Uint8Array(Buffer.from('Fertig ü\0', 'utf16le')));
+
+    assert.equal(fns.SetDlgItemTextW.argBytes, 12);
+    assert.equal(fns.SetDlgItemTextW.handler([dialog, 300, TEXT]), 1);
+    assert.equal(fns.GetDlgItemTextA.handler([dialog, 300, OUT, 32]), 8);
+    assert.deepEqual([...memory.readMemory(OUT, 9)],
+        [...Buffer.from('Fertig ', 'latin1'), 0xfc, 0]);
+    assert.equal(fns.SetDlgItemTextW.handler([dialog, 999, TEXT]), 0, 'no such control');
+});
