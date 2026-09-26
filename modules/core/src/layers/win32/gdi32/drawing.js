@@ -46,12 +46,17 @@ import {
     logFontBytes,
     paletteEntryToPixel,
     readBitmapInfoHeader,
+    readU32,
 } from './structs.js';
 
 /** iUsage of the DIB functions: a colour table of RGBQUADs, not palette indices. */
 const DIB_RGB_COLORS = 0;
-/** BI_RGB: the one compression the DIB decoder reads. */
+/**
+ * The compressions the DIB decoder reads: none, and BI_BITFIELDS -- no
+ * compression either, the three channels named by masks -- at 16 and 32 bits.
+ */
 const BI_RGB = 0;
+const BI_BITFIELDS = 3;
 /** Bits per pixel the DIB decoder reads. */
 const DIB_BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 
@@ -285,17 +290,26 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
      * table that follows it when the format has one, and the bits, read from
      * guest memory into the shape the drawing layer decodes.
      *
+     * A BI_BITFIELDS DIB's masks sit where a colour table would, forty bytes
+     * in, which in a larger header is inside the header rather than after it.
+     *
      * @param {number} info @param {number} bits
      * @returns {{ header: import('./structs.js').BitmapInfoHeaderFields, bits: Uint8Array,
-     *             colors: number[] } | null}
+     *             colors: number[], masks: number[] } | null}
      */
     const readDib = (info, bits)=>{
         const header = readBitmapInfoHeader(host, info);
+        const masked = header.compression === BI_BITFIELDS
+            && (header.bitCount === 16 || header.bitCount === 32);
         if (header.size < BITMAPINFOHEADER.SIZE || header.width <= 0 || header.height === 0
-            || !DIB_BIT_COUNTS.has(header.bitCount) || header.compression !== BI_RGB)
+            || !DIB_BIT_COUNTS.has(header.bitCount)
+            || (header.compression !== BI_RGB && !masked))
         {
             return null;
         }
+        const masks = masked
+            ? [0, 4, 8].map(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at))
+            : [];
         const stride = ((header.width * header.bitCount + 31) >> 5) * 4;
         const rows = Math.abs(header.height);
         const colors = [];
@@ -309,7 +323,7 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                     | table[index * 4 + 2] << 16) >>> 0);
             }
         }
-        return { header, bits: host.readMemory(bits, stride * rows), colors };
+        return { header, bits: host.readMemory(bits, stride * rows), colors, masks };
     };
 
     /** @param {any} a @param {any} b */

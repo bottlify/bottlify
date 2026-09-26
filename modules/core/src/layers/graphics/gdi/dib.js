@@ -29,14 +29,22 @@
 
 import { bitBlt, stretchBlt } from './blit.js';
 import { SRCCOPY } from './rop.js';
-import { RGB_555, createSurface, dibPitch, expand16, narrow16 } from './surface.js';
+import { BI_BITFIELDS, createSurface, dibPitch } from './surface.js';
 
 /** BI_RGB: uncompressed, with the channel layout the bit count implies. */
 export const BI_RGB = 0;
-export const BI_BITFIELDS = 3;
+export { BI_BITFIELDS };
 
 /** The depths this layer converts. */
 const SUPPORTED_DEPTHS = new Set([8, 16, 24, 32]);
+
+/**
+ * The masks a BI_RGB DIB's depth implies: X1R5G5B5 at sixteen bits and
+ * X8R8G8B8 at thirty-two. A BI_BITFIELDS DIB names its own.
+ *
+ * @type {Record<number, number[]>}
+ */
+const RGB_MASKS = { 16: [0x7c00, 0x03e0, 0x001f], 32: [0x00ff0000, 0x0000ff00, 0x000000ff] };
 
 /**
  * @typedef {Object} DibImage
@@ -44,6 +52,7 @@ const SUPPORTED_DEPTHS = new Set([8, 16, 24, 32]);
  * @property {Uint8Array} bits
  * @property {number} [offset]     Where the first supplied row starts inside `bits`.
  * @property {number[]} [colors]   The colour table, as 32-bit pixels.
+ * @property {number[]} [masks]    A BI_BITFIELDS DIB's red, green and blue masks.
  * @property {number} [startScan]  Which DIB row the supplied rows begin at.
  * @property {number} [scanLines]  How many rows are supplied; the whole image by default.
  */
@@ -54,9 +63,88 @@ const SUPPORTED_DEPTHS = new Set([8, 16, 24, 32]);
  */
 export function isConvertibleDib(image){
     const header = image.header;
+    const masked = header.bitCount === 16 || header.bitCount === 32;
     return SUPPORTED_DEPTHS.has(header.bitCount)
-        && (header.compression === BI_RGB || header.compression === BI_BITFIELDS)
+        && (header.compression === BI_RGB || (header.compression === BI_BITFIELDS && masked))
         && header.width > 0 && header.height !== 0;
+}
+
+/**
+ * How a sixteen- or thirty-two-bit DIB's pixels split into channels: for
+ * each of red, green and blue, its mask, where the mask starts and how many
+ * bits wide it is. A mask is one run of bits, as the format requires; an
+ * empty one is a channel that is always zero.
+ *
+ * @param {DibImage} image
+ * @returns {{ mask: number, shift: number, bits: number }[]}
+ */
+function channelsOf(image){
+    const masks = image.header.compression === BI_BITFIELDS
+        ? image.masks ?? [0, 0, 0]
+        : RGB_MASKS[image.header.bitCount];
+    return masks.map(value=>{
+        const mask = value >>> 0;
+        let shift = 0;
+        while (shift < 32 && ((mask >>> shift) & 1) === 0)
+        {
+            shift++;
+        }
+        let bits = 0;
+        while (shift + bits < 32 && ((mask >>> (shift + bits)) & 1) === 1)
+        {
+            bits++;
+        }
+        return { mask, shift, bits };
+    });
+}
+
+/**
+ * A channel `bits` wide, widened to eight by repeating its bits, so full
+ * scale stays full scale: a shift alone leaves five-bit white at 0xf8.
+ *
+ * @param {number} value @param {number} bits
+ */
+function widenChannel(value, bits){
+    if (bits === 0 || bits >= 8)
+    {
+        return bits === 0 ? 0 : (value >>> (bits - 8)) & 0xff;
+    }
+    let wide = value;
+    let filled = bits;
+    while (filled < 8)
+    {
+        wide = (wide << bits) | value;
+        filled += bits;
+    }
+    return (wide >>> (filled - 8)) & 0xff;
+}
+
+/**
+ * @param {number} value  A masked pixel.
+ * @param {{ mask: number, shift: number, bits: number }[]} channels
+ * @returns {number} 0x00RRGGBB
+ */
+function unpack(value, channels){
+    const [red, green, blue] = channels.map(channel=>widenChannel(
+        ((value & channel.mask) >>> 0) >>> channel.shift, channel.bits));
+    return ((red << 16) | (green << 8) | blue) >>> 0;
+}
+
+/**
+ * @param {number} pixel  0x00RRGGBB
+ * @param {{ mask: number, shift: number, bits: number }[]} channels
+ * @returns {number} the masked pixel, each channel's top bits kept
+ */
+function pack(pixel, channels){
+    const eight = [(pixel >>> 16) & 0xff, (pixel >>> 8) & 0xff, pixel & 0xff];
+    let value = 0;
+    channels.forEach((channel, index)=>{
+        const narrowed = channel.bits >= 8
+            ? eight[index] * (2 ** (channel.bits - 8))
+            : eight[index] >>> (8 - channel.bits);
+        value |= channel.bits === 0 ? 0 : (narrowed * (2 ** channel.shift)) & channel.mask;
+    });
+    return value >>> 0;
 }
 
 /**
@@ -86,6 +174,7 @@ export function decodeDib(image){
     const startScan = image.startScan ?? 0;
     const scanLines = Math.min(image.scanLines ?? height, height - startScan);
     const out = createSurface({ width, height });
+    const channels = header.bitCount === 16 || header.bitCount === 32 ? channelsOf(image) : [];
 
     for (let index = 0; index < scanLines; index++)
     {
@@ -100,7 +189,8 @@ export function decodeDib(image){
             if (header.bitCount === 32)
             {
                 const at = row + (x * 4);
-                pixel = ((bits[at + 2] << 16) | (bits[at + 1] << 8) | bits[at]) >>> 0;
+                pixel = unpack(bits[at] | (bits[at + 1] << 8) | (bits[at + 2] << 16)
+                    | (bits[at + 3] << 24), channels);
             }
             else if (header.bitCount === 24)
             {
@@ -110,8 +200,7 @@ export function decodeDib(image){
             else if (header.bitCount === 16)
             {
                 const at = row + (x * 2);
-                // A 16-bit BI_RGB DIB is X1R5G5B5, five bits a channel.
-                pixel = expand16(bits[at] | (bits[at + 1] << 8), RGB_555);
+                pixel = unpack(bits[at] | (bits[at + 1] << 8), channels);
             }
             else
             {
@@ -146,6 +235,7 @@ export function encodeDib(surface, image){
     const base = image.offset ?? 0;
     const startScan = image.startScan ?? 0;
     const scanLines = Math.min(image.scanLines ?? height, height - startScan);
+    const channels = header.bitCount === 16 || header.bitCount === 32 ? channelsOf(image) : [];
 
     let written = 0;
     for (let index = 0; index < scanLines; index++)
@@ -163,10 +253,11 @@ export function encodeDib(surface, image){
             if (header.bitCount === 32)
             {
                 const at = row + (x * 4);
-                bits[at] = pixel & 0xff;
-                bits[at + 1] = (pixel >>> 8) & 0xff;
-                bits[at + 2] = (pixel >>> 16) & 0xff;
-                bits[at + 3] = 0;
+                const value = pack(pixel, channels);
+                bits[at] = value & 0xff;
+                bits[at + 1] = (value >>> 8) & 0xff;
+                bits[at + 2] = (value >>> 16) & 0xff;
+                bits[at + 3] = (value >>> 24) & 0xff;
             }
             else if (header.bitCount === 24)
             {
@@ -178,7 +269,7 @@ export function encodeDib(surface, image){
             else
             {
                 const at = row + (x * 2);
-                const value = narrow16(pixel, RGB_555);
+                const value = pack(pixel, channels);
                 bits[at] = value & 0xff;
                 bits[at + 1] = (value >>> 8) & 0xff;
             }

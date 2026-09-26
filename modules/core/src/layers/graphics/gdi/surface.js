@@ -72,6 +72,36 @@ export function narrow16(pixel, format){
     return ((red >>> 3) << 10) | ((green >>> 3) << 5) | (blue >>> 3);
 }
 
+/** biCompression for a DIB whose channels are named by three masks. */
+export const BI_BITFIELDS = 3;
+
+/**
+ * Which sixteen-bit layout a bitmap's pixels are in: the one it was given,
+ * else the one its BI_BITFIELDS masks name, else 5-5-5, which is what a
+ * BI_RGB DIB means by sixteen bits. Null for masks that are neither of the
+ * two, which no surface here draws by.
+ *
+ * @param {{ bitCount: number, format?: string, compression?: number,
+ *           bitfields?: number[] }} attributes
+ * @returns {string | null}
+ */
+export function formatOf(attributes){
+    if (attributes.format)
+    {
+        return attributes.format;
+    }
+    if (attributes.bitCount !== 16 || attributes.compression !== BI_BITFIELDS)
+    {
+        return RGB_555;
+    }
+    const [red, green, blue] = (attributes.bitfields ?? []).map(mask=>mask >>> 0);
+    if (red === 0xf800 && green === 0x07e0 && blue === 0x001f)
+    {
+        return RGB_565;
+    }
+    return red === 0x7c00 && green === 0x03e0 && blue === 0x001f ? RGB_555 : null;
+}
+
 /**
  * Bytes per row for a DIB: each row starts on a four-byte boundary. A loop that
  * multiplies width by bytes-per-pixel instead is right at every width divisible
@@ -380,10 +410,11 @@ export function createSurface(options){
  *
  * One, four and eight bits need the colour table the indices mean -- a
  * one-bit section is two colours of its own, not a monochrome bitmap --
- * and sixteen bits is 5-5-5 unless the attributes say 5-6-5.
+ * and sixteen bits is laid out as `formatOf` says.
  *
  * @param {{ width: number, height: number, bitCount: number, bits: number,
- *           topDown?: boolean, palette?: number[], format?: string }} attributes
+ *           topDown?: boolean, palette?: number[], format?: string,
+ *           compression?: number, bitfields?: number[] }} attributes
  *        A bitmap object's own attributes.
  * @param {Uint8Array} memory   Guest memory, or the window of it holding the bits.
  * @param {number} [base]       The guest address `memory` starts at.
@@ -391,8 +422,9 @@ export function createSurface(options){
  */
 export function surfaceForDibSection(attributes, memory, base = 0){
     const depth = attributes.bitCount;
+    const format = formatOf(attributes);
     if (!DEPTHS.has(depth) || (attributes.bits >>> 0) === 0
-        || (depth <= 8 && !attributes.palette))
+        || (depth <= 8 && !attributes.palette) || format === null)
     {
         return null;
     }
@@ -405,7 +437,7 @@ export function surfaceForDibSection(attributes, memory, base = 0){
         offset: (attributes.bits >>> 0) - base,
         bitCount: depth,
         palette: attributes.palette,
-        format: attributes.format,
+        format,
     });
 }
 
@@ -450,7 +482,8 @@ export function surfaceForDdb(attributes){
  * being monochrome; a copy of a DIB section keeps the section's colours.
  *
  * @param {{ width: number, height: number, bitCount: number, pixels: Uint8Array,
- *           dib?: boolean, palette?: number[], format?: string }} pattern
+ *           dib?: boolean, palette?: number[], format?: string,
+ *           compression?: number, bitfields?: number[] }} pattern
  * @returns {DepthSurface | null}
  */
 export function surfaceForPattern(pattern){
@@ -459,7 +492,8 @@ export function surfaceForPattern(pattern){
     {
         return surfaceForDdb(pattern);
     }
-    if (!DEPTHS.has(depth) || (depth <= 8 && !pattern.palette))
+    const format = formatOf(pattern);
+    if (!DEPTHS.has(depth) || (depth <= 8 && !pattern.palette) || format === null)
     {
         return null;
     }
@@ -471,7 +505,7 @@ export function surfaceForPattern(pattern){
         bytes: pattern.pixels,
         bitCount: depth,
         palette: pattern.palette,
-        format: pattern.format,
+        format,
     });
 }
 

@@ -249,6 +249,29 @@ test('a DIB section at any drawable depth is a surface, and the rest are not', (
         null, 'an indexed depth with no table');
 });
 
+test('a sixteen-bit section made with BI_BITFIELDS is laid out by its masks', ()=>{
+    const memory = new Uint8Array(16);
+    const bits = 0x100;
+    /** @param {number[]} bitfields */
+    const section = bitfields=>surfaceForDibSection({
+        width: 1, height: 1, bitCount: 16, bits, compression: 3, bitfields,
+    }, memory, bits);
+
+    const sixFive = section([0xf800, 0x07e0, 0x001f]);
+    assert.ok(sixFive);
+    sixFive.write(0, 0, 0x0000ff00);
+    assert.deepEqual([...memory.subarray(0, 2)], [0xe0, 0x07], 'green has six bits here');
+    assert.equal(sixFive.read(0, 0), 0x0000ff00);
+
+    const fiveFive = section([0x7c00, 0x03e0, 0x001f]);
+    assert.ok(fiveFive);
+    fiveFive.write(0, 0, 0x0000ff00);
+    assert.deepEqual([...memory.subarray(0, 2)], [0xe0, 0x03]);
+
+    assert.equal(section([0x0f00, 0x00f0, 0x000f]), null,
+        'masks this layer cannot draw by are refused rather than drawn as 5-5-5');
+});
+
 test('byte-exact: a one-bit surface packs its leftmost pixel into the top bit', ()=>{
     const surface = createSurface({ width: 10, height: 2, bitCount: 1, palette: [...MONOCHROME],
         pitch: ddbPitch(10, 1) });

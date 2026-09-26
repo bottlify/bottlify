@@ -565,3 +565,54 @@ test('a monochrome pattern brush takes the context\'s colours, and keeps its bit
     assert.equal(fns.GetBitmapBits.handler([mask, 2, 0x200]), 2);
     assert.equal(view.getUint16(0x200, true), 0x5555);
 });
+
+/** Where the wired tests below put a BITMAPINFO and the bits it describes. */
+const WIRED_INFO = 0x300;
+const WIRED_BITS = 0x400;
+
+/**
+ * A BITMAPINFOHEADER and what follows it: a colour table of RGBQUADs, or a
+ * BI_BITFIELDS DIB's three masks.
+ *
+ * @param {DataView} view
+ * @param {{ width: number, height: number, bitCount: number, compression?: number,
+ *           table?: number[] }} fields
+ */
+function putInfo(view, { width, height, bitCount, compression = 0, table = [] }){
+    view.setUint32(WIRED_INFO + BITMAPINFOHEADER.biSize, BITMAPINFOHEADER.SIZE, true);
+    view.setInt32(WIRED_INFO + BITMAPINFOHEADER.biWidth, width, true);
+    view.setInt32(WIRED_INFO + BITMAPINFOHEADER.biHeight, height, true);
+    view.setUint16(WIRED_INFO + BITMAPINFOHEADER.biPlanes, 1, true);
+    view.setUint16(WIRED_INFO + BITMAPINFOHEADER.biBitCount, bitCount, true);
+    view.setUint32(WIRED_INFO + BITMAPINFOHEADER.biCompression, compression, true);
+    for (let at = BITMAPINFOHEADER.biSizeImage; at < BITMAPINFOHEADER.SIZE; at += 4)
+    {
+        view.setUint32(WIRED_INFO + at, 0, true);
+    }
+    table.forEach((entry, index)=>view.setUint32(WIRED_INFO + 40 + index * 4, entry, true));
+}
+
+test('a 5-6-5 DIB draws as 5-6-5, from StretchDIBits and in a section of its own', ()=>{
+    const { fns, view, bytes } = wiredGdi();
+    const BI_BITFIELDS = 3;
+    const screen = fns.GetDC.handler([0]);
+    const dc = fns.CreateCompatibleDC.handler([screen]);
+    fns.SelectObject.handler([dc, fns.CreateCompatibleBitmap.handler([screen, 2, 1])]);
+
+    putInfo(view, { width: 2, height: -1, bitCount: 16, compression: BI_BITFIELDS,
+        table: [0xf800, 0x07e0, 0x001f] });
+    view.setUint16(WIRED_BITS, 0x07e0, true);
+    view.setUint16(WIRED_BITS + 2, 0xf800, true);
+    assert.equal(fns.StretchDIBits.handler([dc, 0, 0, 2, 1, 0, 0, 2, 1,
+        WIRED_BITS, WIRED_INFO, 0, 0x00cc0020]), 1);
+    assert.deepEqual([fns.GetPixel.handler([dc, 0, 0]), fns.GetPixel.handler([dc, 1, 0])],
+        [0x00ff00, 0x0000ff], 'full green and full red, as COLORREFs');
+
+    const BITS_OUT = 0x500;
+    const section = fns.CreateDIBSection.handler([dc, WIRED_INFO, 0, BITS_OUT, 0, 0]);
+    assert.notEqual(section, 0);
+    fns.SelectObject.handler([dc, section]);
+    fns.SetPixel.handler([dc, 0, 0, 0x00ff00]);
+    const at = view.getUint32(BITS_OUT, true);
+    assert.deepEqual([...bytes.subarray(at, at + 2)], [0xe0, 0x07]);
+});

@@ -1000,6 +1000,8 @@ export function createGdiFunctions(host){
                 dib: (shape.section >>> 0) !== 0,
                 palette: shape.palette ? [...shape.palette] : undefined,
                 format: shape.format,
+                compression: shape.compression,
+                bitfields: shape.bitfields,
             },
         });
     };

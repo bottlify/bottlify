@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    BI_BITFIELDS,
     BI_RGB,
     decodeDib,
     encodeDib,
@@ -99,6 +100,33 @@ test('a sixteen-bit DIB widens five-bit channels to full scale', ()=>{
     assert.ok(image);
     assert.equal(image.read(0, 0), 0x00ff0000, 'full red must widen to 0xff, not to 0xf8');
     assert.equal(image.read(1, 0), 0x00ffffff);
+});
+
+test('a BI_BITFIELDS DIB is read by its masks, so 5-6-5 is not 5-5-5', ()=>{
+    const bits = new Uint8Array(dibPitch(3, 16));
+    // Full green and full red in 5-6-5; read as 5-5-5, the first would carry
+    // a sliver of red and the second would lose its top bit to nothing.
+    bits.set([0xe0, 0x07, 0x00, 0xf8, 0xff, 0xff], 0);
+    const image = decodeDib({
+        header: { ...header(3, -1, 16), compression: BI_BITFIELDS },
+        bits,
+        masks: [0xf800, 0x07e0, 0x001f],
+    });
+    assert.ok(image);
+    assert.deepEqual([image.read(0, 0), image.read(1, 0), image.read(2, 0)],
+        [0x0000ff00, 0x00ff0000, 0x00ffffff]);
+
+    // The masks say which bits are which channel, whatever they are.
+    const swapped = new Uint8Array([0xff, 0x00, 0x00, 0x00]);
+    const blueFirst = decodeDib({
+        header: { ...header(1, -1, 32), compression: BI_BITFIELDS },
+        bits: swapped,
+        masks: [0x000000ff, 0x0000ff00, 0x00ff0000],
+    });
+    assert.equal(blueFirst?.read(0, 0), 0x00ff0000, 'the low byte is red under these masks');
+    assert.equal(isConvertibleDib({
+        header: { ...header(1, 1, 24), compression: BI_BITFIELDS }, bits: new Uint8Array(4),
+    }), false, 'masks describe sixteen and thirty-two bits only');
 });
 
 test('a format this layer cannot convert is refused rather than guessed', ()=>{
