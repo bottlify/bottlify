@@ -406,6 +406,51 @@ test('_vsnprintf formats from a list in memory and truncates the way _snprintf d
     assert.equal(fns._vsnprintf.argBytes, 16);
 });
 
+test('_vsnwprintf formats wide text from a list, terminated only when there is room', ()=>{
+    // Wine's msvcrt test_vsnwprintf, and test_snprintf's lengths for the
+    // narrow twin: text shorter than the count is terminated, text exactly
+    // the count is not, and longer text is -1 with the count written.
+    const { fns, host, put } = setup();
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} address @param {string} text */
+    const wide = (address, text)=>{
+        [...text, '\0'].forEach((c, at)=>view.setUint16(address + at * 2, c.charCodeAt(0), true));
+        return address;
+    };
+    /** @param {number} address @param {number} count */
+    const units = (address, count)=>String.fromCharCode(
+        ...Array.from({ length: count }, (_, at)=>view.getUint16(address + at * 2, true)));
+    /** @param {number} list @param {number[]} values */
+    const slots = (list, values)=>{
+        values.forEach((value, at)=>view.setUint32(list + at * 4, value, true));
+        return list;
+    };
+    const list = slots(0x180, [wide(0x100, 'one'), wide(0x110, 'two'), wide(0x120, 'three')]);
+    const format = wide(0x140, '%ws%ws%ws');
+
+    host.bytes.fill(0xee, 0x200, 0x300);
+    assert.equal(fns._vsnwprintf.handler([0x200, 32, format, list]), 11);
+    assert.equal(units(0x200, 12), 'onetwothree\0');
+    assert.equal(fns._vsnwprintf.handler([0x200, 0, format, list]), -1);
+    assert.equal(fns._vsnwprintf.handler([0, 0, format, list]), 11, 'the count it would need');
+
+    const none = slots(0x1a0, []);
+    for (const [text, expected] of /** @type {[string, number][]} */ ([
+        ['short', 5], ['justfit', 7], ['justfits', 8], ['muchlonger', -1],
+    ]))
+    {
+        host.bytes.fill(0xee, 0x200, 0x300);
+        assert.equal(fns._vsnwprintf.handler([0x200, 8, wide(0x240, text), none]), expected, text);
+        const valid = expected < 0 ? 8 : Math.min(expected + 1, 8);
+        assert.equal(units(0x200, valid), `${text}\0`.slice(0, valid), text);
+        assert.equal(view.getUint16(0x200 + 16, true), 0xeeee, `${text}: nothing past the count`);
+    }
+    assert.equal(fns._vsnwprintf.handler([0x200, 8, wide(0x240, '%s|%S'),
+        slots(0x1a0, [wide(0x100, 'w'), put(0x120, 'n')])]), 3, '%s wide, %S narrow');
+    assert.equal(units(0x200, 3), 'w|n');
+    assert.equal(fns._vsnwprintf.argBytes, 16);
+});
+
 test('_vsnprintf stops the va_list window at the end of its region', ()=>{
     // The stop that faulted a whole run: a thread formats from just below the
     // top of its stack, every argument it reads is there, and the fixed

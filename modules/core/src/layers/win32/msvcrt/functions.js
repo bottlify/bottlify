@@ -36,6 +36,7 @@ import { createStdioFunctions, standardRecords } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
 import { createGlobals, EINVAL, ERANGE } from './globals.js';
 import { createDescriptors, createIoFunctions } from './io.js';
+import { bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
 
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
@@ -157,6 +158,9 @@ export function createMsvcrtFunctions(host){
 
     /** @param {number} pointer */
     const readString = pointer=>host.readCString(pointer, MAX_STRING);
+
+    /** @param {number} pointer */
+    const readWide = pointer=>wideStringAt(host.readMemory, pointer);
 
     /**
      * The scratch a single-byte search marks in. Handlers answer one call at a
@@ -708,6 +712,39 @@ export function createMsvcrtFunctions(host){
                 }
                 writeString(buffer, text);
                 return text.length;
+            },
+        },
+
+        /**
+         * int _vsnwprintf(wchar_t *buffer, size_t count, const wchar_t *format,
+         *                 va_list args)
+         *
+         * _vsnprintf in wide characters, where %s is a wide string: at most
+         * `count` characters, terminated only when there is room, and -1 when
+         * the text does not fit. With no buffer and a count of zero it answers
+         * how many the text needs (Wine's msvcrt test_vsnwprintf); no format,
+         * or no buffer for a count, is -1 and EINVAL.
+         */
+        _vsnwprintf: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([buffer, count, format, list])=>{
+                const limit = count >>> 0;
+                if ((format >>> 0) === 0 || ((buffer >>> 0) === 0 && limit !== 0))
+                {
+                    errno(EINVAL);
+                    return -1;
+                }
+                const text = formatToString(readWide(format), varargsAt(list), readString,
+                    { readWideString: readWide, wide: true });
+                if ((buffer >>> 0) === 0)
+                {
+                    return text.length;
+                }
+                const units = unitsOfText(text.slice(0, limit));
+                host.writeMemory(buffer, bytesOfUnits(text.length < limit ? [...units, 0] : units));
+                return text.length > limit ? -1 : text.length;
             },
         },
 

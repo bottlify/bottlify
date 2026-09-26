@@ -9,7 +9,7 @@ import { VARIADIC_SLOTS } from './scan.js';
 import { EBADF, EILSEQ, EINVAL } from './globals.js';
 import { createDescriptors, LF, settle } from './io.js';
 import {
-    O_U16TEXT, O_U8TEXT, O_WTEXT, bytesOfUnits, unitsOf, wideStringAt,
+    O_U16TEXT, O_U8TEXT, O_WTEXT, bytesOfUnits, unitsOf, unitsOfText, wideStringAt,
 } from './widetext.js';
 
 /**
@@ -61,9 +61,6 @@ const EOF = -1;
 const WEOF = 0xffff;
 
 const MAX_STRING = 1 << 20;
-
-/** @param {string} text */
-const unitsOfText = text=>Array.from({ length: text.length }, (_, at)=>text.charCodeAt(at));
 
 /** `setvbuf`'s mode argument, at the values msvcrt gives them. */
 const IOFBF = 0x0000;
