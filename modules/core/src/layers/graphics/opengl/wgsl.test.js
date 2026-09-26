@@ -161,7 +161,8 @@ test('the clip depth is remapped, and an absent attribute is the current value',
     const { code } = generateDraw(state({
         attributes: CANONICAL_LAYOUT.attributes.filter(a=>a.name === 'position'),
     }));
-    assert.match(code, /out\.position = vec4f\(clip\.x, clip\.y, \(clip\.z \+ clip\.w\) \* 0\.5, clip\.w\)/);
+    assert.ok(code.includes('out.position = vec4f(clip.x, clip.y,'
+        + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w)'));
     assert.match(code, /out\.color = uniforms\.color;/);
     assert.match(code, /out\.secondary = uniforms\.secondary;/);
 });
@@ -353,7 +354,8 @@ test('a position-invariant program emits the fixed stage\'s position lines', ()=
             offset: 0, format: 'float32x3' }],
         strides: [12],
     })).code;
-    const remap = '    out.position = vec4f(clip.x, clip.y, (clip.z + clip.w) * 0.5, clip.w);';
+    const remap = '    out.position = vec4f(clip.x, clip.y,'
+        + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w);';
     assert.ok(fixed.includes(remap), 'the fixed stage remaps the depth the way GL does');
     assert.ok(emitted.code.includes(remap), 'the invariant position is the fixed one');
     assert.ok(emitted.code.includes(

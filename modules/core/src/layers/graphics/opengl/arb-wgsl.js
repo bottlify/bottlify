@@ -63,6 +63,15 @@
 
 import { canonicalAttribName } from './arb-program.js';
 
+/**
+ * The fixed stage's position, from GL's clip space into WebGPU's, which the
+ * position-invariant option has to reproduce exactly. `uniforms.misc.y` is
+ * the depth range's direction: -1 when it runs backwards, which a WebGPU
+ * viewport cannot express.
+ */
+export const CLIP_REMAP =
+    'vec4f(clip.x, clip.y, (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w)';
+
 export { canonicalAttribName };
 
 /**
@@ -1098,15 +1107,17 @@ export function emitVertex(ir, inputs, varyings, group = VERTEX_PROGRAM_GROUP){
         // the program's position is the fixed pipeline's -- holds bit for bit
         // on the device, not only in intent.
         body.push(`    let clip = uniforms.modelViewProjection * ${source};`);
-        body.push('    out.position = vec4f(clip.x, clip.y, (clip.z + clip.w) * 0.5, clip.w);');
+        body.push(`    out.position = ${CLIP_REMAP};`);
     }
     body.push(...lines);
     if (!ir.positionInvariant && writesPosition)
     {
         // GL's clip z runs -w..w and WebGPU's 0..w. The program may write the
         // position one component at a time (a DP4 per matrix row), so the
-        // remap runs once here, against the w the program actually wrote.
-        body.push('    out.position.z = (out.position.z + out.position.w) * 0.5;');
+        // remap runs once here, against the w the program actually wrote,
+        // turned round as the fixed stage turns it for a backwards range.
+        body.push('    out.position.z = (out.position.z * uniforms.misc.y + out.position.w)'
+            + ' * 0.5;');
     }
     body.push('    return out;');
 

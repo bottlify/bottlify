@@ -40,6 +40,13 @@ function fragment(text, viewportHeight = 0){
 
 const VARYINGS = { texcoords: [0, 1, 2, 3], fogCoord: false };
 
+
+/** The program's own position, turned from GL's clip depth into WebGPU's. */
+const REMAP_Z = new RegExp(String.raw`out\.position\.z = \(out\.position\.z \* uniforms\.misc\.y`
+    + String.raw` \+ out\.position\.w\) \* 0\.5;`);
+/** The fixed stage's position line, which position invariance reproduces. */
+const REMAP_POSITION = new RegExp(String.raw`out\.position = vec4f\(clip\.x, clip\.y,`
+    + String.raw` \(clip\.z \* uniforms\.misc\.y \+ clip\.w\) \* 0\.5, clip\.w\);`);
 test('every vertex instruction emits its arithmetic in vec4f', ()=>{
     const { code } = vertex(`!!ARBvp1.0
 TEMP r0, r1, r2, r3;
@@ -151,9 +158,9 @@ END
 `);
     assert.match(masked.code, /out\.position\.z = v\d+\.z;/);
     assert.match(masked.code, /out\.position\.w = v\d+\.w;/);
-    assert.match(masked.code, /out\.position\.z = \(out\.position\.z \+ out\.position\.w\) \* 0\.5;/);
+    assert.match(masked.code, REMAP_Z);
     const writes = masked.code.indexOf('out.position.w =');
-    const remap = masked.code.indexOf('out.position.z = (out.position.z + out.position.w)');
+    const remap = masked.code.indexOf('out.position.z = (out.position.z * uniforms.misc.y');
     assert.ok(remap > writes, 'the remap runs after the program wrote the position');
 });
 
@@ -165,7 +172,7 @@ END
 `);
     assert.match(full.code, /out\.position = v\d+;/);
     assert.match(full.code,
-        /out\.position\.z = \(out\.position\.z \+ out\.position\.w\) \* 0\.5;/);
+        REMAP_Z);
     // A DP4 per matrix row writes one component at a time. The remap must use
     // the w that the program wrote, not the z instruction's own value: the
     // scalar DP4 broadcasts into every component, so a per-write remap would
@@ -180,7 +187,7 @@ END
 `);
     assert.match(componentWise.code, /out\.position\.z = v\d+\.z;/);
     assert.match(componentWise.code,
-        /out\.position\.z = \(out\.position\.z \+ out\.position\.w\) \* 0\.5;/);
+        REMAP_Z);
     assert.doesNotMatch(componentWise.code, /out\.position\.z = \(v\d+\.z \+ v\d+\.w\)/,
         'the z instruction\'s broadcast w is not the clip w');
 });
@@ -208,7 +215,7 @@ END
     assert.match(code,
         /let clip = uniforms\.modelViewProjection \* vec4f\(vertex\.position, 1\.0\);/);
     assert.match(code,
-        /out\.position = vec4f\(clip\.x, clip\.y, \(clip\.z \+ clip\.w\) \* 0\.5, clip\.w\);/,
+        REMAP_POSITION,
         'the remap line is the fixed stage\'s, byte for byte');
     assert.doesNotMatch(code, /out\.position = vec4f\(v\d+/);
 });

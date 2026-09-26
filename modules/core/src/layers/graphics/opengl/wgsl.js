@@ -32,8 +32,9 @@
  */
 
 import { GL } from './constants.js';
-import { FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS, emitFragment, emitVertex, needsOf }
-    from './arb-wgsl.js';
+import {
+    CLIP_REMAP, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS, emitFragment, emitVertex, needsOf,
+} from './arb-wgsl.js';
 
 /**
  * @typedef {Object} UnitState
@@ -106,7 +107,7 @@ export const UNIFORM = Object.freeze({
     envColor: 48 + UNITS * 32 + 12 + VARYING_TEXCOORDS * 4,   // UNITS vec4f
     fogColor: 48 + UNITS * 36 + 12 + VARYING_TEXCOORDS * 4,
     fogParams: 48 + UNITS * 36 + 16 + VARYING_TEXCOORDS * 4,  // density, start, end, coordinate
-    misc: 48 + UNITS * 36 + 20 + VARYING_TEXCOORDS * 4,       // alpha reference
+    misc: 48 + UNITS * 36 + 20 + VARYING_TEXCOORDS * 4,       // alpha reference, depth direction
     floats: 48 + UNITS * 36 + 24 + VARYING_TEXCOORDS * 4,
 });
 
@@ -603,8 +604,9 @@ function fixedVertexMain(state, varyings){
             : 'vec4f(0.0, 0.0, 0.0, 1.0)'};`,
         '    let eyePosition = uniforms.modelView * objectPosition;',
         '    let clip = uniforms.modelViewProjection * objectPosition;',
-        // GL's near plane is z = -w; WebGPU's is z = 0.
-        '    out.position = vec4f(clip.x, clip.y, (clip.z + clip.w) * 0.5, clip.w);',
+        // GL's near plane is z = -w; WebGPU's is z = 0. The direction is -1
+        // for a depth range run backwards, which the viewport cannot express.
+        `    out.position = ${CLIP_REMAP};`,
         `    out.color = ${colour ? widen(colour, [0, 0, 0, 1]) : 'uniforms.color'};`,
         `    out.secondary = ${secondary ? widen(secondary, [0, 0, 0, 1]) : 'uniforms.secondary'};`,
     ];
