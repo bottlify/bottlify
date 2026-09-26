@@ -118,6 +118,7 @@ async function build(replace){
             versionInfo: ()=>null,
             /** @param {string} name */
             systemLibrary: name=>name.toLowerCase() === 'kernel32.dll',
+            ...replace?.modules,
         },
     }), host));
     return { bytes, view, libraries: api.libraries(), lastError: ()=>api.lastError() };
@@ -217,4 +218,28 @@ test('a structure written to a profile is read from guest memory and read back',
     assert.deepEqual([...bytes.subarray(0x3000, 0x3004)], [0x10, 0x20, 0x30, 0x40]);
     await win32Module.dispose();
     await filesystemModule.dispose();
+});
+
+test('LoadLibraryEx\'s flags reach whoever assembled the process', async()=>{
+    /** @type {any[][]} */
+    const asked = [];
+    const { bytes, libraries } = await build({ modules: {
+        /** @param {string} name @param {number} flags */
+        load: (name, flags)=>{
+            asked.push([name, flags]);
+            return 0x10000001;
+        },
+        /** @param {number} handle */
+        dataFile: handle=>(handle === 0x10000001
+            ? { name: 'probe.dll', base: 0x10000000, release: ()=>1 } : null),
+    } });
+    bytes.set([...'probe.dll\0'].map(ch=>ch.charCodeAt(0)), 0x4000);
+    const LOAD_LIBRARY_AS_DATAFILE = 0x2;
+
+    assert.equal(libraries['KERNEL32.dll'].LoadLibraryExA.handler(
+        [0x4000, 0, LOAD_LIBRARY_AS_DATAFILE]), 0x10000001);
+    assert.deepEqual(asked, [['probe.dll', LOAD_LIBRARY_AS_DATAFILE]]);
+    assert.equal(libraries['KERNEL32.dll'].FreeLibrary.handler([0x10000001]), 1,
+        'and the data file is given back by its handle');
+    await win32Module.dispose();
 });

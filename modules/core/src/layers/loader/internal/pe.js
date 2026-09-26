@@ -23,6 +23,9 @@ export const DIR_IMPORT = 1;
 export const DIR_BASERELOC = 5;
 
 /** Section characteristics. */
+/** The COFF characteristic that marks an image as a library rather than a program. */
+const IMAGE_FILE_DLL = 0x2000;
+
 const SECTION_MEM_EXECUTE = 0x20000000;
 const SECTION_MEM_READ = 0x40000000;
 const SECTION_MEM_WRITE = 0x80000000;
@@ -51,6 +54,9 @@ const SECTION_MEM_WRITE = 0x80000000;
  * @property {number} stackReserve     How much stack the program was linked to expect.
  * @property {number} stackCommit
  * @property {boolean} relocatable     False when the image has no relocation directory.
+ * @property {boolean} library         A DLL, as against a program: only a DLL's imports
+ *                                     are resolved and its entry point run when one is
+ *                                     loaded by LoadLibrary.
  * @property {PeSection[]} sections
  * @property {{ address: number, size: number }[]} directories
  */
@@ -137,6 +143,7 @@ export function parsePe(bytes){
         // Plenty of pre-2000 executables ship without a relocation directory and
         // simply cannot be moved: every absolute address in them assumes ImageBase.
         relocatable: relocDirectory !== undefined && relocDirectory.size > 0,
+        library: (view.getUint16(coff + 18, true) & IMAGE_FILE_DLL) !== 0,
         sections,
         directories,
     };

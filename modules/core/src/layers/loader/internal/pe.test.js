@@ -43,6 +43,15 @@ test('headers of a real 32-bit console executable', ()=>{
     assert.ok(image.sections[0].executable, 'code section is executable');
 });
 
+test('a program is not a library until its COFF header says IMAGE_FILE_DLL', ()=>{
+    assert.equal(parsePe(file).library, false);
+    const library = file.slice();
+    const view = new DataView(library.buffer);
+    const characteristics = view.getUint32(0x3c, true) + 4 + 18;
+    view.setUint16(characteristics, view.getUint16(characteristics, true) | 0x2000, true);
+    assert.equal(parsePe(library).library, true);
+});
+
 test('rejects images it cannot honestly load', ()=>{
     assert.throws(()=>parsePe(new Uint8Array(64)), /missing MZ/);
 

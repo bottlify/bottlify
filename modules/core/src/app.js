@@ -18,6 +18,7 @@ import { findResource, listResources, loadString } from './layers/loader/interna
 import { readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
 import { mangledCall } from './layers/loader/internal/mangling.js';
+import { mapImage } from './layers/loader/internal/image.js';
 import { createProcessBlocks } from './layers/win32/kernel32/teb.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
@@ -1323,12 +1324,28 @@ export async function inParallel(items, limit, work){
  * names: a resource found in one module and addressed relative to another's
  * base is a pointer into the wrong image.
  *
+ * A library LoadLibraryEx mapped as data is no module, and its handle is its
+ * base with a low bit set: one for a view of the file as it lies on disk, two
+ * for one laid out as an image. The resource calls take that handle as they
+ * take a module's, and in the file's own layout a resource lies at its file
+ * offset from the base rather than at its RVA -- so that is the `rva` a data
+ * file's lookup answers, since every caller adds it to the base.
+ *
  * @param {() => any} main       The running program's module, once loaded.
  * @param {Map<number, any>} byBase  Every mapped module by its base.
+ * @param {Map<number, any>} [dataFiles]  Libraries mapped as data, by handle.
  */
-export function resourceLookup(main, byBase){
+export function resourceLookup(main, byBase, dataFiles = new Map()){
     /** @param {number} instance */
-    const moduleOf = instance=>(instance === 0 ? main() : byBase.get(instance >>> 0) ?? null);
+    const moduleOf = instance=>{
+        if (instance === 0)
+        {
+            return main();
+        }
+        return (instance & 3) !== 0
+            ? dataFiles.get(instance >>> 0) ?? null
+            : byBase.get(instance >>> 0) ?? null;
+    };
     return {
         /** @param {number} instance @param {number} id */
         loadString: (instance, id)=>{
@@ -1345,9 +1362,22 @@ export function resourceLookup(main, byBase){
          */
         findResource: (instance, type, name, language = null)=>{
             const module = moduleOf(instance);
-            return module?.file
+            const found = module?.file
                 ? findResource(module.file, module.image, type, name, language)
                 : null;
+            if (!found || !module.flat)
+            {
+                return found;
+            }
+            try
+            {
+                return { ...found, rva: rvaToFileOffset(module.image, found.rva) };
+            }
+            catch {
+                // Data outside every section: a file that describes a
+                // resource it does not hold.
+                return null;
+            }
         },
         /**
          * Everything a module carries, for the enumerations: a program picks
@@ -1410,6 +1440,16 @@ export function placePatches(patches, base, size){
  * the emulator was given, and a wrong guess maps a library outside guest RAM.
  */
 const LIBRARY_ALIGN = 0x10000;
+
+/** LoadLibraryEx's flags: mapped with nothing resolved or run, or loaded as data. */
+const DONT_RESOLVE_DLL_REFERENCES = 0x1;
+const LOAD_LIBRARY_AS_DATAFILE = 0x2;
+const LOAD_LIBRARY_AS_IMAGE_RESOURCE = 0x20;
+const LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE = 0x40;
+const LOAD_AS_DATA = LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE
+    | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE;
+/** A page: a view of a file is mapped in whole ones. */
+const PAGE_SIZE = 0x1000;
 
 /**
  * The system libraries in every process, whatever it imports.
@@ -2468,6 +2508,13 @@ async function buildApp(options){
     const byName = new Map();
     /** @type {Map<number, any>} */
     const byBase = new Map();
+    /**
+     * Libraries LoadLibraryEx loaded as data, by the handle it gave out: no
+     * modules, so in neither table above.
+     *
+     * @type {Map<number, any>}
+     */
+    const dataFiles = new Map();
     /** @type {any} */
     let mainModule = null;
 
@@ -3221,10 +3268,13 @@ async function buildApp(options){
                 byBase: base=>byBase.get(base >>> 0) ?? null,
                 imagePath: ()=>options.imagePath ?? 'C:\\app.exe',
                 /** @param {string} name */
-                load: name=>loadLibraryAtRuntime(name),
+                /** @param {string} name @param {number} [flags] */
+                load: (name, flags)=>loadLibraryAtRuntime(name, flags),
+                /** @param {number} handle */
+                dataFile: handle=>dataFiles.get(handle >>> 0) ?? null,
                 /** @param {any} asked */
                 resolved: asked=>events.emit('resolved', asked),
-                ...resourceLookup(()=>mainModule, byBase),
+                ...resourceLookup(()=>mainModule, byBase, dataFiles),
                 /**
                  * The version resource of a file on the volume, by path: what
                  * an installer compares before it replaces a shared component.
@@ -3972,14 +4022,26 @@ async function buildApp(options){
      * treats a promise as "park the guest thread" and the two cheap answers --
      * already here, known absent -- must not cost that.
      *
+     * `flags` are LoadLibraryEx's. With DONT_RESOLVE_DLL_REFERENCES the library
+     * is mapped and becomes a module, but nothing it imports is loaded or bound
+     * and its entry point never runs -- and a later LoadLibrary hands back that
+     * same module as it is, as Wine's loader test has it. A program, as against
+     * a library, is loaded the same way whatever the flags say.
+     *
      * @param {string} name
+     * @param {number} [flags]
      * @returns {number | Promise<number>}
      */
-    const loadLibraryAtRuntime = name=>{
+    const loadLibraryAtRuntime = (name, flags = 0)=>{
+        if ((flags & LOAD_AS_DATA) !== 0)
+        {
+            return loadAsData(name, flags);
+        }
         // Read now, before anything is awaited: this is the thread whose
         // LoadLibrary call is being answered, and it is the one whose stack the
         // library's entry point has to run on.
         const asked = kernel.currentThread();
+        const unresolved = (flags & DONT_RESOLVE_DLL_REFERENCES) !== 0;
         const key = name.toLowerCase().replace(/\.dll$/, '');
         if (absentLibraries.has(key))
         {
@@ -4067,6 +4129,10 @@ async function buildApp(options){
                         .filter(entry=>entry.forwards === null)
                         .map(entry=>[entry.ordinal, base + entry.rva]));
 
+                    // Only a library's imports are resolved and its entry
+                    // point run: a program loaded by name is mapped for what
+                    // it holds, and its entry point is its main.
+                    const inert = unresolved || !image.library;
                     const held = {
                         name, base, size: image.sizeOfImage,
                         /** @param {string} exported */
@@ -4087,7 +4153,7 @@ async function buildApp(options){
                         references: 1,
                         /** @returns {number | Promise<number>} */
                         release: ()=>releaseLibrary(held),
-                    });
+                    }, inert ? { inert, attached: false } : {});
                     byName.set(moduleKeyOf(name), held);
                     byBase.set(base, held);
                     // Joins PEB->Ldr's own module list the same moment: a
@@ -4110,18 +4176,22 @@ async function buildApp(options){
                     // slot does not fail at the call, it runs whatever bytes the
                     // slot happened to name. What is seen is an invalid opcode
                     // at an address belonging to nothing.
-                    for (const dependency of readImports(file, image))
+                    if (!inert)
                     {
-                        if (findModule(dependency.dll) === null)
+                        for (const dependency of readImports(file, image))
                         {
-                            await loadLibraryAtRuntime(dependency.dll);
+                            if (findModule(dependency.dll) === null)
+                            {
+                                await loadLibraryAtRuntime(dependency.dll);
+                            }
                         }
-                    }
 
-                    loader.bind(mapped, resolveImport, missingImport);
-                    // Both tables, and in this order: the delay-load pass adds
-                    // to what the first one recorded rather than replacing it.
-                    loader.bindDelayed(mapped, resolveImport, missingImport);
+                        loader.bind(mapped, resolveImport, missingImport);
+                        // Both tables, and in this order: the delay-load pass
+                        // adds to what the first one recorded rather than
+                        // replacing it.
+                        loader.bindDelayed(mapped, resolveImport, missingImport);
+                    }
                     // Before DllMain: a sidecar entry for this library patches
                     // its code, which must happen before any of it has run
                     // or been compiled.
@@ -4134,7 +4204,7 @@ async function buildApp(options){
                         timeDateStamp: image.timeDateStamp,
                     });
 
-                    if (held.entryPoint && held.entryPoint !== base)
+                    if (!inert && held.entryPoint && held.entryPoint !== base)
                     {
                         // On the thread that asked for the library, which by
                         // now is not the one on the processor: mapping it
@@ -4157,7 +4227,10 @@ async function buildApp(options){
         {
             markLoaded(loaded);
             loaded.references = (loaded.references ?? 0) + 1;
-            if (loaded.attached !== false || !loaded.entryPoint)
+            // One of ours asked for unresolved is left unattached, and a later
+            // load attaches it: its entry point is our own setup, which the
+            // rest of it relies on.
+            if (loaded.attached !== false || !loaded.entryPoint || loaded.inert || unresolved)
             {
                 return loaded.base;
             }
@@ -4181,6 +4254,123 @@ async function buildApp(options){
             path: isKnownDll(name) ? 'KnownDLLs' : candidates.join(';'),
         });
         return 0;
+    };
+
+    /**
+     * FreeLibrary on a data file's handle: the last one unmaps the view.
+     *
+     * @param {number} handle
+     */
+    const releaseData = handle=>{
+        const held = dataFiles.get(handle);
+        if (!held)
+        {
+            return 0;
+        }
+        held.references--;
+        if (held.references === 0)
+        {
+            dataFiles.delete(handle);
+            if (held.region)
+            {
+                memory.unregister(held.region);
+            }
+        }
+        return 1;
+    };
+
+    /**
+     * LoadLibraryEx with a flag that loads a library as data, for its
+     * resources: nothing in it is bound or run.
+     *
+     * A library already loaded as a module is answered with its module handle,
+     * and counted, as Wine's loader test has it. Any other is mapped apart and
+     * is no module -- GetModuleHandle does not find it -- and its handle is its
+     * base with a low bit set: one for a view of the file as it lies on disk,
+     * two for one laid out as an image (LOAD_LIBRARY_AS_IMAGE_RESOURCE). Each
+     * such load is a view of its own.
+     *
+     * @param {string} name
+     * @param {number} flags
+     * @returns {number | Promise<number>}
+     */
+    const loadAsData = (name, flags)=>{
+        const loaded = findModule(name);
+        if (loaded && loaded.loaded !== false)
+        {
+            loaded.references = (loaded.references ?? 0) + 1;
+            return loaded.base;
+        }
+        const layout = (flags & LOAD_LIBRARY_AS_IMAGE_RESOURCE) !== 0 ? 2 : 1;
+        /**
+         * @param {any} held  What was mapped, and where.
+         * @returns {number}
+         */
+        const record = held=>{
+            const handle = (held.base | layout) >>> 0;
+            dataFiles.set(handle, {
+                ...held, references: 1, release: ()=>releaseData(handle),
+            });
+            return handle;
+        };
+        const wanted = libraryCandidates(name, options.imagePath ?? 'C:\\app.exe')
+            .find(candidate=>{
+                try
+                {
+                    const entry = filesystem.stat(candidate);
+                    return entry && !entry.directory;
+                }
+                catch {
+                    return false;
+                }
+            });
+        if (wanted === undefined)
+        {
+            // One of ours nothing has loaded: there is no file to view, and
+            // the image it has holds no resources.
+            if (loaded)
+            {
+                return record({ name, base: loaded.base, file: null, image: null,
+                    flat: false, region: null });
+            }
+            events.emit('library-missing', { name, path: 'as data' });
+            return 0;
+        }
+        return (async()=>{
+            const file = await readWholeFile(filesystem, blocks, wanted);
+            let image;
+            try
+            {
+                image = file ? parsePe(file) : null;
+            }
+            catch {
+                image = null;
+            }
+            if (!file || !image)
+            {
+                events.emit('library-missing', { name, path: wanted, reason: 'not an image' });
+                return 0;
+            }
+            const bytes = layout === 1 ? file : mapImage(file, image.imageBase).bytes;
+            const size = Math.ceil(bytes.length / PAGE_SIZE) * PAGE_SIZE;
+            const place = placeLibrary({ relocatable: true, imageBase: 0, sizeOfImage: size },
+                { next: nextLibraryBase, ...librarySpace });
+            if ('refused' in place)
+            {
+                events.emit('libraries-missing', { names: [name], reason: place.refused });
+                return 0;
+            }
+            const region = `${name} as data at 0x${place.base.toString(16)}`;
+            memory.register({
+                name: region, base: place.base, size,
+                kind: memory.RegionKind.IMAGE, access: memory.Access.READ_WRITE,
+            });
+            memory.writeBytes(place.base, bytes);
+            // Read-only once filled, as a view of a data file is mapped.
+            memory.protect(region, memory.Access.READ);
+            return record({ name, base: place.base, file, image, flat: layout === 1, region,
+                path: wanted });
+        })();
     };
 
     // Where a library may go: above the program's own image, which is not in

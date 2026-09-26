@@ -42,6 +42,18 @@ function movable(file){
 }
 
 /**
+ * Marks a fixture image as a DLL: only a library's DllMain is run.
+ *
+ * @param {Uint8Array} file
+ */
+function library(file){
+    const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    const characteristics = view.getUint32(0x3c, true) + 4 + 18;
+    view.setUint16(characteristics, view.getUint16(characteristics, true) | 0x2000, true);
+    return file;
+}
+
+/**
  * Exit code bits: loaded (1), loaded again as the same module (2), still
  * there after one of two frees (4), attached once and not yet detached (8),
  * the last free answered TRUE (16), detached (32), and gone (64).
@@ -94,7 +106,7 @@ function buildProgram(){
  * @param {number} reasons  Where the program keeps them.
  */
 function buildProbe(reasons){
-    return movable(buildExe({
+    return library(movable(buildExe({
         imports: { 'KERNEL32.dll': ['GetModuleHandleA'] },
         code: ()=>[
             0x8b, 0x44, 0x24, 0x08, //                     mov eax, [esp+8]    reason
@@ -105,7 +117,7 @@ function buildProbe(reasons){
             0xb8, ...u32(1), //                            mov eax, 1
             0xc2, 0x0c, 0x00, //                           ret 12
         ],
-    }));
+    })));
 }
 
 test('the last FreeLibrary tells DllMain and unloads the library', { timeout: 30000 }, async t=>{

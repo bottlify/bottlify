@@ -339,6 +339,73 @@ test('a resource is addressed relative to the module its instance names', ()=>{
     assert.equal(lookup.loadString(0, 1), null, 'a module without its file has no resources');
 });
 
+/**
+ * A library whose only section holds one resource: RCDATA 1, four bytes, at
+ * RVA 0x1058 and file offset 0x258 -- two different numbers, so a lookup that
+ * mixes them up lands somewhere else.
+ */
+function resourceLibrary(){
+    const bytes = new Uint8Array(0x260);
+    const view = new DataView(bytes.buffer);
+    const put = (/** @type {number} */ at, /** @type {number} */ value)=>
+        view.setUint32(at, value, true);
+    view.setUint16(0, 0x5a4d, true); //              "MZ"
+    put(0x3c, 0x80);
+    put(0x80, 0x4550); //                             "PE\0\0"
+    view.setUint16(0x84, 0x014c, true); //           i386
+    view.setUint16(0x86, 1, true); //                one section
+    view.setUint16(0x94, 224, true);
+    view.setUint16(0x96, 0x2102, true); //           a DLL
+    view.setUint16(0x98, 0x010b, true); //           PE32
+    put(0x98 + 28, 0x10000000); //                    ImageBase
+    put(0x98 + 32, 0x1000); //                        SectionAlignment
+    put(0x98 + 56, 0x2000); //                        SizeOfImage
+    put(0x98 + 60, 0x200); //                         SizeOfHeaders
+    put(0x98 + 92, 16);
+    put(0x98 + 96 + 2 * 8, 0x1000); //                the resource directory
+    put(0x98 + 96 + 2 * 8 + 4, 0x60);
+    bytes.set([...'.rsrc'].map(ch=>ch.charCodeAt(0)), 0x178);
+    put(0x178 + 8, 0x60);
+    put(0x178 + 12, 0x1000);
+    put(0x178 + 16, 0x60);
+    put(0x178 + 20, 0x200);
+    // Type 10, then name 1, then language 0x409, then the data entry.
+    view.setUint16(0x200 + 14, 1, true);
+    put(0x200 + 16, 10);
+    put(0x200 + 20, 24 | 0x80000000);
+    view.setUint16(0x200 + 24 + 14, 1, true);
+    put(0x200 + 40, 1);
+    put(0x200 + 44, 48 | 0x80000000);
+    view.setUint16(0x200 + 48 + 14, 1, true);
+    put(0x200 + 64, 0x409);
+    put(0x200 + 68, 72);
+    put(0x200 + 72, 0x1058);
+    put(0x200 + 76, 4);
+    bytes.set([0xca, 0xfe, 0xf0, 0x0d], 0x258);
+    return bytes;
+}
+
+test('a library loaded as data answers for its resources by the handle it was given', ()=>{
+    // LoadLibraryEx hands out a data file's base with a low bit set -- one for
+    // a view of the file as it lies on disk, two for one laid out as an image
+    // -- and FindResource, LoadResource and the rest take that handle. In the
+    // file's own layout a resource is at its file offset from the base, not at
+    // its RVA.
+    const file = resourceLibrary();
+    const image = parsePe(file);
+    const flat = { base: 0x10000000, file, image, flat: true };
+    const laidOut = { base: 0x10100000, file, image, flat: false };
+    const lookup = resourceLookup(()=>null, new Map(),
+        new Map([[0x10000001, flat], [0x10100002, laidOut]]));
+
+    assert.equal(lookup.moduleBase(0x10000001), 0x10000000);
+    assert.equal(lookup.findResource(0x10000001, 10, 1)?.rva, 0x258);
+    assert.equal(lookup.moduleBase(0x10100002), 0x10100000);
+    assert.equal(lookup.findResource(0x10100002, 10, 1)?.rva, 0x1058);
+    assert.equal(lookup.moduleBase(0x10000000), 0, 'the base alone names no module');
+    assert.equal(lookup.findResource(0x10000003, 10, 1), null, 'nor does another low bit');
+});
+
 test('a bare name is looked for beside the executable, then where the system keeps its own', ()=>{
     // An installer puts a library it brought into the system directory and
     // loads it by bare name; a search that stops beside the executable

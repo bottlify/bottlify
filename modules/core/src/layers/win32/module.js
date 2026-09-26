@@ -945,8 +945,10 @@ export const win32Module = {
                     // Without it LoadLibrary can only answer for what is
                     // already mapped, and a program asking for a library it
                     // ships is told the module does not exist.
-                    /** @param {string} name */
-                    load: name=>modules.load?.(name) ?? 0,
+                    /** @param {string} name @param {number} [flags] */
+                    load: (name, flags)=>modules.load?.(name, flags) ?? 0,
+                    /** @param {number} handle */
+                    dataFile: handle=>modules.dataFile?.(handle) ?? null,
                     /** @param {any} asked */
                     resolved: asked=>modules.resolved?.(asked),
                 }),

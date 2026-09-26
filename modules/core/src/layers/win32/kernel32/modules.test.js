@@ -37,7 +37,7 @@ const record = (name, base)=>({
  *
  * @param {Object} [options]
  * @param {Record<string, number>} [options.lookup]  Name to table base.
- * @param {(name: string) => number} [options.load]  What the assembler answers.
+ * @param {(name: string, flags?: number) => number} [options.load]  What the assembler answers.
  */
 function hostFor({ lookup = {}, load } = {}){
     /** @type {Map<string, ReturnType<typeof record>>} */
@@ -151,4 +151,65 @@ test('the wide entry point reaches the same loader', ()=>{
 
     assert.equal(fns.LoadLibraryW.handler([0x400000]), 0);
     assert.deepEqual(asked, ['Straight.dll']);
+});
+
+test('LoadLibraryEx hands its flags to the loader, in both spellings', ()=>{
+    // How a library is loaded -- as data, or mapped without its imports
+    // resolved -- is the loader's to act on; this layer only has to pass the
+    // request through rather than drop it.
+    /** @type {[string, number | undefined][]} */
+    const asked = [];
+    const f = hostFor({ load: (name, flags)=>{
+        asked.push([name, flags]);
+        return 0x10000001;
+    } });
+    const fns = createModuleFunctions(f.host);
+    f.say(0x400000, 'probe.dll');
+    const LOAD_LIBRARY_AS_DATAFILE = 0x2;
+    const DONT_RESOLVE_DLL_REFERENCES = 0x1;
+
+    assert.equal(fns.LoadLibraryExA.handler([0x400000, 0, LOAD_LIBRARY_AS_DATAFILE]), 0x10000001);
+    assert.equal(fns.LoadLibraryExW.handler([0x400000, 0, DONT_RESOLVE_DLL_REFERENCES]),
+        0x10000001);
+    assert.deepEqual(asked, [
+        ['probe.dll', LOAD_LIBRARY_AS_DATAFILE], ['probe.dll', DONT_RESOLVE_DLL_REFERENCES],
+    ]);
+});
+
+test('LoadLibraryEx refuses a file handle, which is reserved and must be NULL', ()=>{
+    // Wine's module test: a handle in hFile fails the load, with
+    // ERROR_INVALID_PARAMETER on every Windows since XP.
+    /** @type {string[]} */
+    const asked = [];
+    const f = hostFor({ load: name=>{ asked.push(name); return 0x1000; } });
+    const fns = createModuleFunctions(f.host);
+    f.say(0x400000, 'kernel32.dll');
+
+    assert.equal(fns.LoadLibraryExA.handler([0x400000, 0xdeadbeef, 0]), 0);
+    assert.equal(f.lastError(), 87);
+    assert.equal(fns.LoadLibraryExW.handler([0x400000, 0xdeadbeef, 0]), 0);
+    assert.deepEqual(asked, [], 'nothing was loaded');
+});
+
+test('FreeLibrary takes back a data file by the handle LoadLibraryEx gave out', ()=>{
+    // A library loaded as data is no module -- GetModuleHandle does not find
+    // it -- so its handle, the base with a low bit set, is looked up apart.
+    // A handle with those bits that names nothing is a bad image, as Wine's
+    // module test has it, rather than a module not found.
+    const f = hostFor({});
+    /** @type {number[]} */
+    const released = [];
+    const host = /** @type {any} */ (f.host);
+    host.dataFile = (/** @type {number} */ handle)=>(handle === 0x10000001
+        ? { ...record('probe.dll', 0x10000000), release: ()=>{
+            released.push(handle);
+            return 1;
+        } }
+        : null);
+    const fns = createModuleFunctions(f.host);
+
+    assert.equal(fns.FreeLibrary.handler([0x10000001]), 1);
+    assert.deepEqual(released, [0x10000001]);
+    assert.equal(fns.FreeLibrary.handler([0x10001231]), 0);
+    assert.equal(f.lastError(), 193, 'ERROR_BAD_EXE_FORMAT');
 });
