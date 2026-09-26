@@ -12,6 +12,8 @@
  * address computed from where the text was read, never the text itself.
  */
 
+import { encodeAnsi } from '../kernel32/locale.js';
+
 /** As long as a path a program hands these may be, terminator included. */
 const MAX_LENGTH = 0x1000;
 
@@ -209,8 +211,8 @@ export function createShlwapiFunctions(host){
     const widePathAt = address=>((address >>> 0) === 0 || !host.readWideString
         ? null : host.readWideString(address >>> 0, MAX_LENGTH));
 
-    /** @param {string} text */
-    const narrow = text=>Uint8Array.from([...text, '\0'].map(c=>c.charCodeAt(0) & 0xff));
+    /** In the ANSI page a path is read in. @param {string} text */
+    const narrow = text=>encodeAnsi(`${text}\0`);
 
     /** @param {string} text */
     const wide = text=>{
