@@ -20,8 +20,13 @@ import { win32Module } from './module.js';
 
 const ARENA = { base: 0x100000, size: 0x200000 };
 
-/** The least of a module graph this layer can be built over, on real bytes. */
-function hostOver(){
+/**
+ * The least of a module graph this layer can be built over, on real bytes.
+ *
+ * @param {Record<string, any>} [replace]  Whole APIs, or kernel entries, to use
+ *   in place of the stand-ins.
+ */
+function hostOver(replace = {}){
     const bytes = new Uint8Array(0x400000);
     const view = new DataView(bytes.buffer);
     /** @type {Map<number, { type: string, object: any }>} */
@@ -89,8 +94,9 @@ function hostOver(){
             callerThread: ()=>null,
             label: ()=>{},
         },
-        filesystem: { drives: ()=>[], stat: ()=>null },
+        filesystem: replace.filesystem ?? { drives: ()=>[], stat: ()=>null },
     };
+    Object.assign(apis.kernel, replace.kernel ?? {});
     const host = /** @type {any} */ ({
         /** @param {string} name */
         requireApi: name=>apis[name],
@@ -99,8 +105,9 @@ function hostOver(){
     return { bytes, view, host };
 }
 
-async function build(){
-    const { bytes, view, host } = hostOver();
+/** @param {Record<string, any>} [replace] */
+async function build(replace){
+    const { bytes, view, host } = hostOver(replace);
     const api = /** @type {any} */ (await win32Module.create(/** @type {any} */ ({
         arena: ARENA,
         modules: {
@@ -112,7 +119,7 @@ async function build(){
             systemLibrary: name=>name.toLowerCase() === 'kernel32.dll',
         },
     }), host));
-    return { bytes, view, libraries: api.libraries() };
+    return { bytes, view, libraries: api.libraries(), lastError: ()=>api.lastError() };
 }
 
 test('SHLWAPI\'s wide spellings read wide strings', async()=>{
@@ -159,5 +166,28 @@ test('an mmio buffer comes from the program\'s heap', async()=>{
     assert.ok(buffer >= ARENA.base && buffer < ARENA.base + ARENA.size,
         `the buffer is in the arena: 0x${buffer.toString(16)}`);
     assert.equal(libraries['WINMM.dll'].mmioClose.handler([handle, 0]), 0);
+    await win32Module.dispose();
+});
+
+test('the synchronisation calls leave their failures as the thread\'s last error', async()=>{
+    // A suspend the kernel refuses (the count is at its maximum) and a one-time
+    // initialisation begun with flags that cannot go together each answer
+    // failure; GetLastError then has to say why.
+    const ERROR_SIGNAL_REFUSED = 156;
+    const ERROR_INVALID_PARAMETER = 87;
+    const thread = { id: 1 };
+    const { libraries, lastError } = await build({
+        kernel: { currentThread: ()=>thread, suspendThread: ()=>null },
+    });
+    const kernel32 = libraries['KERNEL32.dll'];
+    const CURRENT_THREAD = 0xfffffffe;
+
+    assert.equal(kernel32.SuspendThread.handler([CURRENT_THREAD]), 0xffffffff);
+    assert.equal(lastError(), ERROR_SIGNAL_REFUSED);
+
+    const INIT_ONCE_CHECK_ONLY_ASYNC = 3;
+    assert.equal(kernel32.InitOnceBeginInitialize.handler(
+        [0x6000, INIT_ONCE_CHECK_ONLY_ASYNC, 0x6004, 0x6008]), 0);
+    assert.equal(lastError(), ERROR_INVALID_PARAMETER);
     await win32Module.dispose();
 });

@@ -793,6 +793,7 @@ export const win32Module = {
                     /** @param {number} bytes */
                     allocateCode: bytes=>heap.allocateCode(bytes),
                     advanceClock: (/** @type {number} */ ms)=>kernel.clock.advance(ms),
+                    setLastError: setError,
                 }),
                 ...createLocaleFunctions({
                     readMemory, writeMemory,
