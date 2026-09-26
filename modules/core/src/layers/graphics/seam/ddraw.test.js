@@ -1114,6 +1114,17 @@ test('the caps say what this build can do, and refuse a structure of an unknown 
     assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'GetCaps'), [caps, 0]), DD_OK);
     assert.equal(h.box.memory.readU32(caps + DDCAPS.dwCaps) & DDCAPS_BLT, DDCAPS_BLT);
     assert.ok(h.box.memory.readU32(caps + DDCAPS.dwVidMemTotal) > 0);
+    // Wine's ddraw tests look here for DDSCAPS_TEXTURE | DDSCAPS_MIPMAP before
+    // building a mip chain; both copies of the surface caps carry it.
+    const surfaces = DDSCAPS_TEXTURE | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX | DDSCAPS_FLIP;
+    assert.equal(h.box.memory.readU32(caps + DDCAPS.ddsCaps) & surfaces, surfaces);
+    assert.equal(h.box.memory.readU32(caps + DDCAPS.ddsOldCaps) & surfaces, surfaces);
+    h.box.bytes.fill(0, caps, caps + DDCAPS.SIZE);
+    h.box.memory.writeU32(caps + DDCAPS.dwSize, 0x13c);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'GetCaps'), [caps, 0]), DD_OK);
+    assert.equal(h.box.memory.readU32(caps + DDCAPS.ddsOldCaps) & surfaces, surfaces,
+        'the older structure has only the one');
+    assert.equal(h.box.memory.readU32(caps + DDCAPS.ddsCaps), 0, 'and nothing past its end');
 
     assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();
