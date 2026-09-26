@@ -101,8 +101,9 @@ reading each table:
 | `OPENGL32.dll` | 507 | The whole of OpenGL 1.1, all of WGL, and every extension function this implementation answers. Every name is bound, implemented or not, because a stdcall stub that pops the wrong number of bytes loses the process far from the call. Unimplemented names answer zero and are counted. |
 | `vulkan-1.dll` | 149 | Every command with its 32-bit argument size (`src/layers/graphics/vulkan/commands.js`). 65 are implemented (20 instance-level, 45 device-level); the rest answer `VK_ERROR_FEATURE_NOT_PRESENT` and are counted by name. |
 | `DDRAW.dll` | 4 | `DirectDrawCreate`, `DirectDrawCreateEx`, `DirectDrawEnumerateA`, `DirectDrawCreateClipper`. |
-| `D3D10.dll` | 2 | `D3D10CreateDevice`, `D3D10CreateDeviceAndSwapChain`. |
-| `DXGI.dll` | 2 | `CreateDXGIFactory`, `CreateDXGIFactory1` (the latter refuses; a program uses that to learn which DXGI it has). |
+| `D3D10.dll` | 27 | `D3D10CreateDevice` and `D3D10CreateDeviceAndSwapChain`; blobs and reflection (`D3D10CreateBlob`, the three signature-blob functions, `D3D10GetShaderDebugInfo`, `D3D10ReflectShader`); the three profile names; the state block (`D3D10CreateStateBlock` and the eight `D3D10StateBlockMask*` functions); and seven that refuse by name, each reporting why: the two compilers answer `E_FAIL` with the reason in the error blob, the two disassemblers, `D3D10PreprocessShader` and the two effect constructors `E_NOTIMPL`. |
+| `D3D10_1.dll` | 27 | `D3D10CreateDevice1` and `D3D10CreateDeviceAndSwapChain1`, which make an `ID3D10Device1` at feature level 10.0 and answer `DXGI_ERROR_UNSUPPORTED` for 10.1 and the 9.x levels, and the other 25 of `D3D10.dll`. |
+| `DXGI.dll` | 2 | `CreateDXGIFactory`, and `CreateDXGIFactory1`, whose factory and adapters answer as DXGI 1.1's. |
 | `D3D8.dll` | 1 | `Direct3DCreate8`. |
 | `D3D9.dll` | 1 | `Direct3DCreate9`. |
 
@@ -110,7 +111,8 @@ The COM entry points are thin on purpose: each makes one object and publishes on
 everything a program does afterwards goes through the vtable. The vtable slot lists are in
 `src/layers/graphics/seam/vtables.js` (DirectDraw, Direct3D 7 and 8: 22 lists, 288 slots),
 `src/layers/graphics/d3d9/interfaces.js` (11 lists) and `src/layers/graphics/seam/d3d10.js`
-(15 lists for DXGI and Direct3D 10).
+(29 lists for DXGI and Direct3D 10, three of them the shader reflection's tables without
+`IUnknown`).
 
 ### `diagnostics()`
 
@@ -318,9 +320,12 @@ Per API:
   shared-handle pointer that must be null; a handful of methods return a count, a boolean or a
   float rather than an `HRESULT`.
 - **`d3d10.js`** publishes the DXGI factory, adapter, output, swap chain and device interfaces and
-  the Direct3D 10 device, resources, views, state objects, shaders and queries. Arrays of
-  interfaces arrive as pointer and count; a map allocates a guest block of the subresource's size,
-  shows it the current bytes, and the unmap reads it back.
+  the Direct3D 10 and 10.1 device, resources, views, state objects, shaders, queries, state
+  blocks, blobs and the shader reflection. The reflection's constant buffers, variables and types
+  derive from no interface: their descriptors are marked `bare`, so `com.js` lays their tables out
+  from their own first method, and since nothing can Release one, each a program looks up stays
+  published for the run. Arrays of interfaces arrive as pointer and count; a map allocates a guest
+  block of the subresource's size, shows it the current bytes, and the unmap reads it back.
 - **`vulkan.js`** is a C ABI rather than COM. Every command is placed as a trap once through the
   loader's `guest` builder, so an export's address and the address `vkGetInstanceProcAddr` answers
   are the same one, minted before the program's first instruction. The runtime decides whether a
@@ -504,7 +509,18 @@ graph (a swap chain's parent is the factory; `ResizeBuffers` fails while a back 
 leaves the description untouched). `RSSetViewports` with more viewports than the sixteen slots is
 ignored whole, and `RSGetViewports`/`RSGetScissorRects` write back the number bound and zero the
 slots past it. `render.js` keeps a host copy of every resource's bytes and replays a record onto one
-backend frame at present.
+backend frame at present. A draw opens a pass over every bound render target at its slot, or over
+the depth target alone, a clear still pending on any of them made by the pass's load; the blend
+factor and the stencil reference are set on the pass when they change; an occlusion query or
+predicate is a counter that every draw recorded while it is open adds its own GPU occlusion
+query's count to, since a WebGPU query can neither span passes nor nest. The module hands the
+device the configuration-and-adapter answer on block compression that Direct3D 8 and 9 get, the
+guest's clock for timestamps, and whether the GPU device was made with `depth-clip-control`.
+`reflection.js` reads a container's `RDEF` and `STAT` chunks for `D3D10ReflectShader`: the
+constant buffers with their variables, types and structure members (in either Shader Model 4's
+layout or the longer one a Shader Model 5 compiler announces in its `RD11` header), the bound
+resources, the signatures and the compiler's counts; a lookup that finds nothing answers one
+invalid object of its kind rather than null, as the runtime does.
 
 **OpenGL** (`src/layers/graphics/opengl/`). Reports `GL_VERSION` 1.1, vendor `Bottlify Project`,
 renderer `Bottlify OpenGL`, 25 GL extensions and 4 WGL extensions (`extensions.js`; a name in the
@@ -728,8 +744,11 @@ Refused (the program is told no):
   zero. `GetNPatchMode` returns a float in `ST(0)`, which the bridge cannot set, and is reported.
   `IDirect3DSurface9::GetDC` on a surface of any other format answers `D3DERR_INVALIDCALL` with the
   handle untouched.
-- Direct3D 10: a shader using an untranslated instruction is refused by name; a geometry shader
-  with stream output is refused; `CreateDXGIFactory1` refuses.
+- Direct3D 10: a shader using an untranslated instruction has its draws refused by name (counted in
+  `skipped.untranslatable`); a geometry shader with stream output answers `E_NOTIMPL`; a
+  multisampled resource (`CheckMultisampleQualityLevels` offers one sample only); a 10.1 device at
+  feature level 10.1 or 9.x; the effect framework (`D3D10CreateEffectFromMemory`,
+  `D3D10CreateEffectPoolFromMemory`), the compilers, the disassemblers and the preprocessor.
 - Vulkan: 84 of 149 commands, including every draw and pipeline creation; a SPIR-V module
   declaring `Geometry` or `Tessellation`; secondary command buffers; an instance whose
   `apiVersion` is out of range; features the device lacks.
@@ -752,16 +771,25 @@ Accepted and reported through `divergence`:
   stage on, counted under `cascade.noTexture` / `cascade.noCoordSet`); a draw with a vertex shader
   feeding the fixed-function pixel stage, or a shader pair the renderer could not build a pipeline
   for; a render state or transform set in the guest shadow that the device refuses.
-- Direct3D 10: wireframe fill drawn solid; depth clipping cannot be turned off; only the first of
-  several render targets is drawn into; a bound geometry shader is ignored; a blend factor other
-  than white and a stencil reference other than zero are not applied; instanced draws start at
-  instance zero; `DrawAuto` draws nothing; predication is recorded and never consulted; a
-  stream-output target is bound and never written; a query never answers; `GenerateMips` and a
-  copy out of a render target read the bytes the program last wrote, not what the GPU drew;
+- Direct3D 10: wireframe fill drawn solid; depth clipping left on by a GPU device made without
+  `depth-clip-control`; a render target of another size than the first is not drawn into; a
+  32-bit float target is drawn unblended; a bound geometry shader is ignored; per-instance data
+  stepping once every several instances steps every instance; `DrawAuto` draws nothing;
+  predication is recorded and never consulted; a stream-output target is bound and never written;
+  an occlusion query with no GPU count behind it (no device, a frame past WebGPU's 4096 queries, a
+  frame that failed) answers the samples its draws' viewports cover; a timestamp is the clock the
+  device was given, not the GPU's, and its disjoint query says `Disjoint`; `GenerateMips` without a
+  GPU filters only eight-bit four-channel formats, and it and a copy out of a render target the
+  GPU cannot copy read the bytes the program last wrote, not what the GPU drew;
   `ResolveSubresource` does nothing; `UpdateSubresource` on a non-default resource; a copy between
-  resources of different kinds, into an immutable resource, or with itself; a shader resource view
-  over a buffer; a text-filtering sampler used as a point sampler; a texture format the device
-  cannot back.
+  resources of different kinds, extents or format families, into an immutable resource, or with
+  itself; bytes given to a depth texture are kept but not uploaded; a buffer view in a format with
+  no decoding, or a texture view bound where the shader reads a buffer, reads zeros; a texture of
+  another sample type than the shader reads reads as empty; a sampler of the other kind,
+  comparison or not, is replaced by a point sampler of the kind declared; a text-filtering sampler
+  used as a point sampler; a view of a typeless texture in a format WebGPU cannot cast it to reads
+  it in one it can; a view into a slice of a 3D texture draws into its first slice; a texture
+  format the device cannot back.
 - Vulkan: more than one subpass, more than one colour attachment, a render area smaller than the
   framebuffer (the whole attachment is cleared), a viewport or scissor other than the first, a
   present of more than one swapchain, and every unimplemented command on first call.
