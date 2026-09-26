@@ -1174,6 +1174,20 @@ export const win32Module = {
                 // beside it.
                 trackMouseEvent: request=>
                     libraries['USER32.dll'].TrackMouseEvent.handler([request]),
+                // A property sheet is a dialog made with user32's own calls,
+                // as a program would make one, around a dialog procedure the
+                // bridge gives an address.
+                user32: name=>libraries['USER32.dll'][name],
+                allocate: bytes=>heap.allocate(bytes),
+                release: address=>heap.free(address),
+                call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                callerThread: ()=>bridge.callerThread(),
+                procedure: (name, handler)=>bridge.register(`<${name}>`,
+                    { argBytes: 16, handler }),
+                findResource: (instance, type, name)=>
+                    modules.findResource?.(instance, type, name) ?? null,
+                moduleBase: instance=>modules.moduleBase?.(instance) ?? 0,
+                loadString: (instance, id)=>modules.loadString?.(instance, id) ?? null,
             }),
 
             'SHELL32.dll': createShellFunctions({
