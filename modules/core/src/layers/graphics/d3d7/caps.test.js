@@ -9,7 +9,8 @@ import assert from 'node:assert/strict';
 import { DEVICE_DESCRIPTIONS } from './caps.js';
 import {
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DPRASTERCAPS_FOGRANGE,
-    D3DPRASTERCAPS_ZTEST, D3DTOP, DEVICE_IDS, textureOpCaps,
+    D3DPRASTERCAPS_ZTEST, D3DPTFILTERCAPS_MIPFLINEAR, D3DPTFILTERCAPS_MIPFPOINT, D3DTOP,
+    DEVICE_IDS, textureOpCaps,
 } from './constants.js';
 
 test('the three devices differ only in where the work is said to happen', ()=>{
@@ -36,6 +37,9 @@ test('a capability claimed is one the renderer draws', ()=>{
     assert.equal(caps.triCaps.rasterCaps, D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGRANGE,
         'the depth test and range fog');
     assert.equal(caps.lineCaps.rasterCaps, caps.triCaps.rasterCaps);
+    const mipFilters = D3DPTFILTERCAPS_MIPFPOINT | D3DPTFILTERCAPS_MIPFLINEAR;
+    assert.equal(caps.triCaps.textureFilterCaps & mipFilters, mipFilters,
+        'a DirectDraw mip chain is sampled level by level');
     // Bump environment mapping is operation 22; nothing here draws it.
     assert.equal(caps.textureOpCaps & textureOpCaps([22]), 0);
     assert.notEqual(caps.textureOpCaps & textureOpCaps([D3DTOP.MODULATE]), 0);

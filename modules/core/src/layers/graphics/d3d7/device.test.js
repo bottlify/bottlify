@@ -27,11 +27,12 @@ import { D3DCLEAR, D3DPT, D3DTA, D3DTOP, D3DTSS } from '../d3d8/constants.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { UNIFORM_AT } from '../d3d8/render.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import {
-    DDPF_ALPHAPIXELS, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_SYSTEMMEMORY,
-    DDSCAPS_TEXTURE, DDSCAPS_ZBUFFER, DDSCL_NORMAL, DDSD_CAPS, DDSD_HEIGHT, DDSD_PIXELFORMAT,
-    DDSD_WIDTH, DDSD_ZBUFFERBITDEPTH,
+    DDPF_ALPHAPIXELS, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_COMPLEX, DDSCAPS_MIPMAP,
+    DDSCAPS_OFFSCREENPLAIN, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_ZBUFFER, DDSCL_NORMAL,
+    DDSD_CAPS, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DDSD_ZBUFFERBITDEPTH,
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
@@ -406,6 +407,13 @@ test('ValidateDevice refuses a stage the combiner does not draw', ()=>{
     const refused = {};
     assert.equal(device.ValidateDevice(refused), 0x8876081a, 'D3DERR_UNSUPPORTEDCOLORARG');
     assert.equal(refused.passes, undefined);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TEXTURE), D3D_OK);
+
+    // Read in this version's numbering: D3DTFP_LINEAR is drawn, D3DTFG_FLATCUBIC is not.
+    assert.equal(device.SetTextureStageState(0, D3DTSS.MIPFILTER, 3), D3D_OK);
+    assert.equal(device.ValidateDevice(out), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.MAGFILTER, 3), D3D_OK);
+    assert.equal(device.ValidateDevice(refused), 0x88760822, 'D3DERR_UNSUPPORTEDTEXTUREFILTER');
 
     releaseAll(f);
 });
@@ -752,6 +760,99 @@ test('recorded: a texture goes up once, and again only after the program wrote i
     assert.equal(target.release(), 0);
     assert.equal(root.release('IDirectDraw7'), 0);
     assert.ok(root.destroyed);
+});
+
+test('recorded: every level of a DirectDraw mip chain goes up, each when it was written', async()=>{
+    const f = recorded();
+    const { device, gpu, root, ram, target } = f;
+    const made = root.createSurface({
+        flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | DDSD_MIPMAPCOUNT,
+        caps: DDSCAPS_TEXTURE | DDSCAPS_COMPLEX | DDSCAPS_MIPMAP,
+        width: 4, height: 4, mipMapCount: 3, pixelFormat: ARGB32,
+    });
+    assert.equal(made.hr, D3D_OK);
+    const texture = /** @type {any} */ (made.surface);
+    const levels = [texture, texture.mipNext, texture.mipNext.mipNext];
+    levels.forEach((level, index)=>{
+        ram.fill(index + 1, level.buffer, level.buffer + level.pitch * level.height);
+    });
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.SELECTARG1), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TEXTURE), D3D_OK);
+    const quad = vertices([[0, 0, 0, 0], [8, 0, 1, 0], [0, 8, 0, 1], [8, 8, 1, 1]], true);
+    const draw = async()=>{
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL_TEX, quad, 4), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        device.present(target.buffer);
+        await device.idle();
+    };
+    const written = ()=>gpu.of('writeTexture').map((/** @type {any} */ call)=>
+        [call.destination.mipLevel ?? 0, call.bytes[0], call.bytes.length]);
+
+    await draw();
+    const chain = gpu.of('createTexture').find((/** @type {any} */ call)=>
+        call.descriptor.size.width === 4 && call.descriptor.size.height === 4);
+    assert.equal(chain?.descriptor.mipLevelCount, 3);
+    assert.deepEqual(written(), [[0, 1, 64], [1, 2, 16], [2, 3, 4]], 'each level, its own bytes');
+
+    ram.fill(9, levels[1].buffer, levels[1].buffer + 16);
+    assert.equal(levels[1].lock(null).hr, D3D_OK);
+    assert.equal(levels[1].unlock(null), D3D_OK);
+    await draw();
+    assert.deepEqual(written().slice(3), [[1, 9, 16]], 'a level written goes up alone');
+
+    assert.equal(device.SetTexture(0, null), D3D_OK);
+    assert.equal(texture.release(), 0);
+    assert.equal(device.release(), 0);
+    assert.equal(target.release(), 0);
+    assert.equal(root.release('IDirectDraw7'), 0);
+    assert.ok(root.destroyed);
+});
+
+test('recorded: Direct3D 7 filters are its own numbering, D3DTFP_NONE the mip default', async()=>{
+    // d3dtypes.h: D3DTFP_NONE is 1, D3DTFP_POINT 2 and D3DTFP_LINEAR 3, and
+    // D3DTFG_ANISOTROPIC 5, where Direct3D 8 numbers them 0, 1, 2 and 3.
+    const f = recorded();
+    const { device, gpu, root, target } = f;
+    /** @type {{ value?: number }} */
+    const out = {};
+    assert.equal(device.GetTextureStageState(0, D3DTSS.MIPFILTER, out), D3D_OK);
+    assert.equal(out.value, 1, 'D3DTFP_NONE');
+    const texture = surface(root, {
+        caps: DDSCAPS_TEXTURE | DDSCAPS_OFFSCREENPLAIN, width: 2, height: 2, pixelFormat: ARGB32,
+    });
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    const quad = vertices([[0, 0, 0, 0], [8, 0, 1, 0], [0, 8, 0, 1], [8, 8, 1, 1]], true);
+    /** @param {number} mip @param {number} mag */
+    const flagsFor = async(mip, mag)=>{
+        assert.equal(device.SetTextureStageState(0, D3DTSS.MIPFILTER, mip), D3D_OK);
+        assert.equal(device.SetTextureStageState(0, D3DTSS.MAGFILTER, mag), D3D_OK);
+        assert.equal(device.GetTextureStageState(0, D3DTSS.MIPFILTER, out), D3D_OK);
+        assert.equal(out.value, mip, 'read back as it was set');
+        assert.equal(device.GetTextureStageState(0, D3DTSS.MAGFILTER, out), D3D_OK);
+        assert.equal(out.value, mag);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL_TEX, quad, 4), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        device.present(target.buffer);
+        await device.idle();
+        const writes = gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
+            call.buffer.descriptor.label.startsWith('uniforms'));
+        const last = writes[writes.length - 1].bytes;
+        const flags = new DataView(last.buffer, last.byteOffset, last.byteLength)
+            .getUint32(UNIFORM_AT.stage0 * 4, true);
+        return { mipMode: (flags >> 6) & 3, magPoint: (flags >> 4) & 1 };
+    };
+    assert.deepEqual(await flagsFor(1, 1), { mipMode: 0, magPoint: 1 }, 'none, point');
+    assert.deepEqual(await flagsFor(2, 2), { mipMode: 1, magPoint: 0 }, 'point, linear');
+    assert.deepEqual(await flagsFor(3, 5), { mipMode: 2, magPoint: 0 }, 'linear, anisotropic');
+
+    assert.equal(device.SetTexture(0, null), D3D_OK);
+    assert.equal(texture.release(), 0);
+    assert.equal(device.release(), 0);
+    assert.equal(target.release(), 0);
+    assert.equal(root.release('IDirectDraw7'), 0);
 });
 
 test('recorded: indices by pointer and vertices in a buffer draw as one indexed call', async()=>{

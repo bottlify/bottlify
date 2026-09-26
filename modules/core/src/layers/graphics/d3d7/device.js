@@ -58,6 +58,27 @@ import {
 } from '../ddraw/constants.js';
 
 /**
+ * Direct3D 7 numbers two of its filters apart from Direct3D 8, whose
+ * numbering the stage states are kept in so the renderer reads them as they
+ * are: D3DTFP counts from one where D3DTEXF counts from zero, and D3DTFG puts
+ * the two cubic filters before anisotropic (d3dtypes.h). Each mapping is one
+ * to one over the dword, so a value no header names reads back as it was set.
+ *
+ * @type {Readonly<Record<number, { stored: (value: number) => number,
+ *   read: (value: number) => number }>>}
+ */
+const FILTER_NUMBERING = Object.freeze({
+    [D3DTSS.MAGFILTER]: {
+        stored: value=>[value, value, value, 4, 5, 3][value] ?? value,
+        read: value=>[value, value, value, 5, 3, 4][value] ?? value,
+    },
+    [D3DTSS.MIPFILTER]: {
+        stored: value=>(value - 1) >>> 0,
+        read: value=>(value + 1) >>> 0,
+    },
+});
+
+/**
  * @typedef {import('../d3d8/device.js').Light} Light
  * @typedef {import('../d3d8/device.js').Material} Material
  * @typedef {import('../d3d8/device.js').Viewport} Viewport
@@ -470,12 +491,27 @@ export function createDirect3D7(ddraw, services = {}){
             {
                 return null;
             }
+            // A DirectDraw mip chain is a surface per level, each with pixels
+            // and a uniqueness value of its own.
+            /** @type {any[]} */
+            const levels = [];
+            for (let level = surface; level && levels.length < Math.max(1, surface.mipMapCount);
+                level = level.mipNext)
+            {
+                levels.push(level);
+            }
+            const views = levels.map(level=>({ base: level.buffer, release: ()=>0 }));
             const adapter = {
-                seen: -1,
+                levels,
+                seen: levels.map(()=>-1),
                 /** @param {number} level @param {{ surface?: any }} out */
                 GetSurfaceLevel(level, out){
-                    void level;
-                    out.surface = { base: surface.buffer, release: ()=>0 };
+                    if (!views[level])
+                    {
+                        return DDERR_INVALIDPARAMS;
+                    }
+                    views[level].base = levels[level].buffer;
+                    out.surface = views[level];
                     return D3D_OK;
                 },
                 /** Replaced by the renderer with the one that marks the copy stale. */
@@ -484,7 +520,7 @@ export function createDirect3D7(ddraw, services = {}){
                 },
             };
             renderer.trackTexture(adapter,
-                { width: surface.width, height: surface.height, format });
+                { width: surface.width, height: surface.height, format, levels: levels.length });
             textureAdapters.set(surface, adapter);
             return adapter;
         };
@@ -510,12 +546,14 @@ export function createDirect3D7(ddraw, services = {}){
             {
                 return null;
             }
-            const now = surface.uniquenessValue();
-            if (now !== adapter.seen)
-            {
-                adapter.seen = now;
-                adapter.UnlockRect(0);
-            }
+            adapter.levels.forEach((/** @type {any} */ level, /** @type {number} */ index)=>{
+                const now = level.uniquenessValue();
+                if (now !== adapter.seen[index])
+                {
+                    adapter.seen[index] = now;
+                    adapter.UnlockRect(index);
+                }
+            });
             return adapter;
         };
 
@@ -1035,8 +1073,9 @@ export function createDirect3D7(ddraw, services = {}){
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                states.set(type, value >>> 0);
-                record('stageStates', (stage << 8) | type, value >>> 0);
+                const stored = FILTER_NUMBERING[type]?.stored(value >>> 0) ?? value >>> 0;
+                states.set(type, stored);
+                record('stageStates', (stage << 8) | type, stored);
                 return D3D_OK;
             },
 
@@ -1051,18 +1090,18 @@ export function createDirect3D7(ddraw, services = {}){
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                out.value = states.get(type);
+                const stored = /** @type {number} */ (states.get(type));
+                out.value = FILTER_NUMBERING[type]?.read(stored) ?? stored;
                 return D3D_OK;
             },
 
             /**
-             * One pass when the combiner draws the cascade. The filters are
-             * this version's own numbering, which the check does not read.
+             * One pass when the combiner draws the cascade.
              *
              * @param {{ passes?: number }} out  Written only on success.
              */
             ValidateDevice(out){
-                const hr = validateStages(stageStatesFor, STAGE_COUNT, { filters: false });
+                const hr = validateStages(stageStatesFor, STAGE_COUNT);
                 if (hr === D3D_OK)
                 {
                     out.passes = 1;
