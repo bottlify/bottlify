@@ -2751,6 +2751,20 @@ export function createGdiFunctions(host){
         table: aliased,
 
         /**
+         * A bitmap's size, or null for a handle that is not a bitmap: what an
+         * image list divides a strip by to count the images in it.
+         *
+         * @param {number} handle
+         * @returns {{ width: number, height: number } | null}
+         */
+        bitmapSize(handle){
+            const record = objects.get(handle >>> 0);
+            return record && record.type === 'bitmap'
+                ? { width: record.attributes.width, height: record.attributes.height }
+                : null;
+        },
+
+        /**
          * The rectangle a region object holds, or null for a handle that is
          * not a region: what user32 reads when a program names an area to
          * repaint by a region rather than by a rectangle.
