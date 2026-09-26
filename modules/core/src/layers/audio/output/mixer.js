@@ -8,6 +8,7 @@ import { createRing } from './ring.js';
 import {
     SLOTS, SLOT_BYTES, PCM_MASK, SLOT_HEADER_INT32, GLOBAL_HEADER_INT32, TABLE_BYTES,
     STATE, GENERATION, RATE, CHANNELS, BITS, GAIN, PAUSED, WRITTEN, READ, DROP_TO, MIXED_FRAMES,
+    LEFT_CUT, RIGHT_CUT,
     STATE_FREE, STATE_OPEN, STATE_CLOSING, GAIN_SCALE,
     OUTPUT_RATE, BLOCKS, STARVED_BLOCKS, STARVED_FRAMES,
     slotHeaderOffset, slotPcmOffset,
@@ -23,7 +24,7 @@ import {
  *
  * Two backends share one surface (`open`, `pump`, `consumed`, `diagnostics`,
  * a track's `write`, `played`, `playedBytes`, `pending`, `reset`, `close`,
- * `gain`, `paused`), chosen by `shared`:
+ * `gain`, `balance`, `paused`), chosen by `shared`:
  *
  * - Without it (the default, and what every caller that does not ask
  *   otherwise gets): `createEngineMixer`, unchanged from before this file grew
@@ -216,6 +217,8 @@ function createEngineMixer(
                 /** Of those, the ones the device has already played. */
                 heard: 0,
                 gain: 1,
+                /** Each side's share of `gain`, left then right: a pan. */
+                balance: [1, 1],
                 paused: false,
 
                 /**
@@ -422,9 +425,12 @@ function mixInto(block, track, frames){
         const take = Math.min(available, frames - at);
         const from = track.offset * OUTPUT_CHANNELS;
         const to = at * OUTPUT_CHANNELS;
-        for (let sample = 0; sample < take * OUTPUT_CHANNELS; sample++)
+        const left = track.gain * track.balance[0];
+        const right = track.gain * track.balance[1];
+        for (let sample = 0; sample < take * OUTPUT_CHANNELS; sample += OUTPUT_CHANNELS)
         {
-            block[to + sample] += head[from + sample] * track.gain;
+            block[to + sample] += head[from + sample] * left;
+            block[to + sample + 1] += head[from + sample + 1] * right;
         }
         at += take;
         track.offset += take;
@@ -698,6 +704,8 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
         Atomics.store(header, CHANNELS, format.channels);
         Atomics.store(header, BITS, format.bitsPerSample);
         Atomics.store(header, GAIN, GAIN_SCALE);
+        Atomics.store(header, LEFT_CUT, 0);
+        Atomics.store(header, RIGHT_CUT, 0);
         Atomics.store(header, PAUSED, 0);
         Atomics.store(header, WRITTEN, 0);
         Atomics.store(header, READ, 0);
@@ -728,6 +736,15 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
             },
             set gain(value){
                 Atomics.store(header, GAIN, Math.round(value * GAIN_SCALE));
+            },
+            /** @returns {number[]} */
+            get balance(){
+                return [1 - Atomics.load(header, LEFT_CUT) / GAIN_SCALE,
+                    1 - Atomics.load(header, RIGHT_CUT) / GAIN_SCALE];
+            },
+            set balance([left, right]){
+                Atomics.store(header, LEFT_CUT, Math.round((1 - left) * GAIN_SCALE));
+                Atomics.store(header, RIGHT_CUT, Math.round((1 - right) * GAIN_SCALE));
             },
             get paused(){
                 return Atomics.load(header, PAUSED) !== 0;
@@ -854,6 +871,8 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
             set gain(value){
                 localGain = value;
             },
+            /** @type {number[]} */
+            balance: [1, 1],
             get paused(){
                 return localPaused;
             },

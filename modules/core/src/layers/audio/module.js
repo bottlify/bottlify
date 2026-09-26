@@ -280,6 +280,7 @@ export const audioModule = {
                     behind++;
                 }
                 track.gain = buffer.gain;
+                track.balance = buffer.balance;
                 for (const range of ranges)
                 {
                     fedBytes += range.bytes;

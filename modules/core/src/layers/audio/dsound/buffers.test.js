@@ -513,6 +513,25 @@ test('volume is decibels, and a gain is what a mixer can use', ()=>{
     assert.equal(sound.gain, 0, 'and the floor is silence, not almost silence');
 });
 
+test('pan takes decibels off the far side and leaves the near one whole', ()=>{
+    // IDirectSoundBuffer::SetPan: hundredths of a decibel, like volume, off the
+    // side the sound is panned away from; DSBPAN_LEFT leaves the right silent.
+    const { sound } = buffer();
+    assert.deepEqual(sound.balance, [1, 1], 'centred, both sides at full');
+
+    sound.setPan(DSBPAN_LEFT);
+    assert.deepEqual(sound.balance, [1, 0]);
+    sound.setPan(DSBPAN_RIGHT);
+    assert.deepEqual(sound.balance, [0, 1]);
+
+    sound.setPan(2000);
+    assert.ok(Math.abs(sound.balance[0] - 0.1) < 1e-9, 'twenty decibels off the left');
+    assert.equal(sound.balance[1], 1);
+    sound.setPan(-600);
+    assert.equal(sound.balance[0], 1);
+    assert.ok(Math.abs(sound.balance[1] - 0.5) < 0.01, 'six off the right');
+});
+
 test('a one-shot that finishes before it is ever drained still hands over its sound', ()=>{
     // A menu click is short enough to play out between two fills of the ring.
     // Draining sees the cursor back at zero, and the whole sound must not be

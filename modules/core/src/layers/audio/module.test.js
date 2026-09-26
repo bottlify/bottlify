@@ -264,6 +264,39 @@ test('a silenced buffer is mixed at its own gain, not at full', async()=>{
         'DSBVOLUME_MIN is silence, and the volume is decibels rather than a fraction');
 });
 
+test('a buffer panned hard left is heard on the left alone', async()=>{
+    const f = await playing();
+    f.call(f.buffer, 'SetPan', [-10000]);
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.advance(50);
+    f.api.pump();
+
+    const block = new Float32Array(64 * 2);
+    const frames = f.api.output().ring.read(block);
+    assert.ok(frames > 0);
+    for (let frame = 0; frame < frames; frame++)
+    {
+        assert.ok(block[frame * 2] > 0, 'the left side plays');
+        assert.equal(block[frame * 2 + 1], 0, 'DSBPAN_LEFT leaves the right silent');
+    }
+});
+
+test('with shared memory, a buffer\'s pan reaches its slot', async()=>{
+    const f = await playing({ shared: true });
+    f.call(f.buffer, 'SetPan', [10000]);
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.advance(50);
+    f.api.pump();
+
+    const table = f.api.output().table;
+    const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+    const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
+    const block = new Float32Array(2 * 2);
+    resampleInto({ block, blockFrames: 2, header, pcm, outputRate: 48000, seam: createSeam() });
+    assert.equal(block[0], 0, 'DSBPAN_RIGHT leaves the left silent');
+    assert.ok(block[1] > 0);
+});
+
 test('the mixer asks for sound itself, so whoever pumps it need not know how', async()=>{
     // Whoever drives the machine reaches the mixer directly rather than through
     // this module, so a feed hung anywhere else here is never called at all --

@@ -128,6 +128,20 @@ test('a mono source is heard from both sides', ()=>{
     assert.ok(heard[0] > 0.49);
 });
 
+test('a track\'s balance scales each side on its own, on top of its gain', ()=>{
+    const mixer = createMixer();
+    const track = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
+    track.gain = 0.5;
+    track.balance = [1, 0.25];
+
+    track.write(pcm16([16384]));
+    mixer.pump();
+
+    const heard = drain(mixer, 1);
+    assert.ok(Math.abs(heard[0] - 0.25) < 1e-6, `left ${heard[0]}`);
+    assert.ok(Math.abs(heard[1] - 0.0625) < 1e-6, `right ${heard[1]}`);
+});
+
 test('a slower source is resampled to the output rate', ()=>{
     const mixer = createMixer();
     const track = mixer.open({ sampleRate: 24000, channels: 2, bitsPerSample: 16 });

@@ -509,6 +509,21 @@ export function createSoundBuffer(
             return pan;
         },
 
+        /**
+         * That pan as a multiplier for each side, left then right.
+         *
+         * Hundredths of a decibel like volume, taken off the side the sound is
+         * panned away from while the other stays whole -- not a crossfade
+         * between the two. The bound is silence on the far side, as the floor
+         * of volume is.
+         *
+         * @returns {[number, number]}
+         */
+        get balance(){
+            const keep = (/** @type {number} */ cut)=>(cut >= DSBPAN_RIGHT ? 0 : 10 ** (-cut / 2000));
+            return [keep(Math.max(0, pan)), keep(Math.max(0, -pan))];
+        },
+
         /** @param {{ offset: number, event: number }[]} positions */
         setNotifications(positions){
             notifications = positions.map(entry=>({ ...entry }));

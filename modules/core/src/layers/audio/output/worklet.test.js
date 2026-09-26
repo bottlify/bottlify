@@ -96,6 +96,28 @@ test('two tracks at different rates and gains come out summed', ()=>{
     assert.equal(music.playedBytes(), 4);
 });
 
+test('a track\'s balance reaches the audio thread, one side at a time', ()=>{
+    const mixer = createMixer({ shared: true, sampleRate: 48000 });
+    const left = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
+    const right = mixer.open({ sampleRate: 48000, channels: 2, bitsPerSample: 16 });
+    left.balance = [1, 0];
+    right.gain = 0.5;
+    right.balance = [0.5, 1];
+    assert.deepEqual(left.balance, [1, 0]);
+    left.write(pcm16([16384]));
+    right.write(pcm16([16384, 16384]));
+
+    const Processor = loadWorkletClass();
+    const processor = new Processor({ processorOptions: { table: mixer.table, channels: 2 } });
+    const outputs = [outputBlock(1)];
+    processor.process([], outputs);
+
+    // Left: 0.5 from the first track, 0.125 from the second; right: the
+    // second track's alone, at its gain.
+    assert.ok(Math.abs(outputs[0][0][0] - 0.625) < 1e-6, `left[0] = ${outputs[0][0][0]}`);
+    assert.ok(Math.abs(outputs[0][1][0] - 0.25) < 1e-6, `right[0] = ${outputs[0][1][0]}`);
+});
+
 test('a silent block counts STARVED_BLOCKS and STARVED_FRAMES', ()=>{
     const mixer = createMixer({ shared: true, sampleRate: 48000 });
     mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 }); // nothing written

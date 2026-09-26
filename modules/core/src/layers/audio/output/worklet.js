@@ -37,7 +37,7 @@ const SLOT_BYTES = 65536;
 const PCM_MASK = SLOT_BYTES - 1;
 
 /**
- * Ints in one slot's header. Eleven are named below; the rest are unused
+ * Ints in one slot's header. Thirteen are named below; the rest are unused
  * padding that rounds the header to 64 bytes -- one cache line -- so two
  * adjacent slots' headers, written by different threads, never share one.
  */
@@ -63,6 +63,11 @@ const READ = 8;
 const DROP_TO = 9;
 /** Output frames, reader-owned: this slot's contribution so far. */
 const MIXED_FRAMES = 10;
+/** What each side loses, ×`GAIN_SCALE`, on top of `GAIN`: a sound panned to
+ * one side. Stored as the loss rather than what is kept, so a header written
+ * without them -- zeroed -- plays both sides whole. */
+const LEFT_CUT = 11;
+const RIGHT_CUT = 12;
 
 const STATE_FREE = 0;
 const STATE_OPEN = 1;
@@ -165,6 +170,8 @@ function resampleInto({ block, blockFrames, header, pcm, outputRate, seam }){
     const channels = Atomics.load(header, CHANNELS);
     const bits = Atomics.load(header, BITS);
     const gain = Atomics.load(header, GAIN) / GAIN_SCALE;
+    const leftGain = gain * (1 - Atomics.load(header, LEFT_CUT) / GAIN_SCALE);
+    const rightGain = gain * (1 - Atomics.load(header, RIGHT_CUT) / GAIN_SCALE);
     const bytesPerSample = bits === 8 ? 1 : 2;
     const stride = bytesPerSample * channels;
 
@@ -216,8 +223,8 @@ function resampleInto({ block, blockFrames, header, pcm, outputRate, seam }){
         {
             for (let channel = 0; channel < 2; channel++)
             {
-                block[frame * 2 + channel] +=
-                    readSample(frame, Math.min(channel, channels - 1)) * gain;
+                block[frame * 2 + channel] += readSample(frame, Math.min(channel, channels - 1))
+                    * (channel === 0 ? leftGain : rightGain);
             }
         }
         produced = consumedFrames;
@@ -238,7 +245,7 @@ function resampleInto({ block, blockFrames, header, pcm, outputRate, seam }){
                 const which = Math.min(channel, channels - 1);
                 block[frame * 2 + channel] +=
                     (readSample(left, which) * (1 - blend) + readSample(left + 1, which) * blend)
-                    * gain;
+                    * (channel === 0 ? leftGain : rightGain);
             }
             pos += step;
             frame++;
