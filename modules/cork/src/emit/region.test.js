@@ -7,7 +7,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../testing/machine.js';
-import { Exit, deadFlagPass, liveFlagsOut, planStructure } from './region.js';
+import { formRegion } from '../region.js';
+import { ModuleBuilder } from '../wasm/encoder.js';
+import { ownLayout } from '../runtime/layout.js';
+import {
+    Exit, RegionEmitter, deadFlagPass, emitRegion, liveFlagsOut, planStructure, prepareModule,
+} from './region.js';
 
 const CODE = 0x1000;
 const DATA = 0x3000;
@@ -842,6 +847,33 @@ test('a loop onto itself inside another loop has an entry, through the head arou
     m.setReg('edx', 2);
     assert.equal(unit.run(I, 1000).kind, Exit.HALT);
     assert.deepEqual([m.reg('eax'), m.reg('ecx'), m.reg('edx')], [6, 0, 0]);
+});
+
+test('the function of a region\'s copies, planned from the region\'s own planning, is the one'
+    + ' planned afresh', ()=>{
+    const layout = ownLayout({ ramSize: 1 << 22 });
+    const features = { simd: true, tailCalls: true, defaultNaNNegative: false };
+    // mov ecx, 5; L: fld1; fstp st0; test cl, 1; jz S; inc edx; S: dec ecx; jnz L; hlt
+    const X87_LOOP = [0xb9, 5, 0, 0, 0, 0xd9, 0xe8, 0xdd, 0xd8, 0xf6, 0xc1, 0x01, 0x74, 0x01,
+        0x42, 0x49, 0x75, 0xf3, 0xf4];
+    for (const program of [LOOP, NESTED, X87_LOOP])
+    {
+        const region = formRegion(address=>program[address - CODE] ?? 0xf4, CODE);
+        /** @param {(context: ReturnType<typeof prepareModule>) => number} emit */
+        const functionOf = emit=>{
+            const m = new ModuleBuilder();
+            const index = emit(prepareModule(m, layout, features, {},
+                { hash: true, resume: true }));
+            const { locals, body, hints } = m.functions[index - m.importedFunctions];
+            return { locals, body: [...body], hints };
+        };
+        const shared = functionOf(context=>emitRegion(context, region,
+            { entryTop: 0, checked: false }).copiesIndex);
+        const fresh = functionOf(context=>new RegionEmitter(context, region,
+            { entryTop: 0, checked: false, copyFunction: true }).emit().functionIndex);
+        assert.ok(fresh.body.length > 0);
+        assert.deepEqual(shared, fresh, `the copies of ${program.length} bytes of code`);
+    }
 });
 
 test('a nested loop\'s head is entered through the head of the loop around it', ()=>{

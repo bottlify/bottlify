@@ -52,8 +52,8 @@ import {
 } from './flags.js';
 import { emitInstruction } from './integer.js';
 import {
-    addUndoHelper, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock, planLoop,
-    planRegion,
+    addUndoHelper, copyPlan, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock,
+    planLoop, planRegion,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
 import { Tables, blockSlot } from '../runtime/layout.js';
@@ -61,7 +61,7 @@ import { ANY_TOP } from '../runtime/entries.js';
 import { inlineReturns } from '../region.js';
 import { fpremStatus, fpremValue } from '../ir-x87.js';
 import {
-    floatCondition, isX87, prepareX87, regionHasMmx, sameState, x87BlockEnd, x87BlockStart,
+    analyseX87, floatCondition, isX87, prepareX87, sameState, x87BlockEnd, x87BlockStart,
     x87Edge, x87EntryCheck, x87Epilogue, x87LoadRegisters, x87Normalise,
     x87Prologue, x87StoreRegisters,
 } from './x87.js';
@@ -663,17 +663,36 @@ export function emitRegion(context, region, options = {}){
     return emitter.emit();
 }
 
+/**
+ * What a region's function plans of the region before it emits, a pure
+ * function of the formed region, the module's options and the x87 top and
+ * `checked` it is compiled for -- so the same for the function of its copies,
+ * which takes it (`emitCopies`). Nothing of it is written while emitting but
+ * the access plan's `used` marks, which the copies take a copy of.
+ *
+ * @typedef {Object} RegionPlanning
+ * @property {Map<number, number[]>} returns  by ret block, the return addresses it jumps to
+ * @property {ReturnType<typeof planStructure> | null} structure
+ * @property {import('../region.js').Region} region  in its emitting order
+ * @property {import('./x87.js').X87Analysis} x87
+ * @property {number[]} flagsOut  the flags live at each block's end
+ * @property {import('./memory.js').RegionPlan | null} memoryPlan  the access groups
+ */
+
 /** The state the emitter keeps while writing one function. */
 export class RegionEmitter {
     /**
      * @param {ModuleContext} context
      * @param {import('../region.js').Region} region
      * @param {{ entryTop?: number, checked?: boolean, copies?: boolean,
-     *     copyFunction?: boolean }} [options]  copies: as `emitRegion` takes it; copyFunction:
-     *     this is the function of a structured region's copies (`emitCopies`)
+     *     copyFunction?: boolean, planned?: RegionPlanning | null }} [options]  copies: as
+     *     `emitRegion` takes it; copyFunction: this is the function of a structured region's
+     *     copies (`emitCopies`); planned: what the region's own function planned of it, which
+     *     the function of its copies takes rather than plan it again
      */
     constructor(context, region,
-        { entryTop = 0, checked = false, copies = true, copyFunction = false } = {})
+        { entryTop = 0, checked = false, copies = true, copyFunction = false,
+            planned = null } = {})
     {
         this.context = context;
         /** The region as formed, and the options, for the function of its copies. */
@@ -683,14 +702,21 @@ export class RegionEmitter {
         this.layout = context.layout;
         /** Where the layout keeps the flag record between regions, or -1. */
         this.flagRecord = context.layout.flagRecord ?? -1;
+        /** What the function of the region's copies takes of this one's planning. */
+        this.planned = planned;
         /** By ret block: the return addresses it jumps to rather than leaves by. */
-        this.returns = inlineReturns(region);
+        this.returns = planned?.returns ?? inlineReturns(region);
         /** The emitting order and its loops, in a structured region (`planStructure`). */
-        this.structure = context.flat === true ? null : planStructure(region, this.returns);
+        this.structure = planned !== null ? planned.structure
+            : context.flat === true ? null : planStructure(region, this.returns);
         // A structured region's blocks in the order they are emitted, which
         // is their labels' order too.
-        this.region = this.structure === null || this.structure.order.every((at, k)=>at === k)
-            ? region : { ...region, blocks: this.structure.order.map(at=>region.blocks[at]) };
+        this.region = planned?.region ?? (this.structure === null
+            || this.structure.order.every((at, k)=>at === k)
+            ? region : { ...region, blocks: this.structure.order.map(at=>region.blocks[at]) });
+        /** The planning of the region's x87 (`analyseX87`). */
+        this.x87Plan = planned !== null ? planned.x87
+            : analyseX87(this.region, context.leaveOut, entryTop, checked);
         // Room for what a region's code comes to, a good sixteen bytes of wasm
         // for each of its bytes, rather than doubling up to it.
         this.b = new Body(Math.min(1 << 16, 2 ** Math.ceil(Math.log2(Math.max(64,
@@ -860,10 +886,7 @@ export class RegionEmitter {
         // class moves the other's, and a register only one class touches is
         // still written back in the form the other left it. Allocate all eight
         // mm locals there; elsewhere only the operands'.
-        const mixed = context.features.simd
-            && !context.leaveOut.has('x87')
-            && region.blocks.some(block=>block.instructions.some(isX87))
-            && regionHasMmx(region, context.leaveOut);
+        const mixed = context.features.simd && this.x87Plan !== null && this.x87Plan.hasMmx;
         if (context.features.simd)
         {
             this.localTypes.push(ValType.v128, ValType.v128, ValType.v128);
@@ -908,7 +931,7 @@ export class RegionEmitter {
             }
         }
         /** The x87 emission state: the tracker's states per block and the locals. */
-        this.x87 = prepareX87(this, entryTop, checked);
+        this.x87 = prepareX87(this, entryTop, checked, this.x87Plan);
         /**
          * Where the registers' loads and stores go, filled once the body is
          * written and the locals it uses are known (`fillDeferred`): the
@@ -956,9 +979,24 @@ export class RegionEmitter {
     /** @returns {Translation} */
     emit(){
         const { b } = this;
+        const blocks = this.region.blocks;
+        const flat = this.structure === null;
+        const { planned } = this;
+        const flagsOut = planned?.flagsOut
+            ?? liveFlagsOut(blocks, this.labels, this.context.precise === true);
+        // The other executor's code table in a hybrid layout is a second
+        // thing a store is noted against: that layout tests each access. A
+        // jump back carries windows only through the flat dispatch; a block
+        // the x87 plan cuts runs nothing to take them for.
+        const memoryPlan = planned !== null ? planned.memoryPlan
+            : this.layout.codePages < 0
+                ? planRegion(blocks, { entry: this.region.entry, backward: flat,
+                    heads: new Set([...this.loopEnds.keys(), ...this.x87.cut]),
+                    returns: this.returns })
+                : null;
         if (this.copies.length > 0 && !this.copyFunction)
         {
-            this.emitCopies();
+            this.emitCopies(flagsOut, memoryPlan);
         }
         this.prologue();
         this.open('out', EMPTY);
@@ -967,19 +1005,9 @@ export class RegionEmitter {
             x87EntryCheck(this);
         }
         this.openLoop('dispatch');
-        const blocks = this.region.blocks;
-        const flat = this.structure === null;
         this.flowsInto = null;
-        this.flagsOut = liveFlagsOut(blocks, this.labels, this.context.precise === true);
-        // The other executor's code table in a hybrid layout is a second
-        // thing a store is noted against: that layout tests each access. A
-        // jump back carries windows only through the flat dispatch; a block
-        // the x87 plan cuts runs nothing to take them for.
-        this.memoryPlan = this.layout.codePages < 0
-            ? planRegion(blocks, { entry: this.region.entry, backward: flat,
-                heads: new Set([...this.loopEnds.keys(), ...this.x87.cut]),
-                returns: this.returns })
-            : null;
+        this.flagsOut = flagsOut;
+        this.memoryPlan = memoryPlan;
         this.ranges = [];
         this.emitRange(0, blocks.length - 1, false);
         // Falling out of the last block cannot happen: every block ends with
@@ -1952,11 +1980,18 @@ export class RegionEmitter {
      * region's function there before anything of it runs, with the state as
      * it came in. Kept out of the region's function, whose loops then join no
      * way in but their heads': cold copies inside it make TurboFan keep less of
-     * a loop in registers.
+     * a loop in registers. The same region's plans -- its order and loops, its
+     * returns, its x87, its flags' liveness and its access groups -- are this
+     * function's, taken rather than made again.
+     *
+     * @param {number[]} flagsOut  the flags live at each block's end (`liveFlagsOut`)
+     * @param {import('./memory.js').RegionPlan | null} memoryPlan  the access groups
      */
-    emitCopies(){
-        const copies = new RegionEmitter(this.context, this.formed,
-            { ...this.options, copyFunction: true });
+    emitCopies(flagsOut, memoryPlan){
+        const copies = new RegionEmitter(this.context, this.formed, { ...this.options,
+            copyFunction: true, planned: { returns: this.returns, structure: this.structure,
+                region: this.region, x87: this.x87Plan, flagsOut,
+                memoryPlan: memoryPlan === null ? null : copyPlan(memoryPlan) } });
         const { functionIndex } = copies.emit();
         this.copiesIndex = functionIndex;
         const { b } = this;

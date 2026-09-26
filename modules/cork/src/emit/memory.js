@@ -679,6 +679,22 @@ export function planRegion(blocks, options = {}){
     return { blocks: blocks.map((_, s)=>plans[s] ?? NO_PLAN), entry: entries, inherit };
 }
 
+/**
+ * A plan for a second function emitted from it (a region's copies): the
+ * instructions' slots anew, whose `used` the emitting marks; the groups and the
+ * accesses, which nothing writes, shared.
+ *
+ * @param {RegionPlan} plan
+ * @returns {RegionPlan}
+ */
+export function copyPlan(plan){
+    return {
+        ...plan,
+        blocks: plan.blocks.map(slots=>(slots === NO_PLAN ? slots
+            : new Map([...slots].map(([i, slot])=>[i, { ...slot }])))),
+    };
+}
+
 /** The plan of a block with no access planned; read, never written. */
 /** @type {Map<number, Planned>} */
 const NO_PLAN = new Map();

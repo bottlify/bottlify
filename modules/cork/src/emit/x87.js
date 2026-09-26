@@ -835,6 +835,46 @@ export function regionHasMmx(region, leaveOut){
 }
 
 /**
+ * What a region's x87 emission is planned from, the same for the function of
+ * its copies as for its own (`analyseX87`): whether it uses x87, whether it has
+ * MMX too, whether it tracks a quadword `fild` exactly, the tracker's states at
+ * each block's start and end with the blocks it cuts, and the stack words' shape
+ * each block start knows and each entry tests. Null for a region with no x87.
+ *
+ * @typedef {{ hasMmx: boolean, tracksExact: boolean, states: (StackState | null)[],
+ *     ends: (StackState | null)[], cut: Set<number>, shapes: Shape[],
+ *     needs: (Shape | null)[] } | null} X87Analysis
+ */
+
+/**
+ * The planning of a region's x87 (`X87Analysis`), a pure function of the region
+ * in its emitting order, the classes left out, the entry's top and `checked`.
+ *
+ * @param {import('../region.js').Region} region
+ * @param {Set<string>} leaveOut @param {number} entryTop @param {boolean} checked
+ * @returns {X87Analysis}
+ */
+export function analyseX87(region, leaveOut, entryTop, checked){
+    const uses = !leaveOut.has('x87')
+        && region.blocks.some(block=>block.instructions.some(isX87));
+    if (!uses)
+    {
+        return null;
+    }
+    const hasMmx = regionHasMmx(region, leaveOut);
+    /** @param {(instruction: Instruction) => boolean} test */
+    const any = test=>region.blocks.some(block=>block.instructions.some(test));
+    const tracksExact = !hasMmx
+        && any(({ op, operands })=>op === 'fild' && operands[1].size === 8)
+        && any(({ op, operands })=>(op === 'fistp' || op === 'fisttp') && operands[0].size === 8);
+    const { states, cut, ends } = trackRegion(region, entryTop);
+    const { known: shapes, needs } = hasMmx
+        ? { known: region.blocks.map(()=>NOTHING), needs: [] }
+        : planStack(region, states, cut, !checked);
+    return { hasMmx, tracksExact, states, ends, cut, shapes, needs };
+}
+
+/**
  * Sets up the region's x87 emission: decides whether the region uses x87,
  * runs the tracker and allocates the locals. A region with MMX in it keeps
  * x87 too -- the two are the mantissa and the value of one set of eight
@@ -846,13 +886,14 @@ export function regionHasMmx(region, leaveOut){
  * tests nothing at its entries.
  *
  * @param {E} e @param {number} entryTop @param {boolean} [checked]
+ * @param {X87Analysis} [analysis]  the region's planning, when made already
+ *     (`analyseX87`): nothing of it is written while emitting
  * @returns {X87Emit}
  */
-export function prepareX87(e, entryTop, checked = false){
-    const region = e.region;
-    const uses = !e.context.leaveOut.has('x87')
-        && region.blocks.some(block=>block.instructions.some(isX87));
-    if (!uses)
+export function prepareX87(e, entryTop, checked = false,
+    analysis = analyseX87(e.region, e.context.leaveOut, entryTop, checked))
+{
+    if (analysis === null)
     {
         return {
             active: false, hasMmx: false, base: 0, form: -1, temp: 0, temp2: 0, temp3: 0,
@@ -861,16 +902,7 @@ export function prepareX87(e, entryTop, checked = false){
             guards: 0, relaxedReads: 0, tracksExact: false, exact: 0, exactNaN: 0, shadow: [],
         };
     }
-    const hasMmx = regionHasMmx(region, e.context.leaveOut);
-    /** @param {(instruction: Instruction) => boolean} test */
-    const any = test=>region.blocks.some(block=>block.instructions.some(test));
-    const tracksExact = !hasMmx
-        && any(({ op, operands })=>op === 'fild' && operands[1].size === 8)
-        && any(({ op, operands })=>(op === 'fistp' || op === 'fisttp') && operands[0].size === 8);
-    const { states, cut, ends } = trackRegion(region, entryTop);
-    const { known: shapes, needs } = hasMmx
-        ? { known: region.blocks.map(()=>NOTHING), needs: [] }
-        : planStack(region, states, cut, !checked);
+    const { hasMmx, tracksExact, states, ends, cut, shapes, needs } = analysis;
     const base = e.localTypes.length + STATE_PARAMS;
     // The eight registers, three scratch locals, and a fused compare's operands.
     for (let k = 0; k < 13; k++)
