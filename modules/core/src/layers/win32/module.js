@@ -1147,6 +1147,7 @@ export const win32Module = {
                     // The high half of an __int64 answer, which a program
                     // reads from EDX.
                     setRegisters,
+                    version: reported,
                     files: volume,
                     // kernel32's own file handles, so the handle
                     // `_get_osfhandle` gives is one ReadFile and

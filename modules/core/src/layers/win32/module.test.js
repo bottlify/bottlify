@@ -354,6 +354,10 @@ test('the configured Windows is the one every library answers with', async()=>{
     const current = key && hive.getValue(key, 'CurrentVersion');
     assert.equal(current && String.fromCharCode(...current.data.subarray(0, 3)), '6.1');
 
+    const winver = libraries['msvcrt.dll']._winver.data();
+    assert.equal(new DataView(winver.buffer).getUint32(0, true), 0x0601,
+        'the C runtime\'s own copy of the version');
+
     assert.ok(kernel32.VerSetConditionMask, 'the 64-bit answer has registers to go to');
     kernel32.VerSetConditionMask.handler([0, 0, 0x80, 1]);
     assert.equal(registers.edx, 0);
