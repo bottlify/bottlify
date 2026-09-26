@@ -21,7 +21,7 @@
  * Bumped whenever the emitter changes what it emits for the same bytes, or
  * the record's format changes: a record of another version is a miss.
  */
-export const CACHE_VERSION = 51;
+export const CACHE_VERSION = 52;
 
 const MAGIC = 0x4b524f43; // 'CORK'
 
@@ -80,6 +80,8 @@ export function moduleKey({ version, features, variant = '', layoutId, bundleId 
  * @property {boolean} [linked]        the module is a relinked one, which gathers many regions
  * @property {[number, number][]} labels  block start → label
  * @property {number[]} cut            labels of blocks that leave at once
+ * @property {number[]} [closed]       starts of the blocks inside the loops that have no entry
+ *     (`closed` of a translation)
  * @property {number} entryTop
  * @property {number} instructions
  */
@@ -92,6 +94,7 @@ export function packRegion(region){
         ...(region.exportName === undefined ? {} : { exportName: region.exportName }),
         ...(region.moduleKey === undefined ? {} : { moduleKey: region.moduleKey }),
         ...(region.linked ? { linked: true } : {}),
+        ...(region.closed?.length ? { closed: region.closed } : {}),
     }));
     const out = new Uint8Array(12 + header.length + region.module.length);
     const view = new DataView(out.buffer);
@@ -137,6 +140,7 @@ export function unpackRegion(bytes){
             ...(typeof header.exportName === 'string' ? { exportName: header.exportName } : {}),
             ...(typeof header.moduleKey === 'string' ? { moduleKey: header.moduleKey } : {}),
             ...(header.linked === true ? { linked: true } : {}),
+            ...(Array.isArray(header.closed) ? { closed: header.closed } : {}),
         };
     }
     catch {

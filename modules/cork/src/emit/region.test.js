@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../testing/machine.js';
-import { Exit, deadFlagPass, liveFlagsOut, planLoops } from './region.js';
+import { Exit, deadFlagPass, liveFlagsOut, planStructure } from './region.js';
 
 const CODE = 0x1000;
 const DATA = 0x3000;
@@ -324,8 +324,8 @@ test('a loop of several blocks runs as a wasm loop to its halt', ()=>{
     assert.equal(m.counter(), 1 + 5 + 5 + 6 + 6 + 6 + 1);
 });
 
-test('a loop is entered in its middle through its head, by the label', ()=>{
-    const m = createTestMachine();
+test('under the flat dispatch a block in the middle of a loop is entered by its label', ()=>{
+    const m = createTestMachine({ structure: false });
     m.write(CODE, LOOP);
     m.setReg('ecx', 1);
     const exit = m.translate(CODE).run(S, 1000);
@@ -701,13 +701,205 @@ test('the flag liveness over a region is the walk of every instruction to a fixe
     }
 });
 
-test('loops that overlap are widened until they nest', ()=>{
-    /** @param {number} start @param {string} kind @param {number[]} targets @param {number} next */
-    const block = (start, kind, targets, next)=>/** @type {any} */ ({
-        start, exit: { kind, targets, next },
+/**
+ * A hand-made block: its start and its exit, which is all the structure reads.
+ * @param {number} start @param {string} kind @param {number[]} targets @param {number} next
+ * @param {object} [more]
+ */
+const shaped = (start, kind, targets, next, more = {})=>/** @type {any} */ ({
+    start, end: start + 1, instructions: [],
+    exit: { kind, targets, next, backEdge: false, ...more },
+});
+/** @param {any[]} blocks */
+const regionOf = blocks=>/** @type {import('../region.js').Region} */ (/** @type {any} */ (
+    { entry: blocks[0].start, blocks }));
+
+test('a loop is the control flow\'s, not the layout\'s: cases laid after the latch are in it', ()=>{
+    // 0: the head's switch to 3 or 4; 1: the latch, back to 0; 2: hlt; 3, 4: cases, each a
+    // jump back to the latch -- as address ranges, a loop [1, 4] across [0, 1].
+    const { order, loops } = planStructure(regionOf([
+        shaped(0, 'indirect', [3, 4], 1, { table: { index: 0, address: 0x100, entries: [3, 4] } }),
+        shaped(1, 'jcc', [0, 2], 2), shaped(2, 'hlt', [], 3), shaped(3, 'jump', [1], 4),
+        shaped(4, 'jump', [1], 5)]), new Map());
+    assert.deepEqual(order, [0, 3, 4, 1, 2], 'the cases before the latch they go on to');
+    assert.deepEqual([...loops], [[0, 3]], 'one loop, from the head to the latch');
+});
+
+test('a loop entered at its test at the bottom has the test for its head', ()=>{
+    // 0: jump 2; 1: the body; 2: jcc 1 else 3; 3: hlt
+    const { order, loops } = planStructure(regionOf([shaped(0, 'jump', [2], 1),
+        shaped(1, 'fallthrough', [2], 2), shaped(2, 'jcc', [1, 3], 3), shaped(3, 'hlt', [], 4)]),
+    new Map());
+    assert.deepEqual(order, [0, 2, 1, 3]);
+    assert.deepEqual([...loops], [[1, 2]]);
+});
+
+test('a loop a call leaves from is entered in its middle by the return, and is no wasm loop', ()=>{
+    // 0: jcc 2 else 1; 1: call out, back at 2; 2: jcc 0 else 3; 3: hlt
+    const blocks = [shaped(0, 'jcc', [2, 1], 1), shaped(1, 'call', [0x9000], 2),
+        shaped(2, 'jcc', [0, 3], 3), shaped(3, 'hlt', [], 4)];
+    assert.deepEqual([...planStructure(regionOf(blocks), new Map()).loops], []);
+    // Formed in, the callee's return is a jump: the loop is the head's.
+    blocks[1] = shaped(1, 'call', [4], 2);
+    blocks.push(shaped(4, 'ret', [], 5));
+    const { loops } = planStructure(regionOf(blocks), new Map([[4, [2]]]));
+    assert.equal(loops.size, 1);
+});
+
+test('a region formed in the middle of a loop has the loop the code has, its entry inside it', ()=>{
+    // 0: jump 3 (the outer loop's way into the inner one's test); 1: the entry, falling
+    // into 2; 2: jcc 5 else 3; 3: the inner test, jcc 1 else 4; 4: jump 2; 5: jcc 0 else 6;
+    // 6: ret. From 1, a loop at 1 around one at 2, both of one loop of the code.
+    const blocks = [shaped(0, 'jump', [3], 1), shaped(1, 'fallthrough', [2], 2),
+        shaped(2, 'jcc', [5, 3], 3), shaped(3, 'jcc', [1, 4], 4), shaped(4, 'jump', [2], 5),
+        shaped(5, 'jcc', [0, 6], 6), shaped(6, 'ret', [], 7)];
+    const region = /** @type {import('../region.js').Region} */ (/** @type {any} */ (
+        { entry: 1, blocks }));
+    const { order, loops } = planStructure(region, new Map());
+    assert.deepEqual(order, [2, 5, 0, 3, 4, 1, 6]);
+    assert.deepEqual([...loops], [[0, 5]], 'one loop, the entry a block of it');
+});
+
+/**
+ * mov ecx, 3; O: mov edx, 4; I: add eax, 1; test al, 1; jz K; add ebx, 1; K: dec edx;
+ * jnz I; dec ecx; jnz O; hlt -- a loop of three blocks inside another.
+ */
+const NESTED = [0xb9, 3, 0, 0, 0, 0xba, 4, 0, 0, 0, 0x83, 0xc0, 0x01, 0xa8, 0x01, 0x74, 0x03,
+    0x83, 0xc3, 0x01, 0x4a, 0x75, 0xf3, 0x49, 0x75, 0xeb, 0xf4];
+
+test('a structured region runs its nested loops to the end from any budget, each resumed where'
+    + ' it was left', ()=>{
+    for (let budget = 1; budget <= 80; budget++)
+    {
+        const m = createTestMachine({ structure: true });
+        m.write(CODE, NESTED);
+        const unit = m.translate(CODE);
+        let exit = unit.run(CODE, budget);
+        for (let runs = 0; exit.kind === Exit.BUDGET && runs < 200; runs++)
+        {
+            exit = unit.run(m.eip(), budget);
+        }
+        assert.equal(exit.kind, Exit.HALT, `budget ${budget}`);
+        assert.deepEqual([m.reg('eax'), m.reg('ebx'), m.reg('ecx'), m.reg('edx')], [12, 6, 0, 0],
+            `budget ${budget}`);
+        // mov ecx; three turns of mov edx, four inner turns (two of six, two of five),
+        // dec ecx and jnz; hlt.
+        assert.equal(m.counter(), 1 + 3 * (1 + 22 + 2) + 1, `budget ${budget}`);
+    }
+});
+
+test('a block inside a loop is entered by its copy, which goes on into the loop at its head',
+    ()=>{
+        const m = createTestMachine({ structure: true });
+        m.write(CODE, LOOP);
+        // The copy leaves at the head through the entry hash, as any transfer does.
+        const unit = m.translate(CODE, { hash: true });
+        const count = unit.region.blocks.length;
+        assert.ok(/** @type {number} */ (unit.translation.labels.get(S)) >= 2 * count,
+            'the copy\'s label');
+        assert.ok(/** @type {number} */ (unit.translation.labels.get(HEAD)) < count,
+            'the head\'s own');
+        // From S with ecx 3: dec, jnz; add, cmp, jl taken; twice; then dec, jnz not taken, hlt.
+        m.setReg('ecx', 3);
+        assert.equal(unit.run(S, 1000).kind, Exit.HALT);
+        assert.deepEqual([m.reg('eax'), m.reg('ecx'), m.reg('edx')], [4, 0, 0]);
+        assert.equal(m.counter(), 2 + 3 + 2 + 3 + 2 + 1);
     });
-    // 0; 1: jump 0; 2: jcc 1 else 3; 3: hlt -- [0, 1] and [1, 2] overlap.
-    const loops = planLoops([block(0, 'fallthrough', [1], 1), block(1, 'jump', [0], 2),
-        block(2, 'jcc', [1], 3), block(3, 'hlt', [], 4)]);
-    assert.deepEqual([...loops].sort(), [[0, 2], [1, 2]]);
+
+test('without its copies, a block inside a loop has no entry, and the region runs the same', ()=>{
+    const m = createTestMachine({ structure: true });
+    m.write(CODE, LOOP);
+    const unit = m.translate(CODE, { copies: false });
+    assert.equal(unit.translation.copiesIndex, -1, 'no function of copies');
+    assert.deepEqual([...unit.translation.closed].sort(), [CODE + 0x0d, S]);
+    assert.ok(unit.translation.cut.has(/** @type {number} */ (unit.translation.labels.get(S))));
+    assert.ok(!unit.translation.cut.has(/** @type {number} */ (unit.translation.labels.get(HEAD))));
+    assert.equal(unit.run(CODE, 1000).kind, Exit.HALT);
+    assert.deepEqual([m.reg('eax'), m.reg('ecx'), m.reg('edx')], [10, 0, 3]);
+});
+
+test('a loop onto itself inside another loop has an entry, through the head around it', ()=>{
+    // mov ecx, 3; O: mov edx, 4; I: add eax, 1; dec edx; jnz I; dec ecx; jnz O; hlt
+    const SELF = [0xb9, 3, 0, 0, 0, 0xba, 4, 0, 0, 0, 0x83, 0xc0, 0x01, 0x4a, 0x75, 0xfa,
+        0x49, 0x75, 0xf2, 0xf4];
+    const I = CODE + 10;
+    const region = regionOf([
+        shaped(CODE, 'fallthrough', [CODE + 5], CODE + 5),
+        shaped(CODE + 5, 'fallthrough', [I], I),
+        shaped(I, 'jcc', [I, CODE + 16], CODE + 16),
+        shaped(CODE + 16, 'jcc', [CODE + 5, CODE + 19], CODE + 19),
+        shaped(CODE + 19, 'hlt', [], CODE + 20),
+    ]);
+    const { order, loops } = planStructure(region, new Map());
+    assert.deepEqual(order, [0, 1, 2, 3, 4]);
+    assert.deepEqual([...loops].sort((a, b)=>a[0] - b[0]), [[1, 3], [2, 2]]);
+    const m = createTestMachine({ structure: true });
+    m.write(CODE, SELF);
+    const unit = m.translate(CODE, { copies: false });
+    assert.deepEqual([...unit.translation.closed], [CODE + 16], 'only the outer loop\'s latch');
+    // Entered in its second outer turn, with two inner turns left.
+    m.setReg('ecx', 2);
+    m.setReg('edx', 2);
+    assert.equal(unit.run(I, 1000).kind, Exit.HALT);
+    assert.deepEqual([m.reg('eax'), m.reg('ecx'), m.reg('edx')], [6, 0, 0]);
+});
+
+test('a nested loop\'s head is entered through the head of the loop around it', ()=>{
+    const I = CODE + 10;
+    const m = createTestMachine({ structure: true });
+    m.write(CODE, NESTED);
+    m.setReg('ecx', 2);
+    m.setReg('edx', 3);
+    const unit = m.translate(CODE);
+    assert.ok(/** @type {number} */ (unit.translation.labels.get(I)) < unit.region.blocks.length);
+    assert.equal(unit.run(I, 1000).kind, Exit.HALT);
+    // Three inner turns, then one more outer turn of four.
+    assert.deepEqual([m.reg('eax'), m.reg('ecx'), m.reg('edx')], [7, 0, 0]);
+});
+
+test('every block start of a structured region runs as the flat dispatch runs it', ()=>{
+    // mov ecx, 4; L: call F; dec ecx; jnz L; hlt; F: add eax, 3; ret -- a formed-in callee
+    // whose return jumps back into the loop.
+    const CALLS = [0xb9, 4, 0, 0, 0, 0xe8, 4, 0, 0, 0, 0x49, 0x75, 0xf8, 0xf4, 0x83, 0xc0, 0x03,
+        0xc3];
+    // mov ecx, 3; O: mov edx, 4; jmp T; B: add eax, 1; test al, 1; jz K; add ebx, 1;
+    // K: dec edx; T: test edx, edx; jnz B; dec ecx; jnz O; hlt -- an inner loop entered at
+    // its test, which a region formed at B sees begin at B.
+    const BOTTOM = [0xb9, 3, 0, 0, 0, 0xba, 4, 0, 0, 0, 0xeb, 0x0b, 0x83, 0xc0, 0x01, 0xa8, 0x01,
+        0x74, 0x03, 0x83, 0xc3, 0x01, 0x4a, 0x85, 0xd2, 0x75, 0xf1, 0x49, 0x75, 0xe7, 0xf4];
+    for (const program of [LOOP, NESTED, CALLS, BOTTOM])
+    {
+        const machine = createTestMachine();
+        machine.write(CODE, program);
+        const starts = machine.translate(CODE).region.blocks.map(block=>block.start);
+        // Each region formed at a block start, entered at each of its own.
+        for (const entry of starts)
+        {
+            for (const start of starts)
+            {
+                /** @type {number[][]} */
+                const ends = [];
+                for (const structure of [true, false])
+                {
+                    const m = createTestMachine({ structure });
+                    m.write(CODE, program);
+                    // A return with nothing called comes back to the hlt of CALLS.
+                    m.setReg('esp', 0x80000);
+                    m.writeU32(0x80000, CODE + 0x0d);
+                    m.setReg('ecx', 2);
+                    m.setReg('edx', 1);
+                    const unit = m.translate(entry, { hash: true });
+                    if (!unit.translation.labels.has(start))
+                    {
+                        break;
+                    }
+                    const exit = unit.run(start, 10_000);
+                    ends.push([exit.kind, m.eip(), m.counter(),
+                        ...['eax', 'ecx', 'edx', 'ebx', 'esp'].map(name=>m.reg(name))]);
+                }
+                assert.deepEqual(ends[0], ends[1], `${program.length}-byte program, region at `
+                    + `${entry.toString(16)}, from ${start.toString(16)}`);
+            }
+        }
+    }
 });

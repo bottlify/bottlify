@@ -1167,12 +1167,46 @@ test('a candidate a region of the same batch already holds is not formed again',
     m.runtime.noteHot(CODE + 14);
     m.runtime.noteHot(CODE + 5);
     assert.equal(await m.runtime.translatePending(), 1, 'the loop, with its callee in it');
-    assert.ok(m.runtime.entryOf(CODE + 14) >= 0, 'the callee is an entry of the loop\'s region');
-    assert.ok(m.runtime.entryOf(CODE + 5) >= 0);
+    assert.ok(m.runtime.entryOf(CODE + 5) >= 0, 'the loop\'s head is an entry');
     const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
     assert.equal(exit.kind, 'halt');
     assert.equal(m.reg(2), 1000);
 });
+
+test('a block inside a region\'s loop has an entry once translated code keeps leaving for it',
+    async()=>{
+        const m = machine();
+        // mov ecx, 1000; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret -- F is a block
+        // of the loop, which the region is formed with no entry into.
+        m.write(CODE, [
+            0xb9, 0xe8, 0x03, 0, 0,
+            0xe8, 0x04, 0, 0, 0,
+            0x49, 0x75, 0xf8,
+            0xf4,
+            0x42, 0xc3,
+        ]);
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE);
+        assert.equal(await m.runtime.translatePending(), 1);
+        assert.equal(m.runtime.entryOf(CODE + 14), -1, 'none at first');
+        // Nor is it a candidate of its own, however hot the interpreter finds it.
+        m.runtime.noteHot(CODE + 14, 0, 128);
+        assert.equal(m.runtime.diagnostics().queued, 0);
+        for (let i = 0; i < 64; i++)
+        {
+            m.runtime.missAt(CODE + 14);
+        }
+        await m.runtime.translatePending();
+        assert.equal(m.runtime.diagnostics().copied, 1, 'the region formed again');
+        assert.ok(m.runtime.entryOf(CODE + 14) >= 0, 'its copy is an entry');
+        // Called with its return address on the stack, F comes back to the hlt.
+        m.setReg(4, 0x80000 - 4);
+        new DataView(m.memory.buffer).setUint32(m.layout.ramBase + 0x80000 - 4, CODE + 13, true);
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 14), 1000).kind, 'halt');
+        assert.equal(m.reg(2), 1);
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+        assert.equal(m.reg(2), 1001);
+    });
 
 /**
  * mov ecx, n; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret
@@ -1337,7 +1371,9 @@ test('an indirect call sampled going to a few small callees has them formed into
         await m.runtime.translatePending();
     }
     assert.equal(m.runtime.diagnostics().reforms, 1);
-    assert.equal(run(), 200, 'only H leaves, and its return comes back');
+    // Only H leaves: its call, its return into the copy of the block after the call, which
+    // is inside the loop (`emitCopies`), and the copy's way on to the loop's head.
+    assert.equal(run(), 300, 'only H leaves, and its return comes back');
 });
 
 test('a transfer that finds no entry leaves with the carried state written back', async()=>{

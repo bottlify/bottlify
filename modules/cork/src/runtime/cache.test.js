@@ -24,6 +24,9 @@ test('a record round-trips, and bytes of another version or shape are a miss', (
     assert.deepEqual(back.cut, [1]);
     assert.equal(back.entryTop, 6);
     assert.equal(back.instructions, 42);
+    assert.equal(back.closed, undefined, 'no closed blocks, none kept');
+    assert.deepEqual(unpackRegion(packRegion({ ...region, closed: [0x1010] }))?.closed, [0x1010],
+        'the blocks inside the loops with no entry, which the runtime answers for');
     const other = new Uint8Array(bytes);
     new DataView(other.buffer).setUint32(4, CACHE_VERSION + 1, true);
     assert.equal(unpackRegion(other), null, 'another version');

@@ -68,8 +68,10 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * modules there are -- 2000 regions a module each ran a chain of calls at
  * 219 ns a call where one module of them ran it at 6.
  *
- * @param {{ region: import('../region.js').Region, entryTop: number, checked?: boolean }[]} jobs
- *     checked: an x87 region whose entries test nothing of the stack's shape
+ * @param {{ region: import('../region.js').Region, entryTop: number, checked?: boolean,
+ *     copies?: boolean }[]} jobs  checked: an x87 region whose entries test nothing of the
+ *     stack's shape; copies: the blocks inside a structured region's loops are entered
+ *     through copies of them, where without they have no entry (`emitRegion`)
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
@@ -96,7 +98,7 @@ export function emitBatch(jobs, layout, features, options = {}){
         blockProfile: options.blockProfile === true,
         wide: options.wide === true,
         narrow: options.narrow === true,
-        structure: options.structure === true,
+        structure: options.structure !== false,
         precise: options.precise === true,
         place: options.place === true ? jobs.length : 0,
         profileCalls: options.profileCalls === true,
@@ -107,24 +109,30 @@ export function emitBatch(jobs, layout, features, options = {}){
     /** Each job's function, for the dispatcher. @type {(number | null)[]} */
     const functions = jobs.map(()=>null);
     /** @type {BuiltBatch['results']} */
-    const results = jobs.map(({ region, entryTop, checked }, index)=>{
+    const results = jobs.map(({ region, entryTop, checked, copies }, index)=>{
         try
         {
             // The emitter adds the function only once the region is written,
             // so a region it fails on leaves the module as it was.
             const translation = emitRegion(context, region,
-                { entryTop, checked: checked === true });
+                { entryTop, checked: checked === true, copies: copies === true });
             const exportName = `r${index}`;
             m.exportFunction(exportName, translation.functionIndex);
             functions[index] = translation.functionIndex;
             // Named by its address, so a browser's CPU profile of the engine
-            // says which regions the time went to.
-            m.nameFunction(translation.functionIndex,
-                `r${region.entry.toString(16).padStart(8, '0')}`);
+            // says which regions the time went to; the names in the order of
+            // the functions, the copies' first (`emitCopies`).
+            const named = `r${region.entry.toString(16).padStart(8, '0')}`;
+            if (translation.copiesIndex >= 0)
+            {
+                m.nameFunction(translation.copiesIndex, `${named}-copies`);
+            }
+            m.nameFunction(translation.functionIndex, named);
             return { ok: true, region: {
                 exportName,
                 labels: [...translation.labels],
                 cut: [...translation.cut],
+                closed: [...translation.closed],
                 entryTop: translation.entryTop,
                 instructions: translation.instructions,
                 unsupported: [...translation.unsupported],
@@ -152,7 +160,7 @@ export function emitBatch(jobs, layout, features, options = {}){
  * `targets` are the callees its indirect calls were predicted to (`callTargets`).
  *
  * @param {{ jobs: { entry: number, entryTop: number, hash: string, checked?: boolean,
- *         targets?: [number, number[]][] }[],
+ *         copies?: boolean, targets?: [number, number[]][] }[],
  *     pages: [number, Uint8Array][],
  *     form: { maxBlocks: number, maxBytes: number, leafCalls?: boolean } }} relink
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
@@ -172,7 +180,8 @@ export function relinkBatch({ jobs, pages, form }, layout, features, options = {
         const region = formRegion(read, job.entry, { ...form, translatable,
             ...(job.targets === undefined ? {} : { callTargets: new Map(job.targets) }) });
         return region.hash === job.hash
-            ? { region, entryTop: job.entryTop, checked: job.checked === true } : null;
+            ? { region, entryTop: job.entryTop, checked: job.checked === true,
+                copies: job.copies === true } : null;
     });
     const batch = emitBatch(/** @type {{ region: any, entryTop: number }[]} */ (
         formed.filter(one=>one !== null)), layout, features, options);

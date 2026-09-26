@@ -119,11 +119,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // (false: every region so from the start).
         x87Shapes: true,
         checkedAfter: 4,
-        // A region's loops as wasm loops and its flags' liveness over its
-        // blocks. Off by default: in Doom 3's menu it doubled the guest's time
-        // a frame (5.9 -> 10.1 ms) while it made play 3% faster, and the cause
-        // is not yet known.
-        structure: false,
+        // A region's loops as wasm loops, the loops of its control flow
+        // (`planStructure`), a block inside one entered through a copy of its
+        // own (false: every backward jump through the region's dispatch).
+        structure: true,
         // Everything the translator relaxes for speed kept exact instead: the x87
         // exception flags and their tests, signalling NaNs, underflow and C1, and
         // the flags an instruction leaves undefined -- off, what the cheapest code
@@ -403,6 +402,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {boolean} [wide]  an x87 region compiled for the wide precision controls
      * @property {boolean} [narrow]  an x87 region compiled for single precision
      * @property {boolean} [checked]  an x87 region whose entries test nothing of the stack's shape
+     * @property {boolean} [copies]  its blocks inside its loops are entered through copies
+     *     (`emitRegion`); without, they have no entry (`closed`)
+     * @property {number[]} [closed]  the starts of those blocks with no entry
+     * @property {number} [blocks]  how many blocks it has: a label from twice as many is a copy's
      * @property {Placed} [module]  the placed module its table index is in (`placeModule`)
      * @property {boolean} [movedAlone]  a merge took it alone into the module calling it
      * @property {number} [shapeMisses]  its entries' tests that failed
@@ -415,6 +418,20 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const recordOf = new Map();
     /** key(entry, top) of the x87 regions whose shape test kept failing: formed checked. */
     const checkedKeys = new Set();
+    /** By the start of a block inside a structured region's loop that has no entry, the
+     * regions holding it so. @type {Map<number, Set<RegionRecord>>} */
+    const closedIn = new Map();
+    /** @param {number} start @param {RegionRecord} record */
+    const forgetClosed = (start, record)=>{
+        const holders = closedIn.get(start);
+        holders?.delete(record);
+        if (holders?.size === 0)
+        {
+            closedIn.delete(start);
+        }
+    };
+    /** The regions to form again with copies of those blocks. @type {Set<RegionRecord>} */
+    const copiesWanted = new Set();
     /** @type {Map<number, Set<RegionRecord>>} page → regions on it */
     const byPage = new Map();
     /** By the address of an indirect call in translated code, its targets sampled and how
@@ -436,7 +453,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
-        relinks: 0, relinked: 0, merges: 0, reforms: 0,
+        relinks: 0, relinked: 0, merges: 0, reforms: 0, copied: 0,
         formingMs: 0, lookupMs: 0, emitMs: 0, encodeMs: 0, storeMs: 0, instantiateMs: 0,
         publishMs: 0,
         // Emitting and encoding the worker did: reported apart from
@@ -546,6 +563,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 byPage.get(p)?.delete(record);
             }
+            for (const start of record.closed ?? [])
+            {
+                forgetClosed(start, record);
+            }
+            copiesWanted.delete(record);
             // A region formed with its calls' callees is formed without them
             // when its code is next translated: they are sampled again.
             for (const [site] of record.targets ?? [])
@@ -962,10 +984,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * answer and an inline emission take the same path.
      *
      * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string,
-     *     wide?: boolean, narrow?: boolean, checked?: boolean, replaces?: RegionRecord,
-     *     targets?: [number, number[]][] }} one  replaces: the region it is formed again
-     *     from, with the callees of its indirect calls (`targets`)
-     * @param {{ labels: [number, number][], cut: number[], entryTop: number,
+     *     wide?: boolean, narrow?: boolean, checked?: boolean, copies?: boolean,
+     *     replaces?: RegionRecord, targets?: [number, number[]][], copying?: boolean }} one
+     *     replaces: the region it is formed again from, with the callees of its indirect calls
+     *     (`targets`), or with copies of the blocks inside its loops (`copying`)
+     * @param {{ labels: [number, number][], cut: number[], closed?: number[], entryTop: number,
      *     exportName?: string, linked?: boolean }} built
      * @param {WebAssembly.Instance} instance
      * @returns {number} 1 when a region was published, 0 when it was dropped
@@ -990,9 +1013,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         const fn = /** @type {(label: number, budget: number) => number} */ (
             instance.exports[built.exportName ?? 'r0']);
         const cut = new Set(built.cut);
+        const closed = built.closed ?? [];
+        const closedSet = new Set(closed);
         // Entries for every block start but the cut ones; a region with x87
-        // in it is keyed by the top it was compiled for.
-        const top = cut.size > 0 || usesX87(region) ? built.entryTop : ANY_TOP;
+        // in it is keyed by the top it was compiled for. A block closed in a
+        // loop is no x87 matter.
+        const top = built.labels.some(([start, label])=>cut.has(label) && !closedSet.has(start))
+            || usesX87(region) ? built.entryTop : ANY_TOP;
         const starts = built.labels.filter(([, label])=>!cut.has(label));
         if (starts.length === 0)
         {
@@ -1009,13 +1036,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             entryTop: one.entryTop, hash: region.hash, labels: JSON.stringify(built.labels),
             linked: built.linked === true, wide: one.wide === true,
             narrow: one.narrow === true, checked: one.checked === true,
+            copies: one.copies === true, closed, blocks: built.labels.length,
         };
         if (one.replaces !== undefined)
         {
-            // Formed again with its indirect calls' callees: the old region's
-            // entries give way to this one's.
+            // Formed again with its indirect calls' callees, or with copies:
+            // the old region's entries give way to this one's.
             record.targets = one.targets;
-            record.reforms = (one.replaces.reforms ?? 0) + 1;
+            record.reforms = (one.replaces.reforms ?? 0) + (one.copying === true ? 0 : 1);
             if (regions.has(one.replaces))
             {
                 unpublish([one.replaces]);
@@ -1047,8 +1075,21 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // An address another region's entry already holds stays that
             // region's: the record keeps only the entries it made, or a relink
             // of it would put its function under the other's label (and a drop
-            // of it would take the other's entry away).
-            const slot = entries.add(start, fn, label, top, record.table);
+            // of it would take the other's entry away) -- unless there it is
+            // a copy of a block inside a loop (a label past twice its blocks,
+            // `emitCopies`) and here it is not: a run entered there goes on in
+            // this region's loops rather than in a flat dispatch.
+            let slot = entries.add(start, fn, label, top, record.table);
+            const held = entries.at(slot);
+            const holder = recordOf.get(slot);
+            if (held.fn !== fn && holder !== undefined && held.top === top
+                && held.label >= 2 * (holder.blocks ?? Infinity) && label < 2 * built.labels.length)
+            {
+                entries.remove(slot);
+                recordOf.delete(slot);
+                holder.slots = holder.slots.filter(other=>other !== slot);
+                slot = entries.add(start, fn, label, top, record.table);
+            }
             if (entries.at(slot).fn === fn)
             {
                 record.slots.push(slot);
@@ -1057,13 +1098,26 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
         // A cut block start has no entry here: an address the runtime must
         // answer for with a region of its own at the machine's top, so a miss
-        // there is a candidate, not an unknown address.
+        // there is a candidate, not an unknown address. A block closed in a
+        // loop is this region's to answer for, formed again with copies once
+        // translated code keeps leaving for it (`missAt`); the interpreter
+        // runs through it to the loop's head, which has an entry.
         for (const [start, label] of built.labels)
         {
-            if (cut.has(label))
+            if (cut.has(label) && !closedSet.has(start))
             {
                 entries.noteStart(start);
             }
+        }
+        for (const start of closed)
+        {
+            let holders = closedIn.get(start);
+            if (holders === undefined)
+            {
+                holders = new Set();
+                closedIn.set(start, holders);
+            }
+            holders.add(record);
         }
         for (const block of region.blocks)
         {
@@ -1115,12 +1169,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * precision controls or for single, or checked, is another translation of the same
      * bytes.
      * @param {{ region: { entry: number, hash: string }, entryTop: number, wide?: boolean,
-     *     narrow?: boolean, checked?: boolean }} one */
+     *     narrow?: boolean, checked?: boolean, copies?: boolean }} one */
     const regionKey = one=>cacheKey({
         version: CACHE_VERSION, features: found, variant, layoutId: layout.id,
         bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
         hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}`
-            + `${one.narrow ? '-n' : ''}${one.checked ? '-c' : ''}`,
+            + `${one.narrow ? '-n' : ''}${one.checked ? '-c' : ''}${one.copies ? '-k' : ''}`,
     });
 
     /**
@@ -1267,7 +1321,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 const one = { region: { entry: record.entry, hash: record.hash },
                     entryTop: record.entryTop, wide: record.wide, narrow: record.narrow,
-                    checked: record.checked };
+                    checked: record.checked, copies: record.copies };
                 store.put(regionKey(one), packRegion({ ...result.region,
                     module: new Uint8Array(0), moduleKey: key, linked: true })).catch(()=>{});
             }
@@ -1520,7 +1574,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
                     cached: null, wide: record.wide === true && precision === 'wide',
                     narrow: record.narrow === true && precision === 'narrow',
-                    checked: record.checked === true, replaces: record, targets: [...targets] });
+                    checked: record.checked === true, copies: record.copies === true,
+                    replaces: record, targets: [...targets] });
             }
             if (formed.length > 0)
             {
@@ -1530,6 +1585,53 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
         }
         return false;
+    };
+
+    /**
+     * The regions whose closed blocks translated code keeps leaving for (`missAt`),
+     * formed again with copies of the blocks inside their loops (`emitRegion`) and
+     * published over the ones they replace when they come back.
+     *
+     * @param {any} store
+     * @returns {boolean} whether a batch was taken this call
+     */
+    const copiesStep = store=>{
+        const formed = [];
+        for (const record of copiesWanted)
+        {
+            copiesWanted.delete(record);
+            if (!regions.has(record) || record.copies === true)
+            {
+                continue;
+            }
+            // Asked once: its closed blocks are then the runtime's as any
+            // block with no entry is, and the region is formed from the code
+            // as it is now, whether or not that is what it was formed from.
+            for (const start of record.closed ?? [])
+            {
+                forgetClosed(start, record);
+            }
+            const called = record.targets === undefined ? {}
+                : { callTargets: new Map(record.targets) };
+            const region = formRegion(read, record.entry, { ...formOptions, translatable,
+                ...called });
+            formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
+                cached: null, wide: record.wide === true && precision === 'wide',
+                narrow: record.narrow === true && precision === 'narrow',
+                checked: record.checked === true, copies: true, copying: true, replaces: record,
+                ...(record.targets === undefined ? {} : { targets: record.targets }) });
+            if (formed.length >= settings.batchRegions)
+            {
+                break;
+            }
+        }
+        if (formed.length === 0)
+        {
+            return false;
+        }
+        counts.copied += formed.length;
+        finishBatch(formed, store);
+        return true;
     };
 
     /**
@@ -1548,7 +1650,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         const copies = copyPages(chunk.map(record=>record.pages));
         const relink = {
             jobs: chunk.map(record=>({ entry: record.entry, entryTop: record.entryTop,
-                hash: record.hash, checked: record.checked === true,
+                hash: record.hash, checked: record.checked === true, copies: record.copies === true,
                 ...(record.targets === undefined ? {} : { targets: record.targets }) })),
             pages: [...copies],
             form: formOptions,
@@ -1694,7 +1796,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 id: outstanding.id,
                 relink: {
                     jobs: unbuilt.map(one=>({ entry: one.region.entry, entryTop: one.entryTop,
-                        hash: one.region.hash, checked: one.checked,
+                        hash: one.region.hash, checked: one.checked, copies: one.copies === true,
                         ...(one.targets === undefined ? {} : { targets: one.targets }) })),
                     pages: [...copies],
                     form: formOptions,
@@ -1709,7 +1811,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // region the emitter fails on is named in the report and the
             // program runs on without it.
             const jobs = unbuilt.map(one=>({ region: one.region, entryTop: one.entryTop,
-                checked: one.checked }));
+                checked: one.checked, copies: one.copies === true }));
             const batch = emitBatch(jobs, layout, found, emitOptions());
             counts.emitMs += batch.emitMs;
             counts.encodeMs += batch.encodeMs;
@@ -1856,6 +1958,19 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             if (seen >= settings.missThreshold)
             {
                 misses.delete(key);
+                const holders = closedIn.get(address);
+                if (holders !== undefined)
+                {
+                    // A block closed in the loop of a region translated code
+                    // keeps leaving for (a jump back to it that is no loop's,
+                    // another region's exit): that region, formed again with
+                    // copies, takes it rather than a region formed here.
+                    for (const record of holders)
+                    {
+                        copiesWanted.add(record);
+                    }
+                    return;
+                }
                 // Noted with the exits this target has taken as its heat, and
                 // again at every further threshold, so a target translated
                 // code leaves for millions of times is formed before a start
@@ -1910,8 +2025,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 }
                 return;
             }
+            // A block closed in a live region's loop is that region's, formed
+            // again with copies should translated code keep leaving for it.
             if (entries.entryOf(eip, top & 7) >= 0 || barrenHas(eip, top & 7)
-                || !translatable(eip))
+                || !translatable(eip) || closedIn.has(eip))
             {
                 return;
             }
@@ -1966,6 +2083,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // length.
             const keeps = leaveOut.size > 0 || settings.undoLog || profiling
                 ? null : (settings.store ?? null);
+            if (copiesWanted.size > 0 && copiesStep(keeps))
+            {
+                return 0;
+            }
             if (!buckets.slice(HOT_BUCKET).some(bucket=>bucket.size > 0)
                 && (profileAt >= 0 && reformStep(keeps) || relinkStep(keeps)))
             {
@@ -2018,7 +2139,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 const [key, eip] = batch[i];
                 const entryTop = key % 16;
-                if (covered.has(eip))
+                if (covered.has(eip) || closedIn.has(eip))
                 {
                     inFlight.delete(key);
                     continue;
@@ -2189,6 +2310,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 relinked: counts.relinked,
                 merges: counts.merges,
                 reforms: counts.reforms,
+                copied: counts.copied,
                 // Transfers that left a placed module through the table, as it
                 // counts them (running modules only).
                 crossings: [...placedLive].reduce((sum, placed)=>sum + placed.crossings.value, 0),

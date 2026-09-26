@@ -231,6 +231,8 @@
  *     transferring into the other (`mergeAfter`).
  * @property {number} [reforms]        Regions formed again with the callees their indirect
  *     calls were sampled going to (`callTargets`).
+ * @property {number} [copied]         Regions formed again with copies of the blocks inside
+ *     their loops, which the machine kept coming back into there (`structure`).
  * @property {number} [crossings]      Transfers out of a running module into another,
  *     through the function table: the rest are direct tail calls.
  * @property {number} [tableSize]      The function table's length, which the regions' indices

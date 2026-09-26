@@ -27,7 +27,12 @@
  * label and branches back to the dispatch loop, charging the instructions
  * retired since the last charge against the budget and leaving with `budget`
  * when it is spent: only a backward jump can close a loop. A block that falls
- * through to the block emitted right after it does nothing at all. Anything
+ * through to the block emitted right after it does nothing at all. In a
+ * structured region (the default, `planStructure`) the blocks are in the
+ * order of the control flow rather than of their addresses, the region's
+ * loops are wasm loops a jump back to the head branches to, and the blocks
+ * inside a loop are entered from outside through a second function of their
+ * copies (`emitCopies`); only other backward jumps take the dispatch. Anything
  * the region cannot continue -- a return, an indirect
  * jump, a call, an instruction the emitter does not translate -- writes the
  * next address into the state and leaves with `untranslated`, for the host
@@ -235,12 +240,13 @@ const LOCAL_TYPES = [
  *     hash, the number of regions the module will hold, which the host places in a range
  *     of the table: a transfer into the range is a direct tail call, and one out of it is
  *     counted (`finishModule`); profileCalls: indirect calls note their targets in the
- *     layout's call profile, when it has one (`callProfile`)
+ *     layout's call profile, when it has one (`callProfile`); structure: a region's loops
+ *     as wasm loops (`planStructure`), false for every backward jump through the dispatch
  * @returns {ModuleContext}
  */
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
-        wide = false, narrow = false, blockProfile = false, structure = false, precise = false,
+        wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
         place = 0, profileCalls = false } = {})
 {
     m.importMemory('env', 'memory', {
@@ -519,6 +525,8 @@ export function finishModule(context, functions){
 /**
  * @typedef {Object} Translation
  * @property {number} functionIndex
+ * @property {number} copiesIndex   the function of the copies of a structured region's blocks
+ *     inside its loops (`emitCopies`), which the region's own calls, or -1
  * @property {Map<number, number>} labels     block start eip → label
  * @property {Map<string, number>} unsupported  opcode → instructions the emitter left out
  * @property {Map<string, number>} refusals  `opcode (reason; entry kinds; entry x87)` → count
@@ -527,8 +535,10 @@ export function finishModule(context, functions){
  *     sees there is the fast default's (`relaxedFlagReads`)
  * @property {number} instructions
  * @property {Set<number>} cut      labels of blocks with no entry of their own: ones that
- *     leave at once (an x87 state conflict, nothing decoded, the first instruction left out)
- *     and ones compiled for the x87 stack in another shape than the entry's
+ *     leave at once (an x87 state conflict, nothing decoded, the first instruction left out),
+ *     ones compiled for the x87 stack in another shape than the entry's, and the `closed`
+ * @property {Set<number>} closed   the starts of the blocks inside a structured region's
+ *     loops that have no entry, the region emitted without copies (`emitRegion`)
  * @property {number} entryTop      the x87 top the function was compiled for
  * @property {number} loops         blocks emitted as wasm loops onto themselves
  * @property {number} x87Guards     x87 stack-fault checks left to run time
@@ -544,8 +554,10 @@ export function finishModule(context, functions){
  *
  * @param {ModuleContext} context
  * @param {import('../region.js').Region} region
- * @param {{ entryTop?: number, checked?: boolean }} [options]  the x87 top the entry is
- *     compiled for; checked: the entries test nothing of the x87 stack's shape (`planStack`)
+ * @param {{ entryTop?: number, checked?: boolean, copies?: boolean }} [options]  the x87 top
+ *     the entry is compiled for; checked: the entries test nothing of the x87 stack's shape
+ *     (`planStack`); copies: a structured region's blocks inside its loops are entered through
+ *     copies of them (`emitCopies`) -- false, they have no entry (`closed`)
  * @returns {Translation}
  */
 export function emitRegion(context, region, options = {}){
@@ -558,19 +570,32 @@ export class RegionEmitter {
     /**
      * @param {ModuleContext} context
      * @param {import('../region.js').Region} region
-     * @param {{ entryTop?: number, checked?: boolean }} [options]
+     * @param {{ entryTop?: number, checked?: boolean, copies?: boolean,
+     *     copyFunction?: boolean }} [options]  copies: as `emitRegion` takes it; copyFunction:
+     *     this is the function of a structured region's copies (`emitCopies`)
      */
-    constructor(context, region, { entryTop = 0, checked = false } = {}){
+    constructor(context, region,
+        { entryTop = 0, checked = false, copies = true, copyFunction = false } = {})
+    {
         this.context = context;
+        /** The region as formed, and the options, for the function of its copies. */
+        this.formed = region;
+        this.options = { entryTop, checked };
+        this.copyFunction = copyFunction;
         this.layout = context.layout;
         /** Where the layout keeps the flag record between regions, or -1. */
         this.flagRecord = context.layout.flagRecord ?? -1;
-        this.region = region;
-        this.b = new Body();
-        /** @type {Map<number, number>} */
-        this.labels = new Map(region.blocks.map((block, index)=>[block.start, index]));
         /** By ret block: the return addresses it jumps to rather than leaves by. */
         this.returns = inlineReturns(region);
+        /** The emitting order and its loops, in a structured region (`planStructure`). */
+        this.structure = context.flat === true ? null : planStructure(region, this.returns);
+        // A structured region's blocks in the order they are emitted, which
+        // is their labels' order too.
+        this.region = this.structure === null || this.structure.order.every((at, k)=>at === k)
+            ? region : { ...region, blocks: this.structure.order.map(at=>region.blocks[at]) };
+        this.b = new Body();
+        /** @type {Map<number, number>} */
+        this.labels = new Map(this.region.blocks.map((block, index)=>[block.start, index]));
         /** @type {string[]} the open control labels, innermost last */
         this.controls = [];
         /**
@@ -649,11 +674,58 @@ export class RegionEmitter {
         /** By block, the blocks whose way on goes there, in order, once a guess needs them.
          * @type {number[][] | null} */
         this.flowsInto = null;
-        /** Each loop head's last block (`planLoops`). @type {Map<number, number>} */
-        this.loopEnds = new Map();
+        /** Each loop head's last block (`planStructure`). @type {Map<number, number>} */
+        this.loopEnds = this.structure?.loops ?? new Map();
+        /**
+         * The blocks inside a loop other than a loop's head, in order, each
+         * emitted twice: in its loop, and as a copy in a function of the
+         * copies that the runtime enters it by (`emitCopies`).
+         * @type {number[]}
+         */
+        this.copies = [];
+        /** The heads of the loops that hold loops, whose head takes an entry into one. @type {Set<number>} */
+        this.entered = new Set();
+        for (const [lo, hi] of this.loopEnds)
+        {
+            for (let at = lo + 1; at <= hi; at++)
+            {
+                if (this.loopEnds.has(at))
+                {
+                    this.entered.add(lo);
+                }
+                else
+                {
+                    this.copies.push(at);
+                }
+            }
+        }
+        this.copies = [...new Set(this.copies)].sort((a, b)=>a - b);
+        /** Every block inside a loop but a loop's head, copied or not. */
+        this.interior = new Set(this.copies);
+        /** Those with no entry, the region emitted without copies. @type {number[]} */
+        this.closed = [];
+        // A predicted call's return inside a loop comes back from outside
+        // whenever the call goes elsewhere: such a region has its copies from
+        // the start.
+        const reentered = new Set((this.structure?.reentered ?? [])
+            .map(at=>this.region.blocks.indexOf(region.blocks[at])));
+        if (!copies && !copyFunction && !this.copies.some(at=>reentered.has(at)))
+        {
+            this.closed = this.copies;
+            this.copies = [];
+        }
+        /** Each copied block's place among the copies. @type {Map<number, number>} */
+        this.copyIndex = new Map(this.copies.map((at, k)=>[at, k]));
+        /** The function of the copies, once emitted (`emitCopies`). */
+        this.copiesIndex = -1;
+        /** Whether the block being emitted is a copy, and which. */
+        this.copying = false;
+        this.copyAt = -1;
+        /** The block emitted before this one, whose record's kind a guess may take. */
+        this.lastEmitted = -1;
         /** The ranges being emitted, innermost last (`emitRange`).
          * @type {{ lo: number, hi: number, loop: boolean,
-         *     items: { start: number, end: number, loop: boolean }[] }[]} */
+         *     items: { start: number, end: number, loop: boolean, copy?: boolean }[] }[]} */
         this.ranges = [];
         /** Whether the current block's remaining instructions are unreachable. */
         this.dead = false;
@@ -781,6 +853,10 @@ export class RegionEmitter {
     /** @returns {Translation} */
     emit(){
         const { b } = this;
+        if (this.copies.length > 0 && !this.copyFunction)
+        {
+            this.emitCopies();
+        }
         this.prologue();
         this.open('out', EMPTY);
         if (this.x87.active)
@@ -789,8 +865,7 @@ export class RegionEmitter {
         }
         this.openLoop('dispatch');
         const blocks = this.region.blocks;
-        const flat = this.context.flat === true;
-        this.loopEnds = flat ? new Map() : planLoops(blocks);
+        const flat = this.structure === null;
         this.flowsInto = null;
         this.flagsOut = liveFlagsOut(blocks, this.labels, this.context.precise === true);
         // The other executor's code table in a hybrid layout is a second
@@ -815,11 +890,13 @@ export class RegionEmitter {
         const functionIndex = this.context.m.function(
             this.context.regionType, this.localTypes, b.toBytes(), { hints: b.hints });
         return {
-            functionIndex, labels: this.labels, unsupported: this.unsupported,
-            refusals: this.refusals, relaxedReads: this.relaxedReads,
+            functionIndex, copiesIndex: this.copiesIndex,
+            labels: new Map([...this.labels].map(([start, at])=>[start, this.entryLabel(at)])),
+            unsupported: this.unsupported, refusals: this.refusals, relaxedReads: this.relaxedReads,
             instructions: this.instructions,
             cut: new Set([...this.x87.cut, ...this.unknownBlocks(), ...this.leaving,
-                ...this.shapedBlocks()]),
+                ...this.shapedBlocks(), ...this.closed].map(at=>this.entryLabel(at))),
+            closed: new Set(this.closed.map(at=>this.region.blocks[at].start)),
             entryTop: this.entryTop, loops: this.loops, x87Guards: this.x87.guards,
             x87RelaxedReads: this.x87.relaxedReads, fusedCompares: this.fusedCompares,
             folds: this.folds,
@@ -1555,14 +1632,63 @@ export class RegionEmitter {
     }
 
     /**
+     * Whether a block's own branch comes back to its start as a wasm loop
+     * onto itself -- the shape of most inner loops -- rather than a jump:
+     * with x87 in play, only when the block ends in the state it starts in,
+     * so the edge needs no moves.
+     *
+     * @param {number} index
+     */
+    loopsOntoItself(index){
+        const block = this.region.blocks[index];
+        const x = this.x87;
+        return (block.exit.kind === 'jcc' || block.exit.kind === 'loop')
+            && block.exit.targets[0] === block.start && block.instructions.length > 0
+            && (!x.active || (x.states[index] !== null && x.ends[index] !== null
+                && sameState(x.states[index], x.ends[index])));
+    }
+
+    /**
+     * The label the runtime enters a block by: its own, or, for a block inside
+     * a loop other than the head, its copy's past the labels of the blocks
+     * and of their entry tests.
+     *
+     * @param {number} index
+     */
+    entryLabel(index){
+        const at = this.copyIndex.get(index);
+        return at === undefined ? index : 2 * this.region.blocks.length + at;
+    }
+
+    /**
+     * By label, the block the dispatch enters with it, or -1 for a label past
+     * a block's entry test (a jump's inside the region, never an entry).
+     *
+     * @returns {number[]}
+     */
+    labelBlocks(){
+        const count = this.region.blocks.length;
+        if (this.copies.length === 0)
+        {
+            return this.region.blocks.map((_, index)=>index);
+        }
+        return [...this.region.blocks.map((_, index)=>index), ...new Array(count).fill(-1),
+            ...this.copies];
+    }
+
+    /**
      * The blocks `lo` to `hi` as the region's structure has them: each a wasm
      * block the code after its end follows, a loop among them as one item
      * whose blocks are a range of their own inside a wasm loop. A branch
      * forward is a branch out of its target's item; a branch back to the head
-     * of a loop around it is a branch to that loop. The dispatch at the head
-     * of the range takes an entry to any of its blocks: at the function's own
-     * head always, at a loop's only when the label is not the loop's head --
-     * an entry into the middle of the loop from outside it, rather than a turn.
+     * of a loop around it is a branch to that loop, the only way into the
+     * loop but its head's own, so a turn tests no label and a block inside it
+     * joins no way in from the dispatch -- the runtime enters such a block
+     * (after an exit in the middle of the loop, or from another region) through
+     * its copy (`emitCopies`). A loop's head inside another loop is entered from
+     * the dispatch through the outer loop's head, which tests the label.
+     * The function's own range opens with the dispatch; in the function of the
+     * copies, it holds the copies alone.
      *
      * @param {number} lo @param {number} hi
      * @param {boolean} loop  the range is a loop's, `lo` its head
@@ -1570,9 +1696,10 @@ export class RegionEmitter {
     emitRange(lo, hi, loop){
         const { b } = this;
         const blocks = this.region.blocks;
-        /** @type {{ start: number, end: number, loop: boolean }[]} */
-        const items = [];
-        for (let i = loop ? lo + 1 : lo; i <= hi;)
+        /** @type {{ start: number, end: number, loop: boolean, copy?: boolean }[]} */
+        const items = this.copyFunction
+            ? this.copies.map(at=>({ start: at, end: at, loop: false, copy: true })) : [];
+        for (let i = loop ? lo + 1 : lo; i <= hi && !this.copyFunction;)
         {
             const end = this.loopEnds.get(i);
             if (end !== undefined && end <= hi)
@@ -1590,65 +1717,137 @@ export class RegionEmitter {
         this.ranges.push(range);
         for (let k = items.length - 1; k >= 0; k--)
         {
-            this.open(`b${items[k].start}`, EMPTY);
-            if (!items[k].loop && this.entryTested(items[k].start))
+            const { start, copy } = items[k];
+            this.open(`${copy ? 'c' : 'b'}${start}`, EMPTY);
+            if (!items[k].loop && this.entryTested(start))
             {
                 // The block's own entry, before its test of the windows it
                 // takes from the block before (`emitEntryTests`).
-                this.open(`p${items[k].start}`, EMPTY);
+                this.open(`${copy ? 'q' : 'p'}${start}`, EMPTY);
             }
         }
-        /** The depth of the item holding each label, `fallback` for the rest. @param {number} fallback */
-        const table = fallback=>{
-            const past = blocks.map((block, t)=>{
-                const item = items.find(one=>one.start <= t && t <= one.end);
-                return item ? this.depthOf(`b${item.start}`) : fallback;
-            });
-            if (this.memoryPlan === null || !this.memoryPlan.entry.some(tests=>tests.length > 0))
-            {
-                return past;
-            }
-            // A label past the blocks is the block's from the one it takes
-            // windows from: past their test (`takesFrom`).
-            const own = past.map((depth, t)=>(this.entryTested(t)
-                && items.some(one=>one.start === t && !one.loop) ? this.depthOf(`p${t}`) : depth));
-            return [...own, ...past];
-        };
         if (loop)
         {
-            b.localGet(Local.label).i32const(lo).op(I32.ne);
-            this.openIf(`enter${lo}`);
-            // Any label not of an item here is the head's: out of the `if`.
-            b.localGet(Local.label);
-            b.brTable(table(0), 0);
-            this.close();
+            if (this.entered.has(lo))
+            {
+                // A way into a loop inside this one, from the dispatch: a turn
+                // comes back with the head's own label.
+                b.localGet(Local.label).i32const(lo).op(I32.ne);
+                this.openGuard(`enter${lo}`);
+                b.localGet(Local.label);
+                b.brTable(blocks.map((block, t)=>{
+                    const item = items.find(one=>one.loop && one.start <= t && t <= one.end);
+                    return item ? this.depthOf(`b${item.start}`) : 0;
+                }), 0);
+                this.close();
+            }
             this.emitBlock(blocks[lo], lo);
         }
         else
         {
             b.localGet(Local.label);
-            b.brTable(table(0), 0);
+            b.brTable(this.dispatchTable(items), 0);
         }
         for (const item of items)
         {
             this.close();
             if (item.loop)
             {
-                this.openLoop(`L${item.start}`);
+                // A loop of one block that is its own loop onto itself needs
+                // no second one around it, nor the stack check at its head.
+                if (item.start === item.end && this.loopsOntoItself(item.start))
+                {
+                    this.open(`L${item.start}`, EMPTY);
+                }
+                else
+                {
+                    this.openLoop(`L${item.start}`);
+                }
                 this.emitRange(item.start, item.end, true);
                 this.close();
+                continue;
             }
-            else
+            this.copying = item.copy === true;
+            this.copyAt = this.copying ? /** @type {number} */ (this.copyIndex.get(item.start)) : -1;
+            if (this.entryTested(item.start))
             {
-                if (this.entryTested(item.start))
-                {
-                    this.emitEntryTests(item.start);
-                    this.close();
-                }
-                this.emitBlock(blocks[item.start], item.start);
+                this.emitEntryTests(item.start);
+                this.close();
             }
+            this.emitBlock(blocks[item.start], item.start);
+            this.copying = false;
+            this.copyAt = -1;
         }
         this.ranges.pop();
+    }
+
+    /**
+     * The function's dispatch over its labels (`labelBlocks`): a block's own
+     * label to the item holding it, past its entry test to the block, a copy's
+     * to the copy. Without entry tests or copies, only the blocks' own.
+     *
+     * @param {{ start: number, end: number, loop: boolean, copy?: boolean }[]} items
+     * @returns {number[]}
+     */
+    dispatchTable(items){
+        const blocks = this.region.blocks;
+        /** @param {number} t */
+        const copyDepth = t=>this.depthOf(`${this.entryTested(t) ? 'q' : 'c'}${t}`);
+        const past = blocks.map((block, t)=>{
+            if (this.copyFunction)
+            {
+                return this.copyIndex.has(t) ? copyDepth(t) : 0;
+            }
+            const item = items.find(one=>one.start <= t && t <= one.end);
+            return item ? this.depthOf(`b${item.start}`) : 0;
+        });
+        const tested = this.memoryPlan !== null
+            && this.memoryPlan.entry.some(tests=>tests.length > 0);
+        if (!tested && !this.copyFunction)
+        {
+            return past;
+        }
+        // A label past the blocks is the block's from the one it takes
+        // windows from: past their test (`takesFrom`).
+        const own = past.map((depth, t)=>(this.entryTested(t)
+            && items.some(one=>one.start === t && !one.loop)
+            ? this.depthOf(`${this.copyFunction ? 'q' : 'p'}${t}`) : depth));
+        return this.copyFunction ? [...own, ...past, ...this.copies.map(copyDepth)]
+            : [...own, ...past];
+    }
+
+    /**
+     * The function of a structured region's copies: the blocks inside its
+     * loops but the heads (`copies`), each as a block of a flat dispatch, which
+     * go on among themselves and leave by the entry hash at the first jump to
+     * a block that has no copy -- a loop's head, or a block after the loops --
+     * where the region's own function takes over. A copy's label sends the
+     * region's function there before anything of it runs, with the state as
+     * it came in. Kept out of the region's function, whose loops then join no
+     * way in but their heads': cold copies inside it make TurboFan keep less of
+     * a loop in registers.
+     */
+    emitCopies(){
+        const copies = new RegionEmitter(this.context, this.formed,
+            { ...this.options, copyFunction: true });
+        const { functionIndex } = copies.emit();
+        this.copiesIndex = functionIndex;
+        const { b } = this;
+        b.localGet(Local.label).i32const(2 * this.region.blocks.length).op(I32.geU);
+        this.openGuard('copy');
+        for (let local = 0; local < STATE_PARAMS; local++)
+        {
+            b.localGet(local);
+        }
+        if (this.context.features.tailCalls)
+        {
+            b.returnCall(functionIndex);
+        }
+        else
+        {
+            b.call(functionIndex).return();
+        }
+        this.close();
     }
 
     /**
@@ -1696,20 +1895,30 @@ export class RegionEmitter {
     }
 
     /**
-     * Before falling through into the block after this one: a loop's head is
-     * entered with its own label, which its dispatch tells from an entry; a
-     * block that takes windows from this one past its entry test.
+     * The block whose code follows the current block's in the function, or -1:
+     * the next in the order, or the next copy while emitting the copies (the
+     * last one's way on is a branch).
+     *
+     * @param {number} index  the current block
+     */
+    following(index){
+        if (this.copying)
+        {
+            return this.copies[this.copyAt + 1] ?? -1;
+        }
+        return index + 1 < this.region.blocks.length ? index + 1 : -1;
+    }
+
+    /**
+     * Before falling through into the block after this one: a block that
+     * takes windows from this one past its entry test.
      *
      * @param {number} index  the block fallen into
      */
     fallInto(index){
-        if (this.loopEnds.has(index))
+        if (this.takesFrom(index))
         {
-            this.b.i32const(index).localSet(Local.label);
-        }
-        else if (this.takesFrom(index))
-        {
-            this.b.br(this.depthOf(`b${index}`));
+            this.b.br(this.depthOf(`${this.copying ? 'c' : 'b'}${index}`));
         }
     }
 
@@ -1720,10 +1929,12 @@ export class RegionEmitter {
     emitBlock(block, index){
         // The record's kind at the end of the block before, which a later
         // block's read at its start may take as its guess (`blockHint`).
-        if (index > 0)
+        if (this.lastEmitted >= 0)
         {
-            this.ends[index - 1] = this.pending;
+            this.ends[this.lastEmitted] = this.pending;
         }
+        this.lastEmitted = index;
+        this.x87.checkedPrecision = -1;
         this.hint = undefined;
         this.pending = null;
         this.fcmp = null;
@@ -1753,10 +1964,7 @@ export class RegionEmitter {
         // With x87 in play, only when the block ends in the state it starts
         // in, so the edge needs no moves.
         const x = this.x87;
-        this.selfLoop = (block.exit.kind === 'jcc' || block.exit.kind === 'loop')
-            && block.exit.targets[0] === block.start && block.instructions.length > 0
-            && (!x.active || (x.states[index] !== null && x.ends[index] !== null
-                && sameState(x.states[index], x.ends[index])));
+        this.selfLoop = this.loopsOntoItself(index);
         this.flagsAfterEach = [];
         const live = deadFlagPass(block, this.flagsOut[index], this.flagsAfterEach,
             this.context.precise === true);
@@ -1871,10 +2079,11 @@ export class RegionEmitter {
         this.close(); // selfDone
         this.selfLoop = false;
         const [, notTaken] = block.exit.targets;
-        const next = this.region.blocks[index + 1];
+        const after = this.following(index);
+        const next = after < 0 ? undefined : this.region.blocks[after];
         if (next && next.start === notTaken)
         {
-            this.fallInto(index + 1);
+            this.fallInto(after);
             return;
         }
         this.jumpTo(notTaken);
@@ -2039,14 +2248,15 @@ export class RegionEmitter {
      */
     emitExit(block, index){
         const { exit } = block;
-        const next = this.region.blocks[index + 1];
+        const after = this.following(index);
+        const next = after < 0 ? undefined : this.region.blocks[after];
         switch (exit.kind)
         {
             case 'fallthrough':
                 this.charge();
                 if (next && next.start === exit.targets[0])
                 {
-                    if (this.x87.active && !x87Edge(this, index + 1))
+                    if (this.x87.active && !x87Edge(this, after))
                     {
                         // The next block is compiled for another top than the
                         // one arriving here (a region's own entry, reached by
@@ -2055,7 +2265,7 @@ export class RegionEmitter {
                     }
                     else
                     {
-                        this.fallInto(index + 1);
+                        this.fallInto(after);
                     }
                     return;
                 }
@@ -2088,7 +2298,7 @@ export class RegionEmitter {
                     this.closeSelfLoop();
                     if (next && next.start === notTaken)
                     {
-                        this.fallInto(index + 1);
+                        this.fallInto(after);
                         return;
                     }
                     this.jumpTo(notTaken);
@@ -2100,7 +2310,7 @@ export class RegionEmitter {
                 this.close();
                 if (next && next.start === notTaken)
                 {
-                    this.fallInto(index + 1);
+                    this.fallInto(after);
                     return;
                 }
                 this.jumpTo(notTaken);
@@ -2212,22 +2422,25 @@ export class RegionEmitter {
             this.exitAt(target, Exit.UNTRANSLATED);
             return;
         }
-        if (label > this.blockIndex)
+        if (this.copying && this.jumpFromCopy(label))
+        {
+            return;
+        }
+        if (!this.copying && label > this.blockIndex)
         {
             // A forward edge cannot close a loop: a branch out of the item that
             // holds the target, in the innermost range holding it, which is
             // still open here -- with no budget test and no trip through a
-            // dispatch. A target in a loop enters the loop with its label.
+            // dispatch. A loop is entered at its head, falling into it.
             for (let k = this.ranges.length - 1; k >= 0; k--)
             {
                 const range = this.ranges[k];
-                const item = range.items.find(one=>one.start <= label && label <= one.end);
-                if (label >= range.lo && label <= range.hi && item)
+                /** @type {{ start: number, end: number, loop: boolean } | undefined} */
+                const item = range.items.find(one=>!one.copy && one.start <= label
+                    && label <= one.end);
+                if (label >= range.lo && label <= range.hi && item
+                    && (!item.loop || item.start === label))
                 {
-                    if (item.loop)
-                    {
-                        b.i32const(this.labelFor(label)).localSet(Local.label);
-                    }
                     b.br(this.depthOf(item.loop || this.takesFrom(label)
                         || !this.entryTested(label) ? `b${item.start}` : `p${label}`));
                     return;
@@ -2236,24 +2449,56 @@ export class RegionEmitter {
         }
         // A backward edge is looked at against the budget: only it can close
         // a loop. To the head of a loop around this block it is a branch to
-        // that loop; any other goes through the function's dispatch.
-        const around = this.ranges.some(range=>range.loop && range.lo === label);
+        // that loop; any other goes through the function's dispatch -- or,
+        // to a block the dispatch does not hold, out through the entry hash:
+        // a copy's (`emitCopies`), or, from a copy, the region's own.
+        const around = !this.copying && this.ranges.some(range=>range.loop && range.lo === label);
         b.localGet(Local.budget).i32const(0).op(I32.leS);
         this.openGuard('spent');
         this.exitAt(target, Exit.BUDGET);
         this.close();
-        b.i32const(this.labelFor(label)).localSet(Local.label);
+        if (this.copyFunction ? !this.copyIndex.has(label) : this.interior.has(label))
+        {
+            this.exitAt(target, Exit.UNTRANSLATED);
+            return;
+        }
+        if (!around || this.entered.has(label))
+        {
+            b.i32const(this.labelFor(label)).localSet(Local.label);
+        }
         b.br(this.depthOf(around ? `L${label}` : 'dispatch'));
     }
 
     /**
+     * A jump forward from a copy (`emitCopies`) to a later copy: a branch.
+     * Answers false for any other, which is looked at against the budget.
+     *
+     * @param {number} label  the target block
+     */
+    jumpFromCopy(label){
+        const at = this.copyIndex.get(label);
+        if (at === undefined || at <= this.copyAt)
+        {
+            return false;
+        }
+        this.b.br(this.depthOf(this.takesFrom(label) || !this.entryTested(label) ? `c${label}`
+            : `q${label}`));
+        return true;
+    }
+
+    /**
      * The label a jump from the current block into `index` goes through a
-     * dispatch with: past the block's entry test when the block takes its
-     * windows from this one (the labels past the blocks), its own otherwise.
+     * dispatch with: a block inside a loop, its copy's (entered with its test);
+     * past the block's entry test when the block takes its windows from this
+     * one (the labels past the blocks); its own otherwise.
      *
      * @param {number} index
      */
     labelFor(index){
+        if (this.copyIndex.has(index))
+        {
+            return this.entryLabel(index);
+        }
         return this.takesFrom(index) ? index + this.region.blocks.length : index;
     }
 
@@ -2410,48 +2655,455 @@ export function liveFlagsOut(blocks, labels, precise = true){
 }
 
 /**
- * The loops of a region as wasm can hold them: each head (the target of a
- * branch back from a block at or after it) with the last block of its loop,
- * widened until any two loops are nested or apart. A loop of one block is left
- * out: the block's own loop onto itself (`selfLoop`) takes it.
+ * The blocks of a region in the order a structured function emits them, and
+ * the loops that order holds as wasm loops.
  *
- * @param {import('../region.js').Block[]} blocks  in address order
- * @returns {Map<number, number>} the head's index -> the loop's last block's
+ * Address order is the compiler's layout, not the program's control flow: a
+ * switch's cases laid after the loop's latch jump back to it, a callee laid
+ * below its caller is reached by a jump back, and a loop entered at its test
+ * at the bottom is jumped into from above -- each of those a jump back that
+ * closes no loop, which as a wasm loop would widen the real ones into a nest
+ * the code does not have. So the loops are the control flow's own: a jump to
+ * a block that dominates it -- every way into the region reaches the jumper
+ * through the target -- closes a natural loop, whose blocks are those that
+ * reach the jump without passing its head. The ways in are the region's entry
+ * and the return addresses of the calls that leave it, where the callee's
+ * return comes back from outside: a loop with such a return inside it is
+ * entered in its middle every turn -- through a copy of its blocks and the
+ * entry hash back to its head (`emitCopies`), dearer than the flat dispatch's
+ * one branch -- so it is no natural loop and its jumps back go through the
+ * function's dispatch. The blocks are then emitted in a
+ * topological order of the jumps that close no loop, a loop's blocks together
+ * after its head, so that every other jump is a branch forward; ties go to
+ * the block the last one falls through to, then to the lowest address.
+ *
+ * @param {import('../region.js').Region} region
+ * @param {Map<number, number[]>} returns  by ret block, the return addresses it jumps to
+ *     (`inlineReturns`)
+ * @returns {{ order: number[], loops: Map<number, number>, reentered: number[] }}  order: the
+ *     blocks as they are emitted, each by its index in `region.blocks`; loops: by the place
+ *     in `order` of each loop's head, the place of its last block (a loop of one block only
+ *     inside another: elsewhere the block's own loop onto itself, `selfLoop`, is all it
+ *     needs); reentered: by index in `region.blocks`, blocks the runtime enters that may be
+ *     inside a loop: the return addresses of the predicted indirect calls, which a call to
+ *     another target comes back to from outside
  */
-export function planLoops(blocks){
+export function planStructure(region, returns){
+    const { blocks } = region;
+    const count = blocks.length;
     const index = new Map(blocks.map((block, i)=>[block.start, i]));
-    /** @type {Map<number, number>} */
-    const ends = new Map();
-    blocks.forEach((block, source)=>{
-        const { kind, targets, next } = block.exit;
-        const edges = kind === 'jump' || kind === 'call' ? [...targets]
-            : kind === 'jcc' || kind === 'loop' || kind === 'fallthrough'
-                ? [...targets, next] : [];
-        for (const target of edges)
+    /** @type {number[]} the blocks entered from outside the region besides its entry */
+    const roots = [index.get(region.entry) ?? 0];
+    /** @type {number[]} the return addresses of calls that leave only when they go elsewhere */
+    const reentered = [];
+    /** @type {number[][]} the blocks each jumps to inside the region, once each */
+    const successors = blocks.map(block=>{
+        /** @type {number[]} */
+        const out = [];
+        for (const target of jumpsOf(block, returns))
         {
-            const head = index.get(target);
-            if (head !== undefined && head < source)
+            const at = index.get(target);
+            if (at !== undefined && !out.includes(at))
             {
-                ends.set(head, Math.max(ends.get(head) ?? head, source));
+                out.push(at);
+            }
+        }
+        const back = comesBackTo(block, index);
+        if (back !== undefined && !roots.includes(back))
+        {
+            roots.push(back);
+        }
+        const { kind, next, predicted } = block.exit;
+        const last = block.instructions[block.instructions.length - 1];
+        if (kind === 'indirect' && last?.op === 'call' && predicted === true)
+        {
+            const after = index.get(next);
+            if (after !== undefined)
+            {
+                reentered.push(after);
+            }
+        }
+        return out;
+    });
+    // With no jump back in address order but a block's onto itself there is
+    // no loop of more than one block, and the address order is one the jumps
+    // all go forward in: most regions, whose search below cost more than their
+    // emitting.
+    if (successors.every((to, from)=>to.every(at=>at >= from)))
+    {
+        return { order: blocks.map((_, at)=>at), loops: new Map(), reentered };
+    }
+    const entry = roots[0];
+    let graph = successors;
+    let found = naturalLoops(graph, roots);
+    // A region formed at a block in the middle of a loop -- a jump's target
+    // that got hot first -- sees that loop begin at its entry, a loop around
+    // the one the code has whenever every way back to the entry comes from
+    // inside a loop of the region: the two, one of the code, turn by turn
+    // through both heads. The entry is then taken as a block of that loop,
+    // its way in a root above it (`virtual`) that goes where the entry goes,
+    // and the loop has one head -- where the machine, running on from the
+    // entry, comes into the region, as it does from any block of a loop
+    // that has no copy.
+    let virtual = -1;
+    const around = found.bodies.get(entry);
+    if (around !== undefined && found.predecessors[entry].every(p=>around.has(p))
+        && [...found.bodies].some(([head, body])=>head !== entry
+            && found.predecessors[entry].every(p=>body.has(p))))
+    {
+        virtual = count;
+        graph = [...successors, successors[entry]];
+        found = naturalLoops(graph, [virtual, ...roots.slice(1)]);
+    }
+    const { number, bodies } = found;
+    const nodes = graph.length;
+    // Each block's loops, innermost first: natural loops nest or are apart.
+    /** @type {number[][]} */
+    const loopsOf = graph.map(()=>[]);
+    const heads = [...bodies.keys()].sort((a, b)=>(bodies.get(a)?.size ?? 0)
+        - (bodies.get(b)?.size ?? 0));
+    for (const head of heads)
+    {
+        for (const at of /** @type {Set<number>} */ (bodies.get(head)))
+        {
+            loopsOf[at].push(head);
+        }
+    }
+    // The order: a block is ready once every block that jumps to it forward
+    // is placed, and while a loop is open only its own blocks are taken.
+    const waiting = new Int32Array(nodes);
+    graph.forEach((to, from)=>{
+        for (const at of to)
+        {
+            if (number[at] > number[from])
+            {
+                waiting[at]++;
             }
         }
     });
-    for (let changed = true; changed;)
-    {
-        changed = false;
-        for (const [one, oneEnd] of ends)
+    /** @type {Set<number>} */
+    const ready = new Set();
+    graph.forEach((_, at)=>{
+        if (waiting[at] === 0)
         {
-            for (const [two, twoEnd] of ends)
+            ready.add(at);
+        }
+    });
+    /** @type {{ head: number, left: number }[]} */
+    const open = [];
+    /** @type {Set<number>} loops whose blocks the order could not keep together */
+    const broken = new Set();
+    /** @type {number[]} */
+    const order = [];
+    let last = -1;
+    while (order.length < nodes)
+    {
+        const inner = open.length > 0 ? open[open.length - 1].head : -1;
+        /** @param {number} at */
+        const allowed = at=>inner < 0 || loopsOf[at].includes(inner);
+        const falls = last >= 0 && last !== virtual
+            && ['fallthrough', 'jcc', 'loop'].includes(blocks[last].exit.kind);
+        const fall = falls ? index.get(blocks[last].exit.next) : undefined;
+        let pick = -1;
+        if (fall !== undefined && ready.has(fall) && allowed(fall))
+        {
+            pick = fall;
+        }
+        else
+        {
+            for (const at of ready)
             {
-                if (one < two && two <= oneEnd && oneEnd < twoEnd)
+                if (allowed(at) && (pick < 0 || at < pick))
                 {
-                    ends.set(one, twoEnd);
-                    changed = true;
+                    pick = at;
                 }
             }
         }
+        if (pick < 0)
+        {
+            // Not met with natural loops; so that an order is always made.
+            const loop = open.pop();
+            if (loop === undefined)
+            {
+                throw new Error('emit: the blocks have no order');
+            }
+            broken.add(loop.head);
+            continue;
+        }
+        ready.delete(pick);
+        order.push(pick);
+        last = pick;
+        const body = bodies.get(pick);
+        if (body !== undefined)
+        {
+            open.push({ head: pick, left: body.size });
+        }
+        for (const one of open)
+        {
+            if (loopsOf[pick].includes(one.head))
+            {
+                one.left--;
+            }
+        }
+        while (open.length > 0 && open[open.length - 1].left === 0)
+        {
+            open.pop();
+        }
+        for (const at of graph[pick])
+        {
+            if (number[at] > number[pick] && --waiting[at] === 0)
+            {
+                ready.add(at);
+            }
+        }
     }
-    return ends;
+    const blockOrder = order.filter(at=>at !== virtual);
+    const placed = new Int32Array(count).fill(-1);
+    blockOrder.forEach((at, k)=>{
+        placed[at] = k;
+    });
+    /** @type {Map<number, number>} */
+    const loops = new Map();
+    /** @type {number[]} */
+    const ontoItself = [];
+    for (const [head, body] of bodies)
+    {
+        if (broken.has(head) || head === virtual)
+        {
+            continue;
+        }
+        if (body.size < 2)
+        {
+            ontoItself.push(placed[head]);
+            continue;
+        }
+        const first = placed[head];
+        const end = first + body.size - 1;
+        if ([...body].every(at=>placed[at] >= first && placed[at] <= end))
+        {
+            loops.set(first, end);
+        }
+    }
+    // A loop of one block is the block's own loop onto itself (`selfLoop`),
+    // and a loop here only inside another: there it is entered through that
+    // loop's head, where as one of its blocks it would have no entry and the
+    // machine, found standing in it when the region comes, would run it
+    // interpreted to its end.
+    for (const at of ontoItself)
+    {
+        if ([...loops].some(([lo, hi])=>lo < at && at <= hi))
+        {
+            loops.set(at, at);
+        }
+    }
+    return { order: blockOrder, loops, reentered };
+}
+
+/**
+ * The natural loops of a region's jumps (`planStructure`): a depth-first
+ * search from the ways in, then from any block only the runtime enters, each
+ * in address order, whose reverse finishing order numbers the blocks so that
+ * only a jump to an ancestor goes back; the dominators under a root above
+ * every way in -- a block a search starts from is one, dominated by nothing
+ * of the region; and for each jump to a block that dominates the jumper, the
+ * blocks that reach the jump without passing that head.
+ *
+ * @param {number[][]} successors  by block, the blocks it jumps to
+ * @param {number[]} roots  the ways in
+ * @returns {{ number: Int32Array, predecessors: number[][], bodies: Map<number, Set<number>> }}
+ */
+function naturalLoops(successors, roots){
+    const count = successors.length;
+    /** @type {number[]} */
+    const finished = [];
+    const state = new Uint8Array(count);
+    const isRoot = new Uint8Array(count);
+    for (const root of roots)
+    {
+        isRoot[root] = 1;
+    }
+    const starts = [...roots, ...successors.map((_, i)=>i)];
+    for (const start of starts)
+    {
+        if (state[start] !== 0)
+        {
+            continue;
+        }
+        isRoot[start] = 1;
+        /** @type {[number, number][]} */
+        const stack = [[start, 0]];
+        state[start] = 1;
+        while (stack.length > 0)
+        {
+            const top = stack[stack.length - 1];
+            const [at, k] = top;
+            if (k < successors[at].length)
+            {
+                top[1]++;
+                const to = successors[at][k];
+                if (state[to] === 0)
+                {
+                    state[to] = 1;
+                    stack.push([to, 0]);
+                }
+                continue;
+            }
+            state[at] = 2;
+            finished.push(at);
+            stack.pop();
+        }
+    }
+    const rpo = finished.reverse();
+    const number = new Int32Array(count);
+    rpo.forEach((at, k)=>{
+        number[at] = k;
+    });
+    /** @type {number[][]} */
+    const predecessors = successors.map(()=>[]);
+    successors.forEach((to, from)=>{
+        for (const at of to)
+        {
+            predecessors[at].push(from);
+        }
+    });
+    // The iterative algorithm over that numbering; -1 is the root above the ways in.
+    const idom = new Int32Array(count).fill(-2);
+    /** @param {number} a @param {number} b */
+    const meet = (a, b)=>{
+        let x = a;
+        let y = b;
+        while (x !== y)
+        {
+            if (x === -1 || y === -1)
+            {
+                return -1;
+            }
+            if (number[x] > number[y])
+            {
+                x = idom[x];
+            }
+            else
+            {
+                y = idom[y];
+            }
+        }
+        return x;
+    };
+    for (const at of rpo)
+    {
+        if (isRoot[at] === 1)
+        {
+            idom[at] = -1;
+        }
+    }
+    for (let changed = true; changed;)
+    {
+        changed = false;
+        for (const at of rpo)
+        {
+            if (isRoot[at] === 1)
+            {
+                continue;
+            }
+            let dom = -2;
+            for (const p of predecessors[at])
+            {
+                if (idom[p] !== -2)
+                {
+                    dom = dom === -2 ? p : meet(p, dom);
+                }
+            }
+            if (dom !== idom[at])
+            {
+                idom[at] = dom;
+                changed = true;
+            }
+        }
+    }
+    /** @param {number} a @param {number} b  whether a dominates b */
+    const dominates = (a, b)=>{
+        for (let at = b; at >= 0; at = idom[at])
+        {
+            if (at === a)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    /** @type {Map<number, Set<number>>} */
+    const bodies = new Map();
+    successors.forEach((to, from)=>{
+        for (const head of to)
+        {
+            if (number[head] > number[from] || !dominates(head, from))
+            {
+                continue;
+            }
+            const body = bodies.get(head) ?? new Set([head]);
+            bodies.set(head, body);
+            const work = [from];
+            while (work.length > 0)
+            {
+                const at = /** @type {number} */ (work.pop());
+                if (body.has(at))
+                {
+                    continue;
+                }
+                body.add(at);
+                work.push(...predecessors[at]);
+            }
+        }
+    });
+    return { number, predecessors, bodies };
+}
+
+/**
+ * Where a block's way on goes inside its region, as the emitter jumps there:
+ * its branches' targets, a switch's cases, a call's formed-in callee or a
+ * predicted call's, the return addresses of a formed-in callee's `ret`, and
+ * past a port write the host's call channel answers from inside the region.
+ *
+ * @param {import('../region.js').Block} block @param {Map<number, number[]>} returns
+ * @returns {number[]} addresses, some perhaps outside the region
+ */
+function jumpsOf(block, returns){
+    const { kind, targets, next, table, predicted } = block.exit;
+    if (kind === 'fallthrough' || kind === 'jump' || kind === 'call'
+        || kind === 'indirect' && (table !== undefined || predicted))
+    {
+        return targets;
+    }
+    if (kind === 'jcc' || kind === 'loop')
+    {
+        return [...targets, next];
+    }
+    if (kind === 'trap')
+    {
+        return [next];
+    }
+    return kind === 'ret' ? returns.get(block.start) ?? [] : [];
+}
+
+/**
+ * The block a way out of this one comes back to from outside the region on
+ * every turn, if any: the return address of a call that always leaves it -- a
+ * direct call whose callee is not formed in, an indirect one no prediction
+ * formed a callee of in -- and the address after a port write, where the host
+ * resumes a program whose handler it did not run from inside the region. A
+ * predicted call's return comes back from outside only when the call went
+ * elsewhere, which its copy takes (`emitCopies`).
+ *
+ * @param {import('../region.js').Block} block @param {Map<number, number>} index
+ * @returns {number | undefined}  the block's index
+ */
+function comesBackTo(block, index){
+    const { kind, targets, next, predicted } = block.exit;
+    const last = block.instructions[block.instructions.length - 1];
+    const leaves = kind === 'call' ? !index.has(targets[0])
+        : kind === 'trap' || kind === 'indirect' && last?.op === 'call'
+            && !(predicted === true && targets.some(target=>index.has(target)));
+    return leaves ? index.get(next) : undefined;
 }
 
 /**

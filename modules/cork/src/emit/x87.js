@@ -920,8 +920,8 @@ export function x87EntryCheck(e){
     {
         e.open(`shape${k}`, EMPTY);
     }
-    const depths = e.region.blocks.map((_, label)=>{
-        const k = tests.findIndex(test=>test.label === label);
+    const depths = e.labelBlocks().map(index=>{
+        const k = tests.findIndex(test=>test.label === index);
         return e.depthOf(k < 0 ? 'shaped' : `shape${k}`);
     });
     b.localGet(Local.label).brTable(depths, e.depthOf('shaped'));

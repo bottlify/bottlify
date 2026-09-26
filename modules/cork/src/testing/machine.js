@@ -28,15 +28,21 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 /**
  * @param {{ ramSize?: number, codePages?: boolean, trapPort?: number,
  *     trap?: (value: number) => number, rdtsc?: () => bigint,
- *     leaveOut?: string[], precise?: boolean }} [given]
+ *     leaveOut?: string[], precise?: boolean, structure?: boolean }} [given]
  *     trapPort: `out dx, eax` to it calls
  *     `trap` from inside the region (answering 1 when it moved EIP), as under a host with
  *     a call channel; without `trap`, one that answers 0; precise: nothing relaxed -- on
- *     unless a test asks, since the tests and the corpus judge the processor's behaviour
+ *     unless a test asks, since the tests and the corpus judge the processor's behaviour;
+ *     structure: the regions' loops as wasm loops (`prepareModule`), as the emitter's default
+ *     unless a test asks or `CORK_STRUCTURE` in the environment says 0 or 1, so a suite can
+ *     be run under the other form
  */
 export function createTestMachine(given = {}){
     const { ramSize = 1 << 20, codePages = false, trapPort, trap, rdtsc, leaveOut = [],
         precise = true } = given;
+    const forced = globalThis.process?.env?.CORK_STRUCTURE;
+    const structure = given.structure
+        ?? (forced === '1' ? true : forced === '0' ? false : undefined);
     // With `codePages`, the undo ring's area doubles as another executor's
     // byte-per-page code table, for the tests of a store into its pages.
     const own = ownLayout({ ramSize });
@@ -122,26 +128,29 @@ export function createTestMachine(given = {}){
          * @param {number} entry
          * @param {{ maxBlocks?: number, maxBytes?: number, undoLog?: boolean,
          *     entryTop?: number, hash?: boolean, leafCalls?: boolean, wide?: boolean,
-         *     narrow?: boolean, speculate?: boolean, callTargets?: Map<number, number[]> }}
-         *     [options]
+         *     narrow?: boolean, speculate?: boolean, callTargets?: Map<number, number[]>,
+         *     copies?: boolean }} [options]
          *     hash: register the region's entries in the machine's hash, so a transfer from
          *     another region finds them; wide: compiled for the wide precision controls;
          *     narrow: compiled for single precision;
          *     speculate: an x87 region's entries test the stack's shape its blocks were
          *     compiled for, and leave with `SHAPE` when it is not the machine's -- off, the
-         *     region is the `checked` one, which runs from any stack
+         *     region is the `checked` one, which runs from any stack; copies: as `emitRegion`
+         *     takes it, on unless false
          */
         translate(entry, options = {}){
             const { undoLog = false, entryTop = 0, hash = false, wide = false, narrow = false,
-                speculate = false, ...regionOptions } = options;
+                speculate = false, copies = true, ...regionOptions } = options;
             const read = (/** @type {number} */ address)=>bytes()[layout.ramBase + address];
             const region = formRegion(read, entry, regionOptions);
             const m = new ModuleBuilder();
             const context = prepareModule(m, layout, found, {}, {
                 undoLog, hash: table !== null && hash, wide, narrow, precise,
+                ...(structure === undefined ? {} : { structure }),
                 ...(trapPort === undefined ? {} : { trapPort }), leaveOut: new Set(leaveOut),
             });
-            const translation = emitRegion(context, region, { entryTop, checked: !speculate });
+            const translation = emitRegion(context, region,
+                { entryTop, checked: !speculate, copies });
             finishModule(context, [translation.functionIndex]);
             m.exportFunction('region', translation.functionIndex);
             const built = m.toBytes();
