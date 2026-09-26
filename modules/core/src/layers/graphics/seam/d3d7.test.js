@@ -637,6 +637,29 @@ test('a draw of nothing draws nothing and succeeds, by pointer, by buffer and st
     h.assertAllReleased();
 });
 
+test('GetInfo succeeds with nothing to say, and says nothing into the structure', ()=>{
+    // The retail runtime keeps no statistics; S_FALSE is its answer, as
+    // Direct3D 8's device gives it (Wine's d3d8 device.c 9796-9797).
+    const h = seamed();
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const device = h.createDevice(d3d, target).device;
+    const info = 0x7000;
+    h.box.bytes.fill(0xab, info, info + 16);
+    for (const id of [1, 2, 3])
+    {
+        assert.equal(h.device(device, 'GetInfo', [id, info, 16]), 1, `D3DDEVINFOID ${id}`);
+    }
+    assert.ok(h.box.bytes.subarray(info, info + 16).every(byte=>byte === 0xab));
+
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
 test('a vertex buffer is a guest allocation with a description of its own', ()=>{
     const h = seamed();
     const ddraw = h.create7();

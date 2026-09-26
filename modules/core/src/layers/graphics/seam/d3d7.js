@@ -43,6 +43,9 @@ import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 /** What an enumeration callback answers to stop. */
 const DDENUMRET_CANCEL = 0;
 
+/** Succeeded, and answered nothing -- which is what GetInfo does outside a debug runtime. */
+const S_FALSE = 1;
+
 /** The texture formats EnumTextureFormats names: the ones the renderer uploads. */
 const TEXTURE_DEPTHS = Object.freeze([32, 16]);
 
@@ -926,6 +929,11 @@ export function createDirect3D7Seam(
             }
             return hr;
         },
+
+        // The retail answer: the call succeeded and there is nothing to report,
+        // which is what a program checks before reading the structure it
+        // passed. Nothing is written into it.
+        GetInfo: ()=>S_FALSE,
 
         /** @param {any} device @param {number[]} args */
         SetClipPlane: (device, [index, pointer])=>((pointer >>> 0) === 0

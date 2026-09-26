@@ -944,6 +944,27 @@ export function createDirectDrawSeam(
                 : DD_OK),
 
             /** @param {any} surface @param {number[]} args */
+            SetPriority: (surface, [value])=>surface.setPriority(value >>> 0),
+
+            /**
+             * A refusal leaves the caller's variable as it was.
+             *
+             * @param {any} surface @param {number[]} args
+             */
+            GetPriority: (surface, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                const got = surface.getPriority();
+                if (got.hr === DD_OK)
+                {
+                    fields.writeU32(out >>> 0, got.priority);
+                }
+                return got.hr;
+            },
+
+            /** @param {any} surface @param {number[]} args */
             SetSurfaceDesc: (surface, [desc, flags])=>{
                 const request = (desc >>> 0) === 0
                     ? null

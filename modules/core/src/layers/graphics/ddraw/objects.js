@@ -53,6 +53,7 @@ import {
     DDERR_CLIPPERISUSINGHWND,
     DDERR_INVALIDCAPS,
     DDERR_INVALIDMODE,
+    DDERR_INVALIDOBJECT,
     DDERR_INVALIDPARAMS,
     DDERR_INVALIDSURFACETYPE,
     DDERR_NOCLIPPERATTACHED,
@@ -83,6 +84,7 @@ import {
     DDSCAPS_FLIP,
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
+    DDSCAPS_TEXTURE,
     DDSCAPS_VISIBLE,
     DDSCAPS_ZBUFFER,
     DDSCL_EXCLUSIVE,
@@ -276,6 +278,8 @@ export function depthFormatForDepth(bitDepth){
  * @property {Uint16Array | null} gammaRamp  What SetGammaRamp set; null is the identity.
  * @property {() => Uint16Array} getGammaRamp
  * @property {(ramp: ArrayLike<number>) => number} setGammaRamp
+ * @property {() => { hr: number, priority: number }} getPriority
+ * @property {(value: number) => number} setPriority
  */
 
 /** Entries per channel of a DDGAMMARAMP, and its three channels end to end. */
@@ -792,6 +796,21 @@ export function createDirectDraw(options = {}){
         let uniqueness = 1;
         /** @type {Uint16Array | null} */
         let gammaRamp = null;
+        let priority = 0;
+        /**
+         * Whether this surface can hold a priority: only a texture the
+         * runtime manages has one, and only at its top level.
+         */
+        const priorityRefusal = ()=>{
+            if ((caps & DDSCAPS_TEXTURE) === 0)
+            {
+                return DDERR_INVALIDOBJECT;
+            }
+            return (spec.caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) === 0
+                || sublevel
+                ? DDERR_INVALIDPARAMS
+                : DD_OK;
+        };
 
         const life = counted(()=>{
             surfaces.delete(surface);
@@ -1412,6 +1431,24 @@ export function createDirectDraw(options = {}){
             setGammaRamp(ramp){
                 gammaRamp = Uint16Array.from({ length: GAMMA_WORDS }, (_, index)=>ramp[index] ?? 0);
                 return DD_OK;
+            },
+
+            /**
+             * The priority the texture manager evicts by. Kept and read back;
+             * nothing is evicted here, so it orders nothing.
+             */
+            getPriority(){
+                const hr = priorityRefusal();
+                return { hr, priority: hr === DD_OK ? priority : 0 };
+            },
+            /** @param {number} value */
+            setPriority(value){
+                const hr = priorityRefusal();
+                if (hr === DD_OK)
+                {
+                    priority = value >>> 0;
+                }
+                return hr;
             },
         };
 

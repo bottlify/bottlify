@@ -262,8 +262,8 @@ function seamed(build = {}){
         },
         /**
          * @param {number} ddraw
-         * @param {{ caps: number, width?: number, height?: number, backBufferCount?: number,
-         *   mipMapCount?: number }} desc
+         * @param {{ caps: number, caps2?: number, width?: number, height?: number,
+         *   backBufferCount?: number, mipMapCount?: number }} desc
          */
         createSurface7(ddraw, desc){
             const at = 0x5000;
@@ -279,7 +279,7 @@ function seamed(build = {}){
                 backBufferCount: desc.backBufferCount ?? 0,
                 mipMapCount: desc.mipMapCount ?? 0,
                 caps: desc.caps,
-                caps2: 0,
+                caps2: desc.caps2 ?? 0,
                 pixelFormat: { size: 0x20, flags: DDPF_RGB, fourCC: 0, bitCount: 32,
                     redMask: 0xff0000, greenMask: 0xff00, blueMask: 0xff, alphaMask: 0 },
             });
@@ -1731,3 +1731,57 @@ test('no surface is an overlay: creating one is refused, and the overlay calls s
     assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();
 });
+
+test('a managed texture keeps a priority; other textures refuse one and other surfaces more so',
+    ()=>{
+        // ddraw7.c test_resource_priority (11094-11175, 11201): managed
+        // textures start at zero and read back what was set; an unmanaged
+        // texture and a mip sublevel are DDERR_INVALIDPARAMS, a surface
+        // that is no texture DDERR_INVALIDOBJECT, and a refusal leaves the
+        // caller's variable alone.
+        const DDSCAPS2_TEXTUREMANAGE = 0x10;
+        const DDSCAPS2_D3DTEXTUREMANAGE = 0x20000;
+        const DDERR_INVALIDOBJECT = 0x88760082;
+        const h = seamed();
+        const ddraw = h.create7();
+        const out = 0x5c00;
+        const cases = /** @type {[number, number, number][]} */ ([
+            [DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY, 0, DDERR_INVALIDPARAMS],
+            [DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY, 0, DDERR_INVALIDPARAMS],
+            [DDSCAPS_TEXTURE, DDSCAPS2_TEXTUREMANAGE, DD_OK],
+            [DDSCAPS_TEXTURE, DDSCAPS2_D3DTEXTUREMANAGE, DD_OK],
+            [DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 0, DDERR_INVALIDOBJECT],
+            [DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY, 0, DDERR_INVALIDOBJECT],
+        ]);
+        for (const [caps, caps2, hr] of cases)
+        {
+            const surface = h.createSurface7(ddraw, { caps, caps2, width: 32, height: 32 });
+            h.box.memory.writeU32(out, 0xdeadbeef);
+            assert.equal(h.surface7(surface, 'GetPriority', [out]), hr);
+            assert.equal(h.box.memory.readU32(out), hr === DD_OK ? 0 : 0xdeadbeef);
+            assert.equal(h.surface7(surface, 'SetPriority', [1]), hr);
+            h.box.memory.writeU32(out, 0xdeadbeef);
+            assert.equal(h.surface7(surface, 'GetPriority', [out]), hr);
+            assert.equal(h.box.memory.readU32(out), hr === DD_OK ? 1 : 0xdeadbeef);
+            assert.equal(h.release(surface), 0);
+        }
+
+        const top = h.createSurface7(ddraw, { caps: DDSCAPS_TEXTURE | DDSCAPS_COMPLEX
+            | DDSCAPS_MIPMAP, caps2: DDSCAPS2_TEXTUREMANAGE, width: 32, height: 32,
+        mipMapCount: 2 });
+        h.box.memory.writeU32(0x5b00, DDSCAPS_COMPLEX);
+        h.box.bytes.fill(0, 0x5b04, 0x5b10);
+        assert.equal(h.surface7(top, 'GetAttachedSurface', [0x5b00, 0x5b20]), DD_OK);
+        const sublevel = h.box.memory.readU32(0x5b20);
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(h.surface7(sublevel, 'GetPriority', [out]), DDERR_INVALIDPARAMS);
+        assert.equal(h.box.memory.readU32(out), 0xdeadbeef);
+        assert.equal(h.surface7(top, 'GetPriority', [out]), DD_OK);
+        assert.equal(h.box.memory.readU32(out), 0);
+        assert.equal(h.surface7(top, 'GetPriority', [0]), DDERR_INVALIDPARAMS);
+
+        assert.equal(h.release(sublevel), 1);
+        assert.equal(h.release(top), 0);
+        assert.equal(h.release(ddraw), 0);
+        h.assertAllReleased();
+    });
