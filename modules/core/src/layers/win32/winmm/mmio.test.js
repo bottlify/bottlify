@@ -715,6 +715,8 @@ const MMIOM_SEEK = 2;
 const MMIOM_OPEN = 3;
 const MMIOM_CLOSE = 4;
 const MMIOM_WRITEFLUSH = 5;
+const MMIOM_RENAME = 6;
+const MMIOM_USER = 0x8000;
 const MMIO_INSTALLPROC = 0x10000;
 const MMIO_REMOVEPROC = 0x20000;
 const PROCEDURE = 0x401000;
@@ -734,8 +736,10 @@ function procedureOver(memory, image){
         calls: [],
         /** What MMIOM_OPEN was handed. @type {any} */
         opened: null,
-        /** What MMIOM_OPEN answers. */
+        /** What MMIOM_OPEN and MMIOM_RENAME answer. */
         refuse: 0,
+        /** What MMIOM_RENAME was handed. @type {any} */
+        renamed: null,
     };
     /**
      * @param {number} entry @param {number[]} args @param {unknown} [thread]
@@ -781,6 +785,12 @@ function procedureOver(memory, image){
                 memory.setU32(record + INFO.lDiskOffset, to);
                 return to;
             }
+            case MMIOM_RENAME:
+                state.renamed = { record, from: first, to: second,
+                    fcc: memory.u32(record + INFO.fccIOProc) };
+                return state.refuse;
+            case MMIOM_USER:
+                return first + second;
             default:
                 return 0;
         }
@@ -984,13 +994,81 @@ test('a procedure that refuses the open leaves nothing open, and a wide one gets
     assert.equal(await fns.mmioClose.handler([handle, 0]), 0);
 });
 
+test('mmioSendMessage reaches the program\'s procedure, and a built-in one knows none', async()=>{
+    // A message of the program's own, MMIOM_USER and up, is answered by its
+    // procedure; the built-in procedures recognise none, and answer zero.
+    const { memory, fns, state, diverged } = withProcedure(riffImage());
+    fns.mmioInstallIOProcA.handler([fourcc('XYZ '), PROCEDURE, MMIO_INSTALLPROC]);
+    const record = memory.allocate(INFO.size);
+    memory.setU32(record + INFO.fccIOProc, fourcc('XYZ '));
+    const handle = await fns.mmioOpenA.handler([memory.put('movie.xyz'), record, MMIO_READ]);
+    assert.equal(await fns.mmioSendMessage.handler([handle, MMIOM_USER, 2, 3]), 5);
+    assert.deepEqual([state.calls.at(-1)?.message, state.calls.at(-1)?.thread],
+        [MMIOM_USER, 'the caller']);
+
+    const plain = fns.mmioOpenA.handler([memory.put('C:\\click.wav'), 0, MMIO_READ]);
+    assert.equal(fns.mmioSendMessage.handler([plain, MMIOM_USER, 2, 3]), 0);
+    assert.equal(diverged.length, 0);
+    assert.equal(fns.mmioSendMessage.handler([plain, MMIOM_SEEK, 0, SEEK_END]), 0);
+    assert.equal(diverged.length, 1, 'one of mmio\'s own messages, which is not to be sent so');
+    assert.equal(fns.mmioSeek.handler([plain, 0, SEEK_CUR]), 0, 'and nothing moved');
+    assert.equal(fns.mmioSendMessage.handler([0x1234, MMIOM_USER, 0, 0]), 5,
+        'MMSYSERR_INVALHANDLE');
+});
+
+test('mmioRename renames a file on the volume, or asks the program\'s procedure to', async()=>{
+    const MMIOERR_FILENOTFOUND = 257;
+    const { memory, files, fns, state, freed } = withProcedure(riffImage());
+    /** @type {any} */ (files).rename = (/** @type {string} */ from, /** @type {string} */ to)=>{
+        if (!files.files[from] || files.files[to])
+        {
+            return false;
+        }
+        files.files[to] = files.files[from];
+        delete files.files[from];
+        return true;
+    };
+    const wave = files.files['C:\\click.wav'];
+    assert.equal(fns.mmioRenameA.handler(
+        [memory.put('C:\\click.wav'), memory.put('C:\\clack.wav'), 0, 0]), 0);
+    assert.equal(files.files['C:\\clack.wav'], wave);
+    assert.equal(files.files['C:\\click.wav'], undefined);
+    assert.equal(fns.mmioRenameW.handler(
+        [memory.putWide('C:\\clack.wav'), memory.putWide('C:\\click.wav'), 0, 0]), 0);
+    assert.equal(files.files['C:\\click.wav'], wave, 'the wide call by UTF-16 names');
+    assert.equal(fns.mmioRenameA.handler(
+        [memory.put('C:\\none.wav'), memory.put('C:\\some.wav'), 0, 0]), MMIOERR_FILENOTFOUND);
+    files.files['C:\\other.wav'] = new Uint8Array(4);
+    assert.notEqual(fns.mmioRenameA.handler(
+        [memory.put('C:\\click.wav'), memory.put('C:\\other.wav'), 0, 0]), 0,
+    'a name already taken is refused');
+    assert.equal(files.files['C:\\click.wav'], wave);
+
+    // A compound name's procedure is sent MMIOM_RENAME with both names, in
+    // an MMIOINFO of its own, and answers for the rename.
+    fns.mmioInstallIOProcA.handler([fourcc('XYZ '), PROCEDURE, MMIO_INSTALLPROC]);
+    assert.equal(await fns.mmioRenameA.handler(
+        [memory.put('pack.xyz+one'), memory.put('pack.xyz+two'), 0, 0]), 0);
+    assert.deepEqual([memory.text(state.renamed.from), memory.text(state.renamed.to),
+        state.renamed.fcc], ['pack.xyz+one', 'pack.xyz+two', fourcc('XYZ ')]);
+    assert.equal(state.calls.at(-1)?.thread, 'the caller');
+    assert.ok(freed.includes(state.renamed.record), 'the MMIOINFO is let go');
+    state.refuse = MMIOERR_FILENOTFOUND;
+    const record = memory.allocate(INFO.size);
+    memory.setU32(record + INFO.pIOProc, PROCEDURE);
+    assert.equal(await fns.mmioRenameA.handler(
+        [memory.put('a'), memory.put('b'), record, 0]), MMIOERR_FILENOTFOUND,
+    'one handed in the MMIOINFO, whose answer is passed on');
+});
+
 test('every entry pops what the guest pushed', ()=>{
     const { fns } = build();
     assert.deepEqual(
         ['mmioOpenA', 'mmioOpenW', 'mmioClose', 'mmioRead', 'mmioWrite', 'mmioSeek',
             'mmioDescend', 'mmioAscend', 'mmioCreateChunk', 'mmioGetInfo', 'mmioSetInfo',
             'mmioAdvance', 'mmioStringToFOURCCA', 'mmioInstallIOProcA', 'mmioSetBuffer',
-            'mmioFlush', 'mmioStringToFOURCCW', 'mmioInstallIOProcW']
+            'mmioFlush', 'mmioStringToFOURCCW', 'mmioInstallIOProcW', 'mmioSendMessage',
+            'mmioRenameA', 'mmioRenameW']
             .map(name=>fns[name].argBytes),
-        [12, 12, 8, 12, 12, 12, 16, 12, 12, 12, 12, 12, 8, 12, 16, 8, 8, 12]);
+        [12, 12, 8, 12, 12, 12, 16, 12, 12, 12, 12, 12, 8, 12, 16, 8, 8, 12, 16, 16, 16]);
 });
