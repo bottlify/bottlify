@@ -223,6 +223,21 @@ test('popf changes the ID and AC bits, so the CPUID probe finds CPUID', ()=>{
     assert.equal((r.state.reg[0] ^ r.state.reg[1]) >>> 0, 0x240000, 'the model');
 });
 
+test('popfw loads the low sixteen bits of EFLAGS alone, so AC and ID stay', ()=>{
+    // push word 0x0003 (CF and the reserved bit); popfw -- with AC and ID set
+    // before: the word form writes bits 0-15, and they are above them. Then
+    // popfd, which writes them, with a dword that clears both.
+    const r = both([0x66, 0x6a, 0x03, 0x66, 0x9d, 0x9c, 0x5b, 0x6a, 0x02, 0x9d, 0x9c, 0x59, 0xf4],
+        { eflags: 2 | 1 << 18 | 1 << 21 });
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    const AC_ID = 1 << 18 | 1 << 21;
+    assert.equal(r.m.reg('ebx') & (AC_ID | CF), AC_ID | CF, 'translated: popfw kept AC and ID');
+    assert.equal(r.state.reg[3] & (AC_ID | CF), AC_ID | CF, 'the model: popfw kept AC and ID');
+    assert.equal(r.m.reg('ecx') & AC_ID, 0, 'translated: popfd cleared them');
+    assert.equal(r.state.reg[1] & AC_ID, 0, 'the model: popfd cleared them');
+});
+
 test('ret imm16 pops the return and adds the immediate, model and emitter agreeing', ()=>{
     const r = both([
         0x6a, 0x00,                                     // push 0

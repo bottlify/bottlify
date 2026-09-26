@@ -416,8 +416,10 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         case 'popf':
         {
-            // As the model's: AC and ID too, which the CPUID probe flips.
-            const writable = 0xcd5 | DF | 1 << 11 | 1 << 18 | 1 << 21;
+            // As the model's: AC and ID too, which the CPUID probe flips; the
+            // word form writes the low sixteen bits alone.
+            const writable = (0xcd5 | DF | 1 << 11 | 1 << 18 | 1 << 21)
+                & (size === 2 ? 0xffff : -1);
             e.materialise();
             stackAccess(e, size);
             b.localGet(Local.addr)
