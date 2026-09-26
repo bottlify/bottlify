@@ -68,7 +68,8 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
  *     blockProfile?: boolean, timings?: boolean, place?: boolean,
- *     leaveOut?: Set<string> | string[], wide?: boolean, structure?: boolean }} [options]
+ *     leaveOut?: Set<string> | string[], wide?: boolean, structure?: boolean,
+ *     profileCalls?: boolean }} [options]
  *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0;
  *     place: job i's function goes at the module's range of the table plus i, a transfer
  *     into the range a direct tail call and one out of it counted (`finishModule`)
@@ -89,6 +90,7 @@ export function emitBatch(jobs, layout, features, options = {}){
         wide: options.wide === true,
         structure: options.structure === true,
         place: options.place === true ? jobs.length : 0,
+        profileCalls: options.profileCalls === true,
         leaveOut,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
     });
@@ -135,9 +137,11 @@ export function emitBatch(jobs, layout, features, options = {}){
  * Regions already running, formed again from a copy of their pages and emitted
  * into one module: the relink that gathers the regions of many small batch
  * modules into a few big ones. A region whose bytes no longer hash as they did
- * is answered as a failure (`changed`) and keeps the function it has.
+ * is answered as a failure (`changed`) and keeps the function it has. A job's
+ * `targets` are the callees its indirect calls were predicted to (`callTargets`).
  *
- * @param {{ jobs: { entry: number, entryTop: number, hash: string, checked?: boolean }[],
+ * @param {{ jobs: { entry: number, entryTop: number, hash: string, checked?: boolean,
+ *         targets?: [number, number[]][] }[],
  *     pages: [number, Uint8Array][],
  *     form: { maxBlocks: number, maxBytes: number, leafCalls?: boolean } }} relink
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
@@ -154,7 +158,8 @@ export function relinkBatch({ jobs, pages, form }, layout, features, options = {
     /** @param {number} address */
     const translatable = address=>byPage.has(address >>> 12);
     const formed = jobs.map(job=>{
-        const region = formRegion(read, job.entry, { ...form, translatable });
+        const region = formRegion(read, job.entry, { ...form, translatable,
+            ...(job.targets === undefined ? {} : { callTargets: new Map(job.targets) }) });
         return region.hash === job.hash
             ? { region, entryTop: job.entryTop, checked: job.checked === true } : null;
     });

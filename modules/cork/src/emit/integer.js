@@ -79,6 +79,71 @@ export function classOf(instruction){
 }
 
 /**
+ * An indirect call's address and target into the layout's call profile while
+ * the runtime has it on (`callProfile`: a flag, a count, and the last sixteen
+ * calls as pairs), which is how the runtime learns the callees to form into
+ * the caller (`callTargets`). Off, one load and a branch; the call's target is
+ * in `count`.
+ *
+ * @param {E} e @param {number} site
+ */
+function profileCall(e, site){
+    if (e.context.profileCalls !== true)
+    {
+        return;
+    }
+    const at = /** @type {number} */ (e.layout.callProfile);
+    const { b } = e;
+    b.i32const(0).load('i32', { offset: at });
+    e.openIf('profile');
+    b.i32const(0).i32const(0).load('i32', { offset: at + 4 }).localTee(Local.t1)
+        .i32const(1).op(I32.add).store('i32', { offset: at + 4 });
+    b.localGet(Local.t1).i32const(15).op(I32.and).i32const(3).op(I32.shl).localTee(Local.t1)
+        .i32const(site | 0).store('i32', { offset: at + 8 });
+    b.localGet(Local.t1).localGet(Local.count).store('i32', { offset: at + 12 });
+    e.close();
+}
+
+/**
+ * An indirect call whose callees the runtime predicted, with the ones formed
+ * into the region: the target compared with each, a match a jump to the
+ * callee's block -- the return address is pushed, and the callee's `ret`
+ * comes back to the block after the call as a direct call's does
+ * (`inlineReturns`). Anything else leaves as before. Charged once here, at
+ * the block's depth, for every way out below; a push into a code page leaves
+ * `stale` before any of it.
+ *
+ * @param {E} e
+ */
+function predictCall(e){
+    const { exit } = e.region.blocks[e.blockIndex];
+    const callees = exit.kind === 'indirect' && exit.predicted
+        ? exit.targets.filter(target=>e.labels.has(target)) : [];
+    if (callees.length === 0)
+    {
+        return;
+    }
+    const { b } = e;
+    e.charge();
+    if (e.staleCheck)
+    {
+        b.localGet(Local.stale).op(I32.eqz);
+        e.openIf('clean');
+    }
+    for (const callee of callees)
+    {
+        b.localGet(Local.count).i32const(callee | 0).op(I32.eq);
+        e.openIf('predicted');
+        e.jumpTo(callee);
+        e.close();
+    }
+    if (e.staleCheck)
+    {
+        e.close();
+    }
+}
+
+/**
  * Emits one instruction. Answers false when it is not one this file
  * translates; nothing is emitted then.
  *
@@ -474,6 +539,8 @@ export function emitInstruction(e, instruction, flagsLive){
             }
             else
             {
+                profileCall(e, instruction.eip);
+                predictCall(e);
                 b.localGet(Local.count).localSet(Local.eip);
                 e.exitDynamic(Exit.UNTRANSLATED);
             }

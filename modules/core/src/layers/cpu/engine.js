@@ -56,6 +56,9 @@
  * @property {number} fsBase       The thread block's linear address (32-bit Windows).
  * @property {number} gsBase       The same for 64-bit Windows; -1 when absent.
  * @property {number} counter      u32 retired-instruction word (hybrid: the emulator's).
+ * @property {number} [callProfile] Cork's own: where translated code notes its indirect calls
+ *     while the runtime asks -- a flag, a count, and sixteen pairs of the call's address and
+ *     its target, the last calls (`callTargets`); absent, no profile.
  * @property {number} tables       Wasm address of the engine's own tables.
  * @property {number} codePages    Wasm address of the other executor's byte-per-page
  *                                 "has compiled code" table (hybrid), or -1: a store into
@@ -191,6 +194,8 @@
  * @property {number} [relinked]       Regions switched to a relinked module's function.
  * @property {number} [merges]         Two modules gathered into one because one kept
  *     transferring into the other (`mergeAfter`).
+ * @property {number} [reforms]        Regions formed again with the callees their indirect
+ *     calls were sampled going to (`callTargets`).
  * @property {number} [crossings]      Transfers out of a running module into another,
  *     through the function table: the rest are direct tail calls.
  * @property {number} [transfers]      Transfers between regions, when counted (`countTransfers`).

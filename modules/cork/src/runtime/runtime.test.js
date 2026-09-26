@@ -1078,6 +1078,66 @@ test('two modules that keep transferring into each other are gathered into one, 
     await m.runtime.flush();
 });
 
+/**
+ * mov ecx, n; L: mov eax, ecx; and eax, 15; call [TABLE + eax*4]; dec ecx; jnz L; hlt;
+ * F: add edx, 1; ret; G: add edx, 3; ret; H: add edx, 100; ret -- the table F and G in
+ * turn, H in its last slot: F and G an indirect call's usual callees, H a rare one.
+ * @param {number} n
+ */
+const dispatchLoop = n=>{
+    const table = CODE + 0x100;
+    const code = [
+        0xb9, n & 0xff, n >>> 8 & 0xff, n >>> 16 & 0xff, 0,
+        0x89, 0xc8,
+        0x83, 0xe0, 0x0f,
+        0xff, 0x14, 0x85, table & 0xff, table >>> 8 & 0xff, 0, 0,
+        0x49, 0x75, 0xf1,
+        0xf4,
+        0x83, 0xc2, 0x01, 0xc3,
+        0x83, 0xc2, 0x03, 0xc3,
+        0x83, 0xc2, 0x64, 0xc3,
+    ];
+    const [f, g, h] = [CODE + 21, CODE + 25, CODE + 29];
+    const slots = Array.from({ length: 16 }, (_, k)=>(k === 15 ? h : k % 2 === 1 ? g : f));
+    return { code, table, slots, f, g, h };
+};
+
+test('an indirect call sampled going to a few small callees has them formed into its region,'
+    + ' and a call to another still leaves', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return; // no hash, no transfers to count
+    }
+    const m = machine({ countTransfers: true });
+    const { code, table, slots, f, g, h } = dispatchLoop(1600);
+    m.write(CODE, code);
+    m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
+    for (const at of [f, g, h, CODE])
+    {
+        m.runtime.noteHot(at);
+    }
+    await m.runtime.translatePending();
+    /** The loop from its start, 1600 calls: F 800 times, G 700, H 100. */
+    const run = ()=>{
+        m.setReg(1, 1600);
+        m.setReg(2, 0);
+        m.setReg(4, 0x80000);
+        const before = m.runtime.diagnostics().transfers ?? 0;
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 5), 1_000_000).kind, 'halt');
+        assert.equal(m.reg(2), 800 + 700 * 3 + 100 * 100);
+        return (m.runtime.diagnostics().transfers ?? 0) - before;
+    };
+    assert.equal(run(), 3200, 'every call and every return a transfer');
+    // Sixteen calls a reading, one translatePending in two.
+    for (let i = 0; i < 16 && m.runtime.diagnostics().reforms === 0; i++)
+    {
+        run();
+        await m.runtime.translatePending();
+    }
+    assert.equal(m.runtime.diagnostics().reforms, 1);
+    assert.equal(run(), 200, 'only H leaves, and its return comes back');
+});
+
 test('a transfer that finds no entry leaves with the carried state written back', async()=>{
     const m = machine();
     // mov ebx, 7; mov edx, -1; add edx, 1; mov eax, CODE+0x800; jmp eax -- nothing is

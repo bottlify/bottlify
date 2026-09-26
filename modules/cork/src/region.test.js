@@ -181,6 +181,32 @@ test('a small leaf callee is formed into its caller, and only its rets return in
     assert.deepEqual(deeper.entries, [0x1000, 0x1005, 0x1006, 0x100b]);
 });
 
+test('an indirect call\'s predicted callees are formed in as a direct call\'s are, and'
+    + ' only then', ()=>{
+    // 1000: call eax (ff d0)   1002: ret   F = 1003: inc eax; ret   G = 1005: dec eax; ret
+    const code = [0xff, 0xd0, 0xc3, 0x40, 0xc3, 0x48, 0xc3];
+    const plain = regionOf(code);
+    assert.deepEqual(plain.entries, [0x1000, 0x1002]);
+    assert.equal(plain.blocks[0].exit.kind, 'indirect');
+    assert.equal(plain.blocks[0].exit.predicted, undefined);
+    const predicted = regionOf(code, 0x1000,
+        { callTargets: new Map([[0x1000, [0x1003, 0x1005]]]) });
+    assert.deepEqual(predicted.entries, [0x1000, 0x1002, 0x1003, 0x1005]);
+    const call = predicted.blocks[0].exit;
+    assert.equal(call.kind, 'indirect');
+    assert.equal(call.predicted, true);
+    assert.deepEqual(call.targets, [0x1003, 0x1005]);
+    assert.deepEqual([...inlineReturns(predicted)].sort((x, y)=>x[0] - y[0]),
+        [[0x1003, [0x1002]], [0x1005, [0x1002]]],
+        'each callee\'s ret comes back after the call');
+    assert.notEqual(predicted.hash, plain.hash, 'the prediction is part of what the region is');
+    // Another call's prediction, or none with leaf calls off, forms nothing in.
+    assert.deepEqual(regionOf(code, 0x1000, { callTargets: new Map([[0x2000, [0x1003]]]) })
+        .entries, [0x1000, 0x1002]);
+    assert.deepEqual(regionOf(code, 0x1000, { leafCalls: false,
+        callTargets: new Map([[0x1000, [0x1003]]]) }).entries, [0x1000, 0x1002]);
+});
+
 test('a jump through a bounded table takes the table\'s cases into the region', ()=>{
     // cmp eax, 2; ja D; jmp [0x3000 + eax*4]; C0: ret; C1: ret; C2: ret; D: hlt
     const table = [0x100e, 0x100f, 0x1010];

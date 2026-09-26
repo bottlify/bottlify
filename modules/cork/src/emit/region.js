@@ -173,6 +173,8 @@ const LOCAL_TYPES = [
  *     tables' transfer count (a diagnostic run)
  * @property {boolean} [blockProfile] each block counts its executions in the block
  *     profile past the tables (a diagnostic run, in a memory sized for it)
+ * @property {boolean} [profileCalls] an indirect call notes its address and target in the
+ *     layout's call profile while the host has it on
  * @property {boolean} [flat]  every backward jump through the dispatch and every flag live at
  *     every block's end, rather than the loops and liveness the region's structure gives
  * @property {boolean} [wide]  compiled for the wide precision controls (double, extended):
@@ -210,19 +212,21 @@ const LOCAL_TYPES = [
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
  *     countTransfers?: boolean, wide?: boolean, blockProfile?: boolean, structure?: boolean,
- *     place?: number }}
+ *     place?: number, profileCalls?: boolean }}
  *     [options]  undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
  *     tail calls); trapPort: `out dx, eax` to it leaves with a trap exit; place: with
  *     hash, the number of regions the module will hold, which the host places in a range
  *     of the table: a transfer into the range is a direct tail call, and one out of it is
- *     counted (`finishModule`)
+ *     counted (`finishModule`); profileCalls: indirect calls note their targets in the
+ *     layout's call profile, when it has one (`callProfile`)
  * @returns {ModuleContext}
  */
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
-        wide = false, blockProfile = false, structure = false, place = 0 } = {})
+        wide = false, blockProfile = false, structure = false, place = 0,
+        profileCalls = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -291,6 +295,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (wide)
     {
         context.wide = true;
+    }
+    if (profileCalls && (layout.callProfile ?? -1) >= 0)
+    {
+        context.profileCalls = true;
     }
     if (!structure)
     {

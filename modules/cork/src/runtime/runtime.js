@@ -90,6 +90,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
+        // Indirect calls sampled while the translator runs, and a region whose
+        // indirect call keeps going to a few small leaf callees formed again
+        // with them in it: the call compares its target with each and jumps
+        // (false: every indirect call leaves its region).
+        callTargets: true,
         // Transfers from one module's regions into another's before the two
         // are gathered into one module on the translation worker (0: never;
         // never without a worker): a relink's cost against the direct tail
@@ -383,6 +388,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {Placed} [module]  the placed module its table index is in (`placeModule`)
      * @property {boolean} [movedAlone]  a merge took it alone into the module calling it
      * @property {number} [shapeMisses]  its entries' tests that failed
+     * @property {[number, number[]][]} [targets]  by indirect call, the callees formed into it
+     * @property {number} [reforms]  times it was formed again for its indirect calls
      */
     /** @type {Set<RegionRecord>} */
     const regions = new Set();
@@ -392,6 +399,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const checkedKeys = new Set();
     /** @type {Map<number, Set<RegionRecord>>} page → regions on it */
     const byPage = new Map();
+    /** By the address of an indirect call in translated code, its targets sampled and how
+     * often. @type {Map<number, Map<number, number>>} */
+    const callSamples = new Map();
+    /** By indirect call, the callees its regions were formed again with or failed to take,
+     * not tried again while those regions run. @type {Map<number, Set<number>>} */
+    const callTried = new Map();
+    const CALL_SITES_CAP = 4096;
     /** @type {Map<number, number>} page → times invalidated, the stamp a batch checks */
     const generation = new Map();
     /** @type {Map<number, number>} page → times a write dropped its regions */
@@ -404,7 +418,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
-        relinks: 0, relinked: 0, merges: 0,
+        relinks: 0, relinked: 0, merges: 0, reforms: 0,
         formingMs: 0, lookupMs: 0, emitMs: 0, encodeMs: 0, storeMs: 0, instantiateMs: 0,
         publishMs: 0,
         // Emitting and encoding the worker did: reported apart from
@@ -510,6 +524,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             for (const p of record.pages)
             {
                 byPage.get(p)?.delete(record);
+            }
+            // A region formed with its calls' callees is formed without them
+            // when its code is next translated: they are sampled again.
+            for (const [site] of record.targets ?? [])
+            {
+                callTried.delete(site);
             }
             regions.delete(record);
         }
@@ -738,6 +758,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         blockProfile: profiling,
         hash: table !== null,
         place: table !== null && settings.dispatch === true,
+        profileCalls: table !== null && settings.callTargets === true,
         wide,
         structure: settings.structure,
         leaveOut,
@@ -876,7 +897,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * answer and an inline emission take the same path.
      *
      * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string,
-     *     wide?: boolean, checked?: boolean }} one
+     *     wide?: boolean, checked?: boolean, replaces?: RegionRecord,
+     *     targets?: [number, number[]][] }} one  replaces: the region it is formed again
+     *     from, with the callees of its indirect calls (`targets`)
      * @param {{ labels: [number, number][], cut: number[], entryTop: number,
      *     exportName?: string, linked?: boolean }} built
      * @param {WebAssembly.Instance} instance
@@ -921,6 +944,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             linked: built.linked === true, wide: one.wide === true,
             checked: one.checked === true,
         };
+        if (one.replaces !== undefined)
+        {
+            // Formed again with its indirect calls' callees: the old region's
+            // entries give way to this one's.
+            record.targets = one.targets;
+            record.reforms = (one.replaces.reforms ?? 0) + 1;
+            if (regions.has(one.replaces))
+            {
+                unpublish([one.replaces]);
+            }
+        }
         const placed = placedOf.get(instance);
         if (table)
         {
@@ -1304,6 +1338,124 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         return relinkChunk(chunk, store);
     };
 
+    // Samples of one call before its callees are looked at: sixteen come in
+    // a reading at most, the last calls of a slice.
+    const PREDICT_AFTER = 48;
+    // A callee formed in takes an eighth of the call's samples, and a call
+    // compares its target with four at most.
+    const PREDICT_SHARE = 8;
+    const PREDICT_CALLEES = 4;
+    const REFORMS = 3;
+    const profileAt = settings.callTargets === true && table !== null
+        ? layout.callProfile ?? -1 : -1;
+    /**
+     * Reads the indirect calls translated code noted since the last reading
+     * and turns the profile on or off: on for one call here in two, so the
+     * sixteen pairs are the last calls of a stretch of the run. Nothing is
+     * noted with the profile off but its flag's load.
+     */
+    const sampleCalls = ()=>{
+        const words = view();
+        if (words.getUint32(profileAt, true) === 0)
+        {
+            words.setUint32(profileAt + 4, 0, true);
+            words.setUint32(profileAt, 1, true);
+            return;
+        }
+        words.setUint32(profileAt, 0, true);
+        const count = Math.min(words.getUint32(profileAt + 4, true), 16);
+        for (let i = 0; i < count; i++)
+        {
+            const site = words.getUint32(profileAt + 8 + i * 8, true);
+            const target = words.getUint32(profileAt + 12 + i * 8, true);
+            let seen = callSamples.get(site);
+            if (seen === undefined)
+            {
+                if (callSamples.size >= CALL_SITES_CAP)
+                {
+                    callSamples.clear();
+                }
+                seen = new Map();
+                callSamples.set(site, seen);
+            }
+            seen.set(target, (seen.get(target) ?? 0) + 1);
+        }
+    };
+
+    /**
+     * The first indirect call sampled `PREDICT_AFTER` times whose callees
+     * are not yet in the regions holding it: each such region formed again
+     * with the callees that took a share of its samples (`callTargets`), and
+     * published over the one it replaces when it comes back -- only when one
+     * of them was formed in, a small leaf; the others' regions are left as
+     * they are.
+     *
+     * @param {any} store
+     * @returns {boolean} whether a batch was taken this call
+     */
+    const reformStep = store=>{
+        for (const [site, seen] of callSamples)
+        {
+            let total = 0;
+            for (const times of seen.values())
+            {
+                total += times;
+            }
+            if (total < PREDICT_AFTER)
+            {
+                continue;
+            }
+            callSamples.delete(site);
+            let tried = callTried.get(site);
+            if (tried === undefined)
+            {
+                if (callTried.size >= CALL_SITES_CAP)
+                {
+                    callTried.clear();
+                }
+                tried = new Set();
+                callTried.set(site, tried);
+            }
+            const fresh = [...seen].filter(([target, times])=>times * PREDICT_SHARE >= total
+                && !tried.has(target)).sort((a, b)=>b[1] - a[1]).map(([target])=>target);
+            if (fresh.length === 0)
+            {
+                continue;
+            }
+            fresh.forEach(target=>tried.add(target));
+            const formed = [];
+            for (const record of byPage.get(site >>> 12) ?? [])
+            {
+                const targets = new Map(record.targets ?? []);
+                const had = targets.get(site) ?? [];
+                const added = fresh.filter(target=>!had.includes(target))
+                    .slice(0, PREDICT_CALLEES - had.length);
+                if (added.length === 0 || (record.reforms ?? 0) >= REFORMS
+                    || !record.spans.some(([start, end])=>site >= start && site < end))
+                {
+                    continue;
+                }
+                targets.set(site, [...had, ...added]);
+                const region = formRegion(read, record.entry,
+                    { ...formOptions, translatable, callTargets: targets });
+                if (!region.blocks.some(block=>added.includes(block.start)))
+                {
+                    continue;
+                }
+                formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
+                    cached: null, wide: record.wide === true && wide,
+                    checked: record.checked === true, replaces: record, targets: [...targets] });
+            }
+            if (formed.length > 0)
+            {
+                counts.reforms += formed.length;
+                finishBatch(formed, store);
+                return true;
+            }
+        }
+        return false;
+    };
+
     /**
      * Running regions formed again from a copy of their pages and emitted
      * into one module -- on the worker if there is one -- which takes their
@@ -1320,7 +1472,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         const copies = copyPages(chunk.map(record=>record.pages));
         const relink = {
             jobs: chunk.map(record=>({ entry: record.entry, entryTop: record.entryTop,
-                hash: record.hash, checked: record.checked === true })),
+                hash: record.hash, checked: record.checked === true,
+                ...(record.targets === undefined ? {} : { targets: record.targets }) })),
             pages: [...copies],
             form: formOptions,
         };
@@ -1450,7 +1603,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 id: outstanding.id,
                 relink: {
                     jobs: unbuilt.map(one=>({ entry: one.region.entry, entryTop: one.entryTop,
-                        hash: one.region.hash, checked: one.checked })),
+                        hash: one.region.hash, checked: one.checked,
+                        ...(one.targets === undefined ? {} : { targets: one.targets }) })),
                     pages: [...copies],
                     form: formOptions,
                 },
@@ -1688,6 +1842,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
 
         /** @type {() => Promise<number>} */
         async translatePending(){
+            if (profileAt >= 0)
+            {
+                sampleCalls();
+            }
             // A batch is with the worker: its answer is published when it
             // comes back, so the engine never waits for it. Candidates
             // formed in the meantime stay queued for the next call. A
@@ -1708,7 +1866,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // length.
             const keeps = leaveOut.size > 0 || settings.undoLog || profiling
                 ? null : (settings.store ?? null);
-            if (!buckets.slice(HOT_BUCKET).some(bucket=>bucket.size > 0) && relinkStep(keeps))
+            if (!buckets.slice(HOT_BUCKET).some(bucket=>bucket.size > 0)
+                && (profileAt >= 0 && reformStep(keeps) || relinkStep(keeps)))
             {
                 return 0;
             }
@@ -1919,6 +2078,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 relinks: counts.relinks,
                 relinked: counts.relinked,
                 merges: counts.merges,
+                reforms: counts.reforms,
                 // Transfers that left a placed module through the table, as it
                 // counts them (running modules only).
                 crossings: [...placedLive].reduce((sum, placed)=>sum + placed.crossings.value, 0),
