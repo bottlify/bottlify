@@ -754,6 +754,8 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         RevokeDragDrop: 4,
         OleFlushClipboard: 0,
         OleIsCurrentClipboard: 4,
+        PropVariantCopy: 8,
+        PropVariantClear: 4,
     };
     assert.deepEqual(Object.keys(table).sort(), Object.keys(expected).sort());
     for (const [name, argBytes] of Object.entries(expected))

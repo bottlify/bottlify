@@ -30,6 +30,7 @@
 import { GUID_NULL, GUID_SIZE, GUID_STRING_LENGTH, readGuid, writeGuid } from './guid.js';
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { createStorageFunctions } from './storage.js';
+import { createPropVariantFunctions } from './propvariant.js';
 
 /** HRESULTs this file produces. */
 const S_OK = 0x00000000;
@@ -120,6 +121,12 @@ const MAX_PROGID = 255;
  *           => import('./objects.js').ComObject} [makeObject]
  *           An object of our own that no CLSID produces: the class object
  *           CoGetClassObject answers with for a class implemented here.
+ * @property {{ copy: (bstr: number) => number, free: (bstr: number) => unknown }} [bstr]
+ *           oleaut32's SysAllocString and SysFreeString, for a BSTR a
+ *           PROPVARIANT holds. Absent, such a value cannot be copied.
+ * @property {{ copy: (array: number, out: number) => number,
+ *              destroy: (array: number) => number }} [safeArray]
+ *           oleaut32's SafeArrayCopy and SafeArrayDestroy, likewise.
  * @property {(window: number) => boolean} [isWindow]
  *           Whether a handle names a window that exists, as user32's IsWindow
  *           answers. Absent, no handle is known to be one, and a drop target
@@ -1146,6 +1153,9 @@ export function createOleFunctions(host){
         // Structured storage: the docfile, its objects and the entry points
         // that hand them out, over the same heap, registry and vtables.
         ...createStorageFunctions(host),
+
+        // The property value, whose copy owns what it points at in task memory.
+        ...createPropVariantFunctions(host),
 
         /**
          * HRESULT ProgIDFromCLSID(REFCLSID clsid, LPOLESTR *lplpszProgID)
