@@ -212,7 +212,9 @@ const MAX_RESOURCE_NAME = 256;
  *           The dialog class's procedure: DWLP_DLGPROC first, then the default.
  * @property {() => number} focus
  * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} setFocus
- * @property {(hwnd: number) => void} [show]  Shows a window as ShowWindow(SW_SHOW) would.
+ * @property {(hwnd: number) => number | Promise<number>} [show]
+ *           Shows a window as ShowWindow(SW_SHOW) would, answering once the
+ *           procedures it sent to have.
  * @property {(message: { hwnd: number, message: number, wParam: number, lParam: number })
  *     => number} [translate]  What TranslateMessage does with a key message.
  * @property {(record: any) => any[]} children
@@ -624,7 +626,7 @@ export function createDialogFunctions(options){
                 // from WM_INITDIALOG has left nothing to show.
                 if (wantsVisible && live(dialog.hwnd))
                 {
-                    host.show?.(dialog.hwnd);
+                    return after(host.show?.(dialog.hwnd) ?? 0, ()=>dialog.hwnd);
                 }
                 return dialog.hwnd;
             });
@@ -854,7 +856,7 @@ export function createDialogFunctions(options){
         }
         // A modal dialog is shown by the call whether or not its template
         // says WS_VISIBLE: most templates leave the bit off and rely on this.
-        host.show?.(hwnd);
+        await host.show?.(hwnd);
         while (!record.destroyed)
         {
             const entry = host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });

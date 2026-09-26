@@ -624,7 +624,7 @@ test('buffered DirectInput sees the same events, in order', ()=>{
 test('gaining focus tells the program nothing at all', ()=>{
     // It used to send the activation trio. Focus is the page's business: it
     // decides whether this element receives keystrokes, and a program has no
-    // reason to hear about it. Activation is sent once by `arm`, below.
+    // reason to hear about it. Activation is user32's, when a window is shown.
     const h = harness();
     h.send({ kind: 'focus', gained: true });
     assert.deepEqual(h.drain(), []);
@@ -671,24 +671,6 @@ test('a released key is not released twice when focus goes away', ()=>{
 
     h.send({ kind: 'focus', gained: false });
     assert.deepEqual(h.drain(), []);
-});
-
-test('the program is told it is active once, when input is wired to a window', ()=>{
-    // There is one window in this machine and it is the active one. The
-    // activation a program waits for before it will do anything is owed to it,
-    // so it is sent once -- when input is wired to a window, not when a page
-    // gains focus, which would be the browser deciding it. And it
-    // is never taken back, however often the page loses its focus afterwards.
-    const h = harness();
-    h.router.arm();
-    h.router.arm();
-    assert.deepEqual(h.drain().map(m=>[m.message, m.wParam]),
-        [[WM.ACTIVATEAPP, 1], [WM.NCACTIVATE, 1], [WM.ACTIVATE, 1], [WM.SETFOCUS, 0]]);
-
-    h.send({ kind: 'focus', gained: false });
-    h.send({ kind: 'focus', gained: true });
-    h.send({ kind: 'focus', gained: false });
-    assert.deepEqual(h.drain(), [], 'and the page losing focus says nothing');
 });
 
 test('the cursor question is asked when the answer could have changed, not per move', ()=>{
@@ -748,29 +730,6 @@ test('the cursor is confined to the viewport showing the program, not a configur
     h.drain();
     assert.deepEqual(h.router.diagnostics().cursor, { x: 639, y: 479 },
         'detaching gives the configured screen back');
-});
-
-test('activation waits for a window rather than being spent on hwnd zero', ()=>{
-    // Input is wired to the viewport when a run starts, which is before the
-    // program has executed anything and therefore before it owns a window.
-    let hwnd = 0;
-    const h = harness({ window: ()=>hwnd });
-
-    h.router.arm();
-    assert.deepEqual(h.all(), [],
-        'nothing is sent while there is no window: a message posted to zero is'
-        + ' retrieved by the next GetMessage and dispatched to no procedure');
-
-    hwnd = HWND;
-    h.router.arm();
-    const told = h.all();
-    assert.deepEqual(told.map(entry=>entry.message),
-        [WM.ACTIVATEAPP, WM.NCACTIVATE, WM.ACTIVATE, WM.SETFOCUS]);
-    assert.deepEqual(told.map(entry=>entry.hwnd), [HWND, HWND, HWND, HWND]);
-
-    // Latched on having delivered, so a second window does not activate twice.
-    h.router.arm();
-    assert.deepEqual(h.all(), []);
 });
 
 test('a press is written down with the position it was mapped to', ()=>{

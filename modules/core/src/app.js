@@ -3394,13 +3394,6 @@ async function buildApp(options){
             /** @param {number} hwnd */
             created: hwnd=>{
                 lastCreated = hwnd;
-                // A program becomes the active application when it has a window
-                // to be told through, and not before: input is wired to the
-                // viewport when the run starts, which is earlier than the
-                // program's first instruction. Told here, where there is finally
-                // a window; the input layer ignores every call after the first
-                // that lands.
-                core.api('input')?.arm?.();
             },
         },
     });

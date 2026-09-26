@@ -806,63 +806,75 @@ test('a class that asked for no extra bytes has none', ()=>{
     assert.equal(fns.GetWindowLongA.handler([hwnd, 0]), 0);
 });
 
-test('a window that takes the activation is told, and the one it replaced is told it lost it', ()=>{
+test('the first window shown makes the application active before the call returns', ()=>{
+    // user32's message tests: WmCreatePopupSeq (CreateWindow with WS_VISIBLE)
+    // and WmShowOverlappedSeq (ShowWindow on a hidden window) both follow
+    // WM_SHOWWINDOW(1) with WM_ACTIVATEAPP(1), WM_NCACTIVATE(1),
+    // WM_ACTIVATE(WA_ACTIVE) and WM_SETFOCUS, all sent. WM_ACTIVATEAPP goes
+    // to every top-level window of the application, a hidden one too; a
+    // window made hidden is activated by nothing until it is shown.
+    const WM_ACTIVATEAPP = 0x001c;
     const WM_ACTIVATE = 0x0006;
+    const WM_SETFOCUS = 0x0007;
+    const { memory, fns, dispatched, queue } = setup({ heap: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hidden = createWindow(fns, memory);
+    assert.deepEqual(dispatched.map(entry=>entry.message), [WM_NCCREATE, WM_CREATE]);
+    assert.equal(fns.GetActiveWindow.handler(), 0, 'a window made hidden is not activated');
+    dispatched.length = 0;
+
+    const shown = createWindow(fns, memory, { style: WS_VISIBLE });
+    assert.deepEqual(dispatched.map(({ hwnd, message, wParam })=>[hwnd, message, wParam]), [
+        [shown, WM_NCCREATE, 0], [shown, WM_CREATE, 0], [shown, WM_SIZE, 0], [shown, WM_MOVE, 0],
+        [shown, WM_SHOWWINDOW, 1], [shown, WM_ACTIVATEAPP, 1], [hidden, WM_ACTIVATEAPP, 1],
+        [shown, WM_NCACTIVATE, 1], [shown, WM_ACTIVATE, 1], [shown, WM_SETFOCUS, 0],
+    ]);
+    assert.deepEqual(dispatched.slice(5).map(entry=>entry.lParam), [0, 0, 0, 0, 0],
+        'no thread of this program had the activation, and no window');
+    assert.equal(queue.depth(), 0, 'nothing of it was posted');
+    assert.equal(fns.GetActiveWindow.handler(), shown);
+    assert.equal(fns.GetFocus.handler(), shown);
+
+    // With the active window gone nothing of the application is active, and
+    // the next window shown makes it the active application again.
+    fns.DestroyWindow.handler([shown]);
+    dispatched.length = 0;
+    fns.ShowWindow.handler([hidden, SW_SHOW]);
+    assert.deepEqual(dispatched.map(({ hwnd, message, wParam })=>[hwnd, message, wParam]), [
+        [hidden, WM_SHOWWINDOW, 1], [hidden, WM_ACTIVATEAPP, 1], [hidden, WM_NCACTIVATE, 1],
+        [hidden, WM_ACTIVATE, 1], [hidden, WM_SETFOCUS, 0], [hidden, WM_SIZE, 0],
+    ], 'with no window active, the application is activated again');
+});
+
+test('a window that takes the activation is told, and the one it replaced is told it lost it', ()=>{
+    // user32's message tests, SetActiveWindowSeq2: the window losing the
+    // activation hears WM_NCACTIVATE(0) and WM_ACTIVATE(WA_INACTIVE), the one
+    // gaining it WM_NCACTIVATE(1) and WM_ACTIVATE(WA_ACTIVE), and then the
+    // focus moves -- WM_KILLFOCUS, WM_SETFOCUS -- all sent. A second window
+    // of the same application is no news to the application: no
+    // WM_ACTIVATEAPP. A program that shows a second window, or makes another
+    // render window for a mode change, activates its mouse and clips its
+    // cursor only in the window it has been told is active.
+    const WM_ACTIVATE = 0x0006;
+    const WM_SETFOCUS = 0x0007;
+    const WM_KILLFOCUS = 0x0008;
     const WA_ACTIVE = 1;
     const WA_INACTIVE = 0;
-    // The application is told it is foreground once, when its first window
-    // appears. Which of its own windows holds that activation afterwards is a
-    // window-level fact, and a program that shows a second window -- or destroys
-    // its render window and makes another for a mode change -- activates its
-    // mouse, captures and clips only in the window it believes active, so that
-    // window has to be told it is. The first activation is left alone (the
-    // input layer sends that one, with WM_ACTIVATEAPP, in order); this is the
-    // switch to a later window.
     const context = setup();
     putClass(context.memory);
     context.fns.RegisterClassA.handler([CLASS_STRUCT]);
     const first = createWindow(context.fns, context.memory, { style: WS_VISIBLE });
+    context.dispatched.length = 0;
     const second = createWindow(context.fns, context.memory, { style: WS_VISIBLE });
 
-    /** @type {any[]} */
-    const told = [];
-    // Only what was actually posted: a visible window's paint is made up on
-    // every look and never leaves by looking, so draining to "nothing" would
-    // never stop -- the pending count is the queue's own, and reaches zero.
-    while (context.queue.depth() > 0)
-    {
-        const message = context.queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
-        if (!message)
-        {
-            break;
-        }
-        told.push(message);
-    }
-
-    const gained = told.find(entry=>entry.hwnd === second && entry.message === WM_ACTIVATE);
-    const yielded = told.find(entry=>entry.hwnd === first && entry.message === WM_ACTIVATE);
-    assert.ok(gained, 'the new window is told it became the active one');
-    assert.equal(gained.wParam, WA_ACTIVE);
-    assert.equal(gained.lParam >>> 0, first, 'and names the window it took the activation from');
-    assert.ok(yielded, 'the window that gave it up is told it no longer has it');
-    assert.equal(yielded.wParam, WA_INACTIVE);
-    assert.equal(told.indexOf(yielded) < told.indexOf(gained), true,
-        'the one that loses hears it before the one that gains');
-    const activations = told.filter(entry=>entry.message === WM_ACTIVATE
-        && entry.hwnd === second && entry.wParam === WA_ACTIVE).length;
-    assert.equal(activations, 1,
-        'exactly once: the switch does not re-send the first activation');
-
-    // WM_NCACTIVATE tells the frame before WM_ACTIVATE tells the window, for
-    // both the one losing activation and the one gaining it.
-    const yieldedNc = told.find(entry=>entry.hwnd === first && entry.message === WM_NCACTIVATE);
-    const gainedNc = told.find(entry=>entry.hwnd === second && entry.message === WM_NCACTIVATE);
-    assert.ok(yieldedNc);
-    assert.equal(yieldedNc.wParam, 0);
-    assert.ok(gainedNc);
-    assert.equal(gainedNc.wParam, 1);
-    assert.equal(told.indexOf(yieldedNc) < told.indexOf(yielded), true);
-    assert.equal(told.indexOf(gainedNc) < told.indexOf(gained), true);
+    assert.deepEqual(context.dispatched.map(({ hwnd, message, wParam, lParam })=>
+        [hwnd, message, wParam, lParam >>> 0]), [
+        [first, WM_NCACTIVATE, 0, 0], [first, WM_ACTIVATE, WA_INACTIVE, second],
+        [second, WM_NCACTIVATE, 1, 0], [second, WM_ACTIVATE, WA_ACTIVE, first],
+        [first, WM_KILLFOCUS, second, 0], [second, WM_SETFOCUS, first, 0],
+    ]);
+    assert.equal(context.queue.depth(), 0, 'sent before the call returns, none of it posted');
 });
 
 test('SetFocus into another window sends the activation set, then the focus', ()=>{
@@ -1249,7 +1261,8 @@ test('a window with an area to paint is handed WM_PAINT when nothing else is que
     // the window in the code that follows it. Posting either one leaves the
     // text rasterised for whatever default the program started with.
     assert.deepEqual(dispatched.slice(announced).map(entry=>entry.message),
-        [WM_SHOWWINDOW, WM_SIZE], 'shown: the show message, then the size');
+        [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_SIZE],
+        'shown: the show message, the activation, then the size');
     assert.equal(dispatched[announced].wParam, 1, 'TRUE: the window is being shown');
     // Showing a window is the first thing that paints it.
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
@@ -1313,12 +1326,13 @@ test('ShowWindow answers only after the procedures it sent to have run', async()
     const result = fns.ShowWindow.handler([hwnd, SW_SHOW]);
     assert.equal(typeof result.then, 'function', 'the show message is still running');
     assert.deepEqual(dispatched.map(entry=>entry.message), [WM_SHOWWINDOW],
-        'and the size waits behind it');
+        'and the activation and the size wait behind it');
 
     answer(0);
     assert.equal(await result, 0, 'SW_SHOW on a hidden window answers the state it found');
-    assert.deepEqual(dispatched.map(entry=>entry.message), [WM_SHOWWINDOW, WM_SIZE],
-        'the size went once the show message was answered');
+    assert.deepEqual(dispatched.map(entry=>entry.message),
+        [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_SIZE],
+        'the activation and the size went once the show message was answered');
 });
 
 test('WaitMessage yields until there is something to retrieve, and takes nothing', async()=>{
@@ -1667,8 +1681,11 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     // call, as the real CreateWindowEx sends them once WM_CREATE is answered:
     // a program that never calls ShowWindow measures the screen it lays itself
     // out and rasterises its text for from what it is told here.
+    // And, the application's first window shown, that the application is
+    // the active one: WM_ACTIVATEAPP, WM_NCACTIVATE, WM_ACTIVATE, WM_SETFOCUS.
     assert.deepEqual(dispatched.map(entry=>entry.message),
-        [WM_NCCREATE, WM_CREATE, WM_SIZE, WM_MOVE, WM_SHOWWINDOW]);
+        [WM_NCCREATE, WM_CREATE, WM_SIZE, WM_MOVE, WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006,
+            0x0007]);
     assert.equal(dispatched[0].lParam, dispatched[1].lParam,
         'WM_NCCREATE carries the same structure');
     const message = dispatched[1];
@@ -1726,8 +1743,10 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
     + 'tests pin', ()=>{
     // WmCreateOverlappedSeq and WmCreatePopupSeq, less what this layer does
     // not send (WM_GETMINMAXINFO, WM_NCCALCSIZE, the WM_WINDOWPOS pair, the
-    // painting): HCBT_CREATEWND, WM_NCCREATE, WM_CREATE, and for a window
-    // created visible WM_SIZE (SIZE_RESTORED), WM_MOVE and WM_SHOWWINDOW(1).
+    // painting, HCBT_ACTIVATE and HCBT_SETFOCUS): HCBT_CREATEWND, WM_NCCREATE,
+    // WM_CREATE, and for a window created visible WM_SIZE (SIZE_RESTORED),
+    // WM_MOVE, WM_SHOWWINDOW(1) and the activation -- WM_ACTIVATEAPP to each
+    // of the application's top-level windows, the hidden one too.
     /** @type {string[]} */
     const log = [];
     const { memory, fns } = setup({
@@ -1751,7 +1770,7 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
     log.length = 0;
     createWindow(fns, memory, { style: 0x80000000 | WS_VISIBLE });
     assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0', '0x5:0', '0x3:0',
-        '0x18:1'], 'visible');
+        '0x18:1', '0x1c:1', '0x1c:1', '0x86:1', '0x6:1', '0x7:0'], 'visible');
 });
 
 test('WM_NCCREATE answered FALSE refuses the window, which hears WM_NCDESTROY alone', ()=>{

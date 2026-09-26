@@ -192,9 +192,6 @@ export const inputModule = {
             attach(canvas, options){
                 attached?.detach();
                 attached = null;
-                // Wiring input to a window is when the program becomes the
-                // active one, and it stays active for the rest of the run.
-                router.arm();
                 // The canvas's own pixels are the picture, so they are both
                 // what a pointer position is measured in and what the cursor
                 // may not leave. One number rather than two.
@@ -244,15 +241,6 @@ export const inputModule = {
             place: (x, y)=>router.place(x, y),
             /** @param {boolean} visible */
             cursorShown: visible=>router.shown(visible),
-
-            /**
-             * Says a window has appeared, which is when a program can be told
-             * it is the active application at all. Called on every window
-             * rather than guessed at: activation is owed to a window, and until
-             * one exists there is nowhere to deliver it. Does nothing once the
-             * program has been told.
-             */
-            arm: ()=>router.arm(),
 
             /** @param {number} vk */
             keyState: vk=>router.keyState(vk),

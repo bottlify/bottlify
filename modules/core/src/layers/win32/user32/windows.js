@@ -66,6 +66,8 @@ const WM_SYSCHAR = 0x0106;
 
 /** The rest of what DefWindowProc and the frame answer. */
 const WM_ACTIVATE = 0x0006;
+/** To every top-level window of a program that becomes, or stops being, the active one. */
+const WM_ACTIVATEAPP = 0x001c;
 const WM_MOUSEACTIVATE = 0x0021;
 /** WM_ACTIVATE's wParam: who is being told, and why. */
 const WA_INACTIVE = 0;
@@ -966,21 +968,24 @@ export function createWindowFunctions(host){
     };
     /**
      * Makes a top-level window the active one, telling the window that loses
-     * activation and the one that gains it.
+     * activation and the one that gains it, and moving the focus into it.
      *
-     * Told by sending when the caller is a guest call -- `sent` -- so the
-     * window procedures have heard it before the call returns, as Windows
-     * sends the set: SetFocus, SetActiveWindow, ShowWindow, a click taken
-     * from the queue. Posted otherwise, when nothing of the guest's is
-     * running to send from: a window made visible as it is created.
+     * Everything is sent, before the call that caused it returns -- SetFocus,
+     * ShowWindow, CreateWindowEx with WS_VISIBLE, a click taken from the
+     * queue -- in the order user32's message tests pin: WM_NCACTIVATE(0) and
+     * WM_ACTIVATE(WA_INACTIVE) to the window losing it, WM_NCACTIVATE(1) and
+     * WM_ACTIVATE to the one gaining it, then WM_KILLFOCUS and WM_SETFOCUS as
+     * the focus follows (SetActiveWindowSeq2). When nothing of the program was
+     * active the program itself becomes the active application, and each of
+     * its top-level windows hears WM_ACTIVATEAPP(1) first (WmCreatePopupSeq).
      *
      * @param {number} hwnd
-     * @param {{ thread?: unknown, sent?: boolean, how?: number }} [options]
+     * @param {{ thread?: unknown, how?: number }} [options]
      *        `how` is WM_ACTIVATE's wParam for the window gaining it:
      *        WA_CLICKACTIVE when a click did it.
      * @returns {number | Promise<number>} once every procedure told has answered
      */
-    const activate = (hwnd, { thread, sent = false, how = WA_ACTIVE } = {})=>{
+    const activate = (hwnd, { thread, how = WA_ACTIVE } = {})=>{
         const record = live(hwnd);
         const previous = active;
         active = record ? topLevelOf(record).hwnd : 0;
@@ -989,47 +994,48 @@ export function createWindowFunctions(host){
             rootOwnerOf(record).lastActivePopup = active;
         }
         // The keyboard follows activation: a focus outside the window that
-        // became active is moved to it, as Windows moves it.
+        // became active is moved to it, as DefWindowProc's WM_ACTIVATE moves
+        // it. A caller that placed the focus itself -- SetFocus -- tells it.
         const current = focusWindow();
-        if (active !== 0 && (current === 0 || topLevelOf(windows.get(current)).hwnd !== active))
+        const moved = active !== 0
+            && (current === 0 || topLevelOf(windows.get(current)).hwnd !== active);
+        if (moved)
         {
             focus = active;
         }
-        // Which of the program's own windows holds the activation is a
-        // window-level fact, and a window is told it holds it -- and the one it
-        // took it from is told it no longer does -- every time it changes, not
-        // only the first time. The application is told it is foreground once,
-        // when its first window appears; that first WM_ACTIVATE travels with it,
-        // in the order Windows sends the set. What has no other source is the
-        // switch to a later window: a program that shows one window and then
-        // another -- a title that recreates its render window for a mode change
-        // is the ordinary case -- activates its mouse, captures and clips only in
-        // the window it believes active, and without this message that window is
-        // never told it is.
-        if (previous === 0 || active === previous)
+        if (active === previous)
         {
             return 0;
         }
-        // WM_NCACTIVATE comes first, to the window losing activation and
-        // then, when there is one, to the window gaining it: the frame redraws
-        // itself before either window's own procedure hears WM_ACTIVATE.
         const gained = active;
         /** @type {[number, number, number, number][]} */
-        const told = [
-            [previous, WM_NCACTIVATE, 0, 0],
-            [previous, WM_ACTIVATE, WA_INACTIVE, gained],
-            ...(gained !== 0 ? /** @type {[number, number, number, number][]} */ ([
-                [gained, WM_NCACTIVATE, 1, 0],
-                [gained, WM_ACTIVATE, how, previous],
-            ]) : []),
-        ];
-        if (!sent)
+        const told = [];
+        if (previous !== 0)
         {
-            for (const [target, message, wParam, lParam] of told)
+            told.push([previous, WM_NCACTIVATE, 0, 0],
+                [previous, WM_ACTIVATE, WA_INACTIVE, gained]);
+        }
+        else
+        {
+            // lParam names the thread that had the activation: another
+            // program's, which here is none.
+            for (const top of [...windows.values()]
+                .filter(each=>!each.destroyed && !isChild(each)).reverse())
             {
-                host.queue.post({ hwnd: target, message, wParam, lParam });
+                told.push([top.hwnd, WM_ACTIVATEAPP, 1, 0]);
             }
-            return 0;
+        }
+        if (gained !== 0)
+        {
+            told.push([gained, WM_NCACTIVATE, 1, 0], [gained, WM_ACTIVATE, how, previous]);
+        }
+        if (moved)
+        {
+            if (current !== 0)
+            {
+                told.push([current, WM_KILLFOCUS, gained, 0]);
+            }
+            told.push([gained, WM_SETFOCUS, current, 0]);
         }
         /** @param {number} index @returns {number | Promise<number>} */
         const tell = index=>{
@@ -1074,7 +1080,7 @@ export function createWindowFunctions(host){
         focus = target;
         // Activation is told first, then the focus: a window gaining both
         // hears WM_ACTIVATE before WM_SETFOCUS.
-        const activated = target !== 0 ? activate(target, { thread, sent: true }) : 0;
+        const activated = target !== 0 ? activate(target, { thread }) : 0;
         return andThen(activated, ()=>
             andThen(previous !== 0 ? send(previous, WM_KILLFOCUS, target, 0, thread) : 0,
                 ()=>andThen(target !== 0 ? send(target, WM_SETFOCUS, previous, 0, thread) : 0,
@@ -1432,16 +1438,23 @@ export function createWindowFunctions(host){
         }
         record.hwnd = host.handles.open('window', record);
         windows.set(record.hwnd, record);
-        if ((record.style & WS_VISIBLE) !== 0 && !isChild(record))
-        {
-            activate(record.hwnd);
-        }
         if ((record.style & WS_VISIBLE) !== 0)
         {
             appear(record);
         }
         return record;
     };
+
+    /**
+     * A top-level window created visible is activated once it has been told
+     * it is shown, as CreateWindowEx activates it (WmCreatePopupSeq); a child,
+     * or a window refused on the way, is not.
+     *
+     * @param {any} record @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const activateCreated = (record, thread)=>((record.style & WS_VISIBLE) !== 0
+        && !isChild(record) && live(record.hwnd) ? activate(record.hwnd, { thread }) : 0);
 
     /**
      * CreateWindowExA, and CreateWindowA once its missing argument is filled in.
@@ -1506,33 +1519,38 @@ export function createWindowFunctions(host){
     const announce = (record, args)=>{
         const [exStyle, className, windowName, style, x, y, width, height,
             parent, menu, instance, params] = args;
+        // Named once, before anything is awaited: a call made after the hook
+        // has answered is answering a call the bridge has already let go of.
+        const thread = host.callerThread?.();
+        /** The window, activated first when it was created visible. */
+        const activated = ()=>andThen(activateCreated(record, thread), ()=>record.hwnd);
         if (record.wndProc === 0)
         {
-            return record.hwnd;
+            return activated();
         }
         // A procedure on this side reads nothing out of a CREATESTRUCT.
         if (procedures.has(record.wndProc))
         {
             return andThen(callProcedure(record.wndProc, {
                 hwnd: record.hwnd, message: WM_CREATE, wParam: 0, lParam: 0,
-            }, host.callerThread?.()), created=>{
+            }, thread), created=>{
                 if ((created | 0) === -1)
                 {
                     return andThen(destroyWindow(record.hwnd, undefined, 'ncdestroy'), ()=>0);
                 }
-                return record.hwnd;
+                return activated();
             });
         }
         if (!host.allocate)
         {
-            return record.hwnd;
+            return activated();
         }
         // The CREATESTRUCT, and behind it the two words a CBT hook is handed
         // that point at it.
         const create = host.allocate(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.SIZE);
         if (create === 0)
         {
-            return record.hwnd;
+            return activated();
         }
         const bytes = new Uint8Array(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.SIZE);
         const view = new DataView(bytes.buffer);
@@ -1558,9 +1576,6 @@ export function createWindowFunctions(host){
         void x;
         void y;
 
-        // Named once, before anything is awaited: a call made after the hook
-        // has answered is answering a call the bridge has already let go of.
-        const thread = host.callerThread?.();
         /** @param {number} message */
         const tell = message=>callProcedure(record.wndProc, {
             hwnd: record.hwnd, message, wParam: 0, lParam: create,
@@ -1597,7 +1612,8 @@ export function createWindowFunctions(host){
                     // CreateWindowEx sends them once WM_CREATE has been
                     // answered: a program that never calls ShowWindow
                     // measures the screen it lays itself out and rasterises
-                    // its text for from the size it is told here.
+                    // its text for from the size it is told here. Then it
+                    // is activated.
                     if ((style & WS_VISIBLE) === 0)
                     {
                         return done(record.hwnd);
@@ -1609,7 +1625,7 @@ export function createWindowFunctions(host){
                     ()=>andThen(send(record.hwnd, WM_MOVE, 0,
                         (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
                     ()=>andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread),
-                        ()=>done(record.hwnd))));
+                        ()=>andThen(activateCreated(record, thread), ()=>done(record.hwnd)))));
                 })));
         });
     };
@@ -2297,7 +2313,7 @@ export function createWindowFunctions(host){
                 return !eaten;
             }
             raise(top);
-            return andThen(activate(top.hwnd, { thread, sent: true, how: WA_CLICKACTIVE }),
+            return andThen(activate(top.hwnd, { thread, how: WA_CLICKACTIVE }),
                 ()=>!eaten);
         });
     };
@@ -2884,7 +2900,7 @@ export function createWindowFunctions(host){
         if (!hide && !SHOW_WITHOUT_ACTIVATING.has(cmdShow) && !isChild(record))
         {
             told = andThen(greeting, ()=>activate(record.hwnd,
-                { thread: host.callerThread?.(), sent: true }));
+                { thread: host.callerThread?.() }));
             raise(record);
         }
         if (!wasVisible && !hide)
@@ -2895,8 +2911,10 @@ export function createWindowFunctions(host){
             // and rasterises every glyph of its text for. Without it a program
             // keeps whatever default it started with, and its text stays
             // scaled for that instead of for its window.
+            // After the activation, not beside it: two guest calls started
+            // from one host call would run over each other's stack.
             const client = geometry.clientRect(record);
-            told = andThen(greeting, ()=>send(record.hwnd, WM_SIZE, SIZE_RESTORED,
+            told = andThen(told, ()=>send(record.hwnd, WM_SIZE, SIZE_RESTORED,
                 ((((client.bottom - client.top) & 0xffff) << 16)
                     | ((client.right - client.left) & 0xffff)) >>> 0,
                 host.callerThread?.()));
@@ -2976,10 +2994,7 @@ export function createWindowFunctions(host){
                     ((host.keyState?.(key) ?? 0) & 0x8000) !== 0,
                 show: (/** @type {number} */ hwnd)=>{
                     const record = live(hwnd);
-                    if (record)
-                    {
-                        showWindow(record, SW_SHOW);
-                    }
+                    return record ? showWindow(record, SW_SHOW) : 0;
                 },
                 translate,
             }),

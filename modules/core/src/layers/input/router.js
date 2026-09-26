@@ -41,9 +41,6 @@ export const WM = Object.freeze({
     MOUSEWHEEL: 0x020a,
 });
 
-/** WM_ACTIVATE's low word. */
-const WA_ACTIVE = 1;
-
 /** The hit-test code WM_SETCURSOR reports for the client area. */
 const HTCLIENT = 1;
 
@@ -282,11 +279,6 @@ export function createInputRouter(
      * which is where a program that sets its own cursor sets it.
      */
     let cursorDirty = true;
-    /**
-     * Whether the program has been told it is the active application. Once, and
-     * never taken back: see `focus` below.
-     */
-    let activated = false;
     let posted = 0;
     let dropped = 0;
 
@@ -618,12 +610,12 @@ export function createInputRouter(
      * something happened to a web page. In this machine there is one window and
      * it is the active one, always.
      *
-     * The program is told it is active once, by `arm` below, when input is
-     * wired to a window -- not by a focus event, which would be the page
+     * The program is told it is the active application by user32, when it
+     * shows a window -- not by a focus event, which would be the page
      * deciding when a program becomes active. What still happens here on the
-     * way out is the release
-     * of everything held: a key whose release is never delivered stays down for
-     * the rest of the session, the player walks into a wall for ever, and no
+     * way out is the release of everything held: a key whose release is
+     * never delivered stays down for the rest of the session, the player
+     * walks into a wall for ever, and no
      * later event can undo it because as far as the program is concerned
      * nothing has happened. That is not browser state reaching the program --
      * it is the keyboard and the mouse, finished properly.
@@ -655,15 +647,6 @@ export function createInputRouter(
          * dropped here rather than reaching a program as a wrong one.
          *
          * @param {HostInputEvent} event
-         */
-        /**
-         * The one activation this machine ever sends.
-         *
-         * Called when input is wired to a window, which is a fact about this
-         * machine rather than a browser event: there is one window here and it
-         * is the active one. A program that waits to be told so before it will
-         * do anything is owed this once -- and it is never taken back, whatever
-         * the page's focus does afterwards.
          */
         /**
          * Confines the cursor to the viewport now showing the program, in that
@@ -734,39 +717,6 @@ export function createInputRouter(
          */
         shown(visible){
             cursorVisible = visible;
-        },
-
-        /**
-         * Tells the program it is the active application, once it has a window
-         * to be told through.
-         *
-         * Latched on having delivered, never on having tried. Input is wired to
-         * the viewport when a run starts, which is before the program has
-         * executed a single instruction and therefore before it owns a window:
-         * activation sent then goes to window zero, is retrieved by the first
-         * GetMessage that asks for every window, and is dispatched to no
-         * procedure at all. Latching there left a program believing for the
-         * whole run that it was in the background -- which a program of this era
-         * takes as a reason to ignore input -- and nothing could say otherwise
-         * afterwards.
-         *
-         * So this is called again whenever a window appears, and does nothing
-         * until one has. Windows works the same way round: a window is told it
-         * became active after it exists, never before.
-         */
-        arm(){
-            if (activated || targetWindow() === 0)
-            {
-                return;
-            }
-            activated = true;
-            emit(WM.ACTIVATEAPP, 1, 0);
-            // Matches Wine's dlls/user32/tests/msg.c WmActivateApp/WmSetFocus
-            // sequences: the frame is told it is active (WM_NCACTIVATE)
-            // before the window itself is (WM_ACTIVATE).
-            emit(WM.NCACTIVATE, 1, 0);
-            emit(WM.ACTIVATE, WA_ACTIVE, 0);
-            emit(WM.SETFOCUS, 0, 0);
         },
 
         /** @param {HostInputEvent} event */
