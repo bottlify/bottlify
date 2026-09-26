@@ -113,6 +113,12 @@ const OF_DELETE = 0x0200;
 const OF_EXIST = 0x4000;
 const HFILE_ERROR = 0xffffffff;
 
+/** FindFirstFileEx's levels, search operations and flags, as far as they go here. */
+const FIND_EX_INFO_BASIC = 1;
+const FIND_EX_SEARCH_LIMIT_TO_DIRECTORIES = 1;
+const FIND_FIRST_EX_CASE_SENSITIVE = 0x1;
+const FIND_FIRST_EX_LARGE_FETCH = 0x2;
+
 /** MoveFileEx's flags: the two an installer actually passes. */
 const MOVEFILE_REPLACE_EXISTING = 0x0001;
 const MOVEFILE_DELAY_UNTIL_REBOOT = 0x0004;
@@ -916,6 +922,25 @@ export function createFileFunctions(host){
     });
 
     /**
+     * FindFirstFileEx: the same search, with the level of detail, a search
+     * operation and flags. The basic level leaves out the 8.3 name, which is
+     * never written here anyway; limiting to directories is advice a file
+     * system is free not to take, and a caller filters for itself; and the
+     * flags ask for case-sensitive matching or larger reads, neither of which
+     * changes what is found. Anything else is refused.
+     */
+    const findFirstFileEx = bothForms(24, ([name, level, data, operation, filter, flags], text)=>{
+        if ((level >>> 0) > FIND_EX_INFO_BASIC
+            || (operation >>> 0) > FIND_EX_SEARCH_LIMIT_TO_DIRECTORIES
+            || filter !== 0
+            || ((flags >>> 0) & ~(FIND_FIRST_EX_CASE_SENSITIVE | FIND_FIRST_EX_LARGE_FETCH)) !== 0)
+        {
+            return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+        }
+        return (text === WIDE ? findFirstFile.wide : findFirstFile.ansi).handler([name, data]);
+    });
+
+    /**
      * CreateFile, in terms of a resolved path, so both spellings open the same
      * file. Sharing, security and the template are accepted and ignored: there
      * is one process, no security descriptor to check against, and no attribute
@@ -1531,6 +1556,13 @@ export function createFileFunctions(host){
         /** HANDLE FindFirstFile(LPCSTR, LPWIN32_FIND_DATA) -- one body, both spellings. */
         FindFirstFileA: findFirstFile.ansi,
         FindFirstFileW: findFirstFile.wide,
+
+        /**
+         * HANDLE FindFirstFileEx(LPCSTR, FINDEX_INFO_LEVELS, LPVOID,
+         *   FINDEX_SEARCH_OPS, LPVOID lpSearchFilter, DWORD dwAdditionalFlags)
+         */
+        FindFirstFileExA: findFirstFileEx.ansi,
+        FindFirstFileExW: findFirstFileEx.wide,
 
         /** BOOL FindNextFile(HANDLE, LPWIN32_FIND_DATA) -- one body, both spellings. */
         FindNextFileA: findNextFile.ansi,

@@ -16,6 +16,7 @@ const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NO_MORE_FILES = 18;
 const ERROR_FILE_EXISTS = 80;
+const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_ALREADY_EXISTS = 183;
 const ERROR_NOT_SUPPORTED = 50;
@@ -807,6 +808,43 @@ test('a search runs out with its own code, not with a general failure', ()=>{
     assert.equal(error.code, ERROR_NO_MORE_FILES);
     assert.equal(fns.FindClose.handler([handle]), 1);
     assert.equal(fns.FindNextFileA.handler([handle, FIND_DATA]), 0, 'and the handle is gone');
+});
+
+test('FindFirstFileEx searches as FindFirstFile does, at either level, in both spellings', ()=>{
+    const FIND_EX_INFO_BASIC = 1;
+    const FIND_EX_SEARCH_LIMIT_TO_DIRECTORIES = 1;
+    const FIND_FIRST_EX_LARGE_FETCH = 2;
+    const { files, memory, error, fns, at } = setup();
+    files.put('C:\\GAME\\A.SAV', 'a');
+    files.put('C:\\GAME\\B.SAV', 'bb');
+
+    const handle = fns.FindFirstFileExA.handler(
+        [at(NAME, 'C:\\GAME\\*.SAV'), FIND_EX_INFO_BASIC, FIND_DATA, 0, 0,
+            FIND_FIRST_EX_LARGE_FETCH]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE);
+    assert.equal(memory.string(FIND_DATA + 44), 'A.SAV');
+    assert.equal(fns.FindNextFileA.handler([handle, FIND_DATA]), 1, 'the handle is a search');
+    assert.equal(memory.string(FIND_DATA + 44), 'B.SAV');
+    fns.FindClose.handler([handle]);
+
+    // Limiting to directories is advice a file system may not take.
+    const wide = fns.FindFirstFileExW.handler([putWide(memory, NAME, 'C:\\GAME\\*'), 0,
+        FIND_DATA, FIND_EX_SEARCH_LIMIT_TO_DIRECTORIES, 0, 0]);
+    assert.notEqual(wide, INVALID_HANDLE_VALUE);
+    fns.FindClose.handler([wide]);
+
+    assert.equal(fns.FindFirstFileExA.handler(
+        [at(NAME, 'C:\\GAME\\*.SAV'), 0, FIND_DATA, 0, 0x1234, 0]), INVALID_HANDLE_VALUE,
+    'no search filter is defined');
+    assert.equal(error.code, ERROR_INVALID_PARAMETER);
+    assert.equal(fns.FindFirstFileExA.handler(
+        [at(NAME, 'C:\\GAME\\*.SAV'), 2, FIND_DATA, 0, 0, 0]), INVALID_HANDLE_VALUE,
+    'nor a third level');
+    assert.equal(fns.FindFirstFileExA.handler(
+        [at(NAME, 'C:\\NOWHERE\\*'), 0, FIND_DATA, 0, 0, 0]), INVALID_HANDLE_VALUE);
+    assert.equal(error.code, ERROR_PATH_NOT_FOUND);
+    assert.equal(fns.FindFirstFileExA.argBytes, 24);
+    assert.equal(fns.FindFirstFileExW.argBytes, 24);
 });
 
 test('a search handle is not a file handle', ()=>{
