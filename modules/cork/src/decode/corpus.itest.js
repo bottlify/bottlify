@@ -16,7 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { skipWithout } from '../testing/fetched.js';
 import { readFile } from 'node:fs/promises';
 import { decode } from './decoder.js';
 import { loadCorpus } from '../testing/corpus.js';
@@ -24,7 +24,7 @@ import { loadCorpus } from '../testing/corpus.js';
 const CORPUS = new URL('../../vendor/nasm-corpus.json.gz', import.meta.url);
 
 test('a linear decode of every corpus case reaches its hlt, refusing nothing',
-    { skip: !existsSync(CORPUS) && `missing ${CORPUS.href}` },
+    { skip: skipWithout(CORPUS) },
     async()=>{
         const { cases } = loadCorpus(await readFile(CORPUS));
         /** @type {string[]} */

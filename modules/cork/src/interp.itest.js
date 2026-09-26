@@ -17,7 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { skipWithout } from './testing/fetched.js';
 import { readFile } from 'node:fs/promises';
 import { createV86Host } from '../../core/src/layers/cpu/internal/v86-host.js';
 import { createCorkHost } from '../../core/src/layers/cpu/internal/cork-host.js';
@@ -42,7 +42,7 @@ const ONLY = new RegExp(process.env.CORPUS_ONLY ?? '', 'i');
 const X87_PRECISION = new Set(['x87-int-binop', 'fscale-wide']);
 
 test('the interpreter leaves what the hardware left, on every case it models',
-    { skip: !existsSync(CORPUS) && `missing ${CORPUS.href}`, timeout: 30 * 60 * 1000 },
+    { skip: skipWithout(CORPUS), timeout: 30 * 60 * 1000 },
     async()=>{
         const { cases } = loadCorpus(await readFile(CORPUS));
         const selected = cases.filter(one=>ONLY.test(one.name));
@@ -227,8 +227,7 @@ const u32 = value=>Uint8Array.from(
  * count, `SEQUENCE_SEED` names another run.
  */
 test('sequences of x87, MMX and SSE leave what the emulator leaves, on the interpreter',
-    { skip: !existsSync(new URL('v86.wasm', PREBUILT)) && 'missing the prebuilt emulator',
-        timeout: 30 * 60 * 1000 },
+    { skip: skipWithout(new URL('v86.wasm', PREBUILT)), timeout: 30 * 60 * 1000 },
     async()=>{
         const seed = Number(process.env.SEQUENCE_SEED ?? 0xc05eed);
         const count = Number(process.env.SEQUENCES ?? 2000);

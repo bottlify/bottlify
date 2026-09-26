@@ -17,16 +17,18 @@ const STACK = 0x80000;
 /**
  * Runs a program on translated code and on the model from the same start,
  * and answers both, so a test can assert on the one and know the other
- * agrees.
+ * agrees -- translated `precise`, so the flags an instruction leaves
+ * undefined agree too, unless `start.precise` is false.
  *
  * @param {number[]} bytes
  * @param {{ regs?: Record<string, number>, eflags?: number,
- *     memory?: [number, number[]][] }} [start]
+ *     memory?: [number, number[]][], precise?: boolean, fsBase?: number }} [start]
  */
 function both(bytes, start = {}){
-    const m = createTestMachine();
+    const m = createTestMachine({ precise: start.precise ?? true });
     m.write(CODE, bytes);
     m.setReg('esp', STACK);
+    m.setFsBase(start.fsBase ?? 0);
     for (const [address, data] of start.memory ?? [])
     {
         m.write(address, data);
@@ -63,7 +65,7 @@ function both(bytes, start = {}){
                 view.setUint32(address, value, true);
             }
         },
-    }, { eip: CODE, esp: STACK });
+    }, { eip: CODE, esp: STACK, fsBase: start.fsBase ?? 0 });
     for (const [name, value] of Object.entries(start.regs ?? {}))
     {
         const index = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'].indexOf(name);
@@ -222,6 +224,21 @@ test('popf changes the ID and AC bits, so the CPUID probe finds CPUID', ()=>{
     assert.equal((r.state.reg[0] ^ r.state.reg[1]) >>> 0, 0x240000, 'the model');
 });
 
+test('popfw loads the low sixteen bits of EFLAGS alone, so AC and ID stay', ()=>{
+    // push word 0x0003 (CF and the reserved bit); popfw -- with AC and ID set
+    // before: the word form writes bits 0-15, and they are above them. Then
+    // popfd, which writes them, with a dword that clears both.
+    const r = both([0x66, 0x6a, 0x03, 0x66, 0x9d, 0x9c, 0x5b, 0x6a, 0x02, 0x9d, 0x9c, 0x59, 0xf4],
+        { eflags: 2 | 1 << 18 | 1 << 21 });
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    const AC_ID = 1 << 18 | 1 << 21;
+    assert.equal(r.m.reg('ebx') & (AC_ID | CF), AC_ID | CF, 'translated: popfw kept AC and ID');
+    assert.equal(r.state.reg[3] & (AC_ID | CF), AC_ID | CF, 'the model: popfw kept AC and ID');
+    assert.equal(r.m.reg('ecx') & AC_ID, 0, 'translated: popfd cleared them');
+    assert.equal(r.state.reg[1] & AC_ID, 0, 'the model: popfd cleared them');
+});
+
 test('ret imm16 pops the return and adds the immediate, model and emitter agreeing', ()=>{
     const r = both([
         0x6a, 0x00,                                     // push 0
@@ -314,6 +331,41 @@ test('rep stops on a compare and leaves the count and pointers at the stop', ()=
     assert.equal(r.m.eflags() >>> 6 & 1, 0, 'ZF is clear: the bytes differ');
 });
 
+test('a rep compare whose slice ends on the iteration that stops it resumes after it', ()=>{
+    // cld; xor eax, eax; repne scasb (a strlen) -- and cld; repe cmpsb over
+    // "abcX" and "abcY" -- under every budget: one that runs out on the
+    // stopping iteration leaves the instruction done, not on it, since
+    // running it again would go on scanning past the match.
+    const programs = [
+        { code: [0xfc, 0x31, 0xc0, 0xf2, 0xae, 0xf4], edi: 0x2005, esi: 0x3000, ecx: -6 },
+        { code: [0xfc, 0xf3, 0xa6, 0xf4], edi: 0x2004, esi: 0x3004, ecx: -5 },
+    ];
+    for (const { code, edi, esi, ecx } of programs)
+    {
+        for (let budget = 1; budget <= 8; budget++)
+        {
+            const m = createTestMachine();
+            m.write(CODE, code);
+            m.write(0x2000, [...Buffer.from('abcY'), 0, ...Buffer.from('defgh'), 0]);
+            m.write(0x3000, [...Buffer.from('abcX'), 1, ...Buffer.from('defgh'), 0]);
+            m.setReg('esp', STACK);
+            m.setReg('edi', 0x2000);
+            m.setReg('esi', 0x3000);
+            m.setReg('ecx', 0xffffffff);
+            let exit = m.translate(CODE).run(CODE, budget);
+            // The host resumes where a slice left, with a fresh budget.
+            for (let resumed = 0; exit.kind === 1 && resumed < 100; resumed++)
+            {
+                exit = m.translate(m.eip()).run(m.eip(), budget);
+            }
+            assert.equal(exit.kind, 3, `halted, budget ${budget}`);
+            assert.equal(m.reg('edi'), edi, `the scan stopped at the match, budget ${budget}`);
+            assert.equal(m.reg('esi'), esi);
+            assert.equal(m.reg('ecx') | 0, ecx);
+        }
+    }
+});
+
 test('the direction flag runs a rep backwards, and the first iteration always runs', ()=>{
     // std; rep movsb with the pointers at the top of their runs. The first
     // iteration runs -- there is no count test before it for a nonzero count
@@ -347,6 +399,34 @@ test('the direction flag runs a rep backwards, and the first iteration always ru
     assert.deepEqual([...one.m.read(0x4000, 1)], [0x41]);
     assert.equal(one.m.reg('edi'), 0x4001);
     assert.equal(one.m.reg('ecx'), 0);
+});
+
+test('a string instruction\'s fs: source adds the thread base; its destination is es:[edi]', ()=>{
+    // With the thread block at 0x7000 and esi at 0, a source read without the
+    // base would read the 0x99s at linear 0.
+    const r = both([
+        0x64, 0xad,                     // fs: lodsd       eax = fs:[0]
+        0xbf, 0x00, 0x30, 0, 0,         // mov edi, 0x3000
+        0x64, 0xa5,                     // fs: movsd       [0x3000] = fs:[4]
+        0x64, 0xa7,                     // fs: cmpsd       fs:[8] with [0x3004]
+        0x0f, 0x94, 0xc3,               // sete bl
+        0xb9, 4, 0, 0, 0,               // mov ecx, 4
+        0xf3, 0x64, 0xa4,               // rep fs: movsb   [0x3008..] = fs:[0xc..]
+        0xf4,
+    ], { fsBase: 0x7000, memory: [
+        [0x0000, new Array(16).fill(0x99)],
+        [0x7000, [0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22, 0x33, 0x33, 0x33, 0x33,
+            1, 2, 3, 4]],
+        [0x3004, [0x33, 0x33, 0x33, 0x33]],
+    ] });
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    assert.equal(r.m.reg('eax'), 0x11111111, 'lodsd');
+    assert.equal(r.m.readU32(0x3000), 0x22222222, 'movsd');
+    assert.equal(r.m.reg('ebx') & 0xff, 1, 'cmpsd found the two equal');
+    assert.deepEqual([...r.m.read(0x3008, 4)], [1, 2, 3, 4], 'rep movsb');
+    assert.equal(r.m.reg('esi'), 0x10);
+    assert.equal(r.m.reg('edi'), 0x300c);
 });
 
 test('fs-relative reads add the thread base, and 16-bit lea wraps', ()=>{
@@ -404,6 +484,24 @@ test('cpuid answers the pinned emulator\'s leaves and zero for the rest', ()=>{
     assert.equal(unknown.reg('ebx'), 0);
     assert.equal(unknown.reg('ecx'), 0);
     assert.equal(unknown.reg('edx'), 0);
+});
+
+test('cpuid reads its subleaf from ecx where a leaf has them, as the emulator does', ()=>{
+    /** @param {number} leaf @param {number} subleaf */
+    const ask = (leaf, subleaf)=>{
+        const m = createTestMachine();
+        // mov eax, leaf; mov ecx, subleaf; cpuid; hlt
+        m.write(CODE, [0xb8, leaf & 0xff, leaf >>> 8 & 0xff, leaf >>> 16 & 0xff, leaf >>> 24,
+            0xb9, subleaf, 0, 0, 0, 0x0f, 0xa2, 0xf4]);
+        assert.equal(m.runProgram(CODE).kind, 3);
+        return ['eax', 'ebx', 'ecx', 'edx'].map(name=>m.reg(name) >>> 0);
+    };
+    assert.deepEqual(ask(4, 1), [0x122, 0x01c0003f, 0x3f, 1]);
+    assert.deepEqual(ask(4, 2), [0x143, 0x05c0003f, 0xfff, 1]);
+    assert.deepEqual(ask(4, 3), [0, 0, 0, 0], 'a subleaf the leaf does not list');
+    assert.deepEqual(ask(7, 0), [0, 0x200, 0, 0]);
+    assert.deepEqual(ask(7, 1), [0, 0, 0, 0]);
+    assert.deepEqual(ask(5, 9), [0x40, 0x40, 3, 0x00142120], 'a plain leaf ignores ecx');
 });
 
 test('int3 and int n are left to the other executor, before the instruction', ()=>{

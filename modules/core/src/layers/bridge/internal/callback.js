@@ -153,7 +153,8 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             // that suspends and never answers stops the whole machine -- every
             // thread of it -- and from outside that is indistinguishable from a
             // machine that is merely slow.
-            hostCalls(thread).push({ ...call, at: Date.now() });
+            hostCalls(thread).push({ ...call,
+                at: import.meta.BOTTLIFY_DIAGNOSTICS !== false ? Date.now() : 0 });
         },
 
         /**
@@ -428,7 +429,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 hostCalls(thread).map(call=>({
                     thread: thread.name,
                     name: call.name,
-                    forMs: Date.now() - (call.at ?? Date.now()),
+                    forMs: call.at ? Date.now() - call.at : 0,
                 }))),
         }),
     };

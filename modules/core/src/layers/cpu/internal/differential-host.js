@@ -274,7 +274,12 @@ export function createDifferentialHost({ emulator, cork, engine, memory, layout 
                 emulatorNext = false;
                 if (entry >= 0)
                 {
+                    const control = emulator.x87Control();
                     const exit = replayRegion(eip, entry, remaining);
+                    if (emulator.x87Control() !== control)
+                    {
+                        emulator.syncX87Control();
+                    }
                     remaining -= exit.retired;
                     ran += exit.retired;
                     if (exit.kind === 'halt')

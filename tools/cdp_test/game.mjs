@@ -23,7 +23,7 @@
  *                                  [--command-line STRING] [--windows NAME]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
- *                                  [--exact] [--cpu-profile SECONDS]
+ *                                  [--exact] [--cpu-profile SECONDS] [--export-translations FILE]
  */
 
 import { deflateSync } from 'node:zlib';
@@ -181,6 +181,10 @@ function parse(argv){
         // beyond whatever the run itself reads -- a fuller warm-up between
         // runs, at the cost of the bandwidth to do it.
         prefetch: argv.includes('--prefetch'),
+        // Where the run's translations go once it ends, as the seed a bundle
+        // carries (`node tools/make-btl.mjs translations <id> <file>`).
+        exportTranslations: argv.includes('--export-translations')
+            ? argv[argv.indexOf('--export-translations') + 1] : null,
         // How long the engine itself runs before it stops and reports, for a
         // title that reaches its loop and would otherwise run out the turns
         // hours later. Zero means the turns alone decide.
@@ -209,8 +213,8 @@ function parse(argv){
         // The translator's own settings as JSON ('{"countTransfers":true}').
         corkConfig: argv.includes('--cork-config')
             ? JSON.parse(argv[argv.indexOf('--cork-config') + 1]) : undefined,
-        // Which execution engine runs the program (`emulator`, the default,
-        // or `hybrid` with the translator), so two runs differ by that alone.
+        // Which execution engine runs the program (`cork`, the default, or
+        // `emulator` / `hybrid`), so two runs differ by that alone.
         engine: argv.includes('--engine') ? argv[argv.indexOf('--engine') + 1] : undefined,
         // The display the program is told it has, as `WxH`. The launcher
         // names the person's own screen, which is rarely a size a program of
@@ -505,7 +509,8 @@ function describeCork(cork, say){
     say(`  cork: ${cork.regions} regions, ${cork.entries} entries, ${cork.modules} modules`
         + `, share ${(share * 100).toFixed(1)}%`
         + ` (retired ${cork.retired ?? 0})`
-        + (cork.relinks ? `, ${cork.relinked} regions relinked in ${cork.relinks} relinks` : ''));
+        + (cork.relinks || cork.merges ? `, ${cork.relinked} regions relinked in ${cork.relinks}`
+            + ` relinks and ${cork.merges ?? 0} merges` : ''));
     say(`    x87 precision: ${cork.wide ? 'wide' : 'rounding'}`
         + `, switched ${cork.precisionSwitches ?? 0} times`);
     say(`    volatile pages: ${cork.volatilePages ?? 0}`
@@ -1123,7 +1128,9 @@ export async function game(options){
             maxTurns: options.turns,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
             engine: options.engine,
-            cork: options.corkConfig ? { config: options.corkConfig } : undefined,
+            // A harness run is a diagnostic one: the translator's timings and its
+            // record of long holds are on unless the run turns them off.
+            cork: { config: { timings: true, ...options.corkConfig } },
             screen: options.screen,
             quantum: options.quantum,
             log: Boolean(options.log),
@@ -1161,6 +1168,7 @@ export async function game(options){
             wholeFiles: options.saveFiles,
             store: options.store ?? undefined,
             prefetch: options.prefetch,
+            exportTranslations: options.exportTranslations !== null,
             bundleId: options.id,
             exact: options.exact,
         });
@@ -1335,6 +1343,22 @@ export async function game(options){
             writeFileSync(saved, file.base64 ? Buffer.from(file.base64, 'base64') : file.text,
                 file.base64 ? undefined : 'latin1');
             file.saved = saved;
+        }
+
+        // The seed goes to its own file, not into the report.
+        if (options.exportTranslations !== null)
+        {
+            if (result.translations)
+            {
+                writeFileSync(options.exportTranslations,
+                    Buffer.from(result.translations, 'base64'));
+                console.log(`translations: ${options.exportTranslations}`);
+            }
+            else
+            {
+                console.log('translations: none (no translating engine, or no store)');
+            }
+            delete result.translations;
         }
 
         const text = describe(result, {

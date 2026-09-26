@@ -102,6 +102,9 @@ export function ownLayout({ ramSize }){
         fsBase: 340,
         gsBase: -1,
         counter: 344,
+        // The indirect calls' profile: a flag the runtime sets, a count, and
+        // sixteen (address, target) pairs, the last calls made while it is set.
+        callProfile: 352,
         tables: ramBase + ramSize,
         codePages: -1,
         // The entry hash's slot is the top bits of eip times the golden ratio,

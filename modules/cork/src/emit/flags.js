@@ -219,7 +219,6 @@ export function emitFlag(b, l, kind, width, flag){
 export function emitCondition(b, l, kind, width, cc){
     const test = cc >> 1;
     const negate = (cc & 1) === 1;
-    const sign = SIGN_BITS[width];
     const shift = 32 - 8 * (1 << width);
     /** Both operands sign-extended from their width, for a signed compare. */
     const signedOperands = ()=>{
@@ -269,7 +268,6 @@ export function emitCondition(b, l, kind, width, cc){
             b.op(OP.ne);
             b.op(OP.or);
     }
-    void sign;
     if (negate)
     {
         b.op(OP.eqz);

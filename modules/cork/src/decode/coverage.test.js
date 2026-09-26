@@ -50,6 +50,7 @@ const LEFT_TO_HOST = new Map([
     ['fxsave', 'the SSE environment, out of scope and ending a region (plan 3.4)'],
     ['fxrstor', 'the SSE environment, out of scope and ending a region (plan 3.4)'],
     ['fbld', 'the packed-BCD load, an environment form ending a region (plan 3.4)'],
+    ['rdrand', 'the host\'s randomness, rare enough to end a region for the interpreter'],
 ]);
 
 /** @param {number[]} bytes */

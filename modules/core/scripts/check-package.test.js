@@ -34,6 +34,8 @@ const core = [
     { path: 'dist/engine.worker.js', size: 4096 },
     { path: 'dist/worklet.js', size: 4096 },
     { path: 'dist/vendor/manifest.json', size: 64 },
+    { path: 'dist/cork/index.js', size: 4096 },
+    { path: 'dist/cork/translator.worker.js', size: 4096 },
     { path: 'package.json', size: 64 },
     { path: 'LICENSE', size: 64 },
     { path: 'THIRD-PARTY-NOTICES.md', size: 64 },
@@ -59,5 +61,12 @@ test('a file the package promises and is not optional still fails', ()=>{
     const files = core.filter(file=>file.path !== 'dist/worklet.js');
     const problems = packageProblems(files, manifest);
     assert.ok(problems.some(problem=>problem.includes('dist/worklet.js')),
+        JSON.stringify(problems));
+});
+
+test('a package without its translator fails', ()=>{
+    const files = core.filter(file=>!file.path.startsWith('dist/cork/'));
+    const problems = packageProblems(files, manifest);
+    assert.ok(problems.some(problem=>problem.includes('dist/cork/index.js')),
         JSON.stringify(problems));
 });

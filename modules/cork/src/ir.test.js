@@ -401,6 +401,55 @@ test('cpuid and rdtsc answer without a crossing', ()=>{
     assert.equal(leaf.state.reg[3], 0x00010800);
 });
 
+test('cpuid reads a subleaf from ecx; rdrand fills a register and sets CF alone', ()=>{
+    const sub = run([0xb8, 4, 0, 0, 0, 0xb9, 2, 0, 0, 0, 0x0f, 0xa2]); // leaf 4, subleaf 2
+    assert.equal(sub.state.reg[0], 0x143);
+    assert.equal(sub.state.reg[1], 0xfff);
+    const values = new Set();
+    for (let i = 0; i < 4; i++)
+    {
+        // mov eax, -1; add eax, eax (CF, SF, AF set); rdrand ecx
+        const m = run([0xb8, 0xff, 0xff, 0xff, 0xff, 0x01, 0xc0, 0x0f, 0xc7, 0xf1]);
+        assert.equal(m.state.eflags & (CF | PF | AF | ZF | SF | OF), CF,
+            'CF set, the other five clear');
+        values.add(m.state.reg[1]);
+    }
+    assert.ok(values.size > 1, 'the values differ from one to the next');
+    assert.throws(()=>run([0x0f, 0xc7, 0x30]), // rdrand [eax]: #UD
+        (/** @type {any} */ fault)=>fault instanceof Fault && fault.vector === 6);
+});
+
+test('lea with an fs: override computes the offset alone, as the processor does', ()=>{
+    // lea eax, fs:[ebx+0x18]
+    const m = run([0x64, 0x8d, 0x43, 0x18], state=>{
+        state.reg[3] = 0x100;
+        state.fsBase = 0x7000;
+    });
+    assert.equal(m.state.reg[0], 0x118);
+});
+
+test('an extended load keeps an infinity, a NaN\'s sign, and flags only a signalling NaN', ()=>{
+    /** @param {bigint} mantissa @param {number} signExponent */
+    const through = (mantissa, signExponent)=>{
+        // fld tword [0x2000]; fstp qword [0x2010]
+        const m = run([0xdb, 0x2d, 0x00, 0x20, 0, 0, 0xdd, 0x1d, 0x10, 0x20, 0, 0], state=>{
+            state.memory.write(0x2000, 4, Number(mantissa & 0xffffffffn));
+            state.memory.write(0x2004, 4, Number(mantissa >> 32n));
+            state.memory.write(0x2008, 2, signExponent);
+        });
+        return { bits: m.view.getBigUint64(0x2010, true), ie: m.state.status & 1 };
+    };
+    assert.equal(through(0x8000000000000000n, 0xffff).bits, 0xfff0000000000000n, '-inf');
+    assert.equal(through(0x8000000000000000n, 0x7fff).bits, 0x7ff0000000000000n, '+inf');
+    const negativeNaN = through(0xc000000000000000n, 0xffff);
+    assert.equal(negativeNaN.bits >> 63n, 1n, 'a negative NaN keeps its sign');
+    assert.ok((negativeNaN.bits & 0x7ff0000000000000n) === 0x7ff0000000000000n
+        && (negativeNaN.bits & 0xfffffffffffffn) !== 0n, 'and is a NaN');
+    assert.equal(negativeNaN.ie, 0, 'a quiet NaN raises nothing');
+    assert.equal(through(0xc000000000000001n, 0x7fff).ie, 0, 'nor one with a payload');
+    assert.equal(through(0x8000000000000001n, 0x7fff).ie, 1, 'a signalling one raises IE');
+});
+
 test('addsubps subtracts the even lanes and adds the odd', ()=>{
     const m = machine();
     const instruction = decode(
@@ -427,6 +476,77 @@ test('fbstp writes the packed BCD and its sign', ()=>{
     });
     assert.deepEqual([...m.ram.slice(0x2010, 0x201a)],
         [2, 0, 0, 0, 0, 0, 0, 0, 0, 0x80]);
+});
+
+test('a quadword fild stored by a quadword fistp or fisttp copies all eight bytes', ()=>{
+    // As the translator does: an exchange and a register copy carry the
+    // quadword with its value, and a write rounds it through the double.
+    const FILD = [0xdf, 0x2d, 0x00, 0x20, 0, 0];     // fild qword [0x2000]
+    const FISTP = [0xdf, 0x3d, 0x08, 0x20, 0, 0];    // fistp qword [0x2008]
+    const FISTTP = [0xdd, 0x0d, 0x08, 0x20, 0, 0];   // fisttp qword [0x2008]
+    const between = {
+        nothing: [],
+        'fld1; fxch st1': [0xd9, 0xe8, 0xd9, 0xc9],
+        'fld st0; fstp st1': [0xd9, 0xc0, 0xdd, 0xd9],
+        'fnstsw ax': [0xdf, 0xe0],
+    };
+    /** @param {number[]} bytes @param {bigint} value */
+    const quad = (bytes, value)=>run(bytes, state=>{
+        state.memory.write(0x2000, 4, Number(BigInt.asUintN(32, value)));
+        state.memory.write(0x2004, 4, Number(BigInt.asUintN(64, value) >> 32n));
+    });
+    for (const value of [0x7fffffffffffffffn, 0x0123456789abcdefn, (1n << 53n) + 1n,
+        -((1n << 60n) + 3n), -0x8000000000000000n])
+    {
+        for (const [name, middle] of Object.entries(between))
+        {
+            for (const store of [FISTP, FISTTP])
+            {
+                const m = quad([...FILD, ...middle, ...store], value);
+                assert.equal(m.view.getBigInt64(0x2008, true), value,
+                    `${value} with ${name} between`);
+                assert.equal(m.state.status & 1, 0, 'no invalid operation');
+            }
+        }
+    }
+    const written = quad([...FILD, 0xd9, 0xe0, 0xd9, 0xe0, ...FISTP], 0x0123456789abcdefn);
+    assert.equal(written.view.getBigInt64(0x2008, true), 0x0123456789abcdf0n, 'fchs twice rounds');
+});
+
+test('fprem and fprem1 leave the exact remainder, and the quotient\'s low bits in C0 C3 C1', ()=>{
+    // [ST0, ST1, fprem's remainder and quotient mod 8, fprem1's], worked out
+    // in integers; the translator's test holds it to the same.
+    /** @type {[number, number, number, number, number, number][]} */
+    const cases = [
+        [3736.3244596153145, 7.049668791727009, 7.04966879172678, 1, -2.291500322826323e-13, 2],
+        [1e17, 7, 5, 5, -2, 6],
+        [-1e17, 7, -5, 5, 2, 6],
+        [2 ** 63 + 2 ** 11, 3, 1, 5, 1, 5],
+        [100, 2 * Math.PI, 5.7522203923062065, 7, -0.5309649148733797, 0],
+    ];
+    /** @param {number} low */
+    const bits = low=>((low & 4) !== 0 ? 0x100 : 0) | ((low & 2) !== 0 ? 0x4000 : 0)
+        | ((low & 1) !== 0 ? 0x200 : 0);
+    for (const [a, c, rem, low, rem1, low1] of cases)
+    {
+        for (const [opcode, want, quotient] of [[0xf8, rem, low], [0xf5, rem1, low1]])
+        {
+            // fld qword [0x2000]; fld qword [0x2008]; fprem/fprem1; fstp qword [0x2010]
+            const m = run([0xdd, 0x05, 0x00, 0x20, 0, 0, 0xdd, 0x05, 0x08, 0x20, 0, 0, 0xd9, opcode,
+                0xdd, 0x1d, 0x10, 0x20, 0, 0], state=>{
+                const bytes = new DataView(new ArrayBuffer(16));
+                bytes.setFloat64(0, c, true);
+                bytes.setFloat64(8, a, true);
+                for (let i = 0; i < 16; i++)
+                {
+                    state.memory.write(0x2000 + i, 1, bytes.getUint8(i));
+                }
+            });
+            const name = `${opcode === 0xf8 ? 'fprem' : 'fprem1'}(${a}, ${c})`;
+            assert.equal(m.view.getFloat64(0x2010, true), want, name);
+            assert.equal(m.state.status & 0x4700, bits(quotient), `${name}: C0 C1 C2 C3`);
+        }
+    }
 });
 
 test('the x87 memory forms by words: single precision, a negative quadword, a signalling NaN', ()=>{

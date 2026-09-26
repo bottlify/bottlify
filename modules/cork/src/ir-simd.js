@@ -116,6 +116,7 @@ function writeVector(state, operand, width, address, value){
             word = word << 8n | BigInt(value[i] & 0xff);
         }
         state.f80bits[/** @type {number} */ (operand.reg)] = BigInt.asIntN(64, word);
+        state.x87Exact &= ~(1 << /** @type {number} */ (operand.reg));
         return;
     }
     if (operand.kind === 'reg')
@@ -233,62 +234,56 @@ function putU64(bytes, at, value){
 const F32_INDEFINITE = 0xffc00000;
 const F64_INDEFINITE = 0xfff8000000000000n;
 
-/** @param {number} value */
-const f32Bits = value=>{
-    scratch.setFloat32(0, value, true);
-    return scratch.getUint32(0, true);
-};
-/** @param {number} word */
-const f32FromBits = word=>{
-    scratch.setUint32(0, word >>> 0, true);
-    return scratch.getFloat32(0, true);
-};
-/** @param {number} value */
-const f64Bits = value=>{
-    scratch.setFloat64(0, value, true);
-    return scratch.getBigUint64(0, true);
-};
-/** @param {bigint} word */
-const f64FromBits = word=>{
-    scratch.setBigUint64(0, BigInt.asUintN(64, word), true);
-    return scratch.getFloat64(0, true);
-};
-
 /**
- * An f32 result with the processor's NaN rule: a NaN whose inputs were all
- * numeric is an invalid operation and becomes the indefinite; a NaN input
- * propagates, quieted.
+ * Puts a lane's result with the processor's NaN rule: a NaN whose operands
+ * were all numeric is an invalid operation and becomes the indefinite; a NaN
+ * operand propagates, quieted. The operand's bits are read from its bytes, not
+ * from its value: once the optimizer knows a value is a NaN it may use the
+ * canonical NaN in its place, and the same instruction gave another payload
+ * once its code was optimized.
  *
- * @param {number} value @param {number[]} inputs
+ * @param {Uint8Array} out @param {number} at @param {number} value @param {boolean} double
+ * @param {Uint8Array[]} operands the operands' bytes, the lane at `from` in each
+ * @param {number} from
  */
-function f32Value(value, inputs){
-    if (!Number.isNaN(value))
+function putLane(out, at, value, double, operands, from){
+    if (double)
     {
-        return value;
-    }
-    for (const input of inputs)
-    {
-        if (Number.isNaN(input))
+        if (!Number.isNaN(value))
         {
-            return f32FromBits(f32Bits(input) | 0x00400000);
+            putF64(out, at, value);
+            return;
+        }
+        for (const bytes of operands)
+        {
+            const high = u32At(bytes, from + 4);
+            if ((high & 0x7ff00000) === 0x7ff00000
+                && ((high & 0xfffff) !== 0 || u32At(bytes, from) !== 0))
+            {
+                putU32(out, at, u32At(bytes, from));
+                putU32(out, at + 4, high | 0x80000);
+                return;
+            }
+        }
+        putU64(out, at, F64_INDEFINITE);
+        return;
+    }
+    const rounded = Math.fround(value);
+    if (!Number.isNaN(rounded))
+    {
+        putF32(out, at, rounded);
+        return;
+    }
+    for (const bytes of operands)
+    {
+        const word = u32At(bytes, from);
+        if ((word & 0x7fffffff) > 0x7f800000)
+        {
+            putU32(out, at, word | 0x00400000);
+            return;
         }
     }
-    return f32FromBits(F32_INDEFINITE);
-}
-/** @param {number} value @param {number[]} inputs */
-function f64Value(value, inputs){
-    if (!Number.isNaN(value))
-    {
-        return value;
-    }
-    for (const input of inputs)
-    {
-        if (Number.isNaN(input))
-        {
-            return f64FromBits(f64Bits(input) | 0x0008000000000000n);
-        }
-    }
-    return f64FromBits(F64_INDEFINITE);
+    putU32(out, at, F32_INDEFINITE);
 }
 
 /** Rounds half to even, as the SSE control word's nearest mode does. @param {number} value */
@@ -550,15 +545,7 @@ function floatBinary(state, dst, src, scalar, double, operation, address){
     {
         const x = double ? f64At(a, i * size) : f32At(a, i * size);
         const y = double ? f64At(b, i * size) : f32At(b, i * size);
-        const value = operation(x, y);
-        if (double)
-        {
-            putF64(out, i * size, f64Value(value, [x, y]));
-        }
-        else
-        {
-            putF32(out, i * size, f32Value(Math.fround(value), [x, y]));
-        }
+        putLane(out, i * size, operation(x, y), double, [a, b], i * size);
     }
     writeVector(state, dst, 16, address, out);
 }
@@ -581,15 +568,7 @@ function floatUnary(state, dst, src, scalar, double, operation, address){
     for (let i = 0; i < count; i++)
     {
         const x = double ? f64At(source, i * size) : f32At(source, i * size);
-        const value = operation(x);
-        if (double)
-        {
-            putF64(out, i * size, f64Value(value, [x]));
-        }
-        else
-        {
-            putF32(out, i * size, f32Value(Math.fround(value), [x]));
-        }
+        putLane(out, i * size, operation(x), double, [source], i * size);
     }
     writeVector(state, dst, 16, address, out);
 }
@@ -890,15 +869,10 @@ export function evaluateSimd(instruction, state, address){
                 const x = double ? f64At(pair, base * size) : f32At(pair, base * size);
                 const y = double ? f64At(pair, (base + 1) * size)
                     : f32At(pair, (base + 1) * size);
-                const value = subtract ? x - y : x + y;
-                if (double)
-                {
-                    putF64(out, i * size, f64Value(value, [x, y]));
-                }
-                else
-                {
-                    putF32(out, i * size, f32Value(Math.fround(value), [x, y]));
-                }
+                // The pair's two lanes for the NaN rule: the second is the first
+                // one lane on.
+                putLane(out, i * size, subtract ? x - y : x + y, double,
+                    [pair, pair.subarray(size)], base * size);
             }
             writeVector(state, dst, 16, address, out);
             return true;
@@ -917,15 +891,8 @@ export function evaluateSimd(instruction, state, address){
             {
                 const x = double ? f64At(left, i * size) : f32At(left, i * size);
                 const y = double ? f64At(right, i * size) : f32At(right, i * size);
-                const value = (i & 1) === 0 ? x - y : x + y;
-                if (double)
-                {
-                    putF64(out, i * size, f64Value(value, [x, y]));
-                }
-                else
-                {
-                    putF32(out, i * size, f32Value(Math.fround(value), [x, y]));
-                }
+                putLane(out, i * size, (i & 1) === 0 ? x - y : x + y, double, [left, right],
+                    i * size);
             }
             writeVector(state, dst, 16, address, out);
             return true;

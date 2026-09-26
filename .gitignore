@@ -12,7 +12,9 @@ modules/core/LICENSE
 modules/core/THIRD-PARTY-NOTICES.md
 tools/cdp_test/reports/
 *.log
-modules/core/vendor/prebuilt/
+# No trailing slash: a symlink at this path (a worktree pointing at the main
+# checkout's artifacts) is ignored too, not committed.
+modules/core/vendor/prebuilt
 
 # Game bundles built locally: gigabytes of someone else's data.
 bundles/
@@ -28,7 +30,8 @@ bundles/
 dbg/
 
 # The nasm corpus the translator tests fetch, pinned by modules/cork/corpus-lock.json.
-modules/cork/vendor/
+# No trailing slash, as for the prebuilt artifacts above: a link here is ignored too.
+modules/cork/vendor
 
 # AppleDouble files the host writes on the shared checkout
 ._*

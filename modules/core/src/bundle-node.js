@@ -225,6 +225,48 @@ export async function scanTree(root){
 }
 
 /**
+ * Writes a translation seed as a run of blocks at `cursor`, the way a file's
+ * are written, and answers the index's `translations` entry for it.
+ *
+ * The seed is what the translator made of this bundle's code on one machine
+ * (`exportSeed` in the cpu layer's translation store): a first run on another
+ * starts its store from it instead of empty. It is not a file of the volume --
+ * a guest never sees it, and a reader that does not know the entry skips it
+ * -- and it is kept out of the bundle's digest, which stays that of the game.
+ *
+ * @param {import('node:fs/promises').FileHandle} handle
+ * @param {Uint8Array} seed
+ * @param {{ offset: number, packed: number, codec: number, crc: number }[]} blocks  appended to
+ * @param {number} cursor  where the first block goes
+ * @param {{ blockSize: number, level: number, store: boolean }} how
+ * @returns {Promise<{ cursor: number, entry: { size: number, firstBlock: number,
+ *     blocks: number, sha256: string } }>}
+ */
+async function writeTranslations(handle, seed, blocks, cursor, { blockSize, level, store }){
+    const bytesOf = Buffer.from(seed.buffer, seed.byteOffset, seed.byteLength);
+    const firstBlock = blocks.length;
+    for (let at = 0; at < bytesOf.length; at += blockSize)
+    {
+        const block = bytesOf.subarray(at, Math.min(at + blockSize, bytesOf.length));
+        const { codec, bytes } = store
+            ? { codec: Codec.STORED, bytes: block }
+            : packBlock(block, level);
+        await handle.write(bytes, 0, bytes.length, cursor);
+        blocks.push({ offset: cursor, packed: bytes.length, codec, crc: crc32(bytes) });
+        cursor += bytes.length;
+    }
+    return {
+        cursor,
+        entry: {
+            size: bytesOf.length,
+            firstBlock,
+            blocks: blocks.length - firstBlock,
+            sha256: createHash('sha256').update(bytesOf).digest('hex'),
+        },
+    };
+}
+
+/**
  * Writes a bundle.
  *
  * @param {Object} options
@@ -233,12 +275,14 @@ export async function scanTree(root){
  * @param {number} [options.blockSize]
  * @param {number} [options.level]
  * @param {boolean} [options.store]     Store everything; skip compression entirely.
+ * @param {Uint8Array} [options.translations]  A translation seed to carry.
  * @param {(progress: any) => void} [options.onProgress]
  * @returns {Promise<any>} what the manifest needs to know about the bundle
  */
 export async function writeBundle(options){
     const {
         root, output, blockSize = DEFAULT_BLOCK_SIZE, level = 9, store = false, onProgress,
+        translations,
     } = options;
     const { files, directories } = await scanTree(root);
     const handle = await open(output, 'w');
@@ -314,7 +358,18 @@ export async function writeBundle(options){
         });
     }
 
-    const indexJson = Buffer.from(JSON.stringify({ blockSize, files: index, directories, blocks }));
+    /** @type {any} */
+    let member = null;
+    if (translations && translations.length > 0)
+    {
+        const written = await writeTranslations(handle, translations, blocks, cursor,
+            { blockSize, level, store });
+        cursor = written.cursor;
+        member = written.entry;
+    }
+
+    const indexJson = Buffer.from(JSON.stringify({ blockSize, files: index, directories, blocks,
+        ...(member === null ? {} : { translations: member }) }));
     const indexBytes = deflate(indexJson, 9);
     await handle.write(indexBytes, 0, indexBytes.length, cursor);
 
@@ -343,7 +398,78 @@ export async function writeBundle(options){
         // other than the bytes it describes -- and unlike the whole-bundle
         // digest it is cheap enough to check on every launch.
         indexSha256: createHash('sha256').update(indexBytes).digest('hex'),
+        translations: member,
     };
+}
+
+/**
+ * Puts a translation seed into a bundle already written, or takes it out
+ * (`seed` null): its blocks go where the index was, or where the seed it
+ * replaces began, and a new index after them -- the game's blocks are not
+ * touched, so a seed made from a run of a bundle rides in that same bundle
+ * without packing the game again. The index's digest changes, and with it
+ * the manifest's `indexSha256`.
+ *
+ * @param {string} path
+ * @param {Uint8Array | null} seed
+ * @param {{ level?: number, store?: boolean }} [how]
+ * @returns {Promise<{ bytes: number, indexSha256: string, translations: any }>}
+ */
+export async function attachTranslations(path, seed, { level = 9, store = false } = {}){
+    const handle = await open(path, 'r+');
+    try
+    {
+        const header = Buffer.alloc(HEADER_SIZE);
+        await handle.read(header, 0, HEADER_SIZE, 0);
+        if (header.toString('latin1', 0, 4) !== MAGIC)
+        {
+            throw new Error(`${path} is not a .btl bundle`);
+        }
+        const blockSize = header.readUInt32LE(8);
+        const indexOffset = Number(header.readBigUInt64LE(0x10));
+        const stored = Buffer.alloc(Number(header.readBigUInt64LE(0x18)));
+        await handle.read(stored, 0, stored.length, indexOffset);
+        const { translations: old, ...index } = JSON.parse(
+            Buffer.from(unpackBlock(header.readUInt32LE(0x20), stored)).toString());
+
+        let cursor = indexOffset;
+        if (old)
+        {
+            // Written after every file's blocks, by this function or the writer.
+            if (old.firstBlock + old.blocks !== index.blocks.length)
+            {
+                throw new Error(`${path}: the translations are not the last blocks`);
+            }
+            cursor = index.blocks[old.firstBlock].offset;
+            index.blocks = index.blocks.slice(0, old.firstBlock);
+        }
+        /** @type {any} */
+        let member = null;
+        if (seed !== null && seed.length > 0)
+        {
+            const written = await writeTranslations(handle, seed, index.blocks, cursor,
+                { blockSize, level, store });
+            cursor = written.cursor;
+            member = written.entry;
+        }
+        const indexBytes = deflate(Buffer.from(JSON.stringify(
+            { ...index, ...(member === null ? {} : { translations: member }) })), 9);
+        await handle.write(indexBytes, 0, indexBytes.length, cursor);
+        header.writeBigUInt64LE(BigInt(cursor), 0x10);
+        header.writeBigUInt64LE(BigInt(indexBytes.length), 0x18);
+        header.writeUInt32LE(Codec.DEFLATE_RAW, 0x20);
+        await handle.write(header, 0, HEADER_SIZE, 0);
+        await handle.truncate(cursor + indexBytes.length);
+        return {
+            bytes: cursor + indexBytes.length,
+            indexSha256: createHash('sha256').update(indexBytes).digest('hex'),
+            translations: member,
+        };
+    }
+    finally
+    {
+        await handle.close();
+    }
 }
 
 /**
@@ -388,6 +514,27 @@ export async function openBundle(path){
 
         list: ()=>index.files,
         directories: ()=>index.directories,
+        /** The translation seed's entry, or null for a bundle without one. */
+        translations: index.translations ?? null,
+
+        /** The translation seed, whole, or null. @returns {Promise<Buffer | null>} */
+        async readTranslations(){
+            const member = index.translations;
+            if (!member)
+            {
+                return null;
+            }
+            /** @type {Buffer[]} */
+            const parts = [];
+            for (let at = member.firstBlock; at < member.firstBlock + member.blocks; at++)
+            {
+                const block = index.blocks[at];
+                const raw = Buffer.alloc(block.packed);
+                await handle.read(raw, 0, block.packed, block.offset);
+                parts.push(Buffer.from(unpackBlock(block.codec, raw)));
+            }
+            return Buffer.concat(parts);
+        },
 
         /** @param {string} filePath */
         stat: filePath=>byPath.get(filePath.toLowerCase()) ?? null,
@@ -462,6 +609,15 @@ export async function verifyBundle(path, onProgress){
         }
         checked++;
         onProgress?.({ checked, total: bundle.list().length, path: file.path });
+    }
+    if (bundle.translations)
+    {
+        const seed = await bundle.readTranslations();
+        if (seed === null
+            || createHash('sha256').update(seed).digest('hex') !== bundle.translations.sha256)
+        {
+            bad.push('<translations>');
+        }
     }
 
     await bundle.close();

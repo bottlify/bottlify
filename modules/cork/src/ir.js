@@ -26,6 +26,8 @@ import { evaluateX87, fxrstor, fxsave, isX87Op } from './ir-x87.js';
 import { evaluateSimd, isSimdOp, mmxState } from './ir-simd.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
+/** The word `rdrand` fills. */
+const RANDOM = new Uint32Array(1);
 
 /** The width masks by operand size. @type {Readonly<Record<number, number>>} */
 const MASK = [0, 0xff, 0xffff, 0, 0xffffffff];
@@ -67,6 +69,9 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @property {number} control      the x87 control word
  * @property {Float64Array} f80    the eight physical x87 registers, as doubles
  * @property {BigInt64Array} f80bits  the same bytes, for an MMX read or write
+ * @property {number} x87Exact     the physical registers holding what a quadword `fild`
+ *     loaded, unwritten since (`exactWrites` in `ir-x87.js`): the quadword is in `x87Shadow`
+ * @property {BigInt64Array} x87Shadow
  * @property {Uint32Array} xmm     the eight XMM registers, four words each
  * @property {number} mxcsr
  */
@@ -89,6 +94,8 @@ export function createState(memory, { eip = 0, esp = 0, fsBase = 0 } = {}){
         top: 0, empty: 0xff, status: 0, control: 0x37f,
         f80: new Float64Array(f80Bytes),
         f80bits: new BigInt64Array(f80Bytes),
+        x87Exact: 0,
+        x87Shadow: new BigInt64Array(8),
         xmm: new Uint32Array(32),
         mxcsr: 0x1f80,
     };
@@ -390,7 +397,8 @@ export function evaluate(instruction, state){
             return;
         }
         case 'lea':
-            write(operands[0], address(operands[1]) & mask);
+            // The effective address alone: a segment override has no part in it.
+            write(operands[0], address({ ...operands[1], segment: undefined }) & mask);
             return;
         case 'xchg':
         {
@@ -410,7 +418,16 @@ export function evaluate(instruction, state){
                         : subFlags(a, b, 0, size);
             if (op === 'xadd')
             {
+                // The destination's address is the one it had before the source
+                // register was written: `xadd [ebx], bh` changes ebx itself.
+                const destination = operands[0].kind === 'mem'
+                    ? { ...operands[0], base: -1, index: -1, disp: address(operands[0]) | 0,
+                        segment: 3, addressSize: /** @type {32} */ (32) }
+                    : operands[0];
                 write(operands[1], a);
+                write(destination, result);
+                setFlags(flags);
+                return;
             }
             if (op !== 'cmp')
             {
@@ -491,6 +508,18 @@ export function evaluate(instruction, state){
         case 'imul':
             imul(operands, size, state, read, write, setFlags);
             return;
+        case 'rdrand':
+        {
+            if (operands[0].kind === 'mem')
+            {
+                throw new Fault(6, instruction.eip);
+            }
+            // The host's own randomness, CF set to say a value came.
+            crypto.getRandomValues(RANDOM);
+            write(operands[0], RANDOM[0] & mask);
+            setFlags(CF, ARITH);
+            return;
+        }
         case 'popcnt':
         {
             let value = read(operands[1]);
@@ -551,6 +580,16 @@ export function evaluate(instruction, state){
         {
             const width = operands[0].kind === 'seg' ? size : operands[0].size;
             const value = pop(width);
+            if (operands[0].kind === 'mem')
+            {
+                // `pop [esp+x]` addresses with esp moved, and a store that
+                // faults leaves the pop undone.
+                const at = address(operands[0]);
+                state.reg[4] = (state.reg[4] - width) >>> 0;
+                state.memory.write(at, width, value & MASK[width]);
+                state.reg[4] = (state.reg[4] + width) >>> 0;
+                return;
+            }
             write(operands[0], value);
             return;
         }
@@ -585,8 +624,10 @@ export function evaluate(instruction, state){
             // The reserved bit 1 always reads set; IF, IOPL and the rest of
             // the system bits are not a user program's to change here. AC
             // and ID are: a program finds CPUID by flipping ID, and one that
-            // cannot sees no CPUID and takes its generic code.
-            const writable = 0xcd5 | DF | (1 << 11) | (1 << 18) | (1 << 21);
+            // cannot sees no CPUID and takes its generic code. The word form
+            // writes the low sixteen bits alone.
+            const writable = (0xcd5 | DF | (1 << 11) | (1 << 18) | (1 << 21))
+                & (size === 2 ? 0xffff : -1);
             state.eflags = ((state.eflags & ~writable) | (value & writable) | 2) >>> 0;
             return;
         }
@@ -866,7 +907,7 @@ export function evaluate(instruction, state){
             return;
         case 'cpuid':
         {
-            const answer = cpuidLeaf(state.reg[0]);
+            const answer = cpuidLeaf(state.reg[0], state.reg[1]);
             state.reg[0] = answer.eax;
             state.reg[1] = answer.ecx;
             state.reg[2] = answer.edx;

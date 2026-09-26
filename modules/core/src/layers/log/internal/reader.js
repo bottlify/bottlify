@@ -267,7 +267,8 @@ export function createLogReader({ memory }){
          */
         frames(count = 240){
             const table = tables.log?.frames;
-            if (!table)
+            // A production bundle builds no profiler, so there is no table to read.
+            if (import.meta.BOTTLIFY_DIAGNOSTICS === false || !table)
             {
                 return [];
             }

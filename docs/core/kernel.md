@@ -150,7 +150,7 @@ sub-record each for handles, sync objects, processes and time:
 | `quantum` | As configured. | Never. |
 | `turns` | Turns taken. | Each `runOnce` that ran a thread. |
 | `overruns`, `worstSlice`, `worstSliceAt`, `worstSliceFrom`, `worstSliceOn` | Slices the emulator ran past the quantum; the worst, where it began and ended, and on which thread. | When a slice retires more than `quantum`. |
-| `worstSliceMs`, `slowSlices` | The eight slices that held the machine longest by the host clock (40 ms and up), as `ms instructions thread 0xfrom->0xat`. | When a slice takes 40 ms or more. |
+| `worstSliceMs`, `slowSlices` | The eight slices that held the machine longest by the host clock (40 ms and up), as `ms instructions thread 0xfrom->0xat`. A production bundle reads no clock for them and reports none. | When a slice takes 40 ms or more. |
 | `expiries` | Timed waits that ran out. | Each expiry. |
 | `stackEscapes`, `stackEscaped` | Threads whose ESP has been seen outside their stack, and where. | Checked once a turn, before the slice. |
 | `deepestStackUse` | `name used/size` per thread. | Once a turn. |

@@ -16,5 +16,5 @@
       "punycode": ["../core/types/punycode.d.ts"]
     }
   },
-  "include": ["src/**/*.js"]
+  "include": ["src/**/*.js", "../core/types/build.d.ts"]
 }

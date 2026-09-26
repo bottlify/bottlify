@@ -7,7 +7,7 @@
 import { createRing } from './ring.js';
 
 /** What a mirrored column reads from when no layer publishes its counter. */
-const ABSENT = new Float64Array(1);
+const ABSENT = /* @__PURE__ */ new Float64Array(1);
 
 /**
  * The phase profiler: where a frame went, and how much of it was ours.
@@ -80,7 +80,7 @@ export const NOTES_PER_FRAME = 8;
  *
  * @type {readonly MirroredCounter[]}
  */
-export const FRAME_DELTAS = Object.freeze([
+export const FRAME_DELTAS = /* @__PURE__ */ Object.freeze([
     { column: 'retired', layer: 'cpu', counter: 'instructions' },
     { column: 'entries', layer: 'cpu', counter: 'jit.entries' },
     { column: 'interpretedSteps', layer: 'cpu', counter: 'jit.interpretedSteps' },
@@ -135,7 +135,7 @@ export const FRAME_DELTAS = Object.freeze([
  *
  * @type {readonly MirroredCounter[]}
  */
-export const FRAME_VALUES = Object.freeze([
+export const FRAME_VALUES = /* @__PURE__ */ Object.freeze([
     { column: 'thread', layer: 'kernel', counter: 'frameThread' },
     { column: 'threadInstructions', layer: 'kernel', counter: 'frameThreadInstructions' },
     { column: 'threadAt', layer: 'kernel', counter: 'frameAt' },
@@ -150,17 +150,21 @@ export const FRAME_VALUES = Object.freeze([
 ]);
 
 /** Every mirrored column, in the order a frame's row stores them. */
-export const FRAME_MIRROR = Object.freeze([...FRAME_DELTAS, ...FRAME_VALUES]);
+export const FRAME_MIRROR = /* @__PURE__ */ Object.freeze([...FRAME_DELTAS, ...FRAME_VALUES]);
 
-export const FRAME_COLUMNS = [
+// Built by one call the bundler is told is pure, so a production bundle, which
+// makes no profiler, drops the table's layout with it.
+export const FRAME_COLUMNS = /* @__PURE__ */ [
     'index', 'startedAt', 'ms',
     'host', 'guest', 'gpu', 'present',
     'sampledHost', 'sampledGuest', 'sampledGpu', 'sampledPresent',
     'hostShare', 'longest', 'longestMs', 'longestGuestMs', 'longestGuestInstructions',
     'waits', 'compiles', 'idleMs',
-    ...FRAME_MIRROR.map(entry=>entry.column),
-    ...Array.from({ length: NOTES_PER_FRAME }, (_, i)=>[`note${i}`, `amount${i}`]).flat(),
-];
+].concat(
+    /* @__PURE__ */ FRAME_MIRROR.map(entry=>entry.column),
+    /* @__PURE__ */ (/* @__PURE__ */ Array.from({ length: NOTES_PER_FRAME },
+        (_, i)=>[`note${i}`, `amount${i}`])).flat(),
+);
 /** One row per phase name, kept up to date as phases close. */
 export const PHASE_COLUMNS = ['name', 'kind', 'count', 'totalMs', 'selfMs', 'worstMs'];
 export const PHASE_ROWS = 512;

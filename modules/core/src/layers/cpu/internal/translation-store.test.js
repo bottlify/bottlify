@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createDirectoryTranslationStore, fileNameOf, resolveTranslationStore, STORE_VERSION,
+    createDirectoryTranslationStore, createMemoryDirectory, fileNameOf, resolveTranslationStore,
+    SEED_FORMAT, STORE_VERSION, unpackSeed,
 } from './translation-store.js';
 
 /**
@@ -381,4 +382,127 @@ test('past the cap the records least recently used go first', async()=>{
     assert.equal((await store.get('r2'))?.[0], 2);
     assert.equal((await store.get('r3'))?.[0], 3);
     assert.equal(recordsSize(root), 20);
+});
+
+/**
+ * What a store answers for each of `keys`, as arrays.
+ *
+ * @param {any} store @param {string[]} keys
+ */
+async function recordsOf(store, keys){
+    return Promise.all(keys.map(async key=>[...(await store.get(key)) ?? []]));
+}
+
+const SEED_KEYS = ['cork/41/a/401000/x', 'cork/41/a/module/y', 'cork/41/a/402000/z'];
+
+/** A store over `root` holding three records, flushed. @param {any} root */
+async function capturedStore(root){
+    const store = await createDirectoryTranslationStore(root, 'game');
+    await store.put(SEED_KEYS[0], new Uint8Array([1, 2, 3]));
+    await store.put(SEED_KEYS[1], new Uint8Array(300).fill(7));
+    await store.put(SEED_KEYS[2], new Uint8Array([9]));
+    // Written twice: a seed carries the later place, as a lookup would.
+    await store.put(SEED_KEYS[2], new Uint8Array([9, 9]));
+    await store.flush();
+    return store;
+}
+
+for (const [kind, rootOf] of /** @type {[string, () => any][]} */ ([
+    ['a worker\'s', ()=>createMemoryDirectory()],
+    ['a page\'s', ()=>fakeDirectory()],
+]))
+{
+    test(`a seed exported from one store gives an empty one the same records (${kind} files)`,
+        async()=>{
+            const first = await capturedStore(rootOf());
+            const seed = await first.exportSeed();
+            assert.equal(String.fromCharCode(...seed.subarray(0, 8)), 'CORKSEED');
+            assert.equal(unpackSeed(seed)?.length, 3, 'one record a name, the later place');
+
+            const root = rootOf();
+            const fresh = await createDirectoryTranslationStore(root, 'game');
+            assert.equal(await fresh.seededWith(), null);
+            assert.deepEqual(await fresh.seed(seed, 'digest-1'),
+                { taken: true, added: 3, present: 0 });
+            const expected = await recordsOf(first, SEED_KEYS);
+            assert.deepEqual(expected[2], [9, 9]);
+            assert.deepEqual(await recordsOf(fresh, SEED_KEYS), expected);
+            assert.equal(await fresh.seededWith(), 'digest-1');
+            assert.deepEqual(await fresh.exportSeed(), seed, 'the same records make the same seed');
+            await fresh.flush();
+            fresh.close();
+
+            // On disk: a store opened later finds the seeded records and the mark.
+            const reopened = await createDirectoryTranslationStore(root, 'game');
+            assert.deepEqual(await recordsOf(reopened, SEED_KEYS), expected);
+            assert.equal(await reopened.seededWith(), 'digest-1');
+            // Taken again, nothing is added: the records file stays as it was.
+            const records = await (await root.getDirectoryHandle('cork'))
+                .getDirectoryHandle(`game.v${STORE_VERSION}`);
+            const size = (await (await records.getFileHandle('records')).getFile()).size;
+            assert.deepEqual(await reopened.seed(seed, 'digest-1'),
+                { taken: true, added: 0, present: 3 });
+            await reopened.flush();
+            assert.equal((await (await records.getFileHandle('records')).getFile()).size, size,
+                'a second seed adds no bytes');
+        });
+}
+
+test('a seed is the same bytes whatever order its records were put in', async()=>{
+    const a = await createDirectoryTranslationStore(createMemoryDirectory(), 'game');
+    const b = await createDirectoryTranslationStore(createMemoryDirectory(), 'game');
+    for (let i = 0; i < 20; i++)
+    {
+        await a.put(`key/${i}`, new Uint8Array([i, i + 1]));
+        await b.put(`key/${19 - i}`, new Uint8Array([19 - i, 20 - i]));
+    }
+    assert.deepEqual(await a.exportSeed(), await b.exportSeed());
+});
+
+test('a seed of another layout version or format, or a torn one, adds nothing', async()=>{
+    const seed = await (await capturedStore(createMemoryDirectory())).exportSeed();
+    const otherVersion = seed.slice();
+    new DataView(otherVersion.buffer).setUint32(12, STORE_VERSION + 1, true);
+    const otherFormat = seed.slice();
+    new DataView(otherFormat.buffer).setUint32(8, SEED_FORMAT + 1, true);
+    for (const [what, bytes] of /** @type {[string, Uint8Array | null][]} */ ([
+        ['another STORE_VERSION', otherVersion], ['another seed format', otherFormat],
+        ['cut short', seed.subarray(0, seed.length - 1)], ['not a seed', new Uint8Array(64)],
+        ['nothing', null],
+    ]))
+    {
+        const store = await createDirectoryTranslationStore(createMemoryDirectory(), 'game');
+        assert.deepEqual(await store.seed(bytes, 'x'), { taken: false, added: 0, present: 0 },
+            what);
+        assert.equal(await store.get(SEED_KEYS[0]), null, `${what}: no record`);
+        assert.equal(await store.seededWith(), null, `${what}: not marked as taken`);
+    }
+});
+
+test('a lookup made while a seed is on its way waits for it and finds its records', async()=>{
+    const seed = await (await capturedStore(createMemoryDirectory())).exportSeed();
+    const store = await createDirectoryTranslationStore(createMemoryDirectory(), 'game');
+    /** @type {(bytes: Uint8Array) => void} */
+    let arrive = ()=>{};
+    store.seed(new Promise(resolve=>{
+        arrive = resolve;
+    }), 'late');
+    let answered = false;
+    const lookup = store.get(SEED_KEYS[0]).then(bytes=>{
+        answered = true;
+        return bytes;
+    });
+    await new Promise(resolve=>setTimeout(resolve, 5));
+    assert.equal(answered, false, 'the lookup waits for the seed');
+    arrive(seed);
+    assert.deepEqual([...await lookup ?? []], [1, 2, 3]);
+});
+
+test('a record the store holds already stays as the store holds it', async()=>{
+    const seed = await (await capturedStore(createMemoryDirectory())).exportSeed();
+    const store = await createDirectoryTranslationStore(createMemoryDirectory(), 'game');
+    await store.put(SEED_KEYS[0], new Uint8Array([4, 4]));
+    assert.deepEqual(await store.seed(seed), { taken: true, added: 2, present: 1 });
+    assert.deepEqual([...await store.get(SEED_KEYS[0]) ?? []], [4, 4]);
+    assert.equal(await store.seededWith(), null, 'no identity, no mark');
 });

@@ -54,6 +54,10 @@ export function packageProblems(files, manifest){
             .map(/** @param {string} t */ t=>t.replace(/^\.\//, ''))
             .filter(path=>!OPTIONAL_VENDOR.has(path)),
         'dist/vendor/manifest.json',
+        // The translator, loaded by URL rather than exported: without it a
+        // package with no emulator starts no machine at all.
+        'dist/cork/index.js',
+        'dist/cork/translator.worker.js',
         'LICENSE',
         'THIRD-PARTY-NOTICES.md',
     ];

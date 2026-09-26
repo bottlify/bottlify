@@ -16,6 +16,25 @@
  * rather than an average: an average hides the frame that stalled.
  */
 
+/** Ends a phase that was never timed. */
+const NOTHING = ()=>{};
+
+/**
+ * The profiler a production bundle has in its place: every call answered,
+ * nothing measured, nothing kept.
+ *
+ * @type {any}
+ */
+export const ABSENT_PROFILER = Object.freeze({
+    beginFrame(){},
+    phase: ()=>NOTHING,
+    bufferUpload(){},
+    textureUpload(){},
+    endFrame(){},
+    count(){},
+    snapshot: ()=>({ frames: 0, counters: {}, uploadsByLabel: {}, recentFrames: [] }),
+});
+
 /**
  * @param {Object} options
  * @param {()=>number} options.now
