@@ -42,6 +42,7 @@ export const DI_BUFFEROVERFLOW = 1;
 export const DI_NOEFFECT = 1;
 const DIERR_INVALIDPARAM = 0x80070057 | 0;
 const DIERR_NOTACQUIRED = 0x8007000c | 0;
+const DIERR_ACQUIRED = 0x800700aa | 0;
 const DIERR_UNSUPPORTED = 0x80004001 | 0;
 const DIERR_DEVICENOTREG = 0x80040154 | 0;
 const DIERR_NOTFOUND = 0x80070002 | 0;
@@ -632,8 +633,17 @@ export function createDirectInput(
             return DI_OK;
         },
 
-        /** HRESULT SetCooperativeLevel(HWND, DWORD) */
-        SetCooperativeLevel(){
+        /**
+         * HRESULT SetCooperativeLevel(HWND, DWORD)
+         *
+         * Like the buffer size, a level is settled before the device is
+         * taken: a held device refuses a new one with DIERR_ACQUIRED.
+         */
+        SetCooperativeLevel(device){
+            if (device.acquired)
+            {
+                return DIERR_ACQUIRED;
+            }
             return DI_OK;
         },
 
@@ -653,6 +663,12 @@ export function createDirectInput(
             // packed into one by MAKEDIPROP, and only the latter reaches here.
             if ((guid >>> 0) === DIPROP_BUFFERSIZE)
             {
+                // The queue is sized while nobody reads it; a held device
+                // keeps the one it was acquired with.
+                if (device.acquired)
+                {
+                    return DIERR_ACQUIRED;
+                }
                 device.setBufferSize(readU32((header >>> 0) + DIPROPDWORD_DATA));
                 return DI_OK;
             }

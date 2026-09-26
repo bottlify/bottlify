@@ -29,6 +29,7 @@ const DIERR_INVALIDPARAM = 0x80070057 | 0;
 const DIERR_NOTACQUIRED = 0x8007000c | 0;
 const DIERR_UNSUPPORTED = 0x80004001 | 0;
 const DIERR_DEVICENOTREG = 0x80040154 | 0;
+const DIERR_ACQUIRED = 0x800700aa | 0;
 
 const DIK_A = 0x1e;
 const DIK_S = 0x1f;
@@ -264,11 +265,18 @@ function mouse(f = fixture(), size = 16){
     return { ...f, device };
 }
 
-/** @param {any} f @param {number} device @param {number} size */
+/**
+ * DIPROP_BUFFERSIZE, set the one way it can be: with the device let go of
+ * and taken back afterwards.
+ *
+ * @param {any} f @param {number} device @param {number} size
+ */
 function setBufferSize(f, device, size){
+    f.bridge.call(device, 'Unacquire', []);
     f.memory.setU32(AT.property + DIPROPDWORD_DATA, size);
     assert.equal(
         f.bridge.call(device, 'SetProperty', [DIPROP_BUFFERSIZE, AT.property]), DI_OK);
+    assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
 }
 
 test('every declared slot counts `this` in its argument size', ()=>{
@@ -646,6 +654,27 @@ test('acquiring what is acquired, or releasing what is not, has no effect and sa
         assert.equal(f.bridge.call(device, 'Acquire', []), DI_NOEFFECT, guid);
         assert.equal(f.bridge.call(device, 'Unacquire', []), DI_OK, guid);
     }
+});
+
+test('an acquired device refuses a new buffer size or cooperative level', ()=>{
+    // joystick8.c: SetCooperativeLevel and SetProperty(DIPROP_BUFFERSIZE)
+    // answer DIERR_ACQUIRED while the device is held, and change nothing.
+    const f = keyboard();
+    setBufferSize(f, f.device, 8);
+    f.dinput.post({ kind: 'key', code: DIK_A, down: true });
+    f.memory.setU32(AT.property + DIPROPDWORD_DATA, 64);
+    assert.equal(f.bridge.call(f.device, 'SetProperty', [DIPROP_BUFFERSIZE, AT.property]),
+        DIERR_ACQUIRED);
+    assert.equal(f.bridge.call(f.device, 'SetCooperativeLevel', [0x1234, 0x5]),
+        DIERR_ACQUIRED);
+    assert.equal(f.dinput.device(GUID_SysKeyboard).bufferSize, 8);
+    assert.equal(f.dinput.device(GUID_SysKeyboard).queued, 1, 'and the queue is left alone');
+
+    assert.equal(f.bridge.call(f.device, 'Unacquire', []), DI_OK);
+    assert.equal(f.bridge.call(f.device, 'SetCooperativeLevel', [0x1234, 0x5]), DI_OK);
+    assert.equal(f.bridge.call(f.device, 'SetProperty', [DIPROP_BUFFERSIZE, AT.property]),
+        DI_OK);
+    assert.equal(f.dinput.device(GUID_SysKeyboard).bufferSize, 64);
 });
 
 test('GetCapabilities fills DIDEVCAPS and needs a header that declares its size', ()=>{
