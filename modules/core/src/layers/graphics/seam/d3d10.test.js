@@ -25,7 +25,9 @@ import {
     ID3D10BLENDSTATE1_SLOTS, ID3D10BLOB_SLOTS, ID3D10BUFFER_SLOTS, ID3D10DEVICE1_SLOTS,
     ID3D10DEVICE_SLOTS, ID3D10MULTITHREAD_SLOTS, ID3D10SHADERRESOURCEVIEW1_SLOTS,
     ID3D10STATE_SLOTS,
-    ID3D10QUERY_SLOTS, ID3D10SHADERREFLECTION_SLOTS, ID3D10STATEBLOCK_SLOTS, ID3D10TEXTURE_SLOTS,
+    ID3D10QUERY_SLOTS, ID3D10SHADERREFLECTIONCONSTANTBUFFER_SLOTS,
+    ID3D10SHADERREFLECTIONTYPE_SLOTS, ID3D10SHADERREFLECTIONVARIABLE_SLOTS,
+    ID3D10SHADERREFLECTION_SLOTS, ID3D10STATEBLOCK_SLOTS, ID3D10TEXTURE_SLOTS,
     ID3D10VIEW_SLOTS, IDXGIADAPTER1_SLOTS, IDXGIADAPTER_SLOTS, IDXGIDEVICE1_SLOTS,
     IDXGIDEVICE_SLOTS, IDXGIFACTORY1_SLOTS, IDXGIFACTORY_SLOTS, IDXGIOUTPUT_SLOTS,
     IDXGIRESOURCE_SLOTS, IDXGISURFACE_SLOTS, IDXGISWAPCHAIN_SLOTS, createDirect3D10Seam,
@@ -37,7 +39,9 @@ import {
     DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, IID, S_OK,
 } from '../d3d10/constants.js';
 import { DXGI_SWAP_CHAIN_DESC, writeSwapChainDesc } from '../d3d10/structs.js';
-import { passThroughVertexShader, solidPixelShader } from '../d3d10/shader-fixtures.js';
+import {
+    constantBufferShader, passThroughVertexShader, solidPixelShader,
+} from '../d3d10/shader-fixtures.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 
@@ -981,9 +985,8 @@ test('d3d10.dll makes blobs, cuts signatures out of a shader and reflects it', (
     assert.deepEqual([...h.box.services.readMemory(parameter + 20, 2)], [0xf, 0]);
     assert.equal(reflect('GetInputParameterDesc', [1, parameter]), E_INVALIDARG);
     assert.equal(reflect('GetResourceBindingDesc', [0, parameter]), E_INVALIDARG);
-    assert.equal(reflect('GetConstantBufferByIndex', [0]), 0);
-    assert.ok(h.divergences.some(line=>line.includes('constant buffers')),
-        'the null answer is reported');
+    assert.notEqual(reflect('GetConstantBufferByIndex', [0]), 0,
+        'a program with no constant buffer is answered the invalid one, not null');
     const queried = h.box.place([0]);
     assert.equal(h.box.call(reflection, 0,
         [h.box.placeGuid(IID.ID3D10ShaderReflection), queried]), S_OK);
@@ -1001,6 +1004,87 @@ test('d3d10.dll makes blobs, cuts signatures out of a shader and reflects it', (
     assert.equal(profile('D3D10GetGeometryShaderProfile'), 'gs_4_0');
     assert.equal(entries.D3D10GetVertexShaderProfile.handler([0]),
         entries.D3D10GetVertexShaderProfile.handler([0]), 'one string, kept');
+});
+
+test('a reflection\'s constant buffers, variables and types are tables without IUnknown', ()=>{
+    // Wine's d3dcompiler test_reflection_constant_buffer, for its ps_4_0
+    // program: an invalid object of each kind rather than null, one pointer
+    // per object however it is looked up, and descriptions that write their
+    // own fields and nothing past them.
+    const h = seamed();
+    const E_FAIL = 0x80004005;
+    const shader = constantBufferShader();
+    const shaderAt = h.box.placeBytes(shader);
+    const reflectionAt = h.box.place([0]);
+    assert.equal(h.d3d10.D3D10ReflectShader.handler([shaderAt, shader.length, reflectionAt])
+        >>> 0, S_OK);
+    const reflection = h.box.memory.readU32(reflectionAt);
+    const reflect = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        h.box.call(reflection, slot(ID3D10SHADERREFLECTION_SLOTS, name), args);
+    /** A table whose first slot is its own first method. @param {[string, number][]} slots */
+    const on = slots=>(/** @type {number} */ pointer, /** @type {string} */ name,
+        /** @type {number[]} */ args = [])=>
+        h.box.call(pointer, slots.findIndex(([entry])=>entry === name), args);
+    const buffer = on(ID3D10SHADERREFLECTIONCONSTANTBUFFER_SLOTS);
+    const variable = on(ID3D10SHADERREFLECTIONVARIABLE_SLOTS);
+    const type = on(ID3D10SHADERREFLECTIONTYPE_SLOTS);
+    const text = (/** @type {number} */ at)=>{
+        const bytes = h.box.services.readMemory(at, 64);
+        return String.fromCharCode(...bytes.subarray(0, bytes.indexOf(0)));
+    };
+    /** @param {number} at @param {number} count */
+    const dwords = (at, count)=>Array.from({ length: count },
+        (_, index)=>h.box.memory.readU32(at + index * 4));
+    const named = (/** @type {string} */ name)=>h.box.placeString(name);
+
+    const invalid = reflect('GetConstantBufferByIndex', [0xffffffff]);
+    assert.notEqual(invalid, 0);
+    assert.equal(reflect('GetConstantBufferByName', [named('invalid')]), invalid);
+    assert.equal(reflect('GetConstantBufferByName', [0]), invalid);
+    const c1 = reflect('GetConstantBufferByIndex', [1]);
+    assert.notEqual(c1, invalid);
+    assert.equal(reflect('GetConstantBufferByName', [named('c1')]), c1,
+        'the pointer the program already holds');
+
+    const desc = h.box.place([1, 1, 1, 1, 1, 0xfeedface, 0xfeedface, 0xfeedface]);
+    assert.equal(buffer(invalid, 'GetDesc', [desc]), E_FAIL);
+    assert.equal(buffer(c1, 'GetDesc', [0]), E_FAIL);
+    assert.equal(buffer(c1, 'GetDesc', [desc]), S_OK);
+    assert.equal(text(h.box.memory.readU32(desc)), 'c1');
+    assert.deepEqual(dwords(desc + 4, 5), [0, 4, 64, 0, 0xfeedface],
+        'D3D10_CT_CBUFFER, four variables, 64 bytes, no flags, and nothing past them');
+
+    const t = buffer(c1, 'GetVariableByName', [named('t')]);
+    assert.equal(buffer(c1, 'GetVariableByIndex', [3]), t);
+    const invalidVariable = buffer(c1, 'GetVariableByName', [0]);
+    assert.notEqual(invalidVariable, 0);
+    assert.notEqual(invalidVariable, t);
+    assert.equal(buffer(invalid, 'GetVariableByIndex', [0]), invalidVariable);
+    assert.equal(variable(invalidVariable, 'GetDesc', [desc]), E_FAIL);
+    assert.equal(variable(t, 'GetDesc', [desc]), S_OK);
+    assert.equal(text(h.box.memory.readU32(desc)), 't');
+    assert.deepEqual(dwords(desc + 4, 5), [48, 8, 2, 0, 0xfeedface],
+        'offset, size, D3D10_SVF_USED, no default value');
+
+    const structure = variable(t, 'GetType');
+    assert.equal(variable(t, 'GetType'), structure);
+    assert.equal(type(structure, 'GetDesc', [desc]), S_OK);
+    assert.deepEqual(dwords(desc, 8), [5, 0, 1, 2, 0, 2, 0, 0xfeedface],
+        'D3D10_SVC_STRUCT, D3D10_SVT_VOID, one row of two, two members, at zero');
+    const second = type(structure, 'GetMemberTypeByIndex', [1]);
+    assert.equal(type(structure, 'GetMemberTypeByName', [named('b')]), second);
+    assert.equal(text(type(structure, 'GetMemberTypeName', [1])), 'b');
+    assert.equal(type(structure, 'GetMemberTypeName', [2]), 0);
+    assert.equal(type(second, 'GetDesc', [desc]), S_OK);
+    assert.equal(h.box.memory.readU32(desc + 24), 4, 'where it sits in its structure');
+
+    const invalidType = variable(invalidVariable, 'GetType');
+    assert.notEqual(invalidType, 0);
+    assert.equal(type(structure, 'GetMemberTypeByIndex', [0xffffffff]), invalidType);
+    assert.equal(type(structure, 'GetMemberTypeByName', [0]), invalidType);
+    assert.equal(type(invalidType, 'GetDesc', [desc]), E_FAIL);
+    assert.equal(text(type(invalidType, 'GetMemberTypeName', [0])), '$Invalid');
+    assert.equal(h.box.argBytesOf(t, 1), 4, 'GetType takes the interface alone');
 });
 
 test('a compile is refused as a failed compile, with the reason in the error blob', ()=>{

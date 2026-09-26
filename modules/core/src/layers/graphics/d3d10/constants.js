@@ -429,6 +429,11 @@ export const IID = Object.freeze({
     ID3D10PixelShader: '{4968B601-9D00-4CDE-8346-8E7F675819B6}',
     ID3D10Blob: '{8BA5FB08-5195-40E2-AC58-0D989C3A0102}',
     ID3D10ShaderReflection: '{D40E20B6-F8F7-42AD-AB20-4BAF8F15DFAA}',
+    // Interfaces without IUnknown, so never asked for by these: the key the
+    // publisher lays each table out under.
+    ID3D10ShaderReflectionConstantBuffer: '{66C66A94-DDDD-4B62-A66A-F0DA33C2B4D0}',
+    ID3D10ShaderReflectionVariable: '{1BF63C95-2650-405D-99C1-3636BD1DA0A1}',
+    ID3D10ShaderReflectionType: '{C530AD7D-9B16-4395-A979-BA2ECFF83ADD}',
     ID3D10StateBlock: '{0803425A-57F5-4DD6-9465-A87570834A08}',
     ID3D10ShaderResourceView1: '{9B7E4C87-342C-4106-A19F-4F2704F689F0}',
     ID3D10BlendState1: '{EDAD8D99-8A35-4D6D-8566-2EA276CDE161}',

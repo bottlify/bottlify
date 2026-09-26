@@ -71,6 +71,22 @@ export const SHADER_DESC_FIELDS = Object.freeze([
 ]);
 
 /**
+ * D3D10_SHADER_BUFFER_DESC, D3D10_SHADER_VARIABLE_DESC and
+ * D3D10_SHADER_TYPE_DESC, one dword per field in declaration order. `Name`
+ * and `DefaultValue` are pointers, given as offsets from the start of the
+ * container, or -1 for none.
+ */
+export const SHADER_BUFFER_DESC_FIELDS = Object.freeze([
+    'Name', 'Type', 'Variables', 'Size', 'uFlags',
+]);
+export const SHADER_VARIABLE_DESC_FIELDS = Object.freeze([
+    'Name', 'StartOffset', 'Size', 'uFlags', 'DefaultValue',
+]);
+export const SHADER_TYPE_DESC_FIELDS = Object.freeze([
+    'Class', 'Type', 'Rows', 'Columns', 'Elements', 'Members', 'Offset',
+]);
+
+/**
  * @typedef {Object} ReflectedBinding
  * @property {string} name
  * @property {number} nameAt       From the start of the container.
@@ -91,6 +107,37 @@ export const SHADER_DESC_FIELDS = Object.freeze([
  * @property {number} size
  * @property {number} flags
  * @property {number} type         D3D10_CBUFFER_TYPE.
+ * @property {ReflectedVariable[]} variableList  The entries laid out, which a
+ *     stripped or damaged chunk may have fewer of than `variables` says.
+ */
+
+/**
+ * @typedef {Object} ReflectedVariable
+ * @property {string} name
+ * @property {number} nameAt
+ * @property {number} startOffset
+ * @property {number} size
+ * @property {number} flags        D3D10_SHADER_VARIABLE_FLAGS.
+ * @property {number} defaultAt    From the start of the container, or -1 for none.
+ * @property {ReflectedType} type
+ */
+
+/**
+ * @typedef {Object} ReflectedType
+ * @property {number} class        D3D10_SHADER_VARIABLE_CLASS.
+ * @property {number} type         D3D10_SHADER_VARIABLE_TYPE.
+ * @property {number} rows
+ * @property {number} columns
+ * @property {number} elements
+ * @property {ReflectedMember[]} members
+ */
+
+/**
+ * @typedef {Object} ReflectedMember
+ * @property {string} name
+ * @property {number} nameAt
+ * @property {number} offset       From the start of the structure.
+ * @property {ReflectedType} type
  */
 
 /**
@@ -112,6 +159,11 @@ function u32(bytes, at){
     return at + 4 > bytes.length
         ? 0
         : (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16) | (bytes[at + 3] << 24)) >>> 0;
+}
+
+/** @param {Uint8Array} bytes @param {number} at */
+function u16(bytes, at){
+    return at + 2 > bytes.length ? 0 : bytes[at] | (bytes[at + 1] << 8);
 }
 
 /** @param {Uint8Array} bytes @param {number} at @returns {string} up to the NUL */
@@ -154,10 +206,113 @@ function located(bytes, chunk, elements){
     }));
 }
 
+/** The tag of the header a Shader Model 5 compiler adds, "RD11". */
+const RD11 = 0x31314452;
+
+/**
+ * How long a variable, a type and a member entry are. A Shader Model 5
+ * compiler appends fields to variables and types and says so in a header of
+ * its own after the first; the fields read here lead either way. A header
+ * claiming entries shorter than those fields is not believed.
+ *
+ * @param {Uint8Array} chunk
+ */
+function entrySizes(chunk){
+    const sizes = { variable: 24, type: 16, member: 12 };
+    if (u32(chunk, 28) === RD11)
+    {
+        sizes.variable = Math.max(u32(chunk, 44), sizes.variable);
+        sizes.type = Math.max(u32(chunk, 48), sizes.type);
+        sizes.member = Math.max(u32(chunk, 52), sizes.member);
+    }
+    return sizes;
+}
+
+/**
+ * How many of `count` entries, `size` bytes apart from `at`, have their
+ * leading `used` bytes inside the chunk. An offset of zero is the header's,
+ * so it lays out nothing.
+ *
+ * @param {Uint8Array} chunk
+ * @param {number} at
+ * @param {number} count
+ * @param {number} size
+ * @param {number} used
+ */
+function entriesIn(chunk, at, count, size, used){
+    if (at === 0 || at + used > chunk.length)
+    {
+        return 0;
+    }
+    return Math.min(count, Math.floor((chunk.length - at - used) / size) + 1);
+}
+
+/**
+ * A constant buffer's variables and the types they name. A type is read
+ * once however many entries name it, so a structure that names itself
+ * through a damaged chunk ends rather than recursing.
+ *
+ * @param {Uint8Array} chunk
+ * @param {number} base        Where the chunk starts in the container.
+ * @param {number} at          The first variable, or zero for none laid out.
+ * @param {number} count
+ */
+function readVariables(chunk, base, at, count){
+    const sizes = entrySizes(chunk);
+    /** @type {Map<number, ReflectedType>} */
+    const known = new Map();
+    /** @param {number} typeAt @returns {ReflectedType} */
+    const readType = typeAt=>{
+        const already = known.get(typeAt);
+        if (already)
+        {
+            return already;
+        }
+        /** @type {ReflectedType} */
+        const type = {
+            class: u16(chunk, typeAt), type: u16(chunk, typeAt + 2), rows: u16(chunk, typeAt + 4),
+            columns: u16(chunk, typeAt + 6), elements: u16(chunk, typeAt + 8), members: [],
+        };
+        known.set(typeAt, type);
+        const membersAt = u32(chunk, typeAt + 12);
+        const memberCount = entriesIn(chunk, membersAt, u16(chunk, typeAt + 10), sizes.member, 12);
+        for (let index = 0; index < memberCount; index++)
+        {
+            const entry = membersAt + index * sizes.member;
+            type.members.push({
+                name: cString(chunk, u32(chunk, entry)),
+                nameAt: base + u32(chunk, entry),
+                offset: u32(chunk, entry + 8),
+                type: readType(u32(chunk, entry + 4)),
+            });
+        }
+        return type;
+    };
+    /** @type {ReflectedVariable[]} */
+    const variables = [];
+    const variableCount = entriesIn(chunk, at, count, sizes.variable, 24);
+    for (let index = 0; index < variableCount; index++)
+    {
+        const entry = at + index * sizes.variable;
+        const defaultAt = u32(chunk, entry + 20);
+        variables.push({
+            name: cString(chunk, u32(chunk, entry)),
+            nameAt: base + u32(chunk, entry),
+            startOffset: u32(chunk, entry + 4),
+            size: u32(chunk, entry + 8),
+            flags: u32(chunk, entry + 12),
+            defaultAt: defaultAt > 0 && defaultAt < chunk.length ? base + defaultAt : -1,
+            type: readType(u32(chunk, entry + 16)),
+        });
+    }
+    return variables;
+}
+
 /**
  * The resource definitions: a header of counts and offsets, the constant
- * buffers at 24 bytes each, the bound resources at 32, and the strings they
- * name, all offsets counted from the start of the chunk.
+ * buffers at 24 bytes each with their variables, the bound resources at 32,
+ * and the strings they name, all offsets counted from the start of the
+ * chunk.
  *
  * @param {Uint8Array} bytes
  * @param {Uint8Array} chunk
@@ -182,6 +337,7 @@ function readDefinitions(bytes, chunk){
             size: u32(chunk, at + 12),
             flags: u32(chunk, at + 16),
             type: u32(chunk, at + 20),
+            variableList: readVariables(chunk, base, u32(chunk, at + 8), u32(chunk, at + 4)),
         });
     }
     /** @type {ReflectedBinding[]} */
@@ -344,14 +500,196 @@ export function createBlob(address, size, onLastRef){
 }
 
 /**
+ * @typedef {(out: { desc?: Record<string, number> } | null) => number} Describe
+ */
+
+/**
+ * A name a reflection hands out: `at` an offset into the container, or
+ * `text` one of the runtime's own strings, which lives as long as the
+ * process.
+ *
+ * @typedef {{ at: number } | { text: string }} ReflectionName
+ */
+
+/**
+ * ID3D10ShaderReflectionType. `owner` is the reflection whose container its
+ * names point into, null for the invalid type.
+ *
+ * @typedef {Object} ReflectionType
+ * @property {any} owner
+ * @property {Describe} GetDesc
+ * @property {(index: number) => ReflectionType} GetMemberTypeByIndex
+ * @property {(name: string | null) => ReflectionType} GetMemberTypeByName
+ * @property {(index: number) => ReflectionName | null} GetMemberTypeName
+ */
+
+/**
+ * ID3D10ShaderReflectionVariable.
+ *
+ * @typedef {Object} ReflectionVariable
+ * @property {any} owner
+ * @property {Describe} GetDesc
+ * @property {() => ReflectionType} GetType
+ */
+
+/**
+ * ID3D10ShaderReflectionConstantBuffer.
+ *
+ * @typedef {Object} ReflectionConstantBuffer
+ * @property {any} owner
+ * @property {Describe} GetDesc
+ * @property {(index: number) => ReflectionVariable} GetVariableByIndex
+ * @property {(name: string | null) => ReflectionVariable} GetVariableByName
+ */
+
+/*
+ * What a lookup that finds nothing answers. These getters never answer null:
+ * each kind has one object whose description fails, whose lookups lead to
+ * its own kind's, and whose member name is "$Invalid" (Wine's d3dcompiler
+ * test_reflection_constant_buffer). A program that chains lookups without
+ * checking is told E_FAIL at the end instead of following a null.
+ */
+
+/** @type {ReflectionType} */
+const INVALID_TYPE = Object.freeze({
+    owner: null,
+    GetDesc: ()=>E_FAIL,
+    GetMemberTypeByIndex: ()=>INVALID_TYPE,
+    GetMemberTypeByName: ()=>INVALID_TYPE,
+    GetMemberTypeName: ()=>({ text: '$Invalid' }),
+});
+
+/** @type {ReflectionVariable} */
+const INVALID_VARIABLE = Object.freeze({
+    owner: null,
+    GetDesc: ()=>E_FAIL,
+    GetType: ()=>INVALID_TYPE,
+});
+
+/** @type {ReflectionConstantBuffer} */
+const INVALID_CONSTANT_BUFFER = Object.freeze({
+    owner: null,
+    GetDesc: ()=>E_FAIL,
+    GetVariableByIndex: ()=>INVALID_VARIABLE,
+    GetVariableByName: ()=>INVALID_VARIABLE,
+});
+
+/**
+ * Where an entry of this name sits in the list, or -1. A null name finds
+ * nothing; names compare as the runtime compares them, exactly.
+ *
+ * @param {{ name: string }[]} list
+ * @param {string | null} name
+ */
+const indexByName = (list, name)=>(name === null
+    ? -1
+    : list.findIndex(entry=>entry.name === name));
+
+/**
+ * One object per entry, made when first asked for and the same object ever
+ * after, since a program compares the pointers; anything out of range is the
+ * invalid object.
+ *
+ * @template E, T
+ * @param {E[]} list
+ * @param {(entry: E) => T} make
+ * @param {T} invalid
+ * @returns {(index: number) => T}
+ */
+function objectsOf(list, make, invalid){
+    /** @type {T[]} */
+    const made = [];
+    return index=>{
+        if (!(index >= 0 && index < list.length))
+        {
+            return invalid;
+        }
+        made[index] ??= make(list[index]);
+        return made[index];
+    };
+}
+
+/**
+ * @param {Record<string, number>} desc
+ * @returns {Describe}
+ */
+const describing = desc=>out=>{
+    if (!out)
+    {
+        return E_FAIL;
+    }
+    out.desc = { ...desc };
+    return S_OK;
+};
+
+/**
  * An ID3D10ShaderReflection over a parsed container. Out-of-range indices and
  * missing structures are the caller's error, answered as the runtime answers
  * them; a description with nowhere to go is E_FAIL, the others E_INVALIDARG.
+ *
+ * The constant buffers, their variables and their types are objects of their
+ * own, made as they are asked for and kept for the reflection's life. They
+ * do not count references: the runtime frees them with the reflection.
  *
  * @param {ShaderReflection} reflection
  * @param {() => void} [onLastRef]
  */
 export function createShaderReflection(reflection, onLastRef){
+    /**
+     * @param {ReflectedType} type
+     * @param {number} offset  From the start of the structure it is a member
+     *     of: a member's own, so one type laid out once for two members is
+     *     two objects.
+     * @returns {ReflectionType}
+     */
+    const typeObject = (type, offset)=>{
+        const memberAt = objectsOf(type.members, member=>typeObject(member.type, member.offset),
+            INVALID_TYPE);
+        return {
+            owner: self,
+            GetDesc: describing({
+                Class: type.class, Type: type.type, Rows: type.rows, Columns: type.columns,
+                Elements: type.elements, Members: type.members.length, Offset: offset,
+            }),
+            GetMemberTypeByIndex: memberAt,
+            GetMemberTypeByName: name=>memberAt(indexByName(type.members, name)),
+            GetMemberTypeName: index=>(index >= 0 && index < type.members.length
+                ? { at: type.members[index].nameAt }
+                : null),
+        };
+    };
+
+    /** @param {ReflectedVariable} variable @returns {ReflectionVariable} */
+    const variableObject = variable=>{
+        /** @type {ReflectionType | null} */
+        let type = null;
+        return {
+            owner: self,
+            GetDesc: describing({
+                Name: variable.nameAt, StartOffset: variable.startOffset, Size: variable.size,
+                uFlags: variable.flags, DefaultValue: variable.defaultAt,
+            }),
+            GetType: ()=>(type ??= typeObject(variable.type, 0)),
+        };
+    };
+
+    /** @param {ReflectedConstantBuffer} buffer @returns {ReflectionConstantBuffer} */
+    const bufferObject = buffer=>{
+        const variableAt = objectsOf(buffer.variableList, variableObject, INVALID_VARIABLE);
+        return {
+            owner: self,
+            GetDesc: describing({
+                Name: buffer.nameAt, Type: buffer.type, Variables: buffer.variables,
+                Size: buffer.size, uFlags: buffer.flags,
+            }),
+            GetVariableByIndex: variableAt,
+            GetVariableByName: name=>variableAt(indexByName(buffer.variableList, name)),
+        };
+    };
+
+    const bufferAt = objectsOf(reflection.constantBuffers, bufferObject,
+        INVALID_CONSTANT_BUFFER);
+
     /**
      * @template T
      * @param {T[]} list
@@ -366,7 +704,7 @@ export function createShaderReflection(reflection, onLastRef){
         out.entry = list[index];
         return S_OK;
     };
-    return attachCom({
+    const self = attachCom({
         reflection,
         /** @param {{ desc?: Record<string, number> } | null} out */
         GetDesc(out){
@@ -377,6 +715,10 @@ export function createShaderReflection(reflection, onLastRef){
             out.desc = { ...reflection.desc };
             return S_OK;
         },
+        /** @param {number} index @returns {ReflectionConstantBuffer} */
+        GetConstantBufferByIndex: index=>bufferAt(index),
+        /** @param {string | null} name @returns {ReflectionConstantBuffer} */
+        GetConstantBufferByName: name=>bufferAt(indexByName(reflection.constantBuffers, name)),
         /** @param {number} index @param {{ entry?: ReflectedBinding } | null} out */
         GetResourceBindingDesc: (index, out)=>entryOf(reflection.bindings, index, out ?? null),
         /** @param {number} index @param {{ entry?: ReflectedParameter } | null} out */
@@ -384,4 +726,5 @@ export function createShaderReflection(reflection, onLastRef){
         /** @param {number} index @param {{ entry?: ReflectedParameter } | null} out */
         GetOutputParameterDesc: (index, out)=>entryOf(reflection.outputs, index, out ?? null),
     }, { interfaces: [IID.ID3D10ShaderReflection], onLastRef });
+    return self;
 }

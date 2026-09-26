@@ -44,7 +44,8 @@ import {
 } from '../d3d10/structs.js';
 import { bindFlagsForUsage, levelExtent } from '../d3d10/validity.js';
 import {
-    D3DERR_INVALIDCALL, SHADER_DESC_FIELDS, SHADER_PROFILE, containerOf, createBlob,
+    D3DERR_INVALIDCALL, SHADER_BUFFER_DESC_FIELDS, SHADER_DESC_FIELDS, SHADER_PROFILE,
+    SHADER_TYPE_DESC_FIELDS, SHADER_VARIABLE_DESC_FIELDS, containerOf, createBlob,
     createShaderReflection, debugInfoOf, reflectShader,
 } from '../d3d10/reflection.js';
 import { STATE_BLOCK_MASK_SIZE, createStateBlock, stateBlockMask } from '../d3d10/stateblock.js';
@@ -389,6 +390,28 @@ export const ID3D10SHADERREFLECTION_SLOTS = /** @type {[string, number][]} */ ([
     ['GetResourceBindingDesc', 2],
     ['GetInputParameterDesc', 2],
     ['GetOutputParameterDesc', 2],
+]);
+
+/*
+ * The reflection's constant buffers, variables and types derive from no
+ * interface: their tables start with their own first method.
+ */
+export const ID3D10SHADERREFLECTIONCONSTANTBUFFER_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetDesc', 1],
+    ['GetVariableByIndex', 1],
+    ['GetVariableByName', 1],
+]);
+
+export const ID3D10SHADERREFLECTIONVARIABLE_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetDesc', 1],
+    ['GetType', 0],
+]);
+
+export const ID3D10SHADERREFLECTIONTYPE_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetDesc', 1],
+    ['GetMemberTypeByIndex', 1],
+    ['GetMemberTypeByName', 1],
+    ['GetMemberTypeName', 1],
 ]);
 
 /** D3D10_BLEND_DESC1: two words, then eight targets of thirty-two bytes. */
@@ -2769,14 +2792,98 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     };
 
     /**
-     * A constant buffer's reflection is an interface without IUnknown's
-     * three methods, which the publisher cannot lay out; a program asking for
-     * one is answered null and the gap reported.
+     * A description whose `Name` and `DefaultValue` are offsets into the
+     * container, written as pointers into its owner's copy of it.
+     *
+     * @param {readonly string[]} names  The structure's fields in order.
      */
-    const constantBufferReflection = ()=>{
-        report('a shader reflection\'s constant buffers are not published; answered null');
-        return 0;
+    const describedAs = names=>{
+        /** @param {any} object @param {number[]} args */
+        const write = (object, [out])=>{
+            /** @type {{ desc?: Record<string, number> }} */
+            const held = {};
+            const hr = object.GetDesc((out >>> 0) === 0 ? null : held);
+            if (hr === S_OK && held.desc)
+            {
+                const desc = held.desc;
+                names.forEach((field, index)=>fields.writeU32(out + index * 4,
+                    field === 'Name' || field === 'DefaultValue'
+                        ? pointerInto(object.owner, desc[field])
+                        : desc[field]));
+            }
+            return hr;
+        };
+        return write;
     };
+
+    /** A name the program passed, or null for a null pointer. @param {number} address */
+    const nameArgument = address=>((address >>> 0) === 0 ? null : readCString(address >>> 0));
+
+    /**
+     * The reflection's constant buffers, variables and types, whose tables
+     * have no IUnknown. Nothing can Release one, so each stays published for
+     * the rest of the run, and so does the reflection it came from: a few
+     * words of guest memory for each one a program looks up, the same pointer
+     * however often it asks. The copy of the container their names point
+     * into still goes with the reflection's last Release, as the runtime's
+     * does.
+     *
+     * @param {import('./com.js').InterfaceDescriptor} descriptor
+     */
+    const bare = descriptor=>({ ...descriptor, bare: true });
+
+    /** @param {any} type @returns {number} */
+    const publishType = type=>publisher.publish(type, reflectedTypeInterfaces,
+        IID.ID3D10ShaderReflectionType);
+    /** @param {any} variable @returns {number} */
+    const publishVariable = variable=>publisher.publish(variable, reflectedVariableInterfaces,
+        IID.ID3D10ShaderReflectionVariable);
+    /** @param {any} buffer @returns {number} */
+    const publishBuffer = buffer=>publisher.publish(buffer, reflectedBufferInterfaces,
+        IID.ID3D10ShaderReflectionConstantBuffer);
+
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
+    const reflectedTypeInterfaces = [bare(describe(IID.ID3D10ShaderReflectionType,
+        ID3D10SHADERREFLECTIONTYPE_SLOTS, {
+            GetDesc: describedAs(SHADER_TYPE_DESC_FIELDS),
+            /** @param {any} type @param {number[]} args */
+            GetMemberTypeByIndex: (type, [index])=>
+                publishType(type.GetMemberTypeByIndex(index >>> 0)),
+            /** @param {any} type @param {number[]} args */
+            GetMemberTypeByName: (type, [name])=>
+                publishType(type.GetMemberTypeByName(nameArgument(name))),
+            /** @param {any} type @param {number[]} args */
+            GetMemberTypeName: (type, [index])=>{
+                const name = type.GetMemberTypeName(index >>> 0);
+                if (!name)
+                {
+                    return 0;
+                }
+                return 'text' in name
+                    ? constantString(name.text)
+                    : pointerInto(type.owner, name.at);
+            },
+        }))];
+
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
+    const reflectedVariableInterfaces = [bare(describe(IID.ID3D10ShaderReflectionVariable,
+        ID3D10SHADERREFLECTIONVARIABLE_SLOTS, {
+            GetDesc: describedAs(SHADER_VARIABLE_DESC_FIELDS),
+            /** @param {any} variable */
+            GetType: variable=>publishType(variable.GetType()),
+        }))];
+
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
+    const reflectedBufferInterfaces = [bare(describe(IID.ID3D10ShaderReflectionConstantBuffer,
+        ID3D10SHADERREFLECTIONCONSTANTBUFFER_SLOTS, {
+            GetDesc: describedAs(SHADER_BUFFER_DESC_FIELDS),
+            /** @param {any} buffer @param {number[]} args */
+            GetVariableByIndex: (buffer, [index])=>
+                publishVariable(buffer.GetVariableByIndex(index >>> 0)),
+            /** @param {any} buffer @param {number[]} args */
+            GetVariableByName: (buffer, [name])=>
+                publishVariable(buffer.GetVariableByName(nameArgument(name))),
+        }))];
 
     const reflectionInterfaces = [describe(IID.ID3D10ShaderReflection,
         ID3D10SHADERREFLECTION_SLOTS, {
@@ -2793,8 +2900,12 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 }
                 return hr;
             },
-            GetConstantBufferByIndex: constantBufferReflection,
-            GetConstantBufferByName: constantBufferReflection,
+            /** @param {any} reflection @param {number[]} args */
+            GetConstantBufferByIndex: (reflection, [index])=>
+                publishBuffer(reflection.GetConstantBufferByIndex(index >>> 0)),
+            /** @param {any} reflection @param {number[]} args */
+            GetConstantBufferByName: (reflection, [name])=>
+                publishBuffer(reflection.GetConstantBufferByName(nameArgument(name))),
             /**
              * D3D10_SHADER_INPUT_BIND_DESC, whose order is not the order the
              * compiler stored the same fields in.
@@ -2821,25 +2932,26 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         })];
 
     /**
-     * The profile strings live in guest memory for the life of the process,
-     * as the runtime's own constants do.
+     * The runtime's own strings -- the profile names, the invalid type's
+     * member name -- live in guest memory for the life of the process, as the
+     * runtime's constants do.
      *
      * @type {Map<string, number>}
      */
-    const profiles = new Map();
-    /** @param {string} profile */
-    const profileString = profile=>{
-        if (!profiles.has(profile))
+    const constants = new Map();
+    /** @param {string} text */
+    const constantString = text=>{
+        if (!constants.has(text))
         {
-            const bytes = Uint8Array.from([...profile].map(char=>char.charCodeAt(0)).concat(0));
+            const bytes = Uint8Array.from([...text].map(char=>char.charCodeAt(0)).concat(0));
             const at = allocate ? allocate(bytes.length) : 0;
             if (at)
             {
                 memory.writeMemory(at, bytes);
             }
-            profiles.set(profile, at);
+            constants.set(text, at);
         }
-        return profiles.get(profile) ?? 0;
+        return constants.get(text) ?? 0;
     };
 
     /**
@@ -2891,7 +3003,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     });
 
     /** @param {string} profile */
-    const profileEntry = profile=>({ argBytes: 4, handler: ()=>profileString(profile) });
+    const profileEntry = profile=>({ argBytes: 4, handler: ()=>constantString(profile) });
 
     /**
      * An entry point this build answers with a refusal: the out pointer, when
@@ -2914,12 +3026,14 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         },
     });
 
-    // An effect's techniques, passes and variables are interfaces without
-    // IUnknown's three methods, which the publisher lays out for every
-    // interface; an effect whose every getter answered null would fail far
-    // from here, so the effect is refused where it is made.
-    const EFFECT_REFUSAL = 'the effect framework is not available: its techniques, passes and'
-        + ' variables are interfaces the publisher cannot lay out';
+    // An effect is refused where it is made. Its techniques, passes and
+    // variables are tables without IUnknown, which the publisher lays out as
+    // the reflection's are; what does not exist is the effect itself --
+    // reading an effect binary, its variables' typed views and the state a
+    // pass applies -- and an effect that could be walked but whose passes
+    // applied nothing would draw wrongly far from here.
+    const EFFECT_REFUSAL = 'the effect framework is not implemented: an effect binary is not'
+        + ' read, and no pass applies its state';
 
     // --- state blocks ---
 
