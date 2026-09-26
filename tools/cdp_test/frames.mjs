@@ -439,7 +439,11 @@ await opened.close();
 const server = await serveStatic({
     sandboxDir: PACKAGE_DIR,
     srcDir: join(PACKAGE_DIR, 'src'),
-    extra: [{ prefix: '/bundle/', root: directory }],
+    extra: [
+        { prefix: '/bundle/', root: directory },
+        // The translator package beside core, where app.js resolves the default engine.
+        { prefix: '/cork/', root: join(PACKAGE_DIR, '..', 'cork') },
+    ],
 });
 const browser = await launchWithGpu();
 /** @type {CdpEndpoint | null} */
