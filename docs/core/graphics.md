@@ -33,12 +33,13 @@ allows because `win32` is declared.
 
 | option | type | default | meaning |
 |---|---|---|---|
-| `device` | `{ device, queue, adapter?, canvas?, screen?, presentTo?, onFrame?, onPresented?, onPresentFailed?, dumpDraws?, maxDraws?, skipTexture?, probeTexture?, fog?, mips? }` or absent | absent | The GPU. `device` and `queue` are the WebGPU objects; `presentTo(frame)` receives a finished frame in a build that did not supply a presenter; `canvas`/`screen` and the three frame callbacks are what the run's presenter is made from. Absent, `available()` is false, `backend()` throws on first use, and every API still answers state questions. |
+| `device` | `{ device, queue, adapter?, canvas?, screen?, presentTo?, onFrame?, onPresented?, onPresentFailed?, dumpDraws?, maxDraws?, skipTexture?, probeTexture?, fog?, mips? }` or absent | absent | The GPU. `device` and `queue` are the WebGPU objects; `presentTo(frame)` receives a finished frame in a build that did not supply a presenter; `canvas`/`screen` and the three frame callbacks are what the run's presenter is made from. Absent, `available()` is false, `backend()` throws on first use, and every API still answers state questions. The layer watches `device.lost`: once the GPU device is lost for any reason but its own destruction, every Direct3D 8 and 9 device made on it is lost, and one made afterwards starts lost (see *Limitations*). |
 | `presenter` | a presenter made by the run, or absent | made from `device` | The canvas, its configured format, the pacer and the texture the primary is copied into. It is a service of the run rather than of a machine, so the assembling caller makes one and hands the same object to every machine the run is rebuilt on; the layer attaches its own backend to it and never disposes it. The last frame one process presented stays on the canvas until the next presents. |
 | `device.adapter` | `{ vendor?, architecture?, description? }` | absent | What `GetAdapterIdentifier` and `vkGetPhysicalDeviceProperties` describe. |
 | `compressedTextures` | boolean | `false` | Whether a kept S3TC texture travels to the device as BC blocks instead of decoded `rgba8unorm`, once the format is legal to create at all -- `CheckDeviceFormat` and `glCompressedTexImage2D` answer a DXT format creatable either way, whatever this flag says. Applies to OpenGL and Direct3D 8/9 alike; DirectDraw has no DXT/FOURCC surface path for it to apply to, and Vulkan's flag instead gates whether `textureCompressionBC` is *advertised* as a supported feature -- a legality signal, not an upload choice, pre-existing before this flag and exercised by no title. The device's own `texture-compression-bc` feature still gates it either way: `true` here without the feature is `false`. Off by default: measured to stall the GPU process on the one machine this project has run it on; a build turns it on once it is checked clean on its own hardware. Set through `createApp`'s `graphics` option, which is forwarded to this layer as given. |
 | `screen` | `{ width, height, bitsPerPixel }` | `{ 640, 480, 32 }` | The display a program is told about until `resolution` changes it. |
 | `maxFps` | number | `60` | Frame-delivery cap for the pacer; `0` means whatever the scheduler offers. |
+| `guestNow` | `() => ms` | the host's `performance.now` | The clock the display's raster runs on -- DirectDraw's vertical-blank status and scan line, Direct3D's raster status. The assembling caller hands the kernel's virtual time, because a program that spins on the blank times the spin with its own timers; the presenter's pacing, a property of the canvas, keeps its own. |
 | `schedule`, `now` | `(tick) => void`, `() => number` | absent | A display-rate scheduler and a clock. Both present enables the pacer; a headless build delivers on a microtask. |
 | `allocate` | `(bytes) => address` | absent | Guest memory for locked surfaces and buffers, and for the shadow state block. Without it a lock hands back an address this layer invented and every state setter stays a trap. |
 | `free` | `(address) => void` | absent | Returns guest memory a texture or map is finished with, so a program that sizes its cache from free heap sees textures released. |
@@ -48,8 +49,9 @@ allows because `win32` is declared.
 | `publishInterface` | `(object, iid) => address` | `() => 0` | The bridge's vtable publisher. The default publishes nothing, so a build without a bridge gets tables that refuse rather than pointers into nowhere. |
 | `exportAddress` | `(name) => address` | absent | The guest address of one of `OPENGL32.dll`'s own exports, which `wglGetProcAddress` needs to answer honestly for core names. |
 
-The six `device.*` diagnostic knobs reach the Direct3D 8 renderer
-(`src/layers/graphics/d3d8/render.js`); the first four also reach the OpenGL device renderer
+The six `device.*` diagnostic knobs reach the shared Direct3D renderer
+(`src/layers/graphics/d3d8/render.js`) through the Direct3D 8 and 9 devices -- a Direct3D 7 device
+builds its renderer without them; the first four also reach the OpenGL device renderer
 (`src/layers/graphics/opengl/gpu.js`), which reads them the same way:
 
 | knob | default | effect |
@@ -58,8 +60,8 @@ The six `device.*` diagnostic knobs reach the Direct3D 8 renderer
 | `maxDraws` | `-1` (all) | Keeps only this many draws per frame and drops the rest, so a region's painter can be found by bisection. |
 | `skipTexture` | `null` | Comma-separated dump ids; every draw sampling one of those textures is dropped and counted under `skipped.texture`. |
 | `probeTexture` | `null` | Copies the colour target out around each dumped draw that samples this texture -- after it on the Direct3D 8 renderer, before and after on the OpenGL one, which reads the first four such draws of a frame and no more -- and puts a few of its pixels on the draw's dump line. |
-| `fog` | `true` | `false` runs every draw as if `D3DRS_FOGENABLE` were clear. Direct3D 8 only. |
-| `mips` | `true` | `false` samples every texture at its top level. Direct3D 8 only. |
+| `fog` | `true` | `false` runs every draw as if `D3DRS_FOGENABLE` were clear. Direct3D 8 and 9 only. |
+| `mips` | `true` | `false` samples every texture at its top level. Direct3D 8 and 9 only. |
 
 ### Provided API
 
@@ -96,7 +98,7 @@ reading each table:
 
 | library | entry points | what they are |
 |---|---|---|
-| `OPENGL32.dll` | 444 | The whole of OpenGL 1.1, all of WGL, and every extension function this implementation answers. Every name is bound, implemented or not, because a stdcall stub that pops the wrong number of bytes loses the process far from the call. Unimplemented names answer zero and are counted. |
+| `OPENGL32.dll` | 507 | The whole of OpenGL 1.1, all of WGL, and every extension function this implementation answers. Every name is bound, implemented or not, because a stdcall stub that pops the wrong number of bytes loses the process far from the call. Unimplemented names answer zero and are counted. |
 | `vulkan-1.dll` | 149 | Every command with its 32-bit argument size (`src/layers/graphics/vulkan/commands.js`). 65 are implemented (20 instance-level, 45 device-level); the rest answer `VK_ERROR_FEATURE_NOT_PRESENT` and are counted by name. |
 | `DDRAW.dll` | 4 | `DirectDrawCreate`, `DirectDrawCreateEx`, `DirectDrawEnumerateA`, `DirectDrawCreateClipper`. |
 | `D3D10.dll` | 2 | `D3D10CreateDevice`, `D3D10CreateDeviceAndSwapChain`. |
@@ -147,9 +149,13 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
 - **Pipelines** (`internal/pipeline.js`). WebGPU wants every piece of state baked into an immutable
   pipeline, so each draw asks `pipelineFor(state)` for the one its state describes. The cache key
   folds every field the descriptor reads -- blend, depth, cull, target and depth formats, the FVF,
-  and each texture stage individually, with "no stages" distinct from "one default stage". Building
-  is asynchronous because shader compilation is; two draws with the same state in one frame share
-  the promise.
+  and each texture stage individually, with "no stages" distinct from "one default stage"; the parts
+  only some draws have -- flat shading, renormalised normals, the fog source, range fog, a stage's
+  colour key, the further streams' strides -- are optional and appear only when set. With the depth
+  test off a draw writes no depth, whatever the write enable says, as Direct3D and OpenGL both tie
+  the write to the test and WebGPU's `always` compare would not; each API's state is translated that
+  way, a partial clear's own quad excepted. Building is asynchronous because shader compilation is;
+  two draws with the same state in one frame share the promise.
 - **Bindings and uniforms** (`internal/bindings.js`). Bind-group layouts are explicit and shared
   per stage count; `createRenderPipeline` refuses `layout: 'auto'` by name, because an automatic
   layout drops a binding the generated shader did not use and every textured draw then silently
@@ -161,13 +167,14 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
   and each write is a trip to the GPU process.
 - **Dynamic buffers** (`internal/buffers.js`). A lock's flags are a promise: `DISCARD` renames the
   backing and only bytes written since travel; `NOOVERWRITE` renames nothing and sends the newly
-  written ranges; neither flag leaves the decision to whether a draw of a frame not yet submitted
-  has read the live backing (`markRead`) -- if none has, the write goes into the backing in place
-  and only the locked range travels, the ordinary case of a program that fills a buffer and then
-  draws from it; if one has, overwriting those bytes is a hazard, so the backing is renamed and the
-  whole buffer is resent, because the old contents stay observable through the new one.
-  `LockFlags.RENAME` is the same rename forced by a caller that tracks the hazard itself rather than
-  through `markRead`. Uploaded ranges align outward to four bytes and are sent from their own
+  written ranges, and the Direct3D renderer reads `DISCARD` and `NOOVERWRITE` together as
+  `NOOVERWRITE`, contents kept; neither flag leaves the decision to whether a draw of a frame not
+  yet submitted has read the live backing (`markRead`) -- if none has, the write goes into the
+  backing in place and only the locked range travels, the ordinary case of a program that fills a
+  buffer and then draws from it; if one has, overwriting those bytes is a hazard, so the backing is
+  renamed and the whole buffer is resent, because the old contents stay observable through the new
+  one. `LockFlags.RENAME` is the same rename forced by a caller that tracks the hazard itself rather
+  than through `markRead`. Uploaded ranges align outward to four bytes and are sent from their own
   offset. A retired backing returns to the pool only after the frames that read it have been
   presented (`markPresent`).
 - **Textures** (`internal/textures.js`). Block-compressed formats (`bc1`, `bc2`, `bc3`) always go
@@ -181,33 +188,52 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
   and never left to leak: it is tracked on that frame, not the caller.
 - **Viewport** (`internal/viewport.js`). Setting a viewport does two things that travel as one
   value: the hardware rectangle and scissor, and the vertex stage's inverse offset and scale, which
-  is what puts a pre-transformed vertex on the pixel it names.
+  is what puts a pre-transformed vertex on the pixel it names. The viewport goes to WebGPU as set,
+  keeping its mapping, even where it reaches past the target (Direct3D 9 and 10 set such
+  viewports); the scissor, from it or from `setScissor`, is clamped to the attachment, since one
+  past it invalidates the pass.
 - **Shaders** (`internal/shaders.js`). Every built module is asked for its compilation info; an
   error-severity message fails the build, and messages are kept in a de-duplicating ring.
-- **Fixed function** (`internal/fixedfunction.js`) generates WGSL per state combination: the
-  vertex path transforms or, for XYZRHW, applies only the viewport constants; a `D3DCOLOR` vertex
-  colour is swizzled from the B,G,R,A byte order; the texture-stage cascade emits one block per
-  enabled stage (`SELECTARG1/2`, `MODULATE`, `MODULATE2X/4X`, `ADD`, `ADDSIGNED`, `ADDSIGNED2X`,
-  `SUBTRACT`, `ADDSMOOTH`, the `BLEND*ALPHA` five, with `COMPLEMENT` and `ALPHAREPLICATE`
-  modifiers, arguments from `DIFFUSE`, `CURRENT`, `TEXTURE`, `TFACTOR`, `SPECULAR`) and nothing at
-  all for an empty list; a texture transform of two to four coordinates is applied per stage, for
-  every one of the eight (the block carries a matrix per stage); a
-  stage set to `D3DTSS_TCI_CAMERASPACEPOSITION`, `_CAMERASPACENORMAL` or
-  `_CAMERASPACEREFLECTIONVECTOR` takes its coordinate from the vertex through world and view,
-  through the stage's whole transform, in the vertex stage, whatever set the vertex carries, and
-  under `D3DTTFF_PROJECTED` is divided per pixel by the count's last component (a pixel shader over
-  fixed-function vertices is handed the same four components undivided); per-vertex lighting is
-  unrolled per enabled light (point, spot, directional,
-  with range, attenuation and cone in uniforms), the material sources honour `D3DRS_COLORVERTEX`,
-  the specular sum is added after the cascade, and alpha comes from the diffuse source alone; fog
-  (`LINEAR`, `EXP`, `EXP2`) is a per-vertex factor from eye depth, or the specular alpha for
-  pre-transformed vertices; the alpha test `discard`s. Sphere-map coordinate generation, a
-  one-coordinate transform and a projected transform over a carried set are not computed (see
-  *Limitations*).
+- **Fixed function** (`internal/fixedfunction.js`) generates WGSL per state combination: the vertex
+  path transforms or, for XYZRHW, applies the viewport constants and gives the RHW back as the clip
+  w (an RHW of zero or less taken as one), so a quad a program projected itself is interpolated in
+  perspective; every position then moves by half a pixel -- half the viewport's scale in clip space,
+  times w -- because Direct3D 9 and before put a pixel's centre on its integer coordinate and WebGPU
+  half a pixel further on; and the position is `@invariant`, so two passes over one mesh through
+  different modules land on the same depth. A `D3DCOLOR` vertex colour is swizzled from the B,G,R,A
+  byte order; the texture-stage cascade emits one block per enabled stage (`SELECTARG1/2`,
+  `MODULATE`, `MODULATE2X/4X`, `ADD`, `ADDSIGNED`, `ADDSIGNED2X`, `SUBTRACT`, `ADDSMOOTH`, the
+  `BLEND*ALPHA` five, with `COMPLEMENT` and `ALPHAREPLICATE` modifiers, arguments from `DIFFUSE`,
+  `CURRENT`, `TEXTURE`, `TFACTOR`, `SPECULAR`), each stage's result saturated before the next reads
+  it, and nothing at all for an empty list; a texture transform of two to four coordinates is
+  applied per stage, for every one of the eight (the block carries a matrix per stage); a stage set
+  to `D3DTSS_TCI_CAMERASPACEPOSITION`, `_CAMERASPACENORMAL` or `_CAMERASPACEREFLECTIONVECTOR` takes
+  its coordinate from the vertex through world and view, through the stage's whole transform, in the
+  vertex stage, whatever set the vertex carries, and under `D3DTTFF_PROJECTED` is divided per pixel
+  by the count's last component (a pixel shader over fixed-function vertices is handed the same four
+  components undivided); per-vertex lighting is unrolled per enabled light (point, spot,
+  directional, with range, attenuation and cone in uniforms), the normal carried into world space by
+  the inverse transpose of the world matrix (`normalMatrix` in the block, so a non-affine world
+  leaves a surface unlit as Direct3D does) and renormalised -- there and for a generated coordinate
+  -- only under `D3DRS_NORMALIZENORMALS`, the material sources honour `D3DRS_COLORVERTEX`, the
+  specular sum is added after the cascade, and alpha comes from the diffuse source alone. Fog
+  (`LINEAR`, `EXP`, `EXP2`) takes its factor where Direct3D does: table fog per pixel, the curve
+  over its z under an affine projection and its w otherwise (the choice a uniform, so a projection
+  change compiles nothing); vertex fog over the magnitude of the camera-space z, or with
+  `D3DRS_RANGEFOGENABLE` the distance from the eye; `D3DRS_FOGENABLE` with both modes `NONE`, and
+  vertex fog on a pre-transformed vertex, is the interpolated specular alpha. `D3DRS_SHADEMODE`
+  `FLAT` makes both colours flat from Direct3D's provoking vertex, the specular alpha still
+  interpolated; `D3DRS_FILLMODE` `WIREFRAME` and `POINT` draw a triangle as its three edges or its
+  three vertices, rewritten as a line or point list; and Direct3D 7's
+  `D3DRENDERSTATE_COLORKEYENABLE` has a stage sampling a keyed texture compare its nearest top-level
+  texel's colour with the key and the fragment discarded after the cascade. The alpha test
+  `discard`s. Sphere-map coordinate generation, a one-coordinate transform and a projected transform
+  over a carried set are not computed (see *Limitations*).
 - **Programmable** (`internal/programmable.js`) builds a pipeline from a translated vertex and
   pixel shader pair, a vertex layout taken from a declaration (`D3DDECLTYPE` to WebGPU format; the
-  packed ten-bit types have no counterpart and refuse the declaration), the stream's stride rather
-  than the declaration's, and the fixed bind groups the translation promises.
+  packed ten-bit types have no counterpart and refuse the declaration) with each member read from
+  its own stream -- a vertex buffer per stream, at the stride that stream is bound with rather than
+  the declaration's -- and the fixed bind groups the translation promises.
 - **Presenter and pacer** (`internal/presenter.js`, `internal/pacer.js`). A DirectDraw or GDI
   program draws into guest memory; the presenter keeps one `bgra8unorm` texture the size of the
   primary, converts 8-, 16- and 32-bit surfaces into it, coalesces a burst of blits onto one
@@ -262,22 +288,31 @@ calls it absorbed, per group.
 
 Per API:
 
-- **`ddraw.js`** publishes four generations of `IDirectDraw` and five of `IDirectDrawSurface`,
-  plus the clipper and palette, with the interface version threaded through every method: a
+- **`ddraw.js`** publishes four generations of `IDirectDraw` and five of `IDirectDrawSurface`, plus
+  the clipper and palette, with the interface version threaded through every method: a
   `CreateSurface` through the second generation takes no reference on the object, a `Lock` through
   the fourth reads the longer descriptor. Reference counts are per generation, as the API does it.
   The three enumerations call into guest code through the bridge and answer with a promise; without
-  `callGuest` they succeed having named nothing. `GetDC` is answered by `win32.gdi().createSurfaceDc`
-  over the surface's own bytes, and an indexed surface's DC is given its palette's live table, so a
-  palette changed while the DC is held is the one it draws in; a surface with no palette of its own
-  draws in the primary's. Display modes: 640x480, 800x600, 1024x768, 1280x1024 at 8, 16 and
-  32 bits, plus the configured screen size if it is not in the list.
+  `callGuest` they succeed having named nothing. `GetDC` is answered by
+  `win32.gdi().createSurfaceDc` over the surface's own bytes, and an indexed surface's DC is given
+  its palette's live table, so a palette changed while the DC is held is the one it draws in; a
+  surface with no palette of its own draws in the primary's. Display modes: 640x480, 800x600,
+  1024x768, 1280x1024 at 8, 16 and 32 bits, plus the configured screen size if it is not in the
+  list. `GetVerticalBlankStatus` and `GetScanLine` read a beam that goes round once a refresh at the
+  60 Hz the display reports, the last 45/525 of each frame -- VGA's 640x480 share, kept for every
+  height -- being the blank (`seam/raster.js`), and `WaitForVerticalBlank` parks its caller until
+  the blank begins or ends; Direct3D 8 and 9's `GetRasterStatus` read the same raster and both claim
+  `D3DCAPS_READ_SCANLINE`. Surfaces here and Direct3D 8 and 9 resources keep private data
+  (`seam/privatedata.js`): an interface entry holds a reference until it is replaced, freed or its
+  object goes, Direct3D's read of one takes a reference and DirectDraw's does not, and a
+  `DDSPD_VOLATILE` entry expires with the surface's contents.
 - **`d3d7.js`** publishes no root; it hands the DirectDraw seam the `IDirect3D7` descriptor to put
   beside its own, and keeps one Direct3D 7 object per DirectDraw object. A draw takes its vertex
   format as an argument and its indices by pointer.
 - **`d3d8.js`** publishes `IDirect3D8`, `IDirect3DDevice8`, surfaces, textures, vertex and index
   buffers. Modes are offered in `D3DFMT_X8R8G8B8` only. Present parameters use Direct3D 8's own
-  layout, which differs from 9's.
+  layout, which differs from 9's. `Clear` takes the rectangle count at its word, as 9's does: a
+  count of zero clears nothing whatever the pointer, and a null array the whole target.
 - **`d3d9.js`** publishes the eleven interfaces of `d3d9/interfaces.js`, including vertex
   declarations, shaders, state blocks, swap chains and queries. Nearly every create ends in a
   shared-handle pointer that must be null; a handful of methods return a count, a boolean or a
@@ -298,37 +333,64 @@ Per API:
 ### The APIs
 
 **DirectDraw** (`src/layers/graphics/ddraw/`). `objects.js` is the object model: what exists, who
-owns whom, when it dies. Generations do not share a reference count; `IDirectDrawX` and
-`IDirect3DX` do; a palette is owned by the surface it is set on; a flip chain is a forward link
-per surface with no closing link. `caps.js` is two tables over a parsed descriptor: which surface
-descriptions are accepted (a flip chain is a three-part request, checked before exclusive mode)
-and which surfaces can back a 3D device. `blit.js` reads the whole source rectangle before writing
-a destination pixel, so overlapping and stretched blits are right; stretching floors, the same rule
-GDI uses; a blit between depths is refused.
+owns whom, when it dies. Generations do not share a reference count; `IDirectDrawX` and `IDirect3DX`
+do; a palette is owned by the surface it is set on; a flip chain is a forward link per surface with
+no closing link. `caps.js` is two tables over a parsed descriptor: which surface descriptions are
+accepted (a flip chain is a three-part request, checked before exclusive mode) and which surfaces
+can back a 3D device. A complex mip-mapped texture is a chain: it halves until both sides are one
+through `IDirectDraw7` and until the shorter is one before it, every level reports
+`DDSD_MIPMAPCOUNT` from itself down, the levels below the top carry `DDSCAPS2_MIPMAPSUBLEVEL` and
+refuse a palette or a colour key, and each holds the one below so the chain goes with its top.
+`GetAttachedSurface` answers the attached surface that has every capability asked for, in both words
+of a `DDSCAPS2`; `DeleteAttachedSurface(NULL)` detaches everything the caller attached; `GetCaps`
+names the surfaces `CreateSurface` builds in `ddsOldCaps` and, in a structure large enough,
+`ddsCaps`. A colour key is one colour, set at creation or after and reported by `GetSurfaceDesc`; a
+range collapses to its low value, a colour-space key is `DDERR_NOCOLORKEYHW`, and a blit compares
+the colour bits alone, so an X8R8G8B8 pixel's unused byte does not defeat the key. `blit.js` reads
+the whole source rectangle before writing a destination pixel, so overlapping and stretched blits
+are right; stretching floors, the same rule GDI uses; a blit between depths is refused. A colour
+fill on a Z-buffer is refused, and `DDBLT_DEPTHFILL` fills its depth bits, keeping any stencil
+beside them, and tells whoever watches the DirectDraw object -- a Direct3D 7 device whose target has
+that buffer attached clears its own GPU depth to match. `GetGDISurface` and `FlipToGDISurface`
+answer `DDERR_NOTFOUND` without a primary, and `FlipToGDISurface` `DDERR_NOTFLIPPABLE` for a primary
+with no flip chain.
 
 **Direct3D 7** (`src/layers/graphics/d3d7/`). Keeps its state in the shape the shared renderer
 reads. A render target is a DirectDraw surface by address, so a flip presents the texture that was
 drawn without copying; a texture is a DirectDraw surface too, and its uniqueness value is how the
-GPU copy is known to be stale. Three devices are enumerated (RGB, HAL, T&L HAL) over one renderer;
-`caps.js` claims only what the shader generator implements.
+GPU copy is known to be stale -- each level of a mip chain goes up when its own value moves, and the
+chain is sampled level by level. `D3DTSS_MAGFILTER` and `D3DTSS_MIPFILTER` are kept in Direct3D 8's
+numbering and read back in this version's, which counts `D3DTFP_*` from one and puts the two cubic
+filters before anisotropic. `Load` copies part of one texture into another down both mip chains with
+the source's palette entries and colour key; `ProcessVertices` and `ProcessVerticesStrided`
+(`process.js`) transform, blend and light vertices into a vertex buffer as a lock would write it;
+`ComputeSphereVisibility` answers each sphere against the view volume and the enabled user clip
+planes. Three devices are enumerated (RGB, HAL, T&L HAL) over one renderer; `caps.js` claims only
+what the shader generator implements.
 
 **Direct3D 8** (`src/layers/graphics/d3d8/`). `device.js` models what a program observes between
 draws and decides whether a call is legal; `render.js` is what happens underneath when there is a
-backend. Draws are recorded, not encoded: a pipeline compiles asynchronously and a guest call
-returns synchronously, so the frame is a command list replayed onto one backend frame once every
-pipeline exists, and each recorded draw captures the buffer generation it was issued against.
-Guest memory is the boundary -- bytes are read back at unlock under the lock's flags and nowhere
-else. Every texture format is expanded to `bgra8unorm` on upload in integer arithmetic, except
-`DXT1`-`DXT5`, which are uploaded as `bc1`-`bc3` blocks when the configuration asks for it, the
-adapter has `texture-compression-bc`, and the surface's base level is a whole number of blocks
-(WebGPU validates a compressed texture's own size against the block width and height; a base level
-narrower or shorter than one block decodes instead, through the layer's shared S3TC decoder). The
-luminance formats expand the same way: `L8` replicates its one byte
-across the three colour channels and reads opaque, `A8L8` pairs a replicated luminance byte with
-its own alpha byte, and `A4L4` widens each 4-bit nibble to 8 bits before doing the same -- so a
-font atlas stored in one of them draws as glyphs, because the grey and the coverage each land in
-the channel the blend and the shader read. The renderer serves Direct3D 7 and 9 too: one
-fixed-function pipeline with one set of numbers.
+backend. A state block (`stateblock.js`) holds the half its type names -- the vertex half's render
+states, lights, material and vertex shader, the pixel half's render states, texture-stage states and
+pixel shader, transforms, textures, streams and indices only in a block of everything -- and a state
+set while recording goes into the block, not the device. `ValidateDevice` answers for the texture
+stages as they stand, as Direct3D 7's and 9's do: the stages are walked to the first disabled one,
+only the arguments an operation reads are looked at, and the first operation, argument or filter the
+combiner cannot draw is named by its code. Draws are recorded, not encoded: a pipeline compiles
+asynchronously and a guest call returns synchronously, so the frame is a command list replayed onto
+one backend frame once every pipeline exists, and each recorded draw captures the buffer generation
+it was issued against. Guest memory is the boundary -- bytes are read back at unlock under the
+lock's flags and nowhere else. Every texture format is expanded to `bgra8unorm` on upload in integer
+arithmetic, except `DXT1`-`DXT5`, which are uploaded as `bc1`-`bc3` blocks when the configuration
+asks for it, the adapter has `texture-compression-bc`, and the surface's base level is a whole
+number of blocks (WebGPU validates a compressed texture's own size against the block width and
+height; a base level narrower or shorter than one block decodes instead, through the layer's shared
+S3TC decoder). The luminance formats expand the same way: `L8` replicates its one byte across the
+three colour channels and reads opaque, `A8L8` pairs a replicated luminance byte with its own alpha
+byte, and `A4L4` widens each 4-bit nibble to 8 bits before doing the same -- so a font atlas stored
+in one of them draws as glyphs, because the grey and the coverage each land in the channel the blend
+and the shader read. The renderer serves Direct3D 7 and 9 too: one fixed-function pipeline with one
+set of numbers.
 
 One backend texture per Direct3D resource, whichever way the program reaches it: the surface
 `GetSurfaceLevel` hands out is a view of a level of the texture's own backend texture, so a
@@ -359,28 +421,29 @@ state, a texture binding, a material, a light, the viewport, a transform other t
 the vertex or pixel shader, a state block applied, a reset -- and raises it for a change of value,
 not for a call that sets the value already there. While that counter and the draw's stride and
 topology are what the last preparation was built from, the next draw reuses its vertex layout, its
-stage cascade, its texture and sampler bindings, its pipeline state and the pipeline itself, and
-the block of uniforms all but the two fields the world transform reaches. The world transform is
-the one state the counter deliberately ignores, because it moves between most draws of a frame;
-whoever reads the counter therefore owes the world matrix a fresh read on every draw, and nothing
-else derived from it may be kept. A texture whose bytes the program rewrites raises a counter of
-its own, so the upload owed to it still happens inside the next draw that samples it. When the
-counter has moved, the preparation is looked up by the state's values among those the frame has
-built. That name is made in two parts so that the common changes stay cheap: the device also
-publishes `stateVersionBesideTextures`, which a texture binding does not raise, and while it holds
-still the state beside the textures keeps the number it was given -- a program that binds a new
-texture before every draw pays for a lookup of that number and the bindings, not for the whole
-state. The render and stage states are named as words by their hash (compared in full on a hit),
-and the targets, transforms, material, lights and viewport are named once per change of the objects
-the device holds, which it replaces rather than writes into. The Direct3D 9 device publishes both
-counters the same way: every setter goes through its one `setState`, and a state block applied, a
-reset and a new target or depth surface raise them as well; a value set again that is already there
-changes nothing. The Direct3D 7 device does not publish them yet and is prepared for on every draw.
-`diagnostics().prepared` counts what was built and what was reused.
-A draw through shaders keeps its translations, vertex layout, pipeline state and samplers while
-`stateVersionBesideTextures`, the shaders, the declaration, the stride and the topology hold still --
-setting constants raises no version, so a frame that sets its constants and binds a texture before
-every draw prepares once -- and copies only the constant blocks and takes the texture views per draw.
+stage cascade, its texture and sampler bindings, its pipeline state and the pipeline itself, and the
+block of uniforms all but the fields the world transform reaches -- the world, world-view and
+world-view-projection matrices, and a lit draw's normal matrix. The world transform is the one state
+the counter deliberately ignores, because it moves between most draws of a frame; whoever reads the
+counter therefore owes the world matrix a fresh read on every draw, and nothing else derived from it
+may be kept. A texture whose bytes the program rewrites raises a counter of its own, so the upload
+owed to it still happens inside the next draw that samples it. When the counter has moved, the
+preparation is looked up by the state's values among those the frame has built. That name is made in
+two parts so that the common changes stay cheap: the device also publishes
+`stateVersionBesideTextures`, which a texture binding does not raise, and while it holds still the
+state beside the textures keeps the number it was given -- a program that binds a new texture before
+every draw pays for a lookup of that number and the bindings, not for the whole state. The render
+and stage states are named as words by their hash (compared in full on a hit), and the targets,
+transforms, material, lights and viewport are named once per change of the objects the device holds,
+which it replaces rather than writes into. The Direct3D 9 device publishes both counters the same
+way: every setter goes through its one `setState`, and a state block applied, a reset and a new
+target or depth surface raise them as well; a value set again that is already there changes nothing.
+The Direct3D 7 device does not publish them yet and is prepared for on every draw.
+`diagnostics().prepared` counts what was built and what was reused. A draw through shaders keeps its
+translations, vertex layout, pipeline state and samplers while `stateVersionBesideTextures`, the
+shaders, the declaration, the stride and the topology hold still -- setting constants raises no
+version, so a frame that sets its constants and binds a texture before every draw prepares once --
+and copies only the constant blocks and takes the texture views per draw.
 
 A texture the program releases for the last time gives its guest storage back at once, and its GPU
 texture at the first present that finds it bound on no stage, after that frame's replay: a binding
@@ -390,34 +453,43 @@ lists the textures still held.
 
 **Direct3D 9** (`src/layers/graphics/d3d9/`). The device advertises vertex and pixel shader model
 2.0 -- the version the translator builds a pipeline from whole -- and refuses a create for a higher
-version. `shader.js` parses the bytecode (operand counts from a table before model 2, relative
-addressing tokens from model 2 on, literal definitions read as raw dwords) and holds the constant
-files; `wgsl.js` translates one instruction at a time into a literal WGSL body: inputs by location
-typed as the declaration lays them, varyings at fixed locations per usage so the two stages agree,
-constants in three uniform arrays per stage, samplers as texture and sampler pairs. A draw binds
-any of the three combinations: a shader pair; a pixel shader over fixed-function vertices, which
-gets a vertex stage made from the declaration (`fixedVertexStage`); or a vertex shader over the
-fixed-function pixel stage, which gets a fragment stage made from the stage cascade, fog and alpha
-test in force (`fixedFragmentStage`), reading the colours, coordinate sets and fog the shader
-wrote and the fixed function's own defaults for what it did not -- the shader-model-1 era's
-ordinary draw, transform in a program and texturing in the stages. In every combination the
-vertex stage writes each varying the pixel stage reads, since a fragment input with no vertex
-output fails the pipeline: a shader writes zero for what it never wrote, the made stage white for
-a colour the declaration lacks and zero for a coordinate set. A pipeline the GPU still refuses is
-built asynchronously and rejects, so its draw alone is skipped and the reason is in the device's
-`failures`; the frame around it is submitted. A target bound with a larger
-depth surface, which Direct3D allows and WebGPU does not, is drawn with a depth of its own size
-standing in (`depth-stand-in`), kept per depth surface and size. `stateblock.js`
-records what is set between `BeginStateBlock` and `EndStateBlock` -- and in this version a state set
-while recording goes into the block, not the device. `declaration.js` converts between vertex
-declarations and FVF codes. A fixed-function draw through a declaration that no FVF spells -- its
-members in another order, at other offsets, or beside ones only a shader reads (tangents, binormals
-and the like are ignored, as Direct3D ignores them) -- is read through a layout made from the
-declaration's own offsets (`fixedFunctionLayoutOf`), carried in the pipeline state and its key. A
-declaration this stage cannot read -- a second stream, a tessellator method, blend weights, a colour
-that is not a `D3DCOLOR`, a position of another type, coordinate sets with a gap, or a member past
-the stream's stride -- is dropped, counted in `skipped.layout` and reported once, rather than raised
-into the program's thread.
+version; a vertex shader below model 3 hands its `oD0` and `oD1` on held to [0, 1]. A draw under
+`D3DRS_SCISSORTESTENABLE` is cut to the scissor rectangle within the viewport, recorded once per
+change. `SetViewport` takes a viewport that reaches past its target and draws its mapping cut to the
+target. `IDirect3DSurface9::GetDC` hands out a context over the surface's pixels for the formats GDI
+draws into (`A8R8G8B8`, `X8R8G8B8`, `R5G6B5`, `X1R5G5B5`, `A1R5G5B5`), a render target's read back
+first and the release an unlock after a write; while one is held, a lock of any surface of its
+resource, a second `GetDC` and a release by the wrong surface are refused. A translated vertex
+shader's position moves by the same half pixel as the fixed-function stage's, from the viewport
+scale carried in a float register past the ones the shader reads. `shader.js` parses the bytecode
+(operand counts from a table before model 2, relative addressing tokens from model 2 on, literal
+definitions read as raw dwords) and holds the constant files; `wgsl.js` translates one instruction
+at a time into a literal WGSL body: inputs by location typed as the declaration lays them, varyings
+at fixed locations per usage so the two stages agree, constants in three uniform arrays per stage,
+samplers as texture and sampler pairs. A draw binds any of the three combinations: a shader pair; a
+pixel shader over fixed-function vertices, which gets a vertex stage made from the declaration
+(`fixedVertexStage`); or a vertex shader over the fixed-function pixel stage, which gets a fragment
+stage made from the stage cascade, fog and alpha test in force (`fixedFragmentStage`), reading the
+colours, coordinate sets and fog the shader wrote and the fixed function's own defaults for what it
+did not -- the shader-model-1 era's ordinary draw, transform in a program and texturing in the
+stages. In every combination the vertex stage writes each varying the pixel stage reads, since a
+fragment input with no vertex output fails the pipeline: a shader writes zero for what it never
+wrote, the made stage white for a colour the declaration lacks and zero for a coordinate set. A
+pipeline the GPU still refuses is built asynchronously and rejects, so its draw alone is skipped and
+the reason is in the device's `failures`; the frame around it is submitted. A target bound with a
+larger depth surface, which Direct3D allows and WebGPU does not, is drawn with a depth of its own
+size standing in (`depth-stand-in`), kept per depth surface and size. `stateblock.js` records what
+is set between `BeginStateBlock` and `EndStateBlock` -- and, as in Direct3D 8, a state set while
+recording goes into the block, not the device. `declaration.js` converts between vertex declarations
+and FVF codes. A fixed-function draw through a declaration that no FVF spells -- its members in
+another order, at other offsets, or beside ones only a shader reads (tangents, binormals and the
+like are ignored, as Direct3D ignores them) -- is read through a layout made from the declaration's
+own offsets (`fixedFunctionLayoutOf`), carried in the pipeline state and its key, each member from
+its own stream: the further streams are bound at their offsets and strides, and a stream with
+nothing bound reads as zero. A declaration this stage cannot read -- a tessellator method, blend
+weights, a colour that is not a `D3DCOLOR`, a position of another type, coordinate sets with a gap,
+or a member past its stream's stride -- is dropped, counted in `skipped.layout` and reported once,
+rather than raised into the program's thread.
 
 **Direct3D 10 and DXGI** (`src/layers/graphics/d3d10/`). `dxbc.js` opens the container (`ISGN`,
 `OSGN`, `SHDR`; older token streams answer `E_INVALIDARG`); `sm4.js` decodes the token stream with
@@ -425,110 +497,108 @@ untyped operands; `wgsl.js` keeps the register model literally -- every register
 bit patterns, each instruction reinterpreting -- and links a vertex and pixel shader by semantic
 name when a pair is bound, writing the `@location` interface then. An instruction with no
 translation makes the whole shader untranslatable and the draw is refused by name. `states.js`
-normalises the four immutable state descriptions before creating them, so identical descriptions
-are one object; `resources.js` separates resources from views (a view takes a reference on the
-device, none on the resource); `validity.js` is the usage-by-bind-flag table; `dxgi.js` is the
-ownership graph (a swap chain's parent is the factory; `ResizeBuffers` fails while a back buffer is
-held and leaves the description untouched). `render.js` keeps a host copy of every resource's bytes
-and replays a record onto one backend frame at present.
+normalises the four immutable state descriptions before creating them, so identical descriptions are
+one object; `resources.js` separates resources from views (a view takes a reference on the device,
+none on the resource); `validity.js` is the usage-by-bind-flag table; `dxgi.js` is the ownership
+graph (a swap chain's parent is the factory; `ResizeBuffers` fails while a back buffer is held and
+leaves the description untouched). `RSSetViewports` with more viewports than the sixteen slots is
+ignored whole, and `RSGetViewports`/`RSGetScissorRects` write back the number bound and zero the
+slots past it. `render.js` keeps a host copy of every resource's bytes and replays a record onto one
+backend frame at present.
 
 **OpenGL** (`src/layers/graphics/opengl/`). Reports `GL_VERSION` 1.1, vendor `Bottlify Project`,
 renderer `Bottlify OpenGL`, 25 GL extensions and 4 WGL extensions (`extensions.js`; a name in the
-string is a promise that every function it defines is obtainable, and the test checks the list,
-the context and the marshalling agree). The context records state (`context*.js`, `state.js`)
-and reads it into one `Scene` per draw (`context-scene.js`); where that scene is drawn depends on
-the build. A handler is reachable without the trap through `entry(name)` -- the same function,
-the same dwords, the same current-context rule -- which is how a bundle's kernel issues GL work
-the guest's own function would have issued (`host.md`'s `frame.gl`).
+string is a promise that every function it defines is obtainable, and the test checks the list, the
+context and the marshalling agree). The context records state (`context*.js`, `state.js`) and reads
+it into one `Scene` per draw (`context-scene.js`); where that scene is drawn depends on the build.
+It takes every sized internal format GL 1.1 names, and texture 0 is one object per target shared by
+every texture unit. A handler is reachable without the trap through `entry(name)` -- the same
+function, the same dwords, the same current-context rule -- which is how a bundle's kernel issues GL
+work the guest's own function would have issued (`host.md`'s `frame.gl`).
 
-With a device, every draw goes to the GPU through the one backend (`gpu.js`): the frame is
-recorded as the program draws and replayed at `SwapBuffers`, once every pipeline it needs has
-compiled. Each recorded draw's fixed uniform block and, under a program, each stage's own block
-are handed back the previous draw's identical array rather than a fresh one when nothing they
-read has moved since -- the model-view-projection product (recomputed only when the modelview or
-projection matrix has actually changed, which its own recorded reference already tells), every
-active unit's texture matrix and environment colour, the current vertex attributes, the fog and
-alpha-test state for the fixed block, and a program's environment and local parameter files for a
-program stage's, each tracked by a version raised only when a write actually changes a value, not
-by one that repeats it -- because a title sets a light's whole parameter cast before every
-interaction draw whether or not any value moved. A buffer object is a dynamic backend buffer
-whose writes pick their own lock flag from
-the byte ranges the unflushed frames' draws read -- a write over a read range renames the buffer,
-any other travels as a range. Vertex arrays are bound as they lie (one slot per buffer and stride,
-an attribute per array; `gpu-layout.js` decides which shapes the GPU can read) and only the index
-list is read on the processor, for its range and to widen it -- an index list bound from an
+With a device, every draw goes to the GPU through the one backend (`gpu.js`): the frame is recorded
+as the program draws and replayed at `SwapBuffers`, once every pipeline it needs has compiled. Each
+recorded draw's fixed uniform block and, under a program, each stage's own block are handed back the
+previous draw's identical array rather than a fresh one when nothing they read has moved since --
+the model-view-projection product (recomputed only when the modelview or projection matrix has
+actually changed, which its own recorded reference already tells), every active unit's texture
+matrix and environment colour, the current vertex attributes, the fog and alpha-test state for the
+fixed block, and a program's environment and local parameter files for a program stage's, each
+tracked by a version raised only when a write actually changes a value, not by one that repeats it
+-- because a title sets a light's whole parameter cast before every interaction draw whether or not
+any value moved. A buffer object is a dynamic backend buffer whose writes pick their own lock flag
+from the byte ranges the unflushed frames' draws read -- a write over a read range renames the
+buffer, any other travels as a range. Vertex arrays are bound as they lie (one slot per buffer and
+stride, an attribute per array; `gpu-layout.js` decides which shapes the GPU can read) and only the
+index list is read on the processor, for its range and to widen it -- an index list bound from an
 `ELEMENT_ARRAY_BUFFER` keeps that scan (its `(min, max)` and its widened copy) against the buffer
 object's own `version` (raised on every `glBufferDataARB`, `glBufferSubDataARB` or write-back
-unmap), so a static mesh drawn again at the same offset and count under a different light is
-scanned once, not once per light; a list read from client memory, or one a seam call already
-dereferenced into its own scratch bytes, has no such identity and is scanned fresh every draw, as
-before. Arrays in client memory are copied
-by that range into a ring, and a vertex assembled on the processor -- immediate mode, a lit draw,
-a type the GPU has no format for -- is packed into one canonical layout. `wgsl.js` writes the
-fixed-function formula as a shader per draw state (texture environment per base format, combine
-with dot3, texture generation, projective coordinates, fog, colour sum, alpha test as a discard,
-GL's clip depth remapped) and the pipeline descriptor (blend, depth, two-sided stencil, cull,
-colour mask, polygon offset); every field either reads is in the cache key. Two indexed draws
-recorded back to back, under state that has not moved (the same pipeline, bindings and uniform
-blocks -- the state-version cache above already makes an unchanged block the identical array, so
-this compares by reference -- vertex slots and base vertex) whose index bytes in the scratch ring
-are exactly what the earlier one's own are immediately followed by, with no alignment gap, are
-joined into the one draw call their combined range reads exactly as: the earlier one's own count
-grows and the later one is dropped, which touches every pixel exactly as many times as the two
-draws together would have and so holds under any blend, stencil or logic-op state. Off while
-`dumpDraws` is on, so a dump or a probe still addresses every draw the guest issued by its own
-number.
-`GL_EXT_stencil_two_side` (`glActiveStencilFaceEXT` selects `GL_FRONT` or `GL_BACK`, a plain
-selector with no dependence on `GL_STENCIL_TEST_TWO_SIDE_EXT`: `glStencilFunc`/`Op`/`Mask` always
-write only the active face's record, front by default, which is the byte-identical single-state
-behaviour every earlier title still gets) maps directly onto the pipeline descriptor's independent
-`stencilFront` and `stencilBack`, with the back record folded into the cache key so a two-sided
-draw and a one-sided draw sharing a front state get different pipelines; `glGet` of the unsuffixed
-stencil queries answers the active face's record -- the front's, unless the selector points at the
-back -- and `GL_STENCIL_BACK_*` always answers the back's. WebGPU has one
-stencil reference and one read and write mask shared by both faces, so a program whose two faces
-disagree on those has the front's applied to the back's test too, reported once as a divergence
-(see *Limitations*). A translator for
-`GL_ARB_vertex_program` and `GL_ARB_fragment_program` exists, is tested, and both names are
-advertised -- `arb-program.js` parses program text into an IR with byte-exact error positions,
-`arb-wgsl.js` emits one literal WGSL stage per program with its parameters materialised into one
-uniform block per draw, state matrices computed from the stacks at draw time, and the varyings
-widened to the eight coordinate sets a program may address. The vertex program's block is bound
-beside the fixed block in group zero, the group whose binding the vertex stage already reads,
-because on the one headless adapter this was measured on the device hands a stage zero for a
-dynamic uniform block outside the first group the stage reads -- a device rule observed there, not
-one the WebGPU specification makes, so it is worth re-checking on a hardware adapter before it is
-relied on; the fragment program's block gets a bind group of its own, which the fragment stage
-reads alone. `HIDDEN_GL_EXTENSIONS` is empty: a name added back there stays sized, implemented and
-obtainable through `wglGetProcAddress`, as a driver's unannounced entry points would be, and only
-the string omits it. Two windows onto a program need a translation of their own: a program's
-`result.position` is depth-remapped once after the whole program, so a position written one DP4
-component at a time remaps against the w the program wrote rather than the z instruction's own
-value, and `fragment.position` is emitted against the render target's height, because GL measures
-it from the window's lower-left corner and WGSL's `@builtin(position)` from the upper-left. The
-context holds
-eight texture units -- the image units and coordinate sets a program addresses -- of which the
-conventional pipeline combines the first four (`GL_MAX_TEXTURE_UNITS`). A binding the GPU path
-cannot answer (a non-matrix state parameter, a 3D texture target) refuses the stage by name as a
-divergence rather than drawing something wrong. A clear is a triangle
-over the viewport under the scissor and the masks, which a pass's load operation would ignore.
-The frame is shown through an opaque copy that alternates between two surfaces, because a
-program's destination alpha is its own scratch and a page composites a presented texture by its
-alpha. Textures are uploaded from the texels the context decoded, in `rgba8unorm`, only the rectangle a
-`glTexSubImage2D` rewrote (the union of every rectangle since the last upload; a full redefine is
-the whole level), level by level as the context marks them written; a cube map is six layers with
-a cube view. An S3TC texture whose every level still holds the blocks it arrived in uploads them
-as `bc1`/`bc2`/`bc3` blocks instead, when the configuration asks for it, the device has
-`texture-compression-bc`, and the base level's own width and height are each a multiple of the
-block size (WebGPU validates a compressed texture's own size against the block, and refuses to
-create one otherwise; a base level narrower or shorter than one block -- legal in GL, whose data is
-one block wide -- falls the whole texture back to `rgba8unorm` instead); one level rewritten
-decoded (`glTexSubImage2D` into it) falls the whole texture back to `rgba8unorm` too. A level
-smaller than one block (a tail mip) still copies the whole block its data physically occupies --
-WebGPU's texture-copy validation compares a compressed copy's extent against the subresource's
-*physical* size, the logical size rounded up to the block, not against the level's own width and
-height (that rounding is for a copy alone; the base level's own size is never rounded up). A copy
-from the
+unmap), so a static mesh drawn again at the same offset and count under a different light is scanned
+once, not once per light; a list read from client memory, or one a seam call already dereferenced
+into its own scratch bytes, has no such identity and is scanned fresh every draw, as before. Arrays
+in client memory are copied by that range into a ring, and a vertex assembled on the processor --
+immediate mode, a lit draw, a type the GPU has no format for -- is packed into one canonical layout.
+`wgsl.js` writes the fixed-function formula as a shader per draw state (texture environment per base
+format, combine with dot3, texture generation, projective coordinates, fog, colour sum, alpha test
+as a discard, GL's clip depth remapped -- and turned round for a `glDepthRange` run backwards, which
+the viewport takes in order -- and an `@invariant` position) and the pipeline descriptor (blend,
+depth, two-sided stencil, cull, colour mask, polygon offset); every field either reads is in the
+cache key. Two indexed draws recorded back to back, under state that has not moved (the same
+pipeline, bindings and uniform blocks -- the state-version cache above already makes an unchanged
+block the identical array, so this compares by reference -- vertex slots and base vertex) whose
+index bytes in the scratch ring are exactly what the earlier one's own are immediately followed by,
+with no alignment gap, are joined into the one draw call their combined range reads exactly as: the
+earlier one's own count grows and the later one is dropped, which touches every pixel exactly as
+many times as the two draws together would have and so holds under any blend, stencil or logic-op
+state. Off while `dumpDraws` is on, so a dump or a probe still addresses every draw the guest issued
+by its own number. `GL_EXT_stencil_two_side` (`glActiveStencilFaceEXT` selects `GL_FRONT` or
+`GL_BACK`, a plain selector with no dependence on `GL_STENCIL_TEST_TWO_SIDE_EXT`:
+`glStencilFunc`/`Op`/`Mask` always write only the active face's record, front by default, which is
+the byte-identical single-state behaviour every earlier title still gets) maps directly onto the
+pipeline descriptor's independent `stencilFront` and `stencilBack`, with the back record folded into
+the cache key so a two-sided draw and a one-sided draw sharing a front state get different
+pipelines; `glGet` of the unsuffixed stencil queries answers the active face's record -- the
+front's, unless the selector points at the back -- and `GL_STENCIL_BACK_*` always answers the
+back's. WebGPU has one stencil reference and one read and write mask shared by both faces, so a
+program whose two faces disagree on those has the front's applied to the back's test too, reported
+once as a divergence (see *Limitations*). A translator for `GL_ARB_vertex_program` and
+`GL_ARB_fragment_program` exists, is tested, and both names are advertised -- `arb-program.js`
+parses program text into an IR with byte-exact error positions, `arb-wgsl.js` emits one literal WGSL
+stage per program with its parameters materialised into one uniform block per draw, state matrices
+computed from the stacks at draw time, and the varyings widened to the eight coordinate sets a
+program may address. The vertex program's block is bound beside the fixed block in group zero, the
+group whose binding the vertex stage already reads, because on the one headless adapter this was
+measured on the device hands a stage zero for a dynamic uniform block outside the first group the
+stage reads -- a device rule observed there, not one the WebGPU specification makes, so it is worth
+re-checking on a hardware adapter before it is relied on; the fragment program's block gets a bind
+group of its own, which the fragment stage reads alone. `HIDDEN_GL_EXTENSIONS` is empty: a name
+added back there stays sized, implemented and obtainable through `wglGetProcAddress`, as a driver's
+unannounced entry points would be, and only the string omits it. Two windows onto a program need a
+translation of their own: a program's `result.position` is depth-remapped once after the whole
+program, so a position written one DP4 component at a time remaps against the w the program wrote
+rather than the z instruction's own value, and `fragment.position` is emitted against the render
+target's height, because GL measures it from the window's lower-left corner and WGSL's
+`@builtin(position)` from the upper-left. The context holds eight texture units -- the image units
+and coordinate sets a program addresses -- of which the conventional pipeline combines the first
+four (`GL_MAX_TEXTURE_UNITS`). A binding the GPU path cannot answer (a non-matrix state parameter, a
+3D texture target) refuses the stage by name as a divergence rather than drawing something wrong. A
+clear is a triangle over the viewport under the scissor and the masks, which a pass's load operation
+would ignore. The frame is shown through an opaque copy that alternates between two surfaces,
+because a program's destination alpha is its own scratch and a page composites a presented texture
+by its alpha. Textures are uploaded from the texels the context decoded, in `rgba8unorm`, only the
+rectangle a `glTexSubImage2D` rewrote (the union of every rectangle since the last upload; a full
+redefine is the whole level), level by level as the context marks them written; a cube map is six
+layers with a cube view. An S3TC texture whose every level still holds the blocks it arrived in
+uploads them as `bc1`/`bc2`/`bc3` blocks instead, when the configuration asks for it, the device has
+`texture-compression-bc`, and the base level's own width and height are each a multiple of the block
+size (WebGPU validates a compressed texture's own size against the block, and refuses to create one
+otherwise; a base level narrower or shorter than one block -- legal in GL, whose data is one block
+wide -- falls the whole texture back to `rgba8unorm` instead); one level rewritten decoded
+(`glTexSubImage2D` into it) falls the whole texture back to `rgba8unorm` too. A level smaller than
+one block (a tail mip) still copies the whole block its data physically occupies -- WebGPU's
+texture-copy validation compares a compressed copy's extent against the subresource's *physical*
+size, the logical size rounded up to the block, not against the level's own width and height (that
+rounding is for a copy alone; the base level's own size is never rounded up). A copy from the
 framebuffer into a texture level is a render pass into a view of that level, sampling the back
 buffer with the row order GL's bottom-up framebuffer implies -- never into a BC surface, which
 WebGPU refuses a render-attachment usage on.
@@ -559,30 +629,37 @@ SPIR-V-to-WGSL translation in the tree: `vkCreateGraphicsPipelines` and every `v
 among the 84 unimplemented commands, so a Vulkan program can clear and present but not draw.
 
 **GDI drawing** (`src/layers/graphics/gdi/`). The pixel half of gdi32, over the bookkeeping half in
-`win32`: a surface is 32-bit BGRX (`0x00RRGGBB` little-endian) and nothing else; DIB rows pad to
-four bytes and device bitmaps to two; raster operations are decoded from the ROP3 truth table
-rather than enumerated; filling is Windows' half-open convention; clipping is one rectangle;
-`BitBlt` shifts the source with the clip and uses memmove order on overlap, `StretchBlt` copies
-first; text is composited from the **font engine**'s glyph coverage (`gdi/fonts.js`) in the text
-colour, at the alignment and advances the program set. The engine rasterises with the browser's
-own fonts through an `OffscreenCanvas` 2D context — no font file ships — mapping the classic
-Windows face names to a CSS stack with the named family first and a generic family (`sans-serif`,
-`serif`, `monospace`) behind it, one glyph per (font, byte) cached, the program's bytes read as
-Windows-1252; a negative LOGFONT height is the em, a positive one the cell the em is fitted to.
-Where there is no canvas (Node, the unit tests) the engine reports `available: false` and text
-falls back to one five-by-seven face (`gdi/glyphs.js`), scaled by whole numbers into the cell,
-with a block for any character the face has no picture of; every byte-exact test runs on that
-face. `createGdiDrawing` (`gdi/context.js`) is the entry; `src/app.js` hands it to `win32` as
-`graphics.createDrawing`, with `surfaceFor`, `presentDesktop`, and the engine's `fontMetrics` and
-`textWidth`, so the metrics a program lays out against (`GetTextMetricsA`,
-`GetTextExtentPoint32A`, `GetCharWidth32A`, `DrawText`, the dialog base units) are the engine's
-measurements when there is one and the bookkeeping half's estimate otherwise. A memory context
-draws into its DIB section's own bytes; a window context draws into a view (`viewOf`) of the **desktop** — one
-32-bit surface the size of the display, allocated from the guest heap so the presenter can show it
-the way it shows a DirectDraw primary — at the rectangle `win32` names for the window. `gdi32`
-calls `presentDesktop` after every drawing entry point (`BitBlt`, `TextOutA`, `LineTo`, ...) that
-binds a window- or display-kind context, not only when `win32`'s own paint pass ends: a program
-that fetches its window's DC once and blits into it every frame, never through
+`win32`: the raster operations see 32-bit BGRX (`0x00RRGGBB` little-endian), and a surface of 1, 4,
+8, 16 or 24 bits converts at each read and write -- 1 bit top bit leftmost, 4 bits high nibble
+first, 24 bits BGR, the indexed depths through their colour table; DIB rows pad to four bytes and
+device bitmaps to two; a blit to or from a monochrome device bitmap converts by the DC's colours,
+its 0 bits becoming the destination's text colour and its 1 bits the background colour, and a colour
+source being 1 exactly where it equals the source's background colour; raster operations are decoded
+from the ROP3 truth table rather than enumerated; filling is Windows' half-open convention; clipping
+is one rectangle; `BitBlt` shifts the source with the clip and uses memmove order on overlap,
+`StretchBlt` copies first; text is composited from the **font engine**'s glyph coverage
+(`gdi/fonts.js`) in the text colour, at the alignment and advances the program set. The engine
+rasterises with the browser's own fonts through an `OffscreenCanvas` 2D context — no font file ships
+— mapping the classic Windows face names to a CSS stack with the named family first and a generic
+family (`sans-serif`, `serif`, `monospace`) behind it, one glyph per (font, byte) cached, the
+program's bytes read as Windows-1252; a negative LOGFONT height is the em, a positive one the cell
+the em is fitted to. A font asked for with `NONANTIALIASED_QUALITY` is a glyph set of its own, each
+pixel inked when at least half covered and untouched otherwise. Where there is no canvas (Node, the
+unit tests) the engine reports `available: false` and text falls back to one five-by-seven face
+(`gdi/glyphs.js`), scaled by whole numbers into the cell, with a block for any character the face
+has no picture of; every byte-exact test runs on that face. `createGdiDrawing` (`gdi/context.js`) is
+the entry; `src/app.js` hands it to `win32` as `graphics.createDrawing`, with `surfaceFor`,
+`presentDesktop`, and the engine's `fontMetrics` and `textWidth`, so the metrics a program lays out
+against (`GetTextMetricsA`, `GetTextExtentPoint32A`, `GetCharWidth32A`, `DrawText`, the dialog base
+units) are the engine's measurements when there is one and the bookkeeping half's estimate
+otherwise. A memory context draws into the bytes of the bitmap selected into it -- a DIB section's
+own bytes in guest memory, or a device-dependent bitmap's rows, which it keeps outside guest memory
+(1-bit monochrome, 16-bit 5-6-5, 24 or 32 bits); a window context draws into a view (`viewOf`) of
+the **desktop** — one 32-bit surface the size of the display, allocated from the guest heap so the
+presenter can show it the way it shows a DirectDraw primary — at the rectangle `win32` names for the
+window. `gdi32` calls `presentDesktop` after every drawing entry point (`BitBlt`, `TextOutA`,
+`LineTo`, ...) that binds a window- or display-kind context, not only when `win32`'s own paint pass
+ends: a program that fetches its window's DC once and blits into it every frame, never through
 `BeginPaint`/`EndPaint` and never releasing it between frames, still changes what is on screen on
 every one of those blits, and the presenter's own coalescing (one flush per burst) is what keeps
 that cheap.
@@ -592,14 +669,19 @@ that cheap.
 `GetAdapterIdentifier` (Direct3D 8 and 9) and `vkGetPhysicalDeviceProperties` describe
 `config.device.adapter`. Modes come from `win32`'s display table; Direct3D 8 lists each in
 `X8R8G8B8` only. A device created or reset at a size calls `config.resolution`, and `screen()` then
-reports that size. Direct3D 8's `GetDeviceCaps` (`seam/d3d8.js`, `writeCaps`) claims a HAL
-device with hardware transform and lighting, eight blend stages and simultaneous textures,
-4096-texel textures, eight active lights, six user clip planes, every compare, blend, filter and
-stencil bit, cube-map and projected texture caps, `TEXGEN`, and leaves both shader versions at
-zero. Some of those claims exceed what the renderer does (cube textures are refused, sphere-map
-coordinate generation is not computed, clip planes are not applied), which is the opposite of the rule
-`d3d7/caps.js` states for itself. Direct3D 9's `DEFAULT_CAPS` (`d3d9/device.js`) claims shader
-model 2.0 for both stages, eight lights, no user clip planes, and no anisotropy.
+reports that size. Each version's caps claim what its renderer honours. Direct3D 8's `GetDeviceCaps`
+(`seam/d3d8.js`, `writeCaps`) claims a HAL device with hardware transform and lighting, eight blend
+stages and simultaneous textures, 4096-texel textures, eight active lights, every compare and blend,
+point and linear filtering with no anisotropy, wrap, mirror and clamp addressing, projected
+textures, the texture operations the combiner draws (derived from its own list, so the two cannot
+part), vertex, table, range, Z-based and W-based fog, a readable scan line, `TEXGEN`, and no cube
+maps, stencil operations, user clip planes or blend matrices, with both shader versions at zero;
+what is left beyond the renderer -- `TEXGEN`'s sphere map, a projected transform over a carried
+coordinate set -- is accepted and reported (see *Limitations*). Direct3D 9's `DEFAULT_CAPS`
+(`d3d9/device.js`) and `capabilityWords` (`d3d9/caps.js`) claim shader model 2.0 for both stages,
+eight lights, no user clip planes, no anisotropy, no stencil operations, the same combiner-derived
+texture operations, the same fog, the scissor test and a readable scan line. Direct3D 7's
+(`d3d7/caps.js`) claim range fog and point and linear mip filtering among the rest.
 
 ### The divergence rule
 
@@ -609,7 +691,7 @@ A call is answered one of three ways, and which one is decided where the call li
   out-pointer, because a success it cannot see through leaves a program drawing nothing and looking
   elsewhere for the reason. Refusals are documented at the slot.
 - **Accepted and reported.** A state the device stores but does not act on -- a projected
-  texture transform, sphere-map coordinate generation, a wireframe fill -- succeeds,
+  texture transform, sphere-map coordinate generation, a Direct3D 10 wireframe fill -- succeeds,
   because refusing `SetTransform` would change what the program does, and is reported once per
   distinct detail through `config.divergence` with the API name and a sentence saying what was not
   done. Every reporter de-duplicates.
@@ -633,19 +715,26 @@ Refused (the program is told no):
   `CreateVolumeTexture` and `CreateAdditionalSwapChain` answer `D3DERR_NOTAVAILABLE`; the four
   palette calls, `ProcessVertices` and `GetFrontBuffer` answer `D3DERR_INVALIDCALL`;
   `SetCursorProperties` answers `D3DERR_INVALIDCALL` unless a `cursor` receiver is configured;
-  `GetInfo` answers `S_FALSE`. A texture in a format the device does not offer is refused and
-  reported once per format.
+  `GetInfo` answers `S_FALSE`; `SetViewport` past the target answers `D3DERR_INVALIDCALL`, as
+  Direct3D 8 does. A texture in a format the device does not offer is refused and reported once per
+  format.
 - Direct3D 9: `CreateCubeTexture`, `CreateVolumeTexture`, `CreateAdditionalSwapChain` answer
   `D3DERR_NOTAVAILABLE`; a shader above model 2.0 is refused at create; `maxUserClipPlanes` is
   zero. `GetNPatchMode` returns a float in `ST(0)`, which the bridge cannot set, and is reported.
+  `IDirect3DSurface9::GetDC` on a surface of any other format answers `D3DERR_INVALIDCALL` with the
+  handle untouched.
 - Direct3D 10: a shader using an untranslated instruction is refused by name; a geometry shader
   with stream output is refused; `CreateDXGIFactory1` refuses.
 - Vulkan: 84 of 149 commands, including every draw and pipeline creation; a SPIR-V module
   declaring `Geometry` or `Tessellation`; secondary command buffers; an instance whose
   `apiVersion` is out of range; features the device lacks.
 - DirectDraw: a blit between different pixel depths; a descriptor whose `dwSize` is not exactly the
-  layout's own.
-- GDI: 4- and 1-bit DIBs.
+  layout's own; a colour-space colour key (`DDERR_NOCOLORKEYHW`); a colour fill on a Z-buffer; a
+  palette or a colour key on a mip sublevel; the event form of `WaitForVerticalBlank`
+  (`DDERR_UNSUPPORTED`).
+- GDI: `StretchDIBits` from a 1- or 4-bit DIB, and `GetDIBits` into a 1-, 4- or 8-bit one
+  (choosing an index for every colour would be a quantiser). A DIB section of those depths is drawn
+  into and blitted from.
 
 Accepted and reported through `divergence`:
 
@@ -697,22 +786,27 @@ Direct3D 10 draws skipped for `noViewport`, `noTarget`, `noShader`, `untranslata
 
 Known ceilings the code names: the OpenGL rasteriser's depth buffer is a float per pixel and a
 mipmapped minification filter samples the base level; Direct3D 7's capability lists claim no
-stencil, bump mapping, cube maps or W-buffer; Direct3D 8 fog is per vertex, an approximation of
-`D3DRS_FOGTABLEMODE`; the D3D 9 translator does not translate 1.x texture-addressing instructions,
-predication, subroutines or vertex-shader texture reads.
+stencil, bump mapping, cube maps or W-buffer; WebGPU cannot cull a line or a point, so a culled
+wireframe also draws its back faces' edges, where Direct3D culls the triangle first; the D3D 9
+translator does not translate 1.x texture-addressing instructions, predication, subroutines or
+vertex-shader texture reads. A lost WebGPU device loses every Direct3D 8 and 9 device made on it --
+`TestCooperativeLevel` and `Present` answer `D3DERR_DEVICELOST` -- and nothing recovers it: `Reset`
+still answers `D3DERR_DEVICELOST`, there being no second GPU device to rebuild on. The raster's
+position is read from the guest's clock, but `WaitForVerticalBlank` waits the time to the edge on a
+host timer, the layer having no hook into the kernel's scheduler.
 
 ## Tests
 
-1,240 `test()` cases across the layer's `*.test.js` files, all run by `npm test` from
+1,498 `test()` cases across the layer's `*.test.js` files, all run by `npm test` from
 `modules/core` (`node --test "src/**/*.test.js"`); one integration file runs under
 `npm run test:integration`. By kind:
 
 | kind | files |
 |---|---|
-| Layer assembly | `graphics.test.js` -- a build with no GPU comes up; the backend is built once; APIs are made by name; diagnostics report what was asked for; the pacer honours `maxFps`; a second instance in one realm does not take the first one's backend; a disposed machine answers as a build with graphics disabled (the stub's refusal); `dispose()` releases this machine's backend and leaves a presenter handed to the run untouched. |
+| Layer assembly | `graphics.test.js` -- a build with no GPU comes up; the backend is built once; APIs are made by name; diagnostics report what was asked for; the pacer honours `maxFps`; a second instance in one realm does not take the first one's backend; a disposed machine answers as a build with graphics disabled (the stub's refusal); `dispose()` releases this machine's backend and leaves a presenter handed to the run untouched; the raster reads the clock handed over as `guestNow`; a lost device loses the Direct3D devices made on it. `bitmaps.test.js` -- gdi32's bookkeeping over this layer's drawing, wired as `app.js` wires them: a double buffer, a monochrome mask made from the program's bits. |
 | Byte-exact against the reference rasteriser or a stored image (base64 of the raw BGRX buffer beside the code, no tolerance) | `webgpu/internal/reference.test.js`, `d3d8/render.test.js`, `d3d9/render.test.js`, `d3d9/program.test.js`, `opengl/raster.test.js`, `opengl/pipeline.test.js`, `gdi/*.test.js`, `ddraw/blit.test.js`. A triangle is asserted at named pixels rather than as a whole image, so no rasterisation rule is pinned. |
 | Recorded commands through the fake device (what the GPU was asked to do, never what a frame looks like) | `webgpu/backend.test.js`, `webgpu/internal/*.test.js` (including `presenter.test.js`: one presenter serves two machine lifetimes, configures the canvas once, and shows the second lifetime's frame rather than a cleared target), `d3d7/device.test.js`, `d3d8/render.test.js`, `d3d10/render.test.js`, `opengl/gpu.test.js` (a context on the renderer: buffer objects bound as they lie, the rename-or-range rule, client copies by index range, the canonical packing, uniform contents, uploads per written level, the clear's masks, the opaque shown copies, program draws and their blocks, the draw dump with its cut, skip and probe). |
-| Contract, against documented behaviour and conformance expectations of the real runtime | `d3d9/contract.test.js`, `d3d9/validity.test.js`, `d3d8/validity.test.js`, `d3d10/validity.test.js`, `d3d10/device.test.js`, `d3d10/dxgi.test.js`, `d3d10/structs.test.js`, `ddraw/objects.test.js`, `ddraw/caps.test.js`, `ddraw/structs.test.js`, `opengl/wgl.test.js`, `opengl/pixelformat.test.js`, `opengl/context.test.js`, `opengl/context-calls.test.js`, `opengl/context-programs.test.js`, `vulkan/*.test.js`, `d3d7/caps.test.js`, `d3d9/caps.test.js`. |
+| Contract, against documented behaviour and conformance expectations of the real runtime | `d3d7/load.test.js`, `d3d7/process.test.js`, `seam/raster.test.js`, `d3d9/contract.test.js`, `d3d9/validity.test.js`, `d3d8/validity.test.js`, `d3d10/validity.test.js`, `d3d10/device.test.js`, `d3d10/dxgi.test.js`, `d3d10/structs.test.js`, `ddraw/objects.test.js`, `ddraw/caps.test.js`, `ddraw/structs.test.js`, `opengl/wgl.test.js`, `opengl/pixelformat.test.js`, `opengl/context.test.js`, `opengl/context-calls.test.js`, `opengl/context-programs.test.js`, `vulkan/*.test.js`, `d3d7/caps.test.js`, `d3d9/caps.test.js`. |
 | Observed behaviour, pinned | `d3d9/observed.test.js` -- lock-flag traffic, matrix order, render-target alpha, viewport placement. |
 | Translators | `d3d9/shader.test.js`, `d3d9/wgsl.test.js`, `d3d10/dxbc.test.js`, `d3d10/sm4.test.js`, `d3d10/wgsl.test.js`, `vulkan/spirv.test.js`, `opengl/wgsl.test.js` (the GL formula as WGSL and the descriptor, and that every field the key must fold changes it), `opengl/arb-program.test.js` (the ARB program grammar, its error positions and limits), `opengl/arb-wgsl.test.js` (one stage at a time: every instruction, the parameters as one materialised block, the attribute aliasing, a real program's coordinate sets and image units), `opengl/gpu-layout.test.js` (array shapes to vertex formats and slots, mode expansion, index scanning). |
 | Seam and ABI | `seam/*.test.js` drive the bridge's real vtable publisher over a flat buffer and read the same words a guest would; `seam/shadow.test.js` pins the guest-side code's bytes and layout; `seam/shadow.itest.js` runs that code on the real emulated processor. |
