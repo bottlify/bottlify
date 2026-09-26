@@ -55,30 +55,37 @@ modules/core/src/
     ├── cpu/internal/      # boot-rom.js context.js faults.js fpu.js thunks.js v86-host.js
     │                      #   (the only layer that may import vendor/v86)
     ├── memory/internal/   # regions.js accessors.js
-    ├── kernel/internal/   # threads.js switch.js sync.js handles.js time.js processes.js
+    ├── kernel/internal/   # threads.js switch.js sync.js handles.js time.js processes.js stacks.js
     ├── bridge/            # replay.js — recorded sessions replayed through the real bridge
     │   ├── internal/      #   conventions.js dispatch.js parking.js callback.js vtable.js
     │   └── sessions/      #   recorded runs that went wrong, one JSON each, with a README
     ├── loader/internal/   # pe.js image.js dependencies.js delayload.js tls.js resources.js
-    │                      #   synth.js (in-guest module synthesis) init.js
+    │                      #   synth.js (in-guest module synthesis) init.js hooks.js
+    │                      #   mangling.js (what a C++ name says of its stack)
     ├── filesystem/internal/
     │   ├── tree.js paths.js handles.js errors.js memory-store.js opfs-store.js
     │   └── bundle/        #   format.js source.js cache.js crc32.js
     ├── media/internal/    # decoder.js (FFmpeg wasm) jpeg.js ijl.js (the hosted JPEG library)
     │
     ├── win32/             # one directory per guest-visible library
-    │   ├── kernel32/      #   process, threading, sync, heap, files, vfs, mapping, modules,
-    │   │                  #   resources, seh, exceptions, iocp, console, locale, environment, spawn
-    │   ├── user32/        #   windows, messages, paint, dialogs, display, objects, system, keys
+    │   ├── kernel32/      #   process, threading, sync, slimsync, critical, heap, files, vfs,
+    │   │                  #   mapping, modules, resources, seh, iocp, console, locale,
+    │   │                  #   environment, profile, spawn
+    │   ├── user32/        #   windows, messages, paint, dialogs, controls, frame, display, objects,
+    │   │                  #   system, cursors, rawinput, keys
     │   │                  #   (keys.js: the physical-key table input's router and dom also use)
     │   ├── gdi32/         #   objects, drawing (the ABI in front of an injected drawing service), structs
     │   ├── advapi32/      #   the registry and the rest
     │   ├── ole32/  oleaut32/
-    │   ├── msvcrt/  ntdll/
-    │   ├── winmm/         #   timeGetTime, the wave-out queue, notifications, its thread
+    │   ├── msvcrt/        #   strings, formatting, io (descriptors), stdio (streams), globals,
+    │   │                  #   startup, threads, seh, eh, cxx and the rest
+    │   ├── ntdll/
+    │   ├── winmm/         #   timeGetTime, the wave-out queue, notifications, its thread, mmio
     │   ├── wsock32/       #   sockets, loopback, sockaddr, the transport contract (also ws2_32, mswsock)
     │   ├── quartz/        #   the DirectShow filter graph and its interfaces
-    │   ├── shell32/  comctl32/  comdlg32/  imm32/  version/  wininet/
+    │   ├── shell32/       #   launching, fileop (SHFileOperation), the namespace, shell links
+    │   ├── comctl32/      #   image lists, progress, treeview, tab, propsheet
+    │   ├── comdlg32/  imm32/  version/  wininet/  shlwapi/  and the smaller libraries
     │
     ├── graphics/          # requires win32, bridge, memory — a sibling of win32, not inside it
     │   ├── webgpu/        #   the one backend: backend.js contract.js
@@ -87,15 +94,16 @@ modules/core/src/
     │   │                  #   reference (the software model frames are checked against), fake-device
     │   ├── gdi/           #   the drawing half of gdi32: blit, brush, context, dib, rop, shapes, surface, text
     │   ├── ddraw/         #   objects, blit, caps, constants, structs
-    │   ├── d3d7/          #   device, caps, constants
-    │   ├── d3d8/          #   device, render, renderstates, stagestates, structs, validity
+    │   ├── d3d7/          #   device, caps, constants, load, process (ProcessVertices)
+    │   ├── d3d8/          #   device, render, renderstates, stagestates, stateblock, structs, validity
     │   ├── d3d9/          #   device, interfaces, resources, declaration, shader, wgsl, stateblock, caps, …
     │   ├── d3d10/         #   device, dxgi, resources, states, render, sm4, dxbc, wgsl, gpuformats, com
     │   ├── opengl/        #   context*, state, matrix, lighting, texture, arrays, pipeline, raster,
     │   │                  #   pixelformat, wgl, extensions, exports
     │   ├── vulkan/        #   instance, physical, device, commands, handles, spirv, runtime
     │   └── seam/          #   what the guest sees: exports.js vtables.js iids.js com.js structs.js
-    │                      #   shadow.js, and one file per library — ddraw, d3d7, d3d8, d3d9, d3d10, vulkan
+    │                      #   shadow.js raster.js privatedata.js, and one file per library —
+    │                      #   ddraw, d3d7, d3d8, d3d9, d3d10, vulkan
     │
     ├── audio/             # requires win32, bridge, memory
     │   ├── output/        #   mixer.js ring.js worklet.js (the AudioWorkletProcessor, shipped as dist/worklet.js)
@@ -103,18 +111,19 @@ modules/core/src/
     │   └── asi/           #   provider.js mp3.js — the MPEG provider a sound middleware loads, hosted
     │
     └── input/             # requires win32, bridge, memory
-        ├── router.js      #   one event stream into the message queue and the polled state
+        ├── router.js      #   one event stream into the message queue, raw input and the polled state
         ├── dom.js         #   keyboard and mouse captured on a canvas (runs on the page)
+        ├── xinput.js      #   XInput, answered as a machine with no pad
         └── dinput/        #   devices.js seam.js — DirectInput and DirectInput8
 ```
 
 Libraries a program sees, by the layer that publishes them: `win32` synthesises `KERNEL32`,
-`USER32`, `GDI32`, `ADVAPI32`, `ole32`, `OLEAUT32`, `msvcrt`, `ntdll`, `WINMM`, `WSOCK32`,
-`WS2_32`, `MSWSOCK`, `SHELL32`, `COMCTL32`, `COMDLG32`, `IMM32`, `VERSION`, `WININET`; `graphics`
-publishes `DDRAW`, `D3D8`, `D3D9`, `D3D10`, `DXGI`, `OPENGL32`, `vulkan-1`; `audio` publishes
-`DSOUND` and answers as `Mp3dec.asi` to a program's `mss32`; `input` publishes `DINPUT` and
-`DINPUT8`; `media` answers as `ijl15`. Direct3D 7 is reached through `DDRAW`, DirectShow through
-`ole32`'s class factory.
+`USER32`, `GDI32`, `ADVAPI32`, `ole32`, `OLEAUT32`, `msvcrt`, `ntdll`, `WINMM`, `WSOCK32`, `WS2_32`,
+`MSWSOCK`, `SHELL32`, `COMCTL32`, `COMDLG32`, `IMM32`, `VERSION`, `WININET`; `graphics` publishes
+`DDRAW`, `D3D8`, `D3D9`, `D3D10`, `DXGI`, `OPENGL32`, `vulkan-1`; `audio` publishes `DSOUND` and
+answers as `Mp3dec.asi` to a program's `mss32`; `input` publishes `DINPUT`, `DINPUT8`, `XINPUT9_1_0`
+and `XINPUT1_4`; `media` answers as `ijl15`. Direct3D 7 is reached through `DDRAW`, DirectShow
+through `ole32`'s class factory.
 
 ## 3. A DLL whose halves live in two layers
 
