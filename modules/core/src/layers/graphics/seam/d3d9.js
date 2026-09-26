@@ -641,8 +641,8 @@ export function createDirect3D9Seam(
         },
         /** @param {any} texture @param {number[]} args */
         UnlockRect: (texture, [level])=>texture.UnlockRect(level >>> 0),
-        // An unlock already marks the whole level for upload.
-        AddDirtyRect: ()=>D3D_OK,
+        /** @param {any} texture @param {number[]} args */
+        AddDirtyRect: (texture, [rect])=>texture.AddDirtyRect(readRect(rect)),
     };
     const cubeTextureMethods = {
         ...resourceMethods(D3DRTYPE.CUBETEXTURE),

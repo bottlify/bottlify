@@ -46,6 +46,12 @@ import { SURFACE_TYPE, surfaceIsLockable } from './validity.js';
 const D3DLOCK_READONLY = 0x00000010;
 
 /**
+ * D3DLOCK_NO_DIRTY_UPDATE: a lock whose writes the texture's dirty region does
+ * not record, the same number in both versions.
+ */
+export const D3DLOCK_NO_DIRTY_UPDATE = 0x00008000;
+
+/**
  * @typedef {Object} ReferenceCount
  * @property {number} value
  * @property {boolean} destroyed
@@ -179,6 +185,7 @@ export function createPriority(pool){
  * @property {(out: { desc?: SurfaceDesc }) => number} GetDesc
  * @property {number} lockFlags   The flags of the lock in force, if one is.
  * @property {any} [container]    The texture a level belongs to; absent for a surface of its own.
+ * @property {(rect: LockRectangle | null) => void} noteWritten
  * @property {(gdi: SurfaceGdi, out: { dc?: number }) => number | Promise<number>} GetDC
  * @property {(handle: number, gdi: SurfaceGdi) => number} ReleaseDC
  */
@@ -239,6 +246,10 @@ const DC_FORMATS = Object.freeze({
  *           bytes. Given, a lock reads them back first and the caller waits;
  *           an unlock after a write hands the bytes over.
  * @property {SurfaceFamily} [family]  Shared by the surfaces of one texture.
+ * @property {(rect: LockRectangle | null) => void} [dirtied]
+ *           Told at an unlock what the lock may have written -- its
+ *           rectangle, or null for all of it -- unless the lock was read-only
+ *           or asked for no dirty update.
  */
 
 /**
@@ -260,6 +271,8 @@ export function createSurface(options){
     const rejectsMalformedRects = options.rejectsMalformedRects === true;
     let locked = false;
     let lockFlags = 0;
+    /** @type {LockRectangle | null} */
+    let lockRect = null;
     /** @type {number | null} */
     let dc = null;
     /** @type {SurfaceFamily} */
@@ -351,6 +364,7 @@ export function createSurface(options){
             }
             locked = true;
             family.locks++;
+            lockRect = rect;
             out.Pitch = pitch;
             out.pBits = options.base
                 + (rect ? offsetOfRect(options.format, pitch, rect) : 0);
@@ -382,12 +396,27 @@ export function createSurface(options){
             {
                 options.pixels.written(self);
             }
+            if ((lockFlags & (D3DLOCK_READONLY | D3DLOCK_NO_DIRTY_UPDATE)) === 0)
+            {
+                options.dirtied?.(lockRect);
+            }
             return D3D_OK;
         },
 
         /** Only meaningful while the surface is locked. */
         get lockFlags(){
             return lockFlags;
+        },
+
+        /**
+         * Something other than a lock wrote a rectangle of the surface -- a
+         * copy into it -- which a texture's dirty region records as a lock's
+         * write would be.
+         *
+         * @param {LockRectangle | null} rect
+         */
+        noteWritten(rect){
+            options.dirtied?.(rect);
         },
 
         /**
@@ -441,10 +470,72 @@ export function createSurface(options){
             locked = true;
             family.locks++;
             lockFlags = 0;
+            lockRect = null;
             return self.UnlockRect();
         },
     };
     return self;
+}
+
+/**
+ * @typedef {Object} SurfaceMove
+ *     One rectangle of one copy, as addresses in the guest's own memory.
+ * @property {number} from
+ * @property {number} to
+ * @property {number} rowBytes
+ * @property {number} rows
+ * @property {number} fromPitch
+ * @property {number} toPitch
+ */
+
+/**
+ * One rectangle of one surface moved to a point of another, as addresses. A
+ * compressed format moves whole blocks: the rectangle is taken outward to them.
+ *
+ * @param {Surface} source @param {LockRectangle} rect
+ * @param {Surface} destination @param {{ x: number, y: number }} point
+ * @returns {SurfaceMove}
+ */
+export function rectMoveOf(source, rect, destination, point){
+    /** @type {{ desc?: SurfaceDesc }} */
+    const described = {};
+    source.GetDesc(described);
+    const from = /** @type {SurfaceDesc} */ (described.desc);
+    destination.GetDesc(described);
+    const to = /** @type {SurfaceDesc} */ (described.desc);
+    const info = FORMAT_INFO[from.Format];
+    const block = info.blockSize ?? 1;
+    const blockBytes = info.blockBytes ?? info.bytesPerPixel;
+    const fromPitch = surfacePitch(from.Format, from.Width);
+    const toPitch = surfacePitch(to.Format, to.Width);
+    return {
+        from: source.base + Math.floor(rect.top / block) * fromPitch
+            + Math.floor(rect.left / block) * blockBytes,
+        to: destination.base + Math.floor(point.y / block) * toPitch
+            + Math.floor(point.x / block) * blockBytes,
+        rowBytes: Math.ceil((rect.right - rect.left) / block) * blockBytes,
+        rows: Math.ceil((rect.bottom - rect.top) / block),
+        fromPitch,
+        toPitch,
+    };
+}
+
+/**
+ * A texture's dirty region, a rectangle of its top level, as it covers one
+ * level: shrunk with the level and taken outward to whole texels.
+ *
+ * @param {LockRectangle} region @param {number} level
+ * @param {number} width @param {number} height  The level's own extent.
+ * @returns {LockRectangle}
+ */
+export function regionAtLevel(region, level, width, height){
+    const round = (/** @type {number} */ edge)=>(edge + (1 << level) - 1) >>> level;
+    return {
+        left: Math.min(region.left >>> level, width - 1),
+        top: Math.min(region.top >>> level, height - 1),
+        right: Math.max(1, Math.min(width, round(region.right))),
+        bottom: Math.max(1, Math.min(height, round(region.bottom))),
+    };
 }
 
 /**
@@ -582,6 +673,32 @@ export function createTexture(options){
     /** @type {SurfaceFamily} */
     const family = { locks: 0, dc: null };
 
+    /** @returns {LockRectangle} the whole top level */
+    const whole = ()=>({ left: 0, top: 0, right: options.width, bottom: options.height });
+    /**
+     * Per face, what UpdateTexture carries from this texture, in texels of
+     * the top level: all of it at first, then what locks and AddDirtyRect
+     * add, until an update takes it (Wine's d3d8 and d3d9 add_dirty_rect_test).
+     *
+     * @type {(LockRectangle | null)[]}
+     */
+    const dirty = Array.from({ length: faces }, whole);
+    /** @param {number} face @param {LockRectangle} rect */
+    const addDirty = (face, rect)=>{
+        const held = dirty[face];
+        dirty[face] = held
+            ? {
+                left: Math.min(held.left, rect.left), top: Math.min(held.top, rect.top),
+                right: Math.max(held.right, rect.right),
+                bottom: Math.max(held.bottom, rect.bottom),
+            }
+            : { ...rect };
+    };
+    /** @param {LockRectangle} rect @param {number} width @param {number} height */
+    const within = (rect, width, height)=>rect.left >= 0 && rect.top >= 0
+        && rect.left < rect.right && rect.top < rect.bottom
+        && rect.right <= width && rect.bottom <= height;
+
     /**
      * @param {number} face
      * @param {number} level
@@ -615,6 +732,15 @@ export function createTexture(options){
             forgivesDoubleUnlock: !cube,
             rejectsMalformedRects: options.rejectsMalformedRects,
             family,
+            // A level's rectangle is a region of the top level scaled up; a
+            // rectangle that is not one is all of it.
+            dirtied: rect=>addDirty(face, rect && within(rect, width, height)
+                ? {
+                    left: rect.left << level, top: rect.top << level,
+                    right: Math.min(options.width, rect.right << level),
+                    bottom: Math.min(options.height, rect.bottom << level),
+                }
+                : whole()),
         });
         surface.container = texture;
         surfaces.set(key, surface);
@@ -650,6 +776,36 @@ export function createTexture(options){
 
         /** @returns {number} */
         GetLOD: ()=>lod,
+
+        /**
+         * Adds to what UpdateTexture carries from this texture: a rectangle
+         * of the top level, or all of it for none. One that is empty or leaves
+         * the level is refused.
+         *
+         * @param {LockRectangle | null} rect
+         * @param {number} [face]
+         */
+        AddDirtyRect(rect, face = 0){
+            if (face < 0 || face >= faces || (rect && !within(rect, options.width, options.height)))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            addDirty(face, rect ?? whole());
+            return D3D_OK;
+        },
+
+        /**
+         * What an update carries from one face, which it then no longer
+         * holds; null when nothing was written since the last.
+         *
+         * @param {number} [face]
+         * @returns {LockRectangle | null}
+         */
+        takeDirtyRegion(face = 0){
+            const region = dirty[face] ?? null;
+            dirty[face] = null;
+            return region;
+        },
 
         get refCount(){
             return options.count.value;

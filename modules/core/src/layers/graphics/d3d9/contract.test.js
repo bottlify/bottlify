@@ -775,6 +775,50 @@ test('UpdateTexture copies the levels, and the pools and formats have to match t
     assert.equal(device.release(), 0);
 });
 
+test('UpdateTexture carries only the source\'s dirty region, scaled to each level', ()=>{
+    // Wine's d3d9 add_dirty_rect_test: an update takes the region, a lock
+    // or AddDirtyRect adds to it, and the destination's own is ignored.
+    const { device, memory } = makeWithMemory();
+    /** @type {{ texture?: any }} */
+    const source = {};
+    device.CreateTexture(8, 8, 2, 0, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, source);
+    /** @type {{ texture?: any }} */
+    const destination = {};
+    device.CreateTexture(8, 8, 2, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, destination);
+    /** @param {any} texture @param {number} level */
+    const baseOf = (texture, level)=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        texture.GetSurfaceLevel(level, held);
+        held.surface.release();
+        return held.surface.base;
+    };
+    assert.equal(device.UpdateTexture(source.texture, destination.texture), D3D_OK);
+    memory.fill(7, baseOf(source.texture, 0), baseOf(source.texture, 0) + 8 * 8 * 4);
+    memory.fill(7, baseOf(source.texture, 1), baseOf(source.texture, 1) + 4 * 4 * 4);
+    assert.equal(device.UpdateTexture(source.texture, destination.texture), D3D_OK);
+    assert.equal(memory[baseOf(destination.texture, 0)], 0, 'written with no lock: not carried');
+
+    assert.equal(destination.texture.AddDirtyRect({ left: 0, top: 0, right: 8, bottom: 8 }),
+        D3D_OK);
+    assert.equal(device.UpdateTexture(source.texture, destination.texture), D3D_OK);
+    assert.equal(memory[baseOf(destination.texture, 0)], 0, 'nor for the destination\'s asking');
+
+    assert.equal(source.texture.AddDirtyRect({ left: 4, top: 4, right: 6, bottom: 6 }), D3D_OK);
+    assert.equal(device.UpdateTexture(source.texture, destination.texture), D3D_OK);
+    const top = baseOf(destination.texture, 0);
+    assert.equal(memory[top + (4 * 8 + 4) * 4], 7, 'inside the rectangle');
+    assert.equal(memory[top + (5 * 8 + 5) * 4], 7);
+    assert.equal(memory[top + (3 * 8 + 4) * 4], 0, 'outside it');
+    assert.equal(memory[top + (4 * 8 + 6) * 4], 0);
+    const next = baseOf(destination.texture, 1);
+    assert.equal(memory[next + (2 * 4 + 2) * 4], 7, 'and its half at the next level');
+    assert.equal(memory[next], 0);
+    source.texture.release();
+    destination.texture.release();
+    assert.equal(device.release(), 0);
+});
+
 test('ColorFill writes the colour in the format\'s own layout, over the rectangle only', ()=>{
     const { device, memory } = makeWithMemory();
     /** @type {{ surface?: any }} */

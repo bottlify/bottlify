@@ -1228,6 +1228,52 @@ test('recorded: a texture is uploaded after it is unlocked, and only then', asyn
     assert.deepEqual([...gpu.of('writeTexture')[1].bytes], [1, 1, 1, 255]);
 });
 
+test('recorded: a managed texture keeps its GPU copy through a lock that promised no change',
+    async()=>{
+        // Wine's d3d8 add_dirty_rect_test: a managed texture's read-only and
+        // NO_DIRTY_UPDATE locks are not uploaded, and AddDirtyRect uploads
+        // what they wrote; a default-pool texture's lock always is.
+        const h = harness();
+        const { device, gpu } = h;
+        const texture = textureFrom(h, 1, 1, D3DFMT.X8R8G8B8, Uint8Array.from([9, 8, 7, 0]));
+        assert.equal(device.SetTexture(0, texture), D3D_OK);
+        selectTexture(device);
+        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+        const draw = async()=>{
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28),
+                D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+            await h.present();
+            return gpu.count('writeTexture');
+        };
+        /** @param {any} target @param {number} flags @param {number} value */
+        const write = (target, flags, value)=>{
+            /** @type {{ pBits?: number }} */
+            const locked = {};
+            assert.equal(target.LockRect(0, locked, null, flags), D3D_OK);
+            h.write(/** @type {number} */ (locked.pBits), Uint8Array.from([value, value, value, 0]));
+            assert.equal(target.UnlockRect(0), D3D_OK);
+        };
+        assert.equal(await draw(), 1);
+        write(texture, D3DLOCK.READONLY, 1);
+        write(texture, 0x8000, 2);
+        assert.equal(await draw(), 1, 'neither lock went up');
+        assert.equal(texture.AddDirtyRect(null), D3D_OK);
+        assert.equal(await draw(), 2, 'AddDirtyRect sends what they wrote');
+        assert.deepEqual([...gpu.of('writeTexture')[1].bytes], [2, 2, 2, 255]);
+
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(1, 1, 1, 0x200, D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, out),
+            D3D_OK);
+        assert.equal(device.SetTexture(0, out.texture), D3D_OK);
+        write(out.texture, 0, 3);
+        assert.equal(await draw(), 3);
+        write(out.texture, 0x8000, 4);
+        assert.equal(await draw(), 4, 'a dynamic texture\'s lock is its texture');
+    });
+
 test('recorded: a chain of levels goes up level by level, into a texture with that many',
     async()=>{
         // A far surface sampled from its top level alone aliases, and the

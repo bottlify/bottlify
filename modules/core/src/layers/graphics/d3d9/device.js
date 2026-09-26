@@ -61,7 +61,8 @@ import {
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { createDefaultRenderStates } from './renderstates.js';
 import {
-    createPriority, createReferenceCount, createSurface, createTexture, packColour, writePixels,
+    createPriority, createReferenceCount, createSurface, createTexture, packColour, rectMoveOf,
+    regionAtLevel, writePixels,
 } from './resources.js';
 import { SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters } from './validity.js';
 import { validateStages } from '../d3d8/validity.js';
@@ -1307,30 +1308,7 @@ function createDeviceObject(parameters, caps, services, identity){
     /** @param {import('./resources.js').SurfaceDesc} desc */
     const pitchOf = desc=>surfacePitch(desc.Format, desc.Width);
 
-    /**
-     * One rectangle of one surface moved to a point of another, as addresses.
-     *
-     * @param {any} source @param {Rect} rect
-     * @param {any} destination @param {{ x: number, y: number }} point
-     * @returns {SurfaceMove}
-     */
-    const rectMove = (source, rect, destination, point)=>{
-        const from = describe(source);
-        const to = describe(destination);
-        const info = FORMAT_INFO[from.Format];
-        const block = info.blockSize ?? 1;
-        const blockBytes = info.blockBytes ?? info.bytesPerPixel;
-        return {
-            from: source.base + Math.floor(rect.top / block) * pitchOf(from)
-                + Math.floor(rect.left / block) * blockBytes,
-            to: destination.base + Math.floor(point.y / block) * pitchOf(to)
-                + Math.floor(point.x / block) * blockBytes,
-            rowBytes: Math.ceil((rect.right - rect.left) / block) * blockBytes,
-            rows: Math.ceil((rect.bottom - rect.top) / block),
-            fromPitch: pitchOf(from),
-            toPitch: pitchOf(to),
-        };
-    };
+    const rectMove = rectMoveOf;
 
     /**
      * Makes the moves, when this device can reach guest memory; otherwise
@@ -3098,9 +3076,9 @@ function createDeviceObject(parameters, caps, services, identity){
             {
                 return D3DERR_INVALIDCALL;
             }
-            /** @type {SurfaceMove[]} */
-            const moves = [];
             const skipped = Math.max(0, source.levels - destination.levels);
+            /** @type {{ one: any, other: any, level: number }[]} */
+            const pairs = [];
             for (let level = 0; level < destination.levels; level++)
             {
                 const one = levelSurface(source, level + skipped);
@@ -3115,10 +3093,25 @@ function createDeviceObject(parameters, caps, services, identity){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                moves.push(rectMove(one, wholeOf(desc), other, { x: 0, y: 0 }));
+                pairs.push({ one, other, level: level + skipped });
+            }
+            // What the source was written in since it was last carried, and
+            // nothing more: an update of a source nobody touched moves nothing
+            // (Wine's d3d9 add_dirty_rect_test).
+            const region = source.takeDirtyRegion?.() ?? null;
+            /** @type {SurfaceMove[]} */
+            const moves = [];
+            for (const { one, other, level } of region ? pairs : [])
+            {
+                const desc = describe(one);
+                const rect = regionAtLevel(region, level, desc.Width, desc.Height);
+                moves.push(rectMove(one, rect, other, { x: rect.left, y: rect.top }));
             }
             deliverMoves(moves, out);
-            renderer?.markDirty?.(destination);
+            for (const { other } of region ? pairs : [])
+            {
+                renderer?.markDirty?.(other);
+            }
             return D3D_OK;
         },
 

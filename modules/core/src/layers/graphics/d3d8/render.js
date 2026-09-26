@@ -37,13 +37,12 @@
 
 import {
     COLORWRITEENABLE_ALPHA, COORD_SET_MASK, D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFILL, D3DFMT,
-    D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPT, D3DRS, D3DSHADE, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP,
-    D3DTS,
-    D3DTSS, D3DUSAGE, D3DZB, D3D_OK, FORMAT_INFO, argumentsRead, dwordToFloat, isCompressed,
-    surfaceBytes,
+    D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPOOL, D3DPT, D3DRS, D3DSHADE, D3DTA, D3DTADDRESS, D3DTEXF,
+    D3DTOP, D3DTS, D3DTSS, D3DUSAGE, D3DZB, D3D_OK, FORMAT_INFO, argumentsRead, dwordToFloat,
+    isCompressed, surfaceBytes,
 } from './constants.js';
 import { FVF, POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
-import { levelExtent } from '../d3d9/resources.js';
+import { D3DLOCK_NO_DIRTY_UPDATE, levelExtent } from '../d3d9/resources.js';
 import { D3DRS as D3DRS9 } from '../d3d9/constants.js';
 import { resourceId } from '../webgpu/internal/bindings.js';
 import {
@@ -4942,22 +4941,53 @@ export function createRenderer(options){
                 entry.soil++;
                 contentVersion++;
             };
+            const surfaceLevel = texture.GetSurfaceLevel;
+            /**
+             * Whether an unlock leaves the GPU's copy as it is: a managed
+             * texture's does after a read-only lock or one that asked for no
+             * dirty update, until AddDirtyRect says otherwise (Wine's d3d8 and
+             * d3d9 add_dirty_rect_test). Any other pool's lock writes the
+             * texture it draws from.
+             *
+             * @param {any} surface
+             */
+            const keepsCopy = surface=>texture.pool === D3DPOOL.MANAGED
+                && ((surface?.lockFlags ?? 0) & (D3DLOCK.READONLY | D3DLOCK_NO_DIRTY_UPDATE)) !== 0;
             const unlockLevel = texture.UnlockRect;
             texture.UnlockRect = (/** @type {number} */ level)=>{
+                /** @type {{ surface?: any }} */
+                const held = {};
+                const keeps = texture.pool === D3DPOOL.MANAGED
+                    && surfaceLevel(level, held) === D3D_OK && keepsCopy(held.surface);
+                held.surface?.release();
                 const hr = unlockLevel(level);
-                if (hr === D3D_OK)
+                if (hr === D3D_OK && !keeps)
                 {
                     soiled(level);
                 }
                 return hr;
             };
+            const addDirtyRect = texture.AddDirtyRect;
+            if (typeof addDirtyRect === 'function')
+            {
+                texture.AddDirtyRect = (/** @type {any} */ rect, /** @type {number} */ face)=>{
+                    const hr = addDirtyRect(rect, face);
+                    if (hr === D3D_OK)
+                    {
+                        for (let level = 0; level < levels; level++)
+                        {
+                            soiled(level);
+                        }
+                    }
+                    return hr;
+                };
+            }
             // Each level's storage is reachable through the level's own
             // surface too -- one object however many times it is asked for --
             // and a copy names that rather than the texture it belongs to. The
             // surfaces are made on demand, so each is taken into care as it is
             // first handed out.
             const hooked = new WeakSet();
-            const surfaceLevel = texture.GetSurfaceLevel;
             /** @type {(level: number, out: { surface?: any }) => number} */
             const takeLevel = (level, out)=>{
                 const hr = surfaceLevel(level, out);
@@ -4969,8 +4999,9 @@ export function createRenderer(options){
                     surfaceLevels.set(surface, level);
                     const unlockSurface = surface.UnlockRect;
                     surface.UnlockRect = ()=>{
+                        const keeps = keepsCopy(surface);
                         const unlocked = unlockSurface();
-                        if (unlocked === D3D_OK)
+                        if (unlocked === D3D_OK && !keeps)
                         {
                             soiled(level);
                         }

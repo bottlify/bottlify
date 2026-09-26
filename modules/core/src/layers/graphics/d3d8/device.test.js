@@ -1847,3 +1847,79 @@ test('what a back buffer says about itself agrees with the storage it was given'
         }
     }
 });
+
+test('UpdateTexture carries what the source was written in since it was last carried', ()=>{
+    // Wine's d3d8 add_dirty_rect_test: a texture starts dirty; an update
+    // takes its region, so a second finds nothing; a lock records its
+    // rectangle unless it is read-only or asked for no dirty update; and
+    // AddDirtyRect adds one, refusing a rectangle that is empty or leaves the
+    // texture.
+    const device = createDevice();
+    /** @param {number} pool */
+    const texture = pool=>{
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(256, 256, 2, 0, D3DFMT.X8R8G8B8, pool, out), D3D_OK);
+        return out.texture;
+    };
+    const source = texture(D3DPOOL.SYSTEMMEM);
+    const destination = texture(D3DPOOL.DEFAULT);
+    /** @returns {any[]} */
+    const update = ()=>{
+        /** @type {{ moves?: any[] }} */
+        const out = {};
+        assert.equal(device.UpdateTexture(source, destination, out), D3D_OK);
+        return out.moves ?? [];
+    };
+    /** @param {any} move */
+    const extent = move=>[move.rowBytes / 4, move.rows];
+
+    assert.deepEqual(update().map(extent), [[256, 256], [128, 128]], 'all of it, at first');
+    assert.deepEqual(update(), [], 'and nothing, once carried');
+
+    /** @param {any} rect @param {number} flags */
+    const lock = (rect, flags)=>{
+        /** @type {any} */
+        const locked = {};
+        assert.equal(source.LockRect(0, locked, rect, flags), D3D_OK);
+        assert.equal(source.UnlockRect(0), D3D_OK);
+    };
+    lock(null, D3DLOCK.READONLY);
+    lock(null, 0x8000);
+    assert.deepEqual(update(), [], 'a read-only lock and a NO_DIRTY_UPDATE one record nothing');
+
+    const part = { left: 96, top: 96, right: 160, bottom: 160 };
+    lock(part, 0);
+    const moves = update();
+    assert.deepEqual(moves.map(extent), [[64, 64], [32, 32]], 'a lock\'s rectangle, per level');
+    const top = /** @type {any} */ ({});
+    assert.equal(source.GetSurfaceLevel(0, top), D3D_OK);
+    top.surface.release();
+    assert.equal(moves[0].from, top.surface.base + 96 * 1024 + 96 * 4);
+
+    assert.equal(destination.AddDirtyRect(part), D3D_OK);
+    assert.deepEqual(update(), [], 'a dirty rectangle on the destination is not carried');
+    assert.equal(source.AddDirtyRect(part), D3D_OK);
+    assert.deepEqual(update().map(extent), [[64, 64], [32, 32]]);
+    assert.equal(source.AddDirtyRect(null), D3D_OK);
+    assert.deepEqual(update().map(extent), [[256, 256], [128, 128]]);
+    for (const rect of [{ left: 0, top: 0, right: 300, bottom: 200 },
+        { left: 100, top: 100, right: 10, bottom: 10 }, { left: 0, top: 0, right: 0, bottom: 0 }])
+    {
+        assert.equal(source.AddDirtyRect(rect), D3DERR_INVALIDCALL);
+    }
+    assert.deepEqual(update(), []);
+
+    // A copy into a level is a write the next update carries.
+    /** @type {{ surface?: any }} */
+    const image = {};
+    assert.equal(device.CreateImageSurface(16, 16, D3DFMT.X8R8G8B8, image), D3D_OK);
+    assert.equal(device.CopyRects(image.surface, [{ left: 0, top: 0, right: 16, bottom: 16 }], 1,
+        top.surface, [{ x: 32, y: 48 }]), D3D_OK);
+    assert.deepEqual(update().map(extent), [[16, 16], [8, 8]]);
+
+    image.surface.release();
+    source.release();
+    destination.release();
+    device.release();
+});

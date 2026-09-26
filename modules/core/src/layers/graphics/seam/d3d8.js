@@ -587,9 +587,8 @@ export function createDirect3D8Seam(
         /** @param {any} texture @param {number[]} args */
         UnlockRect: (texture, [level])=>texture.UnlockRect(level >>> 0),
 
-        // Noted and nothing else: an unlock already marks the whole level for
-        // upload, so there is no smaller area for this to narrow it to.
-        AddDirtyRect: ()=>D3D_OK,
+        /** @param {any} texture @param {number[]} args */
+        AddDirtyRect: (texture, [rect])=>texture.AddDirtyRect(readRect(rect)),
     };
     // The two interfaces a texture derives from are answered too, over the
     // same methods: their slots are the front of the texture's own.

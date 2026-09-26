@@ -57,7 +57,8 @@ import {
     reportedBackBufferCount, targetPairResult, validatePresentParameters, validateStages,
 } from './validity.js';
 import {
-    createPriority, createReferenceCount, createSurface, createTexture, writePixels,
+    createPriority, createReferenceCount, createSurface, createTexture, rectMoveOf,
+    regionAtLevel, writePixels,
 } from '../d3d9/resources.js';
 import { DEVICE_STATE, LIGHT_ENABLED } from '../d3d9/device.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
@@ -2468,6 +2469,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     toPitch: pitchOf(to),
                 }))
                 : [wholeSurfaceMove(source, destination)];
+            // A texture level written this way is written as a lock writes
+            // it, which is what the next UpdateTexture from it carries.
+            for (const copy of copies)
+            {
+                destination.noteWritten?.({
+                    left: copy.at.x, top: copy.at.y,
+                    right: copy.at.x + copy.rect.right - copy.rect.left,
+                    bottom: copy.at.y + copy.rect.bottom - copy.rect.top,
+                });
+            }
             renderer?.markDirty(destination);
             return D3D_OK;
         },
@@ -2508,18 +2519,24 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             }
             /** @type {SurfaceMove[]} */
             const moves = [];
-            const levels = Math.min(source.levels ?? 1, destination.levels ?? 1);
+            // What the source was written in since it was last carried, and
+            // nothing more: an update of a source nobody touched moves nothing.
+            const region = source.takeDirtyRegion?.() ?? null;
+            const levels = region ? Math.min(source.levels ?? 1, destination.levels ?? 1) : 0;
             for (let level = 0; level < levels; level++)
             {
                 const one = levelSurface(source, level);
                 const other = levelSurface(destination, level);
                 if (one && other)
                 {
-                    moves.push(wholeSurfaceMove(one, other));
+                    const desc = describe(one);
+                    const rect = regionAtLevel(/** @type {any} */ (region), level, desc.Width,
+                        desc.Height);
+                    moves.push(rectMoveOf(one, rect, other, { x: rect.left, y: rect.top }));
+                    renderer?.markDirty(other);
                 }
             }
             out.moves = moves;
-            renderer?.markDirty(destination);
             return D3D_OK;
         },
 
