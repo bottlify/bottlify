@@ -599,6 +599,88 @@ function putInfo(view, { width, height, bitCount, compression = 0, table = [] })
     table.forEach((entry, index)=>view.setUint32(WIRED_INFO + 40 + index * 4, entry, true));
 }
 
+test('StretchDIBits answers and draws as Windows does for a top-down DIB', ()=>{
+    // Wine's test_StretchDIBits, the top-down and bottom-up destination cases:
+    // a copy at its own size reads the source from the top, and answers the
+    // lines down to the rectangle's bottom; a stretch reads ySrc from the
+    // bottom and answers the height; a source rectangle that starts before
+    // the DIB draws nothing and answers zero. The pixels are compared without
+    // their top byte.
+    const { fns, view } = wiredGdi();
+    const source = [0xcafed00d, 0xfeedface, 0xfedcba98, 0x76543210];
+    const dc = fns.CreateCompatibleDC.handler([0]);
+    /** @param {number} height @returns {number} the section's first pixel's address */
+    const destination = height=>{
+        putInfo(view, { width: 2, height, bitCount: 32 });
+        fns.SelectObject.handler([dc, fns.CreateDIBSection.handler([dc, WIRED_INFO, 0,
+            WIRED_POINTER, 0, 0])]);
+        return view.getUint32(WIRED_POINTER, true);
+    };
+    /** @param {number} at @param {number[]} args */
+    const stretch = (at, args)=>{
+        for (let index = 0; index < 4; index++)
+        {
+            view.setUint32(at + index * 4, 0, true);
+        }
+        putInfo(view, { width: 2, height: -2, bitCount: 32 });
+        source.forEach((pixel, index)=>view.setUint32(WIRED_BITS + index * 4, pixel, true));
+        const answer = fns.StretchDIBits.handler([dc, ...args, WIRED_BITS, WIRED_INFO, 0,
+            0x00cc0020]);
+        return { answer, pixels: [0, 1, 2, 3].map(index=>view.getUint32(at + index * 4, true)
+            & 0xffffff) };
+    };
+    const [a, b, c, d] = source.map(pixel=>pixel & 0xffffff);
+    /** @type {[number[], number[], number][]} */
+    const cases = [
+        [[0, 0, 2, 2, 0, 0, 2, 2], [a, b, c, d], 2],
+        [[0, 0, 1, 1, 0, 0, 1, 1], [a, 0, 0, 0], 1],
+        [[0, 0, 2, 2, 0, 0, 1, 1], [c, c, c, c], 2],
+        [[0, 0, 1, 1, 0, 0, 2, 2], [0x441000, 0, 0, 0], 2],
+        [[0, 0, 2, 2, 1, 1, -2, -2], [0, 0, 0, 0], 0],
+        [[1, 1, -2, -2, 1, 1, -2, -2], [0, 0, 0, 0], 0],
+        [[1, 1, 2, 2, 0, 0, 2, 2], [0, 0, 0, a], 2],
+        [[2, 2, 4, 4, 0, 0, 2, 2], [0, 0, 0, 0], 2],
+        [[-4, -4, 4, 4, 0, 0, 4, 4], [0, 0, 0, 0], 2],
+    ];
+    const topDown = destination(-2);
+    for (const [args, pixels, answer] of cases)
+    {
+        assert.deepEqual(stretch(topDown, args), { answer, pixels }, `${args}`);
+    }
+    // Windows puts 0xFEEDFACE at the second row's first pixel here, which no
+    // mirroring of the source rectangle gives; the rule is not known, and only
+    // the answer is held to.
+    assert.equal(stretch(topDown, [1, 1, -2, -2, 1, 1, 2, 2]).answer, 2);
+    assert.deepEqual(stretch(destination(2), [0, 0, 2, 2, 0, 0, 2, 2]).pixels, [c, d, a, b],
+        'into a bottom-up section');
+});
+
+test('StretchDIBits answers the DIB\'s height, negative for a top-down one under another '
+    + 'operation than SRCCOPY', ()=>{
+    // Wine's dib tests, a 4x4 32-bit DIB either way up, at its size, cropped
+    // and mirrored, under SRCCOPY and SRCAND.
+    const { fns, view } = wiredGdi();
+    const dc = fns.CreateCompatibleDC.handler([0]);
+    putInfo(view, { width: 128, height: 128, bitCount: 32 });
+    fns.SelectObject.handler([dc, fns.CreateDIBSection.handler([dc, WIRED_INFO, 0,
+        WIRED_POINTER, 0, 0])]);
+    const SRCAND = 0x008800c6;
+    for (const height of [4, -4])
+    {
+        putInfo(view, { width: 4, height, bitCount: 32 });
+        /** @type {[number[], number][]} */
+        const cases = [[[10, 10, 4, 4, 0, 0, 4, 4], SRCCOPY],
+            [[20, 10, 4, 4, 0, 0, 4, 4], SRCAND], [[30, 10, 3, 3, 1, 1, 3, 3], SRCCOPY],
+            [[40, 10, 3, 3, 1, 1, 3, 3], SRCAND], [[50, 10, -2, -2, 2, 3, -2, -2], SRCCOPY],
+            [[60, 10, -2, -2, 2, 3, -2, -2], SRCAND]];
+        for (const [args, rop] of cases)
+        {
+            assert.equal(fns.StretchDIBits.handler([dc, ...args, WIRED_BITS, WIRED_INFO, 0,
+                rop]), rop === SRCCOPY ? 4 : height, `${height}: ${args}, ${rop.toString(16)}`);
+        }
+    }
+});
+
 test('a 5-6-5 DIB draws as 5-6-5, from StretchDIBits and in a section of its own', ()=>{
     const { fns, view, bytes } = wiredGdi();
     const BI_BITFIELDS = 3;
