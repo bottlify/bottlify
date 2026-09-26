@@ -55,7 +55,9 @@ the module graph is built. All are optional.
 | `network` | adapter `{ bind, unbind, find }` or a `NetworkTransport` | loopback | The transport under Winsock; `createApp` hands its own `win32.network` option here. |
 | `http` | request function | `null` | The transport under WinInet. |
 | `cursor`, `keyState`, `clipCursor` | thunks | nothing pressed, origin | The input layer, handed down. |
-| `commandLine`, `environment` | string, record | the quoted image path; `SystemRoot`, `TEMP`, `windir` under `C:\WINDOWS` | What the program is told it was started with. |
+| `windows` | `'win2000' \| 'winxp' \| 'win7' \| 'win10'` | `'winxp'` | The Windows the machine is: 2000 SP4 (5.0.2195), XP SP3 (5.1.2600), 7 SP1 (6.1.7601) or 10 (10.0.19045). One record (`kernel32/versions.js`) reaches every place a version is read -- the version calls, the hive, the default environment, shell32's folders, `VERSION.dll`'s system libraries, `RtlGetVersion` -- and any other name fails the layer's creation, the four choices in the message. |
+| `compatibility` | `{ supportedOS?: string[], imageVersion?: { major, minor } }` | nothing declared | What the running program says it knows: its manifest's `supportedOS` GUIDs and its PE header's operating system version (`createApp` reads both from the image, `compatibilityOf`). Only `win10` consults it, for what the version calls tell the program (§3, "The version a program is told"). |
+| `commandLine`, `environment` | string, record | the quoted image path; `SystemRoot`, `TEMP`, `windir` under `C:\WINDOWS`, and the profile folders of the Windows's layout (`defaultEnvironment`): `ALLUSERSPROFILE`, `APPDATA`, `USERPROFILE`, and for 7 and 10 `LOCALAPPDATA`, `ProgramData`, `PUBLIC` | What the program is told it was started with. |
 | `onOutput(handle, text)`, `onTrace(text)`, `created(hwnd)`, `spawned(request)` | callbacks | no-ops | Console output, `OutputDebugString`, window creation, `CreateProcess`. |
 | `onMessageBox(notice)` | callback | the box's own default | A message box the program put up. `notice` is `{ id, text, caption, type, buttons, defaultButton, icon }`; the answer is the id of the button pressed, and a promise parks the calling thread until `answerMessageBox(id, button)` supplies it. |
 | `onClipboard(text)` | callback | no-op | The text a program copied. Called from `CloseClipboard` when the clipboard was written under that open and holds `CF_UNICODETEXT` (preferred), `CF_TEXT` or `CF_OEMTEXT`; a close after a read alone, or with only non-text formats, calls nothing. A null handle (delayed rendering) is not rendered. |
@@ -112,7 +114,7 @@ instantiation of the module reports (method in "Inventory" below):
 
 | library | directory | exports | what it covers |
 |---------|-----------|--------:|----------------|
-| `KERNEL32.dll` | `kernel32/` | 368 | Console, threads and waits, heap and virtual memory, process and TLS, modules (`GetModuleHandleA`/`W`), files and directories, critical sections, SRW locks, condition variables and one-time initialisation (`slimsync.js`), locale and code pages, environment and command line, system info and time (`GetNativeSystemInfo` is `GetSystemInfo`'s answer and `IsWow64Process` answers FALSE: a 32-bit system has no WOW64), `CreateProcess`, exceptions and SEH, resources, drives, file mappings and pipes, completion ports, file times, console I/O, APCs and the alertable waits (`apc.js`), overlapped I/O with a completion routine (`ReadFileEx`/`WriteFileEx`). |
+| `KERNEL32.dll` | `kernel32/` | 372 | Console, threads and waits, heap and virtual memory, process and TLS, the version (`GetVersion`, `GetVersionExA`/`W`, `VerifyVersionInfoA`/`W`, `VerSetConditionMask`), modules (`GetModuleHandleA`/`W`), files and directories, critical sections, SRW locks, condition variables and one-time initialisation (`slimsync.js`), locale and code pages, environment and command line, system info and time (`GetNativeSystemInfo` is `GetSystemInfo`'s answer and `IsWow64Process` answers FALSE: a 32-bit system has no WOW64), `CreateProcess`, exceptions and SEH, resources, drives, file mappings and pipes, completion ports, file times, console I/O, APCs and the alertable waits (`apc.js`), overlapped I/O with a completion routine (`ReadFileEx`/`WriteFileEx`). |
 | `USER32.dll` | `user32/` | 287 | Windows and classes, painting, system queries and display settings, objects (cursors -- decoded to the picture the page shows, `cursors.js` -- icons, menus, clipboard), dialogs, hot keys, `SendInput`, raw input (`rawinput.js`), `TrackMouseEvent`, the keyboard-layout family (`GetKeyboardLayout`, `MapVirtualKey` A/W/`Ex`, `ToUnicode`/`Ex`, `ToAscii`/`Ex`, `VkKeyScan` A/W/`Ex`) over the one en-US layout this build has, read from one table in `keys.js` (`characterOf`/`keyForCharacter`) that `TranslateMessage`'s fallback reads too, under the modifiers held at the time. |
 | `msvcrt.dll` | `msvcrt/` | 345 (294 without `fpu`) | The C runtime: strings, multibyte strings, conversion, formatting and scanning, heap, math (`_ftol` answering its `__int64` in EDX:EAX), paths and directory searches (`_findfirst`/`_findnext`/`_findclose`, the `i64` forms and the wide `_wfindfirst`/`_wfindnext` and `_wfindfirsti64`/`_wfindnexti64`), the low-level file calls over a descriptor table with text mode (`io.js`: `_open`, `_read`, `_write`, `_lseek`, `_stat`/`_stati64`/`_fstati64`, `_setmode` for `_O_TEXT`/`_O_BINARY` and the Unicode translations `_O_WTEXT`/`_O_U16TEXT`/`_O_U8TEXT` (`widetext.js`), `_tell`, `_eof`, `_filelength` and the rest, and `_lseeki64`/`_telli64`/`_filelengthi64` answering in EDX:EAX; `_get_osfhandle`/`_open_osfhandle` share one record, and so one position, with a kernel32 file handle; `_O_TEMPORARY` and fopen's `D` delete the file when that descriptor closes, or when the process ends however it ends), streams standing on those descriptors (`stdio.js`: `fopen` and its family, `_wfopen`, `ccs=` opening in a Unicode translation, `freopen` (of a standard stream too) and `_fdopen`, `fgetpos`/`fsetpos`, `_fcloseall`/`_flushall`, `getchar`/`putchar`, `printf`/`vprintf`/`puts` through `stdout` and `vfprintf`, the wide calls `fgetwc`/`fputwc`, `fgetws`/`fputws`, `ungetwc`, `_putws` and `fwprintf`/`wprintf`/`vfwprintf`/`vwprintf`, `_filbuf`/`_flsbuf` and the macros' `_flag`, and the standard three as `_iob`'s first records, writing to the console), the runtime's variables with `errno` per thread (`globals.js`), threads (`threads.js`: `_beginthread`/`_beginthreadex` through kernel32's `CreateThread`), time, C++ support (`cxx.js`), CRT startup and the exits (`atexit`, `_onexit`, `_cexit`, `exit`), structured and C++ exceptions (`seh.js`, `eh.js`). |
 | `GDI32.dll` | `gdi32/` | 140 | Device contexts, objects and their lifetimes, metrics, drawing entry points. A device-dependent bitmap has rows of its own outside guest memory (`CreateBitmap` copies `lpBits`; `GetBitmapBits`/`SetBitmapBits` move them), and `GetObject`/`GetObjectW` report every object as the program reads it back -- a `BITMAP` with its stride, a whole `DIBSECTION`, a font's `LOGFONT`, a palette's entry count. Text and fonts in both spellings (`CreateFont`/`Indirect`, `GetTextMetrics` with TEXTMETRICW's WCHAR fields, `GetTextExtentPoint`/`32`, `GetCharWidth`/`32`, `GetCharABCWidths`, `TextOut`, `ExtTextOut`); ABC widths are each character's own advance as the black box, with no bearings. Mapping modes set the extents they fix (MM_TEXT one to one, the fixed modes the device's 96-dot inch against their units with y up, MM_ISOTROPIC starting from MM_LOMETRIC's, MM_ANISOTROPIC keeping its own), and `LPtoDP`/`DPtoLP`/`OffsetWindowOrgEx` answer through them; `SetLayout`/`GetLayout` keep a DC's layout, an RTL one mirroring `LPtoDP` across the device and reading back `MM_ANISOTROPIC`. Drawing itself is still in device units whatever the mode or layout, but for `SetDIBitsToDevice`, which maps its destination point and, under RTL, places the picture from its right edge. Every spelling of adding and removing a font resource answers the documented failure, the font table being fixed; `GetTextCharset(Info)` and `GetFontLanguageInfo` answer for the selected font. `EnumFontFamiliesExA`/`W` call the program's callback on its own thread with each face the table offers (`gdi32/faces.js`), a substitute such as MS Shell Dlg found by name but never listed, for `ANSI_CHARSET` and `DEFAULT_CHARSET`; every face is reported as a vector font (`FontType` 0, `TMPF_VECTOR` in `tmPitchAndFamily`) rather than TrueType, since none has tables `GetFontData` could read, so a program that lists only TrueType faces finds none. `CreateBitmap` (and `CreateBitmapIndirect`, from a `BITMAP`) rounds a depth up to 1, 4, 8, 16, 24 or 32 and refuses a side past 0x7ffffff with `ERROR_INVALID_PARAMETER`; a zero width or height is the one stock 1x1 monochrome bitmap every memory DC starts with; `CreateCompatibleBitmap` and `CreateDiscardableBitmap` make a device-dependent bitmap at the DC's depth, or, with a DIB section selected, a DIB section in its format; `CreateDIBitmap` makes a device-dependent bitmap at the DC's depth. `CreateDIBSection` takes `BI_BITFIELDS` only at 16 and 32 bits with no mask empty and not with `DIB_PAL_COLORS`, refuses `DIB_PAL_COLORS + 1`, a plane count Windows refuses, and an image past 32 bits of bytes. A `BITMAPCOREHEADER` is taken wherever a DIB is, and `GetDIBits` fills one in with an RGBTRIPLE table. A run-length encoded DIB (`BI_RLE8` at eight bits, `BI_RLE4` at four, bottom-up, with its `biSizeImage`) is drawn by `StretchDIBits`, `SetDIBitsToDevice` and `SetDIBits`, whole whatever lines are asked for, only the pixels its runs reach; `GetDIBits` describes one and writes none. Any other DIB needs planes: one whose `biPlanes` is 0 is refused by all three. `StretchDIBits` answers as Windows does: a `SRCCOPY` copy at the source's own size the lines from the DIB's first to the rectangle's far edge, reading a top-down DIB's `ySrc` from its top; a stretch the DIB's height, negative for a top-down one under another operation, reading `ySrc` from the bottom; and 0, drawing nothing, for a source rectangle that begins before the DIB, a negative extent running below or left of the origin. Scan lines go where Windows puts them, counted from the DIB's bottom whichever way it is stored: `SetDIBitsToDevice` draws only the lines handed in, `SetDIBits` (and `CreateDIBitmap`'s `CBM_INIT`) lays the DIB against the bitmap's top-left, and `GetDIBits` writes zeros for lines outside the bitmap. A `DIB_PAL_COLORS` table is read through the DC's palette, wrapping at its end, and `SetDIBits` takes `DIB_PAL_INDICES` into a monochrome bitmap only; the stock `DEFAULT_PALETTE` holds its twenty colours, which `GetPaletteEntries` reads and `SetPaletteEntries` may not change, and `CreateHalftonePalette` makes 256, the default palette's first and last eight at its ends. A pattern brush keeps its own copy of the bitmap's bits; `CreateDIBPatternBrushPt`, `CreateDIBPatternBrush` and `LOGBRUSH`'s `BS_DIBPATTERN` forms copy a packed DIB's, a palette-relative one resolved through the DC's palette each time it paints, and `BS_PATTERN8X8` is `BS_PATTERN`. |
@@ -128,7 +130,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `WININET.dll` | `wininet/` | 12 | HTTP as a handle tree; a request parks the caller. |
 | `IMM32.dll` | `imm32/` | 10 | "There is no input method" — which is the state a game asks for. |
 | `RPCRT4.dll` | `rpcrt4/` | 8 | `UuidCreate` and the other GUID/status helpers a COM-adjacent program links directly; `UuidToStringA` spells a UUID without braces, in lower case, into a string the library allocates on the process heap, which `RpcStringFreeA` frees before clearing the caller's pointer. |
-| `VERSION.dll` | `version/` | 8 | The version block read out of a file's own image, A and W: `VerQueryValueA` answers a text value in ANSI, in the room `GetFileVersionInfoSize` reserves behind the block (marked `FE2X`), or in place when the caller copied the block into less; `VerQueryValueW` answers the block's own UTF-16. A library the engine answers for itself, by bare name or in the system directory, has a block built here -- the system's version as `GetVersionEx` reports it, or for a DirectX component the DirectX version the registry holds -- unless a file of that name on the volume answers first. |
+| `VERSION.dll` | `version/` | 8 | The version block read out of a file's own image, A and W: `VerQueryValueA` answers a text value in ANSI, in the room `GetFileVersionInfoSize` reserves behind the block (marked `FE2X`), or in place when the caller copied the block into less; `VerQueryValueW` answers the block's own UTF-16. A library the engine answers for itself, by bare name or in the system directory, has a block built here -- the machine's own version, `major.minor.build.0` of the configured Windows (the real one, even where `GetVersionEx` tells a program an older one), or for a DirectX component the DirectX version the registry holds -- unless a file of that name on the volume answers first. |
 | `LZ32.dll` | `lz32/` | 4 | The LZ compression stubs an older installer links and never has cause to call successfully. |
 | `MSWSOCK.dll` | `wsock32/` | 4 | The Winsock extensions. |
 | `COMDLG32.dll` | `comdlg32/` | 4 | File dialogs, answered as cancelled. |
@@ -143,7 +145,7 @@ instantiation of the module reports (method in "Inventory" below):
 | *(no DLL)* | `quartz/` | — | The DirectShow filter graph, reached through `CoCreateInstance(CLSID_FilterGraph)`; registered on the COM registry, not as an import table. |
 | *(no DLL)* | `cabinet/` | — | The cabinet reader SETUPAPI extracts through (`cabinet.js`: `CFHEADER` with its reserved areas and set links, `CFFOLDER`, `CFFILE`, and every `CFDATA` block checked against its checksum when it has one, from the Cabinet SDK's format documents) and its decoders: MSZIP (`inflate.js`, one RFC 1951 stream per block, the 32 KiB history carried across the folder) and LZX (`lzx.js`, windows 2^15 to 2^21; verbatim, aligned-offset and uncompressed blocks; the `E8` call translation undone). A Quantum folder is refused as unsupported. |
 
-Total: 1798 table entries across 31 libraries, 1665 distinct functions.
+Total: 1802 table entries across 31 libraries, 1669 distinct functions.
 
 **Inventory method.** `dbg/docs/count-dlls.mjs` (throwaway; not part of the build) creates the
 module against the same stub host `src/layers/win32/module.test.js` uses
@@ -377,7 +379,12 @@ gets its own heap, hive, queue and COM registry.
   machine's side, and deletes the user's key before the machine's -- so a class an installer
   registered under `HKLM\Software\Classes` is found by activation that only reads the classes
   root. A saved hive carries no classes tree of its own; one saved with it has it folded into the
-  machine's classes without overriding what is there.
+  machine's classes without overriding what is there. A hive is made for a Windows
+  (`createHive({ windows })`), and restoring a saved one keeps everything a program wrote but for
+  the values that describe the machine: the version values under `Windows NT\CurrentVersion`
+  and both `Shell Folders` keys are written over, and a version value this Windows lacks is
+  removed, so a bottle whose setting changed describes the Windows it now runs; the processor's
+  `HARDWARE` branch is rewritten whole, as the kernel writes it at every boot.
 - **The display** (`user32/display.js`, `user32/system.js`). `displayModes(screen)` lists the sizes
   of the era whatever the display's own — 640×480, 800×600, 1024×768, 1280×720, 1280×800,
   1280×832, 1440×900, 1512×982, 1600×900, 1680×1050, 1728×1117, 1920×1080, 1920×1200,
@@ -517,8 +524,44 @@ Two clocks, both the kernel's ([`kernel.md`](./kernel.md)):
 | `GetTickCount`, `QueryPerformanceCounter` (1 MHz), `timeGetTime`, `clock`, `Sleep` deadlines, message timers | `kernel.clock.virtualTime()` — the guest's clock. A frame loop that times an interval with one call and reads it with another must not disagree with itself. |
 | `GetSystemTimeAsFileTime`, `GetSystemTime`, `GetLocalTime`, `time`, `timeGetSystemTime` | `kernel.clock.wallClock()` — the date. |
 
-`GetTickCount` wraps at 32 bits as Windows does. `GetVersionExA` reports 5.1 build 2600,
-`VER_PLATFORM_WIN32_NT`, workstation, no service pack.
+`GetTickCount` wraps at 32 bits as Windows does.
+
+### The version a program is told
+
+The machine is one of four Windows, the `windows` configuration (`kernel32/versions.js`), each
+with the last service pack its release had; XP SP3 is the default
+([`decisions.md`](../../roadmap/decisions.md)). Every place a program reads the version agrees:
+
+| where | 2000 | XP | 7 | 10 |
+|-------|------|----|---|----|
+| `GetVersion`, `GetVersionExA`/`W` (`dwMajor.Minor.Build`, `szCSDVersion`) | 5.0.2195, Service Pack 4 | 5.1.2600, Service Pack 3 | 6.1.7601, Service Pack 1 | 10.0.19045, none -- or 6.2.9200 / 6.3.9600, below |
+| `OSVERSIONINFOEX` `wServicePackMajor.Minor`, `wSuiteMask`, `wProductType` | 4.0, 0, workstation | 3.0, `VER_SUITE_SINGLEUSERTS`, workstation | 1.0, `VER_SUITE_SINGLEUSERTS`, workstation | 0.0, `VER_SUITE_SINGLEUSERTS`, workstation |
+| the process block (`OSMajorVersion`, `OSMinorVersion`, `OSBuildNumber`, `OSCSDVersion`, `CSDVersion`, `OSPlatformId`) and `RtlGetVersion` | as above | as above | as above | 10.0.19045 always |
+| `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion`: `CurrentVersion`, `CurrentBuildNumber`, `CurrentBuild`, `CSDVersion`, `ProductName` | 5.0, 2195, `1.511.1 () (Obsolete data - do not use)`, Service Pack 4, Microsoft Windows 2000 | 5.1, 2600, the same placeholder, Service Pack 3, Microsoft Windows XP | 6.1, 7601, 7601, Service Pack 1, Windows 7 Professional | 6.3, 19045, 19045, none, Windows 10 Pro, and `CurrentMajorVersionNumber`/`CurrentMinorVersionNumber` 10 and 0 |
+| a system library's file version (`VERSION.dll`) | 5.0.2195.0 | 5.1.2600.0 | 6.1.7601.0 | 10.0.19045.0 |
+| the profile (`shellFolders`, the environment) | `C:\Documents and Settings\User`, `...\All Users` | as 2000 | `C:\Users\User` (`AppData\Roaming`, `AppData\Local`, `Documents`), `C:\ProgramData`, `C:\Users\Public` | as 7 |
+
+All four are 32-bit systems with the platform `VER_PLATFORM_WIN32_NT`: `IsWow64Process` answers
+FALSE and there is no `Program Files (x86)`. The Windows directory is `C:\WINDOWS` whichever is
+chosen.
+
+Windows 10 answers `GetVersion`, `GetVersionEx` and `VerifyVersionInfo` with the newest Windows the
+program says it knows, never newer than itself (`reportedVersion`): the highest its manifest's
+`supportedOS` elements name, or, when they name none, its PE header's operating system version
+rounded down to 10.0 or 6.3 -- and 6.2.9200 when older still, which is what a program of the era
+with no manifest is told. 8.1's answer is 6.3.9600. The process block, `RtlGetVersion`, the
+registry and a library's file version keep 10.0.19045. The other three answer every program the
+truth.
+
+`VerifyVersionInfo` compares the major and minor version and the two service pack numbers as one
+version: an `EQUAL` condition demands its own field and passes to the next, the first ordering
+condition decides the rest together, and a version field the type mask names with no condition, or
+with `AND` or `OR`, is not met (Wine's kernel32 `test_VerifyVersionInfo`). The suite compares as a
+set (`AND`: every suite asked for, `OR`: any, or none asked). An empty type mask or condition mask
+is `ERROR_BAD_ARGUMENTS`; a request not met is `ERROR_OLD_WIN_VERSION`.
+
+The C runtime's `_osver`, `_winver`, `_winmajor` and `_winminor` are still the default XP's figures
+whatever the configuration (`msvcrt/startup.js` reads `kernel32/process.js`'s constants).
 
 ### The divergence rule
 
@@ -543,7 +586,8 @@ nothing implements).
 
 - **The C runtime's variables are data exports**, read through the address a program imported:
   `_acmdln`, `_pctype`, `__mb_cur_max`, `_adjust_fdiv`; the system version as `_osver`,
-  `_winver`, `_winmajor` and `_winminor`, the figures `GetVersion` answers; `_HUGE` as
+  `_winver`, `_winmajor` and `_winminor`, the default Windows's figures (not yet the configured
+  one's); `_HUGE` as
   infinity; `_environ` as the vector `__getmainargs` hands `main`; and `_iob`, twenty `FILE`
   records whose first three are stdin (at its end: nobody types), stdout and stderr (the console)
   -- `__iob_func` answers the same array. They live in the runtime module's writable `.data`
@@ -776,16 +820,16 @@ and the metrics in §2.
 ## 5. Tests
 
 Unit tests are colocated with each file, `node:test`, over `fakeMemory`
-(`src/layers/win32/msvcrt/harness.test.js`) or a stub host; there are 123 `*.test.js` files under
+(`src/layers/win32/msvcrt/harness.test.js`) or a stub host; there are 125 `*.test.js` files under
 `src/layers/win32/`. Run with `npm test` from `modules/core`.
 
 | area | files (all `src/layers/win32/…`) |
 |------|----------------------------------|
-| kernel32 | `apc`, `atoms`, `code-arena`, `consoleio`, `critical`, `drives`, `environment`, `file-holds`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `modules`, `named-objects`, `process`, `processor`, `profile`, `resources`, `seh`, `slimsync`, `spawn`, `sync`, `system`, `teb`, `threading`, `vfs` `.test.js` |
+| kernel32 | `apc`, `atoms`, `code-arena`, `consoleio`, `critical`, `drives`, `environment`, `file-holds`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `modules`, `named-objects`, `process`, `processor`, `profile`, `resources`, `seh`, `slimsync`, `spawn`, `sync`, `system`, `teb`, `threading`, `versions`, `vfs` `.test.js` |
 | msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `globals`, `heap`, `io`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `stdio`, `strings`, `threads`, `time`, `widetext` `.test.js` |
 | user32 | `controls`, `cursors`, `dialogs`, `display`, `keys`, `messages`, `objects`, `paint`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |
-| the rest | `advapi32/{crypto,functions,registry,services,tokens}`, `advpack/functions`, `cabinet/{cabinet,inflate,lzx}`, `comctl32/{functions,progress,propsheet,tab,treeview}`, `comdlg32/functions`, `d3dx9/functions`, `imm32/functions`, `lz32/{expand,functions}`, `mpr/functions`, `msacm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{cfb,functions,guid,objects,storage}`, `oleaut32/{errorinfo,functions,invoke,objects,typelib}`, `quartz/graph`, `rpcrt4/functions`, `setupapi/{functions,inf}`, `sfc/functions`, `shell32/{fileop,functions,namespace,shelllink}`, `shlwapi/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,mmio,thread,timers,wave}`, `winspool/functions`, `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
+| the rest | `advapi32/{crypto,functions,registry,services,tokens}`, `advpack/functions`, `cabinet/{cabinet,inflate,lzx}`, `comctl32/{functions,imagelist,progress,propsheet,tab,treeview}`, `comdlg32/functions`, `d3dx9/functions`, `imm32/functions`, `lz32/{expand,functions}`, `mpr/functions`, `msacm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{cfb,functions,guid,objects,storage,wbem}`, `oleaut32/{errorinfo,functions,invoke,objects,typelib}`, `quartz/graph`, `rpcrt4/functions`, `setupapi/{functions,inf}`, `sfc/functions`, `shell32/{fileop,functions,namespace,shelllink}`, `shlwapi/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,mmio,thread,timers,wave}`, `winspool/functions`, `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
 | module | `module.test.js` — a configured screen reaches user32 and gdi32; a DC through user32 is GDI's; both fall back to 640×480 together; the C runtime family is cdecl and every other library stdcall; the runtime's `_sleep` is kernel32's `Sleep`; the KnownDLLs; shfolder's forwarding; comctl32's `_TrackMouseEvent` is user32's. `wiring.test.js` builds the module and asks through it what each library's capabilities were handed: SHLWAPI's wide strings, ADVPACK's `IsNTAdmin` from the account's token, SETUPAPI's INF found on the volume by bare name and its OS components in the hive advapi32 reads, VERSION's system libraries, mmio's buffer from the program's heap, the synchronisation calls' and the profile structures' last errors and guest memory, `LoadLibraryEx`'s flags reaching the assembler, `ExitProcess` and the runtime's `exit` telling the attached libraries last first (and ending at once with none), `MWMO_INPUTAVAILABLE`. |
 
 `kernel32/critical.itest.js` runs the hand-assembled critical-section fast paths on the real
