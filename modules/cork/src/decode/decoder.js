@@ -65,6 +65,8 @@ export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
  *              address: boolean }} prefixes
  * @property {number} [cc]          for jcc/setcc/cmovcc/fcmovcc
  * @property {string} opcode        the opcode bytes as text, "0f 2e", for a report
+ * @property {{ name: string, address: number, length: number }} [helper]
+ *           set on the instructions a call to a compiler's runtime helper is formed as (helpers.js)
  */
 
 /**

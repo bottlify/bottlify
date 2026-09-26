@@ -18,6 +18,7 @@
  * shape the emitter turns into one wasm function.
  */
 
+import { RUNTIME_HELPERS, helperAt, helperInstructions } from './helpers.js';
 import { decode } from './decode/decoder.js';
 
 /**
@@ -356,8 +357,12 @@ export function formShared(){
  * @param {number} entry
  * @param {{ maxBlocks?: number, maxBytes?: number,
  *     translatable?: (eip: number) => boolean, leafCalls?: boolean,
- *     callTargets?: Map<number, number[]>, shared?: FormShared }} [options]
- *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`); callTargets:
+ *     callTargets?: Map<number, number[]>, shared?: FormShared,
+ *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[] }} [options]
+ *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`); helpers: a
+ *     call to a compiler's runtime helper is formed as what it amounts to (helpers.js), those
+ *     of RUNTIME_HELPERS or of the list given;
+ *     callTargets:
  *     by the address of an indirect call, the callees it has been seen to go to, formed in
  *     as a direct call's small callee is -- the call compares its target with each;
  *     shared: what forming found, for other regions formed over the same bytes with the
@@ -366,7 +371,7 @@ export function formShared(){
  */
 export function formRegion(read, entry,
     { maxBlocks = 128, maxBytes = 8192, translatable = ()=>true, leafCalls = true,
-        callTargets, shared } = {})
+        callTargets, shared, helpers = true } = {})
 {
     /** @param {number} address */
     const decodeAt = shared === undefined ? (/** @type {number} */ address)=>decode(read, address)
@@ -540,6 +545,23 @@ export function formRegion(read, entry,
                 break;
             }
             const decoded = decodeAt(eip);
+            const called = !('refused' in decoded) && helpers !== false && decoded.op === 'call'
+                && decoded.operands[0].kind === 'rel'
+                ? /** @type {number} */ (decoded.operands[0].target) : -1;
+            const helper = called >= 0 && translatable(called)
+                ? helperAt(read, called, helpers === true ? RUNTIME_HELPERS
+                    : /** @type {readonly import('./helpers.js').RuntimeHelper[]} */ (helpers))
+                : null;
+            if (helper !== null && !('refused' in decoded))
+            {
+                // A compiler's runtime helper: its call is formed as the
+                // instructions it amounts to, and the block goes on (helpers.js).
+                block.instructions.push(...helperInstructions(helper, decoded, called));
+                bytes += decoded.length;
+                eip = (eip + decoded.length) >>> 0;
+                block.end = eip;
+                continue;
+            }
             if ('refused' in decoded)
             {
                 refused.set(decoded.opcode, (refused.get(decoded.opcode) ?? 0) + 1);
@@ -660,6 +682,15 @@ export function formRegion(read, entry,
             }
         }
     }
+    // A runtime helper a call was formed as decides the code as its bytes do:
+    // they are the region's, so a write to them drops it.
+    for (const { address, length } of helpersOf(ordered))
+    {
+        for (let page = address >>> 12; page <= (address + length - 1) >>> 12; page++)
+        {
+            pages.add(page);
+        }
+    }
     // A table's entries decide the region's blocks: they are hashed with the
     // code, and their pages are the region's, so a region is formed again --
     // on a worker, from copies of its pages -- from the same entries.
@@ -682,6 +713,28 @@ export function formRegion(read, entry,
         hash: hashRegion(read, { blocks: ordered, tables }),
         refused,
     };
+}
+
+/**
+ * The runtime helpers the region's calls were formed as, each once, by address.
+ *
+ * @param {Block[]} blocks
+ * @returns {{ address: number, length: number }[]}
+ */
+function helpersOf(blocks){
+    /** @type {Map<number, { address: number, length: number }>} */
+    const found = new Map();
+    for (const block of blocks)
+    {
+        for (const instruction of block.instructions)
+        {
+            if (instruction.helper !== undefined)
+            {
+                found.set(instruction.helper.address, instruction.helper);
+            }
+        }
+    }
+    return [...found.values()].sort((a, b)=>a.address - b.address);
 }
 
 /**
@@ -731,6 +784,15 @@ export function hashRegion(read, { blocks, tables = [] }){
         for (let address = table.address; address < end; address++)
         {
             mix(read(address));
+        }
+    }
+    for (const { address, length } of helpersOf(blocks))
+    {
+        // Tagged, so the same bytes formed in as a leaf callee are keyed apart.
+        mix(0x48);
+        for (let byte = address; byte < address + length; byte++)
+        {
+            mix(read(byte));
         }
     }
     return (high >>> 0).toString(16).padStart(8, '0') + (low >>> 0).toString(16).padStart(8, '0');

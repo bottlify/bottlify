@@ -139,7 +139,8 @@ export function createTestMachine(given = {}){
          * @param {{ maxBlocks?: number, maxBytes?: number, undoLog?: boolean,
          *     entryTop?: number, hash?: boolean, leafCalls?: boolean, wide?: boolean,
          *     narrow?: boolean, speculate?: boolean, callTargets?: Map<number, number[]>,
-         *     copies?: boolean }} [options]
+         *     copies?: boolean,
+         *     helpers?: boolean | readonly import('../helpers.js').RuntimeHelper[] }} [options]
          *     hash: register the region's entries in the machine's hash, so a transfer from
          *     another region finds them; wide: compiled for the wide precision controls;
          *     narrow: compiled for single precision;
@@ -234,7 +235,8 @@ export function createTestMachine(given = {}){
          * @param {number} entry
          * @param {{ budget?: number, maxRegions?: number, undoLog?: boolean,
          *     leafCalls?: boolean, wide?: boolean, speculate?: boolean,
-         *     callTargets?: Map<number, number[]> }} [options]
+         *     callTargets?: Map<number, number[]>,
+         *     helpers?: boolean | readonly import('../helpers.js').RuntimeHelper[] }} [options]
          *     wide: x87 regions compiled for the wide precision controls until one finds
          *     single set, then everything again for single until one finds another, then
          *     everything again with a test at every rounding operation -- as the runtime does;
@@ -248,7 +250,7 @@ export function createTestMachine(given = {}){
          */
         runProgram(entry, options = {}){
             const { budget = 10_000_000, maxRegions = 2000, undoLog = false,
-                leafCalls = true, callTargets } = options;
+                leafCalls = true, callTargets, helpers } = options;
             /** @type {'wide' | 'narrow' | 'mixed'} */
             let precision = options.wide ?? true ? 'wide' : 'mixed';
             let speculate = options.speculate ?? true;
@@ -278,7 +280,8 @@ export function createTestMachine(given = {}){
                     }
                     unit = this.translate(eip, { undoLog, entryTop: top, hash: true, leafCalls,
                         wide: precision === 'wide', narrow: precision === 'narrow', speculate,
-                        ...(callTargets ? { callTargets } : {}) });
+                        ...(callTargets ? { callTargets } : {}),
+                        ...(helpers === undefined ? {} : { helpers }) });
                     made.push(unit);
                     regions++;
                     for (const [opcode, count] of unit.translation.unsupported)

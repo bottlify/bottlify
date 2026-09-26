@@ -370,7 +370,8 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
  * @param {{ jobs: { entry: number, entryTop: number, hash: string, checked?: boolean,
  *         copies?: boolean, targets?: [number, number[]][] }[],
  *     pages: [number, Uint8Array][],
- *     form: { maxBlocks: number, maxBytes: number, leafCalls?: boolean } }} relink
+ *     form: { maxBlocks: number, maxBytes: number, leafCalls?: boolean,
+ *         helpers?: boolean } }} relink
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {Parameters<typeof emitBatch>[3]} [options]
