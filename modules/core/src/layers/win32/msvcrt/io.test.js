@@ -108,6 +108,23 @@ test('a file opened _O_TEMPORARY is removed when its descriptor closes', ()=>{
     assert.ok(files.files['C:\\game\\keep.bin'], 'a file opened without it stays');
 });
 
+test('the end of the process closes every descriptor, and a temporary file goes with it', ()=>{
+    // Windows closes every handle a process held when it ends, however it
+    // ends, which is when a file opened to be deleted on close is.
+    const { memory, files, fns, descriptors, open, console } = build();
+    const scratch = open('C:\\game\\scratch.tmp', O_CREAT | O_RDWR | O_TEMPORARY);
+    open('C:\\game\\kept.bin', O_CREAT | O_RDWR);
+    fns._write.handler([scratch, memory.put('x'), 1]);
+
+    descriptors.closeAll();
+    assert.equal(files.files['C:\\game\\scratch.tmp'], undefined);
+    assert.ok(files.files['C:\\game\\kept.bin']);
+    assert.deepEqual([...files.closed].sort(), ['C:\\game\\kept.bin', 'C:\\game\\scratch.tmp']);
+    assert.equal(fns._write.handler([scratch, memory.put('y'), 1]), -1);
+    assert.equal(fns._write.handler([1, memory.put('still'), 5]), 5, 'the console stays');
+    assert.deepEqual(console, [[2, 'still']]);
+});
+
 test('_open says why it failed', ()=>{
     const { memory, fns, errno, open } = build({ 'C:\\game\\data.bin': bytesOf('x') });
 

@@ -88,6 +88,9 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  * @property {() => number} [systemTimeMs]  Guest wall clock, milliseconds.
  * @property {() => number} [now]           Guest running time, milliseconds.
  * @property {any} [files]                  The volume, for the path functions.
+ * @property {(task: () => void) => void} [atProcessEnd]
+ *           Where the runtime leaves what is to run when the process ends,
+ *           whichever way it ends. Absent, its files stay open at the end.
  * @property {import('./io.js').FileHandles} [handles]
  *           kernel32's handle table, as far as files go: what `_get_osfhandle`
  *           hands out and `_open_osfhandle` takes. Absent, the two stay
@@ -799,6 +802,13 @@ export function createMsvcrtFunctions(host){
             handles: host.handles,
         })
         : null;
+
+    // Every handle a process held closes when it ends, however it ends --
+    // which is when a file opened to be deleted on close goes.
+    if (descriptors)
+    {
+        host.atProcessEnd?.(()=>descriptors.closeAll());
+    }
 
     const stdio = host.files && host.allocate && host.free
         ? createStdioFunctions({

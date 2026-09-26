@@ -446,6 +446,18 @@ export function createDescriptors(host){
             return live;
         },
 
+        /**
+         * Closes every descriptor but the console's three, as the end of the
+         * process closes every handle it held, however it ended: a temporary
+         * file goes then if it has not gone before.
+         */
+        closeAll(){
+            for (const fd of [...table.keys()].filter(number=>number >= STANDARD_DESCRIPTORS))
+            {
+                this.close(fd);
+            }
+        },
+
         size: sizeOf,
 
         /**

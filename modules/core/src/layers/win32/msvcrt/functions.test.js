@@ -715,6 +715,22 @@ test('_cexit closes every open stream after the handlers, a temporary file with 
     assert.deepEqual(host.output.map(entry=>[entry.handle, entry.text]), [[3, 'B']]);
 });
 
+test('the runtime closes its files when the process ends, removing a temporary one', ()=>{
+    /** @type {(() => void)[]} */
+    const atEnd = [];
+    const files = fakeVolume({}, { directories: ['C:\\'] });
+    const { fns, put } = wholeRuntime(files, undefined, {
+        iob: ()=>0x3800, atProcessEnd: (/** @type {() => void} */ task)=>atEnd.push(task),
+    });
+    assert.notEqual(fns.fopen.handler([put(0x100, 'C:\\scratch.tmp'), put(0x120, 'wD')]), 0);
+    const O_CREAT_RDWR_TEMPORARY = 0x0142;
+    assert.ok(fns._open.handler([put(0x140, 'C:\\low.tmp'), O_CREAT_RDWR_TEMPORARY, 0]) > 2);
+
+    assert.equal(atEnd.length, 1, 'told once, when the runtime was made');
+    atEnd.forEach(task=>task());
+    assert.deepEqual(Object.keys(files.files), []);
+});
+
 test('sprintf_s and vsprintf_s write what fits with its terminator, and refuse the rest', ()=>{
     // "If the buffer is too small for the formatted text, including the
     // terminating null, then the buffer is set to an empty string"; a null
