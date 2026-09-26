@@ -17,11 +17,17 @@
  *   node tools/make-btl.mjs pack <game-directory> <bundle-id> [--store] [--block=N]
  *   node tools/make-btl.mjs verify <bundle-id>
  *   node tools/make-btl.mjs list <bundle-id> [pattern]
+ *   node tools/make-btl.mjs translations <bundle-id> (<seed-file> | --remove) [--store]
+ *
+ * `translations` puts a translation seed (a run's store, exported) into the
+ * packed bundle without packing the game again, and rewrites the manifest's
+ * `indexSha256`, which the new index changes.
  */
 
 import { writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { openBundle, verifyBundle, writeBundle, ensureDirectory, DEFAULT_BLOCK_SIZE }
+import { attachTranslations, openBundle, verifyBundle, writeBundle, ensureDirectory,
+    DEFAULT_BLOCK_SIZE }
     from './btl.mjs';
 
 const BUNDLES = 'bundles';
@@ -167,6 +173,27 @@ async function verify(id){
     }
 }
 
+/**
+ * Puts a translation seed into a packed bundle, or takes it out (`--remove`),
+ * and writes the index's new digest into the manifest.
+ *
+ * @param {string} id @param {string | undefined} seedPath @param {Record<string, any>} flags
+ */
+async function translations(id, seedPath, flags){
+    const directory = join(BUNDLES, id);
+    const seed = flags.remove ? null : new Uint8Array(await readFile(String(seedPath)));
+    const result = await attachTranslations(join(directory, 'bundle.btl'), seed,
+        { store: Boolean(flags.store) });
+    const manifestPath = join(directory, 'manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    manifest.bundle = { ...manifest.bundle, bytes: result.bytes, indexSha256: result.indexSha256 };
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 4)}\n`);
+    console.log(result.translations
+        ? `${id}: translations ${mib(result.translations.size)} in `
+            + `${result.translations.blocks} blocks; index ${result.indexSha256}`
+        : `${id}: no translations; index ${result.indexSha256}`);
+}
+
 /** @param {string} id @param {string} [pattern] */
 async function list(id, pattern){
     const bundle = await openBundle(join(BUNDLES, id, 'bundle.btl'));
@@ -195,10 +222,15 @@ switch (command){
     case 'list':
         await list(positional[0], positional[1]);
         break;
+    case 'translations':
+        await translations(positional[0], positional[1], flags);
+        break;
     default:
         console.log('usage: node tools/make-btl.mjs pack <game-directory> <bundle-id> '
             + '[--store] [--block=N]');
         console.log('       node tools/make-btl.mjs verify <bundle-id>');
         console.log('       node tools/make-btl.mjs list <bundle-id> [pattern]');
+        console.log('       node tools/make-btl.mjs translations <bundle-id> '
+            + '(<seed-file> | --remove) [--store]');
         process.exitCode = 1;
 }

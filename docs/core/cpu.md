@@ -321,6 +321,15 @@ checksum is the one a run without a seed computes. `seedRecords` (cork's `runtim
 `select` an export takes to keep only the region records of this emitter and the modules they name:
 a batch's module whose regions a relink moved is named by none, and on the benchmark's load of
 fifteen hundred functions that was nearly half the store (10.0 MB against 5.4).
+A bundle carries its seed as an optional member (`docs/core/filesystem.md`; `node
+tools/make-btl.mjs translations <bundle-id> <seed>` puts one into a packed bundle, where load-x87's
+5.4 MB took 0.4 MB, its blocks compressed as a file's are), and `createApp` hands it to the
+store under a translating engine -- the default, `cork`, or one named -- before the program's first
+instruction, so the first run of a bundle on a machine takes the regions a run elsewhere made. The
+seed is as trusted as the bundle's code, which it rides with: the index names its digest and the
+manifest the index's. And it is never taken for code bytes it was not made from: the lookup's key is
+made here, from the bytes the program holds when a region is formed, so a seed made from another
+build of the program answers only the regions whose bytes did not change.
 `tools/cork-bench/bench.mjs --capture DIR` writes a benchmark program's seed, `--seed DIR` starts
 every rep from one and `--store fresh` from an empty store, the event loop turning between slices
 so the store's answers come back. A seeded first iteration against an empty store, the median of

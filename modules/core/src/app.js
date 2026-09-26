@@ -1723,7 +1723,7 @@ export async function zstdWasmFor(options, here = import.meta.url){
  *                     refetched: () => { blocks: number, bytes: number },
  *                     ranges: () => { requests: number, bytes: number } } | null>}
  */
-async function mountBundle({ options, cpu, filesystem, events }){
+async function mountBundle({ options, cpu, filesystem, events, translationStore }){
     if (!options.bundle?.fetch)
     {
         return null;
@@ -1797,6 +1797,65 @@ async function mountBundle({ options, cpu, filesystem, events }){
     });
 
     filesystem.mount('C', { source });
+
+    /**
+     * The translation seed's bytes: one request for its run of blocks, each
+     * checked against the index and decoded as a guest read's block is. Not
+     * kept in the block cache, where nothing would read it again: the store
+     * keeps what it takes.
+     *
+     * @param {import('./layers/filesystem/internal/bundle/format.js').BundleMember} of
+     */
+    const readTranslations = async of=>{
+        const first = bundle.block(of.firstBlock);
+        const last = bundle.block(of.firstBlock + of.blocks - 1);
+        const whole = await fetchRange(first.offset, last.offset + last.packed - first.offset,
+            bytes=>{
+                for (let at = of.firstBlock; at < of.firstBlock + of.blocks; at++)
+                {
+                    const block = bundle.block(at);
+                    const from = block.offset - first.offset;
+                    if (block.crc !== null
+                        && crc32(bytes.subarray(from, from + block.packed)) !== block.crc)
+                    {
+                        return `block ${at} of the translations arrived damaged`;
+                    }
+                }
+                return null;
+            });
+        const out = new Uint8Array(of.size);
+        let written = 0;
+        for (let at = of.firstBlock; at < of.firstBlock + of.blocks; at++)
+        {
+            const block = bundle.block(at);
+            const from = block.offset - first.offset;
+            const raw = whole.subarray(from, from + block.packed);
+            const bytes = block.codec === 1 ? await inflateRaw(raw) : decode(block.codec, raw,
+                block.length);
+            out.set(bytes, written);
+            written += bytes.length;
+        }
+        return written === of.size ? out : null;
+    };
+
+    // The bundle's translation seed goes into the translator's store before
+    // the program's first instruction, and every lookup waits for it, so the
+    // first run of the bundle on this machine starts from the regions a run
+    // elsewhere made instead of from none. Once a store has taken this seed
+    // it is not fetched again. Only an engine with the translator has a use
+    // for it, the default among them.
+    const member = bundle.translations;
+    if (member !== null && (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
+        && typeof translationStore?.seed === 'function')
+    {
+        const seeding = (async()=>(await translationStore.seededWith() === member.sha256
+            ? null : readTranslations(member))
+        )();
+        translationStore.seed(seeding, member.sha256).then((/** @type {any} */ result)=>{
+            events.emit('bundle-translations', { size: member.size, ...result });
+        });
+    }
+
     events.emit('bundle', {
         files: bundle.files.length,
         blockSize: bundle.blockSize,
@@ -2042,8 +2101,11 @@ async function mountBundle({ options, cpu, filesystem, events }){
             }
         }
 
+        // The translation seed's blocks are the store's business, read once.
         const all = Array.from({ length: bundle.blockCount },
-            (unused, index)=>bundle.block(index));
+            (unused, index)=>bundle.block(index))
+            .filter(block=>member === null || block.index < member.firstBlock
+                || block.index >= member.firstBlock + member.blocks);
         await fillGroups(groupBlocks(all));
     };
 
@@ -2532,6 +2594,13 @@ async function buildApp(options){
             core.api('kernel').currentThread()?.name ?? '?');
     };
 
+    // The translator's cache goes with the bundle's blocks: local by default,
+    // the bundle's name its namespace, resolved here in the engine's own
+    // thread as the block store is. Held here as well, for the bundle's seed.
+    const translationStore = await resolveTranslationStore(
+        options.cork?.config?.store === undefined ? 'local' : options.cork.config.store,
+        options.bundle?.id ?? options.id ?? 'bundle');
+
     const core = await assembleModules({
         filesystem: {
             // The runtime lives in the volume before the bundle is mounted, so
@@ -2562,14 +2631,9 @@ async function buildApp(options){
             engine: options.engine ?? DEFAULT_ENGINE,
             engineUrl: (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
                 ? corkArtifacts(options.cork).moduleUrl : null,
-            // The translator's cache goes with the bundle's blocks: local by
-            // default, the bundle's name its namespace, resolved here in the
-            // engine's own thread as the block store is.
             cork: {
                 ...options.cork?.config,
-                store: await resolveTranslationStore(
-                    options.cork?.config?.store === undefined ? 'local' : options.cork.config.store,
-                    options.bundle?.id ?? options.id ?? 'bundle'),
+                store: translationStore,
                 bundleId: options.bundle?.id ?? options.id ?? 'bundle',
             },
         },
@@ -3356,7 +3420,7 @@ async function buildApp(options){
 
     // Mounted after the machine is up. A zstd block is decoded by this
     // project's own decoder now, so the mount no longer needs the emulator.
-    blocks = await mountBundle({ options, cpu, filesystem, events });
+    blocks = await mountBundle({ options, cpu, filesystem, events, translationStore });
 
     // The session's files go onto the volume once it is the one the program
     // will run on: the mount above puts a fresh writable layer over the
