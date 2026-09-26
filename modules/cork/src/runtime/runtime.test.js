@@ -1196,6 +1196,50 @@ test('a batch the worker forms from a copy of its pages runs as the one formed h
     await m.runtime.flush();
 });
 
+test('a batch whose answer waits behind a hold of the engine thread past the limit is not given up',
+    async()=>{
+        const m = machine({ worker: true, inFlightMs: 200 });
+        const OTHER = 0x2000;
+        m.write(CODE, COUNTDOWN);
+        m.write(OTHER, COUNTDOWN);
+        m.setReg(4, 0x80000);
+        try
+        {
+            // The worker is open once a first batch has come back from it.
+            m.runtime.noteHot(OTHER, 0, 2);
+            for (let i = 0; i < 200 && m.runtime.entryOf(OTHER) < 0; i++)
+            {
+                await m.runtime.translatePending();
+                await new Promise(resolve=>setTimeout(resolve, 10));
+            }
+            assert.ok(m.runtime.entryOf(OTHER) >= 0, 'the worker answers');
+            m.runtime.noteHot(CODE, 0, 2);
+            await m.runtime.translatePending();
+            // The engine thread held well past the limit: the worker answers meanwhile, and
+            // its answer waits in the queue for the hold to end.
+            const until = performance.now() + 1200;
+            while (performance.now() < until)
+            {
+                // Holding.
+            }
+            await m.runtime.translatePending();
+            m.runtime.noteHot(CODE, 0, 4);
+            for (let i = 0; i < 20 && m.runtime.entryOf(CODE) < 0; i++)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 10));
+                await m.runtime.translatePending();
+            }
+            const d = m.runtime.diagnostics();
+            assert.equal(d.refused['worker: no answer'], undefined, 'nothing given up');
+            assert.ok(m.runtime.entryOf(CODE) >= 0, 'published from the answer that waited');
+            assert.equal(d.regions, 2, 'and not translated a second time');
+        }
+        finally
+        {
+            await m.runtime.flush();
+        }
+    });
+
 test('a worker that cannot load is dropped and the batches are emitted inline', async()=>{
     // A worker file that throws as it loads: the worker is made, and fails after.
     const m = machine({ workerUrl: 'data:text/javascript,throw new Error("cannot load")' });

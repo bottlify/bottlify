@@ -184,7 +184,13 @@ is simply published on a later frame, and `workerMs` reports the worker's share 
 `translateMs`, which is the engine thread's own. A worker that cannot load (a browser makes it
 and reports the failure later, as an error event) or dies is dropped (`refused` names why,
 `worker: ...`), the batch it held is given up and emitting goes back inline; so is a batch the
-worker has held past the in-flight limit (ten seconds). Before, the failure was an uncaught
+worker has held past the in-flight limit (`inFlightMs`, ten seconds) on time the engine thread
+was free to hear it -- past it by the clock, and the event loop come round twice since (a
+timer the runtime arms once the clock is past it), in which an answer already waiting would
+have been delivered. By the clock alone, a hold of the engine thread longer than the limit gave
+up answers that were only waiting behind it and threw their work away: a Doom 3 run through
+the launch probe in node, whose slices took 7-10 s once its frames were rasterized in software,
+gave up 15 batches that way. Its candidates count as in flight on the same terms. Before, the failure was an uncaught
 exception and the batch stayed outstanding, so nothing was translated for the rest of the run. The encoder writes a body's bytes straight
 into a buffer that grows by doubling, each number LEB128-encoded in place (a signed constant
 without a BigInt): building each instruction's bytes as an array of its own was half of

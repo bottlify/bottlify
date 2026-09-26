@@ -165,6 +165,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // leaves there; on, what the emulator leaves (docs/core/cpu.md lists every
         // relaxation). Off, as games run: the tests and the hardware corpus turn it on.
         precise: false,
+        // How long a batch may be with the worker, on time the engine thread was
+        // free to hear its answer, before it is given up (tests shorten it).
+        inFlightMs: 10_000,
         // Diagnostic: the host clock read around the translator's phases -- the
         // milliseconds of forming, lookups, emitting, encoding, storing,
         // instantiating and publishing, and the record of long holds. Off, as a
@@ -1090,10 +1093,43 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** Candidates taken into a batch that has not published yet, by when: noted
      * again meanwhile they are not queued a second time (the interpreter keeps
      * meeting them while the batch is with the worker). A batch that never
-     * comes back frees them after IN_FLIGHT_MS.
+     * comes back frees them once it is overdue.
      * @type {Map<number, number>} */
     const inFlight = new Map();
-    const IN_FLIGHT_MS = 10_000;
+    /** When the host's event loop last came round, the two latest a tick armed here saw. */
+    let turns = [0, 0];
+    let tickArmed = false;
+    const armTick = ()=>{
+        if (tickArmed)
+        {
+            return;
+        }
+        tickArmed = true;
+        setTimeout(()=>{
+            tickArmed = false;
+            turns = [turns[1], performance.now()];
+        }, 0);
+    };
+    /**
+     * Whether what went to the worker at `since` is overdue: past `inFlightMs`
+     * by the clock, and the event loop come round twice since, in which an
+     * answer already waiting would have been delivered. The clock alone gave
+     * up answers that a long hold of the engine thread -- a slice, a shader's
+     * compile -- had only kept in the queue, and threw their work away.
+     * @param {number} since
+     */
+    const overdue = since=>{
+        if (performance.now() - since < settings.inFlightMs)
+        {
+            return false;
+        }
+        if (turns[0] > since + settings.inFlightMs)
+        {
+            return true;
+        }
+        armTick();
+        return false;
+    };
 
     /**
      * Stamps a built or stored region and publishes every block start as an
@@ -2371,7 +2407,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             const since = inFlight.get(key);
             if (since !== undefined)
             {
-                if (performance.now() - since < IN_FLIGHT_MS)
+                if (!overdue(since))
                 {
                     return;
                 }
@@ -2429,7 +2465,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // A batch the worker has held past the in-flight limit is given
             // up: its answer, should it come, no longer matches, and the
             // candidates it held are free to be taken again.
-            if (outstanding !== null && performance.now() - outstanding.at > IN_FLIGHT_MS)
+            if (outstanding !== null && overdue(outstanding.at))
             {
                 refused['worker: no answer'] = (refused['worker: no answer'] ?? 0) + 1;
                 outstanding = null;

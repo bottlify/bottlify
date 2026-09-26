@@ -146,6 +146,9 @@
  *     `worker_threads` only when `workerUrl` is named. `false` emits inline.
  * @property {string} [workerUrl]  The `translator.worker.js` URL. Default: the file beside
  *     the runtime. Named explicitly by a test process, or a bundler that moves it.
+ * @property {number} [inFlightMs]  How long a batch may be with the worker before it is given
+ *     up, on time the engine thread was free to hear its answer -- past it by the clock and the
+ *     event loop come round twice since. Default 10000; tests shorten it.
  * @property {TranslationStore} [store]  The per-bundle cache; none = translate every run.
  * @property {string} [bundleId]         The cache's namespace.
  * @property {boolean} [translate]       Test-only: false keeps the translator off, so a run
