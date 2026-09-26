@@ -827,6 +827,30 @@ test('the metrics a window, an icon and a mouse are measured by are the classic 
     assert.equal(gsm(SM_MOUSEWHEELPRESENT), 1, 'and a wheel');
 });
 
+test('a tool window\'s caption is the small caption the metrics give, and a pixel', ()=>{
+    // user32's sysparams tests: SM_CYSMCAPTION is the small caption height
+    // plus one, SM_CYSMSIZE one less than that, and SM_CXSMSIZE the small
+    // caption width -- 15 each by default, as SM_CYCAPTION is the caption
+    // height of 18 plus one. Its window tests take a tool window's caption
+    // as SM_CYSMCAPTION high where any other is SM_CYCAPTION high.
+    const SM_CYSMCAPTION = 51;
+    const SM_CXSMSIZE = 52;
+    const SM_CYSMSIZE = 53;
+    const WS_EX_TOOLWINDOW = 0x00000080;
+    const { memory, fns } = setup();
+    /** @param {number} index */
+    const gsm = index=>fns.GetSystemMetrics.handler([index]);
+    assert.deepEqual([SM_CYSMCAPTION, SM_CXSMSIZE, SM_CYSMSIZE].map(gsm), [16, 15, 15]);
+
+    memory.putU32s(RECT_BUFFER, [0, 0, 100, 100]);
+    fns.AdjustWindowRectEx.handler([RECT_BUFFER, WS_CAPTION, 0, WS_EX_TOOLWINDOW]);
+    const toolTop = memory.u32(RECT_BUFFER + 4) | 0;
+    memory.putU32s(RECT_BUFFER, [0, 0, 100, 100]);
+    fns.AdjustWindowRectEx.handler([RECT_BUFFER, WS_CAPTION, 0, 0]);
+    const plainTop = memory.u32(RECT_BUFFER + 4) | 0;
+    assert.equal(plainTop - toolTop, gsm(SM_CYSMCAPTION) - gsm(4), 'the two captions differ');
+});
+
 test('the display enumeration ends', ()=>{
     // A caller walks this until it returns FALSE. One that never does is a hang
     // with no error anywhere.

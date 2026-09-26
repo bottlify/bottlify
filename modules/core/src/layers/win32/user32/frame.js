@@ -47,8 +47,11 @@ export const CAPTION_HEIGHT = 19;
 export const SIZE_FRAME = 4;
 export const DIALOG_FRAME = 3;
 export const SCROLLBAR = 16;
-/** A tool window's caption is shorter than an ordinary one's. */
-export const TOOL_CAPTION_HEIGHT = 12;
+/**
+ * A tool window's caption, SM_CYSMCAPTION: the small caption's default
+ * height of 15 and a pixel, as an ordinary caption is 18 and a pixel.
+ */
+export const TOOL_CAPTION_HEIGHT = 16;
 /** A menu bar's height, which a top-level window with a menu takes below its caption. */
 export const MENU_HEIGHT = 19;
 
