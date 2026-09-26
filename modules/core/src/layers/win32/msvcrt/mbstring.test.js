@@ -86,6 +86,28 @@ test('wcstombs narrows, and answers the count without a destination', ()=>{
     assert.equal(memory.text(destination), 'abc');
 });
 
+test('wctomb writes a character to U+00FF as its byte, and refuses one past it with EILSEQ', ()=>{
+    // "If the conversion isn't possible in the current locale, wctomb returns
+    // -1 and errno is set to EILSEQ." The C locale has a byte for each of the
+    // first 256 characters and none past them: Wine's msvcrt
+    // test__wcstombs_s_l finds L"\xfffd" EILSEQ there.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (
+        createWideFunctions({ ...memory, errno: code=>errno.push(code) }));
+    const out = memory.allocate(4);
+    assert.equal(table.wctomb.handler([out, 0xe9]), 1);
+    assert.equal(memory.bytes[out], 0xe9);
+    assert.equal(table.wctomb.handler([out, 0x263a]), -1);
+    assert.equal(table.wctomb.handler([out, 0x100]), -1, 'not its low byte');
+    assert.equal(memory.bytes[out], 0xe9, 'nothing written');
+    assert.equal(table.wctomb.handler([out, 0]), 1, 'the null character is one byte');
+    assert.equal(table.wctomb.handler([0, 0x263a]), 0, 'no encoding here keeps a state');
+    const EILSEQ = 42;
+    assert.deepEqual(errno, [EILSEQ, EILSEQ]);
+});
+
 test('mbtowc reports one byte consumed, and zero at the terminator', ()=>{
     const { memory, table } = build();
     const unit = memory.allocate(4);

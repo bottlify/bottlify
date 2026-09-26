@@ -875,7 +875,12 @@ export function createMsvcrtFunctions(host){
         // Bound to the byte functions above, so the two families cannot drift.
         ...createMultiByteFunctions(narrow),
         ...createWideClassificationFunctions(narrow),
-        ...createWideFunctions(host),
+        ...createWideFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readCString: host.readCString,
+            errno,
+        }),
         ...createConversionFunctions({
             readCString: host.readCString,
             writeMemory: host.writeMemory,
