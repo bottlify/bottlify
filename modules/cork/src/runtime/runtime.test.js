@@ -1204,6 +1204,10 @@ test('a block inside a region\'s loop has an entry once translated code keeps le
         m.runtime.noteHot(CODE);
         assert.equal(await m.runtime.translatePending(), 1);
         assert.equal(m.runtime.entryOf(CODE + 14), -1, 'none at first');
+        // Its page says so to the interpreter tier in wasm, which leaves a miss
+        // there to the host rather than run it in place, so the misses count.
+        const page = (CODE + 14) >>> 12;
+        assert.equal(m.runtime.pages.get(page) & PageFlag.CLOSED, PageFlag.CLOSED);
         // Nor is it a candidate of its own, however hot the interpreter finds it.
         m.runtime.noteHot(CODE + 14, 0, 128);
         assert.equal(m.runtime.diagnostics().queued, 0);
@@ -1214,6 +1218,7 @@ test('a block inside a region\'s loop has an entry once translated code keeps le
         await m.runtime.translatePending();
         assert.equal(m.runtime.diagnostics().copied, 1, 'the region formed again');
         assert.ok(m.runtime.entryOf(CODE + 14) >= 0, 'its copy is an entry');
+        assert.equal(m.runtime.pages.get(page) & PageFlag.CLOSED, 0, 'and the page no longer');
         // Called with its return address on the stack, F comes back to the hlt.
         m.setReg(4, 0x80000 - 4);
         new DataView(m.memory.buffer).setUint32(m.layout.ramBase + 0x80000 - 4, CODE + 13, true);

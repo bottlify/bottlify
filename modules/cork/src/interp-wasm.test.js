@@ -23,7 +23,7 @@ import {
 } from './interp-wasm.js';
 import { SOURCE_SHA256 } from './interp-wasm.bytes.js';
 import { ownLayout, pagesFor, Tables } from './runtime/layout.js';
-import { createPageTable } from './runtime/pages.js';
+import { PageFlag, createPageTable } from './runtime/pages.js';
 import { Kind, eflagsOf, kindOf } from './emit/flags.js';
 
 const RAM = 1 << 20;
@@ -72,8 +72,9 @@ const EDGES = [0, 1, 2, 0x7f, 0x80, 0xff, 0x100, 0x7fff, 0x8000, 0xffff, 0x10000
 
 /**
  * One generated instruction: its bytes. `ebx` points at the data, so `[ebx+d8]`
- * reaches it; every form the tier runs is here, with the JavaScript tier's
- * forms (x87, SSE) among them now and then.
+ * reaches it; every integer form the tier runs is here, with a form of the
+ * JavaScript tier's among them now and then (the float forms have
+ * `interp-wasm-float.test.js`).
  *
  * @param {(n: number) => number} next
  * @returns {number[]}
@@ -173,8 +174,8 @@ function instruction(next){
             // push and pop through the stack.
             return [0x50 | reg(), 0x58 | reg()];
         case 38:
-            // An x87 instruction: the JavaScript tier's.
-            return [0xd9, 0xe8];
+            // A 16-bit address: the JavaScript tier's.
+            return [0x67, 0x90];
         default:
             return [0x90];
     }
@@ -369,8 +370,8 @@ test('the module is instantiated at the tier\'s first run, not when the tier is 
 
 test('an instruction the tier does not run is left at eip, unexecuted', ()=>{
     const m = machine();
-    // inc eax; fld1; hlt
-    reset(m, [0x40, 0xd9, 0xe8, 0xf4], random(1));
+    // inc eax; cpuid; hlt
+    reset(m, [0x40, 0x0f, 0xa2, 0xf4], random(1));
     m.view.setUint32(m.layout.regs, 5, true);
     assert.equal(m.tier.run(100), WasmExit.UNSUPPORTED);
     assert.equal(m.tier.retired(), 1);
@@ -470,4 +471,60 @@ test('a flag record a region left is folded before the tier reads the flags', ()
     assert.equal(m.tier.run(100), WasmExit.HALT);
     assert.equal(m.view.getUint32(m.layout.regs, true) & 0xff, 1, 'CF of 1 - 2');
     assert.equal(m.view.getUint32(record, true), 0, 'the record is folded into the word');
+});
+
+test('the entry translated code calls counts its target, runs and adds to the counter', ()=>{
+    const m = machine();
+    // jmp +2; nop; nop; mov eax, 3; hlt -- the target (CODE + 4) has an entry, so a run
+    // from the start stops there, the jump retired.
+    reset(m, [0xeb, 0x02, 0x90, 0x90, 0xb8, 3, 0, 0, 0, 0xf4], random(9));
+    const target = CODE + 4;
+    const slot = Math.imul(target, 0x9e3779b1) >>> (m.layout.hashShift ?? 16);
+    m.view.setUint32(m.layout.tables + Tables.HASH + slot * Tables.HASH_SLOT, target, true);
+    const enter = m.tier.entry();
+    m.view.setUint32(m.layout.counter, 100, true);
+    // The start is a jump's target: counted once, cold at a threshold of two.
+    assert.equal(enter(1000), WasmExit.ENTRY | 1 << 8);
+    assert.equal(m.view.getUint32(m.layout.eip, true), target);
+    assert.equal(m.view.getUint32(m.layout.counter, true), 101, 'what it retired, counted');
+    assert.equal(m.tier.entered(), 1);
+    // Counted again at the same start, it is hot: back at once for the host to note.
+    m.view.setUint32(m.layout.eip, CODE, true);
+    assert.equal(enter(1000), WasmExit.HOT);
+    assert.equal(m.tier.exitValue(), 2);
+    assert.equal(m.view.getUint32(m.layout.eip, true), CODE, 'nothing ran');
+    assert.equal(m.view.getUint32(m.layout.counter, true), 101);
+    // From the entry's start on, which the jump counted once: hot at the second count,
+    // then run to the halt.
+    m.view.setUint32(m.layout.eip, target, true);
+    assert.equal(enter(1000), WasmExit.HOT);
+    assert.equal(enter(1000), WasmExit.HALT | 2 << 8);
+    assert.equal(m.tier.entered(), 3);
+    assert.equal(m.view.getUint32(m.layout.counter, true), 103);
+});
+
+test('a jump to address 0 finds no entry in the hash\'s empty slots', ()=>{
+    const m = machine();
+    // xor eax, eax; jmp eax -- a call through a null pointer's jump. An empty slot's key is
+    // 0, which a probe for 0 must not take for an entry.
+    reset(m, [0x31, 0xc0, 0xff, 0xe0], random(10));
+    assert.equal(m.tier.run(2), WasmExit.BUDGET);
+    assert.equal(m.view.getUint32(m.layout.eip, true), 0);
+    assert.equal(m.tier.retired(), 2);
+});
+
+test('a miss on a page with a block closed in a translated loop is left to the host', ()=>{
+    const m = machine();
+    // inc eax; hlt
+    reset(m, [0x40, 0xf4], random(11));
+    const page = CODE >>> 12;
+    m.table.set(page, PageFlag.CLOSED);
+    const enter = m.tier.entry();
+    // No tier, as far as the transfer is concerned: it leaves untranslated, and the
+    // runtime counts the miss toward the region's copies.
+    assert.equal(enter(1000), 0);
+    assert.equal(m.view.getUint32(m.layout.eip, true), CODE);
+    assert.equal(m.tier.hotCounts[(CODE >>> 2) & (HOT_SLOTS - 1)], 0, 'nor counted here');
+    m.table.clear(page, PageFlag.CLOSED);
+    assert.equal(enter(1000), WasmExit.HALT | 2 << 8);
 });

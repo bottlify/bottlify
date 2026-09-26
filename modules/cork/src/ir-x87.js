@@ -329,9 +329,74 @@ function hostNaN(value, inputs){
     return fromBits(bits(value) | -0x8000000000000000n);
 }
 
+/**
+ * A double's two words, into `scratchU32`. A NaN's bits are taken from its value
+ * this way before anything asks whether it is one: once the optimizer knows a
+ * value is a NaN it may use the canonical NaN in its place, and the payload is
+ * lost -- the same instruction then gave another result once its code was
+ * optimized.
+ *
+ * @param {number} value
+ * @returns {boolean} whether it is a NaN
+ */
+function nanWords(value){
+    scratchF[0] = value;
+    return (scratchU32[1] & 0x7ff00000) === 0x7ff00000
+        && ((scratchU32[1] & 0xfffff) !== 0 || scratchU32[0] !== 0);
+}
+
 /** @param {number} value */
 function signalling(value){
-    return Number.isNaN(value) && (bits(value) & (1n << 51n)) === 0n;
+    return nanWords(value) && (scratchU32[1] & 0x80000) === 0;
+}
+
+/**
+ * A NaN the host's `Math` made, quieted: its log2 and log1p of a negative NaN
+ * are signalling ones, which come back quieted when wasm calls the same
+ * function, and the processor makes none.
+ *
+ * @param {number} value
+ */
+function quiet(value){
+    if (!nanWords(value))
+    {
+        return value;
+    }
+    scratchU32[1] |= 0x80000;
+    return scratchF[0];
+}
+
+/**
+ * The NaN an operation of two NaN operands gives, chosen as the x87 chooses it:
+ * a quiet one over a signalling one, then the larger significand, then the
+ * positive, quieted. The host's own operation returns the one its compiler
+ * happened to put first, which is not the same from one compiled version of
+ * this code to the next.
+ *
+ * @param {number} value the operation's result @param {number} a @param {number} c
+ */
+function twoNaN(value, a, c){
+    if (!nanWords(a))
+    {
+        return value;
+    }
+    const aHigh = scratchU32[1];
+    const aLow = scratchU32[0];
+    if (!nanWords(c))
+    {
+        return value;
+    }
+    const cHigh = scratchU32[1];
+    const cLow = scratchU32[0];
+    const aQuiet = (aHigh & 0x80000) !== 0;
+    const cQuiet = (cHigh & 0x80000) !== 0;
+    const aFraction = (aHigh & 0xfffff) * 4294967296 + aLow;
+    const cFraction = (cHigh & 0xfffff) * 4294967296 + cLow;
+    const pickA = aQuiet !== cQuiet ? aQuiet
+        : aFraction !== cFraction ? aFraction > cFraction : (aHigh & 0x80000000) === 0;
+    scratchU32[1] = (pickA ? aHigh : cHigh) | 0x80000;
+    scratchU32[0] = pickA ? aLow : cLow;
+    return scratchF[0];
 }
 
 /** @param {import('./ir.js').EvalState} state @param {number} address @param {number} size */
@@ -989,7 +1054,8 @@ function stepX87(instruction, state, address){
                 {
                     state.status |= Status.IE;
                 }
-                result = st(1) * Math.log2(st(0));
+                const log = quiet(Math.log2(st(0)));
+                result = twoNaN(st(1) * log, st(1), log);
             }
             else
             {
@@ -997,7 +1063,8 @@ function stepX87(instruction, state, address){
                 {
                     state.status |= Status.IE;
                 }
-                result = st(1) * (Math.log1p(st(0)) / Math.LN2);
+                const log = quiet(Math.log1p(st(0))) / Math.LN2;
+                result = twoNaN(st(1) * log, st(1), log);
             }
             setSt(1, orIndefinite(result, t1));
             popN(1);
@@ -1064,7 +1131,7 @@ function stepX87(instruction, state, address){
             {
                 result = a / c;
             }
-            result = hostNaN(byPrecision(result, state), [a0, c0]);
+            result = twoNaN(hostNaN(byPrecision(result, state), [a0, c0]), a0, c0);
             setSt(target, orIndefinite(result, t1));
             if (t1 === 0)
             {

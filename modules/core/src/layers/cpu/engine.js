@@ -147,9 +147,9 @@
  * @property {string} [bundleId]         The cache's namespace.
  * @property {boolean} [translate]       Test-only: false keeps the translator off, so a run
  *     is the interpreter tier's alone. Default true.
- * @property {boolean} [wasmInterpreter]  Under cork alone, the interpreter tier's integer
- *     instructions run in wasm (`interp-wasm.js`), the JavaScript interpreter taking the rest;
- *     false runs the JavaScript interpreter alone. Default true.
+ * @property {boolean} [wasmInterpreter]  Under cork alone, the interpreter tier's integer, x87
+ *     and SSE instructions run in wasm (`interp-wasm.js`), the JavaScript interpreter taking
+ *     the rest; false runs the JavaScript interpreter alone. Default true.
  * @property {number} [wasmInterpreterAfter]  How far the JavaScript interpreter carries a
  *     process's cork hosts, between them, before the wasm tier takes over: their instructions,
  *     a jump target new to a host counting as 128. Default 8192; 0 runs the wasm tier from the
@@ -157,17 +157,25 @@
  */
 
 /**
- * The engine's interpreter tier in wasm, as the host drives it: the integer instruction set
- * run straight from guest memory over the state block, the host's own interpreter taking
- * what it leaves. It is the engine's `createWasmInterpreter` that makes one.
+ * The engine's interpreter tier in wasm, as the host drives it: the integer, x87 and SSE
+ * instructions run straight from guest memory over the state block, the host's own
+ * interpreter taking what it leaves. It is the engine's `createWasmInterpreter` that makes one.
  *
  * @typedef {Object} WasmInterpreter
  * @property {(budget: number) => number} run  runs from the state block's eip, at most
  *     `budget` instructions; answers a `WasmExit`, with eip and the eager flags word back
  *     in the block
  * @property {() => number} retired     instructions the last run retired
+ * @property {() => number} relaxedReads  x87 status words stored (`fnstsw`) while not
+ *     `precise`: reads that may see what only `precise` keeps
  * @property {() => number} exitValue
  * @property {() => number} exitSize
+ * @property {() => (budget: number) => number} entry  the tier's own `enter`, a wasm function
+ *     translated code calls at an untranslated exit with no region (`Runtime.interpretWith`):
+ *     it counts the target as a jump's, runs from the state block's eip and answers the
+ *     `WasmExit` with what it retired above the low byte, added to the counter word already;
+ *     the module is instantiated if it was not
+ * @property {() => number} entered     instructions those calls have retired, all told
  * @property {Uint8Array} hotCounts     the counts, a slot per `(address >>> 2) & (HOT_SLOTS - 1)`
  * @property {Uint32Array} starts       the ring of recent jump targets
  * @property {() => number} startIndex  the ring's next slot, not yet wrapped
@@ -198,7 +206,8 @@
  * makes a thread switch, a context capture and a fall back to the other
  * executor the same operation -- nothing.
  *
- * @typedef {'untranslated' | 'budget' | 'trap' | 'halt' | 'fault' | 'stale'} ExitKind
+ * @typedef {'untranslated' | 'budget' | 'trap' | 'halt' | 'fault' | 'stale'
+ *     | 'interpreted'} ExitKind
  *   untranslated  EIP in the state block has no translated entry.
  *   budget        A back-edge found the slice's budget spent; EIP is the loop header.
  *   trap          A trap handler moved EIP or asked to stop; EIP is what it set.
@@ -206,6 +215,9 @@
  *   fault         A precise exception; EIP is the faulting instruction, registers as
  *                 before it.
  *   stale         The region was invalidated while running; EIP is the next instruction.
+ *   interpreted   An untranslated exit ran the interpreter tier in wasm in place
+ *                 (`interpretWith`), which stopped short of an entry: `vector` is the
+ *                 tier's `WasmExit`, its `exitValue` and `exitSize` what goes with it.
  */
 
 /**
@@ -244,6 +256,8 @@
  * @property {number} cacheMisses
  * @property {number} [precisionSwitches]  Times x87 regions went to another precision control:
  *     from the wide ones to single, and from single to a test at every rounding operation.
+ * @property {number} [interpretedRelaxedReads]  x87 status words the interpreter tier in wasm
+ *     stored (`fnstsw`) while not `precise`: reads that may see a bit only `precise` keeps.
  * @property {boolean} [wide]  Whether x87 regions are still compiled for wide precision.
  * @property {'wide' | 'narrow' | 'mixed'} [precision]  The precision control new x87 regions are
  *     compiled for: the wide ones, single, or either (a test at every rounding operation).
@@ -308,6 +322,11 @@
  * @property {() => Promise<void>} flush  Writes the store's own bookkeeping (a directory
  *     store's index) before a run ends.
  * @property {(page: number) => void} invalidatePage  A host or guest write into code.
+ * @property {(entry: (budget: number) => number, entered: () => number) => boolean}
+ *     [interpretWith]  Cork alone: the interpreter tier in wasm's `entry`, which translated
+ *     code then runs at an untranslated exit whose target has no region, going on at the
+ *     entry it stops at, rather than leave, and its `entered`, which the translator's own
+ *     share leaves out; false when the runtime has no function table to reach it through.
  * @property {(what: string, since: number, floorMs?: number) => void} [noteStall]
  *     A hold of the engine thread since that `performance.now`, kept when over the floor.
  * @property {(page: number) => boolean} holdsPage  Whether a published region spans the page
