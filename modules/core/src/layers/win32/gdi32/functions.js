@@ -206,6 +206,26 @@ const WIDTH_RATIO = 0.5;
 const FW_NORMAL = 400;
 
 /**
+ * Character sets. DEFAULT_CHARSET is a request, never a font's own: a font
+ * asked for with it is realised in the ANSI set, which is Windows-1252 here,
+ * the code page the font engine draws a program's bytes in.
+ */
+const ANSI_CHARSET = 0;
+const DEFAULT_CHARSET = 1;
+const HEBREW_CHARSET = 177;
+const ARABIC_CHARSET = 178;
+/** SHIFTJIS, HANGUL, JOHAB, GB2312 and CHINESEBIG5: the double-byte sets. */
+const DBCS_CHARSETS = new Set([128, 129, 130, 134, 136]);
+
+/** GetFontLanguageInfo's answers. */
+const GCP_DBCS = 0x0001;
+const GCP_REORDER = 0x0002;
+const GCP_ERROR = 0x8000;
+
+/** FONTSIGNATURE: four DWORDs of Unicode subranges, two of code pages. */
+const FONTSIGNATURE_SIZE = 24;
+
+/**
  * TMPF_FIXED_PITCH, whose name is the opposite of its meaning: the bit is set
  * for a variable-pitch font and clear for a fixed-pitch one.
  */
@@ -782,7 +802,7 @@ export function createGdiFunctions(host){
             // because there is only one pitch here and it is not the one the
             // constant is named after.
             pitchAndFamily: (font.pitchAndFamily & 0xf0) & ~TMPF_FIXED_PITCH,
-            charSet: font.charSet,
+            charSet: font.charSet === DEFAULT_CHARSET ? ANSI_CHARSET : font.charSet,
             ...measured,
         };
     };
@@ -1933,20 +1953,102 @@ export function createGdiFunctions(host){
          * The font table here is fixed: a font file cannot be added to it,
          * and a scalable font resource cannot be written for one. Zero is the
          * documented failure of each, which an installer notes and moves on
-         * from -- the file itself was already copied.
+         * from -- the file itself was already copied. Every spelling answers
+         * the same way, the private and in-memory ones included, and nothing
+         * can be removed that was never added.
          *
          * int AddFontResourceA(LPCSTR lpszFilename)
+         * int AddFontResourceW(LPCWSTR lpszFilename)
+         * int AddFontResourceExA(LPCSTR name, DWORD fl, PVOID res)
+         * int AddFontResourceExW(LPCWSTR name, DWORD fl, PVOID res)
+         * HANDLE AddFontMemResourceEx(PVOID pFileView, DWORD cjSize, PVOID pvResrved,
+         *                             DWORD *pNumFonts)
+         * BOOL RemoveFontResourceA(LPCSTR lpFileName)
+         * BOOL RemoveFontResourceW(LPCWSTR lpFileName)
+         * BOOL RemoveFontResourceExA(LPCSTR name, DWORD fl, PVOID pdv)
+         * BOOL RemoveFontResourceExW(LPCWSTR name, DWORD fl, PVOID pdv)
+         * BOOL RemoveFontMemResourceEx(HANDLE h)
          * BOOL CreateScalableFontResourceA(DWORD fdwHidden, LPCSTR lpszFontRes,
          *                                  LPCSTR lpszFontFile, LPCSTR lpszCurrentPath)
          */
-        AddFontResourceA: {
-            argBytes: 4,
-            handler: ()=>0,
-        },
+        AddFontResourceA: { argBytes: 4, handler: ()=>0 },
+        AddFontResourceW: { argBytes: 4, handler: ()=>0 },
+        AddFontResourceExA: { argBytes: 12, handler: ()=>0 },
+        AddFontResourceExW: { argBytes: 12, handler: ()=>0 },
+        AddFontMemResourceEx: { argBytes: 16, handler: ()=>0 },
+        RemoveFontResourceA: { argBytes: 4, handler: ()=>0 },
+        RemoveFontResourceW: { argBytes: 4, handler: ()=>0 },
+        RemoveFontResourceExA: { argBytes: 12, handler: ()=>0 },
+        RemoveFontResourceExW: { argBytes: 12, handler: ()=>0 },
+        RemoveFontMemResourceEx: { argBytes: 4, handler: ()=>0 },
 
         CreateScalableFontResourceA: {
             argBytes: 16,
             handler: ()=>0,
+        },
+
+        /**
+         * UINT GetTextCharset(HDC hdc)
+         * UINT GetTextCharsetInfo(HDC hdc, LPFONTSIGNATURE lpSig, DWORD dwFlags)
+         *
+         * The character set of the font the DC has selected, as its
+         * TEXTMETRIC reports it, and DEFAULT_CHARSET for a handle that is
+         * not a DC, which is the documented failure. A signature is asked
+         * for only of a TrueType font; these faces are not ones a program can
+         * read tables out of, and TEXTMETRIC says as much, so the signature
+         * is the zeros the documentation gives any other font.
+         */
+        GetTextCharset: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                return dc ? currentMetrics(dc).charSet : DEFAULT_CHARSET;
+            },
+        },
+
+        GetTextCharsetInfo: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, signature])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return DEFAULT_CHARSET;
+                }
+                if ((signature >>> 0) !== 0)
+                {
+                    host.writeMemory(signature >>> 0, new Uint8Array(FONTSIGNATURE_SIZE));
+                }
+                return currentMetrics(dc).charSet;
+            },
+        },
+
+        /**
+         * DWORD GetFontLanguageInfo(HDC hdc)
+         *
+         * Zero, a font "treated as a simple Latin font", unless its character
+         * set says otherwise: a double-byte set is GCP_DBCS, and Hebrew and
+         * Arabic are read in an order that GCP_REORDER announces. No kerning
+         * table or extra glyph tables are exposed here, so nothing claims
+         * them. GCP_ERROR for a handle that is not a DC.
+         */
+        GetFontLanguageInfo: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return GCP_ERROR;
+                }
+                const charSet = currentMetrics(dc).charSet;
+                if (DBCS_CHARSETS.has(charSet))
+                {
+                    return GCP_DBCS;
+                }
+                return charSet === HEBREW_CHARSET || charSet === ARABIC_CHARSET ? GCP_REORDER : 0;
+            },
         },
 
         ScaleViewportExtEx: {

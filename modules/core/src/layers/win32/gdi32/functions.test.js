@@ -1065,6 +1065,73 @@ test('a font file cannot be added to the fixed font table, with the stack intact
         [4, 16]);
 });
 
+test('every spelling of adding and removing a font fails the same way, popping its arguments',
+    ()=>{
+        // gdi32.spec: each is stdcall with these arities. Nothing can be
+        // added, so every add answers zero fonts and every remove FALSE --
+        // including the in-memory pair, whose handle is NULL.
+        const { fns, memory } = setup();
+        const table = /** @type {Record<string, { argBytes: number,
+            handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
+        memory.putU32s(OUT, [UNTOUCHED]);
+        /** @type {[string, number][]} */
+        const spellings = [
+            ['AddFontResourceW', 4], ['AddFontResourceExA', 12], ['AddFontResourceExW', 12],
+            ['AddFontMemResourceEx', 16], ['RemoveFontResourceA', 4],
+            ['RemoveFontResourceW', 4], ['RemoveFontResourceExA', 12],
+            ['RemoveFontResourceExW', 12], ['RemoveFontMemResourceEx', 4],
+        ];
+        for (const [name, argBytes] of spellings)
+        {
+            assert.equal(table[name]?.argBytes, argBytes, `${name} is exported`);
+            assert.equal(table[name].handler([FACE_NAME, 0x10, 0, OUT]), 0, name);
+        }
+        assert.equal(memory.u32(OUT), UNTOUCHED, 'no font count is claimed');
+    });
+
+test('GetTextCharset is the selected font\'s set, and DEFAULT_CHARSET means failure', ()=>{
+    const { fns, memory, hdc } = withDC();
+    const DEFAULT_CHARSET = 1;
+    const RUSSIAN_CHARSET = 204;
+    assert.equal(fns.GetTextCharset.handler([hdc]), 0, 'the system font is ANSI');
+    assert.equal(fns.GetTextCharset.handler([0x9999]), DEFAULT_CHARSET);
+
+    fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([putLogFont(memory,
+        { charSet: RUSSIAN_CHARSET })])]);
+    assert.equal(fns.GetTextCharset.handler([hdc]), RUSSIAN_CHARSET);
+    memory.fill(OUT, 6);
+    assert.equal(fns.GetTextCharsetInfo.handler([hdc, OUT, 0]), RUSSIAN_CHARSET);
+    assert.deepEqual([0, 4, 8, 12, 16, 20].map(at=>memory.u32(OUT + at)), [0, 0, 0, 0, 0, 0],
+        'not a TrueType font: the signature is zeros');
+    assert.equal(fns.GetTextCharsetInfo.handler([hdc, 0, 0]), RUSSIAN_CHARSET);
+    assert.equal(fns.GetTextCharsetInfo.handler([0x9999, OUT, 0]), DEFAULT_CHARSET);
+
+    // A font asked for in the default set is realised in the ANSI one, and
+    // TEXTMETRIC says the same as GetTextCharset.
+    fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([putLogFont(memory,
+        { charSet: DEFAULT_CHARSET })])]);
+    assert.equal(fns.GetTextCharset.handler([hdc]), 0);
+    assert.equal(fns.GetTextMetricsA.handler([hdc, OUT]), 1);
+    assert.equal(memory.u8(OUT + TEXTMETRICA.tmCharSet), 0);
+    assert.deepEqual([fns.GetTextCharset.argBytes, fns.GetTextCharsetInfo.argBytes], [4, 12]);
+});
+
+test('GetFontLanguageInfo calls a Latin font simple and flags double-byte and RTL sets', ()=>{
+    const { fns, memory, hdc } = withDC();
+    assert.equal(fns.GetFontLanguageInfo.handler([hdc]), 0);
+    /** @param {number} charSet */
+    const withSet = charSet=>{
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([putLogFont(memory,
+            { charSet })])]);
+        return fns.GetFontLanguageInfo.handler([hdc]);
+    };
+    assert.equal(withSet(128), 0x0001, 'SHIFTJIS_CHARSET: GCP_DBCS');
+    assert.equal(withSet(177), 0x0002, 'HEBREW_CHARSET: GCP_REORDER');
+    assert.equal(withSet(204), 0);
+    assert.equal(fns.GetFontLanguageInfo.handler([0x9999]), 0x8000, 'GCP_ERROR');
+    assert.equal(fns.GetFontLanguageInfo.argBytes, 4);
+});
+
 test('every function declares the stack its arguments occupy', ()=>{
     const { fns } = setup();
     /** @type {Record<string, number>} */
