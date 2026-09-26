@@ -119,8 +119,17 @@ export function mathImports(){
 
 /** How a run of translated code came back, as the low byte of the result. */
 export const Exit = Object.freeze({
-    UNTRANSLATED: 0, BUDGET: 1, TRAP: 2, HALT: 3, FAULT: 4, STALE: 5,
+    UNTRANSLATED: 0, BUDGET: 1, TRAP: 2, HALT: 3, FAULT: 4, STALE: 5, INTERPRETED: 6,
 });
+
+/**
+ * The function table's index a module with `resume` calls the interpreter tier
+ * in wasm through (`Runtime.interpretWith`): until the host puts the tier's
+ * entry there, a function answering 0, which leaves as a miss always did.
+ */
+export const TIER_SLOT = 0;
+/** The tier's answer at a start with an entry (`WasmExit.ENTRY` in `interp-wasm.js`). */
+export const TIER_ENTRY = 8;
 
 /**
  * The bits of a run's MMX mark (`Local.mmxTouched`). The first MMX
@@ -213,6 +222,9 @@ const LOCAL_TYPES = [
  *                                     tail-calls the region found, through the host's table
  * @property {number} [transfer]       with hash, the module's transfer function
  *     (`finishModule`), which an untranslated exit tail-calls with its EIP for the label
+ * @property {number} [resume]         with a transfer over cork's own layout, the module's
+ *     function a miss of the hash tail-calls to run the interpreter tier in wasm through the
+ *     table's `TIER_SLOT` (`addResume`)
  * @property {{ base: number, arms: number, crossings: number, crossedTo: number }} [placed]
  *     the globals of the module's range of the table (`base`, `arms` long, job i's function
  *     at `base + i` -- the host's `placeModule`), and of what left the range: a count and
@@ -232,7 +244,8 @@ const LOCAL_TYPES = [
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
  *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
- *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean }}
+ *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
+ *     resume?: boolean }}
  *     [options]  undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
@@ -241,13 +254,15 @@ const LOCAL_TYPES = [
  *     of the table: a transfer into the range is a direct tail call, and one out of it is
  *     counted (`finishModule`); profileCalls: indirect calls note their targets in the
  *     layout's call profile, when it has one (`callProfile`); structure: a region's loops
- *     as wasm loops (`planStructure`), false for every backward jump through the dispatch
+ *     as wasm loops (`planStructure`), false for every backward jump through the dispatch;
+ *     resume: with hash, under cork's own layout, a miss of the hash runs the interpreter
+ *     tier in wasm through the table's `TIER_SLOT` (`finishModule`)
  * @returns {ModuleContext}
  */
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
-        place = 0, profileCalls = false } = {})
+        place = 0, profileCalls = false, resume = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -352,6 +367,10 @@ export function prepareModule(m, layout, features, memory = {},
         // The transfer's index is taken before any region's, which call it;
         // its body waits for the module's last region (`finishModule`).
         context.transfer = m.function(regionType, [], new Uint8Array([0x00, 0x0b]));
+        if (resume && (layout.flagRecord ?? -1) >= 0)
+        {
+            context.resume = addResume(m, layout, materialise, context.transfer);
+        }
     }
     if (hashed && place > 0)
     {
@@ -384,6 +403,9 @@ export function prepareModule(m, layout, features, memory = {},
  * One function a module rather than the probe in every region: the regions
  * are the smaller -- a loading phase compiles thousands of them -- and the
  * hop into it is a direct tail call, a fraction of the indirect one.
+ *
+ * With `resume`, a miss tail-calls the module's resume function (`addResume`)
+ * once the carried state is written back, rather than leave.
  *
  * @param {ModuleContext} context
  * @param {(number | null)[]} functions  each job's function index, null for one not emitted
@@ -518,11 +540,84 @@ export function finishModule(context, functions){
             .localGet(Local.budget).op(I32.sub);
         b.store('i32', { offset: layout.counter });
     }
-    b.i32const(Exit.UNTRANSLATED);
+    if (context.resume !== undefined && carried)
+    {
+        b.localGet(Local.budget).returnCall(context.resume);
+    }
+    else
+    {
+        b.i32const(Exit.UNTRANSLATED);
+    }
     m.functions[transfer - m.importedFunctions] = {
         typeIndex: regionType, locals: [ValType.i32, ValType.i32, ValType.i32], body: b.toBytes(),
         hints: b.hints,
     };
+}
+
+/**
+ * The function a module's transfer tail-calls on a miss of the hash, with the
+ * budget left, the state written back into the block: it runs the interpreter
+ * tier in wasm in place of leaving, through the table's `TIER_SLOT` -- the flag
+ * record folded into the word the tier reads, the tier run from EIP -- and where
+ * the tier stops at a start with an entry it tail-calls the transfer with the
+ * state the block holds, charged what the tier retired, to probe for it.
+ * Anything else the tier stops for -- a hot start, a trap, a fault, a store into
+ * code, an instruction it leaves, the budget -- leaves with `INTERPRETED` and the
+ * tier's code, for the host to answer as it answers the tier's own runs; the
+ * slot's function before the host installs the tier answers 0, a miss as
+ * before. A function of its own rather than code in the transfer, which every
+ * transfer runs through: a call there, taken or not, slowed the transfers of
+ * cork-bench's calls workloads.
+ *
+ * @param {import('../wasm/encoder.js').ModuleBuilder} m
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @param {number} materialise @param {number} transfer
+ * @returns {number} the function's index
+ */
+function addResume(m, layout, materialise, transfer){
+    const record = /** @type {number} */ (layout.flagRecord);
+    const [budget, code, left] = [0, 1, 2];
+    const tierType = m.type({ params: [ValType.i32], results: [ValType.i32] });
+    const b = new Body();
+    // The record folded into the word, as `eflagsOf` folds it for the tier's own runs.
+    b.i32const(0).load('i32', { offset: record }).localTee(code);
+    b.if(EMPTY);
+    b.i32const(0).localGet(code);
+    for (let i = 1; i < 5; i++)
+    {
+        b.i32const(0).load('i32', { offset: record + i * 4 });
+    }
+    b.i32const(0).load('i32', { offset: layout.eflags });
+    b.call(materialise).store('i32', { offset: layout.eflags });
+    b.i32const(0).i32const(0).store('i32', { offset: record });
+    b.end();
+    b.localGet(budget).i32const(TIER_SLOT).callIndirect(tierType, 0).localTee(code);
+    b.op(I32.eqz);
+    b.if(EMPTY);
+    b.i32const(Exit.UNTRANSLATED).return();
+    b.end();
+    // What remains of the budget, where the tier stopped at an entry.
+    b.localGet(budget).localGet(code).i32const(8).op(I32.shrU).op(I32.sub).localSet(left);
+    b.localGet(code).i32const(0xff).op(I32.and).i32const(TIER_ENTRY).op(I32.eq)
+        .localGet(left).i32const(0).op(I32.gtS).op(I32.and);
+    b.if(EMPTY);
+    b.i32const(0).load('i32', { offset: layout.eip });
+    b.localGet(left);
+    for (let r = 0; r < 8; r++)
+    {
+        b.i32const(0).load('i32', { offset: layout.regs + r * 4 });
+    }
+    for (let i = 0; i < RECORD_LOCALS.length; i++)
+    {
+        b.i32const(0);
+    }
+    b.i32const(0).load('i32', { offset: layout.eflags });
+    b.localGet(left);
+    b.returnCall(transfer);
+    b.end();
+    b.localGet(code).i32const(0xff).op(I32.and).i32const(8).op(I32.shl)
+        .i32const(Exit.INTERPRETED).op(I32.or);
+    return m.function(tierType, [ValType.i32, ValType.i32], b.toBytes());
 }
 
 /**

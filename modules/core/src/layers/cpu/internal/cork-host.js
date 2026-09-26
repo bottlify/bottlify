@@ -379,8 +379,13 @@ export function createCorkHost(config){
     const HOT_MASK = HOT_SLOTS - 1;
     const hotCounts = wasmTier?.hotCounts.length === HOT_SLOTS
         ? wasmTier.hotCounts : new Uint8Array(HOT_SLOTS);
-    /** Instructions either interpreter has retired. */
-    const interpretedSoFar = ()=>(interpreter?.retired ?? 0) + wasmRetired;
+    // Whether translated code runs the wasm tier at a miss of the entry hash
+    // (`interpretWith`): from the tier's first run on this host.
+    let tierInstalled = false;
+    /** Instructions either interpreter has retired, the wasm tier's runs from translated code
+     * among them. */
+    const interpretedSoFar = ()=>(interpreter?.retired ?? 0) + wasmRetired
+        + (tierInstalled && wasmTier !== null ? wasmTier.entered() : 0);
     // The JavaScript interpreter's stretch before the wasm tier (WASM_AFTER).
     // It is the process's, not the host's: the tier's start is paid once a
     // process, so every host adds what it runs to the tier's one account, and
@@ -593,6 +598,14 @@ export function createCorkHost(config){
      * @returns {number}
      */
     const interpretWasm = (tier, address, budget, jumpedIn)=>{
+        if (!tierInstalled)
+        {
+            // Started: an untranslated exit whose target has no region runs
+            // the tier in place from now on, and goes on at the entry it stops
+            // at without coming back here.
+            tierInstalled = true;
+            runtime.interpretWith?.(tier.entry(), tier.entered);
+        }
         blockView.setUint32(layout.eip, address >>> 0, true);
         lastStart = address;
         if (jumpedIn)
@@ -852,6 +865,48 @@ export function createCorkHost(config){
                 jumpedIn = exit.kind === 'untranslated';
                 remaining -= exit.retired;
                 ran += exit.retired;
+                if (exit.kind === 'interpreted' && wasmTier !== null)
+                {
+                    // A miss ran the wasm tier in place, which stopped short of
+                    // an entry: what it stopped for, answered as for a run of it
+                    // here (`interpretWasm`); an instruction it leaves, the budget
+                    // or an entry at another top go round the loop.
+                    const code = exit.vector;
+                    if (code === WasmExit.HALT)
+                    {
+                        halted = true;
+                        break;
+                    }
+                    if (code === WasmExit.FAULT)
+                    {
+                        takeFault(wasmTier.exitValue());
+                        break;
+                    }
+                    if (code === WasmExit.HOT)
+                    {
+                        runtime.noteHot(eip(), x87Top(), wasmTier.exitValue());
+                        if (corkConfig?.feed === 'slice')
+                        {
+                            feedDue = true;
+                        }
+                        else
+                        {
+                            notedSinceFeed = true;
+                        }
+                    }
+                    else if (code === WasmExit.CODE_WRITE)
+                    {
+                        invalidate(wasmTier.exitValue(), wasmTier.exitSize());
+                    }
+                    else if (code === WasmExit.TRAP)
+                    {
+                        raiseTrap(wasmTier.exitValue());
+                    }
+                    if (notedSinceFeed && interpretedSoFar() - retiredAtFeed >= FEED_MIN_STEPS)
+                    {
+                        translateDue = true;
+                    }
+                }
                 if (exit.kind === 'halt')
                 {
                     halted = true;

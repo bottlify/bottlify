@@ -19,8 +19,13 @@
 
 import { Tables } from './layout.js';
 
-/** Page flag bits. */
-export const PageFlag = Object.freeze({ INACCESSIBLE: 1, HAS_CODE: 2, VOLATILE: 4 });
+/**
+ * Page flag bits. CLOSED marks a page holding a block with no entry inside a
+ * translated region's loop, which the runtime forms copies for once translated
+ * code keeps leaving for it: the interpreter tier in wasm (`interp-wasm.c`, the
+ * same bit) leaves a miss of the hash there to the host, which counts it.
+ */
+export const PageFlag = Object.freeze({ INACCESSIBLE: 1, HAS_CODE: 2, VOLATILE: 4, CLOSED: 8 });
 
 /** Bytes in a guest page. */
 export const GUEST_PAGE = 4096;

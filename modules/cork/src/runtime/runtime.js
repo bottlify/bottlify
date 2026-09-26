@@ -25,11 +25,12 @@
  */
 
 import { formRegion } from '../region.js';
-import { enterRegion, mathImports } from '../emit/region.js';
+import { TIER_SLOT, enterRegion, mathImports } from '../emit/region.js';
 import { decode } from '../decode/decoder.js';
 import { SHAPE, isX87, trackRegion } from '../emit/x87.js';
 import { PRECISION } from '../emit/memory.js';
 import { features as probeFeatures } from '../wasm/features.js';
+import { Body, ModuleBuilder, ValType } from '../wasm/encoder.js';
 import { emitBatch, relinkBatch } from './emit-built.js';
 import { buildHelpersModule } from '../emit/helpers.js';
 import { openTranslationWorker } from './translator.js';
@@ -48,7 +49,27 @@ const usesX87 = region=>region.blocks.some(block=>block.instructions.some(isX87)
 
 /** Exit codes by number, as the region functions answer them. */
 const KINDS = /** @type {ExitKind[]} */ (
-    ['untranslated', 'budget', 'trap', 'halt', 'fault', 'stale']);
+    ['untranslated', 'budget', 'trap', 'halt', 'fault', 'stale', 'interpreted']);
+
+/** @type {Function | null} */
+let noTier = null;
+/**
+ * What the table's `TIER_SLOT` holds until the host puts the interpreter tier's
+ * entry there (`interpretWith`): a function answering 0, which a miss of the
+ * hash takes as no tier and leaves as before. One a process.
+ */
+function noTierEntry(){
+    if (noTier === null)
+    {
+        const m = new ModuleBuilder();
+        const type = m.type({ params: [ValType.i32], results: [ValType.i32] });
+        m.function(type, [], new Body().i32const(0).toBytes(), { exportAs: 'none' });
+        const bytes = /** @type {Uint8Array<ArrayBuffer>} */ (m.toBytes());
+        noTier = /** @type {Function} */ (
+            new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.none);
+    }
+    return noTier;
+}
 
 /**
  * @param {EngineEnv & { features?: ReturnType<typeof probeFeatures> }} env
@@ -180,6 +201,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const table = found.tailCalls
         ? new WebAssembly.Table({ element: 'anyfunc', initial: 256 })
         : null;
+    // Under cork's own layout a miss of the hash may run the interpreter tier
+    // in wasm through the table (`interpretWith`); its slot is no region's.
+    const resumable = table !== null && (layout.flagRecord ?? -1) >= 0;
+    if (resumable)
+    {
+        table.set(TIER_SLOT, noTierEntry());
+    }
+    /** What the tier has retired in place of misses, all told, once it is installed: not
+     * the translator's own share. @type {(() => number) | null} */
+    let tierEntered = null;
     /** @type {number[]} table indices of dropped regions, reused where modules are not
      * placed: a placed module's range is its own until its last region goes (`placeModule`) */
     const freeTable = [];
@@ -421,6 +452,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** By the start of a block inside a structured region's loop that has no entry, the
      * regions holding it so. @type {Map<number, Set<RegionRecord>>} */
     const closedIn = new Map();
+    /** By page, the closed starts on it: those pages carry `PageFlag.CLOSED`, and the
+     * interpreter tier in wasm runs no miss of the hash there, which the host must count
+     * (`missAt`) for the copies. @type {Map<number, number>} */
+    const closedPages = new Map();
     /** @param {number} start @param {RegionRecord} record */
     const forgetClosed = (start, record)=>{
         const holders = closedIn.get(start);
@@ -428,6 +463,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         if (holders?.size === 0)
         {
             closedIn.delete(start);
+            const page = start >>> 12;
+            const left = (closedPages.get(page) ?? 1) - 1;
+            if (left > 0)
+            {
+                closedPages.set(page, left);
+            }
+            else
+            {
+                closedPages.delete(page);
+                pages.clear(page, PageFlag.CLOSED);
+            }
         }
     };
     /** The regions to form again with copies of those blocks. @type {Set<RegionRecord>} */
@@ -484,9 +530,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
         stalls.push({ at: Math.round(since), ms: Math.round(ms), what });
     };
-    let nextTable = 0;
+    let nextTable = resumable ? TIER_SLOT + 1 : 0;
     /** @type {Record<ExitKind, number>} */
-    const exits = { untranslated: 0, budget: 0, trap: 0, halt: 0, fault: 0, stale: 0 };
+    const exits = { untranslated: 0, budget: 0, trap: 0, halt: 0, fault: 0, stale: 0,
+        interpreted: 0 };
     /** @type {import('../../../core/src/layers/cpu/engine.js').ExitRecord} */
     const exit = { retired: 0, kind: 'untranslated', vector: 0 };
     /** @type {Record<string, number>} */
@@ -808,6 +855,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         hash: table !== null,
         place: table !== null && settings.dispatch === true,
         profileCalls: table !== null && settings.callTargets === true,
+        resume: resumable,
         wide: precision === 'wide',
         narrow: precision === 'narrow',
         structure: settings.structure,
@@ -1116,6 +1164,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 holders = new Set();
                 closedIn.set(start, holders);
+                const page = start >>> 12;
+                closedPages.set(page, (closedPages.get(page) ?? 0) + 1);
+                pages.set(page, PageFlag.CLOSED);
             }
             holders.add(record);
         }
@@ -1878,9 +1929,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // and re-enters per call, and an object per leave was the
             // collector's share of the cost.
             const before = counterWord();
+            const tierBefore = tierEntered === null ? 0 : tierEntered();
             const code = enterRegion(fn, label, budget, view(), layout) >>> 0;
             const retired = (counterWord() - before) >>> 0;
-            corkRetired += retired;
+            corkRetired += tierEntered === null ? retired
+                : retired - ((tierEntered() - tierBefore) >>> 0);
             const kind = KINDS[code & 0xff] ?? 'untranslated';
             exits[kind]++;
             if (kind === 'untranslated' && code >>> 8 === PRECISION)
@@ -2270,6 +2323,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return 0;
         },
         invalidatePage,
+        interpretWith(entry, entered){
+            if (!resumable)
+            {
+                return false;
+            }
+            /** @type {WebAssembly.Table} */ (table).set(TIER_SLOT, entry);
+            tierEntered = entered;
+            return true;
+        },
         noteStall,
         /** @param {number} page */
         holdsPage: page=>(pages.get(page) & PageFlag.HAS_CODE) !== 0,

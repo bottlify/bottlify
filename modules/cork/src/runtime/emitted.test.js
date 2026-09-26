@@ -40,6 +40,7 @@ const EMITTED = {
     51: '9e0716ca01235740',
     52: 'd1714e6d24c522cf',
     53: 'faa5e86638c6dcb1',
+    54: '2a2fbc91848b4ca1',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
@@ -61,7 +62,7 @@ function digest(){
             const region = formRegion(read, entry, {});
             const m = new ModuleBuilder();
             const context = prepareModule(m, layout, FEATURES, {},
-                { hash: true, trapPort: 0xb077 });
+                { hash: true, trapPort: 0xb077, resume: true });
             const translation = emitRegion(context, region, { entryTop: 0, checked: false });
             finishModule(context, [translation.functionIndex]);
             m.exportFunction('region', translation.functionIndex);

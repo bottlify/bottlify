@@ -134,6 +134,38 @@ test('a slice that dies on a no-tier instruction still counts what it ran', ()=>
     assert.equal(h.instructionCount(), 4, 'the four nops it ran, not the one it stopped on');
 });
 
+test('a call into code left untranslated runs on the wasm tier in place, not through the host',
+    async()=>{
+        const CALLS = 3000;
+        /** @param {number} value */
+        const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24];
+        /** @param {boolean} wasmInterpreter */
+        const run = async wasmInterpreter=>{
+            const h = host({
+                cork: { wasmInterpreter, wasmInterpreterAfter: 0, leafCalls: false },
+            });
+            // mov al, 0xc3; mov ecx, CALLS; L: call F; dec ecx; jnz L; hlt -- where F is
+            // mov [F + 5], al; ret: a routine that writes its own page, which is left to
+            // the interpreter once its regions have been dropped often enough.
+            load(h, 0x1000, [0xb0, 0xc3, 0xb9, ...u32(CALLS), 0xe8, ...u32(0x4000 - 0x100c),
+                0x49, 0x75, 0xf8, 0xf4]);
+            h.writePhysical(0x4000, Uint8Array.from([0xa2, ...u32(0x4005), 0xc3]));
+            while (!h.halted())
+            {
+                h.runSlice(100_000);
+                await h.cork().translatePending();
+            }
+            return { ecx: h.readReg32('ecx'), count: h.instructionCount(),
+                exits: h.corkDiagnostics().exits };
+        };
+        const js = await run(false);
+        const tier = await run(true);
+        assert.deepEqual([tier.ecx, tier.count], [js.ecx, js.count], 'the same run');
+        assert.ok(js.exits.untranslated > CALLS * 0.8, `${js.exits.untranslated} calls left`);
+        assert.ok(tier.exits.untranslated + tier.exits.interpreted < CALLS * 0.1,
+            `${tier.exits.untranslated} + ${tier.exits.interpreted} calls left`);
+    });
+
 test('the status words the wasm tier stores unless precise are counted in the diagnostics', ()=>{
     for (const precise of [false, true])
     {

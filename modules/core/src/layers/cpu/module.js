@@ -247,7 +247,8 @@ export const cpuModule = {
                     counters[CORK_AT + 1] = cork.invalidations;
                     counters[CORK_AT + 2] = cork.translatedShare;
                     const leaves = cork.exits.untranslated + cork.exits.budget + cork.exits.trap
-                        + cork.exits.halt + cork.exits.fault + cork.exits.stale;
+                        + cork.exits.halt + cork.exits.fault + cork.exits.stale
+                        + (cork.exits.interpreted ?? 0);
                     const instructions = state.host.instructionCount();
                     const last = state.corkFrame;
                     const ran = instructions - last.instructions;

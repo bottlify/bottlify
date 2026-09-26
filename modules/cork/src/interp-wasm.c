@@ -57,6 +57,8 @@ enum
 #define ARITH (CF | PF | AF | ZF | SF | OF)
 #define INACCESSIBLE 1u
 #define HAS_CODE 2u
+/* A page with a block closed in a translated loop (PageFlag.CLOSED): see enter. */
+#define CLOSED 8u
 #define NONE 0xffffffffu
 
 static u8 *ram;
@@ -92,6 +94,11 @@ static u32 *mxcsrAt;
 static u32 precise;
 /* Status-word stores (fnstsw) run while not precise: what a relaxed bit could reach. */
 static u32 relaxedReads;
+/* The block's instruction counter, which a run translated code makes (enter) adds
+ * to as the host adds a run's; and what those runs retired, all told, in the area
+ * past the ring's index, where the host reads it. */
+static u32 *counterAt;
+static u32 *enteredAt;
 
 static u32 retired;
 static u32 exitValue;
@@ -116,6 +123,7 @@ void configure(u32 ramBase, u32 pageFlagsAt, u32 codeRangesAt, u32 hashAt, u32 h
     hotThreshold = threshold;
     starts = (u32 *)(area + hotSlots);
     startAt = starts + 256;
+    enteredAt = startAt + 1;
     trapPort = port;
     parkBase = park;
 }
@@ -138,6 +146,11 @@ __attribute__((export_name("retired"))) u32 getRetired(void) { return retired; }
 __attribute__((export_name("relaxedReads"))) u32 getRelaxedReads(void) { return relaxedReads; }
 __attribute__((export_name("exitValue"))) u32 getExitValue(void) { return exitValue; }
 __attribute__((export_name("exitSize"))) u32 getExitSize(void) { return exitSize; }
+__attribute__((export_name("configureEntry")))
+void configureEntry(u32 counterField)
+{
+    counterAt = (u32 *)counterField;
+}
 
 static const u8 PARITY[256] = {
 #define P2(n) n, n ^ 1, n ^ 1, n
@@ -3061,4 +3074,41 @@ u32 run(u32 budget)
     }
     retired = n;
     return code;
+}
+
+/*
+ * The run translated code makes where an untranslated exit's target has no
+ * region (the module's transfer function, on a miss of the entry hash), rather
+ * than leave for the host: the state block holds the state, the flag record
+ * folded. The target is a jump's, counted as the host counts one it is sent to,
+ * a hot one leaving at once for the host to note; what the run retires is added
+ * to the counter word, as the host adds a run's, and answered above the exit
+ * code, for the caller to charge its budget with and go on at an entry itself.
+ */
+__attribute__((export_name("enter")))
+u32 enter(u32 budget)
+{
+    u32 at = *eipField;
+    /* A block closed in a translated loop has no entry until the runtime forms the
+     * region's copies, which it does once translated code has left for it often
+     * enough: a miss there is the host's to count, answered as no tier. */
+    if (pageFlags[at >> 12] & CLOSED)
+    {
+        retired = 0;
+        return 0;
+    }
+    u8 *count = hotCounts + ((at >> 2) & hotMask);
+    u32 c = *count;
+    if (c < 255) *count = (u8)++c;
+    if (c >= hotThreshold && (c & (c - 1)) == 0)
+    {
+        exitValue = c;
+        retired = 0;
+        return W_HOT;
+    }
+    /* What it retired must fit above the code's byte. */
+    u32 code = run(budget < 0xffffff ? budget : 0xffffff);
+    *counterAt += retired;
+    *enteredAt += retired;
+    return code | retired << 8;
 }

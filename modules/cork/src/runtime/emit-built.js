@@ -77,11 +77,13 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
  *     blockProfile?: boolean, timings?: boolean, place?: boolean,
  *     leaveOut?: Set<string> | string[], wide?: boolean, narrow?: boolean,
- *     structure?: boolean, precise?: boolean, profileCalls?: boolean }} [options]
+ *     structure?: boolean, precise?: boolean, profileCalls?: boolean, resume?: boolean }}
+ *     [options]
  *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0;
  *     precise: nothing relaxed (the runtime's `precise`); place: job i's function goes at
  *     the module's range of the table plus i, a transfer into the range a direct tail call
- *     and one out of it counted (`finishModule`)
+ *     and one out of it counted (`finishModule`); resume: a miss of the hash runs the
+ *     interpreter tier in wasm (`prepareModule`)
  * @returns {BuiltBatch}
  */
 export function emitBatch(jobs, layout, features, options = {}){
@@ -102,6 +104,7 @@ export function emitBatch(jobs, layout, features, options = {}){
         precise: options.precise === true,
         place: options.place === true ? jobs.length : 0,
         profileCalls: options.profileCalls === true,
+        resume: options.resume === true,
         leaveOut,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
     });

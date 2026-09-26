@@ -54,8 +54,9 @@ export const WasmExit = Object.freeze({
 export const HOT_SLOTS = 1 << 22;
 /** Starts the ring of recent ones holds. */
 export const RING_STARTS = 256;
-/** Bytes the tier keeps past the tables: the counts, the ring and the ring's next index. */
-export const WASM_INTERPRETER_AREA = HOT_SLOTS + RING_STARTS * 4 + 4;
+/** Bytes the tier keeps past the tables: the counts, the ring, the ring's next index and
+ * what its runs from translated code have retired. */
+export const WASM_INTERPRETER_AREA = HOT_SLOTS + RING_STARTS * 4 + 8;
 /** Where the module's own data and stack end (the build fails past it): below guest RAM. */
 const MODULE_END = 16384;
 
@@ -125,6 +126,8 @@ export function createWasmInterpreter({ memory, layout, area, hotThreshold, trap
     let relaxedReads = ()=>0;
     let exitValue = ()=>0;
     let exitSize = ()=>0;
+    /** @type {((budget: number) => number) | null} */
+    let enter = null;
     const instantiate = ()=>{
         const exports = /** @type {any} */ (
             new WebAssembly.Instance(wasmModule(), { env: { memory, ...HOST_MATH } }).exports);
@@ -135,7 +138,8 @@ export function createWasmInterpreter({ memory, layout, area, hotThreshold, trap
             trapPort ?? 0x10000, parkBase >>> 0);
         exports.configureFloat(layout.x87, layout.x87Top, layout.x87Empty, layout.x87Control,
             layout.x87Status, precise ? 1 : 0, layout.xmm, layout.mxcsr);
-        ({ retired, relaxedReads, exitValue, exitSize } = exports);
+        exports.configureEntry(layout.counter);
+        ({ retired, relaxedReads, exitValue, exitSize, enter } = exports);
         run = /** @type {(budget: number) => number} */ (exports.run);
         return run;
     };
@@ -152,6 +156,14 @@ export function createWasmInterpreter({ memory, layout, area, hotThreshold, trap
         relaxedReads: ()=>relaxedReads(),
         exitValue: ()=>exitValue() >>> 0,
         exitSize: ()=>exitSize(),
+        entry(){
+            if (run === null)
+            {
+                instantiate();
+            }
+            return /** @type {(budget: number) => number} */ (enter);
+        },
+        entered: ()=>view.getUint32(index + 4, true),
         hotCounts: new Uint8Array(memory.buffer, area, HOT_SLOTS),
         starts,
         startIndex: ()=>view.getUint32(index, true),

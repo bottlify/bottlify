@@ -14,7 +14,9 @@
 import { formRegion } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 import { features } from '../wasm/features.js';
-import { emitRegion, enterRegion, finishModule, prepareModule, mathImports } from '../emit/region.js';
+import {
+    TIER_SLOT, emitRegion, enterRegion, finishModule, prepareModule, mathImports,
+} from '../emit/region.js';
 import { buildHelpersModule } from '../emit/helpers.js';
 import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
 import { createPageTable } from '../runtime/pages.js';
@@ -28,18 +30,20 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 /**
  * @param {{ ramSize?: number, codePages?: boolean, trapPort?: number,
  *     trap?: (value: number) => number, rdtsc?: () => bigint,
- *     leaveOut?: string[], precise?: boolean, structure?: boolean }} [given]
+ *     leaveOut?: string[], precise?: boolean, structure?: boolean,
+ *     resume?: boolean }} [given]
  *     trapPort: `out dx, eax` to it calls
  *     `trap` from inside the region (answering 1 when it moved EIP), as under a host with
  *     a call channel; without `trap`, one that answers 0; precise: nothing relaxed -- on
  *     unless a test asks, since the tests and the corpus judge the processor's behaviour;
  *     structure: the regions' loops as wasm loops (`prepareModule`), as the emitter's default
  *     unless a test asks or `CORK_STRUCTURE` in the environment says 0 or 1, so a suite can
- *     be run under the other form
+ *     be run under the other form; resume: a miss of the hash calls what `setTier` put in the
+ *     table's `TIER_SLOT`
  */
 export function createTestMachine(given = {}){
     const { ramSize = 1 << 20, codePages = false, trapPort, trap, rdtsc, leaveOut = [],
-        precise = true } = given;
+        precise = true, resume = false } = given;
     const forced = globalThis.process?.env?.CORK_STRUCTURE;
     const structure = given.structure
         ?? (forced === '1' ? true : forced === '0' ? false : undefined);
@@ -60,7 +64,8 @@ export function createTestMachine(given = {}){
     // The function table and the entry hash a runtime keeps, so a program
     // run through `runProgram` transfers between its regions as the
     // runtime's would.
-    const table = found.tailCalls ? new WebAssembly.Table({ element: 'anyfunc', initial: 0 })
+    const table = found.tailCalls
+        ? new WebAssembly.Table({ element: 'anyfunc', initial: resume ? TIER_SLOT + 1 : 0 })
         : null;
     const entries = createEntries(table
         ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16 } : {});
@@ -121,6 +126,11 @@ export function createTestMachine(given = {}){
         setFsBase(value){
             view().setUint32(layout.fsBase, value >>> 0, true);
         },
+        /** The function a miss of the hash calls under `resume`: the interpreter tier's
+         * entry, or a stand-in. @param {Function} entry */
+        setTier(entry){
+            /** @type {WebAssembly.Table} */ (table).set(TIER_SLOT, entry);
+        },
         /**
          * Forms and translates a region at `entry` and returns a runner over
          * it, plus what the emitter said.
@@ -145,7 +155,7 @@ export function createTestMachine(given = {}){
             const region = formRegion(read, entry, regionOptions);
             const m = new ModuleBuilder();
             const context = prepareModule(m, layout, found, {}, {
-                undoLog, hash: table !== null && hash, wide, narrow, precise,
+                undoLog, hash: table !== null && hash, wide, narrow, precise, resume,
                 ...(structure === undefined ? {} : { structure }),
                 ...(trapPort === undefined ? {} : { trapPort }), leaveOut: new Set(leaveOut),
             });
