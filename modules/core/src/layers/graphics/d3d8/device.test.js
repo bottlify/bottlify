@@ -873,6 +873,17 @@ test('a leaked resource keeps the device alive, which is how a leak is noticed',
 /** D3DVSD_STREAM(0), D3DVSD_REG(D3DVSDE_POSITION, D3DVSDT_FLOAT3), D3DVSD_END(). */
 const DECLARATION = [0x20000000, 0x40020000, 0xffffffff];
 
+/** ps_1_1: def c1, tex t0, dp3, mul, mul -- Wine's simple_ps. */
+const PIXEL_SHADER = [
+    0xffff0101,
+    0x00000051, 0xa00f0001, 0x3f800000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000042, 0xb00f0000,
+    0x00000008, 0x800f0000, 0xa0e40001, 0xa0e40000,
+    0x00000005, 0x800f0000, 0x90e40000, 0x80e40000,
+    0x00000005, 0x800f0000, 0xb0e40000, 0x80e40000,
+    0x0000ffff,
+];
+
 /** vs_1_1: dp4 oPos.x..w, v0, c0..c3 -- Wine's simple_vs. */
 const SHADER = [
     0xfffe0101,
@@ -892,7 +903,7 @@ test('creating a shader takes no reference on the device', ()=>{
 
     assert.equal(device.CreateVertexShader(DECLARATION, SHADER, vertex), D3D_OK);
     assert.equal(device.refCount, 1, 'a handle is not an object with a lifetime');
-    assert.equal(device.CreatePixelShader([0], pixel), D3D_OK);
+    assert.equal(device.CreatePixelShader(PIXEL_SHADER, pixel), D3D_OK);
     assert.equal(device.refCount, 1);
 
     assert.equal(device.DeleteVertexShader(vertex.handle ?? 0), D3D_OK);
@@ -994,7 +1005,7 @@ test('the two shader stages are independent questions', ()=>{
     /** @type {{ handle?: number }} */
     const out = {};
 
-    assert.equal(device.CreatePixelShader([0], pixel), D3D_OK);
+    assert.equal(device.CreatePixelShader(PIXEL_SHADER, pixel), D3D_OK);
     assert.equal(device.GetPixelShader(out), D3D_OK);
     assert.equal(out.handle, 0, 'creating a pixel shader does not set it either');
 
@@ -1198,6 +1209,99 @@ test('a declaration made alone is a fixed-function stage, and one with a functio
         assert.equal(device.DeleteVertexShader(programmed.handle ?? 0), D3D_OK);
         assertFullyReleased(device);
     });
+
+test('a pixel shader is made from a ps_1_x, hands its function back and has eight constants',
+    ()=>{
+        // Wine's d3d8 test_shader and test_unsupported_shaders.
+        const device = createDevice();
+        /** @type {{ handle?: number }} */
+        const made = {};
+        assert.equal(device.CreatePixelShader(PIXEL_SHADER, made), D3D_OK);
+        /** @type {{ handle?: number }} */
+        const out = {};
+        assert.equal(device.GetPixelShader(out), D3D_OK);
+        assert.equal(out.handle, 0, 'made, not set');
+        /** @type {{ bytes?: number, tokens?: Uint32Array }} */
+        const read = {};
+        assert.equal(device.GetPixelShaderFunction(made.handle, read, null), D3D_OK);
+        assert.equal(read.bytes, PIXEL_SHADER.length * 4);
+        assert.equal(device.GetPixelShaderFunction(made.handle, {}, 1), D3DERR_INVALIDCALL);
+        assert.equal(device.GetPixelShaderFunction(made.handle, read, 1024), D3D_OK);
+        assert.deepEqual([...read.tokens ?? []], PIXEL_SHADER);
+        assert.equal(device.GetPixelShaderFunction(1234567, {}, null), D3DERR_INVALIDCALL);
+
+        for (const tokens of [
+            SHADER,                                     // a vertex shader
+            [0xffff0200, 0x0000ffff],                   // ps_2_0
+            [0xffff0105, 0x0000ffff],                   // past ps_1_4
+            // def c8: past the eight registers.
+            [0xffff0101, 0x00000051, 0xa00f0008, 0, 0, 0, 0, 0x0000ffff],
+            [0xffff0101, 0x00000001],                   // no end token
+        ])
+        {
+            assert.equal(device.CreatePixelShader(tokens, {}), D3DERR_INVALIDCALL);
+        }
+        for (const minor of [0, 1, 2, 3, 4])
+        {
+            /** @type {{ handle?: number }} */
+            const each = {};
+            assert.equal(device.CreatePixelShader([0xffff0100 | minor, 0x0000ffff], each), D3D_OK,
+                `ps_1_${minor}`);
+            assert.equal(device.DeletePixelShader(each.handle ?? 0), D3D_OK);
+        }
+        const none = createDevice({ caps: { pixelShaderVersion: { major: 0, minor: 0 } } });
+        assert.equal(none.CreatePixelShader(PIXEL_SHADER, {}), D3DERR_INVALIDCALL,
+            'a device that claims no pixel shader makes none');
+        assertFullyReleased(none);
+
+        // Constants: c0 to c7, recorded into a block (Wine's d3d8
+        // test_shader_constant_apply).
+        const ps = [5, 6, 7, 8];
+        assert.equal(device.SetPixelShaderConstant(7, ps, 1), D3D_OK);
+        assert.equal(device.SetPixelShaderConstant(7, [...ps, ...ps], 2), D3DERR_INVALIDCALL);
+        assert.equal(device.BeginStateBlock(), D3D_OK);
+        assert.equal(device.SetPixelShaderConstant(1, ps, 1), D3D_OK);
+        /** @type {{ handle?: number }} */
+        const block = {};
+        assert.equal(device.EndStateBlock(block), D3D_OK);
+        /** @type {{ values?: Float32Array }} */
+        const values = {};
+        assert.equal(device.GetPixelShaderConstant(1, 1, values), D3D_OK);
+        assert.deepEqual([...values.values ?? []], [0, 0, 0, 0]);
+        assert.equal(device.ApplyStateBlock(block.handle ?? 0), D3D_OK);
+        assert.equal(device.GetPixelShaderConstant(1, 1, values), D3D_OK);
+        assert.deepEqual([...values.values ?? []], ps);
+        assert.equal(device.GetPixelShaderConstant(7, 2, values), D3DERR_INVALIDCALL);
+
+        assert.equal(device.SetPixelShader(made.handle ?? 0), D3D_OK);
+        assert.equal(device.DeletePixelShader(made.handle ?? 0), D3D_OK);
+        assert.equal(device.GetPixelShader(out), D3D_OK);
+        assert.equal(out.handle, 0, 'deleting the bound shader unbinds it');
+        assert.equal(device.DeletePixelShader(made.handle ?? 0), D3DERR_INVALIDCALL);
+        assert.equal(device.DeleteStateBlock(block.handle ?? 0), D3D_OK);
+        assertFullyReleased(device);
+    });
+
+test('a pixel shader over a vertex format is a program over the format\'s elements', ()=>{
+    const device = createDevice();
+    /** @type {{ handle?: number }} */
+    const made = {};
+    assert.equal(device.CreatePixelShader(PIXEL_SHADER, made), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_XYZ_DIFFUSE), D3D_OK);
+    assert.equal(device.SetPixelShader(made.handle ?? 0), D3D_OK);
+    const processing = device.stageProcessing;
+    assert.equal(processing.fixedFunctionVertex, true);
+    assert.equal(processing.program.vertex, null, 'the vertex stage is the fixed one');
+    assert.equal(processing.program.pixelId, made.handle);
+    assert.deepEqual(processing.program.declaration.map(
+        (/** @type {any} */ element)=>[element.Usage, element.Offset]), [[0, 0], [10, 12]]);
+    assert.equal(processing.program.declarationId, FVF_XYZ_DIFFUSE,
+        'a format is never odd, so it is never a handle');
+    assert.equal(device.SetPixelShader(0), D3D_OK);
+    assert.equal(device.stageProcessing.program, null, 'no shader, no program');
+    assert.equal(device.DeletePixelShader(made.handle ?? 0), D3D_OK);
+    assertFullyReleased(device);
+});
 
 test('a handle from one shader kind is not a handle of the other', ()=>{
     const device = createDevice();

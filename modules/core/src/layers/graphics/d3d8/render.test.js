@@ -1717,28 +1717,33 @@ test('recorded: a fan drawn from user memory is expanded, and unbinds stream zer
     out.buffer.release();
 });
 
-test('recorded: a bound pixel shader is counted and not drawn as fixed function', async()=>{
-    const h = harness();
-    const { device, gpu } = h;
-    /** @type {{ handle?: number }} */
-    const pixel = {};
-    assert.equal(device.CreatePixelShader([0], pixel), D3D_OK);
+test('recorded: a bound pixel shader is drawn through its translation, not as fixed function',
+    async()=>{
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ handle?: number }} */
+        const pixel = {};
+        // ps_1_1: mov r0, v0.
+        assert.equal(device.CreatePixelShader([0xffff0101, 0x00000001, 0x800f0000, 0x90e40000,
+            0x0000ffff], pixel), D3D_OK);
 
-    assert.equal(device.BeginScene(), D3D_OK);
-    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
-    assert.equal(device.SetPixelShader(pixel.handle ?? 0), D3D_OK);
-    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK,
-        'the program is told the draw succeeded');
-    assert.equal(device.SetPixelShader(0), D3D_OK);
-    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK);
-    assert.equal(device.EndScene(), D3D_OK);
-    await h.present();
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(device.SetPixelShader(pixel.handle ?? 0), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20),
+            D3D_OK);
+        assert.equal(device.SetPixelShader(0), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20),
+            D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
 
-    assert.equal(gpu.count('draw'), 1, 'only the fixed-function draw reached the pass');
-    const skipped = h.device.diagnostics().skipped;
-    assert.equal(skipped.pixelShader, 1, 'a pixel shader draw would be the wrong formula');
-    assert.deepEqual(h.device.diagnostics().failures, []);
-});
+        assert.equal(gpu.count('draw'), 2);
+        const diagnostics = h.device.diagnostics();
+        assert.equal(diagnostics.programmable, 1, 'the first through the shader');
+        assert.equal(diagnostics.skipped.pixelShader, 0);
+        assert.deepEqual(diagnostics.failures, []);
+    });
 
 test('recorded: a stream whose stride is not the format\'s is counted, not misread', async()=>{
     const h = harness();

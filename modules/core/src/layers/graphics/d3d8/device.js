@@ -69,7 +69,7 @@ import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import {
     constantsWithin, declaredShader, parseDeclaration, readableByFixedFunction,
 } from './declaration.js';
-import { fixedFunctionLayoutOf } from '../d3d9/declaration.js';
+import { elementsOfFvf, fixedFunctionLayoutOf } from '../d3d9/declaration.js';
 import { SHADER_KIND, createConstantFile, functionOf, parseShader } from '../d3d9/shader.js';
 
 export { DEVICE_STATE, LIGHT_ENABLED };
@@ -87,6 +87,8 @@ export { DEVICE_STATE, LIGHT_ENABLED };
  * @property {{ major: number, minor: number }} [vertexShaderVersion]
  *           The newest vertex shader a create accepts; 0.0 makes none.
  * @property {number} [maxVertexShaderConst]  The vertex shader's float constant registers.
+ * @property {{ major: number, minor: number }} [pixelShaderVersion]
+ *           The newest pixel shader a create accepts; 0.0 makes none.
  */
 
 /** @type {DeviceCaps} */
@@ -99,6 +101,7 @@ export const DEFAULT_CAPS = Object.freeze({
     maxVolumeExtent: 256,
     vertexShaderVersion: Object.freeze({ major: 1, minor: 1 }),
     maxVertexShaderConst: 256,
+    pixelShaderVersion: Object.freeze({ major: 1, minor: 4 }),
 });
 
 /** Direct3D 8's pixel shader constant registers, c0 to c7. */
@@ -116,6 +119,28 @@ const PIXEL_CONSTANTS = 8;
  *           How the fixed-function stage reads the declaration, for a handle
  *           with no function.
  */
+
+/**
+ * @typedef {Object} PixelShader8
+ *     What a pixel shader handle names.
+ * @property {number} handle
+ * @property {Uint32Array} tokens  The function as the program gave it.
+ * @property {import('../d3d9/shader.js').ParsedShader} parsed
+ */
+
+/**
+ * Whether a function is a shader of this kind no newer than a version.
+ *
+ * @param {import('../d3d9/shader.js').ParsedShader} parsed
+ * @param {string} kind  A SHADER_KIND.
+ * @param {{ major: number, minor: number } | undefined} newest
+ */
+function withinVersion(parsed, kind, newest){
+    const { major, minor } = parsed.version;
+    const limit = newest ?? { major: 0, minor: 0 };
+    return !parsed.error && parsed.version.kind === kind && major === 1
+        && (major < limit.major || (major === limit.major && minor <= limit.minor));
+}
 
 /**
  * @typedef {import('../d3d9/device.js').Light} Light
@@ -605,8 +630,15 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * @type {Map<number, VertexShader8>}
      */
     const vertexShaders = new Map();
-    /** @type {Map<number, any>} */
+    /** @type {Map<number, PixelShader8>} */
     const pixelShaders = new Map();
+    /**
+     * The elements a vertex format spells, for a pixel shader drawn over the
+     * fixed-function vertex stage: made once a format.
+     *
+     * @type {Map<number, readonly import('../d3d9/declaration.js').VertexElement[] | null>}
+     */
+    const formatElements = new Map();
     let nextShaderHandle = 1;
     let boundVertexShader = 0;
     let boundPixelShader = 0;
@@ -1129,6 +1161,22 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             out.tokens = tokens;
         }
         return D3D_OK;
+    };
+
+    /**
+     * @param {number} fvf
+     * @returns {readonly import('../d3d9/declaration.js').VertexElement[] | null}
+     */
+    const elementsOfFormat = fvf=>{
+        if ((fvf & POSITION_MASK) === 0)
+        {
+            return null;
+        }
+        if (!formatElements.has(fvf))
+        {
+            formatElements.set(fvf, elementsOfFvf(fvf));
+        }
+        return formatElements.get(fvf) ?? null;
     };
 
     /**
@@ -2899,10 +2947,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 tokens = functionOf(functionCode);
                 const read = parseShader(tokens);
-                const newest = caps.vertexShaderVersion ?? { major: 0, minor: 0 };
-                const { kind, major, minor } = read.version;
-                if (read.error || kind !== SHADER_KIND.VERTEX || major !== 1
-                    || major > newest.major || (major === newest.major && minor > newest.minor)
+                if (!withinVersion(read, SHADER_KIND.VERTEX, caps.vertexShaderVersion)
                     || !constantsWithin(read, vertexConstants.floats.length / 4))
                 {
                     return D3DERR_INVALIDCALL;
@@ -3038,7 +3083,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
-         * @param {readonly number[]} functionCode
+         * A ps_1_x of no newer version than the caps claim, naming none of
+         * c8 on; like a vertex shader, it is not bound by being made (Wine's
+         * d3d8 test_shader and test_unsupported_shaders).
+         *
+         * @param {ArrayLike<number> | null} functionCode
          * @param {{ handle?: number }} out
          */
         CreatePixelShader(functionCode, out){
@@ -3046,10 +3095,44 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
+            const tokens = functionOf(functionCode);
+            const parsed = parseShader(tokens);
+            if (!withinVersion(parsed, SHADER_KIND.PIXEL, caps.pixelShaderVersion)
+                || !constantsWithin(parsed, PIXEL_CONSTANTS))
+            {
+                return D3DERR_INVALIDCALL;
+            }
             const handle = nextHandle();
-            pixelShaders.set(handle, { functionCode });
+            pixelShaders.set(handle, { handle, tokens, parsed });
             out.handle = handle;
             return D3D_OK;
+        },
+
+        /**
+         * @param {number} handle
+         * @param {{ bytes?: number, tokens?: Uint32Array }} out
+         * @param {number | null} room  See `GetVertexShaderDeclaration`.
+         */
+        GetPixelShaderFunction(handle, out, room){
+            const shader = pixelShaders.get(handle);
+            return shader ? handOver(shader.tokens, out, room) : D3DERR_INVALIDCALL;
+        },
+
+        /**
+         * c0 to c7, recorded into a state block as the vertex shader's are.
+         *
+         * @param {number} register @param {ArrayLike<number>} values @param {number} registers
+         */
+        SetPixelShaderConstant(register, values, registers){
+            return setConstants(pixelConstants, 'pixelConstants', register, values, registers);
+        },
+
+        /**
+         * @param {number} register @param {number} registers
+         * @param {{ values?: Float32Array }} out
+         */
+        GetPixelShaderConstant(register, registers, out){
+            return pixelConstants.getF(register, registers, out);
         },
 
         /** @param {number} handle */
@@ -3102,24 +3185,31 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const handle = isShaderHandle(boundVertexShader);
             const shader = handle ? vertexShaders.get(boundVertexShader) ?? null : null;
             const programmed = shader?.parsed ? shader : null;
+            const pixel = pixelShaders.get(boundPixelShader) ?? null;
+            // A handle naming no live shader -- a block applied after a
+            // delete -- is a stage nothing can draw, so it has no program.
+            const drawable = (!handle || shader) && (boundPixelShader === 0 || pixel);
             return {
-                // A handle naming no live shader -- a block applied after a
-                // delete -- is a stage nothing can draw.
                 vertexShader: programmed || (handle && !shader) ? boundVertexShader : 0,
                 fvf: handle ? 0 : boundVertexShader,
                 fixedFunctionLayout: shader && !programmed ? shader.layout : null,
                 fixedFunctionVertex: !programmed,
                 pixelShader: boundPixelShader,
-                program: programmed && boundPixelShader === 0
+                program: drawable && (programmed || pixel)
                     ? {
-                        vertex: programmed.parsed,
+                        vertex: programmed?.parsed ?? null,
                         vertexShader: programmed,
-                        vertexId: programmed.handle,
-                        pixel: null,
-                        pixelShader: null,
-                        pixelId: 0,
-                        declaration: programmed.declaration.elements,
-                        declarationId: programmed.handle,
+                        vertexId: programmed?.handle ?? 0,
+                        pixel: pixel?.parsed ?? null,
+                        pixelShader: pixel,
+                        pixelId: pixel?.handle ?? 0,
+                        // The declaration a handle carries, or the one its
+                        // vertex format spells; a format is never odd, so its
+                        // number is never a handle's.
+                        declaration: shader
+                            ? shader.declaration.elements
+                            : elementsOfFormat(boundVertexShader),
+                        declarationId: shader ? shader.handle : boundVertexShader,
                         vertexConstants,
                         pixelConstants,
                     }

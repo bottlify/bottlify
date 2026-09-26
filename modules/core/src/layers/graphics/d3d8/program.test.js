@@ -131,9 +131,12 @@ function harness(){
             assert.equal(device.Present(), D3D_OK);
             await device.idle();
         },
-        /** The floats the vertex stage's first constant buffer was bound to at the draw. */
-        vertexConstants(){
-            const bound = gpu.of('setBindGroup').find(call=>call.index === 0);
+        /**
+         * The floats a stage's first constant buffer was bound to at the
+         * draw: group 0 for the vertex stage, 1 for the pixel stage.
+         */
+        vertexConstants(group = 0){
+            const bound = gpu.of('setBindGroup').find(call=>call.index === group);
             const entry = bound.group.descriptor.entries.find(
                 (/** @type {any} */ one)=>one.binding === 0);
             const at = entry.resource.dynamicOffset ?? entry.resource.offset ?? 0;
@@ -224,3 +227,88 @@ test('a declaration made alone draws through the fixed-function stage, from both
         assert.equal(h.device.DeleteVertexShader(made.handle), D3D_OK);
         h.release();
     });
+
+test('a ps_1_4 over a vertex format draws through the fixed vertex stage, with its constants',
+    async()=>{
+        // Wine's d3d8 visual.c cnd_test, the 1.4 shader: texcrd r0, t0;
+        // mov r0.a, c0.a; cnd r0, r0, c1, c2 over D3DFVF_XYZ | D3DFVF_TEX1.
+        const h = harness();
+        /** @type {{ handle?: number }} */
+        const made = {};
+        assert.equal(h.device.CreatePixelShader([
+            0xffff0104,
+            0x00000051, 0xa00f0000, 0x00000000, 0x00000000, 0x00000000, 0x3f800000,
+            0x00000040, 0x80070000, 0xb0e40000,
+            0x00000001, 0x80080000, 0xa0ff0000,
+            0x00000050, 0x800f0000, 0x80e40000, 0xa0e40001, 0xa0e40002,
+            0x0000ffff,
+        ], made), D3D_OK);
+        assert.equal(h.device.SetPixelShaderConstant(1, [0, 0, 0, 0], 1), D3D_OK);
+        assert.equal(h.device.SetPixelShaderConstant(2, [1, 1, 1, 1], 1), D3D_OK);
+        assert.equal(h.device.SetVertexShader(0x002 | 0x100), D3D_OK, 'XYZ | TEX1');
+        assert.equal(h.device.SetPixelShader(made.handle), D3D_OK);
+        const quad = new Float32Array([
+            -1, -1, 0.1, 0, 1, -1, 0, 0.1, 0, 0, 0, -1, 0.1, 1, 1, 0, 0, 0.1, 1, 0,
+        ]);
+        assert.equal(h.device.BeginScene(), D3D_OK);
+        assert.equal(h.device.DrawPrimitiveUP(D3DPT.TRIANGLESTRIP, 2,
+            new Uint8Array(quad.buffer), 20), D3D_OK);
+        assert.equal(h.device.EndScene(), D3D_OK);
+        assert.equal(h.device.Present(), D3D_OK);
+        await h.device.idle();
+
+        assert.deepEqual(h.reports, []);
+        const diagnostics = h.device.diagnostics();
+        assert.equal(diagnostics.programmable, 1);
+        assert.equal(diagnostics.skipped.pixelShader, 0);
+        const pixelModule = h.gpu.of('createShaderModule').map(call=>call.descriptor)
+            .find(module=>module.label.startsWith('ps:'));
+        assert.ok(pixelModule.code.includes('> vec4f(0.5)'), 'cnd compares each component');
+        assert.ok(pixelModule.code.includes('in.t0'), 'texcrd reads the coordinate set');
+        const floats = h.vertexConstants(1);
+        assert.deepEqual([...floats.subarray(4, 12)], [0, 0, 0, 0, 1, 1, 1, 1],
+            'c1 and c2 as the program set them');
+        assert.deepEqual(h.gpu.of('draw').map(call=>call.args), [[4, 1, 0]]);
+
+        assert.equal(h.device.SetPixelShader(0), D3D_OK);
+        assert.equal(h.device.DeletePixelShader(made.handle), D3D_OK);
+        h.release();
+    });
+
+test('a vs_1_1 and a ps_1_1 draw as a pair, the pixel shader sampling its stage', async()=>{
+    const h = harness();
+    /** @type {{ handle?: number }} */
+    const vs = {};
+    /** @type {{ handle?: number }} */
+    const ps = {};
+    assert.equal(h.device.CreateVertexShader(DECLARATION, SHADER, vs), D3D_OK);
+    // ps_1_1: tex t0; mul r0, t0, v0.
+    assert.equal(h.device.CreatePixelShader([0xffff0101, 0x00000042, 0xb00f0000,
+        0x00000005, 0x800f0000, 0xb0e40000, 0x90e40000, 0x0000ffff], ps), D3D_OK);
+    /** @type {{ texture?: any }} */
+    const texture = {};
+    assert.equal(h.device.CreateTexture(2, 2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, texture),
+        D3D_OK);
+    assert.equal(h.device.SetTexture(0, texture.texture), D3D_OK);
+    assert.equal(h.device.SetVertexShader(vs.handle), D3D_OK);
+    assert.equal(h.device.SetPixelShader(ps.handle), D3D_OK);
+
+    await h.draw();
+    assert.deepEqual(h.reports, []);
+    assert.equal(h.device.diagnostics().programmable, 1);
+    const modules = h.gpu.of('createShaderModule').map(call=>call.descriptor);
+    const pixelModule = modules.find(module=>module.label.startsWith('ps:'));
+    assert.ok(pixelModule.code.includes('t0 = textureSample(tex0, samp0, in.t0.xy);'));
+    assert.ok(modules.some(module=>module.label.startsWith('vs:')
+        && module.code.includes('@location(5) v5: vec4<f32>,')));
+    const sampled = h.gpu.of('setBindGroup').find(call=>call.index === 2).group.descriptor;
+    assert.equal(sampled.entries.length, 2, 'the texture at stage zero and its sampler');
+
+    assert.equal(h.device.SetTexture(0, null), D3D_OK);
+    assert.equal(h.device.SetVertexShader(0), D3D_OK);
+    assert.equal(h.device.SetPixelShader(0), D3D_OK);
+    assert.equal(h.device.DeleteVertexShader(vs.handle), D3D_OK);
+    assert.equal(h.device.DeletePixelShader(ps.handle), D3D_OK);
+    texture.texture.release();
+    h.release();
+});

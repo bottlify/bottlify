@@ -16,11 +16,11 @@
  * answers E_NOTIMPL, which is a reply a program handles.
  *
  * A slot that answers a failure code rather than doing the thing asked of it is
- * making the same point more loudly: pixel shaders are refused, because the
- * renderer behind this cannot honour what succeeding would promise, and say so
- * where they stand. A refusal is a reply a program acts on -- usually by taking
- * the path this build does draw -- where a success it cannot see through leaves
- * it drawing nothing and looking somewhere else for the reason.
+ * making the same point more loudly: a shader of a version the caps do not
+ * claim is refused, because the renderer behind this cannot honour what
+ * succeeding would promise. A refusal is a reply a program acts on -- usually
+ * by taking the path this build does draw -- where a success it cannot see
+ * through leaves it drawing nothing and looking somewhere else for the reason.
  *
  * Out-parameters are where this is easy to get wrong in a way nothing reports.
  * A method that hands back an interface writes a pointer *and* takes a
@@ -72,9 +72,13 @@ import {
  */
 const D3DCAPS_READ_SCANLINE = 0x00020000;
 const D3DVS_VERSION_MARK = 0xfffe0000;
+const D3DPS_VERSION_MARK = 0xffff0000;
 
 /** Past this many tokens a shader function with no end token is not one. */
 const MAX_SHADER_DWORDS = 1 << 16;
+
+/** A pixel shader's constant registers, c0 to c7. */
+const PIXEL_SHADER_CONSTANTS = 8;
 
 // A colour cursor at any resolution: the device keeps the bitmap a program
 // hands it and the host shows it over the frame. A device that claims neither
@@ -1020,7 +1024,8 @@ export function createDirect3D8Seam(
      * pointer is required, the buffer optional, and a buffer too small is
      * refused with the size left as the caller wrote it.
      *
-     * @param {'GetVertexShaderDeclaration' | 'GetVertexShaderFunction'} name
+     * @param {'GetVertexShaderDeclaration' | 'GetVertexShaderFunction'
+     *     | 'GetPixelShaderFunction'} name
      */
     const tokensOf = name=>(/** @type {any} */ device, /** @type {number[]} */ args)=>{
         const [handle, data, size] = args;
@@ -2117,13 +2122,49 @@ export function createDirect3D8Seam(
         /** @param {any} device @param {number[]} args */
         DeleteVertexShader: (device, [handle])=>device.DeleteVertexShader(handle >>> 0),
 
-        // CreatePixelShader, its constants and its function reader are absent
-        // on purpose: the caps claim no pixel shader, and a create that
-        // succeeded would send a program down a path whose every draw the
-        // renderer declines, where the refusal sends it down the fixed-function
-        // stages, which draw.
+        /** @param {any} device @param {number[]} args */
+        CreatePixelShader: (device, [code, out])=>{
+            const tokens = (code >>> 0) === 0 ? null : readFunction(code >>> 0);
+            if (!tokens || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ handle?: number }} */
+            const held = {};
+            const hr = device.CreatePixelShader(tokens, held);
+            if (hr === D3D_OK)
+            {
+                fields.writeU32(out >>> 0, held.handle ?? 0);
+            }
+            return hr;
+        },
+
         /** @param {any} device @param {number[]} args */
         SetPixelShader: (device, [handle])=>device.SetPixelShader(handle >>> 0),
+
+        GetPixelShaderFunction: tokensOf('GetPixelShaderFunction'),
+
+        /** @param {any} device @param {number[]} args */
+        SetPixelShaderConstant: (device, [register, data, count])=>((data >>> 0) === 0
+            ? D3DERR_INVALIDCALL
+            : device.SetPixelShaderConstant(register >>> 0, readFloats(data >>> 0,
+                Math.min(count >>> 0, PIXEL_SHADER_CONSTANTS) * 4), count >>> 0)),
+
+        /** @param {any} device @param {number[]} args */
+        GetPixelShaderConstant: (device, [register, data, count])=>{
+            if ((data >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ values?: Float32Array }} */
+            const held = {};
+            const hr = device.GetPixelShaderConstant(register >>> 0, count >>> 0, held);
+            if (hr === D3D_OK && held.values)
+            {
+                writeFloats(data >>> 0, held.values);
+            }
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         GetPixelShader: (device, [out])=>{
@@ -2334,18 +2375,16 @@ export function createDirect3D8Seam(
      * is running perfectly and getting nowhere.
      *
      * The values describe what the renderer behind this actually does: the
-     * fixed-function stages, vertex shaders to 1.1 translated to the GPU's own,
-     * no pixel shader, and filtering and addressing a GPU of any generation
-     * has.
+     * fixed-function stages, vertex shaders to 1.1 and pixel shaders to 1.4
+     * translated to the GPU's own, and filtering and addressing a GPU of any
+     * generation has.
      *
      * @param {number} address @param {any} caps
      */
     const writeCaps = (address, caps)=>{
         // Zeroed first: the structure is long, a caller allocates all of it,
         // and every field this does not set has to read as "not supported"
-        // rather than as whatever was on the stack. The pixel shader version
-        // is one of those zeroes, and the pixel shader entry points make it
-        // good.
+        // rather than as whatever was on the stack.
         memory.writeMemory(address, new Uint8Array(D3DCAPS8.SIZE));
         fields.writeStruct(address, D3DCAPS8, {
             DeviceType: D3DDEVTYPE.HAL,
@@ -2417,6 +2456,8 @@ export function createDirect3D8Seam(
                 | (caps.vertexShaderVersion?.minor ?? 0)) >>> 0,
             MaxVertexShaderConst: caps.vertexShaderVersion?.major
                 ? caps.maxVertexShaderConst ?? 0 : 0,
+            PixelShaderVersion: (D3DPS_VERSION_MARK | ((caps.pixelShaderVersion?.major ?? 0) << 8)
+                | (caps.pixelShaderVersion?.minor ?? 0)) >>> 0,
         });
         // The floats, which the same writer cannot place without being told.
         // MaxVertexW is the largest homogeneous W a vertex may carry; a zero
@@ -2429,8 +2470,10 @@ export function createDirect3D8Seam(
             GuardBandRight: 1e9,
             GuardBandBottom: 1e9,
             ExtentsAdjust: 0,
+            // A 1.x shader's registers hold [-1, 1]: its constants read so.
+            MaxPixelShaderValue: caps.pixelShaderVersion?.major ? 1 : 0,
         }, ['MaxPointSize', 'MaxVertexW', 'GuardBandLeft', 'GuardBandTop',
-            'GuardBandRight', 'GuardBandBottom', 'ExtentsAdjust']);
+            'GuardBandRight', 'GuardBandBottom', 'ExtentsAdjust', 'MaxPixelShaderValue']);
     };
 
     const rootMethods = {

@@ -50,7 +50,6 @@ import {
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
 const D3DERR_NOTAVAILABLE = 0x8876086a;
-const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
 const D3DERR_OUTOFVIDEOMEMORY = 0x8876017c;
 const S_FALSE = 1;
@@ -643,8 +642,8 @@ test('a vertex shader is made from guest memory and hands its tokens back as the
     write(0x7100, [0xfffe0200, 0x0000ffff]);
     assert.equal(h.device(device, 'CreateVertexShader', [0x7000, 0x7100, out, 0]),
         D3DERR_INVALIDCALL, 'a vs_2_0, past the version the caps claim');
-    // A pixel shader is not made: the caps claim none.
-    assert.equal(h.device(device, 'CreatePixelShader', [0x7100, out]), E_NOTIMPL);
+    assert.equal(h.device(device, 'CreatePixelShader', [0x7100, out]), D3DERR_INVALIDCALL,
+        'a vertex shader is not a pixel shader');
 
     assert.equal(h.device(device, 'DeleteVertexShader', [made]), D3D_OK);
     assert.equal(h.device(device, 'DeleteVertexShader', [made]), D3DERR_INVALIDCALL,
@@ -659,6 +658,62 @@ test('a vertex shader is made from guest memory and hands its tokens back as the
     assert.equal(h.device(device, 'SetPixelShader', [0]), D3D_OK, 'binding no pixel shader');
     assert.equal(h.device(device, 'GetPixelShader', [out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), 0);
+
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a pixel shader is made from guest memory, and its constants and function read back', ()=>{
+    // Wine's d3d8 test_shader, through the ABI.
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const shader = [
+        0xffff0101,
+        0x00000051, 0xa00f0001, 0x3f800000, 0x00000000, 0x00000000, 0x00000000,
+        0x00000042, 0xb00f0000,
+        0x00000008, 0x800f0000, 0xa0e40001, 0xa0e40000,
+        0x00000005, 0x800f0000, 0x90e40000, 0x80e40000,
+        0x00000005, 0x800f0000, 0xb0e40000, 0x80e40000,
+        0x0000ffff,
+    ];
+    h.box.services.writeMemory(0x7100,
+        new Uint8Array(Uint32Array.from([...shader, 0xdeadbeef]).buffer));
+    const out = 0x7400;
+    const size = 0x7404;
+    const data = 0x7500;
+    assert.equal(h.device(device, 'CreatePixelShader', [0x7100, out]), D3D_OK);
+    const made = h.fields.readU32(out);
+    assert.equal(h.device(device, 'CreatePixelShader', [0, out]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(device, 'CreatePixelShader', [0x7100, 0]), D3DERR_INVALIDCALL);
+
+    assert.equal(h.device(device, 'GetPixelShaderFunction', [made, 0, size]), D3D_OK);
+    assert.equal(h.fields.readU32(size), shader.length * 4);
+    h.fields.writeU32(size, 1);
+    assert.equal(h.device(device, 'GetPixelShaderFunction', [made, data, size]),
+        D3DERR_INVALIDCALL);
+    assert.equal(h.fields.readU32(size), 1, 'left as the caller wrote it');
+    h.fields.writeU32(size, 1024);
+    assert.equal(h.device(device, 'GetPixelShaderFunction', [made, data, size]), D3D_OK);
+    assert.deepEqual(Array.from({ length: shader.length }, (_, i)=>h.fields.readU32(data + i * 4)),
+        shader);
+
+    const floats = 0x7600;
+    [0.25, 0.5, 0.75, 1].forEach((value, i)=>h.fields.writeF32(floats + i * 4, value));
+    assert.equal(h.device(device, 'SetPixelShaderConstant', [7, floats, 1]), D3D_OK);
+    assert.equal(h.device(device, 'GetPixelShaderConstant', [7, data, 1]), D3D_OK);
+    assert.deepEqual([0, 1, 2, 3].map(i=>h.fields.readF32(data + i * 4)), [0.25, 0.5, 0.75, 1]);
+    assert.equal(h.device(device, 'SetPixelShaderConstant', [7, floats, 2]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(device, 'SetPixelShaderConstant', [0, floats, 0x10000000]),
+        D3DERR_INVALIDCALL);
+    assert.equal(h.device(device, 'GetPixelShaderConstant', [0, 0, 1]), D3DERR_INVALIDCALL);
+
+    assert.equal(h.device(device, 'SetPixelShader', [made]), D3D_OK);
+    assert.equal(h.device(device, 'GetPixelShader', [out]), D3D_OK);
+    assert.equal(h.fields.readU32(out), made);
+    assert.equal(h.device(device, 'DeletePixelShader', [made]), D3D_OK);
+    assert.equal(h.device(device, 'GetPixelShader', [out]), D3D_OK);
+    assert.equal(h.fields.readU32(out), 0);
 
     assert.equal(h.release(device), 0);
     h.release(root);
@@ -1560,8 +1615,9 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
 
     const caps = h.fields.readStruct(at, D3DCAPS8,
         ['MaxVertexW', 'GuardBandLeft', 'GuardBandTop', 'GuardBandRight', 'GuardBandBottom',
-            'ExtentsAdjust', 'MaxPointSize']);
+            'ExtentsAdjust', 'MaxPointSize', 'MaxPixelShaderValue']);
     assert.equal(caps.DeviceType, D3DDEVTYPE.HAL, 'the first field, so the whole run starts right');
+    assert.equal(caps.MaxPixelShaderValue, 1, 'a float');
     assert.equal(caps.MaxTextureAspectRatio, 4096);
     assert.equal(caps.MaxAnisotropy, 1, 'the sampler filters no more than linearly');
     assert.equal(caps.MaxTextureBlendStages, 8);
@@ -1574,11 +1630,11 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
     assert.ok(caps.MaxVertexW > 0, 'a zero here is read as no clipping headroom at all');
     assert.ok(caps.GuardBandLeft < 0 && caps.GuardBandRight > 0);
 
-    // Vertex shaders to 1.1, translated, over a file of 256 constants; the
-    // pixel shader version is zero, and its entry points make that good.
+    // Vertex shaders to 1.1 over a file of 256 constants, and pixel shaders
+    // to 1.4, whose registers hold [-1, 1].
     assert.equal(caps.VertexShaderVersion, 0xfffe0101);
     assert.equal(caps.MaxVertexShaderConst, 256);
-    assert.equal(caps.PixelShaderVersion, 0);
+    assert.equal(caps.PixelShaderVersion, 0xffff0104);
 
     // The bits land in the fields they belong to rather than one field over.
     assert.equal(caps.ZCmpCaps, caps.AlphaCmpCaps, 'both comparison sets are the same set');
