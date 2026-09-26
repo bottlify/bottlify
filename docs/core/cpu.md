@@ -446,7 +446,11 @@ of those pages (inaccessible, and code for the destination), then one `memory.co
 pointers, the count and the budget moved by the whole run. DF set, an element across a page,
 a flagged page, and a copy whose destination lies just ahead of its source (which the
 processor fills with the source's first elements, where a memmove does not) take the
-per-element path. `rep movsd` 5.2 -> 0.7 ns an element, `rep stosd` 2.9 -> 0.6.
+per-element path. `rep movsd` 5.2 -> 0.7 ns an element, `rep stosd` 2.9 -> 0.6. Each
+iteration of a `rep` counts against the slice's budget, and a `rep cmps` or `rep scas` tests its
+stop condition before the budget: a slice that runs out on the iteration that stops it leaves the
+instruction done, where it had left on it and the instruction run again scanned on past the match
+(a `repne scasb` strlen of "abc" answered 9).
 
 The null page is *not* marked, because the emulator lets a program read
 address 0 today and the two engines must agree; marking it, and projecting the memory

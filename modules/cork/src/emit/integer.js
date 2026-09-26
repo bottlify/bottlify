@@ -2094,13 +2094,11 @@ function stringInstruction(e, instruction){
         b.localGet(ecx).i32const(1).op(I32.sub).localSet(ecx);
         b.localGet(Local.retired).i32const(1).op(I32.add).localSet(Local.retired);
         b.localGet(Local.budget).i32const(1).op(I32.sub).localSet(Local.budget);
-        b.localGet(Local.budget).i32const(0).op(I32.leS);
-        e.openIf('spent', EMPTY);
-        e.exitAt(instruction.eip, Exit.BUDGET);
-        e.close();
         if (compare)
         {
-            // rep: stop when not equal; repne: stop when equal.
+            // rep: stop when not equal; repne: stop when equal. Before the
+            // budget: an iteration that met its stop has ended the
+            // instruction, and a slice leaving on it would resume the scan.
             b.localGet(Local.res).op(I32.eqz);
             if (prefixes.rep)
             {
@@ -2108,6 +2106,10 @@ function stringInstruction(e, instruction){
             }
             b.brIf(e.depthOf('done'));
         }
+        b.localGet(Local.budget).i32const(0).op(I32.leS);
+        e.openIf('spent', EMPTY);
+        e.exitAt(instruction.eip, Exit.BUDGET);
+        e.close();
         b.br(e.depthOf('again'));
         e.close();
         e.close();

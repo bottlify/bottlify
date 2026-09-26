@@ -314,6 +314,41 @@ test('rep stops on a compare and leaves the count and pointers at the stop', ()=
     assert.equal(r.m.eflags() >>> 6 & 1, 0, 'ZF is clear: the bytes differ');
 });
 
+test('a rep compare whose slice ends on the iteration that stops it resumes after it', ()=>{
+    // cld; xor eax, eax; repne scasb (a strlen) -- and cld; repe cmpsb over
+    // "abcX" and "abcY" -- under every budget: one that runs out on the
+    // stopping iteration leaves the instruction done, not on it, since
+    // running it again would go on scanning past the match.
+    const programs = [
+        { code: [0xfc, 0x31, 0xc0, 0xf2, 0xae, 0xf4], edi: 0x2005, esi: 0x3000, ecx: -6 },
+        { code: [0xfc, 0xf3, 0xa6, 0xf4], edi: 0x2004, esi: 0x3004, ecx: -5 },
+    ];
+    for (const { code, edi, esi, ecx } of programs)
+    {
+        for (let budget = 1; budget <= 8; budget++)
+        {
+            const m = createTestMachine();
+            m.write(CODE, code);
+            m.write(0x2000, [...Buffer.from('abcY'), 0, ...Buffer.from('defgh'), 0]);
+            m.write(0x3000, [...Buffer.from('abcX'), 1, ...Buffer.from('defgh'), 0]);
+            m.setReg('esp', STACK);
+            m.setReg('edi', 0x2000);
+            m.setReg('esi', 0x3000);
+            m.setReg('ecx', 0xffffffff);
+            let exit = m.translate(CODE).run(CODE, budget);
+            // The host resumes where a slice left, with a fresh budget.
+            for (let resumed = 0; exit.kind === 1 && resumed < 100; resumed++)
+            {
+                exit = m.translate(m.eip()).run(m.eip(), budget);
+            }
+            assert.equal(exit.kind, 3, `halted, budget ${budget}`);
+            assert.equal(m.reg('edi'), edi, `the scan stopped at the match, budget ${budget}`);
+            assert.equal(m.reg('esi'), esi);
+            assert.equal(m.reg('ecx') | 0, ecx);
+        }
+    }
+});
+
 test('the direction flag runs a rep backwards, and the first iteration always runs', ()=>{
     // std; rep movsb with the pointers at the top of their runs. The first
     // iteration runs -- there is no count test before it for a nonzero count
