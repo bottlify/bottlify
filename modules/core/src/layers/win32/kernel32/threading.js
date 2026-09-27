@@ -5,6 +5,7 @@
  */
 
 import { encodeAnsi } from './locale.js';
+import { isStandardHandle, untagged } from './handle-tags.js';
 import { TAKEN } from './named-objects.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 
@@ -211,7 +212,7 @@ export function createThreadingFunctions(host){
         }
         try
         {
-            return kernel.handles.resolve(handle, type);
+            return kernel.handles.resolve(untagged(handle), type);
         }
         catch (e){
             void e;
@@ -231,7 +232,7 @@ export function createThreadingFunctions(host){
         {
             return special.type;
         }
-        return host.handleType ? host.handleType(handle >>> 0) : null;
+        return host.handleType ? host.handleType(untagged(handle)) : null;
     };
 
     /**
@@ -589,9 +590,17 @@ export function createThreadingFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, timeout])=>{
+                // A standard stream is always ready to be written, and one
+                // read here never has input to wait for: the call that reads
+                // it answers at once.
+                if (isStandardHandle(handle))
+                {
+                    return WAIT_OBJECT_0;
+                }
                 const target = object(handle >>> 0);
                 if (!target)
                 {
+                    host.setLastError(ERROR_INVALID_HANDLE);
                     return WAIT_FAILED;
                 }
                 const wait = timeout >>> 0;
@@ -599,18 +608,12 @@ export function createThreadingFunctions(host){
 
                 if (kindOf(handle >>> 0) === 'process')
                 {
-                    // A child the engine already answered for -- a
-                    // redistributable installer it stands in for -- is
-                    // finished, and a wait on it returns at once with its exit
-                    // code, as on any already-signalled object.
-                    if (kernel.processes?.finished?.(target))
-                    {
-                        return WAIT_OBJECT_0;
-                    }
                     // The running process is signalled only when it ends, and
                     // that cannot happen while the waiter is still running: a
                     // poll or a timeout answers WAIT_TIMEOUT, and an infinite
-                    // wait parks until a moment that never comes.
+                    // wait parks until a moment that never comes. Asked before
+                    // the kernel's records, which are children's and would
+                    // read this one, which carries no exit code, as finished.
                     if (target.current)
                     {
                         if (wait === 0)
@@ -623,6 +626,14 @@ export function createThreadingFunctions(host){
                                 result: WAIT_TIMEOUT,
                             });
                         return host.park(thread);
+                    }
+                    // A child the engine already answered for -- a
+                    // redistributable installer it stands in for -- is
+                    // finished, and a wait on it returns at once with its exit
+                    // code, as on any already-signalled object.
+                    if (kernel.processes?.finished?.(target))
+                    {
+                        return WAIT_OBJECT_0;
                     }
                     // A child process has not run while its parent can look:
                     // it runs once the parent has nothing else to do. So a poll

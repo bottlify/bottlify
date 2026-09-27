@@ -8,6 +8,7 @@ import { enterCode, leaveCode, tryEnterCode } from './critical.js';
 import { INTERLOCKED } from './interlocked.js';
 import { createSlimSync } from './slimsync.js';
 import { createSListFunctions } from './slist.js';
+import { isStandardHandle, untagged } from './handle-tags.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -70,6 +71,10 @@ const CURRENT_THREAD = 0xfffffffe;
 
 /** More than this in one wait is a caller that has lost track of its handles. */
 const MAXIMUM_WAIT_OBJECTS = 64;
+
+/** A handle in a wait's set that names nothing; a count out of range. */
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_PARAMETER = 87;
 
 /** A thread already carries MAXIMUM_SUSPEND_COUNT suspensions. */
 const ERROR_SIGNAL_REFUSED = 156;
@@ -200,12 +205,25 @@ export function createSyncFunctions(host){
     const object = (handle, type)=>{
         try
         {
-            return kernel.handles.resolve(handle, type);
+            return kernel.handles.resolve(untagged(handle), type);
         }
         catch (e){
             void e;
             return null;
         }
+    };
+
+    /** @type {any} */
+    let standing = null;
+    /**
+     * What a standard stream is in a set: an event that stays set, since the
+     * stream is always ready and a wait for all of a set must still take the
+     * rest.
+     */
+    const alwaysReady = ()=>{
+        standing ??= kernel.createEvent({ manualReset: true, signalled: true,
+            name: 'standard stream' });
+        return standing;
     };
 
     /** @param {number} handle */
@@ -349,6 +367,7 @@ export function createSyncFunctions(host){
                 const total = count >>> 0;
                 if (total === 0 || total > MAXIMUM_WAIT_OBJECTS)
                 {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return WAIT_FAILED;
                 }
                 const view = new DataView(host.readMemory(handles >>> 0, total * 4).buffer);
@@ -366,12 +385,15 @@ export function createSyncFunctions(host){
                 for (let at = 0; at < total; at++)
                 {
                     const handle = view.getUint32(at * 4, true);
-                    const target = object(handle);
+                    // No pseudo-handle is a member of a set, not even the two
+                    // WaitForSingleObject takes: none is in the table.
+                    const target = isStandardHandle(handle) ? alwaysReady() : object(handle);
                     if (!target)
                     {
+                        host.setLastError?.(ERROR_INVALID_HANDLE);
                         return WAIT_FAILED;
                     }
-                    if (kernel.handles.typeOf?.(handle) === 'process')
+                    if (kernel.handles.typeOf?.(untagged(handle)) === 'process')
                     {
                         if (kernel.processes?.finished?.(target))
                         {
