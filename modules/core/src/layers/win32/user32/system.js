@@ -49,6 +49,7 @@ import {
     writeU32s,
 } from './structs.js';
 import { readText } from './unicode.js';
+import { threadIdOf } from './messages.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -211,6 +212,7 @@ const KEYEVENTF_UNICODE = 0x0004;
 const KEYEVENTF_SCANCODE = 0x0008;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_WINDOW_HANDLE = 1400;
 
 /**
  * The one input locale this build has: en-US, low word the language id, high
@@ -3710,22 +3712,25 @@ export function createSystemFunctions({ host, live, windows, classes }){
          *
          * The process reported has to be the one GetCurrentProcessId reports,
          * or a program comparing the two decides its own window belongs to
-         * somebody else. Which thread created a window is not recorded, so the
-         * thread identifier is the one that is asking.
+         * somebody else. The thread is the one that created the window -- the
+         * one PostThreadMessage reaches its loop through -- or, for a window
+         * made where no thread was named, the one asking.
          */
         GetWindowThreadProcessId: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, out])=>{
-                if (!live(hwnd))
+                const record = live(hwnd);
+                if (!record)
                 {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                     return 0;
                 }
                 if ((out >>> 0) !== 0)
                 {
                     writeU32s(host, out >>> 0, [host.processId ?? 0x1000]);
                 }
-                return host.currentThread?.().id >>> 0 || 1;
+                return threadIdOf(record.thread) ?? threadIdOf(host.callerThread?.()) ?? 1;
             },
         },
 

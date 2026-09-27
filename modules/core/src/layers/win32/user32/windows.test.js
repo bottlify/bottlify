@@ -2506,6 +2506,70 @@ test('a thread message is not handed to a retrieval that named a window', ()=>{
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
 });
 
+test('a window\'s messages wait for the thread that made it, and a thread\'s for that thread', ()=>{
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    const { fns, memory } = setup({ caller, threadExists: id=>id === 1 || id === 2 });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    assert.equal(fns.GetWindowThreadProcessId.handler([hwnd, 0]), worker.id,
+        'the thread that made it, whoever asks');
+
+    caller.current = main;
+    assert.equal(fns.GetWindowThreadProcessId.handler([hwnd, 0]), worker.id);
+    assert.equal(fns.PostMessageA.handler([hwnd, WM_USER, 1, 0]), 1);
+    assert.equal(fns.PostThreadMessageA.handler([worker.id, WM_USER + 1, 0, 0]), 1);
+    assert.equal(fns.PostMessageA.handler([0, WM_USER + 2, 0, 0]), 1, 'the poster\'s own');
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_USER + 2);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
+        'the other thread\'s are not the main thread\'s to take');
+    assert.equal(fns.GetQueueStatus.handler([QS_POSTMESSAGE]), 0);
+
+    caller.current = worker;
+    assert.equal(fns.GetQueueStatus.handler([QS_POSTMESSAGE]) >>> 16, QS_POSTMESSAGE);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_USER);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_USER + 1);
+});
+
+test('PostQuitMessage ends the loop of the thread that posted it', ()=>{
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (main) };
+    const { fns, memory } = setup({ caller });
+    fns.PostQuitMessage.handler([4]);
+
+    caller.current = worker;
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0);
+    caller.current = main;
+    assert.equal(fns.GetMessageA.handler([MSG_BUFFER, 0, 0, 0]), 0);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.wParam), 4);
+});
+
+test('a window ends with the thread that made it, and what was posted to it goes too', ()=>{
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    const { fns, memory, queue, dispatched } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    const child = createWindow(fns, memory, { style: WS_CHILD, parent: hwnd });
+    fns.PostMessageA.handler([hwnd, WM_USER, 0, 0]);
+
+    caller.current = main;
+    worker.state = 'terminated';
+    const told = dispatched.length;
+    assert.equal(fns.IsWindow.handler([hwnd]), 0);
+    assert.equal(fns.IsWindow.handler([child]), 0, 'and its children with it');
+    assert.equal(queue.depth(), 0);
+    assert.equal(dispatched.length, told, 'no procedure is told: its thread is gone');
+});
+
 test('PostThreadMessageA refuses a thread that does not exist, and says why', ()=>{
     const { fns, queue, errors } = setup({ threadExists: id=>id === 0x88 });
     assert.equal(fns.PostThreadMessageA.handler([0x99, WM_USER, 0, 0]), 0);

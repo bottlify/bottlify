@@ -45,7 +45,7 @@
  *   to fill in finds it filled.
  */
 
-import { ANY_WINDOW, WM_QUIT } from './messages.js';
+import { ANY_WINDOW, WM_QUIT, threadIdOf } from './messages.js';
 import { readMessage, readRect, writeRect } from './structs.js';
 import { WS_VISIBLE, frameOf } from './frame.js';
 import { createTabWalk } from './tabwalk.js';
@@ -935,7 +935,8 @@ export function createDialogFunctions(options){
             // The program's own loop would have been GetMessage, and what
             // that does as it takes a message the dialog's loop does too.
             const entry = host.take ? await host.take(thread)
-                : host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
+                : host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true,
+                    thread: threadIdOf(thread) });
             if (!entry)
             {
                 if (host.unattended && presses < UNATTENDED_PRESSES)
@@ -964,7 +965,7 @@ export function createDialogFunctions(options){
             }
             if (entry.message === WM_QUIT)
             {
-                host.queue.postQuit(entry.wParam | 0);
+                host.queue.postQuit(entry.wParam | 0, threadIdOf(thread));
                 await destroyWindow(hwnd, thread);
                 break;
             }

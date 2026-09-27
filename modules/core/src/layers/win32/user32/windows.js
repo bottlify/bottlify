@@ -16,7 +16,7 @@
  * class asked for, and the queue behaves the way a message loop expects.
  */
 
-import { ANY_WINDOW, WM_PAINT, WM_QUIT, WM_TIMER } from './messages.js';
+import { ANY_WINDOW, WM_PAINT, WM_QUIT, WM_TIMER, threadIdOf } from './messages.js';
 import { characterOf } from './keys.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createPaintFunctions } from './paint.js';
@@ -219,18 +219,6 @@ export function watchDispatch(host, message, answer){
     }
     return answer;
 }
-
-/**
- * The identifier of a thread the bridge named, or null for one that carries
- * none: a build with no scheduler, whose one caller is then every thread.
- *
- * @param {unknown} thread
- * @returns {number | null}
- */
-export const threadIdOf = thread=>{
-    const id = /** @type {{ id?: unknown } | null | undefined} */ (thread)?.id;
-    return typeof id === 'number' ? id >>> 0 : null;
-};
 
 /**
  * CREATESTRUCTA, which is what WM_NCCREATE and WM_CREATE carry.
@@ -901,7 +889,48 @@ export function createWindowFunctions(host){
             return desktop;
         }
         const record = windows.get(hwnd >>> 0);
-        return record && !record.destroyed ? record : null;
+        if (!record || record.destroyed)
+        {
+            return null;
+        }
+        if (record.thread?.state === 'terminated')
+        {
+            reap(record);
+            return null;
+        }
+        return record;
+    };
+
+    /**
+     * The thread that created a window, whose queue its messages wait in and
+     * whose loop its procedure runs on; null when the bridge named none.
+     *
+     * @param {any} record
+     * @returns {number | null}
+     */
+    const ownerOf = record=>threadIdOf(record.thread);
+
+    /**
+     * Takes down a window whose thread has ended, as Windows destroys a
+     * thread's windows with it, and its children with it. No procedure is
+     * told: the thread that would have run it is gone.
+     *
+     * @param {any} record
+     */
+    const reap = record=>{
+        for (const child of [...windows.values()])
+        {
+            if (!child.destroyed && child.parent === record.hwnd && isChild(child))
+            {
+                reap(child);
+            }
+        }
+        const covered = shown(record) ? geometry.windowRect(record) : null;
+        forget(record);
+        if (covered)
+        {
+            uncover(covered);
+        }
     };
 
     /** @param {any} record  Whether it is placed inside another window. */
@@ -1341,37 +1370,7 @@ export function createWindowFunctions(host){
                 : 1);
             return andThen(destroyChildren(0),
                 ()=>andThen(tell(WM_NCDESTROY), ()=>{
-                    record.destroyed = true;
-                    // A dialog's font is the dialog manager's, made from its
-                    // template, and goes with the dialog.
-                    if (record.dialogFont)
-                    {
-                        draw?.deleteFont?.(record.dialogFont);
-                    }
-                    host.handles.close(record.hwnd);
-                    if (active === record.hwnd)
-                    {
-                        active = 0;
-                    }
-                    if (focus === record.hwnd)
-                    {
-                        focus = 0;
-                    }
-                    if (captured === record.hwnd)
-                    {
-                        captured = 0;
-                    }
-                    if (tracking?.hwnd === record.hwnd)
-                    {
-                        stopTracking();
-                    }
-                    // Its menu goes with it, as DestroyWindow is documented
-                    // to destroy it; one a program took back with SetMenu is
-                    // its own again.
-                    if ((record.menu ?? 0) !== 0)
-                    {
-                        table.DestroyMenu.handler([record.menu]);
-                    }
+                    forget(record);
                     if (covered)
                     {
                         uncover(covered);
@@ -1379,6 +1378,48 @@ export function createWindowFunctions(host){
                     return 1;
                 }));
         });
+    };
+
+    /**
+     * The end of a window, once its procedure has heard the last it will:
+     * the handle stops resolving, and nothing it held is left behind.
+     *
+     * @param {any} record
+     */
+    const forget = record=>{
+        host.queue.purge(record.hwnd);
+        host.queue.killTimersFor?.(record.hwnd);
+        host.queue.unregisterHotKeysFor?.(record.hwnd);
+        record.destroyed = true;
+        // A dialog's font is the dialog manager's, made from its template,
+        // and goes with the dialog.
+        if (record.dialogFont)
+        {
+            draw?.deleteFont?.(record.dialogFont);
+        }
+        host.handles.close(record.hwnd);
+        if (active === record.hwnd)
+        {
+            active = 0;
+        }
+        if (focus === record.hwnd)
+        {
+            focus = 0;
+        }
+        if (captured === record.hwnd)
+        {
+            captured = 0;
+        }
+        if (tracking?.hwnd === record.hwnd)
+        {
+            stopTracking();
+        }
+        // Its menu goes with it, as DestroyWindow is documented to destroy
+        // it; one a program took back with SetMenu is its own again.
+        if ((record.menu ?? 0) !== 0)
+        {
+            table.DestroyMenu.handler([record.menu]);
+        }
     };
 
     /** @param {any} record @param {number} index */
@@ -1608,6 +1649,9 @@ export function createWindowFunctions(host){
             updateRect: null,
             erase: false,
             ncDirty: false,
+            // The thread whose call made it: its messages wait in that
+            // thread's queue, and it ends with that thread.
+            thread: host.callerThread?.() ?? null,
             ...fields,
         };
         // A system class supplies the procedure and the name a program reads
@@ -1901,7 +1945,7 @@ export function createWindowFunctions(host){
         {
             return;
         }
-        host.queue.dirtied?.();
+        host.queue.dirtied?.(ownerOf(record));
         const origin = geometry.clientRect(record);
         const dirty = {
             left: origin.left + record.updateRect.left,
@@ -2692,7 +2736,7 @@ export function createWindowFunctions(host){
             || (kind >= filter.first && kind <= filter.last);
         /** @returns {any} */
         const walk = ()=>{
-            for (const entry of host.queue.queued())
+            for (const entry of host.queue.queued(filter.thread ?? threadIdOf(thread)))
             {
                 const kind = entry.message >>> 0;
                 const client = kind >= WM_MOUSEMOVE ? kind : kind - WM_NCMOUSEMOVE + WM_MOUSEMOVE;
@@ -2722,7 +2766,8 @@ export function createWindowFunctions(host){
      * @returns {any}
      */
     const takeThrough = (filter, thread)=>andThen(placeWaiting(filter, thread), ()=>{
-        const entry = host.queue.peek(filter);
+        const entry = host.queue.peek(filter.thread === undefined
+            ? { ...filter, thread: threadIdOf(thread) } : filter);
         if (!entry)
         {
             return null;
@@ -3126,11 +3171,18 @@ export function createWindowFunctions(host){
     // retrieval rather than posted, because that is what keeps a hundred
     // invalidations one paint. Nothing left to paint is the end of a pass,
     // and the moment the desktop is shown.
+    host.queue.ownersFrom?.(hwnd=>{
+        const record = live(hwnd);
+        return record ? ownerOf(record) : null;
+    });
+
     host.queue.paintsFrom?.(filter=>{
+        const asking = filter.thread ?? null;
         for (const record of paintOrder())
         {
             if (record.updateRect && shown(record)
-                && (filter.hwnd === ANY_WINDOW || filter.hwnd === record.hwnd))
+                && (filter.hwnd === ANY_WINDOW || filter.hwnd === record.hwnd)
+                && (asking === null || ownerOf(record) === null || ownerOf(record) === asking))
             {
                 return record.hwnd;
             }
@@ -3359,7 +3411,10 @@ export function createWindowFunctions(host){
         {
             return 0;
         }
-        host.queue.post({ hwnd: target, message, wParam, lParam, ...unicode ? { unicode } : {} });
+        // No window is a message for the poster's own thread, as
+        // PostThreadMessage to itself would post it.
+        host.queue.post({ hwnd: target, message, wParam, lParam, ...unicode ? { unicode } : {},
+            ...target === 0 ? { thread: threadIdOf(host.callerThread?.()) } : {} });
         return 1;
     };
 
@@ -3377,7 +3432,8 @@ export function createWindowFunctions(host){
             host.setLastError?.(ERROR_INVALID_THREAD_ID);
             return 0;
         }
-        host.queue.post({ hwnd: 0, message, wParam, lParam, ...unicode ? { unicode } : {} });
+        host.queue.post({ hwnd: 0, message, wParam, lParam, thread: id,
+            ...unicode ? { unicode } : {} });
         return 1;
     };
 
@@ -3389,9 +3445,9 @@ export function createWindowFunctions(host){
      */
     const peekMessage = ([out, hwnd, filterMin, filterMax, removeFlag], unicode)=>{
         const remove = (removeFlag & PM_REMOVE) !== 0;
-        const filter = { hwnd: windowFilter(hwnd), first: filterMin >>> 0,
-            last: filterMax >>> 0, remove };
         const thread = host.callerThread?.();
+        const filter = { hwnd: windowFilter(hwnd), first: filterMin >>> 0,
+            last: filterMax >>> 0, remove, thread: threadIdOf(thread) };
         // Only a message taken activates: a look leaves the press,
         // and the activation, for the call that takes it.
         const entry = remove ? takeThrough(filter, thread)
@@ -3424,9 +3480,9 @@ export function createWindowFunctions(host){
             host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
             return -1;
         }
-        const wanted = { hwnd: filter, first: filterMin >>> 0, last: filterMax >>> 0,
-            remove: true };
         const thread = host.callerThread?.();
+        const wanted = { hwnd: filter, first: filterMin >>> 0, last: filterMax >>> 0,
+            remove: true, thread: threadIdOf(thread) };
         const next = ()=>takeThrough(wanted, thread);
         /** @param {any} entry */
         const answer = entry=>{
@@ -4205,7 +4261,8 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([flags])=>{
                 const mask = flags >>> 0;
-                const { inQueue, changed } = host.queue.status();
+                const { inQueue, changed } = host.queue.status(
+                    threadIdOf(host.callerThread?.()));
                 return (((inQueue & mask) << 16) | (changed & mask)) >>> 0;
             },
         },
@@ -4215,7 +4272,7 @@ export function createWindowFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([code])=>{
-                host.queue.postQuit(code | 0);
+                host.queue.postQuit(code | 0, threadIdOf(host.callerThread?.()));
                 return 0; // void: the guest reads nothing back
             },
         },
@@ -4285,8 +4342,9 @@ export function createWindowFunctions(host){
                 const total = count >>> 0;
                 const wait = timeout >>> 0;
                 const mask = wakeMask >>> 0;
-                const input = ()=>((inputAvailable ? host.queue.waiting() : host.queue.news())
-                    & mask) !== 0;
+                const waiter = threadIdOf(host.callerThread?.());
+                const input = ()=>((inputAvailable
+                    ? host.queue.waiting(waiter) : host.queue.news(waiter)) & mask) !== 0;
                 /** @param {number} milliseconds */
                 const askHandles = milliseconds=>{
                     if (total === 0)
@@ -4373,8 +4431,9 @@ export function createWindowFunctions(host){
         WaitMessage: {
             argBytes: 0,
             handler: ()=>{
+                const waiter = threadIdOf(host.callerThread?.());
                 const look = ()=>host.queue.peek({
-                    hwnd: ANY_WINDOW, first: 0, last: 0, remove: false,
+                    hwnd: ANY_WINDOW, first: 0, last: 0, remove: false, thread: waiter,
                 });
                 if (look())
                 {
