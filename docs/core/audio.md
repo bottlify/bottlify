@@ -68,7 +68,7 @@ Source: `src/layers/audio/module.js`. The DirectSound seam imports `IUNKNOWN_MET
 
 | library | entry points | what they are |
 |---|---|---|
-| `DSOUND.dll` | 8 | `DirectSoundCreate`, `DirectSoundCreate8`, `DirectSoundEnumerateA/W`, `GetDeviceID`, `DirectSoundCaptureCreate`, `DirectSoundCaptureCreate8` (both `DSERR_UNSUPPORTED`: there is no capture device), `DllCanUnloadNow`. Seven carry Windows' ordinals (`dsound.spec`): `DirectSoundCreate` 1, `DirectSoundEnumerateA` 2, `DirectSoundEnumerateW` 3, `DirectSoundCaptureCreate` 6, `GetDeviceID` 9, `DirectSoundCreate8` 11, `DirectSoundCaptureCreate8` 12; `DllCanUnloadNow` is numbered above them. |
+| `DSOUND.dll` | 11 | `DirectSoundCreate`, `DirectSoundCreate8`, `DirectSoundEnumerateA/W`, `GetDeviceID`, `DirectSoundCaptureCreate`, `DirectSoundCaptureCreate8` (both `DSERR_NODRIVER`, the pointer cleared: there is no capture device; an outer unknown is `DSERR_NOAGGREGATION`, a null pointer `DSERR_INVALIDPARAM`), `DirectSoundCaptureEnumerateA/W` (succeed having named nothing), `DllGetClassObject`, `DllCanUnloadNow`. Nine carry Windows' ordinals (`dsound.spec`): `DirectSoundCreate` 1, `DirectSoundEnumerateA` 2, `DirectSoundEnumerateW` 3, `DirectSoundCaptureCreate` 6, `DirectSoundCaptureEnumerateA` 7, `DirectSoundCaptureEnumerateW` 8, `GetDeviceID` 9, `DirectSoundCreate8` 11, `DirectSoundCaptureCreate8` 12; the rest are numbered above them. |
 | `Mp3dec.asi` | 11 | `DllMain`, `PROVIDER_query_attribute`, `ASI_startup`, `ASI_shutdown`, `ASI_error`, `ASI_stream_open`, `ASI_stream_process`, `ASI_stream_seek`, `ASI_stream_close`, `ASI_stream_attribute`, `ASI_stream_set_preference`. Nothing is imported by name; the middleware finds these through the tables `DllMain` registers. |
 
 Interfaces published (`src/layers/audio/dsound/seam.js`): `IDirectSound` (8 slots after
@@ -82,8 +82,16 @@ on a buffer created with `DSBCAPS_CTRLPOSITIONNOTIFY`. Every buffer, the primary
 `E_PROP_ID_UNSUPPORTED`, the support flags cleared, which a program asking after EAX takes as
 playing without it. `IDirectSound3DListener` and `IDirectSound3DBuffer` are deliberately not
 declared, so `QueryInterface` answers `E_NOINTERFACE` rather than handing back a table that ends
-after `IUnknown`. `DllGetClassObject` has no class to hand out (`CLASS_E_CLASSNOTAVAILABLE`, the
-pointer cleared): the classes COM makes are made through ole32.
+after `IUnknown`. `DllGetClassObject` hands out the class object (`IClassFactory`) for
+`CLSID_DirectSound` and `CLSID_DirectSound8`, which `CoCreateInstance` reaches through the class's
+`InprocServer32` key (`HKCR\CLSID\{...}\InprocServer32` = `dsound.dll`, `ThreadingModel` `Both`,
+seeded by the registry); any other class is `CLASS_E_CLASSNOTAVAILABLE` and any interface but
+`IClassFactory`/`IUnknown` `E_NOINTERFACE`, the pointer cleared either way. `CreateInstance` refuses
+an outer unknown with `DSERR_NOAGGREGATION`. An object a class factory made is not yet initialised:
+every method but `Initialize` (and `IUnknown`'s) answers `DSERR_UNINITIALIZED` until `Initialize`
+names the device -- a null GUID, a default playback GUID or the device's own; a capture or unknown
+GUID is `DSERR_NODRIVER`. `Initialize` on an object already initialised, every one
+`DirectSoundCreate` made included, answers `DSERR_ALREADYINITIALIZED`.
 
 ### `diagnostics()`
 
@@ -330,7 +338,8 @@ throws, and the open fails with a message `ASI_error` returns.
   advance and notifications still fire, but no sample leaves a DirectSound buffer, by design.
 - **No 3D audio.** `IDirectSound3DListener` and `IDirectSound3DBuffer` answer `E_NOINTERFACE`;
   pan is applied, position is not.
-- **No capture.** Both capture entry points answer `DSERR_UNSUPPORTED`.
+- **No capture.** Both capture entry points answer `DSERR_NODRIVER`, and capture enumeration names
+  no device.
 - **`SetCooperativeLevel` is recorded and not enforced.** Windows refuses `SetFormat` on the
   primary below `DSSCL_PRIORITY`; this layer does not. The seam's own comment notes it has no
   reporter to say so through -- there is no `divergence` hook in this layer.
