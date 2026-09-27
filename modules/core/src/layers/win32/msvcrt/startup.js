@@ -141,6 +141,9 @@ export function splitCommandLine(line){
  * @property {import('../kernel32/versions.js').WindowsVersion} [version]
  *           The Windows GetVersion answers for this process. Absent, the
  *           default one.
+ * @property {{ narrow: () => number, wide: () => number }} [environment]
+ *           The runtime's environment arrays (`environ.js`), which the main
+ *           arguments hand on as they stand. Absent, an empty one.
  */
 
 /**
@@ -234,6 +237,29 @@ export function createStartupFunctions(host){
         return mainArgs;
     };
 
+    /**
+     * The wide argument vector, built once as the narrow one is.
+     *
+     * @type {{ argc: number, argv: number } | null}
+     */
+    let wideMainArgs = null;
+
+    /** A wide string in guest memory that outlives this call. @param {string} text */
+    const publishWide = text=>{
+        const bytes = new Uint8Array((text.length + 1) * 2);
+        const view = new DataView(bytes.buffer);
+        for (let at = 0; at < text.length; at++)
+        {
+            view.setUint16(at * 2, text.charCodeAt(at), true);
+        }
+        const address = host.allocate(bytes.length);
+        if (address !== 0)
+        {
+            host.writeMemory(address, bytes);
+        }
+        return address;
+    };
+
     /** @param {number} value @returns {Uint8Array} a dword, as a data export holds one */
     const dword = value=>{
         const bytes = new Uint8Array(4);
@@ -318,7 +344,32 @@ export function createStartupFunctions(host){
                 const built = buildMainArgs();
                 writeU32(argc, built.argc);
                 writeU32(argv, built.argv);
-                writeU32(env, built.env);
+                writeU32(env, host.environment?.narrow() ?? built.env);
+                return 0;
+            },
+        },
+
+        /**
+         * int __wgetmainargs(int *argc, wchar_t ***argv, wchar_t ***env,
+         *                    int doWildCard, _startupinfo *startInfo)
+         *
+         * __getmainargs in UTF-16: the same arguments, and the wide
+         * environment, which this call makes if nothing has yet.
+         */
+        __wgetmainargs: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([argc, argv, env])=>{
+                if (!wideMainArgs)
+                {
+                    const words = splitCommandLine(host.commandLine());
+                    wideMainArgs = { argc: words.length,
+                        argv: publishVector(words.map(word=>publishWide(word))) };
+                }
+                writeU32(argc, wideMainArgs.argc);
+                writeU32(argv, wideMainArgs.argv);
+                writeU32(env, host.environment?.wide() ?? buildMainArgs().env);
                 return 0;
             },
         },

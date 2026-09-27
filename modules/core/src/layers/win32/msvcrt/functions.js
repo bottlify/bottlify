@@ -39,6 +39,7 @@ import { createStdioFunctions, standardRecords } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
 import { createGlobals, EINVAL, ERANGE } from './globals.js';
 import { createDescriptors, createIoFunctions } from './io.js';
+import { createEnvironment } from './environ.js';
 import { bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
@@ -95,6 +96,14 @@ const RAND_MAX = 0x7fff;
  *           unexported.
  * @property {() => string[]} [drives]      Letters the filesystem has mounted.
  * @property {() => number} [iob]           Where the runtime's `_iob` was placed, once it has been.
+ * @property {() => Record<string, string>} [environment]
+ *           The process's variables as it starts, as GetEnvironmentStrings
+ *           holds them: the runtime's own copy begins as these. Absent, the
+ *           runtime starts with none.
+ * @property {(name: string, value: string | null) => void} [setVariable]
+ *           Where `_putenv` changes the process's block, as
+ *           SetEnvironmentVariable does; null removes. Absent, the change is
+ *           the runtime's alone.
  * @property {(name: string) => number} [addressOf]
  *           Where the runtime's own export of that name was placed, zero
  *           before it is: a table a program reads in place, `_mbctype`, is
@@ -673,6 +682,22 @@ export function createMsvcrtFunctions(host){
     /** @param {number} code */
     const errno = code=>globals.set(errnoName(), code);
 
+    // The runtime's copy of the environment, taken from the process's as it
+    // starts: what getenv reads, _putenv changes and main is handed.
+    const environment = host.allocate
+        ? createEnvironment({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readCString: host.readCString,
+            allocate: host.allocate,
+            errno,
+            ...host.environment ? { environment: host.environment } : {},
+            ...host.setVariable ? { setVariable: host.setVariable } : {},
+            ...host.addressOf ? { addressOf: host.addressOf } : {},
+            cell: (name, initial)=>globals.address(name, initial),
+        })
+        : null;
+
     // The descriptor table the low-level calls hand out numbers from and the
     // streams stand on, so `_fileno(f)` is a number `_read` accepts.
     const descriptors = host.files
@@ -779,8 +804,10 @@ export function createMsvcrtFunctions(host){
                 errnoName,
                 closeStreams,
                 version: host.version,
+                ...environment ? { environment } : {},
             })
             : {}),
+        ...environment?.functions,
 
         // The rest of the runtime needs seams the assembling caller may not
         // have wired. A missing one leaves the functions unexported, and an
