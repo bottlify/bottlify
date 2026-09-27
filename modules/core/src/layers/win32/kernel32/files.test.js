@@ -1146,6 +1146,18 @@ test('_lopen and _lread read a file the old way', ()=>{
     assert.equal(fns._lclose.handler([handle]), 0, 'zero is success here, unlike CloseHandle');
 });
 
+test('_hread and _hwrite are _lread and _lwrite under their long names', ()=>{
+    // Fallout's installer library reads its data with _hread; on Win32 the two
+    // spellings are one call, every count 32 bits.
+    const { files, memory, fns, at } = setup();
+    files.put('C:\\GAME\\DATA.BIN', 'payload');
+    const handle = fns._lopen.handler([at(NAME, 'C:\\GAME\\DATA.BIN'), 0]);
+    assert.equal(fns._hread, fns._lread);
+    assert.equal(fns._hwrite, fns._lwrite);
+    assert.equal(fns._hread.handler([handle, BUFFER, 7]), 7);
+    assert.equal(memory.string(BUFFER), 'payload');
+});
+
 test('_lclose hands the file back to the volume, as CloseHandle does', ()=>{
     // A create-and-close followed by an open for writing is how a
     // self-extractor takes a scratch file. With the handle closed and the file

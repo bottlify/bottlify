@@ -239,10 +239,10 @@ it uses from its first parameter: loads `u8`, `i8`, `u16`, `i16`, `u32`, `i32`, 
 stores `setU8`, `setU16`, `setU32`, `setF64`, `call(fn, ...args)` through a cdecl pointer, and
 `copyUp`/`copyDown`/`fill` (`rep movsd` or `rep stosd` for the whole dwords, down with the
 direction flag set for `copyDown`, the bytes left as the byte forms leave them -- a turn of a
-`rep` translated code moves one element at a time (a copy down, a page holding code) counts as an
-instruction of the thread's quantum, and a dword a turn is a quarter of the turns, where one it
-moves a page at a time counts by its bytes, whatever their width; a copy whose ends are one to
-three bytes apart goes a byte at a time).
+`rep` translated code moves one element at a time (a page holding code, an element across a
+page) counts as an instruction of the thread's quantum, and a dword a turn is a quarter of the
+turns, where one it moves a page at a time -- up or down -- counts by its bytes, whatever their
+width; a copy whose ends are one to three bytes apart goes a byte at a time).
 
 A function that leaves a rare case to the host's handler says `return host()` (`host` taken
 with the other helpers): the frame is taken down -- ESP at the return address, EBX, ESI, EDI and
@@ -312,12 +312,16 @@ a handler only where the host can set EDX); `abs`/`labs`; `toupper`, `tolower`, 
 `isprint`, `iscntrl` and their wide forms `iswalpha` ... `iswgraph`, `iswascii`, `towupper`,
 `towlower` (the classes in `CLASSES` and `WIDE_CLASSES`, which `_pctype`, `_isctype` and
 `iswctype` read too); `strlen`, `strcpy`, `strcat`, `strncpy` (padded, and unterminated when cut
-short), `strcmp`, `strncmp`, `_strnicmp`, `_stricmp`, `strchr`, `strrchr`, `strstr`, `_strlwr`,
-`_strupr` (ASCII only, in place), and the `_mbs` names bound to them; `wcslen`, `wcscmp`,
-`wcscpy`; `memcpy`/`memmove` (one function: as if the source were read whole first, copied up
-or down), `memset`, `memcmp` (four bytes at a time while they match); `atoi`/`atol`;
+short), `strcmp`, `strncmp`, `_strnicmp`, `_stricmp` (and `_strcmpi`, its older name),
+`strchr`, `strrchr`, `strstr`, `_strlwr`, `_strupr` (ASCII only, in place), and the `_mbs` names
+bound to them; `wcslen`, `wcscmp`, `wcscpy`; `memcpy`/`memmove` (one function: as if the source
+were read whole first, copied up or down), `memset`, `memcmp` (four bytes at a time while they
+match); `atoi`/`atol`;
 `strtol`/`strtoul`, handing the host what they leave to it; `qsort` (Shell's sort) and
-`bsearch`, the program's comparator called with a `call`.
+`bsearch`, the program's comparator called with a `call`. `_EH_prolog` is a `code` export too,
+assembled by hand (`EH_PROLOG_CODE`, `msvcrt/cxx.js`): it takes its handler in EAX and builds the
+frame on its caller's stack and in the caller's EBP, which neither a handler nor the compiler's
+subset can express.
 Each keeps the answers of the handler it replaced (see the divergences below); `strtol` and
 `strtoul` are held to theirs input by input as well, the JavaScript against the handler, since
 the handler is part of them.

@@ -34,6 +34,7 @@
 
 import { exceptionName, hostFault } from './faults.js';
 import { captureBlockContext, restoreBlockContext } from './context.js';
+import { createPorts } from './ports.js';
 
 /** Register names in the state block's reg32 view, in index order. */
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
@@ -314,6 +315,7 @@ export function createCorkHost(config){
         lastTsc = Math.max(lastTsc + 1, Math.floor(ticks));
         return BigInt(lastTsc);
     };
+    const ports = createPorts(()=>Number(readTsc()) / TICKS_PER_MS);
     // A slow slice's account of itself reads the clock around every range the
     // interpreter runs -- a tenth of a crossing's cost -- so only a run that
     // asked for the translator's timings keeps one, and a production bundle
@@ -721,6 +723,7 @@ export function createCorkHost(config){
             memory,
             layout,
             rdtsc: readTsc,
+            ...(trapPort === undefined ? {} : { ports: { ...ports, trapPort } }),
             // An interpreted store into a page a region was translated on
             // invalidates it, as a translated store's `stale` exit does.
             onCodeWrite: (/** @type {number} */ at, /** @type {number} */ size)=>{
@@ -1242,6 +1245,8 @@ export function createCorkHost(config){
         inProtectedMode: ()=>true,
         eip,
         trapCrossings: ()=>trapCrossings,
+        /** The I/O ports the program touched other than the trap port. */
+        ports: ports.diagnostics,
         /** The last thirty-two interpreted run starts (a jump's target, or where
          * straight-line code resumed) with their first bytes, oldest first, two
          * per string. */

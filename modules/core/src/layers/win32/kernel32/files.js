@@ -1036,7 +1036,7 @@ export function createFileFunctions(host){
         return 1;
     });
 
-    return {
+    const table = {
         /**
          * HANDLE CreateFile(LPCSTR, DWORD dwDesiredAccess, DWORD dwShareMode,
          *   LPSECURITY_ATTRIBUTES, DWORD dwCreationDisposition,
@@ -2033,4 +2033,8 @@ export function createFileFunctions(host){
             handler: ()=>fail(ERROR_INVALID_FUNCTION),
         },
     };
+
+    // The long spellings are the same calls on Win32, where every count is
+    // 32 bits: _hread and _hwrite were _lread and _lwrite for a huge pointer.
+    return { ...table, _hread: table._lread, _hwrite: table._lwrite };
 }

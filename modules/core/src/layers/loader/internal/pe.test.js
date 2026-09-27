@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 import { parsePe, readImports, readExports, rvaToFileOffset, applyRelocations, DIR_EXPORT }
     from './pe.js';
 import { synthesiseModule } from './synth.js';
-import { buildImage } from './image.js';
+import { buildImage, mapImage } from './image.js';
 
 const FIXTURE = new URL('../../../../test/fixtures/hello.exe', import.meta.url);
 const file = new Uint8Array(readFileSync(FIXTURE));
@@ -86,6 +86,21 @@ test('RVA translation accounts for the zero-filled tail past raw data', ()=>{
     const section = image.sections[0];
     assert.equal(rvaToFileOffset(image, section.virtualAddress), section.rawOffset);
     assert.throws(()=>rvaToFileOffset(image, 0x7fffffff), /outside every section/);
+});
+
+test('a section whose PointerToRawData is zero maps as zeros, whatever its SizeOfRawData', ()=>{
+    const patched = file.slice();
+    const view = new DataView(patched.buffer);
+    const header = view.getUint32(0x3c, true);
+    const sectionTable = header + 24 + view.getUint16(header + 20, true);
+    view.setUint32(sectionTable + 20, 0, true);
+
+    const { bytes } = mapImage(patched, 0x400000);
+
+    const section = parsePe(patched).sections[0];
+    assert.equal(section.rawSize, 512, 'the size still claims file bytes');
+    assert.deepEqual([...bytes.subarray(section.virtualAddress, section.virtualAddress + 512)],
+        new Array(512).fill(0), 'and not the headers at offset zero');
 });
 
 test('an image without relocations refuses to move', ()=>{

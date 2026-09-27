@@ -338,6 +338,29 @@ test('int3, int n and the trap port', ()=>{
     assert.equal(m.state.retired, 3);
 });
 
+test('with the machine\'s ports, only the trap port traps and the rest are devices', ()=>{
+    /** @type {string[]} */
+    const seen = [];
+    const ports = {
+        trapPort: 0xb077,
+        read: (/** @type {number} */ port, /** @type {number} */ size)=>{
+            seen.push(`in ${port.toString(16)}/${size}`);
+            return 0x34;
+        },
+        write: (/** @type {number} */ port, /** @type {number} */ size, /** @type {number} */ value)=>{
+            seen.push(`out ${port.toString(16)}/${size}=${value}`);
+        },
+    };
+    // xor eax, eax; out 0x43, al; mov dx, 0x40; in al, dx; mov dx, 0xb077; out dx, eax
+    const m = run([0x31, 0xc0, 0xe6, 0x43, 0x66, 0xba, 0x40, 0x00, 0xec,
+        0x66, 0xba, 0x77, 0xb0, 0xef], state=>{
+        state.ports = ports;
+    });
+    assert.deepEqual(seen, ['out 43/1=0', 'in 40/1']);
+    assert.equal(m.state.reg[0], 0x34, 'the device\'s byte in al');
+    assert.deepEqual(m.state.trapped, [0x34], 'and the trap port still the host\'s');
+});
+
 test('arpl raises the RPL and sets ZF, or leaves both', ()=>{
     // mov ax, 0x10; mov cx, 3; arpl ax, cx
     let m = run([0x66, 0xb8, 0x10, 0, 0x66, 0xb9, 0x03, 0, 0x63, 0xc8]);

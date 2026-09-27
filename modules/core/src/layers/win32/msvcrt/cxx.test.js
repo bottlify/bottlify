@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCxxFunctions } from './cxx.js';
+import { createCxxFunctions, EH_PROLOG_CODE } from './cxx.js';
 import { fakeMemory } from './harness.test.js';
 
 /**
@@ -182,4 +182,12 @@ test('raw_name is the decorated name inside the descriptor; the destructor pops 
     assert.equal(destructor.handler([graph.types.derived]), 0);
     assert.equal(destructor.convention, 'thiscall');
     assert.equal(destructor.argBytes, 4);
+});
+
+test('_EH_prolog is code of its own, not a variable: it lies in .text, apart from the data', ()=>{
+    // A `data` export shares a page with the runtime's variables, which the
+    // host writes; a translator drops code on a page the host writes to.
+    const { table } = build();
+    assert.equal(table._EH_prolog.data, undefined);
+    assert.deepEqual(table._EH_prolog.code(), EH_PROLOG_CODE);
 });

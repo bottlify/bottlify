@@ -246,13 +246,13 @@ test('a format query opens nothing', ()=>{
 });
 
 test('the capabilities land on the fields a caller reads', ()=>{
-    // szPname ends at 38 and dwFormats is a dword, so it starts at 40. A reader
-    // that counts fields puts every later one two bytes early.
+    // MMVERSION is a UINT: the name starts at 8 and runs to dwFormats at 40.
     const m = machine();
     assert.equal(m.winmm.waveOutGetDevCapsA.handler([0, 0x400, 52]), 0);
-    assert.equal(m.memory[0x400 + 44], 2, 'wChannels, at 44 rather than 42');
-    assert.notEqual(m.get32(0x400 + 40), 0, 'dwFormats, at 40 rather than 38');
-    assert.equal(String.fromCharCode(...m.memory.slice(0x406, 0x40f)), 'Bottlify ');
+    assert.equal(m.memory[0x400 + 44], 2, 'wChannels at 44');
+    assert.notEqual(m.get32(0x400 + 40), 0, 'dwFormats at 40');
+    assert.equal(m.get32(0x400 + 4), 0, 'the driver version is not the name');
+    assert.equal(String.fromCharCode(...m.memory.slice(0x408, 0x411)), 'Bottlify ');
 });
 
 test('the device families this build does not have say so', ()=>{

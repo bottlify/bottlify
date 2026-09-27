@@ -175,6 +175,8 @@ test('_stricmp ignores case, and only for ASCII letters', ()=>{
     assert.equal(fns._stricmp.handler([put(0x100, 'Hello'), put(0x110, 'hELLO')]), 0);
     assert.equal(fns._stricmp.handler([put(0x120, 'abc'), put(0x130, 'ABD')]), -1);
     assert.equal(fns._stricmp.handler([put(0x140, 'B'), put(0x150, 'a')]), 1);
+    assert.equal(fns._strcmpi.handler([put(0x160, 'Hello'), put(0x170, 'hELLO')]), 0,
+        '_strcmpi is the same function');
 });
 
 test('strcpy copies the terminator too and returns the destination', ()=>{
@@ -346,6 +348,18 @@ test('_isnan is nonzero for any NaN and zero for every other double, infinities 
         assert.equal(fns._isnan.handler(doubleSlots(value)), 0, String(value));
     }
     assert.equal(fns._isnan.argBytes, 8);
+});
+
+test('_finite is zero for the infinities and NaN and nonzero for every finite double', ()=>{
+    const { fns } = setup();
+    for (const value of [Infinity, -Infinity, NaN])
+    {
+        assert.equal(fns._finite.handler(doubleSlots(value)), 0, String(value));
+    }
+    for (const value of [0, -0, 1.5, -2e300, Number.MIN_VALUE])
+    {
+        assert.notEqual(fns._finite.handler(doubleSlots(value)), 0, String(value));
+    }
 });
 
 test('itoa writes the digits and returns the buffer', ()=>{
@@ -533,8 +547,11 @@ test('every function is cdecl and declares the stack its arguments occupy', ()=>
     {
         // A variable rather than a function -- `_pctype` is the one here --
         // has no calling convention at all: its export is the address of the
-        // data itself, never a stub a bridge crosses into.
-        if (/** @type {any} */ (fn).data)
+        // data itself, never a stub a bridge crosses into. Nor has code of its
+        // own that declares none: `_EH_prolog` takes its handler in EAX and
+        // leaves the frame it built on its caller's stack.
+        const declared = /** @type {any} */ (fn);
+        if (declared.data || (declared.code && declared.convention === undefined))
         {
             continue;
         }

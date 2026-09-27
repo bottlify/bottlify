@@ -55,6 +55,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--skip-texture tN` | off | a texture id from a draws dump; every draw sampling it is dropped, so two runs differ by that draw and nothing else |
 | `--probe tN` | off | with `--dump-draws`: copy the colour target out right after each dumped draw that samples this texture, and put a few of its pixels on the draw's line. What a draw painted is otherwise only knowable from the finished frame, where every later draw has had its say |
 | `--pointer x,y[,down]` | off | hold the pointer at a position in the program's own pixels, optionally with the button down |
+| `--click-at x,y,ms`, `--key-at Code,ms` | off | a click, or a key tap, at a wall-clock moment: `ms` after the run starts, held 120 ms. For a screen that waits without presenting -- a dialog box, a film waiting on its first click -- where a click counted in presented frames is never sent, because the frame it waits for never comes. Repeatable |
 | `--click x,y[,after]` | off | a click in the program's own pixels after that many presented frames (30 by default): pressed on one frame, released on the next, with the motion that brings a pointer there from where the last click left it, for a program that reads the mouse as relative motion. Repeatable, for a path through several screens |
 | `--screen WxH` | 640x480 | the display the program is told it has. The launcher names the person's own screen, which is rarely a size a program of this era lists, and what a title does on one is a path of its own |
 | `--run-seconds N` | off | how long the engine itself runs before it stops and reports. A title that reaches its loop runs out the turns hours later; this ends the run while the page can still be asked |
@@ -183,6 +184,13 @@ bundle: a gigabyte that must never be read whole to answer one block.
 dumped, one PNG per texture the engine uploaded (and its device-side copy),
 and every file the program itself wrote. A game's own crash report is its
 account of what went wrong and beats any trace taken from outside it.
+
+A run that never answers within `--wait` -- a program still running, not only a
+hung page -- leaves no report; instead the debugger pauses the page and the
+JS stack it was running is printed, `game-<stamp>-live.json` holds every
+layer's metrics as the run stood (the kernel's threads and time, the
+bridge's last call, the cpu's ports), and `game-<stamp>-frame.png` the frame
+presented last, which a page screenshot of the WebGPU canvas does not show.
 
 `game-<stamp>-presents.json` holds every present's wall-clock time. Two runs are
 compared over the same frames rather than the same seconds with
