@@ -21,6 +21,9 @@
  */
 
 import { EINVAL, ENOMEM } from './globals.js';
+import {
+    callocCode, freeCode, mallocCode, msizeCode, reallocCode,
+} from '../kernel32/guest-heap.js';
 
 /**
  * @typedef {Object} HeapHost
@@ -35,6 +38,12 @@ import { EINVAL, ENOMEM } from './globals.js';
  *     the pattern: the lengths are the program's, and a clear of a megabyte
  *     through writeMemory costs an allocation and two extra passes.
  * @property {(code: number) => void} [errno]  Where a failure says why.
+ * @property {ReturnType<typeof import('../kernel32/guest-heap.js').createGuestHeap>} [guestHeap]
+ *     Where the small blocks are the guest's own: malloc, free, calloc,
+ *     realloc and _msize are then guest code over `heapHandle`'s heap, each
+ *     falling back to its handler here.
+ * @property {() => number} [heapHandle]
+ * @property {(bytes: number) => number} [allocateCode]
  */
 
 /** A pointer's size: what an aligned block keeps below itself, and its least alignment. */
@@ -61,19 +70,73 @@ export function createHeapFunctions(host){
         return 0;
     };
 
+    /**
+     * The guest's routines, placed once on the first bind of any of them,
+     * each falling back to its handler through a trap of its own.
+     *
+     * @type {Record<'malloc' | 'free' | 'calloc' | 'realloc' | 'msize', number> | null}
+     */
+    let routines = null;
+    /** @param {{ register: (label: string, trap: any) => number }} builder */
+    const placedRoutines = builder=>{
+        if (routines)
+        {
+            return routines;
+        }
+        const guest = /** @type {NonNullable<HeapHost['guestHeap']>} */ (host.guestHeap);
+        const placement = guest.placement();
+        const heap = /** @type {() => number} */ (host.heapHandle)();
+        const allocateCode = /** @type {(bytes: number) => number} */ (host.allocateCode);
+        /**
+         * @param {string} label @param {{ argBytes: number, handler: Function }} entry
+         * @param {(p: import('../kernel32/guest-heap.js').Placement, at: number, trap: number)
+         *     => Uint8Array} code
+         */
+        const place = (label, entry, code)=>{
+            const trap = builder.register(label, {
+                convention: 'cdecl', argBytes: entry.argBytes, handler: entry.handler,
+            });
+            if (placement === null || !guest.isHeap(heap))
+            {
+                return trap;
+            }
+            const at = allocateCode(code(placement, 0, trap).length);
+            host.writeMemory(at, code(placement, at, trap));
+            return at;
+        };
+        routines = {
+            malloc: place('<malloc>', allocator,
+                (p, at, trap)=>mallocCode(p, at, trap, heap)),
+            free: place('<free>', deallocator, freeCode),
+            calloc: place('<calloc>', table.calloc, (p, at, trap)=>callocCode(p, at, trap, heap)),
+            realloc: place('<realloc>', table.realloc, reallocCode),
+            msize: place('<msize>', table._msize, msizeCode),
+        };
+        return routines;
+    };
+    /** @param {'malloc' | 'free' | 'calloc' | 'realloc' | 'msize'} which */
+    const routine = which=>(host.guestHeap && host.heapHandle && host.allocateCode
+        ? {
+            /** @param {{ register: (label: string, trap: any) => number }} builder */
+            guest: builder=>placedRoutines(builder)[which],
+        }
+        : {});
+
     const allocator = {
         convention: 'cdecl',
         argBytes: 4,
         handler: mallocHandler,
+        ...routine('malloc'),
     };
 
     const deallocator = {
         convention: 'cdecl',
         argBytes: 4,
         handler: freeHandler,
+        ...routine('free'),
     };
 
-    return {
+    const table = {
         /** void *malloc(size_t size) */
         malloc: allocator,
 
@@ -84,6 +147,7 @@ export function createHeapFunctions(host){
         calloc: {
             convention: 'cdecl',
             argBytes: 8,
+            ...routine('calloc'),
             /** @param {number[]} args */
             handler: ([count, size])=>{
                 const bytes = (count >>> 0) * (size >>> 0);
@@ -104,6 +168,7 @@ export function createHeapFunctions(host){
         realloc: {
             convention: 'cdecl',
             argBytes: 8,
+            ...routine('realloc'),
             /** @param {number[]} args */
             handler: ([address, size])=>{
                 const bytes = size >>> 0;
@@ -145,6 +210,7 @@ export function createHeapFunctions(host){
         _msize: {
             convention: 'cdecl',
             argBytes: 4,
+            ...routine('msize'),
             /** @param {number[]} args */
             handler: ([address])=>host.block(address)?.size ?? 0,
         },
@@ -226,4 +292,5 @@ export function createHeapFunctions(host){
         '??3@YAXPAX@Z': deallocator, // operator delete(void *)
         '??_V@YAXPAX@Z': deallocator, // operator delete[](void *)
     };
+    return table;
 }

@@ -1,0 +1,414 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * The heap's small blocks: the guest's routines run on cork's test machine
+ * over the same memory the host's half reads and writes, each call either
+ * answered in the guest or handed to its trap -- a stub here that marks the
+ * hand-over, after which the test answers it as the host would.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createTestMachine } from '../../../../../cork/src/testing/machine.js';
+import { createHeapAllocator } from './heap.js';
+import {
+    CACHE, CONTROL, HEAP_MAGIC, SLAB, SMALL_LIMIT, callocCode, createGuestHeap, freeCode,
+    heapAllocCode, heapFreeCode, heapReAllocCode, heapSizeCode, mallocCode, msizeCode,
+    reallocCode,
+} from './guest-heap.js';
+
+const ARENA = { base: 0x100000, size: 0x300000 };
+const CODE = 0x10000;
+const HALT = 0xf000;
+const STACK = 0x8000;
+/** Where a trap stub marks that its routine handed the call over. */
+const HANDED = 0xe000;
+const HEAP_ZERO_MEMORY = 0x8;
+const HEAP_REALLOC_IN_PLACE_ONLY = 0x10;
+
+/** @param {number} value */
+const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
+
+/**
+ * A machine with the guest heap over its memory, every routine placed, and a
+ * call that says which side answered.
+ */
+function world(){
+    const m = createTestMachine({ ramSize: 4 << 20 });
+    const ram = ()=>new Uint8Array(m.memory.buffer, m.layout.ramBase, 4 << 20);
+    const view = ()=>new DataView(m.memory.buffer, m.layout.ramBase, 4 << 20);
+    const memory = {
+        readU16: (/** @type {number} */ at)=>view().getUint16(at, true),
+        readU32: (/** @type {number} */ at)=>view().getUint32(at, true),
+        writeU16: (/** @type {number} */ at, /** @type {number} */ value)=>{
+            view().setUint16(at, value, true);
+        },
+        writeU32: (/** @type {number} */ at, /** @type {number} */ value)=>{
+            view().setUint32(at, value >>> 0, true);
+        },
+        readBytes: (/** @type {number} */ at, /** @type {number} */ length)=>
+            ram().subarray(at, at + length),
+        writeBytes: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>{
+            ram().set(bytes, at);
+        },
+        /** @param {number} at @param {number} value @param {number} length */
+        fillBytes(at, value, length){
+            ram().fill(value, at, at + length);
+        },
+    };
+    const backend = createHeapAllocator(ARENA);
+    const guest = createGuestHeap({ allocator: backend, arena: ARENA, memory });
+    const heap = guest.createHeap();
+    const other = guest.createHeap();
+    const placement = /** @type {import('./guest-heap.js').Placement} */ (guest.placement());
+    const allocator = guest.wrap();
+    m.write(HALT, [0xf4]);
+    /** @type {Record<string, number>} */
+    const at = {};
+    let next = CODE;
+    /**
+     * @param {string} name @param {number} pop
+     * @param {(p: import('./guest-heap.js').Placement, at: number, trap: number)
+     *     => Uint8Array} make
+     */
+    const place = (name, pop, make)=>{
+        // The trap: mark the hand-over, answer 0, and return as the routine would.
+        const trap = next;
+        m.write(trap, [0xc7, 0x05, ...u32(HANDED), ...u32(1), 0x31, 0xc0,
+            ...pop === 0 ? [0xc3] : [0xc2, pop, 0]]);
+        const code = make(placement, trap + 0x20, trap);
+        m.write(trap + 0x20, code);
+        at[name] = trap + 0x20;
+        next = (trap + 0x20 + code.length + 0xff) & ~0xff;
+    };
+    place('HeapAlloc', 12, heapAllocCode);
+    place('HeapFree', 12, heapFreeCode);
+    place('HeapSize', 12, heapSizeCode);
+    place('HeapReAlloc', 16, heapReAllocCode);
+    place('malloc', 0, (p, where, trap)=>mallocCode(p, where, trap, heap));
+    place('calloc', 0, (p, where, trap)=>callocCode(p, where, trap, heap));
+    place('free', 0, freeCode);
+    place('realloc', 0, reallocCode);
+    place('_msize', 0, msizeCode);
+    /**
+     * @param {string} name @param {number[]} args
+     * @returns {{ eax: number, handed: boolean }}
+     */
+    const call = (name, args)=>{
+        m.writeU32(HANDED, 0);
+        m.writeU32(STACK, HALT);
+        args.forEach((value, i)=>m.writeU32(STACK + 4 + i * 4, value));
+        m.setReg('esp', STACK);
+        for (const register of ['ebx', 'esi', 'edi', 'ebp'])
+        {
+            m.setReg(register, 0x5a5a0000 + register.charCodeAt(1));
+        }
+        const exit = m.runProgram(at[name]);
+        assert.equal(exit.kind, 3, `${name} ran to its return: ${JSON.stringify(exit)}`);
+        for (const register of ['ebx', 'esi', 'edi', 'ebp'])
+        {
+            assert.equal(m.reg(register), 0x5a5a0000 + register.charCodeAt(1),
+                `${name} kept ${register}`);
+        }
+        return { eax: m.reg('eax'), handed: m.readU32(HANDED) === 1 };
+    };
+    return { m, memory, ram, guest, heap, other, allocator, backend, call };
+}
+
+test('a block allocated in the guest is sized, resized in place and freed in the guest,'
+    + ' once the host has filled the cache', ()=>{
+    const w = world();
+    const first = w.call('HeapAlloc', [w.heap, 0, 24]);
+    assert.equal(first.handed, true, 'the cache starts empty: the host fills it');
+    const block = w.allocator.allocate(24, { owner: w.heap });
+    assert.ok(block !== 0);
+    const second = w.call('HeapAlloc', [w.heap, 0, 20]);
+    assert.equal(second.handed, false, 'then the guest takes one');
+    assert.equal(second.eax % 8, 0);
+    assert.notEqual(second.eax, block);
+    assert.deepEqual(w.call('HeapSize', [w.heap, 0, second.eax]), { eax: 20, handed: false });
+    assert.deepEqual(w.call('HeapSize', [w.heap, 0, block]), { eax: 24, handed: false });
+    assert.equal(w.allocator.block(second.eax)?.size, 20, 'the host sees its size');
+    assert.equal(w.allocator.block(second.eax)?.owner, w.heap);
+    // Grown within its cell and shrunk: in place.
+    assert.deepEqual(w.call('HeapReAlloc', [w.heap, 0, second.eax, 24]),
+        { eax: second.eax, handed: false });
+    assert.deepEqual(w.call('HeapSize', [w.heap, 0, second.eax]), { eax: 24, handed: false });
+    assert.deepEqual(w.call('HeapReAlloc', [w.heap, HEAP_REALLOC_IN_PLACE_ONLY, second.eax, 3]),
+        { eax: second.eax, handed: false });
+    assert.equal(w.allocator.block(second.eax)?.size, 3);
+    // Past its cell: the host's, which moves it.
+    assert.equal(w.call('HeapReAlloc', [w.heap, 0, second.eax, 25]).handed, true);
+    assert.deepEqual(w.call('HeapFree', [w.heap, 0, second.eax]), { eax: 1, handed: false });
+    assert.equal(w.allocator.block(second.eax), null, 'free to the host too');
+    assert.equal(w.call('HeapFree', [w.heap, 0, second.eax]).handed, true,
+        'a second free is the host\'s to refuse');
+    assert.equal(w.call('HeapSize', [w.heap, 0, second.eax]).handed, true);
+    assert.deepEqual(w.call('HeapFree', [w.heap, 0, 0]), { eax: 1, handed: false },
+        'a null pointer is TRUE');
+});
+
+test('what the guest\'s path does not take goes to the host', ()=>{
+    const w = world();
+    w.allocator.free(w.allocator.allocate(8, { owner: w.heap }));
+    assert.equal(w.call('HeapAlloc', [w.heap, 0, SMALL_LIMIT + 1]).handed, true, 'too large');
+    assert.equal(w.call('HeapAlloc', [w.heap, 0x20, 8]).handed, true, 'a flag it does not take');
+    assert.equal(w.call('HeapAlloc', [0, 0, 8]).handed, true, 'no heap');
+    assert.equal(w.call('HeapAlloc', [w.heap + 0x100, 0, 8]).handed, true, 'not a heap');
+    assert.equal(w.call('HeapAlloc', [0x7ff00000, 0, 8]).handed, true, 'outside the arena');
+    const block = w.call('HeapAlloc', [w.heap, 1 | 4, 8]);
+    assert.equal(block.handed, false, 'HEAP_NO_SERIALIZE and HEAP_GENERATE_EXCEPTIONS are taken');
+    assert.equal(w.call('HeapFree', [w.other, 0, block.eax]).handed, true, 'another heap\'s');
+    assert.equal(w.call('HeapSize', [w.other, 0, block.eax]).handed, true);
+    assert.equal(w.call('HeapFree', [w.heap, 0, block.eax + 4]).handed, true, 'inside a cell');
+    const large = w.allocator.allocate(4096, { owner: w.heap });
+    assert.equal(w.call('HeapFree', [w.heap, 0, large]).handed, true, 'a block of the host\'s');
+    assert.equal(w.call('free', [0x20]).handed, true, 'below the arena');
+    assert.deepEqual(w.call('free', [0]), { eax: 0, handed: false });
+    // The lock another thread holds: every path hands over.
+    w.memory.writeU32(w.heap + CONTROL.LOCK, 1);
+    assert.equal(w.call('HeapAlloc', [w.heap, 0, 8]).handed, true, 'the lock is held');
+    assert.equal(w.call('HeapFree', [w.heap, 0, block.eax]).handed, true);
+    const meanwhile = w.allocator.allocate(8, { owner: w.heap });
+    assert.ok(meanwhile !== 0, 'the host allocates beside the cache');
+    assert.ok(w.allocator.free(meanwhile));
+    assert.equal(w.memory.readU32(w.heap + CONTROL.LOCK), 1, 'and leaves the lock as it was');
+    w.memory.writeU32(w.heap + CONTROL.LOCK, 0);
+    assert.deepEqual(w.call('HeapFree', [w.heap, 0, block.eax]), { eax: 1, handed: false });
+});
+
+test('HEAP_ZERO_MEMORY and calloc zero a recycled block, and a grown one past its old end', ()=>{
+    const w = world();
+    w.allocator.free(w.allocator.allocate(100, { owner: w.heap }));
+    const dirty = w.call('HeapAlloc', [w.heap, 0, 100]).eax;
+    w.ram().fill(0xaa, dirty, dirty + 100);
+    assert.equal(w.call('HeapFree', [w.heap, 0, dirty]).handed, false);
+    const zeroed = w.call('HeapAlloc', [w.heap, HEAP_ZERO_MEMORY, 99]);
+    assert.deepEqual(zeroed, { eax: dirty, handed: false }, 'the same cell, last in first out');
+    assert.ok(w.ram().subarray(dirty, dirty + 99).every(byte=>byte === 0));
+    w.ram().fill(0xbb, dirty, dirty + 99);
+    assert.equal(w.call('HeapReAlloc', [w.heap, HEAP_ZERO_MEMORY, dirty, 40]).eax, dirty);
+    w.ram().fill(0xcc, dirty + 40, dirty + 112);
+    assert.equal(w.call('HeapReAlloc', [w.heap, HEAP_ZERO_MEMORY, dirty, 110]).eax, dirty);
+    assert.ok(w.ram().subarray(dirty, dirty + 40).every(byte=>byte === 0xbb), 'kept');
+    assert.ok(w.ram().subarray(dirty + 40, dirty + 110).every(byte=>byte === 0), 'gained, zero');
+    assert.equal(w.call('free', [dirty]).handed, false);
+    const again = w.call('calloc', [11, 10]);
+    assert.deepEqual(again, { eax: dirty, handed: false });
+    assert.ok(w.ram().subarray(dirty, dirty + 110).every(byte=>byte === 0));
+    assert.deepEqual(w.call('_msize', [dirty]), { eax: 110, handed: false });
+    assert.equal(w.call('calloc', [0x10000, 0x10001]).handed, true, 'past 32 bits');
+    assert.equal(w.call('calloc', [33, 32]).handed, true, 'past a kilobyte');
+});
+
+test('a full cache hands half back, and a slab whose cells all come back leaves the arena',
+    ()=>{
+        const w = world();
+        const cells = SLAB / 64;
+        /** @type {number[]} */
+        const blocks = [];
+        for (let i = 0; i < cells * 3; i++)
+        {
+            let { eax, handed } = w.call('malloc', [64]);
+            if (handed)
+            {
+                eax = w.allocator.allocate(64, { owner: w.heap });
+            }
+            blocks.push(eax);
+        }
+        assert.equal(new Set(blocks).size, blocks.length);
+        assert.equal(w.guest.diagnostics().slabs, 3);
+        let handedOver = 0;
+        for (const block of blocks)
+        {
+            if (w.call('free', [block]).handed)
+            {
+                handedOver++;
+                assert.ok(w.allocator.free(block));
+            }
+        }
+        assert.ok(handedOver > 0 && handedOver < blocks.length / 10,
+            `${handedOver} frees found the cache full`);
+        const d = w.guest.diagnostics();
+        assert.ok(d.released >= 1, `slabs given back: ${JSON.stringify(d)}`);
+        assert.ok(d.cached <= CACHE);
+        assert.equal(w.allocator.owned(w.heap).length, 0);
+    });
+
+test('HeapDestroy\'s half takes every slab and the handle with it', ()=>{
+    const w = world();
+    const before = w.backend.diagnostics().used;
+    const heap = w.guest.createHeap();
+    for (let i = 0; i < 50; i++)
+    {
+        const { eax, handed } = w.call('HeapAlloc', [heap, 0, 8 + i * 16]);
+        if (handed)
+        {
+            assert.ok(w.allocator.allocate(8 + i * 16, { owner: heap }) !== 0);
+        }
+        else
+        {
+            assert.ok(eax !== 0);
+        }
+    }
+    assert.ok(w.allocator.owned(heap).length === 50);
+    assert.ok(w.guest.destroyHeap(heap));
+    assert.equal(w.backend.diagnostics().used, before);
+    assert.equal(w.memory.readU32(heap + CONTROL.MAGIC), 0);
+    assert.equal(w.call('HeapAlloc', [heap, 0, 8]).handed, true, 'the handle is no heap now');
+    assert.equal(w.guest.isHeap(heap), false);
+});
+
+test('a heap\'s handle is its control block, on a 64 KiB boundary, marked as a heap', ()=>{
+    const w = world();
+    for (const heap of [w.heap, w.other])
+    {
+        assert.equal(heap % 0x10000, 0);
+        assert.equal(w.memory.readU32(heap + CONTROL.MAGIC), HEAP_MAGIC);
+    }
+    assert.deepEqual(w.guest.list(), [w.heap, w.other]);
+});
+
+test('thousands of random calls from both sides keep every block whole and apart', ()=>{
+    const w = world();
+    let state = 12345;
+    const random = (/** @type {number} */ n)=>{
+        state = Math.imul(state ^ state >>> 15, 0x2c1b3c6d) + 0x297a2d39 | 0;
+        return (state >>> 0) % n;
+    };
+    /** @type {Map<number, { size: number, fill: number, heap: number }>} */
+    const live = new Map();
+    let guestCalls = 0;
+    let hostCalls = 0;
+    const heaps = [w.heap, w.other];
+    const sizeOf = ()=>(random(10) === 0 ? 1025 + random(3000) : random(10) < 7
+        ? random(129) : random(1025));
+    /** @param {number} address @param {number} size @param {number} fill */
+    const paint = (address, size, fill)=>{
+        w.ram().fill(fill, address, address + size);
+    };
+    /** @param {number} address */
+    const check = address=>{
+        const { size, fill } = /** @type {{ size: number, fill: number }} */ (live.get(address));
+        const bytes = w.ram().subarray(address, address + size);
+        assert.ok(bytes.every(byte=>byte === fill), `block ${address.toString(16)} intact`);
+    };
+    for (let step = 0; step < 4000; step++)
+    {
+        const op = random(10);
+        const byHost = random(4) === 0;
+        if (op < 4 || live.size === 0)
+        {
+            const heap = heaps[random(2)];
+            const size = sizeOf();
+            let address = 0;
+            const zero = random(3) === 0;
+            if (!byHost)
+            {
+                const { eax, handed } = heap === w.heap && random(2) === 0
+                    ? w.call(zero ? 'calloc' : 'malloc', zero ? [1, size] : [size])
+                    : w.call('HeapAlloc', [heap, zero ? HEAP_ZERO_MEMORY : 0, size]);
+                address = handed ? 0 : eax;
+                guestCalls += handed ? 0 : 1;
+            }
+            if (address === 0)
+            {
+                address = w.allocator.allocate(size, { owner: heap });
+                hostCalls++;
+                if (zero)
+                {
+                    w.ram().fill(0, address, address + size);
+                }
+            }
+            assert.ok(address !== 0 && address % 8 === 0);
+            if (zero)
+            {
+                assert.ok(w.ram().subarray(address, address + size).every(byte=>byte === 0));
+            }
+            for (const [other, block] of live)
+            {
+                assert.ok(address + Math.max(size, 1) <= other
+                    || other + Math.max(block.size, 1) <= address,
+                `${address.toString(16)}+${size} overlaps ${other.toString(16)}+${block.size}`);
+            }
+            const fill = 1 + random(255);
+            paint(address, size, fill);
+            live.set(address, { size, fill, heap });
+            continue;
+        }
+        const keys = [...live.keys()];
+        const address = keys[random(keys.length)];
+        const block = /** @type {{ size: number, fill: number, heap: number }} */ (
+            live.get(address));
+        check(address);
+        if (op < 7)
+        {
+            const size = byHost ? w.allocator.block(address)?.size
+                : random(2) === 0 ? w.call('_msize', [address]) : w.call('HeapSize',
+                    [block.heap, 0, address]);
+            const answered = typeof size === 'number' ? size
+                : size?.handed ? w.allocator.block(address)?.size : size?.eax;
+            assert.equal(answered, block.size, 'the size asked for');
+            live.delete(address);
+            let freed = false;
+            if (!byHost)
+            {
+                const { handed } = random(2) === 0 ? w.call('free', [address])
+                    : w.call('HeapFree', [block.heap, 0, address]);
+                freed = !handed;
+                guestCalls += handed ? 0 : 1;
+            }
+            if (!freed)
+            {
+                assert.ok(w.allocator.free(address));
+                hostCalls++;
+            }
+            assert.equal(w.allocator.block(address), null);
+            continue;
+        }
+        // Resized: in place when it fits, and moved by the host otherwise.
+        const size = sizeOf();
+        const { eax, handed } = byHost ? { eax: 0, handed: true } : random(2) === 0
+            ? w.call('realloc', [address, size]) : w.call('HeapReAlloc',
+                [block.heap, 0, address, size]);
+        let moved = eax;
+        if (handed)
+        {
+            hostCalls++;
+            if (w.allocator.resize(address, size))
+            {
+                moved = address;
+            }
+            else
+            {
+                moved = w.allocator.allocate(size, { owner: block.heap });
+                w.ram().copyWithin(moved, address, address + Math.min(size, block.size));
+                assert.ok(w.allocator.free(address));
+            }
+        }
+        else
+        {
+            guestCalls++;
+            assert.equal(moved, address, 'the guest resizes in place');
+        }
+        live.delete(address);
+        const kept = Math.min(size, block.size);
+        assert.ok(w.ram().subarray(moved, moved + kept).every(byte=>byte === block.fill));
+        paint(moved, size, block.fill);
+        live.set(moved, { size, fill: block.fill, heap: block.heap });
+        assert.equal(w.allocator.block(moved)?.size, size);
+    }
+    for (const address of live.keys())
+    {
+        check(address);
+        assert.equal(w.allocator.block(address)?.size, live.get(address)?.size);
+    }
+    const owned = new Set([...w.allocator.owned(w.heap), ...w.allocator.owned(w.other)]);
+    assert.deepEqual([...owned].sort((a, b)=>a - b), [...live.keys()].sort((a, b)=>a - b),
+        'the host walks exactly the live blocks');
+    assert.ok(guestCalls > hostCalls, `${guestCalls} in the guest, ${hostCalls} in the host`);
+});

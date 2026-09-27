@@ -15,6 +15,7 @@ import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions } from './kernel32/files.js';
 import { createSyncFunctions } from './kernel32/sync.js';
 import { createCodeArena } from './kernel32/code-arena.js';
+import { createGuestHeap } from './kernel32/guest-heap.js';
 import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions, encodeAnsi } from './kernel32/locale.js';
 import { createEnvironmentFunctions, defaultEnvironment } from './kernel32/environment.js';
@@ -434,7 +435,24 @@ export function createWin32Module(){
             // memory from -- the heap it asks for, the bits of a DIB section, COM
             // task memory, a vtable -- comes out of the same free list, because
             // carving it up in advance is guessing at proportions nobody knows.
-            const allocator = createHeapAllocator(arena);
+            //
+            // A heap's small blocks are the guest's own (`guest-heap.js`): what
+            // every host path is handed is the arena's allocator with those
+            // found, sized and freed where they are.
+            const guestHeap = createGuestHeap({
+                allocator: createHeapAllocator(arena),
+                arena,
+                memory: {
+                    readU16: address=>memory.readU16(address),
+                    readU32: address=>memory.readU32(address),
+                    writeU16: (address, value)=>memory.writeU16(address, value),
+                    writeU32: (address, value)=>memory.writeU32(address, value),
+                    readBytes: (address, length)=>memory.readBytes(address, length),
+                    writeBytes: (address, bytes)=>memory.writeBytes(address, bytes),
+                    fillBytes: (address, value, length)=>memory.fillBytes(address, value, length),
+                },
+            });
+            const allocator = guestHeap.wrap();
             // Counted by the mapping calls as they go.
             const mappings = { views: 0, waited: 0, failed: 0 };
             // The guest code the engine writes itself, on pages nothing else is
@@ -957,6 +975,16 @@ export function createWin32Module(){
                 bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
             });
 
+            /** The runtime's heap: HeapCreate's, the first time malloc needs it. */
+            let crtHeapHandle = 0;
+            const crtHeap = ()=>{
+                if (crtHeapHandle === 0)
+                {
+                    crtHeapHandle = libraries['KERNEL32.dll'].HeapCreate.handler([0, 0, 0]);
+                }
+                return crtHeapHandle;
+            };
+
             libraries = {
                 'KERNEL32.dll': {
                     ...createConsoleFunctions({
@@ -1003,6 +1031,9 @@ export function createWin32Module(){
                     }),
                     ...createHeapFunctions({
                         arena, allocator, readMemory, writeMemory, fillMemory,
+                        guestHeap,
+                        /** @param {number} bytes */
+                        allocateCode: bytes=>heap.allocateCode(bytes),
                         setLastError: setError,
                         divergence: config?.divergence,
                         /** @param {number} address */
@@ -1281,11 +1312,16 @@ export function createWin32Module(){
                         currentThread: ()=>kernel.currentThread(),
                         // One allocator behind malloc and HeapAlloc alike: a C++
                         // program frees with `delete` what a library function
-                        // allocated with `malloc`, and Windows lets it.
-                        allocate: bytes=>allocator.allocate(bytes),
+                        // allocated with `malloc`, and Windows lets it. The
+                        // runtime's blocks are a heap of its own, as msvcrt's
+                        // are, made the first time it is asked for one.
+                        allocate: bytes=>allocator.allocate(bytes, { owner: crtHeap() }),
                         free: address=>allocator.free(address),
                         block: address=>allocator.block(address),
                         resize: (address, bytes)=>allocator.resize(address, bytes),
+                        guestHeap,
+                        heapHandle: ()=>crtHeap(),
+                        allocateCode: bytes=>heap.allocateCode(bytes),
                         systemTimeMs: ()=>kernel.clock.wallClock(),
                         now: ()=>kernel.clock.virtualTime(),
                         // The same command line GetCommandLineA reports, because a
