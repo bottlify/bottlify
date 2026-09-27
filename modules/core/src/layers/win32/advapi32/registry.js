@@ -339,6 +339,12 @@ const pick = (table, names)=>Object.fromEntries(names.map(name=>[name, table[nam
 /** Where the kernel describes the processor. */
 const PROCESSOR_KEY = 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0';
 
+/** The in-process COM classes the system libraries serve, by CLSID. */
+const IN_PROCESS_CLASSES = Object.freeze([
+    { clsid: '{47D4D946-62E8-11CF-93BC-444553540000}', library: 'dsound.dll' }, // DirectSound
+    { clsid: '{3901CC3F-84B5-4FA4-BA35-AA8172B8A09B}', library: 'dsound.dll' }, // DirectSound8
+]);
+
 /**
  * The keys and values every Windows installation carries before any program
  * has run, as far as a program of the era asks for them: where programs go,
@@ -367,6 +373,15 @@ const machineKeys = windows=>{
         // finds it missing takes the registry for broken and gives up.
         ...['CLSID', 'Interface', 'TypeLib', 'AppID'].map(name=>
             ({ root: HKEY_LOCAL_MACHINE, path: `${MACHINE_CLASSES}\\${name}` })),
+        // The classes a system library serves in process, as their setup
+        // registers them: CoCreateInstance finds the library here and asks its
+        // DllGetClassObject for the class, which is how a program that never
+        // calls DirectSoundCreate makes a DirectSound object.
+        ...IN_PROCESS_CLASSES.map(({ clsid, library })=>({
+            root: HKEY_LOCAL_MACHINE,
+            path: `${MACHINE_CLASSES}\\CLSID\\${clsid}\\InprocServer32`,
+            values: { '': library, ThreadingModel: 'Both' },
+        })),
         { root: HKEY_LOCAL_MACHINE, path: windowsKey, values: {
             ProgramFilesDir: folders.ProgramFiles,
             ProgramFilesPath: folders.ProgramFiles,

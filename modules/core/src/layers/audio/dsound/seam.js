@@ -30,6 +30,7 @@
  */
 
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
+import { readGuid } from '../../win32/ole32/guid.js';
 import { createSoundBuffer, normaliseFormat, DSBSTATUS_PLAYING } from './buffers.js';
 
 export const DS_OK = 0;
@@ -37,6 +38,24 @@ const DS_UNCERTIFIED = 1;
 const DSERR_INVALIDPARAM = 0x80070057 | 0;
 const DSERR_OUTOFMEMORY = 0x8007000e | 0;
 const DSERR_UNSUPPORTED = 0x80004001 | 0;
+/** An object a class factory made, before Initialize names its device. */
+const DSERR_UNINITIALIZED = 0x889000aa | 0;
+const DSERR_ALREADYINITIALIZED = 0x88780082 | 0;
+/** CLASS_E_NOAGGREGATION, under the name DirectSound gives it. */
+const DSERR_NOAGGREGATION = 0x80040110 | 0;
+const E_POINTER = 0x80004003 | 0;
+const E_NOINTERFACE = 0x80004002 | 0;
+const CLASS_E_CLASSNOTAVAILABLE = 0x80040111 | 0;
+
+/** The classes this library's DllGetClassObject makes, and which generation each is. */
+const CLSID_DirectSound = '{47D4D946-62E8-11CF-93BC-444553540000}';
+const CLSID_DirectSound8 = '{3901CC3F-84B5-4FA4-BA35-AA8172B8A09B}';
+const IID_IClassFactory = '{00000001-0000-0000-C000-000000000046}';
+/** IClassFactory, after IUnknown's three. */
+const ICLASSFACTORY_SLOTS = /** @type {[string, number][]} */ ([
+    ['CreateInstance', 3],
+    ['LockServer', 1],
+]);
 const DSERR_INVALIDCALL = 0x88780032 | 0;
 const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
 const DSERR_NODRIVER = 0x88780078 | 0;
@@ -192,6 +211,8 @@ export const DSOUND_ORDINALS = Object.freeze({
     2: 'DirectSoundEnumerateA',
     3: 'DirectSoundEnumerateW',
     6: 'DirectSoundCaptureCreate',
+    7: 'DirectSoundCaptureEnumerateA',
+    8: 'DirectSoundCaptureEnumerateW',
     9: 'GetDeviceID',
     11: 'DirectSoundCreate8',
     12: 'DirectSoundCaptureCreate8',
@@ -1115,8 +1136,29 @@ export function createDirectSound(
         SetSpeakerConfig(){
             return DS_OK;
         },
-        /** HRESULT Initialize(LPCGUID) */
-        Initialize(){
+        /**
+         * HRESULT Initialize(LPCGUID)
+         *
+         * Names the device of an object a class factory made; one already
+         * named -- every object DirectSoundCreate made -- refuses. A capture
+         * device named is none this machine has.
+         */
+        Initialize(root, [guid]){
+            if (root.initialized !== false)
+            {
+                return DSERR_ALREADYINITIALIZED;
+            }
+            if ((guid >>> 0) !== 0)
+            {
+                const asked = memory.readMemory(guid >>> 0, 16);
+                const names = (/** @type {readonly number[]} */ id)=>
+                    id.every((byte, at)=>asked[at] === byte);
+                if (!names(DEVICE_GUID) && !DEFAULT_PLAYBACK_IDS.some(names))
+                {
+                    return DSERR_NODRIVER;
+                }
+            }
+            root.initialized = true;
             return DS_OK;
         },
 
@@ -1135,6 +1177,18 @@ export function createDirectSound(
             return DS_OK;
         },
     };
+
+    // An object a class factory made answers nothing but Initialize until
+    // Initialize names its device (Wine's dsound IDirectSound_test).
+    for (const [name, method] of Object.entries(soundMethods))
+    {
+        if (name !== 'Initialize')
+        {
+            soundMethods[name] = (root, args)=>(root.initialized === false
+                ? DSERR_UNINITIALIZED
+                : method(root, args));
+        }
+    }
 
     const soundInterfaces = [describe(IID_IDirectSound, IDIRECTSOUND_SLOTS, soundMethods)];
     const sound8Interfaces = [
@@ -1155,13 +1209,14 @@ export function createDirectSound(
      *
      * @param {number} out @param {boolean} eight
      */
-    const createInto = (out, eight)=>{
+    const createInto = (out, eight, initialized = true)=>{
         if ((out >>> 0) === 0)
         {
             return DSERR_INVALIDPARAM;
         }
         let references = 1;
         const device = {
+            initialized,
             addRef: ()=>++references,
             release: ()=>(references = Math.max(0, references - 1)),
             get references(){
@@ -1183,6 +1238,66 @@ export function createDirectSound(
             ? publisher.publish(device, sound8Interfaces, IID_IDirectSound8)
             : publisher.publish(device, soundInterfaces, IID_IDirectSound));
         return DS_OK;
+    };
+
+    const factoryInterfaces = [describe(IID_IClassFactory, ICLASSFACTORY_SLOTS, {
+        /** HRESULT CreateInstance(IUnknown *outer, REFIID, void **ppv) */
+        CreateInstance(factory, [outer, iid, out]){
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            writeU32(out, 0);
+            if ((outer >>> 0) !== 0)
+            {
+                return DSERR_NOAGGREGATION;
+            }
+            const wanted = (iid >>> 0) === 0 ? '' : readGuid(memory, iid >>> 0);
+            const interfaces = factory.eight ? sound8Interfaces : soundInterfaces;
+            if (!interfaces.some(entry=>entry.id === wanted) && wanted !== IID_IUNKNOWN)
+            {
+                return E_NOINTERFACE;
+            }
+            const made = createInto(out, factory.eight, false);
+            if (made !== DS_OK || wanted === (factory.eight ? IID_IDirectSound8 : IID_IDirectSound))
+            {
+                return made;
+            }
+            // Asked for another of its interfaces: that one is handed back,
+            // holding the one reference the object was made with.
+            const object = publisher.objectAt(readU32(out >>> 0));
+            writeU32(out, publisher.publish(object, interfaces, wanted));
+            return DS_OK;
+        },
+        /** HRESULT LockServer(BOOL): nothing here is unloaded to be kept. */
+        LockServer: ()=>DS_OK,
+    })];
+
+    /** @param {number[]} args */
+    const noCaptureDevice = ([, out, outer])=>{
+        if ((outer >>> 0) !== 0)
+        {
+            return DSERR_NOAGGREGATION;
+        }
+        if ((out >>> 0) === 0)
+        {
+            return DSERR_INVALIDPARAM;
+        }
+        writeU32(out, 0);
+        return DSERR_NODRIVER;
+    };
+
+    /** A class object, counting its own references. @param {boolean} eight */
+    const classFactory = eight=>{
+        let references = 1;
+        return {
+            eight,
+            addRef: ()=>++references,
+            release: ()=>(references = Math.max(0, references - 1)),
+            get destroyed(){
+                return references === 0;
+            },
+        };
     };
 
     /**
@@ -1357,25 +1472,50 @@ export function createDirectSound(
                         return DS_OK;
                     },
                 },
-                /** HRESULT DirectSoundCaptureCreate(...) — there is no capture device. */
-                DirectSoundCaptureCreate: { argBytes: 12, handler: ()=>DSERR_UNSUPPORTED },
-                DirectSoundCaptureCreate8: { argBytes: 12, handler: ()=>DSERR_UNSUPPORTED },
+                /**
+                 * HRESULT DirectSoundCaptureCreate(LPCGUID, LPDIRECTSOUNDCAPTURE*, IUnknown*)
+                 *
+                 * There is no capture device, which a program is told as
+                 * Windows tells a machine without one: DSERR_NODRIVER, the
+                 * pointer cleared -- after an aggregation, which is refused
+                 * first with the pointer left alone (Wine's capture test_COM).
+                 */
+                DirectSoundCaptureCreate: { argBytes: 12, handler: noCaptureDevice },
+                DirectSoundCaptureCreate8: { argBytes: 12, handler: noCaptureDevice },
+                /** HRESULT DirectSoundCaptureEnumerateA/W(callback, context): there is none. */
+                DirectSoundCaptureEnumerateA: { argBytes: 8, handler: ()=>DS_OK },
+                DirectSoundCaptureEnumerateW: { argBytes: 8, handler: ()=>DS_OK },
                 /**
                  * HRESULT DllGetClassObject(REFCLSID, REFIID, LPVOID *ppv)
                  *
-                 * The classes COM makes through ole32 are made there; asked
-                 * directly, as a program asks for the private property set,
-                 * this library has no class to hand out.
+                 * The class object for DirectSound and DirectSound8, which
+                 * CoCreateInstance reaches through the class's InprocServer32
+                 * key; its objects wait for Initialize. Any other class -- the
+                 * private property set a program asks for directly among
+                 * them -- is not one this library hands out.
                  */
                 DllGetClassObject: {
                     argBytes: 12,
                     /** @param {number[]} args */
-                    handler: ([, , out])=>{
-                        if ((out >>> 0) !== 0)
+                    handler: ([clsid, iid, out])=>{
+                        if ((out >>> 0) === 0)
                         {
-                            memory.writeMemory(out >>> 0, new Uint8Array(4));
+                            return E_POINTER;
                         }
-                        return 0x80040111; // CLASS_E_CLASSNOTAVAILABLE
+                        writeU32(out, 0);
+                        const asked = (clsid >>> 0) === 0 ? '' : readGuid(memory, clsid >>> 0);
+                        if (asked !== CLSID_DirectSound && asked !== CLSID_DirectSound8)
+                        {
+                            return CLASS_E_CLASSNOTAVAILABLE;
+                        }
+                        const wanted = (iid >>> 0) === 0 ? '' : readGuid(memory, iid >>> 0);
+                        if (wanted !== IID_IClassFactory && wanted !== IID_IUNKNOWN)
+                        {
+                            return E_NOINTERFACE;
+                        }
+                        writeU32(out, publisher.publish(classFactory(asked === CLSID_DirectSound8),
+                            factoryInterfaces, wanted));
+                        return DS_OK;
                     },
                 },
                 /** HRESULT DllCanUnloadNow(void), which COM asks for. */
