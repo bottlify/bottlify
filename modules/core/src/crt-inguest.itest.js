@@ -251,7 +251,8 @@ function buildMsvcrtAnswersExe(){
         args: at=>[...texts.map(text=>at(text)), ...rest], expected: [answer >>> 0] });
     strings('strcmp', ['euro', 'nbsp'], [], -1);
     strings('strcmp', ['top', 'euro'], [], 1);
-    strings('strncmp', ['euro', 'nbsp'], [1], -1);
+    // 32-bit msvcrt.dll's strncmp answers the difference of the bytes, strcmp only the sign.
+    strings('strncmp', ['euro', 'nbsp'], [1], 0x80 - 0xa0);
     strings('_stricmp', ['euro', 'nbsp'], [], -1);
     strings('_strnicmp', ['euro', 'nbsp'], [1], -1);
     strings('_strcmpi', ['euro', 'nbsp'], [], -1);
@@ -294,7 +295,7 @@ function buildPrototypeExe(){
     }
     for (const [left, right, count, answer] of /** @type {[string, string, number, number][]} */ ([
         ['abcX', 'abcY', 3, 0], ['abcX', 'abcY', 4, -1], ['abcY', 'abcX', 4, 1],
-        ['euro', 'yen', 1, -1], ['ab', 'abc', 99, -1], ['abc', 'abd', 0, 0],
+        ['euro', 'yen', 1, 0x80 - 0xa5], ['ab', 'abc', 99, -0x63], ['abc', 'abd', 0, 0],
     ]))
     {
         calls.push({ name: 'strncmp', args: at=>[at(left), at(right), count], returns: 'eax',
