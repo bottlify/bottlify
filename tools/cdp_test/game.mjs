@@ -24,6 +24,12 @@
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
  *                                  [--exact] [--cpu-profile SECONDS] [--export-translations FILE]
+ *                                  [--watch SECONDS]
+ *
+ * `--watch S` is for a program that does not present, an installer above
+ * all: every S seconds the page is photographed and every process standing
+ * says what its threads wait on, which call is parked, which windows show and
+ * where its processor last ran.
  */
 
 import { deflateSync } from 'node:zlib';
@@ -190,6 +196,7 @@ function parse(argv){
         // title that reaches its loop and would otherwise run out the turns
         // hours later. Zero means the turns alone decide.
         runSeconds: number('--run-seconds', 0),
+        watch: number('--watch', 0),
         // The frame averages taken once this many frames came after the last
         // long stall (a load): with a program that advances one step a frame,
         // the same frames of play in every run (0: not taken).
@@ -1398,6 +1405,36 @@ export async function game(options){
                 returnByValue: true },
             sessionId);
 
+        const watchFrom = Date.now();
+        const watchStamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const watchTimer = options.watch > 0
+            ? setInterval(()=>{
+                const at = ((Date.now() - watchFrom) / 1000).toFixed(0).padStart(5, '0');
+                cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId).then(shot=>{
+                    const path = join(REPORTS_DIR, `game-${watchStamp}-watch-${at}.png`);
+                    writeFileSync(path, Buffer.from(shot.data, 'base64'));
+                    console.log(`${at} s  shot ${path}`);
+                }, ()=>{});
+                cdp.send('Runtime.evaluate', { expression: 'window.__bottlify__.standing()',
+                    awaitPromise: true, returnByValue: true }, sessionId).then(answer=>{
+                    for (const one of answer.result?.value ?? [])
+                    {
+                        const { image, windows: shownWindows, cpu, ...rest } = one;
+                        console.log(`${at} s  ${String(image).split('\\').pop()}`
+                            + ` ${JSON.stringify(rest).slice(0, 1200)}`);
+                        console.log(`${at} s    cpu ${JSON.stringify(cpu)}`);
+                        for (const shown of shownWindows)
+                        {
+                            console.log(`${at} s    window ${shown.hwnd}`
+                                + `${shown.parent ? ` in ${shown.parent}` : ''}`
+                                + ` ${shown.className} "${shown.title}"`
+                                + ` ${shown.x},${shown.y} ${shown.width}x${shown.height}`);
+                        }
+                    }
+                }, ()=>{});
+            }, options.watch * 1000)
+            : null;
+
         // The whole call stream, drained in pieces: a quarter of a million
         // lines is more than one evaluation carries. Factored out so a run that
         // never readies a result -- a title that does not exit, slowed by its
@@ -1514,6 +1551,10 @@ the run as it stands: ${path}`;
             if (deviceTimer !== null)
             {
                 clearInterval(deviceTimer);
+            }
+            if (watchTimer !== null)
+            {
+                clearInterval(watchTimer);
             }
         }
 

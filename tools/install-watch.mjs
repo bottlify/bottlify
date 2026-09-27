@@ -13,7 +13,7 @@
  *
  *   node tools/install-watch.mjs <setup.exe> [--every 30] [--minutes 20]
  *       [--journal SECONDS] [--memory MB] [--key Code@S]... [--click X,Y@S]...
- *       [--shots DIR]
+ *       [--shots DIR] [--list 'C:\Program Files']
  *
  * `--journal S` prints, S seconds in, the last cross-process COM calls and
  * message waits from the call journal (every call area on).
@@ -26,7 +26,9 @@
  * followed by that process's visible windows, one a line, children indented:
  * what a person would have seen at that moment. `--shots DIR` writes the
  * desktop the facade's process paints into as a PNG at every status, which is
- * what a person would have seen, pixel for pixel.
+ * what a person would have seen, pixel for pixel. `--list DIR` prints the
+ * files under a directory of the volume once the run is over -- what an
+ * install left behind, which is what a bottle is made of.
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -59,6 +61,7 @@ const all = flag=>argv.flatMap((argument, index)=>argument === flag && index + 1
     ? [argv[index + 1]] : []);
 const journalAt = number('--journal', 0);
 const memory = number('--memory', 0);
+const listAt = argv.includes('--list') ? argv[argv.indexOf('--list') + 1] : null;
 
 const prefix = prefixOptions({ name: basename(file), bytes: new Uint8Array(readFileSync(file)) });
 const started = Date.now();
@@ -294,6 +297,28 @@ try
 }
 catch (e){
     console.log('stopped:', e instanceof Error ? e.stack?.slice(0, 1500) : e);
+}
+if (listAt)
+{
+    /** @param {string} directory */
+    const walk = directory=>{
+        for (const entry of app.files.list(directory))
+        {
+            console.log('FILE', entry.directory ? '<dir>' : String(entry.size).padStart(10),
+                entry.path);
+            if (entry.directory)
+            {
+                walk(entry.path);
+            }
+        }
+    };
+    try
+    {
+        walk(listAt);
+    }
+    catch (e){
+        console.log('list failed:', e instanceof Error ? e.message : e);
+    }
 }
 for (const [library, names] of unresolved)
 {

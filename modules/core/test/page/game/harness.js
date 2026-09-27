@@ -1107,6 +1107,36 @@ export function scalars(layers){
 }
 
 /**
+ * What `standing` reports of each process: the few metrics a stopped run is
+ * read from, small enough to cross from a worker every few seconds.
+ *
+ * @param {any} app
+ */
+async function standingOf(app){
+    return (await app.standing()).map((/** @type {any} */ { image, diagnostics })=>{
+        /** @param {string} layer */
+        const metrics = layer=>diagnostics.find((/** @type {any} */ entry)=>
+            entry.name === layer)?.metrics ?? {};
+        const kernel = metrics('kernel');
+        const bridge = metrics('bridge');
+        const win32 = metrics('win32');
+        const cpu = metrics('cpu');
+        return {
+            image,
+            threads: kernel.byState, waiting: kernel.waiting, turns: kernel.turns,
+            calls: bridge.calls, lastCall: bridge.lastCall, suspended: bridge.suspendedCalls,
+            messages: win32.messages,
+            windows: (win32.windows ?? []).filter((/** @type {any} */ window)=>window.visible)
+                .map((/** @type {any} */ window)=>({ hwnd: window.hwnd, parent: window.parent,
+                    className: window.className, title: String(window.title ?? '').slice(0, 60),
+                    x: window.x, y: window.y, width: window.width, height: window.height })),
+            cpu: { recent: (cpu.recent ?? []).slice(-4), top: (cpu.samples?.top ?? []).slice(0, 8),
+                traps: cpu.traps, trapCapacity: cpu.trapCapacity },
+        };
+    });
+}
+
+/**
  * @typedef {Object} Harness
  * @property {Promise<{ available: boolean, reason?: string, adapter?: any }>} gpu
  * @property {(request: any) => Promise<any>} run   One title, and what came out of it.
@@ -1127,6 +1157,11 @@ export function scalars(layers){
  * @property {() => boolean} exactRestart
  *     Begins the emulator's own account afresh, so a window measures itself
  *     and not the loading before it.
+ * @property {() => Promise<any[]>} standing
+ *     Every process standing, read while the run goes on: its threads and
+ *     what they wait on, its parked calls, its windows, and where its
+ *     processor last ran -- what an installer several processes deep that
+ *     has stopped is diagnosed from, which the frames it presents do not say.
  * @property {string[]} errors
  * @property {{ count: number, gaps: number[] }} presents
  *     When each frame was presented, as the gaps between them in
@@ -1737,6 +1772,7 @@ export function createHarness(canvas, how = {}){
         // switched on has recorded, read while the run is still going.
         /** @param {number} [count] */
         journalRecent: count=>running ? running.log.recent(count) : [],
+        standing: async()=>(running ? standingOf(running) : []),
         exactRestart: ()=>{
             // The sampled account is cleared with the emulator's own, so a
             // window that begins here is measured by itself and not by the
