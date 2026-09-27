@@ -91,6 +91,7 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
         [STATUS.NO_MEMORY, 8],
         [STATUS.ACCESS_DENIED, 5],
         [STATUS.BUFFER_TOO_SMALL, 122],
+        [STATUS.OBJECT_NAME_INVALID, 123],
         [STATUS.OBJECT_NAME_NOT_FOUND, 2],
         [STATUS.OBJECT_NAME_COLLISION, 183],
         [STATUS.OBJECT_PATH_NOT_FOUND, 3],
@@ -100,6 +101,8 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
         [STATUS.NOT_SUPPORTED, 50],
         [STATUS.INVALID_PARAMETER_2, 87],
         [STATUS.NOT_A_DIRECTORY, 267],
+        [STATUS.NAME_TOO_LONG, 206],
+        [STATUS.CANNOT_DELETE, 5],
         [STATUS.REVISION_MISMATCH, 1306],
     ];
     for (const [status, expected] of rows)

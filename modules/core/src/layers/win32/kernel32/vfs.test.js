@@ -173,3 +173,24 @@ test('a second writer gets in when the first agreed to share writing, and not ot
     await filesystemModule.dispose();
     void fs;
 });
+
+test('attributes a program set follow the name through a rename and go with a delete', async()=>{
+    // The filesystem keeps no attribute bits; kernel32's file tests set
+    // read-only, rename the file and expect it read-only still, and a file
+    // made again under a deleted name to be an ordinary one.
+    const { volume: vol } = await volume();
+    vol.mkdir('C:\\dir');
+    vol.close(vol.open('C:\\dir\\a.txt', { read: true, write: true, create: true }));
+
+    assert.equal(vol.setAttributes('C:\\DIR\\A.TXT', 0x21), true);
+    assert.equal(vol.stat('c:\\dir\\a.txt')?.attributes, 0x21, 'whatever the spelling');
+    assert.equal(vol.list('C:\\dir', '*')[0].attributes, 0x21, 'a listing says so too');
+
+    assert.equal(vol.rename('C:\\dir', 'C:\\moved'), true);
+    assert.equal(vol.stat('C:\\moved\\a.txt')?.attributes, 0x21, 'carried with its directory');
+
+    assert.equal(vol.remove('C:\\moved\\a.txt'), true);
+    vol.close(vol.open('C:\\moved\\a.txt', { read: true, write: true, create: true }));
+    assert.equal(vol.stat('C:\\moved\\a.txt')?.attributes, undefined);
+    assert.equal(vol.setAttributes('C:\\nothing', 1), false, 'no name, nothing to carry them');
+});
