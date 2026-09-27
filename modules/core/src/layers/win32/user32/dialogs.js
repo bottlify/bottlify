@@ -303,7 +303,8 @@ const MAX_RESOURCE_NAME = 256;
  *     A class the program registered, by the name a template spells it.
  * @param {(name: string) => boolean} [options.classKnown]
  *     Whether a class of that name, or `#atom`, is the program's or the system's.
- * @param {(record: any, args: number[]) => number | Promise<number>} options.announce
+ * @param {(record: any, args: number[], unicode?: boolean, caller?: unknown)
+ *     => number | Promise<number>} options.announce
  *     Tells a new window's procedure that it exists, as CreateWindowEx does.
  * @param {(run: (hwnd: number, thread: unknown, first?: ModalHook) => Promise<number>)
  *     => void} [options.modalLoop]  Handed the modal loop, for a dialog another
@@ -480,6 +481,7 @@ export function createDialogFunctions(options){
                 id: extended ? template.u32(at + item.id) & 0xffff : template.u16(at + item.id),
                 className: '',
                 title: '',
+                data: 0,
             };
             template.at = at + item.size;
             const cls = template.nameOrOrdinal();
@@ -488,8 +490,11 @@ export function createDialogFunctions(options){
 
             // The creation data begins with its size in bytes. In the old
             // layout that word counts itself, so a zero means there is only
-            // the word; in the extended one it counts what follows it.
+            // the word; in the extended one it counts what follows it. The
+            // control's WM_CREATE is handed the data, size word first, as
+            // lpCreateParams, and NULL when there is none.
             const extra = template.u16(template.at);
+            control.data = extra === 0 ? 0 : (address + template.at) >>> 0;
             template.at += extended ? 2 + extra : (extra === 0 ? 2 : extra);
             dialog.controls.push(control);
         }
@@ -627,12 +632,23 @@ export function createDialogFunctions(options){
         // the first message and the dialog's first control.
         const build = ()=>{
             dialog.extra.setUint32(DWLP_DLGPROC, dialogFunc >>> 0, true);
-            /** @type {Promise<number>[]} */
-            const creating = [];
             /** @type {any[]} */
             const controls = [];
-            for (const control of makeable)
-            {
+            /**
+             * Makes the controls one at a time, as the dialog manager calls
+             * CreateWindowEx for each: a control's WM_CREATE has run before the
+             * next exists. Two made at once would each run the program's code
+             * from the one call, and the second would wait on the first.
+             *
+             * @param {number} index
+             * @returns {any}
+             */
+            const createFrom = index=>{
+                if (index >= makeable.length)
+                {
+                    return 0;
+                }
+                const control = makeable[index];
                 // A class the program registered is the program's, procedure and
                 // all: a template names its own controls this way, and one of
                 // them keeps its state in the extra bytes and sets it up in
@@ -668,31 +684,24 @@ export function createDialogFunctions(options){
                 {
                     dialog.defaultId = control.id & 0xffff;
                 }
-                if (cls)
-                {
-                    // The class and title are in the template, not in guest
-                    // memory, so the CREATESTRUCT names neither: a procedure
-                    // that reads them there finds NULL. The ceiling on this.
-                    const announced = announce(record, [control.exStyle, 0, 0, style,
-                        placed.x, placed.y, placed.width, placed.height,
-                        dialog.hwnd, control.id, instance >>> 0, 0]);
-                    if (typeof (/** @type {any} */ (announced))?.then === 'function')
-                    {
-                        creating.push(/** @type {Promise<number>} */ (announced));
-                    }
-                }
                 controls.push(record);
-            }
+                // The class and title are in the template, not in guest
+                // memory, so the CREATESTRUCT names neither: a procedure that
+                // reads them there finds NULL. The ceiling on this.
+                return after(cls ? announce(record, [control.exStyle, 0, 0, style,
+                    placed.x, placed.y, placed.width, placed.height,
+                    dialog.hwnd, control.id, instance >>> 0, control.data], false, thread) : 0,
+                ()=>createFrom(index + 1));
+            };
             // Every control is told the dialog's font once it exists and has
             // set itself up, as the dialog manager tells it: before
             // WM_INITDIALOG, and after the program's own WM_CREATE.
             const thread = host.callerThread?.();
-            const setFonts = ()=>{
-                const told = font === 0
-                    ? [] : controls.map(record=>
-                        host.send(record.hwnd, WM_SETFONT, font, 0, thread));
-                return told.some(answer=>typeof answer !== 'number') ? Promise.all(told) : null;
-            };
+            // One control at a time, for the reason they are made one at a time.
+            /** @param {number} index @returns {any} */
+            const setFonts = (index = 0)=>(font === 0 || index >= controls.length ? 0
+                : after(host.send(controls[index].hwnd, WM_SETFONT, font, 0, thread),
+                    ()=>setFonts(index + 1)));
             const initialise = ()=>{
                 host.created?.(dialog.hwnd);
                 // Sent, not posted: a program that creates a dialog and then reads
@@ -716,8 +725,7 @@ export function createDialogFunctions(options){
             // WM_INITDIALOG comes after every control exists and has been told
             // so; a procedure that talks to a control from there expects the
             // control to have set itself up.
-            const fonts = creating.length === 0 ? setFonts() : Promise.all(creating).then(setFonts);
-            return fonts ? fonts.then(initialise) : initialise();
+            return after(after(createFrom(0), ()=>setFonts()), initialise);
         };
         return after(announce(dialog, [exStyle, 0, 0, dialog.style, x, y, width, height,
             parent >>> 0, 0, instance >>> 0, initParam >>> 0]),

@@ -1691,13 +1691,15 @@ export function createWindowFunctions(host){
      *
      * @param {any} record @param {number[]} args
      * @param {boolean} [unicode]  Whether the call's names are wide strings.
+     * @param {unknown} [caller]  Whose call this answers, when the caller has
+     *     awaited before making the window.
      */
-    const announce = (record, args, unicode = false)=>{
+    const announce = (record, args, unicode = false, caller = undefined)=>{
         const [exStyle, className, windowName, style, x, y, width, height,
             parent, menu, instance, params] = args;
         // Named once, before anything is awaited: a call made after the hook
         // has answered is answering a call the bridge has already let go of.
-        const thread = host.callerThread?.();
+        const thread = caller ?? host.callerThread?.();
         /** The window, activated first when it was created visible. */
         const activated = ()=>andThen(activateCreated(record, thread), ()=>record.hwnd);
         // A procedure on this side reads nothing out of a CREATESTRUCT.
