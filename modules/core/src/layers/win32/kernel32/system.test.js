@@ -488,3 +488,46 @@ test('the lstr family reads a string a span at a time, and to the edge of mapped
     assert.equal(fns.lstrlenA.handler([0xffc]), 0);
     assert.equal(host.errors.at(-1), 87);
 });
+
+test('terminating a child that has not run ends it with the code, and it never runs', ()=>{
+    // Wine's kernel32 sync test starts a child that sleeps for ever and
+    // terminates it; a child still recorded as to run would be handed the
+    // machine once the parent exits.
+    const host = fakeHost();
+    const child = { imagePath: 'C:\\child.exe', exitCode: 259, completed: false };
+    host.handles.set(0x40, child);
+    const fns = createSystemFunctions(host);
+
+    assert.equal(fns.TerminateProcess.handler([0x40, 5]), 1);
+    assert.equal(child.exitCode, 5);
+    assert.equal(child.completed, true, 'no longer one to hand over to');
+    assert.deepEqual(host.exits, [], 'and this process goes on');
+    assert.equal(fns.GetExitCodeProcess.handler([0x40, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 5);
+});
+
+test('terminating a child wakes whoever waits on it, with its wait\'s answer', ()=>{
+    const host = fakeHost();
+    const waiter = { name: 'waiter' };
+    const child = { imagePath: 'C:\\child.exe', exitCode: 259, completed: false,
+        waiters: [{ thread: waiter, result: 0 }] };
+    host.handles.set(0x40, child);
+    /** @type {{ thread: any, result: number }[]} */
+    const woken = [];
+    const fns = createSystemFunctions({ ...host,
+        wake: (thread, result)=>woken.push({ thread, result }) });
+
+    assert.equal(fns.TerminateProcess.handler([0x40, 1]), 1);
+    assert.deepEqual(woken, [{ thread: waiter, result: 0 }]);
+    assert.deepEqual(child.waiters, []);
+});
+
+test('a child that has ended already is not ended twice', ()=>{
+    const host = fakeHost();
+    const child = { imagePath: 'C:\\child.exe', exitCode: 0, completed: true };
+    host.handles.set(0x40, child);
+    const fns = createSystemFunctions(host);
+    assert.equal(fns.TerminateProcess.handler([0x40, 9]), 0);
+    assert.equal(child.exitCode, 0);
+    assert.deepEqual(host.errors, [5], 'ERROR_ACCESS_DENIED, as Windows answers');
+});

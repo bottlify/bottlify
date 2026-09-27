@@ -29,6 +29,8 @@ import {
 /** Error codes this file can produce. */
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_INVALID_HANDLE = 6;
+/** TerminateProcess on a process that has already ended. */
+const ERROR_ACCESS_DENIED = 5;
 
 /** sizeof(SYSTEM_INFO) and sizeof(SYSTEMTIME). */
 const SYSTEM_INFO_SIZE = 36;
@@ -201,6 +203,10 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  *           Guest memory, for the one caller that asks for it:
  *           FormatMessage with FORMAT_MESSAGE_ALLOCATE_BUFFER. Without
  *           it that one flag is refused and everything else works.
+ * @property {(thread: any, result: number) => void} [wake]
+ *           Ends a thread's wait with its answer: how a thread waiting on a
+ *           child another one terminates goes on. Without it that thread
+ *           stays waiting.
  */
 
 /**
@@ -743,9 +749,12 @@ export function createSystemFunctions(host){
         /**
          * BOOL TerminateProcess(HANDLE hProcess, UINT uExitCode)
          *
-         * Only the running process can be terminated, and terminating it does
-         * not return -- so, like ExitProcess, the stub's own return is redirected
-         * into the park loop rather than answered.
+         * Terminating the running process does not return -- so, like
+         * ExitProcess, the stub's own return is redirected into the park loop
+         * rather than answered. A child has not run while its parent can call
+         * this: it ends with the code before it starts, is no longer one to
+         * hand the machine to, and whoever waits on it is answered. One that
+         * has ended already is refused, as Windows refuses it.
          */
         TerminateProcess: {
             argBytes: 8,
@@ -753,8 +762,26 @@ export function createSystemFunctions(host){
             handler: ([handle, code])=>{
                 if ((handle >>> 0) !== CURRENT_PROCESS)
                 {
-                    host.setLastError(ERROR_INVALID_HANDLE);
-                    return 0;
+                    const child = object(handle, 'process');
+                    if (!child)
+                    {
+                        host.setLastError(ERROR_INVALID_HANDLE);
+                        return 0;
+                    }
+                    if (child.completed || child.exitCode !== STILL_ACTIVE)
+                    {
+                        host.setLastError(ERROR_ACCESS_DENIED);
+                        return 0;
+                    }
+                    child.exitCode = code >>> 0;
+                    child.completed = true;
+                    const waiters = child.waiters ?? [];
+                    child.waiters = [];
+                    for (const waiter of waiters)
+                    {
+                        host.wake?.(waiter.thread, waiter.settle ? waiter.settle() : waiter.result);
+                    }
+                    return 1;
                 }
                 host.exit(code >>> 0);
                 return host.park();
