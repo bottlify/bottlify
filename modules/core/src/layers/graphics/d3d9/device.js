@@ -55,9 +55,9 @@ import {
     D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DOK_NOAUTOGEN, D3DPOOL, D3DRS, D3DRTYPE, D3DUSAGE,
     D3D_OK, FORMAT_INFO, isCompressed, surfaceBytes, surfacePitch,
 } from './constants.js';
-import { D3DCLEAR } from '../d3d8/constants.js';
+import { D3DCLEAR, D3DTS } from '../d3d8/constants.js';
 import {
-    IDENTITY, STAGE_COUNT, createRenderer, multiplyMatrices, vertexCountOf,
+    IDENTITY, STAGE_COUNT, createRenderer, multiplyMatrices, sameLight, vertexCountOf,
 } from '../d3d8/render.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { createDefaultRenderStates } from './renderstates.js';
@@ -785,6 +785,16 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      */
     let vertexDeclaration = { declaration: null, fvf: 0 };
     /**
+     * What `stageProcessing` last answered, and the bindings it answered for:
+     * the shader objects and the declaration record, each replaced, never
+     * written into, when it changes.
+     *
+     * @type {{ vertexShader: unknown, pixelShader: unknown, declaration: unknown,
+     *     answer: any }}
+     */
+    const heldProcessing = { vertexShader: null, pixelShader: null, declaration: null,
+        answer: null };
+    /**
      * The declarations SetFVF has made, one per format, so that setting the
      * same format twice hands back the same object.
      *
@@ -1252,11 +1262,44 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * renderer cannot read.
      */
     const effectiveFvf = ()=>{
-        if (!vertexDeclaration.declaration)
+        const declaration = vertexDeclaration.declaration;
+        if (!declaration)
         {
             return 0;
         }
-        return vertexDeclaration.fvf || fvfOfElements(vertexDeclaration.declaration.elements);
+        if (vertexDeclaration.fvf)
+        {
+            return vertexDeclaration.fvf;
+        }
+        // Asked on every draw; a declaration never changes, and working the
+        // format out makes the elements the format would spell to compare.
+        let fvf = declaredFvfs.get(declaration);
+        if (fvf === undefined)
+        {
+            fvf = fvfOfElements(declaration.elements);
+            declaredFvfs.set(declaration, fvf);
+        }
+        return fvf;
+    };
+    /** @type {WeakMap<object, number>} */
+    const declaredFvfs = new WeakMap();
+
+    /**
+     * Whether a matrix a program is setting is the one already there, bit for
+     * bit: a zero's sign is a different matrix to read back.
+     *
+     * @param {Float32Array} held @param {ArrayLike<number>} given
+     */
+    const sameMatrix = (held, given)=>{
+        for (let at = 0; at < 16; at++)
+        {
+            const value = given[at];
+            if (held[at] !== value || (value === 0 && 1 / held[at] !== 1 / value))
+            {
+                return false;
+            }
+        }
+        return true;
     };
 
     /**
@@ -2107,18 +2150,31 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            return setState(
-                record=>{
-                    const held = record.lights.get(index);
-                    record.lights.set(index,
-                        { light: { ...light }, enabled: held?.enabled ?? false });
-                },
-                ()=>{
-                    const existing = lights.get(index);
-                    lights.set(index,
-                        { light: { ...light }, enabled: existing?.enabled ?? false });
-                    lightsVersion++;
-                });
+            // Set again with what it holds, as a program that sets its lights
+            // before every model does: observably nothing, and a new version
+            // would have every draw after it name its state again.
+            if (recording)
+            {
+                const held = recording.lights.get(index);
+                recording.lights.set(index,
+                    { light: { ...light }, enabled: held?.enabled ?? false });
+                return D3D_OK;
+            }
+            const existing = lights.get(index);
+            if (existing && sameLight(existing.light, light))
+            {
+                return D3D_OK;
+            }
+            lights.set(index, { light: { ...light }, enabled: existing?.enabled ?? false });
+            lightsVersion++;
+            // A draw's preparation is shaped by a light's type, and packs its
+            // values into the block for each draw by `lightsVersion`: a light
+            // that moves keeps the preparation it had.
+            if (existing?.light.Type !== light.Type)
+            {
+                drawStateVersion++;
+            }
+            return D3D_OK;
         },
 
         /**
@@ -2145,6 +2201,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {boolean} enable
          */
         LightEnable(index, enable){
+            if (!recording && lights.get(index)?.enabled === (enable === true))
+            {
+                return D3D_OK;
+            }
             return setState(
                 record=>{
                     const held = record.lights.get(index);
@@ -2300,9 +2360,33 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            return setState(
-                record=>record.transforms.set(type, new Float32Array(matrix)),
-                ()=>transforms.set(type, new Float32Array(matrix)));
+            if (recording)
+            {
+                recording.transforms.set(type, new Float32Array(matrix));
+                return D3D_OK;
+            }
+            // Setting the matrix already there is nothing, as for every other
+            // state. The world moves before most draws, and the renderer
+            // reads it afresh on every draw rather than by the version; nothing
+            // keeps the matrix the device holds past the call that reads it
+            // -- a state block, GetTransform and the renderer copy it -- so a
+            // new world is written over it rather than made.
+            const held = transforms.get(type);
+            if (held && sameMatrix(held, matrix))
+            {
+                return D3D_OK;
+            }
+            if (type === D3DTS.WORLD && held)
+            {
+                held.set(matrix);
+                return D3D_OK;
+            }
+            transforms.set(type, new Float32Array(matrix));
+            if (type !== D3DTS.WORLD)
+            {
+                drawStateVersion++;
+            }
+            return D3D_OK;
         },
 
         /**
@@ -2745,7 +2829,18 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * and the constant files, all live views.
          */
         get stageProcessing(){
-            return {
+            // Asked for by every draw: the answer is kept while the shaders and
+            // the declaration it was made from are the ones bound.
+            const held = heldProcessing;
+            if (held.answer !== null && held.vertexShader === vertexShader
+                && held.pixelShader === pixelShader && held.declaration === vertexDeclaration)
+            {
+                return held.answer;
+            }
+            held.vertexShader = vertexShader;
+            held.pixelShader = pixelShader;
+            held.declaration = vertexDeclaration;
+            held.answer = {
                 vertexShader: vertexShader ? vertexShader.id : 0,
                 fvf: effectiveFvf(),
                 fixedFunctionLayout: fixedFunctionLayout(),
@@ -2766,6 +2861,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     }
                     : null,
             };
+            return held.answer;
         },
 
         /**

@@ -111,6 +111,8 @@ function fakeMemory(size = 0x1000){
 function fakeFiles(){
     /** @type {Map<string, { data: Uint8Array, directory: boolean }>} */
     const nodes = new Map();
+    /** What SetFileAttributes recorded, as the volume adapter records it. @type {Map<string, number>} */
+    const attributes = new Map();
     let current = 'C:\\GAME';
     nodes.set('C:\\', { data: new Uint8Array(0), directory: true });
     nodes.set('C:\\GAME', { data: new Uint8Array(0), directory: true });
@@ -141,8 +143,25 @@ function fakeFiles(){
         stat(path){
             const node = nodes.get(path);
             return node
-                ? { exists: true, isDirectory: node.directory, size: node.data.length }
+                ? { exists: true, isDirectory: node.directory, size: node.data.length,
+                    ...attributes.has(path) ? { attributes: attributes.get(path) } : {} }
                 : null;
+        },
+        /** @param {string} path @param {number | null} value */
+        setAttributes(path, value){
+            if (!nodes.has(path))
+            {
+                return false;
+            }
+            if (value === null)
+            {
+                attributes.delete(path);
+            }
+            else
+            {
+                attributes.set(path, value);
+            }
+            return true;
         },
         /** @param {string} path @param {import('./files.js').OpenMode} mode */
         open(path, mode){
@@ -198,6 +217,7 @@ function fakeFiles(){
             {
                 return false;
             }
+            attributes.delete(path);
             return nodes.delete(path);
         },
         /** @param {string} path */
@@ -218,6 +238,11 @@ function fakeFiles(){
             }
             nodes.delete(from);
             nodes.set(to, node);
+            if (attributes.has(from))
+            {
+                attributes.set(to, /** @type {number} */ (attributes.get(from)));
+                attributes.delete(from);
+            }
             return true;
         },
         /** @param {string} path @param {string} pattern */
@@ -1509,4 +1534,177 @@ test('CreateFile hands the volume the write sharing it was asked for', ()=>{
     fns.CreateFileA.handler(
         [at(NAME, 'C:\\TEMP\\PKG.DAT'), GENERIC_READ | GENERIC_WRITE, 1, 0, OPEN_ALWAYS, 0, 0]);
     assert.deepEqual(asked.map(mode=>mode.shareWrite), [true, false]);
+});
+
+const DELETE = 0x00010000;
+const FILE_FLAG_DELETE_ON_CLOSE = 0x04000000;
+const FILE_ATTRIBUTE_READONLY = 0x01;
+const FILE_ATTRIBUTE_NORMAL = 0x80;
+
+test('a read-only file refuses a delete and a write until the attribute comes off', ()=>{
+    // kernel32's file tests: _lcreat with attribute 1 makes a read-only file
+    // the creating handle still writes; DeleteFile and a write open are then
+    // ERROR_ACCESS_DENIED, a rename is allowed and takes the attribute along,
+    // and SetFileAttributes(FILE_ATTRIBUTE_NORMAL) lets the delete through.
+    const { files, error, fns, at, memory } = setup();
+    const handle = fns._lcreat.handler([at(NAME, 'C:\\GAME\\RO.TXT'), 1]);
+    assert.notEqual(handle, HFILE_ERROR);
+    memory.putString(BUFFER, 'text');
+    assert.equal(fns._hwrite.handler([handle, BUFFER, 4]), 4, 'the creating handle writes');
+    fns._lclose.handler([handle]);
+    assert.equal(fns.GetFileAttributesA.handler([NAME]) & FILE_ATTRIBUTE_READONLY,
+        FILE_ATTRIBUTE_READONLY);
+
+    error.code = 0xdeadbeef;
+    assert.equal(fns.DeleteFileA.handler([NAME]), 0);
+    assert.equal(error.code, ERROR_ACCESS_DENIED);
+    assert.equal(fns.CreateFileA.handler([NAME, GENERIC_WRITE, 0, 0, OPEN_EXISTING, 0, 0]),
+        INVALID_HANDLE_VALUE);
+    assert.equal(error.code, ERROR_ACCESS_DENIED);
+    assert.equal(fns.CreateFileA.handler(
+        [NAME, DELETE, 0, 0, OPEN_EXISTING, FILE_FLAG_DELETE_ON_CLOSE, 0]), INVALID_HANDLE_VALUE);
+    assert.equal(error.code, ERROR_ACCESS_DENIED);
+    const reader = fns.CreateFileA.handler([NAME, GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0]);
+    assert.notEqual(reader, INVALID_HANDLE_VALUE, 'reading it is still allowed');
+    fns.CloseHandle.handler([reader]);
+
+    assert.equal(fns.MoveFileA.handler([NAME, at(NAME2, 'C:\\GAME\\RO2.TXT')]), 1);
+    assert.equal(fns.DeleteFileA.handler([NAME2]), 0, 'the attribute moved with the name');
+    assert.equal(fns.SetFileAttributesA.handler([NAME2, FILE_ATTRIBUTE_NORMAL]), 1);
+    assert.equal(fns.GetFileAttributesA.handler([NAME2]), FILE_ATTRIBUTE_NORMAL);
+    assert.equal(fns.DeleteFileA.handler([NAME2]), 1);
+    assert.equal(files.stat('C:\\GAME\\RO2.TXT'), null);
+});
+
+test('CreateFile gives a new file the attributes it asked for', ()=>{
+    const { error, fns, at } = setup();
+    const handle = fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\NEW.TXT'), 0, 0, 0,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_READONLY, 0]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE);
+    fns.CloseHandle.handler([handle]);
+    assert.ok(fns.GetFileAttributesA.handler([NAME]) & FILE_ATTRIBUTE_READONLY);
+    assert.equal(fns.CreateFileA.handler([NAME, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0]),
+        INVALID_HANDLE_VALUE, 'and replacing it is refused');
+    assert.equal(error.code, ERROR_ACCESS_DENIED);
+});
+
+test('a copy carries the read-only attribute and will not overwrite a read-only file', ()=>{
+    const { files, error, fns, at } = setup();
+    files.put('C:\\GAME\\A.TXT', 'a');
+    at(NAME, 'C:\\GAME\\A.TXT');
+    at(NAME2, 'C:\\GAME\\B.TXT');
+    assert.equal(fns.SetFileAttributesA.handler([NAME, FILE_ATTRIBUTE_READONLY]), 1);
+    assert.equal(fns.CopyFileA.handler([NAME, NAME2, 0]), 1);
+    assert.ok(fns.GetFileAttributesA.handler([NAME2]) & FILE_ATTRIBUTE_READONLY);
+    assert.equal(fns.CopyFileA.handler([NAME, NAME2, 0]), 0);
+    assert.equal(error.code, ERROR_ACCESS_DENIED);
+});
+
+test('FILE_FLAG_DELETE_ON_CLOSE takes the file away with its handle', ()=>{
+    const { files, fns, at } = setup();
+    const handle = fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\SCRATCH.TMP'),
+        GENERIC_READ | GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE, 0]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE);
+    assert.equal(files.stat('C:\\GAME\\SCRATCH.TMP')?.exists, true, 'there while it is open');
+    fns.CloseHandle.handler([handle]);
+    assert.equal(files.stat('C:\\GAME\\SCRATCH.TMP'), null);
+});
+
+/** Where the native-open fixtures put their structures. */
+const NT_NAME = 0x700;
+const NT_STRING = 0x7a0;
+const NT_ATTRIBUTES = 0x7b0;
+const NT_STATUS = 0x7d0;
+const NT_HANDLE = 0x7e0;
+
+/**
+ * Lays out OBJECT_ATTRIBUTES over a UNICODE_STRING naming `name`.
+ *
+ * @param {ReturnType<typeof fakeMemory>} memory @param {string} name
+ */
+function objectAttributes(memory, name){
+    for (let at = 0; at < name.length; at++)
+    {
+        memory.bytes[NT_NAME + at * 2] = name.charCodeAt(at);
+        memory.bytes[NT_NAME + at * 2 + 1] = 0;
+    }
+    const length = name.length * 2;
+    memory.putDword(NT_STRING, length | (length << 16));
+    memory.putDword(NT_STRING + 4, NT_NAME);
+    memory.putDword(NT_ATTRIBUTES, 24);
+    memory.putDword(NT_ATTRIBUTES + 4, 0);
+    memory.putDword(NT_ATTRIBUTES + 8, NT_STRING);
+    memory.putDword(NT_ATTRIBUTES + 12, 0x40);
+    return NT_ATTRIBUTES;
+}
+
+const FILE_OPEN = 1;
+const FILE_CREATE = 2;
+const FILE_DIRECTORY_FILE = 0x1;
+const FILE_NON_DIRECTORY_FILE = 0x40;
+const FILE_DELETE_ON_CLOSE = 0x1000;
+
+test('NtCreateFile opens a \\??\\ name and reports how in the status block', ()=>{
+    const { files, fns, memory } = setup();
+    const native = /** @type {any} */ (fns.CreateFileW).natives?.NtCreateFile;
+    assert.ok(native, 'published for ntdll beside CreateFileW');
+    files.put('C:\\GAME\\DATA.BIN', 'data');
+    const attributes = objectAttributes(memory, '\\??\\C:\\GAME\\DATA.BIN');
+
+    assert.equal(native.handler([NT_HANDLE, GENERIC_READ, attributes, NT_STATUS, 0, 0, 7,
+        FILE_OPEN, FILE_NON_DIRECTORY_FILE, 0, 0]), 0);
+    const handle = memory.dword(NT_HANDLE);
+    assert.equal(memory.dword(NT_STATUS), 0);
+    assert.equal(memory.dword(NT_STATUS + 4), 1, 'FILE_OPENED');
+    assert.equal(fns.ReadFile.handler([handle, BUFFER, 4, OUT_COUNT, 0]), 1);
+    assert.equal(memory.dword(OUT_COUNT), 4, 'the handle reads as CreateFile\'s would');
+    assert.equal(fns.CloseHandle.handler([handle]), 1);
+
+    assert.equal(native.handler([NT_HANDLE, GENERIC_WRITE, objectAttributes(memory,
+        '\\??\\C:\\GAME\\NEW.BIN'), NT_STATUS, 0, 0, 0, FILE_CREATE, 0, 0, 0]), 0);
+    assert.equal(memory.dword(NT_STATUS + 4), 2, 'FILE_CREATED');
+    assert.equal(files.stat('C:\\GAME\\NEW.BIN')?.exists, true);
+});
+
+test('NtCreateFile answers the statuses kernel32\'s tests expect of a read-only file', ()=>{
+    // file.c's _lcreat test: write access is refused first, then a
+    // delete-on-close open of the read-only file, then asking a file to be a
+    // directory.
+    const { files, fns, memory } = setup();
+    const native = /** @type {any} */ (fns.CreateFileW).natives.NtCreateFile;
+    files.put('C:\\GAME\\RO.TXT', 'text');
+    files.setAttributes('C:\\GAME\\RO.TXT', FILE_ATTRIBUTE_READONLY);
+    const attributes = objectAttributes(memory, '\\??\\C:\\GAME\\RO.TXT');
+    /** @param {number} access @param {number} options */
+    const open = (access, options)=>native.handler([NT_HANDLE, access, attributes, NT_STATUS,
+        0, 0, 7, FILE_OPEN, options, 0, 0]) >>> 0;
+
+    assert.equal(open(GENERIC_READ | GENERIC_WRITE | DELETE,
+        FILE_DELETE_ON_CLOSE | FILE_NON_DIRECTORY_FILE), 0xc0000022, 'STATUS_ACCESS_DENIED');
+    assert.equal(open(DELETE, FILE_DELETE_ON_CLOSE | FILE_NON_DIRECTORY_FILE), 0xc0000121,
+        'STATUS_CANNOT_DELETE');
+    assert.equal(open(DELETE, FILE_DELETE_ON_CLOSE | FILE_DIRECTORY_FILE), 0xc0000103,
+        'STATUS_NOT_A_DIRECTORY');
+    assert.equal(open(GENERIC_READ, FILE_DELETE_ON_CLOSE), 0xc000000d,
+        'deleting on close needs DELETE access');
+    assert.equal(files.stat('C:\\GAME\\RO.TXT')?.exists, true, 'and nothing deleted it');
+});
+
+test('NtCreateFile names what is missing, and takes only object names', ()=>{
+    const { fns, memory, files } = setup();
+    const native = /** @type {any} */ (fns.CreateFileW).natives.NtCreateFile;
+    /** @param {string} name @param {number} [disposition] @param {number} [options] */
+    const open = (name, disposition = FILE_OPEN, options = 0)=>
+        native.handler([NT_HANDLE, GENERIC_READ, objectAttributes(memory, name), NT_STATUS,
+            0, 0, 7, disposition, options, 0, 0]) >>> 0;
+
+    assert.equal(open('\\??\\C:\\GAME\\NONE.TXT'), 0xc0000034, 'OBJECT_NAME_NOT_FOUND');
+    assert.equal(open('\\??\\C:\\NOWHERE\\NONE.TXT'), 0xc000003a, 'OBJECT_PATH_NOT_FOUND');
+    assert.equal(open('C:\\GAME\\NONE.TXT'), 0xc000003b, 'a DOS path is not an object name');
+    assert.equal(open('\\??\\C:\\GAME', FILE_OPEN, FILE_NON_DIRECTORY_FILE), 0xc00000ba,
+        'STATUS_FILE_IS_A_DIRECTORY');
+    assert.equal(open('\\??\\C:\\GAME\\SUB', FILE_CREATE, FILE_DIRECTORY_FILE), 0);
+    assert.equal(files.stat('C:\\GAME\\SUB')?.isDirectory, true, 'a directory was made');
+    assert.equal(fns.CloseHandle.handler([memory.dword(NT_HANDLE)]), 1,
+        'and its handle closes as any other');
 });

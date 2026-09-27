@@ -151,25 +151,38 @@ const FILE_ATTRIBUTE_READONLY = 0x01;
 const FILE_ATTRIBUTE_HIDDEN = 0x02;
 const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 const FILE_ATTRIBUTE_ARCHIVE = 0x20;
+const FILE_ATTRIBUTE_NORMAL = 0x80;
 
 /**
  * The attributes a name on the volume is reported with.
  *
- * No attribute bits are kept, so a file is an ordinary archived one and a
- * directory a directory -- except on read-only media, where every name is
- * read-only, files and directories alike, as the CD-ROM file system reports
- * them, and none carries the archive bit, because nothing ever wrote it. A
- * name the disc records as hidden is hidden.
+ * A name nobody set attributes on is an ordinary archived file or a plain
+ * directory -- except on read-only media, where every name is read-only, files
+ * and directories alike, as the CD-ROM file system reports them, and none
+ * carries the archive bit, because nothing ever wrote it. A name the disc
+ * records as hidden is hidden.
  *
- * @param {{ isDirectory: boolean, readOnly?: boolean, hidden?: boolean } | null | undefined} entry
+ * Attributes a program set are what it set, the directory bit beside them.
+ * FILE_ATTRIBUTE_NORMAL means "no other attribute" and is only ever answered
+ * alone: a directory set to it is just a directory.
+ *
+ * @param {{ isDirectory: boolean, readOnly?: boolean, hidden?: boolean,
+ *           attributes?: number } | null | undefined} entry
  * @returns {number}
  */
 export function fileAttributes(entry){
     const kind = entry?.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : 0;
     const hidden = entry?.hidden ? FILE_ATTRIBUTE_HIDDEN : 0;
-    if (entry?.readOnly)
+    const media = entry?.readOnly ? FILE_ATTRIBUTE_READONLY : 0;
+    if (entry?.attributes !== undefined)
     {
-        return kind | hidden | FILE_ATTRIBUTE_READONLY;
+        const bits = (entry.attributes | kind | hidden | media) >>> 0;
+        const others = bits & ~FILE_ATTRIBUTE_NORMAL;
+        return others !== 0 ? others : FILE_ATTRIBUTE_NORMAL;
+    }
+    if (media !== 0)
+    {
+        return kind | hidden | media;
     }
     return (kind || FILE_ATTRIBUTE_ARCHIVE) | hidden;
 }

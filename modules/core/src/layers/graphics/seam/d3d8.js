@@ -43,7 +43,7 @@ import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js'
 import { queryAs, readGuid } from './guid.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DSURFACE_DESC8, D3DLOCKED_RECT, D3DLIGHT7, RECT, POINT, createFields,
-    D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, dwordsOf, floatsOf, putLight,
+    D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, createLightReader, dwordsOf, floatsOf, putLight,
     putMaterial } from './structs.js';
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
@@ -1022,38 +1022,8 @@ export function createDirect3D8Seam(
         fields.writeStaged(address, 17);
     };
 
-    /**
-     * D3DLIGHT8, which is D3DLIGHT7's layout under D3D8's names: a type, three
-     * colours of four floats, two vectors of three, and seven floats after
-     * them.
-     *
-     * @param {number} pointer
-     */
-    const readLight = pointer=>{
-        const colour = (/** @type {number} */ at)=>{
-            const f = readFloats(pointer + at, 4);
-            return { r: f[0], g: f[1], b: f[2], a: f[3] };
-        };
-        const vector = (/** @type {number} */ at)=>{
-            const f = readFloats(pointer + at, 3);
-            return { x: f[0], y: f[1], z: f[2] };
-        };
-        return {
-            Type: fields.readU32(pointer + D3DLIGHT7.dltType),
-            Diffuse: colour(D3DLIGHT7.dcvDiffuse),
-            Specular: colour(D3DLIGHT7.dcvSpecular),
-            Ambient: colour(D3DLIGHT7.dcvAmbient),
-            Position: vector(D3DLIGHT7.dvPosition),
-            Direction: vector(D3DLIGHT7.dvDirection),
-            Range: fields.readF32(pointer + D3DLIGHT7.dvRange),
-            Falloff: fields.readF32(pointer + D3DLIGHT7.dvFalloff),
-            Attenuation0: fields.readF32(pointer + D3DLIGHT7.dvAttenuation0),
-            Attenuation1: fields.readF32(pointer + D3DLIGHT7.dvAttenuation1),
-            Attenuation2: fields.readF32(pointer + D3DLIGHT7.dvAttenuation2),
-            Theta: fields.readF32(pointer + D3DLIGHT7.dvTheta),
-            Phi: fields.readF32(pointer + D3DLIGHT7.dvPhi),
-        };
-    };
+    /** D3DLIGHT8 is D3DLIGHT7's layout under D3D8's names. */
+    const readLight = createLightReader(fields);
 
     /** @param {number} address @param {any} light */
     const writeLight = (address, light)=>{
@@ -1711,7 +1681,7 @@ export function createDirect3D8Seam(
         /** @param {any} device @param {number[]} args */
         SetLight: (device, [index, pointer])=>((pointer >>> 0) === 0
             ? D3DERR_INVALIDCALL
-            : device.SetLight(index >>> 0, readLight(pointer >>> 0))),
+            : device.SetLight(index >>> 0, readLight(device, index >>> 0, pointer >>> 0))),
 
         /** @param {any} device @param {number[]} args */
         GetLight: (device, [index, out])=>{
