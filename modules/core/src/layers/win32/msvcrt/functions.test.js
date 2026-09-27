@@ -411,8 +411,14 @@ test('itoa writes the digits and returns the buffer', ()=>{
     fns.itoa.handler([-1, 0x230, 16]);
     assert.equal(at(0x230), 'ffffffff', 'only radix ten is signed');
     put(0x240, 'untouched');
-    assert.equal(fns.itoa.handler([7, 0x240, 1]), 0, 'a radix out of range writes nothing');
+    assert.equal(fns.itoa.handler([7, 0x240, 1]), 0, 'a radix below two writes nothing');
     assert.equal(at(0x240), 'untouched');
+    fns._itoa.handler([100, 0x250, 100]);
+    assert.equal(at(0x250), '10', 'past thirty-six the digits go on counting');
+    fns._itoa.handler([46, 0x260, 40]);
+    assert.equal(at(0x260), '16');
+    fns._itoa.handler([39, 0x270, 40]);
+    assert.equal(at(0x270), '~', "digit 39 is the fourth character after 'z'");
 });
 
 test('puts writes the string with a newline', ()=>{

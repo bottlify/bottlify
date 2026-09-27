@@ -20,6 +20,7 @@
 
 import { formatToString, guestAccess, varargsSlots } from './format.js';
 import { createStringFunctions } from './strings.js';
+import { createSecureFunctions } from './secure.js';
 import { createConversionFunctions } from './convert.js';
 import { createScanFunctions, VARIADIC_SLOTS } from './scan.js';
 import { createHeapFunctions } from './heap.js';
@@ -260,20 +261,39 @@ export function createMsvcrtFunctions(host){
     /** int atoi(const char *str) -- in the guest */
     const atoi = guestEntry(inGuest.atoi, COMPILED.atoi, host);
 
+    /** @param {number} value  Unsigned. @param {number} radix */
+    const radixDigits = (value, radix)=>{
+        if (radix <= 36)
+        {
+            return value.toString(radix);
+        }
+        let text = '';
+        for (let rest = value; text === '' || rest > 0; rest = Math.floor(rest / radix))
+        {
+            const digit = rest % radix;
+            text = String.fromCharCode(digit < 10 ? 0x30 + digit : 0x57 + digit) + text;
+        }
+        return text;
+    };
+
     /** char *_itoa(int value, char *buffer, int radix) */
     const itoa = {
         convention: 'cdecl',
         argBytes: 12,
         /** @param {number[]} args */
         handler: ([value, buffer, radix])=>{
-            if (radix < 2 || radix > 36)
+            if (radix < 2)
             {
-                // The secure variants reject this outright; the classic ones
-                // leave it undefined. Refusing beats writing arbitrary bytes.
+                // No radix below two ends a division loop; refusing beats
+                // writing arbitrary bytes.
                 return 0;
             }
             // Only base ten is signed: every other radix prints the bit pattern.
-            const text = radix === 10 ? (value | 0).toString(10) : (value >>> 0).toString(radix);
+            // Past thirty-six msvcrt goes on counting digits from 'a', which
+            // the secure form refuses and this one does not check:
+            // _itoa(100, buffer, 100) is "10" (Wine's msvcrt test__itoa_s).
+            const text = radix === 10 ? (value | 0).toString(10)
+                : radixDigits(value >>> 0, radix);
             writeString(buffer, text);
             return buffer;
         },
@@ -772,6 +792,8 @@ export function createMsvcrtFunctions(host){
             page: multiBytePage,
         }),
         ...createWideClassificationFunctions(),
+        ...createSecureFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory,
+            errno }),
         ...createWideFunctions({
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
