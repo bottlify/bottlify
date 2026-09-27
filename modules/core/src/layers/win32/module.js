@@ -1225,6 +1225,7 @@ export function createWin32Module(){
                         readMemory,
                         writeMemory,
                         setLastError: setError,
+                        ramTop: arena.size > 0 ? arena.base + arena.size : 0,
                         systemTimeMs: ()=>kernel.clock.wallClock(),
                         /** @param {number} bytes */
                         allocate: bytes=>allocator.allocate(bytes),

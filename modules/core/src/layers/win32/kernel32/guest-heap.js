@@ -38,7 +38,7 @@
  * which a slab whose cells are all back goes back to the arena.
  */
 
-import { assemble } from '../msvcrt/guest-code.js';
+import { assembleTo } from './code-arena.js';
 
 /** The largest block the guest's own path hands out. */
 export const SMALL_LIMIT = 1024;
@@ -700,21 +700,7 @@ const JAE = [0x0f, 0x83];
 const JBE = [0x0f, 0x86];
 const JA = [0x0f, 0x87];
 
-/**
- * @typedef {(number[] | string | { jump: number[], to: string, short?: boolean })} Piece
- */
-
-/**
- * The pieces, ending at `slow` with a jump to the trap, assembled where they
- * will be placed.
- *
- * @param {Piece[]} pieces @param {number} at @param {number} trap
- */
-function withTrap(pieces, at, trap){
-    const code = assemble([...pieces, 'slow', [0xe9, 0, 0, 0, 0]]);
-    new DataView(code.buffer).setInt32(code.length - 4, (trap - (at + code.length)) | 0, true);
-    return code;
-}
+/** @typedef {import('./code-arena.js').Piece} Piece */
 
 /**
  * EAX a pointer: ECX its slab's record, EDX its cell's index and ESI the
@@ -844,7 +830,7 @@ const REALLOC_FLAGS = ALLOC_FLAGS | 0x10;
  * @param {Placement} p @param {number} at @param {number} trap
  */
 export function heapAllocCode(p, at, trap){
-    return withTrap([
+    return assembleTo([
         [0x8b, 0x54, 0x24, 0x04],                            // mov edx, [esp + 4]
         [0x8b, 0x4c, 0x24, 0x0c],                            // mov ecx, [esp + 12]
         [0xf7, 0x44, 0x24, 0x08, ...dword(~ALLOC_FLAGS)],    // test dword [esp + 8], ~flags
@@ -866,7 +852,7 @@ export function heapAllocCode(p, at, trap){
  * @param {Placement} p @param {number} at @param {number} trap @param {number} heap
  */
 export function mallocCode(p, at, trap, heap){
-    return withTrap([
+    return assembleTo([
         [0x8b, 0x4c, 0x24, 0x04],                            // mov ecx, [esp + 4]
         [0x81, 0xf9, ...dword(SMALL_LIMIT)],                 // cmp ecx, 1024
         { jump: JA, to: 'slow' },
@@ -882,7 +868,7 @@ export function mallocCode(p, at, trap, heap){
  * @param {Placement} p @param {number} at @param {number} trap @param {number} heap
  */
 export function callocCode(p, at, trap, heap){
-    return withTrap([
+    return assembleTo([
         [0x8b, 0x44, 0x24, 0x04],                            // mov eax, [esp + 4]
         [0xf7, 0x64, 0x24, 0x08],                            // mul dword [esp + 8]
         { jump: JB, to: 'slow' },                            // jc: past 32 bits
@@ -948,7 +934,7 @@ function freeBody(pop, answer){
  * @param {Placement} p @param {number} at @param {number} trap
  */
 export function heapFreeCode(p, at, trap){
-    return withTrap([
+    return assembleTo([
         [0x8b, 0x44, 0x24, 0x0c],                            // mov eax, [esp + 12]
         [0x85, 0xc0],                                        // test eax, eax
         { jump: JZ, to: 'done' },
@@ -968,7 +954,7 @@ export function heapFreeCode(p, at, trap){
  * @param {Placement} p @param {number} at @param {number} trap
  */
 export function freeCode(p, at, trap){
-    return withTrap([
+    return assembleTo([
         [0x8b, 0x44, 0x24, 0x04],                            // mov eax, [esp + 4]
         [0x85, 0xc0],                                        // test eax, eax
         { jump: JZ, to: 'done' },
@@ -1004,7 +990,7 @@ function sizeBody(pop){
  * @param {Placement} p @param {number} at @param {number} trap
  */
 export function heapSizeCode(p, at, trap){
-    return withTrap([
+    return assembleTo([
         [0x8b, 0x44, 0x24, 0x0c],                            // mov eax, [esp + 12]
         ...locate(p),
         [0x8b, 0x01],                                        // mov eax, [ecx + heap]
@@ -1020,7 +1006,7 @@ export function heapSizeCode(p, at, trap){
  * @param {Placement} p @param {number} at @param {number} trap
  */
 export function msizeCode(p, at, trap){
-    return withTrap([
+    return assembleTo([
         [0x8b, 0x44, 0x24, 0x04],                            // mov eax, [esp + 4]
         ...locate(p),
         ...sizeBody(0),
@@ -1084,7 +1070,7 @@ function resizeBody(pop, zeroFlag){
  * @param {Placement} p @param {number} at @param {number} trap
  */
 export function heapReAllocCode(p, at, trap){
-    return withTrap([
+    return assembleTo([
         [0xf7, 0x44, 0x24, 0x08, ...dword(~REALLOC_FLAGS)],  // test dword [esp + 8], ~flags
         { jump: JNZ, to: 'slow' },
         [0x8b, 0x44, 0x24, 0x0c],                            // mov eax, [esp + 12]
@@ -1104,7 +1090,7 @@ export function heapReAllocCode(p, at, trap){
  * @param {Placement} p @param {number} at @param {number} trap
  */
 export function reallocCode(p, at, trap){
-    return withTrap([
+    return assembleTo([
         [0x8b, 0x44, 0x24, 0x04],                            // mov eax, [esp + 4]
         [0x85, 0xc0],                                        // test eax, eax
         { jump: JZ, to: 'slow' },

@@ -19,6 +19,8 @@
  * page-aligned out of spans of the heap that nothing else is handed.
  */
 
+import { assemble } from '../msvcrt/guest-code.js';
+
 /** The size of a page, which is what a translator watches for stores. */
 export const PAGE = 4096;
 
@@ -53,4 +55,20 @@ export function createCodeArena(allocate){
         at += size;
         return placed;
     };
+}
+
+/**
+ * @typedef {(number[] | string | { jump: number[], to: string, short?: boolean })} Piece
+ */
+
+/**
+ * Guest code assembled where it will be placed, ending at a label `slow`
+ * with the jump to the trap it falls back to.
+ *
+ * @param {Piece[]} pieces @param {number} at @param {number} trap
+ */
+export function assembleTo(pieces, at, trap){
+    const code = assemble([...pieces, 'slow', [0xe9, 0, 0, 0, 0]]);
+    new DataView(code.buffer).setInt32(code.length - 4, (trap - (at + code.length)) | 0, true);
+    return code;
 }

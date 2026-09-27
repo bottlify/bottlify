@@ -999,6 +999,9 @@ export function createHeapFunctions(host){
         GetProcessHeap: {
             argBytes: 0,
             handler: ()=>processHeap,
+            // mov eax, fs:[0x30]; mov eax, [eax + 0x18]; ret -- PEB->ProcessHeap,
+            // which the process block is written with from this handler
+            code: ()=>Uint8Array.from([0x64, 0xa1, 0x30, 0, 0, 0, 0x8b, 0x40, 0x18, 0xc3]),
         },
 
         /** HANDLE HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize) */

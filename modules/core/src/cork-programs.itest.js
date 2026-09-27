@@ -45,20 +45,24 @@ const missing = ['v86.wasm', 'libv86.mjs']
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
-/** A loop that calls lstrlenA("abc") `iterations` times and exits with the sum. */
+/**
+ * A loop that calls lstrcmpA("abc", "ab") `iterations` times and exits with the
+ * sum of its answers, 1 each: an import that crosses into the host every time.
+ */
 function buildLoopExe(iterations = ITERATIONS){
     return buildExe({
-        imports: { 'KERNEL32.dll': ['lstrlenA', 'ExitProcess'] },
-        data: { text: [0x61, 0x62, 0x63, 0] },
+        imports: { 'KERNEL32.dll': ['lstrcmpA', 'ExitProcess'] },
+        data: { text: [0x61, 0x62, 0x63, 0], shorter: [0x61, 0x62, 0] },
         codeSize: 0x40,
         code: ({ iat, at })=>[
             0xbe, ...u32(iterations),
             0x31, 0xff,
+            0x68, ...u32(at('shorter')),
             0x68, ...u32(at('text')),
-            0xff, 0x15, ...u32(iat('lstrlenA')),
+            0xff, 0x15, ...u32(iat('lstrcmpA')),
             0x01, 0xc7,
             0x4e,
-            0x75, 0xf0,
+            0x75, 0xeb,
             0x81, 0xe7, ...u32(0xff),
             0x57,
             0xff, 0x15, ...u32(iat('ExitProcess')),
@@ -218,7 +222,7 @@ test('a loop calling an import runs and translates under cork',
     { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
         const exe = buildLoopExe();
         const reference = await run(exe, 'emulator');
-        assert.equal(reference.code, (3 * ITERATIONS) & 0xff);
+        assert.equal(reference.code, ITERATIONS & 0xff);
         const cork = await run(exe, 'cork');
         assert.equal(cork.code, reference.code);
         assert.equal(cork.output, reference.output);
