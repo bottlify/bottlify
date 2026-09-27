@@ -416,9 +416,10 @@ test('OPENGL32 is bound entirely, and nothing is made until a program calls it',
     assert.equal(table.SetPixelFormat, undefined, 'that one is GDI32\'s export, not this one\'s');
     assert.deepEqual(made, [], 'nothing was built merely by assembling the table');
 
-    assert.equal(table.glGetError.handler([]), 0);
+    // With no context current glGetError answers GL_INVALID_OPERATION.
+    assert.equal(table.glGetError.handler([]), 0x0502);
     assert.deepEqual(made, ['opengl'], 'and the first call built it, once');
-    assert.equal(table.glGetError.handler([]), 0);
+    assert.equal(table.glGetError.handler([]), 0x0502);
     assert.deepEqual(made, ['opengl']);
 });
 
@@ -458,7 +459,7 @@ test('GDI32 and OPENGL32 negotiate over one runtime, not two', ()=>{
     // call through it is a call the program's own trap would have made.
     const glGetError = seam.opengl.entry('glGetError');
     assert.ok(glGetError, 'an implemented name resolves');
-    assert.equal(glGetError([]), 0);
+    assert.equal(glGetError([]), 0x0502);
     assert.equal(seam.opengl.entry('glNotAnEntryPoint'), null);
     assert.deepEqual(made, ['opengl']);
 });

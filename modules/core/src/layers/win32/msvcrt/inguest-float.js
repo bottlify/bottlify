@@ -94,6 +94,36 @@ const hardwareOf = (/** @type {number} */ bits)=>hardwareExceptions(bits) | (bit
     | ((bits & 0x30000) === 0 ? 0x300 : (bits & 0x30000) === 0x10000 ? 0x200 : 0)
     | (bits & 0x40000) >>> 6;
 
+/*
+ * The translations above as the guest's code makes them: a table read for
+ * each group of bits a translation moves apart, where the shifts and masks
+ * cost the code two and a half times the instructions and cork twice the
+ * translation. The tables are the functions' own answers.
+ */
+
+/** The runtime's exception bits for each value of the x87's six. */
+export const EXCEPTIONS = Uint32Array.from({ length: 64 }, (_, word)=>exceptionsOf(word));
+
+/** The runtime's rounding and precision bits for each value of a control word's bits 8-11. */
+export const ROUNDING_PRECISION = Uint32Array.from({ length: 16 },
+    (_, bits)=>abstractOf(bits << 8) & 0x30300);
+
+/** The x87's exception masks for the runtime's bits 0-4 and, as bit 5, its bit 19. */
+export const HARDWARE_EXCEPTIONS = Uint8Array.from({ length: 64 },
+    (_, index)=>hardwareExceptions(index & 0x1f | (index & 0x20) << 14));
+
+/** The x87's precision bits for each value of `_MCW_PC`'s two. */
+export const HARDWARE_PRECISION = Uint16Array.from({ length: 4 },
+    (_, index)=>hardwareOf(index << 16) & 0x300);
+
+/** `abstractOf`, through the tables. */
+const readBack = (/** @type {number} */ word)=>EXCEPTIONS[word & 0x3f]
+    | ROUNDING_PRECISION[word >>> 8 & 0xf] | (word & 0x1000) << 6;
+
+/** `hardwareOf`, through the tables. */
+const loadable = (/** @type {number} */ bits)=>HARDWARE_EXCEPTIONS[bits & 0x1f | bits >>> 14 & 0x20]
+    | (bits & 0x300) << 2 | HARDWARE_PRECISION[bits >>> 16 & 3] | (bits & 0x40000) >>> 6;
+
 /** The control word Clinger's step runs under: double precision, to nearest. */
 const exactly = (/** @type {number} */ word)=>word & 0xf0ff | 0x0200;
 
@@ -111,10 +141,10 @@ const exactly = (/** @type {number} */ word)=>word & 0xf0ff | 0x0200;
 export function _control87({ controlWord, setControlWord }, newControl, mask){
     const word = controlWord();
     const changed = mask & CHANGEABLE;
-    const wanted = abstractOf(word) & ~changed | newControl & changed;
-    const loaded = word & RESERVED | hardwareOf(wanted);
+    const wanted = readBack(word) & ~changed | newControl & changed;
+    const loaded = word & RESERVED | loadable(wanted);
     setControlWord(loaded);
-    return abstractOf(loaded) >>> 0;
+    return readBack(loaded) >>> 0;
 }
 
 /**
@@ -128,10 +158,10 @@ export function _control87({ controlWord, setControlWord }, newControl, mask){
 export function _controlfp({ controlWord, setControlWord }, newControl, mask){
     const word = controlWord();
     const changed = mask & CHANGEABLE & ~EM_DENORMAL;
-    const wanted = abstractOf(word) & ~changed | newControl & changed;
-    const loaded = word & RESERVED | hardwareOf(wanted);
+    const wanted = readBack(word) & ~changed | newControl & changed;
+    const loaded = word & RESERVED | loadable(wanted);
     setControlWord(loaded);
-    return abstractOf(loaded) >>> 0;
+    return readBack(loaded) >>> 0;
 }
 
 /**
@@ -143,7 +173,7 @@ export function _controlfp({ controlWord, setControlWord }, newControl, mask){
  * @returns {u32}
  */
 export function _statusfp({ statusWord }){
-    return exceptionsOf(statusWord()) >>> 0;
+    return EXCEPTIONS[statusWord() & 0x3f] >>> 0;
 }
 
 /**
@@ -154,7 +184,7 @@ export function _statusfp({ statusWord }){
  * @returns {u32}
  */
 export function _clearfp({ statusWord, clearExceptions }){
-    const flags = exceptionsOf(statusWord());
+    const flags = EXCEPTIONS[statusWord() & 0x3f];
     clearExceptions();
     return flags >>> 0;
 }
