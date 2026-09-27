@@ -14,9 +14,13 @@
  *   node tools/install-watch.mjs <setup.exe> [--every 30] [--minutes 20]
  *       [--journal SECONDS] [--memory MB] [--key Code@S]... [--click X,Y@S]...
  *       [--shots DIR] [--list 'C:\Program Files'] [--collect]
+ *       [--screen 1024x768]
  *
  * `--journal S` prints, S seconds in, the last cross-process COM calls and
- * message waits from the call journal (every call area on).
+ * message waits from the call journal (every call area on); `--trace S` prints
+ * the last three thousand calls of every kind instead, with their first
+ * arguments -- what a process that loops without waiting keeps calling. A run
+ * that ends sooner prints either when it ends.
  *
  * A wizard waits in its own message loop rather than in a modal dialog an
  * unattended run answers, so a route through one is given as input: `--key
@@ -62,9 +66,14 @@ const shotsAt = argv.includes('--shots') ? argv[argv.indexOf('--shots') + 1] : n
  */
 const all = flag=>argv.flatMap((argument, index)=>argument === flag && index + 1 < argv.length
     ? [argv[index + 1]] : []);
-const journalAt = number('--journal', 0);
+const traceAt = number('--trace', 0);
+const journalAt = number('--journal', 0) || traceAt;
 const memory = number('--memory', 0);
 const listAt = argv.includes('--list') ? argv[argv.indexOf('--list') + 1] : null;
+// The launcher hands a program the size of the screen it is on; the engine's
+// own default is 640x480, which a wizard laid out for 800x600 overhangs.
+const [screenWidth, screenHeight] = argv.includes('--screen')
+    ? argv[argv.indexOf('--screen') + 1].split('x').map(Number) : [0, 0];
 
 const media = { name: basename(file), bytes: new Uint8Array(readFileSync(file)) };
 const prefix = prefixOptions(media);
@@ -78,6 +87,8 @@ const app = await createApp({
     graphics: { raster: false },
     unattended: true,
     ...memory > 0 ? { memorySize: memory * 1048576 } : {},
+    ...screenWidth > 0
+        ? { screen: { width: screenWidth, height: screenHeight, bitsPerPixel: 32 } } : {},
     ...journalAt > 0 ? { log: { capacity: 100000, categories: {
         'call.cpu': 'trace', 'call.com': 'trace', 'call.gpu': 'trace', 'call.input': 'trace',
     } } } : {},
@@ -281,17 +292,26 @@ setInterval(async()=>{
     }
 }, every * 1000);
 
+// Printed once: at S seconds, or when the run ends first -- an installer that
+// quits on an error it just showed has its last calls in the journal still.
+let journalPrinted = false;
+const printJournal = ()=>{
+    if (journalAt <= 0 || journalPrinted)
+    {
+        return;
+    }
+    journalPrinted = true;
+    const crossing = /OleMainThread|CoWait|MsgWait|PostMessage|PostThread|SendMessage|WaitFor/;
+    const trail = app.log.recent(100000).filter((/** @type {any} */ entry)=>traceAt > 0
+        || entry.category === 'call.com' || crossing.test(entry.text));
+    for (const entry of trail.slice(traceAt > 0 ? -3000 : -150))
+    {
+        console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 220));
+    }
+};
 if (journalAt > 0)
 {
-    setTimeout(()=>{
-        const crossing = /OleMainThread|CoWait|MsgWait|PostMessage|PostThread|SendMessage|WaitFor/;
-        const trail = app.log.recent(100000).filter((/** @type {any} */ entry)=>
-            entry.category === 'call.com' || crossing.test(entry.text));
-        for (const entry of trail.slice(-150))
-        {
-            console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 220));
-        }
-    }, journalAt * 1000);
+    setTimeout(printJournal, journalAt * 1000);
 }
 
 try
@@ -302,6 +322,7 @@ try
 catch (e){
     console.log('stopped:', e instanceof Error ? e.stack?.slice(0, 1500) : e);
 }
+printJournal();
 if (listAt)
 {
     /** @param {string} directory */
