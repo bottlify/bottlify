@@ -40,8 +40,15 @@ const LOWEST_RECORD = 0x1000;
 /** `cmp eax, imm32` with `LOWEST_RECORD`, as the loop's bytes carry it. */
 const CMP_LOWEST = [0x3d, LOWEST_RECORD & 0xff, LOWEST_RECORD >>> 8 & 0xff,
     LOWEST_RECORD >>> 16 & 0xff, LOWEST_RECORD >>> 24 & 0xff];
-/** MMSYSERR_INVALPARAM: no such timer. */
+/** MMSYSERR_INVALPARAM: no such timer was ever made. */
 const MMSYSERR_INVALPARAM = 11;
+/** TIMERR_NOCANDO: the timer was made and is gone -- a one shot that has fired. */
+const TIMERR_NOCANDO = 97;
+/**
+ * How many timers may be armed at once. winmm's timer tests make twenty and
+ * expect the last four refused.
+ */
+const MAX_TIMERS = 16;
 /** The longest delay `timeSetEvent` takes, in milliseconds; the shortest is one. */
 export const MAX_PERIOD = 1000000;
 
@@ -113,6 +120,7 @@ export function createTimerService(deps){
      * @property {number} target  the routine, or the event handle
      * @property {number} user
      * @property {number} flags
+     * @property {boolean} [firing]  A one shot whose routine is running now.
      */
     /** @type {Map<number, Timer>} */
     const timers = new Map();
@@ -124,6 +132,15 @@ export function createTimerService(deps){
     let waiting = null;
     let record = 0;
     let fired = 0;
+    /**
+     * The one-shot timer whose routine the loop is calling. It stays in the
+     * table until the loop asks again, which is when the routine has
+     * returned: a routine may kill its own timer, as winmm's timer tests do,
+     * and is told TIMERR_NOERROR.
+     *
+     * @type {Timer | null}
+     */
+    let calling = null;
 
     /** @param {number} value */
     const dword = value=>new Uint8Array([
@@ -136,6 +153,10 @@ export function createTimerService(deps){
         let found = null;
         for (const timer of timers.values())
         {
+            if (timer.firing)
+            {
+                continue;
+            }
             if (found === null || timer.due < found.due)
             {
                 found = timer;
@@ -168,6 +189,11 @@ export function createTimerService(deps){
      */
     const fetch = ()=>{
         const me = deps.currentThread();
+        if (calling !== null)
+        {
+            timers.delete(calling.id);
+            calling = null;
+        }
         for (;;)
         {
             const timer = earliest();
@@ -200,7 +226,16 @@ export function createTimerService(deps){
             deps.writeMemory(record + RECORD.ENTRY, dword(timer.target));
             [timer.id, 0, timer.user, 0, 0].forEach((value, index)=>
                 deps.writeMemory(record + RECORD.ARGS + index * 4, dword(value)));
-            advance(timer);
+            if (timer.period > 0)
+            {
+                advance(timer);
+            }
+            else
+            {
+                fired++;
+                timer.firing = true;
+                calling = timer;
+            }
             return record;
         }
     };
@@ -230,7 +265,7 @@ export function createTimerService(deps){
          * @returns {number} the timer's id, or 0
          */
         set(delay, target, user, flags){
-            if (delay < 1 || delay > MAX_PERIOD || target === 0)
+            if (delay < 1 || delay > MAX_PERIOD || target === 0 || timers.size >= MAX_TIMERS)
             {
                 return 0;
             }
@@ -256,7 +291,11 @@ export function createTimerService(deps){
 
         /** MMRESULT timeKillEvent(UINT uTimerID) @param {number} id */
         kill(id){
-            return timers.delete(id) ? 0 : MMSYSERR_INVALPARAM;
+            if (timers.delete(id))
+            {
+                return 0;
+            }
+            return id > 0 && id < nextId ? TIMERR_NOCANDO : MMSYSERR_INVALPARAM;
         },
 
         diagnostics: ()=>({
