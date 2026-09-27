@@ -2241,8 +2241,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3DERR_INVALIDCALL;
             }
             return setState(
-                record=>record.transforms.set(type, Float32Array.from(matrix)),
-                ()=>transforms.set(type, Float32Array.from(matrix)));
+                record=>record.transforms.set(type, new Float32Array(matrix)),
+                ()=>transforms.set(type, new Float32Array(matrix)));
         },
 
         /**

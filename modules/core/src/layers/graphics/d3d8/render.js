@@ -4973,55 +4973,57 @@ export function createRenderer(options){
      * @returns {number}
      */
     const stateNumberOf = (model, processing)=>{
+        const streams = processing.fixedFunctionLayout?.streams ?? [];
+        // Sized once for the words below, so that writing them tests nothing.
+        let needed = 4 + streams.length + 2 * model.renderStates.size;
+        for (let stage = 0; stage < STAGE_COUNT; stage++)
+        {
+            needed += 1 + 2 * model.stageStates(stage).size;
+        }
+        if (needed > stateScratch.length)
+        {
+            stateScratch = new Int32Array(Math.max(needed, stateScratch.length * 2));
+        }
+        const words = stateScratch;
         let at = 0;
-        /** @param {number} value */
-        const put = value=>{
-            if (at === stateScratch.length)
-            {
-                const grown = new Int32Array(stateScratch.length * 2);
-                grown.set(stateScratch);
-                stateScratch = grown;
-            }
-            stateScratch[at++] = value;
-        };
-        put(slowStateOf(model));
-        put(processing.fvf);
+        words[at++] = slowStateOf(model);
+        words[at++] = processing.fvf;
         // A declaration read without a format is told apart by its own id,
         // and by the strides its further streams are bound at.
-        put(processing.fixedFunctionLayout?.id ?? 0);
-        for (const stream of processing.fixedFunctionLayout?.streams ?? [])
+        words[at++] = processing.fixedFunctionLayout?.id ?? 0;
+        for (const stream of streams)
         {
-            put(strideOf(model, stream));
+            words[at++] = strideOf(model, stream);
         }
-        put(model.renderStates.size);
-        for (const [state, value] of model.renderStates)
-        {
-            put(state);
-            put(value);
-        }
+        // Through `forEach` rather than `for...of`, which makes an array of
+        // each entry, and a state has some hundreds of them.
+        /** @param {number} value @param {number} state */
+        const putEntry = (value, state)=>{
+            words[at++] = state;
+            words[at++] = value;
+        };
+        words[at++] = model.renderStates.size;
+        model.renderStates.forEach(putEntry);
         for (let stage = 0; stage < STAGE_COUNT; stage++)
         {
             const states = model.stageStates(stage);
-            put(states.size);
-            for (const [state, value] of states)
-            {
-                put(state);
-                put(value);
-            }
+            words[at++] = states.size;
+            states.forEach(putEntry);
         }
+        const count = at;
         // FNV-1a over the words; a hit is compared in full, so a collision
         // costs a comparison and never names two states alike.
         let hash = 0x811c9dc5;
-        for (let index = 0; index < at; index++)
+        for (let index = 0; index < count; index++)
         {
-            hash = Math.imul(hash ^ stateScratch[index], 0x01000193);
+            hash = Math.imul(hash ^ words[index], 0x01000193);
         }
         const bucket = intStates.get(hash);
         if (bucket !== undefined)
         {
             for (const entry of bucket)
             {
-                if (entry.values.length === at && sameWords(entry.values, stateScratch))
+                if (entry.values.length === count && sameWords(entry.values, words))
                 {
                     return entry.number;
                 }
@@ -5032,7 +5034,7 @@ export function createRenderer(options){
             intStates.clear();
             intStateCount = 0;
         }
-        const entry = { values: stateScratch.slice(0, at), number: nextStateNumber++ };
+        const entry = { values: words.slice(0, count), number: nextStateNumber++ };
         if (bucket !== undefined && intStates.has(hash))
         {
             bucket.push(entry);

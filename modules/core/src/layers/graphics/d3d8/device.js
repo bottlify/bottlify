@@ -1760,7 +1760,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             // when another matrix is current must still put this one back.
             if (recording)
             {
-                recording.transforms.set(type, Float32Array.from(matrix));
+                recording.transforms.set(type, new Float32Array(matrix));
                 return D3D_OK;
             }
             const held = transforms.get(type);
@@ -1769,7 +1769,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 redundantTransforms++;
                 return D3D_OK;
             }
-            transforms.set(type, Float32Array.from(matrix));
+            transforms.set(type, new Float32Array(matrix));
             if (type !== D3DTS.WORLD)
             {
                 drawStateVersion++;

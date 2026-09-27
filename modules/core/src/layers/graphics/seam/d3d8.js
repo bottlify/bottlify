@@ -43,7 +43,7 @@ import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js'
 import { queryAs, readGuid } from './guid.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DSURFACE_DESC8, D3DLOCKED_RECT, D3DLIGHT7, RECT, POINT, createFields,
-    D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8 } from './structs.js';
+    D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, dwordsOf, floatsOf } from './structs.js';
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
@@ -918,12 +918,11 @@ export function createDirect3D8Seam(
 
     /** @param {number} pointer @param {number} count @returns {Float32Array} */
     const readFloats = (pointer, count)=>{
-        // One copy, out of the window where there is one: the floats are the
-        // caller's to keep, so a copy there must be, but not two.
+        // Out of the window where there is one, rather than a copy of the
+        // bytes: the floats are the caller's to keep, and `floatsOf` answers
+        // an array of their own.
         const read = memory.windowMemory ?? memory.readMemory;
-        const floats = new Float32Array(count);
-        new Uint8Array(floats.buffer).set(read(pointer >>> 0, count * 4));
-        return floats;
+        return floatsOf(read(pointer >>> 0, count * 4), count);
     };
 
     /**
@@ -948,11 +947,8 @@ export function createDirect3D8Seam(
     };
 
     /** @param {number} pointer @param {number} count @returns {Uint32Array} */
-    const readDwords = (pointer, count)=>{
-        const dwords = new Uint32Array(count);
-        new Uint8Array(dwords.buffer).set(memory.readMemory(pointer >>> 0, count * 4));
-        return dwords;
-    };
+    const readDwords = (pointer, count)=>dwordsOf(memory.readMemory(pointer >>> 0, count * 4),
+        count);
 
     /**
      * A shader function's tokens, read to its end token. The stream carries
