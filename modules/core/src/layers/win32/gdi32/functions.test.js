@@ -2089,3 +2089,100 @@ test('the text character extra is kept on the context and answered back', ()=>{
     assert.equal(fns.GetTextCharacterExtra.handler([hdc]) | 0, -2);
     assert.equal(fns.GetTextCharacterExtra.handler([0x9999]), 0x80000000, 'not a context');
 });
+
+test('the miter limit is 10 until set, refuses one below 1, and is saved with the context', ()=>{
+    const { memory, fns, hdc } = withDC();
+    const view = new DataView(memory.bytes.buffer);
+    const LIMIT = 0x2000;
+    /** @param {number} value */
+    const bits = value=>{
+        const scratch = new DataView(new ArrayBuffer(4));
+        scratch.setFloat32(0, value, true);
+        return scratch.getUint32(0, true);
+    };
+    const limit = ()=>view.getFloat32(LIMIT, true);
+    view.setFloat32(LIMIT, 123, true);
+    assert.equal(fns.GetMiterLimit.handler([hdc, LIMIT]), 1);
+    assert.equal(limit(), 10);
+    view.setFloat32(LIMIT, 456, true);
+    assert.equal(fns.SetMiterLimit.handler([hdc, bits(0.9), LIMIT]), 0, 'below one');
+    assert.equal(limit(), 456, 'and the old one not written');
+    assert.equal(fns.SetMiterLimit.handler([hdc, bits(1), LIMIT]), 1);
+    assert.equal(limit(), 10, 'the old one answered');
+    assert.equal(fns.SetMiterLimit.handler([hdc, bits(3.4), 0]), 1,
+        'with nowhere to put the old one');
+    assert.equal(fns.GetMiterLimit.handler([hdc, LIMIT]), 1);
+    assert.equal(limit(), Math.fround(3.4));
+
+    fns.SetTextCharacterExtra.handler([hdc, 5]);
+    fns.SetTextAlign.handler([hdc, 6]);
+    assert.equal(fns.SaveDC.handler([hdc]), 1);
+    fns.SetMiterLimit.handler([hdc, bits(7), 0]);
+    fns.SetTextCharacterExtra.handler([hdc, 9]);
+    fns.SetTextAlign.handler([hdc, 0]);
+    assert.equal(fns.RestoreDC.handler([hdc, -1 >>> 0]), 1);
+    fns.GetMiterLimit.handler([hdc, LIMIT]);
+    assert.equal(limit(), Math.fround(3.4), 'RestoreDC brings the miter limit back');
+    assert.equal(fns.GetTextCharacterExtra.handler([hdc]), 5, 'and the character extra');
+    assert.equal(fns.GetTextAlign.handler([hdc]), 6, 'and the text alignment');
+    assert.equal(fns.GetMiterLimit.handler([0x9999, LIMIT]), 0, 'not a context');
+});
+
+test('GetTextFace names the face asked for, or the one its family stands in with', ()=>{
+    const { memory, fns, hdc } = withDC();
+    const NAME = 0x2000;
+    /** @param {Parameters<typeof putLogFont>[1]} options */
+    const select = options=>{
+        putLogFont(memory, options);
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+    };
+    const faceA = ()=>{
+        const length = fns.GetTextFaceA.handler([hdc, 32, NAME]);
+        return decodeAnsi(memory.bytes.subarray(NAME, NAME + length));
+    };
+    assert.equal(faceA(), 'System', 'the context starts with the stock system font');
+    select({ faceName: 'tahoma' });
+    assert.equal(faceA(), 'Tahoma');
+    select({ faceName: 'MS Shell Dlg' });
+    assert.equal(faceA(), 'MS Shell Dlg', 'a substitute answers under its own name');
+    select({ faceName: 'Nonexistent font', pitchAndFamily: 0x20 });
+    assert.equal(faceA(), 'Arial');
+    select({ faceName: 'Nonexistent font', pitchAndFamily: 0x10 });
+    assert.equal(faceA(), 'Times New Roman');
+    select({ faceName: '', pitchAndFamily: 0x01 });
+    assert.equal(faceA(), 'Courier New');
+    fns.SelectObject.handler([hdc, fns.GetStockObject.handler([17])]);
+    assert.equal(faceA(), 'MS Shell Dlg', 'DEFAULT_GUI_FONT');
+});
+
+test('GetTextFace cuts the name to the count, and a null buffer asks for the size', ()=>{
+    const { memory, fns, hdc } = withDC();
+    const NAME = 0x2000;
+    putLogFont(memory, { faceName: 'Tahoma' });
+    fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+
+    memory.bytes[NAME] = 0x78;
+    assert.equal(fns.GetTextFaceA.handler([hdc, 0, NAME]), 0);
+    assert.equal(memory.bytes[NAME], 0x78, 'a count of zero writes nothing');
+    assert.equal(fns.GetTextFaceA.handler([hdc, 1, NAME]), 0);
+    assert.equal(memory.bytes[NAME], 0);
+    assert.equal(fns.GetTextFaceA.handler([hdc, 2, NAME]), 1);
+    assert.deepEqual([...memory.bytes.subarray(NAME, NAME + 2)], [0x54, 0]);
+    assert.equal(fns.GetTextFaceA.handler([hdc, 32, NAME]), 6, 'ANSI: the terminator not counted');
+    assert.equal(fns.GetTextFaceA.handler([hdc, 0, 0]), 7,
+        'no buffer: the size, terminator included');
+
+    const units = (/** @type {number} */ count)=>
+        [...new Uint16Array(memory.bytes.slice(NAME, NAME + count * 2).buffer)];
+    memory.bytes[NAME] = 0x78;
+    assert.equal(fns.GetTextFaceW.handler([hdc, 0, NAME]), 0);
+    assert.equal(memory.bytes[NAME], 0x78);
+    assert.equal(fns.GetTextFaceW.handler([hdc, 1, NAME]), 1, 'wide: the terminator counted');
+    assert.deepEqual(units(1), [0]);
+    assert.equal(fns.GetTextFaceW.handler([hdc, 2, NAME]), 2);
+    assert.deepEqual(units(2), [0x54, 0]);
+    assert.equal(fns.GetTextFaceW.handler([hdc, 32, NAME]), 7);
+    assert.equal(String.fromCharCode(...units(6)), 'Tahoma');
+    assert.equal(fns.GetTextFaceW.handler([hdc, 0, 0]), 7);
+    assert.equal(fns.GetTextFaceA.handler([0x9999, 32, NAME]), 0, 'not a context');
+});

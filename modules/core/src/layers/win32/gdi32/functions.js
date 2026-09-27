@@ -22,8 +22,8 @@
 
 import { createGdiObjects } from './objects.js';
 import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
-import { FACES, faceNamed } from './faces.js';
-import { decodeAnsi } from '../kernel32/locale.js';
+import { FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed } from './faces.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import {
     BITMAP,
     BITMAPINFOHEADER,
@@ -475,11 +475,14 @@ export function createGdiFunctions(host){
                 return { type: 'pen', attributes: { style: PS_NULL, width: 1, color: BLACK } };
             case SYSTEM_FONT:
             case DEVICE_DEFAULT_FONT:
-                return { type: 'font', attributes: logFont({ height: 16, weight: 700 }) };
+                return { type: 'font',
+                    attributes: logFont({ height: 16, weight: 700, faceName: 'System' }) };
             case SYSTEM_FIXED_FONT:
-                return { type: 'font', attributes: logFont({ height: 16, pitchAndFamily: 1 }) };
+                return { type: 'font',
+                    attributes: logFont({ height: 16, pitchAndFamily: 1, faceName: 'Fixedsys' }) };
             case DEFAULT_GUI_FONT:
-                return { type: 'font', attributes: logFont({ height: -11 }) };
+                return { type: 'font',
+                    attributes: logFont({ height: -11, faceName: 'MS Shell Dlg' }) };
             case DEFAULT_PALETTE:
                 // PALETTEENTRYs, red in the low byte.
                 return { type: 'palette', attributes: { version: 0x300,
@@ -583,6 +586,10 @@ export function createGdiFunctions(host){
             textAlign: 0,
             mapMode: MM_TEXT,
             layout: 0,
+            /** SetTextCharacterExtra's spacing, in logical units. */
+            characterExtra: 0,
+            /** The miter limit, a FLOAT's value; 10 until the program sets one. */
+            miterLimit: 10,
             viewportOrg: { x: 0, y: 0 },
             windowOrg: { x: 0, y: 0 },
             viewportExt: { cx: 1, cy: 1 },
@@ -632,6 +639,8 @@ export function createGdiFunctions(host){
         textAlign: dc.textAlign,
         mapMode: dc.mapMode,
         layout: dc.layout,
+        characterExtra: dc.characterExtra,
+        miterLimit: dc.miterLimit,
         viewportOrg: { ...dc.viewportOrg },
         windowOrg: { ...dc.windowOrg },
         viewportExt: { ...dc.viewportExt },
@@ -694,8 +703,11 @@ export function createGdiFunctions(host){
         dc.bkColor = state.bkColor;
         dc.bkMode = state.bkMode;
         dc.rop2 = state.rop2;
+        dc.textAlign = state.textAlign;
         dc.mapMode = state.mapMode;
         dc.layout = state.layout;
+        dc.characterExtra = state.characterExtra;
+        dc.miterLimit = state.miterLimit;
         dc.viewportOrg = state.viewportOrg;
         dc.windowOrg = state.windowOrg;
         dc.viewportExt = state.viewportExt;
@@ -935,6 +947,28 @@ export function createGdiFunctions(host){
 
     /** @param {any} dc @returns {import('./structs.js').TextMetricFields} */
     const currentMetrics = dc=>metricsOf(currentFont(dc));
+
+    /**
+     * The face a context's font is drawn in, as GetTextFace names it: the one
+     * asked for when there is a face of that name, a substitute's included,
+     * and otherwise the face its family stands in with.
+     *
+     * @param {any} dc @returns {string}
+     */
+    const currentFace = dc=>{
+        const font = currentFont(dc);
+        const named = font.faceName === '' ? null : faceNamed(font.faceName);
+        if (named)
+        {
+            return named.name;
+        }
+        if ((font.pitchAndFamily & 0xf0) === FF_ROMAN)
+        {
+            return 'Times New Roman';
+        }
+        const fixed = (font.pitchAndFamily & 3) === FIXED_PITCH;
+        return fixed || (font.pitchAndFamily & 0xf0) === FF_MODERN ? 'Courier New' : 'Arial';
+    };
 
     /**
      * How wide a string is in a context's font: what the engine draws, or
@@ -2780,6 +2814,73 @@ export function createGdiFunctions(host){
                 }
                 writeTextMetrics(host, out, currentMetrics(dc));
                 return 1;
+            },
+        },
+
+        /**
+         * int GetTextFaceA(HDC hdc, int c, LPSTR lpName)
+         *
+         * With a buffer, the bytes written before the terminator, the name
+         * cut to fit; with none, the size a buffer needs, terminator and all.
+         * A count of zero writes nothing.
+         */
+        GetTextFaceA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, count, out])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                const name = encodeAnsi(currentFace(dc));
+                if ((out >>> 0) === 0)
+                {
+                    return name.length + 1;
+                }
+                if ((count | 0) <= 0)
+                {
+                    return 0;
+                }
+                const kept = name.subarray(0, (count | 0) - 1);
+                host.writeMemory(out >>> 0, Uint8Array.of(...kept, 0));
+                return kept.length;
+            },
+        },
+
+        /**
+         * int GetTextFaceW(HDC hdc, int c, LPWSTR lpName)
+         *
+         * As the ANSI call, but what a buffer was given counts the terminator
+         * too, as Windows' wide call does.
+         */
+        GetTextFaceW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, count, out])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                const name = currentFace(dc);
+                if ((out >>> 0) === 0)
+                {
+                    return name.length + 1;
+                }
+                if ((count | 0) <= 0)
+                {
+                    return 0;
+                }
+                const kept = name.slice(0, (count | 0) - 1);
+                const bytes = new Uint8Array((kept.length + 1) * 2);
+                for (let at = 0; at < kept.length; at++)
+                {
+                    bytes[at * 2] = kept.charCodeAt(at) & 0xff;
+                    bytes[at * 2 + 1] = kept.charCodeAt(at) >>> 8;
+                }
+                host.writeMemory(out >>> 0, bytes);
+                return kept.length + 1;
             },
         },
 

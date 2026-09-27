@@ -64,6 +64,13 @@ const DIB_PAL_INDICES = 2;
 /** The drawing layer's name for a sixteen-bit surface made in 5-6-5. */
 const RGB_565 = '565';
 
+/** A FLOAT crosses the ABI as its 32 bits, on the stack and through a pointer. */
+const FLOAT_BITS = new DataView(new ArrayBuffer(4));
+/** @param {number} bits @returns {number} */
+const floatOf = bits=>(FLOAT_BITS.setUint32(0, bits >>> 0, true), FLOAT_BITS.getFloat32(0, true));
+/** @param {number} value @returns {number} */
+const bitsOf = value=>(FLOAT_BITS.setFloat32(0, value, true), FLOAT_BITS.getUint32(0, true));
+
 /**
  * The default palette's twenty colours, the ones a palette device keeps for
  * itself: eight dark, four pale, eight bright. 0x00RRGGBB. They are the
@@ -978,7 +985,7 @@ export function createDrawingFunctions(
                 {
                     return 0x80000000;
                 }
-                const previous = dc.characterExtra ?? 0;
+                const previous = dc.characterExtra;
                 dc.characterExtra = extra | 0;
                 return previous >>> 0;
             },
@@ -991,6 +998,72 @@ export function createDrawingFunctions(
             handler: ([handle])=>{
                 const dc = dcOf(handle);
                 return dc ? (dc.characterExtra ?? 0) >>> 0 : 0x80000000;
+            },
+        },
+
+        /**
+         * BOOL SetMiterLimit(HDC hdc, FLOAT limit, PFLOAT old)
+         *
+         * A limit below one is refused with the old one left unwritten: a
+         * miter is never shorter than the line is wide. Nothing drawn here
+         * joins lines by it yet; the value is kept, saved and answered.
+         */
+        SetMiterLimit: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, limit, old])=>{
+                const dc = dcOf(handle);
+                const value = floatOf(limit);
+                if (!dc || !(value >= 1))
+                {
+                    return 0;
+                }
+                if ((old >>> 0) !== 0)
+                {
+                    writeU32s(host, old >>> 0, [bitsOf(dc.miterLimit)]);
+                }
+                dc.miterLimit = value;
+                return 1;
+            },
+        },
+
+        /** BOOL GetMiterLimit(HDC hdc, PFLOAT limit) */
+        GetMiterLimit: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                if ((out >>> 0) !== 0)
+                {
+                    writeU32s(host, out >>> 0, [bitsOf(dc.miterLimit)]);
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * COLORREF GetNearestColor(HDC hdc, COLORREF color)
+         *
+         * What the context's surface keeps of a colour -- the palette entry
+         * nearest it, the bits sixteen keep -- which is what a SetPixel of it
+         * reads back as. A build that cannot draw keeps every colour whole.
+         */
+        GetNearestColor: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, color])=>{
+                if (!dcOf(handle))
+                {
+                    return 0xffffffff;
+                }
+                const interfaces = bound(handle, false);
+                return interfaces
+                    ? interfaces.nearestColor(handle >>> 0, color >>> 0) >>> 0
+                    : (color & 0xffffff) >>> 0;
             },
         },
 
