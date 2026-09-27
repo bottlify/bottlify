@@ -316,13 +316,15 @@ short), `strcmp`, `strncmp`, `_strnicmp`, `_stricmp` (and `_strcmpi`, its older 
 `strchr`, `strrchr`, `strstr`, `_strlwr`, `_strupr` (ASCII only, in place), and the `_mbs` names
 bound to them; `wcslen`, `wcscmp`, `wcscpy`; `memcpy`/`memmove` (one function: as if the source
 were read whole first, copied up or down), `memset`, `memcmp` (four bytes at a time while they
-match); `atoi`/`atol`;
+match); `atoi`/`atol` (wrapping past 32 bits, as msvcrt.dll's does: `"4294967296"` is 0);
 `strtol`/`strtoul`, handing the host what they leave to it; `qsort` (Shell's sort) and
 `bsearch`, the program's comparator called with a `call`. `_EH_prolog` is a `code` export too,
 assembled by hand (`EH_PROLOG_CODE`, `msvcrt/cxx.js`): it takes its handler in EAX and builds the
 frame on its caller's stack and in the caller's EBP, which neither a handler nor the compiler's
 subset can express.
-Each keeps the answers of the handler it replaced (see the divergences below); `strtol` and
+Each keeps the answers of the handler it replaced (see the divergences below) but where
+msvcrt.dll answers otherwise: bytes compare as unsigned chars, `atoi` wraps, `towupper` and
+`towlower` hand WEOF back, and the wide classes of the Latin-1 page are msvcrt's; `strtol` and
 `strtoul` are held to theirs input by input as well, the JavaScript against the handler, since
 the handler is part of them.
 
@@ -579,7 +581,10 @@ TLS pointer (`FS:[0x2c]`), the one record of them: `TlsGetValue`/`FlsGetValue` a
 set leaving it and not checking the index against the allocation, as on Windows -- and the host's
 own handlers read and write the same array, so what they answer cannot drift from what the guest,
 the compiler's `__declspec(thread)` sequence included, reaches through `FS`. `TlsFree` clears the
-slot in every thread's array. An index from 64 up jumps to the host, which keeps those values per
+slot in every thread's array, and so does `TlsAlloc` handing it out: a set on a freed index lands
+in the array as on Windows, and the slot's next owner reads zero all the same (Windows clears only
+the allocating thread's; every thread's here is what a slot from 64 up already gets from its
+generation). An index from 64 up jumps to the host, which keeps those values per
 thread under the slot's generation and fails an index nobody allocated with
 `ERROR_INVALID_PARAMETER`.
 
@@ -612,6 +617,15 @@ that is not on the chain unwinds nothing. What nothing handles goes to the progr
 filter (`SetUnhandledExceptionFilter`) and then ends the process with the exception's code as its
 exit code; a processor exception in a program with no filter stops the machine with the fault
 report instead, since that report is the only account of it.
+
+Each handler of the walk, and the last-chance filter, starts with TF, DF and AC clear, as Windows
+enters its dispatcher, whatever the exception left on the processor: compiled code assumes DF clear
+at every call, and a fault inside a copy going down (`std; rep movsd`, which is how the guest's own
+`memmove` copies an overlapping run) would otherwise have every `rep` in the handler run
+backwards. The context keeps the flags the exception had -- a raised exception's too, read at the
+call -- and a handler that answers `EXCEPTION_CONTINUE_EXECUTION` continues with the context's
+flags: the arithmetic ones, TF, DF, AC and ID as the handler left them, the rest (the reserved bit,
+IF, IOPL) the thread's own.
 
 The C runtime's half is what the compiler registers. `_except_handler3` (`msvcrt/seh.js`) reads
 the function's scope table and runs its blocks with EBP set to the frame plus `0x10`, as the
@@ -839,12 +853,18 @@ nothing implements).
   one piece of state — because a program may set the FPU control word through one entry point and
   read it back through the other, and answering from two separate words would make that read-back a
   coin toss (`msvcrt/startup.js`).
-- **The `isw*`/`tow*` wide-character classifiers are built from the byte classifiers' classes**
-  so the two families cannot disagree below `0x80`; above it they follow the C locale as a real
-  Windows answers through `iswctype`: the Latin-1 letters are alpha (except the multiplication and
-  division signs among them), `0x85` and `0xa0` are the two extra spaces the ASCII table does not
-  carry, and case folding stays ASCII, so those letters are alpha with no upper or lower answer of
-  their own (`CLASSES` and `WIDE_CLASSES` in `msvcrt/inguest.js`).
+- **The `isw*`/`tow*` wide-character classifiers answer below `0x100` from msvcrt.dll's own
+  table**, which it reads in every locale and asks the system (`GetStringTypeW`) only past `0xff`
+  (`WIDE_CLASSES` in `msvcrt/inguest.js`, derived rather than transcribed, and checked entry by
+  entry against the table Wine keeps for msvcrt.dll): ASCII as the byte classifiers class it, but
+  for the tab, which is blank; the C1 controls `0x80`..`0x9f` are controls, `0x85` among them and
+  no space; the no-break space is space and blank; `0xa1`..`0xbf` are punctuation, the ordinal
+  indicators and the micro sign included, and the superscript one, two and three digits as well;
+  `0xc0`..`0xff` are letters, upper or lower, but for the multiplication and division signs. The
+  classifiers ask that table as msvcrt's do -- `iswprint` the blanks, punctuation, letters and
+  digits, `iswgraph` the same without the blanks, so a tab prints -- and `iswctype` answers
+  msvcrt's own bits from it. Case mapping stays ASCII's, as the C locale's does, and a unit past
+  `0xff` has no class at all here, where msvcrt.dll asks the system.
 - **A `va_list` is read as a fixed window**, since the list carries no argument count of its own:
   `varargsSlots` reads slots up to the end of the memory region the pointer sits in — a thread's
   stack has a top, and a program formatting from just below it is within its rights, since every
@@ -873,14 +893,12 @@ nothing implements).
 
 Stated as the code states them.
 
-- **The C runtime's comparisons answer -1, 0 or 1, in the order of the ANSI page's characters.**
-  `strcmp`, `strncmp` and the case-blind `_stricmp`/`_strnicmp` normalise the sign, where a
-  runtime may answer the difference of the bytes; and they order bytes as the handlers ordered
-  the strings they decoded -- a byte's own value, except for the sixteen of 0x80..0x9F that
-  Windows-1252 gives characters above U+00FF, so 0x80 (the euro sign) sorts after 0xFF, where
-  msvcrt compares unsigned bytes. The comparisons in the guest keep that order (`ORDER` in
-  `msvcrt/inguest.js`) so the handler and the x86 answer alike. A string past 1 MiB, which the
-  handlers read no further than (`strlen`'s stopped the run without a terminator by then), is
+- **The C runtime's comparisons answer -1, 0 or 1.** `strcmp`, `strncmp` and the case-blind
+  `_stricmp`/`_strnicmp` compare bytes as unsigned chars -- the case-blind ones after folding
+  ASCII's letters -- as msvcrt.dll does, and normalise the sign, where 32-bit msvcrt.dll's
+  `strncmp` answers the difference of the bytes (Wine's conformance tests record it) and C
+  promises only the sign. A string past 1 MiB, which the handlers read no further than
+  (`strlen`'s stopped the run without a terminator by then), is
   measured, copied and compared whole by the x86, as msvcrt's are, and `strtol`/`strtoul` read
   only as far as the number goes, where their handler read the whole string first; so is a wide
   string past 65536 units, where `wcslen`, `wcscmp` and `wcscpy`'s handlers stopped, having
@@ -1029,7 +1047,8 @@ cork and on the emulator: each interlocked call's answer, the dword it leaves, t
 and the registers it keeps, and three preempted threads counting through two of them; a TLS value
 set in the guest read back by the API, by the compiler's `FS:[0x2c]` sequence and not by another
 thread, the last error each call leaves, a slot past the array through the host, an index past
-every slot refused, a freed slot zero; three threads through one critical section with recursion,
+every slot refused, a freed slot zero, and a value set in a freed slot gone once `TlsAlloc` hands
+the slot out again; three threads through one critical section with recursion,
 sleeping while they hold it, the count exact, every entry through the fast path and every waiter
 handed the section; and a thread that finds a section held refused by `TryEnterCriticalSection`,
 then waiting in the host, with the lock count showing it queued, while the owner's own try is a
@@ -1041,13 +1060,19 @@ address the import took, and neither clock crossing into the host. `src/crt-ingu
 calls the runtime's in-guest functions through the import of a small program, under cork and
 under the emulator: `_ftol`'s two halves, `qsort` and `bsearch` through the program's comparator, and the
 rest against the handlers' answers -- each copy, fill or move read back by a comparison -- with
-the program's ESI and EDI kept across each call; and under cork a program that calls `floor`
-while the host writes stdout's record in `_iob` at every turn has every instruction translated.
+the program's ESI and EDI kept across each call, and where msvcrt.dll answers otherwise than the
+handlers did, against its answers: 0x80 below 0xa0 in each comparison, `atoi("4294967296")` 0,
+WEOF back from `towupper` and `towlower`, and the Latin-1 classes; and under cork a program that
+calls `floor` while the host writes stdout's record in `_iob` at every turn has every instruction
+translated.
 `src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe`, `cxxeh.exe`,
 `unhandled.exe`, built from `test/fixtures/src/` by `scripts/build-fixtures.mjs` with clang and
 lld against the MSVC ABI -- through every path above, processor faults and two threads throwing
-at once included. `src/apc.itest.js` runs `apc.exe`, built the same way: APCs to itself and to
-another thread's alertable sleep, one refused by a wait that is not alertable, a routine queued
+at once included; beside them a program built in the test takes an invalid opcode with DF set, on
+cork and on the emulator, and its handler runs with DF clear -- a `rep stosb` in it fills upwards
+-- while the context has DF, and the block the handler continues at gets DF back.
+`src/apc.itest.js` runs `apc.exe`, built the same way: APCs to itself and to another thread's
+alertable sleep, one refused by a wait that is not alertable, a routine queued
 by a routine, and a timer's completion routine. Others build their guest program in the test
 itself, most answering one property per bit of its exit code: `src/condition.itest.js` sleeps on a
 condition variable over an SRW lock and over a critical section; `src/suspend.itest.js` creates a

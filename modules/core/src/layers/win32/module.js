@@ -23,6 +23,7 @@ import { createSystemFunctions } from './kernel32/system.js';
 import { createSpawner, createSpawnFunctions } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
 import { createSeh } from './kernel32/seh.js';
+import { createEntryPointCaller } from './kernel32/dllentry.js';
 import { createCrtSeh } from './msvcrt/seh.js';
 import { createCxxExceptions } from './msvcrt/eh.js';
 import { createApcs } from './kernel32/apc.js';
@@ -35,6 +36,7 @@ import { createFileTimeFunctions } from './kernel32/filetime.js';
 import { createConsoleIoFunctions } from './kernel32/consoleio.js';
 import { createVolume } from './kernel32/vfs.js';
 import { createMsvcrtFunctions } from './msvcrt/functions.js';
+import { createCrtdllFunctions } from './msvcrt/crtdll.js';
 import { createWindowFunctions } from './user32/windows.js';
 import { createMessageQueue } from './user32/messages.js';
 import { createRegistryFunctions } from './advapi32/functions.js';
@@ -222,6 +224,28 @@ export function createWin32Module(){
             const sink = config?.onOutput ?? (()=>{});
             /** @type {(text: string) => void} */
             const trace = config?.onTrace ?? (()=>{});
+
+            /**
+             * A modal dialog or message box put to an unattended run: the
+             * embedder's answerer chooses, and without one the default button
+             * is pressed, as Enter would press it. Either way the log says
+             * what was answered, since nobody saw it.
+             *
+             * @param {import('./user32/dialogs.js').UnattendedDialog} dialog
+             * @returns {number | Promise<number>}
+             */
+            const answerUnattended = dialog=>{
+                const fallback = dialog.buttons.find(button=>button.default)?.id
+                    ?? dialog.buttons[0]?.id ?? 1;
+                const chosen = config?.answer ? config.answer(dialog) : fallback;
+                /** @param {number} id */
+                const told = id=>{
+                    config?.divergence?.(dialog.kind === 'messagebox' ? 'MessageBox' : 'DialogBox',
+                        `unattended: answered ${id} to "${dialog.title}: ${dialog.text}"`);
+                    return id;
+                };
+                return chosen instanceof Promise ? chosen.then(told) : told(chosen);
+            };
 
             // What the assembling caller owns and we are only handed: where the heap
             // may allocate, how to reach a module, and how a waiting call gets to
@@ -660,8 +684,10 @@ export function createWin32Module(){
                 /** @param {number} address */
                 isMapped: address=>memory.find(address) !== null,
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
+                // With the flags: a raised exception's context carries them as a
+                // fault's does, and a handler that continues from it gets them back.
                 registers: ()=>Object.fromEntries(
-                    registerNames.map(name=>[name, cpuRegisters.read(name)])),
+                    [...registerNames, 'eflags'].map(name=>[name, cpuRegisters.read(name)])),
                 setRegisters,
                 /** @param {any} call */
                 callGuest: call=>bridge.callGuest(call),
@@ -746,6 +772,21 @@ export function createWin32Module(){
                 },
             });
 
+            // Every DllMain this layer or the loader calls goes through the
+            // loader's own frame, so an exception out of one ends it rather
+            // than reaching the program's handlers.
+            const callEntryPoint = createEntryPointCaller({
+                register: (name, fn)=>bridge.register(name, fn),
+                callGuest: call=>bridge.callGuest(call),
+                continueAt: (registers, options)=>bridge.continueAt(registers, options),
+                unwind: (frame, address, options)=>seh.unwind(frame, address, options),
+                readU32: address=>memory.readU32(address),
+                writeU32: (address, value)=>memory.writeU32(address, value),
+                stackPointer: ()=>cpuRegisters.read('esp') >>> 0,
+                teb: thread=>(thread?.tebAddress ?? kernel.currentThread()?.tebAddress ?? 0) >>> 0,
+                divergence: detail=>config?.divergence?.('DllMain', detail),
+            });
+
             /** Set once the process has begun to end, so that it ends only once. */
             let ending = false;
             /**
@@ -795,9 +836,11 @@ export function createWin32Module(){
                 let told = Promise.resolve(0);
                 for (const library of attached)
                 {
-                    told = told.then(()=>bridge.callGuest({
+                    told = told.then(()=>callEntryPoint({
                         entry: library.entryPoint,
-                        args: [library.base, DLL_PROCESS_DETACH, 1],
+                        base: library.base,
+                        reason: DLL_PROCESS_DETACH,
+                        reserved: 1,
                         thread: self,
                     }));
                 }
@@ -1480,6 +1523,22 @@ export function createWin32Module(){
                         modules.findResource?.(instance, type, name) ?? null,
                     /** @param {number} instance */
                     moduleBase: instance=>modules.moduleBase?.(instance) ?? 0,
+                    // A bitmap resource made a bitmap for the display: CreateDIBitmap
+                    // on a screen context, as LoadBitmap and LoadImage make one.
+                    /** @param {number} info @param {number} bits */
+                    bitmapFromDib: (info, bits)=>{
+                        const CBM_INIT = 4;
+                        const hdc = gdi.windowContext(0, null);
+                        try
+                        {
+                            return gdi.table.CreateDIBitmap.handler(
+                                [hdc, info, CBM_INIT, bits, info, 0]);
+                        }
+                        finally
+                        {
+                            gdi.table.ReleaseDC.handler([0, hdc]);
+                        }
+                    },
                     // Where the pointer is and what is held down. The input layer
                     // is above this one and cannot be imported from here, so both
                     // are handed down as thunks; a build without one answers what
@@ -1568,8 +1627,17 @@ export function createWin32Module(){
                     // A program's own explanation of why it is stopping, handed up
                     // whole rather than as a line of log, so whoever is embedding
                     // this engine can show it the way a person would have seen it.
+                    // Unattended, nobody is at the page to answer it.
                     /** @param {any} notice */
-                    messageBox: notice=>config?.onMessageBox?.(notice),
+                    messageBox: notice=>(config?.unattended === true
+                        ? answerUnattended({
+                            kind: 'messagebox', title: notice.caption, text: notice.text,
+                            buttons: notice.buttons.map((/** @type {any} */ button)=>
+                                ({ ...button, default: button.id === notice.defaultButton })),
+                        })
+                        : config?.onMessageBox?.(notice)),
+                    unattended: config?.unattended === true,
+                    answer: answerUnattended,
                     /** @param {string} text */
                     clipboard: text=>config?.onClipboard?.(text),
                     pasteboard,
@@ -1722,6 +1790,10 @@ export function createWin32Module(){
                 };
             }
 
+            // The runtime before msvcrt, built from it: the same entries under the
+            // same names, and its own few beside them.
+            libraries['CRTDLL.dll'] = createCrtdllFunctions(libraries['msvcrt.dll']);
+
             // Added after the rest because it is built from them: nearly everything
             // ntdll exports is a second name for a function another library already
             // publishes, and it has to be the same entry rather than a second
@@ -1771,6 +1843,17 @@ export function createWin32Module(){
                  * @returns {'cdecl' | 'stdcall'}
                  */
                 libraryConvention: library=>CDECL_LIBRARIES.test(library) ? 'cdecl' : 'stdcall',
+
+                /**
+                 * Calls a library's entry point as the loader does: inside a
+                 * frame of the loader's that takes whatever it raises, which
+                 * then ends the call with 0.
+                 *
+                 * @param {{ entry: number, base: number, reason: number,
+                 *     reserved: number, thread: any }} call
+                 * @returns {Promise<number>}
+                 */
+                callEntryPoint: call=>callEntryPoint(call),
 
                 /**
                  * Device contexts over pixels this layer did not allocate.

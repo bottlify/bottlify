@@ -81,11 +81,16 @@ export function createFilesystemModule(){
              * one machine in a worker needs two at once -- so each run keeps its
              * own drives and open files.
              *
-             * @type {{ drives: Map<string, any>, directories: any, files: any,
-             *     disposed: boolean }}
+             * @type {{ drives: Map<string, any>, writables: Map<string, any>,
+             *     directories: any, files: any, disposed: boolean }}
              */
             const state = {
                 drives: new Map(),
+                // Each drive's writable layer, kept across a remount: mounting a
+                // bundle on a drive puts its files under what is already written
+                // there -- the machine's own directories, made before the game
+                // was mounted -- rather than giving the drive a blank disk.
+                writables: new Map(),
                 directories: null,
                 files: createFileTable({ limit: config?.openFileLimit }),
                 disposed: false,
@@ -130,6 +135,9 @@ export function createFilesystemModule(){
                 {
                     throw fsError(ErrorCode.INVALID_PATH, `"${letter}" is not a drive letter`);
                 }
+                const writable = stores?.writable ?? state.writables.get(key)
+                    ?? createMemoryStore();
+                state.writables.set(key, writable);
                 state.drives.set(key, createOverlay({
                     source: stores?.source ?? null,
                     // The engine's own volume, beneath every bundle: what a host
@@ -137,7 +145,7 @@ export function createFilesystemModule(){
                     // write to. A per-mount store overrides the configured one,
                     // which is how a test drives it without a module around it.
                     system: stores?.system ?? config?.system ?? null,
-                    writable: stores?.writable ?? createMemoryStore(),
+                    writable,
                     now: config?.now,
                     onChanged: (/** @type {any} */ change)=>{
                         changes.set(`${key}:${change.path}`, {

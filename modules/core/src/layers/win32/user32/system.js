@@ -949,6 +949,46 @@ export function createSystemFunctions({ host, live, windows, classes }){
     const readI32 = address=>readU32(address) | 0;
 
     /**
+     * A bitmap out of a module's resources, as LoadBitmap loads one: the
+     * resource is a packed DIB -- the header, its colours, then the pixels --
+     * and becomes a bitmap for the display. A name that is not an integer is
+     * a string, ANSI or wide by the entry point. The system's own bitmaps (a
+     * null instance) are not here, and a program is told there is none.
+     *
+     * @param {number} instance @param {number} name @param {boolean} wide
+     */
+    const loadBitmap = (instance, name, wide)=>{
+        const RT_BITMAP = 2;
+        const BI_BITFIELDS = 3;
+        const module = instance >>> 0;
+        const raw = name >>> 0;
+        if (module === 0)
+        {
+            return 0;
+        }
+        const key = raw < 0x10000 ? raw
+            : wide ? host.readWideString?.(raw, 256) ?? '' : host.readCString(raw, 256);
+        const found = /** @type {{ rva: number } | null | undefined} */ (
+            host.findResource?.(module, RT_BITMAP, key));
+        const base = host.moduleBase?.(module) ?? 0;
+        if (!found || base === 0 || !host.bitmapFromDib)
+        {
+            return 0;
+        }
+        const info = base + found.rva;
+        const headerSize = readU32(info);
+        // A BITMAPCOREHEADER's colours are three bytes each; every later
+        // header's are four, after three masks when the header is the
+        // 40-byte one and the pixels are BI_BITFIELDS.
+        const core = headerSize === 12;
+        const bitCount = readU16(info + (core ? 10 : 14));
+        const used = core ? 0 : readU32(info + 32);
+        const colours = used !== 0 ? used : bitCount <= 8 ? 1 << bitCount : 0;
+        const masks = !core && headerSize === 40 && readU32(info + 16) === BI_BITFIELDS ? 12 : 0;
+        return host.bitmapFromDib(info, info + headerSize + masks + colours * (core ? 3 : 4));
+    };
+
+    /**
      * One INPUT_MOUSE event, turned into the pointer events the input layer
      * takes.
      *
@@ -2448,7 +2488,15 @@ export function createSystemFunctions({ host, live, windows, classes }){
          */
         LoadBitmapA: {
             argBytes: 8,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([instance, name])=>loadBitmap(instance, name, false),
+        },
+
+        /** HBITMAP LoadBitmapW(HINSTANCE hInstance, LPCWSTR lpBitmapName) */
+        LoadBitmapW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([instance, name])=>loadBitmap(instance, name, true),
         },
 
         /**
@@ -2565,6 +2613,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([instance, name, type])=>{
+                const IMAGE_BITMAP = 0;
                 const IMAGE_ICON = 1;
                 const IMAGE_CURSOR = 2;
                 switch (type >>> 0){
@@ -2572,6 +2621,10 @@ export function createSystemFunctions({ host, live, windows, classes }){
                         return loadResourceObject(host, 'icon', RT_GROUP_ICON, instance, name);
                     case IMAGE_CURSOR:
                         return loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name);
+                    case IMAGE_BITMAP:
+                        // A device bitmap stands in for LR_CREATEDIBSECTION's section:
+                        // selected and blitted, the two draw the same.
+                        return loadBitmap(instance, name, false);
                     default:
                         return 0;
                 }

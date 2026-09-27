@@ -159,6 +159,33 @@ test('strcmp reports the sign of the first difference', ()=>{
     assert.equal(fns.strcmp.handler([put(0x140, ''), put(0x150, '')]), 0);
 });
 
+test('the comparisons order bytes as unsigned chars, the upper half of the page included', ()=>{
+    // As msvcrt.dll compares, and not by the characters the ANSI page gives
+    // those bytes: 0x80, the euro sign there, sorts below 0xa0.
+    const { fns: table, put } = setup();
+    const fns = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
+        /** @type {unknown} */ (table));
+    const euro = put(0x100, '\x80');
+    const space = put(0x110, '\xa0');
+    const last = put(0x120, '\x9f');
+    const top = put(0x130, '\xff');
+    for (const name of ['strcmp', '_stricmp', '_strcmpi'])
+    {
+        assert.equal(fns[name].handler([euro, space]), -1, name);
+        assert.equal(fns[name].handler([space, euro]), 1, name);
+        assert.equal(fns[name].handler([last, top]), -1, name);
+    }
+    for (const name of ['strncmp', '_strnicmp'])
+    {
+        assert.equal(fns[name].handler([euro, space, 1]), -1, name);
+        assert.equal(fns[name].handler([top, last, 1]), 1, name);
+    }
+    assert.equal(fns._stricmp.handler([put(0x140, 'A\x80'), put(0x150, 'a\xa0')]), -1,
+        'folded ASCII first, then the byte');
+    assert.equal(fns._stricmp.handler([put(0x160, '\xc9'), put(0x170, '\xe9')]), -1,
+        'and no letter past ASCII is folded');
+});
+
 test('strncmp stops after n bytes, and n of zero compares nothing', ()=>{
     const { fns, put } = setup();
     const a = put(0x100, 'abcX');
@@ -328,11 +355,19 @@ test('atoi takes the leading integer and ignores the rest', ()=>{
     assert.equal(fns.atoi.handler([put(0x150, '0x1f')]), 0, 'atoi is decimal only');
 });
 
-test('atoi saturates rather than wrapping, and atol is the same function', ()=>{
+test('atoi wraps rather than saturating, as msvcrt.dll does, and atol is the same function', ()=>{
+    // Wine's conformance test: atoi("4294967296") and atol("4294967296") are 0.
     const { fns, put } = setup();
-    assert.equal(fns.atoi.handler([put(0x100, '99999999999')]), 0x7fffffff);
-    assert.equal(fns.atoi.handler([put(0x110, '-99999999999')]), -0x80000000);
-    assert.equal(fns.atol.handler([put(0x120, '-17')]), -17);
+    assert.equal(fns.atoi.handler([put(0x100, '4294967296')]), 0);
+    assert.equal(fns.atol.handler([put(0x100, '4294967296')]), 0);
+    assert.equal(fns.atoi.handler([put(0x110, '2147483648')]), -0x80000000);
+    assert.equal(fns.atoi.handler([put(0x120, '-2147483649')]), 0x7fffffff);
+    assert.equal(fns.atoi.handler([put(0x130, '99999999999')]), 1215752191,
+        '99999999999 less 23 times 2^32');
+    assert.equal(fns.atoi.handler([put(0x140, '-99999999999')]), -1215752191);
+    assert.equal(fns.atoi.handler([put(0x150, '2147483647')]), 0x7fffffff);
+    assert.equal(fns.atoi.handler([put(0x160, '-2147483648')]), -0x80000000);
+    assert.equal(fns.atol.handler([put(0x170, '-17')]), -17);
     assert.equal(fns.atol.argBytes, fns.atoi.argBytes);
 });
 

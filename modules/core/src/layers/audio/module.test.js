@@ -493,6 +493,33 @@ test('with shared memory, a stalled engine thread is not heard: the device plays
         'and it is the cursor the program reads');
 });
 
+test('with shared memory, what the device plays and nobody wrote is counted stale', async()=>{
+    // The device reads the buffer on its own clock, so a refill that comes
+    // late is heard as the last lap again -- and counted, on this path too.
+    const f = await playing({ shared: true });
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.api.pump();
+    const table = f.api.output().table;
+    const outputRate = f.api.output().sampleRate;
+    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
+    const slots = Array.from({ length: SLOTS }, (_, slot)=>({
+        header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+        pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
+    }));
+    const seams = slots.map(()=>createSeam());
+    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const block = new Float32Array(128 * 2);
+    for (let at = 0; at < Math.ceil(outputRate * 0.3 / 128); at++)
+    {
+        mixBlock({ global, slots, seams, block, blockFrames: 128, outputRate, arena });
+    }
+    f.advance(300);
+    f.api.pump();
+    // The fixture filled the buffer behind the program's back: nothing of it
+    // was ever unlocked, so all the device played is stale.
+    assert.ok(f.held.stale.bytes > 0, `stale ${f.held.stale.bytes}`);
+});
+
 test('with shared memory, a released DirectSound buffer frees its slot: 40 over a session '
     + 'never fall back', async()=>{
     // The seam never called track.close() when a buffer's references reached

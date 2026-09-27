@@ -651,6 +651,10 @@ export function createSoundBuffer({
         drainPlayed(){
             if (device)
             {
+                // The device plays it; what it passed is still checked against
+                // what the program wrote, which is how a late refill -- heard as
+                // a repeat of the last lap -- is counted on this path too.
+                takeWritten(played());
                 return [];
             }
             const ranges = played();

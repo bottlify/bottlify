@@ -228,6 +228,9 @@ test('the multi-byte names are bound to the byte functions themselves', ()=>{
     assert.equal(multi._ismbcspace, narrow.isspace, 'a classifier, bound the same way');
     assert.equal(multi._ismbcspace.handler([' '.charCodeAt(0)]), 1);
     assert.equal(multi._ismbcspace.handler(['x'.charCodeAt(0)]), 0);
+    assert.equal(multi._mbsnbcmp, narrow.strncmp, 'a byte count is a character count here');
+    assert.equal(multi._mbspbrk, narrow.strpbrk);
+    assert.equal(multi._ismbcdigit, narrow.isdigit);
 });
 
 test('under a single-byte locale a character is one byte and nothing leads', ()=>{
@@ -237,6 +240,16 @@ test('under a single-byte locale a character is one byte and nothing leads', ()=
     assert.equal(multi._mbsinc.handler([0x1000]), 0x1001);
     assert.equal(multi._mbsdec.handler([0x1000, 0x1004]), 0x1003);
     assert.equal(multi._mbsdec.handler([0x1000, 0x1000]), 0, 'nothing before the start');
+    assert.deepEqual([...multi._mbctype.data()], new Array(257).fill(0), 'no byte leads or trails');
+    /** @type {string[]} */
+    const said = [];
+    const told = /** @type {Record<string, any>} */ (createMultiByteFunctions({},
+        (/** @type {string} */ api)=>said.push(api)));
+    assert.equal(told._setmbcp.handler([1252]), 0);
+    assert.equal(told._setmbcp.handler([-3]), 0);
+    assert.deepEqual(said, [], 'the ANSI page is the page it has');
+    assert.equal(told._setmbcp.handler([932]), 0);
+    assert.deepEqual(said, ['_setmbcp'], 'a double-byte page is not, and says so');
 });
 
 /**
@@ -257,43 +270,80 @@ test('iswspace classifies the spaces the C locale has, and a code unit it has no
     assert.equal(fns.iswspace.handler([0x20]), 1);
     assert.equal(fns.iswspace.handler([0x09]), 1);
     assert.equal(fns.iswspace.handler(['x'.charCodeAt(0)]), 0);
-    assert.equal(fns.iswspace.handler([0x85]), 1, 'NEL is a space');
+    assert.equal(fns.iswspace.handler([0x85]), 0, 'NEL is a control in msvcrt.dll\'s table');
     assert.equal(fns.iswspace.handler([0xa0]), 1, 'the no-break space is a space');
     assert.equal(fns.iswspace.handler([0x4e2d]), 0, 'a CJK unit is nothing');
     assert.equal(fns.iswspace.handler([0xffff]), 0, 'and WEOF is nothing at all');
 });
 
-test('the Latin-1 letters are alpha, the two signs among them are not', ()=>{
+test('the Latin-1 letters are alpha with their case, the two signs among them are not', ()=>{
     const fns = runtime();
     assert.equal(fns.iswalpha.handler([0xc0]), 1);
     assert.equal(fns.iswalpha.handler([0xff]), 1);
     assert.equal(fns.iswalnum.handler([0xc0]), 1, 'alpha carries alnum');
     assert.equal(fns.iswalpha.handler([0xd7]), 0, 'multiplication is not a letter');
     assert.equal(fns.iswalpha.handler([0xf7]), 0, 'and neither is division');
-    assert.equal(fns.iswupper.handler([0xc0]), 0, 'the C locale gives them no case');
-    assert.equal(fns.iswlower.handler([0xc0]), 0);
+    assert.equal(fns.iswpunct.handler([0xd7]), 1, 'it is punctuation');
+    assert.equal(fns.iswupper.handler([0xc9]), 1, 'É is upper');
+    assert.equal(fns.iswlower.handler([0xc9]), 0);
+    assert.equal(fns.iswlower.handler([0xe9]), 1, 'é is lower');
+    assert.equal(fns.iswlower.handler([0xdf]), 1, 'ß is lower, though it has no upper here');
+    assert.equal(fns.iswlower.handler([0xff]), 1);
+    assert.equal(fns.iswprint.handler([0xe9]), 1, 'a letter prints');
+    assert.equal(fns.iswgraph.handler([0xe9]), 1, 'and is graphic');
+    assert.equal(fns.towupper.handler([0xe9]), 0xe9, 'the C locale maps no case past ASCII');
     assert.equal(fns.iswalpha.handler([0x4e2d]), 0, 'a CJK unit is not alpha here');
     assert.equal(fns.iswalpha.handler([0xffff]), 0);
+});
+
+test('the Latin-1 signs are punctuation, three of them digits, none of them letters', ()=>{
+    // msvcrt.dll's own table, older than the Unicode that calls the ordinal
+    // indicators and the micro sign letters.
+    const fns = runtime();
+    for (let code = 0xa1; code <= 0xbf; code++)
+    {
+        assert.equal(fns.iswpunct.handler([code]), 1, `0x${code.toString(16)}`);
+        assert.equal(fns.iswalpha.handler([code]), 0, `0x${code.toString(16)}`);
+        assert.equal(fns.iswgraph.handler([code]), 1, `0x${code.toString(16)}`);
+    }
+    assert.equal(fns.iswpunct.handler([0xa9]), 1, '©');
+    assert.equal(fns.iswalpha.handler([0xaa]), 0, 'ª');
+    assert.equal(fns.iswlower.handler([0xb5]), 0, 'µ');
+    assert.deepEqual([0xb2, 0xb3, 0xb9, 0xbc].map(code=>fns.iswdigit.handler([code])),
+        [1, 1, 1, 0], 'the superscripts two, three and one; a fraction is not');
+    assert.equal(fns.iswxdigit.handler([0xb2]), 0);
 });
 
 test('iswctype answers by the real msvcrt bit values, over the Latin-1 range', ()=>{
     const fns = runtime();
     const UPPER = 0x0001;
+    const LOWER = 0x0002;
     const DIGIT = 0x0004;
+    const SPACE = 0x0008;
+    const CONTROL = 0x0020;
+    const BLANK = 0x0040;
     const ALPHA = 0x0103;
     assert.equal(fns.iswctype.handler(['A'.charCodeAt(0), UPPER]), 1);
     assert.equal(fns.iswctype.handler(['a'.charCodeAt(0), UPPER]), 0);
     assert.equal(fns.iswctype.handler(['5'.charCodeAt(0), DIGIT]), 1);
-    // The Latin-1 extension iswalpha itself carries: alpha, but no case.
     assert.notEqual(fns.iswctype.handler([0xc0, ALPHA]), 0);
-    assert.equal(fns.iswctype.handler([0xc0, UPPER]), 0, 'the C locale gives it no case');
+    assert.equal(fns.iswctype.handler([0xc0, UPPER]), 1);
+    assert.equal(fns.iswctype.handler([0xe0, LOWER]), 1);
     assert.equal(fns.iswctype.handler([0xd7, ALPHA]), 0, 'multiplication is not a letter');
+    assert.equal(fns.iswctype.handler([0x09, BLANK]), 1, 'the tab is blank in the wide table');
+    assert.equal(fns.iswctype.handler([0xa0, BLANK]), 1, 'and the no-break space');
+    assert.equal(fns.iswctype.handler([0x0a, BLANK]), 0);
+    assert.equal(fns.iswctype.handler([0x85, SPACE]), 0);
+    assert.equal(fns.iswctype.handler([0x85, CONTROL]), 1);
+    assert.equal(fns.iswctype.handler([0xb2, DIGIT]), 1);
     // WEOF and anything past the Latin-1 table classify as nothing.
     assert.equal(fns.iswctype.handler([0xffff, UPPER | DIGIT | ALPHA]), 0);
     assert.equal(fns.iswctype.handler([0x4e2d, ALPHA]), 0, 'a CJK unit is nothing here');
 });
 
 test('the wide classifiers answer every ASCII code unit what the byte ones answer', ()=>{
+    // But for the tab, which msvcrt's wide table calls blank, and iswprint
+    // asks for the blanks: the byte table has only the space blank.
     const fns = runtime();
     for (const [wide, byte] of Object.entries({
         iswalpha: 'isalpha', iswdigit: 'isdigit', iswalnum: 'isalnum',
@@ -304,8 +354,8 @@ test('the wide classifiers answer every ASCII code unit what the byte ones answe
     {
         for (let code = 0; code < 0x80; code++)
         {
-            assert.equal(fns[wide].handler([code]), fns[byte].handler([code]),
-                `${wide}(0x${code.toString(16)})`);
+            const expected = wide === 'iswprint' && code === 0x09 ? 1 : fns[byte].handler([code]);
+            assert.equal(fns[wide].handler([code]), expected, `${wide}(0x${code.toString(16)})`);
         }
     }
 });
@@ -321,11 +371,15 @@ test('the wide classifiers that have no byte twin still answer the C locale', ()
     assert.equal(fns.iswpunct.handler(['!'.charCodeAt(0)]), 1);
     assert.equal(fns.iswpunct.handler([0xa0]), 0, 'the no-break space is not punctuation');
     assert.equal(fns.iswcntrl.handler([0x01]), 1);
-    assert.equal(fns.iswcntrl.handler([0x85]), 0, 'NEL is a space here, not a control');
+    assert.equal(fns.iswcntrl.handler([0x80]), 1, 'the C1 controls are controls');
+    assert.equal(fns.iswcntrl.handler([0x9f]), 1);
+    assert.equal(fns.iswcntrl.handler([0x85]), 1);
     assert.equal(fns.iswprint.handler([0x20]), 1);
-    assert.equal(fns.iswprint.handler([0xa0]), 0, 'print stops with the ASCII page');
+    assert.equal(fns.iswprint.handler([0x09]), 1, 'the tab is blank, and blanks print');
+    assert.equal(fns.iswprint.handler([0xa0]), 1, 'as the no-break space does');
+    assert.equal(fns.iswprint.handler([0x85]), 0);
     assert.equal(fns.iswgraph.handler(['!'.charCodeAt(0)]), 1);
-    assert.equal(fns.iswgraph.handler([0x20]), 0, 'graph is print without the space');
+    assert.equal(fns.iswgraph.handler([0x20]), 0, 'graph is print without the blanks');
     assert.equal(fns.iswgraph.handler([0xa0]), 0);
     assert.equal(fns.iswascii.handler(['a'.charCodeAt(0)]), 1);
     assert.equal(fns.iswascii.handler([0x7f]), 1);
@@ -339,11 +393,11 @@ test('towupper and towlower fold the ASCII letters and pass the rest through', (
     assert.equal(fns.towupper.handler(['Z'.charCodeAt(0)]), 0x5a);
     assert.equal(fns.towupper.handler(['0'.charCodeAt(0)]), 0x30);
     assert.equal(fns.towupper.handler([0xe9]), 0xe9, 'the C locale folds no accent');
-    assert.equal(fns.towupper.handler([0xffff]), 0, 'WEOF answers zero, as everywhere');
+    assert.equal(fns.towupper.handler([0xffff]), 0xffff, 'WEOF passes through as any unit does');
     assert.equal(fns.towlower.handler(['Z'.charCodeAt(0)]), 0x7a);
     assert.equal(fns.towlower.handler(['a'.charCodeAt(0)]), 0x61);
     assert.equal(fns.towlower.handler([0xc0]), 0xc0);
-    assert.equal(fns.towlower.handler([0xffff]), 0);
+    assert.equal(fns.towlower.handler([0xffff]), 0xffff);
 });
 
 test('a wide string near the end of its region is read to its terminator, not past it', ()=>{
