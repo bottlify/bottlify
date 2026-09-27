@@ -246,6 +246,38 @@ test('a template is walked into a dialog and the controls it names', ()=>{
     assert.equal(fns.GetDlgItem.handler([dialog, 999]), 0);
 });
 
+test('a control is a child of its dialog whatever its template says, its border a sunken edge',
+    ()=>{
+        // The dialog test's TEST_DLG_CHILD_POPUP: a control with WS_POPUP in
+        // its template is still found by its id as a child, the popup bit and
+        // the border gone, WS_EX_NOPARENTNOTIFY and for the border
+        // WS_EX_CLIENTEDGE in their place.
+        const WS_CHILD = 0x40000000;
+        const WS_POPUP = 0x80000000;
+        const WS_VISIBLE = 0x10000000;
+        const WS_BORDER = 0x00800000;
+        const WS_EX_NOPARENTNOTIFY = 0x4;
+        const WS_EX_CLIENTEDGE = 0x200;
+        const { memory, fns } = setup();
+        putTemplate(memory, [
+            { id: 7, x: 0, y: 0, cx: 40, cy: 10, className: 'static', title: 'bump7',
+                style: WS_CHILD | WS_POPUP | WS_BORDER | WS_VISIBLE },
+            { id: 8, x: 0, y: 10, cx: 40, cy: 10, className: 'static', title: 'bump8',
+                style: WS_POPUP | WS_VISIBLE },
+        ]);
+        const dialog = fns.CreateDialogIndirectParamA.handler(
+            [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+        const bordered = fns.GetDlgItem.handler([dialog, 7]);
+        const plain = fns.GetDlgItem.handler([dialog, 8]);
+        assert.notEqual(bordered, 0);
+        assert.notEqual(plain, 0);
+        assert.equal(fns.GetWindowLongA.handler([bordered, -16]) >>> 0, WS_CHILD | WS_VISIBLE);
+        assert.equal(fns.GetWindowLongA.handler([bordered, -20]),
+            WS_EX_NOPARENTNOTIFY | WS_EX_CLIENTEDGE);
+        assert.equal(fns.GetWindowLongA.handler([plain, -16]) >>> 0, WS_CHILD | WS_VISIBLE);
+        assert.equal(fns.GetWindowLongA.handler([plain, -20]), WS_EX_NOPARENTNOTIFY);
+    });
+
 test('a CBT hook hears of the dialog window and may subclass it before its first message', ()=>{
     // A framework attaches its dialog object to the window from the hook and
     // puts its own procedure in; the dialog's creation messages then reach

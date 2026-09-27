@@ -45,7 +45,7 @@
  *   to fill in finds it filled.
  */
 
-import { ANY_WINDOW, WM_QUIT } from './messages.js';
+import { ANY_WINDOW, WM_QUIT, threadIdOf } from './messages.js';
 import { readMessage, readRect, writeRect } from './structs.js';
 import { WS_VISIBLE, frameOf } from './frame.js';
 import { createTabWalk } from './tabwalk.js';
@@ -136,6 +136,11 @@ const SHELL_FONT_FACE = 'MS Shell Dlg';
 /** The style bits a dialog's own window carries. */
 const WS_CHILD = 0x40000000;
 const WS_DISABLED = 0x08000000;
+const WS_POPUP = 0x80000000;
+const WS_BORDER = 0x00800000;
+/** What the dialog manager adds to every control it makes. */
+const WS_EX_NOPARENTNOTIFY = 0x00000004;
+const WS_EX_CLIENTEDGE = 0x00000200;
 /** The dialog styles that decide where it goes and what frame it has. */
 const DS_MODALFRAME = 0x0080;
 const DS_CENTER = 0x0800;
@@ -242,6 +247,10 @@ const MAX_RESOURCE_NAME = 256;
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  * @property {(hwnd: number, message: number, wParam: number, lParam: number,
  *     thread?: unknown, unicode?: boolean) => number | Promise<number>} send
+ * @property {(hwnd: number, message: number, wParam: number, lParam: number,
+ *     thread?: unknown, unicode?: boolean) => number | Promise<number | null>} [sendAcross]
+ *           SendMessage as a program calls it: to another thread's window it
+ *           waits for that thread to take it.
  * @property {(record: any, message: { hwnd: number, message: number, wParam: number,
  *     lParam: number }, thread?: unknown) => number | Promise<number>} defDlgProc
  *           The dialog class's procedure: DWLP_DLGPROC first, then the default.
@@ -661,7 +670,12 @@ export function createDialogFunctions(options){
                 // no procedure here, and a control that answered messages from
                 // nowhere would be inventing behaviour.
                 const cls = classNamed(control.className);
-                const style = (control.style | WS_CHILD) >>> 0;
+                // A control is a child of the dialog whatever its template
+                // says, told nothing of its parent's creation, and a border
+                // is drawn as a sunken edge.
+                const style = ((control.style | WS_CHILD) & ~(WS_POPUP | WS_BORDER)) >>> 0;
+                const extended = (control.exStyle | WS_EX_NOPARENTNOTIFY
+                    | ((control.style & WS_BORDER) !== 0 ? WS_EX_CLIENTEDGE : 0)) >>> 0;
                 const placed = {
                     x: acrossFor(control.x, cell),
                     y: downFor(control.y, cell),
@@ -672,7 +686,7 @@ export function createDialogFunctions(options){
                     className: control.className,
                     title: control.title,
                     style,
-                    exStyle: control.exStyle,
+                    exStyle: extended,
                     parent: dialog.hwnd,
                     instance: instance >>> 0,
                     id: control.id,
@@ -693,7 +707,7 @@ export function createDialogFunctions(options){
                 // The class and title are in the template, not in guest
                 // memory, so the CREATESTRUCT names neither: a procedure that
                 // reads them there finds NULL. The ceiling on this.
-                return after(cls ? announce(record, [control.exStyle, 0, 0, style,
+                return after(cls ? announce(record, [extended, 0, 0, style,
                     placed.x, placed.y, placed.width, placed.height,
                     dialog.hwnd, control.id, instance >>> 0, control.data], false, thread) : 0,
                 ()=>createFrom(index + 1));
@@ -917,7 +931,7 @@ export function createDialogFunctions(options){
         // The owner is disabled for as long as the dialog is up, as Windows
         // disables it: a program asking IsWindowEnabled of its own frame
         // meanwhile is told no, and a click on the frame reaches nothing.
-        const owner = (record.style & WS_CHILD) === 0 ? live(record.parent) : null;
+        const owner = (record.style & WS_CHILD) === 0 ? live(record.owner ?? 0) : null;
         const ownerWasEnabled = owner !== null && (owner.style & WS_DISABLED) === 0;
         if (ownerWasEnabled)
         {
@@ -935,7 +949,8 @@ export function createDialogFunctions(options){
             // The program's own loop would have been GetMessage, and what
             // that does as it takes a message the dialog's loop does too.
             const entry = host.take ? await host.take(thread)
-                : host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
+                : host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true,
+                    thread: threadIdOf(thread) });
             if (!entry)
             {
                 if (host.unattended && presses < UNATTENDED_PRESSES)
@@ -964,7 +979,7 @@ export function createDialogFunctions(options){
             }
             if (entry.message === WM_QUIT)
             {
-                host.queue.postQuit(entry.wParam | 0);
+                host.queue.postQuit(entry.wParam | 0, threadIdOf(thread));
                 await destroyWindow(hwnd, thread);
                 break;
             }
@@ -1355,8 +1370,8 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                return host.send(control.hwnd, message >>> 0, wParam >>> 0, lParam >>> 0,
-                    host.callerThread?.());
+                return (host.sendAcross ?? host.send)(control.hwnd, message >>> 0,
+                    wParam >>> 0, lParam >>> 0, host.callerThread?.());
             },
         },
 
@@ -1370,8 +1385,8 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                return host.send(control.hwnd, message >>> 0, wParam >>> 0, lParam >>> 0,
-                    host.callerThread?.(), true);
+                return (host.sendAcross ?? host.send)(control.hwnd, message >>> 0,
+                    wParam >>> 0, lParam >>> 0, host.callerThread?.(), true);
             },
         },
 

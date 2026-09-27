@@ -16,13 +16,14 @@
  * class asked for, and the queue behaves the way a message loop expects.
  */
 
-import { ANY_WINDOW, WM_PAINT, WM_QUIT, WM_TIMER } from './messages.js';
+import { ANY_WINDOW, WM_PAINT, WM_QUIT, WM_TIMER, threadIdOf } from './messages.js';
 import { characterOf } from './keys.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createPaintFunctions } from './paint.js';
 import { HOVER_SIZE, HOVER_TIME, SYS_COLORS, createSystemFunctions } from './system.js';
 import { createObjectFunctions } from './objects.js';
 import { createDialogFunctions } from './dialogs.js';
+import { createDesktopFunctions } from './desktops.js';
 import { createRawInput } from './rawinput.js';
 import {
     WS_CHILD, WS_DISABLED, contains, createGeometry, intersect, isEmpty,
@@ -165,7 +166,13 @@ const HOST_PROCEDURE_BASE = 0x7ff00000;
 
 /** The one hook type this build calls, and the one event it calls it for. */
 const WH_CBT = 5;
+/** The CBT hook's codes: what is about to happen, which it may forbid. */
+const HCBT_MINMAX = 1;
 const HCBT_CREATEWND = 3;
+const HCBT_DESTROYWND = 4;
+const HCBT_ACTIVATE = 5;
+const HCBT_SYSCOMMAND = 8;
+const HCBT_SETFOCUS = 9;
 
 /** CBT_CREATEWNDA: what a CBT hook is handed for HCBT_CREATEWND. */
 const CBT_CREATEWNDA = Object.freeze({ lpcs: 0, hwndInsertAfter: 4, SIZE: 8 });
@@ -254,6 +261,8 @@ const SW_MINIMIZE = 6;
 const SW_SHOWNA = 8;
 /** The show commands that leave the window minimised. */
 const MINIMISING = new Set([2, SW_MINIMIZE, 7]);
+/** The show commands that bring a minimised window back: SW_SHOWNORMAL, SW_RESTORE, SW_SHOWDEFAULT. */
+const RESTORING = new Set([1, 9, 10]);
 const WS_MINIMIZE = 0x20000000;
 const WS_POPUP = 0x80000000;
 /** The ShowWindow commands that leave activation where it is. */
@@ -298,6 +307,9 @@ const INFINITE = 0xffffffff;
  */
 const POLLED_KINDS = new Set(['event', 'semaphore', 'timer']);
 
+/** The parent a message-only window is made with. */
+const HWND_MESSAGE = 0xfffffffd;
+
 /** PeekMessage takes this where a window goes to mean "thread messages only". */
 const HWND_THREAD_MESSAGES = 0xffffffff;
 
@@ -305,6 +317,17 @@ const HWND_THREAD_MESSAGES = 0xffffffff;
 const ERROR_INVALID_THREAD_ID = 1444;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_WINDOW_HANDLE = 1400;
+const ERROR_TLW_WITH_WSCHILD = 1406;
+
+/**
+ * InSendMessageEx's answer: how the message being handled was sent from
+ * another thread, and whether ReplyMessage has answered it yet.
+ */
+const ISMEX_NOSEND = 0;
+const ISMEX_SEND = 1;
+const ISMEX_NOTIFY = 2;
+const ISMEX_CALLBACK = 4;
+const ISMEX_REPLIED = 8;
 
 /** TrackMouseEvent's request, its flags, and the messages its tracking posts. */
 const TRACKMOUSEEVENT_SIZE = 16;
@@ -722,10 +745,190 @@ export function createWindowFunctions(host){
         {
             return 0;
         }
+        // What the window manager sends itself -- activation, destruction,
+        // the messages a call it answers makes -- runs the procedure on the
+        // thread that caused it, even for another thread's window, where
+        // Windows hands it to that thread as a program's SendMessage is.
+        const owner = creatorOf(record);
+        const sender = threadIdOf(thread);
+        if (owner !== null && sender !== null && owner !== sender)
+        {
+            host.divergence?.('SendMessage', 'a message the window manager sends to another '
+                + 'thread\'s window runs on the thread that sent it');
+        }
         return callProcedure(record.wndProc, {
             hwnd: record.hwnd, message: message >>> 0, wParam: wParam >>> 0, lParam: lParam >>> 0,
             ...unicode ? { unicode } : {},
         }, thread);
+    };
+
+    /**
+     * A message sent to a window of another thread: it waits for that thread
+     * to look at its queue, which runs the window's procedure on its own
+     * thread and hands the answer back to the sender.
+     *
+     * @typedef {{ hwnd: number, message: number, wParam: number, lParam: number,
+     *     unicode: boolean, kind: number, replied: boolean, result: number,
+     *     from: number | null, callback: number, data: number }} SentMessage
+     */
+
+    /**
+     * What other threads have sent to each thread's windows, oldest first,
+     * and the answers a thread that sent with SendMessageCallback is still
+     * to be told of -- both waiting for the thread's next look at its queue.
+     *
+     * @type {Map<number, SentMessage[]>}
+     */
+    const inbox = new Map();
+    /** @type {Map<number, SentMessage[]>} */
+    const answered = new Map();
+    /**
+     * The threads that have a message queue: made a window, or looked at
+     * their queue. A thread's queue is made the first time it needs one.
+     *
+     * @type {Set<number>}
+     */
+    const queueing = new Set();
+    /** @param {unknown} thread */
+    const hasQueue = thread=>{
+        const id = threadIdOf(thread);
+        if (id !== null)
+        {
+            queueing.add(id);
+        }
+    };
+    /**
+     * The sent messages a thread's procedures are inside, innermost last:
+     * what InSendMessage and ReplyMessage answer about.
+     *
+     * @type {Map<number, SentMessage[]>}
+     */
+    const handling = new Map();
+
+    /** @param {Map<number, SentMessage[]>} map @param {number} thread */
+    const listOf = (map, thread)=>{
+        let list = map.get(thread);
+        if (!list)
+        {
+            list = [];
+            map.set(thread, list);
+        }
+        return list;
+    };
+
+    /**
+     * Answers a sent message, once: an answer ReplyMessage gave early is the
+     * one the sender reads, whatever the procedure returns after it.
+     *
+     * @param {SentMessage} sent @param {number} result
+     */
+    const reply = (sent, result)=>{
+        if (sent.replied)
+        {
+            return;
+        }
+        sent.replied = true;
+        sent.result = result;
+        if (sent.kind === ISMEX_CALLBACK && sent.from !== null)
+        {
+            listOf(answered, sent.from).push(sent);
+            host.queue.sent?.(sent.from);
+        }
+    };
+
+    /**
+     * Runs what other threads sent to this thread's windows, and the
+     * callbacks its own SendMessageCallback is owed: what every look at a
+     * thread's queue does before it looks for a posted message, and what a
+     * thread waiting on a send of its own keeps doing, or two threads
+     * sending to each other would each wait for ever.
+     *
+     * @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const receiveSent = thread=>{
+        const id = threadIdOf(thread);
+        if (id === null)
+        {
+            return 0;
+        }
+        const owed = answered.get(id)?.shift();
+        if (owed)
+        {
+            return andThen(host.call?.(owed.callback,
+                [owed.hwnd, owed.message, owed.data, owed.result], thread) ?? 0,
+            ()=>receiveSent(thread));
+        }
+        const sent = inbox.get(id)?.shift();
+        if (!sent)
+        {
+            return 0;
+        }
+        const inside = listOf(handling, id);
+        inside.push(sent);
+        return andThen(send(sent.hwnd, sent.message, sent.wParam, sent.lParam, thread,
+            sent.unicode), result=>{
+            inside.splice(inside.lastIndexOf(sent), 1);
+            reply(sent, result);
+            return receiveSent(thread);
+        });
+    };
+
+    /**
+     * SendMessage and its relatives as a program calls them: to a window of
+     * the caller's own thread the procedure runs now; to another thread's
+     * the message waits for that thread to take it, and SendMessage waits
+     * for the answer -- a notification and a message sent with a callback do
+     * not. A window whose thread is not known is its caller's.
+     *
+     * @param {number} hwnd @param {number} message @param {number} wParam
+     * @param {number} lParam @param {unknown} thread
+     * @param {boolean} [unicode]
+     * @param {{ kind?: number, timeout?: number, callback?: number, data?: number }} [how]
+     *     `timeout` in milliseconds, for SendMessageTimeout.
+     * @returns {number | Promise<number | null>} the answer; null when the
+     *     timeout passed first
+     */
+    const sendAcross = (hwnd, message, wParam, lParam, thread, unicode = false, how = {})=>{
+        const record = live(hwnd);
+        const owner = record ? creatorOf(record) : null;
+        const self = threadIdOf(thread);
+        if (!record || owner === null || self === null || owner === self)
+        {
+            return send(hwnd, message, wParam, lParam, thread, unicode);
+        }
+        /** @type {SentMessage} */
+        const sent = {
+            hwnd: record.hwnd, message: message >>> 0, wParam: wParam >>> 0,
+            lParam: lParam >>> 0, unicode, kind: how.kind ?? ISMEX_SEND, replied: false,
+            result: 0, from: self, callback: how.callback ?? 0, data: how.data ?? 0,
+        };
+        listOf(inbox, owner).push(sent);
+        host.queue.sent?.(owner);
+        if (sent.kind !== ISMEX_SEND)
+        {
+            return 1;
+        }
+        const clock = host.now ?? (()=>0);
+        const deadline = how.timeout === undefined ? Infinity : clock() + how.timeout;
+        return (async()=>{
+            while (!sent.replied)
+            {
+                // A window destroyed, or whose thread ended, answers nothing.
+                if (!live(sent.hwnd) || clock() >= deadline)
+                {
+                    const waiting = inbox.get(owner) ?? [];
+                    if (waiting.includes(sent))
+                    {
+                        waiting.splice(waiting.indexOf(sent), 1);
+                    }
+                    return live(sent.hwnd) ? null : 0;
+                }
+                await host.idle();
+                await receiveSent(thread);
+            }
+            return sent.result;
+        })();
     };
 
     /** @param {any} value @param {(answer: any) => any} then */
@@ -867,7 +1070,7 @@ export function createWindowFunctions(host){
         {
             desktop = {
                 hwnd: 0, className: '#32769', title: '', style: DESKTOP_STYLE, exStyle: 0,
-                parent: 0, instance: 0, id: 0, wndProc: 0, menu: 0, x: 0, y: 0,
+                parent: 0, owner: 0, instance: 0, id: 0, wndProc: 0, menu: 0, x: 0, y: 0,
                 width: 0, height: 0, userData: 0, extra: new DataView(new ArrayBuffer(0)),
                 destroyed: false, updateRect: null, erase: false, ncDirty: false,
             };
@@ -889,7 +1092,48 @@ export function createWindowFunctions(host){
             return desktop;
         }
         const record = windows.get(hwnd >>> 0);
-        return record && !record.destroyed ? record : null;
+        if (!record || record.destroyed)
+        {
+            return null;
+        }
+        if (record.thread?.state === 'terminated')
+        {
+            reap(record);
+            return null;
+        }
+        return record;
+    };
+
+    /**
+     * The thread that created a window, whose queue its messages wait in and
+     * whose loop its procedure runs on; null when the bridge named none.
+     *
+     * @param {any} record
+     * @returns {number | null}
+     */
+    const creatorOf = record=>threadIdOf(record.thread);
+
+    /**
+     * Takes down a window whose thread has ended, as Windows destroys a
+     * thread's windows with it, and its children with it. No procedure is
+     * told: the thread that would have run it is gone.
+     *
+     * @param {any} record
+     */
+    const reap = record=>{
+        for (const child of [...windows.values()])
+        {
+            if (!child.destroyed && child.parent === record.hwnd && isChild(child))
+            {
+                reap(child);
+            }
+        }
+        const covered = shown(record) ? geometry.windowRect(record) : null;
+        forget(record);
+        if (covered)
+        {
+            uncover(covered);
+        }
     };
 
     /** @param {any} record  Whether it is placed inside another window. */
@@ -907,17 +1151,16 @@ export function createWindowFunctions(host){
 
     /**
      * The top-level window at the end of a window's owner chain: the one whose
-     * popups GetLastActivePopup answers about. An owner is kept where a
-     * child keeps its parent, and a chain a program looped with SetParent
-     * ends where it comes round.
+     * popups GetLastActivePopup answers about. A chain a program looped with
+     * SetWindowLong ends where it comes round.
      *
      * @param {any} record
      */
     const rootOwnerOf = record=>{
         let at = topLevelOf(record);
         const seen = new Set([at]);
-        for (let owner = live(at.parent); owner && !seen.has(topLevelOf(owner));
-            owner = live(at.parent))
+        for (let owner = live(at.owner ?? 0); owner && !seen.has(topLevelOf(owner));
+            owner = live(at.owner ?? 0))
         {
             at = topLevelOf(owner);
             seen.add(at);
@@ -1087,7 +1330,53 @@ export function createWindowFunctions(host){
      *        WA_CLICKACTIVE when a click did it.
      * @returns {number | Promise<number>} once every procedure told has answered
      */
-    const activate = (hwnd, { thread, how = WA_ACTIVE } = {})=>{
+    const activate = (hwnd, options = {})=>{
+        const record = live(hwnd);
+        const target = record ? topLevelOf(record).hwnd : 0;
+        if (target === 0 || target === active)
+        {
+            return activateNow(hwnd, options);
+        }
+        // A CBT hook hears first, while the window losing activation is
+        // still the active one, and may forbid it.
+        return andThen(askActivate(target, options.how ?? WA_ACTIVE,
+            options.thread ?? host.callerThread?.()),
+        refused=>((refused | 0) !== 0 ? 0 : activateNow(hwnd, options)));
+    };
+
+    /**
+     * HCBT_ACTIVATE, whose lParam is a CBTACTIVATESTRUCT: whether a click
+     * did it, and the window active until now.
+     *
+     * @param {number} target @param {number} how @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const askActivate = (target, how, thread)=>{
+        if (chainOf(WH_CBT, thread).length === 0)
+        {
+            return 0;
+        }
+        const at = host.allocate?.(8) ?? 0;
+        if (at !== 0)
+        {
+            writeU32s(host, at, [how === WA_CLICKACTIVE ? 1 : 0, active]);
+        }
+        return andThen(callHook(WH_CBT, null, [HCBT_ACTIVATE, target, at], thread), answer=>{
+            if (at !== 0)
+            {
+                host.release?.(at);
+            }
+            return answer;
+        });
+    };
+
+    /**
+     * The activation itself, once nothing has forbidden it.
+     *
+     * @param {number} hwnd @param {{ thread?: unknown, how?: number }} options
+     * @returns {number | Promise<number>}
+     */
+    const activateNow = (hwnd, { thread, how = WA_ACTIVE })=>{
         const record = live(hwnd);
         const previous = active;
         active = record ? topLevelOf(record).hwnd : 0;
@@ -1137,14 +1426,6 @@ export function createWindowFunctions(host){
         {
             told.push([gained, WM_NCACTIVATE, 1, 0], [gained, WM_ACTIVATE, how, previous]);
         }
-        if (moved)
-        {
-            if (current !== 0)
-            {
-                told.push([current, WM_KILLFOCUS, gained, 0]);
-            }
-            told.push([gained, WM_SETFOCUS, current, 0]);
-        }
         /** @param {number} index @returns {number | Promise<number>} */
         const tell = index=>{
             if (index >= told.length)
@@ -1155,7 +1436,23 @@ export function createWindowFunctions(host){
             return andThen(live(target) ? send(target, message, wParam, lParam, thread) : 0,
                 ()=>tell(index + 1));
         };
-        return tell(0);
+        if (!moved)
+        {
+            return tell(0);
+        }
+        // The focus follows as SetFocus moves it, a CBT hook first: one that
+        // forbids it leaves the focus where it was.
+        return andThen(tell(0), ()=>andThen(askCbt(HCBT_SETFOCUS, gained, current,
+            thread ?? host.callerThread?.()), refused=>{
+            if ((refused | 0) !== 0)
+            {
+                focus = current;
+                return 0;
+            }
+            return andThen(current !== 0 && live(current)
+                ? send(current, WM_KILLFOCUS, gained, 0, thread) : 0,
+            ()=>(live(gained) ? send(gained, WM_SETFOCUS, current, 0, thread) : 0));
+        }));
     };
 
     /**
@@ -1185,14 +1482,22 @@ export function createWindowFunctions(host){
         {
             return previous;
         }
-        focus = target;
-        // Activation is told first, then the focus: a window gaining both
-        // hears WM_ACTIVATE before WM_SETFOCUS.
-        const activated = target !== 0 ? activate(target, { thread }) : 0;
-        return andThen(activated, ()=>
-            andThen(previous !== 0 ? send(previous, WM_KILLFOCUS, target, 0, thread) : 0,
-                ()=>andThen(target !== 0 ? send(target, WM_SETFOCUS, previous, 0, thread) : 0,
-                    ()=>previous)));
+        const on = thread ?? host.callerThread?.();
+        // A CBT hook hears first, and may forbid it: then nothing moves.
+        return andThen(askCbt(HCBT_SETFOCUS, target, previous, on), refused=>{
+            if ((refused | 0) !== 0)
+            {
+                return 0;
+            }
+            focus = target;
+            // Activation is told first, then the focus: a window gaining both
+            // hears WM_ACTIVATE before WM_SETFOCUS.
+            const activated = target !== 0 ? activate(target, { thread: on }) : 0;
+            return andThen(activated, ()=>
+                andThen(previous !== 0 ? send(previous, WM_KILLFOCUS, target, 0, on) : 0,
+                    ()=>andThen(target !== 0 ? send(target, WM_SETFOCUS, previous, 0, on) : 0,
+                        ()=>previous)));
+        });
     };
 
     /** The window that has the mouse, or zero. */
@@ -1320,8 +1625,10 @@ export function createWindowFunctions(host){
             ? send(record.hwnd, message, 0, 0, on)
             : 0);
         return andThen(tell(WM_DESTROY), ()=>{
-            const children = [...windows.values()]
-                .filter(child=>child.parent === record.hwnd && !child.destroyed);
+            // Its children and the windows it owns go with it.
+            const children = [...windows.values()].filter(child=>child !== record
+                && !child.destroyed
+                && (child.parent === record.hwnd || child.owner === record.hwnd));
             /** @param {number} index @returns {number | Promise<number>} */
             const destroyChildren = index=>(index < children.length
                 ? andThen(destroyWindow(children[index].hwnd, on, told),
@@ -1329,37 +1636,7 @@ export function createWindowFunctions(host){
                 : 1);
             return andThen(destroyChildren(0),
                 ()=>andThen(tell(WM_NCDESTROY), ()=>{
-                    record.destroyed = true;
-                    // A dialog's font is the dialog manager's, made from its
-                    // template, and goes with the dialog.
-                    if (record.dialogFont)
-                    {
-                        draw?.deleteFont?.(record.dialogFont);
-                    }
-                    host.handles.close(record.hwnd);
-                    if (active === record.hwnd)
-                    {
-                        active = 0;
-                    }
-                    if (focus === record.hwnd)
-                    {
-                        focus = 0;
-                    }
-                    if (captured === record.hwnd)
-                    {
-                        captured = 0;
-                    }
-                    if (tracking?.hwnd === record.hwnd)
-                    {
-                        stopTracking();
-                    }
-                    // Its menu goes with it, as DestroyWindow is documented
-                    // to destroy it; one a program took back with SetMenu is
-                    // its own again.
-                    if ((record.menu ?? 0) !== 0)
-                    {
-                        table.DestroyMenu.handler([record.menu]);
-                    }
+                    forget(record);
                     if (covered)
                     {
                         uncover(covered);
@@ -1367,6 +1644,67 @@ export function createWindowFunctions(host){
                     return 1;
                 }));
         });
+    };
+
+    /**
+     * DestroyWindow as a program calls it: a CBT hook hears first, and one
+     * that answers non-zero keeps the window.
+     *
+     * @param {number} hwnd @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const destroyAsked = (hwnd, thread)=>{
+        const record = live(hwnd);
+        if (!record || record === desktop)
+        {
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+            return 0;
+        }
+        const on = thread ?? host.callerThread?.();
+        return andThen(askCbt(HCBT_DESTROYWND, record.hwnd, 0, on),
+            refused=>((refused | 0) !== 0 ? 0 : destroyWindow(record.hwnd, on)));
+    };
+
+    /**
+     * The end of a window, once its procedure has heard the last it will:
+     * the handle stops resolving, and nothing it held is left behind.
+     *
+     * @param {any} record
+     */
+    const forget = record=>{
+        host.queue.purge(record.hwnd);
+        host.queue.killTimersFor?.(record.hwnd);
+        host.queue.unregisterHotKeysFor?.(record.hwnd);
+        record.destroyed = true;
+        // A dialog's font is the dialog manager's, made from its template,
+        // and goes with the dialog.
+        if (record.dialogFont)
+        {
+            draw?.deleteFont?.(record.dialogFont);
+        }
+        host.handles.close(record.hwnd);
+        if (active === record.hwnd)
+        {
+            active = 0;
+        }
+        if (focus === record.hwnd)
+        {
+            focus = 0;
+        }
+        if (captured === record.hwnd)
+        {
+            captured = 0;
+        }
+        if (tracking?.hwnd === record.hwnd)
+        {
+            stopTracking();
+        }
+        // Its menu goes with it, as DestroyWindow is documented to destroy
+        // it; one a program took back with SetMenu is its own again.
+        if ((record.menu ?? 0) !== 0)
+        {
+            table.DestroyMenu.handler([record.menu]);
+        }
     };
 
     /** @param {any} record @param {number} index */
@@ -1377,7 +1715,8 @@ export function createWindowFunctions(host){
             case GWL_HINSTANCE:
                 return record.instance;
             case GWL_HWNDPARENT:
-                return record.parent;
+                // The parent, or for a window on the desktop its owner.
+                return record.parent !== 0 ? record.parent : record.owner ?? 0;
             case GWL_ID:
                 return record.id;
             case GWL_STYLE:
@@ -1407,7 +1746,16 @@ export function createWindowFunctions(host){
                 record.unicode = unicode;
                 return;
             case GWL_HWNDPARENT:
-                record.parent = value >>> 0;
+                // A window on the desktop is given an owner this way; any
+                // other is moved to another parent.
+                if (record.parent === 0)
+                {
+                    record.owner = value >>> 0;
+                }
+                else
+                {
+                    record.parent = value >>> 0;
+                }
                 return;
             case GWL_ID:
                 record.id = value >>> 0;
@@ -1517,36 +1865,64 @@ export function createWindowFunctions(host){
      * installs one for -- to attach its own object to the window before the
      * window's procedure runs.
      *
-     * ponytail: a hook's thread is recorded and not consulted -- every hook of
-     * a type is called whichever thread creates the window. Per-thread
-     * delivery when a program is seen to hook one thread and create on another.
+     * A hook set for one thread hears what happens on that thread alone; one
+     * set for none -- a global hook -- hears every thread of the process. A
+     * chain on a thread is its own hooks, newest first, and after them the
+     * global ones, newest first: the last of a thread's own passes on to the
+     * newest global hook.
      *
      * @type {{ handle: number, type: number, proc: number, thread: number }[]}
      */
     const hooks = [];
 
     /**
-     * Calls the newest hook of a type, or the one older than `after`.
+     * Whether a hook hears what a thread does. A caller the bridge names
+     * without an identifier is a build with no scheduler, and its one
+     * thread is every thread.
      *
-     * @param {number} type @param {number | null} after  A hook handle, or null for the newest.
+     * @param {{ thread: number }} hook @param {unknown} thread
+     */
+    const hears = (hook, thread)=>{
+        const id = threadIdOf(thread);
+        return hook.thread === 0 || id === null || hook.thread === id;
+    };
+
+    /**
+     * A thread's chain of hooks of a type, in the order they are called.
+     *
+     * @param {number} type @param {unknown} thread
+     */
+    const chainOf = (type, thread)=>{
+        const heard = hooks.filter(hook=>hook.type === type && hears(hook, thread)).reverse();
+        return [...heard.filter(hook=>hook.thread !== 0), ...heard.filter(hook=>hook.thread === 0)];
+    };
+
+    /**
+     * Calls the first hook of a thread's chain of a type, or the one after `after`.
+     *
+     * @param {number} type @param {number | null} after  A hook handle, or null for the first.
      * @param {number[]} args @param {unknown} thread
      * @returns {number | Promise<number>} what the hook answered; 0 with none to call.
      */
     const callHook = (type, after, args, thread)=>{
-        let from = hooks.length - 1;
-        if (after !== null)
-        {
-            from = hooks.findIndex(hook=>hook.handle === after) - 1;
-        }
-        for (let at = from; at >= 0; at--)
-        {
-            if (hooks[at].type === type && host.call)
-            {
-                return host.call(hooks[at].proc, args, thread);
-            }
-        }
-        return 0;
+        const chain = chainOf(type, thread);
+        // A hook not in this thread's chain has nothing after it here.
+        const next = after === null ? chain[0] : chain.findIndex(hook=>hook.handle === after) < 0
+            ? undefined : chain[chain.findIndex(hook=>hook.handle === after) + 1];
+        return next && host.call ? host.call(next.proc, args, thread) : 0;
     };
+
+    /**
+     * Asks a thread's CBT hooks about what is about to happen to a window;
+     * an answer other than zero forbids it. A thread with no CBT hook is
+     * asked nothing, and nothing waits.
+     *
+     * @param {number} code @param {number} wParam @param {number} lParam
+     * @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const askCbt = (code, wParam, lParam, thread)=>(chainOf(WH_CBT, thread).length === 0 ? 0
+        : callHook(WH_CBT, null, [code, wParam >>> 0, lParam >>> 0], thread));
 
     /**
      * A window record and the handle that names it, with everything a window
@@ -1584,8 +1960,26 @@ export function createWindowFunctions(host){
             updateRect: null,
             erase: false,
             ncDirty: false,
+            // The thread whose call made it: its messages wait in that
+            // thread's queue, and it ends with that thread.
+            thread: host.callerThread?.() ?? null,
             ...fields,
         };
+        // hWndParent names the parent of a child window and the owner of any
+        // other, which sits on the desktop: the top-level window of what it
+        // names, since only a top-level window owns another. A message-only
+        // window keeps the parent that makes it one.
+        if (record.owner === undefined)
+        {
+            record.owner = 0;
+            if ((record.style & (WS_CHILD | WS_POPUP)) !== WS_CHILD && record.parent !== 0
+                && record.parent !== HWND_MESSAGE)
+            {
+                const named = windows.get(record.parent);
+                record.owner = named && !named.destroyed ? topLevelOf(named).hwnd : 0;
+                record.parent = 0;
+            }
+        }
         // A system class supplies the procedure and the name a program reads
         // back: `#128` in a template is the Button class.
         const system = systemClasses.has(String(record.className).toLowerCase())
@@ -1601,6 +1995,7 @@ export function createWindowFunctions(host){
         }
         record.hwnd = host.handles.open('window', record);
         windows.set(record.hwnd, record);
+        hasQueue(record.thread);
         if ((record.style & WS_VISIBLE) !== 0)
         {
             appear(record);
@@ -1638,6 +2033,12 @@ export function createWindowFunctions(host){
         const cls = classOf(className, unicode);
         if (!cls)
         {
+            return 0;
+        }
+        // A child needs something to be inside.
+        if ((style & (WS_CHILD | WS_POPUP)) === WS_CHILD && (parent >>> 0) === 0)
+        {
+            host.setLastError?.(ERROR_TLW_WITH_WSCHILD);
             return 0;
         }
         const record = makeWindow({
@@ -1719,7 +2120,7 @@ export function createWindowFunctions(host){
         const systemProcedure = ()=>record.wndProc === 0 || procedures.has(record.wndProc);
         // A CBT hook hears of every window, a system class's too: a framework
         // subclasses a dialog there, and the messages that follow go to it.
-        const hooked = hooks.some(hook=>hook.type === WH_CBT);
+        const hooked = hooks.some(hook=>hook.type === WH_CBT && hears(hook, thread));
         if (systemProcedure() && !hooked)
         {
             return onThisSide();
@@ -1773,8 +2174,13 @@ export function createWindowFunctions(host){
         // framework attaches its object to the window here and subclasses the
         // procedure, so the messages that follow reach the framework and not
         // the class. A hook that answers non-zero refuses the window.
-        const cbt = callHook(WH_CBT, null,
-            [HCBT_CREATEWND, record.hwnd, create + CREATESTRUCTA.SIZE], thread);
+        // Not yet among its siblings while the hook decides whether it may be.
+        record.unlinked = true;
+        const cbt = andThen(callHook(WH_CBT, null,
+            [HCBT_CREATEWND, record.hwnd, create + CREATESTRUCTA.SIZE], thread), answer=>{
+            delete record.unlinked;
+            return answer;
+        });
         /** @returns {number | Promise<number>} */
         const refuse = ()=>andThen(destroyWindow(record.hwnd, thread, 'ncdestroy'), ()=>done(0));
         return andThen(cbt, refused=>{
@@ -1877,7 +2283,7 @@ export function createWindowFunctions(host){
         {
             return;
         }
-        host.queue.dirtied?.();
+        host.queue.dirtied?.(creatorOf(record));
         const origin = geometry.clientRect(record);
         const dirty = {
             left: origin.left + record.updateRect.left,
@@ -2668,7 +3074,7 @@ export function createWindowFunctions(host){
             || (kind >= filter.first && kind <= filter.last);
         /** @returns {any} */
         const walk = ()=>{
-            for (const entry of host.queue.queued())
+            for (const entry of host.queue.queued(filter.thread ?? threadIdOf(thread)))
             {
                 const kind = entry.message >>> 0;
                 const client = kind >= WM_MOUSEMOVE ? kind : kind - WM_NCMOUSEMOVE + WM_MOUSEMOVE;
@@ -2698,7 +3104,8 @@ export function createWindowFunctions(host){
      * @returns {any}
      */
     const takeThrough = (filter, thread)=>andThen(placeWaiting(filter, thread), ()=>{
-        const entry = host.queue.peek(filter);
+        const entry = host.queue.peek(filter.thread === undefined
+            ? { ...filter, thread: threadIdOf(thread) } : filter);
         if (!entry)
         {
             return null;
@@ -2752,7 +3159,7 @@ export function createWindowFunctions(host){
                 return 1;
             }
             case WM_CLOSE:
-                return andThen(destroyWindow(record.hwnd, thread), ()=>0);
+                return andThen(destroyAsked(record.hwnd, thread), ()=>0);
             // Validates the window: a procedure that hands WM_PAINT here has
             // nothing to draw, and the area has to be cleared or the same
             // paint is retrieved for ever. The frame and background still
@@ -2780,11 +3187,15 @@ export function createWindowFunctions(host){
                 return 0;
             }
             case WM_SYSCOMMAND:
-                if ((message.wParam & 0xfff0) === SC_CLOSE)
-                {
-                    return send(record.hwnd, WM_CLOSE, 0, 0, thread);
-                }
-                return 0;
+                // A CBT hook hears the command before it is carried out.
+                return andThen(askCbt(HCBT_SYSCOMMAND, message.wParam, message.lParam,
+                    thread ?? host.callerThread?.()), refused=>{
+                    if ((refused | 0) === 0 && (message.wParam & 0xfff0) === SC_CLOSE)
+                    {
+                        return send(record.hwnd, WM_CLOSE, 0, 0, thread);
+                    }
+                    return 0;
+                });
             case WM_SETCURSOR: {
                 // The parent decides first -- a dialog chooses for its
                 // controls -- except on a sizing border, which is the
@@ -3102,11 +3513,21 @@ export function createWindowFunctions(host){
     // retrieval rather than posted, because that is what keeps a hundred
     // invalidations one paint. Nothing left to paint is the end of a pass,
     // and the moment the desktop is shown.
+    host.queue.sendsFrom?.(thread=>(inbox.get(thread)?.length ?? 0) > 0
+        || (answered.get(thread)?.length ?? 0) > 0);
+
+    host.queue.ownersFrom?.(hwnd=>{
+        const record = live(hwnd);
+        return record ? creatorOf(record) : null;
+    });
+
     host.queue.paintsFrom?.(filter=>{
+        const asking = filter.thread ?? null;
         for (const record of paintOrder())
         {
             if (record.updateRect && shown(record)
-                && (filter.hwnd === ANY_WINDOW || filter.hwnd === record.hwnd))
+                && (filter.hwnd === ANY_WINDOW || filter.hwnd === record.hwnd)
+                && (asking === null || creatorOf(record) === null || creatorOf(record) === asking))
             {
                 return record.hwnd;
             }
@@ -3181,7 +3602,8 @@ export function createWindowFunctions(host){
                 visible: (record.style & WS_VISIBLE) !== 0,
                 className: record.className,
                 title: record.title,
-                parent: record.parent ? `0x${record.parent.toString(16)}` : null,
+                parent: record.parent || record.owner
+                    ? `0x${(record.parent || record.owner).toString(16)}` : null,
                 // Inside its parent, as against owned by it: a top-level
                 // window with an owner is still over everything below it.
                 child: isChild(record),
@@ -3246,6 +3668,23 @@ export function createWindowFunctions(host){
      * @param {any} record @param {number} cmdShow
      */
     const showWindow = (record, cmdShow)=>{
+        const minimised = (record.style & WS_MINIMIZE) !== 0;
+        if ((MINIMISING.has(cmdShow) && !minimised) || (RESTORING.has(cmdShow) && minimised))
+        {
+            // Minimising and restoring are a CBT hook's to forbid; the window
+            // is still shown as asked, in the state it had.
+            return andThen(askCbt(HCBT_MINMAX, record.hwnd, cmdShow, host.callerThread?.()),
+                refused=>showNow(record, cmdShow, (refused | 0) !== 0));
+        }
+        return showNow(record, cmdShow, false);
+    };
+
+    /**
+     * @param {any} record @param {number} cmdShow
+     * @param {boolean} keepState  Whether a hook forbade minimising or restoring.
+     * @returns {number | Promise<number>}
+     */
+    const showNow = (record, cmdShow, keepState)=>{
         const wasVisible = (record.style & WS_VISIBLE) !== 0;
         const hide = cmdShow === SW_HIDE;
         const covered = wasVisible && hide && shown(record)
@@ -3270,11 +3709,11 @@ export function createWindowFunctions(host){
         // Minimised is a state IsIconic reads back and a restore clears; the
         // window keeps its place in the picture, there being no taskbar to
         // shrink to.
-        if (MINIMISING.has(cmdShow))
+        if (!keepState && MINIMISING.has(cmdShow))
         {
             record.style = (record.style | WS_MINIMIZE) >>> 0;
         }
-        else if (!hide)
+        else if (!keepState && !hide)
         {
             record.style = (record.style & ~WS_MINIMIZE) >>> 0;
         }
@@ -3335,8 +3774,61 @@ export function createWindowFunctions(host){
         {
             return 0;
         }
-        host.queue.post({ hwnd: target, message, wParam, lParam, ...unicode ? { unicode } : {} });
+        // No window is a message for the poster's own thread, as
+        // PostThreadMessage to itself would post it.
+        host.queue.post({ hwnd: target, message, wParam, lParam, ...unicode ? { unicode } : {},
+            ...target === 0 ? { thread: threadIdOf(host.callerThread?.()) } : {} });
         return 1;
+    };
+
+    /**
+     * SendNotifyMessage, in either encoding.
+     *
+     * @param {number[]} args  hWnd, Msg, wParam, lParam.
+     * @param {boolean} unicode
+     */
+    const notify = ([hwnd, message, wParam, lParam], unicode)=>{
+        if (!live(hwnd))
+        {
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+            return 0;
+        }
+        return andThen(sendAcross(hwnd, message, wParam, lParam, host.callerThread?.(), unicode,
+            { kind: ISMEX_NOTIFY }), ()=>1);
+    };
+
+    /**
+     * SendMessageCallback, in either encoding.
+     *
+     * @param {number[]} args  hWnd, Msg, wParam, lParam, lpResultCallBack, dwData.
+     * @param {boolean} unicode
+     */
+    const sendWithCallback = ([hwnd, message, wParam, lParam, callback, data], unicode)=>{
+        const record = live(hwnd);
+        if (!record)
+        {
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+            return 0;
+        }
+        const thread = host.callerThread?.();
+        const owner = creatorOf(record);
+        const self = threadIdOf(thread);
+        if (owner !== null && self !== null && owner !== self)
+        {
+            return sendAcross(hwnd, message, wParam, lParam, thread, unicode,
+                { kind: ISMEX_CALLBACK, callback: callback >>> 0, data: data >>> 0 });
+        }
+        return andThen(send(hwnd, message, wParam, lParam, thread, unicode), result=>
+            andThen((callback >>> 0) !== 0 && host.call
+                ? host.call(callback >>> 0, [record.hwnd, message >>> 0, data >>> 0, result],
+                    thread)
+                : 0, ()=>1));
+    };
+
+    /** The sent message the caller's procedure is handling, innermost, or null. */
+    const inSend = ()=>{
+        const id = threadIdOf(host.callerThread?.());
+        return id === null ? null : handling.get(id)?.at(-1) ?? null;
     };
 
     /**
@@ -3353,7 +3845,8 @@ export function createWindowFunctions(host){
             host.setLastError?.(ERROR_INVALID_THREAD_ID);
             return 0;
         }
-        host.queue.post({ hwnd: 0, message, wParam, lParam, ...unicode ? { unicode } : {} });
+        host.queue.post({ hwnd: 0, message, wParam, lParam, thread: id,
+            ...unicode ? { unicode } : {} });
         return 1;
     };
 
@@ -3365,13 +3858,15 @@ export function createWindowFunctions(host){
      */
     const peekMessage = ([out, hwnd, filterMin, filterMax, removeFlag], unicode)=>{
         const remove = (removeFlag & PM_REMOVE) !== 0;
-        const filter = { hwnd: windowFilter(hwnd), first: filterMin >>> 0,
-            last: filterMax >>> 0, remove };
         const thread = host.callerThread?.();
+        hasQueue(thread);
+        const filter = { hwnd: windowFilter(hwnd), first: filterMin >>> 0,
+            last: filterMax >>> 0, remove, thread: threadIdOf(thread) };
         // Only a message taken activates: a look leaves the press,
         // and the activation, for the call that takes it.
-        const entry = remove ? takeThrough(filter, thread)
-            : andThen(placeWaiting(filter, thread), ()=>host.queue.peek(filter));
+        // What other threads sent is handled before anything posted is looked for.
+        const entry = andThen(receiveSent(thread), ()=>(remove ? takeThrough(filter, thread)
+            : andThen(placeWaiting(filter, thread), ()=>host.queue.peek(filter))));
         return andThen(entry, (/** @type {any} */ taken)=>{
             if (!taken)
             {
@@ -3400,10 +3895,11 @@ export function createWindowFunctions(host){
             host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
             return -1;
         }
-        const wanted = { hwnd: filter, first: filterMin >>> 0, last: filterMax >>> 0,
-            remove: true };
         const thread = host.callerThread?.();
-        const next = ()=>takeThrough(wanted, thread);
+        hasQueue(thread);
+        const wanted = { hwnd: filter, first: filterMin >>> 0, last: filterMax >>> 0,
+            remove: true, thread: threadIdOf(thread) };
+        const next = ()=>andThen(receiveSent(thread), ()=>takeThrough(wanted, thread));
         /** @param {any} entry */
         const answer = entry=>{
             writeMessage(host, out, retrieved(entry, unicode));
@@ -3440,7 +3936,8 @@ export function createWindowFunctions(host){
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, active: activeWindow, activate,
                 capture: ()=>captured, setCapture, releaseCapture,
-                send, callProcedure, geometry, windowFromPoint, askedFromPoint, isChild, repaint,
+                send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
+                isChild, repaint,
                 appear, uncover,
                 shown, raise, restack, desktop: desktopWindow,
                 isDesktop: (/** @type {any} */ record)=>record !== null && record === desktop,
@@ -3454,7 +3951,7 @@ export function createWindowFunctions(host){
                  * @param {any} record
                  */
                 lastActivePopup: record=>{
-                    if (isChild(record) || live(record.parent))
+                    if (isChild(record) || live(record.owner ?? 0))
                     {
                         return record.hwnd;
                     }
@@ -3463,6 +3960,11 @@ export function createWindowFunctions(host){
             }),
             live, windows, classes,
         }),
+        ...createDesktopFunctions({ host,
+            topLevel: ()=>[...windows.values()]
+                .filter(record=>!record.destroyed && !isChild(record))
+                .reverse()
+                .map(record=>record.hwnd) }),
         ...createObjectFunctions({ host, live,
             clipboardService: service=>{
                 clipboardAccess = service;
@@ -3490,7 +3992,8 @@ export function createWindowFunctions(host){
         }),
         ...createDialogFunctions({
             host: Object.assign(Object.create(host), {
-                focus: focusWindow, setFocus, send, callProcedure, geometry, children: childrenOf,
+                focus: focusWindow, setFocus, send, sendAcross, callProcedure, geometry,
+                children: childrenOf,
                 defDlgProc: controls.helpers.dialogProc, markDefault: controls.helpers.markDefault,
                 keyDown: (/** @type {number} */ key)=>
                     ((host.keyState?.(key) ?? 0) & 0x8000) !== 0,
@@ -3759,7 +4262,7 @@ export function createWindowFunctions(host){
         DestroyWindow: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>destroyWindow(hwnd),
+            handler: ([hwnd])=>destroyAsked(hwnd),
         },
 
         /** BOOL ShowWindow(HWND hWnd, int nCmdShow) */
@@ -4092,6 +4595,34 @@ export function createWindowFunctions(host){
             },
         },
 
+        /**
+         * BOOL AttachThreadInput(DWORD idAttach, DWORD idAttachTo, BOOL fAttach)
+         *
+         * Joins two threads' input state, or parts them. The focus, the active
+         * window and the capture are one for the whole process here, which is
+         * every thread already attached to every other, so what is left is
+         * the refusal: a thread attached to itself, one that does not exist,
+         * or one that has no message queue yet -- no window made, no look at
+         * a queue -- is ERROR_INVALID_PARAMETER.
+         */
+        AttachThreadInput: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([from, to])=>{
+                const one = from >>> 0;
+                const other = to >>> 0;
+                const exists = (/** @type {number} */ id)=>(host.threadExists
+                    ? host.threadExists(id) : id !== 0);
+                if (one === other || !exists(one) || !exists(other)
+                    || !queueing.has(one) || !queueing.has(other))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
         /** BOOL PostMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) */
         PostMessageA: {
             argBytes: 16,
@@ -4114,25 +4645,100 @@ export function createWindowFunctions(host){
         /**
          * BOOL SendNotifyMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
          *
-         * Like SendMessage to another thread's window and like PostMessage to
-         * one's own: it does not wait for the window procedure to answer. There
-         * is one message loop here, so it posts and returns at once -- the
-         * window sees the message when it next pumps, which is what a sender
-         * that did not want to block asked for. Declared with its four
-         * arguments so an installer that fires one off does not lose four bytes
-         * of stack to it.
+         * SendMessage to a window of the caller's own thread, whose procedure
+         * has answered by the time this returns; to another thread's, a sent
+         * message that thread takes on its next look at its queue, without
+         * the caller waiting for the answer.
          */
         SendNotifyMessageA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: args=>postTo(args, false),
+            handler: args=>notify(args, false),
         },
 
         /** BOOL SendNotifyMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) */
         SendNotifyMessageW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: args=>postTo(args, true),
+            handler: args=>notify(args, true),
+        },
+
+        /**
+         * BOOL SendMessageCallbackA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam,
+         *     SENDASYNCPROC lpResultCallBack, ULONG_PTR dwData)
+         *
+         * A send that does not wait: the callback is handed the answer --
+         * at once for a window of the caller's own thread, and for another
+         * thread's once it has answered and the caller next looks at its
+         * own queue.
+         */
+        SendMessageCallbackA: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>sendWithCallback(args, false),
+        },
+
+        /** BOOL SendMessageCallbackW(...), with wide text in the message. */
+        SendMessageCallbackW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>sendWithCallback(args, true),
+        },
+
+        /**
+         * BOOL InSendMessage(void)
+         *
+         * Whether the procedure running is handling a message another thread
+         * sent, as against one this thread sent itself or took from its
+         * queue.
+         */
+        InSendMessage: {
+            argBytes: 0,
+            handler: ()=>(inSend() ? 1 : 0),
+        },
+
+        /**
+         * DWORD InSendMessageEx(LPVOID lpReserved)
+         *
+         * How that message was sent -- ISMEX_SEND, ISMEX_NOTIFY or
+         * ISMEX_CALLBACK, with ISMEX_REPLIED once ReplyMessage has answered
+         * it -- or ISMEX_NOSEND.
+         */
+        InSendMessageEx: {
+            argBytes: 4,
+            handler: ()=>{
+                const sent = inSend();
+                if (!sent)
+                {
+                    return ISMEX_NOSEND;
+                }
+                return sent.kind | (sent.replied && sent.kind !== ISMEX_NOTIFY ? ISMEX_REPLIED : 0);
+            },
+        },
+
+        /**
+         * BOOL ReplyMessage(LRESULT lResult)
+         *
+         * Answers a message another thread sent before its procedure has
+         * finished, so the sender goes on. FALSE when the procedure is not
+         * handling one; a notification has nobody waiting, and is not marked
+         * as answered.
+         */
+        ReplyMessage: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([result])=>{
+                const sent = inSend();
+                if (!sent)
+                {
+                    return 0;
+                }
+                if (sent.kind !== ISMEX_NOTIFY)
+                {
+                    reply(sent, result);
+                }
+                return 1;
+            },
         },
 
         /**
@@ -4181,7 +4787,9 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([flags])=>{
                 const mask = flags >>> 0;
-                const { inQueue, changed } = host.queue.status();
+                hasQueue(host.callerThread?.());
+                const { inQueue, changed } = host.queue.status(
+                    threadIdOf(host.callerThread?.()), mask);
                 return (((inQueue & mask) << 16) | (changed & mask)) >>> 0;
             },
         },
@@ -4191,7 +4799,7 @@ export function createWindowFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([code])=>{
-                host.queue.postQuit(code | 0);
+                host.queue.postQuit(code | 0, threadIdOf(host.callerThread?.()));
                 return 0; // void: the guest reads nothing back
             },
         },
@@ -4261,8 +4869,10 @@ export function createWindowFunctions(host){
                 const total = count >>> 0;
                 const wait = timeout >>> 0;
                 const mask = wakeMask >>> 0;
-                const input = ()=>((inputAvailable ? host.queue.waiting() : host.queue.news())
-                    & mask) !== 0;
+                const waiter = threadIdOf(host.callerThread?.());
+                hasQueue(host.callerThread?.());
+                const input = ()=>((inputAvailable
+                    ? host.queue.waiting(waiter) : host.queue.news(waiter)) & mask) !== 0;
                 /** @param {number} milliseconds */
                 const askHandles = milliseconds=>{
                     if (total === 0)
@@ -4342,16 +4952,20 @@ export function createWindowFunctions(host){
          * BOOL WaitMessage(void)
          *
          * Yields until the queue has something to retrieve -- a posted
-         * message, a window to paint, a due timer, a quit -- and answers
-         * without taking it. A pump written as peek-then-wait spins without
-         * this, which from outside is a program at full speed doing nothing.
+         * message, a window to paint, a due timer, a quit, a message another
+         * thread sent -- and answers without taking it. A pump written as
+         * peek-then-wait spins without this, which from outside is a program
+         * at full speed doing nothing.
          */
         WaitMessage: {
             argBytes: 0,
             handler: ()=>{
-                const look = ()=>host.queue.peek({
-                    hwnd: ANY_WINDOW, first: 0, last: 0, remove: false,
-                });
+                const waiter = threadIdOf(host.callerThread?.());
+                hasQueue(host.callerThread?.());
+                const look = ()=>(waiter !== null && (inbox.get(waiter)?.length ?? 0) > 0)
+                    || host.queue.peek({
+                        hwnd: ANY_WINDOW, first: 0, last: 0, remove: false, thread: waiter,
+                    });
                 if (look())
                 {
                     return 1;

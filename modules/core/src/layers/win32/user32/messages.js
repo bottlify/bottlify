@@ -5,12 +5,19 @@
  */
 
 /**
- * The thread's message queue.
+ * The threads' message queues.
  *
  * It is its own thing rather than a field of the window table because it is the
  * seam the outside world posts through: a keystroke and a mouse move come from
  * the input layer, not from a window operation, and both arrive here as
  * ordinary posts.
+ *
+ * Every thread has a queue of its own, as on Windows: a message posted to a
+ * window waits for the thread that created the window, one posted to a thread
+ * for that thread, and a retrieval sees its own thread's alone. They are kept
+ * as one list, each entry naming its thread, because the order messages were
+ * posted in is what a retrieval walks, and the input layer's posts name no
+ * window until they are routed.
  *
  * WM_QUIT is deliberately not a queued message. PostQuitMessage sets a flag,
  * and the flag only becomes a message once the queue has nothing else to give,
@@ -38,6 +45,18 @@ export const WM_MOUSEMOVE = 0x0200;
 export const ANY_WINDOW = null;
 
 /**
+ * The identifier of a thread the bridge named, or null for one that carries
+ * none: a build with no scheduler, whose one caller is then every thread.
+ *
+ * @param {unknown} thread
+ * @returns {number | null}
+ */
+export const threadIdOf = thread=>{
+    const id = /** @type {{ id?: unknown } | null | undefined} */ (thread)?.id;
+    return typeof id === 'number' ? id >>> 0 : null;
+};
+
+/**
  * @typedef {Object} PostedMessage
  * @property {number} hwnd        Zero for a message that belongs to the thread.
  * @property {number} message
@@ -47,6 +66,9 @@ export const ANY_WINDOW = null;
  * @property {number} [x]         Cursor position, for messages that carry one.
  * @property {number} [y]
  * @property {boolean} [unicode]  Posted by a wide caller, so a character is a UTF-16 unit.
+ * @property {number | null} [thread]  The thread whose queue it goes to, for a
+ *     message with no window; null for whichever thread looks first. Left out,
+ *     a window's message goes to the thread that created the window.
  */
 
 /**
@@ -55,6 +77,8 @@ export const ANY_WINDOW = null;
  * @property {number} first        Lowest message accepted; 0 with `last` means all.
  * @property {number} last
  * @property {boolean} remove      Whether retrieving it takes it out of the queue.
+ * @property {number | null} [thread]  Whose queue is looked in; null for every
+ *     thread's. Left out, the queue of the thread running.
  */
 
 /** WM_TIMER, which is synthesised rather than queued -- see `timers` below. */
@@ -72,6 +96,7 @@ export const QS_MOUSEBUTTON = 0x0004;
 export const QS_POSTMESSAGE = 0x0008;
 export const QS_TIMER = 0x0010;
 export const QS_PAINT = 0x0020;
+export const QS_SENDMESSAGE = 0x0040;
 export const QS_HOTKEY = 0x0080;
 export const QS_ALLPOSTMESSAGE = 0x0100;
 export const QS_RAWINPUT = 0x0400;
@@ -173,32 +198,106 @@ const classOf = message=>{
  */
 export function createMessageQueue(options = {}){
     const { now = ()=>0, keyState = ()=>0, currentThread = ()=>null } = options;
-    /** @type {import('./structs.js').MessageFields[]} */
+    /** @type {(import('./structs.js').MessageFields & { unicode?: boolean })[]} */
     const pending = [];
-    /** @type {number | null} */
-    let quitCode = null;
+    /**
+     * The thread each queued message waits for, kept beside the message so a
+     * retrieval hands back only what was posted.
+     *
+     * @type {WeakMap<object, number | null>}
+     */
+    const threadOf = new WeakMap();
+    /**
+     * PostQuitMessage's code, by the thread that posted it: WM_QUIT ends that
+     * thread's loop and no other.
+     *
+     * @type {Map<number | null, number>}
+     */
+    const quits = new Map();
     let posted = 0;
     let retrieved = 0;
+
     /**
-     * The classes that arrived since the queue was last looked at, which is the
-     * half of GetQueueStatus that says what is *new*. Cleared by every look --
-     * GetQueueStatus's own, and any retrieval -- because that is the window the
-     * documentation defines it over.
+     * What a thread's last look at its queue saw.
+     *
+     * `changed` is the classes that arrived since, the half of GetQueueStatus
+     * that says what is *new*: cleared by every look -- GetQueueStatus's own,
+     * and any retrieval -- because that is the window the documentation
+     * defines it over. `synthetic` is the paint and the timer as the last
+     * status call saw them: neither is a queued message, so neither has an
+     * arrival to record, and a condition that was absent and is now present is
+     * the news -- without it a window left dirty for a hundred frames would
+     * report itself as news in every one of them. `at` is when, on the guest
+     * clock: a timer that came due after it is news to a wait, one already due
+     * then is not.
+     *
+     * @typedef {{ changed: number, synthetic: number, at: number }} Look
+     * @type {Map<number | null, Look>}
      */
-    let changed = 0;
+    const looks = new Map();
+    /** @param {number | null} thread @returns {Look} */
+    const lookOf = thread=>{
+        let look = looks.get(thread);
+        if (!look)
+        {
+            look = { changed: 0, synthetic: 0, at: -Infinity };
+            looks.set(thread, look);
+        }
+        return look;
+    };
     /**
-     * The paint and the timer as the last status call saw them. Neither is a
-     * queued message, so neither has an arrival to record: a condition that was
-     * absent and is now present is the news, and this is what it is compared
-     * against. Without it a window left dirty for a hundred frames would report
-     * itself as news in every one of them.
+     * News of a class for a thread. A message whichever thread looks first
+     * may take is news to every thread.
+     *
+     * @param {number | null} thread @param {number} classes
      */
-    let reportedSynthetic = 0;
+    const arrived = (thread, classes)=>{
+        if (thread === null)
+        {
+            lookOf(null).changed |= classes;
+            for (const look of looks.values())
+            {
+                look.changed |= classes;
+            }
+            return;
+        }
+        lookOf(thread).changed |= classes;
+    };
+
+    /** The thread running, as a queue is keyed. */
+    const running = ()=>threadIdOf(currentThread());
     /**
-     * When the queue was last looked at, on the guest clock: a timer that
-     * came due after it is news to a wait, one already due then is not.
+     * Whose queue a call means: the one it names, or the running thread's.
+     *
+     * @param {number | null | undefined} thread
      */
-    let lookedAt = -Infinity;
+    const whose = thread=>(thread === undefined ? running() : thread);
+    /**
+     * Whether a message belongs to a thread's queue. One for no thread in
+     * particular is anyone's, and a caller naming no thread sees them all.
+     *
+     * @param {object} entry @param {number | null} thread
+     */
+    const belongs = (entry, thread)=>{
+        const waiter = threadOf.get(entry) ?? null;
+        return waiter === null || thread === null || waiter === thread;
+    };
+
+    /**
+     * The thread that created a window, when the window half has said how
+     * to find it, or null for a window it does not know.
+     *
+     * @type {((hwnd: number) => number | null) | null}
+     */
+    let ownerOf = null;
+    /**
+     * Whether another thread has sent a thread something it has not taken,
+     * when the window half has said: sent messages are the window half's,
+     * and only their presence is a class of this queue's.
+     *
+     * @type {((thread: number) => boolean) | null}
+     */
+    let sentTo = null;
     /**
      * The message most recently taken off the queue, for GetMessageTime and
      * GetMessagePos: both answer about it, whichever window it was for.
@@ -257,25 +356,23 @@ export function createMessageQueue(options = {}){
 
     /**
      * Whether a thread's pump may be handed this timer's tick. A window's
-     * timer goes to whoever pumps; a thread's own goes only to that thread.
-     * One whose thread has ended is dropped on sight: nothing is left that
-     * could ever retrieve it, and Windows destroys it with the thread.
+     * timer goes to the thread that created the window; a thread's own goes
+     * only to that thread. One whose thread has ended is dropped on sight:
+     * nothing is left that could ever retrieve it, and Windows destroys it
+     * with the thread.
      *
      * @param {string} key
-     * @param {{ thread: any }} timer
+     * @param {{ hwnd: number, thread: any }} timer
+     * @param {number | null} asking  The thread looking, null for any.
      */
-    const deliverable = (key, timer)=>{
-        if (!timer.thread)
-        {
-            return true;
-        }
-        if (timer.thread.state === 'terminated')
+    const deliverable = (key, timer, asking)=>{
+        if (timer.thread?.state === 'terminated')
         {
             timers.delete(key);
             return false;
         }
-        const asking = currentThread();
-        return !asking || asking === timer.thread;
+        const owner = timer.hwnd !== 0 ? ownerOf?.(timer.hwnd) ?? null : threadIdOf(timer.thread);
+        return asking === null || owner === null || owner === asking;
     };
 
     /**
@@ -413,7 +510,7 @@ export function createMessageQueue(options = {}){
         const at = now();
         for (const [key, timer] of timers)
         {
-            if (timer.due > at || !deliverable(key, timer))
+            if (timer.due > at || !deliverable(key, timer, filter.thread ?? null))
             {
                 continue;
             }
@@ -531,19 +628,51 @@ export function createMessageQueue(options = {}){
         return null;
     };
 
-    /** Every class waiting to be retrieved now, the synthesised ones included. */
-    const waiting = ()=>{
+    /**
+     * The quit a thread's loop would be handed, and whose it is: its own, or
+     * one posted where no thread was known.
+     *
+     * @param {number | null} thread
+     * @returns {[number | null, number] | null}
+     */
+    const quitFor = thread=>{
+        for (const key of [thread, null])
+        {
+            const code = quits.get(key);
+            if (code !== undefined)
+            {
+                return [key, code];
+            }
+        }
+        const first = thread === null ? quits.entries().next() : null;
+        return first && !first.done ? first.value : null;
+    };
+
+    /**
+     * Every class waiting to be retrieved now, the synthesised ones included.
+     *
+     * @param {number | null} [thread]  Whose queue; the running thread's if left out.
+     */
+    const waiting = thread=>{
+        const asking = whose(thread);
         releaseLater();
         let inQueue = 0;
         for (const entry of pending)
         {
-            inQueue |= classOf(entry.message);
+            if (belongs(entry, asking))
+            {
+                inQueue |= classOf(entry.message);
+            }
         }
-        if (quitCode !== null)
+        if (quitFor(asking))
         {
             inQueue |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
         }
-        const filter = { hwnd: ANY_WINDOW, first: 0, last: 0, remove: false };
+        if (asking !== null && sentTo?.(asking))
+        {
+            inQueue |= QS_SENDMESSAGE;
+        }
+        const filter = { hwnd: ANY_WINDOW, first: 0, last: 0, remove: false, thread: asking };
         if (dirtyWindow && dirtyWindow(filter) !== 0)
         {
             inQueue |= QS_PAINT;
@@ -551,7 +680,7 @@ export function createMessageQueue(options = {}){
         const at = now();
         for (const [key, timer] of timers)
         {
-            if (timer.due <= at && deliverable(key, timer))
+            if (timer.due <= at && deliverable(key, timer, asking))
             {
                 inQueue |= QS_TIMER;
                 break;
@@ -596,14 +725,21 @@ export function createMessageQueue(options = {}){
         {
             return;
         }
-        changed |= classOf(message.message >>> 0);
+        // A window's message waits for the thread that made the window. One
+        // with no window is the thread's it names, or the poster's own; the
+        // input layer's, when nothing claimed it, is whoever looks first.
+        const hwnd = message.hwnd >>> 0;
+        const thread = message.thread !== undefined ? message.thread
+            : hwnd !== 0 ? ownerOf?.(hwnd) ?? null
+                : message.x !== undefined ? null : running();
+        arrived(thread, classOf(message.message >>> 0));
         if ((message.message >>> 0) === WM_MOUSEMOVE)
         {
             // Replaced in place rather than dropped and re-appended: a move
             // that overtook the keystroke before it would report the button
             // as pressed somewhere the pointer had already left.
             const held = pending.find(entry=>entry.message === WM_MOUSEMOVE
-                && entry.hwnd === (message.hwnd >>> 0));
+                && entry.hwnd === hwnd && (threadOf.get(entry) ?? null) === thread);
             if (held)
             {
                 held.wParam = message.wParam >>> 0;
@@ -620,7 +756,7 @@ export function createMessageQueue(options = {}){
             }
         }
         const entry = {
-            hwnd: message.hwnd >>> 0,
+            hwnd,
             message: message.message >>> 0,
             wParam: message.wParam >>> 0,
             lParam: message.lParam >>> 0,
@@ -634,6 +770,7 @@ export function createMessageQueue(options = {}){
         {
             input.add(entry);
         }
+        threadOf.set(entry, thread);
         pending.push(entry);
         posted++;
     };
@@ -700,8 +837,13 @@ export function createMessageQueue(options = {}){
          * retrieval looks through before its filter, to settle where a
          * mouse message goes. A copy, so settling one does not move the
          * walk under itself.
+         *
+         * @param {number | null} [thread]  Whose; the running thread's if left out.
          */
-        queued: ()=>[...pending],
+        queued: thread=>{
+            const asking = whose(thread);
+            return pending.filter(entry=>belongs(entry, asking));
+        },
 
         /** Whether a retrieval's filter takes a message. */
         accepts,
@@ -780,10 +922,14 @@ export function createMessageQueue(options = {}){
          */
         nextTimerDue: soonestDue,
 
-        /** @param {number} code  The value the program exits with. */
-        postQuit(code){
-            quitCode = code | 0;
-            changed |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
+        /**
+         * @param {number} code  The value the thread's loop ends with.
+         * @param {number | null} [thread]  Whose loop; the running thread's if left out.
+         */
+        postQuit(code, thread){
+            const poster = whose(thread);
+            quits.set(poster, code | 0);
+            arrived(poster, QS_POSTMESSAGE | QS_ALLPOSTMESSAGE);
         },
 
         /**
@@ -793,21 +939,26 @@ export function createMessageQueue(options = {}){
          * different things -- "is there anything to pump" against "has anything
          * happened since I last asked".
          *
-         * Looking counts as a look: the news is cleared here, the way it is
-         * cleared by a retrieval.
+         * Looking counts as a look: the news of the classes asked about is
+         * cleared here, the way a retrieval clears all of it; news of a class
+         * not asked about is still news to the next look.
          *
+         * @param {number | null} [thread]  Whose queue; the running thread's if left out.
+         * @param {number} [asked]  The classes asked about; every one if left out.
          * @returns {{ inQueue: number, changed: number }}
          */
-        status(){
-            const inQueue = waiting();
+        status(thread, asked = ~0){
+            const asking = whose(thread);
+            const inQueue = waiting(asking);
             const synthetic = inQueue & (QS_PAINT | QS_TIMER);
+            const look = lookOf(asking);
             // Only what is still there: the low word is defined as what arrived
             // *and has not been taken yet*, so a keystroke posted and retrieved
             // between two looks is no longer news.
-            const news = (changed | (synthetic & ~reportedSynthetic)) & inQueue;
-            changed = 0;
-            lookedAt = now();
-            reportedSynthetic = synthetic;
+            const news = (look.changed | (synthetic & ~look.synthetic)) & inQueue;
+            look.changed &= ~asked;
+            look.at = now();
+            look.synthetic = (look.synthetic & ~asked) | (synthetic & asked);
             return { inQueue, changed: news };
         },
 
@@ -823,25 +974,34 @@ export function createMessageQueue(options = {}){
          * wait that ends on news leaves it for the pump that follows -- and a
          * message a look has already seen is no longer news, whether or not
          * it was taken.
+         *
+         * @param {number | null} [thread]  Whose queue; the running thread's if left out.
          */
-        news(){
+        news(thread){
+            const asking = whose(thread);
             releaseLater();
-            let arrived = changed;
+            const look = lookOf(asking);
+            let fresh = look.changed;
             const at = now();
             for (const [key, timer] of timers)
             {
-                if (timer.due > lookedAt && timer.due <= at && deliverable(key, timer))
+                if (timer.due > look.at && timer.due <= at && deliverable(key, timer, asking))
                 {
-                    arrived |= QS_TIMER;
+                    fresh |= QS_TIMER;
                     break;
                 }
             }
-            return arrived;
+            return fresh;
         },
 
-        /** A window has an area to paint where it had none: news of a paint. */
-        dirtied(){
-            changed |= QS_PAINT;
+        /**
+         * A window has an area to paint where it had none: news of a paint,
+         * for the thread that made it.
+         *
+         * @param {number | null} [thread]
+         */
+        dirtied(thread = null){
+            arrived(thread, QS_PAINT);
         },
 
         /**
@@ -873,7 +1033,7 @@ export function createMessageQueue(options = {}){
         hasTimer(hwnd, id){
             const key = `${hwnd >>> 0}:${id >>> 0}`;
             const timer = timers.get(key);
-            return timer !== undefined && deliverable(key, timer);
+            return timer !== undefined && deliverable(key, timer, running());
         },
 
         /**
@@ -942,9 +1102,13 @@ export function createMessageQueue(options = {}){
             // PeekMessage clear the news GetQueueStatus reports just as
             // GetQueueStatus itself does.
             releaseLater();
-            changed = 0;
-            lookedAt = now();
-            const index = pending.findIndex(entry=>accepts(entry, filter));
+            const asking = whose(filter.thread);
+            const scoped = { ...filter, thread: asking };
+            const look = lookOf(asking);
+            look.changed = 0;
+            look.at = now();
+            const index = pending.findIndex(entry=>belongs(entry, asking)
+                && accepts(entry, filter));
             if (index >= 0)
             {
                 const entry = pending[index];
@@ -962,7 +1126,7 @@ export function createMessageQueue(options = {}){
             // in. Not removed, because retrieval does not paint: the area
             // stays until BeginPaint clears it, and the next look finds it
             // again exactly as Windows would.
-            const paint = takePaint(filter);
+            const paint = takePaint(scoped);
             if (paint)
             {
                 if (filter.remove)
@@ -972,7 +1136,7 @@ export function createMessageQueue(options = {}){
                 }
                 return paint;
             }
-            const due = takeTimer(filter);
+            const due = takeTimer(scoped);
             if (due)
             {
                 if (filter.remove)
@@ -982,14 +1146,15 @@ export function createMessageQueue(options = {}){
                 }
                 return due;
             }
-            if (quitCode === null)
+            const quitting = quitFor(asking);
+            if (quitting === null)
             {
                 return null;
             }
             const quit = {
                 hwnd: 0,
                 message: WM_QUIT,
-                wParam: quitCode >>> 0,
+                wParam: quitting[1] >>> 0,
                 lParam: 0,
                 time: 0,
                 x: 0,
@@ -1001,7 +1166,7 @@ export function createMessageQueue(options = {}){
             }
             if (filter.remove)
             {
-                quitCode = null;
+                quits.delete(quitting[0]);
                 retrieved++;
                 last = quit;
             }
@@ -1048,16 +1213,45 @@ export function createMessageQueue(options = {}){
             router = route;
         },
 
+        /**
+         * Another thread has sent this thread something: news of a sent message.
+         *
+         * @param {number} thread
+         */
+        sent(thread){
+            arrived(thread, QS_SENDMESSAGE);
+        },
+
+        /**
+         * Tells the queue how to find whether a thread has been sent a message
+         * it has not taken.
+         *
+         * @param {(thread: number) => boolean} source
+         */
+        sendsFrom(source){
+            sentTo = source;
+        },
+
+        /**
+         * Tells the queue how to find the thread that created a window, whose
+         * queue the window's messages wait in.
+         *
+         * @param {(hwnd: number) => number | null} owner
+         */
+        ownersFrom(owner){
+            ownerOf = owner;
+        },
+
         /** How many real messages are waiting; a pending quit is not one. */
         depth: ()=>pending.length,
 
-        quitPending: ()=>quitCode !== null,
+        quitPending: ()=>quits.size > 0,
 
         diagnostics: ()=>({
             depth: pending.length,
             posted,
             retrieved,
-            quitPending: quitCode !== null,
+            quitPending: quits.size > 0,
             // The dozen a program pumps most, by message, newest count first.
             // Written as hexadecimal because that is how every reference lists
             // a WM_.

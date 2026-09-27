@@ -48,7 +48,8 @@ import {
     writeU16,
     writeU32s,
 } from './structs.js';
-import { readText } from './unicode.js';
+import { readText, textBytes } from './unicode.js';
+import { threadIdOf } from './messages.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -160,6 +161,7 @@ export const SYS_COLORS = Object.freeze({
 
 /** MonitorFromRect and friends answer with this, there being one display. */
 const PRIMARY_MONITOR = 0x00010001;
+const MONITOR_DEFAULTTONULL = 0;
 const MONITORINFOF_PRIMARY = 1;
 
 /**
@@ -211,6 +213,9 @@ const KEYEVENTF_UNICODE = 0x0004;
 const KEYEVENTF_SCANCODE = 0x0008;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_WINDOW_HANDLE = 1400;
+const ERROR_NOACCESS = 998;
+const ERROR_TIMEOUT = 1460;
 
 /**
  * The one input locale this build has: en-US, low word the language id, high
@@ -218,6 +223,9 @@ const ERROR_INVALID_HANDLE = 6;
  * which is the only kind an engine with one keyboard layout ever has.
  */
 const HKL_EN_US = (LANGID_EN_US << 16 | LANGID_EN_US) >>> 0;
+
+/** The double-click time Windows starts with, in milliseconds. */
+const DOUBLE_CLICK_TIME = 500;
 
 /**
  * The modifiers a 256-byte key state holds: shift and control down, caps lock
@@ -348,6 +356,12 @@ const GCL_HICONSM = -34;
 /** The style bit EnableWindow sets, and the only one it touches. */
 const WS_DISABLED = 0x08000000;
 const WS_MINIMIZE = 0x20000000;
+const WS_POPUP = 0x80000000;
+/** What the region calls answer: no region, or one rectangle. */
+const REGION_ERROR = 0;
+const SIMPLEREGION = 2;
+/** WINDOWINFO's dwWindowStatus for the active window. */
+const WS_ACTIVECAPTION = 0x0001;
 
 /** A class or window name is at most this long. */
 const MAX_NAME = 256;
@@ -614,16 +628,41 @@ export function createSystemFunctions({ host, live, windows, classes }){
             hotSpot: { ...shape.hotSpot }, bgra: shape.bgra } : { shown });
     };
 
+    /** GetDoubleClickTime's answer, which SetDoubleClickTime changes. */
+    let doubleClickTime = DOUBLE_CLICK_TIME;
+
     /**
-     * What SendMessage does, shared with the timed form.
+     * GetKeyboardLayoutName in either encoding.
+     *
+     * @param {number} into @param {boolean} wide
+     */
+    const layoutName = (into, wide)=>{
+        if ((into >>> 0) === 0)
+        {
+            host.setLastError?.(ERROR_NOACCESS);
+            return 0;
+        }
+        const name = `0000${LANGID_EN_US.toString(16).padStart(4, '0')}`;
+        host.writeMemory(into >>> 0, textBytes(name, wide));
+        return 1;
+    };
+
+    /**
+     * What SendMessage does, shared with the timed form: the procedure runs
+     * on the thread that created the window, and the caller waits for it.
      *
      * @param {number} hwnd @param {number} message @param {number} wParam
      * @param {number} lParam
      * @param {boolean} [unicode]  Whether the text the message carries is wide.
+     * @param {number} [timeout]  How long to wait for another thread, in milliseconds.
+     * @returns {number | Promise<number | null>} null when the timeout passed first
      */
-    const sendMessage = (hwnd, message, wParam, lParam, unicode = false)=>
-        host.send(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0, host.callerThread?.(),
-            unicode);
+    const sendMessage = (hwnd, message, wParam, lParam, unicode = false, timeout = undefined)=>
+        (host.sendAcross
+            ? host.sendAcross(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0,
+                host.callerThread?.(), unicode, timeout === undefined ? {} : { timeout })
+            : host.send(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0,
+                host.callerThread?.(), unicode));
 
     /**
      * GetMonitorInfo, both spellings. cbSize is the caller saying which
@@ -675,31 +714,37 @@ export function createSystemFunctions({ host, live, windows, classes }){
 
     /**
      * SendMessageTimeout in either encoding. The timeout is for a window on
-     * another thread that does not answer. Every window here is on the
-     * caller's thread, where the send runs the procedure to completion, so the
-     * answer is always in time: the result goes out through the pointer and
-     * the call reports success.
+     * another thread that does not answer in time, which fails the call with
+     * ERROR_TIMEOUT; on the caller's own thread the procedure runs to its end
+     * and the answer is always in time. The result goes out through the
+     * pointer.
      *
      * @param {number[]} args  hWnd, Msg, wParam, lParam, fuFlags, uTimeout, lpdwResult.
      * @param {boolean} unicode
      */
-    const sendMessageTimeout = ([hwnd, message, wParam, lParam, , , result], unicode)=>{
+    const sendMessageTimeout = ([hwnd, message, wParam, lParam, , timeout, result], unicode)=>{
         if (!live(hwnd))
         {
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
             return 0;
         }
-        /** @param {number} answer */
+        /** @param {number | null} answer */
         const report = answer=>{
+            if (answer === null)
+            {
+                host.setLastError?.(ERROR_TIMEOUT);
+                return 0;
+            }
             if ((result >>> 0) !== 0)
             {
                 writeU32s(host, result >>> 0, [answer >>> 0]);
             }
             return 1;
         };
-        const answer = sendMessage(hwnd, message, wParam, lParam, unicode);
+        const answer = sendMessage(hwnd, message, wParam, lParam, unicode, timeout >>> 0);
         return typeof (/** @type {any} */ (answer))?.then === 'function'
-            ? /** @type {any} */ (answer).then(report)
-            : report(answer);
+            ? /** @type {Promise<number | null>} */ (answer).then(report)
+            : report(/** @type {number} */ (answer));
     };
 
     const screen = host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 };
@@ -778,8 +823,31 @@ export function createSystemFunctions({ host, live, windows, classes }){
         return 1;
     };
 
-    /** Windows in creation order, which is the only order this build has. */
-    const ordered = ()=>[...windows.values()].filter(record=>!record.destroyed);
+    /**
+     * Windows in creation order, which is the only order this build has; a
+     * window being made is in none until its CBT hook has let it be.
+     */
+    const ordered = ()=>[...windows.values()].filter(record=>!record.destroyed
+        && !record.unlinked);
+
+    /**
+     * What GetParent answers for a window: its owner when it is a popup, its
+     * parent when it is a child -- the desktop for a child of the desktop --
+     * and nothing otherwise, by the style it has now.
+     *
+     * @param {any} record
+     */
+    const parentOf = record=>{
+        if ((record.style & WS_POPUP) !== 0)
+        {
+            return record.owner ?? 0;
+        }
+        if ((record.style & WS_CHILD) !== 0 && !host.isDesktop(record))
+        {
+            return record.parent !== 0 ? record.parent : host.desktop().hwnd;
+        }
+        return 0;
+    };
 
     /**
      * The bytes of a terminated string, terminator excluded, read a piece at
@@ -1634,6 +1702,23 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ()=>host.desktop?.().hwnd ?? 0,
         },
 
+        /**
+         * HMONITOR MonitorFromPoint(POINT pt, DWORD dwFlags)
+         *
+         * The point comes by value. The one monitor holds every point on the
+         * screen; for one off it, MONITOR_DEFAULTTONULL asks for none and
+         * either other default for that monitor.
+         */
+        MonitorFromPoint: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([x, y, flags])=>{
+                const inside = (x | 0) >= 0 && (y | 0) >= 0 && (x | 0) < screen.width
+                    && (y | 0) < screen.height;
+                return inside || (flags >>> 0) !== MONITOR_DEFAULTTONULL ? PRIMARY_MONITOR : 0;
+            },
+        },
+
         /** HMONITOR MonitorFromRect(LPCRECT lprc, DWORD dwFlags) */
         MonitorFromRect: {
             argBytes: 8,
@@ -1879,20 +1964,35 @@ export function createSystemFunctions({ host, live, windows, classes }){
             },
         },
 
-        /** HWND GetParent(HWND hWnd) */
+        /**
+         * HWND GetParent(HWND hWnd)
+         *
+         * The owner of a popup, the parent of a child -- the desktop for a
+         * child of the desktop -- and nothing for any other window, by the
+         * style the window has now.
+         */
         GetParent: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>live(hwnd)?.parent ?? 0,
+            handler: ([hwnd])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                return parentOf(record);
+            },
         },
 
         /**
          * HWND GetAncestor(HWND hwnd, UINT gaFlags)
          *
-         * GA_PARENT is the parent alone -- the desktop for a window that is
-         * no child, where GetParent names the owner; GA_ROOT is where the
-         * chain of child windows ends; GA_ROOTOWNER goes on from there
-         * through each owner and its root. The desktop has no ancestor.
+         * GA_PARENT is the parent alone -- the desktop for a window on it,
+         * where GetParent may name the owner; GA_ROOT is the window whose
+         * parent is the desktop, whatever the styles on the way; GA_ROOTOWNER
+         * follows GetParent from the window until it answers nothing. The
+         * desktop has no ancestor.
          */
         GetAncestor: {
             argBytes: 8,
@@ -1906,7 +2006,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 /** @param {any} from */
                 const rootOf = from=>{
                     let at = from;
-                    for (let depth = 0; host.isChild(at) && live(at.parent) && depth < 256; depth++)
+                    for (let depth = 0; live(at.parent) && depth < 256; depth++)
                     {
                         at = live(at.parent);
                     }
@@ -1914,16 +2014,16 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 };
                 switch (flags >>> 0){
                     case GA_PARENT:
-                        return host.isChild(record) ? record.parent : host.desktop().hwnd;
+                        return live(record.parent)?.hwnd ?? host.desktop().hwnd;
                     case GA_ROOT:
                         return rootOf(record).hwnd;
                     case GA_ROOTOWNER: {
-                        let at = rootOf(record);
+                        let at = record;
                         const seen = new Set([at]);
-                        for (let owner = live(at.parent); owner && !seen.has(rootOf(owner));
-                            owner = live(at.parent))
+                        for (let next = live(parentOf(at)); next && !seen.has(next);
+                            next = live(parentOf(at)))
                         {
-                            at = rootOf(owner);
+                            at = next;
                             seen.add(at);
                         }
                         return at.hwnd;
@@ -1957,18 +2057,42 @@ export function createSystemFunctions({ host, live, windows, classes }){
             },
         },
 
-        /** HWND SetParent(HWND hWndChild, HWND hWndNewParent) */
+        /**
+         * HWND SetParent(HWND hWndChild, HWND hWndNewParent)
+         *
+         * Moves a window inside another, or onto the desktop for none, and
+         * answers the parent it had -- the desktop for a window on it. A
+         * window cannot go inside itself or anything inside it, which is
+         * refused with ERROR_INVALID_PARAMETER and changes nothing.
+         */
         SetParent: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([child, parent])=>{
                 const record = live(child);
-                if (!record)
+                const desktop = host.desktop();
+                if (!record || record === desktop)
                 {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                     return 0;
                 }
-                const previous = record.parent;
-                record.parent = parent >>> 0;
+                const target = (parent >>> 0) === desktop.hwnd ? 0 : parent >>> 0;
+                const inside = target === 0 ? null : live(target);
+                if (target !== 0 && !inside)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                for (let at = inside, depth = 0; at && depth < 256; at = live(at.parent), depth++)
+                {
+                    if (at === record)
+                    {
+                        host.setLastError?.(ERROR_INVALID_PARAMETER);
+                        return 0;
+                    }
+                }
+                const previous = record.parent !== 0 ? record.parent : desktop.hwnd;
+                record.parent = target;
                 return previous;
             },
         },
@@ -2005,39 +2129,52 @@ export function createSystemFunctions({ host, live, windows, classes }){
                         return siblings[0]?.hwnd ?? 0;
                     case GW_HWNDLAST:
                         return siblings[siblings.length - 1]?.hwnd ?? 0;
+                    // Not yet among its siblings, a window has none either side.
                     case GW_HWNDNEXT:
-                        return siblings[at + 1]?.hwnd ?? 0;
+                        return at < 0 ? 0 : siblings[at + 1]?.hwnd ?? 0;
                     case GW_HWNDPREV:
                         return at > 0 ? siblings[at - 1].hwnd : 0;
                     case GW_CHILD:
                         return ordered().find(other=>other.parent === record.hwnd
                             && host.isChild(other))?.hwnd ?? 0;
                     case GW_OWNER:
-                        // A child has a parent, not an owner.
-                        return child ? 0 : record.parent;
+                        return record.owner ?? 0;
                     default:
                         return 0;
                 }
             },
         },
 
-        /** BOOL GetWindowInfo(HWND hwnd, PWINDOWINFO pwi) */
+        /**
+         * BOOL GetWindowInfo(HWND hwnd, PWINDOWINFO pwi)
+         *
+         * What GetWindowRect, GetClientRect on the screen, the two styles and
+         * GetClassLong(GCW_ATOM) answer one by one, and WS_ACTIVECAPTION for
+         * the active window.
+         */
         GetWindowInfo: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, info])=>{
                 const record = live(hwnd);
-                if (!record || (info >>> 0) === 0)
+                if (!record)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                if ((info >>> 0) === 0)
                 {
                     return 0;
                 }
                 const frame = host.geometry.frame(record);
                 writeRect(host, info + WINDOWINFO.rcWindow, host.geometry.windowRect(record));
                 writeRect(host, info + WINDOWINFO.rcClient, host.geometry.clientRect(record));
+                const status = (host.active?.() ?? 0) === record.hwnd ? WS_ACTIVECAPTION : 0;
                 writeU32s(host, info + WINDOWINFO.dwStyle,
-                    [record.style, record.exStyle, 0, frame.left, frame.top]);
+                    [record.style, record.exStyle, status, frame.left, frame.top]);
                 // Two WORDs share the last DWORD, so neither may be written as one.
-                writeU16(host, info + WINDOWINFO.atomWindowType, 0);
+                writeU16(host, info + WINDOWINFO.atomWindowType,
+                    classOfWindow(record.hwnd)?.atom ?? 0);
                 writeU16(host, info + WINDOWINFO.wCreatorVersion, 0x0400);
                 return 1;
             },
@@ -2475,16 +2612,56 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, hRgn])=>{
-                if (!live(hwnd))
+                const record = live(hwnd);
+                if (!record)
                 {
                     return 0;
                 }
+                // Its rectangle is kept, for what GetWindowRgn and
+                // GetWindowRgnBox answer.
+                record.regionBox = (hRgn >>> 0) === 0 ? null : host.regionBox?.(hRgn >>> 0) ?? null;
                 if ((hRgn >>> 0) !== 0)
                 {
                     host.divergence?.('SetWindowRgn',
                         'a window region is accepted and the window is not clipped to it');
                 }
                 return 1;
+            },
+        },
+
+        /**
+         * int GetWindowRgnBox(HWND hWnd, LPRECT lprc)
+         *
+         * The rectangle around the region SetWindowRgn gave the window, in
+         * window coordinates, and SIMPLEREGION; ERROR for a window with none.
+         * Only the rectangle of a region is kept, so every region is a simple one.
+         */
+        GetWindowRgnBox: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, rect])=>{
+                const box = live(hwnd)?.regionBox ?? null;
+                if (!box || (rect >>> 0) === 0)
+                {
+                    return REGION_ERROR;
+                }
+                writeRect(host, rect >>> 0, box);
+                return SIMPLEREGION;
+            },
+        },
+
+        /** int GetWindowRgn(HWND hWnd, HRGN hRgn): the window's region copied into hRgn. */
+        GetWindowRgn: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, region])=>{
+                const box = live(hwnd)?.regionBox ?? null;
+                if (!box || !host.setRegion || (region >>> 0) === 0)
+                {
+                    return REGION_ERROR;
+                }
+                host.setRegion(region >>> 0, box);
+                return SIMPLEREGION;
             },
         },
 
@@ -2905,18 +3082,24 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * `cbSize` is checked rather than trusted: it is sizeof(INPUT) or the
          * caller is not describing one, and Windows refuses the whole call
          * with ERROR_INVALID_PARAMETER rather than read past what it was
-         * given. `INPUT_HARDWARE` is a device model of its own -- a low-level
-         * message replay nothing here reproduces -- and is counted without
-         * being injected, exactly as this build's mouse and keyboard are
-         * counted when they are.
+         * given; so is a count of none, and no array at all is
+         * ERROR_NOACCESS. Every event of a known type is counted as inserted,
+         * one that moves nothing and presses nothing too. `INPUT_HARDWARE` is
+         * a device model of its own -- a low-level message replay nothing here
+         * reproduces -- and is counted without being injected.
          */
         SendInput: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([count, inputs, size])=>{
-                if ((size | 0) !== INPUT_SIZE)
+                if ((size | 0) !== INPUT_SIZE || (count >>> 0) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if ((inputs >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_NOACCESS);
                     return 0;
                 }
                 const events = count >>> 0;
@@ -2928,13 +3111,15 @@ export function createSystemFunctions({ host, live, windows, classes }){
                     const type = readU32(piece);
                     if (type === INPUT_MOUSE)
                     {
-                        inserted += injectMouse({ dx: readI32(piece + 4), dy: readI32(piece + 8),
-                            data: readU32(piece + 12), flags: readU32(piece + 16) }) ? 1 : 0;
+                        injectMouse({ dx: readI32(piece + 4), dy: readI32(piece + 8),
+                            data: readU32(piece + 12), flags: readU32(piece + 16) });
+                        inserted++;
                     }
                     else if (type === INPUT_KEYBOARD)
                     {
-                        inserted += injectKeyboard({ wVk: readU16(piece + 4),
-                            wScan: readU16(piece + 6), flags: readU32(piece + 8) }) ? 1 : 0;
+                        injectKeyboard({ wVk: readU16(piece + 4),
+                            wScan: readU16(piece + 6), flags: readU32(piece + 8) });
+                        inserted++;
                     }
                     else if (type === INPUT_HARDWARE)
                     {
@@ -3220,6 +3405,116 @@ export function createSystemFunctions({ host, live, windows, classes }){
         GetKeyboardLayout: {
             argBytes: 4,
             handler: ()=>HKL_EN_US,
+        },
+
+        /**
+         * UINT GetDoubleClickTime(void)
+         *
+         * How far apart two clicks may be and still be a double click, in
+         * milliseconds: 500 until a program sets another.
+         */
+        GetDoubleClickTime: {
+            argBytes: 0,
+            handler: ()=>doubleClickTime,
+        },
+
+        /** BOOL SetDoubleClickTime(UINT uInterval), zero meaning the default again. */
+        SetDoubleClickTime: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([interval])=>{
+                doubleClickTime = (interval >>> 0) === 0 ? DOUBLE_CLICK_TIME : interval >>> 0;
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetKeyboardLayoutNameA(LPSTR pwszKLID)
+         *
+         * The active layout's identifier, eight hexadecimal digits: the one
+         * layout there is, United States. No buffer is ERROR_NOACCESS.
+         */
+        GetKeyboardLayoutNameA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([into])=>layoutName(into, false),
+        },
+
+        /** BOOL GetKeyboardLayoutNameW(LPWSTR pwszKLID) */
+        GetKeyboardLayoutNameW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([into])=>layoutName(into, true),
+        },
+
+        /**
+         * int GetKeyboardLayoutList(int nBuff, HKL *lpList)
+         *
+         * The layouts there are -- one -- counted when nBuff is zero and
+         * written as far as the buffer goes otherwise.
+         */
+        GetKeyboardLayoutList: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([room, list])=>{
+                if ((room | 0) === 0)
+                {
+                    return 1;
+                }
+                if ((room | 0) < 0 || (list >>> 0) === 0)
+                {
+                    return 0;
+                }
+                writeU32s(host, list >>> 0, [HKL_EN_US]);
+                return 1;
+            },
+        },
+
+        /**
+         * HKL ActivateKeyboardLayout(HKL hkl, UINT Flags)
+         *
+         * The layout active until now, when the one asked for is the one
+         * there is or the next or previous of the list, which is the same.
+         */
+        ActivateKeyboardLayout: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([layout])=>{
+                const HKL_PREV = 0;
+                const HKL_NEXT = 1;
+                const wanted = layout >>> 0;
+                if (wanted === HKL_PREV || wanted === HKL_NEXT || wanted === HKL_EN_US)
+                {
+                    return HKL_EN_US;
+                }
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
+                return 0;
+            },
+        },
+
+        /**
+         * HKL LoadKeyboardLayoutA(LPCSTR pwszKLID, UINT Flags)
+         *
+         * The layout of that identifier, which is the one layout there is:
+         * any other falls back to the system's default, as documented for a
+         * layout that cannot be had.
+         */
+        LoadKeyboardLayoutA: {
+            argBytes: 8,
+            handler: ()=>HKL_EN_US,
+        },
+
+        /** HKL LoadKeyboardLayoutW(LPCWSTR pwszKLID, UINT Flags) */
+        LoadKeyboardLayoutW: {
+            argBytes: 8,
+            handler: ()=>HKL_EN_US,
+        },
+
+        /** BOOL UnloadKeyboardLayout(HKL hkl) */
+        UnloadKeyboardLayout: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([layout])=>((layout >>> 0) === HKL_EN_US ? 1 : 0),
         },
 
         /**
@@ -3710,22 +4005,25 @@ export function createSystemFunctions({ host, live, windows, classes }){
          *
          * The process reported has to be the one GetCurrentProcessId reports,
          * or a program comparing the two decides its own window belongs to
-         * somebody else. Which thread created a window is not recorded, so the
-         * thread identifier is the one that is asking.
+         * somebody else. The thread is the one that created the window -- the
+         * one PostThreadMessage reaches its loop through -- or, for a window
+         * made where no thread was named, the one asking.
          */
         GetWindowThreadProcessId: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, out])=>{
-                if (!live(hwnd))
+                const record = live(hwnd);
+                if (!record)
                 {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                     return 0;
                 }
                 if ((out >>> 0) !== 0)
                 {
                     writeU32s(host, out >>> 0, [host.processId ?? 0x1000]);
                 }
-                return host.currentThread?.().id >>> 0 || 1;
+                return threadIdOf(record.thread) ?? threadIdOf(host.callerThread?.()) ?? 1;
             },
         },
 
