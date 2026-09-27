@@ -50,9 +50,16 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  *     an instruction at a time
  * @property {boolean} [hit]
  * @property {(copy: boolean, to: number, from: number, size: number, count: number,
- *     value: number) => number} [repeat]  a `rep movs` (copy) or `rep stos` going up,
- *     as many of its `count` elements at once as the memory can move whole: answers
- *     how many it did, from the first, and none leaves the next to the one-element path
+ *     value: number, down: boolean) => number} [repeat]  a `rep movs` (copy) or
+ *     `rep stos`, as many of its `count` elements at once as the memory can move whole:
+ *     answers how many it did, from the first, and none leaves the next to the
+ *     one-element path
+ * @property {(compare: boolean, to: number, from: number, size: number, count: number,
+ *     value: number, down: boolean, stopOnEqual: boolean) => number} [pass]  a
+ *     `repe`/`repne` `cmps` (compare) or `scas`: how many of its `count` elements from
+ *     the first the memory finds do not stop it, fewer than all, where each is compared
+ *     as the instruction compares it; the next goes by the one-element path, which
+ *     sets the flags
  */
 
 /**
@@ -1264,11 +1271,13 @@ function stringInstruction(op, instruction, state, read, write, setFlags, addres
             ? (state.reg[index] & 0xffff0000 | (state.reg[index] + by) & 0xffff) >>> 0
             : (state.reg[index] + by) >>> 0;
     };
-    // A `rep movs` or `rep stos` going up offers its elements to the memory's
-    // bulk path (`Memory.repeat`) first; whatever it leaves takes the one below.
-    const bulk = repeat && step > 0 && (op === 'movs' || op === 'stos') && !prefixes.address
-        && state.memory.repeat !== undefined
+    // A `rep movs` or `rep stos` offers its elements to the memory's bulk path
+    // (`Memory.repeat`) first, a `repe`/`repne` `cmps` or `scas` those that do
+    // not stop it (`Memory.pass`); whatever they leave takes the one below.
+    const plain = repeat && !prefixes.address
         && !operands.some(operand=>operand.kind === 'mem' && operand.segment === 4);
+    const bulk = plain && (op === 'movs' || op === 'stos') && state.memory.repeat !== undefined;
+    const passing = plain && (op === 'cmps' || op === 'scas') && state.memory.pass !== undefined;
     for (;;)
     {
         if (repeat && (state.reg[1] & countMask) === 0)
@@ -1278,17 +1287,28 @@ function stringInstruction(op, instruction, state, read, write, setFlags, addres
         if (bulk)
         {
             const moved = state.memory.repeat?.(op === 'movs', state.reg[7], state.reg[6], size,
-                state.reg[1], op === 'stos' ? read(operands[1]) : 0) ?? 0;
+                state.reg[1], op === 'stos' ? read(operands[1]) : 0, step < 0) ?? 0;
             if (moved > 0)
             {
-                advance(7, moved * size);
+                advance(7, moved * step);
                 if (op === 'movs')
                 {
-                    advance(6, moved * size);
+                    advance(6, moved * step);
                 }
                 advance(1, -moved);
                 continue;
             }
+        }
+        else if (passing)
+        {
+            const passed = state.memory.pass?.(op === 'cmps', state.reg[7], state.reg[6], size,
+                state.reg[1], op === 'scas' ? read(operands[0]) : 0, step < 0, !prefixes.rep) ?? 0;
+            advance(7, passed * step);
+            if (op === 'cmps')
+            {
+                advance(6, passed * step);
+            }
+            advance(1, -passed);
         }
         let done = false;
         switch (op)
