@@ -1592,6 +1592,18 @@ test('EnumFontFamiliesEx finds a face by name in any case, and a substitute by i
     assert.deepEqual(await enumerate('Wingdings', 1), { answer: 1, seen: [] });
 });
 
+test('EnumFontFamilies names a family where the Ex call takes a LOGFONT', async()=>{
+    const { fns, memory, seen, hdc } = withEnumeration(false);
+    assert.equal(fns.EnumFontFamiliesA.argBytes, 16);
+    assert.equal(await fns.EnumFontFamiliesA.handler([hdc, 0, ENUMPROC, 0x55]), 1);
+    assert.ok(seen.map(one=>one.face).includes('Arial'), 'no name: every family');
+    assert.equal(seen[0].lParam, 0x55);
+    seen.length = 0;
+    memory.putString(STRUCT, 'courier new');
+    await fns.EnumFontFamiliesA.handler([hdc, STRUCT, ENUMPROC, 0]);
+    assert.deepEqual(seen.map(one=>one.face), ['Courier New'], 'a name: that family');
+});
+
 test('EnumFontFamiliesEx stops at a zero and answers what the callback last answered', async()=>{
     const stopping = withEnumeration(false, ()=>0);
     assert.equal(await stopping.fns.EnumFontFamiliesExA.handler(

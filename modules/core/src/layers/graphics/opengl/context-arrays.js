@@ -110,6 +110,27 @@ const POINTER_QUERIES = Object.freeze({
 });
 
 /**
+ * The entry point that sets each array's pointer, the name a display list and
+ * the glBegin rule know the call by.
+ *
+ * @type {Readonly<Record<string, string>>}
+ */
+const POINTER_CALLS = Object.freeze(Object.fromEntries(Object.keys(ARRAYS).map(name=>[name,
+    `gl${name === 'texCoord' ? 'TexCoord' : name === 'edgeFlag' ? 'EdgeFlag'
+        : name === 'secondary' ? 'SecondaryColor' : name === 'fogCoord' ? 'FogCoord'
+            : name[0].toUpperCase() + name.slice(1)}Pointer${
+        name === 'secondary' || name === 'fogCoord' ? 'EXT' : ''}`])));
+
+/**
+ * The array each client-state enumerant names, the first in `ARRAYS` whose
+ * `enable` it is.
+ *
+ * @type {ReadonlyMap<number, string>}
+ */
+const ARRAY_OF_CAP = new Map(Object.entries(ARRAYS).reverse()
+    .map(([name, spec])=>[spec.enable, name]));
+
+/**
  * @param {number} size
  * @param {number} type
  * @returns {import('./arrays.js').ArrayPointer}
@@ -205,11 +226,7 @@ export function installArrayCalls(context, kernel){
      * @param {boolean} [sized]  whether the entry point takes a size at all
      */
     function setPointer(name, size, type, stride, address, sized = true){
-        const call = `gl${name === 'texCoord' ? 'TexCoord' : name === 'edgeFlag' ? 'EdgeFlag'
-            : name === 'secondary' ? 'SecondaryColor' : name === 'fogCoord' ? 'FogCoord'
-                : name[0].toUpperCase() + name.slice(1)}Pointer${
-            name === 'secondary' || name === 'fogCoord' ? 'EXT' : ''}`;
-        if (!enter(call, [size, type, stride, address]))
+        if (!enter(POINTER_CALLS[name], [size, type, stride, address]))
         {
             return;
         }
@@ -239,14 +256,7 @@ export function installArrayCalls(context, kernel){
      * @returns {string | null} the array a client-state enum names
      */
     function arrayOfCap(cap){
-        for (const [name, spec] of Object.entries(ARRAYS))
-        {
-            if (spec.enable === cap)
-            {
-                return name;
-            }
-        }
-        return null;
+        return ARRAY_OF_CAP.get(cap) ?? null;
     }
 
     /**

@@ -16,7 +16,7 @@
  * mirrored here in batches and `frameReport` answers with a promise.
  */
 
-import { createHarness } from './harness.js';
+import { createHarness, drainTable, packCapture } from './harness.js';
 
 const out = /** @type {HTMLElement} */ (document.querySelector('#out'));
 const canvas = /** @type {HTMLCanvasElement} */ (document.querySelector('#frame'));
@@ -80,6 +80,9 @@ if (inWorker)
         waiting.set(id, resolve);
         worker.postMessage({ type: method, id, ...extra });
     });
+    /** What the page's device mixed, when the run asked for it. @type {any} */
+    let capture = null;
+    let sampleRate = 48000;
     /** @type {(gpu: any) => void} */
     let gpuAnswered = ()=>{};
     namespace.gpu = new Promise(resolve=>{
@@ -99,8 +102,15 @@ if (inWorker)
                     callLog.push(line);
                 }
                 break;
+            case 'audioTable':
+                sampleRate = data.sampleRate;
+                drainTable(data.table, data.sampleRate, capture);
+                break;
             case 'result':
-                finish(data.result);
+                finish(capture && capture.blocks.length > 0
+                    ? { ...data.result,
+                        audioCapture: packCapture(capture, sampleRate) }
+                    : data.result);
                 break;
             case 'error':
                 namespace.errors.push(`worker:${data.text}`);
@@ -131,6 +141,10 @@ if (inWorker)
 
     namespace.start = (/** @type {any} */ request)=>{
         namespace.result = null;
+        capture = request.captureAudio
+            ? { fromMs: request.captureAudio.fromMs, toMs: request.captureAudio.toMs,
+                blocks: /** @type {Int16Array[]} */ ([]) }
+            : null;
         worker.postMessage({ type: 'start', request });
     };
     namespace.drainLog = (/** @type {number} */ from, /** @type {number} */ count)=>

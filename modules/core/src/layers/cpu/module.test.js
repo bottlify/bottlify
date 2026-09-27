@@ -160,3 +160,17 @@ test('a resume can carry the registers the code it enters reads first', async()=
     assert.equal(context.inHlt, 0);
     await cpuModule.dispose();
 });
+
+test('a resume can carry the flags word the code it enters starts with', async()=>{
+    // An exception handler starts with DF clear whatever the faulting code
+    // had, and the context it continues from gives the flags back.
+    const api = await open();
+    const context = { eip: 0, inHlt: 1, reg32: new Int32Array(8), flags: 0x8d7, flagsChanged: 1 };
+
+    api.resumeContextAt(context, { eip: 0x401000, returnValue: 0, registers: { eflags: 0x202 } });
+
+    assert.equal(context.flags, 0x202);
+    assert.equal(context.flagsChanged, 0, 'the word is literal, nothing lazy recomputes over it');
+    assert.deepEqual([...context.reg32], [0, 0, 0, 0, 0, 0, 0, 0], 'and it is no register');
+    await cpuModule.dispose();
+});

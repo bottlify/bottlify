@@ -63,7 +63,7 @@ test('toupper: every byte, EOF and values past a byte', ()=>{
 
 test('strncmp: prefixes, counts, terminators and the upper half of the page', ()=>{
     const next = random(3);
-    // Letters, the terminator, and bytes whose order in the page is not their value's.
+    // Letters, the terminator, and the upper half, whose bytes compare as unsigned chars.
     const alphabet = [0x41, 0x61, 0x7a, 0x7f, 0x80, 0x81, 0x9f, 0xa0, 0xe9, 0xff, 0x00];
     const left = DATA;
     const right = DATA + 0x1000;
@@ -210,12 +210,13 @@ test('_strnicmp and _stricmp: case folded, counts, terminators, the upper half',
     }
 });
 
-test('atoi: white space, signs, digits, the clamp at both ends, and what is not a number', ()=>{
+test('atoi: white space, signs, digits, the wrap past 32 bits, and what is not a number', ()=>{
     const next = random(8);
     const texts = ['', '0', '-0', '+0', '42', '  42', '\t\n\v\f\r 42', '+', '-', '- 5', '+-5',
         '007', '12abc', '2147483647', '2147483648', '-2147483648', '-2147483649',
         '99999999999999999999', '-99999999999999999999', '214748364', '2147483646', '21474836470',
-        ' 42', '\u008542', 'x42', '4\u00002'];
+        ' 42', '\u008542', 'x42', '4\u00002', '4294967296', '-4294967297',
+        '4294967295', '12345678901234567890123'];
     for (let i = 0; i < 80; i++)
     {
         const digits = Array.from({ length: next() % 14 }, ()=>String(next() % 10)).join('');

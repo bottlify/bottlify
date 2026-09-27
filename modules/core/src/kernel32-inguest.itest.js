@@ -211,7 +211,8 @@ function buildInterlockedRaceExe(){
  * a get clears the last error and a set leaves it; another thread has its
  * own; a slot past the thread's array goes through the host and works the
  * same; an index past every slot fails with ERROR_INVALID_PARAMETER; a freed
- * slot reads as zero.
+ * slot reads as zero, and a value set in it while it was free is gone once
+ * TlsAlloc hands it out again.
  */
 function buildTlsExe(){
     const ERROR_INVALID_PARAMETER = 87;
@@ -263,6 +264,15 @@ function buildTlsExe(){
                 check(15), ...errorIs(ERROR_INVALID_PARAMETER),
                 check(16), pushFrom('index'), call('TlsFree'), ...expect(1),
                 check(17), [0x64, 0x8b, 0x0d, 0x2c, 0, 0, 0],
+                [0xa1, ...u32(context.at('index'))], [0x8b, 0x04, 0x81], ...expect(0),
+                // A freed slot is still written, as on Windows, and its next
+                // owner reads zero all the same.
+                check(18), pushValue(0x4321), pushFrom('index'), call('TlsSetValue'), ...expect(1),
+                check(19), call('TlsAlloc'),
+                [0x3b, 0x05, ...u32(context.at('index'))],               // cmp eax, [index]
+                { jump: JNE, to: 'fail' },
+                check(20), pushFrom('index'), call('TlsGetValue'), ...expect(0),
+                check(21), [0x64, 0x8b, 0x0d, 0x2c, 0, 0, 0],
                 [0xa1, ...u32(context.at('index'))], [0x8b, 0x04, 0x81], ...expect(0),
                 exit(),
                 ...fail(),

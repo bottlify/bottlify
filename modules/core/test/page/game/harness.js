@@ -25,7 +25,7 @@
 
 import { createApp } from '../../../src/app.js';
 import {
-    SLOTS, GLOBAL_HEADER_INT32, SLOT_HEADER_INT32, SLOT_BYTES,
+    SLOTS, GLOBAL_HEADER_INT32, SLOT_HEADER_INT32, SLOT_BYTES, ARENA_OFFSET, ARENA_BYTES,
     slotHeaderOffset, slotPcmOffset, createSeam, mixBlock,
 } from '../../../src/layers/audio/output/mix.js';
 
@@ -554,18 +554,29 @@ const DRAIN_CAP_FRAMES = 16384;
  * clock at all without one.
  *
  * @param {any} app
+ * @param {{ fromMs: number, toMs: number, blocks: Int16Array[] } | null} [capture]
+ *     what was mixed between two moments of the run, kept to be written out
+ * @param {((table: ArrayBufferLike, sampleRate: number) => void) | undefined} [elsewhere]
+ *     who reads the table instead, on a thread of its own: the page, when the
+ *     engine runs in a worker, as a launcher's worklet reads it off the engine's
+ * @returns {string} how the sound is read
  */
-function drainSound(app){
+function drainSound(app, capture = null, elsewhere = undefined){
     const table = app.audio.table?.();
+    if (table && elsewhere)
+    {
+        elsewhere(table, app.audio.format().sampleRate);
+        return 'table, on the page';
+    }
     if (table)
     {
-        drainTable(app, table);
-        return;
+        drainTable(table, app.audio.format().sampleRate, capture);
+        return 'table';
     }
     const ring = app.audio.ring?.();
     if (!ring)
     {
-        return;
+        return 'none';
     }
     const { sampleRate, channels } = app.audio.format();
     const block = new Float32Array(ring.capacity * channels);
@@ -588,6 +599,7 @@ function drainSound(app){
         // one.
         readAt += ring.read(block.subarray(0, frames * channels)) * 1000 / sampleRate;
     }, 20);
+    return 'ring';
 }
 
 /**
@@ -596,10 +608,10 @@ function drainSound(app){
  * timer on the page's own thread instead of the audio-rendering thread. See
  * {@link drainSound}.
  *
- * @param {any} app @param {ArrayBufferLike} table
+ * @param {ArrayBufferLike} table @param {number} sampleRate
+ * @param {{ fromMs: number, toMs: number, blocks: Int16Array[] } | null} capture
  */
-function drainTable(app, table){
-    const { sampleRate } = app.audio.format();
+export function drainTable(table, sampleRate, capture){
     const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
     /** @type {{ header: Int32Array, pcm: Uint8Array }[]} */
     const slots = [];
@@ -613,8 +625,12 @@ function drainTable(app, table){
         });
         seams.push(createSeam());
     }
+    // The voices' mirrors, which a playing buffer is read from as a device
+    // reads its DMA region.
+    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
     const block = new Float32Array(DRAIN_CAP_FRAMES * 2);
-    let readAt = performance.now();
+    const started = performance.now();
+    let readAt = started;
     setInterval(()=>{
         const owed = Math.floor((performance.now() - readAt) * sampleRate / 1000);
         const blockFrames = Math.min(DRAIN_CAP_FRAMES, owed);
@@ -622,9 +638,33 @@ function drainTable(app, table){
         {
             return;
         }
-        mixBlock({ global, slots, seams, block, blockFrames, outputRate: sampleRate });
+        mixBlock({ global, slots, seams, block, blockFrames, outputRate: sampleRate, arena });
+        const at = readAt - started;
+        if (capture && at >= capture.fromMs && at < capture.toMs)
+        {
+            capture.blocks.push(Int16Array.from(block.subarray(0, blockFrames * 2),
+                value=>Math.max(-32768, Math.min(32767, Math.round(value * 32767)))));
+        }
         readAt += blockFrames * 1000 / sampleRate;
     }, 20);
+}
+
+/**
+ * What a capture holds, as a result carries it: the blocks in one run of
+ * 16-bit stereo, base64.
+ *
+ * @param {{ blocks: Int16Array[] }} capture @param {number} sampleRate
+ */
+export function packCapture(capture, sampleRate){
+    const length = capture.blocks.reduce((sum, one)=>sum + one.length, 0);
+    const all = new Int16Array(length);
+    let offset = 0;
+    for (const one of capture.blocks)
+    {
+        all.set(one, offset);
+        offset += one.length;
+    }
+    return { sampleRate, pcm: toBase64(new Uint8Array(all.buffer)) };
 }
 
 /**
@@ -1096,7 +1136,8 @@ export function scalars(layers){
 /**
  * @param {any} canvas   Where the last frame is shown: the page's, or an
  *     OffscreenCanvas of it inside a worker.
- * @param {{ pacing?: import('../../../src/app.js').RunPacing }} [how]
+ * @param {{ pacing?: import('../../../src/app.js').RunPacing,
+ *     drainElsewhere?: (table: ArrayBufferLike, sampleRate: number) => void }} [how]
  *     How the run loop waits: a worker hands in the event-driven pacing a
  *     thread of its own allows, a page leaves the default.
  * @returns {Harness}
@@ -1425,10 +1466,15 @@ export function createHarness(canvas, how = {}){
             storage: request.files?.length ? ()=>seedFiles(request.files) : null,
             // This page has a device, in the only sense the engine cares about:
             // something reads the other end of the ring at the rate a device would.
-            audio: { drained: true },
+            audio: { drained: true, ...request.audio ?? {} },
         });
 
-        drainSound(app);
+        // What the device mixed, between two moments of the run, when asked.
+        const capture = request.captureAudio
+            ? { fromMs: request.captureAudio.fromMs, toMs: request.captureAudio.toMs,
+                blocks: /** @type {Int16Array[]} */ ([]) }
+            : null;
+        const drain = drainSound(app, capture, how.drainElsewhere);
 
         listen(app, collected);
         scheduleKeyTimes(app, request);
@@ -1503,6 +1549,11 @@ export function createHarness(canvas, how = {}){
             result.frameRgba = toBase64(image.pixels);
         }
         result.presents = presentState.presents;
+        result.drain = drain;
+        if (capture && capture.blocks.length > 0)
+        {
+            result.audioCapture = packCapture(capture, app.audio.format().sampleRate);
+        }
 
         const layers = app.diagnostics();
         /** @param {string} name */

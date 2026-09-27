@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     SEGMENT_FS, THREAD_CONTROL_WORD, THREAD_MXCSR, captureContext, diffContexts,
-    freshThreadFpu, restoreContext, setThreadBase,
+    freshThreadFpu, restoreContext, setContextEflags, setThreadBase,
 } from './context.js';
 
 /**
@@ -159,4 +159,28 @@ test('a new thread starts with Windows\' floating-point environment, not its cre
     assert.ok(context.regXmm.every((/** @type {number} */ word)=>word === 0));
     assert.deepEqual(context.reg32, registers, 'the rest of the template stays');
     assert.deepEqual(context.segmentOffsets, segments);
+});
+
+test('a context given a flags word whole keeps no lazy arithmetic beside it', ()=>{
+    // The emulator's record: the word is literal once flags_changed is zero;
+    // left set, the lazy operands recompute the arithmetic flags over it.
+    const context = captureContext(fillDistinctly(fakeCpu(), 5));
+    setContextEflags(context, 0x602);
+    assert.equal(context.flags, 0x602);
+    assert.equal(context.flagsChanged, 0);
+    const cpu = fakeCpu();
+    restoreContext(cpu, context);
+    assert.equal(cpu.flags[0], 0x602);
+    assert.equal(cpu.flags_changed[0], 0);
+
+    // Cork's block: the word, and its record of a region's last arithmetic
+    // cleared, as the engine's own setter leaves them.
+    const layout = /** @type {any} */ ({ eflags: 40, flagRecord: 44 });
+    const block = new Uint8Array(64).fill(0x5a);
+    const view = new DataView(block.buffer);
+    const record = /** @type {any} */ ({ block, layout, reg32: [] });
+    setContextEflags(record, 0x403);
+    assert.equal(view.getUint32(40, true), 0x403);
+    assert.equal(view.getUint32(44, true), 0, 'no record: the word says everything');
+    assert.equal(view.getUint32(48, true), 0x5a5a5a5a, 'and nothing past it is touched');
 });

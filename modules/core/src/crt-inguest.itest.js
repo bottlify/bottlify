@@ -185,7 +185,7 @@ function buildCallsExe(calls, data){
         imports: { 'msvcrt.dll': names, 'KERNEL32.dll': ['ExitProcess'] },
         data: { out: new Array(8).fill(0), ...data },
         codeSize: 0x800,
-        code: ({ iat, at, code })=>[...assemble([
+        code: ({ iat, at, code })=>fitted([...assemble([
             [0xbe, ...u32(0x5e5e5e5e), 0xbf, ...u32(0xd1d1d1d1)],        // esi, edi: marks
             ...calls.flatMap((call, i)=>{
                 const args = call.args(at, code(COMPARATOR_AT));
@@ -216,9 +216,66 @@ function buildCallsExe(calls, data){
             [0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],         // exit 0
             'fail',
             [0x53, 0xff, 0x15, ...u32(iat('ExitProcess'))],               // exit ebx
-        ])].concat(new Array(COMPARATOR_AT).fill(0xcc)).slice(0, COMPARATOR_AT)
+        ])]).concat(new Array(COMPARATOR_AT).fill(0xcc)).slice(0, COMPARATOR_AT)
             .concat(COMPARATOR),
     });
+}
+
+/**
+ * The calls, which have to end before the comparator: past it they would be
+ * cut short, and the program would run into it.
+ *
+ * @param {number[]} bytes
+ */
+const fitted = bytes=>{
+    assert.ok(bytes.length <= COMPARATOR_AT, `the calls take ${bytes.length} bytes`);
+    return bytes;
+};
+
+/**
+ * Where msvcrt.dll answers otherwise than the handlers the guest code
+ * replaced did: bytes compared as unsigned chars, atoi wrapping, WEOF through
+ * the case functions, and the wide classes of the Latin-1 page.
+ */
+function buildMsvcrtAnswersExe(){
+    /** @type {Call[]} */
+    const calls = [];
+    /** @param {string} name @param {number[]} args @param {number} answer */
+    const plain = (name, args, answer)=>calls.push({ name, args: ()=>args, returns: 'eax',
+        expected: [answer >>> 0] });
+    /**
+     * @param {string} name @param {string[]} texts @param {number[]} rest
+     * @param {number} answer
+     */
+    const strings = (name, texts, rest, answer)=>calls.push({ name, returns: 'eax',
+        args: at=>[...texts.map(text=>at(text)), ...rest], expected: [answer >>> 0] });
+    strings('strcmp', ['euro', 'nbsp'], [], -1);
+    strings('strcmp', ['top', 'euro'], [], 1);
+    strings('strncmp', ['euro', 'nbsp'], [1], -1);
+    strings('_stricmp', ['euro', 'nbsp'], [], -1);
+    strings('_strnicmp', ['euro', 'nbsp'], [1], -1);
+    strings('_strcmpi', ['euro', 'nbsp'], [], -1);
+    strings('atoi', ['4294967296'], [], 0);
+    strings('atol', ['4294967296'], [], 0);
+    strings('atoi', ['-2147483649'], [], 0x7fffffff);
+    plain('towupper', [0xffff], 0xffff);
+    plain('towlower', [0xffff], 0xffff);
+    plain('iswupper', [0xc9], 1);
+    plain('iswlower', [0xe9], 1);
+    plain('iswprint', [0xe9], 1);
+    plain('iswgraph', [0xe9], 1);
+    plain('iswpunct', [0xa9], 1);
+    plain('iswcntrl', [0x80], 1);
+    plain('iswspace', [0x85], 0);
+    plain('iswalpha', [0xaa], 0);
+    plain('iswdigit', [0xb2], 1);
+    plain('iswprint', [0x09], 1);
+    const data = Object.fromEntries(['4294967296', '-2147483649']
+        .map(text=>[text, cString(text)]));
+    data.euro = [0x80, 0];
+    data.nbsp = [0xa0, 0];
+    data.top = [0xff, 0];
+    return buildCallsExe(calls, data);
 }
 
 /** floor, toupper and strncmp through the import, with what the handlers answered. */
@@ -237,7 +294,7 @@ function buildPrototypeExe(){
     }
     for (const [left, right, count, answer] of /** @type {[string, string, number, number][]} */ ([
         ['abcX', 'abcY', 3, 0], ['abcX', 'abcY', 4, -1], ['abcY', 'abcX', 4, 1],
-        ['euro', 'yen', 1, 1], ['ab', 'abc', 99, -1], ['abc', 'abd', 0, 0],
+        ['euro', 'yen', 1, -1], ['ab', 'abc', 99, -1], ['abc', 'abd', 0, 0],
     ]))
     {
         calls.push({ name: 'strncmp', args: at=>[at(left), at(right), count], returns: 'eax',
@@ -246,7 +303,7 @@ function buildPrototypeExe(){
     return buildCallsExe(calls, {
         abcX: cString('abcX'), abcY: cString('abcY'), ab: cString('ab'), abc: cString('abc'),
         abd: cString('abd'),
-        // 0x80, the euro sign, sorts above 0xff: the order the handlers compared in.
+        // 0x80, the euro sign in the ANSI page, sorts below 0xa5: bytes as unsigned chars.
         euro: [0x80, 0], yen: [0xa5, 0],
     });
 }
@@ -284,7 +341,7 @@ function buildLibraryExe(){
     strings('_stricmp', ['Zeta', 'zetA'], [], 0);
     strings('_stricmp', ['Zeta', 'zetB'], [], -1);
     strings('atoi', ['  -123x'], [], -123);
-    strings('atoi', ['99999999999'], [], 0x7fffffff);
+    strings('atoi', ['99999999999'], [], 1215752191);
     strings('atol', ['+42'], [], 42);
     const sorted = [-7, -3, 0, 4, 4, 9, 12, 30];
     for (const [wanted, index] of [[9, 5], [-7, 0], [30, 7], [5, -1]])
@@ -326,7 +383,7 @@ function buildMemoryExe(){
     call('strcpy', at=>[at('buffer'), at('hello')], at=>at('buffer'));
     call('strcmp', at=>[at('buffer'), at('hello')], 0);
     call('strcmp', at=>[at('hello'), at('help')], -1);
-    call('strcmp', at=>[at('euro'), at('yen')], 1);
+    call('strcmp', at=>[at('euro'), at('yen')], -1);
     call('memset', at=>[at('buffer'), 0x178, 3], at=>at('buffer'));
     call('strcmp', at=>[at('buffer'), at('xxxlo')], 0);
     call('memcpy', at=>[at('buffer'), at('abcdef'), 7], at=>at('buffer'));
@@ -341,7 +398,7 @@ function buildMemoryExe(){
         hello: cString('hello'), help: cString('help'), empty: [0], xxxlo: cString('xxxlo'),
         abcdef: cString('abcdef'), aabcdf: cString('aabcdf'), bcdfdf: cString('bcdfdf'),
         buffer: new Array(16).fill(0),
-        // strcmp orders 0x80 after 0xa5, as the handlers did; memcmp, as bytes.
+        // strcmp orders bytes as memcmp does, unsigned.
         euro: [0x80, 0], yen: [0xa5, 0],
     });
 }
@@ -664,6 +721,12 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
     test(`the classifiers, the case-blind comparisons, atoi and bsearch, in the guest, under `
         + `${engine}`, { timeout: 60000 }, async()=>{
         assert.equal(await exitCodeOf(buildLibraryExe(), engine), 0,
+            'the number of the first call that came back wrong');
+    });
+
+    test(`the comparisons, atoi, WEOF and the Latin-1 classes answer as msvcrt.dll does, `
+        + `under ${engine}`, { timeout: 60000 }, async()=>{
+        assert.equal(await exitCodeOf(buildMsvcrtAnswersExe(), engine), 0,
             'the number of the first call that came back wrong');
     });
 

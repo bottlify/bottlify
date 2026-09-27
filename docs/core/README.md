@@ -53,6 +53,9 @@ entry point. The `.btl` bundle format is published too: `@bottlify/core/bundle` 
 writer and the engine's reader agree on (the header constants, the codecs, `crc32`) and runs in a
 browser, and `@bottlify/core/bundle/node` reads and writes bundle files on a host (`openBundle`,
 `writeBundle`, `verifyBundle`) -- the reader and writer the bundle tools in `tools/` use.
+`@bottlify/core/iso` is the ISO 9660 and Joliet reader a disc image is mounted with (`discs`),
+for whoever has to look inside one before a machine exists: `openIso`, `isIsoImage`, and
+`rangeReader` over a `Blob`, bytes or a reader of one's own.
 
 ## The layers
 
@@ -67,7 +70,7 @@ system described in [`system.md`](./system.md). Each has a document of its own:
 | `bridge` | The trap channel's host half: calls marshalled by convention (`stdcall`, `cdecl`, `thiscall`), a caller parked when the answer is not ready, calls back into guest code, COM interfaces published into guest memory, recorded sessions replayed in tests. | [`bridge.md`](./bridge.md) |
 | `loader` | Maps a PE32 image, relocations, imports and delay-loads, TLS, and synthesises an in-guest module per system library so `GetProcAddress` answers the address an import was bound to. | [`loader.md`](./loader.md) |
 | `log` | The journal: levels and categories, ring buffers, a phase profiler, guest CPU attribution. Requires nothing. | [`log.md`](./log.md) |
-| `filesystem` | A virtual volume with a bundle behind it, read on demand block by block, with an OPFS block cache, and the session overlay a program writes into. | [`filesystem.md`](./filesystem.md) |
+| `filesystem` | A virtual volume with a bundle behind it, read on demand block by block, with an OPFS block cache, and the session overlay a program writes into; a disc image mounted as a read-only CD-ROM drive of its own. | [`filesystem.md`](./filesystem.md) |
 | `win32` | The guest-facing system libraries: `kernel32`, `user32`, `gdi32`'s bookkeeping half, `advapi32` with the registry, `ole32`, `oleaut32`, `msvcrt`, `ntdll`, `winmm`, `wsock32`/`ws2_32`, `shell32`, `comctl32`, `comdlg32`, `imm32`, `version`, `wininet`, and a DirectShow filter graph (`quartz`). | [`win32.md`](./win32.md) |
 | `graphics` | Every drawing API over one WebGPU backend: GDI's drawing half, DirectDraw, Direct3D 7, 8, 9 and 10 with DXGI, OpenGL 1.x with WGL, Vulkan; each published through a seam that is the library's own exports and vtables. | [`graphics.md`](./graphics.md) |
 | `audio` | A mixer over a shared track table an `AudioWorklet` resamples and sums, or -- without shared memory -- a ring the engine thread mixes into itself; DirectSound buffers and cursors on top of it; the MPEG provider a sound middleware loads, hosted. | [`audio.md`](./audio.md) |

@@ -9,8 +9,9 @@ import assert from 'node:assert/strict';
 import { REFRESH_HZ, displayModes } from './display.js';
 
 /** Every size of the era, as the table lists them. */
-const ERA = ['640x480', '800x600', '1024x768', '1280x720', '1280x800', '1280x832', '1440x900',
-    '1512x982', '1600x900', '1680x1050', '1728x1117', '1920x1080', '1920x1200', '2560x1440',
+const ERA = ['640x480', '800x600', '1024x768', '1152x864', '1280x720', '1280x800', '1280x832',
+    '1280x960', '1280x1024', '1400x1050', '1440x900', '1512x982', '1600x900', '1600x1200',
+    '1680x1050', '1728x1117', '1920x1080', '1920x1200', '1920x1440', '2048x1536', '2560x1440',
     '2560x1600', '2560x1664', '2880x1800', '3024x1964', '3456x2234'];
 /** Each size at each rate, as the list walks them. */
 const ERA_MODES = ERA.flatMap(size=>[`${size}@60`, `${size}@120`]);
@@ -25,6 +26,16 @@ test('a display offers every size of the era whatever its own, smallest first', 
     assert.deepEqual(names(modes), ERA_MODES);
     assert.ok(modes.every(mode=>mode.bitsPerPixel === 32));
     assert.equal(modes[0].refresh, REFRESH_HZ);
+});
+
+test('a program that keeps only 4:3 sizes finds the ladder a driver lists, not three', ()=>{
+    // An older program filters the adapter's list to 4:3 and builds its menu
+    // from what is left; with three such sizes its menu had three entries.
+    const fourByThree = [...new Set(displayModes({ width: 1024, height: 768, bitsPerPixel: 32 })
+        .filter(mode=>mode.width * 3 === mode.height * 4)
+        .map(mode=>`${mode.width}x${mode.height}`))];
+    assert.deepEqual(fourByThree, ['640x480', '800x600', '1024x768', '1152x864', '1280x960',
+        '1400x1050', '1600x1200', '1920x1440', '2048x1536']);
 });
 
 test('a display of a size the era never had is still in its own list', ()=>{

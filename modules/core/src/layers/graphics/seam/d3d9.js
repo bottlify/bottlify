@@ -30,7 +30,7 @@
 import { IDIRECT3D9_SLOTS, describe } from './vtables.js';
 import {
     D3DBOX, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_BOX, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS9,
-    POINT, RECT, createFields,
+    POINT, RECT, createFields, dwordsOf, floatsOf, intsOf,
 } from './structs.js';
 import {
     IDIRECT3DBASETEXTURE9_SLOTS, IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS,
@@ -219,25 +219,19 @@ export function createDirect3D9Seam(
     /** @param {number} pointer @param {number} count @returns {Float32Array} */
     const readFloats = (pointer, count)=>{
         const read = memory.windowMemory ?? memory.readMemory;
-        const floats = new Float32Array(count);
-        new Uint8Array(floats.buffer).set(read(pointer >>> 0, count * 4));
-        return floats;
+        return floatsOf(read(pointer >>> 0, count * 4), count);
     };
 
     /** @param {number} pointer @param {number} count @returns {Int32Array} */
     const readInts = (pointer, count)=>{
         const read = memory.windowMemory ?? memory.readMemory;
-        const ints = new Int32Array(count);
-        new Uint8Array(ints.buffer).set(read(pointer >>> 0, count * 4));
-        return ints;
+        return intsOf(read(pointer >>> 0, count * 4), count);
     };
 
     /** @param {number} pointer @param {number} count @returns {Uint32Array} */
     const readDwords = (pointer, count)=>{
         const read = memory.windowMemory ?? memory.readMemory;
-        const dwords = new Uint32Array(count);
-        new Uint8Array(dwords.buffer).set(read(pointer >>> 0, count * 4));
-        return dwords;
+        return dwordsOf(read(pointer >>> 0, count * 4), count);
     };
 
     /** @param {number} address @param {ArrayLike<number>} values */

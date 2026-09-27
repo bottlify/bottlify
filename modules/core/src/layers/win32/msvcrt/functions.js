@@ -673,7 +673,7 @@ export function createMsvcrtFunctions(host){
     return {
         ...narrow,
         // Bound to the byte functions above, so the two families cannot drift.
-        ...createMultiByteFunctions(narrow),
+        ...createMultiByteFunctions(narrow, host.divergence),
         ...createWideClassificationFunctions(),
         ...createWideFunctions({
             readMemory: host.readMemory,

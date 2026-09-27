@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createSeh, RECORD, CONTEXT, Disposition, END_OF_CHAIN, EH_UNWINDING, STATUS,
+    createSeh, RECORD, CONTEXT, Disposition, EFLAGS_AC, EFLAGS_DF, EFLAGS_TF, END_OF_CHAIN,
+    EH_UNWINDING, STATUS,
 } from './seh.js';
 
 const TEB = 0x8000;
@@ -24,6 +25,9 @@ function machine(options = {}){
     const view = new DataView(bytes.buffer);
     /** @type {{ entry: number, args: number[] }[]} */
     const called = [];
+    /** The flags each call was told to start with, or undefined for none. */
+    /** @type {(number | undefined)[]} */
+    const startedWith = [];
     let registers = {
         eax: 0x11, ecx: 0x22, edx: 0x33, ebx: 0x44,
         esp: STACK, ebp: 0x55, esi: 0x66, edi: 0x77,
@@ -46,9 +50,13 @@ function machine(options = {}){
         setRegisters: values=>{
             registers = { ...registers, ...values };
         },
-        /** @param {{ entry: number, args: number[], stackAtRest?: number }} call */
+        /**
+         * @param {{ entry: number, args: number[], stackAtRest?: number,
+         *     registers?: Record<string, number> }} call
+         */
         callGuest: async call=>{
             called.push({ entry: call.entry, args: [...call.args] });
+            startedWith.push(call.registers?.eflags);
             return options.answer
                 ? options.answer(call.entry, call.args)
                 : Disposition.CONTINUE_SEARCH;
@@ -78,7 +86,7 @@ function machine(options = {}){
     };
 
     return {
-        host, called, put, get, registerFrames,
+        host, called, startedWith, put, get, registerFrames,
         seh: createSeh(host),
         registers: ()=>registers,
     };
@@ -453,4 +461,68 @@ test('RtlUnwind answers with the value it was given for EAX', async()=>{
 
     assert.equal(answer, 0x1234);
     assert.equal(m.get(TEB), frames[1]);
+});
+
+test('a handler starts with DF, TF and AC clear, its context with what the fault had', async()=>{
+    // A fault inside a copy going down (`std; rep movsd`) reaches the handler
+    // with DF set on the processor; compiled code assumes it clear at every
+    // call, so every `rep` in the handler would run backwards.
+    const m = machine();
+    m.registerFrames([0x51000, 0x52000]);
+    const faulted = 0x202 | 0x1 | EFLAGS_DF | EFLAGS_TF | EFLAGS_AC;
+
+    await m.seh.onFault({ vector: 14, eip: 0x401000, errorCode: 0 },
+        { ...m.registers(), eflags: faulted });
+
+    assert.deepEqual(m.startedWith, [0x203, 0x203],
+        'every handler of the walk, with the carry and the rest as they were');
+    const [, , context] = m.called[0].args;
+    assert.equal(m.get(context + CONTEXT.EFLAGS), faulted, 'the context has the fault\'s own');
+});
+
+test('continuing from a context takes its flags, and keeps the thread\'s own bits', async()=>{
+    // The handler may leave DF as the fault had it, or change the arithmetic
+    // flags; IF and the reserved bit are the thread's, whatever the record
+    // says.
+    const m = machine({ answer: (entry, args)=>{
+        m.put(args[2] + CONTEXT.EFLAGS, EFLAGS_DF | 0x1);
+        return Disposition.CONTINUE_EXECUTION;
+    } });
+    m.registerFrames([0x51000]);
+
+    const result = await m.seh.onFault({ vector: 14, eip: 0x401000, errorCode: 0 },
+        { ...m.registers(), eflags: 0x202 | EFLAGS_DF | 0x40 });
+
+    assert.equal(result.handled, true);
+    assert.equal(result.registers?.eflags, 0x202 | EFLAGS_DF | 0x1,
+        'DF and the carry from the context, IF and bit 1 from the thread, ZF gone as asked');
+});
+
+test('a raised exception with no frame goes to the filter with the flags a handler gets', async()=>{
+    const m = machine({ answer: ()=>-1 });
+    const seh = createSeh({ ...m.host, registers: ()=>({ ...m.registers(), eflags: 0x646 }) });
+    m.registerFrames([]);
+    seh.table.SetUnhandledExceptionFilter.handler([0x61000]);
+
+    const result = await seh.raise({ code: 0xe0000002, address: 0x401000 });
+
+    assert.deepEqual(m.called.map(call=>call.entry), [0x61000]);
+    assert.deepEqual(m.startedWith, [0x246]);
+    assert.equal(result.registers?.eflags, 0x646, 'and continues with the context\'s');
+});
+
+test('without the exception\'s flags, a handler is told none and continues with none', async()=>{
+    // A word nobody filled in is not the thread's flags.
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    /** @type {Record<string, number>} */
+    const known = { ...m.registers() };
+    delete known.eflags;
+    const seh = createSeh({ ...m.host, registers: ()=>({ ...known }) });
+    m.registerFrames([0x51000]);
+
+    const result = await seh.dispatch({ code: 1, address: 0x401000 });
+
+    assert.deepEqual(m.startedWith, [undefined]);
+    assert.equal(result.handled, true);
+    assert.equal('eflags' in (result.registers ?? {}), false);
 });

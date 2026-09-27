@@ -314,6 +314,15 @@ export function createGraphicsModule(){
                 /** A dword, read in place. @param {number} address */
                 readU32: address=>memory.readU32(address),
                 /**
+                 * A dword, written in place: an out-parameter without an array
+                 * made to carry its four bytes. Absent where the memory given
+                 * writes only bytes, and then the bytes carry it.
+                 */
+                writeU32: typeof memory.writeU32 === 'function'
+                    ? (/** @type {number} */ address, /** @type {number} */ value)=>
+                        memory.writeU32(address, value)
+                    : undefined,
+                /**
                  * `count` floats, decoded straight into `into` -- no window, no
                  * copy, no `DataView` -- for a fixed-count vector argument a
                  * handler consumes before it returns.

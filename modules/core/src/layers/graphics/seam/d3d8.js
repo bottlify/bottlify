@@ -43,7 +43,7 @@ import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js'
 import { queryAs, readGuid } from './guid.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DSURFACE_DESC8, D3DLOCKED_RECT, D3DLIGHT7, RECT, POINT, createFields,
-    D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8 } from './structs.js';
+    D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, dwordsOf, floatsOf } from './structs.js';
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
@@ -918,12 +918,11 @@ export function createDirect3D8Seam(
 
     /** @param {number} pointer @param {number} count @returns {Float32Array} */
     const readFloats = (pointer, count)=>{
-        // One copy, out of the window where there is one: the floats are the
-        // caller's to keep, so a copy there must be, but not two.
+        // Out of the window where there is one, rather than a copy of the
+        // bytes: the floats are the caller's to keep, and `floatsOf` answers
+        // an array of their own.
         const read = memory.windowMemory ?? memory.readMemory;
-        const floats = new Float32Array(count);
-        new Uint8Array(floats.buffer).set(read(pointer >>> 0, count * 4));
-        return floats;
+        return floatsOf(read(pointer >>> 0, count * 4), count);
     };
 
     /**
@@ -948,11 +947,8 @@ export function createDirect3D8Seam(
     };
 
     /** @param {number} pointer @param {number} count @returns {Uint32Array} */
-    const readDwords = (pointer, count)=>{
-        const dwords = new Uint32Array(count);
-        new Uint8Array(dwords.buffer).set(memory.readMemory(pointer >>> 0, count * 4));
-        return dwords;
-    };
+    const readDwords = (pointer, count)=>dwordsOf(memory.readMemory(pointer >>> 0, count * 4),
+        count);
 
     /**
      * A shader function's tokens, read to its end token. The stream carries
@@ -2307,12 +2303,12 @@ export function createDirect3D8Seam(
     };
 
     /**
-     * The one format an adapter's mode list is offered in: 32-bit colour.
-     * Direct3D 8 lists every mode in every format under one index, and a
-     * display that can show 32 bits has no reason to offer 16 -- a program
-     * given both defaults to whichever it finds first and looks worse for it.
+     * The formats an adapter's modes are offered in, as a driver of the era
+     * lists them: 32-bit colour and 16-bit. Direct3D 8 lists every mode in
+     * every format under one index, and a program given both takes whichever
+     * it finds first, so every 32-bit mode comes before the first 16-bit one.
      */
-    const ADAPTER_FORMATS = Object.freeze([22]);
+    const ADAPTER_FORMATS = Object.freeze([22, 23]);
 
     /**
      * Every mode the adapter offers, in the order a program walks them: each
@@ -2320,10 +2316,8 @@ export function createDirect3D8Seam(
      *
      * @returns {{ width: number, height: number, refresh: number, format: number }[]}
      */
-    const adapterModes = ()=>displayModes(screen())
-        .flatMap(mode=>ADAPTER_FORMATS.map(format=>({
-            width: mode.width, height: mode.height, refresh: mode.refresh, format,
-        })));
+    const adapterModes = ()=>ADAPTER_FORMATS.flatMap(format=>displayModes(screen())
+        .map(mode=>({ width: mode.width, height: mode.height, refresh: mode.refresh, format })));
 
     /**
      * What this device says it can do.

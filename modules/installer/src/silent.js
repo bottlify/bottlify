@@ -169,8 +169,13 @@ export function packagedEntries(bytes, overlay){
 const COMPOUND_FILE = '\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1';
 /** RAR 1.5 to 4.x, and RAR 5, as an SFX carries them behind its image. */
 const RAR_SIGNATURES = ['Rar!\x1a\x07\x00', 'Rar!\x1a\x07\x01\x00'];
-/** What the InstallShield player needs beside or behind itself. */
-const INSTALLSHIELD_FILES = ['data1.cab', 'engine32.cab', 'setup.ini'];
+/**
+ * What the InstallShield player needs beside or behind itself: its cabinets
+ * and settings, and an engine -- `engine32.cab` from version 6, the
+ * self-contained `_inst32i.ex_` before it.
+ */
+const INSTALLSHIELD_FILES = ['data1.cab', 'setup.ini'];
+const INSTALLSHIELD_ENGINES = ['engine32.cab', '_inst32i.ex_'];
 
 /**
  * A file's family, from its bytes.
@@ -217,7 +222,8 @@ export function detectFamily(bytes, beside = []){
     }
     const names = [...beside, ...packagedEntries(bytes, image.overlay).map(entry=>entry.name)]
         .map(name=>name.toLowerCase());
-    if (stub.includes('installshield') && INSTALLSHIELD_FILES.every(name=>names.includes(name)))
+    if (stub.includes('installshield') && INSTALLSHIELD_FILES.every(name=>names.includes(name))
+        && INSTALLSHIELD_ENGINES.some(name=>names.includes(name)))
     {
         return 'installshield';
     }
@@ -300,6 +306,81 @@ export function responseFile(guid, destination){
     return `${lines.join('\r\n')}\r\n`;
 }
 
+/** What each standard dialog is answered with: Next, and the destination where it asks. */
+const DIALOG_ANSWERS = /** @type {Record<string, (destination: string) => string[]>} */ ({
+    SdWelcome: ()=>['Result=1'],
+    SdLicense: ()=>['Result=1'],
+    SdShowInfoList: ()=>['Result=1'],
+    SdRegisterUser: ()=>['Result=1', 'szName=User', 'szCompany='],
+    SdRegisterUserEx: ()=>['Result=1', 'szName=User', 'szCompany=', 'szSerial='],
+    SdConfirmRegistration: ()=>['Result=1'],
+    SdAskDestPath: destination=>['Result=1', `szDir=${destination}`],
+    SdSetupType: destination=>['Result=301', `szDir=${destination}`],
+    SdSelectFolder: ()=>['Result=1', 'szFolder=Games'],
+    SdStartCopy: ()=>['Result=1'],
+    SdFinish: ()=>['Result=1', 'bOpt1=0', 'bOpt2=0'],
+    SdFinishReboot: ()=>['Result=1', 'BootOption=0'],
+});
+
+/**
+ * The response file an InstallShield 5 engine reads in silent mode.
+ *
+ * Unlike a later engine's, it names each dialog without a product GUID and
+ * holds the engine to the order in `[DlgOrder]`: a dialog the script shows
+ * that is neither the next one listed nor the one after it ends the install
+ * with -12. That order is the script's own and is not written down anywhere
+ * outside it, so it is learned by running -- the dialog each run reached
+ * (see `dialogCalled`) is added to the next run's list, which is how the
+ * engine's own record mode learns it from a person.
+ *
+ * @param {string[]} order  Dialog names in the order the script shows them.
+ * @param {string} destination
+ * @returns {string}
+ */
+export function responseFileV5(order, destination){
+    // A dialog is the first of its name unless the name says which: the
+    // script's own message boxes are counted, MessageBox-0, MessageBox-1.
+    const section = (/** @type {string} */ name)=>(/-\d+$/.test(name) ? name : `${name}-0`);
+    const lines = [
+        '[InstallShield Silent]',
+        'Version=v5.00.000',
+        'File=Response File',
+        '[File Transfer]',
+        'OverwriteReadOnly=NoToAll',
+        '[DlgOrder]',
+        ...order.map((name, index)=>`Dlg${index}=${section(name)}`),
+        `Count=${order.length}`,
+    ];
+    for (const name of order)
+    {
+        lines.push(`[${section(name)}]`,
+            ...(DIALOG_ANSWERS[name.replace(/-\d+$/, '')]?.(destination) ?? ['Result=1']));
+    }
+    return `${lines.join('\r\n')}\r\n`;
+}
+
+/**
+ * The dialog an InstallShield 5 engine is about to show in silent mode, read
+ * off the call that names its section (`wsprintfA(buffer, "%s-%ld", name, n)`),
+ * or the script's own message box, which is named by its count
+ * (`wsprintfA(buffer, "MessageBox-%d", n)`), or null for any other call.
+ *
+ * @param {{ name: string, strings?: (string | null)[], args?: number[] }} call
+ *     A bridge call record.
+ * @returns {string | null}
+ */
+export function dialogCalled(call){
+    if (!/wsprintfA$/.test(call.name))
+    {
+        return null;
+    }
+    if (call.strings?.[1] === 'MessageBox-%d')
+    {
+        return `MessageBox-${call.args?.[2] ?? 0}`;
+    }
+    return call.strings?.[1] === '%s-%ld' ? call.strings?.[2] ?? null : null;
+}
+
 /**
  * The product GUID an InstallShield response file is keyed by, from the
  * `setup.ini` the player carries or the disc holds.
@@ -345,13 +426,26 @@ const productGuid = media=>{
  *   reads no destination switch; the archive's own script decides.
  * - **Windows Installer**: nothing in the guest runs an `.msi`.
  *
+ * Silent is a choice, not a default: an install with a screen runs the
+ * distribution's own wizard, and only a run with none -- a terminal, a
+ * script -- asks for this, and passes createApp's `unattended` beside it so
+ * that a dialog the silent run raises anyway is answered rather than waited on.
+ *
  * @param {import('./prefix.js').InstallMedia} media
+ * @param {{ silent?: boolean, dialogs?: string[] }} [choice]  `silent` asks for the
+ *     unattended mode, which nothing gets without it; `dialogs` is an InstallShield 5
+ *     script's dialog order as far as earlier runs found it (`responseFileV5`).
  * @returns {SilentOptions | null}
  */
-export function silentOptions(media){
+export function silentOptions(media, choice = {}){
+    if (choice.silent !== true)
+    {
+        return null;
+    }
+    const learned = choice;
     const beside = (media.files ?? []).map(file=>file.name);
     const family = detectFamily(media.bytes, beside);
-    const image = `${MEDIA_DIRECTORY}\\${media.name}`;
+    const image = media.path ?? `${MEDIA_DIRECTORY}\\${media.name}`;
     switch (family){
         case 'wise': {
             const values = `${MEDIA_DIRECTORY}\\bottlify-wise.txt`;
@@ -372,13 +466,24 @@ export function silentOptions(media){
                     destination: DESTINATION,
                 };
             }
+            const response = `${MEDIA_DIRECTORY}\\bottlify.iss`;
+            const log = `${MEDIA_DIRECTORY}\\bottlify.log`;
+            if (beside.some(name=>name.toLowerCase() === '_inst32i.ex_'))
+            {
+                return {
+                    family,
+                    commandLine: `"${image}" -s -f1${response} -f2${log}`,
+                    seeded: [{ path: response,
+                        bytes: latin1(responseFileV5(learned.dialogs ?? ['SdWelcome'],
+                            DESTINATION)) }],
+                    destination: DESTINATION,
+                };
+            }
             const guid = productGuid(media);
             if (guid === null)
             {
                 return null;
             }
-            const response = `${MEDIA_DIRECTORY}\\bottlify.iss`;
-            const log = `${MEDIA_DIRECTORY}\\bottlify.log`;
             return {
                 family,
                 commandLine: `"${image}" /s /f1"${response}" /f2"${log}"`,

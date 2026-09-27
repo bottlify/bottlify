@@ -16,7 +16,7 @@ import {
 } from './internal/boot-rom.js';
 import { readFault, describeFault, hostFault } from './internal/faults.js';
 import {
-    captureContext, freshThreadFpu, restoreContext, setThreadBase,
+    captureContext, freshThreadFpu, restoreContext, setContextEflags, setThreadBase,
 } from './internal/context.js';
 import { createSampleTable, creditSample, topSamples } from './internal/samples.js';
 import { fileNameOf } from './internal/translation-store.js';
@@ -893,7 +893,8 @@ export function createCpuModule(){
                  * is sent into code that reads them before it sets them: a funclet
                  * of an exception handler addresses its parent's locals through
                  * EBP, and the block a handler continues at expects every register
-                 * the handler chose.
+                 * the handler chose -- EFLAGS among them, whole, as the context
+                 * record a handler edits carries them.
                  *
                  * @param {any} context
                  * @param {Object} options
@@ -909,6 +910,11 @@ export function createCpuModule(){
                     {
                         for (const [name, value] of Object.entries(registers))
                         {
+                            if (name === 'eflags')
+                            {
+                                setContextEflags(context, value);
+                                continue;
+                            }
                             const index = REGISTER_INDEX[/** @type {keyof typeof REGISTER_INDEX} */
                                 (name)];
                             if (index !== undefined)

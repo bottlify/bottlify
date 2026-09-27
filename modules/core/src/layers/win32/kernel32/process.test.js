@@ -584,6 +584,51 @@ test('freeing a slot zeroes it in the block of every thread', ()=>{
     assert.equal(host.view.getUint32(blocks.second + slot * 4, true), 0, 'and for the second');
 });
 
+test('a slot handed out again reads zero in every block, whatever was set in it while free', ()=>{
+    // The guest-side TlsSetValue writes a slot of the array without asking
+    // whether it is allocated, as Windows does, so between TlsFree and the
+    // next TlsAlloc a thread can put a value back into the freed slot; the
+    // slot's next owner must not find it.
+    const host = fakeHost();
+    const blocks = { first: 0x1100, second: 0x1300 };
+    host.threads.first.tebAddress = 0x1000;
+    host.threads.second.tebAddress = 0x1200;
+    host.view.setUint32(0x1000 + TEB.TLS_POINTER, blocks.first, true);
+    host.view.setUint32(0x1200 + TEB.TLS_POINTER, blocks.second, true);
+    const fns = createProcessFunctions({
+        ...host,
+        allThreads: ()=>[host.threads.first, host.threads.second],
+        tlsBlock: ()=>host.view.getUint32(host.currentThread().tebAddress + TEB.TLS_POINTER, true),
+    });
+    const slot = fns.TlsAlloc.handler();
+    assert.equal(fns.TlsFree.handler([slot]), 1);
+    // As the guest-side routine writes them, in each thread's array.
+    host.view.setUint32(blocks.first + slot * 4, 0x1234, true);
+    host.view.setUint32(blocks.second + slot * 4, 0x5678, true);
+    assert.equal(fns.TlsAlloc.handler(), slot, 'the freed index is the one handed out');
+    assert.equal(host.view.getUint32(blocks.first + slot * 4, true), 0, 'the caller\'s is zero');
+    assert.equal(host.view.getUint32(blocks.second + slot * 4, true), 0, 'and every other');
+    assert.equal(fns.TlsGetValue.handler([slot]), 0);
+    host.run(host.threads.second);
+    assert.equal(fns.TlsGetValue.handler([slot]), 0);
+});
+
+test('without a list of threads, a slot handed out again is zero in the caller\'s block', ()=>{
+    const host = fakeHost();
+    const block = 0x1100;
+    host.threads.first.tebAddress = 0x1000;
+    host.view.setUint32(0x1000 + TEB.TLS_POINTER, block, true);
+    const fns = createProcessFunctions({
+        ...host,
+        tlsBlock: ()=>host.view.getUint32(host.currentThread().tebAddress + TEB.TLS_POINTER, true),
+    });
+    const slot = fns.TlsAlloc.handler();
+    assert.equal(fns.TlsFree.handler([slot]), 1);
+    host.view.setUint32(block + slot * 4, 0x1234, true);
+    assert.equal(fns.TlsAlloc.handler(), slot);
+    assert.equal(fns.TlsGetValue.handler([slot]), 0);
+});
+
 test('the guest-side paths read the block and fall back to the host past it', ()=>{
     // The bytes are checked where they carry an address: the jump the slow
     // path takes to the host's trap, and the offset the fast path skips to it.

@@ -35,7 +35,7 @@
 import { GL } from './constants.js';
 import { EXTENSION_FUNCTIONS } from './extensions.js';
 import {
-    createMatrixStacks, frustum, identity, multiply, ortho, rotation, scaling, translation,
+    copyOf, createMatrixStacks, frustum, identity, multiply, ortho, rotation, scaling, translation,
 } from './matrix.js';
 import { createShareGroup } from './objects.js';
 import { createDefaultState, readState } from './state.js';
@@ -509,7 +509,16 @@ export function createGlContext(options = {}){
             const matrix = /** @type {any} */ (MATRIX_QUERIES)[query];
             if (matrix)
             {
-                return readState({ kind: 'float', values: [...stacks[matrix].current] }, as);
+                // Copied by index: spreading a typed array walks its iterator,
+                // several times the cost of the sixteen loads.
+                const current = stacks[matrix].current;
+                /** @type {number[]} */
+                const values = new Array(current.length);
+                for (let i = 0; i < current.length; i++)
+                {
+                    values[i] = current[i];
+                }
+                return readState({ kind: 'float', values }, as);
             }
             const depth = /** @type {any} */ (STACK_DEPTH_QUERIES)[query];
             if (depth)
@@ -977,7 +986,7 @@ export function createGlContext(options = {}){
                 setError(GL.STACK_OVERFLOW);
                 return;
             }
-            stack.saved.push(new Float64Array(stack.current));
+            stack.saved.push(copyOf(stack.current));
         },
 
         glPopMatrix(){
@@ -1006,7 +1015,7 @@ export function createGlContext(options = {}){
         glLoadMatrixf(m){
             if (enter('glLoadMatrixf', [m]))
             {
-                currentStack().current = Float64Array.from(m);
+                currentStack().current = copyOf(m);
             }
         },
 
@@ -1765,6 +1774,15 @@ export function createGlContext(options = {}){
 
     /** @returns {import('./matrix.js').MatrixStack} */
     function currentStack(){
+        // The two a program selects nearly always, without a lookup by name.
+        if (matrixMode === GL.MODELVIEW)
+        {
+            return stacks.modelview;
+        }
+        if (matrixMode === GL.PROJECTION)
+        {
+            return stacks.projection;
+        }
         return stacks[/** @type {any} */ (MATRIX_STACK_OF)[matrixMode]];
     }
 

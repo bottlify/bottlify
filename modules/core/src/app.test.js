@@ -17,7 +17,8 @@ import {
     resolveLibraryPath, startDirectoryOf, libraryCandidates, timedWait, pagePacing,
     PAGE_YIELD_MS,
     retryingFetch,
-    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, emulatorArtifacts, heapSizeFor,
+    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound, emulatorArtifacts,
+    heapSizeFor,
     spaceAbove,
     resourceLookup,
     createMissingImports,
@@ -1102,6 +1103,16 @@ test('a near jump is encoded relative to the instruction after it', ()=>{
     assert.deepEqual([...jumpBytes(0x1000, 0x2000)], [0xe9, 0xfb, 0x0f, 0, 0]);
     assert.deepEqual([...jumpBytes(0x2000, 0x1000)], [0xe9, 0xfb, 0xef, 0xff, 0xff],
         'backwards wraps');
+});
+
+test('a film\'s sound counts whole on its timeline, even the part its track refused', ()=>{
+    // Counted as taken only, the refused part was heard the moment it was
+    // offered and the picture raced ahead of a sound that was mostly dropped.
+    const track = { write: (/** @type {Uint8Array} */ bytes)=>Math.floor(bytes.length / 4 / 2) };
+    const block = new Int16Array(22050 * 2);
+    const fed = feedFilmSound(track, [block], 2, 22050, 44100);
+    assert.deepEqual(fed, { offered: 44100, refused: 44100 - 11025 },
+        'a second of film at 22050 is a second of device frames, taken or not');
 });
 
 test('the guest clock is credited with all the wall time between credits, capped', ()=>{

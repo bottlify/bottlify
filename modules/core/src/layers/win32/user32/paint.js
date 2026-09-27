@@ -28,6 +28,7 @@
  */
 
 import { PAINTSTRUCT, RECT, readRect, writeRect, writeU32s } from './structs.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 /** DrawText's flags. */
 const DT_CENTER = 0x0001;
@@ -471,10 +472,14 @@ export function createPaintFunctions(options){
      * @param {number[]} args
      */
     const drawText = ([hdc, text, count, rect, format])=>{
-        const limit = (count | 0) < 0 ? 0x10000 : count | 0;
-        const string = (text >>> 0) === 0 || limit === 0
+        // A count of -1 means a terminated string; any other count is the
+        // string's length, and the text need not be terminated at all -- a
+        // caller drawing part of a buffer passes exactly that part.
+        const string = (text >>> 0) === 0 || (count | 0) === 0
             ? ''
-            : host.readCString(text, limit).slice(0, limit);
+            : (count | 0) < 0
+                ? host.readCString(text, 0x10000)
+                : decodeAnsi(host.readMemory(text >>> 0, count | 0));
         const bounds = (rect >>> 0) === 0
             ? { left: 0, top: 0, right: 0x7fff, bottom: 0x7fff }
             : readRect(host, rect);

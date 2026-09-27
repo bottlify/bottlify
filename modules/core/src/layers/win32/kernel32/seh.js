@@ -13,7 +13,7 @@
  * here is told when that happens, so nothing here may remember the chain. It is
  * read fresh on every dispatch, every time.
  *
- * Six things about this are settled by having been got wrong before, and each
+ * Seven things about this are settled by having been got wrong before, and each
  * is marked where it is honoured rather than restated as a rule:
  *
  * - The record is eighty bytes and a caller's return slot needs its own word
@@ -31,6 +31,10 @@
  *   permission rejects the program's own handler.
  * - Unwinding calls each frame's own handler with the unwinding flag. A runtime
  *   that is not this compiler's depends on exactly that.
+ * - A handler starts with the direction flag clear, whatever the faulting code
+ *   had: compiled code assumes DF clear at every call, and a fault inside a
+ *   copy going down (`std; rep movs`) would otherwise have every `rep` in the
+ *   handler run backwards. The context keeps the flags the fault had.
  */
 
 /** EXCEPTION_RECORD, and the size the whole of one occupies. */
@@ -77,6 +81,27 @@ export const CONTEXT = Object.freeze({
 
 /** CONTEXT_FULL: control, integer and segment registers. */
 export const CONTEXT_FULL = 0x00010007;
+
+/** EFLAGS: the trap, direction and alignment-check flags. */
+export const EFLAGS_TF = 0x100;
+export const EFLAGS_DF = 0x400;
+export const EFLAGS_AC = 0x40000;
+
+/**
+ * What the system clears before it runs a handler, as Windows enters its
+ * dispatcher: a handler is a function like any other, called with DF clear,
+ * and neither single-stepped nor alignment-checked on the faulting code's
+ * account.
+ */
+const HANDLER_CLEARS = EFLAGS_TF | EFLAGS_DF | EFLAGS_AC;
+
+/**
+ * The flags a handler may change in the context it continues from: the
+ * arithmetic six, TF, DF, AC and ID. The rest -- the reserved bit, IF, IOPL
+ * and the mode bits -- are the thread's and stay as they were, as the system
+ * keeps them when it continues from a context a program edited.
+ */
+const EFLAGS_FROM_CONTEXT = 0x0cd5 | EFLAGS_TF | EFLAGS_DF | EFLAGS_AC | 0x200000;
 
 /** What a handler answers with. */
 export const Disposition = Object.freeze({
@@ -156,14 +181,18 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  *           Whether a frame's memory is there. A bounds test and nothing more.
  * @property {() => number} teb  The running thread's block; its first word is
  *           the head of the chain.
- * @property {() => Record<string, number>} registers
+ * @property {() => Record<string, number>} registers  EFLAGS among them
+ *           (`eflags`) when the host can read them; without them a handler
+ *           starts with the flags as they stand and continues with them.
  * @property {(values: Record<string, number>) => void} setRegisters
  * @property {(options: { entry: number, args: number[], thread?: any,
- *                        stackAtRest?: number }) => Promise<number>} callGuest
+ *                        stackAtRest?: number,
+ *                        registers?: Record<string, number> }) => Promise<number>} callGuest
  *           Runs guest code with its frame built at `stackAtRest`, which is
  *           where a handler has to start: the record and context it is handed
  *           sit on this same stack, and a frame built anywhere above them is
- *           a handler writing over what it is reading.
+ *           a handler writing over what it is reading. `registers.eflags`,
+ *           when given, is the flags word it starts with.
  * @property {() => any} [currentThread]
  * @property {(text: string) => void} [trace]
  * @property {(what: { code: number, address: number }) => void} [terminate]
@@ -260,6 +289,39 @@ export function createSeh(host){
     });
 
     /**
+     * Where a thread continues once a handler has fixed the exception: the
+     * context as the handler left it, its flags laid over the ones the thread
+     * had at the exception -- or without flags at all when those were never
+     * known, rather than with a word nobody filled in.
+     *
+     * @param {number} at  The context.
+     * @param {number | undefined} flags  The thread's at the exception.
+     */
+    const continuation = (at, flags)=>{
+        /** @type {Record<string, number>} */
+        const registers = readContext(at);
+        if (flags === undefined)
+        {
+            delete registers.eflags;
+            return registers;
+        }
+        registers.eflags = (registers.eflags & EFLAGS_FROM_CONTEXT
+            | flags & ~EFLAGS_FROM_CONTEXT) >>> 0;
+        return registers;
+    };
+
+    /**
+     * What a handler's call is told to start with: the flags of the exception
+     * less the ones the system clears, when they are known.
+     *
+     * @param {number | undefined} flags
+     * @returns {{ registers?: Record<string, number> }}
+     */
+    const entryFlags = flags=>(flags === undefined
+        ? {}
+        : { registers: { eflags: (flags & ~HANDLER_CLEARS) >>> 0 } });
+
+    /**
      * The frames a thread has registered, outermost last.
      *
      * Read fresh, never kept: a program pushes and pops these itself and never
@@ -324,12 +386,13 @@ export function createSeh(host){
      *        reported from a stub that has already moved the stack and spent
      *        two of them.
      * @returns {Promise<{ handled: boolean, registers?: Record<string, number>,
-     *     record?: number, context?: number, top?: number, asked?: any }>}
+     *     record?: number, context?: number, top?: number, asked?: any, flags?: number }>}
      *     When nothing handled it, where the record and context were built,
      *     for the last-chance filter to be handed the same ones.
      */
     const dispatch = async(what, given)=>{
         const registers = given ?? host.registers();
+        const flags = registers.eflags;
         const at = carve(registers);
         writeRecord(at.record, {
             code: what.code >>> 0,
@@ -353,12 +416,14 @@ export function createSeh(host){
             {
                 continue;
             }
-            // Handlers run below the record they were handed.
+            // Handlers run below the record they were handed, each with the
+            // flags the system gives one.
             const answer = await host.callGuest({
                 entry: handler,
                 args: [at.record, frame, at.context, 0],
                 thread: asked,
                 stackAtRest: at.top,
+                ...entryFlags(flags),
             }) >>> 0;
 
             if (answer === Disposition.CONTINUE_EXECUTION)
@@ -366,7 +431,8 @@ export function createSeh(host){
                 // What the handler put in the context is where execution goes,
                 // and that includes the stack pointer: restoring only the
                 // instruction pointer leaves the stack a frame out, every time.
-                return { handled: true, registers: readContext(at.context) };
+                // The flags too: DF is the faulting code's again.
+                return { handled: true, registers: continuation(at.context, flags) };
             }
             if (answer === Disposition.NESTED_EXCEPTION
                 || answer === Disposition.COLLIDED_UNWIND)
@@ -378,7 +444,9 @@ export function createSeh(host){
             }
         }
 
-        return { handled: false, record: at.record, context: at.context, top: at.top, asked };
+        return {
+            handled: false, record: at.record, context: at.context, top: at.top, asked, flags,
+        };
     };
 
     /**
@@ -480,7 +548,8 @@ export function createSeh(host){
      * exception is fixed.
      *
      * @param {{ code: number, flags?: number, address: number }} what
-     * @param {{ record: number, context: number, top: number, asked?: any }} at
+     * @param {{ record: number, context: number, top: number, asked?: any,
+     *     flags?: number }} at  `flags`: the thread's at the exception.
      * @returns {Promise<{ handled: boolean, registers?: Record<string, number> }>}
      */
     const lastChance = async(what, at)=>{
@@ -489,16 +558,19 @@ export function createSeh(host){
             const pointers = (at.top - 8) >>> 0;
             writeU32(pointers, at.record);
             writeU32(pointers + 4, at.context);
+            // With the flags a handler starts with: a chain with no frame on
+            // it leaves the thread with the faulting code's own.
             const answer = await host.callGuest({
                 entry: topLevelFilter,
                 args: [pointers],
                 thread: at.asked,
                 stackAtRest: pointers,
+                ...entryFlags(at.flags),
             }) | 0;
             if (answer === EXCEPTION_CONTINUE_EXECUTION
                 && ((what.flags ?? 0) & EXCEPTION_NONCONTINUABLE) === 0)
             {
-                return { handled: true, registers: readContext(at.context) };
+                return { handled: true, registers: continuation(at.context, at.flags) };
             }
         }
         host.trace?.(`unhandled exception ${hex(what.code)} at ${hex(what.address)}`);
@@ -521,7 +593,7 @@ export function createSeh(host){
         }
         return lastChance(what, {
             record: result.record ?? 0, context: result.context ?? 0,
-            top: result.top ?? 0, asked: result.asked,
+            top: result.top ?? 0, asked: result.asked, flags: result.flags,
         });
     };
 
@@ -576,7 +648,7 @@ export function createSeh(host){
             }
             return lastChance({ code, address: registers.eip }, {
                 record: result.record ?? 0, context: result.context ?? 0,
-                top: result.top ?? 0, asked: result.asked,
+                top: result.top ?? 0, asked: result.asked, flags: result.flags,
             });
         },
 

@@ -4,6 +4,9 @@
  * See LICENSE for details
  */
 
+/** SetThreadPriority's relative value for the highest priority there is. */
+const THREAD_PRIORITY_TIME_CRITICAL = 15;
+
 /**
  * Multimedia timers: `timeSetEvent`'s callbacks, on a thread of their own.
  *
@@ -208,6 +211,13 @@ export function createTimerService(deps){
         const code = deps.allocate(31);
         deps.writeMemory(code, timerLoopCode(stub, code));
         thread = deps.createThread({ entry: code, name: 'winmm-timer' });
+        // Windows runs the multimedia timer thread time-critical: a callback
+        // that refills a sound buffer is due at its tick, not after whatever
+        // else is running.
+        if (thread)
+        {
+            thread.priority = THREAD_PRIORITY_TIME_CRITICAL;
+        }
     };
 
     return {

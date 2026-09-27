@@ -26,6 +26,15 @@ const CLIP_PLANES = 6;
 const FOG_MODES = new Set([GL.LINEAR, GL.EXP, GL.EXP2]);
 
 /**
+ * The four components a vector parameter sets, zero for any the caller's
+ * array does not have.
+ *
+ * @param {ArrayLike<number>} values
+ * @returns {number[]}
+ */
+const fourOf = values=>[values[0] ?? 0, values[1] ?? 0, values[2] ?? 0, values[3] ?? 0];
+
+/**
  * @param {any} context
  * @param {import('./kernel.js').ContextKernel} kernel
  */
@@ -88,7 +97,7 @@ export function installLightingCalls(context, kernel){
             return;
         }
         const target = lights[index];
-        const four = ()=>[0, 1, 2, 3].map(k=>values[k] ?? 0);
+        const four = ()=>fourOf(values);
         switch (parameter)
         {
             case GL.AMBIENT:
@@ -167,7 +176,7 @@ export function installLightingCalls(context, kernel){
         }
         const targets = face === GL.FRONT ? [materials.front]
             : face === GL.BACK ? [materials.back] : [materials.front, materials.back];
-        const four = ()=>[0, 1, 2, 3].map(k=>values[k] ?? 0);
+        const four = ()=>fourOf(values);
         for (const material of targets)
         {
             switch (parameter)
@@ -320,7 +329,7 @@ export function installLightingCalls(context, kernel){
             switch (parameter)
             {
                 case GL.LIGHT_MODEL_AMBIENT:
-                    setState(GL.LIGHT_MODEL_AMBIENT, [0, 1, 2, 3].map(k=>values[k] ?? 0));
+                    setState(GL.LIGHT_MODEL_AMBIENT, fourOf(values));
                     return;
                 case GL.LIGHT_MODEL_LOCAL_VIEWER:
                 case GL.LIGHT_MODEL_TWO_SIDE:

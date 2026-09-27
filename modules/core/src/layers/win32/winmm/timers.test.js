@@ -91,6 +91,7 @@ test('a periodic timer makes the thread, fires on its period, re-armed from its 
     assert.equal(id, 1);
     assert.equal(m.created.length, 1);
     assert.equal(m.created[0].name, 'winmm-timer');
+    assert.equal(/** @type {any} */ (m.created[0]).priority, 15, 'time-critical, as Windows runs it');
 
     // Not due: the thread parks with the deadline the clock will honour.
     assert.equal(m.ask(), PARKED);

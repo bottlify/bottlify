@@ -591,7 +591,7 @@ test('two consecutive glProgramEnvParameter4fvARB calls hand the context the sam
         // view above: no window, no per-call `DataView`, the shape the real
         // accessor takes.
         readF32sInto: (/** @type {number} */ at, /** @type {number} */ count,
-            /** @type {Float32Array} */ into)=>
+            /** @type {Float32Array | number[]} */ into)=>
         {
             for (let i = 0; i < count; i++)
             {
@@ -755,3 +755,222 @@ test('raster: false reaches the library\'s contexts: a triangle over a clear pai
         assert.deepEqual(drawn(undefined), [0, 0, 255, 255], 'rasterised: red, in BGRX');
         assert.deepEqual(drawn(false), [255, 0, 0, 255], 'not rasterised: the clear\'s blue');
     });
+
+test('every typed form hands the context what its type decodes to, through the memory layer\'s '
+    + 'reader or a window alike, and makes no view of its own per call', ()=>{
+    // The immediate and `*v` forms of each family decode their components in
+    // a handler bound once per name; the float vectors go through the memory
+    // layer's reader where there is one and every other vector through a
+    // window into scratch. Each form is checked against the specification's
+    // decoding -- the integer types normalised where the family is a colour
+    // or a normal, a form short of four components filled with (0, 0, 1) --
+    // in a library with the reader and in one without.
+    /**
+     * @type {Record<string, { bytes: number, put: (view: DataView, at: number, x: number)
+     *     => void, word: (x: number) => number[], norm: (x: number) => number }>}
+     */
+    const TYPE = {
+        f: { bytes: 4, put: (v, at, x)=>v.setFloat32(at, x, true), word: x=>[floatBits(x)],
+            norm: x=>x },
+        d: { bytes: 8, put: (v, at, x)=>v.setFloat64(at, x, true), word: x=>doubleBits(x),
+            norm: x=>x },
+        b: { bytes: 1, put: (v, at, x)=>v.setInt8(at, x), word: x=>[x | 0],
+            norm: x=>(2 * x + 1) / 255 },
+        ub: { bytes: 1, put: (v, at, x)=>v.setUint8(at, x), word: x=>[x],
+            norm: x=>x / 255 },
+        s: { bytes: 2, put: (v, at, x)=>v.setInt16(at, x, true), word: x=>[x | 0],
+            norm: x=>(2 * x + 1) / 65535 },
+        us: { bytes: 2, put: (v, at, x)=>v.setUint16(at, x, true), word: x=>[x],
+            norm: x=>x / 65535 },
+        i: { bytes: 4, put: (v, at, x)=>v.setInt32(at, x, true), word: x=>[x | 0],
+            norm: x=>(2 * x + 1) / 4294967295 },
+        ui: { bytes: 4, put: (v, at, x)=>v.setUint32(at, x, true), word: x=>[x >>> 0],
+            norm: x=>x / 4294967295 },
+    };
+    /** Four values of each type, none of them a default. */
+    /** @type {Record<string, number[]>} */
+    const SAMPLE = {
+        f: [0.5, -2, 0.25, 8], d: [1.5, -0.75, 3, 0.125], b: [100, -7, 3, -128],
+        ub: [200, 7, 255, 1], s: [-300, 1200, 5, 32767], us: [65535, 3, 40000, 12],
+        i: [70000, -5, 123456, 9], ui: [4000000000, 5, 77, 300000],
+    };
+    const floatOf = (/** @type {number} */ x)=>Math.fround(x);
+
+    for (const withReader of [true, false])
+    {
+        const box = machine();
+        const view = new DataView(box.bytes.buffer);
+        let windows = 0;
+        const opengl = createOpengl({
+            readMemory: box.readMemory,
+            windowMemory: (/** @type {number} */ at, /** @type {number} */ length)=>{
+                windows++;
+                return box.readMemory(at, length);
+            },
+            writeMemory: box.writeMemory,
+            screen: ()=>({ width: 4, height: 4 }),
+            scratch: box.scratch,
+            ...(withReader ? {
+                readF32sInto: (/** @type {number} */ at, /** @type {number} */ count,
+                    /** @type {Float32Array | number[]} */ into)=>
+                {
+                    for (let i = 0; i < count; i++)
+                    {
+                        into[i] = view.getFloat32(at + i * 4, true);
+                    }
+                },
+            } : {}),
+        });
+        const table = /** @type {Table} */ (opengl.table);
+        startDrawing(table);
+        const vector = 0x3000;
+        const out = 0x4000;
+
+        /**
+         * One form, immediate and vector, against what the query reads back.
+         *
+         * @param {string} name  the immediate form's name
+         * @param {string} vectorName
+         * @param {number[]} lead  the words before the components
+         * @param {string} type
+         * @param {number} count
+         * @param {number[]} expected  what the query answers, before float rounding
+         * @param {() => number[]} query
+         * @param {string} label
+         */
+        const check = (name, vectorName, lead, type, count, expected, query, label)=>{
+            const t = TYPE[type];
+            const values = SAMPLE[type].slice(0, count);
+            table[name].handler([...lead, ...values.flatMap(t.word)]);
+            assert.deepEqual(query(), expected.map(floatOf), `${label} ${name}`);
+            // Something else in between, so the vector form has to set it.
+            table[name].handler([...lead, ...SAMPLE.f.slice(0, count).flatMap(x=>
+                TYPE[type].word(type === 'f' || type === 'd' ? x + 1 : 1))]);
+            values.forEach((x, i)=>t.put(view, vector + i * t.bytes, x));
+            const readsBefore = windows;
+            table[vectorName].handler([...lead, vector]);
+            assert.deepEqual(query(), expected.map(floatOf), `${label} ${vectorName}`);
+            assert.equal(windows - readsBefore, withReader && type === 'f' ? 0 : 1,
+                `${label} ${vectorName}: one window, or none where the reader reads floats`);
+        };
+        /** @param {number} query @param {number} count */
+        const floats = (query, count)=>{
+            table.glGetFloatv.handler([query, out]);
+            return [...Array(count).keys()].map(i=>view.getFloat32(out + i * 4, true));
+        };
+        const label = withReader ? 'with the reader:' : 'through a window:';
+
+        for (const type of ['b', 'd', 'f', 'i', 's', 'ub', 'ui', 'us'])
+        {
+            const norm = TYPE[type].norm;
+            const [x, y, z, w] = SAMPLE[type];
+            check(`glColor3${type}`, `glColor3${type}v`, [], type, 3,
+                [norm(x), norm(y), norm(z), 1], ()=>floats(GL.CURRENT_COLOR, 4), label);
+            check(`glColor4${type}`, `glColor4${type}v`, [], type, 4,
+                [norm(x), norm(y), norm(z), norm(w)], ()=>floats(GL.CURRENT_COLOR, 4), label);
+            check(`glSecondaryColor3${type}EXT`, `glSecondaryColor3${type}vEXT`, [], type, 3,
+                [norm(x), norm(y), norm(z)], ()=>floats(GL.CURRENT_SECONDARY_COLOR, 3), label);
+        }
+        for (const type of ['b', 'd', 'f', 'i', 's'])
+        {
+            const norm = TYPE[type].norm;
+            const [x, y, z] = SAMPLE[type];
+            check(`glNormal3${type}`, `glNormal3${type}v`, [], type, 3,
+                [norm(x), norm(y), norm(z)], ()=>floats(GL.CURRENT_NORMAL, 3), label);
+        }
+        for (const type of ['d', 'f', 'i', 's'])
+        {
+            for (const count of [1, 2, 3, 4])
+            {
+                const expected = [...SAMPLE[type].slice(0, count), 0, 0, 1].slice(0, 4);
+                if (count < 4)
+                {
+                    expected[3] = 1;
+                }
+                check(`glTexCoord${count}${type}`, `glTexCoord${count}${type}v`, [], type, count,
+                    expected, ()=>floats(GL.CURRENT_TEXTURE_COORDS, 4), label);
+                check(`glMultiTexCoord${count}${type}ARB`, `glMultiTexCoord${count}${type}vARB`,
+                    [GL.TEXTURE0 + 1], type, count, expected, ()=>{
+                        table.glActiveTextureARB.handler([GL.TEXTURE0 + 1]);
+                        const answer = floats(GL.CURRENT_TEXTURE_COORDS, 4);
+                        table.glActiveTextureARB.handler([GL.TEXTURE0]);
+                        return answer;
+                    }, label);
+            }
+        }
+        /** @param {number} index */
+        const attribute = index=>{
+            table.glGetVertexAttribfvARB.handler([index, GL.CURRENT_VERTEX_ATTRIB_ARB, out]);
+            return [0, 1, 2, 3].map(i=>view.getFloat32(out + i * 4, true));
+        };
+        for (const type of ['d', 'f', 's'])
+        {
+            for (const count of [1, 2, 3, 4])
+            {
+                const expected = [...SAMPLE[type].slice(0, count), 0, 0, 1].slice(0, 4);
+                if (count < 4)
+                {
+                    expected[3] = 1;
+                }
+                check(`glVertexAttrib${count}${type}ARB`, `glVertexAttrib${count}${type}vARB`,
+                    [5], type, count, expected, ()=>attribute(5), label);
+            }
+        }
+        for (const [suffix, type, normalised] of /** @type {[string, string, boolean][]} */ ([
+            ['4bv', 'b', false], ['4ubv', 'ub', false], ['4usv', 'us', false],
+            ['4Nbv', 'b', true], ['4Nubv', 'ub', true], ['4Nsv', 's', true],
+            ['4Nuiv', 'ui', true], ['4dv', 'd', false], ['4fv', 'f', false]]))
+        {
+            const convert = normalised ? TYPE[type].norm : (/** @type {number} */ x)=>x;
+            const t = TYPE[type];
+            SAMPLE[type].forEach((x, i)=>t.put(view, vector + i * t.bytes, x));
+            table[`glVertexAttrib${suffix}ARB`].handler([6, vector]);
+            assert.deepEqual(attribute(6), SAMPLE[type].map(convert).map(floatOf),
+                `${label} glVertexAttrib${suffix}ARB`);
+        }
+    }
+});
+
+test('a typed vector form makes no DataView of its own on a call', ()=>{
+    const box = machine();
+    const view = new DataView(box.bytes.buffer);
+    const { table } = createOpengl({
+        readMemory: box.readMemory,
+        windowMemory: box.readMemory,
+        writeMemory: box.writeMemory,
+        screen: ()=>({ width: 4, height: 4 }),
+        scratch: box.scratch,
+        readF32sInto: (/** @type {number} */ at, /** @type {number} */ count,
+            /** @type {Float32Array | number[]} */ into)=>
+        {
+            for (let i = 0; i < count; i++)
+            {
+                into[i] = view.getFloat32(at + i * 4, true);
+            }
+        },
+    });
+    startDrawing(table);
+    box.bytes.set([10, 20, 30, 40], 0x3000);
+    [0.5, 0.25, 1, 0].forEach((value, i)=>view.setFloat32(0x3100 + i * 4, value, true));
+    const RealDataView = globalThis.DataView;
+    let dataViews = 0;
+    globalThis.DataView = /** @type {any} */ (class extends RealDataView {
+        constructor(/** @type {any[]} */ ...args){
+            dataViews++;
+            super(.../** @type {[ArrayBufferLike, number?, number?]} */ (args));
+        }
+    });
+    try
+    {
+        table.glColor4ubv.handler([0x3000]);
+        table.glColor4fv.handler([0x3100]);
+        table.glVertexAttrib4NubvARB.handler([2, 0x3000]);
+        table.glTexCoord2fv.handler([0x3100]);
+    }
+    finally
+    {
+        globalThis.DataView = RealDataView;
+    }
+    assert.equal(dataViews, 0);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+});

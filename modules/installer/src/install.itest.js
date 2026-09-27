@@ -14,17 +14,22 @@
  * missing rather than a guess about it.
  *
  * It needs a distribution nobody can put in a repository. Point
- * `BOTTLIFY_INSTALLER` at one; without it the test says so and skips.
+ * `BOTTLIFY_INSTALLER` at one -- an installer, or a disc image, which is
+ * mounted as D: and read a range at a time; without it the test says so and
+ * skips.
  *
  *     BOTTLIFY_INSTALLER=.to_install/<slug>/Setup.exe npm run test:integration -w @bottlify/installer
+ *     BOTTLIFY_INSTALLER=.to_install/<slug>/disc.iso npm run test:integration -w @bottlify/installer
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { createApp } from '../../core/src/app.js';
 import { collect, prefixOptions } from './prefix.js';
+import { discOptions, isDiscImage } from './disc.js';
 
 const PREBUILT = new URL('../../core/vendor/prebuilt/', import.meta.url);
 
@@ -39,22 +44,36 @@ test('a distribution runs in a prefix and what it wrote comes back out', async t
         return;
     }
 
-    const [wasm, media] = await Promise.all([
-        readFile(new URL('v86.wasm', PREBUILT)),
-        readFile(path),
-    ]);
-    const bytes = new Uint8Array(media);
-    const prefix = prefixOptions({ name: basename(path), bytes });
+    // A disc is read where it lies, a range at a time; an installer is read whole.
+    const descriptor = openSync(path, 'r');
+    t.after(()=>closeSync(descriptor));
+    const size = fstatSync(descriptor).size;
+    const image = {
+        size,
+        read: (/** @type {number} */ offset, /** @type {number} */ length)=>{
+            const bytes = new Uint8Array(Math.max(0, Math.min(length, size - offset)));
+            readSync(descriptor, bytes, 0, bytes.length, offset);
+            return bytes;
+        },
+    };
+    const onDisc = await isDiscImage(image);
+    // The emulator is optional: without its artifacts the default engine runs.
+    const wasm = existsSync(new URL('v86.wasm', PREBUILT))
+        ? await readFile(new URL('v86.wasm', PREBUILT)) : null;
+    const disc = onDisc ? await discOptions({ name: basename(path), disc: image }) : null;
+    const prefix = disc
+        ?? prefixOptions({ name: basename(path), bytes: new Uint8Array(await readFile(path)) });
 
     const app = await createApp({
         executable: prefix.executable,
         imagePath: prefix.imagePath,
         storage: prefix.storage,
+        ...disc ? { discs: disc.discs, commandLine: disc.commandLine } : {},
         traceStrings: true,
-        v86: {
+        ...wasm ? { v86: {
             moduleUrl: new URL('libv86.mjs', PREBUILT).href,
             wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
+        } } : {},
     });
 
     /** @type {string} */

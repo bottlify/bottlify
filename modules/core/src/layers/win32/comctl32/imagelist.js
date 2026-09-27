@@ -428,6 +428,35 @@ export function createImageLists(host){
         },
 
         /**
+         * int ImageList_ReplaceIcon(HIMAGELIST himl, int i, HICON hicon)
+         *
+         * An icon into place i, or appended when i is -1; the index it went to,
+         * or -1. The place is made and counted as Windows makes it, but its
+         * pixels stay blank: an icon is drawn by user32, which this list
+         * cannot reach, and a list that refused would stop the program.
+         */
+        ImageList_ReplaceIcon: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, index, icon])=>{
+                const list = listOf(handle);
+                const at = index | 0;
+                if (!list || (icon >>> 0) === 0 || at < -1 || at >= list.count)
+                {
+                    return -1;
+                }
+                host.divergence?.('ImageList_ReplaceIcon', 'the pixels of the icon are not drawn');
+                if (at !== -1)
+                {
+                    return at;
+                }
+                reserve(list, list.count + 1);
+                list.count++;
+                return list.count - 1;
+            },
+        },
+
+        /**
          * BOOL ImageList_Remove(HIMAGELIST himl, int i)
          *
          * The images after it move down one; -1 removes them all.

@@ -31,7 +31,7 @@ import { GUID_NULL, GUID_SIZE, GUID_STRING_LENGTH, readGuid, writeGuid } from '.
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { createStorageFunctions } from './storage.js';
 import { createPropVariantFunctions } from './propvariant.js';
-import { decodeAnsi } from '../kernel32/locale.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /** HRESULTs this file produces. */
 const S_OK = 0x00000000;
@@ -45,6 +45,10 @@ const RPC_E_CHANGED_MODE = 0x80010106;
 const CLASS_E_NOAGGREGATION = 0x80040110;
 const CLASS_E_CLASSNOTAVAILABLE = 0x80040111;
 const REGDB_E_CLASSNOTREG = 0x80040154;
+/** The registry could not be written: CoTreatAsClass with no hive to write. */
+const REGDB_E_WRITEREGDB = 0x80040151;
+/** A registry string value's type. */
+const REG_SZ = 1;
 const CO_E_NOTINITIALIZED = 0x800401f0;
 const CO_E_CLASSSTRING = 0x800401f3;
 const CO_E_OBJNOTREG = 0x800401fb;
@@ -101,7 +105,10 @@ const MAX_PROGID = 255;
  *           The process's IMalloc, for CoGetMalloc. Absent, that call fails
  *           as an allocation failure would.
  * @property {{ root: (id: number) => any, open: (key: any, path: string) => any,
- *              getValue: (key: any, name: string) => { data: Uint8Array } | null }} [hive]
+ *              getValue: (key: any, name: string) => { data: Uint8Array } | null,
+ *              create?: (key: any, path: string) => { key: any },
+ *              setValue?: (key: any, name: string, type: number, data: Uint8Array) => void,
+ *              remove?: (key: any, path: string) => string }} [hive]
  *           The registry, for the class keys ProgIDFromCLSID reads. Absent,
  *           no class has a ProgID.
  * @property {{ load: (name: number) => number | Promise<number>,
@@ -726,6 +733,15 @@ export function createOleFunctions(host){
         },
 
         /**
+         * void CoFreeAllLibraries(void): a library COM loaded stays mapped for
+         * the process here, as CoFreeUnusedLibraries leaves it.
+         */
+        CoFreeAllLibraries: {
+            argBytes: 0,
+            handler: ()=>0,
+        },
+
+        /**
          * HINSTANCE CoLoadLibrary(LPOLESTR lpszLibName, BOOL bAutoFree)
          * void CoFreeLibrary(HINSTANCE hInst)
          *
@@ -1164,6 +1180,41 @@ export function createOleFunctions(host){
          * The class's ProgID key in the registry, as a string in task
          * memory; a class with no key is not registered.
          */
+        /**
+         * HRESULT CoTreatAsClass(REFCLSID clsidOld, REFCLSID clsidNew)
+         *
+         * Writes the emulation into the registry, as the call does: the old
+         * class's TreatAs key names the new one, and a new class of GUID_NULL
+         * or the old class itself takes the emulation away.
+         */
+        CoTreatAsClass: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([oldClass, newClass])=>{
+                const old = guidAt(oldClass);
+                const replacement = guidAt(newClass);
+                if (old === null || replacement === null)
+                {
+                    return E_INVALIDARG;
+                }
+                const root = host.hive?.root(HKEY_CLASSES_ROOT);
+                if (!root || !host.hive?.create || !host.hive.setValue || !host.hive.remove)
+                {
+                    return REGDB_E_WRITEREGDB;
+                }
+                const nothing = replacement.toUpperCase() === old.toUpperCase()
+                    || replacement === GUID_NULL;
+                if (nothing)
+                {
+                    host.hive.remove(root, `CLSID\\${old}\\TreatAs`);
+                    return S_OK;
+                }
+                const key = host.hive.create(root, `CLSID\\${old}\\TreatAs`).key;
+                host.hive.setValue(key, '', REG_SZ, encodeAnsi(`${replacement}\0`));
+                return S_OK;
+            },
+        },
+
         ProgIDFromCLSID: {
             argBytes: 8,
             /** @param {number[]} args */

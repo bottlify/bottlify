@@ -11,12 +11,12 @@
  * itself the export's handler and the reference the x86 is tested against.
  * What the subset allows, and why, is written at the compiler.
  *
- * Each keeps the answers of the handler it replaced, under the C locale:
- * ASCII case, comparisons normalised to -1, 0 and 1, bytes ordered as the
- * handlers ordered the strings they decoded (`ORDER`).
+ * Each answers under the C locale as msvcrt.dll does, where its comment says
+ * no otherwise: ASCII case, bytes compared as unsigned chars. A comparison
+ * answers -1, 0 or 1, as the handlers it replaced did; C promises only the
+ * sign, and 32-bit msvcrt.dll's own strncmp answers the difference of the
+ * bytes.
  */
-
-import { decodeAnsi } from '../kernel32/locale.js';
 
 /** @typedef {import('./guest-code.js').Guest} Guest */
 /** @typedef {import('./guest-code.js').i32} i32 */
@@ -24,15 +24,6 @@ import { decodeAnsi } from '../kernel32/locale.js';
 /** @typedef {import('./guest-code.js').f64} f64 */
 /** @typedef {import('./guest-code.js').x87} x87 */
 /** @typedef {import('./guest-code.js').i64} i64 */
-
-/**
- * The order the comparisons put bytes in: each byte's character in the ANSI
- * page, as the handlers that compared decoded strings had it -- a byte's own
- * value, but for the sixteen of 0x80..0x9f that Windows-1252 gives characters
- * above 0xff (0x80 the euro sign sorts after every other byte).
- */
-export const ORDER = Uint16Array.from({ length: 256 },
-    (_, byte)=>decodeAnsi(Uint8Array.of(byte)).charCodeAt(0));
 
 /** Each byte uppercased in the C locale: ASCII letters, and nothing else. */
 export const UPPER = Uint8Array.from({ length: 256 },
@@ -47,6 +38,8 @@ export const LOWER = Uint8Array.from({ length: 256 },
  * (`CLASSES`) and the wide family's units below 0x100 (`WIDE_CLASSES`). They
  * mark membership and nothing else -- the bits a program passes to
  * `_isctype` or `iswctype` are msvcrt's own, and those functions translate.
+ * Print and graph are the narrow table's; the wide one has the blank class
+ * instead, which msvcrt's iswprint asks for.
  */
 export const W_ALPHA = 0x001;
 export const W_DIGIT = 0x002;
@@ -56,8 +49,8 @@ export const W_SPACE = 0x010;
 export const W_PUNCT = 0x020;
 export const W_CNTRL = 0x040;
 export const W_PRINT = 0x080;
-export const W_GRAPH = 0x100;
 export const W_XDIGIT = 0x200;
+export const W_BLANK = 0x400;
 
 /** WEOF: the value no code unit is, and the one every wide classifier answers nothing for. */
 export const WEOF = 0xffff;
@@ -84,29 +77,46 @@ export const CLASSES = Uint16Array.from({ length: 256 }, (_, code)=>{
 });
 
 /**
- * The wide classes of the units below 0x100, which above 0x7f are not empty
- * in the C locale, as a real Windows answers through iswctype: the Latin-1
- * letters are alpha -- both signs except the multiplication and division
- * signs that sit among them and are not letters -- and there are two spaces
- * the ASCII list does not carry, NEL at 0x85 and the no-break space at 0xa0.
- * Case stays ASCII's, so those letters are alpha with no upper or lower of
- * their own, and a unit past 0xff -- a CJK unit, WEOF -- is nothing at all.
+ * The wide classes of the units below 0x100, as msvcrt.dll answers them: from
+ * a table of its own, the same in every locale, where only a unit past 0xff
+ * is asked of the system (`GetStringTypeW`).
+ *
+ * - The C0 and C1 controls and DEL are control characters; tab to carriage
+ *   return are spaces as well, and tab is blank.
+ * - The space and the no-break space are space and blank.
+ * - The rest of ASCII is classed as the narrow family classes it.
+ * - The signs of 0xa1..0xbf are punctuation, whatever their Unicode
+ *   category -- the ordinal indicators and the micro sign among them, which
+ *   are letters there -- and the superscript one, two and three, the three
+ *   whose compatibility form is a decimal digit, are digits as well.
+ * - 0xc0..0xff are letters, upper or lower by their Unicode category, but for
+ *   the multiplication and division signs (Sm) that sit among them.
+ *
+ * Case is classed but not mapped: the C locale's towupper and towlower map
+ * ASCII alone. A unit past 0xff -- a CJK unit, WEOF -- is nothing at all
+ * here.
  */
-export const WIDE_CLASSES = Uint16Array.from(CLASSES, (narrow, code)=>{
-    let classes = narrow;
-    if ((classes & W_PRINT) !== 0 && (classes & W_SPACE) === 0)
+export const WIDE_CLASSES = Uint16Array.from({ length: 256 }, (_, code)=>{
+    const char = String.fromCharCode(code);
+    if (code < 0x80)
     {
-        classes |= W_GRAPH;
+        const classes = CLASSES[code] & ~W_PRINT;
+        return code === 0x09 || code === 0x20 ? classes | W_BLANK : classes;
     }
-    if (code >= 0xc0 && code <= 0xff && code !== 0xd7 && code !== 0xf7)
+    if (code < 0xa0)
     {
-        classes |= W_ALPHA;
+        return W_CNTRL;
     }
-    if (code === 0x85 || code === 0xa0)
+    if (code === 0xa0)
     {
-        classes |= W_SPACE;
+        return W_SPACE | W_BLANK;
     }
-    return classes;
+    if (code < 0xc0)
+    {
+        return W_PUNCT | (/^[0-9]$/.test(char.normalize('NFKC')) ? W_DIGIT : 0);
+    }
+    return /\p{Lu}/u.test(char) ? W_ALPHA | W_UPPER
+        : /\p{Ll}/u.test(char) ? W_ALPHA | W_LOWER : W_PUNCT;
 });
 
 /** 1 for a byte of one of the classes, 0 for anything else, EOF and values past a byte included. */
@@ -157,7 +167,7 @@ export function strncmp({ u8 }, left, right, count){
         const b = u8(right + i);
         if (a !== b)
         {
-            return ORDER[a] < ORDER[b] ? -1 : 1;
+            return a < b ? -1 : 1;
         }
         if (a === 0)
         {
@@ -250,7 +260,7 @@ export function _strnicmp({ u8 }, left, right, count){
         const b = LOWER[u8(right + i)];
         if (a !== b)
         {
-            return ORDER[a] < ORDER[b] ? -1 : 1;
+            return a < b ? -1 : 1;
         }
         if (a === 0)
         {
@@ -274,7 +284,7 @@ export function _stricmp({ u8 }, left, right){
         const b = LOWER[u8(right + i)];
         if (a !== b)
         {
-            return ORDER[a] < ORDER[b] ? -1 : 1;
+            return a < b ? -1 : 1;
         }
         if (a === 0)
         {
@@ -495,23 +505,28 @@ export function iswcntrl(c){
 /**
  * int iswprint(wint_t c)
  *
+ * The blank, punctuation, letters and digits, as msvcrt's own asks
+ * `iswctype`: a tab is printable here, where `isprint`'s is not.
+ *
  * @guestCode cdecl
  * @param {u32} c
  * @returns {i32}
  */
 export function iswprint(c){
-    return inWideClass(c, W_PRINT);
+    return inWideClass(c, W_BLANK | W_PUNCT | W_ALPHA | W_DIGIT);
 }
 
 /**
  * int iswgraph(wint_t c)
+ *
+ * iswprint without the blanks.
  *
  * @guestCode cdecl
  * @param {u32} c
  * @returns {i32}
  */
 export function iswgraph(c){
-    return inWideClass(c, W_GRAPH);
+    return inWideClass(c, W_PUNCT | W_ALPHA | W_DIGIT);
 }
 
 /**
@@ -528,16 +543,14 @@ export function iswascii(c){
 /**
  * wint_t towupper(wint_t c)
  *
+ * ASCII's letters, and every other unit as it came -- WEOF included.
+ *
  * @guestCode cdecl
  * @param {u32} c
  * @returns {i32}
  */
 export function towupper(c){
     const unit = c & 0xffff;
-    if (unit === WEOF)
-    {
-        return 0;
-    }
     return unit < 256 ? UPPER[unit] : unit;
 }
 
@@ -550,10 +563,6 @@ export function towupper(c){
  */
 export function towlower(c){
     const unit = c & 0xffff;
-    if (unit === WEOF)
-    {
-        return 0;
-    }
     return unit < 256 ? LOWER[unit] : unit;
 }
 
@@ -561,8 +570,10 @@ export function towlower(c){
  * int atoi(const char *text), and atol, the same function on a 32-bit target
  *
  * White space, a sign, and as many decimal digits as there are; nothing
- * converted is zero. C leaves overflow undefined; this runtime clamps, and a
- * clamped value is at least ordered the way the digits were.
+ * converted is zero. C leaves overflow undefined, and msvcrt.dll's wraps:
+ * each digit is ten times the total so far plus the digit, in 32 bits, and a
+ * minus sign negates the total at the end -- "4294967296" is 0. (The later
+ * runtimes clamp, and set errno; this one does neither.)
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text
@@ -583,24 +594,15 @@ export function atoi({ u8 }, text){
         at++;
         c = u8(at);
     }
-    // The magnitude, held at 2^31 once past it: a longer run of digits clamps alike.
-    /** @type {u32} */
-    let magnitude = 0;
+    /** @type {i32} */
+    let total = 0;
     while (c >= 0x30 && c <= 0x39)
     {
-        magnitude = magnitude > 214748364 ? 0x80000000 : (magnitude * 10 + c - 0x30) >>> 0;
-        if (magnitude > 0x80000000)
-        {
-            magnitude = 0x80000000;
-        }
+        total = (Math.imul(total, 10) + c - 0x30) | 0;
         at++;
         c = u8(at);
     }
-    if (negative !== 0)
-    {
-        return magnitude >= 0x80000000 ? -0x80000000 : (0 - magnitude) | 0;
-    }
-    return magnitude >= 0x7fffffff ? 0x7fffffff : magnitude | 0;
+    return negative !== 0 ? (0 - total) | 0 : total;
 }
 
 /**
@@ -767,7 +769,7 @@ export function strcmp({ u8 }, left, right){
         const b = u8(right + i);
         if (a !== b)
         {
-            return ORDER[a] < ORDER[b] ? -1 : 1;
+            return a < b ? -1 : 1;
         }
         if (a === 0)
         {

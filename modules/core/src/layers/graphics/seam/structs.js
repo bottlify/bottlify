@@ -381,6 +381,95 @@ export const DDCAPS = Object.freeze({
 /** The sizes of DDCAPS across the versions that declared it. */
 export const DDCAPS_SIZES = Object.freeze([0x13c, 0x16c, 0x17c]);
 
+/** Where `floatsOf`, `intsOf` and `dwordsOf` put the bytes they decode. */
+let staging = new ArrayBuffer(256);
+let stagingBytes = new Uint8Array(staging);
+let stagingFloats = new Float32Array(staging);
+let stagingInts = new Int32Array(staging);
+let stagingDwords = new Uint32Array(staging);
+
+/**
+ * Puts `bytes` where the three readers below take `count` values from, zero
+ * past what a short read gave, as a fresh array of that many would be.
+ *
+ * The obvious way -- a fresh typed array of `count`, and a byte view over its
+ * buffer to copy into -- asks a small typed array for its buffer, which moves
+ * its elements out of V8's heap into a store of their own and costs several
+ * times the copy. A slice of a buffer that already has one does not.
+ *
+ * @param {Uint8Array} bytes
+ * @param {number} count
+ */
+function stage(bytes, count){
+    const length = count * 4;
+    if (bytes.length > length)
+    {
+        throw new RangeError(`${bytes.length} bytes do not fit ${count} values`);
+    }
+    if (length > staging.byteLength)
+    {
+        staging = new ArrayBuffer(length);
+        stagingBytes = new Uint8Array(staging);
+        stagingFloats = new Float32Array(staging);
+        stagingInts = new Int32Array(staging);
+        stagingDwords = new Uint32Array(staging);
+    }
+    stagingBytes.set(bytes);
+    if (bytes.length < length)
+    {
+        stagingBytes.fill(0, bytes.length, length);
+    }
+}
+
+/**
+ * `count` floats out of bytes read from guest memory, in an array of their
+ * own: the caller may keep it.
+ *
+ * @param {Uint8Array} bytes
+ * @param {number} count
+ * @returns {Float32Array}
+ */
+export function floatsOf(bytes, count){
+    if (!(count >= 0))
+    {
+        return new Float32Array(count);
+    }
+    stage(bytes, count);
+    return stagingFloats.slice(0, count);
+}
+
+/**
+ * `count` signed dwords, as `floatsOf` reads floats.
+ *
+ * @param {Uint8Array} bytes
+ * @param {number} count
+ * @returns {Int32Array}
+ */
+export function intsOf(bytes, count){
+    if (!(count >= 0))
+    {
+        return new Int32Array(count);
+    }
+    stage(bytes, count);
+    return stagingInts.slice(0, count);
+}
+
+/**
+ * `count` unsigned dwords, as `floatsOf` reads floats.
+ *
+ * @param {Uint8Array} bytes
+ * @param {number} count
+ * @returns {Uint32Array}
+ */
+export function dwordsOf(bytes, count){
+    if (!(count >= 0))
+    {
+        return new Uint32Array(count);
+    }
+    stage(bytes, count);
+    return stagingDwords.slice(0, count);
+}
+
 /**
  * Reading and writing dwords through the memory service, in one place.
  *
@@ -401,6 +490,13 @@ export function createFields(memory){
 
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
+        // In place too, where the memory layer offers it: every out-parameter
+        // a call answers through went through a four-byte array otherwise.
+        if (typeof memory.writeU32 === 'function')
+        {
+            memory.writeU32(address >>> 0, value >>> 0);
+            return;
+        }
         memory.writeMemory(address >>> 0, new Uint8Array([
             value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
         ]));

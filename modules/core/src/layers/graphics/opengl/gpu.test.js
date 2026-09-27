@@ -1207,9 +1207,10 @@ test('the MVP product is computed once per draw and shared with a program that r
     async()=>{
         // The vertex program above binds all four rows of state.matrix.mvp;
         // the fixed block's own modelViewProjection uniform needs the same
-        // product. `new Float64Array(16)` with no source is what `multiply`
-        // (and only `multiply`, on this path) allocates its result into, so
-        // counting those across one draw counts the multiplies.
+        // product. A matrix is a view of sixteen carved out of a block
+        // (`matrix.js`'s `matrix()`), which is what `multiply` (and only
+        // `multiply`, on this path) allocates its result as, so counting
+        // those across one draw counts the multiplies.
         const r = rig();
         programRig(r);
         const { context } = r;
@@ -1219,7 +1220,7 @@ test('the MVP product is computed once per draw and shared with a program that r
             constructor(/** @type {any[]} */ ...args){
                 // @ts-ignore -- a spread onto the real constructor's overloads
                 super(...args);
-                if (args.length === 1 && args[0] === 16)
+                if (args.length === 3 && args[2] === 16)
                 {
                     mvpSizedAllocations++;
                 }
