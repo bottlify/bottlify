@@ -146,7 +146,10 @@ a buffer that stops or runs out gives its slot and its span back, and the next P
 again. A buffer that finds no slot or no room plays through a queue as before, and so does every
 buffer under the engine mixer (no shared memory). `module.test.js` holds a playing buffer through
 300 ms of device blocks with no pump: no block starved, and GetCurrentPosition answers where the
-device read to.
+device read to. What the device passed is still checked against what the program unlocked since it last
+passed there: a refill that came too late for the device is heard as the last lap again, and
+`staleBytes`/`staleDrains` (with `staleAt` and the last trail of unlocks) count it on this path
+too -- the measure of a program the machine cannot keep fed in real time.
 
 **With shared memory** (`createSharedMixer`): the engine writes each track's own guest PCM,
 unconverted, into a per-track byte ring inside one `SharedArrayBuffer` "track table" (`SLOTS = 64`

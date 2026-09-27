@@ -370,6 +370,18 @@ function parse(argv){
         graphics: argv.includes('--graphics-config')
             ? JSON.parse(argv[argv.indexOf('--graphics-config') + 1])
             : null,
+        // Fields of the audio layer's configuration, the same way:
+        // `--audio-config {"mp3":false}` runs the program's own MP3 decoder.
+        entry: argv.includes('--entry') ? argv[argv.indexOf('--entry') + 1] : null,
+        audio: argv.includes('--audio-config')
+            ? JSON.parse(argv[argv.indexOf('--audio-config') + 1])
+            : null,
+        // What the device mixed from FROM to TO seconds of the run, written as
+        // a WAV beside the report: `--capture-audio 20:50`.
+        captureAudio: argv.includes('--capture-audio')
+            ? (([from, to])=>({ fromMs: from * 1000, toMs: to * 1000 }))(
+                argv[argv.indexOf('--capture-audio') + 1].split(':').map(Number))
+            : null,
         // Peeks every pointer argument of every call for a string. Off unless
         // asked for: a title's draws pay for it, and a measurement run should
         // not without asking.
@@ -955,6 +967,8 @@ function describe(result, context, calls, symbols){
     }
 
     say(`  frames presented: ${result.presents ?? 0}`);
+    // How the page read the sound: the shared table a worklet reads, or the ring.
+    say(`  sound drained through: ${result.drain ?? '?'}`);
     if (result.steady)
     {
         const steady = result.steady;
@@ -1158,7 +1172,10 @@ export async function game(options){
     // the entry image is lifted out here; the engine's takes a byte range and
     // gets one over HTTP, which is how the page reads everything else.
     const opened = await openBundle(bundlePath);
-    const executable = await opened.read(manifest.entry);
+    // Another program of the bundle than the one the manifest starts, when
+    // asked: `--entry war3.exe` starts the game where the launcher starts.
+    const entry = options.entry ?? manifest.entry;
+    const executable = await opened.read(entry);
     await opened.close();
 
     const server = await serveStatic({
@@ -1214,7 +1231,7 @@ export async function game(options){
 
         // Where createApp mounts a bundle, so the program is told it was
         // loaded from inside its own installation.
-        const imagePath = `C:\\App\\${manifest.entry}`;
+        const imagePath = `C:\\App\\${entry}`;
         const request = JSON.stringify({
             exe: Buffer.from(executable).toString('base64'),
             bundleUrl: `http://127.0.0.1:${server.port}/bundle/bundle.btl`,
@@ -1245,6 +1262,8 @@ export async function game(options){
             probeTexture: options.probeTexture,
             fog: options.fog,
             graphics: options.graphics,
+            audio: options.audio ?? undefined,
+            captureAudio: options.captureAudio ?? undefined,
             trace: options.trace,
             pointer: options.pointer,
             steadyFrames: options.steadyFrames || undefined,
@@ -1452,6 +1471,27 @@ the run as it stands: ${path}`;
             writeFileSync(join(REPORTS_DIR, `game-${stamp}-snap-${one.frame}.png`), image);
         }
         delete result.snaps;
+        if (result.audioCapture)
+        {
+            // Sixteen-bit stereo PCM behind a 44-byte RIFF header.
+            const pcm = Buffer.from(result.audioCapture.pcm, 'base64');
+            const rate = result.audioCapture.sampleRate;
+            const head = Buffer.alloc(44);
+            head.write('RIFF', 0);
+            head.writeUInt32LE(36 + pcm.length, 4);
+            head.write('WAVEfmt ', 8);
+            head.writeUInt32LE(16, 16);
+            head.writeUInt16LE(1, 20);
+            head.writeUInt16LE(2, 22);
+            head.writeUInt32LE(rate, 24);
+            head.writeUInt32LE(rate * 4, 28);
+            head.writeUInt16LE(4, 32);
+            head.writeUInt16LE(16, 34);
+            head.write('data', 36);
+            head.writeUInt32LE(pcm.length, 40);
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-audio.wav`), Buffer.concat([head, pcm]));
+            delete result.audioCapture;
+        }
         if (result.frameRgba && result.frame)
         {
             writeFileSync(join(REPORTS_DIR, `game-${stamp}-frame.png`), toPng(result.frame.width,
