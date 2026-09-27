@@ -622,6 +622,20 @@ test('a working-set request is accepted and pops its three arguments', ()=>{
     assert.equal(fns.SetProcessWorkingSetSize.argBytes, 12);
 });
 
+test('the process version is the subsystem version its image was built for', ()=>{
+    const { fns, host } = setup();
+    // The running image's headers, planted where the module handle points.
+    const base = 0x800;
+    /** @type {any} */ (host).moduleHandle = ()=>base;
+    host.view.setUint32(base + 0x3c, 0x80, true);
+    host.view.setUint16(base + 0x80 + 24 + 48, 4, true);
+    host.view.setUint16(base + 0x80 + 24 + 50, 10, true);
+    assert.equal(fns.GetProcessVersion.handler([0]), 0x0004000a, 'major in the high word');
+    assert.equal(fns.GetProcessVersion.handler([fns.GetCurrentProcessId.handler([])]), 0x0004000a,
+        'its own id names it too');
+    assert.equal(fns.GetProcessVersion.argBytes, 4);
+});
+
 test('the working set a process is asked for is the default a fresh one has', ()=>{
     const { fns, host } = setup();
     assert.equal(fns.GetProcessWorkingSetSize.handler([0xffffffff, 0x200, 0x204]), 1);

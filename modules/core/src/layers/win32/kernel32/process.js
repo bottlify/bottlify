@@ -702,6 +702,30 @@ export function createProcessFunctions(host){
             handler: ()=>CURRENT_PROCESS,
         },
 
+        /**
+         * DWORD GetProcessVersion(DWORD ProcessId)
+         *
+         * The Windows version the process's image says it was built for: the
+         * subsystem version in its optional header, major in the high word. Zero
+         * names the calling process, as its own id does; another process's
+         * image is not this one's to read.
+         */
+        GetProcessVersion: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([id])=>{
+                if ((id >>> 0) !== 0 && (id >>> 0) !== ((host.processId ?? 0x1000) >>> 0))
+                {
+                    setError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const base = moduleHandleOf(null) >>> 0;
+                const optional = base + memory.readU32(base + 0x3c) + 24;
+                const words = memory.readU32(optional + 48);
+                return ((words & 0xffff) << 16 | words >>> 16) >>> 0;
+            },
+        },
+
         /** HMODULE GetModuleHandleA(LPCSTR lpModuleName) */
         GetModuleHandleA: {
             argBytes: 4,
