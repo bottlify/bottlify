@@ -92,6 +92,8 @@ export function createBackend(options){
     // same group serves the same draw in every frame. A group per draw per
     // frame was a descriptor churn the device did not always keep up with.
     const cache = createBindingCache({ device });
+    /** The dynamic offsets of the group being bound, handed on at once. @type {number[]} */
+    const bindOffsets = [];
 
     /**
      * A pipeline per distinct state, built once.
@@ -489,7 +491,8 @@ export function createBackend(options){
                 profiler.count(cache.created() > before
                     ? 'bindGroupsCreated'
                     : 'bindGroupsReused');
-                const offsets = dynamicOffsetsOf(entries);
+                // setBindGroup copies the offsets it is handed.
+                const offsets = dynamicOffsetsOf(entries, bindOffsets);
                 if (offsets)
                 {
                     raw.setBindGroup(index, group, offsets);
@@ -507,10 +510,13 @@ export function createBackend(options){
              * the last write, and the draws would render, with the wrong values.
              *
              * @param {ArrayBufferView} block
+             * @param {{ buffer: any, offset: number, size: number, dynamicOffset: number }} [into]
+             *     Where the slot is written, for a caller that binds it at
+             *     once and keeps nothing; an object of its own otherwise.
              */
-            uniforms(block){
+            uniforms(block, into){
                 profiler.count('uniformBlocks');
-                return uniforms.allocate(block);
+                return uniforms.allocate(block, into);
             },
 
             /** @param {number} slot @param {any} buffer @param {number} [offset] */
@@ -523,16 +529,41 @@ export function createBackend(options){
                 raw.setIndexBuffer(buffer.gpu === undefined ? buffer : buffer.gpu, format, offset);
             },
 
-            /** @param {number[]} args */
-            draw(...args){
+            /**
+             * The arguments as they were given, as many as there were: the
+             * API's own defaults stand for any left out. Without a rest
+             * parameter, which is an array for every draw.
+             *
+             * @param {number} count @param {number} [instances] @param {number} [first]
+             * @param {number} [firstInstance]
+             */
+            draw(count, instances, first, firstInstance){
                 profiler.count('draws');
-                raw.draw(...args);
+                switch (arguments.length)
+                {
+                    case 1: raw.draw(count); break;
+                    case 2: raw.draw(count, instances); break;
+                    case 3: raw.draw(count, instances, first); break;
+                    default: raw.draw(count, instances, first, firstInstance);
+                }
             },
 
-            /** @param {number[]} args */
-            drawIndexed(...args){
+            /**
+             * As `draw` passes its arguments.
+             *
+             * @param {number} count @param {number} [instances] @param {number} [first]
+             * @param {number} [baseVertex] @param {number} [firstInstance]
+             */
+            drawIndexed(count, instances, first, baseVertex, firstInstance){
                 profiler.count('draws');
-                raw.drawIndexed(...args);
+                switch (arguments.length)
+                {
+                    case 1: raw.drawIndexed(count); break;
+                    case 2: raw.drawIndexed(count, instances); break;
+                    case 3: raw.drawIndexed(count, instances, first); break;
+                    case 4: raw.drawIndexed(count, instances, first, baseVertex); break;
+                    default: raw.drawIndexed(count, instances, first, baseVertex, firstInstance);
+                }
             },
 
             end(){

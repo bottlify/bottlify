@@ -3339,8 +3339,14 @@ export function createRenderer(options){
      * @param {any} pass @param {any} command
      */
     const bindStreams = (pass, command)=>{
-        for (const bound of command.streams ?? [])
+        const streams = command.streams;
+        if (!streams)
         {
+            return;
+        }
+        for (let index = 0; index < streams.length; index++)
+        {
+            const bound = streams[index];
             pass.setVertexBuffer(bound.slot, bound.gpu, bound.offset);
         }
     };
@@ -5374,18 +5380,28 @@ export function createRenderer(options){
         while (blockEntryLists.length <= blocks.length)
         {
             const length = blockEntryLists.length;
-            blockEntryLists.push(
-                Array.from({ length }, (_, binding)=>({ binding, resource: null })));
+            blockEntryLists.push(Array.from({ length }, (_, binding)=>({
+                binding,
+                resource: { buffer: null, offset: 0, size: 0, dynamicOffset: 0 },
+            })));
         }
         const entries = blockEntryLists[blocks.length];
         for (let binding = 0; binding < blocks.length; binding++)
         {
-            entries[binding].resource = pass.uniforms(blocks[binding]);
+            pass.uniforms(blocks[binding], entries[binding].resource);
         }
         return entries;
     };
-    /** @type {{ binding: number, resource: any }[][]} */
+    /**
+     * One list per length, each entry with a uniform slot of its own that
+     * the ring writes into.
+     *
+     * @type {{ binding: number,
+     *     resource: { buffer: any, offset: number, size: number, dynamicOffset: number } }[][]}
+     */
     const blockEntryLists = [];
+    /** Where a fixed-function draw's block is given its slot in the ring. */
+    const fixedUniformSlot = { buffer: null, offset: 0, size: 0, dynamicOffset: 0 };
 
     /**
      * A shader draw's samplers as the entries of its group, made once for each
@@ -7515,7 +7531,10 @@ export function createRenderer(options){
                 }
             }
             pass.setPipeline(pipeline.gpu);
-            const block = pass.uniforms(command.uniforms);
+            // Bound at once and kept by nothing, unless a check keeps it.
+            const block = command.check
+                ? pass.uniforms(command.uniforms)
+                : pass.uniforms(command.uniforms, fixedUniformSlot);
             if (command.check)
             {
                 command.check.block = block;

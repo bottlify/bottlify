@@ -113,15 +113,20 @@ const light = (over = {})=>({
 });
 
 /**
- * The recording double with what its render passes record left out: a pass
- * of it resolves every binding and keeps every call, which is the double's
- * work, and inlined into the backend's own calls the profiler would put it to
- * the engine's account.
+ * The recording double with what its render passes record and its queue's
+ * writes left out: a pass of it resolves every binding and keeps every call,
+ * which is the double's work, and inlined into the backend's own calls the
+ * profiler would put it to the engine's account.
  *
  * @param {any} gpu
  */
 function quietPasses(gpu){
     const nothing = ()=>{};
+    // Nor does its queue keep a copy of every write: a frame's uniform
+    // blocks, copied twice, are external memory a browser's queue does not
+    // put on the JavaScript heap, and which moved the collector here as it
+    // would not there.
+    gpu.queue.writeBuffer = nothing;
     const encoderFor = gpu.device.createCommandEncoder.bind(gpu.device);
     gpu.device.createCommandEncoder = (/** @type {any[]} */ ...args)=>{
         const encoder = encoderFor(...args);

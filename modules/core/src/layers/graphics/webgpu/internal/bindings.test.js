@@ -160,3 +160,49 @@ test('a frame whose blocks outgrow the ring gets a larger one, not a wrap onto i
     frame(12);
     assert.equal(gpu.count('createBuffer'), rings, 'frames that fit keep the ring they have');
 });
+
+test('a slot written into an object and offsets into an array of the caller\'s, floats by bits',
+    ()=>{
+        // What a renderer binds at once and keeps nothing of is written where
+        // it says rather than made; the bytes are the block's own, a
+        // not-a-number's payload included.
+        const gpu = createFakeDevice();
+        const pool = createUniformPool({ device: gpu.device, queue: gpu.queue });
+        const bits = new Uint32Array([0x7fa00001, 0xffc01234, 0x3f800000, 0x80000000]);
+        /** @type {{ buffer: any, offset: number, size: number, dynamicOffset: number }} */
+        const slot = { buffer: null, offset: 9, size: 0, dynamicOffset: 0 };
+        pool.allocate(new Uint8Array(16));
+        assert.equal(pool.allocate(new Float32Array(bits.buffer), slot), slot);
+        assert.deepEqual({ ...slot, buffer: null },
+            { buffer: null, offset: 0, size: 16, dynamicOffset: 256 });
+        pool.flush();
+        const ring = /** @type {any} */ (slot.buffer);
+        assert.deepEqual([...new Uint32Array(ring.bytes.slice(256, 272).buffer)], [...bits]);
+
+        /** @type {number[]} */
+        const into = [7, 7, 7];
+        const entries = [{ binding: 0, resource: slot }, { binding: 1, resource: {} }];
+        assert.equal(dynamicOffsetsOf(entries, into), into);
+        assert.deepEqual(into, [256]);
+        assert.equal(dynamicOffsetsOf([{ binding: 1, resource: {} }], into), undefined);
+    });
+
+test('a group is made from a copy of the entries, which the caller may write over after', ()=>{
+    const gpu = createFakeDevice();
+    const cache = createBindingCache({ device: gpu.device });
+    const layout = gpu.device.createBindGroupLayout({});
+    const ring = gpu.device.createBuffer({});
+    const slot = { buffer: ring, offset: 0, size: 64, dynamicOffset: 0 };
+    const view = {};
+    const entries = [{ binding: 0, resource: slot }, { binding: 1, resource: view }];
+    const first = cache.get(layout, entries);
+    slot.dynamicOffset = 512;
+    entries[1].resource = view;
+    assert.equal(cache.get(layout, entries), first, 'the dynamic offset is not the group\'s');
+    const made = gpu.of('createBindGroup')[0].descriptor;
+    assert.notEqual(made.entries, entries);
+    assert.equal(made.entries[0].resource.dynamicOffset, 0, 'as it was when the group was made');
+    entries[1].resource = {};
+    assert.notEqual(cache.get(layout, entries), first, 'another view is another group');
+    assert.equal(gpu.count('createBindGroup'), 2);
+});

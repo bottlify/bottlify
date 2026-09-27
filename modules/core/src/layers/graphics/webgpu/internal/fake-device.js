@@ -185,7 +185,9 @@ export function createFakeDevice(options = {}){
                     },
                 };
             });
-            record('setBindGroup', { index, group, offsets, resolved });
+            // Copied, as a device copies them: the caller may write the
+            // same array again for its next draw.
+            record('setBindGroup', { index, group, offsets: offsets && [...offsets], resolved });
         };
         pass.setVertexBuffer = (/** @type {number} */ slot, /** @type {any} */ buffer,
             /** @type {number} */ offset)=>record('setVertexBuffer', { slot, buffer, offset });

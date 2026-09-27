@@ -45,33 +45,20 @@ export function resourceId(resource){
 }
 
 /**
- * @param {any} resource
- * @returns {string}
- */
-function resourceKey(resource){
-    if (resource && typeof resource === 'object' && resource.buffer)
-    {
-        // The dynamic offset is not part of the group: it is given at bind
-        // time, which is what lets one group serve every draw.
-        const offset = resource.offset === undefined ? 0 : resource.offset;
-        const size = resource.size === undefined ? 'all' : resource.size;
-        return `b${resourceId(resource.buffer)}@${offset}+${size}`;
-    }
-    return `r${resourceId(resource)}`;
-}
-
-/**
  * The dynamic offsets a group's buffer bindings are bound at, in binding
  * order, or nothing when no binding carries one.
  *
  * @param {any[]} entries
+ * @param {number[]} [into]
+ *     Where the offsets go, its length set to their count: a caller that hands
+ *     them on at once -- setBindGroup copies them -- need not have an array made
+ *     for every draw. A fresh one when not given.
  * @returns {number[] | undefined}
  */
-export function dynamicOffsetsOf(entries){
-    // Every draw binds through here: one pass and one array when the entries
-    // already come in binding order, as a renderer lays them out.
-    /** @type {number[] | undefined} */
-    let offsets;
+export function dynamicOffsetsOf(entries, into){
+    // Every draw binds through here: one pass when the entries already come
+    // in binding order, as a renderer lays them out.
+    let count = 0;
     let last = -Infinity;
     for (let i = 0; i < entries.length; i++)
     {
@@ -84,15 +71,32 @@ export function dynamicOffsetsOf(entries){
         }
         if (entry.binding < last)
         {
-            return entries
+            const sorted = entries
                 .filter(one=>one.resource && typeof one.resource === 'object'
                     && one.resource.buffer && one.resource.dynamicOffset !== undefined)
                 .sort((left, right)=>left.binding - right.binding)
                 .map(one=>one.resource.dynamicOffset);
+            if (into === undefined)
+            {
+                return sorted;
+            }
+            into.length = 0;
+            into.push(...sorted);
+            return into;
         }
         last = entry.binding;
-        (offsets ??= []).push(resource.dynamicOffset);
+        if (count === 0 && into === undefined)
+        {
+            into = [];
+        }
+        /** @type {number[]} */ (into)[count++] = resource.dynamicOffset;
     }
+    if (count === 0)
+    {
+        return undefined;
+    }
+    const offsets = /** @type {number[]} */ (into);
+    offsets.length = count;
     return offsets;
 }
 
@@ -103,10 +107,77 @@ export function dynamicOffsetsOf(entries){
  * @returns {any}
  */
 export function createBindingCache(options){
-    /** @type {Map<string, any>} */
+    /** @type {Map<number, any>} */
     const groups = new Map();
     let created = 0;
     let reused = 0;
+    /**
+     * The groups' keys as words -- the layout, then each entry's binding and
+     * what it binds -- numbered by an FNV-1a hash of them, a hit compared in
+     * full: a key is asked for on every draw, and a string for it was most of
+     * what a draw left on the heap.
+     *
+     * @type {Map<number, { words: Int32Array, key: number }[]>}
+     */
+    const keys = new Map();
+    let nextKey = 0;
+    let words = new Int32Array(64);
+
+    /** @param {any} layout @param {any[]} entries @returns {number} */
+    const keyOf = (layout, entries)=>{
+        const needed = 1 + entries.length * 5;
+        if (needed > words.length)
+        {
+            words = new Int32Array(Math.max(needed, words.length * 2));
+        }
+        let at = 0;
+        words[at++] = resourceId(layout);
+        for (let i = 0; i < entries.length; i++)
+        {
+            const resource = entries[i].resource;
+            words[at++] = entries[i].binding;
+            if (resource && typeof resource === 'object' && resource.buffer)
+            {
+                // The dynamic offset is not part of the group: it is given at
+                // bind time, which is what lets one group serve every draw.
+                words[at++] = 1;
+                words[at++] = resourceId(resource.buffer);
+                words[at++] = resource.offset === undefined ? 0 : resource.offset;
+                words[at++] = resource.size === undefined ? -1 : resource.size;
+            }
+            else
+            {
+                words[at++] = 0;
+                words[at++] = resourceId(resource);
+            }
+        }
+        let hash = 0x811c9dc5;
+        for (let i = 0; i < at; i++)
+        {
+            hash = Math.imul(hash ^ words[i], 0x01000193);
+        }
+        const bucket = keys.get(hash);
+        if (bucket !== undefined)
+        {
+            for (let i = 0; i < bucket.length; i++)
+            {
+                if (sameWords(bucket[i].words, words, at))
+                {
+                    return bucket[i].key;
+                }
+            }
+        }
+        const entry = { words: words.slice(0, at), key: nextKey++ };
+        if (bucket !== undefined)
+        {
+            bucket.push(entry);
+        }
+        else
+        {
+            keys.set(hash, [entry]);
+        }
+        return entry.key;
+    };
 
     return {
         /**
@@ -119,19 +190,7 @@ export function createBindingCache(options){
             {
                 throw new Error('A bind group needs an explicit layout object');
             }
-            // A plain loop rather than `.map().join()`: this key is built on
-            // every draw to ask the cache below, hit or miss, so the array
-            // `.map()` would allocate here is thrown away before the lookup
-            // it fed ever runs.
-            let key = `${resourceId(layout)}|`;
-            for (let i = 0; i < entries.length; i++)
-            {
-                if (i > 0)
-                {
-                    key += ',';
-                }
-                key += `${entries[i].binding}:${resourceKey(entries[i].resource)}`;
-            }
+            const key = keyOf(layout, entries);
             const cached = groups.get(key);
             if (cached)
             {
@@ -139,11 +198,16 @@ export function createBindingCache(options){
                 return cached;
             }
             // The entries are the caller's, and may be written over for its
-            // next draw: the group is made from a copy of them as they are.
+            // next draw, a buffer binding's too: the group is made from a copy
+            // of them as they are.
             const group = options.device.createBindGroup({
                 label,
                 layout,
-                entries: entries.map(entry=>({ binding: entry.binding, resource: entry.resource })),
+                entries: entries.map(entry=>({
+                    binding: entry.binding,
+                    resource: entry.resource && typeof entry.resource === 'object'
+                        && entry.resource.buffer ? { ...entry.resource } : entry.resource,
+                })),
             });
             groups.set(key, group);
             created++;
@@ -157,6 +221,25 @@ export function createBindingCache(options){
         /** Groups built so far: a number, read around every draw's `get`. */
         created: ()=>created,
     };
+}
+
+/**
+ * @param {Int32Array} stored @param {Int32Array} words @param {number} count
+ * @returns {boolean}
+ */
+function sameWords(stored, words, count){
+    if (stored.length !== count)
+    {
+        return false;
+    }
+    for (let i = 0; i < count; i++)
+    {
+        if (stored[i] !== words[i])
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 /** Uniform buffer offsets and sizes are quantised to this in WebGPU. */
@@ -197,6 +280,12 @@ export function createUniformPool(options){
     let ring = null;
     /** @type {Uint8Array} */
     let staging = new Uint8Array(0);
+    /**
+     * The same bytes as floats, which a block of floats is copied through.
+     *
+     * @type {Float32Array}
+     */
+    let stagingFloats = new Float32Array(0);
     /** The laid bytes not yet written: [pendingFrom, pendingTo). */
     let pendingFrom = 0;
     let pendingTo = 0;
@@ -222,6 +311,7 @@ export function createUniformPool(options){
             usage: options.usage,
         });
         staging = new Uint8Array(capacity);
+        stagingFloats = new Float32Array(staging.buffer);
         created++;
         cursor = 0;
         pendingFrom = 0;
@@ -231,9 +321,12 @@ export function createUniformPool(options){
     return {
         /**
          * @param {ArrayBufferView} block
+         * @param {{ buffer: any, offset: number, size: number, dynamicOffset: number }} [into]
+         *     Where the slot is written, rather than an object made for it: a
+         *     caller that binds it at once and keeps nothing.
          * @returns {{ buffer: any, offset: number, size: number, dynamicOffset: number }}
          */
-        allocate(block){
+        allocate(block, into){
             const needed = Math.ceil(block.byteLength / UNIFORM_ALIGNMENT) * UNIFORM_ALIGNMENT;
             const tail = cursor + needed > capacity ? capacity - cursor : 0;
             if (needed > capacity || (ring && frameUsed + tail + needed > capacity))
@@ -258,13 +351,29 @@ export function createUniformPool(options){
             cursor += needed;
             frameUsed += needed;
             reused++;
-            const bytes = block instanceof Uint8Array
-                ? block
-                : new Uint8Array(block.buffer, block.byteOffset, block.byteLength);
-            staging.set(bytes, at);
-            pendingTo = at + bytes.byteLength;
+            // A block of floats is copied as floats -- the same type, which
+            // copies bits -- rather than through a byte view made for it.
+            if (block instanceof Float32Array)
+            {
+                stagingFloats.set(block, at >>> 2);
+            }
+            else
+            {
+                staging.set(block instanceof Uint8Array
+                    ? block
+                    : new Uint8Array(block.buffer, block.byteOffset, block.byteLength), at);
+            }
+            pendingTo = at + block.byteLength;
             // The binding covers one block at offset zero; the offset the draw
             // actually reads from travels beside it, for setBindGroup.
+            if (into)
+            {
+                into.buffer = ring;
+                into.offset = 0;
+                into.size = block.byteLength;
+                into.dynamicOffset = at;
+                return into;
+            }
             return { buffer: ring, offset: 0, size: block.byteLength, dynamicOffset: at };
         },
 

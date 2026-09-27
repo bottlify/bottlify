@@ -172,7 +172,12 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
   layout drops a binding the generated shader did not use and every textured draw then silently
   disappears. Uniform blocks come out of one ring buffer bound at a dynamic offset, so a bind group
   names a texture, a sampler and the ring and nothing that changes per draw; the group cache is
-  keyed on those identities and lives as long as the backend. The blocks are laid into a copy of the
+  keyed on those identities, as a number rather than a string built for each draw, and lives as
+  long as the backend, making each group from a copy of the entries it was handed -- so a caller may
+  keep one list of entries and write each draw's slot into it. `uniforms(block, slot)` writes the
+  ring slot into an object the caller keeps, a float block is copied into the ring as floats, the
+  dynamic offsets are laid in one array the backend keeps (`setBindGroup` copies them), and `draw`
+  and `drawIndexed` pass their arguments without a rest parameter. The blocks are laid into a copy of the
   ring on this side and reach the GPU in one `writeBuffer` per frame, just before its submit (and
   once more before a wrap or a new ring), not in one per block: a shader draw hands out six blocks,
   and each write is a trip to the GPU process. A frame whose blocks would outgrow the ring is handed
