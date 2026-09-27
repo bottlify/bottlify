@@ -148,6 +148,41 @@ test('a DC taken through user32 is one GDI answers for', async()=>{
     await win32Module.dispose();
 });
 
+test('unattended, a message box answers its default button without asking the page', async()=>{
+    /** @type {string[]} */
+    const said = [];
+    const api = await win32Module.create({
+        unattended: true,
+        divergence: (/** @type {string} */ name, /** @type {string} */ detail)=>
+            said.push(`${name}: ${detail}`),
+        onMessageBox: ()=>assert.fail('nobody is at the screen to be asked'),
+    }, stubHost());
+    const user32 = api.libraries()['USER32.dll'];
+    // MB_YESNO | MB_DEFBUTTON2: the second button, No.
+    assert.equal(user32.MessageBoxA.handler([0, 0, 0, 0x4 | 0x100]), 7, 'IDNO');
+    assert.equal(said.length, 1);
+    assert.match(said[0], /^MessageBox: unattended: answered 7/);
+    await win32Module.dispose();
+});
+
+test('unattended, a message box is put to the answerer, and its choice is the answer', async()=>{
+    /** @type {any[]} */
+    const asked = [];
+    const api = await win32Module.create({
+        unattended: true,
+        answer: (/** @type {any} */ dialog)=>{
+            asked.push(dialog);
+            return 6;
+        },
+    }, stubHost());
+    const user32 = api.libraries()['USER32.dll'];
+    assert.equal(user32.MessageBoxA.handler([0, 0, 0, 0x4 | 0x100]), 6, 'IDYES, as chosen');
+    assert.deepEqual(asked[0].buttons.map((/** @type {any} */ button)=>
+        [button.id, button.default]), [[6, false], [7, true]]);
+    assert.equal(asked[0].kind, 'messagebox');
+    await win32Module.dispose();
+});
+
 test('no configured screen leaves both libraries on the same fallback', async()=>{
     const api = await win32Module.create({}, stubHost());
     const user32 = api.libraries()['USER32.dll'];

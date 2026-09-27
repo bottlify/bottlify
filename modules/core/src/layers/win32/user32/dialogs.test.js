@@ -86,9 +86,10 @@ function fakeHandles(){
  * @param {{ resources?: Record<string, number>,
  *           dispatch?: (wndProc: number, message: any, thread?: unknown) => number,
  *           allocate?: (bytes: number) => number,
- *           call?: (entry: number, args: number[], thread?: unknown) => any }} [options]
+ *           call?: (entry: number, args: number[], thread?: unknown) => any,
+ *           unattended?: boolean, answer?: (dialog: any) => number | Promise<number> }} [options]
  */
-function setup({ resources = {}, dispatch = ()=>0, allocate, call } = {}){
+function setup({ resources = {}, dispatch = ()=>0, allocate, call, unattended, answer } = {}){
     const memory = fakeMemory();
     const queue = createMessageQueue();
     const fns = createWindowFunctions({
@@ -101,6 +102,8 @@ function setup({ resources = {}, dispatch = ()=>0, allocate, call } = {}){
         dispatch,
         allocate,
         call,
+        unattended,
+        answer,
         release: ()=>{},
         callerThread: ()=>'the caller',
         park: ()=>({ parked: true }),
@@ -332,6 +335,78 @@ test('DialogBox pumps until EndDialog and answers what it was given', async()=>{
         'and a dialog that cannot be made answers -1 at once');
     assert.equal(fns.DialogBoxIndirectParamA.argBytes, 20);
     assert.equal(fns.DialogBoxParamA.argBytes, 20);
+});
+
+/**
+ * A dialog whose procedure ends it with whatever button was pressed, run
+ * unattended with the answerer given.
+ *
+ * @param {((dialog: any) => number | Promise<number>) | undefined} answer
+ */
+const unattendedDialog = answer=>{
+    /** @type {any} */
+    let table = null;
+    const { memory, fns } = setup({
+        unattended: true,
+        answer,
+        dispatch: (wndProc, message)=>{
+            if (message.message === 0x0111)
+            {
+                table.EndDialog.handler([message.hwnd, message.wParam & 0xffff]);
+            }
+            return 0;
+        },
+    });
+    table = fns;
+    putTemplate(memory, [
+        { id: 100, x: 4, y: 8, cx: 20, cy: 6, title: '&Cancel' },
+        { id: 6, x: 4, y: 20, cx: 20, cy: 6, title: 'Yes', style: 1 },
+    ]);
+    return fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+};
+
+test('unattended, a modal dialog waiting for input is answered with its default button', async()=>{
+    // A silent install run from a terminal: nobody presses anything, so the
+    // engine presses Enter -- the default button's WM_COMMAND, which the
+    // program's own procedure turns into EndDialog.
+    assert.equal(await unattendedDialog(undefined), 6, 'the BS_DEFPUSHBUTTON control, IDYES');
+});
+
+test('unattended, the button the answerer chooses is the press the procedure receives', async()=>{
+    /** @type {any[]} */
+    const asked = [];
+    const pressed = await unattendedDialog(dialog=>{
+        asked.push(dialog);
+        return Promise.resolve(100);
+    });
+    assert.equal(pressed, 100);
+    assert.deepEqual(asked[0].buttons, [
+        { id: 100, label: 'Cancel', default: false },
+        { id: 6, label: 'Yes', default: true },
+    ]);
+    assert.equal(asked[0].kind, 'dialog');
+});
+
+test('attended, a modal dialog is left waiting for a person', async()=>{
+    /** @type {number[]} */
+    const heard = [];
+    let dialog = 0;
+    const { memory, fns } = setup({
+        dispatch: (wndProc, message)=>{
+            heard.push(message.message);
+            dialog = message.hwnd;
+            return 0;
+        },
+    });
+    putTemplate(memory, [{ id: 6, x: 4, y: 20, cx: 20, cy: 6, title: 'Yes', style: 1 }]);
+    const answer = fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    for (let turn = 0; turn < 5; turn++)
+    {
+        await new Promise(resolve=>setImmediate(resolve));
+    }
+    assert.ok(!heard.includes(0x0111), 'no button was pressed');
+    fns.EndDialog.handler([dialog, 3]);
+    assert.equal(await answer, 3, 'until the person ends it');
 });
 
 test('DialogBox shows a dialog whose template does not say WS_VISIBLE', async()=>{

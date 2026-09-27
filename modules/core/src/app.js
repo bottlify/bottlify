@@ -86,6 +86,11 @@ import { loadZstdWasm } from './zstd-wasm.js';
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
  *           Defaults to everything above the libraries up to the end of RAM.
  * @property {boolean} [traceStrings]  Keep the text an argument pointed at, for a trace.
+ * @property {boolean | { answer?: (dialog: import('./layers/win32/user32/dialogs.js')
+ *     .UnattendedDialog) => number | Promise<number> }} [unattended]
+ *     Nobody is at the screen -- a silent install run from a terminal: every modal dialog and
+ *     message box is put to `answer` (a terminal prompt, say), or without one answered with its
+ *     default button as Enter would, and each answer is reported as a divergence.
  * @property {boolean} [profileCalls]  Time every host call as a phase of its own, for a
  *                                     report's cost per API; two clock readings a call.
  * @property {() => boolean} [pageHidden]
@@ -3225,6 +3230,8 @@ async function buildApp(options){
             namedObjects: options.namedObjects,
             // The network beyond this runtime, when the embedder supplied one.
             network: options.win32?.network,
+            unattended: Boolean(options.unattended),
+            answer: typeof options.unattended === 'object' ? options.unattended.answer : undefined,
             // The roots WinVerifyTrust judges a signature's chain against;
             // absent, the win32 layer's default store.
             trustedRoots: options.win32?.trustedRoots,

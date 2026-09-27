@@ -225,6 +225,28 @@ export function createWin32Module(){
             /** @type {(text: string) => void} */
             const trace = config?.onTrace ?? (()=>{});
 
+            /**
+             * A modal dialog or message box put to an unattended run: the
+             * embedder's answerer chooses, and without one the default button
+             * is pressed, as Enter would press it. Either way the log says
+             * what was answered, since nobody saw it.
+             *
+             * @param {import('./user32/dialogs.js').UnattendedDialog} dialog
+             * @returns {number | Promise<number>}
+             */
+            const answerUnattended = dialog=>{
+                const fallback = dialog.buttons.find(button=>button.default)?.id
+                    ?? dialog.buttons[0]?.id ?? 1;
+                const chosen = config?.answer ? config.answer(dialog) : fallback;
+                /** @param {number} id */
+                const told = id=>{
+                    config?.divergence?.(dialog.kind === 'messagebox' ? 'MessageBox' : 'DialogBox',
+                        `unattended: answered ${id} to "${dialog.title}: ${dialog.text}"`);
+                    return id;
+                };
+                return chosen instanceof Promise ? chosen.then(told) : told(chosen);
+            };
+
             // What the assembling caller owns and we are only handed: where the heap
             // may allocate, how to reach a module, and how a waiting call gets to
             // look again. Each is read when a guest calls, never now, so the caller
@@ -1603,8 +1625,17 @@ export function createWin32Module(){
                     // A program's own explanation of why it is stopping, handed up
                     // whole rather than as a line of log, so whoever is embedding
                     // this engine can show it the way a person would have seen it.
+                    // Unattended, nobody is at the page to answer it.
                     /** @param {any} notice */
-                    messageBox: notice=>config?.onMessageBox?.(notice),
+                    messageBox: notice=>(config?.unattended === true
+                        ? answerUnattended({
+                            kind: 'messagebox', title: notice.caption, text: notice.text,
+                            buttons: notice.buttons.map((/** @type {any} */ button)=>
+                                ({ ...button, default: button.id === notice.defaultButton })),
+                        })
+                        : config?.onMessageBox?.(notice)),
+                    unattended: config?.unattended === true,
+                    answer: answerUnattended,
                     /** @param {string} text */
                     clipboard: text=>config?.onClipboard?.(text),
                     pasteboard,

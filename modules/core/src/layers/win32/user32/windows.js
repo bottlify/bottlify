@@ -445,6 +445,11 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           Whose call is being handled, read before an await for `dispatch`
  *           afterwards. Absent in a build with no bridge, and then unnamed.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {boolean} [unattended]
+ *           Nobody is at the screen: a modal dialog waiting for input is
+ *           answered by `answer`, or with its default button.
+ * @property {(dialog: import('./dialogs.js').UnattendedDialog)
+ *     => number | Promise<number>} [answer]
  * @property {(id: number) => boolean} [threadExists]
  *           Whether a thread identifier names a thread of this process, which
  *           is the whole of what PostThreadMessage validates. Absent in a build
