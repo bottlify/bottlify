@@ -189,6 +189,9 @@ test('the multi-byte names are bound to the byte functions themselves', ()=>{
     assert.equal(multi._ismbcspace, narrow.isspace, 'a classifier, bound the same way');
     assert.equal(multi._ismbcspace.handler([' '.charCodeAt(0)]), 1);
     assert.equal(multi._ismbcspace.handler(['x'.charCodeAt(0)]), 0);
+    assert.equal(multi._mbsnbcmp, narrow.strncmp, 'a byte count is a character count here');
+    assert.equal(multi._mbspbrk, narrow.strpbrk);
+    assert.equal(multi._ismbcdigit, narrow.isdigit);
 });
 
 test('under a single-byte locale a character is one byte and nothing leads', ()=>{
@@ -198,6 +201,16 @@ test('under a single-byte locale a character is one byte and nothing leads', ()=
     assert.equal(multi._mbsinc.handler([0x1000]), 0x1001);
     assert.equal(multi._mbsdec.handler([0x1000, 0x1004]), 0x1003);
     assert.equal(multi._mbsdec.handler([0x1000, 0x1000]), 0, 'nothing before the start');
+    assert.deepEqual([...multi._mbctype.data()], new Array(257).fill(0), 'no byte leads or trails');
+    /** @type {string[]} */
+    const said = [];
+    const told = /** @type {Record<string, any>} */ (createMultiByteFunctions({},
+        (/** @type {string} */ api)=>said.push(api)));
+    assert.equal(told._setmbcp.handler([1252]), 0);
+    assert.equal(told._setmbcp.handler([-3]), 0);
+    assert.deepEqual(said, [], 'the ANSI page is the page it has');
+    assert.equal(told._setmbcp.handler([932]), 0);
+    assert.deepEqual(said, ['_setmbcp'], 'a double-byte page is not, and says so');
 });
 
 /**
