@@ -586,6 +586,8 @@ export function createGdiFunctions(host){
             textAlign: 0,
             mapMode: MM_TEXT,
             layout: 0,
+            /** Whether the program selected a clip, which GetClipRgn answers. */
+            clipSelected: false,
             /** SetTextCharacterExtra's spacing, in logical units. */
             characterExtra: 0,
             /** The miter limit, a FLOAT's value; 10 until the program sets one. */

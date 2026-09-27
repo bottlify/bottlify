@@ -593,6 +593,7 @@ export function createDrawingFunctions(
     /** @param {number} handle @param {any} dc @param {any} rect */
     const setClip = (handle, dc, rect)=>{
         dc.clip = { ...rect };
+        dc.clipSelected = true;
         bound(handle)?.setClipRect(handle >>> 0, rect);
     };
 
@@ -820,6 +821,17 @@ export function createDrawingFunctions(
                 }
                 interfaces.setPixel(handle >>> 0, x | 0, y | 0, color >>> 0);
                 return interfaces.getPixel(handle >>> 0, x | 0, y | 0) >>> 0;
+            },
+        },
+
+        /** BOOL SetPixelV(HDC hdc, int x, int y, COLORREF color): SetPixel, answered as a BOOL */
+        SetPixelV: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, x, y, color])=>{
+                const interfaces = bound(handle);
+                return interfaces && interfaces.setPixel(handle >>> 0, x | 0, y | 0, color >>> 0)
+                    !== 0xffffffff ? 1 : 0;
             },
         },
 
@@ -1281,10 +1293,9 @@ export function createDrawingFunctions(
                 }
                 if ((region >>> 0) === 0)
                 {
-                    const surface = surfaceOf(dc);
-                    setClip(handle, dc, {
-                        left: 0, top: 0, right: surface.width, bottom: surface.height,
-                    });
+                    dc.clip = null;
+                    dc.clipSelected = false;
+                    bound(handle)?.setClipRect(handle >>> 0, clipOf(dc));
                     return SIMPLEREGION;
                 }
                 const rect = regionOf(region);
@@ -1294,6 +1305,32 @@ export function createDrawingFunctions(
                 }
                 setClip(handle, dc, rect);
                 return isEmpty(rect) ? NULLREGION : SIMPLEREGION;
+            },
+        },
+
+        /**
+         * int GetClipRgn(HDC hdc, HRGN hrgn)
+         *
+         * 1 with the clip the program selected copied into the region, 0 when
+         * it selected none -- a paint's update area is the system's clip, not
+         * the program's -- and -1 for a context or a region there is not.
+         */
+        GetClipRgn: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, region])=>{
+                const dc = dcOf(handle);
+                const target = objects.get(region);
+                if (!dc || !target || target.type !== 'region')
+                {
+                    return 0xffffffff;
+                }
+                if (!dc.clipSelected)
+                {
+                    return 0;
+                }
+                target.attributes = { ...clipOf(dc) };
+                return 1;
             },
         },
 

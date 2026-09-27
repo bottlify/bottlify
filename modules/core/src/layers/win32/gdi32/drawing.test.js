@@ -431,6 +431,34 @@ test('a null clip region means the whole surface, not an empty one', ()=>{
     assert.equal(fns.SelectClipRgn.handler([hdc, empty]), NULLREGION);
 });
 
+test('GetClipRgn copies the clip the program selected, and answers 0 for none', ()=>{
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+    const region = fns.CreateRectRgn.handler([0, 0, 0, 0]);
+    const selected = fns.CreateRectRgn.handler([2, 3, 40, 50]);
+    assert.equal(fns.GetClipRgn.handler([hdc, region]), 0, 'nothing selected yet');
+    assert.equal(fns.SelectClipRgn.handler([hdc, selected]), SIMPLEREGION);
+    assert.equal(fns.GetClipRgn.handler([hdc, region]), 1);
+    assert.equal(fns.SelectClipRgn.handler([hdc, 0]), SIMPLEREGION);
+    assert.equal(fns.SelectClipRgn.handler([hdc, region]), SIMPLEREGION);
+    assert.deepEqual(graphics.calls.filter(call=>call[0] === 'setClipRect').at(-1)?.[2],
+        { left: 2, top: 3, right: 40, bottom: 50 }, 'the copy is the selection');
+    assert.equal(fns.SelectClipRgn.handler([hdc, 0]), SIMPLEREGION);
+    assert.equal(fns.GetClipRgn.handler([hdc, region]), 0, 'a null selection is none again');
+    assert.equal(fns.GetClipRgn.handler([hdc, hdc]) | 0, -1, 'not a region');
+    assert.equal(fns.GetClipRgn.handler([0x9999, region]) | 0, -1, 'not a context');
+});
+
+test('SetPixelV is SetPixel answered as a BOOL', ()=>{
+    const bare = setup();
+    assert.equal(bare.fns.SetPixelV.handler([bare.hdc, 1, 1, 0xff]), 0, 'nothing to draw with');
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+    assert.equal(fns.SetPixelV.handler([hdc, 9, 10, 0x00abcdef]), 1);
+    assert.deepEqual(graphics.calls.filter(call=>call[0] === 'setPixel'),
+        [['setPixel', hdc, 9, 10, 0x00abcdef]]);
+});
+
 test('a band excluded from the clip is taken off; a cut that would leave an L is not', ()=>{
     const graphics = fakeDrawing();
     const { fns, memory, hdc } = setup(graphics.services);
