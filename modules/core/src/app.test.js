@@ -502,6 +502,12 @@ test('a bare name is looked for beside the executable, then where the system kee
         'a qualified name has one place');
     assert.deepEqual(libraryCandidates('plugins\\Sound.dll', IMAGE),
         ['C:\\App\\plugins\\Sound.dll'], 'and so does one with a directory in it');
+    // A setup that changes to a folder of its disc loads a helper there by
+    // bare name: the current directory, after the system ones.
+    assert.deepEqual(libraryCandidates('dsetup.dll', IMAGE, 'D:\\DirectX').at(-1),
+        'D:\\DirectX\\dsetup.dll');
+    assert.equal(libraryCandidates('dsetup.dll', IMAGE, 'C:\\App\\').length, 3,
+        'the program\'s own directory is not searched twice');
 });
 
 test('a redistributable runtime is answered by the engine whoever brought a copy', ()=>{
