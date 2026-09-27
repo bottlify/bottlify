@@ -40,6 +40,9 @@ try
         // No contraction: a multiply and an add stay two roundings, as in JavaScript.
         '--target=wasm32', '-O2', '-nostdlib', '-ffreestanding', '-fno-builtin',
         '-ffp-contract=off',
+        // memory.copy and memory.fill for a `rep movs`/`rep stos` done a page at once,
+        // as translated code does them.
+        '-mbulk-memory',
         '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
         '-Wl,--no-entry', '-Wl,--import-memory', '-Wl,--global-base=4096',
         '-Wl,-z,stack-size=8192', '-Wl,--export=__heap_base',

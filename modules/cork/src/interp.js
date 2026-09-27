@@ -425,6 +425,68 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
             onCodeWrite(address, size);
         }
     };
+    /**
+     * `Memory.repeat`, as translated code moves a `rep movs` or `rep stos` in
+     * bulk (`bulkString` in `emit/integer.js`): every element that lies wholly
+     * on the pointers' current pages at once, when the destination's page is
+     * neither inaccessible nor holding translated code, the source's can be
+     * read, and a copy's destination does not lie just ahead of its source,
+     * where the processor repeats the source's first elements and a memmove
+     * does not.
+     *
+     * @param {boolean} copy @param {number} to @param {number} from
+     * @param {number} size @param {number} count @param {number} value
+     */
+    const repeat = (copy, to, from, size, count, value)=>{
+        let n = Math.min(count, (0x1000 - (to & 0xfff)) / size | 0);
+        if (copy)
+        {
+            n = Math.min(n, (0x1000 - (from & 0xfff)) / size | 0);
+        }
+        const bytes = n * size;
+        if (n === 0
+            || (pageFlags[to >>> 12] & (PageFlag.INACCESSIBLE | PageFlag.HAS_CODE)) !== 0)
+        {
+            return 0;
+        }
+        if (copy)
+        {
+            if ((pageFlags[from >>> 12] & PageFlag.INACCESSIBLE) !== 0
+                || ((to - from - 1) >>> 0) < bytes - 1)
+            {
+                return 0;
+            }
+            ramBytes.copyWithin(to, from, from + bytes);
+        }
+        else
+        {
+            const word = value >>> 0;
+            const byte = word & 0xff;
+            if (word === (size === 4 ? byte * 0x01010101 : size === 2 ? byte * 0x0101 : byte))
+            {
+                ramBytes.fill(byte, to, to + bytes);
+            }
+            else
+            {
+                for (let address = to; address < to + bytes; address += size)
+                {
+                    if (size === 2)
+                    {
+                        view.setUint16(layout.ramBase + address, word, true);
+                    }
+                    else
+                    {
+                        view.setUint32(layout.ramBase + address, word, true);
+                    }
+                }
+            }
+        }
+        if (to < watchEnd && to + bytes > watchStart)
+        {
+            memoryApi.hit = true;
+        }
+        return n;
+    };
     // The x87 registers are one f64 every sixteen bytes in the block, which no
     // typed array can stride; they are copied in and out around a run, as the
     // XMM registers are -- on the run's first use of them, and back only when
@@ -574,7 +636,7 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
     state.eip = view.getUint32(layout.eip, true);
     state.eflags = view.getUint32(layout.eflags, true);
     const memoryApi = {
-        read, write, same,
+        read, write, same, repeat,
         /** @param {number} start @param {number} end */
         watch(start, end){
             watchStart = start;

@@ -379,6 +379,38 @@ test('a run of instructions sees a store into its own bytes decoded before it', 
     assert.deepEqual(starts, [0x1000, 0x1006], 'the run ended after the store and resumed');
 });
 
+test('a rep stos moved in bulk over its own run\'s bytes ends the run as a store does', ()=>{
+    const layout = ownLayout({ ramSize: 1 << 20 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
+    // mov edi, 0x100f; mov ecx, 1; rep stosb; nop; add ecx, imm8; hlt -- the
+    // rep rewrites the add's immediate, as the store above does.
+    ram.set([0xbf, 0x0f, 0x10, 0, 0, 0xb9, 1, 0, 0, 0, 0xf3, 0xaa, 0x90, 0x83, 0xc1, 0, 0xf4],
+        0x1000);
+    const state = blockState({ memory, layout });
+    const bulk = /** @type {NonNullable<import('./ir.js').Memory['repeat']>} */ (
+        state.memory.repeat);
+    let moved = 0;
+    state.memory.repeat = (...args)=>{
+        const done = bulk(...args);
+        moved += done;
+        return done;
+    };
+    state.reg[0] = 3;
+    state.eip = 0x1000;
+    interpret(state, 10);
+    assert.equal(state.reg[1], 3);
+    /** @type {number[]} */
+    const starts = [];
+    state.reg[0] = 5;
+    state.eip = 0x1000;
+    state.halted = false;
+    interpret(state, 10, { onStep: at=>starts.push(at) });
+    assert.equal(moved, 2, 'both stores went in bulk');
+    assert.equal(state.reg[1], 5, 'the immediate as the second rep left it');
+    assert.deepEqual(starts, [0x1000, 0x100c], 'the run ended after the rep and resumed');
+});
+
 test('a compiled lea step with an fs: override leaves the segment out', ()=>{
     const layout = ownLayout({ ramSize: 1 << 20 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });

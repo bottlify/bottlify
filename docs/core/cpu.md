@@ -690,7 +690,20 @@ of those pages (inaccessible, and code for the destination), then one `memory.co
 pointers, the count and the budget moved by the whole run. DF set, an element across a page,
 a flagged page, and a copy whose destination lies just ahead of its source (which the
 processor fills with the source's first elements, where a memmove does not) take the
-per-element path. `rep movsd` 5.2 -> 0.7 ns an element, `rep stosd` 2.9 -> 0.6. Each
+per-element path. `rep movsd` 5.2 -> 0.7 ns an element, `rep stosd` 2.9 -> 0.6. Both
+interpreter tiers move them the same way (`Memory.repeat` in `ir.js`, which `blockState` answers
+with a `copyWithin` or a `fill` of RAM; `repeatBulk` in `interp-wasm.c`, a `memory.copy` or
+`memory.fill`, the module built with `-mbulk-memory`), under the same tests, each element they
+leave going one at a time as before, and a bulk store into the JavaScript interpreter's own run
+ending the run as a store does. They have to: a `rep` a slice's budget stops in translated code
+leaves on the instruction, in the middle of its block, where no region has an entry, so the next
+slice runs the rest of it on an interpreter tier -- as one instruction, whatever the count -- and
+there it went an element at a time. Under the engine, a loop of one `rep` a turn timed between
+two points of one run (node, pinned to a core, median of three, a run each): `rep stosb` of 4 KiB
+1 100 -> 262 ns a turn, of 16 KiB 12 690 -> 914, of 256 KiB 985 000 -> 14 100; `rep movsb` of
+16 KiB 14 700 -> 1 100, of 256 KiB 1 437 000 -> 10 400; `rep stosd` and `rep movsd` of 256 KiB
+75 500 -> 7 190 and 101 000 -> 7 740, where cork's test machine runs the same loop's 16 KiB
+`rep stosb` in 0.15-0.4 us and its 256 KiB in about 5. Each
 iteration of a `rep` counts against the slice's budget, and a `rep cmps` or `rep scas` tests its
 stop condition before the budget: a slice that runs out on the iteration that stops it leaves the
 instruction done, where it had left on it and the instruction run again scanned on past the match
