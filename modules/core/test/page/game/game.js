@@ -92,7 +92,12 @@ if (inWorker)
                 gpuAnswered(data.gpu);
                 break;
             case 'calls':
-                callLog.push(...data.lines);
+                // One at a time: a batch of a busy run is more lines than a
+                // spread passes as arguments.
+                for (const line of data.lines)
+                {
+                    callLog.push(line);
+                }
                 break;
             case 'result':
                 finish(data.result);
