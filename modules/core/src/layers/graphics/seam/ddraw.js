@@ -83,7 +83,7 @@ import { blt, bltFast } from '../ddraw/blit.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { createRaster } from './raster.js';
 import { DDRAW_PRIVATE_DATA, createPrivateData } from './privatedata.js';
-import { REFRESH_HZ } from '../../win32/user32/display.js';
+import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 
 /** WaitForVerticalBlank: which edge of the blank to return at. */
 const DDWAITVB_BLOCKBEGIN = 0x00000001;
@@ -119,12 +119,7 @@ const DDENUMSURFACES_ALL = 0x00000001;
 const DDENUMSURFACES_MATCH = 0x00000002;
 const DDENUMSURFACES_NOMATCH = 0x00000004;
 
-/**
- * The display modes this build offers, at every depth a mode can be set to.
- * The screen's own size is added to the list when it is not already one of
- * these, so a program that enumerates before choosing finds where it is.
- */
-const MODES = Object.freeze([[640, 480], [800, 600], [1024, 768], [1280, 1024]]);
+/** The depths a display mode can be set to; the sizes are the display's (user32/display.js). */
 const DEPTHS = Object.freeze([8, 16, 32]);
 
 /** RGNDATAHEADER: a size, a type that is always rectangles, a count, a byte size, a bound. */
@@ -1267,7 +1262,7 @@ export function createDirectDrawSeam(
         },
 
         /**
-         * Every mode in the table at every depth, and the screen's own size
+         * Every size the display lists, at every depth, and the screen's own size
          * if the table lacks it. Without a way into the guest this reports
          * success having named nothing.
          *
@@ -1286,11 +1281,10 @@ export function createDirectDrawSeam(
             // Whose call this is, before the loop awaits anything: only the
             // first callback of an enumeration runs on the thread standing here.
             const asked = currentThread?.();
-            const display = screen();
-            const sizes = MODES.some(([width, height])=>
-                width === display.width && height === display.height)
-                ? MODES
-                : [...MODES, [display.width, display.height]];
+            // The same sizes user32 and Direct3D list, each once whatever the
+            // rates it is listed at there.
+            const sizes = [...new Map(displayModes(screen())
+                .map(mode=>[`${mode.width}x${mode.height}`, [mode.width, mode.height]])).values()];
             return (async()=>{
                 for (const [width, height] of sizes)
                 {
