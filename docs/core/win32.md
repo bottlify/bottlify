@@ -277,8 +277,10 @@ In the guest now: `floor`, `_ftol`/`_ftol2`/`_ftol2_sse` (ST0 popped, EDX:EAX; a
 where the host can set EDX); `toupper`, `tolower`, the classifiers `isalpha`, `isdigit`,
 `isalnum`, `isspace`, `isupper`, `islower`, `ispunct`, `isxdigit`, `isprint`, `iscntrl` and
 their wide forms `iswalpha` ... `iswgraph`, `iswascii`, `towupper`, `towlower` (the classes in
-`CLASSES` and `WIDE_CLASSES`, which `_pctype`, `_isctype` and `iswctype` read too); `strncmp`,
-`_strnicmp`, `_stricmp`; `atoi`/`atol`; `qsort` (Shell's sort) and `bsearch`, the program's
+`CLASSES` and `WIDE_CLASSES`, which `_pctype`, `_isctype` and `iswctype` read too); `strlen`,
+`strcpy`, `strcmp`, `strncmp`, `_strnicmp`, `_stricmp`; `memcpy`/`memmove` (one function: as if
+the source were read whole first, `rep movsb` up or `std; rep movsb` down), `memset`
+(`rep stosb`), `memcmp`; `atoi`/`atol`; `qsort` (Shell's sort) and `bsearch`, the program's
 comparator called with a `call`. Each keeps the answers of the handler it replaced (see the
 divergences below). `strtol`/`strtoul` stay handlers: they set `errno`, which is the calling
 thread's own and reached only through the host.
@@ -816,9 +818,17 @@ Stated as the code states them.
   runtime may answer the difference of the bytes; and they order bytes as the handlers ordered
   the strings they decoded -- a byte's own value, except for the sixteen of 0x80..0x9F that
   Windows-1252 gives characters above U+00FF, so 0x80 (the euro sign) sorts after 0xFF, where
-  msvcrt compares unsigned bytes. `strncmp` in the guest keeps that order (`ORDER` in
-  `msvcrt/inguest.js`) so the handler and the x86 answer alike; a string past 1 MiB, which the
-  handlers read no further than, is compared whole by the x86. The classifiers answer 1 rather
+  msvcrt compares unsigned bytes. The comparisons in the guest keep that order (`ORDER` in
+  `msvcrt/inguest.js`) so the handler and the x86 answer alike. A string past 1 MiB, which the
+  handlers read no further than (`strlen`'s stopped the run without a terminator by then), is
+  measured, copied and compared whole by the x86, as msvcrt's are. `strcpy` copies as `memmove`
+  does, as if the source were read whole first, where C leaves an overlap undefined.
+- **The runtime's code in the guest shares the `.data` pages with its variables.** A `data`
+  export is placed with the variables, so `_iob`'s standard records sit on a page with code
+  (`floor` and `_ftol` among it, `_ftol` since before it was compiled); under cork a write from the
+  host into a page drops every translation on it, and stdio writes a standard stream's `_flag`
+  and `_cnt` from the host when a program's `putc` or `getc` macros fall back to it. The loader
+  placing code exports in an executable section of their own would end it. The classifiers answer 1 rather
   than msvcrt's class bit. `atoi` clamps to `INT_MIN`/`INT_MAX`, as its handler did. `bsearch`
   takes its count as a signed number, so an array of 2^31 elements or more is not searched.
 

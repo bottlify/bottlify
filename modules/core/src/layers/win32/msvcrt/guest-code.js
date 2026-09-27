@@ -68,6 +68,8 @@
  * @typedef {Object} GuestHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, length: number) => void} [fillMemory]
+ *     A range set to one byte in place, with no buffer of the length made.
  * @property {(fn: number, args: number[]) => number} [call]
  *     A guest function run to its return, synchronously: a test's stand-in.
  *     The engine has none -- running the guest from the host is a wait --
@@ -136,6 +138,11 @@ export function guestMemory(host){
             }
         },
         fill: (destination, value, count)=>{
+            if (host.fillMemory)
+            {
+                host.fillMemory(destination >>> 0, value & 0xff, count >>> 0);
+                return;
+            }
             host.writeMemory(destination >>> 0, new Uint8Array(count >>> 0).fill(value & 0xff));
         },
         call: (fn, ...args)=>{
@@ -153,6 +160,7 @@ export function guestMemory(host){
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
  *     With writeMemory, wanted by a function that takes the guest's helpers.
  * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
+ * @property {(address: number, value: number, length: number) => void} [fillMemory]
  * @property {import('./float.js').FloatHost} [fpu]
  *     Where an f64 result goes and an x87 argument comes from.
  * @property {(values: Record<string, number>) => void} [setRegisters]
@@ -193,13 +201,14 @@ export function guestEntry(source, compiled, host){
         throw new Error('guest code: a function that calls the guest has no handler here '
             + '(guestExport)');
     }
-    const { readMemory, writeMemory, call } = host;
+    const { readMemory, writeMemory, fillMemory, call } = host;
     if (uses.length > 0 && (!readMemory || !writeMemory))
     {
         throw new Error('guest code: a function that reads the guest wants its memory');
     }
     const guest = uses.length > 0 && readMemory && writeMemory
-        ? guestMemory({ readMemory, writeMemory, ...call ? { call } : {} }) : null;
+        ? guestMemory({ readMemory, writeMemory, ...fillMemory ? { fillMemory } : {},
+            ...call ? { call } : {} }) : null;
     const onStack = params.filter(type=>type === 'x87').length;
     /** @param {number[]} args */
     const handler = args=>{

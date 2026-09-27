@@ -639,3 +639,131 @@ export function bsearch({ call }, key, base, num, width, compare){
     }
     return 0;
 }
+
+/**
+ * void *memmove(void *destination, const void *source, size_t count), and
+ * memcpy, which is the same function here
+ *
+ * As if the source were read whole before a byte of it was written: a
+ * destination above the source and inside it is copied from the last byte
+ * down, anything else from the first up -- `rep movsb`, which the translator
+ * runs a page at a time.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
+ * @returns {u32}
+ */
+export function memmove({ copyUp, copyDown }, destination, source, count){
+    if ((destination - source) >>> 0 < count)
+    {
+        copyDown(destination, source, count);
+    }
+    else
+    {
+        copyUp(destination, source, count);
+    }
+    return destination;
+}
+
+/**
+ * void *memset(void *destination, int value, size_t count)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} value @param {u32} count
+ * @returns {u32}
+ */
+export function memset({ fill }, destination, value, count){
+    fill(destination, value, count);
+    return destination;
+}
+
+/**
+ * int memcmp(const void *left, const void *right, size_t count)
+ *
+ * The bytes as unsigned values, the answer -1, 0 or 1.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @returns {i32}
+ */
+export function memcmp({ u8 }, left, right, count){
+    for (/** @type {u32} */ let i = 0; i < count; i++)
+    {
+        const a = u8(left + i);
+        const b = u8(right + i);
+        if (a !== b)
+        {
+            return a < b ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+/**
+ * size_t strlen(const char *text)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text
+ * @returns {u32}
+ */
+export function strlen({ u8 }, text){
+    /** @type {u32} */
+    let length = 0;
+    while (u8(text + length) !== 0)
+    {
+        length++;
+    }
+    return length;
+}
+
+/**
+ * char *strcpy(char *destination, const char *source)
+ *
+ * The source and its terminator, as if read whole first, the way memmove
+ * copies: C leaves an overlap undefined, and the handler this replaced read
+ * the string before it wrote.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} source
+ * @returns {u32}
+ */
+export function strcpy({ u8, copyUp, copyDown }, destination, source){
+    /** @type {u32} */
+    let length = 1;
+    while (u8(source + length - 1) !== 0)
+    {
+        length++;
+    }
+    if ((destination - source) >>> 0 < length)
+    {
+        copyDown(destination, source, length);
+    }
+    else
+    {
+        copyUp(destination, source, length);
+    }
+    return destination;
+}
+
+/**
+ * int strcmp(const char *left, const char *right)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right
+ * @returns {i32}
+ */
+export function strcmp({ u8 }, left, right){
+    for (/** @type {u32} */ let i = 0; ; i++)
+    {
+        const a = u8(left + i);
+        const b = u8(right + i);
+        if (a !== b)
+        {
+            return ORDER[a] < ORDER[b] ? -1 : 1;
+        }
+        if (a === 0)
+        {
+            return 0;
+        }
+    }
+}

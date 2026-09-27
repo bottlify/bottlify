@@ -246,3 +246,55 @@ test('bsearch: the key found, missed, at either end, among repeats, and in nothi
         }
     }
 });
+
+test('memmove and memcpy: apart, overlapping either way, onto themselves, and nothing', ()=>{
+    const next = random(10);
+    for (let i = 0; i < 200; i++)
+    {
+        const bytes = Array.from({ length: 256 }, ()=>next() & 0xff);
+        const source = DATA + next() % 96;
+        const destination = DATA + [next() % 96, source - DATA, source - DATA + 1,
+            source - DATA - 1][next() % 4];
+        const count = [0, 1, 2, 7, 64, next() % 128][next() % 6];
+        same('memmove', { stack: [destination, source, count], memory: [[DATA, bytes]] });
+    }
+});
+
+test('memset: a byte from the low bits of the value, over counts from none up', ()=>{
+    const next = random(11);
+    for (let i = 0; i < 100; i++)
+    {
+        const count = [0, 1, 3, 100, next() % 300][i % 5];
+        same('memset', { stack: [DATA + next() % 64, next(), count] });
+    }
+});
+
+test('memcmp: unsigned bytes, the first difference, and a count of none', ()=>{
+    const next = random(12);
+    for (let i = 0; i < 200; i++)
+    {
+        const a = Array.from({ length: 32 }, ()=>(next() % 4 === 0 ? 0x80 + next() % 0x80 : 0x41));
+        const b = next() % 3 === 0 ? [...a] : a.map(byte=>(next() % 16 === 0 ? next() & 0xff
+            : byte));
+        same('memcmp', { stack: [DATA, DATA + 0x100, [0, 1, 16, 32, next() % 33][i % 5]],
+            memory: [[DATA, a], [DATA + 0x100, b]] });
+    }
+});
+
+test('strlen, strcpy and strcmp: empty strings, long ones, overlap, the upper half', ()=>{
+    const next = random(13);
+    const alphabet = [0x41, 0x61, 0x7f, 0x80, 0x9f, 0xa0, 0xff, 0x20];
+    for (let i = 0; i < 150; i++)
+    {
+        const a = Array.from({ length: [0, 1, 5, 40, 200][i % 5] + next() % 3 },
+            ()=>alphabet[next() % alphabet.length]);
+        const b = next() % 3 === 0 ? [...a] : Array.from({ length: next() % 12 },
+            ()=>alphabet[next() % alphabet.length]);
+        const memory = /** @type {[number, number[]][]} */ ([[DATA, [...a, 0]],
+            [DATA + 0x400, [...b, 0]]]);
+        same('strlen', { stack: [DATA], memory });
+        same('strcmp', { stack: [DATA, DATA + 0x400], memory });
+        const destination = DATA + [0x800, 1, 3, 0x400][next() % 4];
+        same('strcpy', { stack: [destination, DATA], memory });
+    }
+});

@@ -52,9 +52,6 @@ const VA_LIST_SLOTS = 64;
  */
 const MAX_STRING = 1 << 20;
 
-/** A scan table marking nothing: a walk only the terminator ends. */
-const NO_BYTES = new Uint8Array(256);
-
 /** The largest number `rand` produces, which a caller scales its range by. */
 const RAND_MAX = 0x7fff;
 
@@ -125,21 +122,6 @@ const RAND_MAX = 0x7fff;
  */
 
 /**
- * Only the sign of a comparison is defined by C, and msvcrt normalises it to
- * -1, 0 or 1. Guest code that compares the result against 1 rather than testing
- * its sign exists, so match what it was compiled against.
- *
- * @param {string} a @param {string} b
- */
-function compare(a, b){
-    if (a === b)
-    {
-        return 0;
-    }
-    return a < b ? -1 : 1;
-}
-
-/**
  * Builds the function table: name -> { convention, argBytes, handler }.
  *
  * @param {MsvcrtHost} host
@@ -177,15 +159,6 @@ export function createMsvcrtFunctions(host){
         // One byte longer than the text: a caller expects the terminator too.
         host.writeMemory(pointer, packInto(new Uint8Array(text.length + 1), text));
     };
-
-    /**
-     * A read that owns its bytes. The memory layer may hand back a view onto
-     * guest memory, and writing through one while reading from it is how an
-     * overlapping copy corrupts its own source.
-     *
-     * @param {number} address @param {number} length
-     */
-    const copyOf = (address, length)=>host.readMemory(address, length).slice();
 
     /**
      * What a narrow printer writes: %S and %ls read wide strings, and the
@@ -365,27 +338,11 @@ export function createMsvcrtFunctions(host){
             },
         },
 
-        /**
-         * size_t strlen(const char *str)
-         *
-         * The count wants the terminator's position and nothing else, so the
-         * scan finds it in the guest's own bytes; building the string to ask
-         * its length copies every character first.
-         */
-        strlen: {
-            convention: 'cdecl',
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([string])=>host.scanCString(string, MAX_STRING, NO_BYTES).index,
-        },
+        /** size_t strlen(const char *str) -- in the guest */
+        strlen: guestEntry(inGuest.strlen, COMPILED.strlen, host),
 
-        /** int strcmp(const char *left, const char *right) */
-        strcmp: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([left, right])=>compare(readString(left), readString(right)),
-        },
+        /** int strcmp(const char *left, const char *right) -- in the guest */
+        strcmp: guestEntry(inGuest.strcmp, COMPILED.strcmp, host),
 
         /** int strncmp(const char *left, const char *right, size_t count) -- in the guest */
         strncmp: guestEntry(inGuest.strncmp, COMPILED.strncmp, host),
@@ -393,16 +350,8 @@ export function createMsvcrtFunctions(host){
         /** int _stricmp(const char *left, const char *right) -- in the guest */
         _stricmp: guestEntry(inGuest._stricmp, COMPILED._stricmp, host),
 
-        /** char *strcpy(char *dest, const char *src) */
-        strcpy: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([destination, source])=>{
-                writeString(destination, readString(source));
-                return destination;
-            },
-        },
+        /** char *strcpy(char *dest, const char *src) -- in the guest */
+        strcpy: guestEntry(inGuest.strcpy, COMPILED.strcpy, host),
 
         /** char *strncpy(char *dest, const char *src, size_t count) */
         strncpy: {
@@ -468,60 +417,18 @@ export function createMsvcrtFunctions(host){
         /** int tolower(int ch) -- in the guest */
         tolower: guestEntry(inGuest.tolower, COMPILED.tolower, host),
 
-        /** void *memcpy(void *dest, const void *src, size_t count) */
-        memcpy: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([destination, source, count])=>{
-                host.writeMemory(destination, copyOf(source, count >>> 0));
-                return destination;
-            },
-        },
+        /**
+         * void *memcpy(void *dest, const void *src, size_t count) and memmove,
+         * one function: in the guest
+         */
+        memcpy: guestEntry(inGuest.memmove, COMPILED.memmove, host),
+        memmove: guestEntry(inGuest.memmove, COMPILED.memmove, host),
 
-        /** void *memmove(void *dest, const void *src, size_t count) */
-        memmove: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([destination, source, count])=>{
-                // Overlap is the whole point of this function: the source is
-                // read out in full before a single byte is written back.
-                host.writeMemory(destination, copyOf(source, count >>> 0));
-                return destination;
-            },
-        },
+        /** void *memset(void *dest, int value, size_t count) -- in the guest */
+        memset: guestEntry(inGuest.memset, COMPILED.memset, host),
 
-        /** void *memset(void *dest, int value, size_t count) */
-        memset: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([destination, value, count])=>{
-                host.fillMemory(destination, value & 0xff, count >>> 0);
-                return destination;
-            },
-        },
-
-        /** int memcmp(const void *left, const void *right, size_t count) */
-        memcmp: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([left, right, count])=>{
-                const length = count >>> 0;
-                const a = host.readMemory(left, length);
-                const b = host.readMemory(right, length);
-                for (let i = 0; i < length; i++)
-                {
-                    if (a[i] !== b[i])
-                    {
-                        return a[i] < b[i] ? -1 : 1;
-                    }
-                }
-                return 0;
-            },
-        },
+        /** int memcmp(const void *left, const void *right, size_t count) -- in the guest */
+        memcmp: guestEntry(inGuest.memcmp, COMPILED.memcmp, host),
 
         atoi,
 

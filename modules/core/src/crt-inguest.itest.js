@@ -307,6 +307,44 @@ function buildLibraryExe(){
     return buildCallsExe(calls, data);
 }
 
+/**
+ * The memory and string functions through the import: each copy, fill or
+ * move read back by a comparison after it.
+ */
+function buildMemoryExe(){
+    /** @type {Call[]} */
+    const calls = [];
+    /**
+     * @param {string} name @param {(at: (name: string) => number) => number[]} args
+     * @param {number | ((at: (name: string) => number) => number)} answer
+     */
+    const call = (name, args, answer)=>calls.push({ name, args, returns: 'eax',
+        expected: at=>[(typeof answer === 'function' ? answer(at) : answer) >>> 0] });
+    call('strlen', at=>[at('hello')], 5);
+    call('strlen', at=>[at('empty')], 0);
+    call('strcpy', at=>[at('buffer'), at('hello')], at=>at('buffer'));
+    call('strcmp', at=>[at('buffer'), at('hello')], 0);
+    call('strcmp', at=>[at('hello'), at('help')], -1);
+    call('strcmp', at=>[at('euro'), at('yen')], 1);
+    call('memset', at=>[at('buffer'), 0x178, 3], at=>at('buffer'));
+    call('strcmp', at=>[at('buffer'), at('xxxlo')], 0);
+    call('memcpy', at=>[at('buffer'), at('abcdef'), 7], at=>at('buffer'));
+    call('memmove', at=>[at('buffer') + 1, at('buffer'), 4], at=>at('buffer') + 1);
+    call('strcmp', at=>[at('buffer'), at('aabcdf')], 0);
+    call('memmove', at=>[at('buffer'), at('buffer') + 2, 4], at=>at('buffer'));
+    call('strcmp', at=>[at('buffer'), at('bcdfdf')], 0);
+    call('memcmp', at=>[at('hello'), at('help'), 3], 0);
+    call('memcmp', at=>[at('hello'), at('help'), 4], -1);
+    call('memcmp', at=>[at('euro'), at('yen'), 1], -1);
+    return buildCallsExe(calls, {
+        hello: cString('hello'), help: cString('help'), empty: [0], xxxlo: cString('xxxlo'),
+        abcdef: cString('abcdef'), aabcdf: cString('aabcdf'), bcdfdf: cString('bcdfdf'),
+        buffer: new Array(16).fill(0),
+        // strcmp orders 0x80 after 0xa5, as the handlers did; memcmp, as bytes.
+        euro: [0x80, 0], yen: [0xa5, 0],
+    });
+}
+
 /** @param {Uint8Array} executable @param {'emulator' | 'cork'} engine */
 async function exitCodeOf(executable, engine){
     const wasm = await readFile(new URL('v86.wasm', PREBUILT));
@@ -347,6 +385,12 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
         assert.equal(await exitCodeOf(buildLibraryExe(), engine), 0,
             'the number of the first call that came back wrong');
     });
+
+    test(`the memory and string functions, in the guest, under ${engine}`, { timeout: 60000 },
+        async()=>{
+            assert.equal(await exitCodeOf(buildMemoryExe(), engine), 0,
+                'the number of the first call that came back wrong');
+        });
 
     test(`qsort sorts through the program's comparator, in the guest, under ${engine}`,
         { timeout: 60000 }, async()=>{
