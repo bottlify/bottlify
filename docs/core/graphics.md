@@ -356,9 +356,12 @@ bindings, textures, stage states, material. A routine another thread interrupts 
 and its count is adopted by an entry that finds its mark, or by the next one after its count. The
 block is one-way and untrusted: a mark says only where to look, and a word written by other means
 than the routines is not looked at until one of them marks it. A value the device would refuse is
-refused at the next entry and reported once as a divergence. A stage past the last is refused in
-the guest with `D3DERR_INVALIDCALL`; a stage state type this version has not got, and a null
-material, are left to the trap. A texture is bound by the pointer the guest wrote and resolved to its object when the
+refused at the next entry and reported once as a divergence. A value the block holds that the host
+sets through the trap -- a vertex shader handle, which the routine leaves to it, the unbinding a
+deleted bound shader makes, a transform `MultiplyTransform` changed -- is written back into the
+block and the copy, so that the guest's next write of the value before is seen as the change it
+is. A stage past the last is refused in the guest with `D3DERR_INVALIDCALL`; a stage state type
+this version has not got, and a null material, are left to the trap. A texture is bound by the pointer the guest wrote and resolved to its object when the
 host next looks; when the program releases its last reference the pending binding is adopted first
 and every slot still naming the pointer is marked stale, so the device keeps the texture bound and
 the pointer's next use -- possibly for a new object -- is seen as a change. The block counts the
