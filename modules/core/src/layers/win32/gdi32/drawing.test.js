@@ -462,6 +462,20 @@ test('GetRgnBox answers a region\'s bounds, an empty one as zeros', ()=>{
     assert.equal(fns.GetRgnBox.handler([0x9999, BOX]), 0, 'not a region');
 });
 
+test('IntersectClipRect narrows the clip, and the program has then selected one', ()=>{
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+    const region = fns.CreateRectRgn.handler([0, 0, 0, 0]);
+    const lastClip = ()=>graphics.calls.filter(call=>call[0] === 'setClipRect').at(-1)?.[2];
+    assert.equal(fns.IntersectClipRect.handler([hdc, 10, 20, 50, 60]), SIMPLEREGION);
+    assert.deepEqual(lastClip(), { left: 10, top: 20, right: 50, bottom: 60 });
+    assert.equal(fns.IntersectClipRect.handler([hdc, 40, 0, 100, 30]), SIMPLEREGION);
+    assert.deepEqual(lastClip(), { left: 40, top: 20, right: 50, bottom: 30 });
+    assert.equal(fns.GetClipRgn.handler([hdc, region]), 1);
+    assert.equal(fns.IntersectClipRect.handler([hdc, 0, 0, 5, 5]), NULLREGION, 'nothing left');
+    assert.equal(fns.IntersectClipRect.handler([0x9999, 0, 0, 5, 5]), 0, 'not a context');
+});
+
 test('SetPixelV is SetPixel answered as a BOOL', ()=>{
     const bare = setup();
     assert.equal(bare.fns.SetPixelV.handler([bare.hdc, 1, 1, 0xff]), 0, 'nothing to draw with');

@@ -1353,6 +1353,28 @@ export function createDrawingFunctions(
         },
 
         /**
+         * int IntersectClipRect(HDC hdc, int left, int top, int right, int bottom)
+         *
+         * The clip narrowed to the rectangle, which a rectangle always is.
+         */
+        IntersectClipRect: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, left, top, right, bottom])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return REGION_ERROR;
+                }
+                const clip = intersect(clipOf(dc), {
+                    left: left | 0, top: top | 0, right: right | 0, bottom: bottom | 0,
+                });
+                setClip(handle, dc, clip);
+                return isEmpty(clip) ? NULLREGION : SIMPLEREGION;
+            },
+        },
+
+        /**
          * int ExcludeClipRect(HDC hdc, int left, int top, int right, int bottom)
          *
          * A clip is one rectangle here, so taking a rectangle out of it is
