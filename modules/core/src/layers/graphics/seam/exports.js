@@ -24,6 +24,7 @@
  */
 
 import { ARGUMENT_WORDS } from '../opengl/exports.js';
+import { createGlu } from '../glu/exports.js';
 import { createPublisher } from './com.js';
 import { createDirect3D8Seam } from './d3d8.js';
 import { createDirect3D9Seam } from './d3d9.js';
@@ -239,6 +240,19 @@ export function createGraphicsLibraries(
 
     const libraries = {
         'OPENGL32.dll': openglTable,
+
+        // After OPENGL32, so that where its exports are placed is known when
+        // GLU32's code, which calls them, is placed.
+        'GLU32.dll': createGlu({
+            memory,
+            exportAddress,
+            withContext: body=>openglRuntime().withContext(body),
+            allocate,
+            free,
+            callGuest,
+            currentThread,
+            divergence,
+        }),
 
         'D3D8.dll': {
             /**
