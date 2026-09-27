@@ -1128,3 +1128,38 @@ test('UpdateTexture into a texture that makes its own levels carries the source\
         destination.texture.release();
         assert.equal(device.release(), 0);
     });
+
+test('a surface made on its own gives its storage back with its last reference', ()=>{
+    // A render target made and released in a loop otherwise keeps the heap it
+    // took, and a program that makes enough of them runs the arena out.
+    /** @type {Map<number, number>} */
+    const held = new Map();
+    let next = 0x100000;
+    const { device } = make({ services: {
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes + 0x1000;
+            held.set(at, bytes);
+            return at;
+        },
+        free: (/** @type {number} */ at)=>held.delete(at),
+    } });
+    const before = held.size;
+    for (let round = 0; round < 3; round++)
+    {
+        /** @type {{ surface?: any }[]} */
+        const made = [{}, {}, {}, {}];
+        assert.equal(device.CreateRenderTarget(64, 64, D3DFMT.A8R8G8B8, true, made[0]), D3D_OK);
+        assert.equal(device.CreateDepthStencilSurface(64, 64, D3DFMT.D24S8, made[1]), D3D_OK);
+        assert.equal(device.CreateOffscreenPlainSurface(64, 64, D3DFMT.A8R8G8B8,
+            D3DPOOL.SYSTEMMEM, made[2]), D3D_OK);
+        assert.equal(device.CreateOffscreenPlainSurface(64, 64, D3DFMT.A8R8G8B8,
+            D3DPOOL.DEFAULT, made[3]), D3D_OK);
+        for (const one of made)
+        {
+            assert.equal(one.surface?.release(), 0);
+        }
+    }
+    assert.equal(held.size, before, 'every block went back');
+    assert.equal(device.release(), 0);
+});

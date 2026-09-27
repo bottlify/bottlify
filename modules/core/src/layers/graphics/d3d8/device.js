@@ -830,8 +830,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * while it lives in the default pool it also blocks a Reset.
      *
      * @param {number} pool
+     * @param {() => void} [onGone]  What the resource gives back when its last
+     *     reference goes, before the device's is released.
      */
-    const explicitCount = pool=>{
+    const explicitCount = (pool, onGone = ()=>{})=>{
         count.addRef();
         const blocking = pool === D3DPOOL.DEFAULT;
         if (blocking)
@@ -840,6 +842,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         }
         return createReferenceCount({
             onLastRef: ()=>{
+                onGone();
                 count.release();
                 if (blocking)
                 {
@@ -847,6 +850,19 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 }
             },
         });
+    };
+
+    /**
+     * A surface made on its own, not a level of anything: its storage goes
+     * back once the program's last reference does, as a texture's does, or
+     * every render target a program makes and releases stays taken until the
+     * heap is gone.
+     *
+     * @param {any} surface
+     */
+    const retireSurface = surface=>{
+        free(surface.base);
+        renderer?.retire(surface);
     };
 
     /** A resource the device owns: its first reference is one on the device. */
@@ -2631,7 +2647,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return hr;
             }
-            out.surface = createSurface({
+            const surface = createSurface({
                 type: SURFACE_TYPE.RENDER_TARGET,
                 width,
                 height,
@@ -2642,8 +2658,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 lockable,
                 pixels: targetPixels(),
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.DEFAULT),
+                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface)),
             });
+            out.surface = surface;
             return D3D_OK;
         },
 
@@ -2660,7 +2677,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return hr;
             }
-            out.surface = createSurface({
+            const surface = createSurface({
                 type: SURFACE_TYPE.DEPTH_STENCIL,
                 width,
                 height,
@@ -2669,8 +2686,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 usage: D3DUSAGE.DEPTHSTENCIL,
                 divergence: services.divergence ?? null,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.DEFAULT),
+                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface)),
             });
+            out.surface = surface;
             return D3D_OK;
         },
 
@@ -2690,7 +2708,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return hr;
             }
-            out.surface = createSurface({
+            const surface = createSurface({
                 type: SURFACE_TYPE.PLAIN,
                 width,
                 height,
@@ -2698,8 +2716,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 pool: D3DPOOL.SYSTEMMEM,
                 usage: 0,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.SYSTEMMEM),
+                count: explicitCount(D3DPOOL.SYSTEMMEM, ()=>retireSurface(surface)),
             });
+            out.surface = surface;
             return D3D_OK;
         },
 

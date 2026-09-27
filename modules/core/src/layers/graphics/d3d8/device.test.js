@@ -2278,3 +2278,39 @@ test('a full-screen device\'s gamma ramp is the display\'s, and a windowed one\'
     assertFullyReleased(headless);
     assert.equal(createDevice().caps.fullscreenGamma, false, 'nor without a display at all');
 });
+
+test('a surface made on its own gives its storage back with its last reference', ()=>{
+    // A render target made and released in a loop otherwise keeps the heap it
+    // took, and a program that makes enough of them runs the arena out.
+    /** @type {Map<number, number>} */
+    const held = new Map();
+    let next = 0x100000;
+    const device = createDevice({ caps: {
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes + 0x1000;
+            held.set(at, bytes);
+            return at;
+        },
+        free: (/** @type {number} */ at)=>held.delete(at),
+    } });
+    const before = held.size;
+    for (let round = 0; round < 3; round++)
+    {
+        /** @type {{ surface?: any }} */
+        const target = {};
+        assert.equal(device.CreateRenderTarget(64, 64, D3DFMT.A8R8G8B8, true, target), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const depth = {};
+        assert.equal(device.CreateDepthStencilSurface(64, 64, D3DFMT.D24S8, depth), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const image = {};
+        assert.equal(device.CreateImageSurface(64, 64, D3DFMT.A8R8G8B8, image), D3D_OK);
+        for (const made of [target, depth, image])
+        {
+            assert.equal(made.surface.release(), 0);
+        }
+    }
+    assert.equal(held.size, before, 'every block went back');
+    assertFullyReleased(device);
+});

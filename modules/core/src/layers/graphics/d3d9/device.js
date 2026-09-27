@@ -926,10 +926,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * A resource that the program owns: it took a reference on the device.
      *
      * @param {number} [pool]
+     * @param {() => void} [onGone]  What the resource gives back when its last
+     *     reference goes, before the device's is released.
      */
-    const explicitCount = (pool = D3DPOOL.MANAGED)=>{
+    const explicitCount = (pool = D3DPOOL.MANAGED, onGone = ()=>{})=>{
         count.addRef();
-        const made = createReferenceCount({ onLastRef: ()=>count.release() });
+        const made = createReferenceCount({ onLastRef: ()=>{
+            onGone();
+            count.release();
+        } });
         pooled.add({ pool, count: made });
         return made;
     };
@@ -940,6 +945,19 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         onFirstRef: ()=>count.addRef(),
         onLastRef: ()=>count.release(),
     });
+
+    /**
+     * A surface made on its own, not a level of anything: its storage goes
+     * back once the program's last reference does, as a texture's does, or
+     * every render target a program makes and releases stays taken until the
+     * heap is gone.
+     *
+     * @param {any} surface
+     */
+    const retireSurface = surface=>{
+        free(surface.base);
+        renderer?.retire(surface);
+    };
 
     /**
      * Whether a default-pool resource is still held by the program, which is
@@ -3324,7 +3342,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            out.surface = createSurface({
+            const surface = createSurface({
                 type: SURFACE_TYPE.RENDER_TARGET,
                 width,
                 height,
@@ -3333,11 +3351,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 usage: D3DUSAGE.RENDERTARGET | usage,
                 lockable,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.DEFAULT),
+                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface)),
                 rejectsMalformedRects: true,
                 divergence: services.divergence ?? null,
                 pixels: targetPixels(),
             });
+            out.surface = surface;
             return D3D_OK;
         },
 
@@ -3354,7 +3373,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            out.surface = createSurface({
+            const surface = createSurface({
                 type: SURFACE_TYPE.DEPTH_STENCIL,
                 width,
                 height,
@@ -3362,9 +3381,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 pool: D3DPOOL.DEFAULT,
                 usage: D3DUSAGE.DEPTHSTENCIL | usage,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.DEFAULT),
+                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface)),
                 rejectsMalformedRects: true,
             });
+            out.surface = surface;
             return D3D_OK;
         },
 
@@ -3383,7 +3403,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            out.surface = createSurface({
+            const surface = createSurface({
                 type: SURFACE_TYPE.PLAIN,
                 width,
                 height,
@@ -3391,9 +3411,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 pool,
                 usage,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(pool),
+                count: explicitCount(pool, ()=>retireSurface(surface)),
                 rejectsMalformedRects: true,
             });
+            out.surface = surface;
             return D3D_OK;
         },
 
