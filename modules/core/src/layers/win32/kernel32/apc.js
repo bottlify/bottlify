@@ -43,6 +43,13 @@ const WAIT_FAILED = 0xffffffff;
 
 /** SignalObjectAndWait's refusal of an object it cannot signal. */
 const ERROR_INVALID_HANDLE = 6;
+/** QueueUserAPC's refusal of a thread that has ended. */
+const ERROR_GEN_FAILURE = 31;
+
+/** What the native calls answer. */
+const STATUS_SUCCESS = 0;
+const STATUS_UNSUCCESSFUL = 0xc0000001;
+const STATUS_INVALID_HANDLE = 0xc0000008;
 
 /**
  * @typedef {Object} ApcHost
@@ -166,6 +173,9 @@ export function createApcs(host){
         return kernel.alertably(thread, wait);
     };
 
+    /** @param {any} thread */
+    const ended = thread=>thread.state === 'terminated';
+
     /** @param {number} handle */
     const threadOf = handle=>{
         if ((handle >>> 0) === CURRENT_THREAD)
@@ -208,8 +218,65 @@ export function createApcs(host){
                         host.setLastError(ERROR_INVALID_HANDLE);
                         return 0;
                     }
+                    // A thread that has ended will never wait again, and
+                    // kernel32's sync tests expect the queue refused.
+                    if (ended(thread))
+                    {
+                        host.setLastError(ERROR_GEN_FAILURE);
+                        return 0;
+                    }
                     queue(thread, routine, [data >>> 0]);
                     return 1;
+                },
+                /**
+                 * The native calls over the same queues, which ntdll
+                 * publishes: they are reachable from nowhere else.
+                 */
+                natives: {
+                    /**
+                     * NTSTATUS NtQueueApcThread(HANDLE, PNTAPCFUNC, ULONG_PTR, ULONG_PTR,
+                     *                           ULONG_PTR)
+                     *
+                     * The routine is called with all three arguments; a NULL
+                     * one queues nothing and succeeds, as kernel32's sync
+                     * tests read it.
+                     */
+                    NtQueueApcThread: {
+                        argBytes: 20,
+                        /** @param {number[]} args */
+                        handler: ([handle, routine, first, second, third])=>{
+                            const thread = threadOf(handle);
+                            if (!thread)
+                            {
+                                return STATUS_INVALID_HANDLE;
+                            }
+                            if (ended(thread))
+                            {
+                                return STATUS_UNSUCCESSFUL;
+                            }
+                            if ((routine >>> 0) !== 0)
+                            {
+                                queue(thread, routine, [first >>> 0, second >>> 0, third >>> 0]);
+                            }
+                            return STATUS_SUCCESS;
+                        },
+                    },
+
+                    /**
+                     * NTSTATUS NtTestAlert(void)
+                     *
+                     * Runs what is queued to the calling thread now, as an
+                     * alertable wait would, without waiting.
+                     */
+                    NtTestAlert: {
+                        argBytes: 0,
+                        handler: ()=>{
+                            const thread = host.currentThread();
+                            return queueOf(thread).length === 0
+                                ? STATUS_SUCCESS
+                                : deliver(thread).then(()=>STATUS_SUCCESS);
+                        },
+                    },
                 },
             },
 

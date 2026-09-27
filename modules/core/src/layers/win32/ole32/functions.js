@@ -78,6 +78,26 @@ const SLOT_CREATE_INSTANCE = 3;
  * says nothing about which apartment the thread joined.
  */
 const COINIT_APARTMENTTHREADED = 0x2;
+const COINIT_DISABLE_OLE1DDE = 0x4;
+
+/** What CoGetApartmentType answers. */
+const APTTYPE_CURRENT = 0xffffffff;
+const APTTYPE_STA = 0;
+const APTTYPE_MTA = 1;
+const APTTYPE_MAINSTA = 3;
+const APTTYPEQUALIFIER_NONE = 0;
+const APTTYPEQUALIFIER_IMPLICIT_MTA = 1;
+
+/**
+ * ole32's per-thread record, where TEB.ReservedForOle points: its flags are
+ * the fourth dword, and these three say which apartment the thread entered.
+ */
+const TEB_RESERVED_FOR_OLE = 0xf80;
+const OLETLS_SIZE = 0x40;
+const OLETLS_FLAGS = 12;
+const OLETLS_DISABLE_OLE1DDE = 0x40;
+const OLETLS_APARTMENTTHREADED = 0x80;
+const OLETLS_MULTITHREADED = 0x100;
 
 /** The longest ProgID a registry key can carry. */
 const MAX_PROGID = 255;
@@ -685,6 +705,48 @@ export function createOleFunctions(host){
     };
 
     /**
+     * The first thread to enter a single-threaded apartment, whose apartment
+     * is the main one until it leaves (APTTYPE_MAINSTA); and how many threads
+     * are in the multithreaded apartment. While any is, every thread that
+     * entered no apartment of its own is in it too, implicitly, and may make
+     * objects -- as ole32's compobj tests have a thread do.
+     *
+     * @type {any}
+     */
+    let mainSta = null;
+    let mtaThreads = 0;
+
+    /** @param {any} thread */
+    const inApartment = thread=>Boolean(thread?.ole32) || mtaThreads > 0;
+
+    /**
+     * The flags ole32 keeps in its per-thread record, which the thread's
+     * block points at (TEB.ReservedForOle): the apartment the thread entered,
+     * as a program reading the block sees it. The record is made the first
+     * time and kept, as Windows keeps it.
+     *
+     * @param {any} thread @param {number} flags
+     */
+    const writeOleFlags = (thread, flags)=>{
+        const teb = thread?.tebAddress >>> 0;
+        if (!teb)
+        {
+            return;
+        }
+        if (!thread.oleRecord)
+        {
+            thread.oleRecord = host.heap.allocate(OLETLS_SIZE);
+            if (thread.oleRecord === 0)
+            {
+                return;
+            }
+            host.fillMemory(thread.oleRecord, 0, OLETLS_SIZE);
+            writeU32(teb + TEB_RESERVED_FOR_OLE, thread.oleRecord);
+        }
+        writeU32(thread.oleRecord + OLETLS_FLAGS, flags);
+    };
+
+    /**
      * CoInitialize and CoInitializeEx are the same call; the first one names the
      * model rather than taking it.
      *
@@ -698,6 +760,19 @@ export function createOleFunctions(host){
         if (!apartment)
         {
             thread.ole32 = { model, depth: 1 };
+            if (model === COINIT_APARTMENTTHREADED)
+            {
+                mainSta ??= thread;
+                writeOleFlags(thread, OLETLS_APARTMENTTHREADED
+                    | ((mode & COINIT_DISABLE_OLE1DDE) !== 0 ? OLETLS_DISABLE_OLE1DDE : 0));
+            }
+            else
+            {
+                mtaThreads++;
+                // The multithreaded apartment has no DDE window to disable,
+                // and ole32's own tests read the flag set for it.
+                writeOleFlags(thread, OLETLS_MULTITHREADED | OLETLS_DISABLE_OLE1DDE);
+            }
             return S_OK;
         }
         if (apartment.model !== model)
@@ -725,6 +800,15 @@ export function createOleFunctions(host){
             return 0;
         }
         thread.ole32 = null;
+        if (apartment.model !== COINIT_APARTMENTTHREADED)
+        {
+            mtaThreads--;
+        }
+        if (mainSta === thread)
+        {
+            mainSta = null;
+        }
+        writeOleFlags(thread, 0);
         // The apartment's class objects go with it: revoked, and the
         // reference each registration held released, as the last
         // CoUninitialize does on Windows. Objects of the classes built in
@@ -799,6 +883,47 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, mode])=>enterApartment(mode >>> 0),
+        },
+
+        /**
+         * HRESULT CoGetApartmentType(APTTYPE *pAptType, APTTYPEQUALIFIER *pAptQualifier)
+         *
+         * The apartment the calling thread is in: the main single-threaded
+         * one, another single-threaded one, the multithreaded one -- entered,
+         * or implicitly while another thread is in it -- or none, which is
+         * CO_E_NOTINITIALIZED with APTTYPE_CURRENT written. Both pointers are
+         * required, and a call missing one writes nothing.
+         */
+        CoGetApartmentType: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([type, qualifier])=>{
+                if ((type >>> 0) === 0 || (qualifier >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const thread = host.currentThread();
+                const apartment = thread?.ole32;
+                let answer = S_OK;
+                let kind = APTTYPE_MTA;
+                let detail = APTTYPEQUALIFIER_NONE;
+                if (apartment?.model === COINIT_APARTMENTTHREADED)
+                {
+                    kind = mainSta === thread ? APTTYPE_MAINSTA : APTTYPE_STA;
+                }
+                else if (!apartment && mtaThreads > 0)
+                {
+                    detail = APTTYPEQUALIFIER_IMPLICIT_MTA;
+                }
+                else if (!apartment)
+                {
+                    kind = APTTYPE_CURRENT;
+                    answer = CO_E_NOTINITIALIZED;
+                }
+                writeU32(type >>> 0, kind);
+                writeU32(qualifier >>> 0, detail);
+                return answer;
+            },
         },
 
         /** void CoUninitialize(void) */
@@ -1003,7 +1128,7 @@ export function createOleFunctions(host){
                 }
                 writeU32(out, 0);
 
-                if (!host.currentThread().ole32)
+                if (!inApartment(host.currentThread()))
                 {
                     return CO_E_NOTINITIALIZED;
                 }
@@ -1177,7 +1302,7 @@ export function createOleFunctions(host){
             /** @param {number[]} args */
             handler: ([classId, object, context, flags, cookieOut])=>{
                 const thread = host.currentThread();
-                if (!thread.ole32)
+                if (!inApartment(thread))
                 {
                     return CO_E_NOTINITIALIZED;
                 }

@@ -190,6 +190,25 @@ export function createEnvironmentFunctions(host){
         return path.length;
     };
 
+    /**
+     * VOID GetStartupInfoA(LPSTARTUPINFOA lpStartupInfo)
+     *
+     * Every field but the size is zero, and that is a real answer rather than
+     * a placeholder: no parent handed this process a desktop, a title, a
+     * window position or a set of standard handles to inherit, and dwFlags of
+     * zero is precisely how a program is told not to read the rest.
+     */
+    const startupInfo = {
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([info])=>{
+            const bytes = new Uint8Array(STARTUPINFOA_SIZE);
+            new DataView(bytes.buffer).setUint32(0, STARTUPINFOA_SIZE, true);
+            host.writeMemory(info >>> 0, bytes);
+            return 0;
+        },
+    };
+
     return {
         /** LPSTR GetCommandLineA(VOID) */
         GetCommandLineA: {
@@ -215,8 +234,12 @@ export function createEnvironmentFunctions(host){
             },
         },
 
-        /** LPCH GetEnvironmentStrings(VOID) */
+        /**
+         * LPCH GetEnvironmentStrings(VOID), exported under both of its
+         * names, as kernel32 exports it.
+         */
         GetEnvironmentStrings: { argBytes: 0, handler: ()=>environmentBlock(false) },
+        GetEnvironmentStringsA: { argBytes: 0, handler: ()=>environmentBlock(false) },
 
         /** LPWCH GetEnvironmentStringsW(VOID) */
         GetEnvironmentStringsW: { argBytes: 0, handler: ()=>environmentBlock(true) },
@@ -256,6 +279,21 @@ export function createEnvironmentFunctions(host){
                     return 0;
                 }
                 return reportPath(value, buffer, size);
+            },
+        },
+
+        /** DWORD GetEnvironmentVariableW(LPCWSTR lpName, LPWSTR lpBuffer, DWORD nSize) */
+        GetEnvironmentVariableW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([name, buffer, size])=>{
+                const value = variables.get(host.readWideString(name >>> 0, 0x400));
+                if (value === undefined)
+                {
+                    host.setLastError(ERROR_ENVVAR_NOT_FOUND);
+                    return 0;
+                }
+                return reportWidePath(value, buffer, size);
             },
         },
 
@@ -305,24 +343,15 @@ export function createEnvironmentFunctions(host){
             },
         },
 
+        /** VOID GetStartupInfoA(LPSTARTUPINFOA lpStartupInfo) */
+        GetStartupInfoA: startupInfo,
+
         /**
-         * VOID GetStartupInfoA(LPSTARTUPINFOA lpStartupInfo)
-         *
-         * Every field but the size is zero, and that is a real answer rather than
-         * a placeholder: no parent handed this process a desktop, a title, a
-         * window position or a set of standard handles to inherit, and dwFlags
-         * of zero is precisely how a program is told not to read the rest.
+         * VOID GetStartupInfoW(LPSTARTUPINFOW lpStartupInfo): the same answer,
+         * STARTUPINFOW being STARTUPINFOA's size with its three strings wide,
+         * and none of them given.
          */
-        GetStartupInfoA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([info])=>{
-                const bytes = new Uint8Array(STARTUPINFOA_SIZE);
-                new DataView(bytes.buffer).setUint32(0, STARTUPINFOA_SIZE, true);
-                host.writeMemory(info >>> 0, bytes);
-                return 0;
-            },
-        },
+        GetStartupInfoW: startupInfo,
 
         /**
          * BOOL SetEnvironmentVariableW(LPCWSTR lpName, LPCWSTR lpValue)

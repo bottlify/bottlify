@@ -226,3 +226,31 @@ test('every entry pops its own stdcall bytes', ()=>{
     assert.equal(apcs.table.SignalObjectAndWait.argBytes, 16);
     assert.equal(apcs.user32.MsgWaitForMultipleObjectsEx.argBytes, 20);
 });
+
+test('a thread that has ended takes no APC, from either call', ()=>{
+    // kernel32's sync tests queue to a thread TerminateThread ended.
+    const m = machine();
+    m.worker.state = 'terminated';
+    assert.equal(m.apcs.table.QueueUserAPC.handler([0x00405000, 0x44, 7]), 0);
+    assert.deepEqual(m.errors, [31], 'ERROR_GEN_FAILURE');
+    const natives = m.apcs.table.QueueUserAPC.natives;
+    assert.equal(natives.NtQueueApcThread.handler([0x44, 0x00405000, 1, 2, 3]), 0xc0000001,
+        'STATUS_UNSUCCESSFUL');
+    assert.equal(natives.NtQueueApcThread.handler([0xdeadbeef, 0x00405000, 1, 2, 3]),
+        0xc0000008, 'STATUS_INVALID_HANDLE');
+    assert.equal(m.apcs.pending(m.worker), 0);
+});
+
+test('NtQueueApcThread hands its routine three arguments, and NtTestAlert runs it now', async()=>{
+    const m = machine();
+    const natives = m.apcs.table.QueueUserAPC.natives;
+    assert.equal(natives.NtQueueApcThread.handler([0xfffffffe, 0, 0, 0, 0]), 0,
+        'a NULL routine queues nothing');
+    assert.equal(m.apcs.pending(m.main), 0);
+    assert.equal(natives.NtTestAlert.handler(), 0, 'nothing to run');
+
+    assert.equal(natives.NtQueueApcThread.handler([0xfffffffe, 0x00406000, 1, 2, 3]), 0);
+    assert.equal(await natives.NtTestAlert.handler(), 0);
+    assert.deepEqual(m.guest, [{ entry: 0x00406000, args: [1, 2, 3], thread: 'main' }]);
+    assert.deepEqual([natives.NtQueueApcThread.argBytes, natives.NtTestAlert.argBytes], [20, 0]);
+});

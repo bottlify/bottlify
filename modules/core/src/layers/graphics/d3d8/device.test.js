@@ -2278,3 +2278,106 @@ test('a full-screen device\'s gamma ramp is the display\'s, and a windowed one\'
     assertFullyReleased(headless);
     assert.equal(createDevice().caps.fullscreenGamma, false, 'nor without a display at all');
 });
+
+test('a surface made on its own gives its storage back with its last reference', ()=>{
+    // A render target made and released in a loop otherwise keeps the heap it
+    // took, and a program that makes enough of them runs the arena out.
+    /** @type {Map<number, number>} */
+    const held = new Map();
+    let next = 0x100000;
+    const device = createDevice({ caps: {
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes + 0x1000;
+            held.set(at, bytes);
+            return at;
+        },
+        free: (/** @type {number} */ at)=>held.delete(at),
+    } });
+    const before = held.size;
+    for (let round = 0; round < 3; round++)
+    {
+        /** @type {{ surface?: any }} */
+        const target = {};
+        assert.equal(device.CreateRenderTarget(64, 64, D3DFMT.A8R8G8B8, true, target), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const depth = {};
+        assert.equal(device.CreateDepthStencilSurface(64, 64, D3DFMT.D24S8, depth), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const image = {};
+        assert.equal(device.CreateImageSurface(64, 64, D3DFMT.A8R8G8B8, image), D3D_OK);
+        for (const made of [target, depth, image])
+        {
+            assert.equal(made.surface.release(), 0);
+        }
+    }
+    assert.equal(held.size, before, 'every block went back');
+    assertFullyReleased(device);
+});
+
+test('a buffer gives its storage back with its last reference, a Reset the surfaces it replaces',
+    ()=>{
+        /** @type {Map<number, number>} */
+        const held = new Map();
+        let next = 0x100000;
+        const device = createDevice({ caps: {
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += bytes + 0x1000;
+                held.set(at, bytes);
+                return at;
+            },
+            free: (/** @type {number} */ at)=>held.delete(at),
+        } });
+        const before = held.size;
+        for (let round = 0; round < 3; round++)
+        {
+            /** @type {{ buffer?: any }} */
+            const vertices = {};
+            assert.equal(device.CreateVertexBuffer(4096, 0, 0, D3DPOOL.DEFAULT, vertices), D3D_OK);
+            /** @type {{ buffer?: any }} */
+            const indices = {};
+            assert.equal(device.CreateIndexBuffer(4096, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.DEFAULT,
+                indices), D3D_OK);
+            assert.equal(vertices.buffer.release(), 0);
+            assert.equal(indices.buffer.release(), 0);
+        }
+        assert.equal(held.size, before, 'every buffer\'s block went back');
+        for (const width of [128, 96, WIDTH])
+        {
+            assert.equal(device.Reset({
+                swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1, backBufferWidth: width,
+                backBufferHeight: HEIGHT, backBufferFormat: D3DFMT.X8R8G8B8,
+                enableAutoDepthStencil: true, autoDepthStencilFormat: D3DFMT.D24S8,
+            }), D3D_OK);
+        }
+        assert.equal(held.size, before, 'a Reset keeps one back buffer and one depth stencil');
+        assertFullyReleased(device);
+    });
+
+test('a buffer released to nothing while bound is answered as NULL, and said, not thrown on', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const device = createDevice({ caps: {
+        divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
+            said.push(`${api}: ${detail}`),
+    } });
+    /** @type {{ buffer?: any }} */
+    const made = {};
+    assert.equal(device.CreateVertexBuffer(64, 0, 0, D3DPOOL.DEFAULT, made), D3D_OK);
+    assert.equal(device.SetStreamSource(0, made.buffer, 16), D3D_OK);
+    /** @type {{ buffer?: any, stride?: number }} */
+    const held = {};
+    assert.equal(device.GetStreamSource(0, held), D3D_OK);
+    assert.equal(held.buffer, made.buffer, 'a live one, with a reference taken');
+    assert.equal(made.buffer.release(), 1);
+    assert.equal(made.buffer.release(), 0);
+    /** @type {{ buffer?: any, stride?: number }} */
+    const after = {};
+    assert.equal(device.GetStreamSource(0, after), D3D_OK);
+    assert.equal(after.buffer, null);
+    assert.equal(after.stride, 16);
+    assert.equal(said.filter(line=>line.includes('GetStreamSource')).length, 1);
+    assert.equal(device.SetStreamSource(0, null, 0), D3D_OK);
+    assertFullyReleased(device);
+});

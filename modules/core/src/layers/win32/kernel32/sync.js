@@ -7,6 +7,7 @@
 import { enterCode, leaveCode, tryEnterCode } from './critical.js';
 import { INTERLOCKED } from './interlocked.js';
 import { createSlimSync } from './slimsync.js';
+import { createSListFunctions } from './slist.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -574,5 +575,8 @@ export function createSyncFunctions(host){
         // SRW locks and condition variables; a sleep on one takes a critical
         // section back through the same guest code EnterCriticalSection is.
         ...createSlimSync(host, builder=>placed(builder).enter),
+
+        // Interlocked singly linked lists over the header the program owns.
+        ...createSListFunctions(host),
     };
 }

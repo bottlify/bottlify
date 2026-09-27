@@ -289,7 +289,8 @@ export function classify(result, parsed){
  * @property {FailedCheck[]} onlyHere  checks that failed on the tested engine and
  *     not on this one, by file:line
  * @property {boolean} statusOnlyHere  the run ended worse on the tested engine: it
- *     stopped where the reference finished, or failed where it passed
+ *     hung or crashed the engine where the reference stopped or finished, stopped
+ *     where it finished, or failed where it passed
  */
 
 /**
@@ -321,8 +322,24 @@ export function summarise(module, test, result){
     };
 }
 
-/** How far a run got, for telling which of two runs ended worse. */
+/** The runs that got to the program's closing count. */
 const FINISHED = new Set(['pass', 'fail']);
+
+/**
+ * How badly a run ended, for telling which of two ended worse: a hang or the
+ * engine's own failure is worse than the program stopping on something it
+ * met, which is worse than finishing.
+ *
+ * @param {string} status
+ */
+const endingRank = status=>(status === 'pass' ? 0 : status === 'fail' ? 1
+    : ['timeout', 'deadlock', 'engine-crash'].includes(status) ? 3 : 2);
+
+/**
+ * What every test asks for and is meant not to find: the name a test looks up
+ * to tell Wine from Windows. Its absence is what makes it hold us to Windows.
+ */
+const EXPECTED_MISSING = new Set(['ntdll.dll!wine_server_call']);
 
 /**
  * Sets a test's result against the same test on the reference engine.
@@ -343,8 +360,9 @@ export function againstReference(tested, reference, engine){
         executed: reference.executed,
         failures: reference.failures,
         onlyHere: tested.failed.filter(check=>!there.has(`${check.file}:${check.line}`)),
-        statusOnlyHere: (!FINISHED.has(tested.status) && FINISHED.has(reference.status))
-            || (tested.status === 'fail' && reference.status === 'pass'),
+        // A hang here where the reference processor raised the exception the
+        // program's own filter reported is the translator's too.
+        statusOnlyHere: endingRank(tested.status) > endingRank(reference.status),
     };
 }
 
@@ -791,6 +809,21 @@ export function markdown(report, { failures, baseline }){
             listChecks(there.onlyHere);
             lines.push('');
         }
+    }
+
+    const missing = report.tests.map(t=>({ test: t, names: (t.missing ?? [])
+        .filter(name=>!EXPECTED_MISSING.has(name)) })).filter(({ names })=>names.length > 0);
+    if (missing.length > 0)
+    {
+        // A test that asks GetProcAddress for a function and calls what it got
+        // calls null when this build has none: the run stops there, far from
+        // the name that explains it.
+        lines.push('## Asked for by name and not found', '');
+        for (const { test, names } of missing)
+        {
+            lines.push(`- ${key(test)}: ${names.join(', ')}`);
+        }
+        lines.push('');
     }
 
     /** @type {Map<string, number>} */

@@ -131,3 +131,19 @@ test('a run that stops where the reference finished ended worse there', ()=>{
     assert.equal(againstReference(stopped, finished, 'emulator').statusOnlyHere, true);
     assert.equal(againstReference(finished, stopped, 'emulator').statusOnlyHere, false);
 });
+
+test('a hang where the reference stopped on an exception ended worse, a pass never did', ()=>{
+    const hung = summarise('lib', 't', result({ killed: true }));
+    const excepted = summarise('lib', 't', result({
+        output: '0001:t: unhandled exception c0000005 at 00000000' }));
+    assert.equal(againstReference(hung, excepted, 'emulator').statusOnlyHere, true);
+    assert.equal(againstReference(excepted, hung, 'emulator').statusOnlyHere, false);
+});
+
+test('the names a test asked for and did not get are listed, but for the Wine probe', ()=>{
+    const report = summarise('lib', 't', result({
+        missing: ['ntdll.dll!wine_server_call', 'msvcrt.dll!_get_environ'] }));
+    const text = markdown({ build: 'b', engine: 'cork', started: 's', tests: [report] },
+        { failures: 20, baseline: null });
+    assert.match(text, /## Asked for by name and not found\n\n- lib:t: msvcrt\.dll!_get_environ\n/);
+});

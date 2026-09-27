@@ -1476,3 +1476,52 @@ test('a template\'s controls are made one after another, each handed its creatio
         `${second}:${WM_NCCREATE}`, `${second}:${WM_CREATE}`]);
     assert.deepEqual(data, [[6, 7, 8], []], 'the size word, then the data; NULL for none');
 });
+
+test('a dialog made through the wide call is a Unicode window, its procedure reading wide', ()=>{
+    const WM_SETTEXT = 0x000c;
+    /** @type {any} */
+    let context = null;
+    /** @type {string[]} */
+    const texts = [];
+    let heap = 0x13000;
+    context = setup({
+        allocate: (/** @type {number} */ size)=>{
+            heap += size + 15 & ~15;
+            return heap - (size + 15 & ~15);
+        },
+        dispatch: (wndProc, message)=>{
+            if (wndProc === DIALOGPROC && message.message === WM_SETTEXT)
+            {
+                let text = '';
+                for (let at = message.lParam; ; at += 2)
+                {
+                    const unit = context.memory.bytes[at] | context.memory.bytes[at + 1] << 8;
+                    if (unit === 0)
+                    {
+                        break;
+                    }
+                    text += String.fromCharCode(unit);
+                }
+                texts.push(text);
+                return 1;
+            }
+            return 0;
+        },
+    });
+    const { memory, fns } = context;
+    putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
+    const dialog = fns.CreateDialogIndirectParamW.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    assert.notEqual(dialog, 0);
+    assert.equal(fns.IsWindowUnicode.handler([dialog]), 1);
+    assert.equal(fns.IsWindowUnicode.handler([
+        fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0])]), 0);
+    memory.putString(0x3000, 'Café');
+    fns.SetWindowTextA.handler([dialog, 0x3000]);
+    assert.deepEqual(texts, ['Café'], 'an ANSI caller\'s text, as the wide procedure reads it');
+
+    assert.equal(fns.GetDlgItemTextW.handler([dialog, 100, 0x3100, 16]), 2);
+    assert.deepEqual([...memory.bytes.subarray(0x3100, 0x3106)], [0x4f, 0, 0x4b, 0, 0, 0]);
+    assert.equal(fns.SendDlgItemMessageW.argBytes, 20);
+    assert.equal(fns.DialogBoxParamW.argBytes, 20);
+});

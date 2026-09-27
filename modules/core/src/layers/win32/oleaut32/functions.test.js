@@ -130,6 +130,9 @@ test('error information is held once, handed over once, and absent by default', 
     assert.equal(call('GetErrorInfo', [0, SLOT]), 1, 'collected once, gone');
     assert.equal(fx.GetErrorInfo.argBytes, 8);
     assert.equal(fx.SetErrorInfo.argBytes, 8);
+    // ole32's errorinfo tests: the reserved word is zero or E_INVALIDARG.
+    assert.equal(call('GetErrorInfo', [0xdeadbeef, SLOT]) >>> 0, 0x80070057);
+    assert.equal(call('SetErrorInfo', [0xdeadbeef, 0]) >>> 0, 0x80070057);
 });
 
 test('a BSTR carries its byte count in front of the pointer it hands out', ()=>{

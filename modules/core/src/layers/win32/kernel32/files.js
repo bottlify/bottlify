@@ -96,6 +96,8 @@ const FILE_END = 2;
 const MAX_PATH = 260;
 /** A search path list is many of them; longer is a pointer that is not a string. */
 const MAX_PATH_LIST = 32767;
+/** The longest path the wide spellings take, in characters. */
+const MAX_WIDE_PATH = 32767;
 
 /**
  * The path separator, as a named constant rather than a literal, because it is
@@ -228,6 +230,8 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, maxLength: number) => string} readWideString
+ *           `maxLength` in bytes, as the memory layer counts it: a wide path of
+ *           MAX_PATH characters is twice that.
  * @property {FileSystem} files
  * @property {(code: number) => void} setLastError
  * @property {(handle: number, text: string) => void} writeConsole
@@ -711,9 +715,9 @@ export function createFileFunctions(host){
     /** @type {TextForm} */
     const WIDE = {
         path: pointer=>fullPath(
-            pointer === 0 ? '' : host.readWideString(pointer >>> 0, MAX_PATH)),
-        raw: pointer=>pointer === 0 ? '' : host.readWideString(pointer >>> 0, MAX_PATH),
-        list: pointer=>host.readWideString(pointer >>> 0, MAX_PATH_LIST),
+            pointer === 0 ? '' : host.readWideString(pointer >>> 0, MAX_WIDE_PATH * 2)),
+        raw: pointer=>pointer === 0 ? '' : host.readWideString(pointer >>> 0, MAX_WIDE_PATH * 2),
+        list: pointer=>host.readWideString(pointer >>> 0, MAX_PATH_LIST * 2),
         write: writeWideStringTo,
         findData: writeWideFindData,
         unit: 2,
@@ -782,6 +786,60 @@ export function createFileFunctions(host){
 
     const moveFile = bothForms(8, ([from, to], text)=>
         renamePath(text.path(from), text.path(to), false));
+
+    /** @param {string} base @param {string} stem @param {number} number */
+    const tempName = (base, stem, number)=>
+        `${base}${stem}${number.toString(16).toUpperCase()}.tmp`;
+
+    const getTempFileName = bothForms(16, ([directory, prefix, unique, out], text)=>{
+        const folder = (directory >>> 0) === 0 ? TEMP_PATH : text.path(directory);
+        const stem = text.raw(prefix).slice(0, 3);
+        const base = folder.endsWith(SEPARATOR) ? folder : folder + SEPARATOR;
+
+        let number = (unique >>> 0) & 0xffff;
+        let path = '';
+        if (number !== 0)
+        {
+            path = tempName(base, stem, number);
+        }
+        else
+        {
+            // A name nothing holds. Windows counts rather than randomises,
+            // and a caller that asks twice must not be handed the same name
+            // -- so the file is created here, which is what makes the second
+            // search skip it.
+            for (number = nextTempNumber; number <= 0xffff; number++)
+            {
+                const candidate = tempName(base, stem, number);
+                const entry = files.stat(candidate);
+                if (!entry || !entry.exists)
+                {
+                    path = candidate;
+                    break;
+                }
+            }
+            if (path === '')
+            {
+                return fail(ERROR_ACCESS_DENIED, 0);
+            }
+            nextTempNumber = number + 1;
+            const node = files.open(path,
+                { read: true, write: true, create: true, truncate: true });
+            if (!node)
+            {
+                return fail(ERROR_ACCESS_DENIED, 0);
+            }
+            // Created and closed: the name is reserved by the file's
+            // existence, not by holding it open. Held, the caller's own open
+            // of the name it was just given would be refused as shared with
+            // nobody.
+            files.close(node);
+        }
+
+        text.write(out >>> 0, MAX_PATH, path.slice(0, MAX_PATH - 1));
+        host.setLastError(ERROR_SUCCESS);
+        return number;
+    });
 
     /**
      * The move an installer makes when it puts an unpacked file in its
@@ -1629,7 +1687,28 @@ export function createFileFunctions(host){
         },
 
         /**
-         * UINT GetTempFileNameA(LPCSTR lpPathName, LPCSTR lpPrefixString,
+         * DWORD GetTempPathW(DWORD nBufferLength, LPWSTR lpBuffer)
+         *
+         * The same answer, written differently from its ANSI twin, as
+         * kernel32's path tests pin: what the path does not fill is zeroed --
+         * the whole buffer when it is too short, the rest after the path when
+         * it is not -- as far as the longest wide path, and no further.
+         */
+        GetTempPathW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([size, buffer])=>{
+                const count = Math.min(size >>> 0, MAX_WIDE_PATH);
+                if ((buffer >>> 0) !== 0 && count > 0)
+                {
+                    host.writeMemory(buffer >>> 0, new Uint8Array(count * 2));
+                }
+                return writeWideStringTo(buffer >>> 0, size, TEMP_PATH);
+            },
+        },
+
+        /**
+         * UINT GetTempFileName(LPCSTR lpPathName, LPCSTR lpPrefixString,
          *                      UINT uUnique, LPSTR lpTempFileName)
          *
          * The name a self-extractor unpacks itself into. Two behaviours here
@@ -1644,71 +1723,13 @@ export function createFileFunctions(host){
          *   to build the next name in a series without asking again.
          *
          * The prefix contributes at most three characters, as Windows does,
-         * because the whole name has to fit an 8.3 form.
+         * because the whole name has to fit an 8.3 form; the number is in
+         * upper-case hexadecimal before a lower-case `.tmp`, the spelling
+         * kernel32's file tests compare byte for byte. One body, both
+         * spellings.
          */
-        GetTempFileNameA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([directory, prefix, unique, out])=>{
-                const folder = (directory >>> 0) === 0
-                    ? TEMP_PATH
-                    : pathArgument(directory);
-                const stem = ((prefix >>> 0) === 0
-                    ? ''
-                    : host.readCString(prefix >>> 0, MAX_PATH)).slice(0, 3);
-                const base = folder.endsWith(SEPARATOR) ? folder : folder + SEPARATOR;
-
-                let number = unique >>> 0;
-                let path = '';
-                if (number !== 0)
-                {
-                    path = `${base}${stem}${(number & 0xffff).toString(16)}.TMP`;
-                }
-                else
-                {
-                    // A name nothing holds. Windows counts rather than
-                    // randomises, and a caller that asks twice must not be
-                    // handed the same name -- so the file is created here,
-                    // which is what makes the second search skip it.
-                    for (number = nextTempNumber; number <= 0xffff; number++)
-                    {
-                        const candidate = `${base}${stem}${number.toString(16)}.TMP`;
-                        const entry = files.stat(candidate);
-                        if (!entry || !entry.exists)
-                        {
-                            path = candidate;
-                            break;
-                        }
-                    }
-                    if (path === '')
-                    {
-                        return fail(ERROR_ACCESS_DENIED, 0);
-                    }
-                    nextTempNumber = number + 1;
-                    const node = files.open(path,
-                        { read: true, write: true, create: true, truncate: true });
-                    if (!node)
-                    {
-                        return fail(ERROR_ACCESS_DENIED, 0);
-                    }
-                    // Created and closed: the name is reserved by the file's
-                    // existence, not by holding it open. Held, the caller's own
-                    // open of the name it was just given would be refused as
-                    // shared with nobody.
-                    files.close(node);
-                }
-
-                if ((out >>> 0) !== 0)
-                {
-                    const bytes = encodeAnsi(path.slice(0, MAX_PATH - 1));
-                    const buffer = new Uint8Array(bytes.length + 1);
-                    buffer.set(bytes);
-                    host.writeMemory(out >>> 0, buffer);
-                }
-                host.setLastError(ERROR_SUCCESS);
-                return number & 0xffff;
-            },
-        },
+        GetTempFileNameA: getTempFileName.ansi,
+        GetTempFileNameW: getTempFileName.wide,
 
         /**
          * BOOL MoveFileEx(LPCSTR lpExistingFileName, LPCSTR lpNewFileName,

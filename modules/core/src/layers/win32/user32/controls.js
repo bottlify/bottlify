@@ -508,8 +508,8 @@ const OPAQUE = 2;
  * @property {(record: any, message: ControlMessage, thread?: unknown) => number | Promise<number>}
  *     defWindowProc
  * @property {(record: any) => any[]} children   Its live children, in order.
- * @property {(address: number, message: ControlMessage, thread?: unknown)
- *     => number | Promise<number>} callProcedure
+ * @property {(address: number, message: ControlMessage, thread?: unknown,
+ *     unicode?: boolean) => number | Promise<number>} callProcedure
  *           Runs a window procedure by address: a program's own dialog procedure.
  * @property {(record: any) => { hdc: number, rect: Rect }
  *     | Promise<{ hdc: number, rect: Rect }>} beginPaint
@@ -3119,7 +3119,10 @@ export function createControlProcedures(host){
         // default, not itself again.
         const previous = state.inDlgProc;
         state.inDlgProc = message.message;
-        return after(host.callProcedure(dlgProc, message, thread), handled=>{
+        // The dialog procedure reads text in the encoding its dialog was made
+        // in: DialogBoxParamW's is a wide one.
+        const reads = record.unicode === true;
+        return after(host.callProcedure(dlgProc, message, thread, reads), handled=>{
             state.inDlgProc = previous;
             if ((handled | 0) === 0)
             {

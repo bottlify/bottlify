@@ -77,9 +77,13 @@ Interfaces published (`src/layers/audio/dsound/seam.js`): `IDirectSound` (8 slot
 `QueryInterface` for follows Windows: the object `DirectSoundCreate` returns is `IDirectSound`
 alone, the one `DirectSoundCreate8` returns is both; a secondary buffer is `IDirectSoundBuffer`
 and `IDirectSoundBuffer8`, the primary buffer only the first; `IDirectSoundNotify` is there only
-on a buffer created with `DSBCAPS_CTRLPOSITIONNOTIFY`. `IDirectSound3DListener` and
-`IDirectSound3DBuffer` are deliberately not declared, so `QueryInterface` answers `E_NOINTERFACE`
-rather than handing back a table that ends after `IUnknown`.
+on a buffer created with `DSBCAPS_CTRLPOSITIONNOTIFY`. Every buffer, the primary too, is also
+`IKsPropertySet` (3), with no property set to offer: `Get`, `Set` and `QuerySupport` answer
+`E_PROP_ID_UNSUPPORTED`, the support flags cleared, which a program asking after EAX takes as
+playing without it. `IDirectSound3DListener` and `IDirectSound3DBuffer` are deliberately not
+declared, so `QueryInterface` answers `E_NOINTERFACE` rather than handing back a table that ends
+after `IUnknown`. `DllGetClassObject` has no class to hand out (`CLASS_E_CLASSNOTAVAILABLE`, the
+pointer cleared): the classes COM makes are made through ole32.
 
 ### `diagnostics()`
 

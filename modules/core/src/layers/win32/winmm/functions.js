@@ -39,8 +39,10 @@ import { MAX_PERIOD } from './timers.js';
 
 /** Success, and the errors a caller distinguishes. */
 const MMSYSERR_NOERROR = 0;
+const MMSYSERR_ERROR = 1;
 const MMSYSERR_BADDEVICEID = 2;
 const MMSYSERR_INVALHANDLE = 5;
+const MMSYSERR_NOTSUPPORTED = 8;
 const MMSYSERR_BADERRNUM = 9;
 const MMSYSERR_INVALPARAM = 11;
 const WAVERR_STILLPLAYING = 33;
@@ -368,6 +370,38 @@ const WAVEOUTCAPS = Object.freeze({
     size: 52,
 });
 
+/** WAVEOUTCAPSW: the name is 32 WCHARs, which moves everything after it. */
+const WAVEOUTCAPSW = Object.freeze({
+    szPname: 8,
+    dwFormats: 72,
+    wChannels: 76,
+    dwSupport: 80,
+    size: 84,
+});
+
+/**
+ * Below this nothing is ever mapped, so a structure pointer there is one the
+ * caller got wrong: the capability calls refuse it, as winmm's wave tests
+ * expect of NULL and of 1, rather than write into it.
+ */
+const NEVER_MAPPED = 0x10000;
+
+/** What the one wave-out device calls itself. */
+const WAVE_OUT_NAME = 'Bottlify Wave Out';
+
+/**
+ * The device's interface name, which DRV_QUERYDEVICEINTERFACE answers: a
+ * program keys its saved settings on it, and it names nothing it could open.
+ */
+const DEVICE_INTERFACE = '\\\\?\\bottlify#wave#out';
+
+/** The driver messages a program sends through waveOutMessage and waveInMessage. */
+const DRV_QUERYMAPPABLE = 0x0805;
+const DRV_QUERYDEVICEINTERFACE = 0x080c;
+const DRV_QUERYDEVICEINTERFACESIZE = 0x080d;
+const DRVM_MAPPER_PREFERRED_GET = 0x2015;
+const DRVM_MAPPER_CONSOLEVOICECOM_GET = 0x2017;
+
 /** The formats claimed: 44.1 kHz and 22.05 kHz, mono and stereo, 8 and 16 bit. */
 const WAVE_FORMATS = 0x00000f00 | 0x000000f0;
 
@@ -407,7 +441,10 @@ const SND_RESOURCE = 0x00040004;
 
 /** MMTIME's wType values. Milliseconds is 1, not 0 -- zero is no unit at all. */
 const TIME_MS = 0x0001;
+const TIME_SAMPLES = 0x0002;
 const TIME_BYTES = 0x0004;
+/** MMTIME: its unit, then a union whose largest member, the SMPTE time, is eight bytes. */
+const MMTIME_SIZE = 12;
 
 /**
  * @typedef {Object} WinmmHost
@@ -461,6 +498,17 @@ const dword = value=>new Uint8Array([
     value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
 ]);
 
+/** @param {string} text */
+const utf16 = text=>{
+    const bytes = new Uint8Array(text.length * 2);
+    for (let at = 0; at < text.length; at++)
+    {
+        bytes[at * 2] = text.charCodeAt(at) & 0xff;
+        bytes[at * 2 + 1] = text.charCodeAt(at) >> 8;
+    }
+    return bytes;
+};
+
 /**
  * Which ordinal is which export, for a program that links WINMM.dll by number.
  * Windows exports PlaySoundA a second time as ordinal 2, with no name.
@@ -484,6 +532,8 @@ export function createWinmmFunctions(host){
      * @property {number} callbackInstance
      * @property {{ header: number, length: number }[]} queue
      * @property {number} playedBytes  Into the buffer at the head of the queue.
+     * @property {number} position     Bytes played to the end since the open or the last reset.
+     * @property {number} blockAlign   Bytes a sample frame takes, for TIME_SAMPLES.
      * @property {number} sinceMs      When the cursor was last settled.
      * @property {boolean} paused
      * @property {any} track           The mixer's source, or null.
@@ -863,6 +913,7 @@ export function createWinmmFunctions(host){
             const done = /** @type {{ header: number, length: number }} */
                 (device.queue.shift());
             device.playedBytes -= done.length;
+            device.position += done.length;
             // The flag is set before the notice is queued, and so before any
             // callback runs: a program told a buffer is back reads the flag to
             // find out which, and finding it clear would be a lie about the
@@ -920,7 +971,14 @@ export function createWinmmFunctions(host){
             {
                 return MMSYSERR_INVALPARAM;
             }
-            setFlags(header >>> 0, flagsOf(header >>> 0) | WHDR_PREPARED);
+            // A header already prepared is left as it is; one that is not
+            // starts afresh, neither done nor queued whatever its flags said,
+            // as winmm's wave tests read them back.
+            const flags = flagsOf(header >>> 0);
+            if ((flags & WHDR_PREPARED) === 0)
+            {
+                setFlags(header >>> 0, flags & ~(WHDR_DONE | WHDR_INQUEUE) | WHDR_PREPARED);
+            }
             return MMSYSERR_NOERROR;
         },
     };
@@ -936,6 +994,49 @@ export function createWinmmFunctions(host){
         setFlags(header >>> 0, flags & ~WHDR_PREPARED);
         return MMSYSERR_NOERROR;
     });
+
+    /**
+     * The driver messages waveOutMessage and waveInMessage answer alike, the
+     * device already found. `preferred` is the device the mapper would
+     * choose, -1 where there is none to choose.
+     *
+     * @param {number} message @param {number} first @param {number} second
+     * @param {number} preferred
+     */
+    const driverMessage = (message, first, second, preferred)=>{
+        switch (message)
+        {
+            case DRV_QUERYMAPPABLE:
+                return MMSYSERR_NOERROR;
+            case DRV_QUERYDEVICEINTERFACESIZE:
+                if (first === 0)
+                {
+                    return MMSYSERR_INVALPARAM;
+                }
+                host.writeMemory(first, dword((DEVICE_INTERFACE.length + 1) * 2));
+                return MMSYSERR_NOERROR;
+            case DRV_QUERYDEVICEINTERFACE:
+                if (first === 0 || second < (DEVICE_INTERFACE.length + 1) * 2)
+                {
+                    return MMSYSERR_INVALPARAM;
+                }
+                host.writeMemory(first, utf16(`${DEVICE_INTERFACE}\0`));
+                return MMSYSERR_NOERROR;
+            case DRVM_MAPPER_PREFERRED_GET:
+            case DRVM_MAPPER_CONSOLEVOICECOM_GET:
+                // Both answers are written, the device and its flags, so both
+                // pointers are needed; one missing is the caller's mistake.
+                if (first === 0 || second === 0)
+                {
+                    return MMSYSERR_INVALPARAM;
+                }
+                host.writeMemory(first, dword(preferred >>> 0));
+                host.writeMemory(second, dword(0));
+                return MMSYSERR_NOERROR;
+            default:
+                return MMSYSERR_NOTSUPPORTED;
+        }
+    };
 
     /** Devices this build does not have. @param {number} argBytes @param {number} error */
     const noDevice = (argBytes, error)=>({ argBytes, handler: ()=>error });
@@ -1164,13 +1265,18 @@ export function createWinmmFunctions(host){
             /** @param {number[]} args */
             handler: ([device, caps, size])=>{
                 // WAVE_MAPPER is -1 and names whichever device the system would
-                // pick, which here is the only one.
-                if ((device | 0) !== -1 && (device >>> 0) !== 0)
+                // pick, which here is the only one; an open handle names its
+                // own device, as winmm's wave tests ask it.
+                if (volumeTarget(device) !== MMSYSERR_NOERROR)
                 {
                     return MMSYSERR_BADDEVICEID;
                 }
+                if ((caps >>> 0) < NEVER_MAPPED)
+                {
+                    return MMSYSERR_INVALPARAM;
+                }
                 const bytes = new Uint8Array(WAVEOUTCAPS.size);
-                const name = 'Bottlify Wave Out';
+                const name = WAVE_OUT_NAME;
                 for (let at = 0; at < name.length; at++)
                 {
                     bytes[WAVEOUTCAPS.szPname + at] = name.charCodeAt(at);
@@ -1187,6 +1293,49 @@ export function createWinmmFunctions(host){
             },
         },
 
+        /** MMRESULT waveOutGetDevCapsW(UINT_PTR, LPWAVEOUTCAPSW, UINT): the name in UTF-16. */
+        waveOutGetDevCapsW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([device, caps, size])=>{
+                if (volumeTarget(device) !== MMSYSERR_NOERROR)
+                {
+                    return MMSYSERR_BADDEVICEID;
+                }
+                if ((caps >>> 0) < NEVER_MAPPED)
+                {
+                    return MMSYSERR_INVALPARAM;
+                }
+                const bytes = new Uint8Array(WAVEOUTCAPSW.size);
+                bytes.set(utf16(WAVE_OUT_NAME), WAVEOUTCAPSW.szPname);
+                bytes.set(dword(WAVE_FORMATS), WAVEOUTCAPSW.dwFormats);
+                bytes[WAVEOUTCAPSW.wChannels] = 2;
+                bytes.set(dword(WAVE_SUPPORT), WAVEOUTCAPSW.dwSupport);
+                host.writeMemory(caps >>> 0,
+                    bytes.subarray(0, Math.min(size >>> 0, WAVEOUTCAPSW.size)));
+                return MMSYSERR_NOERROR;
+            },
+        },
+
+        /**
+         * MMRESULT waveOutMessage(HWAVEOUT hwo, UINT uMsg, DWORD_PTR dw1, DWORD_PTR dw2)
+         *
+         * The driver messages a program sends past the API, to the device by
+         * id or by handle: whether it may be mapped, its interface name and
+         * the name's size, and -- asked of WAVE_MAPPER -- the device the
+         * mapper prefers, which is the one there is. Any other message is
+         * one this driver does not support.
+         */
+        waveOutMessage: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwo, message, first, second])=>{
+                const target = volumeTarget(hwo);
+                return target !== MMSYSERR_NOERROR
+                    ? target : driverMessage(message >>> 0, first >>> 0, second >>> 0, 0);
+            },
+        },
+
         /** MMRESULT waveOutGetID(HWAVEOUT hwo, LPUINT puDeviceID) */
         waveOutGetID: onDevice(8, (device, [, out])=>{
             host.writeMemory(out >>> 0, dword(0));
@@ -1200,20 +1349,27 @@ export function createWinmmFunctions(host){
          * does not wait on anything, and polling it is what moves the cursor at
          * all -- there is no interrupt here, so time is credited to the device
          * whenever the device is asked about.
+         *
+         * The position counts from the open or the last reset and stands
+         * still once everything written has played, as winmm's wave tests
+         * read it after a whole queue. The device answers in bytes or in
+         * samples; any other unit asked for is answered in bytes, with
+         * `wType` saying so, and an MMTIME shorter than its twelve bytes is
+         * MMSYSERR_ERROR.
          */
         waveOutGetPosition: onDevice(12, (device, [, time, size])=>{
-            if ((size >>> 0) < 8)
+            if ((size >>> 0) < MMTIME_SIZE)
             {
-                return MMSYSERR_INVALPARAM;
+                return MMSYSERR_ERROR;
             }
             const wanted = u32(host.readMemory(time >>> 0, 4), 0);
-            const bytes = Math.floor(device.playedBytes);
-            host.writeMemory(time >>> 0, dword(wanted === TIME_BYTES
-                ? TIME_BYTES
-                : TIME_MS));
-            host.writeMemory((time >>> 0) + 4, dword(wanted === TIME_BYTES
-                ? bytes
-                : Math.floor(bytes * 1000 / device.bytesPerSecond)));
+            const head = device.queue[0]?.length ?? 0;
+            const bytes = device.position + Math.floor(Math.min(device.playedBytes, head));
+            const unit = wanted === TIME_SAMPLES ? TIME_SAMPLES : TIME_BYTES;
+            host.writeMemory(time >>> 0, dword(unit));
+            host.writeMemory((time >>> 0) + 4, dword(unit === TIME_SAMPLES
+                ? Math.floor(bytes / device.blockAlign)
+                : bytes));
             return MMSYSERR_NOERROR;
         }),
 
@@ -1265,6 +1421,8 @@ export function createWinmmFunctions(host){
                     callbackInstance: instance >>> 0,
                     queue: [],
                     playedBytes: 0,
+                    position: 0,
+                    blockAlign: u16(header, WAVEFORMATEX.nBlockAlign) || 1,
                     sinceMs: host.now(),
                     paused: false,
                     track: mixer?.open({
@@ -1400,6 +1558,7 @@ export function createWinmmFunctions(host){
                 }
                 device.queue = [];
                 device.playedBytes = 0;
+                device.position = 0;
                 device.trackBytes = 0;
                 device.track?.reset();
                 device.sinceMs = host.now();
@@ -1446,13 +1605,34 @@ export function createWinmmFunctions(host){
          */
         waveInGetNumDevs: { argBytes: 0, handler: ()=>0 },
         waveInGetDevCapsA: noDevice(12, MMSYSERR_BADDEVICEID),
+        waveInGetDevCapsW: noDevice(12, MMSYSERR_BADDEVICEID),
         waveInOpen: noDevice(24, MMSYSERR_BADDEVICEID),
         waveInPrepareHeader: noDevice(12, MMSYSERR_INVALHANDLE),
         waveInUnprepareHeader: noDevice(12, MMSYSERR_INVALHANDLE),
         waveInAddBuffer: noDevice(12, MMSYSERR_INVALHANDLE),
         waveInStart: noDevice(4, MMSYSERR_INVALHANDLE),
+        waveInStop: noDevice(4, MMSYSERR_INVALHANDLE),
         waveInReset: noDevice(4, MMSYSERR_INVALHANDLE),
         waveInClose: noDevice(4, MMSYSERR_INVALHANDLE),
+        waveInGetPosition: noDevice(12, MMSYSERR_INVALHANDLE),
+        waveInGetID: noDevice(8, MMSYSERR_INVALHANDLE),
+
+        /**
+         * MMRESULT waveInMessage(HWAVEIN hwi, UINT uMsg, DWORD_PTR dw1, DWORD_PTR dw2)
+         *
+         * Only the mapper answers, and what it answers is that there is no
+         * device to prefer: -1, as winmm's capture tests expect of a machine
+         * without one.
+         */
+        waveInMessage: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwi, message, first, second])=>((hwi | 0) === -1
+                && (message === DRVM_MAPPER_PREFERRED_GET
+                    || message === DRVM_MAPPER_CONSOLEVOICECOM_GET)
+                ? driverMessage(message >>> 0, first >>> 0, second >>> 0, -1)
+                : MMSYSERR_BADDEVICEID),
+        },
 
         /** Midi in: no port to record from. */
         midiInGetNumDevs: { argBytes: 0, handler: ()=>0 },
@@ -1471,6 +1651,8 @@ export function createWinmmFunctions(host){
 
         /** Midi out: no synthesiser and no port. */
         midiOutGetNumDevs: { argBytes: 0, handler: ()=>0 },
+        midiOutGetDevCapsA: noDevice(12, MMSYSERR_BADDEVICEID),
+        midiOutGetDevCapsW: noDevice(12, MMSYSERR_BADDEVICEID),
         midiOutOpen: noDevice(20, MMSYSERR_BADDEVICEID),
         midiOutClose: noDevice(4, MMSYSERR_INVALHANDLE),
         midiOutReset: noDevice(4, MMSYSERR_INVALHANDLE),
@@ -1478,14 +1660,34 @@ export function createWinmmFunctions(host){
         midiOutLongMsg: noDevice(12, MMSYSERR_INVALHANDLE),
         midiOutPrepareHeader: noDevice(12, MMSYSERR_INVALHANDLE),
         midiOutUnprepareHeader: noDevice(12, MMSYSERR_INVALHANDLE),
+        midiOutGetVolume: noDevice(8, MMSYSERR_INVALHANDLE),
+        midiOutSetVolume: noDevice(8, MMSYSERR_INVALHANDLE),
+        midiOutGetID: noDevice(8, MMSYSERR_INVALHANDLE),
+        midiOutMessage: noDevice(16, MMSYSERR_INVALHANDLE),
+
+        /** Midi streams, which play through a midi out device there is none of. */
+        midiStreamOpen: noDevice(24, MMSYSERR_BADDEVICEID),
+        midiStreamClose: noDevice(4, MMSYSERR_INVALHANDLE),
+        midiStreamOut: noDevice(12, MMSYSERR_INVALHANDLE),
+        midiStreamPause: noDevice(4, MMSYSERR_INVALHANDLE),
+        midiStreamPosition: noDevice(12, MMSYSERR_INVALHANDLE),
+        midiStreamProperty: noDevice(12, MMSYSERR_INVALHANDLE),
+        midiStreamRestart: noDevice(4, MMSYSERR_INVALHANDLE),
+        midiStreamStop: noDevice(4, MMSYSERR_INVALHANDLE),
 
         /** The mixer, which a program uses to find the volume controls. */
         mixerGetNumDevs: noDevices(0),
+        mixerGetDevCapsA: noDevice(12, MMSYSERR_BADDEVICEID),
+        mixerGetDevCapsW: noDevice(12, MMSYSERR_BADDEVICEID),
         mixerOpen: noDevice(20, MMSYSERR_BADDEVICEID),
         mixerClose: noDevice(4, MMSYSERR_INVALHANDLE),
+        mixerGetID: noDevice(12, MMSYSERR_INVALHANDLE),
         mixerGetLineInfoA: noDevice(12, MMSYSERR_INVALHANDLE),
+        mixerGetLineInfoW: noDevice(12, MMSYSERR_INVALHANDLE),
         mixerGetLineControlsA: noDevice(12, MMSYSERR_INVALHANDLE),
+        mixerGetLineControlsW: noDevice(12, MMSYSERR_INVALHANDLE),
         mixerGetControlDetailsA: noDevice(12, MMSYSERR_INVALHANDLE),
+        mixerGetControlDetailsW: noDevice(12, MMSYSERR_INVALHANDLE),
         mixerSetControlDetails: noDevice(12, MMSYSERR_INVALHANDLE),
 
         /** The auxiliary output, an older way to the same volume. */

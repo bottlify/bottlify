@@ -332,6 +332,18 @@ export function createGraphicsModule(){
                 readF32sInto: (address, count, into)=>memory.readF32sInto(address, count, into),
                 /** @param {number} address @param {Uint8Array} bytes */
                 writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                /**
+                 * Whether the guest may write `length` bytes at an address: an
+                 * out-parameter the system probes before it writes through it,
+                 * answering E_INVALIDARG where Windows could not write.
+                 *
+                 * @param {number} address @param {number} length
+                 */
+                writable: (address, length)=>{
+                    const region = memory.find?.(address >>> 0);
+                    return !!region && (address >>> 0) + length <= region.base + region.size
+                        && region.access.includes('w');
+                },
                 /** How many bytes a surface of this size needs. */
                 allocate: (/** @type {number} */ bytes)=>new Uint8Array(bytes),
                 screen: config?.screen ?? { width: 640, height: 480, bitsPerPixel: 32 },
@@ -366,14 +378,17 @@ export function createGraphicsModule(){
                     // texture in its own code -- once the configuration says the
                     // path is safe to take on this build.
                     compressedTextures: gatedCompressedTextures(caps),
-                    backend: api.backend(),
+                    // Asked for only when this build has a GPU, as Direct3D 9's
+                    // is: a device made in a headless assembly still keeps and
+                    // answers every state a program sets.
+                    backend: device ? api.backend() : undefined,
                     readMemory: services.readMemory,
                     windowMemory: services.windowMemory,
                     // A lock of a render target brings its pixels back into the
                     // guest's bytes before the pointer is handed out.
                     writeMemory: services.writeMemory,
-                    createSampler: (/** @type {any} */ descriptor)=>
-                        device.device.createSampler(descriptor),
+                    createSampler: device ? (/** @type {any} */ descriptor)=>
+                        device.device.createSampler(descriptor) : undefined,
                     // Where a locked surface or buffer's bytes live. It has to be
                     // memory the guest can write through, because the unlock reads
                     // back exactly what it wrote.

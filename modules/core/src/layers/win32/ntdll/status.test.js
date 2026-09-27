@@ -77,6 +77,7 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
         [STATUS.PENDING, 997],
         [STATUS.BUFFER_OVERFLOW, 234],
         [STATUS.NO_MORE_FILES, 18],
+        [STATUS.NO_MORE_ENTRIES, 259],
         [STATUS.UNSUCCESSFUL, 31],
         [STATUS.NOT_IMPLEMENTED, 1],
         [STATUS.INVALID_INFO_CLASS, 87],

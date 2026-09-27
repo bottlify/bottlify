@@ -2835,3 +2835,24 @@ test('LoadCursorW and LoadIconW find a resource by its wide name', ()=>{
     assert.ok(fns.LoadImageW.handler([HINSTANCE, TEXT_BUFFER, 2, 0, 0, 0]));
     assert.deepEqual(asked, [[12, 'ARROWS'], [14, 'ARROWS'], [12, 'ARROWS']]);
 });
+
+test('keybd_event and mouse_event are one INPUT each, handed over as arguments', ()=>{
+    const KEYEVENTF_KEYUP = 0x2;
+    const MOUSEEVENTF_MOVE = 0x1;
+    const MOUSEEVENTF_LEFTDOWN = 0x2;
+    const MOUSEEVENTF_WHEEL = 0x800;
+    const { fns, sent } = setup();
+    assert.equal(fns.keybd_event.argBytes, 16);
+    assert.equal(fns.mouse_event.argBytes, 20);
+    fns.keybd_event.handler([0x41, 0x1e, 0, 0]);
+    fns.keybd_event.handler([0x41, 0x1e, KEYEVENTF_KEYUP, 0]);
+    fns.mouse_event.handler([MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN, -3 >>> 0, 4, 0, 0]);
+    fns.mouse_event.handler([MOUSEEVENTF_WHEEL, 0, 0, -120 >>> 0, 0]);
+    assert.deepEqual(sent, [
+        { kind: 'key', vk: 0x41, down: true },
+        { kind: 'key', vk: 0x41, down: false },
+        { kind: 'pointerMove', dx: -3, dy: 4 },
+        { kind: 'pointerButton', button: 'left', down: true },
+        { kind: 'wheel', delta: -120 },
+    ]);
+});

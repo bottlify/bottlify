@@ -104,7 +104,7 @@ const DISC_COMPONENT_LENGTH = 221;
 const DISC_UNICODE_COMPONENT_LENGTH = 110;
 
 /** What GetComputerName answers. NetBIOS names are at most 15 characters. */
-const COMPUTER_NAME = 'BOTTLIFY';
+export const COMPUTER_NAME = 'BOTTLIFY';
 
 /**
  * @typedef {Object} DriveHost
@@ -347,7 +347,7 @@ export function createDriveFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>driveType(
-                path === 0 ? '' : host.readWideString(path >>> 0, MAX_PATH)),
+                path === 0 ? '' : host.readWideString(path >>> 0, MAX_PATH * 2)),
         },
 
         /**
@@ -433,7 +433,7 @@ export function createDriveFunctions(host){
 
         /** GetVolumeInformationW: the same answers, the names in UTF-16 and sized in characters. */
         GetVolumeInformationW: volumeInformation(
-            (address, length)=>host.readWideString(address, length), encodeWide),
+            (address, length)=>host.readWideString(address, length * 2), encodeWide),
 
         /**
          * BOOL SetVolumeLabelA(LPCSTR lpRootPathName, LPCSTR lpVolumeName)

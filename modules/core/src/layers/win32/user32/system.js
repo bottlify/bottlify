@@ -1111,12 +1111,11 @@ export function createSystemFunctions({ host, live, windows, classes }){
      * 0..65535 across the display, which is the only coordinate space the call
      * has, so it is scaled onto the screen here.
      *
-     * @param {number} at  Where the INPUT begins.
+     * @param {{ dx: number, dy: number, data: number, flags: number }} event
+     *     The MOUSEINPUT's fields, as SendInput reads them or mouse_event takes them.
      * @returns {boolean} whether anything was inserted.
      */
-    const injectMouse = at=>{
-        const flags = readU32(at + 16);
-        const data = readU32(at + 12);
+    const injectMouse = ({ dx, dy, data, flags })=>{
         let inserted = false;
 
         if ((flags & MOUSEEVENTF_MOVE) !== 0)
@@ -1126,13 +1125,13 @@ export function createSystemFunctions({ host, live, windows, classes }){
             const move = { kind: 'pointerMove' };
             if ((flags & MOUSEEVENTF_ABSOLUTE) !== 0)
             {
-                move.x = Math.round(readI32(at + 4) * (screen.width - 1) / 65535);
-                move.y = Math.round(readI32(at + 8) * (screen.height - 1) / 65535);
+                move.x = Math.round((dx | 0) * (screen.width - 1) / 65535);
+                move.y = Math.round((dy | 0) * (screen.height - 1) / 65535);
             }
             else
             {
-                move.dx = readI32(at + 4);
-                move.dy = readI32(at + 8);
+                move.dx = dx | 0;
+                move.dy = dy | 0;
             }
             host.sendInput?.(move);
             inserted = true;
@@ -1154,7 +1153,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
         }
         // The two extra buttons share a flag pair and name themselves in the
         // high word of mouseData, as the real struct does.
-        const extra = data >>> 16;
+        const extra = (data >>> 0) >>> 16;
         if ((flags & MOUSEEVENTF_XDOWN) !== 0)
         {
             host.sendInput?.({ kind: 'pointerButton',
@@ -1171,7 +1170,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
         {
             // mouseData is the wheel delta itself, in WHEEL_DELTA (120) units,
             // which is what both the message and DirectInput carry.
-            host.sendInput?.({ kind: 'wheel', delta: readI32(at + 12) });
+            host.sendInput?.({ kind: 'wheel', delta: data | 0 });
             inserted = true;
         }
         return inserted;
@@ -1189,13 +1188,11 @@ export function createSystemFunctions({ host, live, windows, classes }){
      * VK_PACKET and lets TranslateMessage alone turn it into WM_CHAR, so only
      * the down half of such a pair produces anything here.
      *
-     * @param {number} at  Where the INPUT begins.
+     * @param {{ wVk: number, wScan: number, flags: number }} event
+     *     The KEYBDINPUT's fields, as SendInput reads them or keybd_event takes them.
      * @returns {boolean} whether anything was inserted.
      */
-    const injectKeyboard = at=>{
-        const wVk = readU16(at + 4);
-        const wScan = readU16(at + 6);
-        const flags = readU32(at + 8);
+    const injectKeyboard = ({ wVk, wScan, flags })=>{
         const up = (flags & KEYEVENTF_KEYUP) !== 0;
 
         if ((flags & KEYEVENTF_UNICODE) !== 0)
@@ -2931,11 +2928,13 @@ export function createSystemFunctions({ host, live, windows, classes }){
                     const type = readU32(piece);
                     if (type === INPUT_MOUSE)
                     {
-                        inserted += injectMouse(piece) ? 1 : 0;
+                        inserted += injectMouse({ dx: readI32(piece + 4), dy: readI32(piece + 8),
+                            data: readU32(piece + 12), flags: readU32(piece + 16) }) ? 1 : 0;
                     }
                     else if (type === INPUT_KEYBOARD)
                     {
-                        inserted += injectKeyboard(piece) ? 1 : 0;
+                        inserted += injectKeyboard({ wVk: readU16(piece + 4),
+                            wScan: readU16(piece + 6), flags: readU32(piece + 8) }) ? 1 : 0;
                     }
                     else if (type === INPUT_HARDWARE)
                     {
@@ -2947,6 +2946,36 @@ export function createSystemFunctions({ host, live, windows, classes }){
                     }
                 }
                 return inserted;
+            },
+        },
+
+        /**
+         * VOID keybd_event(BYTE bVk, BYTE bScan, DWORD dwFlags, ULONG_PTR dwExtraInfo)
+         *
+         * The older spelling of one INPUT_KEYBOARD event: the same key press,
+         * handed over as arguments.
+         */
+        keybd_event: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([vk, scan, flags])=>{
+                injectKeyboard({ wVk: vk & 0xff, wScan: scan & 0xff, flags: flags >>> 0 });
+                return 0;
+            },
+        },
+
+        /**
+         * VOID mouse_event(DWORD dwFlags, DWORD dx, DWORD dy, DWORD dwData,
+         *                  ULONG_PTR dwExtraInfo)
+         *
+         * And of one INPUT_MOUSE event.
+         */
+        mouse_event: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([flags, dx, dy, data])=>{
+                injectMouse({ dx, dy, data, flags: flags >>> 0 });
+                return 0;
             },
         },
 

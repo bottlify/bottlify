@@ -963,6 +963,38 @@ export function createDrawingFunctions(
         },
 
         /**
+         * int SetTextCharacterExtra(HDC hdc, int extra)
+         *
+         * The spacing added between characters, kept on the context and
+         * answered back; the text drawn here is not spread by it. The old
+         * value, or 0x80000000 for a context there is not.
+         */
+        SetTextCharacterExtra: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, extra])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0x80000000;
+                }
+                const previous = dc.characterExtra ?? 0;
+                dc.characterExtra = extra | 0;
+                return previous >>> 0;
+            },
+        },
+
+        /** int GetTextCharacterExtra(HDC hdc) */
+        GetTextCharacterExtra: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                return dc ? (dc.characterExtra ?? 0) >>> 0 : 0x80000000;
+            },
+        },
+
+        /**
          * int GetDIBits(HDC hdc, HBITMAP hbm, UINT start, UINT cLines,
          *   LPVOID lpvBits, LPBITMAPINFO lpbmi, UINT usage)
          *

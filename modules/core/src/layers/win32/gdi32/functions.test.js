@@ -2054,3 +2054,38 @@ test('ABC widths are each character\'s own advance, and agree with GetCharWidth'
     assert.equal(fns.GetCharABCWidthsA.handler([hdc, 0x43, 0x41, ABCS]), 0, 'a reversed range');
     assert.equal(fns.GetCharWidthW, fns.GetCharWidth32W);
 });
+
+test('TranslateCharsetInfo answers a character set, a code page or a font signature\'s bits', ()=>{
+    const { memory, fns } = setup();
+    const INFO = 0x2000;
+    const SIG = 0x2100;
+    /** @returns {number[]} ciCharset, ciACP, fsCsb[0] */
+    const view = new DataView(memory.bytes.buffer);
+    const read = ()=>[0, 4, 24].map(at=>view.getUint32(INFO + at, true));
+    assert.equal(fns.TranslateCharsetInfo.argBytes, 12);
+    assert.equal(fns.TranslateCharsetInfo.handler([204, INFO, 1]), 1, 'TCI_SRCCHARSET');
+    assert.deepEqual(read(), [204, 1251, 1 << 2]);
+    assert.equal(fns.TranslateCharsetInfo.handler([932, INFO, 2]), 1, 'TCI_SRCCODEPAGE');
+    assert.deepEqual(read(), [128, 932, 1 << 17]);
+    new DataView(memory.bytes.buffer).setUint32(SIG, (1 << 1 | 1 << 20) >>> 0, true);
+    assert.equal(fns.TranslateCharsetInfo.handler([SIG, INFO, 3]), 1, 'TCI_SRCFONTSIG, lowest bit');
+    assert.deepEqual(read(), [238, 1250, 1 << 1]);
+    memory.writeMemory(INFO, new Uint8Array(32).fill(0xaa));
+    assert.equal(fns.TranslateCharsetInfo.handler([12345, INFO, 2]), 0, 'no such code page');
+    assert.equal(memory.bytes[INFO], 0xaa, 'and the structure left alone');
+    assert.equal(fns.TranslateCharsetInfo.handler([0, INFO, 3]), 0);
+});
+
+test('CreateDIBSection with no BITMAPINFO makes nothing', ()=>{
+    const { fns, hdc } = withDC();
+    assert.equal(fns.CreateDIBSection.handler([hdc, 0, 0, 0x2200, 0, 0]), 0);
+});
+
+test('the text character extra is kept on the context and answered back', ()=>{
+    const { fns, hdc } = withDC();
+    assert.equal(fns.GetTextCharacterExtra.handler([hdc]), 0);
+    assert.equal(fns.SetTextCharacterExtra.handler([hdc, 3]), 0);
+    assert.equal(fns.SetTextCharacterExtra.handler([hdc, -2 >>> 0]) | 0, 3);
+    assert.equal(fns.GetTextCharacterExtra.handler([hdc]) | 0, -2);
+    assert.equal(fns.GetTextCharacterExtra.handler([0x9999]), 0x80000000, 'not a context');
+});

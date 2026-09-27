@@ -515,7 +515,8 @@ test('GetDirect3D answers the object the device was made through', ()=>{
     assert.equal(h.device(device, 'GetDirect3D', [out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), root,
         'the same object, so the same pointer -- a program compares these');
-    assert.equal(h.roots[0].refCount, 2, 'and the call took the reference it owes');
+    assert.equal(h.roots[0].refCount, 3,
+        'the device holds one on it, and the call took the reference it owes');
     assert.equal(h.device(device, 'GetDirect3D', [0]), D3DERR_INVALIDCALL);
 
     assert.equal(h.release(device), 0);
@@ -2417,6 +2418,38 @@ test('an additional swap chain has back buffers of its own, and writes back only
 
         assert.equal(h.release(second), 0);
         assert.equal(h.release(first), 0);
+        assert.equal(h.release(device), 0);
+        h.release(root);
+    });
+
+test('an additional chain\'s back buffer counts on the device, and may be taken again from none',
+    ()=>{
+        // Wine's d3d8 test_refcount: GetBackBuffer takes a reference on the
+        // device and none on the chain; released to nothing, the buffer is the
+        // chain's still, and AddRef from there is fine.
+        const h = seamed();
+        const root = h.create();
+        const device = h.createDevice(root);
+        const at = 0xe400;
+        const out = 0xe000;
+        h.box.services.writeMemory(at, new Uint8Array(D3DPRESENT_PARAMETERS8.SIZE));
+        h.fields.writeStruct(at, D3DPRESENT_PARAMETERS8, {
+            Windowed: 1, SwapEffect: 1, BackBufferFormat: D3DFMT.A8R8G8B8,
+        });
+        assert.equal(h.device(device, 'CreateAdditionalSwapChain', [at, out]), D3D_OK);
+        const chain = h.box.memory.readU32(out);
+        const onDevice = h.object(device).refCount;
+        assert.equal(h.box.call(chain, slot(IDIRECT3DSWAPCHAIN8_SLOTS, 'GetBackBuffer'),
+            [0, 0, out]), D3D_OK);
+        const back = h.box.memory.readU32(out);
+        assert.equal(h.object(chain).refCount, 1, 'the chain took nothing');
+        assert.equal(h.object(device).refCount, onDevice + 1, 'the device took one');
+        assert.equal(h.release(back), 0);
+        assert.equal(h.object(device).refCount, onDevice);
+        assert.equal(h.box.call(back, 1, []), 1, 'AddRef from nothing');
+        assert.equal(h.object(device).refCount, onDevice + 1);
+        assert.equal(h.release(back), 0);
+        assert.equal(h.release(chain), 0);
         assert.equal(h.release(device), 0);
         h.release(root);
     });

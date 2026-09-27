@@ -114,6 +114,11 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten){
         get destroyed(){
             return gone;
         },
+        // Whether an interface whose count went to zero may still be called
+        // through the pointer the program kept: an object its device owns
+        // says so, and the bridge then keeps the interface published.
+        /** @param {string} id */
+        reachable: id=>(typeof api.reachable === 'function' ? api.reachable(id) === true : false),
         // Where a method that runs in the guest finds the object's memory:
         // the object's own answer, or nothing for an object that keeps none.
         guestState: ()=>(typeof api.guestState === 'function' ? api.guestState() : 0),

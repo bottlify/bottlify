@@ -106,6 +106,8 @@ function machine(){
             readMemory: (at, length)=>bytes.slice(at, at + length),
             /** @param {number} at @param {Uint8Array} value */
             writeMemory: (at, value)=>bytes.set(value, at),
+            /** @param {number} at @param {number} length */
+            writable: (at, length)=>at + length <= bytes.length,
         },
         /** @param {number} size */
         allocateSurface: size=>{
@@ -362,6 +364,27 @@ test('a newer generation is reachable from an older pointer, with its own longer
     assert.equal(h.release(first), 0);
     h.assertAllReleased();
 });
+
+test('CreateSurface refuses an out-pointer it could not write through, before making anything',
+    ()=>{
+        // Wine's ddraw test_surface_qi, in every generation: E_INVALIDARG.
+        const h = seamed();
+        const riid = h.box.putGuid(0x4000, IID_IDirectDraw7);
+        assert.equal(h.ddrawDll.DirectDrawCreateEx.handler([0, 0x4100, riid, 0]), DD_OK);
+        const ddraw = h.box.memory.readU32(0x4100);
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+            [HWND, DDSCL_NORMAL]), DD_OK);
+        writeSurfaceDesc(h.box.services, 0x5000, DDSURFACEDESC2, {
+            flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT, width: 8, height: 8, pitch: 0,
+            backBufferCount: 0, mipMapCount: 0, caps: DDSCAPS_OFFSCREENPLAIN, caps2: 0,
+            pixelFormat: { size: 0x20, flags: 0, fourCC: 0, bitCount: 0, redMask: 0,
+                greenMask: 0, blueMask: 0, alphaMask: 0 },
+        });
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'CreateSurface'),
+            [0x5000, 0xdeadbeef, 0]), 0x80070057);
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'CreateSurface'),
+            [0x5000, 0x5100, 0]), DD_OK);
+    });
 
 test('CreateSurface reads the descriptor its generation takes, after the earlier checks', ()=>{
     const h = seamed();

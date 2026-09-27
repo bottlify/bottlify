@@ -853,6 +853,37 @@ test('a live global block has no flags and a stranger is GMEM_INVALID_HANDLE', (
     assert.equal(fns.GlobalFlags.handler([handle]), 0);
     assert.equal(fns.GlobalFlags.handler([0x1234]), 0x8000);
     assert.equal(fns.GlobalFlags.argBytes, 4);
+    assert.equal(fns.LocalFlags, fns.GlobalFlags, 'LocalFlags is the same call');
+});
+
+test('HeapSummary adds up the heap\'s live blocks, and wants its own size first', ()=>{
+    // kernel32's heap tests: a structure whose cb is not its size is
+    // ERROR_INVALID_PARAMETER; the allocated figure is the live blocks' sizes.
+    /** @type {number[]} */
+    const errors = [];
+    const host = {
+        ...fakeHost({ base: 0x1000, size: 0x10000 }),
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+    };
+    const fns = createHeapFunctions(host);
+    const heap = fns.HeapCreate.handler([0, 0, 0]);
+    fns.HeapAlloc.handler([heap, 0, 0x100]);
+    fns.HeapAlloc.handler([heap, 0, 0x200]);
+    const freed = fns.HeapAlloc.handler([heap, 0, 0x300]);
+    fns.HeapAlloc.handler([fns.GetProcessHeap.handler(), 0, 0x400]);
+    fns.HeapFree.handler([heap, 0, freed]);
+    const summary = 0x100;
+    const dword = (/** @type {number} */ at)=>new DataView(host.bytes.buffer).getUint32(at, true);
+
+    assert.equal(fns.HeapSummary.handler([heap, 0, summary]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+
+    host.bytes.set([20, 0, 0, 0], summary);
+    assert.equal(fns.HeapSummary.handler([heap, 0, summary]), 1);
+    assert.equal(dword(summary + 4), 0x300, 'the blocks still allocated in that heap');
+    assert.ok(dword(summary + 8) >= dword(summary + 4), 'committed covers allocated');
+    assert.ok(dword(summary + 12) >= dword(summary + 8), 'reserved covers committed');
+    assert.equal(fns.HeapSummary.argBytes, 12);
 });
 
 test('the global functions declare the stack they pop', ()=>{

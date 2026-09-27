@@ -114,7 +114,9 @@ test('a device remembers what it was made with and who made it', ()=>{
     const parent = {};
     assert.equal(device.GetDirect3D(parent), D3D_OK);
     assert.equal(parent.direct3D, d3d, 'the same object, with a reference taken');
-    assert.equal(d3d.refCount, 2);
+    // Its own, the one the device holds on it, and the one the call took
+    // (Wine's d3d9 test_refcount).
+    assert.equal(d3d.refCount, 3);
     d3d.release();
     assert.equal(device.GetNumberOfSwapChains(), 1);
     assert.ok(device.GetAvailableTextureMem() > 0);
@@ -123,6 +125,7 @@ test('a device remembers what it was made with and who made it', ()=>{
     assert.equal(device.SetSoftwareVertexProcessing(true), D3DERR_INVALIDCALL,
         'only a mixed device may switch');
     assert.equal(device.release(), 0);
+    assert.equal(d3d.refCount, 1, 'a device gone gives back the reference it held');
 });
 
 test('a mixed device switches vertex processing, and a pure software one is what it is', ()=>{
@@ -1125,3 +1128,38 @@ test('UpdateTexture into a texture that makes its own levels carries the source\
         destination.texture.release();
         assert.equal(device.release(), 0);
     });
+
+test('a surface made on its own gives its storage back with its last reference', ()=>{
+    // A render target made and released in a loop otherwise keeps the heap it
+    // took, and a program that makes enough of them runs the arena out.
+    /** @type {Map<number, number>} */
+    const held = new Map();
+    let next = 0x100000;
+    const { device } = make({ services: {
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes + 0x1000;
+            held.set(at, bytes);
+            return at;
+        },
+        free: (/** @type {number} */ at)=>held.delete(at),
+    } });
+    const before = held.size;
+    for (let round = 0; round < 3; round++)
+    {
+        /** @type {{ surface?: any }[]} */
+        const made = [{}, {}, {}, {}];
+        assert.equal(device.CreateRenderTarget(64, 64, D3DFMT.A8R8G8B8, true, made[0]), D3D_OK);
+        assert.equal(device.CreateDepthStencilSurface(64, 64, D3DFMT.D24S8, made[1]), D3D_OK);
+        assert.equal(device.CreateOffscreenPlainSurface(64, 64, D3DFMT.A8R8G8B8,
+            D3DPOOL.SYSTEMMEM, made[2]), D3D_OK);
+        assert.equal(device.CreateOffscreenPlainSurface(64, 64, D3DFMT.A8R8G8B8,
+            D3DPOOL.DEFAULT, made[3]), D3D_OK);
+        for (const one of made)
+        {
+            assert.equal(one.surface?.release(), 0);
+        }
+    }
+    assert.equal(held.size, before, 'every block went back');
+    assert.equal(device.release(), 0);
+});

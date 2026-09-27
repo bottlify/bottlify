@@ -239,7 +239,7 @@ export function createModuleFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                return load(host.readWideString(name >>> 0, MAX_NAME), flags >>> 0);
+                return load(host.readWideString(name >>> 0, MAX_NAME * 2), flags >>> 0);
             },
         },
 
@@ -328,7 +328,7 @@ export function createModuleFunctions(host){
         LoadLibraryW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>load(host.readWideString(name >>> 0, MAX_NAME)),
+            handler: ([name])=>load(host.readWideString(name >>> 0, MAX_NAME * 2)),
         },
 
         /**

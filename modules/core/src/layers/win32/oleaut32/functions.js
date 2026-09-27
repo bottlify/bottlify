@@ -1148,12 +1148,17 @@ export function createAutomationFunctions(host){
          * it hands the interface over and clears the slot, which is why a
          * caller that gets it twice finds nothing the second time; a call
          * with no reference held answers S_FALSE with a null, the documented
-         * shape a caller checks before it dereferences.
+         * shape a caller checks before it dereferences. The reserved word must be
+         * zero, E_INVALIDARG otherwise, as ole32's errorinfo tests read it.
          */
         SetErrorInfo: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([, errorInfo])=>{
+            handler: ([reserved, errorInfo])=>{
+                if ((reserved >>> 0) !== 0)
+                {
+                    return E_INVALIDARG;
+                }
                 heldErrorInfo = errorInfo >>> 0;
                 return S_OK;
             },
@@ -1162,7 +1167,11 @@ export function createAutomationFunctions(host){
         GetErrorInfo: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([, out])=>{
+            handler: ([reserved, out])=>{
+                if ((reserved >>> 0) !== 0)
+                {
+                    return E_INVALIDARG;
+                }
                 const held = heldErrorInfo;
                 heldErrorInfo = 0;
                 if ((out >>> 0) !== 0)

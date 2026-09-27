@@ -203,6 +203,9 @@ const D3DTEXF_LINEAR = 2;
  * @property {number} base            Byte address the surface's own storage starts at.
  * @property {string} kind            A SURFACE_TYPE.
  * @property {number} refCount
+ * @property {boolean} destroyed      Whether its last reference has gone for good.
+ * @property {() => boolean} reachable  Whether a pointer to it still reaches it at a count
+ *           of zero: while its device or chain owns it.
  * @property {() => number} addRef
  * @property {() => number} release
  * @property {(out: LockedRect, rect?: LockRectangle | null, flags?: number)
@@ -332,6 +335,13 @@ export function createSurface(options){
         get refCount(){
             return options.count.value;
         },
+        // Whether the last reference has gone for good: a surface its device
+        // or chain owns outlives a count of zero, and the pointer a program
+        // kept must still reach it (Wine's d3d8 and d3d9 test_refcount).
+        get destroyed(){
+            return options.count.destroyed;
+        },
+        reachable: ()=>!options.count.destroyed,
         addRef: ()=>options.count.addRef(),
         release: ()=>options.count.release(),
 
@@ -1095,6 +1105,10 @@ export function createVolume(options){
         get refCount(){
             return options.count.value;
         },
+        get destroyed(){
+            return options.count.destroyed;
+        },
+        reachable: ()=>!options.count.destroyed,
         addRef: ()=>options.count.addRef(),
         release: ()=>options.count.release(),
 
