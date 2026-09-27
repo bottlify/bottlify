@@ -155,8 +155,11 @@ its import was bound to, and the two compare equal as they do on Windows.
 
 ### Where system modules go
 
-The assembler places system modules at `0x02000000 + index * 0x00100000` (a megabyte apart) in
-the order the layers list their libraries, then maps the libraries a program ships above them
+The assembler places system modules from the bottom of the modules' space (`0x02000000` above a
+program of ordinary size) in the order the layers list their libraries, each where the one before
+it ends, rounded up to the 64 KiB allocation granularity every image is placed at: together they take a
+few megabytes of the 96 MiB between the program and the thread stacks, and the rest is room for
+the libraries a program brings. Then it maps the libraries a program ships above them
 (in dependency order from `planDependencies`, `internal/dependencies.js`: depth-first, a
 dependency before what depends on it, cycles visited once, KnownDLL names skipped, and the
 executable's own file name counted as already there, as Windows looks in the loaded-module list

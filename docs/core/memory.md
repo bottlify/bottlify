@@ -205,7 +205,7 @@ layers that own each piece register it. What a booted process looks like:
 | `thunks` | assembler | `THUNK_CODE`, rwx while written then `protect`ed to rx | `cpu.layout.thunkBase` (`0x100000`), `thunkCapacity` bytes |
 | `stack` | assembler | `STACK` rw | Below `cpu.layout.initialStack` (`0x300000`), sized from the image's `SizeOfStackReserve` (floored at 64 KiB, clamped to the room above the thunks) |
 | the program image | [`loader`](./loader.md) | `IMAGE` rwx | Its own `ImageBase` |
-| system modules | loader `synthesise` | `IMAGE`, rwx then rx; `<name> .data` rw beside it for a module that exports variables | `0x02000000 + index * 0x00100000` |
+| system modules | loader `synthesise` | `IMAGE`, rwx then rx; `<name> .data` rw beside it for a module that exports variables | From `0x02000000` (above a larger program's image), each where the one before it ends, at 64 KiB |
 | libraries the program ships, and those it loads by name | loader `map` | `IMAGE` rwx | Above the system modules and below the stack pool: a relocatable one at the next free base, one without relocations at its own base or not at all |
 | `<name> as data at 0x…` | assembler | `IMAGE` r | A library `LoadLibraryEx` mapped as data, where a library would go |
 | `process-startup` | assembler | `THUNK_CODE` rwx | 1 MiB where a library would fit -- after the libraries, or in the first gap below the stack pool: TLS blocks and the stub that attaches libraries |
