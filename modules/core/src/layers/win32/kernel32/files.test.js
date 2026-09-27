@@ -1709,7 +1709,44 @@ test('NtCreateFile names what is missing, and takes only object names', ()=>{
         'and its handle closes as any other');
 });
 
+const ERROR_SHARING_VIOLATION = 32;
 const ERROR_INVALID_NAME = 123;
+const ERROR_REQUEST_ABORTED = 1235;
+
+test('a file copied onto itself is a sharing violation, and a NULL name a missing path', ()=>{
+    // kernel32's CopyFileA test, which on Windows opens the source and then
+    // collides with it opening the destination.
+    const { files, error, fns, at } = setup();
+    files.put('C:\\GAME\\A.TXT', 'a');
+    assert.equal(fns.CopyFileA.handler([at(NAME, 'C:\\GAME\\A.TXT'), NAME, 0]), 0);
+    assert.equal(error.code, ERROR_SHARING_VIOLATION);
+    assert.equal(fns.CopyFileA.handler([NAME, at(NAME2, 'c:\\game\\a.txt'), 0]), 0,
+        'however the second name is spelled');
+    assert.equal(fns.CopyFileA.handler([0, NAME, 1]), 0);
+    assert.equal(error.code, ERROR_PATH_NOT_FOUND);
+    assert.equal(fns.CopyFileA.handler([NAME, 0, 1]), 0);
+    assert.equal(error.code, ERROR_PATH_NOT_FOUND);
+});
+
+test('CopyFileW and CopyFileEx copy as CopyFileA does, and a success clears the error', ()=>{
+    const { files, error, fns, memory } = setup();
+    files.put('C:\\GAME\\A.TXT', 'abc');
+    putWide(memory, NAME, 'C:\\GAME\\A.TXT');
+    putWide(memory, NAME2, 'C:\\GAME\\B.TXT');
+    error.code = 0xdeadbeef;
+    assert.equal(fns.CopyFileW.handler([NAME, NAME2, 1]), 1);
+    assert.equal(error.code, ERROR_SUCCESS);
+    assert.equal(files.text('C:\\GAME\\B.TXT'), 'abc');
+    assert.equal(fns.CopyFileW.handler([NAME, NAME2, 1]), 0);
+    assert.equal(error.code, ERROR_FILE_EXISTS);
+    assert.equal(fns.CopyFileExW.handler([NAME, NAME2, 0, 0, 0, 1]), 0,
+        'COPY_FILE_FAIL_IF_EXISTS is bFailIfExists');
+    assert.equal(fns.CopyFileExW.handler([NAME, NAME2, 0, 0, 0, 0]), 1);
+    memory.putDword(OUT_COUNT, 1);
+    assert.equal(fns.CopyFileExW.handler([NAME, NAME2, 0, 0, OUT_COUNT, 0]), 0,
+        'a cancel already set stops the copy');
+    assert.equal(error.code, ERROR_REQUEST_ABORTED);
+});
 
 test('_lopen with OF_WRITE alone opens for writing only', ()=>{
     const { files, error, fns, at, memory } = setup();

@@ -49,7 +49,9 @@ const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_DIR_NOT_EMPTY = 145;
 const ERROR_ALREADY_EXISTS = 183;
+const ERROR_SHARING_VIOLATION = 32;
 const ERROR_INVALID_NAME = 123;
+const ERROR_REQUEST_ABORTED = 1235;
 const ERROR_DIRECTORY = 267;
 const ERROR_IO_DEVICE = 1117;
 const ERROR_HANDLE_EOF = 38;
@@ -181,6 +183,8 @@ const MOVEFILE_DELAY_UNTIL_REBOOT = 0x0004;
 
 /** How much of a file to move at a time when copying one. */
 const COPY_CHUNK = 1 << 20;
+/** CopyFileEx's flag for CopyFile's bFailIfExists. */
+const COPY_FILE_FAIL_IF_EXISTS = 0x1;
 
 /**
  * What GetTempPathA answers. Windows derives it from the environment; there is
@@ -936,6 +940,99 @@ export function createFileFunctions(host){
         }
         return renamePath(text.path(from), text.path(to),
             (flags >>> 0 & MOVEFILE_REPLACE_EXISTING) !== 0);
+    });
+
+    /**
+     * The copy every spelling shares. Copied through the ordinary read and
+     * write path rather than by asking the filesystem for a copy, because a
+     * copy that is not a read followed by a write is a second implementation
+     * of both. The copy carries the source's attributes and its write time,
+     * as a copy on Windows does; a file copied onto itself is the destination
+     * open colliding with the source's, a sharing violation.
+     *
+     * @param {string} source @param {string} destination @param {boolean} failIfExists
+     */
+    const copyPath = (source, destination, failIfExists)=>{
+        if (source === '' || destination === '')
+        {
+            return fail(ERROR_PATH_NOT_FOUND);
+        }
+        const entry = files.stat(source);
+        if (!entry || !entry.exists || entry.isDirectory)
+        {
+            return fail(entry?.isDirectory ? ERROR_ACCESS_DENIED : missing(source));
+        }
+        if (source.toLowerCase() === destination.toLowerCase())
+        {
+            return fail(ERROR_SHARING_VIOLATION);
+        }
+        const present = files.stat(destination);
+        if (failIfExists && present?.exists)
+        {
+            return fail(ERROR_FILE_EXISTS);
+        }
+        if (readOnlyFile(present) || present?.isDirectory)
+        {
+            return fail(ERROR_ACCESS_DENIED);
+        }
+        const input = files.open(source, { read: true });
+        if (!input)
+        {
+            return fail(ERROR_ACCESS_DENIED);
+        }
+        const output = files.open(destination, { write: true, create: true, truncate: true });
+        if (!output)
+        {
+            files.close(input);
+            return fail(onReadOnlyMedia(destination) ? ERROR_WRITE_PROTECT
+                : present?.exists ? ERROR_ACCESS_DENIED : missing(destination));
+        }
+        // A chunk at a time: the files a game copies are the ones it
+        // shipped, and holding one of those whole is a copy that works
+        // in a test and runs out of memory on a real install.
+        for (let at = 0; at < entry.size; at += COPY_CHUNK)
+        {
+            const chunk = files.read(input, at, COPY_CHUNK);
+            if (typeof (/** @type {any} */ (chunk))?.then === 'function')
+            {
+                // A copy that would have to wait is not expressible
+                // here: the call is one operation to the guest and has
+                // no partial answer. Copying from a bundle-backed file
+                // needs the same treatment ReadFile got, and until then
+                // failing is better than silently truncating.
+                files.close(input);
+                files.close(output);
+                return fail(ERROR_ACCESS_DENIED);
+            }
+            files.write(output, at, /** @type {any} */ (chunk));
+        }
+        files.close(input);
+        files.close(output);
+        files.setAttributes?.(destination, entry.attributes ?? null);
+        if (entry.modified)
+        {
+            files.setModified?.(destination, entry.modified);
+        }
+        host.setLastError(ERROR_SUCCESS);
+        return 1;
+    };
+
+    const copyFile = bothForms(12, ([from, to, failIfExists], text)=>
+        copyPath(text.path(from), text.path(to), failIfExists !== 0));
+
+    /**
+     * The progress routine is not called: a copy here is one step with
+     * nothing to report between its start and its end, and a caller that
+     * would have cancelled from the routine sees the copy complete. The
+     * cancel flag is read once, before anything is written.
+     */
+    const copyFileEx = bothForms(24, ([from, to, , , cancel, flags], text)=>{
+        if ((cancel >>> 0) !== 0 && readDword(cancel >>> 0) !== 0)
+        {
+            return fail(ERROR_REQUEST_ABORTED);
+        }
+        return copyPath(text.path(from), text.path(to),
+            ((flags >>> 0) & COPY_FILE_FAIL_IF_EXISTS) !== 0);
     });
 
     /** @param {number[]} args @param {TextForm} text */
@@ -1928,73 +2025,16 @@ export function createFileFunctions(host){
         MoveFileA: moveFile.ansi,
         MoveFileW: moveFile.wide,
 
+        /** BOOL CopyFile(LPCSTR, LPCSTR, BOOL bFailIfExists) -- one body, both spellings. */
+        CopyFileA: copyFile.ansi,
+        CopyFileW: copyFile.wide,
+
         /**
-         * BOOL CopyFileA(LPCSTR, LPCSTR, BOOL bFailIfExists)
-         *
-         * Copied through the ordinary read and write path rather than by asking
-         * the filesystem for a copy, because a copy that is not a read followed
-         * by a write is a second implementation of both.
+         * BOOL CopyFileEx(LPCSTR, LPCSTR, LPPROGRESS_ROUTINE, LPVOID lpData,
+         *                 LPBOOL pbCancel, DWORD dwCopyFlags) -- both spellings.
          */
-        CopyFileA: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([from, to, failIfExists])=>{
-                const source = pathArgument(from);
-                const destination = pathArgument(to);
-                const entry = files.stat(source);
-                if (!entry || !entry.exists || entry.isDirectory)
-                {
-                    return fail(entry?.isDirectory ? ERROR_ACCESS_DENIED : missing(source));
-                }
-                const present = files.stat(destination);
-                if (failIfExists !== 0 && present?.exists)
-                {
-                    return fail(ERROR_FILE_EXISTS);
-                }
-                if (readOnlyFile(present))
-                {
-                    return fail(ERROR_ACCESS_DENIED);
-                }
-                const input = files.open(source, { read: true });
-                if (!input)
-                {
-                    return fail(ERROR_ACCESS_DENIED);
-                }
-                const output = files.open(destination,
-                    { write: true, create: true, truncate: true });
-                if (!output)
-                {
-                    files.close(input);
-                    return fail(onReadOnlyMedia(destination)
-                        ? ERROR_WRITE_PROTECT : missing(destination));
-                }
-                // A chunk at a time: the files a game copies are the ones it
-                // shipped, and holding one of those whole is a copy that works
-                // in a test and runs out of memory on a real install.
-                for (let at = 0; at < entry.size; at += COPY_CHUNK)
-                {
-                    const chunk = files.read(input, at, COPY_CHUNK);
-                    if (typeof (/** @type {any} */ (chunk))?.then === 'function')
-                    {
-                        // A copy that would have to wait is not expressible
-                        // here: the call is one operation to the guest and has
-                        // no partial answer. Copying from a bundle-backed file
-                        // needs the same treatment ReadFile got, and until then
-                        // failing is better than silently truncating.
-                        files.close(input);
-                        files.close(output);
-                        return fail(ERROR_ACCESS_DENIED);
-                    }
-                    files.write(output, at, /** @type {any} */ (chunk));
-                }
-                files.close(input);
-                files.close(output);
-                // The copy carries the source's attributes, read-only among
-                // them, as a copy on Windows does.
-                files.setAttributes?.(destination, entry.attributes ?? null);
-                return 1;
-            },
-        },
+        CopyFileExA: copyFileEx.ansi,
+        CopyFileExW: copyFileEx.wide,
 
         /** BOOL CreateDirectory(LPCSTR, LPSECURITY_ATTRIBUTES) -- one body, both spellings. */
         CreateDirectoryA: createDirectory.ansi,
