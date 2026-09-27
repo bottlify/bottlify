@@ -74,7 +74,7 @@ import {
     DDPCAPS_PRIMARYSURFACE, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX,
     DDSCAPS_FLIP, DDSCAPS_FRONTBUFFER, DDSCAPS_LOCALVIDMEM, DDSCAPS_MIPMAP, DDSCAPS_OFFSCREENPLAIN,
     DDSCAPS_PRIMARYSURFACE, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY,
-    DDSCAPS_ZBUFFER, DDSCL_EXCLUSIVE, DDSD_BACKBUFFERCOUNT,
+    DDSCAPS_ZBUFFER, DDSCL_EXCLUSIVE, DDSCL_FULLSCREEN, DDSD_BACKBUFFERCOUNT,
     DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PITCH,
     DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK, DDGDI_GETHOSTIDENTIFIER,
 } from '../ddraw/constants.js';
@@ -250,13 +250,16 @@ export function versionOf(id){
  * @param {() => number} [deps.deactivations]
  *        How many times it has been told so: an exclusive owner loses its
  *        video memory each time.
+ * @param {(width: number, height: number,
+ *     where?: { window?: number, fullscreen?: boolean }) => void} [deps.resolution]
+ *        The screen is this size now, and a fullscreen window is placed over it.
  */
 export function createDirectDrawSeam(
     { publisher, memory, screen, gdi, present, callGuest, currentThread, scratch,
         extraInterfaces = [], extraSurfaceInterfaces = [], now = ()=>performance.now(),
         schedule = (ms, run)=>{
             setTimeout(run, ms);
-        }, identity, gamma, deactivated, deactivations },
+        }, identity, gamma, deactivated, deactivations, resolution },
 )
 {
     const fields = createFields(memory);
@@ -578,6 +581,25 @@ export function createDirectDrawSeam(
             return readColorKey((fx >>> 0) + offset);
         }
         return surface.getColorKey(which).key ?? undefined;
+    };
+
+    /**
+     * Exclusive full screen takes the cooperative window over the whole
+     * display, as DirectDraw places it: at the origin, the mode's size. A
+     * window left where the program made it offsets every rectangle the
+     * program computes from it with ClientToScreen, and a blit to the primary
+     * then falls off the screen.
+     *
+     * @param {any} root
+     */
+    const coverScreen = root=>{
+        const both = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN;
+        if ((root.cooperativeLevel & both) === both && root.cooperativeWindow)
+        {
+            const mode = root.displayMode;
+            resolution?.(mode.width, mode.height,
+                { window: root.cooperativeWindow, fullscreen: true });
+        }
     };
 
     /**
@@ -1478,6 +1500,10 @@ export function createDirectDrawSeam(
         /** @param {any} root @param {number[]} args */
         SetCooperativeLevel: (root, [window, flags])=>{
             const hr = root.setCooperativeLevel(window >>> 0, flags >>> 0);
+            if (hr === DD_OK)
+            {
+                coverScreen(root);
+            }
             if ((root.cooperativeLevel & DDSCL_EXCLUSIVE) !== 0)
             {
                 exclusiveHolders.add(root);
@@ -1492,8 +1518,15 @@ export function createDirectDrawSeam(
         // The first generation takes width, height and depth; every later one
         // adds a refresh rate and flags after them.
         /** @param {any} root @param {number[]} args */
-        SetDisplayMode: (root, [width, height, depth, refresh])=>root.setDisplayMode(
-            width >>> 0, height >>> 0, depth >>> 0, version === 1 ? 0 : (refresh >>> 0)),
+        SetDisplayMode: (root, [width, height, depth, refresh])=>{
+            const hr = root.setDisplayMode(
+                width >>> 0, height >>> 0, depth >>> 0, version === 1 ? 0 : (refresh >>> 0));
+            if (hr === DD_OK)
+            {
+                coverScreen(root);
+            }
+            return hr;
+        },
 
         /**
          * Parks the caller until the blank begins, or ends. The event form is

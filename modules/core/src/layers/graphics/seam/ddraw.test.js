@@ -163,7 +163,7 @@ function machine(){
  * presenter would be.
  *
  * @param {{ adapter?: any, gamma?: any, deactivated?: () => boolean,
- *     deactivations?: () => number }} [build]
+ *     deactivations?: () => number, resolution?: (...args: any[]) => void }} [build]
  *     What the build says the hardware is, where a primary's gamma ramp is
  *     shown, and whether (and how often) the application has been deactivated.
  */
@@ -218,6 +218,7 @@ function seamed(build = {}){
         gamma: build.gamma,
         deactivated: build.deactivated,
         deactivations: build.deactivations,
+        resolution: build.resolution,
     });
     const fields = createFields(box.services);
     const ddrawDll = libraries.libraries['DDRAW.dll'];
@@ -2146,3 +2147,22 @@ test('a mode change loses video memory, and a primary made in another mode canno
         assert.equal(h.release(ddraw), 0);
         h.assertAllReleased();
     });
+
+test('exclusive full screen places its window over the mode; a windowed one keeps its own', ()=>{
+    // As DirectDraw places a fullscreen window: at the origin, the mode's size.
+    // A window left where the program made it offsets every rectangle the
+    // program computes with ClientToScreen, and its blits fall off the screen.
+    /** @type {any[]} */
+    const placed = [];
+    const h = seamed({ resolution: (/** @type {any[]} */ ...args)=>placed.push(args) });
+    const ddraw = h.create7();
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+        [HWND, DDSCL_NORMAL]), DD_OK);
+    assert.deepEqual(placed, [], 'a windowed program keeps its window');
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+        [HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN]), DD_OK);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetDisplayMode'),
+        [800, 600, 16, 0, 0]), DD_OK);
+    assert.deepEqual(placed.at(-1), [800, 600, { window: HWND, fullscreen: true }]);
+    assert.equal(h.release(ddraw), 0);
+});

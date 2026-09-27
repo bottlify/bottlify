@@ -161,6 +161,7 @@ export function createGraphicsLibraries(
         gamma,
         deactivated,
         deactivations,
+        resolution,
     });
 
     /** What a program has actually asked us to make, for a report. */
