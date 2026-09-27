@@ -25,7 +25,8 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import {
-    W_ALPHA, W_CNTRL, W_DIGIT, W_LOWER, W_PUNCT, W_SPACE, W_UPPER, W_XDIGIT, WEOF, WIDE_CLASSES,
+    W_ALPHA, W_BLANK, W_CNTRL, W_DIGIT, W_LOWER, W_PUNCT, W_SPACE, W_UPPER, W_XDIGIT, WEOF,
+    WIDE_CLASSES,
 } from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
@@ -312,9 +313,10 @@ export function createWideFunctions(host){
 /**
  * The wide classifiers, from the same classes as the byte ones so the two
  * cannot drift: a program may ask either family about the same character and
- * is entitled to the same answer for every code unit below 0x80. Above it the
- * C locale is not empty (`WIDE_CLASSES` in `inguest.js` says how), and the
- * classifiers and the case functions run in the guest.
+ * is entitled to the same answer for every code unit below 0x80 -- but for
+ * the tab, which msvcrt's wide table calls blank and so printable. Above it
+ * the C locale is not empty (`WIDE_CLASSES` in `inguest.js` says how), and
+ * the classifiers and the case functions run in the guest.
  */
 export function createWideClassificationFunctions(){
     const table = WIDE_CLASSES;
@@ -364,11 +366,8 @@ export function createWideClassificationFunctions(){
                     real |= CT_CONTROL;
                 if (classes & W_XDIGIT)
                     real |= CT_HEX;
-                if (unit === 0x20 || unit === 0x09)
+                if (classes & W_BLANK)
                     real |= CT_BLANK;
-                // The Latin-1 extension's letters are alpha with no case of
-                // their own, so the marker follows the table's own alpha bit
-                // rather than being derived from `_UPPER`/`_LOWER` here.
                 if (classes & W_ALPHA)
                     real |= CT_ALPHA_MARK;
                 return (real & type) !== 0 ? 1 : 0;
