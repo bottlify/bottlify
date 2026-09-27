@@ -8,16 +8,23 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMathFunctions } from './math.js';
 import { COMPILED } from './inguest.x86.js';
+import { COMPILED as MATH_CODE } from './inguest-math.x86.js';
+import { EDOM, ERANGE } from './globals.js';
 import { fakeMemory, fakeFpu, doubleSlots } from './harness.test.js';
 
 const build = ()=>{
     const memory = fakeMemory();
     const fpu = fakeFpu();
+    /** @type {number[]} */
+    const errors = [];
     return {
         memory,
         fpu,
-        table: /** @type {Record<string, any>} */ (
-            createMathFunctions({ writeMemory: memory.writeMemory, fpu })),
+        errors,
+        table: /** @type {Record<string, any>} */ (createMathFunctions({
+            readMemory: memory.readMemory, writeMemory: memory.writeMemory, fpu,
+            errno: code=>void errors.push(code),
+        })),
     };
 };
 
@@ -80,8 +87,9 @@ test('_ftol\'s handler, where EDX can be set, pops ST0 and answers both halves',
     const fpu = fakeFpu();
     /** @type {Record<string, number>} */
     const registers = {};
+    const memory = fakeMemory();
     const table = /** @type {Record<string, any>} */ (createMathFunctions({
-        writeMemory: fakeMemory().writeMemory, fpu,
+        readMemory: memory.readMemory, writeMemory: memory.writeMemory, fpu,
         setRegisters: values=>Object.assign(registers, values),
     }));
     fpu.load([-(2 ** 40) - 0.5]);
@@ -119,4 +127,65 @@ test('modf gives both halves the sign of the original', ()=>{
     table.modf.handler([...doubleSlots(-1.5), whole]);
     assert.equal(fpu.result, -0.5);
     assert.equal(new DataView(memory.bytes.buffer).getFloat64(whole, true), -1);
+});
+
+test('every function is code in the guest, hypot the same as _hypot', ()=>{
+    const { table } = build();
+    const TRAP = 0x7ffe1230;
+    /** The compiled code, the trap's address where it hands over. @param {string} name */
+    const bound = name=>{
+        const { code, host } = /** @type {import('./guest-code.js').CompiledGuestCode} */ (
+            MATH_CODE[/** @type {keyof typeof MATH_CODE} */ (name)]);
+        const bytes = code.slice();
+        if (host !== undefined)
+        {
+            // Maths is x87 code, and x87 code jumps to its trap through a register.
+            assert.deepEqual([...bytes.subarray(host - 1, host + 6)],
+                [0xb8, 0, 0, 0, 0, 0xff, 0xe0], `${name}: mov eax, the trap; jmp eax`);
+            new DataView(bytes.buffer).setUint32(host, TRAP, true);
+        }
+        return bytes;
+    };
+    const builder = { register: ()=>TRAP, jump: ()=>assert.fail('a direct jump') };
+    for (const name of ['sqrt', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2', 'exp', 'log',
+        'log10', 'pow', 'fmod', 'sinh', 'cosh', 'tanh', '_hypot', 'ldexp', 'frexp', 'modf',
+        '_CIsqrt', '_CIsin', '_CIpow', '_CIatan2', '_CIfmod', '_CIfloor', '_CIceil', '_CIfabs'])
+    {
+        assert.equal(typeof table[name].code, 'function', name);
+        assert.deepEqual(table[name].code(builder), bound(name), name);
+    }
+    assert.deepEqual(table.hypot.code(builder), bound('_hypot'));
+});
+
+test('errno as msvcrt sets it: EDOM for a NaN of arguments that were none, ERANGE for an '
+    + 'infinity of finite ones, nothing for an underflow', ()=>{
+    /** @type {[string, number[], number | null][]} */
+    const cases = [
+        ['sqrt', [-1], EDOM], ['sqrt', [-Infinity], EDOM], ['sqrt', [NaN], null],
+        ['log', [0], ERANGE], ['log', [-1], EDOM], ['log10', [-0], ERANGE],
+        ['sin', [Infinity], EDOM], ['cos', [-Infinity], EDOM], ['tan', [NaN], null],
+        ['asin', [2], EDOM], ['acos', [-Infinity], EDOM],
+        ['exp', [1000], ERANGE], ['exp', [-1000], null], ['exp', [Infinity], null],
+        ['pow', [0, -1], ERANGE], ['pow', [-1, 1.5], EDOM], ['pow', [2, 1e100], ERANGE],
+        ['pow', [2, -1e100], null], ['pow', [Infinity, 2], null], ['pow', [1e200, 2], ERANGE],
+        ['cosh', [1000], ERANGE], ['sinh', [-Infinity], null],
+        ['_hypot', [1.5e308, 1.5e308], ERANGE],
+        ['ldexp', [1, 5000], ERANGE], ['ldexp', [1, -5000], null], ['ldexp', [Infinity, 1], null],
+    ];
+    for (const [name, args, code] of cases)
+    {
+        const { table, errors } = build();
+        const slots = name === 'ldexp' ? [...doubleSlots(args[0]), args[1]]
+            : args.flatMap(doubleSlots);
+        table[name].handler(slots);
+        assert.deepEqual(errors, code === null ? [] : [code], `${name}(${args})`);
+    }
+});
+
+test('ldexp reaches what a double holds from a power of two a double does not', ()=>{
+    const { fpu, table } = build();
+    table.ldexp.handler([...doubleSlots(1e300), -1100 >>> 0]);
+    assert.equal(fpu.result, 1e300 * 2 ** -1000 * 2 ** -100, 'not 1e300 times 2^-1100, zero');
+    table.ldexp.handler([...doubleSlots(2 ** -1070), 2000]);
+    assert.equal(fpu.result, 2 ** 930);
 });

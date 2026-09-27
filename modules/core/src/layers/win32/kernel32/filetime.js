@@ -147,9 +147,32 @@ export function msToDosDateTime(ms){
     };
 }
 
-/** FILE_ATTRIBUTE_DIRECTORY and FILE_ATTRIBUTE_ARCHIVE. */
+const FILE_ATTRIBUTE_READONLY = 0x01;
+const FILE_ATTRIBUTE_HIDDEN = 0x02;
 const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 const FILE_ATTRIBUTE_ARCHIVE = 0x20;
+
+/**
+ * The attributes a name on the volume is reported with.
+ *
+ * No attribute bits are kept, so a file is an ordinary archived one and a
+ * directory a directory -- except on read-only media, where every name is
+ * read-only, files and directories alike, as the CD-ROM file system reports
+ * them, and none carries the archive bit, because nothing ever wrote it. A
+ * name the disc records as hidden is hidden.
+ *
+ * @param {{ isDirectory: boolean, readOnly?: boolean, hidden?: boolean } | null | undefined} entry
+ * @returns {number}
+ */
+export function fileAttributes(entry){
+    const kind = entry?.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : 0;
+    const hidden = entry?.hidden ? FILE_ATTRIBUTE_HIDDEN : 0;
+    if (entry?.readOnly)
+    {
+        return kind | hidden | FILE_ATTRIBUTE_READONLY;
+    }
+    return (kind || FILE_ATTRIBUTE_ARCHIVE) | hidden;
+}
 
 /**
  * @typedef {Object} FileTimeHost
@@ -158,7 +181,8 @@ const FILE_ATTRIBUTE_ARCHIVE = 0x20;
  * @property {(code: number) => void} setLastError
  * @property {(handle: number, type?: string) => any} resolveHandle
  * @property {(path: string) => { exists: boolean, isDirectory: boolean,
- *                                size: number, modified?: number } | null} stat
+ *                                size: number, modified?: number, readOnly?: boolean,
+ *                                hidden?: boolean } | null} stat
  * @property {(path: string, modified: number) => boolean} [setModified]
  *           Stamps a file's write time, in milliseconds since the epoch.
  */
@@ -399,8 +423,7 @@ export function createFileTimeFunctions(host){
                 const data = new Uint8Array(BY_HANDLE_FILE_INFORMATION.SIZE);
                 const view = new DataView(data.buffer);
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.dwFileAttributes,
-                    entry?.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_ARCHIVE,
-                    true);
+                    fileAttributes(entry), true);
                 const time = msToFileTime(entry?.modified ?? 0);
                 view.setBigUint64(BY_HANDLE_FILE_INFORMATION.ftCreationTime, time, true);
                 view.setBigUint64(BY_HANDLE_FILE_INFORMATION.ftLastAccessTime, time, true);

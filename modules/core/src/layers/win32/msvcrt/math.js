@@ -15,31 +15,39 @@
  * setting, not by source code, so a program links whichever half its build
  * chose and the other name never appears.
  *
+ * Each is code in the guest's own library (`inguest-math.js`), the x87's
+ * instructions under the program's control word, as the runtime computes; a
+ * case it leaves to the host -- one msvcrt answers with errno, or a power
+ * that is not exact -- comes to the handler here, which answers it with
+ * JavaScript's value and sets errno as msvcrt does: EDOM for a NaN out of
+ * arguments that were none (a square root or a logarithm of a negative, an
+ * arcsine past one, a sine of an infinity), ERANGE for an infinity out of
+ * finite ones (a logarithm of zero, an overflow); an underflow sets nothing.
+ *
  * Both shapes need the FPU seam, so this whole table is conditional on it.
  */
 
 import { readDouble, returningDouble } from './float.js';
+import { EDOM, ERANGE } from './globals.js';
 import { guestEntry, guestExport } from './guest-code.js';
 import * as inGuest from './inguest.js';
+import * as inGuestMath from './inguest-math.js';
 import { COMPILED } from './inguest.x86.js';
+import { COMPILED as MATH_CODE } from './inguest-math.x86.js';
 
 /**
  * @typedef {Object} MathHost
+ * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {import('./float.js').FloatHost} fpu
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *     Where `_ftol`'s handler puts EDX; without it `_ftol` is its x86 alone.
+ * @property {(code: number) => void} [errno]  The calling thread's errno.
  */
 
-/** @param {number} value */
-function doubleBytes(value){
-    const bytes = new Uint8Array(8);
-    new DataView(bytes.buffer).setFloat64(0, value, true);
-    return bytes;
-}
-
 /**
- * The one-argument functions, by name, shared between both calling shapes.
+ * The one-argument functions, by name, shared between both calling shapes:
+ * what the handler answers for the cases the code hands it.
  *
  * @type {Record<string, (value: number) => number>}
  */
@@ -72,27 +80,55 @@ const BINARY = {
     hypot: Math.hypot,
 };
 
+/** The code each name is, where two names share one: `hypot` is `_hypot`. */
+const CODE_OF = /** @type {Record<string, string>} */ ({ hypot: '_hypot', _CIhypot: '_CI_hypot' });
+
 /**
  * @param {MathHost} host
  */
 export function createMathFunctions(host){
     const fpu = host.fpu;
 
-    /** @type {Record<string, { convention: string, argBytes: number, handler: Function }>} */
-    const table = {};
+    /**
+     * JavaScript's answer, and errno as msvcrt sets it for the arguments.
+     *
+     * @param {number[]} args @param {number} result
+     */
+    const answer = (args, result)=>{
+        if (Number.isNaN(result) && !args.some(Number.isNaN))
+        {
+            host.errno?.(EDOM);
+        }
+        else if (!Number.isFinite(result) && args.every(Number.isFinite))
+        {
+            host.errno?.(ERANGE);
+        }
+        return result;
+    };
+
+    /**
+     * The handlers the code hands its rare cases to, by export name.
+     *
+     * @type {Record<string, { convention: string, argBytes: number,
+     *     handler: (args: number[]) => number }>}
+     */
+    const handlers = {};
 
     for (const [name, compute] of Object.entries(UNARY))
     {
-        table[name] = returningDouble(fpu, 8, args=>compute(readDouble(args, 0)));
+        handlers[name] = returningDouble(fpu, 8, args=>{
+            const value = readDouble(args, 0);
+            return answer([value], compute(value));
+        });
 
         // The FPU-stack form: one argument, consumed, replaced by the result.
-        table[`_CI${name}`] = {
+        handlers[`_CI${name}`] = {
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
                 const value = fpu.get(0);
                 fpu.pop();
-                fpu.setResult(compute(value));
+                fpu.setResult(answer([value], compute(value)));
                 return 0;
             },
         };
@@ -100,13 +136,16 @@ export function createMathFunctions(host){
 
     for (const [name, compute] of Object.entries(BINARY))
     {
-        table[name] = returningDouble(fpu, 16,
-            args=>compute(readDouble(args, 0), readDouble(args, 2)));
+        handlers[name] = returningDouble(fpu, 16, args=>{
+            const left = readDouble(args, 0);
+            const right = readDouble(args, 2);
+            return answer([left, right], compute(left, right));
+        });
 
         // ST(1) is the left operand and ST(0) the right, because the left was
         // pushed first. Getting these the wrong way round is undetectable for
         // atan2 near the diagonal and wrong everywhere else.
-        table[`_CI${name}`] = {
+        handlers[`_CI${name}`] = {
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
@@ -114,10 +153,36 @@ export function createMathFunctions(host){
                 const left = fpu.get(1);
                 fpu.pop();
                 fpu.pop();
-                fpu.setResult(compute(left, right));
+                fpu.setResult(answer([left, right], compute(left, right)));
                 return 0;
             },
         };
+    }
+
+    /** double ldexp(double value, int exponent): only an overflow comes here. */
+    handlers.ldexp = returningDouble(fpu, 12, args=>{
+        const value = readDouble(args, 0);
+        return answer([value], value * Math.pow(2, args[2] | 0));
+    });
+
+    const guest = {
+        readMemory: host.readMemory,
+        writeMemory: host.writeMemory,
+        fpu,
+        ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
+    };
+
+    /** @type {Record<string, ReturnType<typeof guestEntry>>} */
+    const inTheGuest = {};
+    for (const name of [...Object.keys(handlers), 'frexp', 'modf'])
+    {
+        const code = CODE_OF[name] ?? name;
+        const source = /** @type {Record<string, Function>} */ (inGuestMath)[code];
+        const compiled = /** @type {Record<string, any>} */ (MATH_CODE)[code];
+        if (source && compiled)
+        {
+            inTheGuest[name] = guestEntry(source, compiled, guest, handlers[name]);
+        }
     }
 
     /**
@@ -130,9 +195,10 @@ export function createMathFunctions(host){
         ? guestEntry(inGuest._ftol, COMPILED._ftol, host) : guestExport(COMPILED._ftol);
 
     return {
-        ...table,
+        ...handlers,
+        ...inTheGuest,
 
-        /** double floor(double x) -- in the guest; `_CIfloor` beside it stays a handler */
+        /** double floor(double x) -- in the guest */
         floor: guestEntry(inGuest.floor, COMPILED.floor, host),
 
         /** double ceil(double x) -- in the guest */
@@ -144,57 +210,5 @@ export function createMathFunctions(host){
         _ftol: ftol,
         _ftol2: ftol,
         _ftol2_sse: ftol,
-
-        /** double ldexp(double value, int exponent) */
-        ldexp: returningDouble(fpu, 12,
-            args=>readDouble(args, 0) * Math.pow(2, args[2] | 0)),
-
-        /**
-         * double frexp(double value, int *exponent)
-         *
-         * Splits into a mantissa in [0.5, 1) and a power of two. Zero is the
-         * case that has no such mantissa, and C answers it with both halves
-         * zero rather than with a special value.
-         */
-        frexp: returningDouble(fpu, 12, args=>{
-            const value = readDouble(args, 0);
-            if (value === 0 || !Number.isFinite(value))
-            {
-                host.writeMemory(args[2], new Uint8Array(4));
-                return value;
-            }
-            const exponent = Math.ceil(Math.log2(Math.abs(value)));
-            let mantissa = value / Math.pow(2, exponent);
-            let power = exponent;
-            // log2 is inexact at the boundaries; nudge until the mantissa is in
-            // range rather than trusting it to land there.
-            while (Math.abs(mantissa) >= 1)
-            {
-                mantissa /= 2;
-                power++;
-            }
-            while (Math.abs(mantissa) < 0.5)
-            {
-                mantissa *= 2;
-                power--;
-            }
-            const bytes = new Uint8Array(4);
-            new DataView(bytes.buffer).setInt32(0, power, true);
-            host.writeMemory(args[2], bytes);
-            return mantissa;
-        }),
-
-        /**
-         * double modf(double value, double *integerPart)
-         *
-         * Both halves keep the sign of the original, which is what makes
-         * modf(-1.5) answer -0.5 and -1 rather than -0.5 and -2.
-         */
-        modf: returningDouble(fpu, 12, args=>{
-            const value = readDouble(args, 0);
-            const whole = Math.trunc(value);
-            host.writeMemory(args[2], doubleBytes(whole));
-            return value - whole;
-        }),
     };
 }

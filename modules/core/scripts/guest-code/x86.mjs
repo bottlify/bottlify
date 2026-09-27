@@ -87,8 +87,10 @@ export function memory(reg, { base, index, scale = 1, disp = 0 }){
  * @typedef {{ kind: 'bytes', bytes: number[] }
  *     | { kind: 'label', name: string }
  *     | { kind: 'jump', cc: number, to: string, long: boolean }
+ *     | { kind: 'call', to: string }
  *     | { kind: 'ref', table: string, addend: number }} Item
- *   jump: cc -1 is `jmp`; ref: four bytes, the table's offset less `picBase`'s, plus the addend
+ *   jump: cc -1 is `jmp`; call: `call rel32` to a label; ref: four bytes, the table's offset
+ *   less `picBase`'s, plus the addend
  */
 
 /**
@@ -135,6 +137,12 @@ export class Assembler {
     /** `jcc`, or `jmp` for a cc of -1. @param {number} cc @param {string} to */
     jump(cc, to){
         this.items.push({ kind: 'jump', cc, to, long: false });
+        return this;
+    }
+
+    /** `call rel32` to a label of this code. @param {string} to */
+    call(to){
+        this.items.push({ kind: 'call', to });
         return this;
     }
 
@@ -228,6 +236,15 @@ export class Assembler {
                     : item.long ? [0x0f, 0x80 | item.cc] : [0x70 | item.cc];
                 out.set([...head, ...item.long ? le32(rel) : [rel & 0xff]], offset);
             }
+            else if (item.kind === 'call')
+            {
+                const target = at.get(item.to);
+                if (target === undefined)
+                {
+                    throw new Error(`x86: no label ${item.to}`);
+                }
+                out.set([0xe8, ...le32(target - (offset + 5))], offset);
+            }
             else if (item.kind === 'ref')
             {
                 const table = placed.get(item.table);
@@ -259,6 +276,8 @@ function sizeOf(item){
             return 0;
         case 'ref':
             return 4;
+        case 'call':
+            return 5;
         default:
             if (!item.long)
             {

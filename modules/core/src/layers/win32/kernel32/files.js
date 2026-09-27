@@ -29,7 +29,7 @@
  */
 
 import { HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR } from './console.js';
-import { msToFileTime } from './filetime.js';
+import { fileAttributes, msToFileTime } from './filetime.js';
 import { decodeAnsi, encodeAnsi } from './locale.js';
 
 /** Codes this surface reports through the last-error slot. */
@@ -38,8 +38,11 @@ const ERROR_INVALID_FUNCTION = 1;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_ACCESS_DENIED = 5;
+/** CreateFile's dwShareMode bit that lets another handle write the file too. */
+const FILE_SHARE_WRITE = 0x2;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NO_MORE_FILES = 18;
+const ERROR_WRITE_PROTECT = 19;
 const ERROR_FILE_EXISTS = 80;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NEGATIVE_SEEK = 131;
@@ -84,13 +87,10 @@ const FILE_CURRENT = 1;
 const FILE_END = 2;
 
 /**
- * The attributes we can answer for. We keep no attribute bits of our own, so a
- * file is reported as an ordinary archived one and a directory as a directory;
- * SetFileAttributes accepts what it is told and stores nothing, because nothing
- * below enforces read-only or hidden anyway.
+ * The attributes answered are `fileAttributes`'s. SetFileAttributes accepts
+ * what it is told and stores nothing, because nothing below enforces read-only
+ * or hidden on a writable volume anyway.
  */
-const FILE_ATTRIBUTE_DIRECTORY = 0x10;
-const FILE_ATTRIBUTE_ARCHIVE = 0x20;
 
 /** The ANSI path limit, and the size of cFileName with it. */
 const MAX_PATH = 260;
@@ -174,6 +174,8 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {boolean} isDirectory
  * @property {number} size
  * @property {number} [modified]  Milliseconds since the epoch; absent means unknown.
+ * @property {boolean} [readOnly]  On read-only media.
+ * @property {boolean} [hidden]
  */
 
 /**
@@ -182,6 +184,8 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {boolean} isDirectory
  * @property {number} size
  * @property {number} [modified]  Milliseconds since the epoch; absent means unknown.
+ * @property {boolean} [readOnly]
+ * @property {boolean} [hidden]
  */
 
 /**
@@ -191,6 +195,7 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {boolean} [create]        Make the file when it is not there.
  * @property {boolean} [truncate]      Discard whatever it already holds.
  * @property {boolean} [failIfExists]  Refuse rather than open an existing file.
+ * @property {boolean} [shareWrite]    Another handle may write the file while this one is open.
  */
 
 /**
@@ -213,6 +218,8 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {(path: string, pattern: string) => DirectoryEntry[]} list
  * @property {() => string} currentDirectory
  * @property {(path: string) => void} setCurrentDirectory
+ * @property {(path: string) => boolean} [writeProtected]
+ *           Whether the path is on read-only media, a disc.
  */
 
 /**
@@ -530,8 +537,21 @@ export function createFileFunctions(host){
     const sizeOf = file=>files.stat(file.path)?.size ?? 0;
 
     /** @param {DirectoryEntry | FileStat} entry */
-    const attributesOf = entry=>
-        entry.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_ARCHIVE;
+    const attributesOf = entry=>fileAttributes(entry);
+
+    /**
+     * Whether a change aimed at `path` lands on read-only media. A disc refuses
+     * every write, create and delete as the device, before any name on it is
+     * looked at, and says so with its own code rather than as a denied access:
+     * an installer told the media is write-protected knows it is looking at
+     * the disc it was started from.
+     *
+     * @param {string} path
+     */
+    const onReadOnlyMedia = path=>files.writeProtected?.(path) === true;
+
+    /** The refusal of a change to `path`, when the volume did not make it. @param {string} path */
+    const denied = path=>onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT : ERROR_ACCESS_DENIED;
 
     /**
      * Fills in a whole WIN32_FIND_DATAA. Written in one piece so that no field
@@ -721,7 +741,7 @@ export function createFileFunctions(host){
         {
             return fail(ERROR_ACCESS_DENIED);
         }
-        return files.remove(path) ? 1 : fail(ERROR_ACCESS_DENIED);
+        return files.remove(path) ? 1 : fail(denied(path));
     });
 
     /**
@@ -742,10 +762,13 @@ export function createFileFunctions(host){
             }
             if (!files.remove(destination))
             {
-                return fail(ERROR_ACCESS_DENIED);
+                return fail(denied(destination));
             }
         }
-        return files.rename(source, destination) ? 1 : fail(ERROR_ACCESS_DENIED);
+        // A move off a disc has to delete what it moved, so the disc refuses
+        // it as surely as a move onto one.
+        return files.rename(source, destination)
+            ? 1 : fail(denied(onReadOnlyMedia(source) ? source : destination));
     };
 
     /**
@@ -832,7 +855,8 @@ export function createFileFunctions(host){
         }
         // Only one level at a time, as Windows does: a missing parent is a
         // failure, not something to create on the way past.
-        return files.mkdir(path) ? 1 : fail(ERROR_PATH_NOT_FOUND);
+        return files.mkdir(path)
+            ? 1 : fail(onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT : ERROR_PATH_NOT_FOUND);
     });
 
     const removeDirectory = bothForms(4, ([name], text)=>{
@@ -846,7 +870,8 @@ export function createFileFunctions(host){
         {
             return fail(ERROR_DIRECTORY);
         }
-        return files.remove(path) ? 1 : fail(ERROR_DIR_NOT_EMPTY);
+        return files.remove(path)
+            ? 1 : fail(onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT : ERROR_DIR_NOT_EMPTY);
     });
 
     const getFileAttributes = bothForms(4, ([name], text)=>{
@@ -861,7 +886,11 @@ export function createFileFunctions(host){
 
     const setFileAttributes = bothForms(8, ([name], text)=>{
         const path = text.path(name);
-        return files.stat(path)?.exists ? 1 : fail(missing(path));
+        if (!files.stat(path)?.exists)
+        {
+            return fail(missing(path));
+        }
+        return onReadOnlyMedia(path) ? fail(ERROR_WRITE_PROTECT) : 1;
     });
 
     const setCurrentDirectory = bothForms(4, ([name], text)=>{
@@ -967,12 +996,13 @@ export function createFileFunctions(host){
 
     /**
      * CreateFile, in terms of a resolved path, so both spellings open the same
-     * file. Sharing, security and the template are accepted and ignored: there
-     * is one process, no security descriptor to check against, and no attribute
-     * of a template file we could copy. A request Windows would refuse for want
-     * of a share mode succeeds here.
+     * file. Security and the template are accepted and ignored: there is no
+     * security descriptor to check against, and no attribute of a template file
+     * we could copy. FILE_SHARE_WRITE is honoured, so a second writer the first
+     * open agreed to share with gets in; reading is always shared, so an open
+     * Windows would refuse for want of FILE_SHARE_READ still succeeds here.
      */
-    const createFile = bothForms(28, ([name, access, , , disposition], text)=>{
+    const createFile = bothForms(28, ([name, access, share, , disposition], text)=>{
         const path = text.path(name);
         const mode = openModes[disposition >>> 0];
         if (!mode)
@@ -985,6 +1015,10 @@ export function createFileFunctions(host){
         if (disposition === TRUNCATE_EXISTING && !write)
         {
             return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+        }
+        if (write && onReadOnlyMedia(path))
+        {
+            return fail(ERROR_WRITE_PROTECT, INVALID_HANDLE_VALUE);
         }
 
         const existing = files.stat(path);
@@ -1005,11 +1039,13 @@ export function createFileFunctions(host){
             return fail(missing(path), INVALID_HANDLE_VALUE);
         }
 
-        const node = files.open(path, { read, write, ...mode });
+        const node = files.open(path, {
+            read, write, ...mode, shareWrite: ((share >>> 0) & FILE_SHARE_WRITE) !== 0,
+        });
         if (!node)
         {
-            return fail(exists ? ERROR_ACCESS_DENIED : missing(path),
-                INVALID_HANDLE_VALUE);
+            return fail(onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT
+                : exists ? ERROR_ACCESS_DENIED : missing(path), INVALID_HANDLE_VALUE);
         }
 
         // A program reads the error after a *successful* CreateFile:
@@ -1513,7 +1549,8 @@ export function createFileFunctions(host){
                 if (!output)
                 {
                     files.close(input);
-                    return fail(missing(destination));
+                    return fail(onReadOnlyMedia(destination)
+                        ? ERROR_WRITE_PROTECT : missing(destination));
                 }
                 // A chunk at a time: the files a game copies are the ones it
                 // shipped, and holding one of those whole is a copy that works
@@ -1771,7 +1808,7 @@ export function createFileFunctions(host){
                     {
                         return fail(missing(path), HFILE_ERROR);
                     }
-                    return files.remove(path) ? 1 : fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
+                    return files.remove(path) ? 1 : fail(denied(path), HFILE_ERROR);
                 }
 
                 const write = (flags & (OF_WRITE | OF_READWRITE)) !== 0;
@@ -1784,7 +1821,7 @@ export function createFileFunctions(host){
                     { read: !write, write, create, truncate: create });
                 if (!node)
                 {
-                    return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
+                    return fail(denied(path), HFILE_ERROR);
                 }
                 host.setLastError(ERROR_SUCCESS);
                 return host.handles.open('file',
@@ -1826,7 +1863,7 @@ export function createFileFunctions(host){
                 const node = files.open(path, { read: true, write, create: false });
                 if (!node)
                 {
-                    return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
+                    return fail(denied(path), HFILE_ERROR);
                 }
                 host.setLastError(ERROR_SUCCESS);
                 return host.handles.open('file', { path, node, read: true, write, position: 0 });
@@ -1850,7 +1887,7 @@ export function createFileFunctions(host){
                     { read: true, write: true, create: true, truncate: true });
                 if (!node)
                 {
-                    return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
+                    return fail(denied(path), HFILE_ERROR);
                 }
                 host.setLastError(ERROR_SUCCESS);
                 return host.handles.open('file',

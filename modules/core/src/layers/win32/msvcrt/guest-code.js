@@ -24,6 +24,7 @@
 /** @typedef {number} i32  A signed 32-bit stack slot, or EAX. */
 /** @typedef {number} u32  An unsigned 32-bit stack slot, or EAX. */
 /** @typedef {number} f64  A double: two stack slots, or ST0 as a result. */
+/** @typedef {number} f32  A float: one stack slot, or ST0 as a result. */
 /** @typedef {number} x87  A double the caller left on the x87 stack, which the callee pops. */
 /** @typedef {number} i64  A result in EDX:EAX. */
 
@@ -32,18 +33,20 @@
  *
  * @typedef {Object} CompiledGuestCode
  * @property {'cdecl' | 'stdcall'} convention
- * @property {readonly ('i32' | 'u32' | 'f64' | 'x87')[]} params
- * @property {'i32' | 'u32' | 'f64' | 'i64' | 'void'} returns
+ * @property {readonly ('i32' | 'u32' | 'f64' | 'f32' | 'x87')[]} params
+ * @property {'i32' | 'u32' | 'f64' | 'f32' | 'i64' | 'void'} returns
  * @property {readonly string[]} uses   The guest's helpers the source takes.
  * @property {Uint8Array} code
- * @property {number} [host]  Where the displacement of the jump to the host's
- *     handler is, in a function that hands some calls to it (`return host()`).
+ * @property {number} [host]  Where the jump to the trap into the host's handler
+ *     takes its target, in a function that hands some calls to it (`return
+ *     host()`): a `jmp rel32`'s displacement (the byte before 0xe9), or the
+ *     address a `jmp eax` goes to (0xb8, `mov eax`).
  */
 
 /**
  * What the binding hands a `code` export: the means to register the trap its
  * code jumps to, a trap into the host answering as the export, and to have
- * the jump's displacement filled in where the code lands.
+ * a direct jump's displacement filled in where the code lands.
  *
  * @typedef {Object} CodeBuilder
  * @property {(trap: { convention: string, argBytes: number, handler: Function }) => number}
@@ -78,6 +81,8 @@
  * @property {(address: number, value: number) => void} setU8
  * @property {(address: number, value: number) => void} setU16
  * @property {(address: number, value: number) => void} setU32
+ * @property {(address: number, value: number) => void} setF32
+ *     Rounded to the nearest float, as `fstp dword` stores it.
  * @property {(address: number, value: number) => void} setF64
  * @property {(destination: number, source: number, count: number) => void} copyUp
  *     Byte by byte from the first, as `rep movsb` copies: a destination just
@@ -137,6 +142,7 @@ export function guestMemory(host){
         setU8,
         setU16: (address, value)=>write(address, 2, v=>v.setUint16(0, value, true)),
         setU32: (address, value)=>write(address, 4, v=>v.setUint32(0, value, true)),
+        setF32: (address, value)=>write(address, 4, v=>v.setFloat32(0, value, true)),
         setF64: (address, value)=>write(address, 8, v=>v.setFloat64(0, value, true)),
         copyUp: (destination, source, count)=>{
             const length = count >>> 0;
@@ -192,7 +198,7 @@ export function guestMemory(host){
  * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  * @property {(address: number, value: number, length: number) => void} [fillMemory]
  * @property {import('./float.js').FloatHost} [fpu]
- *     Where an f64 result goes and an x87 argument comes from.
+ *     Where a double's result goes and an x87 argument comes from.
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *     Where an i64 result's high half goes.
  * @property {(fn: number, args: number[]) => number} [call]
@@ -230,8 +236,16 @@ export function guestExport(compiled, fallback){
             throw new Error('guest code: a function that hands calls to the host is bound with '
                 + 'a builder to register its trap');
         }
-        builder.jump(host, builder.register({ convention, argBytes, handler: fallback.handler }));
-        return compiled.code;
+        const trap = builder.register({ convention, argBytes, handler: fallback.handler });
+        if (compiled.code[host - 1] !== MOV_EAX)
+        {
+            builder.jump(host, trap);
+            return compiled.code;
+        }
+        // The address itself, which no placement moves: the trap's stub is the bridge's.
+        const bytes = compiled.code.slice();
+        new DataView(bytes.buffer).setUint32(host, trap >>> 0, true);
+        return bytes;
     };
     return { convention, argBytes, code };
 }
@@ -280,11 +294,16 @@ export function guestEntry(source, compiled, host, fallback){
             }
             else if (type === 'f64')
             {
-                const bits = new DataView(new ArrayBuffer(8));
-                bits.setUint32(0, args[slot] >>> 0, true);
-                bits.setUint32(4, args[slot + 1] >>> 0, true);
-                values.push(bits.getFloat64(0, true));
+                SCRATCH.setUint32(0, args[slot] >>> 0, true);
+                SCRATCH.setUint32(4, args[slot + 1] >>> 0, true);
+                values.push(SCRATCH.getFloat64(0, true));
                 slot += 2;
+            }
+            else if (type === 'f32')
+            {
+                SCRATCH.setUint32(0, args[slot] >>> 0, true);
+                values.push(SCRATCH.getFloat32(0, true));
+                slot++;
             }
             else
             {
@@ -292,17 +311,28 @@ export function guestEntry(source, compiled, host, fallback){
                 slot++;
             }
         }
+        // A call handed over is the handler's whole, the x87 arguments and
+        // the result among it: they are popped only for one answered here.
+        let handed = false;
+        /** @type {Guest | null} */
+        const helpers = handsOver && guest && fallback
+            ? { ...guest, host: ()=>{
+                handed = true;
+                return fallback.handler(args);
+            } } : guest;
+        const result = helpers === null ? source(...values) : source(helpers, ...values);
+        if (handed)
+        {
+            return result;
+        }
         for (let i = 0; i < onStack; i++)
         {
             /** @type {import('./float.js').FloatHost} */ (host.fpu).pop();
         }
-        /** @type {Guest | null} */
-        const helpers = handsOver && guest && fallback
-            ? { ...guest, host: ()=>fallback.handler(args) } : guest;
-        const result = helpers === null ? source(...values) : source(helpers, ...values);
         switch (returns)
         {
             case 'f64':
+            case 'f32':
                 /** @type {import('./float.js').FloatHost} */ (host.fpu).setResult(result);
                 return 0;
             case 'i64':
@@ -320,6 +350,12 @@ export function guestEntry(source, compiled, host, fallback){
     };
     return { ...guestExport(compiled, fallback), handler };
 }
+
+/** `mov eax, imm32`: a hand-over that jumps through EAX to the trap's address. */
+const MOV_EAX = 0xb8;
+
+/** Where a double's or a float's argument slots are put together. */
+const SCRATCH = new DataView(new ArrayBuffer(8));
 
 /**
  * An i64 result as the x86 makes it: an integer as it is, a double truncated

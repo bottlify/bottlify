@@ -1292,11 +1292,13 @@ function enumerating(){
 test('EnumDisplayModes names every mode at every depth, and stops when told', async()=>{
     const h = enumerating();
     assert.equal(await h.ddraw('EnumDisplayModes', [0, 0, 0x77, 0x1234]), DD_OK);
-    // The table has four sizes; the 16x16 screen is not one of them, so five.
-    assert.equal(h.calls.length, 5 * 3);
-    assert.deepEqual(h.calls[0].desc, { width: 640, height: 480, bitCount: 8, caps: 0 });
-    assert.deepEqual(h.calls[5].desc, { width: 800, height: 600, bitCount: 32, caps: 0 });
-    assert.deepEqual(h.calls[14].desc, { width: 16, height: 16, bitCount: 32, caps: 0 });
+    // The sizes user32 and Direct3D list (display.js), and the 16x16 screen,
+    // which is not one of them, first because it is the smallest.
+    assert.equal(h.calls.length, (26 + 1) * 3);
+    assert.deepEqual(h.calls[0].desc, { width: 16, height: 16, bitCount: 8, caps: 0 });
+    assert.deepEqual(h.calls[5].desc, { width: 640, height: 480, bitCount: 32, caps: 0 });
+    assert.deepEqual(h.calls[3 * 4 + 2].desc, { width: 1152, height: 864, bitCount: 32, caps: 0 },
+        'the 4:3 ladder a driver of the era lists, not only three of it');
     assert.equal(h.calls[0].entry, 0x1234);
     assert.equal(h.calls[0].args[1], 0x77, 'the context travels');
     assert.equal(h.ddraw('EnumDisplayModes', [0, 0, 0, 0]), DDERR_INVALIDPARAMS, 'no callback');

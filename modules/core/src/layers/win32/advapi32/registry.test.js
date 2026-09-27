@@ -94,6 +94,13 @@ test('the keys every machine carries are there before any program writes', ()=>{
     assert.deepEqual(mhz && [...mhz.data], [0xe8, 0x03, 0, 0],
         '1000 MHz, the rate rdtsc advances at');
     assert.ok(processor && hive.getValue(processor, 'VendorIdentifier'));
+    // A COM server registering itself opens the class root's CLSID without
+    // creating it, and gives up when it is not there.
+    const classes = /** @type {any} */ (hive.root(HKEY_CLASSES_ROOT));
+    for (const name of ['CLSID', 'Interface', 'TypeLib', 'AppID'])
+    {
+        assert.ok(hive.open(classes, name), name);
+    }
 
     // A restore keeps what a program wrote and puts back what it deleted.
     hive.remove(local, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs');

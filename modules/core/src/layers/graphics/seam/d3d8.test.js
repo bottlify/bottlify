@@ -425,10 +425,10 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     const ask = (name, args)=>h.box.call(root, slot(IDIRECT3D8_SLOTS, name), args);
 
     assert.equal(ask('GetAdapterCount', []), 1);
-    // Every size of the era whatever the display, in 32-bit colour only:
-    // five modes, and a program builds its menu from them.
+    // Every size of the era whatever the display, at both rates, in 32-bit
+    // colour and then 16-bit, and a program builds its menu from them.
     const count = ask('GetAdapterModeCount', [0]);
-    assert.equal(count, 38);
+    assert.equal(count, 26 * 2 * 2);
 
     const mode = 0x1200;
     const seen = [];
@@ -440,12 +440,16 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
             h.fields.readU32(mode + D3DDISPLAYMODE.RefreshRate)}/${
             h.fields.readU32(mode + D3DDISPLAYMODE.Format)}`);
     }
-    assert.deepEqual(seen,
-        ['640x480', '800x600', '1024x768', '1280x720', '1280x800', '1280x832', '1440x900',
-            '1512x982', '1600x900', '1680x1050', '1728x1117', '1920x1080', '1920x1200',
-            '2560x1440', '2560x1600', '2560x1664', '2880x1800', '3024x1964', '3456x2234']
-            .flatMap(size=>[`${size}@60/22`, `${size}@120/22`]),
-        'every size at both rates, 32-bit, smallest first');
+    const sizes = [
+        '640x480', '800x600', '1024x768', '1152x864', '1280x720', '1280x800',
+        '1280x832', '1280x960', '1280x1024', '1400x1050', '1440x900', '1512x982',
+        '1600x900', '1600x1200', '1680x1050', '1728x1117', '1920x1080', '1920x1200',
+        '1920x1440', '2048x1536', '2560x1440', '2560x1600', '2560x1664', '2880x1800',
+        '3024x1964', '3456x2234',
+    ];
+    assert.deepEqual(seen, [22, 23].flatMap(format=>
+        sizes.flatMap(size=>[`${size}@60/${format}`, `${size}@120/${format}`])),
+    'every size at both rates, smallest first, every 32-bit mode before the first 16-bit one');
     assert.equal(ask('EnumAdapterModes', [0, count, mode]), D3DERR_INVALIDCALL,
         'and the index past the end is refused, so a walk ends');
 

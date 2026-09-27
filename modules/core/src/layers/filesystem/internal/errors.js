@@ -29,6 +29,8 @@ export const ErrorCode = {
     IS_A_DIRECTORY: 'IS_A_DIRECTORY',
     DIRECTORY_NOT_EMPTY: 'DIRECTORY_NOT_EMPTY',
     ACCESS_DENIED: 'ACCESS_DENIED',
+    /** The drive is read-only media: nothing on it can be written, made or removed. */
+    WRITE_PROTECTED: 'WRITE_PROTECTED',
     /** Another handle on the same file does not permit this access. */
     SHARING_VIOLATION: 'SHARING_VIOLATION',
     /** The path names a reserved device; the caller above answers it. */

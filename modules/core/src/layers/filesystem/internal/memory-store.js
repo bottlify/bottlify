@@ -30,6 +30,8 @@ import { ErrorCode, fsError } from './errors.js';
  * @property {string} path        Backslash-separated, relative to the mount root.
  * @property {boolean} directory
  * @property {number} size
+ * @property {number} [modified]  Milliseconds since the epoch, where the store records it.
+ * @property {boolean} [hidden]   Where the store records it: a disc's existence bit.
  */
 
 /**

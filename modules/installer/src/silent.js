@@ -445,7 +445,7 @@ export function silentOptions(media, choice = {}){
     const learned = choice;
     const beside = (media.files ?? []).map(file=>file.name);
     const family = detectFamily(media.bytes, beside);
-    const image = `${MEDIA_DIRECTORY}\\${media.name}`;
+    const image = media.path ?? `${MEDIA_DIRECTORY}\\${media.name}`;
     switch (family){
         case 'wise': {
             const values = `${MEDIA_DIRECTORY}\\bottlify-wise.txt`;

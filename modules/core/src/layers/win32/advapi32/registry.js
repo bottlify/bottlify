@@ -361,6 +361,11 @@ const machineKeys = windows=>{
     const windowsKey = 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion';
     return Object.freeze(/** @type {MachineKey[]} */ ([
         { root: HKEY_LOCAL_MACHINE, path: MACHINE_CLASSES },
+        // The class root's own subtrees, there on every machine before any server
+        // registers: a COM server registering itself opens CLSID, and one that
+        // finds it missing takes the registry for broken and gives up.
+        ...['CLSID', 'Interface', 'TypeLib', 'AppID'].map(name=>
+            ({ root: HKEY_LOCAL_MACHINE, path: `${MACHINE_CLASSES}\\${name}` })),
         { root: HKEY_LOCAL_MACHINE, path: windowsKey, values: {
             ProgramFilesDir: folders.ProgramFiles,
             ProgramFilesPath: folders.ProgramFiles,

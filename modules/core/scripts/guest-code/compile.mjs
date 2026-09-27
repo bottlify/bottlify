@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-/**
+/*
  * Compiles the functions a module marks `@guestCode` from JavaScript into
  * i386 code the guest runs itself: a runtime function that is pure -- no
  * state, no call into the host -- costs an instruction sequence in the
@@ -27,6 +27,7 @@
  *
  *   i32, u32  a 32-bit stack slot, signed or unsigned; EAX as a result
  *   f64       a double: two stack slots; ST0 as a result
+ *   f32       a float: one stack slot; ST0 as a result, a value a float holds
  *   x87       a double the caller left on the x87 stack (the last such
  *             parameter in ST0), which the function pops, as `_ftol` does
  *   i64       a result in EDX:EAX: a double truncated toward zero (NaN and
@@ -37,7 +38,8 @@
  * A function that touches guest memory or calls a guest function takes the
  * helpers it uses from its first parameter, destructured: `{ u8, setU8 }`.
  * The loads are u8, i8, u16, i16, u32, i32, f32 and f64 (address); the
- * stores setU8, setU16, setU32 and setF64 (address, value); `call(fn, ...)`
+ * stores setU8, setU16, setU32, setF32 and setF64 (address, value), a
+ * float stored rounded to nearest as `fstp dword` stores it; `call(fn, ...)`
  * calls a cdecl function pointer and answers its EAX as an i32; `copyUp`,
  * `copyDown` (dst, src, count) copy bytes ascending or descending, and
  * `fill` (dst, byte, count) sets them -- `rep movsd` and `rep stosd` for the
@@ -46,12 +48,15 @@
  * `return host()` hands the call to the host's handler of the same function
  * with the arguments it came with, for a case the function leaves to it --
  * errno to set, a base it does not take: the frame is taken down and the code
- * jumps to the handler's trap -- a `jmp rel32` whose displacement, at the
- * offset `host` names, the loader fills in where it places the code -- so the
- * handler finds the stack, EBX, ESI, EDI and EBP as the caller left them.
- * Nothing the function wrote before is undone: it goes to the host before it
- * writes. A function with an x87 parameter, which it has popped by then, has
- * no such return.
+ * jumps to the handler's trap -- a `jmp rel32`, or `mov eax, trap; jmp eax`
+ * in a function with x87 instructions, the four bytes at the offset `host`
+ * names filled in when the export is bound -- so the handler finds the
+ * stack, EBX, ESI, EDI and EBP as the caller left them.
+ * A parameter such a function assigns is a variable of its own, copied from
+ * the argument at entry, so the arguments are still the call's own. Nothing
+ * the function wrote before is undone: it goes to the host before it writes.
+ * A function with x87 parameters pushes them back as it goes, so the
+ * handler finds the x87 stack as the call left it too.
  *
  * Integers are typed as asm.js types them: `|0`, `>>>0` and the bitwise
  * operators bring a value back to 32 bits; `+` and `-` leave a sum that may
@@ -60,18 +65,43 @@
  * result takes it only once it is brought back. A comparison is of two
  * signed or two unsigned values, never one of each; a byte, a 16-bit table
  * entry or a constant below 2^31 compares either way. `*` multiplies by a
- * constant; anything else is `Math.imul`. There is no division.
+ * constant; anything else is `Math.imul`. There is no integer division: `/`
+ * of two integers is a double.
  *
  * `++`, `--`, `+=` and `-=` on an integer variable are 32-bit arithmetic:
  * for a counter bounded by a comparison, and a pointer, that is exactly what
  * JavaScript computes; a value that may wrap is written `x = (x + y) | 0`.
  *
- * Doubles are loaded, stored, compared, rounded to an integral double by
- * `Math.floor`, `Math.ceil` and `Math.trunc` (the x87's rounding control set
- * around `frndint` and put back, its precision control never touched) and
- * returned; integers become doubles exactly, by `+x` or where a double is
- * wanted. There is no double arithmetic: under a program's single-precision
- * control word the x87 would not compute what JavaScript does.
+ * Doubles are the x87's: `+`, `-`, `*`, `/` and unary `-` are its
+ * instructions, `%` its partial remainder until it is whole (JavaScript's
+ * exact remainder), `Math.sqrt` `fsqrt`, `Math.sin`, `Math.cos` and
+ * `Math.tan` `fsin`, `fcos` and `fptan` (for an argument below 2^63 in
+ * magnitude, which the source keeps it to, as it keeps a table's index in
+ * range: past it the instruction leaves the argument), `Math.atan2` and
+ * `Math.atan` `fpatan`, `Math.log2` `fyl2x` of 1, `Math.abs` `fabs`,
+ * `Math.floor`, `Math.ceil` and `Math.trunc` `frndint` under the rounding
+ * control they name, `Math.fround` a store to a float and back, and
+ * `Number.isNaN` a condition, a double compared with itself. Under
+ * a double-precision control word each answers what JavaScript does, as
+ * the engines compute the x87 in doubles and its transcendentals through
+ * the host's `Math`; under the control word the program set, each rounds as
+ * the x87 does -- the arithmetic and the square root to its precision
+ * control -- which is how the runtime the program links computes: the
+ * compiled code never changes the precision control, and changes the
+ * rounding control only around the `frndint` that names one. `Math.exp`,
+ * `Math.log`, `Math.log10` and `Math.pow` are no one instruction, and are
+ * refused: the x87's sequence for each is not JavaScript's to the last bit
+ * under an engine's f64 x87 -- a source writes it with the instructions it
+ * is made of, through `X87` (`x87.js`: `X87.f2xm1`, `X87.yl2x`,
+ * `X87.scale`, `X87.rint`, `X87.exponent`, `X87.significand` and the
+ * constants `fldl2e` and its kin load), whose JavaScript is what the
+ * engines compute for each. A constant other than 0 and 1 is read from a
+ * table after the code, or pushed when the function has one or two.
+ * Integers become doubles exactly, by `+x` or where a double is wanted, and
+ * a double becomes an integer by `| 0` or `>>> 0`, JavaScript's modulo 2^32
+ * (`fisttp`, and `fprem` by 2^32 past its range). A float is a double a
+ * float holds: an `f32` parameter, `f32()`'s load, `Math.fround`'s answer,
+ * or a variable given one.
  *
  * Integer variables and parameters live in registers where they pay: the
  * function is compiled twice, the first time to count each variable's uses
@@ -88,7 +118,9 @@
  * the registers saved above it are what a second compilation found, and a
  * third emits the code. The one x87 parameter of a function that reads it
  * once, before anything else touches the x87 stack or jumps, stays where the
- * caller left it, in ST0, until that read.
+ * caller left it, in ST0, until that read. Doubles and floats live in the
+ * frame; an operand there, read through registers alone, or in the table
+ * of constants is the arithmetic instruction's memory operand.
  *
  * A module-level constant is folded in. A module-level `Uint8Array`,
  * `Int8Array`, `Uint16Array`, `Int16Array`, `Uint32Array` or `Int32Array`
@@ -104,14 +136,15 @@ import {
 } from './x86.mjs';
 
 /**
- * @typedef {'i32' | 'u32' | 'nat' | 'intish' | 'f64'} Type
+ * @typedef {'i32' | 'u32' | 'nat' | 'intish' | 'f64' | 'f32'} Type
  *   nat: an integer the source can see only in [0, 2^31) -- a byte, a 16-bit
  *   table entry, a small constant -- which compares as signed or unsigned
- *   alike; intish: a sum not yet brought back to 32 bits
+ *   alike; intish: a sum not yet brought back to 32 bits; f32: a double a
+ *   float holds exactly
  */
 
-/** @typedef {'i32' | 'u32' | 'f64' | 'x87'} ParamType */
-/** @typedef {'i32' | 'u32' | 'f64' | 'i64' | 'void'} ReturnType */
+/** @typedef {'i32' | 'u32' | 'f64' | 'f32' | 'x87'} ParamType */
+/** @typedef {'i32' | 'u32' | 'f64' | 'f32' | 'i64' | 'void'} ReturnType */
 
 /**
  * @typedef {Object} CompiledFunction
@@ -121,14 +154,17 @@ import {
  * @property {ReturnType} returns
  * @property {string[]} uses        The helpers the first parameter takes, in order.
  * @property {Uint8Array} code
- * @property {number} [host]        Where in the code the displacement of the jump
- *                                  to the host's handler is, when it returns host().
+ * @property {number} [host]        Where in the code the jump to the host's handler's
+ *                                  trap takes its target, when it returns host():
+ *                                  a `jmp rel32`'s displacement, or the address
+ *                                  `mov eax` loads for a `jmp eax`, as the byte
+ *                                  before says (0xe9 or 0xb8).
  */
 
 /**
  * @typedef {Object} Variable
  * @property {string} name
- * @property {'i32' | 'u32' | 'nat' | 'f64'} type
+ * @property {'i32' | 'u32' | 'nat' | 'f64' | 'f32'} type
  * @property {number} disp     From EBP, for one in the frame.
  * @property {number} [reg]    The register it lives in instead.
  * @property {boolean} mutable
@@ -142,6 +178,9 @@ import {
  * @typedef {Object} Plan
  * @property {Map<any, number>} registers  Each variable given one, by the node declaring it.
  * @property {boolean} keepX87             The x87 parameter stays in ST0 until it is read.
+ * @property {Set<any>} assigned           The parameters the body assigns.
+ * @property {boolean} pool                Double constants are read from a table after
+ *                                         the code (EBX its base), not pushed.
  * @property {{ locals: number, saved: number }} [frame]
  *     The bytes of variables in the frame and the registers saved above it,
  *     once a compilation with the registers has found them.
@@ -151,7 +190,7 @@ import {
  * @typedef {{ where: 'imm', type: Type, value: number }
  *     | { where: 'var', type: Type, v: Variable }
  *     | { where: 'eax', type: Type }
- *     | { where: 'st0', type: 'f64' }} Value
+ *     | { where: 'st0', type: 'f64' | 'f32' }} Value
  *   imm and var are not yet emitted: an operand the instruction using it
  *   names directly
  */
@@ -160,7 +199,7 @@ import {
  * @typedef {Object} TableInfo
  * @property {string} name
  * @property {Uint8Array} bytes
- * @property {1 | 2 | 4} size
+ * @property {1 | 2 | 4 | 8} size
  * @property {boolean} signed
  */
 
@@ -180,17 +219,21 @@ const LOADS = /** @type {Record<string, { op: number[], type: Type }>} */ ({
     i16: { op: [0x0f, 0xbf], type: 'i32' },
     u32: { op: [0x8b], type: 'u32' },
     i32: { op: [0x8b], type: 'i32' },
-    f32: { op: [0xd9], type: 'f64' },
+    f32: { op: [0xd9], type: 'f32' },
     f64: { op: [0xdd], type: 'f64' },
 });
 
-/** The stores: the opcode, `mov [m], al/ax/eax` or `fstp qword [m]`. */
+/** The stores: the opcode, `mov [m], al/ax/eax` or `fstp dword/qword [m]`. */
 const STORES = /** @type {Record<string, number[]>} */ ({
     setU8: [0x88],
     setU16: [0x66, 0x89],
     setU32: [0x89],
+    setF32: [0xd9],
     setF64: [0xdd],
 });
+
+/** The stores of a double, whose value is popped from ST0. */
+const FLOAT_STORES = new Set(['setF32', 'setF64']);
 
 const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES),
     'call', 'copyUp', 'copyDown', 'fill', 'host']);
@@ -200,11 +243,36 @@ const TABLE_KINDS = /** @type {const} */ ([
     ['Int16Array', 2, true], ['Uint32Array', 4, false], ['Int32Array', 4, true],
 ]);
 
-const PARAM_TYPES = new Set(['i32', 'u32', 'f64', 'x87']);
-const RETURN_TYPES = new Set(['i32', 'u32', 'f64', 'i64', 'void']);
+const PARAM_TYPES = new Set(['i32', 'u32', 'f64', 'f32', 'x87']);
+const RETURN_TYPES = new Set(['i32', 'u32', 'f64', 'f32', 'i64', 'void']);
 
 /** Rounding control for Math.floor, Math.ceil and Math.trunc, in the control word's high byte. */
 const ROUNDING = /** @type {Record<string, number>} */ ({ floor: 0x04, ceil: 0x08, trunc: 0x0c });
+
+/** `Math` functions that are one x87 instruction or two: the bytes after the argument is pushed. */
+const MATH_UNARY = /** @type {Record<string, number[]>} */ ({
+    sqrt: [0xd9, 0xfa],                  // fsqrt
+    sin: [0xd9, 0xfe],                   // fsin
+    cos: [0xd9, 0xff],                   // fcos
+    tan: [0xd9, 0xf2, 0xdd, 0xd8],       // fptan; fstp st0 (the 1 it pushes)
+    atan: [0xd9, 0xe8, 0xd9, 0xf3],      // fld1; fpatan: atan2(x, 1)
+});
+
+/** The `Math` functions with no one instruction, and what a source writes instead. */
+const MATH_REFUSED = /** @type {Record<string, string>} */ ({
+    exp: 'X87.scale(X87.f2xm1(r) + 1, n), the power split at X87.rint',
+    log: 'X87.yl2x(X87.LN2, x)',
+    log10: 'X87.yl2x(X87.LG2, x)',
+    pow: 'X87.yl2x and the power of two, or leaves it to the handler',
+});
+
+/** The constants the x87 loads by name, through `X87`: the instruction's second byte. */
+const X87_CONSTANTS = /** @type {Record<string, number>} */ ({
+    L2T: 0xe9, L2E: 0xea, PI: 0xeb, LG2: 0xec, LN2: 0xed,
+});
+
+/** The name of the table of double constants placed after the code. */
+const POOL = '$f64';
 
 /** How many x87 registers an expression may hold at once. */
 const X87_DEPTH = 7;
@@ -239,6 +307,9 @@ function constType(value){
 /** Brought back to 32 bits. @param {Type} type */
 const isTyped = type=>type === 'i32' || type === 'u32' || type === 'nat';
 
+/** A double or a float. @param {string} type */
+const isFloat = type=>type === 'f64' || type === 'f32';
+
 /** The load of a table's entry: `mov`, or `movzx`/`movsx` of its width. @param {TableInfo} table */
 const tableOp = table=>(table.size === 4 ? [0x8b]
     : table.size === 2 ? [0x0f, table.signed ? 0xbf : 0xb7] : [0x0f, table.signed ? 0xbe : 0xb6]);
@@ -261,18 +332,25 @@ const tableType = table=>(table.signed ? 'i32' : table.size === 4 ? 'u32' : 'nat
  * @property {Map<string, any>} inline     name → a function node of one return
  * @property {Map<string, any>} declared   name → its declarator's init, for folding
  * @property {any[]} comments
+ * @property {string | null} x87           The name `X87` is imported under, from `x87.js`.
+ * @property {Map<any, Set<string>> | null} arithmetic
+ *     Each arithmetic node and what it was compiled as: 'rounds' for a double's
+ *     `+ - * /` and square root, which precision control rounds, 'integer' for
+ *     an integer's -- what the tests' model of the x87 is made from.
  */
 
 /**
  * Compiles every `@guestCode` function of a module.
  *
  * @param {string} text  The module's source.
- * @param {{ file: string, values?: Record<string, unknown> }} options
+ * @param {{ file: string, values?: Record<string, unknown>,
+ *     arithmetic?: Map<any, Set<string>> }} options
  *     file: named in errors; values: the module's exports as importing it
- *     gives them, where a table's contents come from
+ *     gives them, where a table's contents come from; arithmetic: where each
+ *     arithmetic node is noted (`ModuleScope`), for the tests' model
  * @returns {CompiledFunction[]}
  */
-export function compileModule(text, { file, values = {} }){
+export function compileModule(text, { file, values = {}, arithmetic }){
     /** @type {any} */
     let ast;
     try
@@ -288,7 +366,7 @@ export function compileModule(text, { file, values = {} }){
     /** @type {ModuleScope} */
     const scope = {
         file, text, constants: new Map(), tables: new Map(), inline: new Map(),
-        declared: new Map(), comments: ast.comments,
+        declared: new Map(), comments: ast.comments, x87: null, arithmetic: arithmetic ?? null,
     };
     /** @type {{ node: any, doc: string }[]} */
     const marked = [];
@@ -296,7 +374,13 @@ export function compileModule(text, { file, values = {} }){
     {
         const node = statement.type === 'ExportNamedDeclaration' && statement.declaration
             ? statement.declaration : statement;
-        if (node.type === 'VariableDeclaration' && node.kind === 'const')
+        if (node.type === 'ImportDeclaration' && /(^|\/)x87\.js$/.test(node.source.value))
+        {
+            const named = node.specifiers.find((/** @type {any} */ specifier)=>
+                specifier.type === 'ImportSpecifier' && specifier.imported.name === 'X87');
+            scope.x87 = named?.local.name ?? null;
+        }
+        else if (node.type === 'VariableDeclaration' && node.kind === 'const')
         {
             for (const declarator of node.declarations)
             {
@@ -421,6 +505,8 @@ class FunctionCompiler {
         /** @type {Set<number>} */
         this.saves = new Set();
         this.fpu = 0;
+        /** Whether the code holds an x87 instruction. */
+        this.x87Used = false;
         /** @type {{ breakTo: string, continueTo: string }[]} */
         this.loops = [];
         /** @type {Map<string, TableInfo>} */
@@ -453,6 +539,8 @@ class FunctionCompiler {
         this.acrossCalls = new Set();
         /** @type {Set<any>} The variables a byte is stored from, better in a register with one. */
         this.byteStored = new Set();
+        /** @type {Set<any>} The parameters the body assigns. */
+        this.assigned = new Set();
         /**
          * The load just emitted into EAX, while it is the last instruction:
          * what a store into a register variable can aim at the register.
@@ -469,6 +557,14 @@ class FunctionCompiler {
         this.x87ReadClean = false;
         this.x87Stored = false;
         this.x87Consumed = false;
+        /** @type {Set<any>} Every parameter, the x87's among them. */
+        this.paramKeys = new Set();
+        /** @type {number[]} The double constants of the table after the code. */
+        this.pool = [];
+        /** How many double constants the code loads, a load in a loop weighing more. */
+        this.constantLoads = 0;
+        /** @type {Map<any, Type>} Each node's type, once asked, outside an inlined body. */
+        this.types = new Map();
         for (const reg of planned?.registers.values() ?? [])
         {
             if (CALLEE_SAVED.has(reg))
@@ -505,7 +601,8 @@ class FunctionCompiler {
         const returned = /@returns?\s+\{(\w+)\}/.exec(doc)?.[1] ?? 'void';
         if (!RETURN_TYPES.has(returned))
         {
-            this.fail(node, `${name}: @returns {${returned}} is not i32, u32, f64, i64 or void`);
+            this.fail(node, `${name}: @returns {${returned}} is not i32, u32, f64, f32, i64 `
+                + 'or void');
         }
         this.returns = /** @type {ReturnType} */ (returned);
 
@@ -533,6 +630,16 @@ class FunctionCompiler {
         const x87 = [];
         /** @type {Variable[]} */
         const inRegisters = [];
+        /**
+         * The parameters copied into variables of their own at entry.
+         *
+         * @type {{ from: number, to: Variable, size: number }[]}
+         */
+        const copies = [];
+        /** @type {Variable[]} The slots the x87 parameters are popped into, first first. */
+        const x87Popped = [];
+        /** @type {{ from: Variable, to: Variable }[]} */
+        const x87Copies = [];
         let stack = 8;
         for (const param of params)
         {
@@ -543,9 +650,10 @@ class FunctionCompiler {
             const type = declared.get(param.name);
             if (type === undefined || !PARAM_TYPES.has(type))
             {
-                this.fail(param, `@param {i32 | u32 | f64 | x87} ${param.name} is wanted`);
+                this.fail(param, `@param {i32 | u32 | f64 | f32 | x87} ${param.name} is wanted`);
             }
             types.push(/** @type {ParamType} */ (type));
+            this.paramKeys.add(param);
             if (type === 'x87')
             {
                 /** @type {Variable} */
@@ -553,19 +661,43 @@ class FunctionCompiler {
                     ? { name: param.name, type: 'f64', disp: 0, mutable: true, key: param,
                         onStack: true }
                     : this.newVariable(param.name, 'f64', true, param);
+                if (!v.onStack && this.helpers.has('host') && this.planned?.assigned.has(param))
+                {
+                    // Popped into a slot of its own, which a call handed to
+                    // the host pushes back as it came.
+                    const popped = this.newVariable(param.name, 'f64', false, {});
+                    x87Copies.push({ from: popped, to: v });
+                    x87Popped.push(popped);
+                }
+                else if (!v.onStack)
+                {
+                    x87Popped.push(v);
+                }
                 this.bind(param, v);
                 x87.push(v);
                 this.x87.push(v);
                 continue;
             }
             /** @type {Variable} */
-            const v = { name: param.name, type: /** @type {'i32' | 'u32' | 'f64'} */ (type),
+            const v = { name: param.name, type: /** @type {'i32' | 'u32' | 'f64' | 'f32'} */ (type),
                 disp: stack, mutable: true, key: param };
-            const reg = type === 'f64' ? undefined : this.planned?.registers.get(param);
+            const reg = isFloat(type) ? undefined : this.planned?.registers.get(param);
             if (reg !== undefined)
             {
                 v.reg = reg;
                 inRegisters.push(v);
+            }
+            else if (this.helpers.has('host') && this.planned?.assigned.has(param))
+            {
+                // The trap hands the handler the arguments the call came
+                // with: a parameter the body assigns is a variable of its
+                // own, not the caller's slot. One in a register already is.
+                this.params.add(param);
+                const own = this.newVariable(param.name, v.type, true, param);
+                copies.push({ from: stack, to: own, size: type === 'f64' ? 8 : 4 });
+                this.bind(param, own);
+                stack += type === 'f64' ? 8 : 4;
+                continue;
             }
             this.params.add(param);
             this.live.add(param);
@@ -607,9 +739,19 @@ class FunctionCompiler {
             out.emit(...fitsByte(this.locals)
                 ? [0x83, 0xec, this.locals] : [0x81, 0xec, ...le32(this.locals)]);
         }
-        if (this.tables.size > 0)
+        // A call to the next instruction pushes the address every table is
+        // reached from. Where the x87 stack is deeper or shallower at the
+        // return than at the call, the translator takes a call it cannot
+        // follow back for one that returns there (it stops at the pop, every
+        // time), and the address comes from a call to a routine that returns.
+        const thunk = this.tables.size > 0
+            && x87.length !== (isFloat(this.returns) ? 1 : 0);
+        if (thunk)
         {
-            // The address of the pop, which every table is reached from.
+            out.call('pc').label('picBase');
+        }
+        else if (this.tables.size > 0)
+        {
             out.emit(0xe8, 0, 0, 0, 0).label('picBase').emit(0x5b);
         }
         for (const v of inRegisters)
@@ -617,14 +759,26 @@ class FunctionCompiler {
             out.emit(0x8b, ...memory(/** @type {number} */ (v.reg), {    // mov reg, the parameter
                 base: ESP, disp: this.locals + saved.length * 4 + v.disp - 4 }));
         }
-        // The last x87 parameter is ST0: each popped into its variable, but
-        // one read where it is.
-        for (const v of [...x87].reverse())
+        for (const { from, to, size } of copies)
         {
-            if (!v.onStack)
+            for (let at = 0; at < size; at += 4)
             {
-                out.emit(0xdd, ...memory(3, { base: ESP, disp: this.locals + v.disp }));
+                // mov eax, the argument; mov the variable, eax
+                out.emit(0x8b, ...memory(EAX, {
+                    base: ESP, disp: this.locals + saved.length * 4 + from - 4 + at }));
+                out.emit(0x89, ...memory(EAX, { base: ESP, disp: this.locals + to.disp + at }));
             }
+        }
+        // The last x87 parameter is ST0: each popped into its slot, but one
+        // read where it is.
+        for (const v of [...x87Popped].reverse())
+        {
+            out.emit(0xdd, ...memory(3, { base: ESP, disp: this.locals + v.disp }));
+        }
+        for (const { from, to } of x87Copies)
+        {
+            out.emit(0xdd, ...memory(0, { base: ESP, disp: this.locals + from.disp }));
+            out.emit(0xdd, ...memory(3, { base: ESP, disp: this.locals + to.disp }));
         }
         out.append(this.a);
         /** The frame taken down: ESP and the saved registers as the caller left them. */
@@ -653,11 +807,35 @@ class FunctionCompiler {
         if (this.hostUsed)
         {
             out.label(this.toHost);
+            // The x87 parameters back where the call left them, the last in ST0.
+            for (const v of x87Popped)
+            {
+                out.emit(0xdd, ...memory(0, { base: ESP, disp: this.locals + v.disp }));
+            }
             takeDown();
-            out.emit(0xe9).label('hostJump').emit(0, 0, 0, 0);   // jmp the handler's trap
+            if (this.x87Used || this.x87.length > 0)
+            {
+                // Through a register: cork follows a direct jump into the
+                // trap's stub, and a region with x87 instructions leaves to
+                // its host's loop for the trap; after `jmp eax` the stub is a
+                // region of its own, which calls the trap from its code.
+                out.emit(0xb8).label('hostJump').emit(0, 0, 0, 0);   // mov eax, the trap
+                out.emit(0xff, 0xe0);                                // jmp eax
+            }
+            else
+            {
+                out.emit(0xe9).label('hostJump').emit(0, 0, 0, 0);   // jmp the handler's trap
+            }
+        }
+        if (thunk)
+        {
+            out.label('pc').emit(0x8b, 0x1c, 0x24, 0xc3);        // mov ebx, [esp]; ret
         }
         const tables = [...this.tables.values()].map(table=>({
-            name: table.name, bytes: table.bytes, align: table.size,
+            name: table.name,
+            bytes: table.name === POOL
+                ? new Uint8Array(Float64Array.from(this.pool).buffer) : table.bytes,
+            align: table.size,
         }));
         const code = out.finish(tables);
         return {
@@ -703,7 +881,7 @@ class FunctionCompiler {
      */
     newVariable(name, type, mutable, key){
         this.live.add(key);
-        const reg = type === 'f64' ? undefined : this.planned?.registers.get(key);
+        const reg = isFloat(type) ? undefined : this.planned?.registers.get(key);
         if (reg !== undefined)
         {
             return { name, type, disp: 0, reg, mutable, key };
@@ -787,7 +965,8 @@ class FunctionCompiler {
         {
             free.push({ reg: EDX, cost: 0 });
         }
-        if (this.tables.size === 0)
+        const pool = this.constantLoads > 2;
+        if (this.tables.size === 0 && !pool)
         {
             free.push({ reg: EBX, cost: 2 });
         }
@@ -813,7 +992,9 @@ class FunctionCompiler {
         return {
             registers: this.arrange(registers),
             keepX87: this.x87.length === 1 && this.x87Reads === 1 && this.x87ReadClean
-                && !this.x87Stored,
+                && !this.x87Stored && !this.hostUsed,
+            assigned: this.assigned,
+            pool,
         };
     }
 
@@ -948,6 +1129,9 @@ class FunctionCompiler {
                     case '+': return left + right;
                     case '-': return left - right;
                     case '*': return left * right;
+                    case '/': return left / right;
+                    case '%': return left % right;
+                    case '**': return left ** right;
                     case '|': return left | right;
                     case '&': return left & right;
                     case '^': return left ^ right;
@@ -1101,11 +1285,6 @@ class FunctionCompiler {
         {
             this.fail(node, 'host() takes no arguments: the handler is handed the call\'s own');
         }
-        if (this.x87.length > 0)
-        {
-            this.fail(node, 'a function with an x87 parameter has popped it, and cannot hand '
-                + 'the call to the host');
-        }
         this.hostUsed = true;
     }
 
@@ -1172,9 +1351,9 @@ class FunctionCompiler {
             this.fail(node, 'a variable is let or const');
         }
         const annotated = /@type\s+\{(\w+)\}/.exec(leadingDoc(this.scope, node))?.[1];
-        if (annotated !== undefined && !['i32', 'u32', 'f64'].includes(annotated))
+        if (annotated !== undefined && !['i32', 'u32', 'f64', 'f32'].includes(annotated))
         {
-            this.fail(node, `@type {${annotated}}: a variable is i32, u32 or f64`);
+            this.fail(node, `@type {${annotated}}: a variable is i32, u32, f64 or f32`);
         }
         for (const declarator of node.declarations)
         {
@@ -1200,11 +1379,11 @@ class FunctionCompiler {
             let type;
             if (annotated !== undefined)
             {
-                type = /** @type {'i32' | 'u32' | 'f64'} */ (annotated);
+                type = /** @type {'i32' | 'u32' | 'f64' | 'f32'} */ (annotated);
             }
-            else if (value.type === 'f64')
+            else if (isFloat(value.type))
             {
-                type = 'f64';
+                type = /** @type {'f64' | 'f32'} */ (value.type);
             }
             else if (value.type === 'intish')
             {
@@ -1231,14 +1410,16 @@ class FunctionCompiler {
      */
     store(v, value, node){
         const a = this.a;
-        if (v.type === 'f64')
+        if (isFloat(v.type))
         {
+            this.assignable(v, value.type, node);
             if (this.x87.includes(v))
             {
                 this.x87Stored = true;
             }
             this.toSt0(value, node);
-            a.emit(0xdd, ...this.frameAt(3, v.disp));      // fstp qword [v]
+            // fstp qword [v], or dword, a float's
+            a.emit(v.type === 'f64' ? 0xdd : 0xd9, ...this.frameAt(3, v.disp));
             this.fpu--;
             return;
         }
@@ -1308,13 +1489,15 @@ class FunctionCompiler {
 
     /** @param {Variable} v @param {Type} type @param {any} node */
     assignable(v, type, node){
-        const fits = type === v.type || type === 'nat' && v.type !== 'f64'
-            || v.type === 'f64' && isTyped(type);
+        const fits = type === v.type || type === 'nat' && !isFloat(v.type)
+            || v.type === 'f64' && (isTyped(type) || type === 'f32');
         if (!fits)
         {
             this.fail(node, type === 'intish'
                 ? `${v.name} is given a sum: bring it back to 32 bits with | 0 or >>> 0`
-                : `${v.name} is ${v.type}, and this is ${type}`);
+                : v.type === 'f32'
+                    ? `${v.name} is f32, and this is ${type}: a float is Math.fround's`
+                    : `${v.name} is ${v.type}, and this is ${type}`);
         }
     }
 
@@ -1337,13 +1520,15 @@ class FunctionCompiler {
                     this.store(v, this.expr(node.right), node.right);
                     return;
                 }
-                if (v.type === 'f64')
+                if (isFloat(v.type))
                 {
-                    this.fail(node, 'there is no double arithmetic in the subset');
+                    this.fail(node, `${node.operator} on a double is written ${v.name} = `
+                        + `${v.name} ${node.operator.slice(0, -1)} ...`);
                 }
                 const op = node.operator.slice(0, -1);
-                const result = { '+': 'same', '-': 'same', '|': 'i32', '&': 'i32', '^': 'i32',
-                    '<<': 'i32', '>>': 'i32', '>>>': 'u32' }[op];
+                const result = /** @type {Record<string, string>} */ ({ '+': 'same', '-': 'same',
+                    '|': 'i32', '&': 'i32', '^': 'i32', '<<': 'i32', '>>': 'i32',
+                    '>>>': 'u32' })[op];
                 if (result === undefined)
                 {
                     this.fail(node, `${node.operator} is not in the subset`);
@@ -1355,7 +1540,8 @@ class FunctionCompiler {
                 }
                 const value = this.expr(node.right);
                 this.integer(value, node.right, op === '+' || op === '-' ? 'intish' : 'any');
-                const shift = { '<<': 4, '>>': 7, '>>>': 5 }[op];
+                const shift = /** @type {Record<string, number>} */ ({ '<<': 4, '>>': 7,
+                    '>>>': 5 })[op];
                 if (shift !== undefined)
                 {
                     if (value.where === 'imm')
@@ -1401,9 +1587,10 @@ class FunctionCompiler {
             case 'UpdateExpression':
             {
                 const v = this.variable(node.argument);
-                if (v.type === 'f64')
+                if (isFloat(v.type))
                 {
-                    this.fail(node, 'there is no double arithmetic in the subset');
+                    this.fail(node, `${node.operator} on a double is written ${v.name} = `
+                        + `${v.name} ${node.operator[0]} 1`);
                 }
                 a.emit(0xff, ...this.rm(node.operator === '++' ? 0 : 1, v));
                 return;
@@ -1450,7 +1637,7 @@ class FunctionCompiler {
         const back = right.type === 'BinaryExpression' && (right.operator === '|'
             || right.operator === '>>>') && this.fold(right.right) === 0;
         const sum = back ? right.left : null;
-        if (v.type === 'f64' || v.type !== (right.operator === '|' ? 'i32' : 'u32')
+        if (isFloat(v.type) || v.type !== (right.operator === '|' ? 'i32' : 'u32')
             || sum?.type !== 'BinaryExpression' || sum.operator !== '+' && sum.operator !== '-'
             || sum.left.type !== 'Identifier' || this.lookupLocal(sum.left.name) !== v)
         {
@@ -1476,6 +1663,10 @@ class FunctionCompiler {
         if (!v.mutable)
         {
             this.fail(node, `${node.name} is a const`);
+        }
+        if (this.paramKeys.has(v.key))
+        {
+            this.assigned.add(v.key);
         }
         return v;
     }
@@ -1511,12 +1702,17 @@ class FunctionCompiler {
                 this.fail(node, `the function returns an ${returns}`);
             }
             const value = this.expr(node.argument);
-            if (returns === 'f64')
+            if (returns === 'f32' && value.type !== 'f32')
+            {
+                this.fail(node.argument, `the function returns an f32, and this is ${value.type}: `
+                    + 'a float is Math.fround\'s');
+            }
+            if (isFloat(returns))
             {
                 this.toSt0(value, node.argument);
                 this.fpu--;
             }
-            else if (returns === 'i64' && value.type === 'f64')
+            else if (returns === 'i64' && isFloat(value.type))
             {
                 this.toSt0(value, node.argument);
                 this.fpu--;
@@ -1600,10 +1796,23 @@ class FunctionCompiler {
         {
             this.fail(node, `${node.operator} is written ${node.operator}=`);
         }
+        if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression'
+            && !node.callee.computed && node.callee.object.type === 'Identifier'
+            && node.callee.object.name === 'Number' && node.callee.property.name === 'isNaN'
+            && this.lookupLocal('Number') === undefined)
+        {
+            // A double compared with itself is unordered, PF set, only as a NaN.
+            this.arity(node, 1);
+            this.toSt0(this.expr(node.arguments[0]), node.arguments[0]);
+            a.emit(0xdf, 0xe8);                                    // fucomip st0: popped
+            this.fpu--;
+            a.jump(when ? CC.p : CC.np, target);
+            return;
+        }
         const value = this.expr(node);
         if (!isTyped(value.type))
         {
-            this.fail(node, value.type === 'f64'
+            this.fail(node, isFloat(value.type)
                 ? 'a double is tested by a comparison'
                 : 'a sum is tested once it is brought back to 32 bits');
         }
@@ -1625,7 +1834,7 @@ class FunctionCompiler {
         const op = node.operator;
         const leftType = this.peekType(node.left);
         const rightType = this.peekType(node.right);
-        if (leftType === 'f64' || rightType === 'f64')
+        if (isFloat(leftType) || isFloat(rightType))
         {
             this.toSt0(this.expr(node.left), node.left);
             this.toSt0(this.expr(node.right), node.right);
@@ -1679,7 +1888,7 @@ class FunctionCompiler {
             }
             else
             {
-                a.emit(0x3b, ...this.rm(reg, right.v));                     // cmp reg, [right]
+                a.emit(0x3b, ...this.rm(reg, /** @type {{ v: Variable }} */ (right).v)); // cmp
             }
         }
         else if (left?.where === 'var' && right?.where === 'var' && right.v.reg !== undefined)
@@ -1726,6 +1935,11 @@ class FunctionCompiler {
      * @param {any} node @returns {Type}
      */
     peekType(node){
+        const known = this.inlining === 0 ? this.types.get(node) : undefined;
+        if (known !== undefined)
+        {
+            return known;
+        }
         const mark = this.a.items.length;
         const last = this.a.items[mark - 1];
         const lastLength = last?.kind === 'bytes' ? last.bytes.length : 0;
@@ -1735,7 +1949,8 @@ class FunctionCompiler {
         const tables = new Map(this.tables);
         const saves = new Set(this.saves);
         const scopes = this.scopes.map(scope=>new Map(scope));
-        const { x87Consumed, x87Reads, x87ReadClean, x87Clean, frameUsed } = this;
+        const { x87Consumed, x87Reads, x87ReadClean, x87Clean, frameUsed, constantLoads } = this;
+        const pooled = this.pool.length;
         this.peeking++;
         /** @type {Value} */
         let value;
@@ -1747,7 +1962,10 @@ class FunctionCompiler {
         {
             this.peeking--;
         }
-        Object.assign(this, { x87Consumed, x87Reads, x87ReadClean, x87Clean, frameUsed });
+        Object.assign(this, {
+            x87Consumed, x87Reads, x87ReadClean, x87Clean, frameUsed, constantLoads,
+        });
+        this.pool.length = pooled;
         this.a.items.length = mark;
         if (last?.kind === 'bytes')
         {
@@ -1759,6 +1977,10 @@ class FunctionCompiler {
         this.tables = tables;
         this.saves = saves;
         this.scopes = scopes;
+        if (this.inlining === 0)
+        {
+            this.types.set(node, value.type);
+        }
         return value.type;
     }
 
@@ -1777,7 +1999,7 @@ class FunctionCompiler {
         if (node.type === 'Identifier')
         {
             const v = this.lookupLocal(node.name);
-            if (v !== undefined && !('constant' in v) && v.type !== 'f64')
+            if (v !== undefined && !('constant' in v) && !isFloat(v.type))
             {
                 return { where: 'var', type: v.type, v };
             }
@@ -1879,11 +2101,9 @@ class FunctionCompiler {
      * @param {Value} value @param {any} node @param {'intish' | 'typed' | 'any'} allow
      */
     integer(value, node, allow){
-        if (value.type === 'f64')
+        if (isFloat(value.type))
         {
-            this.fail(node, 'a double where an integer is wanted: there is no double arithmetic '
-                + '(under a program\'s single-precision control word the x87 would not compute '
-                + 'what JavaScript does), and a double becomes an integer only as an i64 result');
+            this.fail(node, 'a double where an integer is wanted: it becomes one by | 0 or >>> 0');
         }
         if (allow === 'typed' && value.type === 'intish')
         {
@@ -1898,9 +2118,9 @@ class FunctionCompiler {
      */
     toEax(value, node){
         const a = this.a;
-        if (value.type === 'f64')
+        if (isFloat(value.type))
         {
-            this.fail(node, 'a double where an integer is wanted');
+            this.fail(node, 'a double where an integer is wanted: it becomes one by | 0 or >>> 0');
         }
         switch (value.where)
         {
@@ -1951,27 +2171,30 @@ class FunctionCompiler {
                 && !this.a.items.some(item=>item.kind !== 'bytes');
         }
         this.x87Clean = false;
+        this.x87Used = true;
         if (++this.fpu > X87_DEPTH)
         {
             this.fail(node, 'the expression holds more doubles at once than the x87 has room for');
         }
-        if (value.where === 'var' && value.type === 'f64')
+        if (value.where === 'var' && isFloat(value.type))
         {
-            a.emit(0xdd, ...this.frameAt(0, value.v.disp));             // fld qword [v]
+            // fld qword [v], or dword, a float's
+            a.emit(value.type === 'f64' ? 0xdd : 0xd9, ...this.frameAt(0, value.v.disp));
             return;
         }
         if (value.where === 'imm')
         {
-            const bits = new DataView(new ArrayBuffer(8));
-            bits.setFloat64(0, value.value, true);
-            // push the two halves; fld qword [esp]; add esp, 8
-            a.emit(0x68, ...le32(bits.getUint32(4, true)), 0x68, ...le32(bits.getUint32(0, true)));
-            a.emit(0xdd, 0x04, 0x24, 0x83, 0xc4, 0x08);
+            this.loadConstant(value.value);
             return;
         }
         if (value.type === 'intish')
         {
             this.fail(node, 'a sum becomes a double once it is brought back to 32 bits');
+        }
+        if (value.where === 'var' && value.v.reg === undefined && value.type !== 'u32')
+        {
+            a.emit(0xdb, ...this.rm(0, value.v));                        // fild dword [v]
+            return;
         }
         this.toEax(value, node);
         if (value.type === 'u32')
@@ -2029,14 +2252,15 @@ class FunctionCompiler {
                 this.branch(node.test, otherwise, false);
                 const yes = this.expr(node.consequent);
                 const no = this.peekType(node.alternate);
-                if (yes.type === 'f64' || no === 'f64')
+                if (isFloat(yes.type) || isFloat(no))
                 {
                     this.toSt0(yes, node.consequent);
                     this.fpu--;
                     a.jump(-1, end).label(otherwise);
                     this.toSt0(this.expr(node.alternate), node.alternate);
                     a.label(end);
-                    return { where: 'st0', type: 'f64' };
+                    return { where: 'st0',
+                        type: yes.type === 'f32' && no === 'f32' ? 'f32' : 'f64' };
                 }
                 const type = this.join(node, yes.type, no);
                 this.toEax(yes, node.consequent);
@@ -2048,6 +2272,26 @@ class FunctionCompiler {
             case 'CallExpression':
                 return this.callExpression(node);
             case 'MemberExpression':
+                if (!node.computed && node.object.type === 'Identifier'
+                    && node.object.name === this.scope.x87
+                    && this.lookupLocal(node.object.name) === undefined)
+                {
+                    const load = X87_CONSTANTS[node.property.name];
+                    if (load === undefined)
+                    {
+                        this.fail(node, `X87.${node.property.name} is not a constant the x87 `
+                            + `loads: ${Object.keys(X87_CONSTANTS).join(', ')}`);
+                    }
+                    this.x87Used = true;
+                    if (++this.fpu > X87_DEPTH)
+                    {
+                        this.fail(node, 'the expression holds more doubles at once than the x87 '
+                            + 'has room for');
+                    }
+                    this.x87Clean = false;
+                    this.a.emit(0xd9, load);                               // fldl2e and its kin
+                    return { where: 'st0', type: 'f64' };
+                }
                 return this.tableLoad(node);
             default:
                 this.fail(node, `${describe(node)} is not in the subset`);
@@ -2083,7 +2327,7 @@ class FunctionCompiler {
             case '-':
             {
                 const value = this.expr(node.argument);
-                if (value.type === 'f64')
+                if (isFloat(value.type))
                 {
                     this.toSt0(value, node.argument);
                     a.emit(0xd9, 0xe0);                                   // fchs
@@ -2122,8 +2366,22 @@ class FunctionCompiler {
         {
             this.fail(node, 'a comparison is a condition, not a value: write c ? 1 : 0');
         }
-        // x | 0 and x >>> 0 bring a value back and emit nothing.
+        // x | 0 and x >>> 0 bring a value back and emit nothing; a double's
+        // are JavaScript's conversions.
         const zero = this.fold(node.right) === 0;
+        if (zero && (op === '|' || op === '>>>') && isFloat(this.peekType(node.left)))
+        {
+            return this.toInteger(node.left, op);
+        }
+        if (['+', '-', '*', '/', '%'].includes(op) && (op === '/' || isFloat(this.peekType(node.left))
+            || isFloat(this.peekType(node.right))))
+        {
+            return this.floatBinary(node);
+        }
+        if (op === '+' || op === '-' || op === '*')
+        {
+            this.note(node, 'integer');
+        }
         if (zero && (op === '|' || op === '>>>'))
         {
             const value = this.expr(node.left);
@@ -2201,9 +2459,356 @@ class FunctionCompiler {
                 return { where: 'eax', type: 'intish' };
             }
             default:
-                this.fail(node, `${op} is not in the subset${op === '/' || op === '%'
-                    ? ': there is no division' : ''}`);
+                this.fail(node, `${op} is not in the subset${op === '%'
+                    ? ': there is no integer division' : ''}`);
         }
+    }
+
+    /**
+     * Notes what an arithmetic node was compiled as, for the tests' model.
+     *
+     * @param {any} node @param {'rounds' | 'integer'} kind
+     */
+    note(node, kind){
+        const arithmetic = this.scope.arithmetic;
+        if (arithmetic === null)
+        {
+            return;
+        }
+        const kinds = arithmetic.get(node) ?? new Set();
+        kinds.add(kind);
+        arithmetic.set(node, kinds);
+    }
+
+    /**
+     * A double's `+`, `-`, `*`, `/` or `%`, an integer operand converted
+     * exactly: the left onto the x87 stack and the right as the memory
+     * operand it is (`floatOperand`), or onto the stack too; or, when the
+     * right calls nothing, the right onto the stack and the left the operand
+     * of the reversed form.
+     *
+     * @param {any} node @returns {Value}
+     */
+    floatBinary(node){
+        const a = this.a;
+        const op = node.operator;
+        if (op === '%')
+        {
+            // fprem is exact, and repeated until C2 says the remainder is whole:
+            // the dividend's sign, as JavaScript's remainder has it.
+            this.toSt0(this.expr(node.left), node.left);
+            this.toSt0(this.expr(node.right), node.right);
+            const again = a.fresh('fprem');
+            a.emit(0xd9, 0xc9).label(again);                           // fxch
+            a.emit(0xd9, 0xf8, 0xdf, 0xe0, 0xf6, 0xc4, 0x04);          // fprem; fnstsw; test ah, 4
+            a.jump(CC.ne, again);
+            a.emit(0xdd, 0xd9);                                        // fstp st1
+            this.fpu--;
+            return { where: 'st0', type: 'f64' };
+        }
+        this.note(node, 'rounds');
+        const digit = /** @type {Record<string, number>} */ ({ '+': 0, '*': 1, '-': 4, '/': 6 })[op];
+        const right = this.floatOperand(node.right);
+        if (right !== null)
+        {
+            this.toSt0(this.expr(node.left), node.left);
+            right(digit);
+            return { where: 'st0', type: 'f64' };
+        }
+        const left = this.callsGuest(node.right) ? null : this.floatOperand(node.left);
+        if (left !== null)
+        {
+            this.toSt0(this.expr(node.right), node.right);
+            // fsubr and fdivr: the memory operand on the left.
+            left(digit === 4 || digit === 6 ? digit + 1 : digit);
+            return { where: 'st0', type: 'f64' };
+        }
+        this.toSt0(this.expr(node.left), node.left);
+        this.toSt0(this.expr(node.right), node.right);
+        // faddp, fmulp, fsubp, fdivp st1: ST1 op ST0 into ST1, popped.
+        a.emit(0xde, 0xc1 | (digit === 4 ? 5 : digit === 6 ? 7 : digit) << 3);
+        this.fpu--;
+        return { where: 'st0', type: 'f64' };
+    }
+
+    /**
+     * An arithmetic instruction's memory operand, when a node is one with
+     * nothing to emit first: a double or a float in the frame, an integer
+     * in the frame (the `fi` forms, exact), a double or float read through
+     * registers alone, a constant of the table. Answers the emitter of the
+     * instruction by its digit; null for anything else.
+     *
+     * @param {any} node @returns {((digit: number) => void) | null}
+     */
+    floatOperand(node){
+        const a = this.a;
+        const constant = this.fold(node);
+        if (constant !== undefined)
+        {
+            if (!this.planned?.pool || this.special(constant))
+            {
+                return null;
+            }
+            return digit=>{
+                this.countConstant();
+                a.emit(0xdc, 0x83 | digit << 3).ref(POOL, this.pooled(constant));
+            };
+        }
+        if (node.type === 'Identifier')
+        {
+            const v = this.lookupLocal(node.name);
+            if (v === undefined || 'constant' in v || v.onStack || this.x87.includes(v))
+            {
+                return null;
+            }
+            if (isFloat(v.type))
+            {
+                return digit=>void a.emit(v.type === 'f64' ? 0xdc : 0xd8,
+                    ...this.frameAt(digit, v.disp));
+            }
+            if ((v.type === 'i32' || v.type === 'nat') && v.reg === undefined)
+            {
+                return digit=>void a.emit(0xda, ...this.rm(digit, v));
+            }
+            return null;
+        }
+        if (node.type === 'CallExpression' && node.callee.type === 'Identifier'
+            && (node.callee.name === 'f32' || node.callee.name === 'f64')
+            && this.helpers.has(node.callee.name) && node.arguments.length === 1)
+        {
+            const operand = this.registerAddress(node.arguments[0]);
+            if (operand === null)
+            {
+                return null;
+            }
+            return digit=>void a.emit(node.callee.name === 'f64' ? 0xdc : 0xd8,
+                ...memory(digit, operand));
+        }
+        return null;
+    }
+
+    /**
+     * Whether an expression calls the guest, which may write what a memory
+     * operand read after it would find.
+     *
+     * @param {any} node @param {Set<any>} [seen]  The inlined functions walked.
+     * @returns {boolean}
+     */
+    callsGuest(node, seen = new Set()){
+        if (node === null || typeof node !== 'object')
+        {
+            return false;
+        }
+        if (Array.isArray(node))
+        {
+            return node.some(item=>this.callsGuest(item, seen));
+        }
+        if (node.type === 'CallExpression' && node.callee.type === 'Identifier')
+        {
+            const name = node.callee.name;
+            if (name === 'call' && this.helpers.has('call'))
+            {
+                return true;
+            }
+            const inline = this.scope.inline.get(name);
+            if (inline && !seen.has(inline))
+            {
+                seen.add(inline);
+                if (this.callsGuest(inline.body, seen))
+                {
+                    return true;
+                }
+            }
+        }
+        return Object.entries(node).some(([key, child])=>key !== 'loc' && key !== 'range'
+            && child !== null && typeof child === 'object' && this.callsGuest(child, seen));
+    }
+
+    /** A constant `fldz` or `fld1` loads, with `fchs` for its negative. @param {number} value */
+    special(value){
+        return value === 0 || value === 1 || value === -1;
+    }
+
+    /** Counts a constant read from the table or pushed, a read in a loop weighing more. */
+    countConstant(){
+        this.constantLoads += LOOP_WEIGHT ** Math.min(this.depth, 6);
+    }
+
+    /**
+     * A constant's place in the table after the code, which this makes the
+     * function's: EBX its base, reached from the pop of `call $+5`.
+     *
+     * @param {number} value @returns {number}  The byte offset.
+     */
+    pooled(value){
+        let at = this.pool.findIndex(known=>Object.is(known, value)
+            || Number.isNaN(known) && Number.isNaN(value));
+        if (at < 0)
+        {
+            at = this.pool.push(value) - 1;
+        }
+        this.tables.set(POOL, { name: POOL, bytes: new Uint8Array(0), size: 8, signed: false });
+        this.saves.add(EBX);
+        return at * 8;
+    }
+
+    /**
+     * Pushes a double constant onto the x87 stack: `fldz` and `fld1` (and
+     * their negatives), a read of the table after the code, or pushed
+     * through the stack -- as a float when a float holds it.
+     *
+     * @param {number} value
+     */
+    loadConstant(value){
+        const a = this.a;
+        if (this.special(value))
+        {
+            a.emit(0xd9, value === 0 ? 0xee : 0xe8);                       // fldz; fld1
+            if (Object.is(value, -0) || value === -1)
+            {
+                a.emit(0xd9, 0xe0);                                        // fchs
+            }
+            return;
+        }
+        this.countConstant();
+        if (this.planned?.pool)
+        {
+            a.emit(0xdd, 0x83).ref(POOL, this.pooled(value));             // fld qword [ebx+c]
+            return;
+        }
+        const bits = new DataView(new ArrayBuffer(8));
+        if (Math.fround(value) === value)
+        {
+            // push the float; fld dword [esp]; add esp, 4
+            bits.setFloat32(0, value, true);
+            a.emit(0x68, ...le32(bits.getUint32(0, true)), 0xd9, 0x04, 0x24, 0x83, 0xc4, 0x04);
+            return;
+        }
+        bits.setFloat64(0, value, true);
+        // push the two halves; fld qword [esp]; add esp, 8
+        a.emit(0x68, ...le32(bits.getUint32(4, true)), 0x68, ...le32(bits.getUint32(0, true)));
+        a.emit(0xdd, 0x04, 0x24, 0x83, 0xc4, 0x08);
+    }
+
+    /**
+     * A double brought to an integer as `| 0` and `>>> 0` bring one, modulo
+     * 2^32 after truncation: `fisttp` of the whole, and where that answers
+     * the integer indefinite -- past 2^63, an infinity, a NaN -- the value's
+     * remainder by 2^32 (`fprem`, exact) truncated instead.
+     *
+     * @param {any} node @param {string} op @returns {Value}
+     */
+    toInteger(node, op){
+        const a = this.a;
+        this.toSt0(this.expr(node), node);
+        if (this.fpu + 1 > 8)
+        {
+            this.fail(node, 'the expression holds more doubles at once than the x87 has room for');
+        }
+        const fast = a.fresh('whole');
+        const done = a.fresh('converted');
+        const again = a.fresh('fprem');
+        a.emit(0x83, 0xec, 0x08);                                          // sub esp, 8
+        a.emit(0xd9, 0xc0, 0xdd, 0x0c, 0x24);                              // fld st0; fisttp [esp]
+        a.emit(0x8b, 0x04, 0x24);                                          // mov eax, [esp]
+        a.emit(0x81, 0x7c, 0x24, 0x04, ...le32(0x80000000));               // cmp dword [esp+4], hi
+        a.jump(CC.ne, fast);
+        a.emit(0x85, 0xc0);                                                // test eax, eax
+        a.jump(CC.ne, fast);
+        a.emit(0x68, ...le32(0x41f00000), 0x6a, 0x00);                     // push 2^32
+        a.emit(0xdd, 0x04, 0x24, 0x83, 0xc4, 0x08);                        // fld qword [esp]; add
+        a.emit(0xd9, 0xc9).label(again);                                   // fxch
+        a.emit(0xd9, 0xf8, 0xdf, 0xe0, 0xf6, 0xc4, 0x04);                  // fprem; fnstsw; test
+        a.jump(CC.ne, again);
+        a.emit(0xdd, 0xd9, 0xdd, 0x0c, 0x24, 0x8b, 0x04, 0x24);            // fstp st1; fisttp; mov
+        a.jump(-1, done);
+        a.label(fast);
+        a.emit(0xdd, 0xd8);                                                // fstp st0
+        a.label(done);
+        a.emit(0x83, 0xc4, 0x08);                                          // add esp, 8
+        this.fpu--;
+        return { where: 'eax', type: op === '|' ? 'i32' : 'u32' };
+    }
+
+    /**
+     * `X87.name(...)`: the one instruction the name is, its arguments pushed
+     * in order.
+     *
+     * @param {any} node @param {string} name @returns {Value}
+     */
+    x87Intrinsic(node, name){
+        const a = this.a;
+        /** @param {number} count */
+        const pushed = count=>node.arguments.slice(0, count).forEach((/** @type {any} */ arg)=>
+            this.toSt0(this.expr(arg), arg));
+        /** Room for what an instruction pushes of its own. */
+        const room = ()=>{
+            if (this.fpu + 1 > 8)
+            {
+                this.fail(node, 'the expression holds more doubles at once than the x87 has '
+                    + 'room for');
+            }
+        };
+        switch (name)
+        {
+            case 'rint':
+                this.arity(node, 1);
+                pushed(1);
+                this.round(0);
+                return { where: 'st0', type: 'f64' };
+            case 'f2xm1':
+                this.arity(node, 1);
+                pushed(1);
+                a.emit(0xd9, 0xf0);                                        // f2xm1
+                return { where: 'st0', type: 'f64' };
+            case 'yl2x':
+                this.arity(node, 2);
+                pushed(2);
+                a.emit(0xd9, 0xf1);                                        // fyl2x
+                this.fpu--;
+                return { where: 'st0', type: 'f64' };
+            case 'scale':
+                this.arity(node, 2);
+                pushed(2);
+                a.emit(0xd9, 0xc9, 0xd9, 0xfd, 0xdd, 0xd9);                // fxch; fscale; fstp st1
+                this.fpu--;
+                return { where: 'st0', type: 'f64' };
+            case 'exponent':
+            case 'significand':
+                this.arity(node, 1);
+                pushed(1);
+                room();
+                // fxtract: ST0 the significand, ST1 the exponent; one popped.
+                a.emit(0xd9, 0xf4, 0xdd, name === 'exponent' ? 0xd8 : 0xd9);
+                return { where: 'st0', type: 'f64' };
+            default:
+                return this.fail(node, `X87.${name} is not one of the x87's here: rint, f2xm1, `
+                    + 'yl2x, scale, exponent, significand');
+        }
+    }
+
+    /**
+     * `frndint` under the rounding control given, in the control word's high
+     * byte -- the word with only that changed, and put back: the program's
+     * precision control and masks stand.
+     *
+     * @param {number} rc
+     */
+    round(rc){
+        const a = this.a;
+        a.emit(0x83, 0xec, 0x04);                                          // sub esp, 4
+        a.emit(0xd9, 0x3c, 0x24);                                          // fnstcw [esp]
+        a.emit(0x0f, 0xb7, 0x04, 0x24);                                    // movzx eax, word [esp]
+        a.emit(0x80, 0xe4, 0xf3);                                          // and ah, 0xf3
+        if (rc !== 0)
+        {
+            a.emit(0x80, 0xcc, rc);                                        // or ah, rc
+        }
+        a.emit(0x66, 0x89, 0x44, 0x24, 0x02);                              // mov [esp+2], ax
+        a.emit(0xd9, 0x6c, 0x24, 0x02);                                    // fldcw [esp+2]
+        a.emit(0xd9, 0xfc);                                                // frndint
+        a.emit(0xd9, 0x2c, 0x24);                                          // fldcw [esp]
+        a.emit(0x83, 0xc4, 0x04);                                          // add esp, 4
     }
 
     /** @param {any} node @returns {Value} */
@@ -2244,26 +2849,69 @@ class FunctionCompiler {
                     a.emit(0xd9, 0xe1);                                    // fabs
                     return { where: 'st0', type: 'f64' };
                 }
-                // The control word with only its rounding control changed, and
-                // back: the program's precision control and masks stand.
-                a.emit(0x83, 0xec, 0x04);                                  // sub esp, 4
-                a.emit(0xd9, 0x3c, 0x24);                                  // fnstcw [esp]
-                a.emit(0x0f, 0xb7, 0x04, 0x24);                            // movzx eax, word [esp]
-                a.emit(0x80, 0xe4, 0xf3);                                  // and ah, 0xf3
-                a.emit(0x80, 0xcc, ROUNDING[name]);                        // or ah, rc
-                a.emit(0x66, 0x89, 0x44, 0x24, 0x02);                      // mov [esp+2], ax
-                a.emit(0xd9, 0x6c, 0x24, 0x02);                            // fldcw [esp+2]
-                a.emit(0xd9, 0xfc);                                        // frndint
-                a.emit(0xd9, 0x2c, 0x24);                                  // fldcw [esp]
-                a.emit(0x83, 0xc4, 0x04);                                  // add esp, 4
+                this.round(ROUNDING[name]);
                 return { where: 'st0', type: 'f64' };
+            }
+            if (Object.hasOwn(MATH_UNARY, name))
+            {
+                this.arity(node, 1);
+                this.toSt0(this.expr(node.arguments[0]), node.arguments[0]);
+                if (name === 'sqrt')
+                {
+                    this.note(node, 'rounds');
+                }
+                if ((name === 'tan' || name === 'atan') && this.fpu + 1 > 8)
+                {
+                    this.fail(node, 'the expression holds more doubles at once than the x87 has '
+                        + 'room for');
+                }
+                a.emit(...MATH_UNARY[name]);
+                return { where: 'st0', type: 'f64' };
+            }
+            if (name === 'atan2')
+            {
+                this.arity(node, 2);
+                this.toSt0(this.expr(node.arguments[0]), node.arguments[0]);
+                this.toSt0(this.expr(node.arguments[1]), node.arguments[1]);
+                a.emit(0xd9, 0xf3);                                        // fpatan
+                this.fpu--;
+                return { where: 'st0', type: 'f64' };
+            }
+            if (name === 'log2')
+            {
+                // fld1, the argument, fyl2x: 1 times log2 of it.
+                this.arity(node, 1);
+                this.toSt0({ where: 'imm', type: 'nat', value: 1 }, node);
+                this.toSt0(this.expr(node.arguments[0]), node.arguments[0]);
+                a.emit(0xd9, 0xf1);                                        // fyl2x
+                this.fpu--;
+                return { where: 'st0', type: 'f64' };
+            }
+            if (name === 'fround')
+            {
+                this.arity(node, 1);
+                this.toSt0(this.expr(node.arguments[0]), node.arguments[0]);
+                // sub esp, 4; fstp dword [esp]; fld dword [esp]; add esp, 4
+                a.emit(0x83, 0xec, 0x04, 0xd9, 0x1c, 0x24, 0xd9, 0x04, 0x24, 0x83, 0xc4, 0x04);
+                return { where: 'st0', type: 'f32' };
+            }
+            if (Object.hasOwn(MATH_REFUSED, name))
+            {
+                this.fail(node, `Math.${name} is no one x87 instruction, and its sequence is not `
+                    + `JavaScript's to the last bit: write ${MATH_REFUSED[name]}`);
             }
             this.fail(node, `Math.${name} is not in the subset`);
         }
+        if (callee.type === 'MemberExpression' && !callee.computed
+            && callee.object.type === 'Identifier' && callee.object.name === this.scope.x87
+            && this.lookupLocal(callee.object.name) === undefined)
+        {
+            return this.x87Intrinsic(node, callee.property.name);
+        }
         if (callee.type !== 'Identifier')
         {
-            this.fail(node, 'only a helper, Math.imul/floor/ceil/trunc/abs or a module-level '
-                + 'function of one return is called');
+            this.fail(node, 'only a helper, a Math function, X87\'s or a module-level function '
+                + 'of one return is called');
         }
         const name = callee.name;
         if (this.helpers.has(name))
@@ -2273,16 +2921,17 @@ class FunctionCompiler {
                 this.arity(node, 1);
                 const load = LOADS[name];
                 const operand = this.address(node.arguments[0]);
-                if (load.type === 'f64')
+                if (isFloat(load.type))
                 {
                     this.x87Clean = false;
+                    this.x87Used = true;
                     if (++this.fpu > X87_DEPTH)
                     {
                         this.fail(node, 'the expression holds more doubles at once than the x87 '
                             + 'has room for');
                     }
                     a.emit(...load.op, ...memory(0, operand));
-                    return { where: 'st0', type: 'f64' };
+                    return { where: 'st0', type: /** @type {'f64' | 'f32'} */ (load.type) };
                 }
                 const modrm = memory(EAX, operand);
                 a.emit(...load.op, ...modrm);
@@ -2358,6 +3007,15 @@ class FunctionCompiler {
                 bound.set(param.name, { ...simple.v, mutable: false });
                 return;
             }
+            // A double's too, as itself: an x87 parameter's reads are counted by it.
+            const local = argument.type === 'Identifier' ? this.lookupLocal(argument.name)
+                : undefined;
+            if (local !== undefined && !('constant' in local) && isFloat(local.type)
+                && !local.onStack)
+            {
+                bound.set(param.name, local);
+                return;
+            }
             const value = this.expr(argument);
             if (value.type === 'intish')
             {
@@ -2366,10 +3024,10 @@ class FunctionCompiler {
             // Keyed by the argument: each place a function is inlined has its own.
             const v = this.newVariable(param.name,
                 /** @type {Variable['type']} */ (value.type), false, argument);
-            if (v.type === 'f64')
+            if (isFloat(v.type))
             {
                 this.toSt0(value, argument);
-                this.a.emit(0xdd, ...this.frameAt(3, v.disp));
+                this.a.emit(v.type === 'f64' ? 0xdd : 0xd9, ...this.frameAt(3, v.disp));
                 this.fpu--;
             }
             else
@@ -2442,7 +3100,7 @@ class FunctionCompiler {
         const a = this.a;
         if (node.type === 'CallExpression' && node.callee.type === 'Identifier'
             && this.helpers.has(node.callee.name) && Object.hasOwn(LOADS, node.callee.name)
-            && LOADS[node.callee.name].type !== 'f64' && node.arguments.length === 1)
+            && !isFloat(LOADS[node.callee.name].type) && node.arguments.length === 1)
         {
             const operand = this.registerAddress(node.arguments[0]);
             const load = LOADS[node.callee.name];
@@ -2608,12 +3266,12 @@ class FunctionCompiler {
         a.emit(0x50);                                                      // push eax
         this.grew(4);
         const value = this.expr(node.arguments[1]);
-        if (name === 'setF64')
+        if (FLOAT_STORES.has(name))
         {
             this.toSt0(value, node.arguments[1]);
             a.emit(0x59);                                                  // pop ecx
             this.grew(-4);
-            a.emit(0xdd, ...memory(3, { base: ECX, disp: operand.disp ?? 0 }));
+            a.emit(...STORES[name], ...memory(3, { base: ECX, disp: operand.disp ?? 0 }));
             this.fpu--;
             return;
         }
@@ -2633,10 +3291,10 @@ class FunctionCompiler {
     storeTo(operand, node, name){
         const a = this.a;
         const value = this.expr(node);
-        if (name === 'setF64')
+        if (FLOAT_STORES.has(name))
         {
             this.toSt0(value, node);
-            a.emit(0xdd, ...memory(3, operand));                           // fstp qword
+            a.emit(...STORES[name], ...memory(3, operand));                // fstp dword/qword
             this.fpu--;
             return;
         }

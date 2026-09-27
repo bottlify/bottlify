@@ -768,8 +768,10 @@ export function createMsvcrtFunctions(host){
         ...(host.threads ? createThreadFunctions(host.threads) : {}),
         ...(host.fpu
             ? createMathFunctions({
+                readMemory: host.readMemory,
                 writeMemory: host.writeMemory,
                 fpu: host.fpu,
+                errno,
                 ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
             })
             : {}),

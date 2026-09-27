@@ -19,8 +19,14 @@
  * machine, to a halt where the host's trap would be; there it must have left
  * everything as the call found it -- ESP at the return address, the
  * arguments, EBX, ESI, EDI and EBP, the direction flag, the control word, the
- * x87 stack and every byte of memory -- and the case's stand-in for the
- * handler answers from there. The JavaScript must hand over the same inputs.
+ * x87 stack and its values, and every byte of memory -- and the case's
+ * stand-in for the handler answers from there. The JavaScript must hand over
+ * the same inputs.
+ *
+ * Under a single-precision control word the reference is the model of the
+ * x87 (`model.mjs`): the same source with each double's `+ - * /` and square
+ * root rounded to 24 bits, as the x87 rounds them and the translator does;
+ * under any other, the source itself, which is the model there.
  *
  * For the tests: the machine is cork's own test machine, not the engine.
  */
@@ -52,8 +58,11 @@ const SAVED = { ebx: 0x11111111, esi: 0x22222222, edi: 0x33333333, ebp: 0x444444
  * @property {number[]} [callback]    x86 at CALLBACK, which a call through a pointer reaches.
  * @property {(memory: Uint8Array, fn: number, args: number[]) => number} [call]
  *     Its JavaScript stand-in.
- * @property {(memory: Uint8Array, args: number[]) => number} [host]
- *     The host's handler a function hands a call to, over the case's memory.
+ * @property {(memory: Uint8Array, args: number[], x87: number[])
+ *     => number | { st0: number }} [host]
+ *     The host's handler a function hands a call to, over the case's memory,
+ *     with the x87 arguments (the last in ST0) as the call left them: EAX, or
+ *     a double that replaces them in ST0.
  */
 
 /** A small generator with a seed, so a failure is the same failure each run. @param {number} seed */
@@ -79,11 +88,24 @@ export function doubleWords(value){
 const sameDouble = (a, b)=>Object.is(a, b) || Number.isNaN(a) && Number.isNaN(b);
 
 /**
+ * The data area a function is held to: all of it for one that takes a
+ * helper of the guest's memory or calls the guest, none for one that takes
+ * nothing but `host` -- it names no address, and a run of maths is spared
+ * copying and comparing the area at every input.
+ *
+ * @param {{ uses: readonly string[] }} fn
+ */
+const spanOf = fn=>(fn.uses.some(use=>use !== 'host') ? DATA_END - DATA : 0);
+
+/**
  * @param {Record<string, import('../../src/layers/win32/msvcrt/guest-code.js').CompiledGuestCode>}
  *     compiled
  * @param {Record<string, unknown>} sources  The module the functions are in.
+ * @param {import('./model.mjs').Model} [model]  The x87's model of the same
+ *     module, the reference under a single-precision control word; without
+ *     one, the source is held to it there too.
  */
-export function equivalence(compiled, sources){
+export function equivalence(compiled, sources, model){
     /** One machine per function: its translations kept from one input to the next. */
     /** @type {Map<string, ReturnType<typeof createTestMachine>>} */
     const machines = new Map();
@@ -108,8 +130,9 @@ export function equivalence(compiled, sources){
             const code = fn.code.slice();
             if (fn.host !== undefined)
             {
-                new DataView(code.buffer).setUint32(fn.host,
-                    (HOST - (CODE + fn.host + 4)) >>> 0, true);
+                // The trap's address for a `jmp eax`, a displacement to it for a `jmp rel32`.
+                new DataView(code.buffer).setUint32(fn.host, code[fn.host - 1] === 0xb8 ? HOST
+                    : (HOST - (CODE + fn.host + 4)) >>> 0, true);
             }
             m.write(CODE, code);
             m.write(HALT, [0xf4]);
@@ -121,7 +144,8 @@ export function equivalence(compiled, sources){
             machines.set(name, m);
         }
         const view = new DataView(m.memory.buffer);
-        new Uint8Array(m.memory.buffer, m.layout.ramBase + DATA, DATA_END - DATA).fill(0);
+        const span = spanOf(fn);
+        new Uint8Array(m.memory.buffer, m.layout.ramBase + DATA, span).fill(0);
         for (const [address, bytes] of input.memory ?? [])
         {
             m.write(address, Array.from(bytes));
@@ -148,7 +172,7 @@ export function equivalence(compiled, sources){
         }
         view.setUint8(m.layout.x87Top, top);
         view.setUint8(m.layout.x87Empty, empty);
-        const before = fn.host === undefined ? null : m.read(DATA, DATA_END - DATA);
+        const before = fn.host === undefined ? null : m.read(DATA, span);
         const slots = fn.params.reduce((sum, type)=>sum + (type === 'f64' ? 2
             : type === 'x87' ? 0 : 1), 0);
         const exit = m.runProgram(CODE);
@@ -173,12 +197,17 @@ export function equivalence(compiled, sources){
             }
             st.push(view.getFloat64(m.layout.x87 + physical * 16, true));
         }
+        // The x87's top where the stack left it: its arguments popped, a double pushed.
+        const popped = fn.params.filter(type=>type === 'x87').length;
+        const pushed = fn.returns === 'f64' || fn.returns === 'f32' ? 1 : 0;
+        assert.equal(after, top + popped - pushed & 7,
+            `${name}: the x87 stack's top where the call and its result leave it`);
         return {
             eax: m.reg('eax'), edx: m.reg('edx'), esp: m.reg('esp'), st,
             saved: { ebx: m.reg('ebx'), esi: m.reg('esi'), edi: m.reg('edi'), ebp: m.reg('ebp') },
             df: (m.eflags() & 0x400) !== 0,
             control: view.getUint16(m.layout.x87Control, true),
-            data: m.read(DATA, DATA_END - DATA),
+            data: m.read(DATA, span),
             handedOver: false,
         };
     };
@@ -207,7 +236,12 @@ export function equivalence(compiled, sources){
             `${what}: the control word`);
         assert.deepEqual({ top: view.getUint8(m.layout.x87Top),
             empty: view.getUint8(m.layout.x87Empty) }, x87, `${what}: the x87 stack as it was`);
-        const data = m.read(DATA, DATA_END - DATA);
+        /** @type {number[]} The x87 arguments as the trap finds them, the last in ST0. */
+        const pushed = (input.x87 ?? []).map((_, i)=>view.getFloat64(m.layout.x87
+            + ((x87.top + (input.x87 ?? []).length - 1 - i) & 7) * 16, true));
+        pushed.forEach((value, i)=>assert.ok(sameDouble(value, (input.x87 ?? [])[i]),
+            `${what}: x87 argument ${i} ${value} where the call left ${(input.x87 ?? [])[i]}`));
+        const data = m.read(DATA, before.length);
         if (!Buffer.from(data).equals(Buffer.from(before)))
         {
             const at = data.findIndex((byte, i)=>byte !== before[i]);
@@ -219,18 +253,24 @@ export function equivalence(compiled, sources){
         }
         const memory = new Uint8Array(1 << 20);
         memory.set(data, DATA);
-        const eax = double.host(memory, args) >>> 0;
+        const answer = double.host(memory, args, pushed);
         // The trap returns as the export does: a stdcall one pops the arguments.
         const popped = compiledOf(name).convention === 'stdcall' ? slots * 4 : 0;
         return {
-            eax, edx: 0, esp: STACK + 4 + popped, st: [], saved: SAVED, df: false,
-            control: input.control ?? 0x37f, data: memory.slice(DATA, DATA_END), handedOver: true,
+            eax: typeof answer === 'number' ? answer >>> 0 : 0, edx: 0, esp: STACK + 4 + popped,
+            st: typeof answer === 'number' ? [] : [answer.st0], saved: SAVED, df: false,
+            control: input.control ?? 0x37f, data: memory.slice(DATA, DATA + data.length),
+            handedOver: true,
         };
     };
 
-    /** @param {string} name @param {Case} input @param {Double} double */
-    const runJs = (name, input, double)=>{
-        const memory = new Uint8Array(1 << 20);
+    /**
+     * @param {string} name @param {Case} input @param {Double} double
+     * @param {Record<string, unknown>} module  The source, or the model's copy of it.
+     */
+    const runJs = (name, input, double, module)=>{
+        const span = spanOf(compiledOf(name));
+        const memory = new Uint8Array(span > 0 ? 1 << 20 : DATA);
         for (const [address, bytes] of input.memory ?? [])
         {
             memory.set(Array.from(bytes), address);
@@ -238,7 +278,7 @@ export function equivalence(compiled, sources){
         /** @type {number[]} ST0 first */
         const st = [...input.x87 ?? []].reverse();
         let edx = 0xd5d5d5d5;
-        const source = sources[name];
+        const source = module[name];
         if (typeof source !== 'function')
         {
             throw new Error(`no source function ${name}`);
@@ -269,7 +309,14 @@ export function equivalence(compiled, sources){
             argBytes: 0,
             handler: args=>{
                 handedOver = true;
-                return host(memory, args);
+                const onStack = compiledOf(name).params.filter(type=>type === 'x87').length;
+                const answer = host(memory, args, st.slice(0, onStack).reverse());
+                if (typeof answer === 'number')
+                {
+                    return answer;
+                }
+                st.splice(0, onStack, answer.st0);
+                return 0;
             },
         } : undefined);
         if (!entry.handler)
@@ -277,7 +324,7 @@ export function equivalence(compiled, sources){
             throw new Error(`${name} calls the guest, and the case gives no stand-in`);
         }
         const eax = entry.handler([...input.stack ?? []]) >>> 0;
-        return { eax, edx, st, data: memory.slice(DATA, DATA_END), handedOver };
+        return { eax, edx, st, data: memory.slice(DATA, DATA + span), handedOver };
     };
 
     return {
@@ -289,7 +336,12 @@ export function equivalence(compiled, sources){
         same(name, input, double = {}){
             const fn = compiledOf(name);
             const x86 = runX86(name, input, double);
-            const js = runJs(name, input, double);
+            const single = ((input.control ?? 0x37f) & 0x300) === 0;
+            if (model)
+            {
+                model.$.control = input.control ?? 0x37f;
+            }
+            const js = runJs(name, input, double, single && model ? model.module : sources);
             const what = `${name}(${JSON.stringify(input.stack ?? [])}${input.x87
                 ? `, st ${JSON.stringify(input.x87)}` : ''}) under 0x${(input.control ?? 0x37f)
                 .toString(16)}`;
@@ -303,7 +355,7 @@ export function equivalence(compiled, sources){
             assert.equal(x86.esp, STACK + 4 + popped, `${what}: ESP past the return address`);
             assert.equal(x86.df, false, `${what}: the direction flag clear`);
             assert.equal(x86.control, input.control ?? 0x37f, `${what}: the control word`);
-            if (fn.returns === 'f64')
+            if (fn.returns === 'f64' || fn.returns === 'f32')
             {
                 assert.equal(x86.st.length, 1, `${what}: one double on the x87 stack`);
                 assert.ok(sameDouble(x86.st[0], js.st[0]),
@@ -313,7 +365,7 @@ export function equivalence(compiled, sources){
             {
                 assert.equal(x86.st.length, 0, `${what}: the x87 stack empty`);
             }
-            if (fn.returns !== 'f64' && fn.returns !== 'void')
+            if (fn.returns !== 'f64' && fn.returns !== 'f32' && fn.returns !== 'void')
             {
                 assert.equal(x86.eax, js.eax, `${what}: EAX`);
             }

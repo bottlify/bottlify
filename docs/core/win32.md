@@ -129,7 +129,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `WSOCK32.dll`, `WS2_32.dll` | `wsock32/` | 38 each | One socket registry under both names, over an injected adapter (loopback by default); readiness delivered as a window message (`WSAAsyncSelect`) or a signalled kernel event (`WSAEventSelect`/`WSAEnumNetworkEvents`), and name resolution the same way (`WSAAsyncGetHostByName`/`WSACancelAsyncRequest`). |
 | `SHELL32.dll` | `shell32/` | 24 | Launching a program (`ShellExecute`, `ShellExecuteEx`, `FindExecutable`), file operations on the volume (`fileop.js`: `SHFileOperationA/W` copying, moving, renaming and deleting by the rules shell32's tests check, `SHCreateDirectoryExA/W`), documented refusals where a registry or a person is needed (a document's handler, folder browse), the drag-and-drop truths, the namespace (`namespace.js`: `IShellFolder`/`IEnumIDList` over the volume), and `CLSID_ShellLink` (`IShellLinkA/W`, `IPersistFile`). |
 | `COMCTL32.dll` | `comctl32/` | 29 | Image lists (`imagelist.js`), which copy each image, and its mask with `ILC_MASK`, into bitmaps of their own and draw them through gdi32 (`ImageList_Draw`, `DrawEx`, `DrawIndirect`: through the mask, onto the background colour for `ILD_NORMAL`, the mask for `ILD_MASK`, the image alone for `ILD_IMAGE`, by `ILD_ROP`'s operation; alpha, the blend flags and the state effects are not drawn), `_TrackMouseEvent` (user32's `TrackMouseEvent`), `msctls_progress32`, `SysTreeView32` and `SysTabControl32` (`tab.js`) as built-in window classes, and property sheets and wizards (`propsheet.js`: `PropertySheetA/W`, `CreatePropertySheetPageA/W`, `DestroyPropertySheetPage`) -- a `#32770` dialog built through user32's own calls around a tab control, each page the program's own template and dialog procedure, told the `PSN_*` notifications through `WM_NOTIFY`, and every message the sheet sends -- to a page, to its own window, to a control -- answered before it sends the next, since any of them may run the program's code; Tab walks into a page's controls (`WS_EX_CONTROLPARENT`), `PSM_ISDIALOGMESSAGE` changes page on Ctrl+Tab, Ctrl+Shift+Tab and Ctrl+PgDn/PgUp, as a modal sheet does in its own loop (user32's, lent through the window service), `PSH_WIZARD97` and `PSH_WIZARD_LITE` make a wizard whose interior pages stand under a header band with the header title and subtitle, a page that cannot be made is dropped, and a modal sheet answers 1 when changes were saved, 0 when none were, and `ID_PSRESTARTWINDOWS`/`ID_PSREBOOTSYSTEM` only when OK or Finish closed it. |
-| `d3dx9_25.dll`, `d3dx9_26.dll`, `d3dx9_27.dll` | `d3dx9/` | 13 each | Stub tables for the D3DX helper libraries, shadowed by the real DLL wherever the program ships one or its installer put one in `system32` ([`decisions.md`](../../roadmap/decisions.md)). |
+| `d3dx9_25.dll`, `d3dx9_26.dll`, `d3dx9_27.dll` | `d3dx9/` | 14 each | Tables for the D3DX helper libraries, shadowed by the real DLL wherever the program ships one or its installer put one in `system32` ([`decisions.md`](../../roadmap/decisions.md)): the matrix and vector arithmetic -- `D3DXMatrixMultiply`, `Transpose`, `Inverse` (the determinant written where a pointer is given, NULL for a singular matrix), `Translation`, `OrthoLH`, `PerspectiveLH`, `D3DXVec4Transform`, `D3DXVec3Transform`, `TransformNormal`, `TransformCoord` and its `Array` form, `D3DXVec3Normalize` -- is code in the guest's own library (`d3dx9/inguest.js`, compiled as msvcrt's is), floats read, computed on the x87 under the program's control word and stored rounded to nearest, every input read before the output is written, so an output over its input answers what it would elsewhere; the effect facilities answer `E_NOTIMPL`. |
 | `WININET.dll` | `wininet/` | 12 | HTTP as a handle tree; a request parks the caller. |
 | `IMM32.dll` | `imm32/` | 10 | "There is no input method" — which is the state a game asks for. |
 | `RPCRT4.dll` | `rpcrt4/` | 8 | `UuidCreate` and the other GUID/status helpers a COM-adjacent program links directly; `UuidToStringA` spells a UUID without braces, in lower case, into a string the library allocates on the process heap, which `RpcStringFreeA` frees before clearing the caller's pointer. |
@@ -232,11 +232,13 @@ export function strncmp({ u8 }, left, right, count){ ... }
 ```
 
 The tag names the convention (`cdecl` or `stdcall`); `@param` and `@returns` give each value's
-machine type -- `i32`/`u32` a stack slot or EAX, `f64` two slots or ST0, `x87` a double the caller
-left on the x87 stack and the callee pops (`_ftol`), `i64` EDX:EAX (a double truncated as `fisttp`
-truncates, or an integer extended), `void`. A function that touches guest memory takes the helpers
-it uses from its first parameter: loads `u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `f32`, `f64`,
-stores `setU8`, `setU16`, `setU32`, `setF64`, `call(fn, ...args)` through a cdecl pointer, and
+machine type -- `i32`/`u32` a stack slot or EAX, `f64` two slots or ST0, `f32` one slot or ST0 (a
+value a float holds), `x87` a double the caller left on the x87 stack and the callee pops (`_ftol`,
+the `_CI` functions), `i64` EDX:EAX (a double truncated as `fisttp` truncates, or an integer
+extended), `void`. A function that touches guest memory takes the helpers it uses from its first
+parameter: loads `u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `f32`, `f64`, stores `setU8`, `setU16`,
+`setU32`, `setF32` (rounded to nearest, as `fstp dword` stores), `setF64`, `call(fn, ...args)`
+through a cdecl pointer, and
 `copyUp`/`copyDown`/`fill` (`rep movsd` or `rep stosd` for the whole dwords, down with the
 direction flag set for `copyDown`, the bytes left as the byte forms leave them -- a turn of a
 `rep` translated code moves one element at a time (a page holding code, an element across a
@@ -250,8 +252,15 @@ EBP as the caller left them -- and the code jumps to a trap into the handler, wh
 call as it came, arguments and all. The jump is a `jmp rel32` whose displacement the compiler
 leaves empty and names (`host` in the compiled module): the binding registers the trap
 (`guestEntry`'s fallback, the handler the function stood for) and the loader, which places the
-code, aims the jump at it ([`loader.md`](./loader.md)). The function goes to the host before it
-writes anything, so there is nothing to undo; one with an x87 parameter, popped by then, cannot.
+code, aims the jump at it ([`loader.md`](./loader.md)). A function with x87 instructions jumps
+through a register instead, `mov eax, trap; jmp eax`, the trap's address written in as the export
+is bound: cork forms the trap's stub into the region a direct jump comes from, and a region with
+x87 instructions leaves to its host's loop for a trap, where the stub's own region calls it from
+its code (`_CIpow` handing a power over, `_CIsqrt` of a negative, 942 and 661 ns a call through
+the direct jump, 725 and 413 through EAX). A parameter such a function assigns is a
+variable of its own, copied from the argument at entry, so the arguments the handler reads are the
+call's. The function goes to the host before it writes anything, so there is nothing to undo; one
+with x87 parameters pushes them back first, the last in ST0, as the call left them.
 `strtol` and `strtoul` hand over a value out of range -- the handler clamps it and sets `errno`,
 which is the calling thread's own and reached only through the host -- and a base outside 2..36
 other than 0, and answer everything else themselves.
@@ -276,7 +285,11 @@ ECX with EAX standing. The one x87 parameter of a function that reads it once, b
 other double, jump or call, stays in ST0 until that read: `_ftol` is `sub esp, 8; fisttp qword
 [esp]; pop eax; pop edx; ret`. Each function is position-independent (the loader places a
 `code` export wherever the module's `.text` has room, and nothing tells the bytes their
-address), a table reached through the address a `call $+5` pushes.
+address), a table reached through the address a `call $+5` pushes -- or, in a function whose x87
+stack is deeper or shallower at its return than at its entry (one that answers a double), a call
+to a four-byte routine after the code that returns it: cork's translator follows `call $+5` as a
+call that returns to the pop, and with the x87 stack changed between them it stops at the pop and
+never gets past it.
 
 The subset is the part of JavaScript 32-bit integer and x87 code reproduces exactly, and everything
 outside it is a compile error naming its place in the source (the full rules are at the top of
@@ -284,20 +297,42 @@ outside it is a compile error naming its place in the source (the full rules are
 typed as asm.js types them (`|0`, `>>>0` and the bitwise operators bring a value back to 32 bits;
 a sum may feed an address, another sum, a bitwise operator, an index or a store, and is brought
 back before a comparison, a variable or a result); a comparison of two signed or two unsigned
-values, never one of each; `*` by a constant, `Math.imul` otherwise, no division; doubles loaded,
-stored, compared, rounded by `Math.floor`/`ceil`/`trunc` (the rounding control set around
-`frndint` and put back, the precision control never touched -- a program under Direct3D runs at
-single precision, and a function that changed it would move the translator's x87 regions to the
-slow mixed form), `Math.abs`, and returned; no double arithmetic, which under a single-precision
-control word would not compute what JavaScript does; a module-level constant folded in; an
-exported module-level typed array read by index, its contents placed after the code; a
-module-level function of one `return` inlined. Objects, arrays, strings, closures, `await` and
-calls to other handlers are refused, and the host is reached only by `return host()`.
+values, never one of each; `*` by a constant, `Math.imul` otherwise, no integer division (`/` of
+two integers is a double's); a module-level constant folded in; an exported module-level typed
+array read by index, its contents placed after the code; a module-level function of one `return`
+inlined. Objects, arrays, strings, closures, `await` and calls to other handlers are refused, and
+the host is reached only by `return host()`.
+
+Doubles are the x87's. `+`, `-`, `*`, `/` and unary `-` are its instructions -- an operand in the
+frame, read through registers alone, or in the table of constants after the code taken as the
+instruction's memory operand (`fsubr`/`fdivr` when it is the left one), an integer in the frame
+through the `fi` forms, exact -- `%` is `fprem` until the remainder is whole (JavaScript's exact
+remainder), `Math.sqrt` `fsqrt`, `Math.sin`, `Math.cos`, `Math.tan` `fsin`, `fcos`, `fptan` (for
+an argument the source keeps below 2^63 in magnitude, past which the instruction leaves it),
+`Math.atan2` and `Math.atan` `fpatan`, `Math.log2` `fyl2x` of 1, `Math.abs` `fabs`,
+`Math.floor`/`ceil`/`trunc` `frndint` under the rounding control they name (set around it and
+put back), and `Math.fround` a store to a float and back. An integer becomes a double exactly,
+and a double an integer by `| 0` or `>>> 0`, JavaScript's modulo 2^32 (`fisttp`, and `fprem` by
+2^32 where that answers the integer indefinite). `Math.exp`, `Math.log`, `Math.log10` and
+`Math.pow` are refused: no one instruction is any of them, and the x87's sequence for each is not
+JavaScript's to the last bit under an engine that keeps the x87 in doubles. A source writes them
+with the instructions they are made of, through `X87` (`msvcrt/x87.js`: `X87.f2xm1`, `X87.yl2x`,
+`X87.scale`, `X87.rint` -- `frndint` to nearest --, `X87.exponent` and `X87.significand` of
+`fxtract`, and the constants `fldl2e`, `fldln2`, `fldlg2`, `fldl2t`, `fldpi` load), whose
+JavaScript is the double the engines compute for each, held to cork's by `msvcrt/x87.test.js`.
+Under a double-precision control word every one of these answers what JavaScript does; under the
+one the program set, each rounds as the x87 rounds -- the arithmetic and the square root to its
+precision control -- which is how the runtime a program links computes. The compiled code never
+changes the precision control, and changes the rounding control only around the `frndint` that
+names one.
 
 The same function is the export's handler (`guestEntry`, `msvcrt/guest-code.js`): its arguments
 read off the stack as the x86 reads them, its result answered where the x86 leaves it. That is
 the reference `msvcrt/inguest.test.js` holds the x86 to on cork's test machine, input by input --
-boundary values and random ones from a fixed seed, under five control words for the doubles --
+boundary values and random ones from a fixed seed, under five control words for the doubles; under
+single precision against the x87's model of the source (`scripts/guest-code/model.mjs`: the
+module rewritten with each double's `+ - * /` and square root rounded to 24 bits, as the x87 and
+the translator round them) --
 the result registers, the x87 stack and memory byte for byte, and what a callee owes its caller:
 EBX, ESI, EDI and EBP kept, ESP past the return address, the direction flag clear, the control
 word as it was, the x87 stack empty but for a double result. It is also what answers wherever a
@@ -327,6 +362,29 @@ msvcrt.dll answers otherwise: bytes compare as unsigned chars, `atoi` wraps, `to
 `towlower` hand WEOF back, and the wide classes of the Latin-1 page are msvcrt's; `strtol` and
 `strtoul` are held to theirs input by input as well, the JavaScript against the handler, since
 the handler is part of them.
+
+The mathematics is in the guest too (`msvcrt/inguest-math.js`), in both its shapes -- `sqrt`,
+`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`, `log10`, `pow`, `fmod`,
+`sinh`, `cosh`, `tanh`, `_hypot`/`hypot`, `ldexp`, `frexp`, `modf`, and the `_CI` forms of each
+the runtime has, with `_CIfabs`, `_CIfloor` and `_CIceil` -- computed on the x87 under the
+program's control word, as the runtime computes: a program under Direct3D gets its square roots,
+arcsines and exponentials to 24 bits, where the handlers answered in doubles whatever the word
+said. Each answers what the x87 answers for the instructions it is (`fsqrt`, `fsin`, `fcos`,
+`fptan`, `fpatan`; `asin` and `acos` as the runtime's own, `fpatan` of x and `fsqrt((1 + x)(1 -
+x))`; `log` and `log10` `fyl2x` of ln 2 and of log10(2); `fmod` `fprem`; `ldexp` `fscale`; `frexp`
+`fxtract`), and `exp` -- and `sinh`, `cosh`, `tanh` through it, `f2xm1` below ln 2 -- reduces its
+argument by ln 2 in two parts (Cody and Waite's) where the runtime multiplies by `fldl2e` in the
+x87's 64 bits: in a double's 53 that product costs up to 187 units in the last place, the
+reduction one. `pow` answers the powers exact in any precision -- x squared, the square root of a
+positive, x, its reciprocal, 1 -- and hands every other to the handler: 2^(y log2 x) in doubles
+missed powers that are exact (pow(10, 2) was 99.99999999999997). A case msvcrt
+answers with errno goes to the handler (`math.js`), which answers JavaScript's value and sets
+errno as msvcrt does -- `EDOM` for a NaN of arguments that were none, `ERANGE` for an infinity of
+finite ones -- and so does an argument past `fsin`'s reduction (2^63), a NaN or an infinity where
+the function checks for one, and a result past a double's range.
+`tools/math-bench.mjs` times each of these calls in a loop, d3dx9's arithmetic beside them and
+the x87's instructions inline, under both precisions, and sets cork's answers beside the
+emulator's.
 
 ### The process model
 
@@ -675,6 +733,28 @@ duplicated file handle does, so a program may close the file, the mapping and th
 order and the file closes with the last of them. The standard handles are never files: writing to
 them goes to `onOutput`.
 
+### Drives and discs
+
+`kernel32/drives.js` answers for the volumes. The machine's own disk is a fixed drive
+(`DRIVE_FIXED`), labelled `Bottlify`, on `NTFS`, with invented free space large enough to refuse no
+installation. A disc image mounted as a drive (`discs`, [`host.md`](./host.md)) is what it is: a
+CD-ROM (`DRIVE_CDROM`), and `GetVolumeInformationA`/`W` answer with the disc's own label and serial
+number ([`filesystem.md`](./filesystem.md), "Disc images"), the file system `CDFS`, a longest name
+of 110 characters on a Joliet disc and 221 on one without, and the flags `FILE_CASE_SENSITIVE_SEARCH`,
+`FILE_UNICODE_ON_DISK` (Joliet only) and `FILE_READ_ONLY_VOLUME`. `GetDiskFreeSpace` reports it
+full, 2048-byte sectors one to a cluster, as large as the disc; `SetVolumeLabel` on it fails with
+`ERROR_WRITE_PROTECT`.
+
+On the disc every name is read-only (`FILE_ATTRIBUTE_READONLY`, files and directories alike, and
+no archive bit), a name the disc records as hidden is hidden, and a file's time is the disc's
+recording time (`kernel32/filetime.js`'s `fileAttributes`, used by `GetFileAttributes`,
+`FindFirstFile` and `GetFileInformationByHandle`). Every change aimed at it -- `CreateFile` asking
+for write access or to create or empty a file, `CreateDirectory`, `DeleteFile`, `RemoveDirectory`,
+`MoveFile` off or onto it, `CopyFile` onto it, `SetFileAttributes`, `OpenFile`, `_lopen` and
+`_lcreat` for writing -- fails with `ERROR_WRITE_PROTECT` (19), the device's refusal, rather than
+`ERROR_ACCESS_DENIED`; `vfs.writeProtected(path)` is how the surface knows. Reading, and copying
+off the disc, are as on any drive.
+
 ### Time and its clock source
 
 Two clocks, both the kernel's ([`kernel.md`](./kernel.md)):
@@ -905,6 +985,33 @@ Stated as the code states them.
   read 128 KiB from the pointer whatever the string's length. `strcpy`
   copies as `memmove` does, as if the source were read whole first, where C leaves an overlap
   undefined.
+- **The C runtime's mathematics is the x87's, under the program's control word, and not the
+  runtime's own to the last bit.** It rounds to the precision control the program set, as msvcrt
+  does, and to nearest whatever the rounding control says, as msvcrt sets it for its maths. Where
+  the engines' x87 is a double, `exp`, `sinh`, `cosh` and `tanh` are within a unit or two in the
+  last place of JavaScript's (`exp` the same double in 92 % of arguments), `log` and `log10`
+  within one (`log10` of a power of ten exact), `asin` and `acos` within two -- the runtime
+  computes them with the x87's 64 bits and Windows answers nearer; `pow` hands a power it cannot
+  make exact to the handler, which answers JavaScript's. `sin`, `cos` and `tan` of an argument past
+  2^63 answer JavaScript's value, where msvcrt reduces it by its own 2π; `sinh`, `cosh`, `tanh` and
+  `_hypot` are written here, not after the runtime's code. errno is set as msvcrt sets it for
+  a domain or a range error; a NaN argument sets none. `ldexp` of a count past a double's range
+  scales in two steps and answers the double the result is (`ldexp(1e300, -1100)` is 7.4e-32),
+  where the handler multiplied by `Math.pow(2, n)`, zero or an infinity by then. The emulator's
+  `f2xm1` is 2^x less one in doubles and its `fldlg2` and `fldl2t` a unit off the doubles cork
+  loads: of the calls `crt-math.itest.js` makes, `exp(1)` and `log(10)` come a unit from cork's
+  under it and `sinh(0.1)` five, and `log10` takes the double nearest log10(2) rather than
+  `fldlg2`, which made `log10(1000)` 2.999999999999999 there. The emulator's `fprem` is not the
+  exact remainder either: of `math-bench.mjs`'s 256 pairs, `fmod` under it missed cork's answer
+  -- JavaScript's `%`, the x87's exact remainder -- in 91, by up to 3.8 million units in the last
+  place of a remainder that cancelled.
+- **d3dx9's arithmetic is the x87's, under the program's control word, over floats.** A matrix
+  product, a transform or a normalisation computes in doubles under a double-precision control
+  word and to 24 bits under Direct3D's, and stores floats rounded to nearest; the library picks
+  its own code by the processor, and the last bit of a result may differ from Windows'. `D3DXVec3TransformNormal` takes no part of the matrix's last row, as the
+  library does, where the handler added it times zero (a NaN out of an infinity there);
+  `D3DXVec3TransformCoord` and its `Array` form divide by 1 a point that comes to a w of 0, as the
+  handler did; `D3DXMatrixTranspose` moves the floats' bits as they are.
 - **Every listed display mode can be set.** `ChangeDisplaySettingsA`/`ExA` switch the screen to
   any mode `EnumDisplaySettingsA` lists -- the metrics, the desktop rectangle and the current
   settings follow, the refresh rate is accepted as asked, `CDS_TEST` answers without switching, and
@@ -1007,6 +1114,14 @@ Stated as the code states them.
   `HKLM\SYSTEM\CurrentControlSet\Control\Setup\OsComponents\{GUID}`, a place of this build's
   choosing rather than a documented one, and one never registered is `ERROR_FILE_NOT_FOUND`,
   the code its callers test for. The wide (`W`) spellings do not exist.
+- **A disc refuses as the device, and some of its answers were not measured.** Every change on a
+  disc is `ERROR_WRITE_PROTECT` before its name is looked up, so `CreateFile` with `CREATE_NEW` on a
+  name the disc has is `ERROR_FILE_EXISTS` only because that is checked first here; which of the
+  two Windows gives there, and the longest-name and flag values `GetVolumeInformation` reports for
+  a disc, are how the CD-ROM file system is known to answer, not something measured here. `GetFileInformationByHandle`
+  gives a file on the disc the machine's own serial number, and the C runtime's `_access` and
+  `_stat` do not see that a file on it is read-only. There is no media change: one image per drive,
+  as long as the program runs.
 - **WINTRUST verifies Authenticode files and nothing else.** An action other than
   `WINTRUST_ACTION_GENERIC_VERIFY_V2` is `TRUST_E_PROVIDER_UNKNOWN`, and a subject other than a
   file (a catalog member, a blob, a signer, a certificate) `TRUST_E_SUBJECT_FORM_UNKNOWN`, each
@@ -1033,11 +1148,11 @@ Unit tests are colocated with each file, `node:test`, over `fakeMemory`
 
 | area | files (all `src/layers/win32/…`) |
 |------|----------------------------------|
-| kernel32 | `apc`, `atoms`, `code-arena`, `consoleio`, `critical`, `drives`, `environment`, `file-holds`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `modules`, `named-objects`, `process`, `processor`, `profile`, `resources`, `seh`, `slimsync`, `spawn`, `sync`, `system`, `teb`, `threading`, `versions`, `vfs` `.test.js` |
-| msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `globals`, `heap`, `inguest`, `io`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `stdio`, `strings`, `threads`, `time`, `widetext` `.test.js` -- `inguest.test.js` holds each `@guestCode` function's x86 to its JavaScript on cork's test machine; the compiler's own tests (every form of the subset against JavaScript, every refusal with its place) are `scripts/guest-code/compile.test.js`, and `scripts/build-guest-code.test.js` fails on a stale `inguest.x86.js` |
+| kernel32 | `apc`, `atoms`, `code-arena`, `consoleio`, `critical`, `disc`, `drives`, `environment`, `file-holds`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `modules`, `named-objects`, `process`, `processor`, `profile`, `resources`, `seh`, `slimsync`, `spawn`, `sync`, `system`, `teb`, `threading`, `versions`, `vfs` `.test.js` |
+| msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `globals`, `heap`, `inguest`, `inguest-math`, `io`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `stdio`, `strings`, `threads`, `time`, `widetext`, `x87` `.test.js` -- `inguest.test.js` and `inguest-math.test.js` hold each `@guestCode` function's x86 to its JavaScript on cork's test machine, and `x87.test.js` `X87`'s JavaScript to the instructions on it; the compiler's own tests (every form of the subset against JavaScript, and against the x87's model under single precision, every refusal with its place) are `scripts/guest-code/compile.test.js`, and `scripts/build-guest-code.test.js` fails on a stale `inguest.x86.js` |
 | user32 | `controls`, `cursors`, `dialogs`, `display`, `keys`, `messages`, `objects`, `paint`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |
-| the rest | `advapi32/{crypto,functions,registry,services,tokens}`, `advpack/functions`, `cabinet/{cabinet,inflate,lzx}`, `crypto/{der,digest,pkcs7,pki,rc4,rsa,signature,x509}` (`pki.test.js` builds the keys, certificates and signed messages the others read), `comctl32/{functions,imagelist,progress,propsheet,tab,treeview}`, `comdlg32/functions`, `d3dx9/functions`, `imm32/functions`, `lz32/{expand,functions}`, `mpr/functions`, `msacm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{cfb,functions,guid,objects,propvariant,storage,wbem}`, `oleaut32/{errorinfo,functions,invoke,objects,typelib}`, `quartz/graph`, `rpcrt4/functions`, `setupapi/{functions,inf}`, `sfc/functions`, `shell32/{fileop,functions,namespace,shelllink}`, `shlwapi/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,mmio,thread,timers,wave}`, `winspool/functions`, `wintrust/{authenticode,fixtures,functions,roots}` (`fixtures.test.js` signs cabinets and images with a chain of its own), `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
+| the rest | `advapi32/{crypto,functions,registry,services,tokens}`, `advpack/functions`, `cabinet/{cabinet,inflate,lzx}`, `crypto/{der,digest,pkcs7,pki,rc4,rsa,signature,x509}` (`pki.test.js` builds the keys, certificates and signed messages the others read), `comctl32/{functions,imagelist,progress,propsheet,tab,treeview}`, `comdlg32/functions`, `d3dx9/{functions,inguest}` (`inguest.test.js` holds the arithmetic's x86 to its JavaScript as msvcrt's does), `imm32/functions`, `lz32/{expand,functions}`, `mpr/functions`, `msacm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{cfb,functions,guid,objects,propvariant,storage,wbem}`, `oleaut32/{errorinfo,functions,invoke,objects,typelib}`, `quartz/graph`, `rpcrt4/functions`, `setupapi/{functions,inf}`, `sfc/functions`, `shell32/{fileop,functions,namespace,shelllink}`, `shlwapi/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,mmio,thread,timers,wave}`, `winspool/functions`, `wintrust/{authenticode,fixtures,functions,roots}` (`fixtures.test.js` signs cabinets and images with a chain of its own), `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
 | module | `module.test.js` — a configured screen reaches user32 and gdi32; a DC through user32 is GDI's; both fall back to 640×480 together; the C runtime family is cdecl and every other library stdcall; the runtime's `_sleep` is kernel32's `Sleep`; the KnownDLLs; shfolder's forwarding; comctl32's `_TrackMouseEvent` is user32's. `wiring.test.js` builds the module and asks through it what each library's capabilities were handed: SHLWAPI's wide strings, ADVPACK's `IsNTAdmin` from the account's token, SETUPAPI's INF found on the volume by bare name and its OS components in the hive advapi32 reads, WINTRUST's file read from the volume and judged against the configured roots, VERSION's system libraries, mmio's buffer from the program's heap, mmio reading a file by the program's own kernel32 handle and calling its own I/O procedure through the bridge on the caller's thread, a drop target as its window's property through user32, a PROPVARIANT's BSTR and SAFEARRAY copied by oleaut32's own calls, the synchronisation calls' and the profile structures' last errors and guest memory, `LoadLibraryEx`'s flags reaching the assembler, `ExitProcess` and the runtime's `exit` telling the attached libraries last first (and ending at once with none), `MWMO_INPUTAVAILABLE`. |
 
 `kernel32/critical.itest.js` runs the hand-assembled critical-section fast paths on the real

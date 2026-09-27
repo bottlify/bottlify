@@ -61,6 +61,8 @@ const SYSTEM_ROOTS = ['windows', 'temp', 'tmp', 'program files\\common files'];
  * @property {string} name          The entry, as the guest will see it, relative to the media root.
  * @property {Uint8Array} bytes
  * @property {MediaFile[]} [files]  The rest of the media, the entry itself included or not.
+ * @property {string} [path]        Where the guest finds the entry when it is not put in
+ *                                  `MEDIA_DIRECTORY`: on a disc's own drive (`disc.js`).
  */
 
 /**
