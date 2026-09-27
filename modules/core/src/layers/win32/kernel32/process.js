@@ -713,7 +713,8 @@ export function createProcessFunctions(host){
     // ones under different names and call them rather than repeating them.
     /**
      * @type {Record<string, { argBytes: number, handler: Function,
-     *     guest?: (builder: import('./sync.js').GuestBuilder) => number }>}
+     *     guest?: (builder: import('./sync.js').GuestBuilder) => number,
+     *     code?: () => Uint8Array }>}
      */
     const table = {
         /** VOID SetLastError(DWORD dwErrCode) */
@@ -754,6 +755,7 @@ export function createProcessFunctions(host){
         GetCurrentProcess: {
             argBytes: 0,
             handler: ()=>CURRENT_PROCESS,
+            code: ()=>Uint8Array.from([0x83, 0xc8, 0xff, 0xc3]),        // or eax, -1; ret
         },
 
         /**
@@ -807,6 +809,8 @@ export function createProcessFunctions(host){
             handler: ()=>(told.major
                 | (told.minor << 8)
                 | ((told.build & 0x7fff) << 16)) >>> 0,
+            // mov eax, version; ret -- one process, one version
+            code: ()=>Uint8Array.from([0xb8, ...dword(table.GetVersion.handler()), 0xc3]),
         },
 
         /** BOOL GetVersionExA(LPOSVERSIONINFOA lpVersionInformation) */

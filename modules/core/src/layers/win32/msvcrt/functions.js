@@ -84,6 +84,12 @@ const RAND_MAX = 0x7fff;
  * @property {(address: number) => boolean} [free]
  * @property {(address: number) => { size: number, capacity: number } | null} [block]
  * @property {(address: number, bytes: number) => boolean} [resize]
+ * @property {ReturnType<typeof import('../kernel32/guest-heap.js').createGuestHeap>} [guestHeap]
+ *           Where malloc's small blocks are the guest's own: with `heapHandle`
+ *           and `allocateCode`, malloc, free, calloc, realloc and _msize are
+ *           guest code over the runtime's heap (`heap.js`).
+ * @property {() => number} [heapHandle]  The runtime's heap.
+ * @property {(bytes: number) => number} [allocateCode]
  * @property {() => number} [systemTimeMs]  Guest wall clock, milliseconds.
  * @property {() => number} [now]           Guest running time, milliseconds.
  * @property {any} [files]                  The volume, for the path functions.
@@ -737,6 +743,10 @@ export function createMsvcrtFunctions(host){
                 writeMemory: host.writeMemory,
                 fillMemory: host.fillMemory,
                 errno,
+                ...(host.guestHeap && host.heapHandle && host.allocateCode
+                    ? { guestHeap: host.guestHeap, heapHandle: host.heapHandle,
+                        allocateCode: host.allocateCode }
+                    : {}),
             })
             : {}),
         ...(host.systemTimeMs && host.now

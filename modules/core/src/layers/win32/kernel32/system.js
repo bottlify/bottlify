@@ -21,6 +21,7 @@
  * to do with rather than one that flatters the host.
  */
 
+import { lstrcpyCode, lstrlenCode } from './lstr.js';
 import { assemble } from '../msvcrt/guest-code.js';
 import {
     PROCESSOR, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION,
@@ -201,6 +202,9 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  *           Guest memory, for the one caller that asks for it:
  *           FormatMessage with FORMAT_MESSAGE_ALLOCATE_BUFFER. Without
  *           it that one flag is refused and everything else works.
+ * @property {number} [ramTop]  Where guest RAM ends. With it lstrlen and lstrcpy in
+ *           both widths are guest code (`lstr.js`), for the pointers it can read
+ *           without a fault.
  */
 
 /**
@@ -236,6 +240,29 @@ export function createSystemFunctions(host){
             return 0;
         }
     };
+
+    /**
+     * An lstr export as guest code, handing to its handler what the code
+     * does not read.
+     *
+     * @param {(at: number, trap: number, top: number) => Uint8Array} make
+     */
+    const lstrCode = make=>(host.ramTop
+        ? {
+            /**
+             * @this {{ argBytes: number, handler: Function }}
+             * @param {import('../msvcrt/guest-code.js').CodeBuilder} builder
+             */
+            code(builder){
+                const trap = builder.register({
+                    convention: 'stdcall', argBytes: this.argBytes, handler: this.handler,
+                });
+                const code = make(0, 0, /** @type {number} */ (host.ramTop));
+                builder.jump(code.length - 4, trap);
+                return code;
+            },
+        }
+        : {});
 
     /**
      * A terminated string of `width`-byte units, read a span at a time -- up to
@@ -972,6 +999,7 @@ export function createSystemFunctions(host){
             handler: survivesFault(([text])=>((text >>> 0) === 0
                 ? 0
                 : readAnsi(text >>> 0, MAX_STRING).length)),
+            ...lstrCode((at, trap, top)=>lstrlenCode(1, at, trap, top)),
         },
 
         /** int lstrlenW(LPCWSTR lpString) */
@@ -981,6 +1009,7 @@ export function createSystemFunctions(host){
             handler: survivesFault(([text])=>((text >>> 0) === 0
                 ? 0
                 : readWide(text >>> 0, MAX_STRING).length)),
+            ...lstrCode((at, trap, top)=>lstrlenCode(2, at, trap, top)),
         },
 
         /**
@@ -1001,6 +1030,28 @@ export function createSystemFunctions(host){
                 writeAnsi(destination >>> 0, readAnsi(source >>> 0, MAX_STRING));
                 return destination >>> 0;
             }),
+            ...lstrCode((at, trap, top)=>lstrcpyCode(1, at, trap, top)),
+        },
+
+        /** LPWSTR lstrcpyW(LPWSTR lpString1, LPCWSTR lpString2): lstrcpyA's, in UTF-16. */
+        lstrcpyW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: survivesFault(([destination, source])=>{
+                if (destination === 0 || source === 0)
+                {
+                    return 0;
+                }
+                const text = readWide(source >>> 0, MAX_STRING);
+                const units = new Uint16Array(text.length + 1);
+                for (let at = 0; at < text.length; at++)
+                {
+                    units[at] = text.charCodeAt(at);
+                }
+                host.writeMemory(destination >>> 0, new Uint8Array(units.buffer));
+                return destination >>> 0;
+            }),
+            ...lstrCode((at, trap, top)=>lstrcpyCode(2, at, trap, top)),
         },
 
         /**
