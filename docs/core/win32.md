@@ -579,7 +579,10 @@ TLS pointer (`FS:[0x2c]`), the one record of them: `TlsGetValue`/`FlsGetValue` a
 set leaving it and not checking the index against the allocation, as on Windows -- and the host's
 own handlers read and write the same array, so what they answer cannot drift from what the guest,
 the compiler's `__declspec(thread)` sequence included, reaches through `FS`. `TlsFree` clears the
-slot in every thread's array. An index from 64 up jumps to the host, which keeps those values per
+slot in every thread's array, and so does `TlsAlloc` handing it out: a set on a freed index lands
+in the array as on Windows, and the slot's next owner reads zero all the same (Windows clears only
+the allocating thread's; every thread's here is what a slot from 64 up already gets from its
+generation). An index from 64 up jumps to the host, which keeps those values per
 thread under the slot's generation and fails an index nobody allocated with
 `ERROR_INVALID_PARAMETER`.
 
@@ -1029,7 +1032,8 @@ cork and on the emulator: each interlocked call's answer, the dword it leaves, t
 and the registers it keeps, and three preempted threads counting through two of them; a TLS value
 set in the guest read back by the API, by the compiler's `FS:[0x2c]` sequence and not by another
 thread, the last error each call leaves, a slot past the array through the host, an index past
-every slot refused, a freed slot zero; three threads through one critical section with recursion,
+every slot refused, a freed slot zero, and a value set in a freed slot gone once `TlsAlloc` hands
+the slot out again; three threads through one critical section with recursion,
 sleeping while they hold it, the count exact, every entry through the fast path and every waiter
 handed the section; and a thread that finds a section held refused by `TryEnterCriticalSection`,
 then waiting in the host, with the lock count showing it queued, while the owner's own try is a
