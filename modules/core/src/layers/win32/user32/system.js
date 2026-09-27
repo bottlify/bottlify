@@ -213,6 +213,7 @@ const KEYEVENTF_SCANCODE = 0x0008;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_WINDOW_HANDLE = 1400;
+const ERROR_TIMEOUT = 1460;
 
 /**
  * The one input locale this build has: en-US, low word the language id, high
@@ -617,15 +618,21 @@ export function createSystemFunctions({ host, live, windows, classes }){
     };
 
     /**
-     * What SendMessage does, shared with the timed form.
+     * What SendMessage does, shared with the timed form: the procedure runs
+     * on the thread that created the window, and the caller waits for it.
      *
      * @param {number} hwnd @param {number} message @param {number} wParam
      * @param {number} lParam
      * @param {boolean} [unicode]  Whether the text the message carries is wide.
+     * @param {number} [timeout]  How long to wait for another thread, in milliseconds.
+     * @returns {number | Promise<number | null>} null when the timeout passed first
      */
-    const sendMessage = (hwnd, message, wParam, lParam, unicode = false)=>
-        host.send(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0, host.callerThread?.(),
-            unicode);
+    const sendMessage = (hwnd, message, wParam, lParam, unicode = false, timeout = undefined)=>
+        (host.sendAcross
+            ? host.sendAcross(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0,
+                host.callerThread?.(), unicode, timeout === undefined ? {} : { timeout })
+            : host.send(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0,
+                host.callerThread?.(), unicode));
 
     /**
      * GetMonitorInfo, both spellings. cbSize is the caller saying which
@@ -677,31 +684,37 @@ export function createSystemFunctions({ host, live, windows, classes }){
 
     /**
      * SendMessageTimeout in either encoding. The timeout is for a window on
-     * another thread that does not answer. Every window here is on the
-     * caller's thread, where the send runs the procedure to completion, so the
-     * answer is always in time: the result goes out through the pointer and
-     * the call reports success.
+     * another thread that does not answer in time, which fails the call with
+     * ERROR_TIMEOUT; on the caller's own thread the procedure runs to its end
+     * and the answer is always in time. The result goes out through the
+     * pointer.
      *
      * @param {number[]} args  hWnd, Msg, wParam, lParam, fuFlags, uTimeout, lpdwResult.
      * @param {boolean} unicode
      */
-    const sendMessageTimeout = ([hwnd, message, wParam, lParam, , , result], unicode)=>{
+    const sendMessageTimeout = ([hwnd, message, wParam, lParam, , timeout, result], unicode)=>{
         if (!live(hwnd))
         {
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
             return 0;
         }
-        /** @param {number} answer */
+        /** @param {number | null} answer */
         const report = answer=>{
+            if (answer === null)
+            {
+                host.setLastError?.(ERROR_TIMEOUT);
+                return 0;
+            }
             if ((result >>> 0) !== 0)
             {
                 writeU32s(host, result >>> 0, [answer >>> 0]);
             }
             return 1;
         };
-        const answer = sendMessage(hwnd, message, wParam, lParam, unicode);
+        const answer = sendMessage(hwnd, message, wParam, lParam, unicode, timeout >>> 0);
         return typeof (/** @type {any} */ (answer))?.then === 'function'
-            ? /** @type {any} */ (answer).then(report)
-            : report(answer);
+            ? /** @type {Promise<number | null>} */ (answer).then(report)
+            : report(/** @type {number} */ (answer));
     };
 
     const screen = host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 };

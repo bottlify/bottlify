@@ -306,6 +306,16 @@ const ERROR_INVALID_THREAD_ID = 1444;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_WINDOW_HANDLE = 1400;
 
+/**
+ * InSendMessageEx's answer: how the message being handled was sent from
+ * another thread, and whether ReplyMessage has answered it yet.
+ */
+const ISMEX_NOSEND = 0;
+const ISMEX_SEND = 1;
+const ISMEX_NOTIFY = 2;
+const ISMEX_CALLBACK = 4;
+const ISMEX_REPLIED = 8;
+
 /** TrackMouseEvent's request, its flags, and the messages its tracking posts. */
 const TRACKMOUSEEVENT_SIZE = 16;
 const TME_HOVER = 0x00000001;
@@ -726,6 +736,160 @@ export function createWindowFunctions(host){
             hwnd: record.hwnd, message: message >>> 0, wParam: wParam >>> 0, lParam: lParam >>> 0,
             ...unicode ? { unicode } : {},
         }, thread);
+    };
+
+    /**
+     * A message sent to a window of another thread: it waits for that thread
+     * to look at its queue, which runs the window's procedure on its own
+     * thread and hands the answer back to the sender.
+     *
+     * @typedef {{ hwnd: number, message: number, wParam: number, lParam: number,
+     *     unicode: boolean, kind: number, replied: boolean, result: number,
+     *     from: number | null, callback: number, data: number }} SentMessage
+     */
+
+    /**
+     * What other threads have sent to each thread's windows, oldest first,
+     * and the answers a thread that sent with SendMessageCallback is still
+     * to be told of -- both waiting for the thread's next look at its queue.
+     *
+     * @type {Map<number, SentMessage[]>}
+     */
+    const inbox = new Map();
+    /** @type {Map<number, SentMessage[]>} */
+    const answered = new Map();
+    /**
+     * The sent messages a thread's procedures are inside, innermost last:
+     * what InSendMessage and ReplyMessage answer about.
+     *
+     * @type {Map<number, SentMessage[]>}
+     */
+    const handling = new Map();
+
+    /** @param {Map<number, SentMessage[]>} map @param {number} thread */
+    const listOf = (map, thread)=>{
+        let list = map.get(thread);
+        if (!list)
+        {
+            list = [];
+            map.set(thread, list);
+        }
+        return list;
+    };
+
+    /**
+     * Answers a sent message, once: an answer ReplyMessage gave early is the
+     * one the sender reads, whatever the procedure returns after it.
+     *
+     * @param {SentMessage} sent @param {number} result
+     */
+    const reply = (sent, result)=>{
+        if (sent.replied)
+        {
+            return;
+        }
+        sent.replied = true;
+        sent.result = result;
+        if (sent.kind === ISMEX_CALLBACK && sent.from !== null)
+        {
+            listOf(answered, sent.from).push(sent);
+            host.queue.sent?.(sent.from);
+        }
+    };
+
+    /**
+     * Runs what other threads sent to this thread's windows, and the
+     * callbacks its own SendMessageCallback is owed: what every look at a
+     * thread's queue does before it looks for a posted message, and what a
+     * thread waiting on a send of its own keeps doing, or two threads
+     * sending to each other would each wait for ever.
+     *
+     * @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const receiveSent = thread=>{
+        const id = threadIdOf(thread);
+        if (id === null)
+        {
+            return 0;
+        }
+        const owed = answered.get(id)?.shift();
+        if (owed)
+        {
+            return andThen(host.call?.(owed.callback,
+                [owed.hwnd, owed.message, owed.data, owed.result], thread) ?? 0,
+            ()=>receiveSent(thread));
+        }
+        const sent = inbox.get(id)?.shift();
+        if (!sent)
+        {
+            return 0;
+        }
+        const inside = listOf(handling, id);
+        inside.push(sent);
+        return andThen(send(sent.hwnd, sent.message, sent.wParam, sent.lParam, thread,
+            sent.unicode), result=>{
+            inside.splice(inside.lastIndexOf(sent), 1);
+            reply(sent, result);
+            return receiveSent(thread);
+        });
+    };
+
+    /**
+     * SendMessage and its relatives as a program calls them: to a window of
+     * the caller's own thread the procedure runs now; to another thread's
+     * the message waits for that thread to take it, and SendMessage waits
+     * for the answer -- a notification and a message sent with a callback do
+     * not. A window whose thread is not known is its caller's.
+     *
+     * @param {number} hwnd @param {number} message @param {number} wParam
+     * @param {number} lParam @param {unknown} thread
+     * @param {boolean} [unicode]
+     * @param {{ kind?: number, timeout?: number, callback?: number, data?: number }} [how]
+     *     `timeout` in milliseconds, for SendMessageTimeout.
+     * @returns {number | Promise<number | null>} the answer; null when the
+     *     timeout passed first
+     */
+    const sendAcross = (hwnd, message, wParam, lParam, thread, unicode = false, how = {})=>{
+        const record = live(hwnd);
+        const owner = record ? ownerOf(record) : null;
+        const self = threadIdOf(thread);
+        if (!record || owner === null || self === null || owner === self)
+        {
+            return send(hwnd, message, wParam, lParam, thread, unicode);
+        }
+        /** @type {SentMessage} */
+        const sent = {
+            hwnd: record.hwnd, message: message >>> 0, wParam: wParam >>> 0,
+            lParam: lParam >>> 0, unicode, kind: how.kind ?? ISMEX_SEND, replied: false,
+            result: 0, from: self, callback: how.callback ?? 0, data: how.data ?? 0,
+        };
+        listOf(inbox, owner).push(sent);
+        host.queue.sent?.(owner);
+        if (sent.kind !== ISMEX_SEND)
+        {
+            return 1;
+        }
+        const clock = host.now ?? (()=>0);
+        const deadline = how.timeout === undefined ? Infinity : clock() + how.timeout;
+        return (async()=>{
+            while (!sent.replied)
+            {
+                // A window destroyed, or whose thread ended, answers nothing.
+                if (!live(sent.hwnd) || clock() >= deadline)
+                {
+                    const waiting = inbox.get(owner) ?? [];
+                    if (waiting.includes(sent))
+                    {
+                        waiting.splice(waiting.indexOf(sent), 1);
+                    }
+                    return live(sent.hwnd) ? null : 0;
+                }
+                await host.idle();
+                await receiveSent(thread);
+            }
+            return sent.result;
+        })();
     };
 
     /** @param {any} value @param {(answer: any) => any} then */
@@ -3171,6 +3335,9 @@ export function createWindowFunctions(host){
     // retrieval rather than posted, because that is what keeps a hundred
     // invalidations one paint. Nothing left to paint is the end of a pass,
     // and the moment the desktop is shown.
+    host.queue.sendsFrom?.(thread=>(inbox.get(thread)?.length ?? 0) > 0
+        || (answered.get(thread)?.length ?? 0) > 0);
+
     host.queue.ownersFrom?.(hwnd=>{
         const record = live(hwnd);
         return record ? ownerOf(record) : null;
@@ -3419,6 +3586,56 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * SendNotifyMessage, in either encoding.
+     *
+     * @param {number[]} args  hWnd, Msg, wParam, lParam.
+     * @param {boolean} unicode
+     */
+    const notify = ([hwnd, message, wParam, lParam], unicode)=>{
+        if (!live(hwnd))
+        {
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+            return 0;
+        }
+        return andThen(sendAcross(hwnd, message, wParam, lParam, host.callerThread?.(), unicode,
+            { kind: ISMEX_NOTIFY }), ()=>1);
+    };
+
+    /**
+     * SendMessageCallback, in either encoding.
+     *
+     * @param {number[]} args  hWnd, Msg, wParam, lParam, lpResultCallBack, dwData.
+     * @param {boolean} unicode
+     */
+    const sendWithCallback = ([hwnd, message, wParam, lParam, callback, data], unicode)=>{
+        const record = live(hwnd);
+        if (!record)
+        {
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+            return 0;
+        }
+        const thread = host.callerThread?.();
+        const owner = ownerOf(record);
+        const self = threadIdOf(thread);
+        if (owner !== null && self !== null && owner !== self)
+        {
+            return sendAcross(hwnd, message, wParam, lParam, thread, unicode,
+                { kind: ISMEX_CALLBACK, callback: callback >>> 0, data: data >>> 0 });
+        }
+        return andThen(send(hwnd, message, wParam, lParam, thread, unicode), result=>
+            andThen((callback >>> 0) !== 0 && host.call
+                ? host.call(callback >>> 0, [record.hwnd, message >>> 0, data >>> 0, result],
+                    thread)
+                : 0, ()=>1));
+    };
+
+    /** The sent message the caller's procedure is handling, innermost, or null. */
+    const inSend = ()=>{
+        const id = threadIdOf(host.callerThread?.());
+        return id === null ? null : handling.get(id)?.at(-1) ?? null;
+    };
+
+    /**
      * PostThreadMessage, in either encoding.
      *
      * @param {number[]} args  idThread, Msg, wParam, lParam.
@@ -3450,8 +3667,9 @@ export function createWindowFunctions(host){
             last: filterMax >>> 0, remove, thread: threadIdOf(thread) };
         // Only a message taken activates: a look leaves the press,
         // and the activation, for the call that takes it.
-        const entry = remove ? takeThrough(filter, thread)
-            : andThen(placeWaiting(filter, thread), ()=>host.queue.peek(filter));
+        // What other threads sent is handled before anything posted is looked for.
+        const entry = andThen(receiveSent(thread), ()=>(remove ? takeThrough(filter, thread)
+            : andThen(placeWaiting(filter, thread), ()=>host.queue.peek(filter))));
         return andThen(entry, (/** @type {any} */ taken)=>{
             if (!taken)
             {
@@ -3483,7 +3701,7 @@ export function createWindowFunctions(host){
         const thread = host.callerThread?.();
         const wanted = { hwnd: filter, first: filterMin >>> 0, last: filterMax >>> 0,
             remove: true, thread: threadIdOf(thread) };
-        const next = ()=>takeThrough(wanted, thread);
+        const next = ()=>andThen(receiveSent(thread), ()=>takeThrough(wanted, thread));
         /** @param {any} entry */
         const answer = entry=>{
             writeMessage(host, out, retrieved(entry, unicode));
@@ -3520,7 +3738,8 @@ export function createWindowFunctions(host){
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, active: activeWindow, activate,
                 capture: ()=>captured, setCapture, releaseCapture,
-                send, callProcedure, geometry, windowFromPoint, askedFromPoint, isChild, repaint,
+                send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
+                isChild, repaint,
                 appear, uncover,
                 shown, raise, restack, desktop: desktopWindow,
                 isDesktop: (/** @type {any} */ record)=>record !== null && record === desktop,
@@ -4194,25 +4413,100 @@ export function createWindowFunctions(host){
         /**
          * BOOL SendNotifyMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
          *
-         * Like SendMessage to another thread's window and like PostMessage to
-         * one's own: it does not wait for the window procedure to answer. There
-         * is one message loop here, so it posts and returns at once -- the
-         * window sees the message when it next pumps, which is what a sender
-         * that did not want to block asked for. Declared with its four
-         * arguments so an installer that fires one off does not lose four bytes
-         * of stack to it.
+         * SendMessage to a window of the caller's own thread, whose procedure
+         * has answered by the time this returns; to another thread's, a sent
+         * message that thread takes on its next look at its queue, without
+         * the caller waiting for the answer.
          */
         SendNotifyMessageA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: args=>postTo(args, false),
+            handler: args=>notify(args, false),
         },
 
         /** BOOL SendNotifyMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) */
         SendNotifyMessageW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: args=>postTo(args, true),
+            handler: args=>notify(args, true),
+        },
+
+        /**
+         * BOOL SendMessageCallbackA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam,
+         *     SENDASYNCPROC lpResultCallBack, ULONG_PTR dwData)
+         *
+         * A send that does not wait: the callback is handed the answer --
+         * at once for a window of the caller's own thread, and for another
+         * thread's once it has answered and the caller next looks at its
+         * own queue.
+         */
+        SendMessageCallbackA: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>sendWithCallback(args, false),
+        },
+
+        /** BOOL SendMessageCallbackW(...), with wide text in the message. */
+        SendMessageCallbackW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>sendWithCallback(args, true),
+        },
+
+        /**
+         * BOOL InSendMessage(void)
+         *
+         * Whether the procedure running is handling a message another thread
+         * sent, as against one this thread sent itself or took from its
+         * queue.
+         */
+        InSendMessage: {
+            argBytes: 0,
+            handler: ()=>(inSend() ? 1 : 0),
+        },
+
+        /**
+         * DWORD InSendMessageEx(LPVOID lpReserved)
+         *
+         * How that message was sent -- ISMEX_SEND, ISMEX_NOTIFY or
+         * ISMEX_CALLBACK, with ISMEX_REPLIED once ReplyMessage has answered
+         * it -- or ISMEX_NOSEND.
+         */
+        InSendMessageEx: {
+            argBytes: 4,
+            handler: ()=>{
+                const sent = inSend();
+                if (!sent)
+                {
+                    return ISMEX_NOSEND;
+                }
+                return sent.kind | (sent.replied && sent.kind !== ISMEX_NOTIFY ? ISMEX_REPLIED : 0);
+            },
+        },
+
+        /**
+         * BOOL ReplyMessage(LRESULT lResult)
+         *
+         * Answers a message another thread sent before its procedure has
+         * finished, so the sender goes on. FALSE when the procedure is not
+         * handling one; a notification has nobody waiting, and is not marked
+         * as answered.
+         */
+        ReplyMessage: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([result])=>{
+                const sent = inSend();
+                if (!sent)
+                {
+                    return 0;
+                }
+                if (sent.kind !== ISMEX_NOTIFY)
+                {
+                    reply(sent, result);
+                }
+                return 1;
+            },
         },
 
         /**
@@ -4262,7 +4556,7 @@ export function createWindowFunctions(host){
             handler: ([flags])=>{
                 const mask = flags >>> 0;
                 const { inQueue, changed } = host.queue.status(
-                    threadIdOf(host.callerThread?.()));
+                    threadIdOf(host.callerThread?.()), mask);
                 return (((inQueue & mask) << 16) | (changed & mask)) >>> 0;
             },
         },
@@ -4424,17 +4718,19 @@ export function createWindowFunctions(host){
          * BOOL WaitMessage(void)
          *
          * Yields until the queue has something to retrieve -- a posted
-         * message, a window to paint, a due timer, a quit -- and answers
-         * without taking it. A pump written as peek-then-wait spins without
-         * this, which from outside is a program at full speed doing nothing.
+         * message, a window to paint, a due timer, a quit, a message another
+         * thread sent -- and answers without taking it. A pump written as
+         * peek-then-wait spins without this, which from outside is a program
+         * at full speed doing nothing.
          */
         WaitMessage: {
             argBytes: 0,
             handler: ()=>{
                 const waiter = threadIdOf(host.callerThread?.());
-                const look = ()=>host.queue.peek({
-                    hwnd: ANY_WINDOW, first: 0, last: 0, remove: false, thread: waiter,
-                });
+                const look = ()=>(waiter !== null && (inbox.get(waiter)?.length ?? 0) > 0)
+                    || host.queue.peek({
+                        hwnd: ANY_WINDOW, first: 0, last: 0, remove: false, thread: waiter,
+                    });
                 if (look())
                 {
                     return 1;

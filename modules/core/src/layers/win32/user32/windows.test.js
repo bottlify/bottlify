@@ -164,7 +164,11 @@ const QS_KEY = 0x0001;
 const QS_MOUSEBUTTON = 0x0004;
 const QS_POSTMESSAGE = 0x0008;
 const QS_INPUT = 0x0007;
+const QS_SENDMESSAGE = 0x0040;
 const ERROR_INVALID_THREAD_ID = 1444;
+const ISMEX_NOSEND = 0;
+const ISMEX_SEND = 1;
+const ISMEX_REPLIED = 8;
 const PARKED = Object.freeze({ parked: true });
 
 /**
@@ -2568,6 +2572,82 @@ test('a window ends with the thread that made it, and what was posted to it goes
     assert.equal(fns.IsWindow.handler([child]), 0, 'and its children with it');
     assert.equal(queue.depth(), 0);
     assert.equal(dispatched.length, told, 'no procedure is told: its thread is gone');
+});
+
+test('SendMessage to another thread\'s window waits for that thread to take it', async()=>{
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    /** @type {any} */
+    let table = null;
+    /** @type {number[]} */
+    const flags = [];
+    const context = setup({
+        caller,
+        reply: message=>{
+            if (message.message === WM_USER)
+            {
+                flags.push(table.InSendMessageEx.handler([0]));
+                assert.equal(table.ReplyMessage.handler([7]), 1);
+                flags.push(table.InSendMessageEx.handler([0]));
+            }
+            if (message.message === WM_USER + 1)
+            {
+                flags.push(table.InSendMessageEx.handler([0]));
+            }
+            return 0x1234;
+        },
+    });
+    const { fns, memory, dispatched, tick } = context;
+    table = fns;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+
+    caller.current = main;
+    const answer = fns.SendMessageA.handler([hwnd, WM_USER, 1, 2]);
+    assert.ok(answer instanceof Promise, 'the sender waits');
+    assert.equal(dispatched.some(m=>m.message === WM_USER), false, 'and nothing has run yet');
+    assert.equal(fns.GetQueueStatus.handler([QS_SENDMESSAGE]), 0, 'it is not the main thread\'s');
+
+    caller.current = worker;
+    assert.equal(fns.GetQueueStatus.handler([QS_SENDMESSAGE]),
+        (QS_SENDMESSAGE << 16 | QS_SENDMESSAGE) >>> 0);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
+        'a look runs what was sent, and has nothing posted to hand back');
+    const ran = dispatched.find(m=>m.message === WM_USER);
+    assert.equal(ran?.thread, worker, 'on the thread that made the window');
+    assert.deepEqual(flags, [ISMEX_SEND, ISMEX_SEND | ISMEX_REPLIED]);
+    await tick();
+    await tick();
+    assert.equal(await answer, 7, 'the answer ReplyMessage gave');
+
+    assert.equal(fns.SendMessageA.handler([hwnd, WM_USER + 1, 0, 0]), 0x1234,
+        'a send to its own window runs at once');
+    assert.equal(flags.at(-1), ISMEX_NOSEND, 'and is no message from another thread');
+    assert.equal(fns.ReplyMessage.handler([0]), 0);
+});
+
+test('SendNotifyMessage leaves another thread\'s window a message and does not wait', ()=>{
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    const { fns, memory, dispatched, queue } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+
+    assert.equal(fns.SendNotifyMessageA.handler([hwnd, WM_USER, 0, 0]), 1);
+    assert.equal(dispatched.at(-1)?.message, WM_USER, 'to its own window it is a send');
+    assert.equal(queue.depth(), 0, 'and nothing is posted');
+
+    caller.current = main;
+    assert.equal(fns.SendNotifyMessageA.handler([hwnd, WM_USER + 1, 0, 0]), 1, 'at once');
+    assert.notEqual(dispatched.at(-1)?.message, WM_USER + 1);
+    caller.current = worker;
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    assert.equal(dispatched.at(-1)?.message, WM_USER + 1);
+    assert.equal(fns.SendNotifyMessageA.handler([0x9999, WM_USER, 0, 0]), 0, 'no window');
 });
 
 test('PostThreadMessageA refuses a thread that does not exist, and says why', ()=>{

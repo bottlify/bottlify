@@ -96,6 +96,7 @@ export const QS_MOUSEBUTTON = 0x0004;
 export const QS_POSTMESSAGE = 0x0008;
 export const QS_TIMER = 0x0010;
 export const QS_PAINT = 0x0020;
+export const QS_SENDMESSAGE = 0x0040;
 export const QS_HOTKEY = 0x0080;
 export const QS_ALLPOSTMESSAGE = 0x0100;
 export const QS_RAWINPUT = 0x0400;
@@ -289,6 +290,14 @@ export function createMessageQueue(options = {}){
      * @type {((hwnd: number) => number | null) | null}
      */
     let ownerOf = null;
+    /**
+     * Whether another thread has sent a thread something it has not taken,
+     * when the window half has said: sent messages are the window half's,
+     * and only their presence is a class of this queue's.
+     *
+     * @type {((thread: number) => boolean) | null}
+     */
+    let sentTo = null;
     /**
      * The message most recently taken off the queue, for GetMessageTime and
      * GetMessagePos: both answer about it, whichever window it was for.
@@ -659,6 +668,10 @@ export function createMessageQueue(options = {}){
         {
             inQueue |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
         }
+        if (asking !== null && sentTo?.(asking))
+        {
+            inQueue |= QS_SENDMESSAGE;
+        }
         const filter = { hwnd: ANY_WINDOW, first: 0, last: 0, remove: false, thread: asking };
         if (dirtyWindow && dirtyWindow(filter) !== 0)
         {
@@ -926,13 +939,15 @@ export function createMessageQueue(options = {}){
          * different things -- "is there anything to pump" against "has anything
          * happened since I last asked".
          *
-         * Looking counts as a look: the news is cleared here, the way it is
-         * cleared by a retrieval.
+         * Looking counts as a look: the news of the classes asked about is
+         * cleared here, the way a retrieval clears all of it; news of a class
+         * not asked about is still news to the next look.
          *
          * @param {number | null} [thread]  Whose queue; the running thread's if left out.
+         * @param {number} [asked]  The classes asked about; every one if left out.
          * @returns {{ inQueue: number, changed: number }}
          */
-        status(thread){
+        status(thread, asked = ~0){
             const asking = whose(thread);
             const inQueue = waiting(asking);
             const synthetic = inQueue & (QS_PAINT | QS_TIMER);
@@ -941,9 +956,9 @@ export function createMessageQueue(options = {}){
             // *and has not been taken yet*, so a keystroke posted and retrieved
             // between two looks is no longer news.
             const news = (look.changed | (synthetic & ~look.synthetic)) & inQueue;
-            look.changed = 0;
+            look.changed &= ~asked;
             look.at = now();
-            look.synthetic = synthetic;
+            look.synthetic = (look.synthetic & ~asked) | (synthetic & asked);
             return { inQueue, changed: news };
         },
 
@@ -1196,6 +1211,25 @@ export function createMessageQueue(options = {}){
          */
         routeWith(route){
             router = route;
+        },
+
+        /**
+         * Another thread has sent this thread something: news of a sent message.
+         *
+         * @param {number} thread
+         */
+        sent(thread){
+            arrived(thread, QS_SENDMESSAGE);
+        },
+
+        /**
+         * Tells the queue how to find whether a thread has been sent a message
+         * it has not taken.
+         *
+         * @param {(thread: number) => boolean} source
+         */
+        sendsFrom(source){
+            sentTo = source;
         },
 
         /**
