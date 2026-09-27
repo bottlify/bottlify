@@ -208,9 +208,12 @@ function paintedHost(fills, presents){
  * @param {(message: any) => void} [options.trace] Told every message a procedure receives.
  * @param {boolean} [options.paint] Whether the build has a display to paint the
  *        desktop on, so a test can see what is painted and what is shown.
+ * @param {{ current: unknown }} [options.caller] Whose call the bridge names, for a
+ *        test that moves between threads; THREAD otherwise.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
+    caller = { current: THREAD },
 } = {})
 {
     const memory = fakeMemory();
@@ -269,7 +272,7 @@ function setup({
             called.push({ entry, args, thread });
             return hookReply ? hookReply(entry, args) : 0;
         },
-        callerThread: ()=>THREAD,
+        callerThread: ()=>caller.current,
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         threadExists,
         /** @param {number} code */
@@ -2396,6 +2399,29 @@ test('the newest hook is called first and reaches the older through CallNextHook
     assert.equal(fns.UnhookWindowsHookEx.handler([newer]), 0, 'and not twice');
     createWindow(fns, memory);
     assert.equal(called.at(-1)?.entry, OLDER_HOOK_PROC, 'the older is the newest now');
+});
+
+test('a hook set for one thread hears that thread alone, and one set for none every thread', ()=>{
+    const main = { id: 1, name: 'main' };
+    const other = { id: 2, name: 'thread-2' };
+    const caller = { current: /** @type {unknown} */ (main) };
+    const { memory, fns, called } = setup({ heap: true, caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    fns.SetWindowsHookExA.handler([WH_CBT, OLDER_HOOK_PROC, 0, main.id]);
+    const global = fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 0]);
+
+    caller.current = other;
+    createWindow(fns, memory);
+    assert.deepEqual(called.map(call=>call.entry), [HOOK_PROC], 'the global hook alone');
+    assert.equal(fns.CallNextHookEx.handler([global, HCBT_CREATEWND, 0x40, 0x50]), 0);
+    assert.equal(called.length, 1, 'the next in the chain is the main thread\'s own');
+
+    caller.current = main;
+    createWindow(fns, memory);
+    assert.equal(called.at(-1)?.entry, HOOK_PROC);
+    fns.CallNextHookEx.handler([global, HCBT_CREATEWND, 0x40, 0x50]);
+    assert.equal(called.at(-1)?.entry, OLDER_HOOK_PROC, 'and the main thread hears its own');
 });
 
 test('a hook of a type that is never called says so once, and is still installed', ()=>{

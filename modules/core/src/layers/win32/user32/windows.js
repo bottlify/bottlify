@@ -221,6 +221,18 @@ export function watchDispatch(host, message, answer){
 }
 
 /**
+ * The identifier of a thread the bridge named, or null for one that carries
+ * none: a build with no scheduler, whose one caller is then every thread.
+ *
+ * @param {unknown} thread
+ * @returns {number | null}
+ */
+export const threadIdOf = thread=>{
+    const id = /** @type {{ id?: unknown } | null | undefined} */ (thread)?.id;
+    return typeof id === 'number' ? id >>> 0 : null;
+};
+
+/**
  * CREATESTRUCTA, which is what WM_NCCREATE and WM_CREATE carry.
  *
  * A program reads `lpCreateParams` out of it to find whatever it passed to
@@ -1517,13 +1529,25 @@ export function createWindowFunctions(host){
      * installs one for -- to attach its own object to the window before the
      * window's procedure runs.
      *
-     * ponytail: a hook's thread is recorded and not consulted -- every hook of
-     * a type is called whichever thread creates the window. Per-thread
-     * delivery when a program is seen to hook one thread and create on another.
+     * A hook set for one thread hears what happens on that thread alone; one
+     * set for none -- a global hook -- hears every thread of the process, and
+     * a chain on a thread is its own hooks and the global ones, newest first.
      *
      * @type {{ handle: number, type: number, proc: number, thread: number }[]}
      */
     const hooks = [];
+
+    /**
+     * Whether a hook hears what a thread does. A caller the bridge names
+     * without an identifier is a build with no scheduler, and its one
+     * thread is every thread.
+     *
+     * @param {{ thread: number }} hook @param {unknown} thread
+     */
+    const hears = (hook, thread)=>{
+        const id = threadIdOf(thread);
+        return hook.thread === 0 || id === null || hook.thread === id;
+    };
 
     /**
      * Calls the newest hook of a type, or the one older than `after`.
@@ -1540,7 +1564,7 @@ export function createWindowFunctions(host){
         }
         for (let at = from; at >= 0; at--)
         {
-            if (hooks[at].type === type && host.call)
+            if (hooks[at].type === type && hears(hooks[at], thread) && host.call)
             {
                 return host.call(hooks[at].proc, args, thread);
             }
@@ -1719,7 +1743,7 @@ export function createWindowFunctions(host){
         const systemProcedure = ()=>record.wndProc === 0 || procedures.has(record.wndProc);
         // A CBT hook hears of every window, a system class's too: a framework
         // subclasses a dialog there, and the messages that follow go to it.
-        const hooked = hooks.some(hook=>hook.type === WH_CBT);
+        const hooked = hooks.some(hook=>hook.type === WH_CBT && hears(hook, thread));
         if (systemProcedure() && !hooked)
         {
             return onThisSide();
