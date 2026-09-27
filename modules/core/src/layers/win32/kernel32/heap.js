@@ -19,6 +19,10 @@
  * about.
  */
 
+import {
+    heapAllocCode, heapFreeCode, heapReAllocCode, heapSizeCode,
+} from './guest-heap.js';
+
 /** Flags the guest passes; the rest of HeapAlloc's flags do not change behaviour here. */
 const HEAP_ZERO_MEMORY = 0x00000008;
 
@@ -586,6 +590,13 @@ export function createHeapAllocator({ base, size }){
  *           Where a refused allocation is reported: a program that is told it
  *           has run out of memory says so in its own words and exits, and
  *           without this nothing says how much it asked for and what was left.
+ * @property {ReturnType<typeof import('./guest-heap.js').createGuestHeap>} [guestHeap]
+ *           The small blocks the guest allocates and frees itself
+ *           (`guest-heap.js`), with `allocator` its `wrap()`: a heap is then its
+ *           control block, and HeapAlloc, HeapFree, HeapSize and HeapReAlloc are
+ *           guest code that falls back to the handlers here.
+ * @property {(bytes: number) => number} [allocateCode]  Pages of their own for
+ *           that code (`code-arena.js`).
  */
 
 /**
@@ -617,7 +628,12 @@ export function createHeapFunctions(host){
         return nextHeap;
     };
 
-    const processHeap = newHandle();
+    const guestHeap = host.guestHeap ?? null;
+    // A heap is its control block where the guest keeps its small blocks, and
+    // a number of the host's own where the arena had no room for one.
+    const makeHeap = ()=>guestHeap?.createHeap() || newHandle();
+
+    const processHeap = makeHeap();
     const heaps = new Set([processHeap]);
     /** Heaps made with HEAP_NO_SERIALIZE, which cannot take the low-fragmentation heap. */
     const unserialized = new Set();
@@ -919,6 +935,62 @@ export function createHeapFunctions(host){
         return moved;
     };
 
+    /**
+     * The guest's routines, placed once on the first bind of any of them: each
+     * falls back to its export's handler through a trap of its own.
+     *
+     * @type {Record<'alloc' | 'free' | 'size' | 'reAlloc', number> | null}
+     */
+    let routines = null;
+    /** @param {import('./sync.js').GuestBuilder} builder */
+    const placedRoutines = builder=>{
+        if (routines)
+        {
+            return routines;
+        }
+        const guest = /** @type {NonNullable<typeof guestHeap>} */ (guestHeap);
+        const placement = guest.placement();
+        /**
+         * @param {string} label @param {'HeapAlloc' | 'HeapFree' | 'HeapSize' | 'HeapReAlloc'} name
+         * @param {(p: import('./guest-heap.js').Placement, at: number, trap: number)
+         *     => Uint8Array} code
+         */
+        const place = (label, name, code)=>{
+            const trap = builder.register(label, {
+                argBytes: table[name].argBytes,
+                /** @param {number[]} args */
+                handler: args=>table[name].handler(args),
+            });
+            if (placement === null || !host.allocateCode)
+            {
+                return trap;
+            }
+            // Sized by a throwaway rendering: the bytes depend on where they
+            // land only through the jump to the trap.
+            const at = host.allocateCode(code(placement, 0, trap).length);
+            host.writeMemory(at, code(placement, at, trap));
+            return at;
+        };
+        routines = {
+            alloc: place('<heap-alloc>', 'HeapAlloc', heapAllocCode),
+            free: place('<heap-free>', 'HeapFree', heapFreeCode),
+            size: place('<heap-size>', 'HeapSize', heapSizeCode),
+            reAlloc: place('<heap-realloc>', 'HeapReAlloc', heapReAllocCode),
+        };
+        return routines;
+    };
+    /**
+     * An export's guest routine where the small blocks are the guest's.
+     *
+     * @param {'alloc' | 'free' | 'size' | 'reAlloc'} which
+     */
+    const routine = which=>(guestHeap && host.allocateCode
+        ? {
+            /** @param {import('./sync.js').GuestBuilder} builder */
+            guest: builder=>placedRoutines(builder)[which],
+        }
+        : {});
+
     const table = {
         /** HANDLE GetProcessHeap(VOID) */
         GetProcessHeap: {
@@ -931,7 +1003,7 @@ export function createHeapFunctions(host){
             argBytes: 12,
             /** @param {number[]} [args] */
             handler: ([options] = [0])=>{
-                const heap = newHandle();
+                const heap = makeHeap();
                 heaps.add(heap);
                 if ((options & HEAP_NO_SERIALIZE) !== 0)
                 {
@@ -1042,6 +1114,7 @@ export function createHeapFunctions(host){
                 {
                     return 0;
                 }
+                guestHeap?.destroyHeap(heap);
                 for (const address of allocator.owned(heap))
                 {
                     allocator.free(address);
@@ -1079,6 +1152,7 @@ export function createHeapFunctions(host){
                 }
                 return address;
             },
+            ...routine('alloc'),
         },
 
         /** LPVOID HeapReAlloc(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem, SIZE_T dwBytes) */
@@ -1098,6 +1172,7 @@ export function createHeapFunctions(host){
                     mayMove: (flags & HEAP_REALLOC_IN_PLACE_ONLY) === 0,
                 });
             },
+            ...routine('reAlloc'),
         },
 
         /** BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem) */
@@ -1118,6 +1193,7 @@ export function createHeapFunctions(host){
                 }
                 return allocator.free(address) ? 1 : 0;
             },
+            ...routine('free'),
         },
 
         /** SIZE_T HeapSize(HANDLE hHeap, DWORD dwFlags, LPCVOID lpMem) */
@@ -1131,6 +1207,7 @@ export function createHeapFunctions(host){
                 // padding follows it.
                 return block ? block.size : INVALID_SIZE;
             },
+            ...routine('size'),
         },
 
         /**

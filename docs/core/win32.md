@@ -544,6 +544,30 @@ gets its own heap, hive, queue and COM registry.
   guest walking its address space by `RegionSize` does not step a page at a time.
   `HeapSetInformation` turns the low-fragmentation heap on once and refuses to turn it off, as
   `HeapQueryInformation` then reports.
+  **A heap's small blocks are the guest's** (`kernel32/guest-heap.js`). A heap is its control
+  block, 64 KiB-aligned as on Windows, and its handle; `PEB->ProcessHeap` holds the process heap's.
+  A block of up to a kilobyte comes from a slab of one size class (twenty-four classes from 8 to
+  1024 bytes, 16 KiB a slab), and `HeapAlloc`, `HeapFree`, `HeapSize` and `HeapReAlloc` -- and
+  `malloc`, `free`, `calloc`, `realloc` and `_msize` over the runtime's own heap, made through
+  `HeapCreate` the first time the runtime allocates -- are guest code that takes a cell off a
+  class's cache in the control block and gives it back there, under the heap's lock, taken with
+  one `xchg`. What that code does not keep goes to the handler above through a trap of its own
+  (`<heap-alloc>`, `<malloc>`, ...): a block past a kilobyte, a flag other than
+  `HEAP_NO_SERIALIZE`, `HEAP_GENERATE_EXCEPTIONS` and `HEAP_ZERO_MEMORY` (and
+  `HEAP_REALLOC_IN_PLACE_ONLY` for a resize), a resize past the block's cell, a pointer that is no
+  live cell of that heap, an empty cache, a full one, and a lock another thread holds -- the host
+  runs while no guest thread does, so it touches a cache only while the lock is free and otherwise
+  keeps the free cells itself. Nothing of this sits beside a block: the guest finds a cell's slab
+  through a directory with a word for every 16 KiB of the arena, and its size in the slab's record,
+  one more than what was asked for (zero free), which is how `HeapSize` is exact and a double free
+  is refused. Every host path goes through the arena's allocator with those cells found, sized and
+  freed where they are (`wrap()`), so `HeapValidate`, `HeapSummary`, `HeapDestroy`,
+  `GlobalSize`/`LocalFree` of such a block and a block the host allocated and the guest frees, or
+  the other way round, all agree; a slab whose cells are all back with the host returns to the
+  arena, and `HeapDestroy` takes a heap's slabs with it. In node on cork (a loop of allocations
+  and frees, the tree before and this one alternated, each its own process on one core), a pair
+  of 16 to 1000 bytes costs about a tenth of what two crossings cost -- 98-119 ns against
+  909-1206 -- and a block past a kilobyte, still the host's, about 70 ns more (904 against 836).
 - **Modules** (`kernel32/modules.js` over the assembler's module table, `src/app.js`). Every system
   library is synthesised before the first instruction and binds whenever it is asked for, but it is
   *loaded* -- found by `GetModuleHandle`, listed in `PEB->Ldr` -- only once an image is bound to it
@@ -1311,7 +1335,7 @@ Unit tests are colocated with each file, `node:test`, over `fakeMemory`
 
 | area | files (all `src/layers/win32/…`) |
 |------|----------------------------------|
-| kernel32 | `apc`, `atoms`, `code-arena`, `consoleio`, `critical`, `disc`, `drives`, `environment`, `file-holds`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `modules`, `named-objects`, `process`, `processor`, `profile`, `resources`, `seh`, `slimsync`, `spawn`, `sync`, `system`, `teb`, `threading`, `versions`, `vfs` `.test.js` |
+| kernel32 | `apc`, `atoms`, `code-arena`, `consoleio`, `critical`, `disc`, `drives`, `environment`, `file-holds`, `files`, `filetime`, `guest-heap` (the heap's guest routines on cork's test machine over the memory the host's half keeps: a cache filled by the host and emptied by the guest, what they hand over, zeroing, a full cache handed back and an empty slab returned, `HeapDestroy`'s half, and four thousand random calls from both sides with every block's contents, extent and size checked), `heap`, `iocp`, `locale`, `mapping`, `modules`, `named-objects`, `process`, `processor`, `profile`, `resources`, `seh`, `slimsync`, `spawn`, `sync`, `system`, `teb`, `threading`, `versions`, `vfs` `.test.js` |
 | msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `globals`, `heap`, `inguest`, `inguest-math`, `io`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `stdio`, `strings`, `threads`, `time`, `widetext`, `x87` `.test.js` -- `inguest.test.js` and `inguest-math.test.js` hold each `@guestCode` function's x86 to its JavaScript on cork's test machine, and `x87.test.js` `X87`'s JavaScript to the instructions on it; the compiler's own tests (every form of the subset against JavaScript, and against the x87's model under single precision, every refusal with its place) are `scripts/guest-code/compile.test.js`, and `scripts/build-guest-code.test.js` fails on a stale `inguest.x86.js` |
 | user32 | `controls`, `cursors`, `dialogs`, `display`, `keys`, `messages`, `objects`, `paint`, `structs`, `system`, `unicode`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |
@@ -1330,7 +1354,13 @@ the slot out again; three threads through one critical section with recursion,
 sleeping while they hold it, the count exact, every entry through the fast path and every waiter
 handed the section; and a thread that finds a section held refused by `TryEnterCriticalSection`,
 then waiting in the host, with the lock count showing it queued, while the owner's own try is a
-recursion, until the owner's last leave hands it over. `src/winmm-inguest.itest.js` calls
+recursion, until the owner's last leave hands it over. `src/heap-inguest.itest.js` calls the
+heap through the import on cork and on the emulator: a block sized, validated by the host, grown in
+place and moved past its cell, freed and no longer valid; `HEAP_ZERO_MEMORY` over a recycled cell;
+a heap of the program's own added up by `HeapSummary` and taken whole by `HeapDestroy`; the
+runtime's family; another heap's block refused; and ten thousand pairs with next to none of them
+crossing -- and three threads preempted every 97 instructions allocating, filling, checking and
+freeing eight blocks a turn from the process heap and from `malloc`. `src/winmm-inguest.itest.js` calls
 `timeGetTime` and `GetTickCount` one after the other through the import, twice with a `Sleep`
 between, on cork and on the emulator: each pair in order on one clock, the sleep seen, the stack
 and the kept registers as they were, `timeBeginPeriod` granted, `GetProcAddress` handing out the
