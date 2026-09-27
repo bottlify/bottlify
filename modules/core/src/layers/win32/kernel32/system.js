@@ -21,6 +21,7 @@
  * to do with rather than one that flatters the host.
  */
 
+import { assemble } from '../msvcrt/guest-code.js';
 import {
     PROCESSOR, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION,
 } from './processor.js';
@@ -64,6 +65,67 @@ const FILETIME_AT_UNIX_EPOCH = 116_444_736_000_000_000n;
  */
 const THREAD_PRIORITIES = new Set([-15, -2, -1, 0, 1, 2, 15]);
 const THREAD_PRIORITY_ERROR_RETURN = 0x7fffffff;
+
+/**
+ * MulDiv's code, stdcall: the product in EDX:EAX from `imul`, its magnitude
+ * and the divisor's taken with the quotient's sign kept in ESI, half the
+ * divisor added, then `div` -- after the check that the quotient fits a word,
+ * so it cannot fault -- and -1 for a divisor of 0 or a magnitude past
+ * 2^31 - 1.
+ */
+export const MULDIV_CODE = assemble([
+    [0x53, 0x56],                                   // push ebx; push esi
+    [0x8b, 0x4c, 0x24, 0x14],                       // mov ecx, [esp+20]: the divisor
+    [0x85, 0xc9],                                   // test ecx, ecx
+    { jump: [0x74], to: 'fail', short: true },      // jz
+    [0x8b, 0x44, 0x24, 0x0c],                       // mov eax, [esp+12]
+    [0xf7, 0x6c, 0x24, 0x10],                       // imul dword [esp+16]
+    [0x89, 0xd6, 0x31, 0xce],                       // mov esi, edx; xor esi, ecx: the sign
+    [0x85, 0xd2],                                   // test edx, edx
+    { jump: [0x79], to: 'product', short: true },   // jns
+    [0xf7, 0xda, 0xf7, 0xd8, 0x83, 0xda, 0x00],     // neg edx; neg eax; sbb edx, 0
+    'product',
+    [0x85, 0xc9],                                   // test ecx, ecx
+    { jump: [0x79], to: 'divisor', short: true },   // jns
+    [0xf7, 0xd9],                                   // neg ecx
+    'divisor',
+    [0x89, 0xcb, 0xd1, 0xeb],                       // mov ebx, ecx; shr ebx, 1: the half
+    [0x01, 0xd8, 0x83, 0xd2, 0x00],                 // add eax, ebx; adc edx, 0
+    [0x39, 0xca],                                   // cmp edx, ecx
+    { jump: [0x73], to: 'fail', short: true },      // jae: no word holds the quotient
+    [0xf7, 0xf1],                                   // div ecx
+    [0x85, 0xc0],                                   // test eax, eax
+    { jump: [0x78], to: 'fail', short: true },      // js: past 2^31 - 1
+    [0x85, 0xf6],                                   // test esi, esi
+    { jump: [0x79], to: 'done', short: true },      // jns
+    [0xf7, 0xd8],                                   // neg eax
+    'done',
+    [0x5e, 0x5b, 0xc2, 0x0c, 0x00],                 // pop esi; pop ebx; ret 12
+    'fail',
+    [0x83, 0xc8, 0xff],                             // or eax, -1
+    [0x5e, 0x5b, 0xc2, 0x0c, 0x00],
+]);
+
+/**
+ * MulDiv's answer, as its code computes it.
+ *
+ * @param {number} number @param {number} numerator @param {number} denominator
+ */
+export function mulDiv(number, numerator, denominator){
+    const divisor = BigInt(denominator | 0);
+    if (divisor === 0n)
+    {
+        return -1 >>> 0;
+    }
+    const product = BigInt(number | 0) * BigInt(numerator | 0);
+    const magnitude = ((product < 0n ? -product : product) + (divisor < 0n ? -divisor
+        : divisor) / 2n) / (divisor < 0n ? -divisor : divisor);
+    if (magnitude > 0x7fffffffn)
+    {
+        return -1 >>> 0;
+    }
+    return Number(BigInt.asUintN(32, product < 0n !== divisor < 0n ? -magnitude : magnitude));
+}
 
 /** GetCurrentThread hands out this, and it is -2 on every Windows. */
 const CURRENT_THREAD = 0xfffffffe;
@@ -454,29 +516,18 @@ export function createSystemFunctions(host){
          *
          * Rounded rather than truncated, and computed at full width: the whole
          * point of the call is that the product does not fit in 32 bits, so a
-         * caller doing it itself would have lost the answer already.
+         * caller doing it itself would have lost the answer already. The
+         * magnitudes' quotient with half the divisor's added, truncated, the
+         * sign put back: a half rounds away from zero. -1 for a divisor of 0
+         * and for a magnitude past 2^31 - 1, INT_MIN's among them (Wine's
+         * kernelbase answers so). Code in the guest (`MULDIV_CODE`): one
+         * `imul`, one `div`.
          */
         MulDiv: {
             argBytes: 12,
+            code: ()=>MULDIV_CODE,
             /** @param {number[]} args */
-            handler: ([number, numerator, denominator])=>{
-                const divisor = denominator | 0;
-                if (divisor === 0)
-                {
-                    return -1 >>> 0;
-                }
-                const product = BigInt(number | 0) * BigInt(numerator | 0);
-                const half = BigInt(Math.abs(divisor)) / 2n;
-                const negative = product < 0n !== divisor < 0;
-                const magnitude = (
-                    (product < 0n ? -product : product) + half) / BigInt(Math.abs(divisor));
-                const result = negative ? -magnitude : magnitude;
-                if (result > 0x7fffffffn || result < -0x80000000n)
-                {
-                    return -1 >>> 0;
-                }
-                return Number(BigInt.asUintN(32, result));
-            },
+            handler: ([number, numerator, denominator])=>mulDiv(number, numerator, denominator),
         },
 
         /**

@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSystemFunctions } from './system.js';
+import { MULDIV_CODE, createSystemFunctions, mulDiv } from './system.js';
+import { KEPT, random, runCode } from '../../../../scripts/guest-code/equivalence.mjs';
 
 const ERROR_INVALID_HANDLE = 6;
 
@@ -137,6 +138,46 @@ test('MulDiv keeps the product a caller could not have kept itself', ()=>{
     assert.equal(fns.MulDiv.handler([7, 3, 2]), 11, 'rounded, not truncated');
     assert.equal(fns.MulDiv.handler([1, 1, 0]) | 0, -1, 'a zero divisor is the error value');
     assert.equal(fns.MulDiv.handler([-7, 3, 2]) | 0, -11, 'and it rounds away from zero');
+});
+
+test('MulDiv\'s code: rounded half away from zero, -1 for no divisor and past 2^31 - 1', ()=>{
+    const next = random(61);
+    const edges = [0, 1, -1, 2, -2, 3, 7, -7, 0x7fffffff, -0x80000000, 0x40000000, -0x40000000,
+        65536, 1000000, 46341, -46341];
+    /** @type {[number, number, number][]} */
+    const cases = [[1, 1, 2], [-1, 1, 2], [1, -1, 2], [3, 1, 2], [5, 1, 4], [-5, 1, 4],
+        [0x7fffffff, 1, 1], [-0x7fffffff, 1, 1], [-0x80000000, 1, 1], [-0x80000000, -1, 1],
+        [0x7fffffff, 0x7fffffff, 0x7fffffff], [-0x80000000, -0x80000000, -0x80000000],
+        [0x7fffffff, 2, 1], [1, 1, 0], [0, 5, -3], [-0x80000000, 1, -4], [100, 100, 3]];
+    for (const a of edges)
+    {
+        for (const b of edges)
+        {
+            cases.push([a, b, edges[next() % edges.length] || 3]);
+        }
+    }
+    for (let i = 0; i < 3000; i++)
+    {
+        const scale = next() % 32;
+        cases.push([next() | 0, (next() | 0) >> scale, ((next() | 0) >> (next() % 32)) || 1]);
+    }
+    for (const [a, b, c] of cases)
+    {
+        const run = runCode(MULDIV_CODE, { stack: [a, b, c] });
+        const what = `MulDiv(${a}, ${b}, ${c})`;
+        assert.ok(run.halted, what);
+        assert.equal(run.popped, 12, `${what} pops its arguments`);
+        assert.deepEqual([run.ebx, run.esi, run.edi, run.ebp], Object.values(KEPT), what);
+        assert.equal(run.eax, mulDiv(a, b, c), what);
+    }
+    // The answers themselves, as Windows rounds: a half away from zero.
+    assert.equal(mulDiv(1, 1, 2), 1);
+    assert.equal(mulDiv(-1, 1, 2) | 0, -1);
+    assert.equal(mulDiv(1, -1, -2), 1);
+    assert.equal(mulDiv(5, 1, 4), 1);
+    assert.equal(mulDiv(0x7fffffff, 2, 2), 0x7fffffff);
+    assert.equal(mulDiv(-0x80000000, 1, 1) | 0, -1, 'INT_MIN is past the magnitude it may have');
+    assert.equal(mulDiv(0x7fffffff, 3, 2) | 0, -1, 'an overflow is the error value');
 });
 
 test('the two clocks answer the same thing, because there is one clock', ()=>{

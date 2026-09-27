@@ -10,10 +10,12 @@
  * over 256 doubles (or sixteen matrices and vectors), and the same loop runs
  * with the operation's loads and stores but not the operation; the
  * difference over N is the operation's cost. Each operation is either a
- * call into a library -- msvcrt's maths in its cdecl and `_CI` forms, d3dx9's
- * matrices and vectors -- or the x87's own instructions inline, the ones a
- * compiler emits for the same mathematics, so the cost of the call's way
- * stands beside the cost of the translator's own code.
+ * call into a library -- msvcrt's maths in its cdecl and `_CI` forms and its
+ * number reading, d3dx9's matrices, vectors, quaternions, planes and halves,
+ * kernel32's MulDiv and ntdll's 64-bit division -- or the x87's own
+ * instructions inline, the ones a compiler emits for the same mathematics,
+ * so the cost of the call's way stands beside the cost of the translator's
+ * own code.
  *
  *   node tools/math-bench.mjs [N] [--rounds R] [--engine cork|emulator]
  *       [--pc 53|24|both] [--rows REGEX] [--root DIR] [--json]
@@ -86,6 +88,8 @@ const fldIn = address=>[0xdd, 0x87, ...u32(address)];
 const fstpOut = address=>[0xdd, 0x9f, ...u32(address)];
 /** `call [iat]`. @param {number} slot */
 const callIat = slot=>[0xff, 0x15, ...u32(slot)];
+/** `lea eax, [texts + edi*4]; push eax`: the text of the turn's number. @param {Asm} x */
+const pushText = x=>[0x8d, 0x04, 0xbd, ...u32(x.at('texts')), 0x50];
 /** `sub esp, 8; fstp qword [esp]`: a double pushed as cdecl passes it. */
 const pushDouble = [0x83, 0xec, 0x08, 0xdd, 0x1c, 0x24];
 /** `lea eax, [array + ebp]; push eax`. @param {number} address */
@@ -150,22 +154,37 @@ function inline(name, arity, op, exact, domain = 'any'){
 }
 
 /**
- * A stdcall d3dx9 function of pointers into the item arrays; `first` pushed
- * last.
+ * A stdcall d3dx9 function of pointers into the item arrays (`#n` a dword
+ * pushed as it is, `+k:` an item array's pointer k bytes on); `first`
+ * pushed last. One whose answers involve the x87's transcendentals is not
+ * exact: each engine computes those with its host's library.
  *
  * @param {string} name @param {string[]} args  Each array's name, first first.
- * @param {'float'} out @param {number} [per]
+ * @param {'float'} out @param {number} [per] @param {boolean} [exact]
  * @returns {Row}
  */
-function d3dx(name, args, out, per = 1){
-    const pushes = (/** @type {Asm} */ x)=>[...args].reverse().flatMap(arg=>(arg.startsWith('#')
-        ? [0x68, ...u32(Number(arg.slice(1)))] : pushItem(x.at(arg))));
+function d3dx(name, args, out, per = 1, exact = true){
+    const pushes = (/** @type {Asm} */ x)=>[...args].reverse().flatMap(arg=>{
+        if (arg.startsWith('#'))
+        {
+            return [0x68, ...u32(Number(arg.slice(1)))];
+        }
+        const [, offset, array] = /^(?:\+(\d+):)?(.*)$/.exec(arg) ?? [];
+        return pushItem(x.at(array) + Number(offset ?? 0));
+    });
     return {
-        name, imports: { 'd3dx9_26.dll': [name] }, out, exact: true, per, scale: 2 * per,
+        name, imports: { 'd3dx9_26.dll': [name] }, out, exact, per, scale: 2 * per,
         body: x=>[...pushes(x), ...callIat(x.iat(name))],
         base: x=>[...pushes(x), 0x83, 0xc4, args.length * 4],
     };
 }
+
+/** A FLOAT argument as the dword `d3dx` pushes. @param {number} value */
+const float = value=>{
+    const view = new DataView(new ArrayBuffer(4));
+    view.setFloat32(0, value, true);
+    return `#${view.getUint32(0, true)}`;
+};
 
 /** fld st0; frndint; fsubr st1, st0... the power of two exp's sequence ends in. */
 const EXP2 = [
@@ -199,6 +218,63 @@ const ROWS = [
         base: x=>[...fldIn(x.at('in')), 0xdd, 0xd8, 0x89, 0x87, ...u32(x.at('out')),
             0x89, 0x97, ...u32(x.at('out') + 4)],
     },
+    {
+        // The text of a number a program's configuration holds, a pointer to it pushed.
+        name: 'atof', imports: { 'msvcrt.dll': ['atof'] }, out: 'double', exact: true,
+        body: x=>[...pushText(x), ...callIat(x.iat('atof')), 0x83, 0xc4, 0x04,
+            ...fstpOut(x.at('out'))],
+        base: x=>[...pushText(x), 0x58, 0xd9, 0xee, ...fstpOut(x.at('out'))],
+    },
+    {
+        // Seventeen significant digits: past the fast path, the handler's.
+        name: 'atof(long)', imports: { 'msvcrt.dll': ['atof'] }, out: 'double', exact: true,
+        body: x=>[...pushText(x), ...callIat(x.iat('atof')), 0x83, 0xc4, 0x04,
+            ...fstpOut(x.at('out'))],
+        base: x=>[...pushText(x), 0x58, 0xd9, 0xee, ...fstpOut(x.at('out'))],
+    },
+    {
+        // _controlfp(_PC_53, _MCW_PC): the precision set, as a program keeps setting it.
+        name: '_controlfp', imports: { 'msvcrt.dll': ['_controlfp'] }, out: 'int', exact: true,
+        body: x=>[0x68, ...u32(0x30000), 0x68, ...u32(0x10000),
+            ...callIat(x.iat('_controlfp')), 0x83, 0xc4, 0x08, 0x89, 0x87, ...u32(x.at('out'))],
+        base: x=>[0x68, ...u32(0x30000), 0x68, ...u32(0x10000), 0x83, 0xc4, 0x08,
+            0x89, 0x87, ...u32(x.at('out'))],
+    },
+    {
+        name: '_fpclass', imports: { 'msvcrt.dll': ['_fpclass'] }, out: 'int', exact: true,
+        body: x=>[...fldIn(x.at('in')), ...pushDouble, ...callIat(x.iat('_fpclass')), 0x83, 0xc4,
+            0x08, 0x89, 0x87, ...u32(x.at('out'))],
+        base: x=>[...fldIn(x.at('in')), ...pushDouble, 0x83, 0xc4, 0x08,
+            0x89, 0x87, ...u32(x.at('out'))],
+    },
+    {
+        // div(1000, 7): the quotient in EAX, the remainder in EDX, both stored.
+        name: 'div', imports: { 'msvcrt.dll': ['div'] }, out: 'int', exact: true,
+        body: x=>[0x6a, 0x07, 0x68, ...u32(1000), ...callIat(x.iat('div')), 0x83, 0xc4, 0x08,
+            0x89, 0x87, ...u32(x.at('out')), 0x89, 0x97, ...u32(x.at('out') + 4)],
+        base: x=>[0x6a, 0x07, 0x68, ...u32(1000), 0x83, 0xc4, 0x08,
+            0x89, 0x87, ...u32(x.at('out')), 0x89, 0x97, ...u32(x.at('out') + 4)],
+    },
+    {
+        // MulDiv(a double's low word, 7, 3000), stdcall: a scaling a program does per item.
+        name: 'MulDiv', imports: { 'KERNEL32.dll': ['MulDiv'] }, out: 'int', exact: true,
+        body: x=>[0x68, ...u32(3000), 0x6a, 0x07, 0xff, 0xb7, ...u32(x.at('in')),
+            ...callIat(x.iat('MulDiv')), 0x89, 0x87, ...u32(x.at('out'))],
+        base: x=>[0x68, ...u32(3000), 0x6a, 0x07, 0xff, 0xb7, ...u32(x.at('in')), 0x83, 0xc4, 0x0c,
+            0x89, 0x87, ...u32(x.at('out'))],
+    },
+    {
+        // _alldiv(a double's bits, the high word of another's): a 64-bit value by a
+        // divisor of one word, as a program divides a count of ticks; callee pops.
+        name: '_alldiv', imports: { 'ntdll.dll': ['_alldiv'] }, out: 'int', exact: true,
+        body: x=>[0x6a, 0x00, 0xff, 0xb7, ...u32(x.at('in2') + 4),
+            0xff, 0xb7, ...u32(x.at('in') + 4), 0xff, 0xb7, ...u32(x.at('in')),
+            ...callIat(x.iat('_alldiv')),
+            0x89, 0x87, ...u32(x.at('out')), 0x89, 0x97, ...u32(x.at('out') + 4)],
+        base: x=>[0x6a, 0x00, 0xff, 0xb7, ...u32(x.at('in2') + 4),
+            0xff, 0xb7, ...u32(x.at('in') + 4), 0xff, 0xb7, ...u32(x.at('in')), 0x83, 0xc4, 0x10,
+            0x89, 0x87, ...u32(x.at('out')), 0x89, 0x97, ...u32(x.at('out') + 4)],
+    },
     intrinsic('_CIsqrt', 1, true, 'positive'),
     intrinsic('_CIsin', 1, false, 'small'),
     intrinsic('_CIcos', 1, false, 'small'),
@@ -214,6 +290,29 @@ const ROWS = [
     d3dx('D3DXVec3TransformCoordArray', ['vOut', '#12', 'v', '#12', 'mA', `#${ITEMS}`], 'float',
         ITEMS),
     d3dx('D3DXVec3Normalize', ['vOut', 'v'], 'float'),
+    {
+        // A float in ST0, stored as a program stores it.
+        ...d3dx('D3DXMatrixDeterminant', ['mA'], 'float'),
+        body: x=>[...pushItem(x.at('mA')), ...callIat(x.iat('D3DXMatrixDeterminant')),
+            0xd9, 0x9d, ...u32(x.at('det'))],
+    },
+    d3dx('D3DXMatrixRotationYawPitchRoll', ['mOut', float(0.3), float(-1.2), float(2.5)],
+        'float', 1, false),
+    d3dx('D3DXMatrixPerspectiveFovLH', ['mOut', float(Math.PI / 4), float(4 / 3), float(1),
+        float(1000)], 'float', 1, false),
+    d3dx('D3DXMatrixLookAtLH', ['mOut', 'v', '+16:v', '+32:v'], 'float'),
+    d3dx('D3DXMatrixTransformation', ['mOut', 'v', 'q', '+16:v', '+32:v', '+16:q', '+48:v'],
+        'float'),
+    d3dx('D3DXMatrixDecompose', ['vOut', '+16:vOut', '+32:vOut', 'mA'], 'float'),
+    d3dx('D3DXQuaternionSlerp', ['vOut', 'q', '+16:q', float(0.3)], 'float', 1, false),
+    d3dx('D3DXQuaternionSquad', ['vOut', 'q', '+16:q', '+32:q', '+48:q', float(0.7)], 'float', 1,
+        false),
+    d3dx('D3DXQuaternionRotationMatrix', ['vOut', 'mA'], 'float'),
+    d3dx('D3DXPlaneFromPoints', ['vOut', 'v', '+16:v', '+32:v'], 'float'),
+    d3dx('D3DXPlaneIntersectLine', ['vOut', 'v', '+16:v', '+32:v'], 'float'),
+    d3dx('D3DXVec3Project', ['vOut', 'v', 'viewport', 'mA', 'mB', '+64:mA'], 'float'),
+    d3dx('D3DXVec3Unproject', ['vOut', 'v', 'viewport', 'mA', 'mB', '+64:mA'], 'float'),
+    d3dx('D3DXFloat32To16Array', ['vOut', 'v', `#${ITEMS * 4}`], 'float', ITEMS * 4),
     inline('fsqrt', 1, [0xd9, 0xfa], true, 'positive'),
     inline('fsin', 1, [0xd9, 0xfe], false, 'small'),
     inline('fcos', 1, [0xd9, 0xff], false, 'small'),
@@ -264,6 +363,41 @@ function matrices(seed){
 }
 
 /**
+ * A number's text in each 32 bytes, one for each double slot: the short
+ * decimals a program's configuration holds, or seventeen significant digits.
+ *
+ * @param {boolean} long
+ */
+function texts(long){
+    const values = doubles('small', 7);
+    return [...values].flatMap((value, i)=>{
+        const text = long ? value.toPrecision(17)
+            : [String(Math.round(value * 100) / 100), `${i % 640}`, `${(i % 9) * 0.25}`,
+                `${Math.round(value)}e-${i % 4}`][i % 4];
+        return [...text.slice(0, 31)].map(c=>c.charCodeAt(0)).concat(
+            new Array(32 - Math.min(text.length, 31)).fill(0));
+    });
+}
+
+/**
+ * Sixteen unit quaternions, each in 64 bytes, and room past the last for
+ * the ones a row reads after it.
+ *
+ * @param {number} seed
+ */
+function quaternions(seed){
+    const q = new Float32Array(ITEMS * 16 + 64);
+    const values = doubles('unit', seed);
+    for (let i = 0; i < ITEMS + 4; i++)
+    {
+        const [x, y, z, w] = values.slice(i * 4, i * 4 + 4);
+        const length = Math.hypot(x, y, z, w) || 1;
+        q.set([x / length, y / length, z / length, w / length], i * 16);
+    }
+    return q;
+}
+
+/**
  * The program: the control word set, N turns of the row's body (or base),
  * then every output written to the console as hex, and exit 0.
  *
@@ -290,13 +424,17 @@ export function program(row, n, withOp, control){
         cw: [...u32(control)],
         in: bytes(doubles(row.domain, 1)), in2: bytes(second),
         mA: bytes(matrices(3)), mB: bytes(matrices(4)), v: bytes(vectors),
+        q: bytes(quaternions(6)),
+        texts: texts(row.name === 'atof(long)'),
+        viewport: [...[10, 5, 800, 600].flatMap(u32), ...bytes(Float32Array.of(0, 1))],
         hex: new Array(2 * DUMPED).fill(0),
         digits: [...'0123456789abcdef'].map(c=>c.charCodeAt(0)),
         written: [0, 0, 0, 0],
     };
     const imports = {
         ...row.imports,
-        'KERNEL32.dll': ['ExitProcess', 'GetStdHandle', 'WriteFile'],
+        'KERNEL32.dll': [...row.imports?.['KERNEL32.dll'] ?? [], 'ExitProcess', 'GetStdHandle',
+            'WriteFile'],
     };
     return buildExe({
         imports,

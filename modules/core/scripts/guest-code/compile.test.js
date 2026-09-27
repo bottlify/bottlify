@@ -1028,6 +1028,61 @@ test('x87 arguments handed to the host where the call left them, one assigned fi
         assert.ok(handed > 50 && handed < 400, `${handed} handed over: both ways taken`);
     });
 
+const WORDS = `
+/**
+ * The control word loaded with the mask's bits from the argument; the old
+ * one and the status word read before and after the flags are cleared.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} bits @param {u32} mask @param {u32} out
+ * @returns {i32}
+ */
+export function words({ controlWord, setControlWord, statusWord, clearExceptions, setU32 },
+    bits, mask, out){
+    const old = controlWord();
+    setControlWord(old & ~mask | bits & mask);
+    setU32(out, statusWord());
+    clearExceptions();
+    setU32(out + 4, statusWord());
+    setU32(out + 8, controlWord());
+    return old;
+}
+
+/**
+ * A sum under the precision the argument names, the program's put back.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x @param {f64} y @param {u32} precision
+ * @returns {f64}
+ */
+export function underPrecision({ controlWord, setControlWord }, x, y, precision){
+    const saved = controlWord();
+    setControlWord(saved & 0xfcff | precision << 8);
+    const sum = x / y + x;
+    setControlWord(saved);
+    return sum;
+}
+`;
+
+test('the control and status words read, loaded and cleared, and arithmetic under a word loaded',
+    async()=>{
+        const { same } = await load(WORDS);
+        const next = random(27);
+        const values = doubleInputs(28, 16);
+        for (const control of CONTROLS)
+        {
+            for (let i = 0; i < 40; i++)
+            {
+                const status = next() & 0x47ff;
+                same('words', { stack: [next() & 0xffff, next() & 0x1f3f, DATA], control, status });
+                const x = values[next() % values.length];
+                const y = values[next() % values.length];
+                same('underPrecision', { stack: [...doubleWords(x), ...doubleWords(y), next() % 4],
+                    control });
+            }
+        }
+    });
+
 const TAGS = '@param {i32} a @param {u32} c @param {f64} x\n * @returns {i32}';
 
 /**

@@ -94,7 +94,38 @@
  * @property {() => number} host
  *     The call answered by the host's handler, with the arguments it came
  *     with: only as `return host()`.
+ * @property {() => number} controlWord  The x87 control word (`fnstcw`).
+ * @property {(word: number) => void} setControlWord  `fldcw`.
+ * @property {() => number} statusWord  The x87 status word, the stack's top
+ *     left out (`fnstsw`).
+ * @property {() => void} clearExceptions  `fnclex`.
  */
+
+/** The helpers that are the x87's control and status words, not the guest's memory. */
+const X87_WORDS = ['controlWord', 'setControlWord', 'statusWord', 'clearExceptions'];
+
+/**
+ * The x87's words as a handler reaches them: through the FPU seam, which
+ * the engine's does not offer -- the export there is its code -- and a
+ * test's stand-in does.
+ *
+ * @param {import('./float.js').FloatHost} [fpu]
+ */
+function x87Words(fpu){
+    /** @param {string} name @returns {never} */
+    const missing = name=>{
+        throw new Error(`guest code: ${name} wants the FPU seam's control and status words`);
+    };
+    return {
+        controlWord: ()=>(fpu?.controlWord ? fpu.controlWord() : missing('controlWord')),
+        /** @param {number} word */
+        setControlWord: word=>(fpu?.setControlWord ? fpu.setControlWord(word & 0xffff)
+            : missing('setControlWord')),
+        statusWord: ()=>(fpu?.statusWord ? fpu.statusWord() & 0xc7ff : missing('statusWord')),
+        clearExceptions: ()=>(fpu?.clearExceptions ? fpu.clearExceptions()
+            : missing('clearExceptions')),
+    };
+}
 
 /**
  * @typedef {Object} GuestHost
@@ -109,10 +140,18 @@
  */
 
 /**
+ * The helpers that are the guest's memory, its calls and `host`: all of
+ * Guest but the x87's words.
+ *
+ * @typedef {Omit<Guest, 'controlWord' | 'setControlWord' | 'statusWord' | 'clearExceptions'>}
+ *     GuestMemory
+ */
+
+/**
  * The guest's memory as the helpers read and write it.
  *
  * @param {GuestHost} host
- * @returns {Guest}
+ * @returns {GuestMemory}
  */
 export function guestMemory(host){
     /** @param {number} address @param {number} length */
@@ -271,13 +310,21 @@ export function guestEntry(source, compiled, host, fallback){
             + '(guestExport)');
     }
     const { readMemory, writeMemory, fillMemory, call } = host;
-    if (uses.length > 0 && (!readMemory || !writeMemory))
+    const memoryUsed = uses.some(use=>use !== 'host' && !X87_WORDS.includes(use));
+    if (memoryUsed && (!readMemory || !writeMemory))
     {
         throw new Error('guest code: a function that reads the guest wants its memory');
     }
-    const guest = uses.length > 0 && readMemory && writeMemory
-        ? guestMemory({ readMemory, writeMemory, ...fillMemory ? { fillMemory } : {},
-            ...call ? { call } : {} }) : null;
+    const words = uses.some(use=>X87_WORDS.includes(use)) ? x87Words(host.fpu) : {};
+    /** @type {Guest | null} */
+    const guest = uses.length === 0 ? null : readMemory && writeMemory
+        ? /** @type {Guest} */ ({ ...guestMemory({ readMemory, writeMemory,
+            ...fillMemory ? { fillMemory } : {}, ...call ? { call } : {} }), ...words })
+        : /** @type {Guest} */ (/** @type {unknown} */ ({ ...words,
+            host: ()=>{
+                throw new Error('guest code: host() is answered only in a handler with a '
+                    + 'fallback');
+            } }));
     const handsOver = uses.includes('host');
     const onStack = params.filter(type=>type === 'x87').length;
     /** @param {number[]} args */

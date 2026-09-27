@@ -136,7 +136,9 @@ export function D3DXMatrixTranspose({ u32, setU32 }, out, m){
  * D3DXMATRIX *D3DXMatrixInverse(D3DXMATRIX *out, FLOAT *determinant, const D3DXMATRIX *m)
  *
  * By cofactors: the determinant written where a pointer for it is given,
- * and NULL answered for a singular matrix, out untouched.
+ * and NULL answered for a singular matrix, out and the determinant
+ * untouched -- Wine's conformance test finds the library leaves a
+ * determinant of 5 as it was.
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} determinant @param {u32} m
@@ -192,13 +194,13 @@ export function D3DXMatrixInverse({ f32, setF32 }, out, determinant, m){
     const c15 = e0 * e5 * e10 - e0 * e6 * e9 - e4 * e1 * e10
         + e4 * e2 * e9 + e8 * e1 * e6 - e8 * e2 * e5;
     const det = e0 * c0 + e1 * c4 + e2 * c8 + e3 * c12;
-    if (determinant !== 0)
-    {
-        setF32(determinant, det);
-    }
     if (det === 0)
     {
         return 0;
+    }
+    if (determinant !== 0)
+    {
+        setF32(determinant, det);
     }
     const scale = 1 / det;
     setF32(out, c0 * scale);
