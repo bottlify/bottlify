@@ -109,6 +109,13 @@ const FIXED_FILE_VERSION_LS = 12;
 const DIRECTX_LIBRARY =
     /^(ddraw|d3d\w*|dsound|dinput8?|dplay\w*|dpn\w*|dm\w+|dswave|dxdiag\w*|xinput\w*)\.dll$/i;
 
+/**
+ * The 16-bit subsystem's modules, in the system directory of every 32-bit
+ * Windows. Nothing here runs them, but their version block is there to read,
+ * and a setup takes the system's language from user.exe's.
+ */
+const WIN16_SYSTEM_FILE = /^(user|gdi|krnl386)\.exe$/i;
+
 /** VS_FIXEDFILEINFO's constants: its version, the flags it may set, NT, a DLL. */
 const VS_FFI_STRUCVERSION = 0x00010000;
 const VS_FFI_FILEFLAGSMASK = 0x0000003f;
@@ -340,7 +347,8 @@ export function createVersionFunctions(host){
         const file = path.slice(slash + 1);
         const name = file.includes('.') ? file : `${file}.dll`;
         return (directory === '' || directory.toLowerCase() === SYSTEM_DIRECTORY.toLowerCase())
-            && file !== '' && host.systemLibrary?.(name) ? name : null;
+            && file !== '' && (host.systemLibrary?.(name) || WIN16_SYSTEM_FILE.test(name))
+            ? name : null;
     };
 
     /**

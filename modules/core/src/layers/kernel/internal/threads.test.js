@@ -606,3 +606,27 @@ test('a suspended thread keeps its state and gets no turn until resumed as often
     assert.equal(sched.runOnce().ran.name, 'a');
     assert.equal(sched.resume(a), 0, 'resuming a thread nobody suspended changes nothing');
 });
+
+test('the report says how long a short-period thread went without the processor', ()=>{
+    // A mixer feeding a sound device from a wait of a few milliseconds is
+    // heard the moment it goes without the processor longer than it wrote
+    // ahead; the gap, on the host clock, is what says a crackle was the
+    // machine's and not the mixer's.
+    let clock = 0;
+    const cpu = fakeCpu();
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000,
+        now: ()=>clock, wall: ()=>clock });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const mixer = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'mixer' });
+    mixer.priority = 15;
+    sched.block(mixer, 'its period', { deadline: 5 });
+    clock = 6;
+    assert.equal(sched.runOnce().ran, mixer);
+    sched.block(mixer, 'its period', { deadline: 11 });
+    clock = 60;
+    assert.equal(sched.runOnce().ran, mixer);
+    assert.equal(mixer.lateGaps, 1, 'the 54 ms since it last ran is a late gap');
+    assert.equal(mixer.worstGap, 54);
+    assert.ok(sched.diagnostics().byThread.includes('p15 b0 g54/1'), 'and the report says so');
+    assert.ok(sched.diagnostics().lateGaps.startsWith('mixer@60+54 '));
+});

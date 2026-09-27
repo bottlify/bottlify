@@ -174,3 +174,54 @@ test('a SID is valid by its revision and count, and membership is asked in one c
         'a handle nothing opened');
     assert.equal(fns.CheckTokenMembership.argBytes, 12);
 });
+
+test('a DACL allowing only the administrators lets the one account in', ()=>{
+    // The sample Microsoft published for "am I an administrator": a descriptor
+    // whose DACL allows BUILTIN\Administrators a right, and AccessCheck with
+    // the caller's token. Answered as the consumer Windows answered it, the
+    // installer that asks refuses to run.
+    const { bytes, errors, fns, dword } = setup();
+    assert.equal(fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 1);
+    const token = dword(OUT);
+
+    const DESCRIPTOR = 0x300;
+    const ACL_AT = 0x340;
+    const MAPPING = 0x400;
+    const PRIVILEGES = 0x420;
+    const PRIVILEGES_LENGTH = 0x440;
+    const GRANTED = 0x444;
+    const STATUS = 0x448;
+    const ACCESS_READ = 1;
+    bytes.set(ADMINISTRATORS_SID, SID);
+    const aclSize = 8 + 8 + ADMINISTRATORS_SID.length;
+
+    assert.equal(fns.InitializeSecurityDescriptor.handler([DESCRIPTOR, 1]), 1);
+    assert.equal(fns.InitializeAcl.handler([ACL_AT, aclSize, 2]), 1);
+    assert.equal(fns.AddAccessAllowedAce.handler([ACL_AT, 2, ACCESS_READ, SID]), 1);
+    assert.equal(fns.SetSecurityDescriptorDacl.handler([DESCRIPTOR, 1, ACL_AT, 0]), 1);
+    assert.equal(fns.SetSecurityDescriptorGroup.handler([DESCRIPTOR, SID, 0]), 1);
+    assert.equal(fns.SetSecurityDescriptorOwner.handler([DESCRIPTOR, SID, 0]), 1);
+    assert.equal(fns.IsValidSecurityDescriptor.handler([DESCRIPTOR]), 1);
+    new DataView(bytes.buffer).setUint32(MAPPING, ACCESS_READ, true);
+    new DataView(bytes.buffer).setUint32(PRIVILEGES_LENGTH, 20, true);
+
+    const check = ()=>fns.AccessCheck.handler([DESCRIPTOR, token, ACCESS_READ, MAPPING,
+        PRIVILEGES, PRIVILEGES_LENGTH, GRANTED, STATUS]);
+    assert.equal(check(), 1);
+    assert.equal(dword(STATUS), 1, 'the administrator is let in');
+    assert.equal(dword(GRANTED), ACCESS_READ);
+
+    // A DACL that allows only a SID the account does not hold refuses it.
+    bytes.set([1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0], SID);   // S-1-5-18, LocalSystem
+    assert.equal(fns.InitializeAcl.handler([ACL_AT, aclSize, 2]), 1);
+    assert.equal(fns.AddAccessAllowedAce.handler([ACL_AT, 2, ACCESS_READ, SID]), 1);
+    assert.equal(check(), 1, 'the check itself succeeds');
+    assert.equal(dword(STATUS), 0);
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+
+    // No room left for another ACE, and a revision no descriptor has.
+    assert.equal(fns.AddAccessAllowedAce.handler([ACL_AT, 2, ACCESS_READ, SID]), 0);
+    assert.equal(errors.at(-1), 1344, 'ERROR_ALLOTTED_SPACE_EXCEEDED');
+    assert.equal(fns.InitializeSecurityDescriptor.handler([DESCRIPTOR, 2]), 0);
+    assert.equal(errors.at(-1), 1305, 'ERROR_UNKNOWN_REVISION');
+});

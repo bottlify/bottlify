@@ -277,7 +277,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             const answer = new Promise(resolve=>{
                 settle = resolve;
             });
-            frames.push({ frameBase, settle });
+            frames.push({ frameBase, extent: frameBase + 4 * (args.length + 2), settle });
 
             kernel.scheduleResume(thread, { eip: entry, esp: frameBase, registers });
             // Off to run guest code, whatever it was doing before.
@@ -292,10 +292,31 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * @returns {boolean} whether this thread was in a callback at all
          */
         returned(thread){
-            const frame = callbackFrames(thread).pop();
+            const frames = callbackFrames(thread);
+            // A routine that never came back leaves its frame behind: an
+            // exception handler in guest code that found its catch unwinds
+            // and jumps there, and the frame the dispatch called it on lies
+            // wholly below the stack the routine returning now came back to.
+            // Settling that one instead would answer the dispatch -- the
+            // throw returns to its caller, which has nothing after it -- and
+            // leave the real caller waiting for ever.
+            const esp = cpu.readReg32('esp') >>> 0;
+            while (frames.length > 1 && frames[frames.length - 1].extent <= esp)
+            {
+                frames.pop();
+            }
+            const frame = frames.pop();
             if (!frame)
             {
                 return false;
+            }
+            // So are the host calls such a routine was inside: the throw's own.
+            const suspended = hostCalls(thread);
+            while (suspended.length > 0
+                && (suspended[suspended.length - 1].restingStack >>> 0) < frame.frameBase)
+            {
+                suspended.pop();
+                pending--;
             }
             // Back inside whatever host call was waiting for it, which has not
             // answered yet: nothing for this thread to run until it does.

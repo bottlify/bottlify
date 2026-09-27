@@ -34,6 +34,8 @@ import { createBlockCache, resolveBlockStore }
 import { decompressZstd } from './zstd.js';
 import { mountDiscs } from './discs.js';
 import { loadZstdWasm } from './zstd-wasm.js';
+import { createClassTable } from './layers/win32/ole32/remote.js';
+import { createReplicas } from './replicas.js';
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -1341,21 +1343,34 @@ export function systemVolume(system){
 /**
  * Every place a LoadLibrary at run time looks, in order: beside the
  * executable first, then the system directories -- which is where an
- * installer puts a library it brought and then loads by bare name. A name
- * with a directory in it names its one place and is looked for nowhere else.
+ * installer puts a library it brought and then loads by bare name -- then the
+ * current directory, where XP's safe search mode puts it: a setup that changes
+ * to a folder of its disc and loads a helper there by bare name finds it. A
+ * name with a directory in it names its one place and is looked for nowhere
+ * else.
  *
  * @param {string} name
  * @param {string} imagePath
+ * @param {string} [currentDirectory]
  * @returns {string[]}
  */
-export function libraryCandidates(name, imagePath){
+export function libraryCandidates(name, imagePath, currentDirectory){
     const first = resolveLibraryPath(name, imagePath);
     if (first !== `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`
         || /[\\/]/.test(name))
     {
         return [first];
     }
-    return [first, ...SYSTEM_LIBRARY_DIRECTORIES.map(directory=>directory + name)];
+    const places = [first, ...SYSTEM_LIBRARY_DIRECTORIES.map(directory=>directory + name)];
+    if (currentDirectory)
+    {
+        const inCurrent = `${currentDirectory.replace(/\\$/, '')}\\${name}`;
+        if (!places.some(place=>place.toLowerCase() === inCurrent.toLowerCase()))
+        {
+            places.push(inCurrent);
+        }
+    }
+    return places;
 }
 
 /**
@@ -2631,6 +2646,7 @@ export function createKernelGl(opengl, journalCall, traced, counters){
  *     spawned?: (request: any) => void,
  *     logSinks?: Map<Function, (payload: any) => void>,
  *     namedObjects?: Map<string, { kind: string, object: any }>,
+ *     com?: { table: any, process: unknown },
  * }} options
  * @returns {Promise<any>} an AppController
  */
@@ -3305,6 +3321,9 @@ async function buildApp(options){
             // ring do, for the same reason -- a replacement rebuilds this
             // layer, and the name was never this process's to keep.
             namedObjects: options.namedObjects,
+            // The run's table of class objects served out of process, and this
+            // process's name in it: shared for the same reason.
+            com: options.com,
             // The network beyond this runtime, when the embedder supplied one.
             network: options.win32?.network,
             unattended: Boolean(options.unattended),
@@ -4331,7 +4350,8 @@ async function buildApp(options){
         // machine then does with its time.
         const loaded = findModule(name);
         const candidates = searchesBesideProgram(isKnownDll(name), Boolean(loaded?.file))
-            ? libraryCandidates(name, options.imagePath ?? 'C:\\app.exe')
+            ? libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
+                filesystem.currentDirectory())
             : [];
         if (candidates.length > 0)
         {
@@ -4581,7 +4601,8 @@ async function buildApp(options){
             });
             return handle;
         };
-        const wanted = libraryCandidates(name, options.imagePath ?? 'C:\\app.exe')
+        const wanted = libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
+            filesystem.currentDirectory())
             .find(candidate=>{
                 try
                 {
@@ -6409,8 +6430,81 @@ export async function createApp(options){
         ...extra,
     });
 
+    // Processes that run at once: a class served by an executable is made in
+    // a process of its own, started beside the one that asked for it and
+    // running alongside it for as long as anything holds one of its objects.
+    // The table of their class objects is the run's, as the service control
+    // manager's is the machine's, and what each of them writes is carried to
+    // the others whenever one runs on another's behalf (`replicas.js`).
+    /** @type {Map<unknown, any>} */
+    const processes = new Map();
+    /** @type {Map<any, unknown>} */
+    const names = new Map();
+    /** @type {Set<Promise<unknown>>} */
+    const servers = new Set();
+    /** @type {Set<any>} */
+    const serving = new Set();
     /** @type {any} */
-    let current = await buildApp(machine());
+    let runOptionsNow;
+    const replicas = createReplicas(detail=>events.emit('divergence', { api: 'process', detail }));
+    const classTable = createClassTable({
+        launch: (request, process)=>{
+            const parent = processes.get(process);
+            if (!parent)
+            {
+                return null;
+            }
+            const exited = startServer(parent, request);
+            servers.add(exited);
+            exited.finally(()=>servers.delete(exited));
+            return { exited };
+        },
+        publish: process=>{
+            const running = processes.get(process);
+            if (running && replicas.tracked(running))
+            {
+                replicas.publish(running);
+            }
+        },
+    });
+
+    /**
+     * A machine for a process, named to the class table.
+     *
+     * @param {any} [extra]
+     */
+    const build = async extra=>{
+        const process = {};
+        const built = await buildApp(machine({ ...extra, com: { table: classTable, process } }));
+        processes.set(process, built);
+        names.set(built, process);
+        if (servers.size > 0)
+        {
+            replicas.track(built);
+        }
+        return built;
+    };
+
+    /**
+     * A process is over: what it wrote reaches everyone still standing, and
+     * everything its proxies held goes back -- which is what lets a server
+     * it was using see its last client go.
+     *
+     * @param {any} ended
+     */
+    const retire = async ended=>{
+        if (replicas.tracked(ended))
+        {
+            replicas.publish(ended);
+        }
+        await classTable.ended(names.get(ended));
+        replicas.forget(ended);
+        processes.delete(names.get(ended));
+        names.delete(ended);
+    };
+
+    /** @type {any} */
+    let current = await build();
 
     // Read from the machine that made it, while it still stands, and handed to
     // every rebuild from here on.
@@ -6464,7 +6558,16 @@ export async function createApp(options){
      * How deep in `own.run` the run is: a child that runs beside its waiting
      * parent is run through it too, and its exit is not the end of the game.
      */
-    let depth = 0;
+    /** The page's own line of processes: the program it started, and what replaces it. */
+    const mainLine = {
+        get current(){
+            return current;
+        },
+        set current(running){
+            current = running;
+        },
+        main: true,
+    };
     /** The image of the process running now, the one whose exit ends the game. */
     let imagePath = options.imagePath ?? 'C:\\app.exe';
 
@@ -6510,6 +6613,99 @@ export async function createApp(options){
     };
 
     /**
+     * The executable a server's command line names: quoted, the text inside
+     * the quotes; unquoted, the shortest run of words up to a space that is a
+     * file, as CreateProcess reads a command line without quotes.
+     *
+     * @param {any} parent @param {string} command
+     * @returns {Promise<{ path: string, image: Uint8Array } | null>}
+     */
+    const serverImage = async(parent, command)=>{
+        const text = command.trim();
+        /** @type {string[]} */
+        const candidates = [];
+        if (text.startsWith('"'))
+        {
+            const end = text.indexOf('"', 1);
+            candidates.push(end > 0 ? text.slice(1, end) : text.slice(1));
+        }
+        else
+        {
+            for (let at = text.indexOf(' '); at > 0; at = text.indexOf(' ', at + 1))
+            {
+                candidates.push(text.slice(0, at));
+            }
+            candidates.push(text);
+        }
+        for (const path of candidates.flatMap(one=>(/\.[^\\.]+$/.test(one)
+            ? [one] : [one, `${one}.exe`])))
+        {
+            const image = await parent.readImage(path).catch(()=>null);
+            if (image)
+            {
+                return { path, image };
+            }
+        }
+        return null;
+    };
+
+    /**
+     * Starts a class's server beside the process that asked for it, with
+     * `-Embedding` after its command line as COM starts one, and runs it
+     * alongside every other process until it exits. The page sees and
+     * drives the server while it stands, as it does a child run beside its
+     * parent.
+     *
+     * @param {any} parent @param {{ command: string, clsid: string }} request
+     * @returns {Promise<number>} its exit code
+     */
+    const startServer = async(parent, request)=>{
+        const found = await serverImage(parent, request.command);
+        if (!found)
+        {
+            events.emit('divergence', { api: 'COM',
+                detail: `the server ${request.command} of ${request.clsid} is not on the volume` });
+            return -1;
+        }
+        // Every process standing is kept in step from here on.
+        for (const standing of processes.values())
+        {
+            replicas.track(standing);
+        }
+        const server = await build({
+            executable: found.image,
+            imagePath: found.path,
+            commandLine: `${request.command.trim()} -Embedding`,
+            seed: parent.session.export(),
+            hive: parent.registry().toJSON(),
+        });
+        replicas.track(server);
+        // A line of processes of its own: a server that starts a child and
+        // waits on it, or hands over to another image, is run the way the
+        // program the page started is.
+        const line = { current: server, main: false };
+        serving.add(line);
+        events.emit('process-server', { image: found.path, clsid: request.clsid });
+        Object.assign(facade, server, own);
+        bindLogLevels();
+        let code = -1;
+        try
+        {
+            code = await runProcesses(runOptionsNow, line, true);
+        }
+        catch (e){
+            events.emit('error', { reason: 'server', error: e });
+        }
+        await retire(line.current);
+        serving.delete(line);
+        await line.current.dispose();
+        Object.assign(facade, current, own);
+        bindLogLevels();
+        events.emit('process-server-exit', { image: found.path, code });
+        return code;
+    };
+
+    /**
      * Runs a child on a machine of its own while its parent waits on it, and
      * gives the parent back what the child left: the files it wrote, the
      * registry it changed, and its exit code, which wakes the parent's wait.
@@ -6521,9 +6717,10 @@ export async function createApp(options){
      * that runs a setup stage and then finishes, a launcher that waits for the
      * game to close.
      *
+     * @param {{ current: any, main: boolean }} line  The processes this one is of.
      * @param {any} parent @param {any} request @param {any} runOptions
      */
-    const runBeside = async(parent, request, runOptions)=>{
+    const runBeside = async(line, parent, request, runOptions)=>{
         const image = await parent.readImage(request.imagePath);
         if (!image)
         {
@@ -6531,22 +6728,29 @@ export async function createApp(options){
         }
         noteLogSequence();
         mediaInstance = parent.media.instance() ?? mediaInstance;
-        current = await buildApp(machine({
+        if (replicas.tracked(parent))
+        {
+            replicas.publish(parent);
+        }
+        line.current = await build({
             executable: image,
             imagePath: request.imagePath,
             commandLine: request.commandLine,
             patches: request.patches,
             seed: parent.session.export(),
             hive: parent.registry().toJSON(),
-        }));
+        });
         replayLogLevels();
-        Object.assign(facade, current, own);
+        Object.assign(facade, line.current, own);
         bindLogLevels();
         events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence });
         const parentImage = imagePath;
-        imagePath = request.imagePath;
+        if (line.main)
+        {
+            imagePath = request.imagePath;
+        }
 
-        const code = await own.run(runOptions);
+        const code = await runProcesses(runOptions, line, true);
         imagePath = parentImage;
 
         // Read while the child's machine stands, and put back into the
@@ -6554,19 +6758,28 @@ export async function createApp(options){
         // first stage goes on to find. The child's registry began as the
         // parent's, and the parent wrote nothing while it waited, so the
         // child's is the whole of it.
-        const files = current.session.export();
-        const registry = current.registry().toJSON();
+        const child = line.current;
+        await retire(child);
+        const files = child.session.export();
+        const registry = child.registry().toJSON();
         noteLogSequence();
-        mediaInstance = current.media.instance() ?? mediaInstance;
-        await current.dispose();
+        mediaInstance = child.media.instance() ?? mediaInstance;
+        await child.dispose();
 
-        current = parent;
-        current.session.apply(files);
-        current.registry().fromJSON(registry);
+        line.current = parent;
+        parent.session.apply(files);
+        parent.registry().fromJSON(registry);
+        // Brought up to date wholesale, so what it holds now is its own
+        // starting point again.
+        if (replicas.tracked(parent))
+        {
+            replicas.forget(parent);
+            replicas.track(parent);
+        }
         replayLogLevels();
-        Object.assign(facade, current, own);
+        Object.assign(facade, parent, own);
         bindLogLevels();
-        current.childExited(request, code);
+        parent.childExited(request, code);
         events.emit('process-resumed', { image: request.imagePath, code });
     };
 
@@ -6575,25 +6788,37 @@ export async function createApp(options){
      * beside it, until one exits with nothing left to run.
      *
      * @param {any} runOptions
+     * @param {{ current: any, main: boolean }} [line]  The line of processes:
+     *        the page's, or a server's.
+     * @param {boolean} [nested]  Run for a parent waiting on it.
      * @returns {Promise<number>} the last program's exit code
      */
-    const runProcesses = async runOptions=>{
+    const runProcesses = async(runOptions, line = mainLine, nested = false)=>{
         while (true)
         {
-            const code = await current.run(runOptions);
-            const request = current.replacement();
+            const code = await line.current.run(runOptions);
+            const request = line.current.replacement();
             if (!request)
             {
-                if (depth === 1)
+                if (line.main && !nested)
                 {
+                    // Its servers end with it: its references go back, and
+                    // what they write before they stop is its to keep.
+                    const ending = line.current;
+                    await classTable.ended(names.get(ending));
+                    while (servers.size > 0)
+                    {
+                        await Promise.allSettled([...servers]);
+                    }
+                    replicas.forget(ending);
                     noticeExit(code);
                 }
                 return code;
             }
 
-            if (current.waitingOn(request))
+            if (line.current.waitingOn(request))
             {
-                await runBeside(current, request, runOptions);
+                await runBeside(line, line.current, request, runOptions);
                 continue;
             }
 
@@ -6602,14 +6827,14 @@ export async function createApp(options){
             // that process wrote: an extractor that unpacked its payload
             // and then started it has to hand that payload across, or the
             // child is launched against files that no longer exist.
-            const child = await current.readImage(request.imagePath);
-            const carried = current.session.export();
-            const hive = current.registry().toJSON();
+            const child = await line.current.readImage(request.imagePath);
+            const carried = line.current.session.export();
+            const hive = line.current.registry().toJSON();
             // The sequence the journal reached, read while the machine that
             // wrote it still stands. The child's journal continues from
             // here, so the cursor a reader is holding points into it rather
             // than past the end of a block that started over.
-            const written = current.diagnostics()
+            const written = line.current.diagnostics()
                 .find((/** @type {any} */ layer)=>layer.name === 'log')
                 ?.metrics?.journal?.written;
             if (typeof written === 'number')
@@ -6619,8 +6844,9 @@ export async function createApp(options){
             // Likewise read while it stands: the decoder the parent made is
             // handed to the child so the same compiled module and linear
             // memory serve both, and only the parent still holds it.
-            mediaInstance = current.media.instance() ?? mediaInstance;
-            await current.dispose();
+            mediaInstance = line.current.media.instance() ?? mediaInstance;
+            await retire(line.current);
+            await line.current.dispose();
 
             if (!child)
             {
@@ -6628,17 +6854,20 @@ export async function createApp(options){
                     `cannot start ${request.imagePath}: it is not on the volume`);
             }
 
-            current = await buildApp(machine({
+            line.current = await build({
                 executable: child,
                 imagePath: request.imagePath,
                 commandLine: request.commandLine,
                 patches: request.patches,
                 seed: carried,
                 hive,
-            }));
-            imagePath = request.imagePath;
+            });
+            if (line.main)
+            {
+                imagePath = request.imagePath;
+            }
             replayLogLevels();
-            Object.assign(facade, current, own);
+            Object.assign(facade, line.current, own);
             bindLogLevels();
             // The child's journal is a fresh block, continuing the parent's
             // sequence. Whoever holds a reader of its own -- the page's
@@ -6661,15 +6890,8 @@ export async function createApp(options){
          * @returns {Promise<number>} the last program's exit code
          */
         async run(runOptions){
-            depth++;
-            try
-            {
-                return await runProcesses(runOptions);
-            }
-            finally
-            {
-                depth--;
-            }
+            runOptionsNow = runOptions;
+            return runProcesses(runOptions);
         },
 
         /**
@@ -6678,7 +6900,9 @@ export async function createApp(options){
          * earlier, because the process that takes this one's place still needs
          * them.
          */
-        dispose: ()=>Promise.resolve(current.dispose()).finally(()=>presenter?.dispose?.()),
+        dispose: ()=>Promise.all([...serving].map(line=>line.current.dispose()))
+            .then(()=>current.dispose())
+            .finally(()=>presenter?.dispose?.()),
 
         /**
          * The presenter this run draws through: the canvas, the format it was
