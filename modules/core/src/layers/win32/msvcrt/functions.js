@@ -95,6 +95,11 @@ const RAND_MAX = 0x7fff;
  *           unexported.
  * @property {() => string[]} [drives]      Letters the filesystem has mounted.
  * @property {() => number} [iob]           Where the runtime's `_iob` was placed, once it has been.
+ * @property {(name: string) => number} [addressOf]
+ *           Where the runtime's own export of that name was placed, zero
+ *           before it is: a table a program reads in place, `_mbctype`, is
+ *           rewritten there when the call that changes it comes. Absent, the
+ *           table stays as it was placed.
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           Registers a call answers in besides EAX: EDX, for the high half
  *           of an __int64. Absent, the calls answering one stay unexported.
@@ -673,7 +678,14 @@ export function createMsvcrtFunctions(host){
     return {
         ...narrow,
         // Bound to the byte functions above, so the two families cannot drift.
-        ...createMultiByteFunctions(narrow, host.divergence),
+        ...createMultiByteFunctions(narrow, {
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            fillMemory: host.fillMemory,
+            errno,
+            addressOf: host.addressOf,
+            divergence: host.divergence,
+        }),
         ...createWideClassificationFunctions(),
         ...createWideFunctions({
             readMemory: host.readMemory,

@@ -10,17 +10,13 @@
  * Two families live here for one reason: both exist because `char` is not the
  * unit a program means. The wide family is UTF-16, two bytes per unit, and is
  * what Win32 itself speaks. The multi-byte family is the other answer to the
- * same problem -- a variable-width encoding chosen by the locale -- and under
- * the C locale, which is the only locale this runtime has, every character is
- * one byte and every `_mbs*` function is its `str*` equivalent exactly.
- *
- * So the `_mbs*` entries are deliberately thin. They are not stubs: under this
- * locale they are complete and correct, and a lead-byte test that answers "no"
- * is the true answer rather than an unimplemented one. What they are not is
- * ready for a double-byte locale, and the place that would change is here.
+ * same problem -- a variable-width encoding, chosen by the multibyte code page
+ * `_setmbcp` selects (`mbcs.js`): under a single-byte page every character is
+ * one byte and every `_mbs*` function is its `str*` equivalent exactly; under
+ * a double-byte one a lead byte and its trail are one character.
  */
 
-import { EILSEQ } from './globals.js';
+import { EILSEQ, EINVAL } from './globals.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
@@ -30,6 +26,7 @@ import {
 } from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
+import { createMultiByteHandlers, createMultiBytePage } from './mbcs.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -376,49 +373,44 @@ export function createWideClassificationFunctions(){
     };
 }
 
+
 /**
- * The multi-byte family, which under the C locale is the byte family.
+ * @typedef {Object} MultiByteFunctionsHost
+ * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, length: number) => void} [fillMemory]
+ * @property {(code: number) => void} [errno]
+ * @property {(name: string) => number} [addressOf]
+ *     Where the runtime's own export of that name was placed, zero before it
+ *     is: `_mbctype` is rewritten there when the page changes. Absent, the
+ *     table a program reads stays the one it was placed with.
+ * @property {(api: string, detail: string) => void} [divergence]
+ */
+
+/**
+ * The multi-byte family, under the code page `_setmbcp` selects (`mbcs.js`).
  *
- * Each name is bound to the narrow function of the same meaning, taken from
- * the table the caller already built rather than written again: two
- * implementations of `strcpy` that must agree is one more than is needed.
+ * A name whose answer is its byte twin's under every page -- a copy, a
+ * concatenation, a duplicate -- is bound to the narrow function itself, taken
+ * from the table the caller already built: two implementations of `strcpy`
+ * that must agree is one more than is needed. The rest read a string by the
+ * page: in the guest while it is ASCII, on the host past that.
  *
  * @param {Record<string, any>} narrow  The byte-string table.
- * @param {(api: string, detail: string) => void} [divergence]
+ * @param {MultiByteFunctionsHost} host
  */
-export function createMultiByteFunctions(narrow, divergence){
+export function createMultiByteFunctions(narrow, host){
+    const page = createMultiBytePage();
+    const handlers = createMultiByteHandlers(host, page);
+
     /** @type {Record<string, any>} */
     const table = {};
     for (const [multiByte, byte] of Object.entries({
-        _mbslen: 'strlen',
         _mbscpy: 'strcpy',
-        _mbsncpy: 'strncpy',
         _mbscat: 'strcat',
-        _mbsncat: 'strncat',
-        _mbscmp: 'strcmp',
-        _mbsncmp: 'strncmp',
-        _mbsicmp: '_stricmp',
-        _mbsnicmp: '_strnicmp',
-        _mbschr: 'strchr',
-        _mbsrchr: 'strrchr',
-        _mbsstr: 'strstr',
-        _mbstok: 'strtok',
         _mbsdup: '_strdup',
-        _mbsupr: '_strupr',
-        _mbslwr: '_strlwr',
-        _mbspbrk: 'strpbrk',
-        _mbsspn: 'strspn',
-        _mbscspn: 'strcspn',
-        _mbsrev: '_strrev',
-        // The `nb` forms count bytes rather than characters, which in a
-        // single-byte locale is the same count.
-        _mbsnbcmp: 'strncmp',
-        _mbsnbicmp: '_strnicmp',
-        _mbsnbcpy: 'strncpy',
-        _mbsnbcat: 'strncat',
-        // A classifier, not a string function, but the same shape: one
-        // character code in, one flag out, and the C locale's answer is the
-        // byte one's exactly, the same as every multi-byte function above.
+        // A classifier, not a string function: one character code in, one
+        // flag out, and a space or a digit is a byte in every page.
         _ismbcspace: 'isspace',
         _ismbcdigit: 'isdigit',
     }))
@@ -429,93 +421,149 @@ export function createMultiByteFunctions(narrow, divergence){
         }
     }
 
+    /**
+     * Code in the guest that hands a string past ASCII to the handler of the
+     * export it is bound as.
+     *
+     * @param {string} name  The export.
+     * @param {string} [source]  The guest function, when another export's.
+     */
+    const guestCoded = (name, source = name)=>{
+        const handler = /** @type {Record<string, (args: number[]) => number>} */ (
+            handlers)[name];
+        const compiled = COMPILED[/** @type {'_mbslen'} */ (source)];
+        return guestEntry(/** @type {Function} */ (inGuest[/** @type {'_mbslen'} */ (source)]),
+            compiled, host, { argBytes: compiled.params.length * 4, handler });
+    };
+
+    /**
+     * A handler that reads by the page under a double-byte one, and answers
+     * as its byte twin under a single-byte one, where the twin is already
+     * the faster walk.
+     *
+     * @param {string} name @param {string} byte
+     */
+    const byPage = (name, byte)=>{
+        const twin = narrow[byte];
+        const handler = /** @type {Record<string, (args: number[]) => number>} */ (
+            handlers)[name];
+        return {
+            convention: 'cdecl',
+            argBytes: twin?.argBytes ?? 8,
+            /** @param {number[]} args */
+            handler: args=>(page.doubleByte() || !twin ? handler(args) : twin.handler(args)),
+        };
+    };
+
+    /** @param {string} name @param {number} argBytes */
+    const onHost = (name, argBytes)=>({
+        convention: 'cdecl',
+        argBytes,
+        handler: /** @type {Record<string, (args: number[]) => number>} */ (handlers)[name],
+    });
+
+    /** Rewrites the table a program reads, where the runtime's export of it was placed. */
+    const publishTable = ()=>{
+        const at = host.addressOf?.('_mbctype') ?? 0;
+        if (at !== 0)
+        {
+            host.writeMemory(at, page.table());
+        }
+    };
+
     return {
         ...table,
+        ...Object.fromEntries(['_mbslen', '_mbclen', '_mbsinc', '_mbsdec', '_ismbblead',
+            '_mbschr', '_mbsrchr', '_mbsstr', '_mbscmp', '_mbsicmp', '_mbsncmp', '_mbsnicmp',
+            '_mbsncpy', '_mbslwr', '_mbsupr'].map(name=>[name, guestCoded(name)])),
+        // The byte-counted forms: in ASCII a byte is a character, and the
+        // guest code is the character-counted form's.
+        _mbsnbcmp: guestCoded('_mbsnbcmp', '_mbsncmp'),
+        _mbsnbicmp: guestCoded('_mbsnbicmp', '_mbsnicmp'),
+        _mbsnbcpy: guestCoded('_mbsnbcpy', '_mbsncpy'),
+
+        _mbspbrk: byPage('_mbspbrk', 'strpbrk'),
+        _mbsspn: byPage('_mbsspn', 'strspn'),
+        _mbscspn: byPage('_mbscspn', 'strcspn'),
+        _mbsncat: byPage('_mbsncat', 'strncat'),
+        _mbsnbcat: byPage('_mbsnbcat', 'strncat'),
+        _mbsrev: byPage('_mbsrev', '_strrev'),
+
+        _mbsspnp: onHost('_mbsspnp', 8),
+        _mbstok: onHost('_mbstok', 8),
+        _mbsninc: onHost('_mbsninc', 8),
+        _mbsnextc: onHost('_mbsnextc', 4),
+        _mbccpy: onHost('_mbccpy', 8),
+        _ismbbtrail: onHost('_ismbbtrail', 4),
+        _ismbslead: onHost('_ismbslead', 8),
+        _ismbstrail: onHost('_ismbstrail', 8),
+        _mbbtype: onHost('_mbbtype', 8),
+        _mbsbtype: onHost('_mbsbtype', 8),
+        _ismbclegal: onHost('_ismbclegal', 4),
 
         /**
-         * unsigned char *_mbsinc(const unsigned char *)
+         * int mblen(const char *text, size_t count) / size_t _mbstrlen(const char *text)
          *
-         * Advances by one character, which is one byte here. A program uses
-         * this instead of `++` precisely so that it would still be right in a
-         * locale where it is not one byte.
+         * By the locale rather than the multibyte code page, and the C locale
+         * is a byte a character: one byte for a character, none for the
+         * terminator or no string, -1 when the count holds nothing.
          */
-        _mbsinc: {
-            convention: 'cdecl',
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([string])=>string + 1,
-        },
-
-        /**
-         * unsigned char *_mbsdec(const unsigned char *start, const unsigned char *at)
-         *
-         * Backwards, and it needs the start of the string because a
-         * variable-width encoding cannot be read backwards without it.
-         */
-        _mbsdec: {
+        mblen: {
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([start, at])=>(at > start ? at - 1 : 0),
+            handler: ([text, count])=>{
+                if ((text >>> 0) === 0)
+                {
+                    return 0;
+                }
+                if ((count >>> 0) === 0)
+                {
+                    return -1;
+                }
+                return host.readMemory(text >>> 0, 1)[0] === 0 ? 0 : 1;
+            },
         },
-
-        /** size_t _mbclen(const unsigned char *) */
-        _mbclen: {
-            convention: 'cdecl',
-            argBytes: 4,
-            handler: ()=>1,
-        },
-
-        /** int _ismbblead(unsigned int) -- never, in a single-byte locale */
-        _ismbblead: {
-            convention: 'cdecl',
-            argBytes: 4,
-            handler: ()=>0,
-        },
-
-        /** int _ismbbtrail(unsigned int) */
-        _ismbbtrail: {
-            convention: 'cdecl',
-            argBytes: 4,
-            handler: ()=>0,
-        },
+        ...narrow.strlen ? { _mbstrlen: narrow.strlen } : {},
 
         /**
          * int _setmbcp(int codepage)
          *
-         * The multi-byte code page stays the single-byte ANSI one, whatever is
-         * asked: every function in this family answers as that page does, and
-         * a lead-byte table set for another page would disagree with them.
-         * Asked for the ANSI page, or for "the current locale's", that is
-         * exactly right; asked for a double-byte page, it is not, and says so.
+         * Zero once the page is selected -- by number, or as `_MB_CP_ANSI`,
+         * `_MB_CP_OEM`, `_MB_CP_LOCALE` (the C locale's is the ANSI page) or
+         * `_MB_CP_SBCS`; a page Windows does not have is -1 and EINVAL, and
+         * the page before it stays. `__mb_cur_max` is the locale's and does
+         * not move.
          */
         _setmbcp: {
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([codepage])=>{
-                const asked = codepage | 0;
-                if (![0, -3, -4, -2, 1252].includes(asked))
+                if (!page.select(codepage))
                 {
-                    divergence?.('_setmbcp', `code page ${asked} stays the ANSI page`);
+                    host.errno?.(EINVAL);
+                    return -1;
                 }
+                publishTable();
                 return 0;
             },
         },
 
-        /** int _getmbcp(void): 0, a single-byte locale's answer. */
+        /** int _getmbcp(void): 0 for the single-byte page a program starts in. */
         _getmbcp: {
             convention: 'cdecl',
             argBytes: 0,
-            handler: ()=>0,
+            handler: ()=>page.page(),
         },
 
         /**
          * unsigned char _mbctype[257]
          *
-         * The lead- and trail-byte flags for each byte, the first entry for
-         * EOF: none, in a single-byte locale.
+         * The flags of each byte under the page, the first entry for EOF: the
+         * ASCII letters' case in every page, and a double-byte page's lead and
+         * trail bytes besides.
          */
-        _mbctype: { data: ()=>new Uint8Array(257) },
+        _mbctype: { data: ()=>page.table().slice() },
     };
 }

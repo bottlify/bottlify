@@ -1254,3 +1254,423 @@ export function wcscpy({ u16, copyUp, copyDown }, destination, source){
     }
     return destination;
 }
+
+/*
+ * The multibyte family, under the code page `_setmbcp` selects. No byte below
+ * 0x80 leads in any page, so a string that is ASCII as far as the answer is a
+ * byte a character whatever the page, and each of these answers it here; at
+ * the first byte past 0x7f -- or for a character past it -- the call is the
+ * host's (`mbcs.js`), which reads the string by the page. Under a single-byte
+ * page each answers as its byte twin does.
+ */
+
+/**
+ * size_t _mbslen(const unsigned char *text)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text
+ * @returns {u32}
+ */
+export function _mbslen({ u8, host }, text){
+    for (/** @type {u32} */ let length = 0; ; length++)
+    {
+        const c = u8(text + length);
+        if (c === 0)
+        {
+            return length;
+        }
+        if (c >= 0x80)
+        {
+            return host();
+        }
+    }
+}
+
+/**
+ * size_t _mbclen(const unsigned char *at)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} at
+ * @returns {u32}
+ */
+export function _mbclen({ u8, host }, at){
+    if (u8(at) >= 0x80)
+    {
+        return host();
+    }
+    return 1;
+}
+
+/**
+ * unsigned char *_mbsinc(const unsigned char *at)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} at
+ * @returns {u32}
+ */
+export function _mbsinc({ u8, host }, at){
+    if (u8(at) >= 0x80)
+    {
+        return host();
+    }
+    return (at + 1) >>> 0;
+}
+
+/**
+ * unsigned char *_mbsdec(const unsigned char *start, const unsigned char *at)
+ *
+ * The character before `at`: the byte before it when the byte before that
+ * cannot lead, or is not in the string; null at the start.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} start @param {u32} at
+ * @returns {u32}
+ */
+export function _mbsdec({ u8, host }, start, at){
+    if (at <= start)
+    {
+        return 0;
+    }
+    const before = (at - 1) >>> 0;
+    if (before > start && u8(before - 1) >= 0x80)
+    {
+        return host();
+    }
+    return before;
+}
+
+/**
+ * int _ismbblead(unsigned int c)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} c
+ * @returns {i32}
+ */
+export function _ismbblead({ host }, c){
+    if ((c & 0xff) >= 0x80)
+    {
+        return host();
+    }
+    return 0;
+}
+
+/**
+ * unsigned char *_mbschr(const unsigned char *text, unsigned int c)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} c
+ * @returns {u32}
+ */
+export function _mbschr({ u8, host }, text, c){
+    if (c > 0x7f)
+    {
+        return host();
+    }
+    for (/** @type {u32} */ let at = text; ; at++)
+    {
+        const byte = u8(at);
+        if (byte >= 0x80)
+        {
+            return host();
+        }
+        if (byte === c)
+        {
+            return at;
+        }
+        if (byte === 0)
+        {
+            return 0;
+        }
+    }
+}
+
+/**
+ * unsigned char *_mbsrchr(const unsigned char *text, unsigned int c)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} c
+ * @returns {u32}
+ */
+export function _mbsrchr({ u8, host }, text, c){
+    if (c > 0x7f)
+    {
+        return host();
+    }
+    /** @type {u32} */
+    let found = 0;
+    for (/** @type {u32} */ let at = text; ; at++)
+    {
+        const byte = u8(at);
+        if (byte >= 0x80)
+        {
+            return host();
+        }
+        if (byte === c)
+        {
+            found = at;
+        }
+        if (byte === 0)
+        {
+            return found;
+        }
+    }
+}
+
+/**
+ * unsigned char *_mbsstr(const unsigned char *haystack, const unsigned char *needle)
+ *
+ * A match is looked for at each character of the haystack, so one with a
+ * byte past 0x7f before the answer is the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} haystack @param {u32} needle
+ * @returns {u32}
+ */
+export function _mbsstr({ u8, host }, haystack, needle){
+    for (/** @type {u32} */ let at = haystack; ; at++)
+    {
+        if (u8(at) >= 0x80)
+        {
+            return host();
+        }
+        /** @type {u32} */
+        let i = 0;
+        while (u8(needle + i) !== 0 && u8(at + i) === u8(needle + i))
+        {
+            i++;
+        }
+        if (u8(needle + i) === 0)
+        {
+            return at;
+        }
+        if (u8(at) === 0)
+        {
+            return 0;
+        }
+    }
+}
+
+/**
+ * int _mbscmp(const unsigned char *left, const unsigned char *right)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right
+ * @returns {i32}
+ */
+export function _mbscmp({ u8, host }, left, right){
+    for (/** @type {u32} */ let i = 0; ; i++)
+    {
+        const a = u8(left + i);
+        const b = u8(right + i);
+        if (a >= 0x80 || b >= 0x80)
+        {
+            return host();
+        }
+        if (a !== b)
+        {
+            return a < b ? -1 : 1;
+        }
+        if (a === 0)
+        {
+            return 0;
+        }
+    }
+}
+
+/**
+ * int _mbsicmp(const unsigned char *left, const unsigned char *right)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right
+ * @returns {i32}
+ */
+export function _mbsicmp({ u8, host }, left, right){
+    for (/** @type {u32} */ let i = 0; ; i++)
+    {
+        const a = u8(left + i);
+        const b = u8(right + i);
+        if (a >= 0x80 || b >= 0x80)
+        {
+            return host();
+        }
+        const la = LOWER[a];
+        const lb = LOWER[b];
+        if (la !== lb)
+        {
+            return la < lb ? -1 : 1;
+        }
+        if (a === 0)
+        {
+            return 0;
+        }
+    }
+}
+
+/**
+ * int _mbsncmp(const unsigned char *left, const unsigned char *right, size_t count),
+ * and _mbsnbcmp, which counts bytes: in ASCII the same count
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @returns {i32}
+ */
+export function _mbsncmp({ u8, host }, left, right, count){
+    for (/** @type {u32} */ let i = 0; i < count; i++)
+    {
+        const a = u8(left + i);
+        const b = u8(right + i);
+        if (a >= 0x80 || b >= 0x80)
+        {
+            return host();
+        }
+        if (a !== b)
+        {
+            return a < b ? -1 : 1;
+        }
+        if (a === 0)
+        {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+/**
+ * int _mbsnicmp(const unsigned char *left, const unsigned char *right, size_t count),
+ * and _mbsnbicmp
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @returns {i32}
+ */
+export function _mbsnicmp({ u8, host }, left, right, count){
+    for (/** @type {u32} */ let i = 0; i < count; i++)
+    {
+        const a = u8(left + i);
+        const b = u8(right + i);
+        if (a >= 0x80 || b >= 0x80)
+        {
+            return host();
+        }
+        const la = LOWER[a];
+        const lb = LOWER[b];
+        if (la !== lb)
+        {
+            return la < lb ? -1 : 1;
+        }
+        if (a === 0)
+        {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+/**
+ * unsigned char *_mbsncpy(unsigned char *destination, const unsigned char *source,
+ *                         size_t count), and _mbsnbcpy
+ *
+ * As strncpy copies, as if the source were read whole first: its bytes to its
+ * terminator or the count, and zeros to the count. No count answers the
+ * destination as it is; with one, no destination or no source is the host's
+ * EINVAL.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
+ * @returns {u32}
+ */
+export function _mbsncpy({ u8, copyUp, copyDown, fill, host }, destination, source, count){
+    if (count === 0)
+    {
+        return destination;
+    }
+    if (destination === 0 || source === 0)
+    {
+        return host();
+    }
+    /** @type {u32} */
+    let length = 0;
+    while (length < count)
+    {
+        const c = u8(source + length);
+        if (c === 0)
+        {
+            break;
+        }
+        if (c >= 0x80)
+        {
+            return host();
+        }
+        length++;
+    }
+    if ((destination - source) >>> 0 < length)
+    {
+        copyDown(destination, source, length);
+    }
+    else
+    {
+        copyUp(destination, source, length);
+    }
+    fill(destination + length, 0, count - length);
+    return destination;
+}
+
+/**
+ * unsigned char *_mbslwr(unsigned char *text)
+ *
+ * In place, the ASCII capitals, once the whole string is known to be ASCII.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text
+ * @returns {u32}
+ */
+export function _mbslwr({ u8, setU8, host }, text){
+    for (/** @type {u32} */ let at = text; u8(at) !== 0; at++)
+    {
+        if (u8(at) >= 0x80)
+        {
+            return host();
+        }
+    }
+    for (/** @type {u32} */ let at = text; ; at++)
+    {
+        const c = u8(at);
+        if (c === 0)
+        {
+            return text;
+        }
+        if (c >= 0x41 && c <= 0x5a)
+        {
+            setU8(at, c + 0x20);
+        }
+    }
+}
+
+/**
+ * unsigned char *_mbsupr(unsigned char *text)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text
+ * @returns {u32}
+ */
+export function _mbsupr({ u8, setU8, host }, text){
+    for (/** @type {u32} */ let at = text; u8(at) !== 0; at++)
+    {
+        if (u8(at) >= 0x80)
+        {
+            return host();
+        }
+    }
+    for (/** @type {u32} */ let at = text; ; at++)
+    {
+        const c = u8(at);
+        if (c === 0)
+        {
+            return text;
+        }
+        if (c >= 0x61 && c <= 0x7a)
+        {
+            setU8(at, c - 0x20);
+        }
+    }
+}

@@ -214,42 +214,253 @@ test('mbtowc reports one byte consumed, and zero at the terminator', ()=>{
     assert.equal(table.mbtowc.handler([unit, source + 1, 4]), 0);
 });
 
-test('the multi-byte names are bound to the byte functions themselves', ()=>{
+test('the multi-byte names a page cannot change are bound to the byte functions themselves',
+    ()=>{
+        const memory = fakeMemory();
+        const narrow = /** @type {Record<string, any>} */ (createMsvcrtFunctions({
+            ...memory,
+            write: ()=>{},
+            callGuest: async()=>0,
+        }));
+        const multi = /** @type {Record<string, any>} */ (createMultiByteFunctions(narrow,
+            memory));
+        assert.equal(multi._mbscpy, narrow.strcpy, 'one implementation, two names');
+        assert.equal(multi._mbscat, narrow.strcat);
+        assert.equal(multi._ismbcspace, narrow.isspace, 'a classifier, bound the same way');
+        assert.equal(multi._ismbcspace.handler([' '.charCodeAt(0)]), 1);
+        assert.equal(multi._ismbcspace.handler(['x'.charCodeAt(0)]), 0);
+        assert.equal(multi._ismbcdigit, narrow.isdigit);
+        assert.notEqual(multi._mbslen, narrow.strlen, 'a length counts characters by the page');
+    });
+
+/**
+ * The multi-byte family over a fake memory, with the runtime's byte table it
+ * binds to and what it told errno.
+ */
+const multiByte = ()=>{
     const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
     const narrow = /** @type {Record<string, any>} */ (createMsvcrtFunctions({
         ...memory,
         write: ()=>{},
         callGuest: async()=>0,
     }));
-    const multi = /** @type {Record<string, any>} */ (createMultiByteFunctions(narrow));
-    assert.equal(multi._mbscpy, narrow.strcpy, 'one implementation, two names');
-    assert.equal(multi._mbslen, narrow.strlen);
-    assert.equal(multi._mbsicmp, narrow._stricmp);
-    assert.equal(multi._ismbcspace, narrow.isspace, 'a classifier, bound the same way');
-    assert.equal(multi._ismbcspace.handler([' '.charCodeAt(0)]), 1);
-    assert.equal(multi._ismbcspace.handler(['x'.charCodeAt(0)]), 0);
-    assert.equal(multi._mbsnbcmp, narrow.strncmp, 'a byte count is a character count here');
-    assert.equal(multi._mbspbrk, narrow.strpbrk);
-    assert.equal(multi._ismbcdigit, narrow.isdigit);
+    const table = /** @type {Record<string, any>} */ (createMultiByteFunctions(narrow, {
+        ...memory,
+        errno: code=>void errno.push(code),
+    }));
+    /** @param {number[]} bytes */
+    const put = bytes=>{
+        const at = memory.allocate(bytes.length + 16);
+        memory.writeMemory(at, Uint8Array.from(bytes));
+        return at;
+    };
+    /** @param {string} name @param {number[]} args */
+    const call = (name, ...args)=>table[name].handler(args);
+    return { memory, table, errno, put, call };
+};
+
+test('under the single-byte page a program starts in, a character is one byte and nothing '
+    + 'leads', ()=>{
+    const { table, put, call } = multiByte();
+    const text = put([0x41, 0xb0, 0xb1, 0x62, 0]);
+    assert.equal(call('_getmbcp'), 0);
+    assert.equal(call('_mbslen', text), 4);
+    assert.equal(call('_mbclen', text + 1), 1);
+    assert.equal(call('_ismbblead', 0xb0), 0);
+    assert.equal(call('_mbsinc', text + 1), text + 2);
+    assert.equal(call('_mbsdec', text, text + 3), text + 2);
+    assert.equal(call('_mbsdec', text, text), 0, 'nothing before the start');
+    assert.equal(call('_mbschr', text, 0x1b1), text + 2, 'a search takes the low byte');
+    const flags = [...table._mbctype.data()];
+    assert.deepEqual([flags[0x42], flags[0x64], flags[0x41 + 1], flags[0xb0 + 1]],
+        [0x10, 0x20, 0x10, 0], 'the ASCII letters have their case, and nothing leads');
 });
 
-test('under a single-byte locale a character is one byte and nothing leads', ()=>{
-    const multi = /** @type {Record<string, any>} */ (createMultiByteFunctions({}));
-    assert.equal(multi._mbclen.handler([0]), 1);
-    assert.equal(multi._ismbblead.handler([0x81]), 0);
-    assert.equal(multi._mbsinc.handler([0x1000]), 0x1001);
-    assert.equal(multi._mbsdec.handler([0x1000, 0x1004]), 0x1003);
-    assert.equal(multi._mbsdec.handler([0x1000, 0x1000]), 0, 'nothing before the start');
-    assert.deepEqual([...multi._mbctype.data()], new Array(257).fill(0), 'no byte leads or trails');
-    /** @type {string[]} */
-    const said = [];
-    const told = /** @type {Record<string, any>} */ (createMultiByteFunctions({},
-        (/** @type {string} */ api)=>said.push(api)));
-    assert.equal(told._setmbcp.handler([1252]), 0);
-    assert.equal(told._setmbcp.handler([-3]), 0);
-    assert.deepEqual(said, [], 'the ANSI page is the page it has');
-    assert.equal(told._setmbcp.handler([932]), 0);
-    assert.deepEqual(said, ['_setmbcp'], 'a double-byte page is not, and says so');
+test('_setmbcp takes the pages Windows has, by number or selector, and refuses the rest', ()=>{
+    const { call, errno } = multiByte();
+    assert.equal(call('_setmbcp', 1250), 0);
+    assert.equal(call('_getmbcp'), 1250);
+    assert.equal(call('_setmbcp', -3), 0, '_MB_CP_ANSI');
+    assert.equal(call('_getmbcp'), 1252);
+    assert.equal(call('_setmbcp', -2), 0, '_MB_CP_OEM');
+    assert.equal(call('_getmbcp'), 437);
+    assert.equal(call('_setmbcp', 932), 0);
+    assert.deepEqual(errno, []);
+    assert.equal(call('_setmbcp', 939), -1, 'an EBCDIC page is not one Windows has');
+    assert.deepEqual(errno, [22]);
+    assert.equal(call('_getmbcp'), 932, 'the page before it stays');
+    assert.equal(call('_setmbcp', 0), 0, '_MB_CP_SBCS');
+    assert.equal(call('_getmbcp'), 0);
+});
+
+test('_mbctype marks each double-byte page\'s lead and trail bytes, and Shift-JIS\'s katakana',
+    ()=>{
+        const memory = fakeMemory();
+        const at = memory.allocate(257);
+        const table = /** @type {Record<string, any>} */ (createMultiByteFunctions({}, {
+            ...memory,
+            addressOf: name=>(name === '_mbctype' ? at : 0),
+        }));
+        /** @param {number} byte */
+        const flags = byte=>memory.bytes[at + 1 + byte];
+        table._setmbcp.handler([932]);
+        assert.deepEqual([0x40, 0x41, 0x61, 0x7f, 0x80, 0x81, 0x9f, 0xa0, 0xa1, 0xa6, 0xdf, 0xe0,
+            0xfc, 0xfd].map(flags),
+        [0x08, 0x18, 0x28, 0, 0x08, 0x0c, 0x0c, 0x08, 0x0a, 0x09, 0x09, 0x0c, 0x0c, 0]);
+        assert.equal(memory.bytes[at], 0, 'EOF has no flags');
+        table._setmbcp.handler([936]);
+        assert.deepEqual([0x3f, 0x40, 0x7f, 0x80, 0x81, 0xfe, 0xff].map(flags),
+            [0, 0x08, 0x08, 0x08, 0x0c, 0x0c, 0]);
+        table._setmbcp.handler([949]);
+        assert.deepEqual([0x40, 0x41, 0x5b, 0x81, 0xfe].map(flags), [0, 0x18, 0x08, 0x0c, 0x0c]);
+        table._setmbcp.handler([950]);
+        assert.deepEqual([0x40, 0x7e, 0x7f, 0x80, 0x81, 0xa0, 0xa1, 0xfe].map(flags),
+            [0x08, 0x08, 0, 0, 0x04, 0x04, 0x0c, 0x0c]);
+        table._setmbcp.handler([1361]);
+        assert.deepEqual([0x31, 0x81, 0xd3, 0xd7, 0xd8, 0xf9, 0xfa].map(flags),
+            [0x08, 0x0c, 0x0c, 0x08, 0x0c, 0x0c, 0x08]);
+        table._setmbcp.handler([1252]);
+        assert.deepEqual([0x42, 0x64, 0x80, 0x81].map(flags), [0x10, 0x20, 0, 0]);
+    });
+
+test('under a double-byte page a lead byte and the byte after it are one character, and a '
+    + 'lead byte the terminator follows ends the string', ()=>{
+    const { put, call } = multiByte();
+    call('_setmbcp', 936);
+    // A lead byte whose next byte cannot trail is still a pair.
+    const text = put([0xb0, 0xb1, 0xb2, 0x20, 0xb3, 0xb4, 0x20, 0xb5, 0]);
+    const valid = put([0xb0, 0xb1, 0xb2, 0xb3, 0x51, 0xb4, 0xb5, 0]);
+    const onlyLead = put([0xb0, 0, 0xb1, 0xb2, 0x20, 0xb3, 0]);
+    assert.equal(call('_ismbblead', 0x1234b0), 1, 'the low byte is the one asked about');
+    assert.equal(call('_ismbbtrail', 0x20), 0);
+    assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 7, 8].map(i=>call('_ismbslead', text, text + i)),
+        [-1, 0, -1, 0, -1, 0, 0, -1, 0]);
+    assert.deepEqual([0, 1, 2, 5].map(i=>call('_ismbslead', onlyLead, onlyLead + i)),
+        [-1, 0, 0, 0]);
+    assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 7, 8].map(i=>call('_ismbstrail', text, text + i)),
+        [0, -1, 0, -1, 0, -1, 0, 0, -1]);
+    assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 7, 8].map(i=>call('_mbsbtype', text, i)),
+        [1, 2, 1, -1, 1, 2, 0, 1, -1]);
+    assert.equal(call('_mbsbtype', 0, 0), -1);
+    assert.deepEqual([call('_mbsnextc', text), call('_mbsnextc', text + 2),
+        call('_mbsnextc', text + 3)], [0xb0b1, 0xb220, 0x20]);
+    assert.deepEqual([call('_mbclen', text), call('_mbclen', text + 3), call('_mbclen', onlyLead)],
+        [2, 1, 1]);
+    assert.deepEqual([call('_mbslen', valid), call('_mbslen', onlyLead), call('_mbslen', text)],
+        [4, 0, 4]);
+    assert.equal(call('_mbsinc', text) - text, 2);
+    assert.deepEqual([0, 1, 2, 3, 4, 5, 17].map(n=>call('_mbsninc', valid, n) - valid),
+        [0, 2, 4, 5, 7, 7, 7]);
+    assert.equal(call('_mbsninc', onlyLead, 2), onlyLead);
+    assert.equal(call('_mbsdec', text, text + 4), text + 2);
+    assert.equal(call('_mbschr', text, 0xb3b4), text + 4);
+    assert.equal(call('_mbsrchr', text, 0x20), text + 6);
+    assert.equal(call('_mbscmp', text, valid), -1, 'pairs compared as pairs');
+});
+
+test('the multi-byte copies count characters or bytes, and cut no pair in two', ()=>{
+    const { memory, put, call, errno } = multiByte();
+    call('_setmbcp', 936);
+    const text = put([0xb0, 0xb1, 0xb2, 0x20, 0xb3, 0xb4, 0x20, 0xb5, 0]);
+    const valid = put([0xb0, 0xb1, 0xb2, 0xb3, 0x51, 0xb4, 0xb5, 0]);
+    const onlyLead = put([0xb0, 0, 0xb1, 0xb2, 0x20, 0xb3, 0]);
+    const buffer = memory.allocate(16);
+    /** @param {() => void} run @param {number} length */
+    const copied = (run, length)=>{
+        memory.bytes.fill(0xff, buffer, buffer + 16);
+        run();
+        return [...memory.bytes.subarray(buffer, buffer + length)];
+    };
+    assert.deepEqual(copied(()=>call('_mbccpy', buffer, text), 3), [0xb0, 0xb1, 0xff]);
+    assert.deepEqual(copied(()=>call('_mbsncpy', buffer, text, 2), 5),
+        [0xb0, 0xb1, 0xb2, 0x20, 0xff]);
+    assert.deepEqual(copied(()=>call('_mbsncpy', buffer, text, 5), 10),
+        [0xb0, 0xb1, 0xb2, 0x20, 0xb3, 0xb4, 0x20, 0, 0, 0xff],
+        'a lead byte left alone is two zeros');
+    assert.deepEqual(copied(()=>call('_mbsncpy', buffer, onlyLead, 6), 8),
+        [0, 0, 0, 0, 0, 0, 0, 0xff]);
+    assert.deepEqual(copied(()=>call('_mbsnbcpy', buffer, valid, 3), 4), [0xb0, 0xb1, 0, 0xff],
+        'the pair the count cuts is not begun');
+    assert.deepEqual(copied(()=>call('_mbsnbcpy', buffer, onlyLead, 5), 6),
+        [0, 0, 0, 0, 0, 0xff]);
+    assert.equal(call('_mbsncpy', 0, text, 1), 0);
+    assert.equal(call('_mbsncpy', buffer, 0, 1), 0);
+    assert.deepEqual(errno, [22, 22]);
+    assert.equal(call('_mbsncpy', 0, text, 0), 0, 'no count is the destination as it is');
+    assert.equal(call('_mbsncpy', buffer, 0, 0), buffer);
+    assert.deepEqual(errno, [22, 22]);
+});
+
+test('the multi-byte spans take a pair as one character of the set', ()=>{
+    const { memory, put, call } = multiByte();
+    const word = put([...'cabernet'].map(c=>c.charCodeAt(0)).concat(0));
+    const abc = put([0x61, 0x62, 0x63, 0]);
+    assert.equal(call('_mbsspnp', word, abc), word + 3);
+    assert.equal(call('_mbsspnp', word, put([...'abcenrt'].map(c=>c.charCodeAt(0)).concat(0))),
+        0, 'a string wholly of the set has no rest');
+    call('_setmbcp', 932);
+    const text = put([0x20, 0x32, 0x30, 0x31, 0x39, 0x94, 0x4e, 0x36, 0x8c, 0x8e, 0x32, 0x39,
+        0x93, 0xfa, 0]);
+    const digits = put([...'0123456789 '].map(c=>c.charCodeAt(0)).concat(0x94, 0x4e, 0));
+    const pairs = put([0x20, 0x94, 0x4e, 0x8c, 0x8e, 0]);
+    const lone = put([0x8e, 0]);
+    assert.deepEqual([call('_mbsspn', text, digits), call('_mbsspn', text, pairs),
+        call('_mbsspn', text + 8, pairs), call('_mbsspn', text, lone)], [8, 1, 2, 14],
+    'a lead byte that ends the set matches every character');
+    assert.deepEqual([call('_mbscspn', text, digits), call('_mbscspn', text + 8, digits),
+        call('_mbscspn', text, lone)], [0, 2, 0]);
+    assert.equal(call('_mbsspnp', text, digits), text + 8);
+    const reversed = put([0x36, 0x8c, 0x8e, 0]);
+    call('_mbsrev', reversed);
+    assert.deepEqual([...memory.bytes.subarray(reversed, reversed + 4)], [0x8c, 0x8e, 0x36, 0]);
+    const cut = put([0x36, 0x8c, 0]);
+    call('_mbsrev', cut);
+    assert.deepEqual([...memory.bytes.subarray(cut, cut + 2)], [0x36, 0],
+        'a lead byte the terminator follows is dropped');
+});
+
+test('_mbbtype and _ismbclegal answer by the page', ()=>{
+    const { call } = multiByte();
+    assert.deepEqual([call('_mbbtype', 0x41, 0), call('_mbbtype', 0x0a, 0),
+        call('_mbbtype', 0x41, 1)], [0, -1, -1]);
+    call('_setmbcp', 932);
+    assert.deepEqual([call('_mbbtype', 0x81, 0), call('_mbbtype', 0x40, 1),
+        call('_mbbtype', 0x7f, 1)], [1, 2, -1]);
+    assert.deepEqual([0x8140, 0x817f, 0x9ffc, 0xa040, 0xe040, 0xfd40, 0x40].map(c=>
+        call('_ismbclegal', c)), [1, 0, 1, 0, 1, 0, 0]);
+    const shiftJis = multiByte();
+    shiftJis.call('_setmbcp', 932);
+    assert.equal(shiftJis.call('_mbscmp', shiftJis.put([0xa6, 0]), shiftJis.put([0x81, 0x40, 0])),
+        -1, 'a katakana byte stands before any pair, whatever its value');
+});
+
+test('_mbstok keeps a position of its own, apart from strtok\'s', ()=>{
+    const { memory, table, put, call } = multiByte();
+    const narrow = /** @type {Record<string, any>} */ (createMsvcrtFunctions({
+        ...memory,
+        write: ()=>{},
+        callGuest: async()=>0,
+    }));
+    const text = put([...'!.!test'].map(c=>c.charCodeAt(0)).concat(0));
+    narrow.strtok.handler([text, put([0x21, 0])]);
+    assert.equal(call('_mbstok', 0, put([0x74, 0])), 0);
+    const words = put([...'a b  c'].map(c=>c.charCodeAt(0)).concat(0));
+    const space = put([0x20, 0]);
+    assert.equal(table._mbstok.handler([words, space]), words);
+    assert.equal(call('_mbstok', 0, space), words + 2);
+    assert.equal(call('_mbstok', 0, space), words + 5);
+    assert.equal(call('_mbstok', 0, space), 0);
+});
+
+test('mblen and _mbstrlen answer by the C locale, a byte a character', ()=>{
+    const { put, call } = multiByte();
+    call('_setmbcp', 936);
+    const text = put([0xb0, 0xb1, 0xb2, 0]);
+    assert.deepEqual([call('mblen', text, 3), call('mblen', text + 3, 1), call('mblen', 0, 1),
+        call('mblen', text, 0)], [1, 0, 0, -1]);
+    assert.equal(call('_mbstrlen', text), 3);
 });
 
 /**
