@@ -12,7 +12,8 @@ import {
 } from './constants.js';
 import { createDirect3D9 } from './device.js';
 import {
-    createReferenceCount, createSurface, createTexture, packColour, writePixels,
+    createReferenceCount, createSurface, createTexture, createVolumeTexture, packColour,
+    writePixels,
 } from './resources.js';
 import { SURFACE_TYPE } from './validity.js';
 
@@ -488,6 +489,47 @@ test('a texture gives its storage back when the last reference goes', ()=>{
     }
     assert.deepEqual(freed.sort(), taken.sort(),
         'every level a program ever locked is handed back, not only the first');
+});
+
+test('a texture\'s storage goes back when its last reference goes through a level', ()=>{
+    // A program releases the texture and then the surface it asked for: the
+    // last reference is the level's, and the storage must go with it. Kept,
+    // Wine's d3d8 visual test ran the arena out after some hundred targets.
+    /** @type {number[]} */
+    const freed = [];
+    let next = 0x1000;
+    const arena = {
+        /** @param {number} bytes */
+        allocate: bytes=>{
+            const at = next;
+            next += bytes;
+            return at;
+        },
+        /** @param {number} address */
+        free: (/** @type {number} */ address)=>freed.push(address),
+    };
+    const texture = createTexture({
+        width: 8, height: 8, levels: 1, format: D3DFMT.A8R8G8B8,
+        pool: D3DPOOL.DEFAULT, usage: 0, count: createReferenceCount(), ...arena,
+    });
+    /** @type {{ surface?: any }} */
+    const level = {};
+    texture.GetSurfaceLevel(0, level);
+    assert.equal(texture.release(), 1);
+    assert.equal(freed.length, 0, 'the level still holds it');
+    assert.equal(level.surface.release(), 0);
+    assert.deepEqual(freed, [level.surface.base]);
+
+    const volumes = createVolumeTexture({
+        width: 4, height: 4, depth: 2, levels: 1, format: D3DFMT.A8R8G8B8,
+        pool: D3DPOOL.MANAGED, usage: 0, count: createReferenceCount(), ...arena,
+    });
+    /** @type {{ volume?: any }} */
+    const box = {};
+    volumes.GetVolumeLevel(0, box);
+    volumes.release();
+    box.volume.release();
+    assert.equal(freed.length, 2, 'a volume texture\'s the same way');
 });
 
 // --- how a compressed level is measured ---
