@@ -2375,13 +2375,16 @@ export function createWin32Module(){
 
                 /**
                  * Whether one of this process's threads is blocked waiting on a
-                 * child it started: the parent that goes on once the child is
-                 * done, which the engine then runs the child beside rather than
-                 * replacing it.
+                 * child it started, or has asked whether it is still running --
+                 * GetExitCodeProcess, or a wait of no time -- as a setup polling
+                 * for a helper between sleeps does: the parent that goes on once
+                 * the child is done, which the engine then runs the child beside
+                 * rather than replacing it.
                  *
                  * @param {any} child  The child's process record.
                  */
-                childWaitedOn: (/** @type {any} */ child)=>(child?.waiters?.length ?? 0) > 0,
+                childWaitedOn: (/** @type {any} */ child)=>(child?.waiters?.length ?? 0) > 0
+                    || child?.polled === true,
 
                 /**
                  * A child run beside this process has exited: its record takes the
