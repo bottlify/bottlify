@@ -4111,9 +4111,8 @@ async function buildApp(options){
         };
         if (held.entryPoint && held.entryPoint !== held.base && held.attached !== false)
         {
-            return bridge.callGuest({
-                entry: held.entryPoint,
-                args: [held.base, DLL_PROCESS_DETACH, 0],
+            return win32.callEntryPoint({
+                entry: held.entryPoint, base: held.base, reason: DLL_PROCESS_DETACH, reserved: 0,
                 thread: kernel.currentThread(),
             }).then(unload);
         }

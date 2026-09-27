@@ -23,6 +23,7 @@ import { createSystemFunctions } from './kernel32/system.js';
 import { createSpawner, createSpawnFunctions } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
 import { createSeh } from './kernel32/seh.js';
+import { createEntryPointCaller } from './kernel32/dllentry.js';
 import { createCrtSeh } from './msvcrt/seh.js';
 import { createCxxExceptions } from './msvcrt/eh.js';
 import { createApcs } from './kernel32/apc.js';
@@ -747,6 +748,21 @@ export function createWin32Module(){
                 },
             });
 
+            // Every DllMain this layer or the loader calls goes through the
+            // loader's own frame, so an exception out of one ends it rather
+            // than reaching the program's handlers.
+            const callEntryPoint = createEntryPointCaller({
+                register: (name, fn)=>bridge.register(name, fn),
+                callGuest: call=>bridge.callGuest(call),
+                continueAt: (registers, options)=>bridge.continueAt(registers, options),
+                unwind: (frame, address, options)=>seh.unwind(frame, address, options),
+                readU32: address=>memory.readU32(address),
+                writeU32: (address, value)=>memory.writeU32(address, value),
+                stackPointer: ()=>cpuRegisters.read('esp') >>> 0,
+                teb: thread=>(thread?.tebAddress ?? kernel.currentThread()?.tebAddress ?? 0) >>> 0,
+                divergence: detail=>config?.divergence?.('DllMain', detail),
+            });
+
             /** Set once the process has begun to end, so that it ends only once. */
             let ending = false;
             /**
@@ -796,9 +812,11 @@ export function createWin32Module(){
                 let told = Promise.resolve(0);
                 for (const library of attached)
                 {
-                    told = told.then(()=>bridge.callGuest({
+                    told = told.then(()=>callEntryPoint({
                         entry: library.entryPoint,
-                        args: [library.base, DLL_PROCESS_DETACH, 1],
+                        base: library.base,
+                        reason: DLL_PROCESS_DETACH,
+                        reserved: 1,
                         thread: self,
                     }));
                 }
@@ -1762,6 +1780,17 @@ export function createWin32Module(){
                  * @returns {'cdecl' | 'stdcall'}
                  */
                 libraryConvention: library=>CDECL_LIBRARIES.test(library) ? 'cdecl' : 'stdcall',
+
+                /**
+                 * Calls a library's entry point as the loader does: inside a
+                 * frame of the loader's that takes whatever it raises, which
+                 * then ends the call with 0.
+                 *
+                 * @param {{ entry: number, base: number, reason: number,
+                 *     reserved: number, thread: any }} call
+                 * @returns {Promise<number>}
+                 */
+                callEntryPoint: call=>callEntryPoint(call),
 
                 /**
                  * Device contexts over pixels this layer did not allocate.
