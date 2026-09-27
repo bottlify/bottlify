@@ -32,6 +32,7 @@ import {
 } from './frame.js';
 import {
     DEVMODEA,
+    DEVMODEW,
     DISPLAY_DEVICEA,
     DISPLAY_DEVICEW,
     DISPLAY_DEVICE_CHARS,
@@ -609,9 +610,88 @@ export function createSystemFunctions({ host, live, windows, classes }){
      *
      * @param {number} hwnd @param {number} message @param {number} wParam
      * @param {number} lParam
+     * @param {boolean} [unicode]  Whether the text the message carries is wide.
      */
-    const sendMessage = (hwnd, message, wParam, lParam)=>
-        host.send(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0, host.callerThread?.());
+    const sendMessage = (hwnd, message, wParam, lParam, unicode = false)=>
+        host.send(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0, host.callerThread?.(),
+            unicode);
+
+    /**
+     * GetMonitorInfo, both spellings. cbSize is the caller saying which
+     * structure it allocated; a size that is neither of the two it may be is a
+     * caller bug, and answering FALSE is how it finds out rather than by
+     * having its stack written past.
+     *
+     * @param {number} monitor @param {number} info
+     */
+    const monitorInfo = (monitor, info)=>{
+        if ((monitor >>> 0) !== PRIMARY_MONITOR || (info >>> 0) === 0)
+        {
+            return 0;
+        }
+        const size = host.readMemory(info + MONITORINFO.cbSize, 4);
+        const declared = (size[0] | size[1] << 8 | size[2] << 16 | size[3] << 24) >>> 0;
+        if (declared < MONITORINFO.SIZE)
+        {
+            return 0;
+        }
+        const whole = { left: 0, top: 0, right: screen.width, bottom: screen.height };
+        writeRect(host, info + MONITORINFO.rcMonitor, whole);
+        writeRect(host, info + MONITORINFO.rcWork, whole);
+        writeU32s(host, info + MONITORINFO.dwFlags, [MONITORINFOF_PRIMARY]);
+        return 1;
+    };
+
+    /**
+     * CallWindowProc in either encoding.
+     *
+     * @param {number[]} args  lpPrevWndFunc, hWnd, Msg, wParam, lParam.
+     * @param {boolean} unicode
+     */
+    const callWindowProc = ([previous, hwnd, message, wParam, lParam], unicode)=>{
+        if ((previous >>> 0) === 0)
+        {
+            return 0;
+        }
+        // A system class's procedure lives on this side, and a program
+        // that subclassed one calls it through here with its address.
+        return host.callProcedure(previous >>> 0, {
+            hwnd: hwnd >>> 0,
+            message: message >>> 0,
+            wParam: wParam >>> 0,
+            lParam: lParam >>> 0,
+            ...unicode ? { unicode } : {},
+        }, host.callerThread?.());
+    };
+
+    /**
+     * SendMessageTimeout in either encoding. The timeout is for a window on
+     * another thread that does not answer. Every window here is on the
+     * caller's thread, where the send runs the procedure to completion, so the
+     * answer is always in time: the result goes out through the pointer and
+     * the call reports success.
+     *
+     * @param {number[]} args  hWnd, Msg, wParam, lParam, fuFlags, uTimeout, lpdwResult.
+     * @param {boolean} unicode
+     */
+    const sendMessageTimeout = ([hwnd, message, wParam, lParam, , , result], unicode)=>{
+        if (!live(hwnd))
+        {
+            return 0;
+        }
+        /** @param {number} answer */
+        const report = answer=>{
+            if ((result >>> 0) !== 0)
+            {
+                writeU32s(host, result >>> 0, [answer >>> 0]);
+            }
+            return 1;
+        };
+        const answer = sendMessage(hwnd, message, wParam, lParam, unicode);
+        return typeof (/** @type {any} */ (answer))?.then === 'function'
+            ? /** @type {any} */ (answer).then(report)
+            : report(answer);
+    };
 
     const screen = host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 };
 
@@ -1103,6 +1183,45 @@ export function createSystemFunctions({ host, live, windows, classes }){
     };
 
     /**
+     * EnumDisplaySettings in either spelling. A caller walks the indices until
+     * one answers FALSE, and builds its resolution menu from what it was given
+     * on the way; the two named indices answer the mode in effect. An
+     * enumeration that never ends is a hang, so the list is finite and the end
+     * is reported.
+     *
+     * The two named indices answer the same mode: the current settings are
+     * the one mode there is, and so are the registry's. A program asks for
+     * the current settings to learn the desktop's depth before it picks
+     * its own, and one refused that answer settles for the shallowest
+     * depth it knows -- sixteen bits, for every surface it makes after.
+     *
+     * @param {number} mode @param {number} devMode
+     * @param {typeof DEVMODEA | typeof DEVMODEW} layout
+     */
+    const enumDisplaySettings = (mode, devMode, layout)=>{
+        const index = mode | 0;
+        if ((devMode >>> 0) === 0)
+        {
+            return 0;
+        }
+        const current = index === ENUM_CURRENT_SETTINGS || index === ENUM_REGISTRY_SETTINGS;
+        const listed = current ? null : displayModes(screen)[index];
+        if (!current && (index < 0 || !listed))
+        {
+            return 0;
+        }
+        const answer = listed ?? { ...screen, refresh: REFRESH_HZ };
+        writeU16(host, devMode + layout.dmSize, layout.SIZE);
+        writeU16(host, devMode + layout.dmDriverExtra, 0);
+        writeU32s(host, devMode + layout.dmFields,
+            [DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY]);
+        writeU32s(host, devMode + layout.dmBitsPerPel,
+            [answer.bitsPerPixel, answer.width, answer.height]);
+        writeU32s(host, devMode + layout.dmDisplayFrequency, [answer.refresh]);
+        return 1;
+    };
+
+    /**
      * The one implementation both ChangeDisplaySettings entry points call.
      *
      * Every mode EnumDisplaySettings lists can be set, and setting one moves
@@ -1116,8 +1235,9 @@ export function createSystemFunctions({ host, live, windows, classes }){
      *
      * @param {number} devMode
      * @param {number} flags
+     * @param {typeof DEVMODEA | typeof DEVMODEW} [layout]  Which of the two the caller built.
      */
-    const changeDisplaySettings = (devMode, flags)=>{
+    const changeDisplaySettings = (devMode, flags, layout = DEVMODEA)=>{
         const display = /** @type {{ displayWidth?: number, displayHeight?: number }} */ (screen);
         if ((devMode >>> 0) === 0)
         {
@@ -1130,17 +1250,17 @@ export function createSystemFunctions({ host, live, windows, classes }){
             }
             return DISP_CHANGE_SUCCESSFUL;
         }
-        const named = readU32(devMode + DEVMODEA.dmFields);
+        const named = readU32(devMode + layout.dmFields);
         const width = (named & DM_PELSWIDTH) !== 0
-            ? readU32(devMode + DEVMODEA.dmPelsWidth) : screen.width;
+            ? readU32(devMode + layout.dmPelsWidth) : screen.width;
         const height = (named & DM_PELSHEIGHT) !== 0
-            ? readU32(devMode + DEVMODEA.dmPelsHeight) : screen.height;
+            ? readU32(devMode + layout.dmPelsHeight) : screen.height;
         // The depth as well, when the caller named one. A program that walks
         // its own list of modes takes the first this accepts as the depth of
         // the display, and accepting a sixteen-bit request for a thirty-two-bit
         // screen makes every surface it creates after sixteen bits deep.
         const bits = (named & DM_BITSPERPEL) !== 0
-            ? readU32(devMode + DEVMODEA.dmBitsPerPel) : screen.bitsPerPixel;
+            ? readU32(devMode + layout.dmBitsPerPel) : screen.bitsPerPixel;
         const offered = displayModes(screen).some(mode=>
             mode.width === width && mode.height === height && mode.bitsPerPixel === bits);
         if (!offered)
@@ -1496,75 +1616,59 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ()=>PRIMARY_MONITOR,
         },
 
-        /**
-         * BOOL GetMonitorInfoA(HMONITOR hMonitor, LPMONITORINFO lpmi)
-         *
-         * cbSize is the caller saying which structure it allocated; a size that
-         * is neither of the two it may be is a caller bug, and answering FALSE is
-         * how it finds out rather than by having its stack written past.
-         */
+        /** BOOL GetMonitorInfoA(HMONITOR hMonitor, LPMONITORINFO lpmi) */
         GetMonitorInfoA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([monitor, info])=>{
-                if ((monitor >>> 0) !== PRIMARY_MONITOR || (info >>> 0) === 0)
-                {
-                    return 0;
-                }
-                const size = host.readMemory(info + MONITORINFO.cbSize, 4);
-                const declared = (size[0] | size[1] << 8 | size[2] << 16 | size[3] << 24) >>> 0;
-                if (declared < MONITORINFO.SIZE)
-                {
-                    return 0;
-                }
-                const whole = { left: 0, top: 0, right: screen.width, bottom: screen.height };
-                writeRect(host, info + MONITORINFO.rcMonitor, whole);
-                writeRect(host, info + MONITORINFO.rcWork, whole);
-                writeU32s(host, info + MONITORINFO.dwFlags, [MONITORINFOF_PRIMARY]);
-                return 1;
-            },
+            handler: ([monitor, info])=>monitorInfo(monitor, info),
+        },
+
+        /**
+         * BOOL GetMonitorInfoW(HMONITOR hMonitor, LPMONITORINFO lpmi)
+         *
+         * MONITORINFO has no string in it, so the two spellings answer alike.
+         */
+        GetMonitorInfoW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([monitor, info])=>monitorInfo(monitor, info),
         },
 
         /**
          * BOOL EnumDisplaySettingsA(LPCSTR lpszDeviceName, DWORD iModeNum,
          *                          DEVMODEA *lpDevMode)
-         *
-         * A caller walks the indices until one answers FALSE, and builds its
-         * resolution menu from what it was given on the way; the two named
-         * indices answer the mode in effect. An enumeration that never ends
-         * is a hang, so the list is finite and the end is reported.
-         *
-         * The two named indices answer the same mode: the current settings are
-         * the one mode there is, and so are the registry's. A program asks for
-         * the current settings to learn the desktop's depth before it picks
-         * its own, and one refused that answer settles for the shallowest
-         * depth it knows -- sixteen bits, for every surface it makes after.
          */
         EnumDisplaySettingsA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, mode, devMode])=>{
-                const index = mode | 0;
-                if ((devMode >>> 0) === 0)
-                {
-                    return 0;
-                }
-                const current = index === ENUM_CURRENT_SETTINGS || index === ENUM_REGISTRY_SETTINGS;
-                const listed = current ? null : displayModes(screen)[index];
-                if (!current && (index < 0 || !listed))
-                {
-                    return 0;
-                }
-                const answer = listed ?? { ...screen, refresh: REFRESH_HZ };
-                writeU16(host, devMode + DEVMODEA.dmSize, DEVMODEA.SIZE);
-                writeU16(host, devMode + DEVMODEA.dmDriverExtra, 0);
-                writeU32s(host, devMode + DEVMODEA.dmFields,
-                    [DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY]);
-                writeU32s(host, devMode + DEVMODEA.dmBitsPerPel,
-                    [answer.bitsPerPixel, answer.width, answer.height]);
-                writeU32s(host, devMode + DEVMODEA.dmDisplayFrequency, [answer.refresh]);
-                return 1;
-            },
+            handler: ([, mode, devMode])=>enumDisplaySettings(mode, devMode, DEVMODEA),
+        },
+
+        /** BOOL EnumDisplaySettingsW(LPCWSTR, DWORD iModeNum, DEVMODEW *lpDevMode) */
+        EnumDisplaySettingsW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, mode, devMode])=>enumDisplaySettings(mode, devMode, DEVMODEW),
+        },
+
+        /**
+         * BOOL EnumDisplaySettingsExA(LPCSTR, DWORD iModeNum, DEVMODEA *lpDevMode,
+         *                            DWORD dwFlags)
+         *
+         * The flags ask for modes the monitor may not take and for the rotated
+         * ones; there is one list of modes, and it answers both.
+         */
+        EnumDisplaySettingsExA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, mode, devMode])=>enumDisplaySettings(mode, devMode, DEVMODEA),
+        },
+
+        /** BOOL EnumDisplaySettingsExW(LPCWSTR, DWORD, DEVMODEW *, DWORD dwFlags) */
+        EnumDisplaySettingsExW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, mode, devMode])=>enumDisplaySettings(mode, devMode, DEVMODEW),
         },
 
         /**
@@ -1629,6 +1733,25 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([devMode, flags])=>changeDisplaySettings(devMode >>> 0, flags >>> 0),
+        },
+
+        /** LONG ChangeDisplaySettingsW(DEVMODEW *lpDevMode, DWORD dwFlags) */
+        ChangeDisplaySettingsW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([devMode, flags])=>
+                changeDisplaySettings(devMode >>> 0, flags >>> 0, DEVMODEW),
+        },
+
+        /**
+         * LONG ChangeDisplaySettingsExW(LPCWSTR lpszDeviceName, DEVMODEW *lpDevMode,
+         *                              HWND hwnd, DWORD dwflags, LPVOID lParam)
+         */
+        ChangeDisplaySettingsExW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([, devMode, , flags])=>
+                changeDisplaySettings(devMode >>> 0, flags >>> 0, DEVMODEW),
         },
 
         /**
@@ -3157,6 +3280,19 @@ export function createSystemFunctions({ host, live, windows, classes }){
         },
 
         /**
+         * LRESULT SendMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
+         *
+         * The text a message carries is wide, and reaches an ANSI procedure
+         * converted (`unicode.js`).
+         */
+        SendMessageW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, message, wParam, lParam])=>
+                sendMessage(hwnd, message, wParam, lParam, true),
+        },
+
+        /**
          * LRESULT SendMessageTimeoutA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam,
          *   UINT fuFlags, UINT uTimeout, PDWORD_PTR lpdwResult)
          *
@@ -3168,24 +3304,14 @@ export function createSystemFunctions({ host, live, windows, classes }){
         SendMessageTimeoutA: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([hwnd, message, wParam, lParam, , , result])=>{
-                if (!live(hwnd))
-                {
-                    return 0;
-                }
-                /** @param {number} answer */
-                const report = answer=>{
-                    if ((result >>> 0) !== 0)
-                    {
-                        writeU32s(host, result >>> 0, [answer >>> 0]);
-                    }
-                    return 1;
-                };
-                const answer = sendMessage(hwnd, message, wParam, lParam);
-                return typeof (/** @type {any} */ (answer))?.then === 'function'
-                    ? /** @type {any} */ (answer).then(report)
-                    : report(answer);
-            },
+            handler: args=>sendMessageTimeout(args, false),
+        },
+
+        /** LRESULT SendMessageTimeoutW(...), with wide text in the message. */
+        SendMessageTimeoutW: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: args=>sendMessageTimeout(args, true),
         },
 
         /** BOOL IsWindowVisible(HWND hWnd) */
@@ -3257,6 +3383,47 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 const previous = readClassLong(cls, index);
                 writeClassLong(cls, index, value);
                 return previous;
+            },
+        },
+
+        /** DWORD GetClassLongW(HWND hWnd, int nIndex) */
+        GetClassLongW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, index])=>{
+                const cls = classOfWindow(hwnd);
+                return cls ? readClassLong(cls, index) : 0;
+            },
+        },
+
+        /** DWORD SetClassLongW(HWND hWnd, int nIndex, LONG dwNewLong) */
+        SetClassLongW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, index, value])=>{
+                const cls = classOfWindow(hwnd);
+                if (!cls)
+                {
+                    return 0;
+                }
+                const previous = readClassLong(cls, index);
+                writeClassLong(cls, index, value);
+                return previous;
+            },
+        },
+
+        /** int GetClassNameW(HWND hWnd, LPWSTR lpClassName, int nMaxCount) */
+        GetClassNameW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, out, maxCount])=>{
+                const record = live(hwnd);
+                const room = maxCount | 0;
+                if (!record || (out >>> 0) === 0 || room <= 0)
+                {
+                    return 0;
+                }
+                return writeWideString(out >>> 0, record.className, room);
             },
         },
 
@@ -3401,6 +3568,13 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * terminator would have it allocate one too many for ever.
          */
         GetWindowTextLengthA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>live(hwnd)?.title.length ?? 0,
+        },
+
+        /** int GetWindowTextLengthW(HWND hWnd), in UTF-16 units. */
+        GetWindowTextLengthW: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>live(hwnd)?.title.length ?? 0,
@@ -3681,20 +3855,20 @@ export function createSystemFunctions({ host, live, windows, classes }){
         CallWindowProcA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([previous, hwnd, message, wParam, lParam])=>{
-                if ((previous >>> 0) === 0)
-                {
-                    return 0;
-                }
-                // A system class's procedure lives on this side, and a program
-                // that subclassed one calls it through here with its address.
-                return host.callProcedure(previous >>> 0, {
-                    hwnd: hwnd >>> 0,
-                    message: message >>> 0,
-                    wParam: wParam >>> 0,
-                    lParam: lParam >>> 0,
-                }, host.callerThread?.());
-            },
+            handler: args=>callWindowProc(args, false),
+        },
+
+        /**
+         * LRESULT CallWindowProcW(WNDPROC lpPrevWndFunc, HWND hWnd, UINT Msg,
+         *                        WPARAM wParam, LPARAM lParam)
+         *
+         * The message is wide; a procedure on this side has it converted, and
+         * a program's own is handed it as it came.
+         */
+        CallWindowProcW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>callWindowProc(args, true),
         },
 
         /**

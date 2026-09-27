@@ -46,6 +46,7 @@ export const ANY_WINDOW = null;
  * @property {number} [time]      Tick count at the moment it was posted.
  * @property {number} [x]         Cursor position, for messages that carry one.
  * @property {number} [y]
+ * @property {boolean} [unicode]  Posted by a wide caller, so a character is a UTF-16 unit.
  */
 
 /**
@@ -626,6 +627,8 @@ export function createMessageQueue(options = {}){
             time: (message.time ?? 0) >>> 0,
             x: (message.x ?? 0) | 0,
             y: (message.y ?? 0) | 0,
+            // Posted by a wide caller: a character in it is a UTF-16 unit.
+            ...message.unicode ? { unicode: true } : {},
         };
         if (message.x !== undefined)
         {
