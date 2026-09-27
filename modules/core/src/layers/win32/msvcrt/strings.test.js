@@ -94,6 +94,16 @@ test('_strdup allocates, and answers null when it cannot', ()=>{
     assert.equal(starved._strdup.handler([memory.put('text')]), 0);
 });
 
+test('_strdup of no string is null, nothing read or allocated', ()=>{
+    const { memory } = build();
+    const table = createStringFunctions({
+        ...memory,
+        readCString: ()=>assert.fail('address zero read'),
+        allocate: ()=>assert.fail('allocated for nothing'),
+    });
+    assert.equal(table._strdup.handler([0]), 0);
+});
+
 test('memchr searches bytes rather than a string, terminators included', ()=>{
     const { memory, table } = build();
     const buffer = memory.allocate(8);
@@ -234,4 +244,55 @@ test('an upper-half string keeps its bytes through a copy, a scan and a search',
     assert.equal(table.strcspn.handler([string, place([0x99])]), 2);
     assert.equal(table.strspn.handler([string, place([0x61, 0x80, 0x99])]), 3);
     assert.equal(table.strrchr.handler([string, 0x80]), string + 4);
+});
+
+test('_swab swaps each pair, leaves an odd last byte where it was, and swaps in place', ()=>{
+    const { memory, table } = build();
+    const from = memory.put('BADCFE@#');
+    const to = memory.allocate(16);
+    memory.bytes.fill(0x24, to, to + 16);
+    table._swab.handler([from, to, 5]);
+    assert.equal(String.fromCharCode(...memory.bytes.subarray(to, to + 6)), 'ABCD$$');
+    table._swab.handler([from, from, 6]);
+    assert.equal(memory.text(from), 'ABCDEF@#');
+    table._swab.handler([from, to, 0]);
+    table._swab.handler([from, to, -2]);
+    assert.equal(memory.bytes[to + 4], 0x24, 'a count of none, or below, swaps nothing');
+});
+
+test('strxfrm under the C locale copies what the count holds and answers the length', ()=>{
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
+    const table = createStringFunctions({ ...memory, errno: code=>void errno.push(code) });
+    const source = memory.put('src');
+    const destination = memory.allocate(8);
+    memory.bytes.fill(0x61, destination, destination + 8);
+    assert.equal(table.strxfrm.handler([0, source, 0]), 3, 'no buffer asks the length');
+    assert.equal(table.strxfrm.handler([destination, source, 1]), 3);
+    assert.deepEqual([...memory.bytes.subarray(destination, destination + 2)], [0x73, 0x61],
+        'a count short of the string is not terminated');
+    assert.equal(table.strxfrm.handler([destination, source, 5]), 3);
+    assert.equal(memory.text(destination), 'src');
+    assert.deepEqual(errno, []);
+    assert.equal(table.strxfrm.handler([0, source, 1]), 0x7fffffff);
+    assert.equal(table.strxfrm.handler([destination, 0, 8]), 0x7fffffff);
+    assert.deepEqual(errno, [22, 22]);
+});
+
+test('_memicmp folds the ASCII letters and answers the difference of the bytes', ()=>{
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
+    const table = createStringFunctions({ ...memory, errno: code=>void errno.push(code) });
+    const left = memory.put('abc');
+    const right = memory.put('aBd');
+    assert.equal(table._memicmp.handler([0, 0, 0]), 0, 'nothing to compare, nothing read');
+    assert.equal(table._memicmp.handler([left, right, 2]), 0);
+    assert.equal(table._memicmp.handler([left, right, 3]), -1);
+    assert.equal(table._memicmp.handler([memory.put('\xe9'), memory.put('\xc9'), 1]), 0x20,
+        'no letter past ASCII is folded');
+    assert.deepEqual(errno, []);
+    assert.equal(table._memicmp.handler([left, 0, 1]), 0x7fffffff);
+    assert.deepEqual(errno, [22]);
 });

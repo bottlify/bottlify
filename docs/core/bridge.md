@@ -443,11 +443,15 @@ One table of stubs per method list, shared by every object exposing it (a table 
 exhausted the stub table after a thousand textures); the first argument of every call is the
 interface pointer, and an `owners` map takes it to the object. Per object and interface, a
 two-word block: the vtable pointer and a state word (`object.guestState?.()`) for methods that
-run as guest code. The same object and interface always answer the same pointer.
+run as guest code. The same object and interface always answer the same pointer. A record may name
+another interface as `sharedWith` -- its table holding that one's and more, as IDirectInput7A's
+holds IDirectInputA's -- and is then answered with that interface's pointer, its reference counted
+against it, so COM identity sees one pointer where Windows has one.
 
 `IUnknown` is the bridge's: `QueryInterface` reads the GUID (three little-endian integers then eight
 raw bytes), asks `interfaceFor`, publishes, `addRef`s the interface asked for, and answers `S_OK`,
-`E_NOINTERFACE` (with `*ppv` zeroed), `E_POINTER` or `E_OUTOFMEMORY`; `AddRef` and `Release` are
+`E_NOINTERFACE` (with `*ppv` zeroed), `E_POINTER`, `E_INVALIDARG` for no GUID at all (with `*ppv`
+zeroed, as DirectDraw refuses a null riid) or `E_OUTOFMEMORY`; `AddRef` and `Release` are
 passed to the object with the interface id (some object models count per interface generation), and
 a release to zero forgets the pointer and frees its block. When the object then reports `destroyed`
 as true -- the object itself is over, not only that interface -- every pointer it was published as

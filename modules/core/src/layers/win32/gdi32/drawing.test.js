@@ -431,6 +431,61 @@ test('a null clip region means the whole surface, not an empty one', ()=>{
     assert.equal(fns.SelectClipRgn.handler([hdc, empty]), NULLREGION);
 });
 
+test('GetClipRgn copies the clip the program selected, and answers 0 for none', ()=>{
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+    const region = fns.CreateRectRgn.handler([0, 0, 0, 0]);
+    const selected = fns.CreateRectRgn.handler([2, 3, 40, 50]);
+    assert.equal(fns.GetClipRgn.handler([hdc, region]), 0, 'nothing selected yet');
+    assert.equal(fns.SelectClipRgn.handler([hdc, selected]), SIMPLEREGION);
+    assert.equal(fns.GetClipRgn.handler([hdc, region]), 1);
+    assert.equal(fns.SelectClipRgn.handler([hdc, 0]), SIMPLEREGION);
+    assert.equal(fns.SelectClipRgn.handler([hdc, region]), SIMPLEREGION);
+    assert.deepEqual(graphics.calls.filter(call=>call[0] === 'setClipRect').at(-1)?.[2],
+        { left: 2, top: 3, right: 40, bottom: 50 }, 'the copy is the selection');
+    assert.equal(fns.SelectClipRgn.handler([hdc, 0]), SIMPLEREGION);
+    assert.equal(fns.GetClipRgn.handler([hdc, region]), 0, 'a null selection is none again');
+    assert.equal(fns.GetClipRgn.handler([hdc, hdc]) | 0, -1, 'not a region');
+    assert.equal(fns.GetClipRgn.handler([0x9999, region]) | 0, -1, 'not a context');
+});
+
+test('GetRgnBox answers a region\'s bounds, an empty one as zeros', ()=>{
+    const { fns, memory } = setup();
+    const BOX = 0x3000;
+    const box = ()=>[0, 4, 8, 12].map(at=>
+        new DataView(memory.bytes.buffer).getInt32(BOX + at, true));
+    assert.equal(fns.GetRgnBox.handler([fns.CreateRectRgn.handler([2, 3, 40, 50]), BOX]),
+        SIMPLEREGION);
+    assert.deepEqual(box(), [2, 3, 40, 50]);
+    assert.equal(fns.GetRgnBox.handler([fns.CreateRectRgn.handler([5, 5, 5, 9]), BOX]), NULLREGION);
+    assert.deepEqual(box(), [0, 0, 0, 0]);
+    assert.equal(fns.GetRgnBox.handler([0x9999, BOX]), 0, 'not a region');
+});
+
+test('IntersectClipRect narrows the clip, and the program has then selected one', ()=>{
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+    const region = fns.CreateRectRgn.handler([0, 0, 0, 0]);
+    const lastClip = ()=>graphics.calls.filter(call=>call[0] === 'setClipRect').at(-1)?.[2];
+    assert.equal(fns.IntersectClipRect.handler([hdc, 10, 20, 50, 60]), SIMPLEREGION);
+    assert.deepEqual(lastClip(), { left: 10, top: 20, right: 50, bottom: 60 });
+    assert.equal(fns.IntersectClipRect.handler([hdc, 40, 0, 100, 30]), SIMPLEREGION);
+    assert.deepEqual(lastClip(), { left: 40, top: 20, right: 50, bottom: 30 });
+    assert.equal(fns.GetClipRgn.handler([hdc, region]), 1);
+    assert.equal(fns.IntersectClipRect.handler([hdc, 0, 0, 5, 5]), NULLREGION, 'nothing left');
+    assert.equal(fns.IntersectClipRect.handler([0x9999, 0, 0, 5, 5]), 0, 'not a context');
+});
+
+test('SetPixelV is SetPixel answered as a BOOL', ()=>{
+    const bare = setup();
+    assert.equal(bare.fns.SetPixelV.handler([bare.hdc, 1, 1, 0xff]), 0, 'nothing to draw with');
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+    assert.equal(fns.SetPixelV.handler([hdc, 9, 10, 0x00abcdef]), 1);
+    assert.deepEqual(graphics.calls.filter(call=>call[0] === 'setPixel'),
+        [['setPixel', hdc, 9, 10, 0x00abcdef]]);
+});
+
 test('a band excluded from the clip is taken off; a cut that would leave an L is not', ()=>{
     const graphics = fakeDrawing();
     const { fns, memory, hdc } = setup(graphics.services);
@@ -1179,4 +1234,30 @@ test('the display\'s ramp is the graphics layer\'s: set there, read back from th
     applies = false;
     assert.equal(fns.GetDeviceCaps.handler([hdc, COLORMGMTCAPS]), 0,
         'claimed only where a ramp reaches the picture');
+});
+
+test('the pixel-format calls on a handle that is no DC say why with the last error', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const graphics = fakeDrawing();
+    const memory = fakeMemory();
+    const fns = /** @type {any} */ (createGdiFunctions({
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
+            memory.writeMemory(a, d),
+        readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
+        handles: fakeHandles(),
+        surfaces: fakeSurfaces(),
+        graphics: graphics.services,
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+    }).table);
+    const STALE = 0x9999;
+    assert.equal(fns.GetPixelFormat.handler([STALE]), 0);
+    assert.equal(fns.SetPixelFormat.handler([STALE, 1, 0]), 0);
+    assert.equal(fns.DescribePixelFormat.handler([STALE, 0, 0, 0]), 0);
+    assert.equal(fns.ChoosePixelFormat.handler([STALE, 0x100]), 0);
+    assert.equal(fns.SwapBuffers.handler([STALE]), 0);
+    // Wine's opengl32 test_setpixelformat: the format query alone says the
+    // format is bad; the rest say the handle is.
+    assert.deepEqual(errors, [2000, 6, 6, 6, 6]);
 });

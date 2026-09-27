@@ -469,7 +469,9 @@ refuse a palette or a colour key, and each holds the one below so the chain goes
 `GetAttachedSurface` answers the attached surface that has every capability asked for, in both words
 of a `DDSCAPS2`; `DeleteAttachedSurface(NULL)` detaches everything the caller attached; `GetCaps`
 names the surfaces `CreateSurface` builds in `ddsOldCaps` and, in a structure large enough,
-`ddsCaps`. A colour key is one colour, set at creation or after and reported by `GetSurfaceDesc`; a
+`ddsCaps`. `CreateSurface` refuses an out-pointer the program cannot write through with
+`E_INVALIDARG` before making anything, from the memory layer's regions. A colour key is one colour,
+set at creation or after and reported by `GetSurfaceDesc`; a
 range collapses to its low value, a colour-space key is `DDERR_NOCOLORKEYHW`, and a blit compares
 the colour bits alone, so an X8R8G8B8 pixel's unused byte does not defeat the key. `blit.js` reads
 the whole source rectangle before writing a destination pixel, so overlapping and stretched blits
@@ -516,7 +518,15 @@ handle, process vertices into the device's transformed-vertex array (the Direct3
 
 **Direct3D 8** (`src/layers/graphics/d3d8/`). `device.js` models what a program observes between
 draws and decides whether a call is legal; `render.js` is what happens underneath when there is a
-backend. A state block (`stateblock.js`) holds the half its type names -- the vertex half's render
+backend, and without one the device is still made and answers. A device holds a reference on the
+`IDirect3D8` that made it, let go with the device's last; the back buffers of an additional swap
+chain are the device's own resources as the implicit chain's are, their first reference one on the
+device; a render target, depth-stencil or image surface and a vertex or index buffer made on their
+own give their guest memory back when their last reference goes, and a device reset gives back the
+surfaces it replaces. `GetTexture`, `GetIndices` and `GetStreamSource` hand back the bound resource
+with a reference; one the program released to nothing while it stayed bound is answered as NULL and
+reported once as a divergence, where Windows keeps it until it is unbound. Direct3D 9's device keeps
+the same lifetimes. A state block (`stateblock.js`) holds the half its type names -- the vertex half's render
 states, lights, material and vertex shader, the pixel half's render states, texture-stage states and
 pixel shader, transforms, textures, streams and indices only in a block of everything -- and a state
 set while recording goes into the block, not the device. `ValidateDevice` answers for the texture

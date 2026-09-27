@@ -12,8 +12,14 @@ import { createResourceFunctions } from './resources.js';
 const RT_BITMAP = 2;
 const RT_STRING = 6;
 
-/** @param {{ reply?: (language: number) => number | Promise<number> }} [options] */
-function setup({ reply } = {}){
+/** Wide names at these addresses; any other address reads as OTHER. */
+const WIDE = new Map([[0x1a000, 'TestDll'], [0x1b000, 'TESTDLL'], [0x1c000, '#101']]);
+
+/**
+ * @param {{ reply?: (language: number) => number | Promise<number>, wide?: boolean }}
+ *     [options]
+ */
+function setup({ reply, wide = true } = {}){
     /** @type {any[]} */
     const asked = [];
     /** @type {number[]} */
@@ -21,22 +27,30 @@ function setup({ reply } = {}){
     /** @type {{ entry: number, args: number[], thread: unknown }[]} */
     const called = [];
     const fns = createResourceFunctions({
-        readCString: address=>address === 0x19000 ? 'MYNAME' : 'OTHER',
+        readCString: address=>address === 0x19000 ? 'MYNAME'
+            : address === 0x19100 ? '#101' : 'OTHER',
+        ...wide ? { readWideString: (/** @type {number} */ address)=>
+            WIDE.get(address) ?? 'OTHER' } : {},
         setLastError: code=>{
             errors.push(code);
         },
         findResource: (instance, type, name, language = null)=>{
             asked.push(language === null
                 ? { instance, type, name } : { instance, type, name, language });
-            return type === RT_BITMAP && name === 101
-                ? { rva: 0x2000, size: 1234 }
-                : null;
+            if (type === RT_BITMAP && name === 101 && (language === null || language === 1033))
+            {
+                return { rva: 0x2000, size: 1234 };
+            }
+            return typeof type === 'string' && type.toLowerCase() === 'testdll'
+                && name === 'OTHER' ? { rva: 0x3000, size: 16 } : null;
         },
         listResources: ()=>[
             { type: RT_STRING, name: 1, language: 1033 },
             { type: RT_STRING, name: 1, language: 1036 },
             { type: RT_STRING, name: 2, language: 1033 },
             { type: RT_BITMAP, name: 'myname', language: 1031 },
+            { type: RT_BITMAP, name: 101, language: 1033 },
+            { type: 'TESTDLL', name: 'OTHER', language: 1033 },
         ],
         moduleBase: ()=>0x00400000,
         call: (entry, args, thread)=>{
@@ -149,7 +163,7 @@ test('a named resource is enumerated whatever the case, and a missing one is an 
     assert.deepEqual(called[0].args, [0, RT_BITMAP, 0x19000, 1031, 0],
         'the pointer is passed through as the caller gave it');
     assert.equal(fns.EnumResourceLanguagesA.handler([0, RT_BITMAP, 999, 0x401000, 0]), 0);
-    assert.deepEqual(errors, [1813]);
+    assert.deepEqual(errors, [1814], 'the type is there and the name is not');
 });
 
 test('a callback that answers late carries the enumeration on a promise', async()=>{
@@ -158,4 +172,61 @@ test('a callback that answers late carries the enumeration on a promise', async(
     assert.equal(typeof (/** @type {Promise<number>} */ (result)).then, 'function');
     assert.equal(await result, 1);
     assert.equal(called.length, 2);
+});
+
+test('FindResourceW takes the name before the type and reads both as wide strings', ()=>{
+    // dinput's tests carry their drivers as FindResourceW(NULL, name, L"TESTDLL").
+    const { fns, asked } = setup();
+    const found = fns.FindResourceW.handler([0, 0x2a000, 0x1a000]);
+
+    assert.notEqual(found, 0);
+    assert.deepEqual(asked.at(-1), { instance: 0, type: 'TestDll', name: 'OTHER' });
+    assert.equal(fns.LoadResource.handler([0, found]), 0x00403000);
+    assert.equal(fns.SizeofResource.handler([0, found]), 16);
+    assert.equal(fns.FindResourceW.argBytes, 12);
+    assert.notEqual(fns.FindResourceW.handler([0, 101, RT_BITMAP]), 0, 'and integers as integers');
+});
+
+test('FindResourceExW takes the type first and the language after the name', ()=>{
+    const { fns, asked } = setup();
+    assert.notEqual(fns.FindResourceExW.handler([0, RT_BITMAP, 101, 1033]), 0);
+    assert.deepEqual(asked.at(-1), { instance: 0, type: RT_BITMAP, name: 101, language: 1033 });
+    assert.notEqual(fns.FindResourceExW.handler([0, RT_BITMAP, 101, 0]), 0,
+        'LANG_NEUTRAL is whatever is there');
+    assert.equal(fns.FindResourceExW.argBytes, 16);
+});
+
+test('a name that is # and digits is the integer it spells, in either width', ()=>{
+    const { fns, asked } = setup();
+    assert.notEqual(fns.FindResourceA.handler([0, 0x19100, RT_BITMAP]), 0);
+    assert.deepEqual(asked.at(-1), { instance: 0, type: RT_BITMAP, name: 101 });
+    assert.notEqual(fns.FindResourceW.handler([0, 0x1c000, RT_BITMAP]), 0);
+    assert.deepEqual(asked.at(-1), { instance: 0, type: RT_BITMAP, name: 101 });
+});
+
+test('a failed lookup says whether the type, the name or the language was missing', ()=>{
+    // Wine's kernel32 resource test, test_find_resource: RT_DIALOG where the
+    // image has none is the type, a second menu the name, a language the menu
+    // is not in the language.
+    const { fns, errors } = setup();
+    assert.equal(fns.FindResourceW.handler([0, 101, 5]), 0);
+    assert.equal(fns.FindResourceW.handler([0, 102, RT_BITMAP]), 0);
+    assert.equal(fns.FindResourceExW.handler([0, RT_BITMAP, 101, 0x407]), 0);
+    assert.deepEqual(errors, [1813, 1814, 1815]);
+});
+
+test('without a wide reader a W call still finds by integer, and a named one is not found', ()=>{
+    const { fns, errors } = setup({ wide: false });
+    assert.notEqual(fns.FindResourceW.handler([0, 101, RT_BITMAP]), 0);
+    assert.equal(fns.FindResourceW.handler([0, 0x2a000, 0x1a000]), 0);
+    assert.deepEqual(errors, [1813]);
+});
+
+test('EnumResourceLanguagesW reads the names wide and passes them on as given', ()=>{
+    const { fns, called } = setup();
+    assert.equal(fns.EnumResourceLanguagesW.handler([0, 0x1b000, 0x2a000, 0x401000, 5]), 1);
+    assert.deepEqual(called, [
+        { entry: 0x401000, args: [0, 0x1b000, 0x2a000, 1033, 5], thread: 'main' },
+    ]);
+    assert.equal(fns.EnumResourceLanguagesW.argBytes, 20);
 });

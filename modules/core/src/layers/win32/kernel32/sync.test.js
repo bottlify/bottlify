@@ -292,6 +292,13 @@ test('a critical section is initialised in the guest structure, not beside it', 
     assert.equal(host.readI32(section + CS_LOCK_COUNT), CS_UNLOCKED);
     assert.equal(host.readI32(section + CS_RECURSION_COUNT), 0);
     assert.equal(host.readI32(section + CS_OWNING_THREAD), 0);
+    // Windows 8 and later keep no debug record and say so with -1, which
+    // DeleteCriticalSection clears (Wine's kernel32 sync test_crit_section).
+    assert.equal(host.readI32(section), -1);
+    fns.DeleteCriticalSection.handler([section]);
+    assert.equal(host.readI32(section), 0);
+    fns.InitializeCriticalSectionAndSpinCount.handler([section, 4000]);
+    assert.equal(host.readI32(section), -1);
 });
 
 test('entering, leaving and trying a section are guest code, placed once', ()=>{
@@ -785,4 +792,47 @@ test('an event of the set the child signalled before it exited is the answer, ta
     event.signalled = true;
     assert.equal(waiter.settle(), 1, 'the event the child set came before its exit');
     assert.equal(event.signalled, false, 'and the wait took it, as an auto-reset event is taken');
+});
+
+test('a set with a pseudo-handle or a stale handle fails with ERROR_INVALID_HANDLE', ()=>{
+    // Unlike WaitForSingleObject, no pseudo-handle is accepted in a set, the
+    // running process and thread included, wherever in the set it stands.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.register(0x10, 'event', host.kernel.createEvent({ signalled: true, manualReset: true }));
+    const view = new DataView(host.bytes.buffer);
+    for (const bad of [0xffffffff, 0xfffffffe, 0xfffffffd, 0xfffffffc, 0xdeadbee0])
+    {
+        view.setUint32(0x400, 0x10, true);
+        view.setUint32(0x404, bad, true);
+        host.errors.length = 0;
+        assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 0, 0]), WAIT_FAILED);
+        assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 1, 0]), WAIT_FAILED);
+        assert.deepEqual(host.errors, [6, 6]);
+    }
+});
+
+test('a set reads its handles without their two tag bits, and a standard stream is ready', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.register(0x10, 'event', host.kernel.createEvent({ signalled: false }));
+    host.register(0x14, 'event', host.kernel.createEvent({ signalled: true, manualReset: true }));
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(0x400, 0x13, true);
+    view.setUint32(0x404, 0x15, true);
+    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 0, 0]), WAIT_OBJECT_0 + 1);
+
+    for (const stream of [0xfffffff6, 0xfffffff5, 0xfffffff4, 1, 2, 3])
+    {
+        view.setUint32(0x400, stream, true);
+        assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 0]), WAIT_OBJECT_0);
+    }
+});
+
+test('a count of nothing or of too much is ERROR_INVALID_PARAMETER', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    fns.WaitForMultipleObjects.handler([0, 0x400, 0, INFINITE]);
+    fns.WaitForMultipleObjects.handler([65, 0x400, 0, INFINITE]);
+    assert.deepEqual(host.errors, [87, 87]);
 });

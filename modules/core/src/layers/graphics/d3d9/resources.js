@@ -109,6 +109,35 @@ export function createReferenceCount(options = {}){
 }
 
 /**
+ * A container's count as its levels share it, with what the container gives
+ * back when the count is over. A level holds a reference on its container, so
+ * the last one can go through a level -- a program releases the texture and
+ * then the surface it asked for -- and the storage has to go whichever it is.
+ *
+ * @param {ReturnType<typeof createReferenceCount>} count
+ * @param {() => void} retire
+ */
+function sharedCount(count, retire){
+    return {
+        get value(){
+            return count.value;
+        },
+        get destroyed(){
+            return count.destroyed;
+        },
+        addRef: ()=>count.addRef(),
+        release(){
+            const left = count.release();
+            if (count.destroyed)
+            {
+                retire();
+            }
+            return left;
+        },
+    };
+}
+
+/**
  * A resource's priority, which a managed resource alone keeps: it is a hint
  * to the manager that evicts, and nothing else is ever evicted, so every
  * other pool reads back zero whatever it was told (Wine's d3d8 and d3d9
@@ -743,6 +772,13 @@ export function createTexture(options){
     const faces = cube ? 6 : 1;
     /** @type {Map<string, Surface>} */
     const surfaces = new Map();
+    const count = sharedCount(options.count, ()=>{
+        for (const surface of surfaces.values())
+        {
+            options.free?.(surface.base);
+        }
+        surfaces.clear();
+    });
     /** @type {SurfaceFamily} */
     const family = { locks: 0, dc: null };
 
@@ -798,7 +834,7 @@ export function createTexture(options){
             pool: options.pool,
             usage: options.usage,
             base: options.allocate(surfaceBytes(options.format, width, height)),
-            count: options.count,
+            count,
             // Only a surface reached through a 2D texture forgives an unlock it
             // does not owe; a cube face does not, and that difference is
             // measured rather than reasoned about.
@@ -890,7 +926,8 @@ export function createTexture(options){
         addRef: ()=>options.count.addRef(),
 
         /**
-         * Gives the storage back when the last reference goes.
+         * Gives the storage back when the last reference goes, here or
+         * through a level (`sharedCount`).
          *
          * A texture's pixels come out of the one arena everything the guest is
          * handed comes out of, and a program sizes its own asset cache from
@@ -899,18 +936,7 @@ export function createTexture(options){
          * is running out of memory, and a program told that evicts what it has
          * and loads it again, for ever.
          */
-        release(){
-            const left = options.count.release();
-            if (options.count.destroyed)
-            {
-                for (const surface of surfaces.values())
-                {
-                    options.free?.(surface.base);
-                }
-                surfaces.clear();
-            }
-            return left;
-        },
+        release: ()=>count.release(),
 
         /**
          * @param {number} level
@@ -1183,6 +1209,13 @@ export function createVolume(options){
 export function createVolumeTexture(options){
     /** @type {Map<number, ReturnType<typeof createVolume>>} */
     const volumes = new Map();
+    const count = sharedCount(options.count, ()=>{
+        for (const volume of volumes.values())
+        {
+            options.free?.(volume.base);
+        }
+        volumes.clear();
+    });
     /** @returns {LockBox} the whole top level */
     const whole = ()=>({
         left: 0, top: 0, front: 0,
@@ -1230,7 +1263,7 @@ export function createVolumeTexture(options){
             pool: options.pool,
             usage: options.usage,
             base: options.allocate(surfacePitch(options.format, width) * height * depth),
-            count: options.count,
+            count,
             // A level's box is a box of the top level scaled up.
             dirtied: box=>addDirty(box
                 ? {
@@ -1311,19 +1344,8 @@ export function createVolumeTexture(options){
         },
         addRef: ()=>options.count.addRef(),
 
-        /** Gives the levels' storage back when the last reference goes. */
-        release(){
-            const left = options.count.release();
-            if (options.count.destroyed)
-            {
-                for (const volume of volumes.values())
-                {
-                    options.free?.(volume.base);
-                }
-                volumes.clear();
-            }
-            return left;
-        },
+        /** Gives the levels' storage back when the last reference goes, here or through one. */
+        release: ()=>count.release(),
 
         /**
          * @param {number} level

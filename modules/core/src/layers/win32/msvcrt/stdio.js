@@ -4,8 +4,8 @@
  * See LICENSE for details
  */
 
-import { formatToString } from './format.js';
-import { VARIADIC_SLOTS } from './scan.js';
+import { formatToString, guestAccess } from './format.js';
+import { createScanStore, runScan, VARIADIC_SLOTS } from './scan.js';
 import { EBADF, EILSEQ, EINVAL } from './globals.js';
 import { createDescriptors, LF, settle } from './io.js';
 import {
@@ -417,6 +417,63 @@ export function createStdioFunctions(host){
     };
 
     /**
+     * fscanf's body: the stream read a line at a time until the scan has what
+     * it needs -- it stopped short of the end of what was read, or the file
+     * ended -- the stores made from the scan of all of it, and what the scan
+     * did not consume given back, as ungetc gives bytes back, for the next
+     * read. A scan that needed more is run again over more, and only the last
+     * run's stores are made.
+     *
+     * @param {Stream} stream @param {string} format @param {number[]} pointers
+     * @returns {number | Promise<number>}
+     */
+    const scanStream = (stream, format, pointers)=>{
+        const store = createScanStore(host);
+        let text = '';
+        let ended = false;
+        /** @returns {number | Promise<number>} */
+        const attempt = ()=>{
+            for (;;)
+            {
+                /** @type {(() => void)[]} */
+                const stores = [];
+                const deferred = {
+                    /** @param {[number, bigint, number]} args */
+                    integer: (...args)=>void stores.push(()=>store.integer(...args)),
+                    /** @param {[number, number, number]} args */
+                    real: (...args)=>void stores.push(()=>store.real(...args)),
+                    /** @param {[number, string, boolean, boolean]} args */
+                    text: (...args)=>void stores.push(()=>store.text(...args)),
+                };
+                const progress = { consumed: 0, starved: false };
+                let taken = 0;
+                const assigned = runScan(text, format, ()=>pointers[taken++] ?? 0, deferred,
+                    { progress });
+                if (!progress.starved || ended)
+                {
+                    stores.forEach(apply=>apply());
+                    stream.pushback.push(...[...encodeAnsi(text.slice(progress.consumed))]
+                        .reverse());
+                    return assigned;
+                }
+                const more = take(stream, 4096, true);
+                if (typeof (/** @type {any} */ (more)).then === 'function')
+                {
+                    return /** @type {Promise<Uint8Array>} */ (more).then(bytes=>{
+                        ended = bytes.length === 0;
+                        text += decodeAnsi(bytes);
+                        return attempt();
+                    });
+                }
+                const bytes = /** @type {Uint8Array} */ (more);
+                ended = bytes.length === 0;
+                text += decodeAnsi(bytes);
+            }
+        };
+        return attempt();
+    };
+
+    /**
      * Writes the caller's bytes and answers with how many were stored; a
      * short write is an error the stream keeps.
      *
@@ -487,7 +544,8 @@ export function createStdioFunctions(host){
             return EOF;
         }
         const text = formatToString(readString(format), values, readString,
-            { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi });
+            { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi,
+                ...guestAccess(host.readMemory, host.writeMemory) });
         return emit(stream, encodeAnsi(text)) === text.length ? text.length : EOF;
     };
 
@@ -602,7 +660,8 @@ export function createStdioFunctions(host){
             return -1;
         }
         const text = formatToString(readWide(format), values, readString,
-            { readWideString: readWide, wide: true });
+            { readWideString: readWide, wide: true,
+                ...guestAccess(host.readMemory, host.writeMemory) });
         return putUnits(stream, unitsOfText(text)) < 0 ? -1 : text.length;
     };
 
@@ -1256,6 +1315,23 @@ export function createStdioFunctions(host){
          * The count of characters formatted; a negative one on a stream not
          * open for writing, or when not all of them were stored.
          */
+        /**
+         * int fscanf(FILE *stream, const char *format, ...)
+         *
+         * scanf over what the stream reads, consuming no more of it than the
+         * scan did.
+         */
+        fscanf: cdecl(8 + VARIADIC_SLOTS * 4, args=>{
+            const stream = argument(args[0]);
+            if (!stream || (args[1] >>> 0) === 0)
+            {
+                fail(EINVAL);
+                return EOF;
+            }
+            return narrowRefused(stream) ? EOF
+                : scanStream(stream, readString(args[1]), args.slice(2));
+        }),
+
         fprintf: cdecl(8 + VARIADIC_SLOTS * 4, args=>{
             const stream = argument(args[0]);
             return stream ? printTo(stream, args[1], args.slice(2)) : EOF;

@@ -336,6 +336,9 @@ const LIST_TYPES = new Map([
  *           run without a device measures everything but the rasteriser.
  */
 
+/** A context handle that names none. */
+const ERROR_INVALID_HANDLE = 6;
+
 /**
  * @param {OpenglServices} services
  */
@@ -1194,7 +1197,9 @@ export function createOpengl(services){
 
         wglDeleteContext: ([handle])=>{
             const context = contexts.get(handle >>> 0);
-            if (!context || !wgl.wglDeleteContext(context))
+            // A handle already deleted, or never made, is WGL's to refuse, so
+            // the program reads ERROR_INVALID_HANDLE rather than nothing.
+            if (!wgl.wglDeleteContext(context ?? null))
             {
                 return 0;
             }
@@ -1210,6 +1215,7 @@ export function createOpengl(services){
             const context = (handle >>> 0) === 0 ? null : contexts.get(handle >>> 0);
             if ((handle >>> 0) !== 0 && !context)
             {
+                services.setLastError?.(ERROR_INVALID_HANDLE);
                 return 0;
             }
             return wgl.wglMakeCurrent(hdc >>> 0, context ?? null) ? 1 : 0;
@@ -1342,7 +1348,10 @@ export function createOpengl(services){
 
         // --- the error flag and the strings ---
 
-        glGetError: ()=>current()?.glGetError() ?? GL.NO_ERROR,
+        // With no context current there is nothing to have no error: Windows
+        // answers GL_INVALID_OPERATION (Wine's opengl32 test, before its first
+        // context).
+        glGetError: ()=>current()?.glGetError() ?? GL.INVALID_OPERATION,
 
         glGetString: ([name])=>guestString(current()?.glGetString(name >>> 0)),
 

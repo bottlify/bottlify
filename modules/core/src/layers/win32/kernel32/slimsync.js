@@ -300,6 +300,9 @@ export function createSlimSync(host, enterCritical){
         const state = locks.get(address);
         if (!state)
         {
+            // A lock no acquire here ever took -- a word the program set --
+            // is released to free, as the word's own arithmetic would leave it.
+            host.writeMemory(address, new Uint8Array(4));
             return;
         }
         if (exclusive)

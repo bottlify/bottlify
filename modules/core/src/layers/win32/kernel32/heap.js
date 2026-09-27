@@ -88,6 +88,9 @@ const ERROR_INVALID_ADDRESS = 487;
 const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 
+/** The pseudo-handle for the running process, the one process the Ex forms reach. */
+const CURRENT_PROCESS = 0xffffffff;
+
 /** HEAP_SUMMARY: its own size, then what is allocated, committed, reserved and may be. */
 const HEAP_SUMMARY_SIZE = 20;
 
@@ -1763,10 +1766,14 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                if (oldProtect !== 0)
+                // The old protection is not optional: Windows writes it before
+                // it changes anything, and faults on nowhere to write it.
+                if (oldProtect === 0)
                 {
-                    writeDword(oldProtect >>> 0, PAGE_EXECUTE_READWRITE);
+                    host.setLastError(ERROR_NOACCESS);
+                    return 0;
                 }
+                writeDword(oldProtect >>> 0, PAGE_EXECUTE_READWRITE);
                 return 1;
             },
         },
@@ -1959,10 +1966,44 @@ export function createHeapFunctions(host){
         },
     };
 
+    /**
+     * A virtual-memory call's Ex form: the plain one, on the running process.
+     * A child's address space does not exist until it runs, so there is no
+     * other process for these to reach.
+     *
+     * @param {'VirtualAlloc' | 'VirtualFree' | 'VirtualProtect' | 'VirtualQuery'} name
+     * @param {number} argBytes
+     */
+    const inProcess = (name, argBytes)=>({
+        argBytes,
+        /** @param {number[]} args */
+        handler: ([process, ...rest])=>{
+            if ((process >>> 0) !== CURRENT_PROCESS)
+            {
+                if ((process >>> 0) !== 0)
+                {
+                    host.divergence?.(`${name}Ex`, `process 0x${(process >>> 0).toString(16)}`
+                        + ' is not the running one, and no other is reachable');
+                }
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            return table[name].handler(rest);
+        },
+    });
+
     // The rest of the local family is the global one under another name: the
     // same heap, the same handles, the same flag values.
     return {
         ...table,
+        /** LPVOID VirtualAllocEx(HANDLE, LPVOID, SIZE_T, DWORD, DWORD) */
+        VirtualAllocEx: inProcess('VirtualAlloc', 20),
+        /** BOOL VirtualFreeEx(HANDLE, LPVOID, SIZE_T, DWORD) */
+        VirtualFreeEx: inProcess('VirtualFree', 16),
+        /** BOOL VirtualProtectEx(HANDLE, LPVOID, SIZE_T, DWORD, PDWORD) */
+        VirtualProtectEx: inProcess('VirtualProtect', 20),
+        /** SIZE_T VirtualQueryEx(HANDLE, LPCVOID, PMEMORY_BASIC_INFORMATION, SIZE_T) */
+        VirtualQueryEx: inProcess('VirtualQuery', 16),
         LocalReAlloc: table.GlobalReAlloc,
         LocalLock: table.GlobalLock,
         LocalUnlock: table.GlobalUnlock,

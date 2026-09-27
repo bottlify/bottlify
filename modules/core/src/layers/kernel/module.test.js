@@ -524,3 +524,17 @@ test('the cpu layer is given the guest\'s clock, for the time-stamp counter', as
     assert.equal(kernel.clock.virtualTime(), 250);
     await kernelModule.dispose();
 });
+
+test('a thread ended while it waits leaves the queue, and a live waiter gets the signal', async()=>{
+    const { kernel } = await makeKernel();
+    const dying = kernel.createThread({ entry: 0x00402000, name: 'dying' });
+    const living = kernel.createThread({ entry: 0x00402000, name: 'living' });
+    const event = kernel.createEvent({});
+
+    assert.equal(kernel.wait(event, dying), null);
+    assert.equal(kernel.wait(event, living), null);
+    kernel.exitThread(dying, 0);
+    assert.deepEqual(event.waiters, [living], 'the ended thread is no longer queued');
+    kernel.setEvent(event);
+    assert.equal(living.state, 'ready', 'an auto-reset signal reaches the live one');
+});

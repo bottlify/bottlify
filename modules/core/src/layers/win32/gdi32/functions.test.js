@@ -337,14 +337,33 @@ test('CreateDCA opens the display and nothing else, and DeleteDC closes it', ()=
     assert.equal(fns.CreateDCA.argBytes, 16);
 });
 
-test('CreateCompatibleDC starts with the one-pixel bitmap it is documented to have', ()=>{
+test('CreateDCW opens the display from a wide name', ()=>{
+    const { fns, memory } = setup();
+    const wide = (/** @type {string} */ text)=>memory.writeMemory(FACE_NAME,
+        new Uint8Array(new Uint16Array([...text].map(c=>c.charCodeAt(0)).concat([0])).buffer));
+    wide('display');
+    const display = fns.CreateDCW.handler([FACE_NAME, 0, 0, 0]);
+    assert.equal(fns.GetDeviceCaps.handler([display, BITSPIXEL]), 32);
+    assert.equal(fns.DeleteDC.handler([display]), 1);
+    wide('WINSPOOL');
+    assert.equal(fns.CreateDCW.handler([FACE_NAME, 0, 0, 0]), 0);
+    assert.equal(fns.CreateDCW.handler([0, 0, 0, 0]), 0);
+});
+
+test('CreateCompatibleDC starts with the one-pixel bitmap, and answers for the display', ()=>{
     const { fns, hdc } = withDC();
     const memoryDC = fns.CreateCompatibleDC.handler([hdc]);
 
     const bitmap = fns.GetCurrentObject.handler([memoryDC, OBJ_BITMAP]);
     assert.ok(bitmap > 0, 'a memory DC is one monochrome pixel until something is selected');
-    assert.equal(fns.GetDeviceCaps.handler([memoryDC, BITSPIXEL]), 1,
-        'and its depth is that bitmap\'s, not the screen\'s');
+    // Its capabilities are the display's it is compatible with, whatever is
+    // selected: Wine's dc.c compares one over a 1-bit bitmap with the screen.
+    assert.equal(fns.GetDeviceCaps.handler([memoryDC, BITSPIXEL]),
+        fns.GetDeviceCaps.handler([hdc, BITSPIXEL]));
+    fns.SelectObject.handler([memoryDC, fns.CreateBitmap.handler([10, 10, 1, 1, 0])]);
+    assert.equal(fns.GetDeviceCaps.handler([memoryDC, BITSPIXEL]), 32);
+    assert.equal(fns.GetDeviceCaps.handler([memoryDC, HORZRES]),
+        fns.GetDeviceCaps.handler([hdc, HORZRES]));
 });
 
 test('deleting a DC lets go of what it had selected', ()=>{
@@ -2088,4 +2107,146 @@ test('the text character extra is kept on the context and answered back', ()=>{
     assert.equal(fns.SetTextCharacterExtra.handler([hdc, -2 >>> 0]) | 0, 3);
     assert.equal(fns.GetTextCharacterExtra.handler([hdc]) | 0, -2);
     assert.equal(fns.GetTextCharacterExtra.handler([0x9999]), 0x80000000, 'not a context');
+});
+
+test('the miter limit is 10 until set, refuses one below 1, and is saved with the context', ()=>{
+    const { memory, fns, hdc } = withDC();
+    const view = new DataView(memory.bytes.buffer);
+    const LIMIT = 0x2000;
+    /** @param {number} value */
+    const bits = value=>{
+        const scratch = new DataView(new ArrayBuffer(4));
+        scratch.setFloat32(0, value, true);
+        return scratch.getUint32(0, true);
+    };
+    const limit = ()=>view.getFloat32(LIMIT, true);
+    view.setFloat32(LIMIT, 123, true);
+    assert.equal(fns.GetMiterLimit.handler([hdc, LIMIT]), 1);
+    assert.equal(limit(), 10);
+    view.setFloat32(LIMIT, 456, true);
+    assert.equal(fns.SetMiterLimit.handler([hdc, bits(0.9), LIMIT]), 0, 'below one');
+    assert.equal(limit(), 456, 'and the old one not written');
+    assert.equal(fns.SetMiterLimit.handler([hdc, bits(1), LIMIT]), 1);
+    assert.equal(limit(), 10, 'the old one answered');
+    assert.equal(fns.SetMiterLimit.handler([hdc, bits(3.4), 0]), 1,
+        'with nowhere to put the old one');
+    assert.equal(fns.GetMiterLimit.handler([hdc, LIMIT]), 1);
+    assert.equal(limit(), Math.fround(3.4));
+
+    fns.SetTextCharacterExtra.handler([hdc, 5]);
+    fns.SetTextAlign.handler([hdc, 6]);
+    assert.equal(fns.SaveDC.handler([hdc]), 1);
+    fns.SetMiterLimit.handler([hdc, bits(7), 0]);
+    fns.SetTextCharacterExtra.handler([hdc, 9]);
+    fns.SetTextAlign.handler([hdc, 0]);
+    assert.equal(fns.RestoreDC.handler([hdc, -1 >>> 0]), 1);
+    fns.GetMiterLimit.handler([hdc, LIMIT]);
+    assert.equal(limit(), Math.fround(3.4), 'RestoreDC brings the miter limit back');
+    assert.equal(fns.GetTextCharacterExtra.handler([hdc]), 5, 'and the character extra');
+    assert.equal(fns.GetTextAlign.handler([hdc]), 6, 'and the text alignment');
+    assert.equal(fns.GetMiterLimit.handler([0x9999, LIMIT]), 0, 'not a context');
+});
+
+test('GetTextFace names the face asked for, or the one its family stands in with', ()=>{
+    const { memory, fns, hdc } = withDC();
+    const NAME = 0x2000;
+    /** @param {Parameters<typeof putLogFont>[1]} options */
+    const select = options=>{
+        putLogFont(memory, options);
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+    };
+    const faceA = ()=>{
+        const length = fns.GetTextFaceA.handler([hdc, 32, NAME]);
+        return decodeAnsi(memory.bytes.subarray(NAME, NAME + length));
+    };
+    assert.equal(faceA(), 'System', 'the context starts with the stock system font');
+    select({ faceName: 'tahoma' });
+    assert.equal(faceA(), 'Tahoma');
+    select({ faceName: 'MS Shell Dlg' });
+    assert.equal(faceA(), 'MS Shell Dlg', 'a substitute answers under its own name');
+    select({ faceName: 'Nonexistent font', pitchAndFamily: 0x20 });
+    assert.equal(faceA(), 'Arial');
+    select({ faceName: 'Nonexistent font', pitchAndFamily: 0x10 });
+    assert.equal(faceA(), 'Times New Roman');
+    select({ faceName: '', pitchAndFamily: 0x01 });
+    assert.equal(faceA(), 'Courier New');
+    fns.SelectObject.handler([hdc, fns.GetStockObject.handler([17])]);
+    assert.equal(faceA(), 'MS Shell Dlg', 'DEFAULT_GUI_FONT');
+});
+
+test('GetTextFace cuts the name to the count, and a null buffer asks for the size', ()=>{
+    const { memory, fns, hdc } = withDC();
+    const NAME = 0x2000;
+    putLogFont(memory, { faceName: 'Tahoma' });
+    fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+
+    memory.bytes[NAME] = 0x78;
+    assert.equal(fns.GetTextFaceA.handler([hdc, 0, NAME]), 0);
+    assert.equal(memory.bytes[NAME], 0x78, 'a count of zero writes nothing');
+    assert.equal(fns.GetTextFaceA.handler([hdc, 1, NAME]), 0);
+    assert.equal(memory.bytes[NAME], 0);
+    assert.equal(fns.GetTextFaceA.handler([hdc, 2, NAME]), 1);
+    assert.deepEqual([...memory.bytes.subarray(NAME, NAME + 2)], [0x54, 0]);
+    assert.equal(fns.GetTextFaceA.handler([hdc, 32, NAME]), 6, 'ANSI: the terminator not counted');
+    assert.equal(fns.GetTextFaceA.handler([hdc, 0, 0]), 7,
+        'no buffer: the size, terminator included');
+
+    const units = (/** @type {number} */ count)=>
+        [...new Uint16Array(memory.bytes.slice(NAME, NAME + count * 2).buffer)];
+    memory.bytes[NAME] = 0x78;
+    assert.equal(fns.GetTextFaceW.handler([hdc, 0, NAME]), 0);
+    assert.equal(memory.bytes[NAME], 0x78);
+    assert.equal(fns.GetTextFaceW.handler([hdc, 1, NAME]), 1, 'wide: the terminator counted');
+    assert.deepEqual(units(1), [0]);
+    assert.equal(fns.GetTextFaceW.handler([hdc, 2, NAME]), 2);
+    assert.deepEqual(units(2), [0x54, 0]);
+    assert.equal(fns.GetTextFaceW.handler([hdc, 32, NAME]), 7);
+    assert.equal(String.fromCharCode(...units(6)), 'Tahoma');
+    assert.equal(fns.GetTextFaceW.handler([hdc, 0, 0]), 7);
+    assert.equal(fns.GetTextFaceA.handler([0x9999, 32, NAME]), 0, 'not a context');
+});
+
+test('GetObjectType names each kind of GDI object, a context by whether it is in memory', ()=>{
+    const { fns, hdc } = withDC();
+    const memory = fns.CreateCompatibleDC.handler([hdc]);
+    assert.equal(fns.GetObjectType.handler([hdc]), 3, 'OBJ_DC');
+    assert.equal(fns.GetObjectType.handler([memory]), 10, 'OBJ_MEMDC');
+    assert.equal(fns.GetObjectType.handler([fns.GetStockObject.handler([7])]), 1, 'OBJ_PEN');
+    assert.equal(fns.GetObjectType.handler([fns.GetStockObject.handler([0])]), 2, 'OBJ_BRUSH');
+    assert.equal(fns.GetObjectType.handler([fns.GetStockObject.handler([15])]), 5, 'OBJ_PAL');
+    assert.equal(fns.GetObjectType.handler([fns.GetStockObject.handler([13])]), 6, 'OBJ_FONT');
+    assert.equal(fns.GetObjectType.handler([fns.CreateBitmap.handler([4, 4, 1, 1, 0])]), 7);
+    assert.equal(fns.GetObjectType.handler([fns.CreateRectRgn.handler([0, 0, 4, 4])]), 8);
+    assert.equal(fns.GetObjectType.handler([0x9999]), 0, 'no such object');
+});
+
+test('D3DKMTCreateDCFromMemory makes a memory DC over the program\'s own pixels', ()=>{
+    const context = setup();
+    const { fns, memory } = context;
+    const DESC = 0x2000;
+    const PIXELS = 0x2400;
+    const view = new DataView(memory.bytes.buffer);
+    // pMemory, Format (A8R8G8B8), Width, Height, Pitch, hDeviceDc, pColorTable
+    [PIXELS, 21, 4, 4, 16, 0, 0].forEach((value, at)=>view.setUint32(DESC + at * 4, value, true));
+    assert.equal(fns.D3DKMTCreateDCFromMemory.handler([DESC]), 0);
+    const hdc = view.getUint32(DESC + 28, true);
+    const bitmap = view.getUint32(DESC + 32, true);
+    assert.equal(fns.GetObjectType.handler([hdc]), 10, 'OBJ_MEMDC');
+    assert.equal(fns.GetCurrentObject.handler([hdc, OBJ_BITMAP]), bitmap);
+    const DIB = 0x3000;
+    assert.equal(fns.GetObjectA.handler([bitmap, 24, DIB]), 24);
+    assert.equal(view.getUint32(DIB + 20, true), PIXELS, 'bmBits is the program\'s memory');
+
+    view.setUint32(DESC + 4, 99, true);
+    assert.equal(fns.D3DKMTCreateDCFromMemory.handler([DESC]), 0xc000000d, 'no such format');
+    view.setUint32(DESC + 4, 21, true);
+    view.setUint32(DESC + 16, 8, true);
+    assert.equal(fns.D3DKMTCreateDCFromMemory.handler([DESC]), 0xc000000d, 'a pitch too short');
+
+    view.setUint32(DESC + 0x40, hdc, true);
+    view.setUint32(DESC + 0x44, bitmap, true);
+    assert.equal(fns.D3DKMTDestroyDCFromMemory.handler([DESC + 0x40]), 0);
+    assert.equal(fns.GetObjectType.handler([hdc]), 0, 'the DC is gone');
+    assert.equal(fns.GetObjectType.handler([bitmap]), 0, 'and the bitmap');
+    assert.ok(!context.surfaces.freed.includes(PIXELS), 'the pixels stay the program\'s');
 });

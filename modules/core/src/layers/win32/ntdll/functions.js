@@ -29,6 +29,8 @@
 import { createCountedStringFunctions } from './strings.js';
 import { createQueryFunctions } from './query.js';
 import { createIntegerFunctions } from './integer.js';
+import { createWaitFunctions } from './waits.js';
+import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
 import { STATUS, toDosError } from './status.js';
 
 /**
@@ -179,6 +181,16 @@ export function createNtdllFunctions(host){
 
         ...(host.setRegisters
             ? createIntegerFunctions({ setRegisters: host.setRegisters })
+            : {}),
+
+        ...(['WaitForSingleObjectEx', 'WaitForMultipleObjectsEx', 'SleepEx', 'GetLastError',
+            'GetSystemTimeAsFileTime'].every(name=>kernel32[name])
+            ? createWaitFunctions({ readMemory: host.readMemory, kernel32, allocate })
+            : {}),
+
+        ...(MEMORY_ENTRIES.every(name=>kernel32[name])
+            ? createMemoryFunctions({ readMemory: host.readMemory,
+                writeMemory: host.writeMemory, kernel32, allocate })
             : {}),
 
         /**

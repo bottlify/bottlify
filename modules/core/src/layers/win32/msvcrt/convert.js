@@ -24,6 +24,8 @@ import { ERANGE } from './globals.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
+import { wideStringAt } from './widetext.js';
+import { cvtDigits } from './format.js';
 import * as inGuestFloat from './inguest-float.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
 
@@ -77,7 +79,7 @@ function digitValue(character){
  * @returns {{ magnitude: bigint, negative: boolean, end: number } | null}
  *          Null when nothing converted, which is not the same as a zero.
  */
-export function scanInteger(text, requestedBase, zeroBeforeX = false){
+export function scanInteger(text, requestedBase, zeroBeforeX = false, prefix = true){
     let at = 0;
     while (at < text.length && WHITESPACE.includes(text[at]))
     {
@@ -94,7 +96,7 @@ export function scanInteger(text, requestedBase, zeroBeforeX = false){
     let base = requestedBase;
     const hexPrefix = text[at] === '0' && (text[at + 1] === 'x' || text[at + 1] === 'X');
     const hexDigitAfter = digitValue(text[at + 2]) >= 0 && digitValue(text[at + 2]) < 16;
-    if ((base === 0 || base === 16) && hexPrefix && (hexDigitAfter || !zeroBeforeX))
+    if ((base === 0 || base === 16) && prefix && hexPrefix && (hexDigitAfter || !zeroBeforeX))
     {
         base = 16;
         at += 2;
@@ -117,6 +119,84 @@ export function scanInteger(text, requestedBase, zeroBeforeX = false){
         at++;
     }
 
+    return at === start ? null : { magnitude, negative, end: at };
+}
+
+/**
+ * The zero of each run of ten decimal digits past ASCII that msvcrt's wide
+ * conversions read as digits: the Arabic-Indic and extended Arabic-Indic,
+ * Devanagari, Bengali, Gurmukhi, Gujarati, Oriya, Telugu, Kannada, Malayalam,
+ * Thai, Lao, Tibetan, Myanmar, Khmer and Mongolian digits and the fullwidth
+ * forms -- not Tamil's, whose zero came into Unicode after them.
+ */
+const WIDE_ZEROS = [0x660, 0x6f0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xc66, 0xce6, 0xd66,
+    0xe50, 0xed0, 0xf20, 0x1040, 0x17e0, 0x1810, 0xff10];
+
+/**
+ * A wide character's value as a digit: a decimal digit of any of the scripts
+ * above, or an ASCII letter from ten; -1 for anything else.
+ *
+ * @param {string | undefined} character
+ */
+function wideDigitValue(character){
+    const ascii = digitValue(character ?? '');
+    if (ascii >= 0 || character === undefined)
+    {
+        return ascii;
+    }
+    const code = character.charCodeAt(0);
+    const zero = WIDE_ZEROS.find(first=>code >= first && code <= first + 9);
+    return zero === undefined ? -1 : code - zero;
+}
+
+/**
+ * The white space the wide conversions skip: the C locale's below U+0100,
+ * where the no-break space is one, and Unicode's separators past it.
+ *
+ * @param {string | undefined} character
+ */
+const isWideSpace = character=>character !== undefined && (WHITESPACE.includes(character)
+    || character === '\xa0' || /[\p{Zs}\p{Zl}\p{Zp}]/u.test(character) && character > '\xff');
+
+/**
+ * scanInteger over a wide string: its digits any script's above, a zero of
+ * any of them the one a `0x` prefix or an octal number begins with.
+ *
+ * @param {string} text @param {number} requestedBase
+ * @returns {{ magnitude: bigint, negative: boolean, end: number } | null}
+ */
+export function scanWideInteger(text, requestedBase){
+    let at = 0;
+    while (isWideSpace(text[at]))
+    {
+        at++;
+    }
+    let negative = false;
+    if (text[at] === '+' || text[at] === '-')
+    {
+        negative = text[at] === '-';
+        at++;
+    }
+    let base = requestedBase;
+    const zero = wideDigitValue(text[at]) === 0;
+    const hexPrefix = zero && (text[at + 1] === 'x' || text[at + 1] === 'X');
+    if ((base === 0 || base === 16) && hexPrefix)
+    {
+        base = 16;
+        at += 2;
+    }
+    else if (base === 0)
+    {
+        base = zero ? 8 : 10;
+    }
+    const start = at;
+    let magnitude = 0n;
+    for (let digit = wideDigitValue(text[at]); digit >= 0 && digit < base;
+        digit = wideDigitValue(text[at]))
+    {
+        magnitude = magnitude * BigInt(base) + BigInt(digit);
+        at++;
+    }
     return at === start ? null : { magnitude, negative, end: at };
 }
 
@@ -240,17 +320,20 @@ export function createConversionFunctions(host){
      * @param {(magnitude: bigint, negative: boolean) => bigint | null} convert
      *        The value, or null when it is out of range and `limit` answers.
      * @param {(negative: boolean) => bigint} limit
+     * @param {boolean} [wide]  A wide string, two bytes a character.
      */
-    const strtoInteger = (argBytes, convert, limit)=>({
+    const strtoInteger = (argBytes, convert, limit, wide = false)=>({
         convention: 'cdecl',
         argBytes,
         /** @param {number[]} args */
         handler: ([string, end, base])=>{
-            const text = readString(string);
-            const scanned = scanInteger(text, base | 0);
+            const scanned = wide
+                ? scanWideInteger(wideStringAt(/** @type {(address: number, length: number)
+                    => Uint8Array} */ (host.readMemory), string), base | 0)
+                : scanInteger(readString(string), base | 0);
             // Nothing converted: the end pointer goes back to the start, so a
             // caller comparing it against the input sees no progress.
-            writeInt(end, scanned ? string + scanned.end : string);
+            writeInt(end, scanned ? string + scanned.end * (wide ? 2 : 1) : string);
             if (scanned === null)
             {
                 return 0;
@@ -303,10 +386,14 @@ export function createConversionFunctions(host){
     });
 
     /** long strtol(const char *str, char **end, int base) */
-    const strtol = strtoInteger(12, (magnitude, negative)=>{
+    /** @param {bigint} magnitude @param {boolean} negative */
+    const toLong = (magnitude, negative)=>{
         const value = negative ? -magnitude : magnitude;
         return value > LONG_MAX || value < LONG_MIN ? null : value;
-    }, negative=>(negative ? LONG_MIN : LONG_MAX));
+    };
+    /** @param {boolean} negative */
+    const longLimit = negative=>(negative ? LONG_MIN : LONG_MAX);
+    const strtol = strtoInteger(12, toLong, longLimit);
 
     /**
      * unsigned long strtoul(const char *str, char **end, int base)
@@ -317,13 +404,39 @@ export function createConversionFunctions(host){
      * negative one comes back as ULONG_MAX negated, 1 (Wine's msvcrt
      * test_strtol).
      */
-    const strtoul = strtoInteger(12, (magnitude, negative)=>{
+    /** @param {bigint} magnitude @param {boolean} negative */
+    const toUnsignedLong = (magnitude, negative)=>{
         if (magnitude > ULONG_MAX)
         {
             return null;
         }
         return negative ? BigInt.asUintN(32, -magnitude) : magnitude;
-    }, negative=>(negative ? BigInt.asUintN(32, -ULONG_MAX) : ULONG_MAX));
+    };
+    /** @param {boolean} negative */
+    const unsignedLongLimit = negative=>(negative ? BigInt.asUintN(32, -ULONG_MAX) : ULONG_MAX);
+    const strtoul = strtoInteger(12, toUnsignedLong, unsignedLongLimit);
+
+    /**
+     * _ecvt and _fcvt: the digits in the buffer they share, the point and the
+     * sign through the pointers.
+     *
+     * @param {boolean} fixed
+     */
+    const cvt = fixed=>({
+        convention: 'cdecl',
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: args=>{
+            const { digits, point, negative } = cvtDigits(
+                { value: readDouble(args, 0), low: args[0] >>> 0, high: args[1] >>> 0 },
+                args[2] | 0, fixed);
+            const buffer = cvtBuffer();
+            writeInt(args[3], point);
+            writeInt(args[4], negative ? 1 : 0);
+            writeString(buffer, digits.slice(0, CVT_BUFFER - 1));
+            return buffer;
+        },
+    });
 
     const { readMemory, writeMemory } = host;
     const table = {
@@ -337,6 +450,17 @@ export function createConversionFunctions(host){
         strtoul: readMemory
             ? guestEntry(inGuest.strtoul, COMPILED.strtoul, { readMemory, writeMemory }, strtoul)
             : strtoul,
+
+        ...readMemory ? {
+            /**
+             * long wcstol(const wchar_t *str, wchar_t **end, int base) and
+             * unsigned long wcstoul: strtol and strtoul over a wide string,
+             * reading the decimal digits of the scripts msvcrt reads and the
+             * separators Unicode has as white space.
+             */
+            wcstol: strtoInteger(12, toLong, longLimit, true),
+            wcstoul: strtoInteger(12, toUnsignedLong, unsignedLongLimit, true),
+        } : {},
 
         /** char *_ltoa(long value, char *buffer, int radix) */
         _ltoa: toText(1, true),
@@ -365,30 +489,10 @@ export function createConversionFunctions(host){
          * Digits only: no sign, no point. Where the point belongs and whether
          * the value was negative come back through the two pointers, and a
          * caller that ignores them prints the magnitude of the wrong number by
-         * a power of ten.
+         * a power of ten. `count` significant digits, of the seventeen msvcrt
+         * converts a double to (`cvtDigits`).
          */
-        _ecvt: {
-            convention: 'cdecl',
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: args=>{
-                const value = readDouble(args, 0);
-                const count = Math.max(0, Math.min(args[2] | 0, MAX_DIGITS));
-                const buffer = cvtBuffer();
-                writeInt(args[4], value < 0 ? 1 : 0);
-                if (value === 0 || !Number.isFinite(value))
-                {
-                    writeInt(args[3], 0);
-                    writeString(buffer, '0'.repeat(count));
-                    return buffer;
-                }
-                const [mantissa, exponent] = Math.abs(value)
-                    .toExponential(Math.max(0, count - 1)).split('e');
-                writeInt(args[3], Number(exponent) + 1);
-                writeString(buffer, mantissa.replace('.', '').padEnd(count, '0'));
-                return buffer;
-            },
-        },
+        _ecvt: cvt(false),
 
         /**
          * char *_fcvt(double value, int count, int *dec, int *sign)
@@ -396,34 +500,7 @@ export function createConversionFunctions(host){
          * The count is digits after the point here, not significant digits, and
          * a value below one loses its leading zeros to a negative *dec.
          */
-        _fcvt: {
-            convention: 'cdecl',
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: args=>{
-                const value = readDouble(args, 0);
-                const count = Math.max(0, Math.min(args[2] | 0, MAX_DIGITS));
-                const buffer = cvtBuffer();
-                writeInt(args[4], value < 0 ? 1 : 0);
-                if (!Number.isFinite(value))
-                {
-                    writeInt(args[3], 0);
-                    writeString(buffer, '');
-                    return buffer;
-                }
-                const [whole, fraction = ''] = Math.abs(value).toFixed(count).split('.');
-                let digits = (whole === '0' ? '' : whole) + fraction;
-                let point = whole === '0' ? 0 : whole.length;
-                while (digits.length > 0 && digits[0] === '0')
-                {
-                    digits = digits.slice(1);
-                    point--;
-                }
-                writeInt(args[3], digits.length === 0 ? 0 : point);
-                writeString(buffer, digits);
-                return buffer;
-            },
-        },
+        _fcvt: cvt(true),
 
         /**
          * char *_gcvt(double value, int digits, char *buffer)

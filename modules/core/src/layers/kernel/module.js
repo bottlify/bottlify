@@ -388,6 +388,10 @@ export function createKernelModule(){
                     // A thread that dies holding a mutex leaves whatever it protected
                     // half-written; the next owner has to be told (§ abandoned mutex).
                     state.sync.abandonMutexesOwnedBy(thread);
+                    // A thread ended while it waited leaves the queues it stood
+                    // in: the next signal would otherwise go to it and be lost
+                    // to a live waiter.
+                    state.sync.stopWaiting(thread);
                     state.scheduler.terminate(thread, exitCode);
                     // And a thread is itself something a program waits on. Whoever
                     // joined it is released now and stays released: the object is

@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createPathFunctions, splitPath, fullPath } from './paths.js';
 import { fakeMemory, fakeVolume as fakeFiles } from './harness.test.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 /** A volume with the handful of operations the path functions reach for. */
 function fakeVolume(existing = ['C:\\game', 'C:\\game\\data.mpq']){
@@ -414,4 +415,145 @@ test('a path\'s pieces and a found name are written in the ANSI page', ()=>{
     assert.notEqual(table._findfirst.handler([memory.put('C:\\game\\*.dat'), data]), -1);
     assert.deepEqual([...memory.bytes.subarray(data + FIND.NAME, data + FIND.NAME + 5)],
         [0x80, 0x99, 0x97, 0xe9, 0x2e]);
+});
+
+test('_tempnam names a file that is not there, in TMP\'s directory, the one asked, or here', ()=>{
+    const memory = fakeMemory();
+    const entries = new Set(['C:\\tmp', 'C:\\work', 'C:\\work\\wne1']);
+    let tmp = /** @type {string | null} */ ('C:\\tmp');
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory,
+        files: {
+            stat: (/** @type {string} */ path)=>({ exists: entries.has(path),
+                isDirectory: entries.has(path) && !/wne/.test(path) }),
+            currentDirectory: ()=>'C:\\here',
+        },
+        getenv: name=>(name === 'TMP' ? tmp : null),
+    }));
+    const first = memory.text(table._tempnam.handler([memory.put('C:\\work'), memory.put('wne')]));
+    assert.match(first, /^C:\\tmp\\wne[0-9a-v]+$/, 'TMP first, when it is a directory');
+    const second = memory.text(table._tempnam.handler([memory.put('C:\\work'), memory.put('wne')]));
+    assert.notEqual(second, first, 'each name another');
+    tmp = 'C:\\nowhere';
+    const asked = memory.text(table._tempnam.handler([memory.put('C:\\work'), memory.put('wne')]));
+    assert.match(asked, /^C:\\work\\wne/);
+    assert.notEqual(asked, 'C:\\work\\wne1', 'a name a file has is passed over');
+    assert.match(memory.text(table._tempnam.handler([0, 0])), /^C:\\here\\[0-9a-v]+$/);
+});
+
+test('a path operation refuses no path with -1 and EINVAL, reading nothing', ()=>{
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory,
+        readCString: ()=>assert.fail('address zero read'),
+        files: fakeVolume(),
+        errno: code=>void errno.push(code),
+    }));
+    for (const name of ['_unlink', 'remove', '_rmdir', '_mkdir', '_chdir', '_access'])
+    {
+        assert.equal(table[name].handler([0, 0]), -1, name);
+    }
+    assert.equal(table.rename.handler([0x100, 0]), -1);
+    assert.deepEqual(errno, new Array(7).fill(22));
+});
+
+test('_makepath takes the drive\'s first character, and _wmakepath joins the same', ()=>{
+    const { memory, table } = build();
+    const out = memory.allocate(64);
+    table._makepath.handler([out, memory.put('c:\\'), memory.put('dir'), memory.put('file'),
+        memory.put('ext')]);
+    assert.equal(memory.text(out), 'c:dir\\file.ext');
+    memory.writeMemory(out, memory.bytes.slice(memory.put('foo'), memory.put('foo') + 4));
+    table._makepath.handler([out, out, 0, 0, 0]);
+    assert.equal(memory.text(out), 'f:', 'the drive read from the buffer written');
+    table._wmakepath.handler([out, 0, memory.putWide('\\dir'), 0, memory.putWide('ext')]);
+    assert.equal(memory.wide(out), '\\dir\\.ext');
+});
+
+test('a path splits by the multibyte code page: a trail byte is no separator', ()=>{
+    // A path as the guest's bytes read in the ANSI page: 0x83 is a Shift-JIS
+    // lead byte, and the 0x5c after the first one its trail.
+    const ansi = (/** @type {number[]} */ ...bytes)=>decodeAnsi(Uint8Array.from(bytes));
+    const lead = ansi(0x83);
+    const path = ansi(0x63, 0x3a, 0x5c, 0x83, 0x5c, 0x83, 0x74, 0x83, 0x67, 0x2e, 0x62, 0x69, 0x6e);
+    assert.deepEqual(splitPath(path), { drive: 'c:', directory: `\\${lead}\\`,
+        name: `${lead}t${lead}g`, extension: '.bin' });
+    const shiftJis = (/** @type {number} */ byte)=>(byte >= 0x81 && byte <= 0x9f);
+    assert.deepEqual(splitPath(path, shiftJis), { drive: 'c:', directory: '\\',
+        name: `${lead}\\${lead}t${lead}g`, extension: '.bin' });
+});
+
+test('_searchenv looks here first, then in each directory the variable lists', ()=>{
+    const memory = fakeMemory();
+    const entries = new Set(['C:\\t\\dir1\\1.dat', 'C:\\t\\dir2\\3.dat', 'C:\\here\\h.dat']);
+    const variables = /** @type {Record<string, string>} */ ({
+        PATHS: 'C:\\t\\dir1;;C:\\t\\dir2', QUOTED: 'C:\\t"\\"d"i"r"1', OPEN: 'C:\\t"\\"d"i"r"1;',
+    });
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory,
+        files: { stat: (/** @type {string} */ path)=>({ exists: entries.has(path) }),
+            currentDirectory: ()=>'C:\\here' },
+        getenv: name=>variables[name] ?? null,
+    }));
+    const out = memory.allocate(64);
+    /** @param {string} file @param {string} variable */
+    const search = (file, variable)=>{
+        table._searchenv.handler([memory.put(file), memory.put(variable), out]);
+        return memory.text(out);
+    };
+    assert.equal(search('3.dat', 'PATHS'), 'C:\\t\\dir2\\3.dat');
+    assert.equal(search('h.dat', 'PATHS'), 'C:\\here\\h.dat');
+    assert.equal(search('none', 'PATHS'), '');
+    assert.equal(search('1.dat', 'QUOTED'), 'C:\\t\\dir1\\1.dat', 'the quotes dropped');
+    assert.equal(search('1.dat', 'OPEN'), '', 'a semicolon inside quotes is the name\'s');
+    assert.equal(table._searchenv_s.handler([memory.put('none'), memory.put('PATHS'), out, 64]),
+        2);
+});
+
+test('_makepath_s writes what leaves room for a terminator and clears the first', ()=>{
+    const memory = fakeMemory();
+    const errno = /** @type {number[]} */ ([]);
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory, files: fakeVolume(), errno: code=>errno.push(code),
+    }));
+    const out = memory.allocate(32);
+    const parts = [memory.put('c:'), memory.put('d\\'), memory.put('file'), memory.put('ext')];
+    assert.equal(table._makepath_s.handler([0, 0, ...parts]), 22);
+    assert.equal(table._makepath_s.handler([out, 0, ...parts]), 22);
+    assert.deepEqual(errno, [22, 22]);
+    assert.equal(table._makepath_s.handler([out, 13, ...parts]), 0);
+    assert.equal(memory.text(out), 'c:d\\file.ext');
+    memory.fillMemory(out, 0x58, 16);
+    assert.equal(table._makepath_s.handler([out, 5, ...parts]), 34, 'ERANGE');
+    assert.equal(errno.pop(), 34);
+    assert.deepEqual(Array.from(memory.bytes.subarray(out, out + 6)),
+        [0, 0x3a, 0x64, 0x5c, 0x58, 0x58], 'four written, the first cleared');
+    memory.fillMemory(out, 0x58, 16);
+    const wide = [memory.putWide('c:'), memory.putWide('dir'), memory.putWide('f'), 0];
+    assert.equal(table._wmakepath_s.handler([out, 4, ...wide]), 34);
+    assert.deepEqual(Array.from(memory.bytes.subarray(out, out + 8)),
+        [0, 0, 0x3a, 0, 0x64, 0, 0x58, 0x58]);
+    assert.equal(table._wmakepath_s.handler([out, 8, ...wide]), 0);
+    assert.equal(memory.wide(out), 'c:dir\\f');
+});
+
+test('_wsearchenv_s answers as _searchenv_s does, in wide characters', ()=>{
+    const memory = fakeMemory();
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory,
+        files: { stat: (/** @type {string} */ path)=>({ exists: path === 'C:\\t\\a.dat' }),
+            currentDirectory: ()=>'C:\\here' },
+        getenv: name=>(name === 'LIST' ? 'C:\\t' : null),
+    }));
+    const out = memory.allocate(64);
+    const search = (/** @type {string} */ file, /** @type {number} */ size)=>
+        table._wsearchenv_s.handler([memory.putWide(file), memory.putWide('LIST'), out, size]);
+    assert.equal(search('a.dat', 32), 0);
+    assert.equal(memory.wide(out), 'C:\\t\\a.dat');
+    assert.equal(search('a.dat', 10), 34, 'ten characters leave no room for the terminator');
+    assert.equal(memory.wide(out), '');
+    assert.equal(search('b.dat', 32), 2);
+    assert.equal(table._wsearchenv_s.handler([0, memory.putWide('LIST'), out, 32]), 22);
 });

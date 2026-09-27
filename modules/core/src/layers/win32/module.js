@@ -19,6 +19,7 @@ import { createGuestHeap } from './kernel32/guest-heap.js';
 import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions, encodeAnsi } from './kernel32/locale.js';
 import { createEnvironmentFunctions, defaultEnvironment } from './kernel32/environment.js';
+import { createThreadPool } from './kernel32/pool.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions } from './kernel32/system.js';
 import { createSpawner, createSpawnFunctions } from './kernel32/spawn.js';
@@ -1033,6 +1034,20 @@ export function createWin32Module(){
                         queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
                     }),
                     ...apcs.table,
+                    ...createThreadPool({
+                        kernel,
+                        register: (name, fn)=>bridge.register(name, fn),
+                        /** @param {number} bytes */
+                        allocate: bytes=>heap.allocate(bytes),
+                        /** @param {number} bytes */
+                        allocateCode: bytes=>heap.allocateCode(bytes),
+                        /** @param {number} address */
+                        free: address=>heap.free(address),
+                        writeMemory,
+                        threadBlock: config?.threadBlock,
+                        park: (/** @type {any} */ thread)=>bridge.park(thread),
+                        setLastError: setError,
+                    }).table,
                     ...createDebugFunctions({
                         readCString,
                         readWideString: (address, maxLength)=>
@@ -1109,6 +1124,7 @@ export function createWin32Module(){
                     }),
                     ...createResourceFunctions({
                         readCString,
+                        readWideString,
                         setLastError: setError,
                         /** @param {number} instance @param {any} type @param {any} name */
                         findResource: (instance, type, name, language = null)=>
@@ -1203,6 +1219,9 @@ export function createWin32Module(){
                             ?? defaultEnvironment(windows, folders),
                     }),
                     ...createSystemFunctions({
+                        // TerminateProcess wakes whoever waits on the child it ends.
+                        wake: (/** @type {any} */ thread, /** @type {number} */ result)=>
+                            kernel.wake(thread, result),
                         readMemory,
                         writeMemory,
                         setLastError: setError,
@@ -1371,6 +1390,14 @@ export function createWin32Module(){
                         // The standard streams are records in the runtime's own
                         // image, wherever the loader put its `_iob`.
                         iob: ()=>modules.find('msvcrt.dll')?.addressOf?.('_iob') ?? 0,
+                        // And the tables a program reads in place -- `_mbctype`,
+                        // `_environ`, the time zone's -- are rewritten where the
+                        // loader placed them.
+                        addressOf: name=>modules.find('msvcrt.dll')?.addressOf?.(name) ?? 0,
+                        // The runtime's copy of the environment starts as the
+                        // variables kernel32 starts the process with.
+                        environment: ()=>config?.environment
+                            ?? defaultEnvironment(windows, folders),
                         // The same set GetLogicalDrives reports, from the same
                         // place: a program populates its drive list from whichever
                         // of the two it happens to call.
@@ -2150,6 +2177,14 @@ export function createWin32Module(){
                  * allocators hand out the same address.
                  */
                 heap: ()=>heap,
+                /**
+                 * Sets the calling thread's last error, as SetLastError does:
+                 * for a layer outside win32 whose calls a program checks with
+                 * GetLastError, as it does WGL's.
+                 *
+                 * @param {number} code
+                 */
+                setLastError: code=>setError(code),
                 /** Views of files: how many were mapped, waited for their bytes, or failed. */
                 mappings: ()=>mappings,
 
