@@ -352,6 +352,8 @@ const GCL_HICONSM = -34;
 const WS_DISABLED = 0x08000000;
 const WS_MINIMIZE = 0x20000000;
 const WS_POPUP = 0x80000000;
+/** WINDOWINFO's dwWindowStatus for the active window. */
+const WS_ACTIVECAPTION = 0x0001;
 
 /** A class or window name is at most this long. */
 const MAX_NAME = 256;
@@ -794,8 +796,12 @@ export function createSystemFunctions({ host, live, windows, classes }){
         return 1;
     };
 
-    /** Windows in creation order, which is the only order this build has. */
-    const ordered = ()=>[...windows.values()].filter(record=>!record.destroyed);
+    /**
+     * Windows in creation order, which is the only order this build has; a
+     * window being made is in none until its CBT hook has let it be.
+     */
+    const ordered = ()=>[...windows.values()].filter(record=>!record.destroyed
+        && !record.unlinked);
 
     /**
      * What GetParent answers for a window: its owner when it is a popup, its
@@ -2079,8 +2085,9 @@ export function createSystemFunctions({ host, live, windows, classes }){
                         return siblings[0]?.hwnd ?? 0;
                     case GW_HWNDLAST:
                         return siblings[siblings.length - 1]?.hwnd ?? 0;
+                    // Not yet among its siblings, a window has none either side.
                     case GW_HWNDNEXT:
-                        return siblings[at + 1]?.hwnd ?? 0;
+                        return at < 0 ? 0 : siblings[at + 1]?.hwnd ?? 0;
                     case GW_HWNDPREV:
                         return at > 0 ? siblings[at - 1].hwnd : 0;
                     case GW_CHILD:
@@ -2094,23 +2101,36 @@ export function createSystemFunctions({ host, live, windows, classes }){
             },
         },
 
-        /** BOOL GetWindowInfo(HWND hwnd, PWINDOWINFO pwi) */
+        /**
+         * BOOL GetWindowInfo(HWND hwnd, PWINDOWINFO pwi)
+         *
+         * What GetWindowRect, GetClientRect on the screen, the two styles and
+         * GetClassLong(GCW_ATOM) answer one by one, and WS_ACTIVECAPTION for
+         * the active window.
+         */
         GetWindowInfo: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, info])=>{
                 const record = live(hwnd);
-                if (!record || (info >>> 0) === 0)
+                if (!record)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                if ((info >>> 0) === 0)
                 {
                     return 0;
                 }
                 const frame = host.geometry.frame(record);
                 writeRect(host, info + WINDOWINFO.rcWindow, host.geometry.windowRect(record));
                 writeRect(host, info + WINDOWINFO.rcClient, host.geometry.clientRect(record));
+                const status = (host.active?.() ?? 0) === record.hwnd ? WS_ACTIVECAPTION : 0;
                 writeU32s(host, info + WINDOWINFO.dwStyle,
-                    [record.style, record.exStyle, 0, frame.left, frame.top]);
+                    [record.style, record.exStyle, status, frame.left, frame.top]);
                 // Two WORDs share the last DWORD, so neither may be written as one.
-                writeU16(host, info + WINDOWINFO.atomWindowType, 0);
+                writeU16(host, info + WINDOWINFO.atomWindowType,
+                    classOfWindow(record.hwnd)?.atom ?? 0);
                 writeU16(host, info + WINDOWINFO.wCreatorVersion, 0x0400);
                 return 1;
             },

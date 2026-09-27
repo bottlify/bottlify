@@ -314,6 +314,29 @@ test('GetWindow walks top-level windows from the top, and children in creation o
     assert.equal(fns.GetWindow.handler([firstControl, GW_OWNER]), 0, 'a child has no owner');
 });
 
+test('GetWindowInfo answers what the single queries do, and refuses no window as they do', ()=>{
+    // win.c's test_window_info: no window is ERROR_INVALID_WINDOW_HANDLE, the
+    // atom is GetClassLong's GCW_ATOM and the status WS_ACTIVECAPTION exactly
+    // when the window is the active one.
+    const GCW_ATOM = -32;
+    const WINDOWINFO_SIZE = 60;
+    const ERROR_INVALID_WINDOW_HANDLE = 1400;
+    const { memory, fns, errors } = setup();
+    const hwnd = makeWindow(memory, fns, WS_OVERLAPPED | WS_VISIBLE);
+    const other = makeWindow(memory, fns);
+    assert.equal(fns.GetWindowInfo.handler([0, OUT_BUFFER]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_WINDOW_HANDLE);
+
+    memory.fill(OUT_BUFFER, WINDOWINFO_SIZE / 4);
+    assert.equal(fns.GetWindowInfo.handler([hwnd, OUT_BUFFER]), 1);
+    assert.equal(memory.u32(OUT_BUFFER + 56) & 0xffff, fns.GetClassLongA.handler([hwnd, GCW_ATOM]));
+    assert.notEqual(memory.u32(OUT_BUFFER + 56) & 0xffff, 0);
+    assert.equal(fns.GetActiveWindow.handler([]), hwnd);
+    assert.equal(memory.u32(OUT_BUFFER + 44), 1, 'WS_ACTIVECAPTION on the active window');
+    fns.GetWindowInfo.handler([other, OUT_BUFFER]);
+    assert.equal(memory.u32(OUT_BUFFER + 44), 0, 'and on no other');
+});
+
 test('a child is hit where GetWindow stacks it, and SetWindowPos restacks it', ()=>{
     // user32's window tests: children made one after another are stacked
     // first-made on top (GW_CHILD, then GW_HWNDNEXT, walks them in creation

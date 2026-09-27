@@ -2146,8 +2146,13 @@ export function createWindowFunctions(host){
         // framework attaches its object to the window here and subclasses the
         // procedure, so the messages that follow reach the framework and not
         // the class. A hook that answers non-zero refuses the window.
-        const cbt = callHook(WH_CBT, null,
-            [HCBT_CREATEWND, record.hwnd, create + CREATESTRUCTA.SIZE], thread);
+        // Not yet among its siblings while the hook decides whether it may be.
+        record.unlinked = true;
+        const cbt = andThen(callHook(WH_CBT, null,
+            [HCBT_CREATEWND, record.hwnd, create + CREATESTRUCTA.SIZE], thread), answer=>{
+            delete record.unlinked;
+            return answer;
+        });
         /** @returns {number | Promise<number>} */
         const refuse = ()=>andThen(destroyWindow(record.hwnd, thread, 'ncdestroy'), ()=>done(0));
         return andThen(cbt, refused=>{

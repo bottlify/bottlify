@@ -2438,6 +2438,40 @@ test('a hook set for one thread hears that thread alone, and one set for none ev
     assert.equal(called.length, count, 'the last global hook ends the chain');
 });
 
+test('a window its CBT hook hears of is not yet among its siblings', ()=>{
+    // win.c's cbt_hook_proc: at HCBT_CREATEWND neither GW_HWNDPREV nor
+    // GW_HWNDNEXT names a window, and FindWindowEx does not find it.
+    const GW_HWNDNEXT = 2;
+    const GW_HWNDPREV = 3;
+    /** @type {any} */
+    let table = null;
+    /** @type {number[][]} */
+    const seen = [];
+    const { memory, fns } = setup({
+        heap: true,
+        hookReply: (entry, args)=>{
+            if (args[0] === HCBT_CREATEWND)
+            {
+                seen.push([table.GetWindow.handler([args[1], GW_HWNDNEXT]),
+                    table.GetWindow.handler([args[1], GW_HWNDPREV]),
+                    table.FindWindowExA.handler([0, 0, CLASS_NAME, 0])]);
+            }
+            return 0;
+        },
+    });
+    table = fns;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const first = createWindow(fns, memory);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+    const second = createWindow(fns, memory);
+    const child = createWindow(fns, memory, { style: WS_CHILD, parent: first });
+    createWindow(fns, memory, { style: WS_CHILD, parent: first });
+    assert.deepEqual(seen, [[0, 0, first], [0, 0, first], [0, 0, first]]);
+    assert.equal(fns.GetWindow.handler([second, GW_HWNDNEXT]), first, 'and then it is');
+    assert.notEqual(fns.GetWindow.handler([child, GW_HWNDNEXT]), 0);
+});
+
 test('a CBT hook hears a window activated, focused, commanded and destroyed, and can forbid '
     + 'each', ()=>{
     const { memory, fns, called, dispatched } = setup({
