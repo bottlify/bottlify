@@ -67,18 +67,19 @@ const toolkit = ({ iat, at })=>({
  * host, grown in place and then past its cell (the host moves it), freed and
  * no longer valid; HEAP_ZERO_MEMORY over a recycled cell; a heap of the
  * program's own that HeapSummary adds up and HeapDestroy takes whole; the C
- * runtime's family; and ten thousand pairs of HeapAlloc and HeapFree.
+ * runtime's family; and ten thousand pairs of HeapAlloc and HeapFree. HeapWalk
+ * ends its walk at once, as it does over the host's blocks.
  */
 function buildCallsExe(){
     return buildExe({
         imports: {
             'KERNEL32.dll': ['GetProcessHeap', 'HeapAlloc', 'HeapFree', 'HeapSize',
                 'HeapReAlloc', 'HeapValidate', 'HeapCreate', 'HeapDestroy', 'HeapSummary',
-                'ExitProcess'],
+                'HeapWalk', 'GetLastError', 'ExitProcess'],
             'msvcrt.dll': ['malloc', 'free', 'calloc', 'realloc', '_msize'],
         },
         data: { heap: [0, 0, 0, 0], p: [0, 0, 0, 0], q: [0, 0, 0, 0], own: [0, 0, 0, 0],
-            summary: [20, 0, 0, 0, ...new Array(16).fill(0)] },
+            summary: [20, 0, 0, 0, ...new Array(16).fill(0)], entry: new Array(28).fill(0) },
         codeSize: 0x800,
         code: context=>{
             const { call, push, pushFrom, pushValue, keep, compare, is, check, exit, fail } =
@@ -138,6 +139,10 @@ function buildCallsExe(){
                 check(10), push('summary'), pushValue(0), pushFrom('own'), call('HeapSummary'),
                 is(1), { jump: JNE, to: 'fail' },
                 compare('summary', 200 * 24, 4), { jump: JNE, to: 'fail' },
+                // HeapWalk hands out the guest's blocks as it does the host's: none.
+                check(17), push('entry'), pushFrom('own'), call('HeapWalk'),
+                is(0), { jump: JNE, to: 'fail' },
+                call('GetLastError'), is(259), { jump: JNE, to: 'fail' },
                 check(11), pushFrom('own'), call('HeapDestroy'), is(1), { jump: JNE, to: 'fail' },
                 pushValue(0), pushValue(0), pushFrom('own'), call('HeapValidate'),
                 is(0), { jump: JNE, to: 'fail' },
