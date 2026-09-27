@@ -385,8 +385,9 @@ export function createWideClassificationFunctions(){
  * implementations of `strcpy` that must agree is one more than is needed.
  *
  * @param {Record<string, any>} narrow  The byte-string table.
+ * @param {(api: string, detail: string) => void} [divergence]
  */
-export function createMultiByteFunctions(narrow){
+export function createMultiByteFunctions(narrow, divergence){
     /** @type {Record<string, any>} */
     const table = {};
     for (const [multiByte, byte] of Object.entries({
@@ -406,10 +407,21 @@ export function createMultiByteFunctions(narrow){
         _mbsdup: '_strdup',
         _mbsupr: '_strupr',
         _mbslwr: '_strlwr',
+        _mbspbrk: 'strpbrk',
+        _mbsspn: 'strspn',
+        _mbscspn: 'strcspn',
+        _mbsrev: '_strrev',
+        // The `nb` forms count bytes rather than characters, which in a
+        // single-byte locale is the same count.
+        _mbsnbcmp: 'strncmp',
+        _mbsnbicmp: '_strnicmp',
+        _mbsnbcpy: 'strncpy',
+        _mbsnbcat: 'strncat',
         // A classifier, not a string function, but the same shape: one
         // character code in, one flag out, and the C locale's answer is the
         // byte one's exactly, the same as every multi-byte function above.
         _ismbcspace: 'isspace',
+        _ismbcdigit: 'isdigit',
     }))
     {
         if (narrow[byte])
@@ -468,5 +480,43 @@ export function createMultiByteFunctions(narrow){
             argBytes: 4,
             handler: ()=>0,
         },
+
+        /**
+         * int _setmbcp(int codepage)
+         *
+         * The multi-byte code page stays the single-byte ANSI one, whatever is
+         * asked: every function in this family answers as that page does, and
+         * a lead-byte table set for another page would disagree with them.
+         * Asked for the ANSI page, or for "the current locale's", that is
+         * exactly right; asked for a double-byte page, it is not, and says so.
+         */
+        _setmbcp: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([codepage])=>{
+                const asked = codepage | 0;
+                if (![0, -3, -4, -2, 1252].includes(asked))
+                {
+                    divergence?.('_setmbcp', `code page ${asked} stays the ANSI page`);
+                }
+                return 0;
+            },
+        },
+
+        /** int _getmbcp(void): 0, a single-byte locale's answer. */
+        _getmbcp: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>0,
+        },
+
+        /**
+         * unsigned char _mbctype[257]
+         *
+         * The lead- and trail-byte flags for each byte, the first entry for
+         * EOF: none, in a single-byte locale.
+         */
+        _mbctype: { data: ()=>new Uint8Array(257) },
     };
 }

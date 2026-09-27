@@ -127,6 +127,16 @@ test('a device is reported rather than opened as a file', async()=>{
     await filesystemModule.dispose();
 });
 
+test('a bundle mounted on a drive goes under what is already written there', async()=>{
+    const fs = await filesystemModule.create(undefined);
+    fs.createDirectory('C:\\WINDOWS');
+    fs.mount('C', { source: createMemoryStore({ 'App\\Game.exe': 'binary' }) });
+
+    assert.equal(fs.stat('C:\\WINDOWS')?.directory, true, 'the machine directory is still there');
+    assert.equal(fs.stat('C:\\App\\Game.exe')?.size, 6, 'and the bundle beside it');
+    await filesystemModule.dispose();
+});
+
 test('the source survives everything the program does to it', async()=>{
     const source = createMemoryStore({ 'Game\\Setup.EXE': 'binary' });
     const fs = await filesystemModule.create({ drives: { C: { source } } });

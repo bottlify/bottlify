@@ -202,6 +202,8 @@ const WM_COMMAND = 0x0111;
 const WM_KEYDOWN = 0x0100;
 const WM_CHAR = 0x0102;
 const DM_GETDEFID = 0x0400;
+/** How many times an unattended modal loop presses Enter before it leaves the dialog be. */
+const UNATTENDED_PRESSES = 8;
 const DC_HASDEFID = 0x534b;
 
 /** The keys the dialog manager acts on, and what a click is called. */
@@ -270,8 +272,22 @@ const MAX_RESOURCE_NAME = 256;
  * @property {(code: number) => void} [setLastError]
  * @property {(hwnd: number) => void} [created]
  * @property {() => Promise<void>} idle
+ * @property {boolean} [unattended]  Nobody at the screen: a modal loop waiting for
+ *     input has it answered rather than wait.
+ * @property {(dialog: UnattendedDialog) => number | Promise<number>} [answer]
+ *     Who answers it, and without one the default button.
  * @property {(instance: number, type: number, name: number | string) => unknown} [findResource]
  * @property {(instance: number) => number} [moduleBase]
+ */
+
+/**
+ * A modal dialog or message box put to whoever answers for an unattended run.
+ *
+ * @typedef {Object} UnattendedDialog
+ * @property {'dialog' | 'messagebox'} kind
+ * @property {string} title
+ * @property {string} text  A message box's text; a dialog's static texts, one a line.
+ * @property {{ id: number, label: string, default: boolean }[]} buttons
  */
 
 /**
@@ -578,8 +594,10 @@ export function createDialogFunctions(options){
         // The dialog class is a system class: its procedure hands every
         // message to the dialog procedure kept in the extra bytes, which is
         // where GetWindowLong(DWLP_DLGPROC) reads it from.
+        // Written once the window exists, as CreateDialog sets it after
+        // CreateWindowEx returns: the procedure never hears the dialog's own
+        // WM_NCCREATE and WM_CREATE.
         const extra = new DataView(new ArrayBuffer(DLGWINDOWEXTRA));
-        extra.setUint32(DWLP_DLGPROC, dialogFunc >>> 0, true);
         // A template that says WS_VISIBLE is shown only after WM_INITDIALOG
         // has reached the procedure; until then the window is created without
         // the bit, as Windows creates it, so a procedure that looks at its
@@ -603,95 +621,107 @@ export function createDialogFunctions(options){
         // handle is the dialog's own, not the program's.
         dialog.font = font;
         dialog.dialogFont = font;
-        /** @type {Promise<number>[]} */
-        const creating = [];
-        /** @type {any[]} */
-        const controls = [];
-        for (const control of makeable)
-        {
-            // A class the program registered is the program's, procedure and
-            // all: a template names its own controls this way, and one of
-            // them keeps its state in the extra bytes and sets it up in
-            // WM_CREATE like a window made any other way. A system class has
-            // no procedure here, and a control that answered messages from
-            // nowhere would be inventing behaviour.
-            const cls = classNamed(control.className);
-            const style = (control.style | WS_CHILD) >>> 0;
-            const placed = {
-                x: acrossFor(control.x, cell),
-                y: downFor(control.y, cell),
-                width: acrossFor(control.width, cell),
-                height: downFor(control.height, cell),
+        // The dialog is a window made the way CreateWindowEx makes one, before
+        // any control: a CBT hook hears of it, and a framework that attaches
+        // its object there and subclasses the procedure has done so before
+        // the first message and the dialog's first control.
+        const build = ()=>{
+            dialog.extra.setUint32(DWLP_DLGPROC, dialogFunc >>> 0, true);
+            /** @type {Promise<number>[]} */
+            const creating = [];
+            /** @type {any[]} */
+            const controls = [];
+            for (const control of makeable)
+            {
+                // A class the program registered is the program's, procedure and
+                // all: a template names its own controls this way, and one of
+                // them keeps its state in the extra bytes and sets it up in
+                // WM_CREATE like a window made any other way. A system class has
+                // no procedure here, and a control that answered messages from
+                // nowhere would be inventing behaviour.
+                const cls = classNamed(control.className);
+                const style = (control.style | WS_CHILD) >>> 0;
+                const placed = {
+                    x: acrossFor(control.x, cell),
+                    y: downFor(control.y, cell),
+                    width: acrossFor(control.width, cell),
+                    height: downFor(control.height, cell),
+                };
+                const record = makeWindow({
+                    className: control.className,
+                    title: control.title,
+                    style,
+                    exStyle: control.exStyle,
+                    parent: dialog.hwnd,
+                    instance: instance >>> 0,
+                    id: control.id,
+                    wndProc: cls ? cls.wndProc : 0,
+                    ...placed,
+                    ...(cls
+                        ? { extra: new DataView(new ArrayBuffer(Math.max(cls.windowExtra, 0))) }
+                        : {}),
+                });
+                // The template's default push button is the dialog's default id
+                // until DM_SETDEFID names another.
+                if (record.className === 'Button'
+                    && (record.style & BS_TYPEMASK) === BS_DEFPUSHBUTTON)
+                {
+                    dialog.defaultId = control.id & 0xffff;
+                }
+                if (cls)
+                {
+                    // The class and title are in the template, not in guest
+                    // memory, so the CREATESTRUCT names neither: a procedure
+                    // that reads them there finds NULL. The ceiling on this.
+                    const announced = announce(record, [control.exStyle, 0, 0, style,
+                        placed.x, placed.y, placed.width, placed.height,
+                        dialog.hwnd, control.id, instance >>> 0, 0]);
+                    if (typeof (/** @type {any} */ (announced))?.then === 'function')
+                    {
+                        creating.push(/** @type {Promise<number>} */ (announced));
+                    }
+                }
+                controls.push(record);
+            }
+            // Every control is told the dialog's font once it exists and has
+            // set itself up, as the dialog manager tells it: before
+            // WM_INITDIALOG, and after the program's own WM_CREATE.
+            const thread = host.callerThread?.();
+            const setFonts = ()=>{
+                const told = font === 0
+                    ? [] : controls.map(record=>
+                        host.send(record.hwnd, WM_SETFONT, font, 0, thread));
+                return told.some(answer=>typeof answer !== 'number') ? Promise.all(told) : null;
             };
-            const record = makeWindow({
-                className: control.className,
-                title: control.title,
-                style,
-                exStyle: control.exStyle,
-                parent: dialog.hwnd,
-                instance: instance >>> 0,
-                id: control.id,
-                wndProc: cls ? cls.wndProc : 0,
-                ...placed,
-                ...(cls
-                    ? { extra: new DataView(new ArrayBuffer(Math.max(cls.windowExtra, 0))) }
-                    : {}),
-            });
-            // The template's default push button is the dialog's default id
-            // until DM_SETDEFID names another.
-            if (record.className === 'Button' && (record.style & BS_TYPEMASK) === BS_DEFPUSHBUTTON)
-            {
-                dialog.defaultId = control.id & 0xffff;
-            }
-            if (cls)
-            {
-                // The class and title are in the template, not in guest
-                // memory, so the CREATESTRUCT names neither: a procedure
-                // that reads them there finds NULL. The ceiling on this.
-                const announced = announce(record, [control.exStyle, 0, 0, style,
-                    placed.x, placed.y, placed.width, placed.height,
-                    dialog.hwnd, control.id, instance >>> 0, 0]);
-                if (typeof (/** @type {any} */ (announced))?.then === 'function')
-                {
-                    creating.push(/** @type {Promise<number>} */ (announced));
-                }
-            }
-            controls.push(record);
-        }
-        // Every control is told the dialog's font once it exists and has
-        // set itself up, as the dialog manager tells it: before
-        // WM_INITDIALOG, and after the program's own WM_CREATE.
-        const thread = host.callerThread?.();
-        const setFonts = ()=>{
-            const told = font === 0
-                ? [] : controls.map(record=>host.send(record.hwnd, WM_SETFONT, font, 0, thread));
-            return told.some(answer=>typeof answer !== 'number') ? Promise.all(told) : null;
+            const initialise = ()=>{
+                host.created?.(dialog.hwnd);
+                // Sent, not posted: a program that creates a dialog and then reads
+                // a control its procedure was to fill in is entitled to find it
+                // filled, so the call does not return until the procedure has run.
+                const answered = host.send(dialog.hwnd, WM_INITDIALOG,
+                    // The control that takes the focus unless the procedure says
+                    // otherwise: the first that stops the Tab key.
+                    nextTabStop(dialog, 0, true)?.hwnd ?? 0, initParam >>> 0, thread);
+                return after(answered, ()=>{
+                    // A template that said WS_VISIBLE is shown only now, after the
+                    // procedure has had its say. A procedure that ended the dialog
+                    // from WM_INITDIALOG has left nothing to show.
+                    if (wantsVisible && live(dialog.hwnd))
+                    {
+                        return after(host.show?.(dialog.hwnd) ?? 0, ()=>dialog.hwnd);
+                    }
+                    return dialog.hwnd;
+                });
+            };
+            // WM_INITDIALOG comes after every control exists and has been told
+            // so; a procedure that talks to a control from there expects the
+            // control to have set itself up.
+            const fonts = creating.length === 0 ? setFonts() : Promise.all(creating).then(setFonts);
+            return fonts ? fonts.then(initialise) : initialise();
         };
-        const initialise = ()=>{
-            host.created?.(dialog.hwnd);
-            // Sent, not posted: a program that creates a dialog and then reads
-            // a control its procedure was to fill in is entitled to find it
-            // filled, so the call does not return until the procedure has run.
-            const answered = host.send(dialog.hwnd, WM_INITDIALOG,
-                // The control that takes the focus unless the procedure says
-                // otherwise: the first that stops the Tab key.
-                nextTabStop(dialog, 0, true)?.hwnd ?? 0, initParam >>> 0, thread);
-            return after(answered, ()=>{
-                // A template that said WS_VISIBLE is shown only now, after the
-                // procedure has had its say. A procedure that ended the dialog
-                // from WM_INITDIALOG has left nothing to show.
-                if (wantsVisible && live(dialog.hwnd))
-                {
-                    return after(host.show?.(dialog.hwnd) ?? 0, ()=>dialog.hwnd);
-                }
-                return dialog.hwnd;
-            });
-        };
-        // WM_INITDIALOG comes after every control exists and has been told
-        // so; a procedure that talks to a control from there expects the
-        // control to have set itself up.
-        const fonts = creating.length === 0 ? setFonts() : Promise.all(creating).then(setFonts);
-        return fonts ? fonts.then(initialise) : initialise();
+        return after(announce(dialog, [exStyle, 0, 0, dialog.style, x, y, width, height,
+            parent >>> 0, 0, instance >>> 0, initParam >>> 0]),
+        (/** @type {number} */ made)=>(made === 0 ? 0 : build()));
     };
 
     /**
@@ -859,6 +889,10 @@ export function createDialogFunctions(options){
         // A modal dialog is shown by the call whether or not its template
         // says WS_VISIBLE: most templates leave the bit off and rely on this.
         await host.show?.(hwnd);
+        // Unattended, a dialog waiting for input is put to whoever answers for
+        // the run, and the button chosen is pressed as a click presses it; one
+        // that stays up after a few presses is left.
+        let presses = 0;
         while (!record.destroyed)
         {
             // The program's own loop would have been GetMessage, and what
@@ -867,6 +901,27 @@ export function createDialogFunctions(options){
                 : host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
             if (!entry)
             {
+                if (host.unattended && presses < UNATTENDED_PRESSES)
+                {
+                    presses++;
+                    const id = await defaultButton(hwnd, thread);
+                    const children = host.children(record);
+                    const buttons = children.filter(child=>child.className === 'Button'
+                        && (child.style & BS_TYPEMASK) <= BS_DEFPUSHBUTTON)
+                        .map(child=>({ id: child.id & 0xffff,
+                            label: String(child.title).replace('&', ''),
+                            default: child.id === id }));
+                    const chosen = await (host.answer?.({
+                        kind: 'dialog',
+                        title: record.title,
+                        text: children.filter(child=>child.className === 'Static' && child.title)
+                            .map(child=>child.title).join('\n'),
+                        buttons: buttons.length > 0
+                            ? buttons : [{ id, label: 'OK', default: true }],
+                    }) ?? id);
+                    await command(hwnd, chosen, thread);
+                    continue;
+                }
                 await host.idle();
                 continue;
             }

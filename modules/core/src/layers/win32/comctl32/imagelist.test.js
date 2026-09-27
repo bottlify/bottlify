@@ -268,6 +268,19 @@ test('ILD_NORMAL puts the background colour behind the image, and ILD_MASK draws
         assert.equal(m.fns.ImageList_DrawEx.argBytes, 40);
     });
 
+test('an icon is appended at -1 or put in place, and counted', ()=>{
+    const { fns } = machine();
+    const list = fns.ImageList_Create.handler([4, 4, ILC_COLOR32, 1, 1]);
+    assert.equal(fns.ImageList_ReplaceIcon.argBytes, 12);
+    assert.equal(fns.ImageList_ReplaceIcon.handler([list, -1, 0x1234]), 0, 'appended first');
+    assert.equal(fns.ImageList_ReplaceIcon.handler([list, -1, 0x1234]), 1);
+    assert.equal(fns.ImageList_GetImageCount.handler([list]), 2);
+    assert.equal(fns.ImageList_ReplaceIcon.handler([list, 0, 0x1234]), 0, 'replaced in place');
+    assert.equal(fns.ImageList_GetImageCount.handler([list]), 2);
+    assert.equal(fns.ImageList_ReplaceIcon.handler([list, 5, 0x1234]), -1, 'past the end');
+    assert.equal(fns.ImageList_ReplaceIcon.handler([list, -1, 0]), -1, 'no icon');
+});
+
 test('removing an image moves the later ones down, and -1 removes them all', ()=>{
     const m = machine();
     const list = m.fns.ImageList_Create.handler([1, 1, ILC_COLOR32, 0, 1]);

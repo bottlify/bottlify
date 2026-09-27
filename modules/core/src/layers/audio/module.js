@@ -301,6 +301,9 @@ export function createAudioModule(){
                     {
                         voice.gain = buffer.gain;
                         voice.balance = buffer.balance;
+                        // Nothing to hand over; what the device passed is still
+                        // checked against what the program wrote (stale).
+                        buffer.drainPlayed();
                         continue;
                     }
                     let track = tracks.get(buffer);

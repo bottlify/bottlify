@@ -1272,13 +1272,15 @@ export function createGdiFunctions(host){
      * is how a program learns a face is not installed.
      *
      * @param {number[]} args @param {boolean} wide
+     * @param {{ charSet: number, faceName: string } | null} [asked]  The request
+     *     itself, for the older call that names a family instead of a LOGFONT.
      */
-    const enumerateFaces = ([hdc, logfont, proc, lParam], wide)=>{
+    const enumerateFaces = ([hdc, logfont, proc, lParam], wide, asked)=>{
         if (!dcOf(hdc))
         {
             return 0;
         }
-        const request = (logfont >>> 0) === 0 ? null
+        const request = asked !== undefined ? asked : (logfont >>> 0) === 0 ? null
             : (wide ? readLogFontW : readLogFont)(host, logfont >>> 0);
         const charSet = request ? request.charSet : DEFAULT_CHARSET;
         const named = request && request.faceName !== '' ? faceNamed(request.faceName) : null;
@@ -2452,6 +2454,23 @@ export function createGdiFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: args=>enumerateFaces(args, true),
+        },
+
+        /**
+         * int EnumFontFamiliesA(HDC hdc, LPCSTR lpszFamily, FONTENUMPROCA lpProc,
+         *                      LPARAM lParam)
+         *
+         * The older call: a family name where the Ex call takes a LOGFONT, and
+         * every character set. Its ENUMLOGFONT and NEWTEXTMETRIC are the
+         * leading parts of the Ex call's structures, so the same answers serve.
+         */
+        EnumFontFamiliesA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hdc, family, proc, lParam])=>enumerateFaces([hdc, 0, proc, lParam], false, {
+                charSet: DEFAULT_CHARSET,
+                faceName: (family >>> 0) === 0 ? '' : host.readCString(family >>> 0, MAX_FACE_NAME),
+            }),
         },
 
         /**

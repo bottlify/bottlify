@@ -86,6 +86,11 @@ import { loadZstdWasm } from './zstd-wasm.js';
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
  *           Defaults to everything above the libraries up to the end of RAM.
  * @property {boolean} [traceStrings]  Keep the text an argument pointed at, for a trace.
+ * @property {boolean | { answer?: (dialog: import('./layers/win32/user32/dialogs.js')
+ *     .UnattendedDialog) => number | Promise<number> }} [unattended]
+ *     Nobody is at the screen -- a silent install run from a terminal: every modal dialog and
+ *     message box is put to `answer` (a terminal prompt, say), or without one answered with its
+ *     default button as Enter would, and each answer is reported as a divergence.
  * @property {boolean} [profileCalls]  Time every host call as a phase of its own, for a
  *                                     report's cost per API; two clock readings a call.
  * @property {() => boolean} [pageHidden]
@@ -1116,6 +1121,39 @@ export function heapSizeFor(memorySize, asked, base = 0x0c000000){
         throw new Error(`heap: ${memorySize} bytes of RAM is less than the heap's base`);
     }
     return memorySize - base;
+}
+
+/**
+ * Hands a film's sound to its track and says how much of the film's timeline
+ * that was, in the device's frames -- all of it, whether the track took it or
+ * not.
+ *
+ * The picture is decoded to just ahead of the sound heard, and heard is what
+ * was handed over less what is still owed. A track that refuses part of a
+ * block (full, or a queue the device is behind on) still moves the film on by
+ * the whole block: counted as taken only, the refused part would be heard the
+ * moment it was offered, the picture would race ahead to meet it and more would
+ * be refused -- a film run through in a fraction of its length on a sound
+ * mostly dropped.
+ *
+ * @param {{ write: (bytes: Uint8Array) => number }} track
+ * @param {Int16Array[]} blocks
+ * @param {number} channels     the film's
+ * @param {number} rate         the film's sample rate
+ * @param {number} deviceRate   the rate the track counts `played()` in
+ * @returns {{ offered: number, refused: number }} device frames
+ */
+export function feedFilmSound(track, blocks, channels, rate, deviceRate){
+    let offered = 0;
+    let refused = 0;
+    for (const block of blocks)
+    {
+        const frames = Math.round(block.length / channels * deviceRate / rate);
+        const taken = track.write(new Uint8Array(block.buffer, block.byteOffset, block.byteLength));
+        offered += frames;
+        refused += Math.max(0, frames - taken);
+    }
+    return { offered, refused };
 }
 
 /**
@@ -3263,6 +3301,8 @@ async function buildApp(options){
             namedObjects: options.namedObjects,
             // The network beyond this runtime, when the embedder supplied one.
             network: options.win32?.network,
+            unattended: Boolean(options.unattended),
+            answer: typeof options.unattended === 'object' ? options.unattended.answer : undefined,
             // The roots WinVerifyTrust judges a signature's chain against;
             // absent, the win32 layer's default store.
             trustedRoots: options.win32?.trustedRoots,
@@ -3750,11 +3790,8 @@ async function buildApp(options){
     // project's own decoder now, so the mount no longer needs the emulator.
     blocks = await mountBundle({ options, cpu, filesystem, events, translationStore });
 
-    // The session's files go onto the volume once it is the one the program
-    // will run on: the mount above puts a fresh writable layer over the
-    // bundle, and files laid down before it went with the layer it replaced
-    // -- which is how a saved profile was written faithfully and never seen
-    // again.
+    // The session's files go onto the volume once the bundle is under it, so
+    // that a saved file the bundle also carries is the one the program sees.
     if (seeded.files.length > 0)
     {
         filesystem.apply(seeded.files);
@@ -4172,9 +4209,8 @@ async function buildApp(options){
         };
         if (held.entryPoint && held.entryPoint !== held.base && held.attached !== false)
         {
-            return bridge.callGuest({
-                entry: held.entryPoint,
-                args: [held.base, DLL_PROCESS_DETACH, 0],
+            return win32.callEntryPoint({
+                entry: held.entryPoint, base: held.base, reason: DLL_PROCESS_DETACH, reserved: 0,
                 thread: kernel.currentThread(),
             }).then(unload);
         }
@@ -5067,6 +5103,8 @@ async function buildApp(options){
         // film's own timeline. A film has one timeline and two ways to advance
         // along it, and nothing else in a report says whether they agree.
         driftMs: 0, worstDriftMs: 0, soundMs: 0, queuedMs: 0,
+        // The film's sound its track would not take: heard as a gap.
+        refusedMs: 0,
     };
 
     /** @param {{ hwnd: number, width: number, height: number, bgra: Uint8Array | null,
@@ -5110,11 +5148,10 @@ async function buildApp(options){
                     written: 0,
                 };
             }
-            for (const block of shown.audio)
-            {
-                filmTrack.written += filmTrack.track.write(new Uint8Array(
-                    block.buffer, block.byteOffset, block.byteLength));
-            }
+            const fed = feedFilmSound(filmTrack.track, shown.audio, shown.channels,
+                shown.sampleRate, sound.sampleRate);
+            filmTrack.written += fed.offered;
+            film.refusedMs += Math.round(fed.refused * 1000 / sound.sampleRate);
         }
         if (filmTrack && sound)
         {

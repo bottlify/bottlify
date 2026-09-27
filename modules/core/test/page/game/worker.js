@@ -81,6 +81,11 @@ self.onmessage = ({ data })=>{
         case 'canvas':
             harness = createHarness(data.canvas, {
                 pacing: data.pacing === 'event' ? pacing : undefined,
+                // The sound is read on the page, off this thread, as a
+                // launcher's worklet reads it: a device here would stand still
+                // whenever the engine does, and hide every refill that came late.
+                drainElsewhere: (table, sampleRate)=>self.postMessage(
+                    { type: 'audioTable', table, sampleRate }),
             });
             harness.gpu.then(gpu=>self.postMessage({ type: 'gpu', gpu }));
             setInterval(flushCalls, CALLS_MS);

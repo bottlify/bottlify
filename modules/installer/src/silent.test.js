@@ -7,9 +7,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    DESTINATION, detectFamily, packagedEntries, readImage, responseFile, silentOptions,
+    DESTINATION, detectFamily, dialogCalled, packagedEntries, readImage, responseFile,
+    responseFileV5, silentOptions,
 } from './silent.js';
 import { MEDIA_DIRECTORY } from './prefix.js';
+
+/**
+ * The unattended mode, asked for as a run with no screen asks for it.
+ *
+ * @param {import('./prefix.js').InstallMedia} media @param {{ dialogs?: string[] }} [learned]
+ */
+const silently = (media, learned = {})=>silentOptions(media, { ...learned, silent: true });
+
+test('silent is asked for: without it the distribution runs its own wizard', ()=>{
+    assert.equal(silentOptions({ name: 'Doom.exe', bytes: WISE_STUB }), null,
+        'a screen: the wizard');
+    assert.equal(silentOptions({ name: 'Doom.exe', bytes: WISE_STUB }, { silent: false }), null);
+    assert.notEqual(silentOptions({ name: 'Doom.exe', bytes: WISE_STUB }, { silent: true }), null,
+        'no screen: the silent switches');
+});
 
 /** @param {string} text */
 const latin1 = text=>Uint8Array.from(text, character=>character.charCodeAt(0) & 0xff);
@@ -152,20 +168,20 @@ test('the silent command lines, per family', ()=>{
     ];
     for (const [bytes, commandLine, destination] of table)
     {
-        const options = silentOptions({ name: 'Setup.exe', bytes });
+        const options = silently({ name: 'Setup.exe', bytes });
         assert.equal(options?.commandLine, commandLine);
         assert.equal(options?.destination, destination);
     }
-    assert.equal(silentOptions({ name: 'Setup.exe', bytes: pe([{ name: '.text' }]) }), null,
+    assert.equal(silently({ name: 'Setup.exe', bytes: pe([{ name: '.text' }]) }), null,
         'no family, no silent mode');
-    assert.equal(silentOptions({
+    assert.equal(silently({
         name: 'product.msi',
         bytes: latin1('\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1' + '\0'.repeat(64)),
     }), null, 'nothing in the guest runs an .msi');
 });
 
 test('Wise is answered from a values file naming the destination relative to Program Files', ()=>{
-    const options = silentOptions({ name: 'Doom.exe', bytes: WISE_STUB });
+    const options = silently({ name: 'Doom.exe', bytes: WISE_STUB });
     assert.equal(options?.family, 'wise');
     assert.deepEqual(options?.seeded.map(file=>[file.path, text(file.bytes)]),
         [[`${MEDIA_DIRECTORY}\\bottlify-wise.txt`, 'MAINDIR=..\\App\r\n']]);
@@ -173,7 +189,7 @@ test('Wise is answered from a values file naming the destination relative to Pro
 });
 
 test('InstallShield is answered from a response file keyed by the product GUID', ()=>{
-    const options = silentOptions({ name: 'Setup.exe', bytes: INSTALLSHIELD_STUB });
+    const options = silently({ name: 'Setup.exe', bytes: INSTALLSHIELD_STUB });
     assert.equal(options?.family, 'installshield');
     assert.equal(options?.seeded[0].path, `${MEDIA_DIRECTORY}\\bottlify.iss`);
     const response = text(options?.seeded[0].bytes ?? new Uint8Array(0));
@@ -184,7 +200,7 @@ test('InstallShield is answered from a response file keyed by the product GUID',
         new RegExp(`\\[${guid}-SdAskDestPath-0\\]\\r\\nResult=1\\r\\nszDir=C:\\\\App\\r\\n`));
     assert.match(response, new RegExp(`-DlgOrder\\]\\r\\nDlg0=${guid}-SdWelcome-0\\r\\n`));
 
-    const disc = silentOptions({
+    const disc = silently({
         name: 'setup.exe',
         bytes: pe([{ name: '.text', text: 'InstallShield' }]),
         files: [
@@ -196,7 +212,7 @@ test('InstallShield is answered from a response file keyed by the product GUID',
     assert.match(text(disc?.seeded[0].bytes ?? new Uint8Array(0)), /\[\{0123-4567\}-DlgOrder\]/,
         'the GUID is read off the disc, braces or not');
 
-    const noIni = silentOptions({
+    const noIni = silently({
         name: 'setup.exe',
         bytes: pe([{ name: '.text', text: 'InstallShield' }]),
         files: [
@@ -207,7 +223,7 @@ test('InstallShield is answered from a response file keyed by the product GUID',
     });
     assert.equal(noIni, null, 'without the GUID there is no way to key the answers');
 
-    const msi = silentOptions({
+    const msi = silently({
         name: 'setup.exe',
         bytes: pe([{ name: '.text', text: 'InstallShield' }]),
         files: [
@@ -231,4 +247,36 @@ test('the response file answers every standard dialog by name', ()=>{
     }
     assert.match(response, /szDir=D:\\Games\r\n/);
     assert.match(response, /Count=\d+\r\n/);
+});
+
+test('an InstallShield 5 disc carries its engine as _inst32i.ex_ and has no product GUID', ()=>{
+    const player = pe([{ name: '.text', text: 'InstallShield' }]);
+    const files = ['data1.cab', '_inst32i.ex_', 'setup.ini']
+        .map(name=>({ name,
+            bytes: latin1(name === 'setup.ini' ? '[Startup]\r\nAppName=x\r\n' : '') }));
+    assert.equal(detectFamily(player, files.map(file=>file.name)), 'installshield');
+    assert.equal(detectFamily(player, ['data1.cab', 'setup.ini']), null, 'no engine, no player');
+
+    const options = silently({ name: 'Setup.exe', bytes: player, files },
+        { dialogs: ['SdWelcome', 'SdLicense', 'SdAskDestPath'] });
+    assert.equal(options?.commandLine, `"${MEDIA_DIRECTORY}\\Setup.exe" -s `
+        + `-f1${MEDIA_DIRECTORY}\\bottlify.iss -f2${MEDIA_DIRECTORY}\\bottlify.log`);
+    const response = text(options?.seeded[0].bytes ?? new Uint8Array(0));
+    assert.match(response, /^\[InstallShield Silent\]\r\nVersion=v5\.00\.000\r\n/);
+    assert.match(response, /\[DlgOrder\]\r\nDlg0=SdWelcome-0\r\nDlg1=SdLicense-0\r\n/);
+    assert.match(response, /Count=3\r\n/);
+    assert.match(response, /\[SdAskDestPath-0\]\r\nResult=1\r\nszDir=C:\\App\r\n/);
+    assert.match(text(silently({ name: 'Setup.exe', bytes: player, files })?.seeded[0].bytes
+        ?? new Uint8Array(0)), /Dlg0=SdWelcome-0\r\nCount=1\r\n/, 'unlearned, the welcome');
+});
+
+test('the dialog an InstallShield 5 engine reaches is read off the call naming its section', ()=>{
+    assert.equal(dialogCalled({ name: 'USER32.dll!wsprintfA',
+        strings: [null, '%s-%ld', 'SdLicense', null] }), 'SdLicense');
+    assert.equal(dialogCalled({ name: 'USER32.dll!wsprintfA', strings: [null, '%d', 'x'] }), null);
+    assert.equal(dialogCalled({ name: 'KERNEL32.dll!lstrcpyA', strings: [null, '%s-%ld'] }), null);
+    assert.equal(dialogCalled({ name: 'USER32.dll!wsprintfA', args: [0x100, 0x200, 1],
+        strings: [null, 'MessageBox-%d', null] }), 'MessageBox-1', 'the script box, counted');
+    assert.match(responseFileV5(['SdWelcome', 'MessageBox-0'], DESTINATION),
+        /Dlg1=MessageBox-0\r\n[^]*\[MessageBox-0\]\r\nResult=1\r\n/);
 });

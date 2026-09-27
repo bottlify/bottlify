@@ -196,11 +196,13 @@ function fakeContexts(){
  *        The rectangle a GDI region holds, for the calls that name one.
  * @param {(instance: number) => number} [options.moduleBase]
  *        Where a module is mapped, for a resource read in place.
+ * @param {(info: number, bits: number) => number} [options.bitmapFromDib]
+ *        The bitmap a packed DIB in guest memory is made into.
  */
 function setup(
     { cursor, keyState, asyncKeyState, keyboardState, setKeyboardState,
         findResource, loadString, dispatch = ()=>0, screen, messageBox, regionBox,
-        moduleBase } = {})
+        moduleBase, bitmapFromDib } = {})
 {
     screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
     const memory = fakeMemory();
@@ -246,6 +248,7 @@ function setup(
         setKeyboardState,
         findResource,
         moduleBase,
+        bitmapFromDib,
         loadString,
         regionBox,
         /** @param {any} notice */
@@ -1126,11 +1129,43 @@ test('AdjustWindowRect is the same call without an extended style', ()=>{
     assert.deepEqual([memory.u32(RECT_BUFFER), memory.u32(RECT_BUFFER + 4)], plain);
 });
 
-test('a banner bitmap and a program-manager conversation are refused with the stack intact', ()=>{
-    // Neither has an implementation to offer, and both were reaching the
-    // missing-import stub, which pops nothing: an installer painting its
-    // banner from a bitmap left eight bytes on its stack per attempt and
-    // returned into them.
+test('a bitmap resource is made from its packed DIB, past the header and its colours', ()=>{
+    // The resource is a BITMAPINFOHEADER, the colour table, then the pixels;
+    // the pixels start where the colours end, which is what the bits pointer
+    // has to say -- one entry short and every row reads the palette's tail.
+    const RT_BITMAP = 2;
+    const base = 0x8000;
+    /** @type {number[][]} */
+    const made = [];
+    const { memory, fns } = setup({
+        findResource: (/** @type {number} */ instance, /** @type {number} */ type,
+            /** @type {number | string} */ name)=>(instance === HINSTANCE && type === RT_BITMAP
+            ? { 101: { rva: 0x100 }, CloseU: { rva: 0x800 } }[name] ?? null : null),
+        moduleBase: (/** @type {number} */ instance)=>(instance === HINSTANCE ? base : 0),
+        bitmapFromDib: (/** @type {number} */ info, /** @type {number} */ bits)=>{
+            made.push([info, bits]);
+            return 0x7000 + made.length;
+        },
+    });
+    // An 8-bit DIB with its full palette, and a 24-bit one with none.
+    memory.putU32s(base + 0x100, [40, 16, 16]);
+    memory.bytes.set([1, 0, 8, 0], base + 0x100 + 12);
+    memory.putU32s(base + 0x800, [40, 16, 16]);
+    memory.bytes.set([1, 0, 24, 0], base + 0x800 + 12);
+    memory.putString(TEXT_BUFFER, 'CloseU');
+
+    assert.equal(fns.LoadBitmapA.handler([HINSTANCE, 101]), 0x7001);
+    assert.deepEqual(made[0], [base + 0x100, base + 0x100 + 40 + 256 * 4]);
+    assert.equal(fns.LoadImageA.handler([HINSTANCE, TEXT_BUFFER, 0, 0, 0, 0x2000]), 0x7002,
+        'IMAGE_BITMAP, by name');
+    assert.deepEqual(made[1], [base + 0x800, base + 0x800 + 40]);
+    assert.equal(fns.LoadBitmapA.handler([HINSTANCE, 999]), 0, 'and one it does not carry is null');
+});
+
+test('a bitmap the module does not carry, and a program-manager conversation, are refused', ()=>{
+    // Both were reaching the missing-import stub, which pops nothing: an
+    // installer painting its banner from a bitmap left eight bytes on its
+    // stack per attempt and returned into them.
     const { fns } = setup();
     assert.equal(fns.LoadBitmapA.handler([0x400000, 101]), 0);
     assert.equal(fns.LoadBitmapA.argBytes, 8);

@@ -88,6 +88,11 @@ function fakeMemory(size = 0x13000){
             {
                 end++;
             }
+            // As the memory layer answers a string with no terminator in reach.
+            if (bytes[end] !== 0)
+            {
+                throw new Error(`No NUL within ${maxLength} bytes of 0x${address.toString(16)}`);
+            }
             return decodeAnsi(bytes.subarray(address, end));
         },
         /** @param {number} address */
@@ -2801,3 +2806,18 @@ test('EnumWindows hands over every top-level window, topmost first, until told t
         assert.equal(stopping.fns.EnumWindows.handler([0, 0]), 0);
         assert.equal(stopping.errors.at(-1), 87, 'ERROR_INVALID_PARAMETER for no callback');
     });
+
+test('DrawText with a count draws that many characters of a buffer with no terminator', ()=>{
+    // A program drawing part of a buffer passes the part's length, and what
+    // follows it is more text, not a terminator.
+    const { memory, fns } = setup();
+    for (let at = 0; at < 80; at++)
+    {
+        memory.bytes[TEXT_BUFFER + at] = 'HelloWorld'.charCodeAt(at % 10);
+    }
+    memory.putU32s(RECT_BUFFER, [0, 0, 0, 0]);
+    const DT_CALCRECT = 0x400;
+    assert.ok(fns.DrawTextA.handler([0, TEXT_BUFFER, 5, RECT_BUFFER, DT_CALCRECT]) > 0);
+    const [left, , right] = [0, 4, 8].map(at=>memory.u32(RECT_BUFFER + at) | 0);
+    assert.equal(right - left, 5 * 8, 'five cells, not the eighty that follow');
+});

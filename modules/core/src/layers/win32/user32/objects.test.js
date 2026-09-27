@@ -267,6 +267,15 @@ test('a window has a system menu with the standard commands, and its close can b
         'and then it was grayed');
     assert.equal(fns.EnableMenuItem.handler([menu, 0x1234, MF_BYCOMMAND]), -1);
 
+    const text = 0x3000;
+    assert.equal(fns.GetMenuStringA.handler([menu, SC_CLOSE, text, 64, MF_BYCOMMAND]), 13);
+    assert.equal(memory.readCString(text, 64), '&Close\tAlt+F4');
+    assert.equal(fns.GetMenuStringA.handler([menu, 0, text, 5, 0x400]), 4, 'cut to the room');
+    assert.equal(memory.readCString(text, 64), '&Res');
+    assert.equal(fns.GetMenuStringA.handler([menu, SC_CLOSE, 0, 0, MF_BYCOMMAND]), 13,
+        'no buffer asks for the length');
+    assert.equal(fns.GetMenuStringA.handler([menu, 0x1234, text, 64, MF_BYCOMMAND]), 0);
+
     assert.equal(fns.GetSystemMenu.handler([hwnd, 1]), 0, 'reverting answers nothing');
     assert.equal(fns.GetMenuItemCount.handler([menu]), -1, 'and the copy is gone');
     assert.notEqual(fns.GetSystemMenu.handler([hwnd, 0]), 0, 'a fresh one comes after');
