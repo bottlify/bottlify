@@ -1255,7 +1255,8 @@ export function createHarness(canvas, how = {}){
     /**
      * Runs one title and reports what came out of it.
      *
-     * @param {{ exe?: string, exeUrl?: string, bundleUrl: string, imagePath: string,
+     * @param {{ exe?: string, exeUrl?: string, bundleUrl: string, bundlePrefix?: string,
+     *           imagePath: string,
      *           commandLine?: string,
      *           windows?: 'win2000' | 'winxp' | 'win7' | 'win10',
      *           sidecarHooks?: { spec: any, source: string },
@@ -1556,6 +1557,7 @@ export function createHarness(canvas, how = {}){
             },
             bundle: {
                 fetch: rangeFetcher(request.bundleUrl),
+                prefix: request.bundlePrefix,
                 ...bundleStoreOptions(request),
             },
             // Seeded from the request when it carries files; nothing goes
