@@ -237,8 +237,10 @@ it uses from its first parameter: loads `u8`, `i8`, `u16`, `i16`, `u32`, `i32`, 
 stores `setU8`, `setU16`, `setU32`, `setF64`, `call(fn, ...args)` through a cdecl pointer, and
 `copyUp`/`copyDown`/`fill` (`rep movsd` or `rep stosd` for the whole dwords, down with the
 direction flag set for `copyDown`, the bytes left as the byte forms leave them -- a turn of a
-`rep` counts as an instruction of the thread's quantum, and a dword a turn is a quarter of the
-turns; a copy whose ends are one to three bytes apart goes a byte at a time).
+`rep` translated code moves one element at a time (a copy down, a page holding code) counts as an
+instruction of the thread's quantum, and a dword a turn is a quarter of the turns, where one it
+moves a page at a time counts by its bytes, whatever their width; a copy whose ends are one to
+three bytes apart goes a byte at a time).
 
 `npm run build` (and `npm run build:guest-code` alone) compiles every `@guestCode` function under
 `src/` with `scripts/guest-code/compile.mjs` -- parsed by `espree`, the parser ESLint already

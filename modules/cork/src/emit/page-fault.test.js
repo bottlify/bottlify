@@ -133,7 +133,7 @@ test('a rep movsb faults into an inaccessible page with ecx, esi and edi as far 
     assert.equal(r.machine.reg('ecx'), 4, 'four of eight moved');
     assert.equal(r.machine.reg('edi'), 0x5000, 'the destination stands in the bad page');
     assert.equal(r.machine.reg('esi'), 0x2004);
-    assert.equal(r.exit.retired, 3 + 4, 'the completed iterations are counted');
+    assert.equal(r.exit.retired, 3 + 1, 'the completed iterations are counted, four bytes in bulk');
     agree(r);
     sameBytes(r, 0x4ffc, 4);
 });
@@ -284,7 +284,8 @@ test('a rep stosd of a word across a page, of zero, and of bytes into code', ()=
     assert.deepEqual([...code.machine.read(0x5ff0, 64)], Array(64).fill(0x90));
 });
 
-test('a bulk rep stops on the budget with the count and the pointers of the elements it ran', ()=>{
+test('a bulk rep is charged a unit of the budget for every sixteen bytes, and stops on it with '
+    + 'the count and the pointers of the elements it ran', ()=>{
     const m = createTestMachine();
     m.write(CODE, [
         0x31, 0xc0,                         // xor eax, eax
@@ -297,9 +298,25 @@ test('a bulk rep stops on the budget with the count and the pointers of the elem
     assert.equal(exit.kind, Exit.BUDGET);
     assert.equal(exit.eip, CODE + 12, 'on the rep');
     // The block's own instructions are charged at its end: the rep has the
-    // whole budget, as one element at a time had it.
-    assert.equal(m.reg('ecx'), 1000 - 100, 'a hundred elements');
-    assert.equal(m.reg('edi'), 0x2000 + 100 * 4);
+    // whole budget, a unit for every sixteen bytes.
+    assert.equal(exit.retired, 3 + 100, 'the block\'s three and the rep\'s hundred units');
+    assert.equal(m.reg('ecx'), 1000 - 400, 'four hundred elements');
+    assert.equal(m.reg('edi'), 0x2000 + 400 * 4);
+    // A byte's rep is charged by its bytes too, a begun unit whole: mov, mov,
+    // the rep itself and the hlt, and the units.
+    for (const [count, units] of [[3, 1], [16, 1], [17, 2], [0x1000, 256]])
+    {
+        const bytes = createTestMachine();
+        bytes.write(CODE, [
+            0xbf, 0x00, 0x40, 0, 0,         // mov edi, 0x4000
+            0xb9, ...le(count),             // mov ecx, count
+            0xf3, 0xaa, 0xf4,               // rep stosb; hlt
+        ]);
+        bytes.setReg('esp', STACK);
+        const done = bytes.runProgram(CODE);
+        assert.equal(done.kind, Exit.HALT);
+        assert.equal(done.retired, 4 + units, `${count} bytes`);
+    }
 });
 
 test('loops whose pointers move by fixed strides agree with the interpreter by pages clean, '

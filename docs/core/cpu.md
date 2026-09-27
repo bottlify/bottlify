@@ -703,9 +703,16 @@ two points of one run (node, pinned to a core, median of three, a run each): `re
 1 100 -> 262 ns a turn, of 16 KiB 12 690 -> 914, of 256 KiB 985 000 -> 14 100; `rep movsb` of
 16 KiB 14 700 -> 1 100, of 256 KiB 1 437 000 -> 10 400; `rep stosd` and `rep movsd` of 256 KiB
 75 500 -> 7 190 and 101 000 -> 7 740, where cork's test machine runs the same loop's 16 KiB
-`rep stosb` in 0.15-0.4 us and its 256 KiB in about 5. Each
-iteration of a `rep` counts against the slice's budget, and a `rep cmps` or `rep scas` tests its
-stop condition before the budget: a slice that runs out on the iteration that stops it leaves the
+`rep stosb` in 0.15-0.4 us and its 256 KiB in about 5. An
+element of the per-element path counts against the slice's budget as an instruction does, and a
+turn of the bulk path a unit for every sixteen bytes it moves, a begun one whole, where it had
+counted each element too: a fill or a copy of sixteen bytes costs about what a translated
+instruction does, and counted by the element a `rep` of bytes ended its slice sixteen times as
+often as its time did -- each end a turn of the host's scheduler, and the rest of the `rep` on an
+interpreter tier. The same loop, one thread: `rep stosb` of 4 KiB 262 -> 95 ns a turn, of
+16 KiB 914 -> 399, of 256 KiB 14 100 -> 5 870; two threads each running it, 16 KiB 1 625 -> 230,
+256 KiB 41 500 -> 7 820. The interpreter tiers count a `rep` as one instruction, as the emulator
+does. A `rep cmps` or `rep scas` tests its stop condition before the budget: a slice that runs out on the iteration that stops it leaves the
 instruction done, where it had left on it and the instruction run again scanned on past the match
 (a `repne scasb` strlen of "abc" answered 9). The source of `lods`, `movs` and `cmps` takes an
 `fs:` override as any memory operand does, the thread block's base added to esi, where translated

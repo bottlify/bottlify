@@ -180,7 +180,8 @@ test('a rep movs that runs into an inaccessible page faults with its progress ke
     assert.equal(m.reg('ecx'), 4, 'four bytes moved');
     assert.equal(m.reg('edi'), 0x5000);
     assert.equal(m.reg('esi'), 0x2004);
-    assert.equal(exit.retired, 3 + 4, 'the iterations that completed');
+    // The four went in bulk, a unit of the budget for up to sixteen bytes.
+    assert.equal(exit.retired, 3 + 1, 'the iterations that completed');
 });
 
 test('the other precise faults: a divide by zero, ud2; int3 and int n are left before', ()=>{

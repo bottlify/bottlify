@@ -1995,6 +1995,9 @@ function decimal(e, instruction){
     return true;
 }
 
+/** The bytes a unit of the budget pays for in the bulk path, as a shift (`bulkString`). */
+const BULK_UNIT_SHIFT = 4;
+
 /**
  * A `rep movs` or `rep stos` with DF clear takes, per turn of its loop, every
  * element that lies wholly on the current page of each pointer (as far as
@@ -2007,6 +2010,14 @@ function decimal(e, instruction){
  * source's first elements there, which a memmove does not). What the run
  * leaves -- registers, memory, count, the budget exit on the instruction --
  * is what as many single elements leave.
+ *
+ * The budget is charged a unit for every 16 bytes the run moves, a begun one
+ * whole, where the per-element path charges an element: the quantum is how
+ * long a thread may hold the machine, and a fill or a copy of 16 bytes costs
+ * about what one translated instruction does. Charged an element, a `rep` of
+ * bytes would end its slice sixteen times as often as its time does, and
+ * each end costs a turn of the host's scheduler and the rest of the `rep` on
+ * an interpreter tier.
  *
  * @param {E} e @param {Instruction} instruction
  */
@@ -2037,7 +2048,11 @@ function bulkString(e, instruction){
         .localGet(Local.budget).i32const(0).op(I32.gtS).op(I32.and);
     e.openIf('bulk', EMPTY);
     b.localGet(ecx).localSet(Local.t0);
-    b.localGet(Local.budget);
+    // The elements the budget pays for, the budget taken at a page's worth at
+    // most so the shift cannot overflow.
+    const page = 4096 >> BULK_UNIT_SHIFT;
+    b.localGet(Local.budget).i32const(page).localGet(Local.budget).i32const(page).op(I32.ltS)
+        .select().i32const(BULK_UNIT_SHIFT - elementShift).op(I32.shl);
     minInto();
     room(edi);
     minInto();
@@ -2095,7 +2110,8 @@ function bulkString(e, instruction){
     }
     b.localGet(edi).localGet(Local.t1).op(I32.add).localSet(edi);
     b.localGet(ecx).localGet(Local.t0).op(I32.sub).localSet(ecx);
-    b.localGet(Local.budget).localGet(Local.t0).op(I32.sub).localSet(Local.budget);
+    b.localGet(Local.budget).localGet(Local.t1).i32const((1 << BULK_UNIT_SHIFT) - 1).op(I32.add)
+        .i32const(BULK_UNIT_SHIFT).op(I32.shrU).op(I32.sub).localSet(Local.budget);
     b.localGet(Local.budget).i32const(0).op(I32.leS);
     e.openGuard('bulkSpent', EMPTY);
     e.exitAt(instruction.eip, Exit.BUDGET);
