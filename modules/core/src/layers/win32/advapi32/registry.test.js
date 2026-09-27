@@ -313,8 +313,9 @@ test('string data is stored with its terminator counted', ()=>{
     const already = hive.setValue(key, 'Done', REG_SZ, latin1('ab\0'));
     assert.deepEqual([...already.data], [0x61, 0x62, 0], 'a terminator is not doubled');
 
+    // advapi32's registry tests set a REG_SZ of no bytes and read none back.
     const empty = hive.setValue(key, 'Empty', REG_SZ, new Uint8Array(0));
-    assert.deepEqual([...empty.data], [0]);
+    assert.deepEqual([...empty.data], [], 'nothing stays nothing');
 
     // REG_MULTI_SZ ends the list with a second NUL, not a first.
     const multi = hive.setValue(key, 'List', REG_MULTI_SZ, latin1('a\0b\0'));

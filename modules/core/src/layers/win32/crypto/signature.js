@@ -99,6 +99,9 @@ const equalBytes = (a, b)=>a.length === b.length && a.every((byte, i)=>byte === 
  * digest algorithm `digestOid`: 00 01, at least eight FF, 00, and a DigestInfo
  * naming that algorithm and holding that hash, filling the block exactly. The
  * DigestInfo's parameters may be NULL or absent, both of which signers produce.
+ * The hash alone in place of the DigestInfo is accepted too, as CryptoAPI's
+ * verification accepts it: a time-stamping service of the early 2000s signed
+ * its countersignatures that way, and XP verifies the files carrying them.
  *
  * @param {RsaKey} key
  * @param {string} digestOid
@@ -129,6 +132,11 @@ export function verifyPkcs1(key, digestOid, hash, signature){
     if (at - 2 < 8 || block[at] !== 0)
     {
         return false;
+    }
+    if (block.length - at - 1 === hash.length
+        && equalBytes(block.subarray(at + 1), hash))
+    {
+        return true;
     }
     try
     {

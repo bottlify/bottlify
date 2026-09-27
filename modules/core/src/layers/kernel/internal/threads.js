@@ -62,6 +62,12 @@ export const SLOW_SLICE_COLUMNS = ['ms', 'instructions', 'from', 'at', 'thread']
 /** A thread's state as the table stores it. */
 export const THREAD_STATES = ['ready', 'running', 'blocked', 'terminated'];
 
+/** A wait this short or shorter, in guest ms, is a thread working in short periods. */
+const SHORT_WAIT_MS = 20;
+
+/** A short-period thread kept off the processor this long, in host ms, is counted late. */
+const LATE_GAP_MS = 40;
+
 /** The base of the normal priority class, and the two relative values pinned outside it. */
 const NORMAL_BASE = 8;
 const THREAD_PRIORITY_IDLE = -15;
@@ -127,6 +133,14 @@ export function createScheduler(options){
     const starvation = options.starvation ?? 4000;
     /** Turns given to a thread because it had been passed over too long. */
     let boosts = 0;
+    /** The last long gaps a short-period thread went without the processor. @type {string[]} */
+    const lateGaps = [];
+    /**
+     * The last turns: whose, host ms in the slice, when it ended, ms since the one before.
+     * @type {{ thread: string, ms: number, end: number, outside: number }[]}
+     */
+    const recentTurns = [];
+    let lastEnd = 0;
     const wall = import.meta.BOTTLIFY_DIAGNOSTICS !== false
         ? options.wall ?? (()=>performance.now()) : ()=>0;
     /**
@@ -548,6 +562,40 @@ export function createScheduler(options){
             // especially, a thread that has just blocked. Saving only threads
             // still marked RUNNING loses the state of every thread that parked
             // itself in a wait, which then resumes from wherever it first began.
+            // How long, on the host clock, a thread that waits in short
+            // periods -- a mixer feeding a sound device every few milliseconds
+            // -- went without the processor, and what had it instead: the
+            // slices run meanwhile by thread, and the time spent outside any.
+            // A gap longer than what it keeps written ahead is heard.
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && next.shortWait
+                && next.lastRanAt !== undefined)
+            {
+                const t = wall();
+                const gap = t - next.lastRanAt;
+                next.worstGap = Math.max(next.worstGap ?? 0, gap);
+                if (gap >= LATE_GAP_MS)
+                {
+                    next.lateGaps = (next.lateGaps ?? 0) + 1;
+                    /** @type {Map<string, number>} */
+                    const held = new Map();
+                    let outside = 0;
+                    for (const turn of recentTurns)
+                    {
+                        if (turn.end > next.lastRanAt)
+                        {
+                            held.set(turn.thread, (held.get(turn.thread) ?? 0) + turn.ms);
+                            outside += turn.outside;
+                        }
+                    }
+                    const by = [...held].map(([name, ms])=>`${name}:${Math.round(ms)}`).join(',');
+                    lateGaps.push(`${next.name}@${Math.round(t)}+${Math.round(gap)} ${by} out:${
+                        Math.round(outside)}`);
+                    if (lateGaps.length > 32)
+                    {
+                        lateGaps.shift();
+                    }
+                }
+            }
             const switched = switcher.switchTo(current, next, resume);
 
             if (current && current.state === ThreadState.RUNNING)
@@ -568,6 +616,17 @@ export function createScheduler(options){
             const began = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? wall() : 0;
             const instructions = cpu.runSlice(quantum);
             const held = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? wall() - began : 0;
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+            {
+                recentTurns.push({ thread: next.name ?? '?', ms: held, end: began + held,
+                    outside: lastEnd === 0 ? 0 : began - lastEnd });
+                if (recentTurns.length > 256)
+                {
+                    recentTurns.shift();
+                }
+                lastEnd = began + held;
+                next.lastRanAt = lastEnd;
+            }
             next.instructions += instructions;
             next.sincePublished += instructions;
             // Where the heaviest slice of the interval began: one page names
@@ -656,6 +715,7 @@ export function createScheduler(options){
             thread.lastWaitingOn = reason ?? null;
             thread.deadline = timed?.deadline ?? null;
             thread.timeoutResult = timed?.result ?? 0;
+            thread.shortWait = thread.deadline !== null && thread.deadline - now() <= SHORT_WAIT_MS;
             // Whether a queued APC may end this wait early. Set for the one
             // block made inside an alertable call and no other, and gone again
             // at the wake: a later wait that is not alertable must not be
@@ -898,6 +958,9 @@ export function createScheduler(options){
                 // too long. A steady count is a high-priority thread that
                 // never yields, which a program does not mean to do.
                 boosts,
+                // The last gaps past LATE_GAP_MS a short-period thread went
+                // without the processor, and what held the machine meanwhile.
+                lateGaps: lateGaps.join(' | '),
                 // Empty in a healthy run: a thread's stack pointer belongs
                 // inside the stack it was given, and anywhere else is memory
                 // somebody else owns. Strings rather than a list, because a
@@ -922,7 +985,8 @@ export function createScheduler(options){
                 byThread: threads
                     .map(thread=>`${thread.name} ${thread.instructions} ${thread.state} p${
                         absolutePriority(thread.priority)} b${thread.boosts}${
-                        thread.boosted ? '+' : ''}`)
+                        thread.boosted ? '+' : ''}${thread.worstGap === undefined ? ''
+                        : ` g${Math.round(thread.worstGap)}/${thread.lateGaps ?? 0}`}`)
                     .join(' | '),
                 current: current ? current.name : null,
                 // A thread that has been waiting on the same thing for a long

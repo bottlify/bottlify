@@ -347,6 +347,26 @@ export const DEVMODEA = Object.freeze({
     SIZE: 156,
 });
 
+/**
+ * DEVMODEW, the same members with both names wide: the device name's 32 more
+ * bytes move every member after it along by 32, and the form name's move the
+ * ones after that by 64.
+ */
+export const DEVMODEW = Object.freeze({
+    dmDeviceName: 0,
+    dmSpecVersion: 64,
+    dmDriverVersion: 66,
+    dmSize: 68,
+    dmDriverExtra: 70,
+    dmFields: 72,
+    dmBitsPerPel: 168,
+    dmPelsWidth: 172,
+    dmPelsHeight: 176,
+    dmDisplayFlags: 180,
+    dmDisplayFrequency: 184,
+    SIZE: 220,
+});
+
 /** The dmFields bits this layer fills in. */
 export const DM_BITSPERPEL = 0x00040000;
 export const DM_PELSWIDTH = 0x00080000;

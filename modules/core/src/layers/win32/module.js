@@ -16,14 +16,14 @@ import { createFileFunctions } from './kernel32/files.js';
 import { createSyncFunctions } from './kernel32/sync.js';
 import { createCodeArena } from './kernel32/code-arena.js';
 import { createCriticalSections } from './kernel32/critical.js';
-import { createLocaleFunctions } from './kernel32/locale.js';
+import { createLocaleFunctions, encodeAnsi } from './kernel32/locale.js';
 import { createEnvironmentFunctions, defaultEnvironment } from './kernel32/environment.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions } from './kernel32/system.js';
 import { createSpawner, createSpawnFunctions } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
 import { createSeh } from './kernel32/seh.js';
-import { createEntryPointCaller } from './kernel32/dllentry.js';
+import { createEntryPointCaller, createGuardedCaller } from './kernel32/dllentry.js';
 import { createCrtSeh } from './msvcrt/seh.js';
 import { createCxxExceptions } from './msvcrt/eh.js';
 import { createApcs } from './kernel32/apc.js';
@@ -713,11 +713,91 @@ export function createWin32Module(){
                 },
             });
 
+            /**
+             * Bytes put in guest memory for as long as `use` runs, a call it
+             * parks on included: what a call that takes a pointer is handed
+             * from the host.
+             *
+             * @param {Uint8Array} bytes @param {(address: number) => any} use
+             * @returns {number | Promise<number>}
+             */
+            const lent = (bytes, use)=>{
+                const at = heap.allocate(Math.max(bytes.length, 4));
+                if (at === 0)
+                {
+                    return 0;
+                }
+                writeMemory(at, bytes);
+                const answer = use(at);
+                if (typeof answer?.then === 'function')
+                {
+                    return answer.then((/** @type {number} */ value)=>{
+                        heap.free(at);
+                        return value >>> 0;
+                    });
+                }
+                heap.free(at);
+                return answer >>> 0;
+            };
+
+            /** Each apartment window's procedure, by window. */
+            /** @type {Map<number, (message: number) => number | Promise<number>>} */
+            const apartmentProcedures = new Map();
+            let apartmentClass = 0;
+            /**
+             * A hidden window on the calling thread whose messages go to
+             * `handler`: "OleMainThreadWndClass", as ole32 names its own.
+             *
+             * @param {(message: number) => number | Promise<number>} handler
+             * @returns {number | Promise<number>}
+             */
+            const apartmentWindow = handler=>{
+                const user32 = libraries['USER32.dll'];
+                const name = encodeAnsi('OleMainThreadWndClass\0');
+                if (apartmentClass === 0)
+                {
+                    const procedure = bridge.register('<OleMainThreadWndProc>', {
+                        argBytes: 16,
+                        /** @param {number[]} args */
+                        handler: ([hwnd, message, wParam, lParam])=>{
+                            const own = apartmentProcedures.get(hwnd >>> 0);
+                            return own && (message >>> 0) === 0x0400
+                                ? own(message >>> 0)
+                                : user32.DefWindowProcA.handler([hwnd, message, wParam, lParam]);
+                        },
+                    });
+                    const wndclass = new Uint8Array(40 + name.length);
+                    const view = new DataView(wndclass.buffer);
+                    view.setUint32(4, procedure >>> 0, true);
+                    apartmentClass = /** @type {number} */ (lent(wndclass, at=>{
+                        writeMemory(at + 40, name);
+                        view.setUint32(36, at + 40, true);
+                        writeMemory(at, wndclass.subarray(0, 40));
+                        return user32.RegisterClassA.handler([at]);
+                    }));
+                }
+                // Known by its procedure before it exists: the messages that
+                // make a window arrive while it is being made.
+                const made = lent(name, at=>user32.CreateWindowExA.handler(
+                    [0, at, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+                /** @param {number} hwnd */
+                const keep = hwnd=>{
+                    if (hwnd !== 0)
+                    {
+                        apartmentProcedures.set(hwnd, handler);
+                    }
+                    return hwnd;
+                };
+                return typeof made === 'number' ? keep(made) : made.then(keep);
+            };
+
             // The one IMalloc, shared by ole32 and shell32: a block the shell
             // hands out is freed through the allocator COM hands out.
             const comVtables = {
                 /** @param {any} object @param {string} interfaceId */
                 publish: (object, interfaceId)=>bridge.publishInterface(object, interfaceId),
+                /** @param {any} object @param {string} interfaceId */
+                unpublish: (object, interfaceId)=>bridge.unpublishInterface(object, interfaceId),
             };
             const taskAllocator = createTaskAllocator({
                 heap, registry: com, vtables: comVtables, readMemory, writeMemory,
@@ -795,6 +875,24 @@ export function createWin32Module(){
                 stackPointer: ()=>cpuRegisters.read('esp') >>> 0,
                 teb: thread=>(thread?.tebAddress ?? kernel.currentThread()?.tebAddress ?? 0) >>> 0,
                 divergence: detail=>config?.divergence?.('DllMain', detail),
+            });
+
+            // And every method a COM stub runs for another process, whose
+            // exception is answered to the caller as RPC_E_SERVERFAULT rather
+            // than ending the server. The stub has awaited by then, so the
+            // thread's stack is where its suspended calls left it.
+            const callGuarded = createGuardedCaller({
+                register: (name, fn)=>bridge.register(name, fn),
+                callGuest: call=>bridge.callGuest(call),
+                continueAt: (registers, options)=>bridge.continueAt(registers, options),
+                unwind: (frame, address, options)=>seh.unwind(frame, address, options),
+                readU32: address=>memory.readU32(address),
+                writeU32: (address, value)=>memory.writeU32(address, value),
+                stackPointer: thread=>Math.min(
+                    thread?.callbackFrames?.at(-1)?.frameBase ?? Infinity,
+                    thread?.hostCalls?.at(-1)?.restingStack ?? Infinity,
+                    Infinity) >>> 0 || cpuRegisters.read('esp') >>> 0,
+                teb: thread=>(thread?.tebAddress ?? kernel.currentThread()?.tebAddress ?? 0) >>> 0,
             });
 
             /** Set once the process has begun to end, so that it ends only once. */
@@ -1710,6 +1808,13 @@ export function createWin32Module(){
                     files: volume,
                     /** @param {number} entry @param {number[]} args @param {unknown} [thread] */
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    /** @param {number} entry @param {number[]} args @param {unknown} thread */
+                    guardedCall: (entry, args, thread)=>callGuarded({
+                        entry, args, thread, failed: 0x80010105,
+                        report: (code, at)=>config?.divergence?.('COM',
+                            `exception 0x${code} at 0x${at} in a method called by another`
+                            + ' process, answered RPC_E_SERVERFAULT'),
+                    }),
                     callerThread: ()=>bridge.callerThread(),
                     // Read at call time: the table they live in is built above,
                     // but the object holding it is assigned after this literal.
@@ -1725,6 +1830,26 @@ export function createWin32Module(){
                             libraries['KERNEL32.dll'].GetProcAddress.handler([module, name]),
                     },
                     makeObject: createComObject,
+                    // The run's class objects served out of process, and the
+                    // hidden window each apartment takes other processes'
+                    // calls through, as ole32's own does.
+                    com: config?.com,
+                    apartmentWindow: {
+                        create: handler=>apartmentWindow(handler),
+                        /** @param {number} window @param {number} message */
+                        post: (window, message)=>
+                            libraries['USER32.dll'].PostMessageA.handler([window, message, 0, 0]),
+                    },
+                    strings: {
+                        allocate: bytes=>/** @type {number} */ (lent(bytes, at=>
+                            libraries['OLEAUT32.dll'].SysAllocStringByteLen.handler(
+                                [at, bytes.length]))),
+                    },
+                    createSafeArray: (vt, bounds)=>/** @type {number} */ (lent(
+                        new Uint8Array(Uint32Array.from(bounds.flatMap(bound=>
+                            [bound.elements, bound.lower >>> 0])).buffer),
+                        at=>libraries['OLEAUT32.dll'].SafeArrayCreate.handler(
+                            [vt, bounds.length, at]))),
                     // A drop target hangs on a window, which user32 knows, and is
                     // the window's property as well.
                     /** @param {number} window */

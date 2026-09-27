@@ -31,6 +31,8 @@ const ELSEWHERE = 0x3000;
 const SEEN = DATA + 0x100;
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
+/** @param {number} value */
+const f64 = value=>[...new Uint8Array(new Float64Array([value]).buffer)];
 const tailCalls = features().tailCalls;
 
 /** @param {number[]} bytes @param {number[]} [data] */
@@ -235,13 +237,32 @@ test('out dx, eax to the trap port calls the host from inside the region; others
         assert.deepEqual(moved.translate(CODE, { hash: true }).run(CODE), { kind: 0, vector: 0 });
         assert.equal(moved.eip(), 0x9000);
         assert.equal(moved.reg('ebx'), 1, 'the instruction after the out did not run');
-        // With x87 registers live in the region, the exit past the out instead.
-        const fp = createTestMachine({ trapPort: PORT, trap: ()=>0 });
+        // With x87 registers live in the region the call is made from it too,
+        // the stack written back first, and the region then leaves for wherever
+        // EIP is: the handler may have moved the top the code after the out was
+        // compiled for.
+        /** @type {number[]} */
+        const fpSeen = [];
+        const fp = createTestMachine({ trapPort: PORT, trap: value=>{
+            const view = new DataView(fp.memory.buffer);
+            fpSeen.push(value, view.getUint8(fp.layout.x87Top), view.getFloat64(fp.layout.x87
+                + view.getUint8(fp.layout.x87Top) * 16, true), fp.eip());
+            return 0;
+        } });
         fp.write(CODE, [0xd9, 0xe8, ...program]); // fld1 first
         fp.setReg('esp', STACK);
         const f = fp.translate(CODE, { hash: true });
-        assert.deepEqual(f.run(CODE), { kind: 2, vector: 0 }, 'trap exit');
+        assert.deepEqual(f.run(CODE), { kind: 0, vector: 0 }, 'left after the call');
+        assert.deepEqual(fpSeen, [7, 7, 1, CODE + 17], 'the value, the pushed 1 in ST0, EIP');
         assert.equal(fp.eip(), CODE + 17, 'past the out');
+        assert.equal(fp.reg('ebx'), 1, 'the instruction after it is the next region\'s');
+        // Where the x87 and MMX views meet, the exit past the out, for the host.
+        const mixed = createTestMachine({ trapPort: PORT, trap: ()=>0 });
+        mixed.write(CODE, [0x0f, 0x6f, 0xc1, 0x0f, 0x77, 0xd9, 0xe8, ...program]);
+        mixed.setReg('esp', STACK);
+        const x = mixed.translate(CODE, { hash: true });
+        assert.deepEqual(x.run(CODE), { kind: 2, vector: 0 }, 'trap exit');
+        assert.equal(mixed.eip(), CODE + 22, 'past the out');
         // Another port: the other executor's, before the instruction.
         const other = createTestMachine({ trapPort: PORT });
         other.write(CODE, [0x66, 0xba, 0x78, 0xb0, 0xb8, ...u32(7), 0xef, 0xf4]); // dx = PORT+1
@@ -258,6 +279,69 @@ test('out dx, eax to the trap port calls the host from inside the region; others
         assert.deepEqual(n.run(CODE), { kind: 0, vector: 0 });
         assert.equal(none.eip(), CODE + 14);
     });
+
+test('a handler called from a region with x87 finds the stack whole and may change it', ()=>{
+    // CODE: fld a; fld b; call F; fstp [DATA+16]; hlt -- F: fxch st1; fld1; faddp st1;
+    // mov dx, PORT; mov eax, id; out dx, eax; ret. At the out the region holds the
+    // registers exchanged in its locals; the handler reads ST0 = a + 1 and ST1 = b from
+    // the state block and leaves one value in their place, or two, or moves EIP to a
+    // hlt of its own; the program goes on from what the handler left.
+    const PORT = 0xb077;
+    const F = CODE + 0x20;
+    const HALT = CODE + 0x40;
+    const code = new Array(0x48).fill(0x90);
+    code.splice(0, 20, 0xdd, 0x05, ...u32(DATA), 0xdd, 0x05, ...u32(DATA + 8),
+        0xe8, ...u32(F - (CODE + 17)), 0xdd, 0x1d, ...u32(DATA + 16));
+    code[23] = 0xf4;
+    code.splice(0x20, 17, 0xd9, 0xc9, 0xd9, 0xe8, 0xde, 0xc1,
+        0x66, 0xba, PORT & 0xff, PORT >> 8, 0xb8, ...u32(3), 0xef, 0xc3);
+    code[0x40] = 0xf4;
+    for (const [name, answer] of /** @type {const} */ ([['one', 1], ['two', 2], ['moved', 0]]))
+    {
+        /** @type {number[]} */
+        const seen = [];
+        const m = createTestMachine({ trapPort: PORT, trap: value=>{
+            const view = new DataView(m.memory.buffer);
+            const top = view.getUint8(m.layout.x87Top);
+            /** @param {number} i */
+            const at = i=>m.layout.x87 + ((top + i) & 7) * 16;
+            seen.push(value, view.getFloat64(at(0), true), view.getFloat64(at(1), true));
+            const product = view.getFloat64(at(0), true) * view.getFloat64(at(1), true);
+            if (answer === 0)
+            {
+                view.setUint32(m.layout.eip, HALT, true);
+                return 1;
+            }
+            // Two popped, `answer` pushed: the product, and its half under it.
+            const rest = (top + 2 - answer) & 7;
+            view.setFloat64(m.layout.x87 + rest * 16, product, true);
+            view.setFloat64(m.layout.x87 + ((rest + 1) & 7) * 16, product / 2, true);
+            view.setUint8(m.layout.x87Top, rest);
+            view.setUint8(m.layout.x87Empty, answer === 1 ? 0xff & ~(1 << rest)
+                : 0xff & ~(1 << rest | 1 << ((rest + 1) & 7)));
+            return 0;
+        } });
+        m.write(CODE, code);
+        m.write(DATA, [...f64(3), ...f64(5)]);
+        m.setReg('esp', STACK);
+        const exit = m.runProgram(CODE);
+        assert.equal(exit.kind, Exit.HALT, name);
+        assert.deepEqual(seen, [3, 4, 5], `${name}: the value, ST0 and ST1 as they were`);
+        const view = new DataView(m.memory.buffer);
+        if (answer === 0)
+        {
+            assert.equal(m.eip(), HALT + 1, `${name}: at the handler's hlt`);
+            assert.equal(view.getUint8(m.layout.x87Top), 6, `${name}: the two left`);
+            continue;
+        }
+        assert.equal(m.eip(), CODE + 24, `${name}: past the caller's hlt`);
+        assert.equal(view.getFloat64(m.layout.ramBase + DATA + 16, true), 20,
+            `${name}: the product stored`);
+        assert.equal(view.getUint8(m.layout.x87Top), answer === 1 ? 0 : 7, `${name}: the top`);
+        assert.equal(view.getUint8(m.layout.x87Empty), answer === 1 ? 0xff : 0x7f,
+            `${name}: the empty mask`);
+    }
+});
 
 test('a small leaf callee is formed into its caller: the call and the return are jumps', ()=>{
     const m = machine([

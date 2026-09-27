@@ -612,3 +612,17 @@ test('an interface nothing can release is given back when whoever made it says s
     assert.equal(f.table.unpublish({}, IID), false, 'and never for what was not published');
     assert.notEqual(f.table.publish(bare, IID), 0, 'published again, it is a new interface');
 });
+
+test('QueryInterface naming no interface is refused, reading nothing at address zero', ()=>{
+    const f = interfaces();
+    const methods = METHODS.slice(0, 3);
+    const single = {
+        /** @param {string} id */
+        interfaceFor: id=>(id === IID ? { id, methods } : null),
+        addRef: ()=>2,
+        release: ()=>1,
+    };
+    const pointer = f.table.publish(single, IID);
+    assert.equal(f.call('QueryInterface', pointer, [0, 0x8000]), 0x80070057, 'E_INVALIDARG');
+    assert.equal(f.call('QueryInterface', pointer, [0x9000, 0]), 0x80004003, 'E_POINTER');
+});

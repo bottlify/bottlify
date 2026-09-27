@@ -624,6 +624,11 @@ export function createDirect3D9(options = {}){
             {
                 return hr;
             }
+            // A device holds a reference on the object that made it, which it
+            // gives back when it goes: a program may release that object at
+            // once and still reach it through GetDirect3D (Wine's d3d8 and
+            // d3d9 test_refcount).
+            root.addRef();
             out.device = createDeviceObject(
                 normalisePresentParameters(parameters), resolved, services, {
                     direct3D: root,
@@ -921,10 +926,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * A resource that the program owns: it took a reference on the device.
      *
      * @param {number} [pool]
+     * @param {() => void} [onGone]  What the resource gives back when its last
+     *     reference goes, before the device's is released.
      */
-    const explicitCount = (pool = D3DPOOL.MANAGED)=>{
+    const explicitCount = (pool = D3DPOOL.MANAGED, onGone = ()=>{})=>{
         count.addRef();
-        const made = createReferenceCount({ onLastRef: ()=>count.release() });
+        const made = createReferenceCount({ onLastRef: ()=>{
+            onGone();
+            count.release();
+        } });
         pooled.add({ pool, count: made });
         return made;
     };
@@ -935,6 +945,19 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         onFirstRef: ()=>count.addRef(),
         onLastRef: ()=>count.release(),
     });
+
+    /**
+     * A surface made on its own, not a level of anything: its storage goes
+     * back once the program's last reference does, as a texture's does, or
+     * every render target a program makes and releases stays taken until the
+     * heap is gone.
+     *
+     * @param {any} surface
+     */
+    const retireSurface = surface=>{
+        free(surface.base);
+        renderer?.retire(surface);
+    };
 
     /**
      * Whether a default-pool resource is still held by the program, which is
@@ -954,6 +977,30 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         }
         return backBuffers.some(surface=>surface.refCount > 0)
             || (autoDepthStencil !== null && autoDepthStencil.refCount > 0);
+    };
+
+    /**
+     * A bound resource handed back with the reference the call owes. One the
+     * program released to nothing while it stayed bound is gone here, where
+     * Windows keeps it until it is unbound; it is answered as nothing, and
+     * said once, rather than ending the run on a reference it cannot take.
+     *
+     * @param {any} resource @param {string} what  The getter, for the report.
+     * @returns {any}
+     */
+    const handOut = (resource, what)=>{
+        if (!resource)
+        {
+            return null;
+        }
+        if (resource.refCount === 0 && resource.destroyed !== false)
+        {
+            report(`released-while-bound:${what}`, `${what} answers NULL for a resource released `
+                + 'to nothing while bound, which Windows keeps until it is unbound');
+            return null;
+        }
+        resource.addRef();
+        return resource;
     };
 
     /** @type {any[]} */
@@ -1697,11 +1744,14 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
         addRef: ()=>count.addRef(),
         release: ()=>{
+            const before = count.value;
             const left = count.release();
-            if (left === 0)
+            if (left === 0 && before > 0)
             {
                 stopWatchingLoss?.();
                 showGamma(true);
+                // The reference CreateDevice took on the object that made it.
+                identity?.direct3D?.release?.();
             }
             return left;
         },
@@ -2144,12 +2194,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            const texture = textures.get(stage) ?? null;
-            if (texture)
-            {
-                texture.addRef();
-            }
-            out.texture = texture;
+            out.texture = handOut(textures.get(stage) ?? null, 'GetTexture');
             return D3D_OK;
         },
 
@@ -2928,11 +2973,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         /** @param {{ buffer?: any }} out */
         GetIndices(out){
-            if (indices)
-            {
-                indices.addRef();
-            }
-            out.buffer = indices;
+            out.buffer = handOut(indices, 'GetIndices');
             return D3D_OK;
         },
 
@@ -2981,11 +3022,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3DERR_INVALIDCALL;
             }
             const record = stream(index);
-            if (record.buffer)
-            {
-                record.buffer.addRef();
-            }
-            out.buffer = record.buffer;
+            out.buffer = handOut(record.buffer, 'GetStreamSource');
             out.offset = record.offset;
             out.stride = record.stride;
             return D3D_OK;
@@ -3316,7 +3353,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            out.surface = createSurface({
+            const surface = createSurface({
                 type: SURFACE_TYPE.RENDER_TARGET,
                 width,
                 height,
@@ -3325,11 +3362,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 usage: D3DUSAGE.RENDERTARGET | usage,
                 lockable,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.DEFAULT),
+                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface)),
                 rejectsMalformedRects: true,
                 divergence: services.divergence ?? null,
                 pixels: targetPixels(),
             });
+            out.surface = surface;
             return D3D_OK;
         },
 
@@ -3346,7 +3384,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            out.surface = createSurface({
+            const surface = createSurface({
                 type: SURFACE_TYPE.DEPTH_STENCIL,
                 width,
                 height,
@@ -3354,9 +3392,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 pool: D3DPOOL.DEFAULT,
                 usage: D3DUSAGE.DEPTHSTENCIL | usage,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.DEFAULT),
+                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface)),
                 rejectsMalformedRects: true,
             });
+            out.surface = surface;
             return D3D_OK;
         },
 
@@ -3375,7 +3414,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            out.surface = createSurface({
+            const surface = createSurface({
                 type: SURFACE_TYPE.PLAIN,
                 width,
                 height,
@@ -3383,9 +3422,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 pool,
                 usage,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(pool),
+                count: explicitCount(pool, ()=>retireSurface(surface)),
                 rejectsMalformedRects: true,
             });
+            out.surface = surface;
             return D3D_OK;
         },
 

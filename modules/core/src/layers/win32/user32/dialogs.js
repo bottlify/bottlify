@@ -35,8 +35,9 @@
  *   default button, or IDOK when there is none, Escape is IDCANCEL, each
  *   reaching the dialog procedure as the WM_COMMAND a button would have sent,
  *   and Tab moves the focus between the controls that stop it. That is what
- *   IsDialogMessageA does too; every other message is reported as not a
- *   dialog message and the caller goes on to translate and dispatch it.
+ *   IsDialogMessage does too, and it translates and dispatches every other
+ *   message for the dialog or a window inside it itself, answering TRUE;
+ *   only a message for another window is left to the caller.
  * - **WM_INITDIALOG is sent, not posted.** The dialog procedure runs during
  *   `CreateDialogParam`/`DialogBoxParam`, after every control exists and has
  *   set itself up, and before a template's WS_VISIBLE shows the window -- so a
@@ -48,6 +49,7 @@ import { ANY_WINDOW, WM_QUIT } from './messages.js';
 import { readMessage, readRect, writeRect } from './structs.js';
 import { WS_VISIBLE, frameOf } from './frame.js';
 import { createTabWalk } from './tabwalk.js';
+import { readText, translated, writeText } from './unicode.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import {
     DLGC_BUTTON, DLGC_DEFPUSHBUTTON, DLGC_HASSETSEL, DLGC_WANTALLKEYS,
@@ -239,7 +241,7 @@ const MAX_RESOURCE_NAME = 256;
  * @property {ReturnType<typeof import('./messages.js').createMessageQueue>} queue
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  * @property {(hwnd: number, message: number, wParam: number, lParam: number,
- *     thread?: unknown) => number | Promise<number>} send
+ *     thread?: unknown, unicode?: boolean) => number | Promise<number>} send
  * @property {(record: any, message: { hwnd: number, message: number, wParam: number,
  *     lParam: number }, thread?: unknown) => number | Promise<number>} defDlgProc
  *           The dialog class's procedure: DWLP_DLGPROC first, then the default.
@@ -303,7 +305,8 @@ const MAX_RESOURCE_NAME = 256;
  *     A class the program registered, by the name a template spells it.
  * @param {(name: string) => boolean} [options.classKnown]
  *     Whether a class of that name, or `#atom`, is the program's or the system's.
- * @param {(record: any, args: number[]) => number | Promise<number>} options.announce
+ * @param {(record: any, args: number[], unicode?: boolean, caller?: unknown)
+ *     => number | Promise<number>} options.announce
  *     Tells a new window's procedure that it exists, as CreateWindowEx does.
  * @param {(run: (hwnd: number, thread: unknown, first?: ModalHook) => Promise<number>)
  *     => void} [options.modalLoop]  Handed the modal loop, for a dialog another
@@ -480,6 +483,7 @@ export function createDialogFunctions(options){
                 id: extended ? template.u32(at + item.id) & 0xffff : template.u16(at + item.id),
                 className: '',
                 title: '',
+                data: 0,
             };
             template.at = at + item.size;
             const cls = template.nameOrOrdinal();
@@ -488,8 +492,11 @@ export function createDialogFunctions(options){
 
             // The creation data begins with its size in bytes. In the old
             // layout that word counts itself, so a zero means there is only
-            // the word; in the extended one it counts what follows it.
+            // the word; in the extended one it counts what follows it. The
+            // control's WM_CREATE is handed the data, size word first, as
+            // lpCreateParams, and NULL when there is none.
             const extra = template.u16(template.at);
+            control.data = extra === 0 ? 0 : (address + template.at) >>> 0;
             template.at += extended ? 2 + extra : (extra === 0 ? 2 : extra);
             dialog.controls.push(control);
         }
@@ -546,8 +553,10 @@ export function createDialogFunctions(options){
      *
      * @param {number} instance @param {number} template @param {number} parent
      * @param {number} dialogFunc @param {number} initParam
+     * @param {boolean} [unicode]  Made through a wide call: the dialog is a
+     *     Unicode window, and its procedure reads wide text.
      */
-    const createDialog = (instance, template, parent, dialogFunc, initParam)=>{
+    const createDialog = (instance, template, parent, dialogFunc, initParam, unicode = false)=>{
         const described = (template >>> 0) === 0
             ? null
             : parseTemplate(template >>> 0);
@@ -605,6 +614,7 @@ export function createDialogFunctions(options){
         const wantsVisible = (described.style & WS_VISIBLE) !== 0;
         const dialog = makeWindow({
             className: '#32770',
+            unicode,
             title: described.title,
             style: (described.style & ~WS_VISIBLE) >>> 0,
             exStyle,
@@ -627,12 +637,23 @@ export function createDialogFunctions(options){
         // the first message and the dialog's first control.
         const build = ()=>{
             dialog.extra.setUint32(DWLP_DLGPROC, dialogFunc >>> 0, true);
-            /** @type {Promise<number>[]} */
-            const creating = [];
             /** @type {any[]} */
             const controls = [];
-            for (const control of makeable)
-            {
+            /**
+             * Makes the controls one at a time, as the dialog manager calls
+             * CreateWindowEx for each: a control's WM_CREATE has run before the
+             * next exists. Two made at once would each run the program's code
+             * from the one call, and the second would wait on the first.
+             *
+             * @param {number} index
+             * @returns {any}
+             */
+            const createFrom = index=>{
+                if (index >= makeable.length)
+                {
+                    return 0;
+                }
+                const control = makeable[index];
                 // A class the program registered is the program's, procedure and
                 // all: a template names its own controls this way, and one of
                 // them keeps its state in the extra bytes and sets it up in
@@ -668,31 +689,24 @@ export function createDialogFunctions(options){
                 {
                     dialog.defaultId = control.id & 0xffff;
                 }
-                if (cls)
-                {
-                    // The class and title are in the template, not in guest
-                    // memory, so the CREATESTRUCT names neither: a procedure
-                    // that reads them there finds NULL. The ceiling on this.
-                    const announced = announce(record, [control.exStyle, 0, 0, style,
-                        placed.x, placed.y, placed.width, placed.height,
-                        dialog.hwnd, control.id, instance >>> 0, 0]);
-                    if (typeof (/** @type {any} */ (announced))?.then === 'function')
-                    {
-                        creating.push(/** @type {Promise<number>} */ (announced));
-                    }
-                }
                 controls.push(record);
-            }
+                // The class and title are in the template, not in guest
+                // memory, so the CREATESTRUCT names neither: a procedure that
+                // reads them there finds NULL. The ceiling on this.
+                return after(cls ? announce(record, [control.exStyle, 0, 0, style,
+                    placed.x, placed.y, placed.width, placed.height,
+                    dialog.hwnd, control.id, instance >>> 0, control.data], false, thread) : 0,
+                ()=>createFrom(index + 1));
+            };
             // Every control is told the dialog's font once it exists and has
             // set itself up, as the dialog manager tells it: before
             // WM_INITDIALOG, and after the program's own WM_CREATE.
             const thread = host.callerThread?.();
-            const setFonts = ()=>{
-                const told = font === 0
-                    ? [] : controls.map(record=>
-                        host.send(record.hwnd, WM_SETFONT, font, 0, thread));
-                return told.some(answer=>typeof answer !== 'number') ? Promise.all(told) : null;
-            };
+            // One control at a time, for the reason they are made one at a time.
+            /** @param {number} index @returns {any} */
+            const setFonts = (index = 0)=>(font === 0 || index >= controls.length ? 0
+                : after(host.send(controls[index].hwnd, WM_SETFONT, font, 0, thread),
+                    ()=>setFonts(index + 1)));
             const initialise = ()=>{
                 host.created?.(dialog.hwnd);
                 // Sent, not posted: a program that creates a dialog and then reads
@@ -716,8 +730,7 @@ export function createDialogFunctions(options){
             // WM_INITDIALOG comes after every control exists and has been told
             // so; a procedure that talks to a control from there expects the
             // control to have set itself up.
-            const fonts = creating.length === 0 ? setFonts() : Promise.all(creating).then(setFonts);
-            return fonts ? fonts.then(initialise) : initialise();
+            return after(after(createFrom(0), ()=>setFonts()), initialise);
         };
         return after(announce(dialog, [exStyle, 0, 0, dialog.style, x, y, width, height,
             parent >>> 0, 0, instance >>> 0, initParam >>> 0]),
@@ -852,6 +865,30 @@ export function createDialogFunctions(options){
     };
 
     /**
+     * IsDialogMessage in either encoding.
+     *
+     * @param {number} dialog
+     * @param {{ hwnd: number, message: number, wParam: number, lParam: number, time: number,
+     *     unicode?: boolean }} message
+     * @returns {number | Promise<number>}
+     */
+    const isDialogMessage = (dialog, message)=>{
+        if (!live(dialog) || !within(message.hwnd, dialog))
+        {
+            return 0;
+        }
+        const thread = host.callerThread?.();
+        return after(dialogKey(dialog, message, thread), taken=>{
+            if (taken !== null)
+            {
+                return 1;
+            }
+            host.translate?.(message);
+            return after(deliver({ x: 0, y: 0, ...message }, thread), ()=>1);
+        });
+    };
+
+    /**
      * The modal loop: the dialog's thread pumps until EndDialog destroys the
      * window, and what EndDialog was given is the answer.
      *
@@ -964,9 +1001,9 @@ export function createDialogFunctions(options){
      *
      * @param {number} instance @param {number} name
      */
-    const templateAddress = (instance, name)=>{
+    const templateAddress = (instance, name, wide = false)=>{
         const raw = name >>> 0;
-        const key = raw < MAX_INTEGER_RESOURCE ? raw : host.readCString(raw, MAX_RESOURCE_NAME);
+        const key = raw < MAX_INTEGER_RESOURCE ? raw : readText(host, raw, wide, MAX_RESOURCE_NAME);
         const found = /** @type {{ rva: number } | null} */ (
             host.findResource?.(instance >>> 0, RT_DIALOG, key) ?? null);
         const base = host.moduleBase?.(instance >>> 0) ?? 0;
@@ -1036,6 +1073,46 @@ export function createDialogFunctions(options){
             },
         },
 
+        /** HWND CreateDialogIndirectParamW(...), a Unicode dialog. */
+        CreateDialogIndirectParamW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([instance, template, parent, dialogFunc, initParam])=>
+                createDialog(instance, template, parent, dialogFunc, initParam, true),
+        },
+
+        /** HWND CreateDialogParamW(HINSTANCE, LPCWSTR lpTemplateName, HWND, DLGPROC, LPARAM) */
+        CreateDialogParamW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([instance, name, parent, dialogFunc, initParam])=>
+                createDialog(instance, templateAddress(instance, name, true), parent, dialogFunc,
+                    initParam, true),
+        },
+
+        /** INT_PTR DialogBoxIndirectParamW(...), modal and Unicode. */
+        DialogBoxIndirectParamW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([instance, template, parent, dialogFunc, initParam])=>{
+                const thread = host.callerThread?.();
+                return once(createDialog(instance, template, parent, dialogFunc, initParam, true),
+                    hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd, thread)));
+            },
+        },
+
+        /** INT_PTR DialogBoxParamW(HINSTANCE, LPCWSTR lpTemplateName, HWND, DLGPROC, LPARAM) */
+        DialogBoxParamW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([instance, name, parent, dialogFunc, initParam])=>{
+                const thread = host.callerThread?.();
+                return once(createDialog(instance, templateAddress(instance, name, true), parent,
+                    dialogFunc, initParam, true),
+                hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd, thread)));
+            },
+        },
+
         /**
          * LRESULT DefDlgProcA(HWND hDlg, UINT Msg, WPARAM wParam, LPARAM lParam)
          *
@@ -1058,6 +1135,29 @@ export function createDialogFunctions(options){
                     hwnd: hwnd >>> 0, message: message >>> 0,
                     wParam: wParam >>> 0, lParam: lParam >>> 0,
                 }, host.callerThread?.());
+            },
+        },
+
+        /**
+         * LRESULT DefDlgProcW(HWND hDlg, UINT Msg, WPARAM wParam, LPARAM lParam)
+         *
+         * The default reads the ANSI page, so a wide message reaches it
+         * converted, and a text it fills comes back wide.
+         */
+        DefDlgProcW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, message, wParam, lParam])=>{
+                const record = windows.get(hwnd >>> 0);
+                if (!record)
+                {
+                    return 0;
+                }
+                const thread = host.callerThread?.();
+                return translated(host, {
+                    hwnd: hwnd >>> 0, message: message >>> 0, wParam: wParam >>> 0,
+                    lParam: lParam >>> 0, unicode: true,
+                }, false, ansi=>host.defDlgProc(record, ansi, thread));
             },
         },
 
@@ -1224,6 +1324,20 @@ export function createDialogFunctions(options){
             },
         },
 
+        /** UINT GetDlgItemTextW(HWND hDlg, int nIDDlgItem, LPWSTR lpString, int cchMax) */
+        GetDlgItemTextW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, id, out, max])=>{
+                const room = max | 0;
+                if ((out >>> 0) === 0 || room <= 0)
+                {
+                    return 0;
+                }
+                return writeText(host, out >>> 0, controlOf(hwnd, id)?.title ?? '', room, true);
+            },
+        },
+
         /**
          * LRESULT SendDlgItemMessageA(HWND hDlg, int nIDDlgItem, UINT Msg,
          *                            WPARAM wParam, LPARAM lParam)
@@ -1243,6 +1357,21 @@ export function createDialogFunctions(options){
                 }
                 return host.send(control.hwnd, message >>> 0, wParam >>> 0, lParam >>> 0,
                     host.callerThread?.());
+            },
+        },
+
+        /** LRESULT SendDlgItemMessageW(...), with wide text in the message. */
+        SendDlgItemMessageW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([hwnd, id, message, wParam, lParam])=>{
+                const control = controlOf(hwnd, id);
+                if (!control)
+                {
+                    return 0;
+                }
+                return host.send(control.hwnd, message >>> 0, wParam >>> 0, lParam >>> 0,
+                    host.callerThread?.(), true);
             },
         },
 
@@ -1293,20 +1422,24 @@ export function createDialogFunctions(options){
         /**
          * BOOL IsDialogMessageA(HWND hDlg, LPMSG lpMsg)
          *
-         * Enter, Escape and Tab are taken; everything else is reported as
-         * not a dialog message, so the caller goes on to translate and
-         * dispatch it. That is the answer that loses nothing: claiming a
-         * message was handled would swallow every keystroke a dialog is
-         * open for.
+         * Enter, Escape and Tab are the dialog manager's; any other message
+         * for the dialog or a window inside it is translated and dispatched
+         * here, and the answer is TRUE either way -- a caller that goes on to
+         * dispatch what it was told was processed would deliver it twice. A
+         * message for any other window is FALSE and left to the caller.
          */
         IsDialogMessageA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([dialog, msg])=>{
-                const message = readMessage(host, msg >>> 0);
-                const answered = dialogKey(dialog >>> 0, message, host.callerThread?.());
-                return after(answered, taken=>(taken === null ? 0 : 1));
-            },
+            handler: ([dialog, msg])=>isDialogMessage(dialog >>> 0, readMessage(host, msg >>> 0)),
+        },
+
+        /** BOOL IsDialogMessageW(HWND hDlg, LPMSG lpMsg), a wide caller's message. */
+        IsDialogMessageW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([dialog, msg])=>isDialogMessage(dialog >>> 0,
+                { ...readMessage(host, msg >>> 0), unicode: true }),
         },
     };
 }

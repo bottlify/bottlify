@@ -31,6 +31,7 @@
 
 import { planesToBgra } from './cursors.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { readText } from './unicode.js';
 
 /** The resource directories a cursor and an icon are named in. */
 export const RT_GROUP_CURSOR = 12;
@@ -56,21 +57,24 @@ const MAX_RESOURCE_NAME = 256;
  *
  * @param {{ handles: { open: (type: string, object: any) => number },
  *           readCString: (address: number, maxLength: number) => string,
+ *           readMemory: (address: number, length: number) => Uint8Array,
+ *           writeMemory: (address: number, bytes: Uint8Array) => void,
  *           findResource?: (instance: number, type: number,
  *               name: number | string) => unknown }} host
  * @param {string} kind    The handle type opened: 'cursor' or 'icon'.
  * @param {number} type    RT_GROUP_CURSOR or RT_GROUP_ICON.
  * @param {number} instance
  * @param {number} name    An integer id or a pointer to a name.
+ * @param {boolean} [wide] Whether a name is a wide string.
  */
-export function loadResourceObject(host, kind, type, instance, name){
+export function loadResourceObject(host, kind, type, instance, name, wide = false){
     const module = instance >>> 0;
     const raw = name >>> 0;
     if (module === 0)
     {
         return raw < MAX_INTEGER_RESOURCE ? raw : 0;
     }
-    const key = raw < MAX_INTEGER_RESOURCE ? raw : host.readCString(raw, MAX_RESOURCE_NAME);
+    const key = raw < MAX_INTEGER_RESOURCE ? raw : readText(host, raw, wide, MAX_RESOURCE_NAME);
     if (!host.findResource?.(module, type, key))
     {
         return 0;
@@ -1669,6 +1673,14 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             /** @param {number[]} args */
             handler: ([instance, name])=>
                 loadResourceObject(host, 'icon', RT_GROUP_ICON, instance, name),
+        },
+
+        /** HICON LoadIconW(HINSTANCE hInstance, LPCWSTR lpIconName) */
+        LoadIconW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([instance, name])=>
+                loadResourceObject(host, 'icon', RT_GROUP_ICON, instance, name, true),
         },
 
         /** BOOL GetScrollInfo(HWND hwnd, int nBar, LPSCROLLINFO lpsi) */

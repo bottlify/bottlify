@@ -56,6 +56,7 @@ export const PEB = Object.freeze({
     IMAGE_BASE_ADDRESS: 0x08,
     LDR: 0x0c,
     PROCESS_PARAMETERS: 0x10,
+    PROCESS_HEAP: 0x18,
     NUMBER_OF_PROCESSORS: 0x64,
     OS_MAJOR_VERSION: 0xa4,
     OS_MINOR_VERSION: 0xa8,
@@ -171,6 +172,7 @@ export const TLS_SLOTS = 64;
  *        The Windows the machine is: the numbers, and the service pack as a
  *        pair and as text, which is how the block keeps it.
  * @param {number} options.imageBase
+ * @param {number} [options.processHeap]  The handle GetProcessHeap answers.
  * @param {string} [options.imagePath]
  * @param {string} [options.commandLine]
  * @param {string} [options.currentDirectory]
@@ -202,6 +204,11 @@ export function createProcessBlocks(options){
     writeMemory(peb, new Uint8Array(PARAMS_OFFSET + PARAMS.SIZE + STRING_ARENA));
     write(peb + PEB.IMAGE_BASE_ADDRESS, imageBase);
     write(peb + PEB.PROCESS_PARAMETERS, params);
+    // Read without a call wherever GetProcessHeap is compiled inline, as
+    // NtCurrentTeb()->Peb->ProcessHeap: a null here is a heap nothing can
+    // allocate from, and a program that tests the pointer it gets back takes
+    // every allocation as out of memory.
+    write(peb + PEB.PROCESS_HEAP, options.processHeap ?? 0);
     write(peb + PEB.OS_MAJOR_VERSION, version.major);
     write(peb + PEB.OS_MINOR_VERSION, version.minor);
     // Two WORDs, written as the DWORD they make up: the build, then the

@@ -126,13 +126,14 @@ function segments(path){
  * String data is stored the way a reader expects to find it: REG_SZ ends in one
  * NUL, REG_MULTI_SZ in two. Guests that pass `strlen` as the byte count are
  * common enough that fixing the terminator here beats handing back a string
- * whose end nobody can find.
+ * whose end nobody can find. Data of no bytes at all stays that: advapi32's
+ * registry tests set a REG_SZ of zero bytes and read zero bytes back.
  *
  * @param {number} type @param {Uint8Array} data
  * @returns {Uint8Array}
  */
 function terminate(type, data){
-    if (!STRING_TYPES.has(type))
+    if (!STRING_TYPES.has(type) || data.length === 0)
     {
         return data;
     }
@@ -524,7 +525,10 @@ export function createHive({ processorMhz = PROCESSOR.mhz, windows = windowsVers
      */
     const listeners = [];
     let announcing = false;
+    /** Moves with every change, for a copy kept elsewhere to tell it has none. */
+    let revision = 0;
     const changed = ()=>{
+        revision++;
         if (announcing || listeners.length === 0)
         {
             return;
@@ -866,6 +870,9 @@ export function createHive({ processorMhz = PROCESSOR.mhz, windows = windowsVers
             }
             return deleted;
         },
+
+        /** Moves with every change and never with a restore. */
+        revision: ()=>revision,
 
         /**
          * Asks to be told when the hive has changed. A restore is not a change.

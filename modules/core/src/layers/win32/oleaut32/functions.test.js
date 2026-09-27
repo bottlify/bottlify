@@ -130,6 +130,9 @@ test('error information is held once, handed over once, and absent by default', 
     assert.equal(call('GetErrorInfo', [0, SLOT]), 1, 'collected once, gone');
     assert.equal(fx.GetErrorInfo.argBytes, 8);
     assert.equal(fx.SetErrorInfo.argBytes, 8);
+    // ole32's errorinfo tests: the reserved word is zero or E_INVALIDARG.
+    assert.equal(call('GetErrorInfo', [0xdeadbeef, SLOT]) >>> 0, 0x80070057);
+    assert.equal(call('SetErrorInfo', [0xdeadbeef, 0]) >>> 0, 0x80070057);
 });
 
 test('a BSTR carries its byte count in front of the pointer it hands out', ()=>{
@@ -537,6 +540,19 @@ test('LoadTypeLib reads the file off the volume, and the library registers and l
             /** @type {any} */ (lib.hive.open(version, 'HELPDIR')), '')).data), 'C:\\lib');
         assert.equal(text(/** @type {any} */ (lib.hive.getValue(
             /** @type {any} */ (lib.hive.open(version, 'FLAGS')), '')).data), '0');
+        // An [oleautomation] interface goes to the universal marshaler, with
+        // the library that describes it; one that is neither that nor dual
+        // needs a proxy of its own, which a library cannot provide.
+        const media = /** @type {any} */ (lib.hive.open(root,
+            'Interface\\{91814EBF-B5F0-11D2-80B9-00104B1F6CEA}'));
+        const valueOf = (/** @type {string} */ path, name = '')=>text(/** @type {any} */ (
+            lib.hive.getValue(/** @type {any} */ (lib.hive.open(media, path)), name)).data);
+        assert.equal(text(/** @type {any} */ (lib.hive.getValue(media, '')).data), 'ISetupMedia');
+        assert.equal(valueOf('ProxyStubClsid32'), '{00020424-0000-0000-C000-000000000046}');
+        assert.equal(valueOf('TypeLib'), '{94636247-BC39-4B8B-A728-2D1FBEBFA76A}');
+        assert.equal(valueOf('TypeLib', 'Version'), '1.0');
+        assert.equal(lib.hive.open(root, 'Interface\\{F4817E4B-04B6-11D3-8862-00C04F72F303}'),
+            null, 'ISetupServiceProvider is not carried');
 
         // Loaded back by GUID and version, through a read that arrives later.
         lib.writeMemory(0x3000, Uint8Array.from([0x47, 0x62, 0x63, 0x94, 0x39, 0xbc, 0x8b, 0x4b,

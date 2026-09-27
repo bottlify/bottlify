@@ -476,7 +476,7 @@ export function createAudioModule(){
                         .map((/** @type {any} */ b)=>{
                             const c = b.cursors();
                             return `st=${b.status()} play=${c.play} write=${c.write}`
-                                + ` bytes=${b.bytes} freq=${b.frequency}`;
+                                + ` bytes=${b.bytes} freq=${b.frequency} held=${b.held}`;
                         }) : [],
                 },
             };

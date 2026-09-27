@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ANY_WINDOW, WM_TIMER, createMessageQueue } from './messages.js';
 import {
-    DEVMODEA, DISPLAY_DEVICEA, DISPLAY_DEVICEW, DM_BITSPERPEL, DM_DISPLAYFREQUENCY,
+    DEVMODEA, DEVMODEW, DISPLAY_DEVICEA, DISPLAY_DEVICEW, DM_BITSPERPEL, DM_DISPLAYFREQUENCY,
     DM_PELSHEIGHT, DM_PELSWIDTH, PAINTSTRUCT, RECT,
 } from './structs.js';
 import { createWindowFunctions } from './windows.js';
@@ -2738,4 +2738,121 @@ test('LoadStringW reports nothing for a string the image does not have', ()=>{
     // return says, and unwritten it holds whatever was there before.
     assert.equal(memory.bytes[OUT_BUFFER], 0);
     assert.equal(memory.bytes[OUT_BUFFER + 1], 0);
+});
+
+// --- the wide display calls, and small calls a program reaches for early ---
+
+test('EnumDisplaySettingsW fills a DEVMODEW at its own offsets, past the wide device name', ()=>{
+    const { memory, fns } = setup();
+    memory.fill(DEVMODE_BUFFER, DEVMODEW.SIZE / 4);
+    assert.equal(fns.EnumDisplaySettingsW.argBytes, 12);
+    assert.equal(fns.EnumDisplaySettingsW.handler([0, -1 >>> 0, DEVMODE_BUFFER]), 1);
+    const u16 = (/** @type {number} */ at)=>memory.bytes[at] | memory.bytes[at + 1] << 8;
+    assert.equal(u16(DEVMODE_BUFFER + DEVMODEW.dmSize), DEVMODEW.SIZE);
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEW.dmPelsWidth), SCREEN.width);
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEW.dmPelsHeight), SCREEN.height);
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEW.dmBitsPerPel), SCREEN.bitsPerPixel);
+    // The ExA form is the same enumeration with a flags argument after it.
+    assert.equal(fns.EnumDisplaySettingsExA.argBytes, 16);
+    assert.equal(fns.EnumDisplaySettingsExA.handler([0, 0, DEVMODE_BUFFER, 0]), 1);
+    assert.equal(fns.EnumDisplaySettingsExW.handler([0, 100000, DEVMODE_BUFFER, 0]), 0,
+        'past the end of the list');
+});
+
+test('ChangeDisplaySettingsW reads the mode asked for from a DEVMODEW', ()=>{
+    const { memory, fns, screen } = setup();
+    memory.fill(DEVMODE_BUFFER, DEVMODEW.SIZE / 4);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEW.dmFields, [DM_PELSWIDTH | DM_PELSHEIGHT]);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEW.dmPelsWidth, [800, 600]);
+    assert.equal(fns.ChangeDisplaySettingsW.handler([DEVMODE_BUFFER, 0]),
+        DISP_CHANGE_SUCCESSFUL);
+    assert.equal(screen.width, 800);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEW.dmPelsWidth, [801, 600]);
+    assert.equal(fns.ChangeDisplaySettingsExW.handler([0, DEVMODE_BUFFER, 0, 0, 0]),
+        DISP_CHANGE_BADMODE);
+});
+
+test('GetClipCursor answers the rectangle ClipCursor set, cut to the screen, or the screen', ()=>{
+    const { memory, fns } = setup();
+    assert.equal(fns.GetClipCursor.handler([RECT_BUFFER]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at) | 0),
+        [0, 0, SCREEN.width, SCREEN.height]);
+    memory.putU32s(OUT_BUFFER, [-10 >>> 0, 20, 300, 5000]);
+    fns.ClipCursor.handler([OUT_BUFFER]);
+    fns.GetClipCursor.handler([RECT_BUFFER]);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at) | 0),
+        [0, 20, 300, SCREEN.height]);
+    fns.ClipCursor.handler([0]);
+    fns.GetClipCursor.handler([RECT_BUFFER]);
+    assert.equal(memory.u32(RECT_BUFFER + 8), SCREEN.width);
+});
+
+test('SubtractRect takes off a band that covers one side right across, and nothing else', ()=>{
+    const { memory, fns } = setup();
+    const A = OUT_BUFFER;
+    const B = OUT_BUFFER + 16;
+    /** @param {number[]} a @param {number[]} b */
+    const subtract = (a, b)=>{
+        memory.putU32s(A, a);
+        memory.putU32s(B, b);
+        const answer = fns.SubtractRect.handler([RECT_BUFFER, A, B]);
+        return [answer, [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at) | 0)];
+    };
+    assert.deepEqual(subtract([0, 0, 100, 100], [0, 0, 100, 30]), [1, [0, 30, 100, 100]]);
+    assert.deepEqual(subtract([0, 0, 100, 100], [-5, 70, 105, 200]), [1, [0, 0, 100, 70]]);
+    assert.deepEqual(subtract([0, 0, 100, 100], [60, -1, 100, 101]), [1, [0, 0, 60, 100]]);
+    // A hole in the middle leaves no rectangle, so the first is answered whole.
+    assert.deepEqual(subtract([0, 0, 100, 100], [10, 10, 20, 20]), [1, [0, 0, 100, 100]]);
+    assert.deepEqual(subtract([0, 0, 100, 100], [0, 0, 100, 100]), [0, [0, 100, 100, 100]]);
+    assert.deepEqual(subtract([5, 5, 5, 10], [0, 0, 1, 1]), [0, [0, 0, 0, 0]]);
+});
+
+test('a device-change registration is a handle, taken back once and not twice', ()=>{
+    const { fns, errors } = setup();
+    assert.equal(fns.RegisterDeviceNotificationA.argBytes, 12);
+    const handle = fns.RegisterDeviceNotificationW.handler([0x1234, 0x5000, 0]);
+    assert.ok(handle);
+    assert.equal(fns.RegisterDeviceNotificationA.handler([0, 0x5000, 0]), 0, 'no recipient');
+    assert.equal(fns.UnregisterDeviceNotification.handler([handle]), 1);
+    assert.equal(fns.UnregisterDeviceNotification.handler([handle]), 0);
+    assert.deepEqual(errors, [6]);
+});
+
+test('LoadCursorW and LoadIconW find a resource by its wide name', ()=>{
+    /** @type {any[]} */
+    const asked = [];
+    const { memory, fns } = setup({
+        findResource: (/** @type {number} */ instance, /** @type {number} */ type,
+            /** @type {number | string} */ name)=>
+        {
+            asked.push([type, name]);
+            return { rva: 0x100, size: 16 };
+        },
+    });
+    memory.writeMemory(TEXT_BUFFER, new Uint8Array(Buffer.from('ARROWS\0', 'utf16le')));
+    assert.ok(fns.LoadCursorW.handler([HINSTANCE, TEXT_BUFFER]));
+    assert.ok(fns.LoadIconW.handler([HINSTANCE, TEXT_BUFFER]));
+    assert.ok(fns.LoadImageW.handler([HINSTANCE, TEXT_BUFFER, 2, 0, 0, 0]));
+    assert.deepEqual(asked, [[12, 'ARROWS'], [14, 'ARROWS'], [12, 'ARROWS']]);
+});
+
+test('keybd_event and mouse_event are one INPUT each, handed over as arguments', ()=>{
+    const KEYEVENTF_KEYUP = 0x2;
+    const MOUSEEVENTF_MOVE = 0x1;
+    const MOUSEEVENTF_LEFTDOWN = 0x2;
+    const MOUSEEVENTF_WHEEL = 0x800;
+    const { fns, sent } = setup();
+    assert.equal(fns.keybd_event.argBytes, 16);
+    assert.equal(fns.mouse_event.argBytes, 20);
+    fns.keybd_event.handler([0x41, 0x1e, 0, 0]);
+    fns.keybd_event.handler([0x41, 0x1e, KEYEVENTF_KEYUP, 0]);
+    fns.mouse_event.handler([MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN, -3 >>> 0, 4, 0, 0]);
+    fns.mouse_event.handler([MOUSEEVENTF_WHEEL, 0, 0, -120 >>> 0, 0]);
+    assert.deepEqual(sent, [
+        { kind: 'key', vk: 0x41, down: true },
+        { kind: 'key', vk: 0x41, down: false },
+        { kind: 'pointerMove', dx: -3, dy: 4 },
+        { kind: 'pointerButton', button: 'left', down: true },
+        { kind: 'wheel', delta: -120 },
+    ]);
 });

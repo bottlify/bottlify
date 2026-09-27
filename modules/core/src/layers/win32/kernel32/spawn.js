@@ -392,10 +392,11 @@ export function createSpawnFunctions(host){
             argBytes: 40,
             /** @param {number[]} args */
             handler: ([application, commandLine, , , , flags, , , , information])=>create(
-                (application >>> 0) === 0 ? '' : host.readWideString(application >>> 0, MAX_PATH),
+                (application >>> 0) === 0 ? ''
+                    : host.readWideString(application >>> 0, MAX_PATH * 2),
                 (commandLine >>> 0) === 0
                     ? ''
-                    : host.readWideString(commandLine >>> 0, MAX_COMMAND_LINE),
+                    : host.readWideString(commandLine >>> 0, MAX_COMMAND_LINE * 2),
                 flags >>> 0, information),
         },
 

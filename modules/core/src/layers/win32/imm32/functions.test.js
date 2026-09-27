@@ -50,3 +50,10 @@ test('the input method is never open, which is the state a game is asking for', 
     assert.equal(m.imm.ImmGetOpenStatus.handler([0]), 0);
     assert.equal(m.imm.ImmGetOpenStatus.argBytes, 4);
 });
+
+test('turning the input method off succeeds, for a thread or the whole process', ()=>{
+    const m = machine();
+    assert.equal(m.imm.ImmDisableIME.argBytes, 4);
+    assert.equal(m.imm.ImmDisableIME.handler([0xffffffff]), 1);
+    assert.equal(m.imm.ImmDisableIME.handler([0]), 1);
+});

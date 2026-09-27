@@ -10,13 +10,13 @@
  * `materialise` (fold a lazy flag record into the flags word), `f80ToF64`
  * and `f64ToF80` (the 80-bit memory forms), `round` (the control word's
  * rounding control), `codeHit` (a store into a page holding translated
- * code), `f64ToBcd` (`fbstp`'s packed BCD) and `x87Invalid` (an x87 NaN
- * result's IE) are identical in every region module, where a copy in each
- * would be a sixth of a module's bytes. They are defined once here,
- * instantiated once by the host with the same memory, and every region
- * module imports them by name -- the same shape as the funcref table a region
- * already imports, so nothing in the emitter's call sites changes but the
- * function index.
+ * code), `f64ToBcd` (`fbstp`'s packed BCD), `x87Invalid` (an x87 NaN
+ * result's IE) and `remainder` (`fprem`'s and `fprem1`'s) are identical in
+ * every region module, where a copy in each would be a sixth of a module's
+ * bytes. They are defined once here, instantiated once by the host with the
+ * same memory, and every region module imports them by name -- the same shape
+ * as the funcref table a region already imports, so nothing in the emitter's
+ * call sites changes but the function index.
  *
  * `undo` is not here: a store calls it only in a differential build, and a
  * module that imported it always would write the ring always. It stays a
@@ -25,12 +25,15 @@
 
 import { ValType, ModuleBuilder } from '../wasm/encoder.js';
 import { addMaterialiseHelper } from './flags.js';
-import { addBcdHelper, addF80Helpers, addInvalidHelper, addRoundHelper } from './x87.js';
+import {
+    addBcdHelper, addF80Helpers, addInvalidHelper, addRemainderHelper, addRoundHelper,
+} from './x87.js';
 import { addCodeHitHelper } from './memory.js';
 
 /** The imported helper names, in the order a region module imports them. */
 export const HELPER_NAMES = Object.freeze([
     'materialise', 'f80ToF64', 'f64ToF80', 'round', 'codeHit', 'f64ToBcd', 'x87Invalid',
+    'remainder',
 ]);
 
 /**
@@ -47,7 +50,8 @@ export function defineHelpers(m, layout){
     const codeHit = addCodeHitHelper(m, layout);
     const f64ToBcd = addBcdHelper(m);
     const x87Invalid = addInvalidHelper(m, layout);
-    return { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid };
+    const remainder = addRemainderHelper(m);
+    return { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid, remainder };
 }
 
 /**
@@ -73,7 +77,8 @@ export function buildHelpersModule(layout){
  *
  * @param {ModuleBuilder} m
  * @returns {{ materialise: number, f80ToF64: number, f64ToF80: number,
- *     round: number, codeHit: number, f64ToBcd: number, x87Invalid: number }}
+ *     round: number, codeHit: number, f64ToBcd: number, x87Invalid: number,
+ *     remainder: number }}
  */
 export function importHelpers(m){
     const i32 = ValType.i32;
@@ -92,5 +97,7 @@ export function importHelpers(m){
         m.type({ params: [f64, i32], results: [] }));
     const x87Invalid = m.importFunction('env', 'x87Invalid',
         m.type({ params: [f64, f64, i32, i32], results: [i32] }));
-    return { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid };
+    const remainder = m.importFunction('env', 'remainder',
+        m.type({ params: [f64, f64, i32], results: [f64, i32] }));
+    return { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid, remainder };
 }

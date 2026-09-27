@@ -106,6 +106,8 @@ function machine(){
             readMemory: (at, length)=>bytes.slice(at, at + length),
             /** @param {number} at @param {Uint8Array} value */
             writeMemory: (at, value)=>bytes.set(value, at),
+            /** @param {number} at @param {number} length */
+            writable: (at, length)=>at + length <= bytes.length,
         },
         /** @param {number} size */
         allocateSurface: size=>{
@@ -163,7 +165,8 @@ function machine(){
  * presenter would be.
  *
  * @param {{ adapter?: any, gamma?: any, deactivated?: () => boolean,
- *     deactivations?: () => number, flipQueued?: () => Promise<void> | null }} [build]
+ *     deactivations?: () => number, flipQueued?: () => Promise<void> | null,
+ *     resolution?: (...args: any[]) => void }} [build]
  *     What the build says the hardware is, where a primary's gamma ramp is
  *     shown, whether (and how often) the application has been deactivated,
  *     and what a flip waits on.
@@ -220,6 +223,7 @@ function seamed(build = {}){
         gamma: build.gamma,
         deactivated: build.deactivated,
         deactivations: build.deactivations,
+        resolution: build.resolution,
     });
     const fields = createFields(box.services);
     const ddrawDll = libraries.libraries['DDRAW.dll'];
@@ -360,6 +364,27 @@ test('a newer generation is reachable from an older pointer, with its own longer
     assert.equal(h.release(first), 0);
     h.assertAllReleased();
 });
+
+test('CreateSurface refuses an out-pointer it could not write through, before making anything',
+    ()=>{
+        // Wine's ddraw test_surface_qi, in every generation: E_INVALIDARG.
+        const h = seamed();
+        const riid = h.box.putGuid(0x4000, IID_IDirectDraw7);
+        assert.equal(h.ddrawDll.DirectDrawCreateEx.handler([0, 0x4100, riid, 0]), DD_OK);
+        const ddraw = h.box.memory.readU32(0x4100);
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+            [HWND, DDSCL_NORMAL]), DD_OK);
+        writeSurfaceDesc(h.box.services, 0x5000, DDSURFACEDESC2, {
+            flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT, width: 8, height: 8, pitch: 0,
+            backBufferCount: 0, mipMapCount: 0, caps: DDSCAPS_OFFSCREENPLAIN, caps2: 0,
+            pixelFormat: { size: 0x20, flags: 0, fourCC: 0, bitCount: 0, redMask: 0,
+                greenMask: 0, blueMask: 0, alphaMask: 0 },
+        });
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'CreateSurface'),
+            [0x5000, 0xdeadbeef, 0]), 0x80070057);
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'CreateSurface'),
+            [0x5000, 0x5100, 0]), DD_OK);
+    });
 
 test('CreateSurface reads the descriptor its generation takes, after the earlier checks', ()=>{
     const h = seamed();
@@ -2186,3 +2211,22 @@ test('a mode change loses video memory, and a primary made in another mode canno
         assert.equal(h.release(ddraw), 0);
         h.assertAllReleased();
     });
+
+test('exclusive full screen places its window over the mode; a windowed one keeps its own', ()=>{
+    // As DirectDraw places a fullscreen window: at the origin, the mode's size.
+    // A window left where the program made it offsets every rectangle the
+    // program computes with ClientToScreen, and its blits fall off the screen.
+    /** @type {any[]} */
+    const placed = [];
+    const h = seamed({ resolution: (/** @type {any[]} */ ...args)=>placed.push(args) });
+    const ddraw = h.create7();
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+        [HWND, DDSCL_NORMAL]), DD_OK);
+    assert.deepEqual(placed, [], 'a windowed program keeps its window');
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+        [HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN]), DD_OK);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetDisplayMode'),
+        [800, 600, 16, 0, 0]), DD_OK);
+    assert.deepEqual(placed.at(-1), [800, 600, { window: HWND, fullscreen: true }]);
+    assert.equal(h.release(ddraw), 0);
+});

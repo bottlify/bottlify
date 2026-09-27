@@ -32,6 +32,7 @@ import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { createStorageFunctions } from './storage.js';
 import { createPropVariantFunctions } from './propvariant.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { createClassTable, createRemoting } from './remote.js';
 
 /** HRESULTs this file produces. */
 const S_OK = 0x00000000;
@@ -58,6 +59,10 @@ const DRAGDROP_E_NOTREGISTERED = 0x80040100;
 const DRAGDROP_E_ALREADYREGISTERED = 0x80040101;
 const DRAGDROP_E_INVALIDHWND = 0x80040102;
 
+/** CLSCTX bits: where a program will accept the object being made. */
+const CLSCTX_INPROC = 0x3;
+const CLSCTX_LOCAL_SERVER = 0x4;
+
 /** IID_IClassFactory: what a class object answers to. */
 const IID_ICLASSFACTORY = '{00000001-0000-0000-C000-000000000046}';
 
@@ -73,6 +78,26 @@ const SLOT_CREATE_INSTANCE = 3;
  * says nothing about which apartment the thread joined.
  */
 const COINIT_APARTMENTTHREADED = 0x2;
+const COINIT_DISABLE_OLE1DDE = 0x4;
+
+/** What CoGetApartmentType answers. */
+const APTTYPE_CURRENT = 0xffffffff;
+const APTTYPE_STA = 0;
+const APTTYPE_MTA = 1;
+const APTTYPE_MAINSTA = 3;
+const APTTYPEQUALIFIER_NONE = 0;
+const APTTYPEQUALIFIER_IMPLICIT_MTA = 1;
+
+/**
+ * ole32's per-thread record, where TEB.ReservedForOle points: its flags are
+ * the fourth dword, and these three say which apartment the thread entered.
+ */
+const TEB_RESERVED_FOR_OLE = 0xf80;
+const OLETLS_SIZE = 0x40;
+const OLETLS_FLAGS = 12;
+const OLETLS_DISABLE_OLE1DDE = 0x40;
+const OLETLS_APARTMENTTHREADED = 0x80;
+const OLETLS_MULTITHREADED = 0x100;
 
 /** The longest ProgID a registry key can carry. */
 const MAX_PROGID = 255;
@@ -152,6 +177,22 @@ const MAX_PROGID = 255;
  *           IUnknown it got through two interfaces to decide whether they belong
  *           to one object, and two addresses for one interface fails that test
  *           however correct the object model underneath is.
+ * @property {{ table: ReturnType<typeof createClassTable>, process: unknown }} [com]
+ *           The run's table of class objects served out of process, and what
+ *           names this process to it. Absent, this process has a table of its
+ *           own and can start no server.
+ * @property {{ create: (handler: (message: number) => number | Promise<number>)
+ *         => number | Promise<number>,
+ *     post: (window: number, message: number) => unknown }} [apartmentWindow]
+ *           A hidden window on the calling thread, for the calls another
+ *           process makes on this apartment's objects.
+ * @property {(entry: number, args: number[], thread: unknown) => Promise<number>} [guardedCall]
+ *           A call into guest code inside a frame that takes what it raises:
+ *           how a method runs for another process.
+ * @property {{ allocate?: (bytes: Uint8Array) => number }} [strings]
+ *           A BSTR made from its content, for a string that crosses in.
+ * @property {(vt: number, bounds: { elements: number, lower: number }[]) => number}
+ *           [createSafeArray]
  */
 
 /**
@@ -407,8 +448,93 @@ export function createOleFunctions(host){
             return null;
         }
         classObjects.delete(cookie);
-        return callMethod(entry.object, SLOT_RELEASE, [], thread);
+        return andThen(remoting?.revokeClass(cookie),
+            ()=>callMethod(entry.object, SLOT_RELEASE, [], thread));
     };
+
+    /**
+     * This process's end of the channel to the others, made the first time a
+     * class crosses: a program that never serves or asks for an out-of-process
+     * class never has one.
+     *
+     * @type {ReturnType<typeof createRemoting> | null}
+     */
+    let remoting = null;
+    const remote = ()=>{
+        if (remoting || !host.call || !host.callerThread || !host.bstr)
+        {
+            return remoting;
+        }
+        const call = host.call;
+        const callerThread = host.callerThread;
+        const bstr = host.bstr;
+        remoting = createRemoting({
+            table: host.com?.table ?? createClassTable(),
+            process: host.com?.process ?? null,
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            heap: host.heap,
+            call: (entry, args, thread)=>call(entry, args, thread),
+            guardedCall: host.guardedCall,
+            callerThread,
+            vtables: host.vtables,
+            bstr: {
+                allocate: bytes=>host.strings?.allocate?.(bytes) ?? 0,
+                free: pointer=>bstr.free(pointer),
+            },
+            safeArray: {
+                create: (vt, bounds)=>host.createSafeArray?.(vt, bounds) ?? 0,
+                destroy: array=>host.safeArray?.destroy(array),
+            },
+            apartmentWindow: host.apartmentWindow,
+            catalog: { hive: host.hive, readFile: wholeFile },
+            divergence: host.divergence,
+        });
+        return remoting;
+    };
+
+    /**
+     * A file off the volume whole, or null: the type library that describes
+     * an interface crossing to another process.
+     *
+     * @param {string} path
+     * @returns {Uint8Array | Promise<Uint8Array> | null}
+     */
+    const wholeFile = path=>{
+        const files = host.files;
+        const entry = files?.stat(path);
+        const node = files && entry?.exists && !entry.isDirectory
+            ? files.open(path, { read: true })
+            : null;
+        if (!files || !entry || !node)
+        {
+            return null;
+        }
+        const bytes = files.read(node, 0, entry.size);
+        if (bytes instanceof Promise)
+        {
+            return bytes.finally(()=>files.close(node));
+        }
+        files.close(node);
+        return bytes;
+    };
+
+    /**
+     * The command line that starts the class's local server, or null.
+     *
+     * @param {string} clsid
+     */
+    const localServer = clsid=>classKeyValue(clsid, 'LocalServer32')
+        ?? classKeyValue(clsid, 'LocalServer');
+
+    /**
+     * Whether a class is made in another process: the caller accepts a local
+     * server, and either has not asked for one in process or there is none.
+     *
+     * @param {string} clsid @param {number} context  CLSCTX_*.
+     */
+    const outOfProcess = (clsid, context)=>(context & CLSCTX_LOCAL_SERVER) !== 0
+        && ((context & CLSCTX_INPROC) === 0 || classKeyValue(clsid, 'InprocServer32') === null);
 
     /**
      * A string value of the class's key under HKEY_CLASSES_ROOT\CLSID, or
@@ -579,6 +705,48 @@ export function createOleFunctions(host){
     };
 
     /**
+     * The first thread to enter a single-threaded apartment, whose apartment
+     * is the main one until it leaves (APTTYPE_MAINSTA); and how many threads
+     * are in the multithreaded apartment. While any is, every thread that
+     * entered no apartment of its own is in it too, implicitly, and may make
+     * objects -- as ole32's compobj tests have a thread do.
+     *
+     * @type {any}
+     */
+    let mainSta = null;
+    let mtaThreads = 0;
+
+    /** @param {any} thread */
+    const inApartment = thread=>Boolean(thread?.ole32) || mtaThreads > 0;
+
+    /**
+     * The flags ole32 keeps in its per-thread record, which the thread's
+     * block points at (TEB.ReservedForOle): the apartment the thread entered,
+     * as a program reading the block sees it. The record is made the first
+     * time and kept, as Windows keeps it.
+     *
+     * @param {any} thread @param {number} flags
+     */
+    const writeOleFlags = (thread, flags)=>{
+        const teb = thread?.tebAddress >>> 0;
+        if (!teb)
+        {
+            return;
+        }
+        if (!thread.oleRecord)
+        {
+            thread.oleRecord = host.heap.allocate(OLETLS_SIZE);
+            if (thread.oleRecord === 0)
+            {
+                return;
+            }
+            host.fillMemory(thread.oleRecord, 0, OLETLS_SIZE);
+            writeU32(teb + TEB_RESERVED_FOR_OLE, thread.oleRecord);
+        }
+        writeU32(thread.oleRecord + OLETLS_FLAGS, flags);
+    };
+
+    /**
      * CoInitialize and CoInitializeEx are the same call; the first one names the
      * model rather than taking it.
      *
@@ -592,6 +760,19 @@ export function createOleFunctions(host){
         if (!apartment)
         {
             thread.ole32 = { model, depth: 1 };
+            if (model === COINIT_APARTMENTTHREADED)
+            {
+                mainSta ??= thread;
+                writeOleFlags(thread, OLETLS_APARTMENTTHREADED
+                    | ((mode & COINIT_DISABLE_OLE1DDE) !== 0 ? OLETLS_DISABLE_OLE1DDE : 0));
+            }
+            else
+            {
+                mtaThreads++;
+                // The multithreaded apartment has no DDE window to disable,
+                // and ole32's own tests read the flag set for it.
+                writeOleFlags(thread, OLETLS_MULTITHREADED | OLETLS_DISABLE_OLE1DDE);
+            }
             return S_OK;
         }
         if (apartment.model !== model)
@@ -619,6 +800,15 @@ export function createOleFunctions(host){
             return 0;
         }
         thread.ole32 = null;
+        if (apartment.model !== COINIT_APARTMENTTHREADED)
+        {
+            mtaThreads--;
+        }
+        if (mainSta === thread)
+        {
+            mainSta = null;
+        }
+        writeOleFlags(thread, 0);
         // The apartment's class objects go with it: revoked, and the
         // reference each registration held released, as the last
         // CoUninitialize does on Windows. Objects of the classes built in
@@ -693,6 +883,47 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, mode])=>enterApartment(mode >>> 0),
+        },
+
+        /**
+         * HRESULT CoGetApartmentType(APTTYPE *pAptType, APTTYPEQUALIFIER *pAptQualifier)
+         *
+         * The apartment the calling thread is in: the main single-threaded
+         * one, another single-threaded one, the multithreaded one -- entered,
+         * or implicitly while another thread is in it -- or none, which is
+         * CO_E_NOTINITIALIZED with APTTYPE_CURRENT written. Both pointers are
+         * required, and a call missing one writes nothing.
+         */
+        CoGetApartmentType: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([type, qualifier])=>{
+                if ((type >>> 0) === 0 || (qualifier >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const thread = host.currentThread();
+                const apartment = thread?.ole32;
+                let answer = S_OK;
+                let kind = APTTYPE_MTA;
+                let detail = APTTYPEQUALIFIER_NONE;
+                if (apartment?.model === COINIT_APARTMENTTHREADED)
+                {
+                    kind = mainSta === thread ? APTTYPE_MAINSTA : APTTYPE_STA;
+                }
+                else if (!apartment && mtaThreads > 0)
+                {
+                    detail = APTTYPEQUALIFIER_IMPLICIT_MTA;
+                }
+                else if (!apartment)
+                {
+                    kind = APTTYPE_CURRENT;
+                    answer = CO_E_NOTINITIALIZED;
+                }
+                writeU32(type >>> 0, kind);
+                writeU32(qualifier >>> 0, detail);
+                return answer;
+            },
         },
 
         /** void CoUninitialize(void) */
@@ -880,14 +1111,16 @@ export function createOleFunctions(host){
          * HRESULT CoCreateInstance(REFCLSID rclsid, LPUNKNOWN pUnkOuter,
          *   DWORD dwClsContext, REFIID riid, LPVOID *ppv)
          *
-         * dwClsContext is not consulted: every class here is in-process, and a
-         * program asking for CLSCTX_LOCAL_SERVER gets the same object rather than
-         * a failure it has no fallback for.
+         * A class built in here is in-process whatever dwClsContext says: a
+         * program asking for CLSCTX_LOCAL_SERVER gets the same object rather
+         * than a failure it has no fallback for. A class whose server is an
+         * executable is made in that server's process, started for it if no
+         * process serves it yet, and the caller holds a proxy (`remote.js`).
          */
         CoCreateInstance: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([classId, outer, , interfaceId, ppv])=>{
+            handler: ([classId, outer, context, interfaceId, ppv])=>{
                 const out = ppv >>> 0;
                 if (out === 0)
                 {
@@ -895,7 +1128,7 @@ export function createOleFunctions(host){
                 }
                 writeU32(out, 0);
 
-                if (!host.currentThread().ole32)
+                if (!inApartment(host.currentThread()))
                 {
                     return CO_E_NOTINITIALIZED;
                 }
@@ -919,6 +1152,27 @@ export function createOleFunctions(host){
                 if (host.registry.isRegistered(clsid))
                 {
                     return createBuiltIn(clsid, outer, iid, out);
+                }
+
+                // An executable serves it, and the caller cannot take it in
+                // process: the object is made over there.
+                const channel = outOfProcess(clsid, context) ? remote() : null;
+                if (channel)
+                {
+                    if ((outer >>> 0) !== 0)
+                    {
+                        return CLASS_E_NOAGGREGATION;
+                    }
+                    const made = channel.activate(clsid, iid, out, localServer(clsid), 'activate');
+                    return andThen(made,
+                        (/** @type {number} */ hr)=>{
+                            if (hr === REGDB_E_CLASSNOTREG)
+                            {
+                                host.divergence?.('COM', `no class ${clsid} is registered,`
+                                    + ' so CoCreateInstance refused it');
+                            }
+                            return hr;
+                        });
                 }
 
                 // A server the registry names: its class object, asked for
@@ -969,7 +1223,7 @@ export function createOleFunctions(host){
         CoGetClassObject: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([classId, , , interfaceId, ppv])=>{
+            handler: ([classId, context, , interfaceId, ppv])=>{
                 const out = ppv >>> 0;
                 if (out === 0)
                 {
@@ -1024,6 +1278,11 @@ export function createOleFunctions(host){
                     writeU32(out, pointer);
                     return S_OK;
                 }
+                const channel = outOfProcess(clsid, context) ? remote() : null;
+                if (channel)
+                {
+                    return channel.activate(clsid, iid, out, localServer(clsid), 'classobject');
+                }
                 const served = fromServer(clsid, classId, interfaceId, out, thread);
                 return served ?? REGDB_E_CLASSNOTREG;
             },
@@ -1041,9 +1300,9 @@ export function createOleFunctions(host){
         CoRegisterClassObject: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([classId, object, , , cookieOut])=>{
+            handler: ([classId, object, context, flags, cookieOut])=>{
                 const thread = host.currentThread();
-                if (!thread.ole32)
+                if (!inApartment(thread))
                 {
                     return CO_E_NOTINITIALIZED;
                 }
@@ -1055,8 +1314,13 @@ export function createOleFunctions(host){
                 const cookie = nextCookie++;
                 classObjects.set(cookie, { clsid, object: object >>> 0, thread });
                 writeU32(cookieOut >>> 0, cookie);
-                return andThen(callMethod(object >>> 0, SLOT_ADD_REF, [], host.callerThread?.()),
-                    ()=>S_OK);
+                const held = callMethod(object >>> 0, SLOT_ADD_REF, [], host.callerThread?.());
+                // Served to other processes too, through the run's table.
+                const channel = (context & CLSCTX_LOCAL_SERVER) !== 0 ? remote() : null;
+                return andThen(held, ()=>(channel
+                    ? channel.registerClass(clsid, object >>> 0, flags >>> 0, cookie)
+                        .then(()=>S_OK)
+                    : S_OK));
             },
         },
 
@@ -1067,6 +1331,20 @@ export function createOleFunctions(host){
             handler: ([cookie])=>{
                 const released = revoke(cookie >>> 0, host.callerThread?.());
                 return released === null ? CO_E_OBJNOTREG : andThen(released, ()=>S_OK);
+            },
+        },
+
+        /**
+         * HRESULT CoResumeClassObjects(void)
+         *
+         * What a server registered with REGCLS_SUSPENDED becomes visible to
+         * other processes, all at once.
+         */
+        CoResumeClassObjects: {
+            argBytes: 0,
+            handler: ()=>{
+                remote()?.resume();
+                return S_OK;
             },
         },
 

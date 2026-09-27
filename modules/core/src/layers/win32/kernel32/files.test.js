@@ -308,20 +308,21 @@ function setup(extra = {}){
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        // The memory layer's contract: the limit counts bytes, and a string
+        // with no terminator inside it throws.
         /** @param {number} address @param {number} maxLength */
         readWideString: (address, maxLength)=>{
             let text = '';
-            for (let at = 0; at < maxLength; at++)
+            for (let at = 0; at + 1 < maxLength; at += 2)
             {
-                const code = memory.bytes[address + at * 2]
-                    | memory.bytes[address + at * 2 + 1] << 8;
+                const code = memory.bytes[address + at] | memory.bytes[address + at + 1] << 8;
                 if (code === 0)
                 {
-                    break;
+                    return text;
                 }
                 text += String.fromCharCode(code);
             }
-            return text;
+            throw new Error(`No wide NUL within ${maxLength} bytes of 0x${address.toString(16)}`);
         },
         files,
         setLastError: code=>{
@@ -1272,7 +1273,7 @@ test('GetTempFileNameA creates the file when asked to pick the name', ()=>{
     assert.equal(error.code, ERROR_SUCCESS);
 
     const path = memory.string(OUT_PATH);
-    assert.match(path, /^C:\\GAME\\WZ[0-9a-f]+\.TMP$/);
+    assert.match(path, /^C:\\GAME\\WZ[0-9A-F]+\.tmp$/);
     assert.ok(files.stat(path)?.exists, 'the name was reserved by creating it');
 });
 
@@ -1294,9 +1295,89 @@ test('a chosen uUnique builds the name and creates nothing', ()=>{
         fns.GetTempFileNameA.handler([at(NAME, 'C:\\GAME'), at(NAME2, 'AB'), 0x41, OUT_PATH]),
         0x41, 'the number comes back so a caller can build the next one');
     const path = memory.string(OUT_PATH);
-    assert.equal(path, 'C:\\GAME\\AB41.TMP');
+    assert.equal(path, 'C:\\GAME\\AB41.tmp');
     assert.equal(files.stat(path)?.exists, undefined, 'nothing was created');
 });
+
+test('GetTempFileName spells the number in upper case before a lower-case .tmp', ()=>{
+    // kernel32's file tests compare the name byte for byte: "abcA.tmp" for 0xA.
+    const { memory, fns, at } = setup();
+
+    assert.equal(
+        fns.GetTempFileNameA.handler([at(NAME, 'C:\\GAME\\'), at(NAME2, 'abc'), 0xa, OUT_PATH]),
+        0xa);
+    assert.equal(memory.string(OUT_PATH), 'C:\\GAME\\abcA.tmp');
+    assert.equal(
+        fns.GetTempFileNameA.handler([at(NAME, 'C:\\GAME'), at(NAME2, 'abc'), 0x12345, OUT_PATH]),
+        0x2345, 'only the low word of uUnique is the number');
+    assert.equal(memory.string(OUT_PATH), 'C:\\GAME\\abc2345.tmp');
+});
+
+test('GetTempFileNameW is the same name in wide text, and creates the file for zero', ()=>{
+    const { files, memory, fns } = setup();
+
+    const number = fns.GetTempFileNameW.handler([putWide(memory, NAME, 'C:\\GAME'),
+        putWide(memory, NAME2, 'wine'), 0, OUT_PATH]);
+    assert.notEqual(number, 0);
+    const path = wideAt(memory, OUT_PATH);
+    assert.equal(path, `C:\\GAME\\win${number.toString(16).toUpperCase()}.tmp`,
+        'three characters of the prefix, in wide text');
+    assert.ok(files.stat(path)?.exists, 'the name was reserved by creating it');
+    assert.equal(fns.GetTempFileNameW.argBytes, 16);
+});
+
+test('GetTempPathW zeroes what the path does not fill, and a short buffer whole', ()=>{
+    // kernel32's path tests: the wide form clears the rest of the buffer after
+    // the path, and a buffer too short for it is cleared as far as it goes,
+    // where the ANSI form leaves both untouched.
+    const { memory, fns } = setup();
+    const expected = 'C:\\WINDOWS\\TEMP\\';
+
+    memory.bytes.fill(0x61, OUT_TEXT, OUT_TEXT + 0x100);
+    assert.equal(fns.GetTempPathW.handler([0x80, OUT_TEXT]), expected.length);
+    assert.equal(wideAt(memory, OUT_TEXT), expected);
+    assert.ok(memory.bytes.subarray(OUT_TEXT + expected.length * 2, OUT_TEXT + 0x100)
+        .every(byte=>byte === 0), 'the rest of the buffer is zeroed');
+
+    memory.bytes.fill(0x61, OUT_TEXT, OUT_TEXT + 0x100);
+    assert.equal(fns.GetTempPathW.handler([4, OUT_TEXT]), expected.length + 1,
+        'too short: the size wanted, terminator included');
+    assert.ok(memory.bytes.subarray(OUT_TEXT, OUT_TEXT + 8).every(byte=>byte === 0),
+        'the characters it was given are zeroed');
+    assert.equal(memory.bytes[OUT_TEXT + 8], 0x61, 'and nothing past them');
+
+    assert.equal(fns.GetTempPathW.handler([0, 0]), expected.length + 1);
+    assert.equal(fns.GetTempPathW.argBytes, 8);
+});
+
+test('a wide path longer than half of MAX_PATH is read whole', ()=>{
+    // The memory layer's limit counts bytes: a wide name read with MAX_PATH as
+    // its limit stopped at 130 characters and threw. winmm's mmio tests delete
+    // and create a name of 169 characters.
+    const { files, memory, fns } = setup();
+    const name = `C:\\GAME\\very_long_filename_${'x'.repeat(150)}`;
+
+    const handle = fns.CreateFileW.handler(
+        [putWide(memory, NAME, name), GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE);
+    fns.CloseHandle.handler([handle]);
+    assert.ok(files.stat(name)?.exists);
+    assert.equal(fns.DeleteFileW.handler([putWide(memory, NAME, name)]), 1);
+});
+
+/**
+ * Reads UTF-16 text a wide entry point wrote.
+ *
+ * @param {any} memory @param {number} at
+ */
+function wideAt(memory, at){
+    let text = '';
+    for (let index = at; memory.bytes[index] !== 0 || memory.bytes[index + 1] !== 0; index += 2)
+    {
+        text += String.fromCharCode(memory.bytes[index] | memory.bytes[index + 1] << 8);
+    }
+    return text;
+}
 
 // --- putting an unpacked file in its place ---
 

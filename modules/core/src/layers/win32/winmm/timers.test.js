@@ -116,11 +116,33 @@ test('a one-shot timer fires once, and killing a timer takes it out of the table
     const later = m.timers.set(50, 0x403000, 2, 0x0001);
     m.tick(5);
     assert.equal(m.record(m.ask()).entry, 0x402000);
-    assert.equal(m.timers.diagnostics().armed, 1, 'the one shot is gone');
-    assert.equal(m.timers.kill(once), 11, 'MMSYSERR_INVALPARAM: already gone');
+    assert.equal(m.timers.diagnostics().armed, 2, 'the one shot stays while its routine runs');
     assert.equal(m.timers.kill(later), 0);
-    assert.equal(m.ask(), PARKED);
+    assert.equal(m.ask(), PARKED, 'the routine returned, and the one shot does not fire again');
+    assert.equal(m.timers.diagnostics().armed, 0, 'the one shot is gone');
+    assert.equal(m.timers.kill(once), 97, 'TIMERR_NOCANDO: made, and already gone');
+    assert.equal(m.timers.kill(1000), 11, 'MMSYSERR_INVALPARAM: never made');
     assert.equal(m.blocked.at(-1)?.timed, undefined, 'nothing armed: parked with no deadline');
+});
+
+test('a one-shot routine may kill its own timer', ()=>{
+    // winmm's timer tests call timeKillEvent from the callback, one shot and
+    // TIME_KILL_SYNCHRONOUS, and expect TIMERR_NOERROR.
+    const m = machine();
+    const once = m.timers.set(5, 0x402000, 1, 0);
+    m.tick(5);
+    assert.equal(m.record(m.ask()).entry, 0x402000);
+    assert.equal(m.timers.kill(once), 0, 'still its timer while the routine runs');
+    assert.equal(m.ask(), PARKED);
+});
+
+test('sixteen timers may be armed at once, and the seventeenth is refused', ()=>{
+    const m = machine();
+    const made = Array.from({ length: 20 }, ()=>m.timers.set(10000, 0x2040, 0, 0x0010));
+    assert.ok(made.slice(0, 16).every(id=>id !== 0));
+    assert.deepEqual(made.slice(16), [0, 0, 0, 0]);
+    assert.equal(m.timers.kill(made[0]), 0);
+    assert.notEqual(m.timers.set(10000, 0x2040, 0, 0x0010), 0, 'room again once one is killed');
 });
 
 test('a new timer wakes a parked thread so it looks at the table again', ()=>{

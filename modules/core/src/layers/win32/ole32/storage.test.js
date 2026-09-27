@@ -694,6 +694,76 @@ test('a memory stream lives in a global block the program can lock', ()=>{
     assert.equal(fns.GetHGlobalFromStream.handler([0x1234, OUT2]), E_INVALIDARG);
 });
 
+test('a memory stream seeks in a DWORD, and a seek it refuses keeps the position', ()=>{
+    // ole32's hglobalstream tests: the move's high half is not read, a
+    // position before the start or an origin that is none is
+    // STG_E_SEEKERROR with the position reported unchanged, and SetSize reads
+    // only the low half of its size.
+    const { host, fns, call } = setup();
+    const STG_E_SEEKERROR = 0x80030019 | 0;
+    assert.equal(fns.CreateStreamOnHGlobal.handler([0, 1, OUT]), S_OK);
+    const stream = host.u32(OUT);
+    /** @param {number} low @param {number} high @param {number} origin */
+    const seek = (low, high, origin)=>{
+        host.putU32(OUT2, 0xcafecafe);
+        host.putU32(OUT2 + 4, 0xcafecafe);
+        const hr = call(stream, 'Seek', [low, high, origin, OUT2]);
+        return [hr, host.u32(OUT2), host.u32(OUT2 + 4)];
+    };
+    assert.equal(call(stream, 'SetSize', [12, 0]), S_OK);
+    assert.deepEqual(seek(12, 0, 0), [S_OK, 12, 0]);
+    assert.deepEqual(seek(123, 0, 3), [STG_E_SEEKERROR, 12, 0], 'no such origin');
+    assert.deepEqual(seek(0, 0xffffffff, 1), [S_OK, 12, 0], 'the high half is not read');
+    assert.deepEqual(seek(0x80000000, 0, 1), [STG_E_SEEKERROR, 12, 0], 'before the start');
+    assert.deepEqual(seek(-12 >>> 0, 0, 1), [S_OK, 0, 0]);
+    seek(12, 0, 0);
+    assert.deepEqual(seek(-13 >>> 0, 0, 1), [STG_E_SEEKERROR, 12, 0]);
+    assert.deepEqual(seek(0x80000000 - 12, 0, 1), [S_OK, 0x80000000, 0]);
+    assert.deepEqual(seek(0x80000000, 0, 0), [STG_E_SEEKERROR, 0x80000000, 0]);
+    assert.deepEqual(seek(0x7fffffff, 0, 0), [S_OK, 0x7fffffff, 0]);
+    assert.deepEqual(seek(9, 0, 1), [S_OK, 0x80000008, 0], 'on past 2 GiB');
+    assert.deepEqual(seek(0x7fffffff, 0, 1), [S_OK, 7, 0], 'and round past 4 GiB');
+    assert.deepEqual(seek(0, 0, 2), [S_OK, 12, 0]);
+
+    assert.equal(call(stream, 'SetSize', [0, 0xffffffff]), S_OK, 'the size is the low half');
+    assert.equal(call(stream, 'Stat', [STAT, 0]), S_OK);
+    assert.equal(host.u32(STAT + 8), 0);
+    assert.equal(host.u32(STAT), 0, 'and a memory stream has no name to report');
+});
+
+test('a clone of a memory stream keeps the block after the original goes', ()=>{
+    // ole32's hglobalstream tests release the stream made with
+    // fDeleteOnRelease and go on writing and reading through its clone.
+    const { host, fns, call } = setup();
+    assert.equal(fns.CreateStreamOnHGlobal.handler([0, 1, OUT]), S_OK);
+    const stream = host.u32(OUT);
+    assert.equal(call(stream, 'Clone', [OUT2]), S_OK);
+    const clone = host.u32(OUT2);
+    assert.equal(fns.GetHGlobalFromStream.handler([stream, OUT]), S_OK);
+    host.release(stream);
+    assert.equal(call(clone, 'SetSize', [0x100, 0]), S_OK, 'the block is still there');
+    assert.equal(fns.GetHGlobalFromStream.handler([clone, OUT]), S_OK);
+    const block = host.u32(OUT);
+    assert.ok(host.heap.block(block));
+    host.release(clone);
+    assert.equal(host.heap.block(block), null, 'freed with the last stream over it');
+});
+
+test('a memory stream whose block was freed reads nothing and cannot grow', ()=>{
+    const { host, fns, call } = setup();
+    const own = host.heap.allocate(8);
+    host.bytes.fill(0x41, own, own + 8);
+    assert.equal(fns.CreateStreamOnHGlobal.handler([own, 0, OUT]), S_OK);
+    const stream = host.u32(OUT);
+    host.heap.free(own);
+    host.putU32(COUNT, 0xffffffff);
+    assert.equal(call(stream, 'Read', [BUFFER, 8, COUNT]), S_OK);
+    assert.equal(host.u32(COUNT), 0);
+    assert.equal(call(stream, 'SetSize', [16, 0]) >>> 0, 0x8007000e, 'E_OUTOFMEMORY');
+    assert.equal(call(stream, 'Write', [BUFFER, 8, COUNT]) >>> 0, 0x8007000e);
+    assert.equal(host.u32(COUNT), 0);
+});
+
 test('a class travels through a stream, ours or the program\'s own', async()=>{
     const { host, fns, call, createDocfile, createStream } = setup();
     const root = createDocfile();

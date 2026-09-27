@@ -488,6 +488,11 @@ export function createDirect3D8(options = {}){
             {
                 return hr;
             }
+            // A device holds a reference on the object that made it, which it
+            // gives back when it goes: a program may release that object at
+            // once and still reach it through GetDirect3D (Wine's d3d8 and
+            // d3d9 test_refcount).
+            root.addRef();
             out.device = createDeviceObject(
                 normalisePresentParameters(parameters), resolved, behaviourFlags, services, {
                     direct3D: root,
@@ -825,8 +830,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * while it lives in the default pool it also blocks a Reset.
      *
      * @param {number} pool
+     * @param {() => void} [onGone]  What the resource gives back when its last
+     *     reference goes, before the device's is released.
      */
-    const explicitCount = pool=>{
+    const explicitCount = (pool, onGone = ()=>{})=>{
         count.addRef();
         const blocking = pool === D3DPOOL.DEFAULT;
         if (blocking)
@@ -835,6 +842,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         }
         return createReferenceCount({
             onLastRef: ()=>{
+                onGone();
                 count.release();
                 if (blocking)
                 {
@@ -842,6 +850,19 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 }
             },
         });
+    };
+
+    /**
+     * A surface made on its own, not a level of anything: its storage goes
+     * back once the program's last reference does, as a texture's does, or
+     * every render target a program makes and releases stays taken until the
+     * heap is gone.
+     *
+     * @param {any} surface
+     */
+    const retireSurface = surface=>{
+        free(surface.base);
+        renderer?.retire(surface);
     };
 
     /** A resource the device owns: its first reference is one on the device. */
@@ -856,6 +877,30 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             liveImplicitReferences--;
         },
     });
+
+    /**
+     * A bound resource handed back with the reference the call owes. One the
+     * program released to nothing while it stayed bound is gone here, where
+     * Windows keeps it until it is unbound; it is answered as nothing, and
+     * said once, rather than ending the run on a reference it cannot take.
+     *
+     * @param {any} resource @param {string} what  The getter, for the report.
+     * @returns {any}
+     */
+    const handOut = (resource, what)=>{
+        if (!resource)
+        {
+            return null;
+        }
+        if (resource.refCount === 0 && resource.destroyed !== false)
+        {
+            reportOnce(`released-while-bound:${what}`, `${what} answers NULL for a resource `
+                + 'released to nothing while bound, which Windows keeps until it is unbound');
+            return null;
+        }
+        resource.addRef();
+        return resource;
+    };
 
     /** @type {any[]} */
     let backBuffers = [];
@@ -876,12 +921,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     function buildImplicitResources(){
         const width = presentParameters.backBufferWidth ?? 640;
         const height = presentParameters.backBufferHeight ?? 480;
+        // The surfaces a Reset replaces give their storage back, as Direct3D 9's
+        // do: each Reset to another size kept the old ones' otherwise.
         for (const surface of backBuffers)
         {
+            free(surface.base);
             renderer?.retire(surface);
         }
         if (autoDepthStencil)
         {
+            free(autoDepthStencil.base);
             renderer?.retire(autoDepthStencil);
         }
         backBuffers = [];
@@ -1094,8 +1143,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      *           format?: number }} spec
      */
     const createBuffer = spec=>{
-        const bufferCount = explicitCount(spec.pool);
         const base = allocate(spec.length);
+        // Its storage goes back with its last reference, as a Direct3D 9
+        // buffer's does.
+        const bufferCount = explicitCount(spec.pool, ()=>free(base));
         let locked = false;
         const buffer = {
             ...spec,
@@ -1381,11 +1432,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
         addRef: ()=>count.addRef(),
         release: ()=>{
+            const before = count.value;
             const left = count.release();
-            if (left === 0)
+            if (left === 0 && before > 0)
             {
                 stopWatchingLoss?.();
                 showGamma(true);
+                // The reference CreateDevice took on the object that made it.
+                identity?.direct3D?.release?.();
             }
             return left;
         },
@@ -1569,7 +1623,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             out.swapChain = createAdditionalChain({
                 parameters: wanted,
                 count: explicitCount(D3DPOOL.DEFAULT),
-                makeBackBuffer: chainCount=>createSurface({
+                // A back buffer's count is its own and not the chain's, as the
+                // device's own back buffer's is: a reference on it is one on
+                // the device, and one released to nothing leaves it the
+                // chain's to take again (Wine's d3d8 test_refcount). Direct3D 9
+                // shares the chain's.
+                makeBackBuffer: ()=>createSurface({
                     type: SURFACE_TYPE.RENDER_TARGET,
                     width,
                     height,
@@ -1580,7 +1639,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     divergence: services.divergence ?? null,
                     pixels: targetPixels(),
                     base: allocate(surfaceBytes(format, width, height)),
-                    count: chainCount,
+                    count: implicitCount(),
                 }),
                 present: presentChain,
                 retire: surface=>{
@@ -2345,12 +2404,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            const texture = textures.get(stage) ?? null;
-            if (texture)
-            {
-                texture.addRef();
-            }
-            out.texture = texture;
+            out.texture = handOut(textures.get(stage) ?? null, 'GetTexture');
             return D3D_OK;
         },
 
@@ -2374,11 +2428,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
         /** @param {{ buffer?: any, baseVertexIndex?: number }} out */
         GetIndices(out){
-            if (indices)
-            {
-                indices.addRef();
-            }
-            out.buffer = indices;
+            out.buffer = handOut(indices, 'GetIndices');
             out.baseVertexIndex = baseVertexIndex;
             return D3D_OK;
         },
@@ -2418,11 +2468,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          */
         GetStreamSource(index, out){
             const record = stream(index);
-            if (record.buffer)
-            {
-                record.buffer.addRef();
-            }
-            out.buffer = record.buffer;
+            out.buffer = handOut(record.buffer, 'GetStreamSource');
             out.stride = record.stride;
             return D3D_OK;
         },
@@ -2618,7 +2664,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return hr;
             }
-            out.surface = createSurface({
+            const surface = createSurface({
                 type: SURFACE_TYPE.RENDER_TARGET,
                 width,
                 height,
@@ -2629,8 +2675,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 lockable,
                 pixels: targetPixels(),
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.DEFAULT),
+                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface)),
             });
+            out.surface = surface;
             return D3D_OK;
         },
 
@@ -2647,7 +2694,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return hr;
             }
-            out.surface = createSurface({
+            const surface = createSurface({
                 type: SURFACE_TYPE.DEPTH_STENCIL,
                 width,
                 height,
@@ -2656,8 +2703,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 usage: D3DUSAGE.DEPTHSTENCIL,
                 divergence: services.divergence ?? null,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.DEFAULT),
+                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface)),
             });
+            out.surface = surface;
             return D3D_OK;
         },
 
@@ -2677,7 +2725,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return hr;
             }
-            out.surface = createSurface({
+            const surface = createSurface({
                 type: SURFACE_TYPE.PLAIN,
                 width,
                 height,
@@ -2685,8 +2733,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 pool: D3DPOOL.SYSTEMMEM,
                 usage: 0,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.SYSTEMMEM),
+                count: explicitCount(D3DPOOL.SYSTEMMEM, ()=>retireSurface(surface)),
             });
+            out.surface = surface;
             return D3D_OK;
         },
 

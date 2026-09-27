@@ -360,6 +360,29 @@ test('CreateThread makes a thread and does not switch to it', ()=>{
     assert.deepEqual(parked, [], 'the creating thread keeps running');
 });
 
+test('CreateRemoteThread into this process is CreateThread, and into another is refused', ()=>{
+    // kernel32's process and thread tests: the stack of a remote thread of
+    // our own process; a child, which runs only after this process, cannot
+    // be given one.
+    const { kernel, fns, errors } = setup();
+    const handle = fns.CreateRemoteThread.handler(
+        [0xffffffff, 0, 0x10000, 0x401000, 0xdead, 0, 0x405000]);
+    assert.ok(handle > 0);
+    assert.equal(kernel.state.created[0].entry, 0x401000);
+    assert.equal(kernel.state.created[0].parameter, 0xdead);
+    assert.deepEqual(kernel.state.threadIds, [{ address: 0x405000, id: 2 }]);
+
+    assert.ok(fns.CreateRemoteThreadEx.handler(
+        [0xffffffff, 0, 0, 0x402000, 0, 0, 0x406000, 0x407000]) > 0);
+    assert.equal(kernel.state.created[1].entry, 0x402000);
+    assert.equal(kernel.state.threadIds.at(-1)?.address, 0x407000, 'the id after the list');
+
+    assert.equal(fns.CreateRemoteThread.handler([0x1234, 0, 0, 0x401000, 0, 0, 0]), 0);
+    assert.deepEqual(errors, [6], 'ERROR_INVALID_HANDLE for what is no process');
+    assert.deepEqual([fns.CreateRemoteThread.argBytes, fns.CreateRemoteThreadEx.argBytes],
+        [28, 32]);
+});
+
 test('CreateThread gives the new thread its own environment block', ()=>{
     // FS points at it: a thread without one reads its id, its stack bounds
     // and its thread-local slots from linear address zero and up.

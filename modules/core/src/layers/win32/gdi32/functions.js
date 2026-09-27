@@ -259,6 +259,32 @@ const ARABIC_CHARSET = 178;
 /** SHIFTJIS, HANGUL, JOHAB, GB2312 and CHINESEBIG5: the double-byte sets. */
 const DBCS_CHARSETS = new Set([128, 129, 130, 134, 136]);
 
+/**
+ * The character sets TranslateCharsetInfo knows, each with the ANSI code page
+ * it stands for and the bit of FONTSIGNATURE.fsCsb[0] that names it -- the
+ * code-page bits the FONTSIGNATURE documentation lists, in its order.
+ *
+ * @type {readonly { charSet: number, codePage: number, bit: number }[]}
+ */
+const CHARSET_TABLE = Object.freeze([
+    { charSet: 0, codePage: 1252, bit: 0 },
+    { charSet: 238, codePage: 1250, bit: 1 },
+    { charSet: 204, codePage: 1251, bit: 2 },
+    { charSet: 161, codePage: 1253, bit: 3 },
+    { charSet: 162, codePage: 1254, bit: 4 },
+    { charSet: 177, codePage: 1255, bit: 5 },
+    { charSet: 178, codePage: 1256, bit: 6 },
+    { charSet: 186, codePage: 1257, bit: 7 },
+    { charSet: 163, codePage: 1258, bit: 8 },
+    { charSet: 222, codePage: 874, bit: 16 },
+    { charSet: 128, codePage: 932, bit: 17 },
+    { charSet: 134, codePage: 936, bit: 18 },
+    { charSet: 129, codePage: 949, bit: 19 },
+    { charSet: 136, codePage: 950, bit: 20 },
+    { charSet: 130, codePage: 1361, bit: 21 },
+    { charSet: 2, codePage: 42, bit: 31 },
+]);
+
 /** GetFontLanguageInfo's answers. */
 const GCP_DBCS = 0x0001;
 const GCP_REORDER = 0x0002;
@@ -1895,12 +1921,16 @@ export function createGdiFunctions(host){
          * A null ppvBits is not refused: the section is created and the pointer
          * simply goes nowhere. The documentation does not say what happens, and
          * a program that asks for a surface it cannot address has not failed at
-         * this call.
+         * this call. A null pbmi describes nothing to make.
          */
         CreateDIBSection: {
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([hdc, info, usage, bitsOut, section])=>{
+                if ((info >>> 0) === 0)
+                {
+                    return 0;
+                }
                 const header = readBitmapInfoHeader(host, info);
                 if (!isDibHeaderSize(header.size))
                 {
@@ -2522,6 +2552,59 @@ export function createGdiFunctions(host){
          * read tables out of, and TEXTMETRIC says as much, so the signature
          * is the zeros the documentation gives any other font.
          */
+        /**
+         * BOOL TranslateCharsetInfo(DWORD *lpSrc, LPCHARSETINFO lpCs, DWORD dwFlags)
+         *
+         * One of a character set, an ANSI code page or a font signature's
+         * code-page bits, and the CHARSETINFO all three describe: TCI_SRCCHARSET
+         * and TCI_SRCCODEPAGE take the value itself where the pointer would
+         * be, TCI_SRCFONTSIG reads fsCsb[0] and takes its lowest set bit. A
+         * value no set answers to fails and leaves the structure alone.
+         */
+        TranslateCharsetInfo: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([source, out, flags])=>{
+                const TCI_SRCCHARSET = 1;
+                const TCI_SRCCODEPAGE = 2;
+                const TCI_SRCFONTSIG = 3;
+                const value = source >>> 0;
+                let found = null;
+                switch (flags >>> 0){
+                    case TCI_SRCCHARSET:
+                        found = CHARSET_TABLE.find(entry=>entry.charSet === value);
+                        break;
+                    case TCI_SRCCODEPAGE:
+                        found = CHARSET_TABLE.find(entry=>entry.codePage === value);
+                        break;
+                    case TCI_SRCFONTSIG: {
+                        if (value === 0)
+                        {
+                            break;
+                        }
+                        const bits = readU32(host, value);
+                        found = CHARSET_TABLE.find(entry=>(bits >>> entry.bit & 1) !== 0);
+                        break;
+                    }
+                    default:
+                        break;
+                }
+                if (!found || (out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                // CHARSETINFO: ciCharset, ciACP, then a FONTSIGNATURE of four
+                // Unicode-subset dwords and two code-page ones.
+                const bytes = new Uint8Array(32);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(0, found.charSet, true);
+                view.setUint32(4, found.codePage, true);
+                view.setUint32(24, (1 << found.bit) >>> 0, true);
+                host.writeMemory(out >>> 0, bytes);
+                return 1;
+            },
+        },
+
         GetTextCharset: {
             argBytes: 4,
             /** @param {number[]} args */

@@ -1152,8 +1152,11 @@ async()=>{
     assert.equal(await context.press(hwnd, VK_TAB, [], true), 1, 'a plain Tab');
     assert.notEqual(context.fns.GetFocus.handler([]), focused, 'moves the focus');
     assert.equal(active(), 0, 'and not the page');
-    assert.equal(await context.press(hwnd, VK_NEXT, [], true), 0,
-        'PgDn alone is not the sheet\'s');
+    // PgDn alone is not the sheet's: the dialog manager has it, and
+    // dispatches it as it dispatches any message for a window in the sheet.
+    assert.equal(await context.press(hwnd, VK_NEXT, [], true), 1,
+        'PgDn alone is the dialog manager\'s to dispatch');
+    assert.equal(active(), 0, 'and does not change the page');
 });
 
 test('a sheet whose only page names a control of a class nobody has cannot show it: a modal '

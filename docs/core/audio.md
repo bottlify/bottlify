@@ -77,9 +77,13 @@ Interfaces published (`src/layers/audio/dsound/seam.js`): `IDirectSound` (8 slot
 `QueryInterface` for follows Windows: the object `DirectSoundCreate` returns is `IDirectSound`
 alone, the one `DirectSoundCreate8` returns is both; a secondary buffer is `IDirectSoundBuffer`
 and `IDirectSoundBuffer8`, the primary buffer only the first; `IDirectSoundNotify` is there only
-on a buffer created with `DSBCAPS_CTRLPOSITIONNOTIFY`. `IDirectSound3DListener` and
-`IDirectSound3DBuffer` are deliberately not declared, so `QueryInterface` answers `E_NOINTERFACE`
-rather than handing back a table that ends after `IUnknown`.
+on a buffer created with `DSBCAPS_CTRLPOSITIONNOTIFY`. Every buffer, the primary too, is also
+`IKsPropertySet` (3), with no property set to offer: `Get`, `Set` and `QuerySupport` answer
+`E_PROP_ID_UNSUPPORTED`, the support flags cleared, which a program asking after EAX takes as
+playing without it. `IDirectSound3DListener` and `IDirectSound3DBuffer` are deliberately not
+declared, so `QueryInterface` answers `E_NOINTERFACE` rather than handing back a table that ends
+after `IUnknown`. `DllGetClassObject` has no class to hand out (`CLASS_E_CLASSNOTAVAILABLE`, the
+pointer cleared): the classes COM makes are made through ole32.
 
 ### `diagnostics()`
 
@@ -150,6 +154,18 @@ device read to. What the device passed is still checked against what the program
 passed there: a refill that came too late for the device is heard as the last lap again, and
 `staleBytes`/`staleDrains` (with `staleAt` and the last trail of unlocks) count it on this path
 too -- the measure of a program the machine cannot keep fed in real time.
+
+**A buffer written in sequence while it plays is a stream**, and the device plays it no further than
+what was written: an unlock of a playing voice that starts where the last one ended moves the
+voice's `FRESH` (laps times the length plus the offset, where that write ends, measured from the
+cursor) and sets `STREAMING`; the device stops a stream at `FRESH`, adds silence and counts the
+frames in `HELD`, and goes on once the writer catches up. Played on round the circle it would
+replay the lap before whenever the guest thread feeding it -- a Miles or FMOD mixer that writes a
+few tens of milliseconds past the cursor -- was held longer than that by the machine: a short
+gap is heard where the crackle was. Play and SetCurrentPosition end a stream; a buffer rewritten
+once while it loops is not one; and a stream waited for 250 ms is played on round the circle, as
+a writer that stopped leaves the hardware looping. `module.test.js` stalls a 65 ms-ahead writer
+for 120 ms: nothing stale is played.
 
 **With shared memory** (`createSharedMixer`): the engine writes each track's own guest PCM,
 unconverted, into a per-track byte ring inside one `SharedArrayBuffer` "track table" (`SLOTS = 64`

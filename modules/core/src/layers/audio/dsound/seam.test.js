@@ -13,7 +13,7 @@ import {
     createDirectSound, createPublisher, describe,
     DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBCAPS, DSCAPS, DSCAPS_FLAGS, DSBPOSITIONNOTIFY,
     IID_IDirectSound, IID_IDirectSound8, IID_IDirectSoundBuffer,
-    IID_IDirectSoundBuffer8, IID_IDirectSoundNotify, IID_IDirectSound3DBuffer,
+    IID_IDirectSoundBuffer8, IID_IDirectSoundNotify, IID_IDirectSound3DBuffer, IID_IKsPropertySet,
     IDIRECTSOUND_SLOTS, IDIRECTSOUND8_SLOTS, IDIRECTSOUNDBUFFER_SLOTS,
     IDIRECTSOUNDBUFFER8_SLOTS,
 } from './seam.js';
@@ -1493,4 +1493,30 @@ test('two buffers share one method list, and a slot called through either acts o
     assert.equal(first.methods, second.methods, 'one list for IDirectSoundBuffer');
     assert.equal(first.object.interfaceFor(first.id).methods, first.methods,
         'the same list every time');
+});
+
+test('every buffer has IKsPropertySet, which has no property set to offer', ()=>{
+    // Wine's dsound ds3d test asks the primary buffer for it; a program asking
+    // after EAX through it is told the device has none.
+    const f = createRoot();
+    const buffer = createBuffer(f, { flags: DSBCAPS_GETCURRENTPOSITION2 });
+    const adapter = f.bridge.recordAt(buffer).object;
+    const record = adapter.interfaceFor(IID_IKsPropertySet);
+    assert.ok(record);
+    assert.deepEqual(record.methods.slice(3).map((/** @type {any} */ method)=>method.name),
+        ['Get', 'Set', 'QuerySupport']);
+    const support = 0x1f00;
+    f.memory.writeMemory(support, Uint8Array.of(0xff, 0xff, 0xff, 0xff));
+    const querySupport = record.methods[5].invoke;
+    assert.equal(querySupport(adapter.api ?? adapter, [0x1f10, 0, support]) >>> 0, 0x80070490);
+    assert.equal(f.memory.u32(support), 0, 'the caller\'s flags are cleared');
+});
+
+test('DllGetClassObject has no class to hand out, and clears the pointer', ()=>{
+    const f = createRoot();
+    const out = 0x1f20;
+    f.memory.writeMemory(out, Uint8Array.of(1, 2, 3, 4));
+    assert.equal(f.dsound.libraries['DSOUND.dll'].DllGetClassObject.handler([0x1f30, 0x1f40, out])
+        >>> 0, 0x80040111);
+    assert.equal(f.memory.u32(out), 0);
 });

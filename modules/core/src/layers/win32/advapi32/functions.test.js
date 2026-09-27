@@ -32,7 +32,8 @@ const REG_OPENED_EXISTING_KEY = 2;
 /** Addresses the fixtures use; nothing about them matters but that they differ. */
 const SUBKEY = 0x100;
 const NAME = 0x200;
-const INPUT = 0x300;
+// Above the never-mapped 64 KiB, where a value's data can come from.
+const INPUT = 0x10300;
 const OUT_HANDLE = 0x400;
 const OUT_TYPE = 0x404;
 const OUT_SIZE = 0x408;
@@ -47,7 +48,7 @@ const OUT_INFO = 0x700;
  * copy, exactly as the real memory layer may, so anything that stores what it
  * read has to say so.
  */
-function fakeMemory(size = 0x1000){
+function fakeMemory(size = 0x11000){
     const bytes = new Uint8Array(size);
     return {
         bytes,
@@ -605,10 +606,11 @@ test('a key with subkeys is refused, not deleted', ()=>{
     assert.equal(fns.RegDeleteKeyA.handler([HKEY_LOCAL_MACHINE, SUBKEY]), ERROR_FILE_NOT_FOUND);
 });
 
-test('a key cannot delete itself', ()=>{
+test('a delete that names no subkey is refused', ()=>{
+    // advapi32's registry tests: RegDeleteKeyA(key, NULL) is ERROR_INVALID_PARAMETER.
     const { fns, create } = setup();
     const key = create('Software\\Test');
-    assert.equal(fns.RegDeleteKeyA.handler([key, 0]), ERROR_FILE_NOT_FOUND);
+    assert.equal(fns.RegDeleteKeyA.handler([key, 0]), ERROR_INVALID_PARAMETER);
 });
 
 test('what a guest writes through this surface is what the hive holds', ()=>{
@@ -746,7 +748,7 @@ test('the wide file security call is refused like the narrow one, popping what i
     assert.equal(fns.SetFileSecurityW.argBytes, 12);
 });
 
-test('the token, impersonation and access-check calls refuse plainly and pop their arguments', ()=>{
+test('impersonating oneself succeeds, and the file security calls refuse plainly', ()=>{
     const memory = fakeMemory();
     /** @type {number[]} */
     const errors = [];
@@ -762,13 +764,7 @@ test('the token, impersonation and access-check calls refuse plainly and pop the
     assert.equal(fns.RevertToSelf.handler(), 1);
     assert.equal(fns.ImpersonateSelf.argBytes, 4);
     assert.equal(fns.RevertToSelf.argBytes, 0);
-    const expected = {
-        LookupPrivilegeValueA: 12, AdjustTokenPrivileges: 24, AccessCheck: 32,
-        GetFileSecurityA: 20, SetFileSecurityA: 12,
-        InitializeSecurityDescriptor: 8, IsValidSecurityDescriptor: 4,
-        SetSecurityDescriptorOwner: 12, SetSecurityDescriptorGroup: 12,
-        SetSecurityDescriptorDacl: 16, InitializeAcl: 12, AddAccessAllowedAce: 16,
-    };
+    const expected = { GetFileSecurityA: 20, SetFileSecurityA: 12 };
     const table = /** @type {Record<string, { argBytes: number, handler: (args: number[]) => number }>} */ (
         /** @type {unknown} */ (fns));
     for (const [name, argBytes] of Object.entries(expected))
@@ -910,4 +906,131 @@ test('the user\'s classes lie over the machine\'s under the classes root', ()=>{
     assert.equal(remove(hkcr, 'subkey1'), ERROR_SUCCESS);
     assert.equal(open(hklm, 'subkey1'), -ERROR_FILE_NOT_FOUND);
     assert.equal(remove(hkcr, 'subkey1'), ERROR_FILE_NOT_FOUND);
+});
+
+/**
+ * Plants UTF-16 text where a W call reads it.
+ *
+ * @param {any} memory @param {number} at @param {string} text
+ */
+function plantWide(memory, at, text){
+    for (let i = 0; i <= text.length; i++)
+    {
+        const code = i < text.length ? text.charCodeAt(i) : 0;
+        memory.bytes[at + i * 2] = code & 0xff;
+        memory.bytes[at + i * 2 + 1] = code >>> 8;
+    }
+    return at;
+}
+
+/** @param {any} memory @param {number} at */
+function wideAt(memory, at){
+    let text = '';
+    for (let i = at; memory.bytes[i] !== 0 || memory.bytes[i + 1] !== 0; i += 2)
+    {
+        text += String.fromCharCode(memory.bytes[i] | memory.bytes[i + 1] << 8);
+    }
+    return text;
+}
+
+test('RegSetValueW and RegQueryValueW are the default string of a subkey, in wide text', ()=>{
+    // advapi32's registry tests: only REG_SZ, to the first NUL whatever the size.
+    const { memory, fns, create } = setup();
+    const key = create('Software\\Wide');
+    plantWide(memory, SUBKEY, 'Sub');
+    plantWide(memory, INPUT, 'This\0Breaks');
+    assert.equal(fns.RegSetValueW.handler([key, SUBKEY, REG_SZ, INPUT, 8]), ERROR_SUCCESS);
+    assert.equal(fns.RegSetValueW.handler([key, SUBKEY, REG_BINARY, INPUT, 8]),
+        ERROR_INVALID_PARAMETER);
+    memory.putDword(OUT_SIZE, 0x40);
+    assert.equal(fns.RegQueryValueW.handler([key, SUBKEY, OUT_DATA, OUT_SIZE]), ERROR_SUCCESS);
+    assert.equal(wideAt(memory, OUT_DATA), 'This');
+    assert.equal(memory.dword(OUT_SIZE), 10, 'bytes, the terminator counted');
+    memory.putString(SUBKEY, 'Sub');
+    memory.putDword(OUT_SIZE, 0x40);
+    assert.equal(fns.RegQueryValueA.handler([key, SUBKEY, OUT_DATA, OUT_SIZE]), ERROR_SUCCESS);
+    assert.equal(memory.string(OUT_DATA), 'This', 'and the narrow read finds it');
+});
+
+test('an enumerated value too long for either buffer writes nothing but its size', ()=>{
+    // advapi32's registry tests: on ERROR_MORE_DATA the name and its count are
+    // left as they were, and the data's size is what it needs.
+    const { memory, fns, create, setString } = setup();
+    const key = create('Software\\Enum');
+    setString(key, 'Test', 'foobar');
+    memory.putString(OUT_NAME, 'xxxxxxxx');
+    memory.putDword(OUT_NAME_SIZE, 20);
+    memory.putDword(OUT_SIZE, 2);
+    assert.equal(fns.RegEnumValueA.handler(
+        [key, 0, OUT_NAME, OUT_NAME_SIZE, 0, OUT_TYPE, OUT_DATA, OUT_SIZE]), ERROR_MORE_DATA);
+    assert.equal(memory.dword(OUT_NAME_SIZE), 20);
+    assert.equal(memory.string(OUT_NAME), 'xxxxxxxx');
+    assert.equal(memory.dword(OUT_SIZE), 7);
+    assert.equal(memory.dword(OUT_TYPE), REG_SZ);
+
+    memory.putDword(OUT_SIZE, 0x40);
+    assert.equal(fns.RegEnumValueW.handler(
+        [key, 0, OUT_NAME, OUT_NAME_SIZE, 0, OUT_TYPE, OUT_DATA, OUT_SIZE]), ERROR_SUCCESS);
+    assert.equal(wideAt(memory, OUT_NAME), 'Test');
+    assert.equal(memory.dword(OUT_NAME_SIZE), 4);
+    assert.equal(wideAt(memory, OUT_DATA), 'foobar');
+    assert.equal(memory.dword(OUT_SIZE), 14, 'the string answered wide');
+});
+
+test('RegGetValue holds the value to the types it is asked for', ()=>{
+    // advapi32's registry tests: a type outside the mask is
+    // ERROR_UNSUPPORTED_TYPE with everything still answered, a four-byte
+    // binary value is a DWORD and an eight-byte one is not.
+    const { memory, fns, create } = setup();
+    const key = create('Software\\Get');
+    memory.putString(NAME, 'DWORD');
+    memory.putDword(INPUT, 0x12345678);
+    fns.RegSetValueExA.handler([key, NAME, 0, REG_DWORD, INPUT, 4]);
+    memory.putString(NAME + 0x20, 'BIN64');
+    fns.RegSetValueExA.handler([key, NAME + 0x20, 0, REG_BINARY, INPUT, 8]);
+    const RRF_RT_REG_DWORD = 0x10;
+    const RRF_RT_REG_BINARY = 0x08;
+    const RRF_RT_DWORD = 0x18;
+    const RRF_RT_QWORD = 0x48;
+
+    assert.equal(fns.RegGetValueA.handler([key, 0, NAME, RRF_RT_REG_DWORD, OUT_TYPE, OUT_DATA, 0]),
+        ERROR_INVALID_PARAMETER, 'data with no size');
+    memory.putDword(OUT_SIZE, 0x40);
+    assert.equal(fns.RegGetValueA.handler(
+        [key, 0, NAME, RRF_RT_REG_DWORD, OUT_TYPE, OUT_DATA, OUT_SIZE]), ERROR_SUCCESS);
+    assert.deepEqual([memory.dword(OUT_TYPE), memory.dword(OUT_DATA), memory.dword(OUT_SIZE)],
+        [REG_DWORD, 0x12345678, 4]);
+    memory.putDword(OUT_DATA, 0);
+    assert.equal(fns.RegGetValueA.handler(
+        [key, 0, NAME, RRF_RT_REG_BINARY, OUT_TYPE, OUT_DATA, OUT_SIZE]), 1630);
+    assert.equal(memory.dword(OUT_DATA), 0x12345678, 'answered all the same');
+    memory.putDword(OUT_SIZE, 0x40);
+    assert.equal(fns.RegGetValueA.handler(
+        [key, 0, NAME + 0x20, RRF_RT_DWORD, OUT_TYPE, OUT_DATA, OUT_SIZE]), 1629);
+    memory.putDword(OUT_SIZE, 0x40);
+    assert.equal(fns.RegGetValueA.handler(
+        [key, 0, NAME + 0x20, RRF_RT_QWORD, OUT_TYPE, OUT_DATA, OUT_SIZE]), ERROR_SUCCESS);
+    assert.equal(fns.RegGetValueA.argBytes, 28);
+});
+
+test('a tree is copied whole and deleted whole, and data below 64 KiB is refused', ()=>{
+    const { memory, fns, create, setString } = setup();
+    const from = create('Software\\From');
+    const to = create('Software\\To');
+    memory.putString(SUBKEY, 'Deep\\Deeper');
+    fns.RegCreateKeyA.handler([from, SUBKEY, OUT_HANDLE]);
+    setString(memory.dword(OUT_HANDLE), 'Leaf', 'green');
+    assert.equal(fns.RegCopyTreeA.handler([from, 0, to]), ERROR_SUCCESS);
+    memory.putString(SUBKEY, 'Deep\\Deeper');
+    assert.equal(fns.RegOpenKeyA.handler([to, SUBKEY, OUT_HANDLE]), ERROR_SUCCESS);
+
+    memory.putString(SUBKEY, 'Deep');
+    assert.equal(fns.RegDeleteTreeA.handler([from, SUBKEY]), ERROR_SUCCESS);
+    assert.equal(fns.RegOpenKeyA.handler([from, SUBKEY, OUT_HANDLE]), ERROR_FILE_NOT_FOUND);
+
+    memory.putString(NAME, 'Low');
+    assert.equal(fns.RegSetValueExA.handler([from, NAME, 0, REG_SZ, 1, 1]), 998,
+        'ERROR_NOACCESS');
+    assert.equal(fns.RegSetValueExA.handler([from, NAME, 0, REG_SZ, 0, 0]), ERROR_SUCCESS,
+        'no data at all is fine');
 });

@@ -116,6 +116,19 @@ test('a region is cut at an indirect jump, a return, a call, a trap and a fault'
     assert.equal(halt.blocks[0].exit.kind, 'hlt');
 });
 
+test('call $+5 is a push of its own return address: the block goes on past it', ()=>{
+    // 1000: call $+5; 1005: pop ebx; fld1; ret -- and with an operand-size prefix,
+    // a call of sixteen bits, which stays a call.
+    const region = regionOf([0xe8, 0, 0, 0, 0, 0x5b, 0xd9, 0xe8, 0xc3]);
+    assert.deepEqual(region.entries, [0x1000]);
+    assert.deepEqual(region.blocks[0].instructions.map(one=>one.op),
+        ['call', 'pop', 'fld1', 'ret']);
+    assert.equal(region.blocks[0].exit.kind, 'ret');
+    assert.deepEqual([...inlineReturns(region)], [], 'no return comes back into the region');
+    const short = regionOf([0x66, 0xe8, 0, 0, 0x5b, 0xc3]);
+    assert.equal(short.blocks[0].exit.kind, 'call');
+});
+
 test('a refused instruction ends the block, named, and is counted by opcode', ()=>{
     const region = regionOf([0x90, 0xea, 0, 0, 0, 0, 0, 0]); // nop; jmp far
     assert.equal(region.blocks[0].exit.kind, 'refused');

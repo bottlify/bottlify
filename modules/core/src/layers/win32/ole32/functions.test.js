@@ -308,14 +308,75 @@ test('a second CoInitializeEx with the other model is refused', ()=>{
 
 test('the apartment belongs to the thread that entered it', ()=>{
     const { host, fns } = setup();
-    assert.equal(initialize(fns, COINIT_MULTITHREADED), S_OK);
+    assert.equal(initialize(fns, COINIT_APARTMENTTHREADED), S_OK);
 
     host.run(host.threads.second);
     assert.equal(createInstance(fns), CO_E_NOTINITIALIZED);
     // A different thread may pick a different model without disturbing the first.
-    assert.equal(initialize(fns, COINIT_APARTMENTTHREADED), S_OK);
-    assert.equal(host.threads.second.ole32.model, COINIT_APARTMENTTHREADED);
-    assert.equal(host.threads.first.ole32.model, COINIT_MULTITHREADED);
+    assert.equal(initialize(fns, COINIT_MULTITHREADED), S_OK);
+    assert.equal(host.threads.second.ole32.model, COINIT_MULTITHREADED);
+    assert.equal(host.threads.first.ole32.model, COINIT_APARTMENTTHREADED);
+});
+
+test('a thread that entered no apartment is in the multithreaded one while it exists', ()=>{
+    // ole32's compobj tests: the implicit MTA. A thread that never called
+    // CoInitialize makes an object while another thread is in the MTA.
+    const { host, fns } = setup();
+    assert.equal(initialize(fns, COINIT_MULTITHREADED), S_OK);
+    host.run(host.threads.second);
+    assert.equal(createInstance(fns), S_OK);
+
+    host.run(host.threads.first);
+    fns.CoUninitialize.handler();
+    host.run(host.threads.second);
+    assert.equal(createInstance(fns), CO_E_NOTINITIALIZED, 'and not once it is gone');
+});
+
+test('CoGetApartmentType names the apartment, and wants both pointers', ()=>{
+    // ole32's compobj tests and every dsound test's apartment check.
+    const { host, fns } = setup();
+    const TYPE = 0x9000;
+    const QUALIFIER = 0x9004;
+    const answer = ()=>[fns.CoGetApartmentType.handler([TYPE, QUALIFIER]) >>> 0,
+        host.u32(TYPE), host.u32(QUALIFIER)];
+
+    host.bytes.fill(0xef, TYPE, TYPE + 8);
+    assert.equal(fns.CoGetApartmentType.handler([TYPE, 0]) >>> 0, 0x80070057);
+    assert.equal(fns.CoGetApartmentType.handler([0, QUALIFIER]) >>> 0, 0x80070057);
+    assert.equal(host.u32(TYPE), 0xefefefef, 'nothing written for a call missing one');
+
+    assert.deepEqual(answer(), [CO_E_NOTINITIALIZED, 0xffffffff, 0], 'APTTYPE_CURRENT');
+    initialize(fns, COINIT_APARTMENTTHREADED);
+    assert.deepEqual(answer(), [S_OK, 3, 0], 'the first STA is the main one');
+    host.run(host.threads.second);
+    initialize(fns, COINIT_APARTMENTTHREADED);
+    assert.deepEqual(answer(), [S_OK, 0, 0], 'a second is an STA');
+    fns.CoUninitialize.handler();
+    host.run(host.threads.first);
+    fns.CoUninitialize.handler();
+
+    initialize(fns, COINIT_MULTITHREADED);
+    assert.deepEqual(answer(), [S_OK, 1, 0], 'APTTYPE_MTA');
+    host.run(host.threads.second);
+    assert.deepEqual(answer(), [S_OK, 1, 1], 'APTTYPEQUALIFIER_IMPLICIT_MTA');
+});
+
+test('the thread\'s block points at ole32\'s record, whose flags name the apartment', ()=>{
+    // ole32's compobj tests read NtCurrentTeb()->ReservedForOle->flags.
+    const { host, fns } = setup();
+    const TEB = 0x8000;
+    host.threads.first.tebAddress = TEB;
+    const flags = ()=>host.u32(host.u32(TEB + 0xf80) + 12);
+
+    initialize(fns, COINIT_APARTMENTTHREADED);
+    assert.equal(flags(), 0x80, 'OLETLS_APARTMENTTHREADED');
+    fns.CoUninitialize.handler();
+    assert.equal(flags(), 0, 'cleared by the last CoUninitialize, the record kept');
+    initialize(fns, COINIT_APARTMENTTHREADED | 0x4);
+    assert.equal(flags(), 0x80 | 0x40, 'and OLETLS_DISABLE_OLE1DDE when asked');
+    fns.CoUninitialize.handler();
+    initialize(fns, COINIT_MULTITHREADED);
+    assert.equal(flags(), 0x100 | 0x40, 'OLETLS_MULTITHREADED, with DDE disabled');
 });
 
 test('CoCreateInstance hands back one reference and an interface pointer', ()=>{
@@ -726,6 +787,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
     const expected = {
         CoInitialize: 4,
         CoInitializeEx: 8,
+        CoGetApartmentType: 8,
         CoInitializeSecurity: 36,
         CoUninitialize: 0,
         OleInitialize: 4,
@@ -739,6 +801,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoGetClassObject: 20,
         CoRegisterClassObject: 20,
         CoRevokeClassObject: 4,
+        CoResumeClassObjects: 0,
         CoSetProxyBlanket: 32,
         CoCreateGuid: 4,
         CoTaskMemAlloc: 4,
