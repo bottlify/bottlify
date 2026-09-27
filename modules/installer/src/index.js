@@ -14,14 +14,16 @@
  * not an installer's.
  *
  *     const options = prefixOptions(media, { windows }); // build the app with these
- *     const silent = silentOptions(media);               // and these, to skip the wizard
+ *     const silent = silentOptions(media, { silent });   // with no screen: skip the wizard
  *     await app.run(...);                                // the person clicks through
  *     const prefix = collectFrom(app, media);            // this is what it produced
  *     await publish({ prefix, manifest: { windows } });  // and this is the bottle
  *
- * `silentOptions` is the engine's own unattended mode, when its family is
- * recognised: a command line and the files it reads its answers from, with
- * the destination already decided. Null means the wizard has to be run.
+ * `silentOptions` is the engine's own unattended mode, asked for only by a run
+ * with no screen (`{ silent: true }`, with createApp's `unattended` beside it),
+ * when its family is recognised: a command line and the files it reads its
+ * answers from, with the destination already decided. Null means the wizard
+ * has to be run, which is the default with a screen.
  *
  * What is reachable today is the publisher's own single-process installer.
  * A distribution that extracts a payload and starts a second program cannot
