@@ -39,6 +39,7 @@ const STG_E_INVALIDFUNCTION = 0x80030001 | 0;
 const STG_E_FILENOTFOUND = 0x80030002 | 0;
 const STG_E_ACCESSDENIED = 0x80030005 | 0;
 const STG_E_INSUFFICIENTMEMORY = 0x80030008 | 0;
+const STG_E_SEEKERROR = 0x80030019 | 0;
 const STG_E_INVALIDPOINTER = 0x80030009 | 0;
 const STG_E_READFAULT = 0x8003001e | 0;
 const STG_E_FILEALREADYEXISTS = 0x80030050 | 0;
@@ -158,7 +159,7 @@ const MAX_PATH = 260;
  * memory stream over a block the guest owns.
  *
  * @typedef {Object} StreamBacking
- * @property {string} name
+ * @property {string | null} name  None for a memory stream, whose Stat names nothing.
  * @property {() => number} size
  * @property {(offset: number, length: number) => Uint8Array} read
  * @property {(offset: number, bytes: Uint8Array) => boolean} write
@@ -166,6 +167,9 @@ const MAX_PATH = 260;
  * @property {(size: number) => boolean} resize
  * @property {import('./cfb.js').CfbEntry | null} entry  For Stat's times.
  * @property {() => number} [handle]  The HGLOBAL, for a memory stream.
+ * @property {() => () => void} [retain]
+ *           One more stream over the backing; answers what that stream calls
+ *           when it goes.
  */
 
 /**
@@ -387,13 +391,13 @@ export function createStorageFunctions(host){
      * Fills a STATSTG.
      *
      * @param {number} at
-     * @param {{ name: string, type: number, size: number, mode: number,
+     * @param {{ name: string | null, type: number, size: number, mode: number,
      *           entry: import('./cfb.js').CfbEntry | null }} about
      * @param {number} flags
      */
     const writeStat = (at, about, flags)=>{
         host.writeMemory(at, new Uint8Array(STATSTG.SIZE_OF));
-        if ((flags & STATFLAG_NONAME) === 0)
+        if ((flags & STATFLAG_NONAME) === 0 && about.name !== null)
         {
             const name = allocateWide(about.name);
             if (name === 0)
@@ -477,6 +481,34 @@ export function createStorageFunctions(host){
     });
 
     /**
+     * Seek on a memory stream, whose position is a DWORD, as ole32's
+     * hglobalstream tests pin: the move is the low half of its LARGE_INTEGER,
+     * signed, and the high half is not read; a move that lands before the
+     * start, or an origin there is no such thing as, is STG_E_SEEKERROR with
+     * the position kept and reported; past 4 GiB it wraps.
+     *
+     * @param {StreamState} state @param {number} low @param {number} origin
+     * @param {number} out
+     * @returns {number} an HRESULT
+     */
+    const seekMemory = (state, low, origin, out)=>{
+        const base = origin === STREAM_SEEK_SET ? 0
+            : origin === STREAM_SEEK_CUR ? state.position
+                : origin === STREAM_SEEK_END ? state.backing.size() : -1;
+        const target = base + (low | 0);
+        const failed = base < 0 || target < 0;
+        if (!failed)
+        {
+            state.position = target >>> 0;
+        }
+        if (out !== 0)
+        {
+            writeU64(out, BigInt(state.position));
+        }
+        return failed ? STG_E_SEEKERROR : S_OK;
+    };
+
+    /**
      * A stream's methods over its backing. Positions and sizes arrive as
      * 64-bit integers, two words each, and go back the same way.
      *
@@ -545,6 +577,10 @@ export function createStorageFunctions(host){
         { name: 'Seek', argBytes: 20, invoke: (object, [low, high, origin, out])=>{
             /** @type {StreamState} */
             const state = object.state;
+            if (state.backing.handle)
+            {
+                return seekMemory(state, low, origin >>> 0, out >>> 0);
+            }
             const move = Number(BigInt.asIntN(64, (BigInt(high >>> 0) << 32n) | BigInt(low >>> 0)));
             let target;
             switch (origin >>> 0){
@@ -580,7 +616,9 @@ export function createStorageFunctions(host){
             {
                 return STG_E_ACCESSDENIED;
             }
-            if ((high >>> 0) !== 0)
+            // A memory stream's size is a DWORD and the high half is not
+            // read at all, as ole32's hglobalstream tests pass it -1.
+            if ((high >>> 0) !== 0 && !state.backing.handle)
             {
                 return E_OUTOFMEMORY;
             }
@@ -661,6 +699,7 @@ export function createStorageFunctions(host){
     const publishStream = (state, out)=>{
         const methods = streamMethods();
         const detach = state.document ? attach(state.document) : null;
+        const release = state.backing.retain?.();
         return publish(CLSID_STREAM, {
             state,
             interfaces: [
@@ -669,7 +708,10 @@ export function createStorageFunctions(host){
                 // what a program that asks for it expects to find there.
                 { id: IID_ISEQUENTIALSTREAM, methods: methods.slice(0, 2) },
             ],
-            destroy: ()=>detach?.(),
+            destroy: ()=>{
+                detach?.();
+                release?.();
+            },
         }, IID_ISTREAM, out);
     };
 
@@ -1280,15 +1322,19 @@ export function createStorageFunctions(host){
             handle = moved;
             return true;
         };
+        // A block the program freed under the stream is one the stream no
+        // longer has: it reads as empty and refuses to grow, as ole32's
+        // hglobalstream tests free one and go on using the stream.
+        const alive = ()=>host.heap.block(handle) !== null;
         /** @type {StreamBacking} */
         const backing = {
-            name: '',
+            name: null,
             entry: null,
             handle: ()=>handle,
-            size: ()=>size,
+            size: ()=>(alive() ? size : 0),
             read: (offset, length)=>host.readMemory(handle + offset, length).slice(),
             write: (offset, bytes)=>{
-                if (!grow(offset + bytes.length))
+                if (!alive() || !grow(offset + bytes.length))
                 {
                     return false;
                 }
@@ -1301,7 +1347,7 @@ export function createStorageFunctions(host){
                 return true;
             },
             resize: wanted=>{
-                if (!grow(wanted))
+                if (!alive() || !grow(wanted))
                 {
                     return false;
                 }
@@ -1312,24 +1358,25 @@ export function createStorageFunctions(host){
                 size = wanted;
                 return true;
             },
-        };
-        const methods = streamMethods();
-        return publish(CLSID_STREAM, {
-            state: /** @type {StreamState} */ ({
-                backing, mode: STGM_READWRITE | STGM_SHARE_EXCLUSIVE, position: 0,
-                document: null,
-            }),
-            interfaces: [
-                { id: IID_ISTREAM, methods },
-                { id: IID_ISEQUENTIALSTREAM, methods: methods.slice(0, 2) },
-            ],
-            destroy: ()=>{
-                if (deleteOnRelease)
-                {
-                    host.heap.free(handle);
-                }
+            // A clone shares the block, so it is freed with the last stream
+            // over it rather than the first: ole32's hglobalstream tests
+            // release the original and go on with the clone.
+            retain: ()=>{
+                holders++;
+                return ()=>{
+                    holders--;
+                    if (holders === 0 && deleteOnRelease)
+                    {
+                        host.heap.free(handle);
+                    }
+                };
             },
-        }, IID_ISTREAM, out);
+        };
+        let holders = 0;
+        return publishStream(/** @type {StreamState} */ ({
+            backing, mode: STGM_READWRITE | STGM_SHARE_EXCLUSIVE, position: 0,
+            document: null,
+        }), out);
     };
 
     let temporaries = 0;
