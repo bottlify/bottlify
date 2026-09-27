@@ -49,9 +49,11 @@
  * jumps to the handler's trap -- a `jmp rel32` whose displacement, at the
  * offset `host` names, the loader fills in where it places the code -- so the
  * handler finds the stack, EBX, ESI, EDI and EBP as the caller left them.
- * Nothing the function wrote before is undone: it goes to the host before it
- * writes. A function with an x87 parameter, which it has popped by then, has
- * no such return.
+ * A parameter such a function assigns is a variable of its own, copied from
+ * the argument at entry, so the arguments are still the call's own. Nothing
+ * the function wrote before is undone: it goes to the host before it writes.
+ * A function with an x87 parameter, which it has popped by then, has no such
+ * return.
  *
  * Integers are typed as asm.js types them: `|0`, `>>>0` and the bitwise
  * operators bring a value back to 32 bits; `+` and `-` leave a sum that may
@@ -142,6 +144,7 @@ import {
  * @typedef {Object} Plan
  * @property {Map<any, number>} registers  Each variable given one, by the node declaring it.
  * @property {boolean} keepX87             The x87 parameter stays in ST0 until it is read.
+ * @property {Set<any>} assigned           The parameters the body assigns.
  * @property {{ locals: number, saved: number }} [frame]
  *     The bytes of variables in the frame and the registers saved above it,
  *     once a compilation with the registers has found them.
@@ -453,6 +456,8 @@ class FunctionCompiler {
         this.acrossCalls = new Set();
         /** @type {Set<any>} The variables a byte is stored from, better in a register with one. */
         this.byteStored = new Set();
+        /** @type {Set<any>} The parameters the body assigns. */
+        this.assigned = new Set();
         /**
          * The load just emitted into EAX, while it is the last instruction:
          * what a store into a register variable can aim at the register.
@@ -533,6 +538,12 @@ class FunctionCompiler {
         const x87 = [];
         /** @type {Variable[]} */
         const inRegisters = [];
+        /**
+         * The parameters copied into variables of their own at entry.
+         *
+         * @type {{ from: number, to: Variable, size: number }[]}
+         */
+        const copies = [];
         let stack = 8;
         for (const param of params)
         {
@@ -566,6 +577,18 @@ class FunctionCompiler {
             {
                 v.reg = reg;
                 inRegisters.push(v);
+            }
+            else if (this.helpers.has('host') && this.planned?.assigned.has(param))
+            {
+                // The trap hands the handler the arguments the call came
+                // with: a parameter the body assigns is a variable of its
+                // own, not the caller's slot. One in a register already is.
+                this.params.add(param);
+                const own = this.newVariable(param.name, v.type, true, param);
+                copies.push({ from: stack, to: own, size: type === 'f64' ? 8 : 4 });
+                this.bind(param, own);
+                stack += type === 'f64' ? 8 : 4;
+                continue;
             }
             this.params.add(param);
             this.live.add(param);
@@ -616,6 +639,16 @@ class FunctionCompiler {
         {
             out.emit(0x8b, ...memory(/** @type {number} */ (v.reg), {    // mov reg, the parameter
                 base: ESP, disp: this.locals + saved.length * 4 + v.disp - 4 }));
+        }
+        for (const { from, to, size } of copies)
+        {
+            for (let at = 0; at < size; at += 4)
+            {
+                // mov eax, the argument; mov the variable, eax
+                out.emit(0x8b, ...memory(EAX, {
+                    base: ESP, disp: this.locals + saved.length * 4 + from - 4 + at }));
+                out.emit(0x89, ...memory(EAX, { base: ESP, disp: this.locals + to.disp + at }));
+            }
         }
         // The last x87 parameter is ST0: each popped into its variable, but
         // one read where it is.
@@ -814,6 +847,7 @@ class FunctionCompiler {
             registers: this.arrange(registers),
             keepX87: this.x87.length === 1 && this.x87Reads === 1 && this.x87ReadClean
                 && !this.x87Stored,
+            assigned: this.assigned,
         };
     }
 
@@ -1476,6 +1510,10 @@ class FunctionCompiler {
         if (!v.mutable)
         {
             this.fail(node, `${node.name} is a const`);
+        }
+        if (this.params.has(v.key))
+        {
+            this.assigned.add(v.key);
         }
         return v;
     }

@@ -250,8 +250,10 @@ EBP as the caller left them -- and the code jumps to a trap into the handler, wh
 call as it came, arguments and all. The jump is a `jmp rel32` whose displacement the compiler
 leaves empty and names (`host` in the compiled module): the binding registers the trap
 (`guestEntry`'s fallback, the handler the function stood for) and the loader, which places the
-code, aims the jump at it ([`loader.md`](./loader.md)). The function goes to the host before it
-writes anything, so there is nothing to undo; one with an x87 parameter, popped by then, cannot.
+code, aims the jump at it ([`loader.md`](./loader.md)). A parameter such a function assigns is a
+variable of its own, copied from the argument at entry, so the arguments the handler reads are the
+call's. The function goes to the host before it writes anything, so there is nothing to undo; one
+with an x87 parameter, popped by then, cannot.
 `strtol` and `strtoul` hand over a value out of range -- the handler clamps it and sets `errno`,
 which is the calling thread's own and reached only through the host -- and a base outside 2..36
 other than 0, and answer everything else themselves.

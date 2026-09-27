@@ -201,6 +201,38 @@ export function handOver({ u8, setU8, host }, p, k){
 }
 
 /**
+ * Parameters assigned before the call is handed over, one left in the frame
+ * by the variables that take the registers and a double: the handler is
+ * handed the arguments the call came with.
+ *
+ * @guestCode cdecl
+ * @param {any} guest @param {u32} p @param {i32} a @param {f64} x @param {i32} b
+ * @returns {i32}
+ */
+export function assignedThenHost({ u8, host }, p, a, x, b){
+    let s0 = 0;
+    let s1 = 0;
+    let s2 = 0;
+    let s3 = 0;
+    let s4 = 0;
+    for (let i = 0; i < 8; i++)
+    {
+        s0 = (s0 + u8(p + i)) | 0;
+        s1 = (s1 ^ u8(p + i + 1)) | 0;
+        s2 = (s2 + s0) | 0;
+        s3 = (s3 + s1) | 0;
+        s4 = (s4 ^ s2 ^ s3) | 0;
+    }
+    a = (a + 1) | 0;
+    x = -x;
+    if (b === 0 || x > 0)
+    {
+        return host();
+    }
+    return (a + s0 + s1 + s2 + s3 + s4) | 0;
+}
+
+/**
  * More variables live at once than there are registers to give, in loops
  * nested three deep, each changed every turn and all of them answered.
  *
@@ -635,6 +667,24 @@ test('a call handed to the host: the frame down, the stack and the kept register
             handed += js.handedOver ? 1 : 0;
         }
         assert.ok(handed > 20 && handed < 180, `${handed} of 200 handed over: both ways taken`);
+    });
+
+test('a parameter assigned before the call is handed over: the handler gets the call\'s own',
+    async()=>{
+        const { same } = await load(SAMPLE);
+        const next = random(22);
+        /** @type {(memory: Uint8Array, args: number[]) => number} */
+        const host = (memory, [p, a, low, high, b])=>(p ^ a ^ low ^ high ^ b) | 0;
+        let handed = 0;
+        for (let i = 0; i < 40; i++)
+        {
+            const bytes = Array.from({ length: 16 }, ()=>next() & 0xff);
+            const x = [1.5, -2, -0, 1e300][i % 4];
+            const js = same('assignedThenHost', { stack: [DATA, next(), ...doubleWords(x),
+                i % 3 === 0 ? 0 : next()], memory: [[DATA, bytes]] }, { host });
+            handed += js.handedOver ? 1 : 0;
+        }
+        assert.ok(handed > 10 && handed < 40, `${handed} of 40 handed over: both ways taken`);
     });
 
 const TAGS = '@param {i32} a @param {u32} c @param {f64} x\n * @returns {i32}';
