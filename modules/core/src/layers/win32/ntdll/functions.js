@@ -83,7 +83,10 @@ const KERNEL32_ALIASES = Object.freeze({
 });
 
 /**
- * @typedef {{ argBytes: number, convention?: string, handler: Function }} Entry
+ * @typedef {{ argBytes: number, convention?: string, handler: Function,
+ *     natives?: Record<string, any> }} Entry
+ *     `natives`: the native calls ntdll publishes over the state this entry's
+ *     own table keeps.
  */
 
 /**
@@ -140,8 +143,15 @@ export function createNtdllFunctions(host){
     /** @param {number} address */
     const free = address=>kernel32.HeapFree.handler([processHeap, 0, address]) !== 0;
 
+    // Native calls a kernel32 table builds over state only it holds -- the
+    // APC queues -- ride on the entry that shares the state, since nothing
+    // here reaches it.
+    const natives = Object.assign({}, ...Object.values(kernel32)
+        .map(entry=>entry?.natives ?? {}));
+
     return {
         ...alias(kernel32, KERNEL32_ALIASES),
+        ...natives,
         ...alias(crt, Object.fromEntries(CRT_EXPORTS.map(name=>[name, name]))),
 
         ...createCountedStringFunctions({
