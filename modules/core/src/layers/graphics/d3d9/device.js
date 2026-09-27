@@ -1096,6 +1096,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
         addRef: ()=>swapChainCount.addRef(),
         release: ()=>swapChainCount.release(),
+        // The device keeps its implicit chain: a program that released the one
+        // GetSwapChain answered may call through it while the device lives
+        // (Wine's d3d9 test_swapchain does), so its pointer outlives its count.
+        reachable: ()=>count.value > 0,
 
         /**
          * The type is not looked at: a stereo buffer asked for is the mono
