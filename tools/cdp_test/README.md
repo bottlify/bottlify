@@ -113,6 +113,10 @@ page's workers answer nothing to a direct attach.
 | `worker-profile.mjs` | the engine worker's time: idle, GC, top functions, and every pause outside guest code with when it began | `node tools/cdp_test/live/worker-profile.mjs [seconds] [minMs]` |
 | `allocations.mjs` | which functions of the engine worker allocate the most, garbage included | `node tools/cdp_test/live/allocations.mjs [seconds]` |
 | `big-buffers.mjs` | every backing store over a size in the engine worker, and what holds it | `node tools/cdp_test/live/big-buffers.mjs [minMB]` |
+| `record-output.mjs` | what the person hears, uncompressed off the output node, the last two minutes (`arm` keeps a tap across reloads; `save` writes a WAV) | `node tools/cdp_test/live/record-output.mjs arm` then `… save [seconds] [file]` |
+
+`tools/wav-scan.mjs <file.wav>` reads such a recording for what is wrong in it: gaps of
+silence inside sound, clicks (a step far beyond the signal's own), and exact repeats.
 
 `tools/install-watch.mjs` is the same question for an installer in Node: it
 runs one unattended and prints every process's threads, waits and parked
