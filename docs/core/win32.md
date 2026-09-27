@@ -410,9 +410,13 @@ double precision, a step past the largest double the handler's (ERANGE). `strtod
 their number in the guest -- white space, a sign, digits and a point, an exponent after `e`, `E`,
 `d` or `D` where a digit follows, msvcrt's reading -- and compute what Clinger's fast path makes
 exact, up to fifteen significant digits scaled by up to 10^22 in one multiplication or division
-under double precision and rounding to nearest, the program's control word put back after; more
-digits, a larger scale, an overflow and an underflow go to the handler, which answers the double
-JavaScript reads and sets ERANGE for an infinity or a zero out of digits that were not all zeros.
+under double precision and rounding to nearest, the program's control word put back after -- one
+loop reading the digits on both sides of the point, and the power of ten multiplied up a ten at a
+time, a function of few branches being what cork translates cheaply; more digits, a larger scale,
+an overflow and an underflow go to the handler, which reads the number's own bytes (a window of 64,
+up to the first byte no number is spelt with, and the whole string only where the window holds no
+such byte or runs past what is mapped), answers the double JavaScript reads and sets ERANGE for an
+infinity or a zero out of digits that were not all zeros.
 `div` and `ldiv` are assembled by hand (`DIVIDE_CODE`, `msvcrt/math.js`): the quotient in EAX and
 the remainder in EDX, where a compiler takes an eight-byte structure, from one `idiv`, which
 faults as msvcrt's own does for a zero divisor or INT_MIN over -1. `msvcrt/inguest-float.test.js`
@@ -1368,7 +1372,8 @@ then waiting in the host, with the lock count showing it queued, while the owner
 recursion, until the owner's last leave hands it over. `src/heap-inguest.itest.js` calls the
 heap through the import on cork and on the emulator: a block sized, validated by the host, grown in
 place and moved past its cell, freed and no longer valid; `HEAP_ZERO_MEMORY` over a recycled cell;
-a heap of the program's own added up by `HeapSummary` and taken whole by `HeapDestroy`; the
+a heap of the program's own added up by `HeapSummary`, walked by `HeapWalk` (which ends at once,
+over its blocks as over the host's) and taken whole by `HeapDestroy`; the
 runtime's family; another heap's block refused; and ten thousand pairs with next to none of them
 crossing -- and three threads preempted every 97 instructions allocating, filling, checking and
 freeing eight blocks a turn from the process heap and from `malloc`. `src/winmm-inguest.itest.js` calls
