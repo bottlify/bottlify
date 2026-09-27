@@ -98,15 +98,6 @@ const hardwareOf = (/** @type {number} */ bits)=>hardwareExceptions(bits) | (bit
 const exactly = (/** @type {number} */ word)=>word & 0xf0ff | 0x0200;
 
 /**
- * 10^k for k from 0 to 22, every power a double holds exactly, as a product
- * of 10, 10^2, 10^4 and 10^8 (twice for 10^16), each an integer made a
- * double, which stays exact under double precision.
- */
-const tenTo = (/** @type {number} */ k)=>+((k & 1) !== 0 ? 10 : 1) * +((k & 2) !== 0 ? 100 : 1)
-    * +((k & 4) !== 0 ? 10000 : 1) * +((k & 8) !== 0 ? 100000000 : 1)
-    * +((k & 16) !== 0 ? 100000000 : 1) * +((k & 16) !== 0 ? 100000000 : 1);
-
-/**
  * unsigned int _control87(unsigned int newControl, unsigned int mask)
  *
  * The control word the thread runs under, the bits the mask names changed
@@ -328,6 +319,12 @@ export function _nextafter({ controlWord, setControlWord, host }, x, y){
  * scale is 10^22 or less (Clinger's fast path, exact); a sixteenth digit or
  * a larger scale is the handler's, which reads the text again.
  *
+ * One loop reads the digits on both sides of the point, and the powers of
+ * ten are multiplied up a ten at a time -- every one to 10^22 is exact --
+ * rather than assembled from branches: cork translates a function like this
+ * as many regions, each over most of it, so every branch is paid for many
+ * times over before the first call returns.
+ *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text @param {u32} end
  * @returns {f64}
@@ -348,68 +345,47 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, 
         c = u8(at);
     }
     let seen = 0;
+    let point = 0;
     let digits = 0;
     let high = 0;
     let low = 0;
-    let lowDigits = 0;
     let scale = 0;
-    while (c >= 0x30 && c <= 0x39)
+    for (;;)
     {
-        seen = 1;
-        if (digits === 0 && c === 0x30)
+        if (c >= 0x30 && c <= 0x39)
         {
-            // A leading zero, which is no significant digit.
+            seen = 1;
+            // A leading zero is no significant digit; after the point it
+            // moves the scale as any digit there does.
+            if (digits !== 0 || c !== 0x30)
+            {
+                if (digits < 9)
+                {
+                    high = (Math.imul(high, 10) + (c - 0x30)) | 0;
+                }
+                else if (digits < 15)
+                {
+                    low = (Math.imul(low, 10) + (c - 0x30)) | 0;
+                }
+                else
+                {
+                    // A sixteenth significant digit, past the fast path.
+                    return host();
+                }
+                digits++;
+            }
+            scale = (scale - point) | 0;
         }
-        else if (digits < 9)
+        else if (c === 0x2e && point === 0)
         {
-            high = (Math.imul(high, 10) + (c - 0x30)) | 0;
-            digits++;
-        }
-        else if (digits < 15)
-        {
-            low = (Math.imul(low, 10) + (c - 0x30)) | 0;
-            lowDigits++;
-            digits++;
+            point = 1;
         }
         else
         {
-            // A sixteenth significant digit, past the fast path.
-            return host();
+            break;
         }
         at++;
         c = u8(at);
-    }
-    if (c === 0x2e)
-    {
-        at++;
-        c = u8(at);
-        while (c >= 0x30 && c <= 0x39)
-        {
-            seen = 1;
-            if (digits === 0 && c === 0x30)
-            {
-                scale--;
-            }
-            else if (digits < 9)
-            {
-                high = (Math.imul(high, 10) + (c - 0x30)) | 0;
-                digits++;
-                scale--;
-            }
-            else if (digits < 15)
-            {
-                low = (Math.imul(low, 10) + (c - 0x30)) | 0;
-                lowDigits++;
-                digits++;
-                scale--;
-            }
-            else
-            {
-                return host();
-            }
-            at++;
-            c = u8(at);
-        }
     }
     if (seen === 0)
     {
@@ -458,8 +434,24 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, 
     }
     const word = controlWord();
     setControlWord(exactly(word));
-    const whole = lowDigits === 0 ? +high : high * tenTo(lowDigits) + low;
-    const value = scale < 0 ? whole / tenTo((0 - scale) | 0) : whole * tenTo(scale);
+    /** @type {f64} */
+    let whole = +high;
+    let k = (digits - 9) | 0;
+    while (k > 0)
+    {
+        whole = whole * 10;
+        k--;
+    }
+    whole = whole + low;
+    /** @type {f64} */
+    let power = 1;
+    k = scale < 0 ? (0 - scale) | 0 : scale;
+    while (k > 0)
+    {
+        power = power * 10;
+        k--;
+    }
+    const value = scale < 0 ? whole / power : whole * power;
     setControlWord(word);
     if (end !== 0)
     {
@@ -492,68 +484,44 @@ export function atof({ u8, controlWord, setControlWord, host }, text){
         c = u8(at);
     }
     let seen = 0;
+    let point = 0;
     let digits = 0;
     let high = 0;
     let low = 0;
-    let lowDigits = 0;
     let scale = 0;
-    while (c >= 0x30 && c <= 0x39)
+    for (;;)
     {
-        seen = 1;
-        if (digits === 0 && c === 0x30)
+        if (c >= 0x30 && c <= 0x39)
         {
-            // A leading zero, which is no significant digit.
+            seen = 1;
+            if (digits !== 0 || c !== 0x30)
+            {
+                if (digits < 9)
+                {
+                    high = (Math.imul(high, 10) + (c - 0x30)) | 0;
+                }
+                else if (digits < 15)
+                {
+                    low = (Math.imul(low, 10) + (c - 0x30)) | 0;
+                }
+                else
+                {
+                    return host();
+                }
+                digits++;
+            }
+            scale = (scale - point) | 0;
         }
-        else if (digits < 9)
+        else if (c === 0x2e && point === 0)
         {
-            high = (Math.imul(high, 10) + (c - 0x30)) | 0;
-            digits++;
-        }
-        else if (digits < 15)
-        {
-            low = (Math.imul(low, 10) + (c - 0x30)) | 0;
-            lowDigits++;
-            digits++;
+            point = 1;
         }
         else
         {
-            // A sixteenth significant digit, past the fast path.
-            return host();
+            break;
         }
         at++;
         c = u8(at);
-    }
-    if (c === 0x2e)
-    {
-        at++;
-        c = u8(at);
-        while (c >= 0x30 && c <= 0x39)
-        {
-            seen = 1;
-            if (digits === 0 && c === 0x30)
-            {
-                scale--;
-            }
-            else if (digits < 9)
-            {
-                high = (Math.imul(high, 10) + (c - 0x30)) | 0;
-                digits++;
-                scale--;
-            }
-            else if (digits < 15)
-            {
-                low = (Math.imul(low, 10) + (c - 0x30)) | 0;
-                lowDigits++;
-                digits++;
-                scale--;
-            }
-            else
-            {
-                return host();
-            }
-            at++;
-            c = u8(at);
-        }
     }
     if (digits === 0)
     {
@@ -561,22 +529,22 @@ export function atof({ u8, controlWord, setControlWord, host }, text){
     }
     if ((c | 0x20) === 0x65 || (c | 0x20) === 0x64)
     {
-        let after = (at + 1) >>> 0;
-        let d = u8(after);
+        at++;
+        c = u8(at);
         let minus = 0;
-        if (d === 0x2d || d === 0x2b)
+        if (c === 0x2d || c === 0x2b)
         {
-            minus = d === 0x2d ? 1 : 0;
-            after++;
-            d = u8(after);
+            minus = c === 0x2d ? 1 : 0;
+            at++;
+            c = u8(at);
         }
         let exponent = 0;
-        while (d >= 0x30 && d <= 0x39)
+        while (c >= 0x30 && c <= 0x39)
         {
-            exponent = exponent < 100000 ? (Math.imul(exponent, 10) + (d - 0x30)) | 0
+            exponent = exponent < 100000 ? (Math.imul(exponent, 10) + (c - 0x30)) | 0
                 : exponent;
-            after++;
-            d = u8(after);
+            at++;
+            c = u8(at);
         }
         scale = minus !== 0 ? (scale - exponent) | 0 : (scale + exponent) | 0;
     }
@@ -586,8 +554,24 @@ export function atof({ u8, controlWord, setControlWord, host }, text){
     }
     const word = controlWord();
     setControlWord(exactly(word));
-    const whole = lowDigits === 0 ? +high : high * tenTo(lowDigits) + low;
-    const value = scale < 0 ? whole / tenTo((0 - scale) | 0) : whole * tenTo(scale);
+    /** @type {f64} */
+    let whole = +high;
+    let k = (digits - 9) | 0;
+    while (k > 0)
+    {
+        whole = whole * 10;
+        k--;
+    }
+    whole = whole + low;
+    /** @type {f64} */
+    let power = 1;
+    k = scale < 0 ? (0 - scale) | 0 : scale;
+    while (k > 0)
+    {
+        power = power * 10;
+        k--;
+    }
+    const value = scale < 0 ? whole / power : whole * power;
     setControlWord(word);
     return negative !== 0 ? -value : value;
 }
