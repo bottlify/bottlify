@@ -16,7 +16,10 @@
  * A process's changes are what differs between its state now and its state
  * the last time it was brought up to date, so what another process wrote in
  * between is never mistaken for its own and carried back over something
- * newer.
+ * newer. Its files are asked for by generation -- only those it wrote since --
+ * and its registry is compared only when its revision moved: a process calls
+ * another thousands of times, and reading every file it ever wrote at each
+ * call cost more than the programs themselves.
  */
 
 /**
@@ -29,7 +32,8 @@
 
 /**
  * @typedef {Object} Snapshot
- * @property {Map<string, { path: string, bytes: Uint8Array }>} files  By folded path.
+ * @property {number} generation  The volume's generation it was brought up to date at.
+ * @property {number} revision    The hive's revision likewise.
  * @property {Map<string, RegistryValue>} values  By folded key path and value name.
  * @property {Map<string, string>} keys  Folded key path -> as spelled.
  */
@@ -72,19 +76,15 @@ function readHive(hive, into){
 }
 
 /**
- * What a process holds right now: the files it wrote and its registry.
+ * Where a process stands right now: its volume's generation and its registry.
  *
- * @param {{ session: { export: () => { path: string, bytes: Uint8Array }[] },
- *     registry: () => { toJSON: () => any } }} process
+ * @param {any} process
  * @returns {Snapshot}
  */
 export function snapshotOf(process){
     /** @type {Snapshot} */
-    const snapshot = { files: new Map(), values: new Map(), keys: new Map() };
-    for (const file of process.session.export())
-    {
-        snapshot.files.set(fold(file.path), file);
-    }
+    const snapshot = { generation: process.session.generation(),
+        revision: process.registry().revision(), values: new Map(), keys: new Map() };
     readHive(process.registry().toJSON(), snapshot);
     return snapshot;
 }
@@ -112,21 +112,6 @@ function same(a, b){
 export function changesBetween(before, after){
     /** @type {Changes} */
     const changes = { files: [], values: [], removedValues: [], keys: [], removedKeys: [] };
-    for (const [path, file] of after.files)
-    {
-        const was = before.files.get(path);
-        if (!was || !same(was.bytes, file.bytes))
-        {
-            changes.files.push(file);
-        }
-    }
-    for (const [path, file] of before.files)
-    {
-        if (!after.files.has(path))
-        {
-            changes.files.push({ path: file.path, delete: true });
-        }
-    }
     for (const [path, spelled] of after.keys)
     {
         if (!before.keys.has(path))
@@ -170,18 +155,6 @@ export const isEmpty = changes=>changes.files.length + changes.values.length
  * @param {Snapshot} snapshot @param {Changes} changes
  */
 export function applyToSnapshot(snapshot, changes){
-    for (const file of changes.files)
-    {
-        if (file.delete)
-        {
-            snapshot.files.delete(fold(file.path));
-        }
-        else
-        {
-            snapshot.files.set(fold(file.path), { path: file.path,
-                bytes: /** @type {Uint8Array} */ (file.bytes) });
-        }
-    }
     for (const path of changes.removedKeys)
     {
         const folded = fold(path);
@@ -328,9 +301,27 @@ export function createReplicas(report){
             {
                 return;
             }
-            const after = snapshotOf(process);
-            const changes = changesBetween(before, after);
-            known.set(process, after);
+            const generation = process.session.generation();
+            const revision = process.registry().revision();
+            if (generation === before.generation && revision === before.revision)
+            {
+                return;
+            }
+            /** @type {Changes} */
+            let changes = { files: [], values: [], removedValues: [], keys: [], removedKeys: [] };
+            if (revision !== before.revision)
+            {
+                const after = snapshotOf(process);
+                changes = changesBetween(before, after);
+                before.values = after.values;
+                before.keys = after.keys;
+            }
+            if (generation !== before.generation)
+            {
+                changes.files = process.session.changesSince(before.generation);
+            }
+            before.generation = generation;
+            before.revision = revision;
             if (isEmpty(changes))
             {
                 return;
@@ -345,7 +336,9 @@ export function createReplicas(report){
                 {
                     try
                     {
-                        other.session.apply([file]);
+                        // Quietly: it is the other's copy of this process's
+                        // write, and not the other's to carry back.
+                        other.session.apply([file], { quiet: true });
                     }
                     catch (e){
                         report?.(`${file.path} is open in another process and was not replaced:`

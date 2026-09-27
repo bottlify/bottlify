@@ -495,6 +495,7 @@ export function createOverlay({
             }
             writable.truncate(node.path, size);
             node.modified = now();
+            changed(node.path, 'written');
         },
 
         /**

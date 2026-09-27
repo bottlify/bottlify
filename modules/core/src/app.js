@@ -6120,8 +6120,15 @@ async function buildApp(options){
         session: {
             /** @returns {{ path: string, bytes: Uint8Array }[]} */
             export: ()=>filesystem.export(),
-            /** @param {{ path: string, bytes?: Uint8Array, delete?: boolean }[]} changes */
-            apply: changes=>filesystem.apply(changes),
+            /**
+             * @param {{ path: string, bytes?: Uint8Array, delete?: boolean }[]} changes
+             * @param {{ quiet?: boolean }} [how]
+             */
+            apply: (changes, how)=>filesystem.apply(changes, how),
+            /** @returns {number} */
+            generation: ()=>filesystem.generation(),
+            /** @param {number} mark */
+            changesSince: mark=>filesystem.changesSince(mark),
         },
 
         /**
