@@ -358,6 +358,38 @@ test('a host write into a translated page invalidates the region', async()=>{
     assert.equal(runtime.holdsPage(0x1000 >>> 12), false, 'the host write dropped it');
 });
 
+test('code the host rewrites between two calls of it runs as written; a host write beside it'
+    + ' leaves it translated', async()=>{
+    const h = host();
+    const runtime = h.cork();
+    // call F; mov ebx, eax; mov dx, 0x1234; out dx, eax; call F; hlt -- F (0x1100): mov eax,
+    // 1; ret, translated before the program starts; the trap's handler rewrites F's immediate.
+    load(h, 0x1000, [0xe8, 0xfb, 0x00, 0, 0, 0x89, 0xc3, 0x66, 0xba, 0x34, 0x12, 0xef,
+        0xe8, 0xef, 0x00, 0, 0, 0xf4]);
+    h.writePhysical(0x1100, Uint8Array.from([0xb8, 1, 0, 0, 0, 0xc3]));
+    runtime.noteHot(0x1100);
+    assert.equal(await runtime.translatePending(), 1);
+    /** @type {boolean[]} */
+    const held = [];
+    h.onTrap(()=>{
+        // An answer into the stack's page, where nothing of the translator's is.
+        h.writeData(0x2fff00, Uint8Array.from([1, 2, 3, 4]));
+        h.fillData(0x2fff04, 0, 8);
+        held.push(runtime.entryOf(0x1100) >= 0);
+        h.writeData(0x1101, Uint8Array.from([7]));
+        held.push(runtime.entryOf(0x1100) >= 0);
+    });
+    for (let slice = 0; slice < 10 && !h.halted(); slice++)
+    {
+        h.runSlice(1000);
+    }
+    assert.equal(h.halted(), true);
+    assert.deepEqual(held, [true, false],
+        'kept past the write beside it, dropped by the one into it');
+    assert.equal(h.readReg32('ebx'), 1, 'the first call ran the code as translated');
+    assert.equal(h.readReg32('eax'), 7, 'the second ran the code the host wrote');
+});
+
 test('newContext under cork positions eip and esp', async()=>{
     const { cpuModule } = await import('../module.js');
     const api = await cpuModule.create({
