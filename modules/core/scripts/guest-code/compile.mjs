@@ -45,6 +45,12 @@
  * `fill` (dst, byte, count) sets them -- `rep movsd` and `rep stosd` for the
  * whole dwords, leaving the bytes as the byte forms do.
  *
+ * `controlWord()` and `statusWord()` answer the x87's control word and its
+ * status word (without the stack's top), `setControlWord(word)` loads the
+ * control word and `clearExceptions()` clears the exception flags: the
+ * runtime's own business with the floating-point environment, whose
+ * JavaScript reads and writes the words the host's FPU seam keeps.
+ *
  * `return host()` hands the call to the host's handler of the same function
  * with the arguments it came with, for a case the function leaves to it --
  * errno to set, a base it does not take: the frame is taken down and the code
@@ -235,8 +241,17 @@ const STORES = /** @type {Record<string, number[]>} */ ({
 /** The stores of a double, whose value is popped from ST0. */
 const FLOAT_STORES = new Set(['setF32', 'setF64']);
 
+/**
+ * The x87's control and status words: `controlWord()` and `statusWord()`
+ * answer them (`fnstcw`, `fnstsw` -- the status word without the stack's
+ * top, which a function cannot see from its source), `setControlWord(word)`
+ * loads the control word (`fldcw`), `clearExceptions()` clears the
+ * exception flags (`fnclex`).
+ */
+const X87_WORDS = new Set(['controlWord', 'statusWord', 'setControlWord', 'clearExceptions']);
+
 const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES),
-    'call', 'copyUp', 'copyDown', 'fill', 'host']);
+    'call', 'copyUp', 'copyDown', 'fill', 'host', ...X87_WORDS]);
 
 const TABLE_KINDS = /** @type {const} */ ([
     ['Uint8Array', 1, false], ['Int8Array', 1, true], ['Uint16Array', 2, false],
@@ -1614,6 +1629,23 @@ class FunctionCompiler {
                     this.guestCall(node);
                     return;
                 }
+                if (name === 'setControlWord' && this.helpers.has(name))
+                {
+                    this.arity(node, 1);
+                    const value = this.expr(node.arguments[0]);
+                    this.integer(value, node.arguments[0], 'typed');
+                    this.toEax(value, node.arguments[0]);
+                    a.emit(0x50, 0xd9, 0x2c, 0x24, 0x58);               // push; fldcw [esp]; pop
+                    this.x87Used = true;
+                    return;
+                }
+                if (name === 'clearExceptions' && this.helpers.has(name))
+                {
+                    this.arity(node, 0);
+                    a.emit(0xdb, 0xe2);                                    // fnclex
+                    this.x87Used = true;
+                    return;
+                }
                 if (name === 'host' && this.helpers.has(name))
                 {
                     this.fail(node, 'host() is only returned: return host()');
@@ -2942,6 +2974,24 @@ class FunctionCompiler {
             {
                 this.guestCall(node);
                 return { where: 'eax', type: 'i32' };
+            }
+            if (name === 'controlWord' || name === 'statusWord')
+            {
+                this.arity(node, 0);
+                this.x87Used = true;
+                if (name === 'controlWord')
+                {
+                    a.emit(0x83, 0xec, 0x04);                              // sub esp, 4
+                    a.emit(0xd9, 0x3c, 0x24);                              // fnstcw [esp]
+                    a.emit(0x0f, 0xb7, 0x04, 0x24);                        // movzx eax, word [esp]
+                    a.emit(0x83, 0xc4, 0x04);                              // add esp, 4
+                }
+                else
+                {
+                    a.emit(0xdf, 0xe0);                                    // fnstsw ax
+                    a.emit(0x25, ...le32(0xc7ff));                         // and eax, ~top
+                }
+                return { where: 'eax', type: 'nat' };
             }
             if (name === 'host')
             {

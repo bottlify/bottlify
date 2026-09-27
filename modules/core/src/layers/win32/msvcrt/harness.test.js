@@ -313,6 +313,22 @@ export function fakeFpu(){
             stack.length = 0;
             stack.push(...values);
         },
+        /** The x87's control and status words, for the runtime's own business with them. */
+        control: 0x27f,
+        status: 0,
+        controlWord(){
+            return this.control;
+        },
+        /** @param {number} word */
+        setControlWord(word){
+            this.control = word;
+        },
+        statusWord(){
+            return this.status;
+        },
+        clearExceptions(){
+            this.status &= 0x7f00;
+        },
     };
 }
 

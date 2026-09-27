@@ -32,8 +32,46 @@ import { EDOM, ERANGE } from './globals.js';
 import { guestEntry, guestExport } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import * as inGuestMath from './inguest-math.js';
+import * as inGuestFloat from './inguest-float.js';
 import { COMPILED } from './inguest.x86.js';
 import { COMPILED as MATH_CODE } from './inguest-math.x86.js';
+import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
+
+/**
+ * div_t div(int numerator, int denominator), and ldiv, its long twin: the
+ * quotient in EAX and the remainder in EDX, where a compiler takes an
+ * eight-byte structure, from the one `idiv` -- which faults, as the
+ * runtime's own does, dividing by zero or INT_MIN by -1.
+ *
+ *   mov eax, [esp+4]; cdq; idiv dword [esp+8]; ret
+ */
+const DIVIDE_CODE = Uint8Array.of(0x8b, 0x44, 0x24, 0x04, 0x99, 0xf7, 0x7c, 0x24, 0x08, 0xc3);
+
+/**
+ * The double next to x toward y, from its bits: what `_nextafter`'s code
+ * hands over, a step past the largest double.
+ *
+ * @param {number} x @param {number} y
+ */
+function nextAfter(x, y){
+    if (Number.isNaN(x) || Number.isNaN(y))
+    {
+        return x + y;
+    }
+    if (x === y)
+    {
+        return y;
+    }
+    if (x === 0)
+    {
+        return y > 0 ? Number.MIN_VALUE : -Number.MIN_VALUE;
+    }
+    const view = new DataView(new ArrayBuffer(8));
+    view.setFloat64(0, x);
+    const bits = view.getBigUint64(0);
+    view.setBigUint64(0, y > x === x > 0 ? bits + 1n : bits - 1n);
+    return view.getFloat64(0);
+}
 
 /**
  * @typedef {Object} MathHost
@@ -80,8 +118,9 @@ const BINARY = {
     hypot: Math.hypot,
 };
 
-/** The code each name is, where two names share one: `hypot` is `_hypot`. */
-const CODE_OF = /** @type {Record<string, string>} */ ({ hypot: '_hypot', _CIhypot: '_CI_hypot' });
+/** The code each name is, where two names share one: `hypot` is `_hypot`, `_scalb` `ldexp`. */
+const CODE_OF = /** @type {Record<string, string>} */ ({ hypot: '_hypot', _CIhypot: '_CI_hypot',
+    _scalb: 'ldexp' });
 
 /**
  * @param {MathHost} host
@@ -165,6 +204,22 @@ export function createMathFunctions(host){
         return answer([value], value * Math.pow(2, args[2] | 0));
     });
 
+    /** double _scalb(double value, long exponent): ldexp under another name. */
+    handlers._scalb = handlers.ldexp;
+
+    /** double _logb(double x): only a zero comes here, -infinity and ERANGE. */
+    handlers._logb = returningDouble(fpu, 8, args=>{
+        const value = readDouble(args, 0);
+        return answer([value], value === 0 ? -Infinity : value);
+    });
+
+    /** double _nextafter(double x, double y): only a step to an infinity, ERANGE. */
+    handlers._nextafter = returningDouble(fpu, 16, args=>{
+        const x = readDouble(args, 0);
+        const y = readDouble(args, 2);
+        return answer([x, y], nextAfter(x, y));
+    });
+
     const guest = {
         readMemory: host.readMemory,
         writeMemory: host.writeMemory,
@@ -177,8 +232,10 @@ export function createMathFunctions(host){
     for (const name of [...Object.keys(handlers), 'frexp', 'modf'])
     {
         const code = CODE_OF[name] ?? name;
-        const source = /** @type {Record<string, Function>} */ (inGuestMath)[code];
-        const compiled = /** @type {Record<string, any>} */ (MATH_CODE)[code];
+        const source = /** @type {Record<string, Function>} */ (inGuestMath)[code]
+            ?? /** @type {Record<string, Function>} */ (inGuestFloat)[code];
+        const compiled = /** @type {Record<string, any>} */ (MATH_CODE)[code]
+            ?? /** @type {Record<string, any>} */ (FLOAT_CODE)[code];
         if (source && compiled)
         {
             inTheGuest[name] = guestEntry(source, compiled, guest, handlers[name]);
@@ -193,6 +250,28 @@ export function createMathFunctions(host){
      */
     const ftol = host.setRegisters
         ? guestEntry(inGuest._ftol, COMPILED._ftol, host) : guestExport(COMPILED._ftol);
+
+    const { setRegisters } = host;
+    /** div and ldiv: the code, and a handler where the host can set EDX. */
+    const divide = {
+        convention: 'cdecl',
+        argBytes: 8,
+        code: ()=>DIVIDE_CODE,
+        ...setRegisters ? {
+            /** @param {number[]} args */
+            handler: ([numerator, denominator])=>{
+                const n = numerator | 0;
+                const d = denominator | 0;
+                if (d === 0 || n === -0x80000000 && d === -1)
+                {
+                    throw new Error('div: the guest divided by zero, or INT_MIN by -1');
+                }
+                const quotient = Math.trunc(n / d);
+                setRegisters({ edx: (n - quotient * d) >>> 0 });
+                return quotient >>> 0;
+            },
+        } : {},
+    };
 
     return {
         ...handlers,
@@ -210,5 +289,14 @@ export function createMathFunctions(host){
         _ftol: ftol,
         _ftol2: ftol,
         _ftol2_sse: ftol,
+
+        div: divide,
+        ldiv: divide,
+
+        /** double _copysign(double x, double y) -- in the guest */
+        _copysign: guestEntry(inGuestFloat._copysign, FLOAT_CODE._copysign, guest),
+
+        /** double _chgsign(double x) -- in the guest */
+        _chgsign: guestEntry(inGuestFloat._chgsign, FLOAT_CODE._chgsign, guest),
     };
 }

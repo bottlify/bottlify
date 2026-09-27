@@ -87,6 +87,8 @@ const fldIn = address=>[0xdd, 0x87, ...u32(address)];
 const fstpOut = address=>[0xdd, 0x9f, ...u32(address)];
 /** `call [iat]`. @param {number} slot */
 const callIat = slot=>[0xff, 0x15, ...u32(slot)];
+/** `lea eax, [texts + edi*4]; push eax`: the text of the turn's number. @param {Asm} x */
+const pushText = x=>[0x8d, 0x04, 0xbd, ...u32(x.at('texts')), 0x50];
 /** `sub esp, 8; fstp qword [esp]`: a double pushed as cdecl passes it. */
 const pushDouble = [0x83, 0xec, 0x08, 0xdd, 0x1c, 0x24];
 /** `lea eax, [array + ebp]; push eax`. @param {number} address */
@@ -215,6 +217,43 @@ const ROWS = [
         base: x=>[...fldIn(x.at('in')), 0xdd, 0xd8, 0x89, 0x87, ...u32(x.at('out')),
             0x89, 0x97, ...u32(x.at('out') + 4)],
     },
+    {
+        // The text of a number a program's configuration holds, a pointer to it pushed.
+        name: 'atof', imports: { 'msvcrt.dll': ['atof'] }, out: 'double', exact: true,
+        body: x=>[...pushText(x), ...callIat(x.iat('atof')), 0x83, 0xc4, 0x04,
+            ...fstpOut(x.at('out'))],
+        base: x=>[...pushText(x), 0x58, 0xd9, 0xee, ...fstpOut(x.at('out'))],
+    },
+    {
+        // Seventeen significant digits: past the fast path, the handler's.
+        name: 'atof(long)', imports: { 'msvcrt.dll': ['atof'] }, out: 'double', exact: true,
+        body: x=>[...pushText(x), ...callIat(x.iat('atof')), 0x83, 0xc4, 0x04,
+            ...fstpOut(x.at('out'))],
+        base: x=>[...pushText(x), 0x58, 0xd9, 0xee, ...fstpOut(x.at('out'))],
+    },
+    {
+        // _controlfp(_PC_53, _MCW_PC): the precision set, as a program keeps setting it.
+        name: '_controlfp', imports: { 'msvcrt.dll': ['_controlfp'] }, out: 'int', exact: true,
+        body: x=>[0x68, ...u32(0x30000), 0x68, ...u32(0x10000),
+            ...callIat(x.iat('_controlfp')), 0x83, 0xc4, 0x08, 0x89, 0x87, ...u32(x.at('out'))],
+        base: x=>[0x68, ...u32(0x30000), 0x68, ...u32(0x10000), 0x83, 0xc4, 0x08,
+            0x89, 0x87, ...u32(x.at('out'))],
+    },
+    {
+        name: '_fpclass', imports: { 'msvcrt.dll': ['_fpclass'] }, out: 'int', exact: true,
+        body: x=>[...fldIn(x.at('in')), ...pushDouble, ...callIat(x.iat('_fpclass')), 0x83, 0xc4,
+            0x08, 0x89, 0x87, ...u32(x.at('out'))],
+        base: x=>[...fldIn(x.at('in')), ...pushDouble, 0x83, 0xc4, 0x08,
+            0x89, 0x87, ...u32(x.at('out'))],
+    },
+    {
+        // div(1000, 7): the quotient in EAX, the remainder in EDX, both stored.
+        name: 'div', imports: { 'msvcrt.dll': ['div'] }, out: 'int', exact: true,
+        body: x=>[0x6a, 0x07, 0x68, ...u32(1000), ...callIat(x.iat('div')), 0x83, 0xc4, 0x08,
+            0x89, 0x87, ...u32(x.at('out')), 0x89, 0x97, ...u32(x.at('out') + 4)],
+        base: x=>[0x6a, 0x07, 0x68, ...u32(1000), 0x83, 0xc4, 0x08,
+            0x89, 0x87, ...u32(x.at('out')), 0x89, 0x97, ...u32(x.at('out') + 4)],
+    },
     intrinsic('_CIsqrt', 1, true, 'positive'),
     intrinsic('_CIsin', 1, false, 'small'),
     intrinsic('_CIcos', 1, false, 'small'),
@@ -303,6 +342,23 @@ function matrices(seed){
 }
 
 /**
+ * A number's text in each 32 bytes, one for each double slot: the short
+ * decimals a program's configuration holds, or seventeen significant digits.
+ *
+ * @param {boolean} long
+ */
+function texts(long){
+    const values = doubles('small', 7);
+    return [...values].flatMap((value, i)=>{
+        const text = long ? value.toPrecision(17)
+            : [String(Math.round(value * 100) / 100), `${i % 640}`, `${(i % 9) * 0.25}`,
+                `${Math.round(value)}e-${i % 4}`][i % 4];
+        return [...text.slice(0, 31)].map(c=>c.charCodeAt(0)).concat(
+            new Array(32 - Math.min(text.length, 31)).fill(0));
+    });
+}
+
+/**
  * Sixteen unit quaternions, each in 64 bytes, and room past the last for
  * the ones a row reads after it.
  *
@@ -348,6 +404,7 @@ export function program(row, n, withOp, control){
         in: bytes(doubles(row.domain, 1)), in2: bytes(second),
         mA: bytes(matrices(3)), mB: bytes(matrices(4)), v: bytes(vectors),
         q: bytes(quaternions(6)),
+        texts: texts(row.name === 'atof(long)'),
         viewport: [...[10, 5, 800, 600].flatMap(u32), ...bytes(Float32Array.of(0, 1))],
         hex: new Array(2 * DUMPED).fill(0),
         digits: [...'0123456789abcdef'].map(c=>c.charCodeAt(0)),

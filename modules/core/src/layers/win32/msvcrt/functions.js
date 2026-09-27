@@ -32,8 +32,9 @@ import { createCxxFunctions } from './cxx.js';
 import { guestEntry, guestExport } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
+import * as inGuestFloat from './inguest-float.js';
+import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
 import { createMathFunctions } from './math.js';
-import { readDouble } from './float.js';
 import { createStartupFunctions } from './startup.js';
 import { createStdioFunctions, standardRecords } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
@@ -393,26 +394,33 @@ export function createMsvcrtFunctions(host){
         _itoa: itoa,
 
         /**
-         * int _isnan(double x)
+         * int _isnan(double x), int _finite(double x), int _fpclass(double x)
          *
-         * A question about the bits of a double on the stack, answered in EAX:
-         * unlike the maths functions it needs no FPU, so it is here rather than
-         * with them.
+         * Questions about the bits of a double on the stack, answered in EAX
+         * by code in the guest (`inguest-float.js`) that reads them as integers:
+         * no FPU, so they are here rather than with the maths.
          */
-        _isnan: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: args=>(Number.isNaN(readDouble(args, 0)) ? 1 : 0),
-        },
+        _isnan: guestEntry(inGuestFloat._isnan, FLOAT_CODE._isnan, {}),
+        _finite: guestEntry(inGuestFloat._finite, FLOAT_CODE._finite, {}),
+        _fpclass: guestEntry(inGuestFloat._fpclass, FLOAT_CODE._fpclass, {}),
 
-        /** int _finite(double x): nonzero unless x is infinite or a NaN. */
-        _finite: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: args=>(Number.isFinite(readDouble(args, 0)) ? 1 : 0),
-        },
+        /**
+         * unsigned int _control87(unsigned int newControl, unsigned int mask),
+         * _controlfp, _statusfp, _clearfp
+         *
+         * The x87's control and status words, read and loaded by code in the
+         * guest (`inguest-float.js`): the thread's own, the precision a program
+         * sets the precision its arithmetic rounds to. The handlers reach the
+         * words through the FPU seam, where one offers them.
+         */
+        _control87: guestEntry(inGuestFloat._control87, FLOAT_CODE._control87,
+            { ...host.fpu ? { fpu: host.fpu } : {} }),
+        _controlfp: guestEntry(inGuestFloat._controlfp, FLOAT_CODE._controlfp,
+            { ...host.fpu ? { fpu: host.fpu } : {} }),
+        _statusfp: guestEntry(inGuestFloat._statusfp, FLOAT_CODE._statusfp,
+            { ...host.fpu ? { fpu: host.fpu } : {} }),
+        _clearfp: guestEntry(inGuestFloat._clearfp, FLOAT_CODE._clearfp,
+            { ...host.fpu ? { fpu: host.fpu } : {} }),
 
         /**
          * void srand(unsigned int seed) and int rand(void)
