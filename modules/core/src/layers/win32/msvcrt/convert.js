@@ -25,6 +25,7 @@ import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
+import { cvtDigits } from './format.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -381,6 +382,28 @@ export function createConversionFunctions(host){
     const unsignedLongLimit = negative=>(negative ? BigInt.asUintN(32, -ULONG_MAX) : ULONG_MAX);
     const strtoul = strtoInteger(12, toUnsignedLong, unsignedLongLimit);
 
+    /**
+     * _ecvt and _fcvt: the digits in the buffer they share, the point and the
+     * sign through the pointers.
+     *
+     * @param {boolean} fixed
+     */
+    const cvt = fixed=>({
+        convention: 'cdecl',
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: args=>{
+            const { digits, point, negative } = cvtDigits(
+                { value: readDouble(args, 0), low: args[0] >>> 0, high: args[1] >>> 0 },
+                args[2] | 0, fixed);
+            const buffer = cvtBuffer();
+            writeInt(args[3], point);
+            writeInt(args[4], negative ? 1 : 0);
+            writeString(buffer, digits.slice(0, CVT_BUFFER - 1));
+            return buffer;
+        },
+    });
+
     const { readMemory, writeMemory } = host;
     const table = {
         // Code in the guest (`inguest.js`), which hands the host a value out
@@ -432,30 +455,10 @@ export function createConversionFunctions(host){
          * Digits only: no sign, no point. Where the point belongs and whether
          * the value was negative come back through the two pointers, and a
          * caller that ignores them prints the magnitude of the wrong number by
-         * a power of ten.
+         * a power of ten. `count` significant digits, of the seventeen msvcrt
+         * converts a double to (`cvtDigits`).
          */
-        _ecvt: {
-            convention: 'cdecl',
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: args=>{
-                const value = readDouble(args, 0);
-                const count = Math.max(0, Math.min(args[2] | 0, MAX_DIGITS));
-                const buffer = cvtBuffer();
-                writeInt(args[4], value < 0 ? 1 : 0);
-                if (value === 0 || !Number.isFinite(value))
-                {
-                    writeInt(args[3], 0);
-                    writeString(buffer, '0'.repeat(count));
-                    return buffer;
-                }
-                const [mantissa, exponent] = Math.abs(value)
-                    .toExponential(Math.max(0, count - 1)).split('e');
-                writeInt(args[3], Number(exponent) + 1);
-                writeString(buffer, mantissa.replace('.', '').padEnd(count, '0'));
-                return buffer;
-            },
-        },
+        _ecvt: cvt(false),
 
         /**
          * char *_fcvt(double value, int count, int *dec, int *sign)
@@ -463,34 +466,7 @@ export function createConversionFunctions(host){
          * The count is digits after the point here, not significant digits, and
          * a value below one loses its leading zeros to a negative *dec.
          */
-        _fcvt: {
-            convention: 'cdecl',
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: args=>{
-                const value = readDouble(args, 0);
-                const count = Math.max(0, Math.min(args[2] | 0, MAX_DIGITS));
-                const buffer = cvtBuffer();
-                writeInt(args[4], value < 0 ? 1 : 0);
-                if (!Number.isFinite(value))
-                {
-                    writeInt(args[3], 0);
-                    writeString(buffer, '');
-                    return buffer;
-                }
-                const [whole, fraction = ''] = Math.abs(value).toFixed(count).split('.');
-                let digits = (whole === '0' ? '' : whole) + fraction;
-                let point = whole === '0' ? 0 : whole.length;
-                while (digits.length > 0 && digits[0] === '0')
-                {
-                    digits = digits.slice(1);
-                    point--;
-                }
-                writeInt(args[3], digits.length === 0 ? 0 : point);
-                writeString(buffer, digits);
-                return buffer;
-            },
-        },
+        _fcvt: cvt(true),
 
         /**
          * char *_gcvt(double value, int digits, char *buffer)

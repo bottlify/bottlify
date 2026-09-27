@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { formatToString } from './format.js';
+import { formatToString, guestAccess } from './format.js';
 import { VARIADIC_SLOTS } from './scan.js';
 import { EBADF, EILSEQ, EINVAL } from './globals.js';
 import { createDescriptors, LF, settle } from './io.js';
@@ -487,7 +487,8 @@ export function createStdioFunctions(host){
             return EOF;
         }
         const text = formatToString(readString(format), values, readString,
-            { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi });
+            { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi,
+                ...guestAccess(host.readMemory, host.writeMemory) });
         return emit(stream, encodeAnsi(text)) === text.length ? text.length : EOF;
     };
 
@@ -602,7 +603,8 @@ export function createStdioFunctions(host){
             return -1;
         }
         const text = formatToString(readWide(format), values, readString,
-            { readWideString: readWide, wide: true });
+            { readWideString: readWide, wide: true,
+                ...guestAccess(host.readMemory, host.writeMemory) });
         return putUnits(stream, unitsOfText(text)) < 0 ? -1 : text.length;
     };
 

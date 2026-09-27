@@ -882,7 +882,11 @@ nothing implements).
   `ferror` and `getc` macros read what the functions do. `_stat`/`_fstat` fill the 36-byte
   `struct _stat`; `_findfirst`/`_findnext` walk a directory as `FindFirstFile` does into a
   `_finddata_t`. `printf`, `vprintf` and `puts` are `fprintf` and `fputs` on `stdout`, so they
-  follow it wherever `freopen` moved it. In a Unicode translation (`msvcrt/widetext.js`) -- a
+  follow it wherever `freopen` moved it. Every printer formats a double as msvcrt does
+  (`msvcrt/format.js`, `cvtDigits`, which `_ecvt` and `_fcvt` share): seventeen significant
+  digits rounded half up, zeros past them, an exponent of three digits, and an infinity or NaN as
+  `1#INF`, `1#QNAN`, `1#SNAN` or `1#IND` rounded as if digits (`%.2f` of one is `1.#J`); a
+  conversion it does not know is written as its own character. In a Unicode translation (`msvcrt/widetext.js`) -- a
   `_O_WTEXT`, `_O_U16TEXT` or `_O_U8TEXT` descriptor, or `fopen`'s `ccs=UNICODE`, `UTF-8` or
   `UTF-16LE` unless `b` overrides it -- the program's text is UTF-16: `_write`, `fwrite` and the
   wide calls keep it in the file as UTF-16 or UTF-8, LF as CR LF, a file opened empty for writing

@@ -477,6 +477,34 @@ test('sprintf reads %S and %ls as the wide strings they are', ()=>{
     assert.equal(at(0x200), '<wide>');
 });
 
+test('swprintf takes no count, and _snwprintf its arguments as _vsnwprintf takes a list', ()=>{
+    // Wine's msvcrt test_swprintf: msvcrt's swprintf has no count, %S is a
+    // narrow string in it and %I64d eight bytes.
+    const { fns, host } = setup();
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} address @param {string} text */
+    const wide = (address, text)=>{
+        [...text, '\0'].forEach((c, at)=>view.setUint16(address + at * 2, c.charCodeAt(0), true));
+        return address;
+    };
+    /** @param {number} address */
+    const read = address=>{
+        let text = '';
+        for (let at = address; view.getUint16(at, true) !== 0; at += 2)
+        {
+            text += String.fromCharCode(view.getUint16(at, true));
+        }
+        return text;
+    };
+    host.bytes.set([...'string'].map(c=>c.charCodeAt(0)).concat(0), 0x180);
+    assert.equal(fns.swprintf.handler([0x200, wide(0x100, '%S|%I64d'), 0x180, 1, 1]),
+        'string|4294967297'.length);
+    assert.equal(read(0x200), 'string|4294967297');
+    assert.equal(fns._swprintf, fns.swprintf);
+    assert.equal(fns._snwprintf.handler([0x200, 3, wide(0x100, '%d'), 12345]), -1);
+    assert.equal(read(0x200).slice(0, 3), '123');
+});
+
 test('_vsnwprintf formats wide text from a list, terminated only when there is room', ()=>{
     // Wine's msvcrt test_vsnwprintf, and test_snprintf's lengths for the
     // narrow twin: text shorter than the count is terminated, text exactly

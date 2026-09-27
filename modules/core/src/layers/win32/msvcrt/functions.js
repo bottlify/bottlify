@@ -18,7 +18,7 @@
  * undefined, the choice made here is written down at the function.
  */
 
-import { formatToString, varargsSlots } from './format.js';
+import { formatToString, guestAccess, varargsSlots } from './format.js';
 import { createStringFunctions } from './strings.js';
 import { createConversionFunctions } from './convert.js';
 import { createScanFunctions, VARIADIC_SLOTS } from './scan.js';
@@ -141,6 +141,9 @@ export function createMsvcrtFunctions(host){
     /** @param {number} pointer */
     const readWide = pointer=>wideStringAt(host.readMemory, pointer);
 
+    /** Where %Z reads and %n writes. */
+    const memoryAccess = guestAccess(host.readMemory, host.writeMemory);
+
     /**
      * Text into bytes that may be longer than it, in the ANSI page the text
      * was read in: a string a program passed is copied as its own bytes.
@@ -166,7 +169,7 @@ export function createMsvcrtFunctions(host){
      * @param {number} format @param {number[]} values
      */
     const narrowText = (format, values)=>formatToString(readString(format), values, readString,
-        { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi });
+        { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi, ...memoryAccess });
 
     /** @param {number[]} args @param {number} fixed */
     const render = (args, fixed)=>narrowText(args[fixed - 1], args.slice(fixed));
@@ -195,6 +198,53 @@ export function createMsvcrtFunctions(host){
         host.writeMemory(buffer, packInto(
             new Uint8Array(kept.length + (text.length < limit ? 1 : 0)), kept));
         return text.length > limit ? -1 : text.length;
+    };
+
+    /**
+     * What a wide printer writes: %s is a wide string, %S a narrow one.
+     *
+     * @param {number} format @param {number[]} values
+     */
+    const wideText = (format, values)=>formatToString(readWide(format), values, readString,
+        { readWideString: readWide, wide: true, ...memoryAccess });
+
+    /**
+     * The _snwprintf family's answer: at most `count` characters, terminated
+     * only when there is room, and -1 when the text does not fit. With no
+     * buffer and a count of zero it answers how many the text needs (Wine's
+     * msvcrt test_vsnwprintf); no format, or no buffer for a count, is -1
+     * and EINVAL.
+     *
+     * @param {number} buffer @param {number} count @param {number} format
+     * @param {number[]} values
+     */
+    const countedWide = (buffer, count, format, values)=>{
+        const limit = count >>> 0;
+        if ((format >>> 0) === 0 || ((buffer >>> 0) === 0 && limit !== 0))
+        {
+            errno(EINVAL);
+            return -1;
+        }
+        const text = wideText(format, values);
+        if ((buffer >>> 0) === 0)
+        {
+            return text.length;
+        }
+        const units = unitsOfText(text.slice(0, limit));
+        host.writeMemory(buffer, bytesOfUnits(text.length < limit ? [...units, 0] : units));
+        return text.length > limit ? -1 : text.length;
+    };
+
+    /** int swprintf(wchar_t *buffer, const wchar_t *format, ...) */
+    const uncountedWide = {
+        convention: 'cdecl',
+        argBytes: 8 + VARIADIC_SLOTS * 4,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ args)=>{
+            const text = wideText(args[1], args.slice(2));
+            host.writeMemory(args[0], bytesOfUnits([...unitsOfText(text), 0]));
+            return text.length;
+        },
     };
 
     /** int atoi(const char *str) -- in the guest */
@@ -533,24 +583,27 @@ export function createMsvcrtFunctions(host){
             convention: 'cdecl',
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([buffer, count, format, list])=>{
-                const limit = count >>> 0;
-                if ((format >>> 0) === 0 || ((buffer >>> 0) === 0 && limit !== 0))
-                {
-                    errno(EINVAL);
-                    return -1;
-                }
-                const text = formatToString(readWide(format), varargsAt(list), readString,
-                    { readWideString: readWide, wide: true });
-                if ((buffer >>> 0) === 0)
-                {
-                    return text.length;
-                }
-                const units = unitsOfText(text.slice(0, limit));
-                host.writeMemory(buffer, bytesOfUnits(text.length < limit ? [...units, 0] : units));
-                return text.length > limit ? -1 : text.length;
-            },
+            handler: ([buffer, count, format, list])=>
+                countedWide(buffer, count, format, (format >>> 0) === 0 ? [] : varargsAt(list)),
         },
+
+        /** int _snwprintf(wchar_t *buffer, size_t count, const wchar_t *format, ...) */
+        _snwprintf: {
+            convention: 'cdecl',
+            argBytes: 12 + VARIADIC_SLOTS * 4,
+            /** @param {number[]} args */
+            handler: args=>countedWide(args[0], args[1], args[2], args.slice(3)),
+        },
+
+        /**
+         * int swprintf(wchar_t *buffer, const wchar_t *format, ...)
+         *
+         * msvcrt's own, which takes no count: the text and its terminator,
+         * however long, and the count of its characters. `_swprintf` is
+         * the same function.
+         */
+        swprintf: uncountedWide,
+        _swprintf: uncountedWide,
 
         /**
          * int sprintf_s(char *buffer, size_t size, const char *format, ...)

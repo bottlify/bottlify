@@ -182,6 +182,31 @@ test('_fcvt counts digits after the point, and a small value loses leading zeros
     assert.equal(memory.i32(sign), 0);
 });
 
+test('_ecvt and _fcvt round where the count says, keep the point of a value rounded to '
+    + 'nothing, and give the sign of a negative zero', ()=>{
+    const { memory, table } = build();
+    const decimal = memory.allocate(4);
+    const sign = memory.allocate(4);
+    /** @param {string} name @param {number[]} value @param {number} count */
+    const cvt = (name, value, count)=>{
+        const text = memory.text(table[name].handler([...value, count, decimal, sign]));
+        return [text, memory.i32(decimal), memory.i32(sign)];
+    };
+    assert.deepEqual(cvt('_ecvt', doubleSlots(999999999999.9), 3), ['100', 13, 0]);
+    assert.deepEqual(cvt('_fcvt', doubleSlots(999999999999.9), 3), ['999999999999900', 12, 0]);
+    assert.deepEqual(cvt('_ecvt', doubleSlots(0.6), 0), ['', 1, 0], 'no digits, one carried');
+    assert.deepEqual(cvt('_fcvt', doubleSlots(0.6), 0), ['1', 1, 0]);
+    assert.deepEqual(cvt('_fcvt', doubleSlots(0.4), 0), ['', 0, 0]);
+    assert.deepEqual(cvt('_fcvt', doubleSlots(0.0001), 1), ['', -3, 0]);
+    assert.deepEqual(cvt('_fcvt', doubleSlots(-123.0001), -1), ['12', 3, 1]);
+    assert.deepEqual(cvt('_fcvt', doubleSlots(-0), 5), ['00000', 0, 1]);
+    assert.deepEqual(cvt('_ecvt', doubleSlots(123456789012345680000), 30),
+        ['123456789012345680000000000000', 21, 0], 'seventeen digits, then zeros');
+    assert.deepEqual(cvt('_ecvt', doubleSlots(NaN), 5), ['1#QNB', 1, 0]);
+    assert.deepEqual(cvt('_fcvt', doubleSlots(Infinity), 2), ['1#J', 1, 0]);
+    assert.deepEqual(cvt('_fcvt', [0, 0xfff80000], 5), ['1#IND0', 1, 1]);
+});
+
 test('_ecvt and _fcvt hand back the same buffer every time', ()=>{
     const { memory, table } = build();
     const decimal = memory.allocate(4);
