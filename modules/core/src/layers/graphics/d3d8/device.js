@@ -897,12 +897,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     function buildImplicitResources(){
         const width = presentParameters.backBufferWidth ?? 640;
         const height = presentParameters.backBufferHeight ?? 480;
+        // The surfaces a Reset replaces give their storage back, as Direct3D 9's
+        // do: each Reset to another size kept the old ones' otherwise.
         for (const surface of backBuffers)
         {
+            free(surface.base);
             renderer?.retire(surface);
         }
         if (autoDepthStencil)
         {
+            free(autoDepthStencil.base);
             renderer?.retire(autoDepthStencil);
         }
         backBuffers = [];
@@ -1115,8 +1119,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      *           format?: number }} spec
      */
     const createBuffer = spec=>{
-        const bufferCount = explicitCount(spec.pool);
         const base = allocate(spec.length);
+        // Its storage goes back with its last reference, as a Direct3D 9
+        // buffer's does.
+        const bufferCount = explicitCount(spec.pool, ()=>free(base));
         let locked = false;
         const buffer = {
             ...spec,

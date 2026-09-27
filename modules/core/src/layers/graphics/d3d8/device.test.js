@@ -2314,3 +2314,43 @@ test('a surface made on its own gives its storage back with its last reference',
     assert.equal(held.size, before, 'every block went back');
     assertFullyReleased(device);
 });
+
+test('a buffer gives its storage back with its last reference, a Reset the surfaces it replaces',
+    ()=>{
+        /** @type {Map<number, number>} */
+        const held = new Map();
+        let next = 0x100000;
+        const device = createDevice({ caps: {
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += bytes + 0x1000;
+                held.set(at, bytes);
+                return at;
+            },
+            free: (/** @type {number} */ at)=>held.delete(at),
+        } });
+        const before = held.size;
+        for (let round = 0; round < 3; round++)
+        {
+            /** @type {{ buffer?: any }} */
+            const vertices = {};
+            assert.equal(device.CreateVertexBuffer(4096, 0, 0, D3DPOOL.DEFAULT, vertices), D3D_OK);
+            /** @type {{ buffer?: any }} */
+            const indices = {};
+            assert.equal(device.CreateIndexBuffer(4096, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.DEFAULT,
+                indices), D3D_OK);
+            assert.equal(vertices.buffer.release(), 0);
+            assert.equal(indices.buffer.release(), 0);
+        }
+        assert.equal(held.size, before, 'every buffer\'s block went back');
+        for (const width of [128, 96, WIDTH])
+        {
+            assert.equal(device.Reset({
+                swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1, backBufferWidth: width,
+                backBufferHeight: HEIGHT, backBufferFormat: D3DFMT.X8R8G8B8,
+                enableAutoDepthStencil: true, autoDepthStencilFormat: D3DFMT.D24S8,
+            }), D3D_OK);
+        }
+        assert.equal(held.size, before, 'a Reset keeps one back buffer and one depth stencil');
+        assertFullyReleased(device);
+    });
