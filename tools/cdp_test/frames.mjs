@@ -367,8 +367,7 @@ function describe(before, after, windowMs){
             say(`  ${held.ticks} ticks carried something, ${held.frames} carried a picture`);
             say(`  shown ${held.shown}`
                 + `, no picture ${held.silent}`
-                + `, nowhere to show it ${held.noScreen}`
-                + `, no room for it ${held.noRoom}`);
+                + `, nowhere to show it ${held.noScreen}`);
             say(`  the picture is ${held.driftMs ?? 0}ms ahead of the sound`
                 + ` (worst ${held.worstDriftMs ?? 0}ms)`
                 + `, ${held.soundMs ?? 0}ms of it played`

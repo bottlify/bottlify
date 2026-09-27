@@ -105,6 +105,28 @@ test('the decoding thread works ahead by a bounded number of frames and no furth
         clip.close();
     });
 
+test('frames come laid out on the screen the engine last described', async()=>{
+    const { engine, worker } = ports();
+    const decoder = scriptedDecoder(['frame', 'frame', 'frame']);
+    /** @type {any[]} */
+    const shapes = [];
+    worker.serve(serveClips(worker, Promise.resolve(decoder), (picture, out, shape)=>{
+        shapes.push(shape.key);
+        out.fill(picture.bgra[0]);
+    }));
+    const clips = createRemoteClips(engine);
+    clips.fitTo({ key: '4x1', width: 4, height: 1 });
+    const clip = await clips.open(Uint8Array.of(1, 2, 3));
+    await settle();
+
+    assert.equal(clip.decode(), 'frame');
+    assert.equal(clip.fitted(), '4x1');
+    assert.deepEqual([...clip.frame()], Array(16).fill(1), 'laid out at the size of the screen');
+    assert.equal(clip.width, 2, 'while the clip still reports the size of the film');
+    assert.deepEqual(shapes, ['4x1', '4x1', '4x1']);
+    clip.close();
+});
+
 test('a clip the thread cannot open is refused with the decoder\'s reason', async()=>{
     const { engine, worker } = ports();
     worker.serve(serveClips(worker, Promise.resolve({ open(){

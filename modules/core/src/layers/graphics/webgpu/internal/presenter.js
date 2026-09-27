@@ -149,6 +149,10 @@ const six = value=>(value << 2) | (value >>> 4);
 /**
  * @typedef {Object} PresentableSurface
  * @property {number} buffer    Guest address of row zero.
+ * @property {Uint8Array} [pixels]  The rows in host memory instead, for a picture
+ *           the guest never held -- a film frame. Read in place of `buffer`.
+ * @property {boolean} [opaque]  32-bit pixels whose fourth byte is already 0xff,
+ *           uploaded as they are rather than converted.
  * @property {number} width
  * @property {number} height
  * @property {number} pitch     Bytes per row, which may exceed the pixels' worth.
@@ -502,12 +506,16 @@ export function createPresenter(options = {}){
         {
             converted = new Uint8Array(needed);
         }
+        const direct = surface.pixels && surface.opaque && surface.bitCount === 32
+            && surface.pitch === rowBytes;
         // Read a row at a time by the pitch, which may be wider than the
         // pixels: the padding is not part of the picture.
-        for (let y = 0; y < surface.height; y++)
+        const length = surface.width * (surface.bitCount >>> 3);
+        for (let y = 0; y < (direct ? 0 : surface.height); y++)
         {
-            const row = from.readMemory(surface.buffer + y * surface.pitch,
-                surface.width * (surface.bitCount >>> 3));
+            const row = surface.pixels
+                ? surface.pixels.subarray(y * surface.pitch, y * surface.pitch + length)
+                : from.readMemory(surface.buffer + y * surface.pitch, length);
             expandRow(row, surface.width, surface.bitCount, surface.palette,
                 converted.subarray(y * rowBytes, (y + 1) * rowBytes));
         }
@@ -516,7 +524,7 @@ export function createPresenter(options = {}){
             format: FORMAT,
             width: surface.width,
             height: surface.height,
-            data: converted,
+            data: direct ? /** @type {Uint8Array} */ (surface.pixels) : converted,
         });
         counters.uploads++;
         counters.bytes += needed;
