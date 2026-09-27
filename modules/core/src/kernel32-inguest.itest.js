@@ -417,6 +417,82 @@ function buildSectionHandoffExe(){
 }
 
 /**
+ * The calls that are a few instructions in the guest, each against what the
+ * process block or the host says: GetProcessHeap is PEB->ProcessHeap and a
+ * heap to allocate from, GetVersion the version the block holds, the two
+ * pseudo-handles, and the host's GetCurrentThreadId the block's id and, in a
+ * second thread, the id CreateThread answered; lstrlen and lstrcpy in both
+ * widths, a null pointer 0 in the guest and one the guest cannot read (0x100)
+ * 0 from the host, and a copy compared by the host's lstrcmpA.
+ */
+function buildSimpleCallsExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['GetProcessHeap', 'HeapAlloc', 'GetVersion',
+            'GetCurrentProcess', 'GetCurrentThread', 'GetCurrentThreadId', 'lstrlenA',
+            'lstrlenW', 'lstrcpyA', 'lstrcpyW', 'lstrcmpA', 'CreateThread', 'ExitThread',
+            'WaitForSingleObject', 'ExitProcess'] },
+        data: { text: [...'hello', '\0'].map(c=>c.charCodeAt(0)),
+            wide: [...'h\u00e9llo', '\0']
+                .flatMap(c=>[c.charCodeAt(0) & 0xff, c.charCodeAt(0) >>> 8]),
+            buffer: new Array(16).fill(0xcc), wideBuffer: new Array(16).fill(0xcc),
+            handles: [0, 0, 0, 0], id: [0, 0, 0, 0], seen: [0, 0, 0, 0], main: [0, 0, 0, 0] },
+        codeSize: 0x400,
+        code: context=>{
+            const { call, push, pushFrom, pushValue, keep, compare, check, exit, fail } =
+                toolkit(context);
+            const worker = context.code(0x300);
+            /** cmp eax, value; jne fail @param {number} value */
+            const expect = value=>[[0x3d, ...u32(value)], { jump: JNE, to: 'fail' }];
+            const main = assemble([
+                check(1), call('GetProcessHeap'), [0x85, 0xc0], { jump: JE, to: 'fail' },
+                [0x64, 0x8b, 0x0d, 0x30, 0, 0, 0, 0x3b, 0x41, 0x18],    // cmp eax, [peb + 0x18]
+                { jump: JNE, to: 'fail' },
+                pushValue(8), pushValue(0), [0x50], call('HeapAlloc'),  // HeapAlloc(it, 0, 8)
+                [0x85, 0xc0], { jump: JE, to: 'fail' },
+                // (build & 0x7fff) << 16 | minor << 8 | major, from the process block
+                check(2), [0x64, 0x8b, 0x0d, 0x30, 0, 0, 0],             // mov ecx, fs:[0x30]
+                [0x0f, 0xb7, 0x91, 0xac, 0, 0, 0],                      // movzx edx, word [+0xac]
+                [0x81, 0xe2, ...u32(0x7fff), 0xc1, 0xe2, 0x10],          // and edx; shl edx, 16
+                [0x8b, 0x81, 0xa8, 0, 0, 0, 0xc1, 0xe0, 0x08],          // eax = minor << 8
+                [0x0b, 0x81, 0xa4, 0, 0, 0, 0x09, 0xc2],                // | major; edx |= eax
+                [0x52], call('GetVersion'), [0x5a, 0x39, 0xd0], { jump: JNE, to: 'fail' },
+                check(3), call('GetCurrentProcess'), ...expect(0xffffffff),
+                check(4), call('GetCurrentThread'), ...expect(0xfffffffe),
+                check(5), call('GetCurrentThreadId'), keep('main'),
+                [0x64, 0x3b, 0x05, 0x24, 0, 0, 0], { jump: JNE, to: 'fail' },  // cmp eax, fs:[0x24]
+                [0x85, 0xc0], { jump: JE, to: 'fail' },
+                check(6), push('text'), call('lstrlenA'), ...expect(5),
+                pushValue(0), call('lstrlenA'), ...expect(0),
+                pushValue(0x100), call('lstrlenA'), ...expect(0),
+                check(7), push('wide'), call('lstrlenW'), ...expect(5),
+                check(8), push('text'), push('buffer'), call('lstrcpyA'),
+                [0x3d, ...u32(context.at('buffer'))], { jump: JNE, to: 'fail' },
+                push('text'), push('buffer'), call('lstrcmpA'), ...expect(0),
+                compare('buffer', 0xcccc006f, 4), { jump: JNE, to: 'fail' },    // "o\0" and after
+                check(9), push('wide'), push('wideBuffer'), call('lstrcpyW'),
+                [0x3d, ...u32(context.at('wideBuffer'))], { jump: JNE, to: 'fail' },
+                push('wideBuffer'), call('lstrlenW'), ...expect(5),
+                // CreateThread(NULL, 0, worker, NULL, 0, &id)
+                check(10), push('id'), [0x6a, 0x00, 0x6a, 0x00, 0x68, ...u32(worker), 0x6a, 0x00,
+                    0x6a, 0x00], call('CreateThread'), keep('handles'),
+                [0x6a, 0xff], pushFrom('handles'), call('WaitForSingleObject'),
+                [0xa1, ...u32(context.at('seen'))], [0x3b, 0x05, ...u32(context.at('id'))],
+                { jump: JNE, to: 'fail' },
+                [0x3b, 0x05, ...u32(context.at('main'))], { jump: JE, to: 'fail' },
+                exit(),
+                ...fail(),
+            ]);
+            const body = assemble([
+                call('GetCurrentThreadId'), keep('seen'),
+                [0x6a, 0x00], call('ExitThread'),
+            ]);
+            assert.ok(main.length <= 0x300, `main is ${main.length} bytes`);
+            return [...main, ...new Array(0x300 - main.length).fill(0x90), ...body];
+        },
+    });
+}
+
+/**
  * Runs a program to its exit, and reads before the machine goes what crossed
  * into the host: the bridge's most frequent calls, and what the host's half
  * of the critical sections counted.
@@ -491,6 +567,20 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
         assert.equal(sections.queued, 0);
         assert.equal(sections.owed, 0);
     });
+
+    test(`the calls a few instructions long answer in the guest as the host does, under ${engine}`,
+        { timeout: 60000 }, async()=>{
+            const { code, hot } = await run(buildSimpleCallsExe(), engine);
+            assert.equal(code, 0, 'the number of the first check that failed');
+            const crossed = Object.fromEntries(hot);
+            for (const name of ['GetProcessHeap', 'GetVersion', 'GetCurrentProcess',
+                'GetCurrentThread', 'lstrlenW', 'lstrcpyA', 'lstrcpyW'])
+            {
+                assert.equal(crossed[`KERNEL32.dll!${name}`], undefined, `${name} crossed`);
+            }
+            assert.equal(crossed['KERNEL32.dll!lstrlenA'], 1, 'only the pointer at 0x100');
+            assert.equal(crossed['KERNEL32.dll!lstrcmpA'], 1, 'lstrcmpA stays the host\'s');
+        });
 
     test(`a thread waiting for a section waits in the host and is handed it, under ${engine}`,
         { timeout: 60000 }, async()=>{

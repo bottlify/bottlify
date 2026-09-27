@@ -494,6 +494,7 @@ export function createSyncFunctions(host){
         GetCurrentThread: {
             argBytes: 0,
             handler: ()=>CURRENT_THREAD,
+            code: ()=>Uint8Array.from([0xb8, 0xfe, 0xff, 0xff, 0xff, 0xc3]), // mov eax, -2; ret
         },
 
         /** DWORD SuspendThread(HANDLE hThread) */

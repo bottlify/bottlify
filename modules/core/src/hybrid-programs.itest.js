@@ -35,22 +35,24 @@ const ITERATIONS = 2_000_000;
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
 /**
- * A loop that calls lstrlenA("abc") ITERATIONS times and exits with the sum
- * of the lengths, modulo 256.
+ * A loop that calls lstrcmpA("abc", "ab") ITERATIONS times and exits with the
+ * sum of its answers, 1 each, modulo 256: an import that crosses into the
+ * host every time.
  */
 function buildLoopExe(){
     return buildExe({
-        imports: { 'KERNEL32.dll': ['lstrlenA', 'ExitProcess'] },
-        data: { text: [0x61, 0x62, 0x63, 0] },
+        imports: { 'KERNEL32.dll': ['lstrcmpA', 'ExitProcess'] },
+        data: { text: [0x61, 0x62, 0x63, 0], shorter: [0x61, 0x62, 0] },
         codeSize: 0x40,
         code: ({ iat, at })=>[
             0xbe, ...u32(ITERATIONS),            //     mov esi, N
             0x31, 0xff,                          //     xor edi, edi
-            0x68, ...u32(at('text')),            // L:  push text
-            0xff, 0x15, ...u32(iat('lstrlenA')), //     call [lstrlenA]
+            0x68, ...u32(at('shorter')),         // L:  push shorter
+            0x68, ...u32(at('text')),            //     push text
+            0xff, 0x15, ...u32(iat('lstrcmpA')), //     call [lstrcmpA]
             0x01, 0xc7,                          //     add edi, eax
             0x4e,                                //     dec esi
-            0x75, 0xf0,                          //     jnz L
+            0x75, 0xeb,                          //     jnz L
             0x81, 0xe7, ...u32(0xff),            //     and edi, 0xff
             0x57,                                //     push edi
             0xff, 0x15, ...u32(iat('ExitProcess')), // call [ExitProcess]
@@ -101,7 +103,7 @@ test('a loop calling a kernel32 import translates, the import runs on the emulat
     + ' code agrees', { timeout: 60000 }, async()=>{
     const exe = buildLoopExe();
     const reference = await run(exe, 'emulator');
-    assert.equal(reference.code, (3 * ITERATIONS) & 0xff);
+    assert.equal(reference.code, ITERATIONS & 0xff);
     assert.equal(reference.cork, null);
     const hybrid = await run(exe, 'hybrid');
     assert.equal(hybrid.code, reference.code);
