@@ -308,7 +308,8 @@ export function createProgramCache({ backend }){
                             module: vertexModule,
                             entryPoint: program.vertex.entry,
                             buffers: vertexBuffersOf(program.layout.stride,
-                                program.layout.attributes, program.layout.streams),
+                                program.layout.attributes, program.layout.streams,
+                                Boolean(state.points)),
                         },
                         fragment: {
                             module: pixelModule,

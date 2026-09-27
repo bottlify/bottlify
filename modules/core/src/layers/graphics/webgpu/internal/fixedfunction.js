@@ -658,6 +658,40 @@ export function generateFixedFunction(state, layout){
                 generatedCoordinate(stage.texCoordIndex))};`);
     }
 
+    // A point drawn as a quad: this vertex is one of its six corners, moved
+    // from the point's centre by half its size in pixels. The size is the
+    // vertex's own or the state's; scaled, it falls off with the distance from
+    // the eye by the three coefficients, in units of the viewport's height;
+    // then it is held between the minimum and the maximum, the maximum
+    // winning where the two cross.
+    const points = state.points ?? null;
+    /** @type {string[]} */
+    const pointLines = [];
+    if (points)
+    {
+        const base = has('pointSize') ? 'vertex.pointSize' : 'uniforms.point.x';
+        const scaled = points.scale && !layout.preTransformed;
+        pointLines.push(
+            '    var pointCorners = array<vec2f, 6>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0),',
+            '        vec2f(-1.0, 1.0), vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0));',
+            '    let pointCorner = pointCorners[corner];',
+            ...(scaled ? [
+                '    let pointDistance = length((uniforms.worldView'
+                    + ' * vec4f(vertex.position, 1.0)).xyz);',
+                '    let pointScaled = uniforms.pointScale.w * sqrt(1.0 / (uniforms.pointScale.x',
+                '        + uniforms.pointScale.y * pointDistance',
+                `        + uniforms.pointScale.z * pointDistance * pointDistance)) * ${base};`,
+            ] : [`    let pointScaled = ${base};`]),
+            '    let pointSize = min(max(pointScaled, uniforms.point.y), uniforms.point.z);',
+            '    out.position = vec4f(out.position.xy + pointCorner * pointSize * 0.5',
+            '        * uniforms.viewportScale * out.position.w, out.position.zw);');
+        if (points.sprite)
+        {
+            varyings.push(`    @location(${location++}) sprite: vec2f,`);
+            pointLines.push('    out.sprite = pointCorner * 0.5 + 0.5;');
+        }
+    }
+
     // Table fog is the pixel's own and needs no varying. Vertex fog on a
     // pre-transformed vertex is the program's, in its specular alpha.
     const fogSource = fogSourceOf(state);
@@ -712,6 +746,7 @@ export function generateFixedFunction(state, layout){
             : [`    out.fogAmount = ${has('specular') ? 'vertex.specular.a' : '1.0'};`];
 
     const lightCount = lighting === null ? 0 : lighting.lights.length;
+    const cornerInput = points ? ', @builtin(vertex_index) corner: u32' : '';
     const keys = state.stages.map(stage=>stage.colorKey ?? null);
     // The position is @invariant: a second pass over the same geometry with
     // a different stage or light setup is a different module, and WGSL
@@ -735,10 +770,11 @@ ${varyings.join('\n')}
 };
 
 @vertex
-fn vertexMain(vertex: VertexIn) -> VertexOut {
+fn vertexMain(vertex: VertexIn${cornerInput}) -> VertexOut {
     var out: VertexOut;
 ${position}
 ${pixelCentre}
+${pointLines.join('\n')}
 ${[...assignments, ...fogAmount].join('\n')}
     return out;
 }
@@ -746,7 +782,8 @@ ${[...assignments, ...fogAmount].join('\n')}
 @fragment
 fn fragmentMain(input: VertexOut) -> @location(0) vec4f {
 ${fragmentBody(state, specularEnable, undefined, undefined,
-        flat ? 'vec4f(input.specular.rgb, input.specularAlpha)' : 'input.specular')}
+        flat ? 'vec4f(input.specular.rgb, input.specularAlpha)' : 'input.specular',
+        points?.sprite === true)}
     return current;
 }
 `;
@@ -787,7 +824,9 @@ function uniformStruct(lightCount){
     texTransform: array<vec4f, 32>,
     worldView: mat4x4f,
     normalMatrix: mat4x4f,
-    cameraNormalMatrix: mat4x4f,${lightCount === 0 ? '' : `
+    cameraNormalMatrix: mat4x4f,
+    point: vec4f,
+    pointScale: vec4f,${lightCount === 0 ? '' : `
     lights: array<Light, ${lightCount}>,`}
 };`;
 }
@@ -834,10 +873,11 @@ function tableFog(position){
  *     vertex stage generated (`generated{n}`) rather than a carried set.
  * @param {string} [position]  The fragment's position builtin, for table fog.
  * @param {string} [specular]  What a stage reads the specular colour as.
+ * @param {boolean} [sprite]  Every carried set is the point sprite's `input.sprite`.
  */
 function fragmentBody(state, specularEnable, generated = state.stages.map(
     stage=>generates(stage.texCoordIndex)), position = 'input.position',
-specular = 'input.specular')
+specular = 'input.specular', sprite = false)
 {
     const wide = wideSets(state);
     const stages = state.stages.length === 0
@@ -852,7 +892,8 @@ specular = 'input.specular')
             const own = `input.generated${index}`;
             const coordinate = generated[index]
                 ? flat ? own : stage.projected === 4 ? `(${own}.xyz / ${own}.w)` : `${own}.xyz`
-                : `input.texCoord${set}${wide.has(set) ? flat ? '.xy' : '.xyz' : ''}`;
+                : sprite ? flat ? 'input.sprite' : 'vec3f(input.sprite, 0.0)'
+                    : `input.texCoord${set}${wide.has(set) ? flat ? '.xy' : '.xyz' : ''}`;
             const color = combine(
                 stage.colorOp, index, coordinate, stage.colorArg1, stage.colorArg2, specular);
             if (color === null)

@@ -391,18 +391,35 @@ export function vertexCountOf(type, primitiveCount){
 }
 
 /**
+ * A point list, which is drawn at its size -- a quad a point -- where WebGPU
+ * would draw a pixel. A triangle filled as points (D3DFILL_POINT) is not one,
+ * and draws WebGPU's own.
+ */
+const POINT_QUADS = 'point-quads';
+
+/**
  * The WebGPU topology a primitive type draws as when its vertices come in
- * order. Fans have no counterpart and are always expanded.
+ * order, or POINT_QUADS. Fans have no counterpart and are always expanded.
  *
  * @type {Readonly<Record<number, string>>}
  */
 const TOPOLOGY = Object.freeze({
-    [D3DPT.POINTLIST]: 'point-list',
+    [D3DPT.POINTLIST]: POINT_QUADS,
     [D3DPT.LINELIST]: 'line-list',
     [D3DPT.LINESTRIP]: 'line-strip',
     [D3DPT.TRIANGLELIST]: 'triangle-list',
     [D3DPT.TRIANGLESTRIP]: 'triangle-strip',
 });
+
+/**
+ * A draw of vertices in order; a point list's as six corners an instance,
+ * the instance its point.
+ *
+ * @param {any} pass @param {{ count: number, first: number, points?: boolean }} command
+ */
+const drawInOrder = (pass, command)=>(command.points
+    ? pass.draw(6, command.count, 0, command.first)
+    : pass.draw(command.count, 1, command.first));
 
 /** @type {Readonly<Record<number, string>>} */
 const LIST_OF = Object.freeze({
@@ -785,7 +802,11 @@ export const UNIFORM_AT = Object.freeze({
     // The inverse transpose of world then view, which a normal a coordinate
     // is generated from goes through; identity unless a stage takes one.
     cameraNormalMatrix: 236,
-    lights: 252,
+    // A point's size, its minimum and its maximum; then the three coefficients
+    // it falls off with the distance by, and the viewport height it is scaled in.
+    point: 252,
+    pointScale: 256,
+    lights: 260,
 });
 
 /** How many stages the block carries sampler state for. */
@@ -913,8 +934,24 @@ function putDword(block, at, dword){
  *     `normalMatrixOf` world then view; identity unless a stage generates from the normal.
  * @property {number} [ambient]      D3DCOLOR, the scene's own ambient light.
  * @property {readonly number[]} [eye]     Camera position in world space.
+ * @property {readonly number[]} [points]
+ *     POINTSIZE, POINTSIZE_MIN, POINTSIZE_MAX, then POINTSCALE_A, B, C and the
+ *     viewport's height: eight floats.
  * @property {readonly Light[]} [lights]
  */
+
+/**
+ * A point's size, its minimum and its maximum, as the state holds them.
+ *
+ * @param {RenderModel} model
+ */
+function pointLimits(model){
+    const rs = (/** @type {number} */ state)=>dwordToFloat(model.renderStates.get(state) ?? 0);
+    return [rs(D3DRS.POINTSIZE), rs(D3DRS.POINTSIZE_MIN), rs(D3DRS.POINTSIZE_MAX), 0];
+}
+
+/** What a block carries for points when nothing says: one pixel, unscaled. */
+const NO_POINTS = Object.freeze([1, 0, 1, 0, 1, 0, 0, 1]);
 
 /**
  * @param {UniformValues} values
@@ -963,6 +1000,7 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     block.set(values.worldView ?? IDENTITY, at.worldView);
     block.set(values.normalMatrix ?? IDENTITY, at.normalMatrix);
     block.set(values.cameraNormalMatrix ?? IDENTITY, at.cameraNormalMatrix);
+    block.set(values.points ?? NO_POINTS, at.point);
     for (let index = 0; index < lights.length; index++)
     {
         packLight(block, at.lights + index * LIGHT_FLOATS, lights[index]);
@@ -1379,6 +1417,11 @@ export function uniformsOf(model, lighting, take, mips = true){
         ...(generatesFromNormal(model)
             ? { cameraNormalMatrix: normalMatrixOf(worldView, CAMERA_NORMAL_MATRIX) }
             : {}),
+        points: [
+            ...pointLimits(model),
+            dwordToFloat(rs('POINTSCALE_A')), dwordToFloat(rs('POINTSCALE_B')),
+            dwordToFloat(rs('POINTSCALE_C')), model.viewport.rect.height,
+        ],
         // The shader declares an array exactly as long as the lighting state
         // said, so a block that carried lights it does not know about would be
         // read past its own end.
@@ -1561,10 +1604,11 @@ const EMPTY_BLOCK = new Float32Array(0);
  *
  * @param {RenderModel} model
  * @param {import('../webgpu/internal/vertexformat.js').VertexLayout} layout
+ * @param {boolean} [sprite]  A point sprite, whose quad is every stage's coordinate.
  * @returns {{ stages: import('../webgpu/internal/pipeline.js').StageKey[],
  *             textures: (any | null)[], truncated: CascadeTruncation | null }}
  */
-export function stageCascade(model, layout){
+export function stageCascade(model, layout, sprite = false){
     /** @type {import('../webgpu/internal/pipeline.js').StageKey[]} */
     const stages = [];
     /** @type {(any | null)[]} */
@@ -1602,7 +1646,7 @@ export function stageCascade(model, layout){
         const samples = selectors.some(arg=>(arg & D3DTA_SELECTMASK) === D3DTA.TEXTURE);
         const texture = model.textures.get(stage) ?? null;
         const coordSet = key.texCoordIndex & COORD_SET_MASK;
-        const carried = generates(key.texCoordIndex) || coordSet < layout.texCoordSets;
+        const carried = sprite || generates(key.texCoordIndex) || coordSet < layout.texCoordSets;
         if (samples && (!texture || !carried))
         {
             return {
@@ -1745,7 +1789,7 @@ export function pipelineStateOf(model, shape){
         pixelShader: 0,
         targetFormat: shape.targetFormat,
         depthFormat: shape.depthFormat,
-        topology: shape.topology,
+        topology: shape.topology === POINT_QUADS ? 'point-list' : shape.topology,
         depthTest,
         depthWrite: depthTest && rs('ZWRITEENABLE') !== 0,
         depthFunc: rs('ZFUNC'),
@@ -1779,6 +1823,20 @@ export function pipelineStateOf(model, shape){
             vertexLayout: shape.vertexLayout,
             vertexLayoutKey: shape.vertexLayoutKey,
         } : {}),
+        ...(shape.topology === POINT_QUADS ? { points: pointsOf(model) } : {}),
+    };
+}
+
+/**
+ * How a point list is drawn: as sprites or not, scaled with distance or not.
+ *
+ * @param {RenderModel} model
+ * @returns {import('../webgpu/internal/pipeline.js').PointState}
+ */
+export function pointsOf(model){
+    return {
+        sprite: (model.renderStates.get(D3DRS.POINTSPRITEENABLE) ?? 0) !== 0,
+        scale: (model.renderStates.get(D3DRS.POINTSCALEENABLE) ?? 0) !== 0,
     };
 }
 
@@ -4353,9 +4411,10 @@ export function createRenderer(options){
 
     /**
      * The usages a hybrid's fixed vertex stage carries through: what a pixel
-     * shader can read from a fixed-function vertex.
+     * shader can read from a fixed-function vertex, and the size a point is
+     * drawn at.
      */
-    const HYBRID_USAGES = new Set([0, 9, 10, 5, 3]);
+    const HYBRID_USAGES = new Set([0, 9, 10, 5, 3, 4]);
 
     /**
      * Everything a draw through shaders needs that is not its geometry, or
@@ -4796,19 +4855,23 @@ export function createRenderer(options){
                 && !fogCarried.includes(location)
                 && !generated.some((mode, set)=>mode !== 0
                     && varyingLocation(D3DDECLUSAGE.TEXCOORD, set) === location));
+        const points = topology === POINT_QUADS ? pointsOf(model) : null;
+        const pointKey = points ? `|p${points.sprite ? 's' : ''}${points.scale ? 'd' : ''}` : '';
         const vertex = program.vertex
             ? translationOf(/** @type {object} */ (program.vertexShader),
-                `vs:${shapes}|w${missing.join(',')}${flat ? '|flat' : ''}|f${fog.source}`,
+                `vs:${shapes}|w${missing.join(',')}${flat ? '|flat' : ''}|f${fog.source}`
+                    + pointKey,
                 ()=>translateShader(
                     /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
                     { inputs: layout.shapes, alsoWrite: missing, flatColours: flat,
-                        fogSource: fog.source }))
+                        fogSource: fog.source, ...(points ? { points } : {}) }))
             : hybridStageFor(
                 `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`
                     + `|f${fog.source}/${fog.mode}${flat ? '|flat' : ''}`
-                    + `${normalizeNormals ? '|normalize' : ''}${rangeFog ? '|range' : ''}`,
+                    + `${normalizeNormals ? '|normalize' : ''}${rangeFog ? '|range' : ''}`
+                    + pointKey,
                 wanted, layout.shapes, missing, generated, fog,
-                { flatColours: flat, normalizeNormals, rangeFog });
+                { flatColours: flat, normalizeNormals, rangeFog, ...(points ? { points } : {}) });
         if (vertex.error)
         {
             skip('program');
@@ -4891,11 +4954,24 @@ export function createRenderer(options){
         const layout = stepped(laid.layout, model);
         const shapes = shapeKey(layout);
         const flat = isFlatShaded(model);
+        // A sprite is every stage's coordinate, whatever the shader writes:
+        // the sets the cascade samples are written, and the quad's corner
+        // overwrites them.
+        const points = topology === POINT_QUADS ? pointsOf(model) : null;
+        const spriteSets = points?.sprite
+            ? [...new Set(stageCascade(model, {
+                texCoordSets: 0, attributes: [], stride, preTransformed: false, blendWeights: 0,
+            }, true).stages.map(stage=>varyingLocation(D3DDECLUSAGE.TEXCOORD,
+                stage.texCoordIndex & COORD_SET_MASK)))]
+            : [];
         /** @type {import('../d3d9/wgsl.js').TranslatedShader} */
         const vertex = translationOf(/** @type {object} */ (program.vertexShader),
-            `vs:${shapes}${flat ? '|flat' : ''}`, ()=>translateShader(
+            `vs:${shapes}${flat ? '|flat' : ''}${points
+                ? `|p${points.sprite ? 's' : ''}w${spriteSets.join(',')}` : ''}`,
+            ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
-                { inputs: layout.shapes, flatColours: flat }));
+                { inputs: layout.shapes, flatColours: flat,
+                    ...(points ? { points, alsoWrite: spriteSets } : {}) }));
         if (vertex.error)
         {
             skip('program');
@@ -4915,7 +4991,7 @@ export function createRenderer(options){
         }
         const cascade = stageCascade(model, {
             texCoordSets: sets, attributes: [], stride, preTransformed: false, blendWeights: 0,
-        });
+        }, points?.sprite === true);
         reportCascade(cascade);
         const state = {
             ...pipelineStateOf(model, {
@@ -4977,7 +5053,8 @@ export function createRenderer(options){
      * @param {number[]} alsoWrite
      * @param {number[]} generated
      * @param {{ source: number, mode: number }} fog  See `fogOf`.
-     * @param {{ flatColours: boolean, normalizeNormals: boolean, rangeFog: boolean }} shading
+     * @param {{ flatColours: boolean, normalizeNormals: boolean, rangeFog: boolean,
+     *     points?: import('../webgpu/internal/pipeline.js').PointState }} shading
      *     See `fixedVertexStage`.
      */
     const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog, shading)=>{
@@ -5031,6 +5108,10 @@ export function createRenderer(options){
         if (vertex.viewportRegister !== undefined)
         {
             blocks[0].set(model.viewport.scale, vertex.viewportRegister * 4);
+        }
+        if (vertex.pointRegister !== undefined)
+        {
+            blocks[0].set(pointLimits(model), vertex.pointRegister * 4);
         }
         if (vertex.fogRegister !== undefined)
         {
@@ -5090,6 +5171,11 @@ export function createRenderer(options){
         const fogColour = colorToFloats(rs('FOGCOLOR'));
         floats.set([fogColour.r, fogColour.g, fogColour.b, fogColour.a],
             HYBRID_CONSTANTS.FOG_COLOR * 4);
+        floats.set(pointLimits(model), HYBRID_CONSTANTS.POINT * 4);
+        floats.set([
+            dwordToFloat(rs('POINTSCALE_A')), dwordToFloat(rs('POINTSCALE_B')),
+            dwordToFloat(rs('POINTSCALE_C')), model.viewport.rect.height,
+        ], HYBRID_CONSTANTS.POINT_SCALE * 4);
         return [floats, take(64), take(16)];
     };
 
@@ -5322,6 +5408,8 @@ export function createRenderer(options){
         prepared.pipelineIndex = holder.pipelineIndex;
         const command = {
             kind: 'draw',
+            // Six corners an instance, one instance a point.
+            ...(prepared.state.points ? { points: true } : {}),
             pipeline: prepared.pipelineIndex,
             state: prepared.state,
             uniforms: prepared.uniforms,
@@ -6083,7 +6171,8 @@ export function createRenderer(options){
                 return null;
             }
         }
-        const cascade = stageCascade(model, layout);
+        const cascade = stageCascade(model, layout,
+            topology === POINT_QUADS && pointsOf(model).sprite);
         keyStages(model, cascade);
         reportCascade(cascade);
         if (skipTextures.size > 0 && cascade.textures.some(
@@ -6158,6 +6247,15 @@ export function createRenderer(options){
         return preparedState;
     };
 
+    /**
+     * Whether a draw reads streams past zero, which a gathered point list
+     * cannot follow.
+     *
+     * @param {PreparedDraw} prepared
+     */
+    const hasFurtherStreams = prepared=>((prepared.layout?.streams
+        ?? prepared.program?.source?.layout?.streams)?.length ?? 0) > 0;
+
     /** @param {number} format D3DFMT_INDEX @returns {{ gpu: string, bytes: number } | null} */
     const indexFormatOf = format=>{
         if (format === D3DFMT_INDEX.INDEX16)
@@ -6182,6 +6280,36 @@ export function createRenderer(options){
         return elementBytes === 2
             ? new Uint16Array(copy.buffer, 0, copy.byteLength >>> 1)
             : new Uint32Array(copy.buffer, 0, copy.byteLength >>> 2);
+    };
+
+    /**
+     * An indexed point list's vertices in index order: a point is drawn as an
+     * instance, and an instance is read in order, never through an index.
+     *
+     * @param {(first: number, count: number) => Uint8Array} read
+     *     The vertices from `first`, `count` of them.
+     * @param {ArrayLike<number>} order @param {number} stride
+     */
+    const gatheredPoints = (read, order, stride)=>{
+        let lowest = Infinity;
+        let highest = -1;
+        for (let index = 0; index < order.length; index++)
+        {
+            lowest = Math.min(lowest, order[index]);
+            highest = Math.max(highest, order[index]);
+        }
+        const gathered = new Uint8Array(order.length * stride);
+        if (highest < 0)
+        {
+            return gathered;
+        }
+        const range = read(lowest, highest - lowest + 1);
+        for (let index = 0; index < order.length; index++)
+        {
+            const from = (order[index] - lowest) * stride;
+            gathered.set(range.subarray(from, from + stride), index * stride);
+        }
+        return gathered;
     };
 
     /**
@@ -6875,6 +7003,27 @@ export function createRenderer(options){
                 return;
             }
             const byteOffset = startIndex * format.bytes;
+            if (prepared.state.points)
+            {
+                if (hasFurtherStreams(prepared))
+                {
+                    skip('stream');
+                    return;
+                }
+                const order = indicesFrom(readMemory(model.indices.base + byteOffset,
+                    count * format.bytes), format.bytes);
+                const base = stream.buffer.base + (stream.offset ?? 0)
+                    + model.baseVertexIndex * stream.stride;
+                record(model, prepared, {
+                    vertices: scratchVertices.write(gatheredPoints((first, many)=>
+                        readMemory(base + first * stream.stride, many * stream.stride),
+                    order, stream.stride)),
+                    indices: null,
+                    count,
+                    first: 0,
+                });
+                return;
+            }
             const streamBuffer = bufferFor(stream.buffer).gpu;
             const indexBuffer = bufferFor(model.indices).gpu;
             streamBuffer.markRead();
@@ -6983,8 +7132,20 @@ export function createRenderer(options){
             {
                 return;
             }
-            const vertices = scratchVertices.write(vertexData.subarray(0, numVertices * stride));
             const indices = indicesFrom(indexData.subarray(0, count * format.bytes), format.bytes);
+            if (prepared.state.points)
+            {
+                record(model, prepared, {
+                    vertices: scratchVertices.write(gatheredPoints((first, many)=>
+                        vertexData.subarray(first * stride, (first + many) * stride),
+                    indices, stride)),
+                    indices: null,
+                    count,
+                    first: 0,
+                });
+                return;
+            }
+            const vertices = scratchVertices.write(vertexData.subarray(0, numVertices * stride));
             record(model, prepared, {
                 vertices,
                 ...(list === undefined
@@ -7406,7 +7567,7 @@ export function createRenderer(options){
         }
         else
         {
-            pass.draw(command.count, 1, command.first);
+            drawInOrder(pass, command);
         }
         endCounting(pass, slot);
         counters.draws++;
@@ -7623,7 +7784,7 @@ export function createRenderer(options){
             }
             else
             {
-                pass.draw(command.count, 1, command.first);
+                drawInOrder(pass, command);
             }
             endCounting(pass, slot);
             counters.draws++;
@@ -7658,7 +7819,7 @@ export function createRenderer(options){
                 }
                 else
                 {
-                    pass.draw(command.count, 1, command.first);
+                    drawInOrder(pass, command);
                 }
                 command.check.again = frame.snapshot(scratch.target);
                 // The same vertices, twice more: from a fresh buffer the region
@@ -7824,7 +7985,7 @@ export function createRenderer(options){
                     }
                     else
                     {
-                        pass.draw(command.count, 1, command.first);
+                        drawInOrder(pass, command);
                     }
                     check[name] = frame.snapshot(scratch.target);
                 }

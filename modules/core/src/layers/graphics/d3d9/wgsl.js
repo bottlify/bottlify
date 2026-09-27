@@ -123,8 +123,41 @@ export const HYBRID_CONSTANTS = Object.freeze({
     FOG_COLOR: 42,
     /** Four rows: the inverse transpose of world then view, which the normal goes through. */
     CAMERA_NORMAL: 43,
-    COUNT: 47,
+    /** A point's size, minimum and maximum; then the scale's three coefficients and the viewport height. */
+    POINT: 47,
+    POINT_SCALE: 48,
+    COUNT: 49,
 });
+
+/** Whether a varying location carries a coordinate set. @param {number} location */
+const isCoordinate = location=>location >= varyingLocation(D3DDECLUSAGE.TEXCOORD, 0)
+    && location <= varyingLocation(D3DDECLUSAGE.TEXCOORD, 7);
+
+/**
+ * The lines that move a point's vertex to its corner of the quad the point is
+ * drawn as: six corners, two triangles, the corner the vertex index names;
+ * half the size in pixels each way, held between the minimum and the maximum
+ * (the maximum winning where they cross), and with a sprite every coordinate
+ * the quad's own, (0, 0) at its top left.
+ *
+ * @param {string} corner   The vertex index.
+ * @param {string} size     The size before it is held to its limits.
+ * @param {string} limits   A vec4f: size, minimum, maximum.
+ * @param {string} pixel    A vec2f: one pixel in clip space, as the viewport scale.
+ * @param {readonly string[]} sprites  Outputs a sprite's coordinate goes to.
+ * @returns {string[]}
+ */
+export function pointQuadLines(corner, size, limits, pixel, sprites){
+    return [
+        '    var pointCorners = array<vec2f, 6>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0),',
+        '        vec2f(-1.0, 1.0), vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0));',
+        `    let pointCorner = pointCorners[${corner}];`,
+        `    let pointSize = min(max(${size}, ${limits}.y), ${limits}.z);`,
+        '    out.oPos = vec4f(out.oPos.xy + pointCorner * pointSize * 0.5',
+        `        * ${pixel} * out.oPos.w, out.oPos.zw);`,
+        ...sprites.map(target=>`    ${target} = vec4f(pointCorner * 0.5 + 0.5, 0.0, 1.0);`),
+    ];
+}
 
 /**
  * Where a hybrid's vertex stage puts table fog's start, end and density, and
@@ -197,6 +230,8 @@ export function varyingLocation(usage, index){
  *           register, with the table curve's range in the one after it.
  *     A vertex shader's: the float register past the ones it reads, where the
  *     viewport's scale is carried for the half-pixel move of its position.
+ * @property {number} [pointRegister]  A vertex shader drawing points: the
+ *           register holding the state's size, minimum and maximum.
  * @property {number} [bumpRegister]
  *     A 1.x pixel shader's that bumps: the first of the two registers a stage
  *     its bump matrix and luminance travel in, past the ones it reads.
@@ -335,7 +370,8 @@ function moduleHeader(options){
  * @param {import('./shader.js').ParsedShader} parsed
  * @param {{ inputs?: Map<number, InputShape>, alsoWrite?: readonly number[],
  *     fog?: number, fogSource?: number, flatColours?: boolean,
- *     stageDimensions?: readonly string[], projectedBy?: readonly string[] }} [options]
+ *     stageDimensions?: readonly string[], projectedBy?: readonly string[],
+ *     points?: { sprite: boolean } }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
  *        by register. Absent means every declared input arrives as four
  *        floats; present, a declared register it does not name reads as the
@@ -351,6 +387,9 @@ function moduleHeader(options){
  *        is the fixed one can promise the varying, so only it is fogged.
  *        `fogSource` FOG_SOURCE.TABLE evaluates the curve per pixel instead,
  *        over the range the vertex stage carries at `FOG_RANGE_LOCATION`.
+ *        `points` draws a vertex shader's point list as quads, sized by the
+ *        shader's oPts or the state's size, and with a sprite every
+ *        coordinate set it writes is the quad's own.
  *        `flatColours` declares the two colour varyings flat, for
  *        D3DSHADE_FLAT; the stage paired with this one must say the same.
  *        For a 1.x pixel shader, `stageDimensions` is the dimension ('2d',
@@ -1290,6 +1329,10 @@ export function translateShader(parsed, options = {}){
     let viewportRegister;
     /** @type {number | undefined} */
     let fogRegister;
+    /** @type {number | undefined} */
+    let pointRegister;
+    /** The name each varying location is written under. @type {Map<number, string>} */
+    const emitted = new Map();
     let entry;
     if (vertex)
     {
@@ -1326,6 +1369,7 @@ export function translateShader(parsed, options = {}){
             outputFields.push(`    @location(${location})`
                 + `${colourInterpolation(location, options.flatColours)} ${name}: vec4f,`);
             outputs.push(location);
+            emitted.set(location, name);
         };
         if (major >= 3)
         {
@@ -1402,6 +1446,18 @@ export function translateShader(parsed, options = {}){
                 body.push(`    out.o${FOG_RANGE_LOCATION} = c[${fogRegister + 1}];`);
             }
         }
+        if (options.points)
+        {
+            pointRegister = fogRegister !== undefined ? fogRegister + 2 : viewportRegister + 1;
+            inputFields.push('    @builtin(vertex_index) corner: u32,');
+            const sprites = options.points.sprite
+                ? [...emitted].filter(([location])=>isCoordinate(location))
+                    .map(([, name])=>`out.${name}`)
+                : [];
+            body.push(...pointQuadLines('in.corner',
+                vertexOutputs.has(2) && major < 3 ? 'out.oPts.x' : `c[${pointRegister}].x`,
+                `c[${pointRegister}]`, `c[${viewportRegister}].xy`, sprites));
+        }
         entry = 'vs_main';
     }
     else
@@ -1477,10 +1533,11 @@ export function translateShader(parsed, options = {}){
     // two, named through a module constant so the body did not need to know
     // where they would start.
     const bumpRegister = bumps ? constants : undefined;
-    const reach = fogRegister !== undefined ? fogRegister + 2
-        : viewportRegister !== undefined ? viewportRegister + 1
-            : bumpRegister !== undefined ? bumpRegister + 16
-                : constants === Infinity ? 224 : constants;
+    const reach = pointRegister !== undefined ? pointRegister + 1
+        : fogRegister !== undefined ? fogRegister + 2
+            : viewportRegister !== undefined ? viewportRegister + 1
+                : bumpRegister !== undefined ? bumpRegister + 16
+                    : constants === Infinity ? 224 : constants;
     const wgsl = [
         ...moduleHeader({
             vertex, constants: reach, samplers, inputFields, outputFields,
@@ -1502,6 +1559,7 @@ export function translateShader(parsed, options = {}){
         wgsl, entry, inputs, outputs, reads, samplers, constants: reach,
         ...(viewportRegister === undefined ? {} : { viewportRegister }),
         ...(fogRegister === undefined ? {} : { fogRegister }),
+        ...(pointRegister === undefined ? {} : { pointRegister }),
         ...(bumpRegister === undefined ? {} : { bumpRegister }),
         error,
     };
@@ -1544,12 +1602,15 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        the specular alpha for a pre-transformed vertex or with no mode set,
  *        and for table fog the colour alone, with the curve's range beside it
  *        for the pixel shader to evaluate per pixel.
- * @param {{ flatColours?: boolean, normalizeNormals?: boolean, rangeFog?: boolean }} [options]
+ * @param {{ flatColours?: boolean, normalizeNormals?: boolean, rangeFog?: boolean,
+ *     points?: { sprite: boolean, scale: boolean } }} [options]
  *        `flatColours`: the two colour varyings flat, for D3DSHADE_FLAT, as
  *        the pixel shader must read them. `normalizeNormals`:
  *        D3DRS_NORMALIZENORMALS, whether the camera-space normal a
  *        coordinate is generated from is renormalised. `rangeFog`:
  *        D3DRS_RANGEFOGENABLE, vertex fog over the distance from the eye.
+ *        `points`: a point list drawn as quads, sized by the vertex's PSIZE
+ *        or the state's, scaled with the distance as the fixed function does.
  * @returns {TranslatedShader}
  */
 export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [], fog = 0,
@@ -1570,6 +1631,7 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     let vertex = null;
     let normal = 'vec3f(0.0, 0.0, 1.0)';
     let specularAlpha = '1.0';
+    let pointBase = `c[${HYBRID_CONSTANTS.POINT}].x`;
     for (const element of elements)
     {
         const shape = shapes.get(element.register) ?? FOUR_FLOATS;
@@ -1592,6 +1654,10 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         else if (element.usage === D3DDECLUSAGE.NORMAL)
         {
             normal = `${value}.xyz`;
+        }
+        else if (element.usage === D3DDECLUSAGE.PSIZE)
+        {
+            pointBase = `${value}.x`;
         }
         else if (element.usage === D3DDECLUSAGE.TEXCOORD
             && (generated[element.usageIndex] ?? 0) !== 0)
@@ -1689,6 +1755,22 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
                 || location === varyingLocation(D3DDECLUSAGE.COLOR, 1);
             body.push(`    out.o${location} = vec4f(${colour ? '1.0' : '0.0'});`);
         }
+    }
+    if (options.points)
+    {
+        inputFields.push('    @builtin(vertex_index) corner: u32,');
+        const wv = HYBRID_CONSTANTS.WORLD_VIEW;
+        const scale = `c[${HYBRID_CONSTANTS.POINT_SCALE}]`;
+        const distance = `length((mat4x4f(c[${wv}], c[${wv + 1}], c[${wv + 2}], c[${wv + 3}])`
+            + ` * vec4f(${vertex}, 1.0)).xyz)`;
+        const size = options.points.scale && vertex
+            ? `${scale}.w * ${pointBase} * inverseSqrt(${scale}.x + ${scale}.y * ${distance}`
+                + ` + ${scale}.z * ${distance} * ${distance})`
+            : pointBase;
+        body.push(...pointQuadLines('in.corner', size, `c[${HYBRID_CONSTANTS.POINT}]`,
+            `c[${HYBRID_CONSTANTS.VIEWPORT}].zw`, options.points.sprite
+                ? outputs.filter(isCoordinate).map(location=>`out.o${location}`)
+                : []));
     }
     // Half a pixel on to WebGPU's pixel centres, as every Direct3D position.
     body.unshift(`    out.oPos = ${position ?? 'vec4f(0.0, 0.0, 0.0, 1.0)'};`,

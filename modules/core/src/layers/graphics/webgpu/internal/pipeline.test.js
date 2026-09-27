@@ -254,3 +254,26 @@ test('a pipeline in flight is shared, not built twice', async()=>{
     assert.equal(first, second);
     assert.deepEqual(cache.stats(), { built: 1, reused: 1, resident: 1 });
 });
+
+test('a point list is drawn as quads: triangles, never culled, a point an instance', ()=>{
+    // WebGPU draws a point a pixel wide; Direct3D draws it at its size.
+    const layout = {
+        stride: 12,
+        attributes: [{ name: 'position', shaderLocation: 0, offset: 0, format: 'float32x3' }],
+        preTransformed: false,
+        texCoordSets: 0,
+        blendWeights: 0,
+    };
+    const points = pipelineDescriptor(/** @type {any} */ ({
+        ...baseState(), topology: 'point-list', points: { sprite: false, scale: false },
+    }), layout);
+    assert.equal(points.primitive.topology, 'triangle-list');
+    assert.equal(points.primitive.cullMode, 'none');
+    assert.equal(points.vertexBuffers[0].stepMode, 'instance');
+    const pixels = pipelineDescriptor(
+        /** @type {any} */ ({ ...baseState(), topology: 'point-list' }), layout);
+    assert.equal(pixels.primitive.topology, 'point-list', 'a triangle filled as points is not one');
+    const keyed = (/** @type {boolean} */ sprite)=>pipelineKey(
+        /** @type {any} */ ({ ...baseState(), points: { sprite, scale: false } }));
+    assert.notEqual(keyed(true), keyed(false));
+});

@@ -2727,8 +2727,8 @@ test('the block lays a texture transform out as two rows per sampled stage', ()=
     assert.equal(UNIFORM_AT.worldView, 204);
     assert.equal(UNIFORM_AT.normalMatrix, 220);
     assert.equal(UNIFORM_AT.cameraNormalMatrix, 236);
-    assert.equal(UNIFORM_AT.lights, 252);
-    assert.equal(UNIFORM_FLOATS, 252);
+    assert.equal(UNIFORM_AT.lights, 260);
+    assert.equal(UNIFORM_FLOATS, 260);
     const columns = Array.from({ length: 16 }, (_, at)=>at + 2);
     const block = uniformBlock({
         worldViewProjection: IDENTITY,

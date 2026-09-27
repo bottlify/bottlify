@@ -214,6 +214,17 @@ function lookUp(table, value, what){
  *     The vertex layout when the vertex format cannot spell it -- a declaration
  *     read by the fixed-function stage -- with `vertexLayoutKey` naming it.
  * @property {string} [vertexLayoutKey]
+ * @property {PointState} [points]
+ *     A point list, which WebGPU draws only a pixel wide: each point is drawn
+ *     as a quad of its size instead, its vertex read once an instance.
+ */
+
+/**
+ * @typedef {Object} PointState
+ * @property {boolean} sprite  D3DRS_POINTSPRITEENABLE: every coordinate set is
+ *           the quad's own, (0, 0) at its top left and (1, 1) at its bottom right.
+ * @property {boolean} scale   D3DRS_POINTSCALEENABLE: the size falls off with
+ *           the distance from the eye.
  */
 
 /**
@@ -274,6 +285,8 @@ export function pipelineKey(state){
         ...(state.normalizeNormals ? ['normalize'] : []),
         ...(state.flatShading ? ['flat'] : []),
         ...(state.rangeFog ? ['range'] : []),
+        ...(state.points
+            ? [`points${state.points.sprite ? 's' : ''}${state.points.scale ? 'd' : ''}`] : []),
     ].join('|');
 }
 
@@ -322,15 +335,16 @@ export function colorWriteMask(bits){
  *     stream?: number }[]} attributes
  * @param {readonly { stream: number, stride: number, instanced?: boolean }[]} [streams]
  *        A stream `instanced` steps once an instance.
+ * @param {boolean} [points]  Every stream steps once an instance: a point each.
  * @returns {{ arrayStride: number, stepMode: string,
  *     attributes: { shaderLocation: number, offset: number, format: string }[] }[]}
  */
-export function vertexBuffersOf(stride, attributes, streams = []){
+export function vertexBuffersOf(stride, attributes, streams = [], points = false){
     /** @type {readonly { stream: number, stride: number, instanced?: boolean }[]} */
     const buffers = [{ stream: 0, stride }, ...streams];
     return buffers.map(buffer=>({
         arrayStride: buffer.stride,
-        stepMode: buffer.instanced ? 'instance' : 'vertex',
+        stepMode: buffer.instanced || points ? 'instance' : 'vertex',
         attributes: attributes
             .filter(attribute=>(attribute.stream ?? 0) === buffer.stream)
             .map(attribute=>({
@@ -380,11 +394,14 @@ export function pipelineDescriptor(state, layout){
 
     const vertexBuffers = layout === null
         ? undefined
-        : vertexBuffersOf(layout.stride, layout.attributes, layout.streams);
+        : vertexBuffersOf(layout.stride, layout.attributes, layout.streams,
+            Boolean(state.points));
     return {
         primitive: {
-            topology: state.topology === undefined ? 'triangle-list' : state.topology,
-            cullMode: lookUp(CULL, state.cullMode, 'cull mode'),
+            // A point's quad is two triangles, and a point is never culled.
+            topology: state.points ? 'triangle-list'
+                : state.topology === undefined ? 'triangle-list' : state.topology,
+            cullMode: state.points ? 'none' : lookUp(CULL, state.cullMode, 'cull mode'),
             frontFace: 'ccw',
         },
         depthStencil: depth,

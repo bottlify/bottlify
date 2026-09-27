@@ -773,7 +773,7 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assert.equal(stage.error, null);
     assert.equal(stage.entry, 'vs_main');
     assert.equal(stage.constants, HYBRID_CONSTANTS.COUNT);
-    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 47>;');
+    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 49>;');
     assertLine(stage.wgsl,
         'out.oPos = mat4x4f(c[0], c[1], c[2], c[3]) * vec4f(vec4f(in.v0, 1.0).xyz, 1.0);');
     assertLine(stage.wgsl, `out.o${varyingLocation(D3DDECLUSAGE.COLOR, 0)} = in.v1.zyxw;`);

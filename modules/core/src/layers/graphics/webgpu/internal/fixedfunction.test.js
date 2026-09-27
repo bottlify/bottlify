@@ -73,7 +73,7 @@ test('the same state generates the same source, byte for byte', ()=>{
     const second = generate(baseState()).code;
 
     assert.equal(first, second);
-    assert.equal(digest(first), '723c3e6c587a87c2');
+    assert.equal(digest(first), '366492c82c7bd382');
 });
 
 test('a stage generating its coordinates takes them from the vertex in camera space', ()=>{
@@ -822,6 +822,37 @@ test('a lit vertex takes its alpha from the diffuse source alone', ()=>{
     const code = generate(baseState({ fvf: LIT_FVF, lighting: lighting() })).code;
     assert.match(code,
         /out\.diffuse = vec4f\(clamp\(lit, vec3f\(0\.0\), vec3f\(1\.0\)\), sourceDiffuse\.a\);/);
+});
+
+test('a point is moved to its corner of a quad of its size, and a sprite is its coordinate', ()=>{
+    const plain = generate(baseState({ fvf: FVF.XYZ, points: { sprite: false, scale: false } }))
+        .code;
+    assert.match(plain, /@builtin\(vertex_index\) corner: u32/);
+    assert.match(plain, /let pointScaled = uniforms\.point\.x;/, 'the size of the state');
+    assert.match(plain, /min\(max\(pointScaled, uniforms\.point\.y\), uniforms\.point\.z\)/,
+        'held to the limits, the maximum winning');
+    assert.doesNotMatch(plain, /sprite/);
+
+    const scaled = generate(baseState({ fvf: FVF.XYZ, points: { sprite: false, scale: true } }))
+        .code;
+    assert.match(scaled, /uniforms\.pointScale\.w \* sqrt\(1\.0 \/ \(uniforms\.pointScale\.x/);
+
+    const sized = generate(baseState({
+        fvf: FVF.XYZ | FVF.PSIZE, points: { sprite: false, scale: false },
+    })).code;
+    assert.match(sized, /let pointScaled = vertex\.pointSize;/, 'the size of the vertex');
+
+    const sprite = generate(baseState({
+        fvf: FVF.XYZ,
+        points: { sprite: true, scale: false },
+        stages: [{
+            colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.SELECTMASK,
+            alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.DIFFUSE, alphaArg2: D3DTA.SELECTMASK,
+            texCoordIndex: 0,
+        }],
+    })).code;
+    assert.match(sprite, /out\.sprite = pointCorner \* 0\.5 \+ 0\.5;/);
+    assert.match(sprite, /sampleStage0\(input\.sprite\)/, 'the stage samples the quad');
 });
 
 test('the specular term is computed only when it is enabled, and added after the cascade', ()=>{
