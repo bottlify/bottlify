@@ -288,12 +288,19 @@ export function createThreadingFunctions(host){
         host.namedObjects.remember(name, kind, made, reused, host.setLastError);
 
     /**
-     * What an Open* call reports for what `existing` found: nothing by that
-     * name is "no such thing", and a different kind holding it is a bad
-     * handle rather than a silent conversion between kinds.
-     * @param {string} kind @param {any} found
+     * What an Open* call reports for a name: no name at all is a bad
+     * parameter, nothing by that name is "no such thing", and a different
+     * kind holding it is a bad handle rather than a silent conversion between
+     * kinds.
+     * @param {string} kind @param {string | null} name
      */
-    const namedOpen = (kind, found)=>{
+    const namedOpen = (kind, name)=>{
+        if (name === null)
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const found = existing(name, kind);
         if (!found || found === TAKEN)
         {
             host.setLastError(found === TAKEN ? ERROR_INVALID_HANDLE : ERROR_FILE_NOT_FOUND);
@@ -304,7 +311,7 @@ export function createThreadingFunctions(host){
     };
 
     const openMutex = bothNamedForms(12, ([, , namePointer], wide)=>
-        namedOpen('mutex', existing(nameOf(namePointer, wide), 'mutex')));
+        namedOpen('mutex', nameOf(namePointer, wide)));
 
     /**
      * Unlike the mutex form this can succeed, and routinely does: one process
@@ -313,13 +320,13 @@ export function createThreadingFunctions(host){
      * agree on a signal.
      */
     const openEvent = bothNamedForms(12, ([, , namePointer], wide)=>
-        namedOpen('event', existing(nameOf(namePointer, wide), 'event')));
+        namedOpen('event', nameOf(namePointer, wide)));
 
     const openSemaphore = bothNamedForms(12, ([, , namePointer], wide)=>
-        namedOpen('semaphore', existing(nameOf(namePointer, wide), 'semaphore')));
+        namedOpen('semaphore', nameOf(namePointer, wide)));
 
     const openWaitableTimer = bothNamedForms(12, ([, , namePointer], wide)=>
-        namedOpen('timer', existing(nameOf(namePointer, wide), 'timer')));
+        namedOpen('timer', nameOf(namePointer, wide)));
 
     const createMutex = bothNamedForms(12, ([, initialOwner, namePointer], wide)=>{
         const name = nameOf(namePointer, wide);

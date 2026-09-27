@@ -1152,3 +1152,18 @@ test('the pseudo-handles that are no waitable object fail, and the standard stre
             assert.equal(fns.WaitForSingleObject.handler([handle, 0]), 0);
         }
     });
+
+test('an Open call with no name at all is ERROR_INVALID_PARAMETER, not "no such thing"', ()=>{
+    // Wine's kernel32 sync test asks each Open*A and Open*W with a NULL name.
+    const { fns, errors } = setup({ 0x500: 'unused' });
+    for (const open of /** @type {const} */ (['OpenMutexA', 'OpenMutexW', 'OpenEventA',
+        'OpenEventW', 'OpenSemaphoreA', 'OpenSemaphoreW', 'OpenWaitableTimerA',
+        'OpenWaitableTimerW']))
+    {
+        assert.equal(fns[open].handler([0x1f0003, 0, 0]), 0, open);
+    }
+    assert.equal(errors.length, 8);
+    assert.ok(errors.every(code=>code === ERROR_INVALID_PARAMETER));
+    assert.equal(fns.OpenEventA.handler([0x1f0003, 0, 0x500]), 0);
+    assert.equal(errors.at(-1), ERROR_FILE_NOT_FOUND, 'a name nothing holds');
+});
