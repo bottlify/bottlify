@@ -104,7 +104,7 @@ const DISC_COMPONENT_LENGTH = 221;
 const DISC_UNICODE_COMPONENT_LENGTH = 110;
 
 /** What GetComputerName answers. NetBIOS names are at most 15 characters. */
-const COMPUTER_NAME = 'BOTTLIFY';
+export const COMPUTER_NAME = 'BOTTLIFY';
 
 /**
  * @typedef {Object} DriveHost
