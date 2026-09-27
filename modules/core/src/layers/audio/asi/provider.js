@@ -796,13 +796,14 @@ export function createMp3Provider(host){
                     // 22050 as 0x5622 -- where a later one passes its address. The low
                     // 64 KiB are never mapped in a Win32 process, so an argument there
                     // is a value and not a pointer.
-                    let preference = value | 0;
+                    let chosen = value | 0;
                     if ((value >>> 0) >= 0x10000)
                     {
                         const bytes = readMemory(value >>> 0, 4);
-                        preference = new DataView(bytes.buffer, bytes.byteOffset, 4).getInt32(0, true);
+                        chosen = new DataView(bytes.buffer, bytes.byteOffset, 4)
+                            .getInt32(0, true);
                     }
-                    stream.preferences.set(which | 0, preference);
+                    stream.preferences.set(which | 0, chosen);
                     return previous;
                 },
             },
