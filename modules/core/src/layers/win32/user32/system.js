@@ -48,6 +48,7 @@ import {
     writeU16,
     writeU32s,
 } from './structs.js';
+import { readText } from './unicode.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -209,6 +210,7 @@ const KEYEVENTF_KEYUP = 0x0002;
 const KEYEVENTF_UNICODE = 0x0004;
 const KEYEVENTF_SCANCODE = 0x0008;
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INVALID_HANDLE = 6;
 
 /**
  * The one input locale this build has: en-US, low word the language id, high
@@ -499,6 +501,13 @@ export function createSystemFunctions({ host, live, windows, classes }){
     let nextMessageBoxId = 1;
     /** The cursor SetCursor last set, which GetCursor reads back. */
     let currentCursor = 0;
+    /**
+     * The rectangle ClipCursor last confined the pointer to, which
+     * GetClipCursor reads back; null for none.
+     *
+     * @type {{ left: number, top: number, right: number, bottom: number } | null}
+     */
+    let clip = null;
     /** ShowCursor's display count: the cursor is shown while it is not below zero. */
     let cursorShowCount = 0;
     /** Whether SetCursor named the null cursor, which hides it whatever the count says. */
@@ -1029,6 +1038,31 @@ export function createSystemFunctions({ host, live, windows, classes }){
     const readI32 = address=>readU32(address) | 0;
 
     /**
+     * LoadImage in either spelling: a cursor or an icon out of a module's
+     * resources, as LoadCursor and LoadIcon load them; a device bitmap stands
+     * in for LR_CREATEDIBSECTION's section, since selected and blitted the two
+     * draw the same.
+     *
+     * @param {number} instance @param {number} name @param {number} type
+     * @param {boolean} wide
+     */
+    const loadImage = (instance, name, type, wide)=>{
+        const IMAGE_BITMAP = 0;
+        const IMAGE_ICON = 1;
+        const IMAGE_CURSOR = 2;
+        switch (type >>> 0){
+            case IMAGE_ICON:
+                return loadResourceObject(host, 'icon', RT_GROUP_ICON, instance, name, wide);
+            case IMAGE_CURSOR:
+                return loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name, wide);
+            case IMAGE_BITMAP:
+                return loadBitmap(instance, name, wide);
+            default:
+                return 0;
+        }
+    };
+
+    /**
      * A bitmap out of a module's resources, as LoadBitmap loads one: the
      * resource is a packed DIB -- the header, its colours, then the pixels --
      * and becomes a bitmap for the display. A name that is not an integer is
@@ -1046,8 +1080,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
         {
             return 0;
         }
-        const key = raw < 0x10000 ? raw
-            : wide ? host.readWideString?.(raw, 256) ?? '' : host.readCString(raw, 256);
+        const key = raw < 0x10000 ? raw : readText(host, raw, wide, 256);
         const found = /** @type {{ rva: number } | null | undefined} */ (
             host.findResource?.(module, RT_BITMAP, key));
         const base = host.moduleBase?.(module) ?? 0;
@@ -2729,29 +2762,19 @@ export function createSystemFunctions({ host, live, windows, classes }){
          *                  int cy, UINT fuLoad)
          *
          * A cursor or an icon out of a module's resources, as LoadCursor and
-         * LoadIcon load them; a bitmap needs a decoder that is not here, and
-         * null is what a program checks for.
+         * LoadIcon load them, or a bitmap as LoadBitmap loads one.
          */
         LoadImageA: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([instance, name, type])=>{
-                const IMAGE_BITMAP = 0;
-                const IMAGE_ICON = 1;
-                const IMAGE_CURSOR = 2;
-                switch (type >>> 0){
-                    case IMAGE_ICON:
-                        return loadResourceObject(host, 'icon', RT_GROUP_ICON, instance, name);
-                    case IMAGE_CURSOR:
-                        return loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name);
-                    case IMAGE_BITMAP:
-                        // A device bitmap stands in for LR_CREATEDIBSECTION's section:
-                        // selected and blitted, the two draw the same.
-                        return loadBitmap(instance, name, false);
-                    default:
-                        return 0;
-                }
-            },
+            handler: ([instance, name, type])=>loadImage(instance, name, type, false),
+        },
+
+        /** HANDLE LoadImageW(HINSTANCE hInst, LPCWSTR name, UINT type, int cx, int cy, UINT) */
+        LoadImageW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([instance, name, type])=>loadImage(instance, name, type, true),
         },
 
         /** HCURSOR LoadCursorA(HINSTANCE hInstance, LPCSTR lpCursorName) */
@@ -2760,6 +2783,14 @@ export function createSystemFunctions({ host, live, windows, classes }){
             /** @param {number[]} args */
             handler: ([instance, name])=>
                 loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name),
+        },
+
+        /** HCURSOR LoadCursorW(HINSTANCE hInstance, LPCWSTR lpCursorName) */
+        LoadCursorW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([instance, name])=>
+                loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name, true),
         },
 
         /**
@@ -2932,7 +2963,72 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([rect])=>{
-                host.clipCursor?.((rect >>> 0) === 0 ? null : readRect(host, rect >>> 0));
+                clip = (rect >>> 0) === 0 ? null : readRect(host, rect >>> 0);
+                host.clipCursor?.(clip);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetClipCursor(LPRECT lpRect)
+         *
+         * The rectangle ClipCursor confined the pointer to, cut to the screen
+         * as the pointer is; with none, the whole screen.
+         */
+        GetClipCursor: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([rect])=>{
+                if ((rect >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const whole = { left: 0, top: 0, right: screen.width, bottom: screen.height };
+                writeRect(host, rect >>> 0, clip === null ? whole : {
+                    left: Math.max(clip.left, 0),
+                    top: Math.max(clip.top, 0),
+                    right: Math.min(clip.right, screen.width),
+                    bottom: Math.min(clip.bottom, screen.height),
+                });
+                return 1;
+            },
+        },
+
+        /**
+         * HDEVNOTIFY RegisterDeviceNotificationA(HANDLE hRecipient,
+         *     LPVOID NotificationFilter, DWORD Flags)
+         *
+         * A device arriving or leaving is told to the window as
+         * WM_DEVICECHANGE. No device comes or goes here, so the registration
+         * is a handle that nothing will ever use, and a program that sets one
+         * up before it looks for its controllers goes on to look.
+         */
+        RegisterDeviceNotificationA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([recipient])=>((recipient >>> 0) === 0
+                ? 0 : host.handles.open('device-notification', { recipient: recipient >>> 0 })),
+        },
+
+        /** HDEVNOTIFY RegisterDeviceNotificationW(HANDLE, LPVOID, DWORD) */
+        RegisterDeviceNotificationW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([recipient])=>((recipient >>> 0) === 0
+                ? 0 : host.handles.open('device-notification', { recipient: recipient >>> 0 })),
+        },
+
+        /** BOOL UnregisterDeviceNotification(HDEVNOTIFY Handle) */
+        UnregisterDeviceNotification: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                if (host.handles.typeOf?.(handle >>> 0) !== 'device-notification')
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                host.handles.close(handle >>> 0);
                 return 1;
             },
         },
@@ -3816,6 +3912,66 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * another is the other, and of two empty ones an empty rectangle and
          * FALSE.
          */
+        /**
+         * BOOL SubtractRect(LPRECT lprcDst, const RECT *lprcSrc1, const RECT *lprcSrc2)
+         *
+         * The first rectangle less the second, when what is left is still a
+         * rectangle: the second has to cover the first right across one way
+         * and reach one of its edges the other. Otherwise the first is
+         * answered whole. The answer is whether anything is left.
+         */
+        SubtractRect: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([out, first, second])=>{
+                if ((out >>> 0) === 0 || (first >>> 0) === 0 || (second >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const a = readRect(host, first >>> 0);
+                const b = readRect(host, second >>> 0);
+                /** @param {{ left: number, top: number, right: number, bottom: number }} r */
+                const empty = r=>r.right <= r.left || r.bottom <= r.top;
+                if (empty(a))
+                {
+                    writeRect(host, out >>> 0, { left: 0, top: 0, right: 0, bottom: 0 });
+                    return 0;
+                }
+                const left = { ...a };
+                const meet = {
+                    left: Math.max(a.left, b.left), top: Math.max(a.top, b.top),
+                    right: Math.min(a.right, b.right), bottom: Math.min(a.bottom, b.bottom),
+                };
+                if (!empty(meet))
+                {
+                    if (meet.left === a.left && meet.right === a.right)
+                    {
+                        if (meet.top === a.top)
+                        {
+                            left.top = meet.bottom;
+                        }
+                        else if (meet.bottom === a.bottom)
+                        {
+                            left.bottom = meet.top;
+                        }
+                    }
+                    else if (meet.top === a.top && meet.bottom === a.bottom)
+                    {
+                        if (meet.left === a.left)
+                        {
+                            left.left = meet.right;
+                        }
+                        else if (meet.right === a.right)
+                        {
+                            left.right = meet.left;
+                        }
+                    }
+                }
+                writeRect(host, out >>> 0, left);
+                return empty(left) ? 0 : 1;
+            },
+        },
+
         UnionRect: {
             argBytes: 12,
             /** @param {number[]} args */
