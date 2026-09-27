@@ -365,6 +365,9 @@ export function createMsvcrtFunctions(host){
         /** int toupper(int ch) -- in the guest */
         toupper: guestEntry(inGuest.toupper, COMPILED.toupper, host),
 
+        /** int _strcmpi(const char *, const char *): the older name of _stricmp, in the guest */
+        _strcmpi: guestEntry(inGuest._stricmp, COMPILED._stricmp, host),
+
         /** int tolower(int ch) -- in the guest */
         tolower: guestEntry(inGuest.tolower, COMPILED.tolower, host),
 
@@ -401,6 +404,14 @@ export function createMsvcrtFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: args=>(Number.isNaN(readDouble(args, 0)) ? 1 : 0),
+        },
+
+        /** int _finite(double x): nonzero unless x is infinite or a NaN. */
+        _finite: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>(Number.isFinite(readDouble(args, 0)) ? 1 : 0),
         },
 
         /**

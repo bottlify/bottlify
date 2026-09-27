@@ -242,6 +242,13 @@ export function interpret(state, maxInstructions = 1, options = {}){
             const run = runAt(state, cache);
             if (run.refused !== null)
             {
+                // An encoding that is no instruction is the program's #UD, which
+                // its own handler may answer; one this engine does not know is
+                // the engine's gap.
+                if (run.refused.invalid)
+                {
+                    throw new Fault(6, run.refused.eip);
+                }
                 throw new Unsupported(run.refused.opcode, run.refused.eip);
             }
             onStep?.(run.start, run.start !== fallthrough);
@@ -599,8 +606,9 @@ class BlockState {
      * @param {import('../../core/src/layers/cpu/engine.js').StateLayout} layout
      * @param {((address: number, size: number) => void) | null} onCodeWrite
      * @param {(() => bigint) | undefined} rdtsc
+     * @param {import('./ir.js').EvalState['ports']} ports
      */
-    constructor(memory, layout, onCodeWrite, rdtsc){
+    constructor(memory, layout, onCodeWrite, rdtsc, ports){
         const view = new DataView(memory.buffer);
         this.reg = new Uint32Array(memory.buffer, layout.regs, 8);
         // eip and the flags word are the state's own between `syncIn` and
@@ -616,6 +624,7 @@ class BlockState {
         /** @type {number[]} */
         this.trapped = [];
         this.rdtsc = rdtsc;
+        this.ports = ports;
         // The instruction's own address, kept by `interpret` for a fault's EIP.
         this.faultEip = 0;
         this.view = view;
@@ -765,12 +774,12 @@ class BlockState {
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     onCodeWrite?: (address: number, size: number) => void,
- *     rdtsc?: () => bigint }} what
+ *     rdtsc?: () => bigint, ports?: import('./ir.js').EvalState['ports'] }} what
  *     `onCodeWrite` is called after an interpreted store lands in a page
  *     holding translated code, so the caller can invalidate the region it
  *     translated there, as a translated store's `stale` exit does.
  * @returns {import('./ir.js').EvalState & { syncIn: () => void, syncOut: () => void }}
  */
-export function blockState({ memory, layout, onCodeWrite, rdtsc }){
-    return new BlockState(memory, layout, onCodeWrite ?? null, rdtsc);
+export function blockState({ memory, layout, onCodeWrite, rdtsc, ports }){
+    return new BlockState(memory, layout, onCodeWrite ?? null, rdtsc, ports);
 }

@@ -293,6 +293,26 @@ function parse(argv){
             const [x, y, after] = argv[index + 1].split(',');
             return [{ x: Number(x), y: Number(y), ...afterOf(after) }];
         }),
+        // Clicks and key taps at a wall-clock moment, milliseconds after the
+        // run starts, as `x,y,ms` and `Code,ms`: a screen that waits for a
+        // click without presenting -- a dialog, a film's first frame -- never
+        // reaches the frame a frame-counted click would be sent on.
+        clickTimes: argv.flatMap((flag, index)=>{
+            if (flag !== '--click-at')
+            {
+                return [];
+            }
+            const [x, y, atMs] = argv[index + 1].split(',').map(Number);
+            return [{ x, y, atMs }];
+        }),
+        keyTimes: argv.flatMap((flag, index)=>{
+            if (flag !== '--key-at')
+            {
+                return [];
+            }
+            const [code, atMs] = argv[index + 1].split(',');
+            return [{ code, atMs: Number(atMs) }];
+        }),
         // Key taps in the program's own keyboard codes, after that many
         // presented frames each, as `Code,after`: pressed on one frame and
         // released on the next. `Code` is a KeyboardEvent.code -- `Enter`,
@@ -380,6 +400,50 @@ function parse(argv){
     };
 }
 
+/** The engine's RGBA read-back as the BGRA the PNG writer takes. @param {Buffer} rgba */
+const toBgra = rgba=>{
+    const bgra = Buffer.alloc(rgba.length);
+    for (let at = 0; at < rgba.length; at += 4)
+    {
+        bgra[at] = rgba[at + 2];
+        bgra[at + 1] = rgba[at + 1];
+        bgra[at + 2] = rgba[at];
+        bgra[at + 3] = rgba[at + 3];
+    }
+    return bgra;
+};
+
+/**
+ * Where a page that answers nothing is running: the debugger's pause
+ * interrupts the thread even inside a loop that never yields, and the frames
+ * it stops in are named, then the page is let go again.
+ *
+ * @param {CdpEndpoint} cdp
+ * @param {string} sessionId
+ * @returns {Promise<string>}
+ */
+async function pausedStack(cdp, sessionId){
+    /** @type {(frames: any[]) => void} */
+    let paused = ()=>{};
+    /** @type {Promise<any[]>} */
+    const frames = new Promise(settle=>{
+        paused = settle;
+    });
+    // Enabling the debugger announces every script, which a paused frame
+    // names only by id.
+    /** @type {Map<string, string>} */
+    const scripts = new Map();
+    cdp.on('Debugger.scriptParsed', params=>scripts.set(params.scriptId, params.url));
+    cdp.on('Debugger.paused', params=>paused(params.callFrames));
+    await cdp.send('Debugger.enable', {}, sessionId);
+    await cdp.send('Debugger.pause', {}, sessionId);
+    const stack = await Promise.race([frames, new Promise((_, reject)=>
+        setTimeout(()=>reject(new Error('the page did not pause')), 10000))]);
+    await cdp.send('Debugger.resume', {}, sessionId).catch(()=>{});
+    return stack.slice(0, 25).map(frame=>`  ${frame.functionName || '(anonymous)'} `
+        + `${(scripts.get(frame.location.scriptId) ?? '').split('/').slice(-3).join('/')}:${frame.location.lineNumber + 1}`).join('\n');
+}
+
 /**
  * Waits for an expression to answer something other than null.
  *
@@ -422,6 +486,45 @@ async function poll(cdp, sessionId, expression, timeoutMs){
         await new Promise(wait=>setTimeout(wait, 500));
     }
     throw new Error(`the page did not answer within ${timeoutMs}ms`);
+}
+
+/**
+ * The most text one answer carries, before it is escaped twice on its way. An
+ * answer of 4 MB closed the connection where one of 2 MB did not, and a run's
+ * result is more than that once the files a title wrote are in it -- Doom 3's
+ * timed demo answered 6 MB, most of it its files and the last frame's pixels.
+ */
+const RESULT_CHUNK = 1 << 19;
+
+/**
+ * The page's result, once it has one: its length first, then its text a piece
+ * at a time, a piece never ending between the two halves of a character.
+ *
+ * @param {CdpEndpoint} cdp
+ * @param {string} sessionId
+ * @param {number} timeoutMs
+ * @returns {Promise<any>}
+ */
+async function readResult(cdp, sessionId, timeoutMs){
+    const length = await poll(cdp, sessionId, 'window.__bottlify__.result ? String(('
+        + 'self.__bottlifyResultText = JSON.stringify(window.__bottlify__.result)).length) : null',
+    timeoutMs);
+    const pieces = [];
+    for (let at = 0; at < length;)
+    {
+        const answer = await cdp.send('Runtime.evaluate', {
+            expression: `(()=>{ const text = self.__bottlifyResultText;
+                let end = Math.min(text.length, ${at + RESULT_CHUNK});
+                const last = text.charCodeAt(end - 1);
+                if (end < text.length && last >= 0xd800 && last <= 0xdbff) end--;
+                return JSON.stringify({ piece: text.slice(${at}, end), end }); })()`,
+            returnByValue: true,
+        }, sessionId);
+        const { piece, end } = JSON.parse(answer.result.value);
+        pieces.push(piece);
+        at = end;
+    }
+    return JSON.parse(pieces.join(''));
 }
 
 /**
@@ -715,6 +818,16 @@ function describe(result, context, calls, symbols){
         {
             say(`    texture uploads=${graphics.uploads.textures}`
                 + ` staged=${graphics.uploads.staged} bytes=${graphics.uploads.bytes}`);
+        }
+        // How often a present waited for the device, and how far behind the
+        // device ever was: a run on a slow adapter goes at the device's pace.
+        const latency = graphics.presenter?.latency;
+        if (latency?.frames > 0)
+        {
+            say(`    frames in flight: bound ${latency.limit || 'none'}; ${latency.held} of`
+                + ` ${latency.frames} presents waited for the device,`
+                + ` ${(latency.heldMs / 1000).toFixed(1)} s in all;`
+                + ` at most ${latency.peak} unfinished`);
         }
         const device = graphics.device;
         if (device)
@@ -1198,6 +1311,8 @@ export async function game(options){
             snapCount: options.snapCount,
             snapEvery: options.snapEvery,
             clicks: options.clicks,
+            clickTimes: options.clickTimes,
+            keyTimes: options.keyTimes,
             typed: options.typed,
             looks: options.looks,
             pasted: options.pasted,
@@ -1313,9 +1428,7 @@ export async function game(options){
         let result;
         try
         {
-            result = await poll(cdp, sessionId,
-                'window.__bottlify__.result ? JSON.stringify(window.__bottlify__.result) : null',
-                options.waitMs);
+            result = await readResult(cdp, sessionId, options.waitMs);
             result.answeredAfterMs = Date.now() - startedAt;
         }
         catch (e){
@@ -1341,6 +1454,37 @@ export async function game(options){
                 },
                 capture: async()=>(await cdp.send(
                     'Page.captureScreenshot', { format: 'png' }, sessionId)).data,
+                stack: async()=>{
+                    const stack = await pausedStack(cdp, sessionId);
+                    // The page answers between the engine's turns: every layer's
+                    // metrics as the run stands, since no report will come.
+                    const live = await cdp.send('Runtime.evaluate', {
+                        expression: 'window.__bottlify__.frameReport()', returnByValue: true,
+                    }, sessionId).catch(()=>null);
+                    if (live?.result?.value)
+                    {
+                        const path = join(REPORTS_DIR, `game-${stampOut}-live.json`);
+                        writeFileSync(path, live.result.value);
+                        // And the frame presented last, which a page screenshot
+                        // of a WebGPU canvas does not hold.
+                        const shot = await cdp.send('Runtime.evaluate', {
+                            expression: 'window.__bottlify__.frameShot()'
+                                + '.then(function(s){ return JSON.stringify(s); })',
+                            returnByValue: true, awaitPromise: true,
+                        }, sessionId).catch(()=>null);
+                        const frame = shot?.result?.value ? JSON.parse(shot.result.value) : null;
+                        if (frame)
+                        {
+                            writeFileSync(join(REPORTS_DIR, `game-${stampOut}-frame.png`),
+                                toPng(frame.width, frame.height, frame.format.startsWith('bgra')
+                                    ? Buffer.from(frame.pixels, 'base64')
+                                    : toBgra(Buffer.from(frame.pixels, 'base64'))));
+                        }
+                        return `${stack}
+the run as it stands: ${path}`;
+                    }
+                    return stack;
+                },
                 write: data=>writeFileSync(join(REPORTS_DIR, `game-${stampOut}.png`),
                     Buffer.from(data, 'base64')),
             });
@@ -1384,18 +1528,6 @@ export async function game(options){
         // The last presented frame as the engine read it back, beside the
         // page's screenshot: the screenshot is what the compositor showed at
         // the moment of the stop, the frame is what the program drew.
-        /** The engine's RGBA read-back as the BGRA the PNG writer takes. @param {Buffer} rgba */
-        const toBgra = rgba=>{
-            const bgra = Buffer.alloc(rgba.length);
-            for (let at = 0; at < rgba.length; at += 4)
-            {
-                bgra[at] = rgba[at + 2];
-                bgra[at + 1] = rgba[at + 1];
-                bgra[at + 2] = rgba[at];
-                bgra[at + 3] = rgba[at + 3];
-            }
-            return bgra;
-        };
         for (const [index, one] of (result.snaps ?? []).entries())
         {
             // The first as -snap.png as before, every one also by its frame.

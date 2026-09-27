@@ -39,6 +39,20 @@ const TYPE_NAME = 8;
  */
 
 /**
+ * `_EH_prolog`'s body, as the runtime's: with S the caller's ESP before its
+ * call, it leaves -1 at S-8 (no try level yet) and EAX, the handler, at S-12,
+ * links a registration record at S-16 into fs:[0], puts the caller's EBP where
+ * the return address was and points EBP at it, then returns with ESP at S-16.
+ *
+ *   push -1; push eax; mov eax, fs:[0]; push eax; mov eax, [esp+12];
+ *   mov fs:[0], esp; mov [esp+12], ebp; lea ebp, [esp+12]; push eax; ret
+ */
+export const EH_PROLOG_CODE = Uint8Array.of(
+    0x6a, 0xff, 0x50, 0x64, 0xa1, 0, 0, 0, 0, 0x50, 0x8b, 0x44, 0x24, 0x0c,
+    0x64, 0x89, 0x25, 0, 0, 0, 0, 0x89, 0x6c, 0x24, 0x0c, 0x8d, 0x6c, 0x24, 0x0c,
+    0x50, 0xc3);
+
+/**
  * @param {CxxHost} host
  */
 export function createCxxFunctions(host){
@@ -87,6 +101,17 @@ export function createCxxFunctions(host){
     };
 
     return {
+        /**
+         * _EH_prolog: the frame setup a function with C++ unwinding calls
+         * instead of writing it out, with its handler in EAX. It builds the
+         * frame on the caller's own stack and in its EBP, so it runs in the
+         * guest (`EH_PROLOG_CODE`): a host handler returns to a stack it
+         * left as it found it, and the caller then unwinds through a frame
+         * that is not there. It is code of its own, in the module's
+         * read-only .text beside the compiled functions, not a variable.
+         */
+        _EH_prolog: { code: ()=>EH_PROLOG_CODE },
+
         /**
          * void *__RTDynamicCast(void *object, LONG delta, void *from,
          *                       void *to, BOOL isReference)

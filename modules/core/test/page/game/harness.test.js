@@ -57,6 +57,19 @@ test('a typed key at a moment lands in input.send', async()=>{
     ]);
 });
 
+test('a click at a moment lands in input.send, where the pointer is, then lets go', async()=>{
+    const app = fakeApp();
+    scheduleKeyTimes(app, { clickTimes: [{ x: 375, y: 306, atMs: 5, holdMs: 10 }] });
+
+    await new Promise(resolve=>setTimeout(resolve, 40));
+
+    assert.deepEqual(app.sent, [
+        { kind: 'pointerMove', x: 375, y: 306, dx: 0, dy: 0 },
+        { kind: 'pointerButton', button: 'left', down: true },
+        { kind: 'pointerButton', button: 'left', down: false },
+    ]);
+});
+
 test('a presented frame increments the counter and records the gap', ()=>{
     const app = fakeApp();
     /** @type {import('./harness.js').PresentState} */

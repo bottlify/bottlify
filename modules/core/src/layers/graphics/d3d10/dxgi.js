@@ -524,7 +524,7 @@ function createSwapChain(requested, device, factory, windowClientSize){
         /**
          * @param {number} syncInterval
          * @param {number} flags
-         * @returns {number}
+         * @returns {number | Promise<number>}
          */
         Present(syncInterval, flags){
             if (syncInterval > 4 || flags < 0)
@@ -535,8 +535,8 @@ function createSwapChain(requested, device, factory, windowClientSize){
             currentBuffer = (currentBuffer + 1) % Math.max(1, desc.bufferCount);
             // Buffer zero is the one a program draws into whatever the swap
             // effect, so it is the one shown.
-            device.present(bufferFor(0));
-            return S_OK;
+            const held = device.frameQueued?.(device.present(bufferFor(0))) ?? null;
+            return held ? held.then(()=>S_OK) : S_OK;
         },
 
         /**

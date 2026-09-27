@@ -11,7 +11,8 @@ import {
     resampleInto, createSeam, slotHeaderOffset, slotPcmOffset,
     SLOT_HEADER_INT32, SLOT_BYTES, GLOBAL_HEADER_INT32,
     STATE, GENERATION, RATE, CHANNELS, BITS, GAIN, PAUSED, WRITTEN, READ, DROP_TO,
-    STATE_OPEN, GAIN_SCALE, TABLE_BYTES,
+    STATE_OPEN, GAIN_SCALE, TABLE_BYTES, KIND, KIND_DMA, BASE, LENGTH, POSITION, LOOPING, PLAYING,
+    LAPS, ENDS, ARENA_OFFSET, ARENA_BYTES,
 } from './mix.js';
 import { convert, createMixer } from './mixer.js';
 
@@ -191,4 +192,68 @@ test('WRITTEN/READ crossing 2^31 bytes does not stall the ring', ()=>{
     });
     assert.equal(produced, 2,
         'the two frames written across the wrap are read, not lost to a stalled span');
+});
+
+/**
+ * A DMA voice over a whole table: slot 0's header, and \`samples\` (signed
+ * 16-bit mono) as its mirror at the start of the arena.
+ *
+ * @param {number[]} samples @param {{ looping?: boolean, rate?: number }} [options]
+ */
+function voice(samples, { looping = true, rate = 48000 } = {}){
+    const table = new ArrayBuffer(TABLE_BYTES);
+    const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    arena.set(pcm16(samples), 0);
+    for (const [field, value] of /** @type {[number, number][]} */ ([
+        [KIND, KIND_DMA], [BASE, 0], [LENGTH, samples.length * 2], [RATE, rate],
+        [CHANNELS, 1], [BITS, 16], [GAIN, GAIN_SCALE], [LOOPING, looping ? 1 : 0],
+        [PLAYING, 1], [STATE, STATE_OPEN],
+    ]))
+    {
+        Atomics.store(header, field, value);
+    }
+    const seam = createSeam();
+    /** @param {number} frames */
+    const mix = frames=>{
+        const block = new Float32Array(frames * 2);
+        const produced = resampleInto({ block, blockFrames: frames, header, pcm: new Uint8Array(0),
+            arena, outputRate: 48000, seam });
+        const left = [...block].filter((_, at)=>at % 2 === 0).map(v=>Math.round(v * 32768));
+        return { produced, left };
+    };
+    return { header, mix };
+}
+
+test('a DMA voice reads its mirror on the device\'s own clock, round and round', ()=>{
+    // A sound card plays the buffer whatever the program is doing: nothing
+    // here is written by the engine while the device reads.
+    const samples = [100, 200, 300, 400, 500];
+    const { header, mix } = voice(samples);
+    const first = mix(3);
+    assert.deepEqual(first.left, [100, 200, 300]);
+    assert.equal(Atomics.load(header, POSITION), 3 * 2, 'the play cursor, in bytes');
+    const second = mix(4);
+    assert.deepEqual(second.left, [400, 500, 100, 200], 'on round the end to the start');
+    assert.equal(Atomics.load(header, LAPS), 1);
+    assert.equal(Atomics.load(header, POSITION), 2 * 2);
+    assert.equal(Atomics.load(header, PLAYING), 1, 'a loop keeps playing');
+});
+
+test('a DMA voice that does not loop stops itself at the end, as a sound card does', ()=>{
+    const { header, mix } = voice([100, 200, 300], { looping: false });
+    const out = mix(8);
+    assert.equal(out.produced, 3, 'the three frames it has, then silence');
+    assert.deepEqual(out.left.slice(0, 3), [100, 200, 300]);
+    assert.equal(Atomics.load(header, PLAYING), 0);
+    assert.equal(Atomics.load(header, POSITION), 0, 'its cursor reads the start again');
+    assert.equal(Atomics.load(header, ENDS), 1);
+    assert.equal(mix(4).produced, 0, 'and it is quiet until played again');
+});
+
+test('a DMA voice at half the output rate moves half a frame an output frame', ()=>{
+    const { header, mix } = voice([0, 1000, 2000, 3000], { rate: 24000 });
+    const out = mix(4);
+    assert.deepEqual(out.left, [0, 500, 1000, 1500], 'interpolated between its frames');
+    assert.equal(Atomics.load(header, POSITION), 2 * 2);
 });

@@ -45,7 +45,9 @@ function library(withAddresses = true){
             : undefined,
     });
     const hdc = 0x900d;
-    const { table } = opengl;
+    // With no device behind it no call waits, so every handler answers a number.
+    const table = /** @type {Record<string, { argBytes: number,
+        handler: (args: number[]) => number }>} */ (opengl.table);
     assert.equal(table.wglSetPixelFormat.handler([hdc, 1, 0]), 1);
     const context = table.wglCreateContext.handler([hdc]);
     assert.equal(table.wglMakeCurrent.handler([hdc, context]), 1);

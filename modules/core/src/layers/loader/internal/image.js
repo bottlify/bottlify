@@ -77,7 +77,10 @@ export function mapImage(file, base){
 
     for (const section of image.sections)
     {
-        if (section.rawSize === 0)
+        // A PointerToRawData of zero means the section has no bytes in the file
+        // whatever its SizeOfRawData says, and Windows maps it zero-filled: some
+        // linkers write the BSS's size there and leave the pointer at zero.
+        if (section.rawSize === 0 || section.rawOffset === 0)
         {
             continue; // pure BSS: already zero
         }

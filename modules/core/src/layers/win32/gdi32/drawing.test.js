@@ -770,6 +770,24 @@ test('SwapBuffers presents the frame through the graphics layer', ()=>{
     assert.equal(fns.SwapBuffers.handler([0]), 0, 'and a handle that is not a DC fails');
 });
 
+test('a SwapBuffers the graphics layer holds answers once it lets go', async()=>{
+    // Once the device is enough frames behind, the graphics layer answers a
+    // swap with what it waits on; the call is still the program's to see
+    // succeed, only later.
+    const graphics = fakeDrawing();
+    /** @type {() => void} */
+    let letGo = ()=>{};
+    /** @type {any} */ (graphics.services).swapBuffers = ()=>new Promise(resolve=>{
+        letGo = ()=>resolve(true);
+    });
+    const { fns, hdc } = setup(graphics.services);
+    const answer = /** @type {Promise<number> | number} */ (
+        /** @type {unknown} */ (fns.SwapBuffers.handler([hdc])));
+    assert.ok(answer instanceof Promise, 'the call waits');
+    letGo();
+    assert.equal(await answer, 1);
+});
+
 test('SwapBuffers is exported and pops its one argument', ()=>{
     // Missing from the table it would reach the unimplemented-import stub,
     // which cleans up nothing, and the caller would return with its stack four
@@ -898,6 +916,14 @@ test('the system palette has no entries to report', ()=>{
     // palette nothing draws through.
     const { fns, hdc } = setup();
     assert.equal(fns.GetSystemPaletteEntries.handler([hdc, 0, 16, OUT]), 0);
+});
+
+test('the batch limit is kept and the previous one answered, and the palette use is static', ()=>{
+    const { fns, hdc } = setup();
+    assert.equal(fns.GdiSetBatchLimit.handler([1]), 20, 'the default until one is set');
+    assert.equal(fns.GdiSetBatchLimit.handler([0]), 1);
+    assert.equal(fns.GdiSetBatchLimit.handler([5]), 20, 'zero asked for the default back');
+    assert.equal(fns.GetSystemPaletteUse.handler([hdc]), 1, 'SYSPAL_STATIC');
 });
 
 test('text alignment is remembered even with nothing to draw on', ()=>{

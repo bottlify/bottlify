@@ -162,6 +162,34 @@ export function createDriveFunctions(host){
      */
     const driveType = path=>known(path) ? DRIVE_FIXED : DRIVE_NO_ROOT_DIR;
 
+    /**
+     * GetComputerName in either width: the name is ASCII, so the sizes are
+     * the same numbers counted in characters.
+     *
+     * @param {(text: string) => Uint8Array} encode
+     */
+    const computerName = encode=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([buffer, size])=>{
+            if (size === 0)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const room = readDword(size >>> 0);
+            if (buffer === 0 || COMPUTER_NAME.length + 1 > room)
+            {
+                writeDword(size >>> 0, COMPUTER_NAME.length + 1);
+                host.setLastError(ERROR_BUFFER_OVERFLOW);
+                return 0;
+            }
+            host.writeMemory(buffer >>> 0, encode(COMPUTER_NAME + '\0'));
+            writeDword(size >>> 0, COMPUTER_NAME.length);
+            return 1;
+        },
+    });
+
     return {
         /**
          * DWORD GetLogicalDrives(VOID)
@@ -360,26 +388,10 @@ export function createDriveFunctions(host){
          * two differ by one, and answering with the wrong one leaves a caller
          * allocating a buffer that is exactly one byte short for ever.
          */
-        GetComputerNameA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([buffer, size])=>{
-                if (size === 0)
-                {
-                    host.setLastError(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-                const room = readDword(size >>> 0);
-                if (buffer === 0 || COMPUTER_NAME.length + 1 > room)
-                {
-                    writeDword(size >>> 0, COMPUTER_NAME.length + 1);
-                    host.setLastError(ERROR_BUFFER_OVERFLOW);
-                    return 0;
-                }
-                host.writeMemory(buffer >>> 0, encodeAnsi(COMPUTER_NAME + '\0'));
-                writeDword(size >>> 0, COMPUTER_NAME.length);
-                return 1;
-            },
-        },
+        GetComputerNameA: computerName(encodeAnsi),
+
+        /** BOOL GetComputerNameW(LPWSTR lpBuffer, LPDWORD nSize): the size in characters. */
+        GetComputerNameW: computerName(text=>new Uint8Array(Uint16Array.from(text,
+            character=>character.charCodeAt(0)).buffer)),
     };
 }

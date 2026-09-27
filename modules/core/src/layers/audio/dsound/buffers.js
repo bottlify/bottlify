@@ -162,6 +162,18 @@ export function createSoundBuffer({
     /** @type {{ offset: number, first: number, second: number } | null} */
     let lock = null;
     /**
+     * The sound device's voice for this buffer, once one is attached
+     * (`attachDevice`): a mirror of the buffer that the device plays on its
+     * own clock. From then on the play cursor, whether it is playing and when
+     * a one-shot ended are the device's, not the guest clock's; nothing is
+     * read out per turn, and what the program unlocks goes to the mirror.
+     * @type {{ voice: any, copy: (from: number, count: number) => void } | null}
+     */
+    let device = null;
+    /** The device's lap and end counts as last seen. */
+    let seenLaps = 0;
+    let seenEnds = 0;
+    /**
      * Which bytes the program has written since they were last handed over.
      *
      * Everything a program can observe is right when its refill is late: the
@@ -275,6 +287,20 @@ export function createSoundBuffer({
         {
             return;
         }
+        if (device)
+        {
+            const ends = device.voice.ends;
+            if (ends !== seenEnds || (!looping && !device.voice.playing))
+            {
+                seenEnds = ends;
+                playing = false;
+                anchorByte = 0;
+                anchorMs = now();
+                stopOwed = true;
+                ranOut = true;
+            }
+            return;
+        }
         const advanced = Math.floor((now() - anchorMs) * byteRate() / 1000);
         if (!looping && anchorByte + advanced >= bytes)
         {
@@ -290,6 +316,10 @@ export function createSoundBuffer({
     /** The play cursor as a program sees it. */
     const playCursor = ()=>{
         settle();
+        if (device)
+        {
+            return alignDown((playing ? device.voice.position : anchorByte) % bytes);
+        }
         if (!playing)
         {
             return alignDown(anchorByte % bytes);
@@ -449,6 +479,12 @@ export function createSoundBuffer({
                 playing = true;
             }
             looping = (flags & DSBPLAY_LOOPING) !== 0;
+            if (device)
+            {
+                device.voice.position = anchorByte;
+                seenEnds = device.voice.ends;
+                device.voice.play(looping);
+            }
         },
 
         stop(){
@@ -460,6 +496,7 @@ export function createSoundBuffer({
             // first one repeated. The same holds after a one-shot ran to
             // its end, where the cursor reads zero again and a read pulled
             // back there hands over the whole sound a second time.
+            device?.voice.stop();
             anchorByte = playCursor();
             anchorMs = now();
             // Only a buffer that was playing stops; one that already ran to
@@ -480,6 +517,10 @@ export function createSoundBuffer({
             // which is most of the buffer, played at once.
             fedByte = anchorByte;
             fedLead = 0;
+            if (device)
+            {
+                device.voice.position = anchorByte;
+            }
         },
 
         /** @param {number} hz  Zero means the format's own rate. */
@@ -490,6 +531,7 @@ export function createSoundBuffer({
             anchorByte = playCursor();
             anchorMs = now();
             frequency = (hz >>> 0) === 0 ? format.sampleRate : hz >>> 0;
+            device?.voice.retune(frequency);
         },
         get frequency(){
             return frequency;
@@ -571,7 +613,12 @@ export function createSoundBuffer({
         drainNotifications(){
             const play = playCursor();
             const from = lastNotified;
-            const wrapped = ranOut || play < from;
+            // A lap the device came round since the last look, however near
+            // it now stands to where it stood.
+            const laps = device ? device.voice.laps : seenLaps;
+            const lapped = laps !== seenLaps;
+            seenLaps = laps;
+            const wrapped = ranOut || lapped || play < from;
             lastNotified = play;
             ranOut = false;
             const stopped = stopOwed;
@@ -602,6 +649,10 @@ export function createSoundBuffer({
          * @returns {{ from: number, bytes: number }[]}
          */
         drainPlayed(){
+            if (device)
+            {
+                return [];
+            }
             const ranges = played();
             takeWritten(ranges);
             return ranges;
@@ -685,6 +736,11 @@ export function createSoundBuffer({
                 // between, and what is heard is what was there when it let go.
                 markWritten(held.offset, held.first);
                 markWritten(0, held.second);
+                if (device)
+                {
+                    device.copy(held.offset, held.first);
+                    device.copy(0, held.second);
+                }
                 if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
                 {
                     const { play, write } = cursorsNow();
@@ -697,6 +753,47 @@ export function createSoundBuffer({
         },
         get locked(){
             return lock !== null;
+        },
+
+        /**
+         * Hands the buffer to the sound device: the whole buffer into the
+         * voice's mirror, the voice put where the cursor stands and set
+         * playing if the buffer is. `copy` writes a span of the program's
+         * buffer into the mirror, and is called again at every unlock.
+         *
+         * @param {any} voice @param {(from: number, count: number) => void} copy
+         */
+        attachDevice(voice, copy){
+            const at = playCursor();
+            device = { voice, copy };
+            copy(0, bytes);
+            voice.position = at;
+            seenLaps = voice.laps;
+            seenEnds = voice.ends;
+            anchorByte = at;
+            if (playing)
+            {
+                voice.play(looping);
+            }
+        },
+        /**
+         * Takes the buffer back from the sound device, the cursor kept where
+         * the device left it, and answers the voice for its owner to close.
+         * A voice is what plays now, as a sound card's are: a buffer that is
+         * not playing needs none, and the next Play attaches one again.
+         */
+        detachDevice(){
+            if (!device)
+            {
+                return null;
+            }
+            const { voice } = device;
+            anchorByte = playCursor();
+            device = null;
+            return voice;
+        },
+        get device(){
+            return device?.voice ?? null;
         },
     };
 }

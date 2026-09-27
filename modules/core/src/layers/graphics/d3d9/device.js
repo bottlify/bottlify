@@ -433,6 +433,10 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {import('../webgpu/internal/presenter.js').DisplayGamma} [gamma]
  *     Where a full-screen device's gamma ramp reaches the picture. Absent, a
  *     ramp is kept and read back only.
+ * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
+ *     Told of every frame a present queues; what it answers is what the
+ *     present waits on before it answers the program. Absent, a present never
+ *     waits.
  */
 
 /**
@@ -454,7 +458,7 @@ export function createDirect3D9(options = {}){
     const {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, maxDraws, skipTexture, probeTexture, fog, mips,
-        onDeviceLost, gamma, ...caps
+        onDeviceLost, gamma, frameQueued, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -462,7 +466,7 @@ export function createDirect3D9(options = {}){
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, maxDraws, skipTexture, probeTexture, fog, mips,
-        onDeviceLost, gamma,
+        onDeviceLost, gamma, frameQueued,
     };
     if (backend && !readMemory)
     {
@@ -1587,11 +1591,24 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     let stopWatchingLoss;
 
     /**
+     * A present's answer, once its frame is queued: at once, or once the
+     * device has finished enough of the frames before it.
+     *
+     * @param {Promise<void> | undefined} submitted  settled when the frame is on the queue
+     * @returns {number | Promise<number>}
+     */
+    const presented = submitted=>{
+        const held = submitted ? services.frameQueued?.(submitted) ?? null : null;
+        return held ? held.then(()=>D3D_OK) : D3D_OK;
+    };
+
+    /**
      * A swap chain's back buffer presented: onto the display when it goes
      * into the window the display shows, and otherwise drawn and kept, which
      * is reported once.
      *
      * @param {any} backBuffer @param {boolean} shown
+     * @returns {number | Promise<number>}
      */
     const presentChain = (backBuffer, shown)=>{
         if (deviceState !== DEVICE_STATE.OK)
@@ -1600,15 +1617,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         }
         if (shown)
         {
-            renderer?.present(Object.create(model, { backBuffer: { get: ()=>backBuffer } }));
+            return presented(renderer?.present(
+                Object.create(model, { backBuffer: { get: ()=>backBuffer } })));
         }
-        else
-        {
-            report('chain-window', 'a swap chain presented into a window the display does not'
-                + ' show: its frame is drawn and its picture is not shown');
-            renderer?.submit();
-        }
-        return D3D_OK;
+        report('chain-window', 'a swap chain presented into a window the display does not'
+            + ' show: its frame is drawn and its picture is not shown');
+        return presented(renderer?.submit());
     };
 
     /** The state a plain device's reset puts back to what a new device has. */
@@ -1762,14 +1776,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * differ, and a program that resets on the strength of Present alone
          * never learns that the device came back.
          */
+        /** @returns {number | Promise<number>} */
         Present(){
             if (deviceState !== DEVICE_STATE.OK)
             {
                 return lostAnswer();
             }
-            renderer?.present(model);
+            const submitted = renderer?.present(model);
             presents++;
-            return D3D_OK;
+            return presented(submitted);
         },
 
         /** Made through IDirect3D9Ex. */

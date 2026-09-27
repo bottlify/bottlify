@@ -1529,10 +1529,11 @@ export function createDirect3D7(ddraw, services = {}){
              * when a DirectDraw flip or blit puts that address on the screen.
              *
              * @param {number} buffer
+             * @returns {Promise<void> | undefined} settled once the frame is on the queue
              */
             present(buffer){
                 presenting = buffer;
-                renderer?.present(model);
+                return renderer?.present(model);
             },
 
             /** Settled when every presented frame has reached the backend. */

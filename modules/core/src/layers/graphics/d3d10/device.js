@@ -106,6 +106,9 @@ const PREDICATE_QUERIES = new Set([
  *     without it a block-compressed texture is decoded on the processor.
  * @property {boolean} [depthClipControl]  Whether the GPU device can leave depth
  *     unclipped, as a rasterizer state with DepthClipEnable FALSE asks.
+ * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
+ *     Told of every frame a swap chain's present queues; what it answers is
+ *     what the present waits on before it answers the program.
  */
 
 /**
@@ -1773,6 +1776,17 @@ export function createDevice(options = {}){
          */
         present(backBuffer){
             return renderer.present(backBuffer);
+        },
+
+        /**
+         * What a present waits on, once its frame is queued, before it answers
+         * the program; null when it may answer at once.
+         *
+         * @param {Promise<void>} submitted  settled when the frame is on the queue
+         * @returns {Promise<void> | null}
+         */
+        frameQueued(submitted){
+            return options.backend ? options.frameQueued?.(submitted) ?? null : null;
         },
 
         /** @returns {Promise<void>} settled when every presented frame has been submitted */

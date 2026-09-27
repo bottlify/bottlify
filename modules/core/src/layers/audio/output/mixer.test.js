@@ -459,17 +459,17 @@ test('with a shared table, a backlog past the depth sets DROP_TO', ()=>{
 });
 
 test('with a shared table, a closed slot is freed by the reader and reused', ()=>{
-    // 32 slots (SLOTS in mix.js): fill them all, close one, and the next
+    // SLOTS slots (mix.js): fill them all, close one, and the next
     // open() must reuse it -- otherwise a game that opens and closes many
     // short-lived buffers over a session exhausts every slot and falls back
     // permanently.
     const mixer = createMixer({ shared: true });
     const tracks = [];
-    for (let i = 0; i < 32; i++)
+    for (let i = 0; i < SLOTS; i++)
     {
         tracks.push(mixer.open(DIRECT));
     }
-    assert.equal(mixer.open(DIRECT).slot, -1, 'the 33rd track falls back: no free slot');
+    assert.equal(mixer.open(DIRECT).slot, -1, 'one track past them falls back: no free slot');
 
     const closing = tracks[5];
     const closedSlot = closing.slot;

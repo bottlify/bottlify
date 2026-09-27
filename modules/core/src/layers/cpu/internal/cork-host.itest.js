@@ -71,8 +71,9 @@ test('the no-tier answer names the instruction met, not the range it started at'
 
 test('an interpreted trap reaches the call channel', ()=>{
     const h = host();
-    // mov eax, 0x1234; out dx, eax; hlt
-    load(h, 0x1000, [0xb8, 0x34, 0x12, 0, 0, 0xef, 0xf4]);
+    // mov edx, trap port; mov eax, 0x1234; out dx, eax; hlt -- a write to any
+    // other port is a device's.
+    load(h, 0x1000, [0xba, 0x34, 0x12, 0, 0, 0xb8, 0x34, 0x12, 0, 0, 0xef, 0xf4]);
     /** @type {number[]} */
     const traps = [];
     /** @param {number} value */

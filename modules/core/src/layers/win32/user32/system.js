@@ -1352,6 +1352,31 @@ export function createSystemFunctions({ host, live, windows, classes }){
         return record.hwnd;
     };
 
+
+    /**
+     * A name's number in the global atom table registered messages and
+     * clipboard formats share: the same for the same name in any case.
+     *
+     * @param {number[]} args
+     */
+    const registerName = ([name])=>{
+        if ((name >>> 0) === 0)
+        {
+            return 0;
+        }
+        const key = host.readCString(name >>> 0, MAX_NAME).toLowerCase();
+        if (key.length === 0)
+        {
+            return 0;
+        }
+        let id = registeredMessages.get(key);
+        if (id === undefined)
+        {
+            id = REGISTERED_MESSAGE_FIRST + registeredMessages.size;
+            registeredMessages.set(key, id);
+        }
+        return id;
+    };
     return {
         /** int GetSystemMetrics(int nIndex) */
         GetSystemMetrics: {
@@ -2281,24 +2306,20 @@ export function createSystemFunctions({ host, live, windows, classes }){
         RegisterWindowMessageA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>{
-                if ((name >>> 0) === 0)
-                {
-                    return 0;
-                }
-                const key = host.readCString(name >>> 0, MAX_NAME).toLowerCase();
-                if (key.length === 0)
-                {
-                    return 0;
-                }
-                let id = registeredMessages.get(key);
-                if (id === undefined)
-                {
-                    id = REGISTERED_MESSAGE_FIRST + registeredMessages.size;
-                    registeredMessages.set(key, id);
-                }
-                return id;
-            },
+            handler: registerName,
+        },
+
+        /**
+         * UINT RegisterClipboardFormatA(LPCSTR lpszFormat)
+         *
+         * Windows takes a clipboard format's number from the same global atom
+         * table a registered message's comes from, so one name is one number
+         * through either call.
+         */
+        RegisterClipboardFormatA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: registerName,
         },
 
         /** BOOL MessageBeep(UINT uType) */
@@ -3544,6 +3565,54 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 writeRect(host, out >>> 0,
                     empty ? { left: 0, top: 0, right: 0, bottom: 0 } : meet);
                 return empty ? 0 : 1;
+            },
+        },
+
+        /** BOOL IsRectEmpty(const RECT *lprc): no area, or no rectangle at all. */
+        IsRectEmpty: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([rect])=>{
+                if ((rect >>> 0) === 0)
+                {
+                    return 1;
+                }
+                const r = readRect(host, rect >>> 0);
+                return r.right <= r.left || r.bottom <= r.top ? 1 : 0;
+            },
+        },
+
+        /**
+         * BOOL UnionRect(LPRECT lprcDst, const RECT *lprcSrc1, const RECT *lprcSrc2)
+         *
+         * An empty source adds nothing: the union of one empty rectangle and
+         * another is the other, and of two empty ones an empty rectangle and
+         * FALSE.
+         */
+        UnionRect: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([out, first, second])=>{
+                if ((out >>> 0) === 0 || (first >>> 0) === 0 || (second >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const a = readRect(host, first >>> 0);
+                const b = readRect(host, second >>> 0);
+                /** @param {{ left: number, top: number, right: number, bottom: number }} r */
+                const empty = r=>r.right <= r.left || r.bottom <= r.top;
+                if (empty(a) && empty(b))
+                {
+                    writeRect(host, out >>> 0, { left: 0, top: 0, right: 0, bottom: 0 });
+                    return 0;
+                }
+                writeRect(host, out >>> 0, empty(a) ? b : empty(b) ? a : {
+                    left: Math.min(a.left, b.left),
+                    top: Math.min(a.top, b.top),
+                    right: Math.max(a.right, b.right),
+                    bottom: Math.max(a.bottom, b.bottom),
+                });
+                return 1;
             },
         },
 

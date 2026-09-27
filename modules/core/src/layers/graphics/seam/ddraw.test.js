@@ -163,9 +163,10 @@ function machine(){
  * presenter would be.
  *
  * @param {{ adapter?: any, gamma?: any, deactivated?: () => boolean,
- *     deactivations?: () => number }} [build]
+ *     deactivations?: () => number, flipQueued?: () => Promise<void> | null }} [build]
  *     What the build says the hardware is, where a primary's gamma ramp is
- *     shown, and whether (and how often) the application has been deactivated.
+ *     shown, whether (and how often) the application has been deactivated,
+ *     and what a flip waits on.
  */
 function seamed(build = {}){
     const box = machine();
@@ -215,6 +216,7 @@ function seamed(build = {}){
             },
         },
         present: surface=>presented.push(surface),
+        flipQueued: build.flipQueued,
         gamma: build.gamma,
         deactivated: build.deactivated,
         deactivations: build.deactivations,
@@ -517,6 +519,44 @@ test('a flip chain walks front to back and closes, and only the front flips', ()
     assert.equal(h.release(front), 0);
     assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();
+});
+
+test('a flip that queued a frame waits on what the bound says before it answers', async()=>{
+    // A flip ends a frame, and like a present it is held once the device is
+    // the bound's worth of frames behind. A flip refused queued nothing.
+    /** @type {() => void} */
+    let finish = ()=>{};
+    let asked = 0;
+    const h = seamed({
+        flipQueued: ()=>{
+            asked++;
+            return new Promise(resolve=>{
+                finish = ()=>resolve(undefined);
+            });
+        },
+    });
+    const ddraw = h.create7(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    const front = h.createSurface7(ddraw,
+        { caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_COMPLEX | DDSCAPS_FLIP, backBufferCount: 1 });
+    const flip = slot(IDIRECTDRAWSURFACE7_SLOTS, 'Flip');
+    assert.equal(h.surface7(front, 'Flip', [front, 0]), DDERR_NOTFLIPPABLE);
+    assert.equal(asked, 0, 'a refused flip queued nothing');
+
+    /** @type {number | null} */
+    let answered = null;
+    const answer = h.box.callParked(front, flip, [0, 0]).then(hr=>{
+        answered = hr;
+    });
+    assert.equal(asked, 1);
+    assert.equal(h.presented.length, 1, 'the flip is made before it waits');
+    await Promise.resolve();
+    assert.equal(answered, null, 'and answers once the wait is over');
+    finish();
+    await answer;
+    assert.equal(answered, DD_OK);
+
+    assert.equal(h.release(front), 0);
+    assert.equal(h.release(ddraw), 0);
 });
 
 test('a mip chain reports its levels through the descriptor and is walked level by level', ()=>{

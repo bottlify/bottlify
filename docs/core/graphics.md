@@ -40,6 +40,7 @@ allows because `win32` is declared.
 | `raster` | boolean | `true` | `false` leaves every primitive OpenGL draws on the processor (the build without a device) unrasterised: each call still does its state work and each draw still reads its scene, a clear still clears, but no primitive reaches the framebuffer -- so a long run in Node measures the program and the layers rather than the software rasteriser. A diagnostic; with a device nothing is rasterised on the processor either way, so it changes nothing there. `tools/launch-probe.mjs --no-raster` sets it. |
 | `screen` | `{ width, height, bitsPerPixel }` | `{ 640, 480, 32 }` | The display a program is told about until `resolution` changes it. |
 | `maxFps` | number | `60` | Frame-delivery cap for the pacer; `0` means whatever the scheduler offers. |
+| `maxFrameLatency` | number | `3` | How many presented frames the device may still be working on when a presenting call answers -- Direct3D's default maximum frame latency. A `Present`, `SwapBuffers`, `Flip` or DXGI `Present` that queues a frame past it waits, parked through the bridge, for the oldest to finish (see *Frames in flight*). `0` holds nothing and still counts. The run presenter keeps it, one count for every machine, so `createApp` reads it from its own `graphics` option; a presenter this layer makes for itself reads it from here. |
 | `guestNow` | `() => ms` | the host's `performance.now` | The clock the display's raster runs on -- DirectDraw's vertical-blank status and scan line, Direct3D's raster status. The assembling caller hands the kernel's virtual time, because a program that spins on the blank times the spin with its own timers; the presenter's pacing, a property of the canvas, keeps its own. |
 | `schedule`, `now` | `(tick) => void`, `() => number` | absent | A display-rate scheduler and a clock. Both present enables the pacer; a headless build delivers on a microtask. |
 | `allocate` | `(bytes) => address` | absent | Guest memory for locked surfaces and buffers, and for the shadow state block. Without it a lock hands back an address this layer invented and every state setter stays a trap. |
@@ -79,7 +80,7 @@ builds its renderer without them; the first four also reach the OpenGL device re
 | `create(name, options?)` | Makes one API object by name: `ddraw`, `d3d8`, `d3d9`, `opengl`, `d3d10`, `vulkan`. Direct3D 7 has no factory of its own; it is reached from a DirectDraw object. |
 | `apis()` | The six names above. |
 | `libraries()` | `{ 'OPENGL32.dll', 'D3D8.dll', 'D3D9.dll', 'D3D10.dll', 'DXGI.dll', 'vulkan-1.dll', 'DDRAW.dll' }`, each a `{ Name: { argBytes, handler } }` table shaped like a `win32` library's, for the loader. |
-| `opengl()` | The pixel-format negotiation (`size`, `count`, `choose`, `describe`) and `swapBuffers(hdc)` whose entry points `gdi32` exports; the assembling caller hands these down to `win32`; and `entry(name)`, one named `OPENGL32.dll` handler with its raw-dword convention, for a caller already on this side of the boundary. |
+| `opengl()` | The pixel-format negotiation (`size`, `count`, `choose`, `describe`) and `swapBuffers(hdc)` whose entry points `gdi32` exports -- a swap answers a promise when it waits for the device (see *Frames in flight*); the assembling caller hands these down to `win32`; and `entry(name)`, one named `OPENGL32.dll` handler with its raw-dword convention, for a caller already on this side of the boundary -- every one but the two WGL swaps, which may wait. |
 | `gdiDrawing()` | GDI's own drawing for the device contexts `win32` keeps (`create`, `fontMetrics`, `textWidth`, `surfaceFor`, `desktop`, `presentDesktop`), and the display's gamma ramp for `gdi32`'s `SetDeviceGammaRamp`, `GetDeviceGammaRamp` and `GetDeviceCaps(COLORMGMTCAPS)`, which `app.js` hands down as `setGammaRamp`, `gammaRamp` and `appliesGamma`: `setDisplayGamma(ramp)` sets it (`{ red, green, blue }`, 256 sixteen-bit entries each; `null` takes it back), `displayGamma()` answers the ramp the display shows through, whoever set it, or `null` when none was (the identity), and `appliesGamma()` whether a ramp reaches the picture at all. A ramp a full-screen Direct3D 8 or 9 device or a DirectDraw primary sets afterwards is shown instead until that one is taken back; the display's own outlives the process, and a machine's devices take theirs with them when it is disposed. |
 
 An instance owns its GPU work. `create()` may run more than once in the same realm (a process
@@ -133,7 +134,7 @@ extend the variable's).
 | `seam.vulkan` | `placed` traps, `objects` by kind, `unimplemented` by command name. |
 | `shadow` | The Direct3D 8 guest-side state block: `placed`, `slowPath`, `renderStateCalls`, `transformCalls`, `bindingCalls`, `lockCalls`, `unlockCalls`, `textureCalls`, `stageStateCalls`, `materialCalls`, `buffers`, `synced`, `skipped`, `refused`. |
 | `backend` | Profiler snapshot (`frames`, `counters`, `uploadsByLabel`, `recentFrames` with phases), `shaders` (`builds`, `errors`, `warnings`, `dropped`, `distinct`), `shaderMessages`, `pipelines` (`built`, `reused`, `resident`), `uniforms`, `buffers` per dynamic buffer (`renames`, `pooled`, `dirty`), `frameOpen`, `pendingTextureCopies`, `surfaceWrites`, `presents`. |
-| `presenter` | `presents`, `uploads`, `bytes`, `shownByOwner`, `shown` (frames copied to the canvas), `shownBy` (those copies by the label of what was shown -- a Direct3D device's `target`, OpenGL's `gl-shown[0]`/`gl-shown[1]`, the `desktop`'s bytes, a primary's `guest bytes` -- so a picture one device draws and another path paints over shows as two labels rising together), `gammaShown` (those copies drawn through a gamma ramp rather than copied), `gamma` (whether a ramp other than the identity is in effect), `dropped` (surfaces a machine presented and went before they were shown, never read), `lastBuffer`, `pending`, `claimed` (addresses a GPU owns, across the machines attached), `attached` (machines attached now), `failures`, `disposed`. The same label is on every record of `presented().history`. The counters are cumulative across a process replacement, because the presenter is. |
+| `presenter` | `presents`, `uploads`, `bytes`, `shownByOwner`, `shown` (frames copied to the canvas), `shownBy` (those copies by the label of what was shown -- a Direct3D device's `target`, OpenGL's `gl-shown[0]`/`gl-shown[1]`, the `desktop`'s bytes, a primary's `guest bytes` -- so a picture one device draws and another path paints over shows as two labels rising together), `gammaShown` (those copies drawn through a gamma ramp rather than copied), `gamma` (whether a ramp other than the identity is in effect), `dropped` (surfaces a machine presented and went before they were shown, never read), `lastBuffer`, `pending`, `claimed` (addresses a GPU owns, across the machines attached), `attached` (machines attached now), `failures`, `latency` (the frames in flight: `limit`, `counting` -- false with no device, or one that cannot say when work is done, or once it is lost -- `inFlight`, `peak`, the most counted at once with the frame just queued among them, `frames`, `held` presenting calls that waited, `heldMs` spent waiting, `waiting` now), `disposed`. The same label is on every record of `presented().history`. The counters are cumulative across a process replacement, because the presenter is. |
 | `backend` | The WebGPU backend's counters, among them `surfacesCreated` and `surfacesDestroyed`: a device reset gives its previous back buffer and depth back to the GPU at once, since the collector does not watch GPU memory. |
 | `pacing` | `requests`, `delivered`, `coalesced`, `idleTicks`, `heldTicks`, `waiting`, and interval statistics (`count`, `minMs`, `maxMs`, `meanMs`, `deviationMs`, `p50Ms`, `p95Ms`, `p99Ms`, `fps`, `periods`). Null in a build with no scheduler. The pacer belongs to the presenter, so the rhythm is read from it. |
 
@@ -278,6 +279,26 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
   byte, so both identities programs write (index times 257, index shifted up by eight) keep the
   plain copy. A frame texture the pass cannot read is copied as it is, and a presenter with no
   canvas says it applies no ramp (`appliesGamma()`), which is what the gamma capabilities follow.
+- **Frames in flight** (`internal/latency.js`). Nothing a present does waits for the GPU: the
+  frame is recorded, replayed onto the queue once its pipelines exist, and the call answers. A
+  device slower than the program would fall further behind for as long as it runs, so, as a
+  Windows driver holds a presenting call once a few frames are queued, every call that ends a
+  frame tells the run presenter it queued one -- Direct3D 8 and 9's `Present` on the device, on
+  an additional chain (a picture kept rather than shown included) and 9Ex's `PresentEx`, DXGI's
+  `Present`, `wglSwapBuffers`, `wglSwapLayerBuffers` and gdi32's `SwapBuffers`, and a DirectDraw
+  `Flip`, whose frame is the burst the presenter flushes, a Direct3D 7 target's replay among
+  them. A frame counts from the call until the device has finished the work submitted with it:
+  `queue.onSubmittedWorkDone()` asked once the frame's replay is on the queue, never before, since
+  it answers for the work submitted ahead of the asking. A call that queues a frame past
+  `maxFrameLatency` answers with a promise, its thread parks on it through the bridge as any
+  waiting host call does and the scheduler runs the others; the oldest frame finishing lets it
+  go, and it answers what it would have. Calls waiting at once, from two threads or two chains,
+  go oldest first as the frames ahead of each finish. The frame is recorded and queued before the
+  call waits, so what reaches the device and in what order is the same with any bound. One count
+  for the run, since every machine draws on one queue. A queue without `onSubmittedWorkDone` --
+  no device, the recording double -- counts nothing and holds nothing, and a lost device lets
+  every waiting call go and holds nothing after. `entry(name)` does not hand out the two WGL swaps,
+  since a caller on this side has no thread to park.
 - **Profiler** (`internal/profiler.js`) keeps per-frame phase timings (`uploads`, `passes`,
   `submit`, `present`), counters, and a per-label upload breakdown rather than a top-N.
 - **Reference rasteriser** (`internal/reference.js`). The fixed-function formula written a second
@@ -812,8 +833,9 @@ divergence and draws nothing. That path is the formula the byte-exact tests hold
 `wgl.js` is the seam with GDI, every rule of it measured: a pixel format belongs to the drawable,
 can be set once, a DC without one cannot make a context, a context is current on one thread,
 `wglGetProcAddress` returns null for core names. `SwapBuffers` replays the recorded frame on a
-device, and on the processor hands the frame to the presenter through guest scratch memory -- so
-this is the one API a headless build can run to a finished frame.
+device, and waits past the bound as a present does, and on the processor hands the frame to the
+presenter through guest scratch memory -- so this is the one API a headless build can run to a
+finished frame.
 
 **Vulkan** (`src/layers/graphics/vulkan/`). One physical device, described from what WebGPU
 guarantees of every adapter (`physical.js`). Instances, devices, queues, surfaces and swapchains
@@ -1054,27 +1076,37 @@ destination alone is mirrored places its pixels as a mirror would, where Wine's 
 placing one that no mirroring gives, though it answers as Windows does; and a 32-bit DIB's top byte,
 which Windows carries through `StretchDIBits`, is not kept. A Direct3D 10 effect's
 `Optimize` keeps what the runtime would drop, which only the effect's own reflection reads.
-Nothing bounds how far the device may fall behind the program: a present never waits for the
-device, where a Windows driver holds the presenting call once a few frames are queued, so a device
-slower than the program accumulates its frames for as long as it runs -- a software adapter is.
-Measured with SwiftShader and the engine on the same two cores, Doom 3's timed demo presented 16
-to 19 frames a second while the device finished 1.6 to 3.3, ending the demo 54 to 120 s behind.
+Only a call that ends a frame waits for the device (see *Frames in flight*): a DirectDraw blit,
+unlock or released device context onto the primary counts no frame -- a flip does -- so a
+windowed program that shows its frames by blitting is not held, though a blit out of a Direct3D 7
+target reads the target back first and waits for the device that way; nor is Vulkan's
+`vkQueuePresentKHR`, its runtime drawing no geometry. A program's own `SetMaximumFrameLatency`
+(9Ex, DXGI) is kept and read back, not applied: the configured bound holds whatever it sets. With
+the bound a device slower than the program sets the program's pace, as it does on Windows.
+Measured with SwiftShader, the engine in a worker and the browser on the same two cores, Doom 3's
+timed demo (213 frames): with the bound, 2.2 to 3.1 frames a second by the wall clock and 2.1 to
+2.9 by the demo's own, the device finishing 2.2 to 3.2, at most four frames unfinished at any
+present -- the one just made among them -- and the page's report answering 1.0 to 2.7 s after the
+run; with no bound, 15.4 to 16.4 a second by the wall clock and 12.6 to 13.1 by the demo's own
+while the device finished 1.7 to 3.3, up to 183 frames unfinished, the last finishing 52 to 117 s
+after it was made and the report answering 53 to 118 s after the run.
 
 ## Tests
 
-1,498 `test()` cases across the layer's `*.test.js` files, all run by `npm test` from
+1,823 `test()` cases across the layer's `*.test.js` files, all run by `npm test` from
 `modules/core` (`node --test "src/**/*.test.js"`); one integration file runs under
 `npm run test:integration`. By kind:
 
 | kind | files |
 |---|---|
-| Layer assembly | `graphics.test.js` -- a build with no GPU comes up; the backend is built once; APIs are made by name; diagnostics report what was asked for; the pacer honours `maxFps`; a second instance in one realm does not take the first one's backend; a disposed machine answers as a build with graphics disabled (the stub's refusal); `dispose()` releases this machine's backend and leaves a presenter handed to the run untouched; a child's machine that goes leaves its parent drawing from its own memory; the raster reads the clock handed over as `guestNow`; a lost device loses the Direct3D devices made on it. `bitmaps.test.js` -- gdi32's bookkeeping over this layer's drawing, wired as `app.js` wires them: a double buffer, a monochrome mask made from the program's bits. |
+| Layer assembly | `graphics.test.js` -- a build with no GPU comes up; the backend is built once; APIs are made by name; diagnostics report what was asked for; the pacer honours `maxFps`; a second instance in one realm does not take the first one's backend; a disposed machine answers as a build with graphics disabled (the stub's refusal); `dispose()` releases this machine's backend and leaves a presenter handed to the run untouched; a child's machine that goes leaves its parent drawing from its own memory; the raster reads the clock handed over as `guestNow`; a lost device loses the Direct3D devices made on it. `frame-latency.test.js` -- over a device that finishes its work only when told: a Direct3D 8 `Present` past three frames in flight is held until the oldest finishes and then answers `D3D_OK`, frames reach the queue in the order presented and as drawn with the bound as without it, a bound of zero holds nothing, a Direct3D 9 device and a swap chain beside it count against one bound, `SwapBuffers` through GDI and through WGL is held the same way, and a device that cannot say when work is done holds nothing. | `bitmaps.test.js` -- gdi32's bookkeeping over this layer's drawing, wired as `app.js` wires them: a double buffer, a monochrome mask made from the program's bits. |
 | Byte-exact against the reference rasteriser or a stored image (base64 of the raw BGRX buffer beside the code, no tolerance) | `webgpu/internal/reference.test.js`, `d3d8/render.test.js`, `d3d9/render.test.js`, `d3d9/program.test.js`, `opengl/raster.test.js`, `opengl/pipeline.test.js`, `gdi/*.test.js`, `ddraw/blit.test.js`. A triangle is asserted at named pixels rather than as a whole image, so no rasterisation rule is pinned. |
-| Recorded commands through the fake device (what the GPU was asked to do, never what a frame looks like) | `webgpu/backend.test.js`, `webgpu/internal/*.test.js` (including `presenter.test.js`: one presenter serves two machine lifetimes, configures the canvas once, and shows the second lifetime's frame rather than a cleared target; a machine that goes takes its pending frame and its claims with it), `d3d7/device.test.js`, `d3d8/render.test.js`, `d3d8/program.test.js`, `d3d10/render.test.js`, `opengl/gpu.test.js` (a context on the renderer: buffer objects bound as they lie, the rename-or-range rule, client copies by index range, the canonical packing, uniform contents, uploads per written level, the clear's masks, the opaque shown copies, program draws and their blocks, the draw dump with its cut, skip and probe). |
+| Recorded commands through the fake device (what the GPU was asked to do, never what a frame looks like) | `webgpu/backend.test.js`, `webgpu/internal/*.test.js` (including `presenter.test.js`: one presenter serves two machine lifetimes, configures the canvas once, and shows the second lifetime's frame rather than a cleared target; a machine that goes takes its pending frame and its claims with it; a flip's frame is the burst it is in, on the queue once an owner's replay is; every machine counts against one bound -- and `latency.test.js`: the fourth frame waits for the oldest, a frame counts until the work submitted with it is finished and not before it is submitted, waiting calls go oldest first, a failed replay and a lost device let a call go), `d3d7/device.test.js`, `d3d8/render.test.js`, `d3d8/program.test.js`, `d3d10/render.test.js`, `opengl/gpu.test.js` (a context on the renderer: buffer objects bound as they lie, the rename-or-range rule, client copies by index range, the canonical packing, uniform contents, uploads per written level, the clear's masks, the opaque shown copies, program draws and their blocks, the draw dump with its cut, skip and probe). |
 | Contract, against documented behaviour and conformance expectations of the real runtime | `d3d7/load.test.js`, `d3d7/process.test.js`, `seam/raster.test.js`, `d3d9/contract.test.js`, `d3d9/ex.test.js`, `d3d9/validity.test.js`, `d3d8/validity.test.js`, `d3d8/declaration.test.js`, `d3d8/process.test.js`, `d3d10/validity.test.js`, `d3d10/device.test.js`, `d3d10/dxgi.test.js`, `d3d10/structs.test.js`, `d3d10/effect.test.js`, `d3d10/effect-object.test.js` (the effect framework, after Wine's d3d10 effect tests, over effects a fixture lays out), `ddraw/objects.test.js`, `ddraw/caps.test.js`, `ddraw/structs.test.js`, `opengl/wgl.test.js`, `opengl/pixelformat.test.js`, `opengl/context.test.js`, `opengl/context-calls.test.js`, `opengl/context-programs.test.js`, `vulkan/*.test.js`, `d3d7/caps.test.js`, `d3d9/caps.test.js`. |
 | Observed behaviour, pinned | `d3d9/observed.test.js` -- lock-flag traffic, matrix order, render-target alpha, viewport placement. |
 | Translators | `d3d9/shader.test.js`, `d3d9/wgsl.test.js`, `d3d10/dxbc.test.js`, `d3d10/sm4.test.js`, `d3d10/wgsl.test.js`, `vulkan/spirv.test.js`, `opengl/wgsl.test.js` (the GL formula as WGSL and the descriptor, and that every field the key must fold changes it), `opengl/arb-program.test.js` (the ARB program grammar, its error positions and limits), `opengl/arb-wgsl.test.js` (one stage at a time: every instruction, the parameters as one materialised block, the attribute aliasing, a real program's coordinate sets and image units), `opengl/gpu-layout.test.js` (array shapes to vertex formats and slots, mode expansion, index scanning), `opengl/buffer-reads.test.js` (the byte ranges unflushed draws read: overlap, forgotten once their frame flushed, a write past a frame's hull compared against none). |
-| Seam and ABI | `seam/*.test.js` drive the bridge's real vtable publisher over a flat buffer and read the same words a guest would; `seam/shadow.test.js` pins the guest-side code's bytes and layout; `seam/shadow.itest.js` runs that code on the real emulated processor. |
+| Seam and ABI | `seam/*.test.js` drive the bridge's real vtable publisher over a flat buffer and read the same words a guest would (among them a `Flip` answering once the bound lets it, and not counted when refused); `seam/shadow.test.js` pins the guest-side code's bytes and layout; `seam/shadow.itest.js` runs that code on the real emulated processor. |
+| A whole program | `src/frame-latency.itest.js` (`npm run test:integration`) -- a program with a Direct3D 8 device and a second thread that only counts presents twelve frames through `createApp` over a device finishing one submit every few milliseconds: with the default bound presents wait, the device is never more than one frame past the bound behind and the counting thread runs while a present waits; with no bound none waits and the program runs ahead. |
 
 Real-GPU acceptance lives outside the unit suite in `tools/cdp_test/`: `triangle.mjs` (a
 Direct3D 8 fixture, four named pixels) and `game.mjs` (drives a program bundle), both driving a headless

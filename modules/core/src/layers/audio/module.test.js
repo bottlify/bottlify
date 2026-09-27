@@ -19,8 +19,9 @@ import { audioModule } from './module.js';
 import { DSBPLAY_LOOPING } from './dsound/buffers.js';
 import { createRing } from './output/ring.js';
 import {
-    slotHeaderOffset, slotPcmOffset, SLOT_HEADER_INT32, SLOT_BYTES, WRITTEN, RATE as SLOT_RATE,
-    createSeam, resampleInto,
+    slotHeaderOffset, slotPcmOffset, SLOT_HEADER_INT32, SLOT_BYTES, RATE as SLOT_RATE,
+    createSeam, resampleInto, mixBlock, KIND, KIND_DMA, BASE, LENGTH, PLAYING, LOOPING, POSITION,
+    ARENA_OFFSET, ARENA_BYTES, GLOBAL_HEADER_INT32, SLOTS, STARVED_BLOCKS, BLOCKS,
 } from './output/mix.js';
 import {
     WAVEFORMATEX, DSBUFFERDESC, DS_OK, IID_IDirectSoundNotify,
@@ -239,24 +240,25 @@ test('what reaches the ring is the buffer\'s own bytes, not silence', async()=>{
     assert.ok(frames > 0, 'the ring had something in it');
 });
 
-test('with shared memory, what reaches the slot is the buffer\'s own bytes', async()=>{
-    // The table replaces the ring, but the same claim holds: this is the
-    // buffer's own bytes, not converted, not silence.
-    const loud = await playing({ shared: true });
-    loud.call(loud.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
-    loud.advance(50);
-    loud.api.pump();
+test('with shared memory, a playing buffer is a sound card\'s voice over the buffer\'s own bytes',
+    async()=>{
+        // Not converted, not silence, not pushed a turn at a time: the whole
+        // buffer mirrored for the device to read on its own clock.
+        const loud = await playing({ shared: true });
+        loud.call(loud.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+        loud.api.pump();
 
-    assert.equal(loud.api.output().diagnostics().tracks, 1, 'the buffer opened a track');
-    // The only track this fixture ever opens, so it is the first free slot.
-    const table = loud.api.output().table;
-    const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
-    const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
-    const written = Atomics.load(header, WRITTEN);
-    assert.ok(written > 0, 'bytes reached the slot');
-    assert.ok([...pcm.subarray(0, written)].every(byte=>byte === 0x40),
-        'byte-equal to what the guest wrote, not converted or silent');
-});
+        const table = loud.api.output().table;
+        const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+        assert.equal(Atomics.load(header, KIND), KIND_DMA, 'a voice, not a queue');
+        assert.equal(Atomics.load(header, LENGTH), BUFFER_BYTES, 'the whole buffer');
+        assert.equal(Atomics.load(header, PLAYING), 1);
+        assert.equal(Atomics.load(header, LOOPING), 1);
+        const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+        const base = Atomics.load(header, BASE);
+        assert.ok(arena.subarray(base, base + BUFFER_BYTES).every(byte=>byte === 0x40),
+            'byte-equal to what the guest wrote');
+    });
 
 test('a silenced buffer is mixed at its own gain, not at full', async()=>{
     const f = await playing();
@@ -288,18 +290,19 @@ test('a buffer panned hard left is heard on the left alone', async()=>{
     }
 });
 
-test('with shared memory, a buffer\'s pan reaches its slot', async()=>{
+test('with shared memory, a buffer\'s pan reaches its voice', async()=>{
     const f = await playing({ shared: true });
     f.call(f.buffer, 'SetPan', [10000]);
     f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
-    f.advance(50);
     f.api.pump();
 
     const table = f.api.output().table;
     const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
     const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
+    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
     const block = new Float32Array(2 * 2);
-    resampleInto({ block, blockFrames: 2, header, pcm, outputRate: 48000, seam: createSeam() });
+    resampleInto({ block, blockFrames: 2, header, pcm, arena, outputRate: 48000,
+        seam: createSeam() });
     assert.equal(block[0], 0, 'DSBPAN_RIGHT leaves the left silent');
     assert.ok(block[1] > 0);
 });
@@ -449,18 +452,45 @@ test('the span read on the turn the machine falls behind is the one it plays', (
     });
 });
 
-test('with shared memory, a backlog past the depth also counts behind', async()=>{
-    // The same policy as the ring backend, now built on DROP_TO instead of
-    // dropping the queue: this is the observable it must still produce.
+test('with shared memory, a stalled engine thread is not heard: the device plays on', async()=>{
+    // The crackle a busy engine made: the bytes left for the audio thread only
+    // when the engine ran, so a load or a translation that held it for a few
+    // tens of milliseconds emptied the device while the program's own buffer
+    // held most of a second. Now the device reads the buffer itself, the way
+    // a sound card's DMA does, and the program's cursor is where it reads.
     const f = await playing({ shared: true });
     f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
-    f.advance(300); // well past the 200 ms depth, in one span
     f.api.pump();
-    assert.equal(f.api.behind(), 0, 'nothing refused yet -- the check runs before this write');
 
-    f.advance(10);
-    f.api.pump();
-    assert.ok(f.api.behind() > 0, 'this is the turn it fell behind');
+    const table = f.api.output().table;
+    const outputRate = f.api.output().sampleRate;
+    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
+    const slots = Array.from({ length: SLOTS }, (_, slot)=>({
+        header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+        pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
+    }));
+    const seams = slots.map(()=>createSeam());
+    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const block = new Float32Array(128 * 2);
+    // Three hundred milliseconds of device blocks, and not one pump.
+    const blocks = Math.ceil(outputRate * 0.3 / 128);
+    const starvedBefore = Atomics.load(global, STARVED_BLOCKS);
+    for (let at = 0; at < blocks; at++)
+    {
+        mixBlock({ global, slots, seams, block, blockFrames: 128, outputRate, arena });
+    }
+    assert.equal(Atomics.load(global, STARVED_BLOCKS) - starvedBefore, 0,
+        'every block had the program\'s sound in it');
+    assert.equal(Atomics.load(global, BLOCKS) >= blocks, true);
+
+    const position = Atomics.load(slots[0].header, POSITION);
+    const expected = Math.floor(blocks * 128 * RATE / outputRate) * CHANNELS * (BITS / 8);
+    assert.ok(Math.abs(position - expected) <= CHANNELS * (BITS / 8) * 2,
+        `the device moved the cursor (${position} against ${expected})`);
+    f.view.setUint32(OUT_AT, 0xffffffff, true);
+    assert.equal(f.call(f.buffer, 'GetCurrentPosition', [OUT_AT, 0]), DS_OK);
+    assert.equal(f.view.getUint32(OUT_AT, true), position,
+        'and it is the cursor the program reads');
 });
 
 test('with shared memory, a released DirectSound buffer frees its slot: 40 over a session '

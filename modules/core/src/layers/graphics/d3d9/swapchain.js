@@ -27,9 +27,10 @@ import { D3DERR_INVALIDCALL, D3D_OK } from './constants.js';
  *           The chain's own, which its back buffers share: a program releasing
  *           a back buffer it took from the chain releases the chain.
  * @property {(count: import('./resources.js').ReferenceCount) => any} makeBackBuffer
- * @property {(backBuffer: any, shown: boolean) => number} present
+ * @property {(backBuffer: any, shown: boolean) => number | Promise<number>} present
  *           The device's: whether it can present at all, and what showing or
- *           keeping the picture takes.
+ *           keeping the picture takes. A promise is a present made and held
+ *           until the device has room for another frame.
  * @property {(surface: any) => void} retire
  *           Gives a back buffer's storage back once the chain is gone.
  */
@@ -96,10 +97,13 @@ export function createAdditionalChain(options){
             return D3D_OK;
         },
 
-        /** @param {boolean} [shown]  Whether the picture goes to the window the display shows. */
+        /**
+         * @param {boolean} [shown]  Whether the picture goes to the window the display shows.
+         * @returns {number | Promise<number>}
+         */
         Present(shown = true){
             const hr = options.present(buffers[0], shown);
-            if (hr === D3D_OK)
+            if (hr === D3D_OK || hr instanceof Promise)
             {
                 presented = buffers[0];
                 presents++;

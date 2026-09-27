@@ -26,6 +26,17 @@ test('a screenshot that fails does not replace why the run timed out', async()=>
     assert.deepEqual(done, ['profiles'], 'the profiles were saved; no picture was written');
 });
 
+test('the stack the page was running is added to the reason', async()=>{
+    const reason = await reportTimeout({
+        reason: 'page did not answer',
+        save: ()=>{},
+        capture: async()=>'',
+        write: ()=>{},
+        stack: async()=>'  loop app.js:12',
+    });
+    assert.equal(reason, 'page did not answer\nthe page was running:\n  loop app.js:12');
+});
+
 test('a screenshot that works is written after the profiles', async()=>{
     /** @type {string[]} */
     const done = [];

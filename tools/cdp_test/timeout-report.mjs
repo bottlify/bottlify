@@ -17,10 +17,23 @@
  * @param {() => void} what.save  Writes the profiles collected so far.
  * @param {() => Promise<string>} what.capture  The page's screenshot, base64.
  * @param {(data: string) => void} what.write  Keeps a screenshot that came.
+ * @param {() => Promise<string>} [what.stack]  Where the page's own code is
+ *     running, when it holds the thread: the debugger interrupts a page that
+ *     answers nothing else.
  * @returns {Promise<string>} the reason, with what could not be kept
  */
-export async function reportTimeout({ reason, save, capture, write }){
+export async function reportTimeout({ reason, save, capture, write, stack }){
     save();
+    if (stack)
+    {
+        try
+        {
+            reason += `\nthe page was running:\n${await stack()}`;
+        }
+        catch (e){
+            reason += ` (no stack: ${e instanceof Error ? e.message : String(e)})`;
+        }
+    }
     try
     {
         write(await capture());
