@@ -1812,6 +1812,18 @@ test('a create with nowhere to put the interface fails instead of answering succ
     assert.equal(h.box.memory.readU32(out), 0);
 });
 
+/**
+ * A group's count as a guest routine leaves it, and the count of every call
+ * raised with it, which is what an entry reads first.
+ *
+ * @param {ReturnType<typeof seamed>} h @param {number} block
+ * @param {number} counter @param {number} value
+ */
+function counted(h, block, counter, value){
+    h.box.memory.writeU32(block + counter, value);
+    h.box.memory.writeU32(block + SHADOW.CALLS, h.box.memory.readU32(block + SHADOW.CALLS) + 1);
+}
+
 test('a device is handed out with its block already in place, and reads what the guest wrote', ()=>{
     // The guest methods find the block one word past the interface pointer,
     // and that word is written when the interface is published. A device
@@ -1831,9 +1843,10 @@ test('a device is handed out with its block already in place, and reads what the
     assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + cull * 4),
         h.box.memory.readU32(out), 'mirrored as the device holds it');
 
-    // What the guest method does: write the state, count the call.
+    // What the guest method does: write the state, mark it, count the call.
     h.box.memory.writeU32(block + SHADOW.RENDER_STATES + cull * 4, 1);
-    h.box.memory.writeU32(block + SHADOW.RENDER_STATE_CALLS, 1);
+    h.box.memory.writeU32(block + SHADOW.RENDER_STATE_MARKS, 1 << cull);
+    counted(h, block, SHADOW.RENDER_STATE_CALLS, 1);
     assert.equal(h.device(device, 'GetRenderState', [cull, out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), 1, 'the host answers from the block');
     assert.equal(h.libraries.shadow().renderStateCalls, 1);
@@ -1851,7 +1864,7 @@ test('a device is handed out with its block already in place, and reads what the
     assert.equal(h.box.memory.readU32(vblock + BUFFER.LENGTH), 256);
     h.box.memory.writeU32(block + SHADOW.STREAMS, vb);
     h.box.memory.writeU32(block + SHADOW.STREAMS + 4, 24);
-    h.box.memory.writeU32(block + SHADOW.BINDING_CALLS, 1);
+    counted(h, block, SHADOW.BINDING_CALLS, 1);
     const stride = 0xe200;
     assert.equal(h.device(device, 'GetStreamSource', [0, out, stride]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), vb, 'bound to the buffer the guest named');
@@ -1863,13 +1876,13 @@ test('a device is handed out with its block already in place, and reads what the
     h.box.memory.writeU32(vblock + BUFFER.LOCKED, 1);
     h.box.memory.writeU32(vblock + BUFFER.FROM, 0);
     h.box.memory.writeU32(vblock + BUFFER.TO, 64);
-    h.box.memory.writeU32(block + SHADOW.LOCK_CALLS, 1);
+    counted(h, block, SHADOW.LOCK_CALLS, 1);
     const bits = 0xe300;
     assert.equal(h.buffer(vb, 'Lock', [0, 0, bits, 0]), D3DERR_INVALIDCALL);
     h.box.memory.writeU32(vblock + BUFFER.LOCKED, 0);
     h.box.memory.writeU32(block + SHADOW.RING, vblock);
     h.box.memory.writeU32(block + SHADOW.RING_HEAD, 1);
-    h.box.memory.writeU32(block + SHADOW.UNLOCK_CALLS, 1);
+    counted(h, block, SHADOW.UNLOCK_CALLS, 1);
     assert.equal(h.buffer(vb, 'Lock', [0, 0, bits, 0]), D3D_OK);
     assert.equal(h.box.memory.readU32(vblock + BUFFER.LOCKED), 1, 'the guest routine sees it');
     assert.equal(h.buffer(vb, 'Unlock'), D3D_OK);
@@ -2031,12 +2044,13 @@ test('a texture, a stage state and a material the guest wrote reach the device',
     // What the guest routines leave: a pointer in a stage slot, a value in
     // the stage table, seventeen floats, and a count for each.
     h.box.memory.writeU32(block + SHADOW.TEXTURES + 3 * 4, texture);
-    h.box.memory.writeU32(block + SHADOW.TEXTURE_CALLS, 1);
+    counted(h, block, SHADOW.TEXTURE_CALLS, 1);
     h.box.memory.writeU32(block + SHADOW.STAGE_STATES + (3 * 32 + D3DTSS.COLOROP) * 4, D3DTOP.ADD);
-    h.box.memory.writeU32(block + SHADOW.STAGE_STATE_CALLS, 1);
+    h.box.memory.writeU32(block + SHADOW.STAGE_STATE_MARKS + 3 * 4, 1 << D3DTSS.COLOROP);
+    counted(h, block, SHADOW.STAGE_STATE_CALLS, 1);
     const material = 0xe300;
     h.fields.writeF32(block + SHADOW.MATERIAL + 16 * 4, 12.5);   // Power
-    h.box.memory.writeU32(block + SHADOW.MATERIAL_CALLS, 1);
+    counted(h, block, SHADOW.MATERIAL_CALLS, 1);
 
     assert.equal(h.device(device, 'GetTexture', [3, out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), texture, 'bound to the texture the guest named');
@@ -2060,7 +2074,7 @@ test('a texture, a stage state and a material the guest wrote reach the device',
         created]), D3D_OK);
     const second = h.box.memory.readU32(created);
     h.box.memory.writeU32(block + SHADOW.TEXTURES, second);
-    h.box.memory.writeU32(block + SHADOW.TEXTURE_CALLS, 2);
+    counted(h, block, SHADOW.TEXTURE_CALLS, 2);
     assert.equal(h.release(second), 0);
     assert.equal(h.object(second), null, 'the program holds nothing');
     assert.equal(h.box.memory.readU32(block + SHADOW.TEXTURES), STALE_POINTER);
@@ -2074,7 +2088,7 @@ test('a texture, a stage state and a material the guest wrote reach the device',
         created]), D3D_OK);
     const third = h.box.memory.readU32(created);
     h.box.memory.writeU32(block + SHADOW.TEXTURES, third);
-    h.box.memory.writeU32(block + SHADOW.TEXTURE_CALLS, 3);
+    counted(h, block, SHADOW.TEXTURE_CALLS, 3);
     assert.equal(h.device(device, 'GetTexture', [0, out]), D3D_OK);
     assert.equal(h.object(h.box.memory.readU32(out)), h.object(third));
     h.release(h.box.memory.readU32(out));
@@ -2082,7 +2096,7 @@ test('a texture, a stage state and a material the guest wrote reach the device',
     // Unbinding through the guest leaves it, and a stage the program never
     // wrote is left alone whatever the device holds.
     h.box.memory.writeU32(block + SHADOW.TEXTURES, 0);
-    h.box.memory.writeU32(block + SHADOW.TEXTURE_CALLS, 4);
+    counted(h, block, SHADOW.TEXTURE_CALLS, 4);
     assert.equal(h.device(device, 'GetTexture', [0, out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), 0);
     assert.equal(h.device(device, 'GetTexture', [3, out]), D3D_OK);

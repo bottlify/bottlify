@@ -26,13 +26,16 @@
  *
  * The block is one-way and untrusted. The guest writes it, and nothing the
  * host derives from state -- a pipeline, a shader, a binding -- is keyed on
- * the block directly. On every entry into the host the block is compared
- * with the host's own copy, and each difference goes through the same
- * setter the trap would have called, which is where validation and
- * invalidation live. Nothing depends on the guest having set a flag, because
- * the guest can write the block by any means at all. The host writes the
- * block only to mirror its own state into it -- at creation, after a state
- * block is applied, after a reset -- so that "unchanged" in the block means
+ * the block directly. On every entry into the host what the guest wrote is
+ * compared with the host's own copy, and each difference goes through the
+ * same setter the trap would have called, which is where validation and
+ * invalidation live. Nothing is taken on the guest's word: a mark or a count
+ * the routines leave says only where to look, a mark on a word that did not
+ * change costs a comparison, and a word written by other means than the
+ * routines is not looked at until one of them marks it -- the device keeps
+ * what it was last told, never anything unchecked. The host writes the block
+ * only to mirror its own state into it -- at creation, after a state block
+ * is applied, after a reset -- so that "unchanged" in the block means
  * "unchanged" on the device.
  *
  * Two things the fast path cannot do stay with the host. While a state block
@@ -44,9 +47,13 @@
  *
  * The block also counts the calls it absorbed, because the host no longer
  * sees them and a saving nobody can measure is a belief. It counts them per
- * group, and the host compares only the groups whose count moved: a burst of
- * render states between two draws costs the next draw a scan of the render
- * states, not of every word in the block.
+ * group and once more in all, and an entry reads the one count first: an
+ * entry after no setter reads one word. After some, the host looks at the
+ * small groups whose count moved, whole, and at the three large ones --
+ * 256 render states, 28 matrices, 256 stage states -- through marks: the
+ * routine marks the word or matrix it wrote, a bit each, and the host
+ * compares only what is marked. A burst of render states between two draws
+ * costs the next draw the states that were set, not a scan of the 256.
  *
  * A getter answers from the block too, where what it answers cannot change:
  * a texture's level is one surface however often it is asked for, so the
@@ -83,6 +90,11 @@ export const SHADOW = {
     RENDER_STATE_CALLS: 4,
     /** Fast-path SetTransform calls, counted by the guest. */
     TRANSFORM_CALLS: 8,
+    /**
+     * Every call the routines take, counted once more: the one word an entry
+     * reads when nothing was set.
+     */
+    CALLS: 12,
     /** 256 dwords, one per D3DRENDERSTATETYPE below 256. */
     RENDER_STATES: 16,
     RENDER_STATE_COUNT: 256,
@@ -118,7 +130,18 @@ export const SHADOW = {
     /** 8 stages of 32 dwords, one per D3DTEXTURESTAGESTATETYPE below 32. */
     STAGE_STATES: 3356,
     STAGE_STATE_STRIDE: 32,
-    SIZE: 3356 + 8 * 32 * 4,
+    /**
+     * The marks: a bit per word or matrix the guest wrote since the host last
+     * looked. 256 bits over 8 dwords for the render states, one dword for
+     * the 28 matrices, and a dword per stage for the stage states. One run,
+     * so the host clears them all with one write.
+     */
+    MARKS: 4380,
+    RENDER_STATE_MARKS: 4380,
+    TRANSFORM_MARKS: 4412,
+    STAGE_STATE_MARKS: 4416,
+    MARK_WORDS: 17,
+    SIZE: 4448,
 };
 
 /**
@@ -189,6 +212,9 @@ export const TEXTURE = {
 };
 
 export const FLAG_SLOW_PATH = 1;
+
+/** What the host clears the marks and the ring's head with; never written to. */
+const ZERO_MARKS = new Uint8Array(SHADOW.MARK_WORDS * 4);
 
 /** A lock for reading has nothing to remember; the host takes it. */
 const D3DLOCK_READONLY = 0x10;
@@ -314,6 +340,31 @@ const routine = (at, trap, parts)=>{
 };
 
 /**
+ * `bts [ecx + marks], eax`: marks word `eax` of a group as written. With a
+ * register offset into memory, `bts` addresses a string of bits, so the
+ * index is the bit whatever dword of the marks it falls in.
+ *
+ * A routine marks after it writes and counts after it marks. Another thread
+ * can enter the host between any two of its instructions, and the host
+ * adopts every word marked when it looks and clears every mark: a word is
+ * marked only once it holds the value, so a mark adopted early adopts that
+ * value, and a count that comes after its word was adopted finds it done.
+ *
+ * @param {number} marks  The group's marks, as an offset in the block.
+ * @returns {number[]}
+ */
+const mark = marks=>[0x0f, 0xab, 0x81, ...dword(marks)];
+
+/**
+ * `inc dword [reg + CALLS]`, a routine's last write: the call counted where
+ * an entry looks first. The register holds the device's block.
+ *
+ * @param {number} reg  1 for ECX, 2 for EDX, 3 for EBX.
+ * @returns {number[]}
+ */
+const counted = reg=>[0xff, 0x40 | reg, SHADOW.CALLS];
+
+/**
  * HRESULT SetRenderState(this, D3DRENDERSTATETYPE state, DWORD value), as
  * guest code. The block is one word past `this`.
  *
@@ -328,7 +379,9 @@ const routine = (at, trap, parts)=>{
  *     jae slow                    ; not a state the block holds
  *     mov edx, [esp+12]           ; value
  *     mov [ecx + eax*4 + RENDER_STATES], edx
+ *     bts [ecx + RENDER_STATE_MARKS], eax
  *     inc dword [ecx + RENDER_STATE_CALLS]
+ *     inc dword [ecx + CALLS]
  *     xor eax, eax                ; D3D_OK
  *     ret 12
  *   slow:
@@ -346,7 +399,9 @@ export function setRenderStateCode(at, trap){
         { jcc: 0x73, to: 'slow' },                               // jae slow
         [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
         [0x89, 0x94, 0x81, ...dword(SHADOW.RENDER_STATES)],      // mov [ecx+eax*4+disp], edx
+        mark(SHADOW.RENDER_STATE_MARKS),                         // bts [ecx+disp], eax
         [0xff, 0x41, SHADOW.RENDER_STATE_CALLS],                 // inc dword [ecx+4]
+        counted(1),                                              // inc dword [ecx+12]
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x0c, 0x00],                                      // ret 12
     ]);
@@ -374,15 +429,18 @@ export function setRenderStateCode(at, trap){
  *     mov edx, [esp+12]           ; the matrix
  *     test edx, edx
  *     jz slow                     ; NULL is refused by the host
- *     shl eax, 6                  ; slot * 64
- *     lea eax, [ecx + eax + TRANSFORMS]
- *     inc dword [ecx + TRANSFORM_CALLS]
  *     push esi
  *     push edi
  *     mov esi, edx
  *     mov edi, eax
+ *     shl edi, 6                  ; slot * 64
+ *     lea edi, [ecx + edi + TRANSFORMS]
+ *     mov edx, ecx                ; the block, kept across the copy
  *     mov ecx, 16
  *     rep movsd
+ *     bts [edx + TRANSFORM_MARKS], eax   ; the slot, once it holds the matrix
+ *     inc dword [edx + TRANSFORM_CALLS]
+ *     inc dword [edx + CALLS]
  *     pop edi
  *     pop esi
  *     xor eax, eax
@@ -408,15 +466,18 @@ export function setTransformCode(at, trap){
         [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0xc1, 0xe0, 0x06],                                      // shl eax, 6
-        [0x8d, 0x84, 0x01, ...dword(SHADOW.TRANSFORMS)],         // lea eax, [ecx+eax+disp]
-        [0xff, 0x41, SHADOW.TRANSFORM_CALLS],                    // inc dword [ecx+8]
         [0x56],                                                  // push esi
         [0x57],                                                  // push edi
         [0x89, 0xd6],                                            // mov esi, edx
         [0x89, 0xc7],                                            // mov edi, eax
+        [0xc1, 0xe7, 0x06],                                      // shl edi, 6
+        [0x8d, 0xbc, 0x39, ...dword(SHADOW.TRANSFORMS)],         // lea edi, [ecx+edi+disp]
+        [0x89, 0xca],                                            // mov edx, ecx
         [0xb9, ...dword(16)],                                    // mov ecx, 16
         [0xf3, 0xa5],                                            // rep movsd
+        [0x0f, 0xab, 0x82, ...dword(SHADOW.TRANSFORM_MARKS)],    // bts [edx+disp], eax
+        [0xff, 0x42, SHADOW.TRANSFORM_CALLS],                    // inc dword [edx+8]
+        counted(2),                                              // inc dword [edx+12]
         [0x5f],                                                  // pop edi
         [0x5e],                                                  // pop esi
         [0x31, 0xc0],                                            // xor eax, eax
@@ -480,6 +541,7 @@ export function setTransformCode(at, trap){
  *     mov dword [ecx+LOCKED], 1
  *     mov ebx, [ecx+DEVICE]
  *     inc dword [ebx+LOCK_CALLS]
+ *     inc dword [ebx+CALLS]
  *     pop ebx
  *     xor eax, eax
  *     ret 20
@@ -537,6 +599,7 @@ export function lockCode(at, trap){
         [0xc7, 0x41, BUFFER.LOCKED, ...dword(1)],                // mov dword [ecx+12], 1
         [0x8b, 0x59, BUFFER.DEVICE],                             // mov ebx, [ecx+28]
         [0xff, 0x83, ...dword(SHADOW.LOCK_CALLS)],               // inc dword [ebx+disp]
+        counted(3),                                              // inc dword [ebx+12]
         [0x5b],                                                  // pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x14, 0x00],                                      // ret 20
@@ -558,6 +621,7 @@ export function lockCode(at, trap){
  *     inc dword [edx+RING_HEAD]
  *     mov dword [ecx+LOCKED], 0
  *     inc dword [edx+UNLOCK_CALLS]
+ *     inc dword [edx+CALLS]
  *     xor eax, eax
  *     ret 4
  *
@@ -577,6 +641,7 @@ export function unlockCode(at, trap){
         [0xff, 0x82, ...dword(SHADOW.RING_HEAD)],                // inc dword [edx+disp]
         [0xc7, 0x41, BUFFER.LOCKED, ...dword(0)],                // mov dword [ecx+12], 0
         [0xff, 0x82, ...dword(SHADOW.UNLOCK_CALLS)],             // inc dword [edx+disp]
+        counted(2),                                              // inc dword [edx+12]
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x04, 0x00],                                      // ret 4
     ]);
@@ -597,6 +662,7 @@ export function unlockCode(at, trap){
  *     mov [ecx + eax*8 + STREAMS + 4], edx
  *   unbound:
  *     inc dword [ecx+BINDING_CALLS]
+ *     inc dword [ecx+CALLS]
  *     xor eax, eax
  *     ret 16
  *
@@ -617,6 +683,7 @@ export function setStreamSourceCode(at, trap){
         [0x89, 0x94, 0xc1, ...dword(SHADOW.STREAMS + 4)],        // mov [ecx+eax*8+disp+4], edx
         { label: 'unbound' },
         [0xff, 0x81, ...dword(SHADOW.BINDING_CALLS)],            // inc dword [ecx+disp]
+        counted(1),                                              // inc dword [ecx+12]
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x10, 0x00],                                      // ret 16
     ]);
@@ -637,6 +704,7 @@ export function setIndicesCode(at, trap){
         [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
         [0x89, 0x81, ...dword(SHADOW.BASE_VERTEX)],              // mov [ecx+disp], eax
         [0xff, 0x81, ...dword(SHADOW.BINDING_CALLS)],            // inc dword [ecx+disp]
+        counted(1),                                              // inc dword [ecx+12]
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x0c, 0x00],                                      // ret 12
     ]);
@@ -658,6 +726,7 @@ export function setVertexShaderCode(at, trap){
         { jcc: 0x75, to: 'slow' },                               // jnz slow
         [0x89, 0x81, ...dword(SHADOW.VERTEX_SHADER)],            // mov [ecx+disp], eax
         [0xff, 0x81, ...dword(SHADOW.BINDING_CALLS)],            // inc dword [ecx+disp]
+        counted(1),                                              // inc dword [ecx+12]
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x08, 0x00],                                      // ret 8
     ]);
@@ -691,6 +760,7 @@ const invalidTail = popped=>[
  *     mov edx, [esp+12]           ; the texture
  *     mov [ecx + eax*4 + TEXTURES], edx
  *     inc dword [ecx+TEXTURE_CALLS]
+ *     inc dword [ecx+CALLS]
  *     xor eax, eax
  *     ret 12
  *
@@ -706,6 +776,7 @@ export function setTextureCode(at, trap){
         [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
         [0x89, 0x94, 0x81, ...dword(SHADOW.TEXTURES)],           // mov [ecx+eax*4+disp], edx
         [0xff, 0x81, ...dword(SHADOW.TEXTURE_CALLS)],            // inc dword [ecx+disp]
+        counted(1),                                              // inc dword [ecx+12]
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x0c, 0x00],                                      // ret 12
         ...invalidTail(12),
@@ -730,7 +801,9 @@ export function setTextureCode(at, trap){
  *     add eax, [esp+12]           ; + type
  *     mov edx, [esp+16]           ; value
  *     mov [ecx + eax*4 + STAGE_STATES], edx
+ *     bts [ecx + STAGE_STATE_MARKS], eax  ; the stage's dword, the type's bit
  *     inc dword [ecx+STAGE_STATE_CALLS]
+ *     inc dword [ecx+CALLS]
  *     xor eax, eax
  *     ret 16
  *
@@ -753,7 +826,9 @@ export function setTextureStageStateCode(at, trap){
         [0x03, 0x44, 0x24, 0x0c],                                // add eax, [esp+12]
         [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
         [0x89, 0x94, 0x81, ...dword(SHADOW.STAGE_STATES)],       // mov [ecx+eax*4+disp], edx
+        mark(SHADOW.STAGE_STATE_MARKS),                          // bts [ecx+disp], eax
         [0xff, 0x81, ...dword(SHADOW.STAGE_STATE_CALLS)],        // inc dword [ecx+disp]
+        counted(1),                                              // inc dword [ecx+12]
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x10, 0x00],                                      // ret 16
         ...invalidTail(16),
@@ -763,18 +838,21 @@ export function setTextureStageStateCode(at, trap){
 /**
  * HRESULT SetMaterial(this, const D3DMATERIAL8*), as guest code. Copies the
  * seventeen floats into the block; a null pointer is the host's to refuse.
+ * The call is counted once the copy is done, so that an entry another
+ * thread makes during it does not take half a material as the whole.
  *
  *     mov edx, [esp+8]            ; the material
  *     test edx, edx
  *     jz slow
- *     lea eax, [ecx + MATERIAL]
- *     inc dword [ecx+MATERIAL_CALLS]
  *     push esi
  *     push edi
  *     mov esi, edx
- *     mov edi, eax
+ *     lea edi, [ecx + MATERIAL]
+ *     mov edx, ecx                ; the block, kept across the copy
  *     mov ecx, 17
  *     rep movsd
+ *     inc dword [edx+MATERIAL_CALLS]
+ *     inc dword [edx+CALLS]
  *     pop edi
  *     pop esi
  *     xor eax, eax
@@ -789,14 +867,15 @@ export function setMaterialCode(at, trap){
         [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x8d, 0x81, ...dword(SHADOW.MATERIAL)],                 // lea eax, [ecx+disp]
-        [0xff, 0x81, ...dword(SHADOW.MATERIAL_CALLS)],           // inc dword [ecx+disp]
         [0x56],                                                  // push esi
         [0x57],                                                  // push edi
         [0x89, 0xd6],                                            // mov esi, edx
-        [0x89, 0xc7],                                            // mov edi, eax
+        [0x8d, 0xb9, ...dword(SHADOW.MATERIAL)],                 // lea edi, [ecx+disp]
+        [0x89, 0xca],                                            // mov edx, ecx
         [0xb9, ...dword(SHADOW.MATERIAL_WORDS)],                 // mov ecx, 17
         [0xf3, 0xa5],                                            // rep movsd
+        [0xff, 0x82, ...dword(SHADOW.MATERIAL_CALLS)],           // inc dword [edx+disp]
+        counted(2),                                              // inc dword [edx+12]
         [0x5f],                                                  // pop edi
         [0x5e],                                                  // pop esi
         [0x31, 0xc0],                                            // xor eax, eax
@@ -946,8 +1025,8 @@ export function materialFloats(material){
  *     keeps what it returns past the call that read it.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number) => number} [readU32]
- *     A dword read in place, for the six counters looked at on every call:
- *     a view per call was a measured share of a frame.
+ *     A dword read in place, for the count looked at on every call: a view
+ *     per call was a measured share of a frame.
  * @property {ShadowDevice} device
  * @property {(pointer: number) => any} objectAt    The object a pointer the guest wrote names.
  * @property {(buffer: ShadowBuffer) => number} pointerOf   The pointer a buffer is published as.
@@ -977,12 +1056,16 @@ export function createShadow(deps){
      * a group whose count is unchanged has nothing to adopt.
      */
     const seenCounters = new Uint32Array(COUNTERS.length);
+    /** The count of every call the routines took, as of the last entry. */
+    let seenCalls = 0;
     const counters = new Uint32Array(COUNTERS.length);
-    let calls = {
-        renderStates: 0, transforms: 0, bindings: 0, locks: 0, unlocks: 0,
-        textures: 0, stageStates: 0, materials: 0,
-    };
+    /** The counters as the last entry that found something read them. */
+    const absorbed = new Uint32Array(COUNTERS.length);
+    /** @param {number} group */
+    const changed = group=>counters[group] !== seenCounters[group];
     let refused = 0;
+    /** Words of the block compared with the host's copy, over every entry. */
+    let compared = 0;
     let slow = false;
     let synced = 0;
     let skipped = 0;
@@ -1190,38 +1273,96 @@ export function createShadow(deps){
         }
     };
 
-    // One scan per group, each over its own region of the block, so that
-    // a call that changed one group reads that group and no other. A
-    // difference goes through the device's own setter; a value the setter
-    // refuses is reported once and kept as the guest set it, so it is not
-    // reported again.
-    const syncRenderStates = ()=>{
-        const words = readWords(address + SHADOW.RENDER_STATES, SHADOW.RENDER_STATE_COUNT);
-        for (let state = 0; state < SHADOW.RENDER_STATE_COUNT; state++)
+    // Each group below reads the block through `block`, one view of all of
+    // it, taken once per entry: a view per group, or a read per word, each
+    // cost more than the words they read. A difference goes through the
+    // device's own setter; a value the setter refuses is reported once and
+    // kept as the guest set it, so it is not reported again.
+
+    /**
+     * The render states and stage states marked in one group's marks, each
+     * adopted in ascending order -- the order a scan of the whole group took
+     * them in -- by `adopt`. Answers whether any was marked.
+     *
+     * @param {Uint32Array} block
+     * @param {number} marksAt  The group's marks, as an offset in the block.
+     * @param {(block: Uint32Array, index: number) => void} adopt
+     */
+    const takeMarked = (block, marksAt, adopt)=>{
+        let any = false;
+        for (let row = 0; row < 8; row++)
         {
-            const value = words[state];
-            if (value === seenStates[state])
+            const marks = block[(marksAt >>> 2) + row];
+            if (marks === 0)
             {
                 continue;
             }
-            seenStates[state] = value;
-            if (device.SetRenderState(state, value) !== 0)
+            any = true;
+            for (let bits = marks; bits !== 0; bits &= bits - 1)
             {
-                refuse('IDirect3DDevice8::SetRenderState',
-                    `state ${state} set to ${value} in the guest was accepted;`
-                    + ' the device refuses it');
+                compared++;
+                adopt(block, row * 32 + (31 - Math.clz32(bits & -bits)));
             }
+        }
+        return any;
+    };
+
+    /** @param {Uint32Array} block @param {number} state */
+    const adoptRenderState = (block, state)=>{
+        const value = block[(SHADOW.RENDER_STATES >>> 2) + state];
+        if (value === seenStates[state])
+        {
+            return;
+        }
+        seenStates[state] = value;
+        if (device.SetRenderState(state, value) !== 0)
+        {
+            refuse('IDirect3DDevice8::SetRenderState',
+                `state ${state} set to ${value} in the guest was accepted;`
+                + ' the device refuses it');
         }
     };
 
-    const syncTransforms = ()=>{
-        const words = readWords(address + SHADOW.TRANSFORMS, SHADOW.TRANSFORM_SLOTS * 16);
-        for (let slot = 0; slot < SHADOW.TRANSFORM_SLOTS; slot++)
+    /** @param {Uint32Array} block @param {number} at  The stage times 32, plus the type. */
+    const adoptStageState = (block, at)=>{
+        const value = block[(SHADOW.STAGE_STATES >>> 2) + at];
+        if (value === seenStageStates[at])
         {
-            let same = true;
-            for (let word = slot * 16; word < slot * 16 + 16; word++)
+            return;
+        }
+        seenStageStates[at] = value;
+        const stage = at >>> 5;
+        const type = at & (SHADOW.STAGE_STATE_STRIDE - 1);
+        if (device.SetTextureStageState(stage, type, value) !== 0)
+        {
+            refuse('IDirect3DDevice8::SetTextureStageState',
+                `stage ${stage} state ${type} set to ${value} in the guest was accepted;`
+                + ' the device refuses it');
+        }
+    };
+
+    /**
+     * A transform is sixteen words and there are 28, so its marks are one
+     * dword. A mark past the 28 names nothing: only a write by other means
+     * than the routines puts one there.
+     *
+     * @param {Uint32Array} block
+     */
+    const syncTransforms = block=>{
+        const marks = block[SHADOW.TRANSFORM_MARKS >>> 2];
+        for (let bits = marks; bits !== 0; bits &= bits - 1)
+        {
+            const slot = 31 - Math.clz32(bits & -bits);
+            if (slot >= SHADOW.TRANSFORM_SLOTS)
             {
-                if (words[word] !== seenTransforms[word])
+                continue;
+            }
+            compared += 16;
+            const from = (SHADOW.TRANSFORMS >>> 2) + slot * 16;
+            let same = true;
+            for (let word = 0; word < 16; word++)
+            {
+                if (block[from + word] !== seenTransforms[slot * 16 + word])
                 {
                     same = false;
                     break;
@@ -1231,8 +1372,9 @@ export function createShadow(deps){
             {
                 continue;
             }
-            seenTransforms.set(words.subarray(slot * 16, slot * 16 + 16), slot * 16);
-            const matrix = new Float32Array(words.buffer, words.byteOffset + slot * 64, 16);
+            const words = block.subarray(from, from + 16);
+            seenTransforms.set(words, slot * 16);
+            const matrix = new Float32Array(words.buffer, words.byteOffset, 16);
             if (device.SetTransform(transformType(slot), matrix) !== 0)
             {
                 refuse('IDirect3DDevice8::SetTransform',
@@ -1240,14 +1382,19 @@ export function createShadow(deps){
                     + ' the device refuses it');
             }
         }
+        return marks !== 0;
     };
 
-    const syncBindings = ()=>{
-        const bound = readWords(address + SHADOW.STREAMS, SHADOW.STREAM_COUNT * 2 + 3);
+    // The three small groups are compared whole: a scan of thirty-five words,
+    // eight or seventeen costs less than keeping marks for them would.
+    /** @param {Uint32Array} block */
+    const syncBindings = block=>{
+        const from = SHADOW.STREAMS >>> 2;
+        compared += SHADOW.STREAM_COUNT * 2 + 3;
         for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
         {
-            const pointer = bound[index * 2];
-            const stride = bound[index * 2 + 1];
+            const pointer = block[from + index * 2];
+            const stride = block[from + index * 2 + 1];
             if (pointer === seenStreams[index * 2] && stride === seenStreams[index * 2 + 1])
             {
                 continue;
@@ -1267,11 +1414,12 @@ export function createShadow(deps){
                     `stream ${index} bound in the guest was accepted; the device refuses it`);
             }
         }
-        const indicesAt = SHADOW.STREAM_COUNT * 2;
-        if (bound[indicesAt] !== seenIndices || bound[indicesAt + 1] !== seenBaseVertex)
+        const indices = block[SHADOW.INDICES >>> 2];
+        const baseVertex = block[SHADOW.BASE_VERTEX >>> 2];
+        if (indices !== seenIndices || baseVertex !== seenBaseVertex)
         {
-            seenIndices = bound[indicesAt];
-            seenBaseVertex = bound[indicesAt + 1];
+            seenIndices = indices;
+            seenBaseVertex = baseVertex;
             const buffer = seenIndices === 0 ? null : deps.objectAt(seenIndices);
             if (seenIndices !== 0 && !buffer)
             {
@@ -1285,9 +1433,10 @@ export function createShadow(deps){
                     'indices bound in the guest were accepted; the device refuses them');
             }
         }
-        if (bound[indicesAt + 2] !== seenShader)
+        const shader = block[SHADOW.VERTEX_SHADER >>> 2];
+        if (shader !== seenShader)
         {
-            seenShader = bound[indicesAt + 2];
+            seenShader = shader;
             if (device.SetVertexShader(seenShader) !== 0)
             {
                 refuse('IDirect3DDevice8::SetVertexShader',
@@ -1297,11 +1446,13 @@ export function createShadow(deps){
         }
     };
 
-    const syncTextures = ()=>{
-        const bound = readWords(address + SHADOW.TEXTURES, SHADOW.STAGE_COUNT);
+    /** @param {Uint32Array} block */
+    const syncTextures = block=>{
+        const from = SHADOW.TEXTURES >>> 2;
+        compared += SHADOW.STAGE_COUNT;
         for (let stage = 0; stage < SHADOW.STAGE_COUNT; stage++)
         {
-            const pointer = bound[stage];
+            const pointer = block[from + stage];
             if (pointer === seenTextures[stage])
             {
                 continue;
@@ -1322,34 +1473,14 @@ export function createShadow(deps){
         }
     };
 
-    const syncStageStates = ()=>{
-        const words = readWords(address + SHADOW.STAGE_STATES,
-            SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE);
-        for (let at = 0; at < words.length; at++)
-        {
-            const value = words[at];
-            if (value === seenStageStates[at])
-            {
-                continue;
-            }
-            seenStageStates[at] = value;
-            const stage = at >>> 5;
-            const type = at & (SHADOW.STAGE_STATE_STRIDE - 1);
-            if (device.SetTextureStageState(stage, type, value) !== 0)
-            {
-                refuse('IDirect3DDevice8::SetTextureStageState',
-                    `stage ${stage} state ${type} set to ${value} in the guest was accepted;`
-                    + ' the device refuses it');
-            }
-        }
-    };
-
-    const syncMaterial = ()=>{
-        const words = readWords(address + SHADOW.MATERIAL, SHADOW.MATERIAL_WORDS);
+    /** @param {Uint32Array} block */
+    const syncMaterial = block=>{
+        const from = SHADOW.MATERIAL >>> 2;
+        compared += SHADOW.MATERIAL_WORDS;
         let same = true;
         for (let word = 0; word < SHADOW.MATERIAL_WORDS; word++)
         {
-            if (words[word] !== seenMaterial[word])
+            if (block[from + word] !== seenMaterial[word])
             {
                 same = false;
                 break;
@@ -1359,6 +1490,7 @@ export function createShadow(deps){
         {
             return;
         }
+        const words = block.subarray(from, from + SHADOW.MATERIAL_WORDS);
         seenMaterial.set(words);
         const floats = new Float32Array(words.buffer, words.byteOffset, SHADOW.MATERIAL_WORDS);
         if (device.SetMaterial(materialOf(floats)) !== 0)
@@ -1421,69 +1553,70 @@ export function createShadow(deps){
             {
                 return;
             }
-            let moved = false;
-            for (let group = 0; group < COUNTERS.length; group++)
+            const calls = readWord(address + SHADOW.CALLS);
+            if (calls === seenCalls)
             {
-                counters[group] = readWord(address + COUNTERS[group]);
-                moved ||= counters[group] !== seenCounters[group];
-            }
-            if (!moved)
-            {
-                // Nothing was set and nothing unlocked since the last look;
-                // the block can only differ from the copy through the
-                // routines, which count.
+                // Nothing was set and nothing unlocked since the last look:
+                // the routines count every call they take.
                 skipped++;
                 return;
             }
+            const block = readWords(address, SHADOW.SIZE >>> 2);
+            if (block.length < SHADOW.SIZE >>> 2)
+            {
+                // No memory to read -- a machine that has stopped: nothing
+                // the guest wrote is there to adopt.
+                return;
+            }
+            seenCalls = calls;
             synced++;
-            calls = {
-                renderStates: counters[RENDER_STATE_GROUP],
-                transforms: counters[TRANSFORM_GROUP],
-                bindings: counters[BINDING_GROUP],
-                locks: counters[LOCK_GROUP],
-                unlocks: counters[UNLOCK_GROUP],
-                textures: counters[TEXTURE_GROUP],
-                stageStates: counters[STAGE_STATE_GROUP],
-                materials: counters[MATERIAL_GROUP],
-            };
-            /** @param {number} group */
-            const changed = group=>counters[group] !== seenCounters[group];
-            if (changed(RENDER_STATE_GROUP))
+            for (let group = 0; group < COUNTERS.length; group++)
             {
-                syncRenderStates();
+                counters[group] = block[COUNTERS[group] >>> 2];
             }
-            if (changed(TRANSFORM_GROUP))
+            // By index: `set` on arrays this short cost more than the loop.
+            for (let group = 0; group < COUNTERS.length; group++)
             {
-                syncTransforms();
+                absorbed[group] = counters[group];
             }
+            // The marked groups are taken by their marks whichever count
+            // moved, and every mark with them, so that one write clears the
+            // lot: a routine that marked and has not counted yet is adopted
+            // here, and its count finds nothing left to do.
+            let marked = takeMarked(block, SHADOW.RENDER_STATE_MARKS, adoptRenderState);
+            marked = syncTransforms(block) || marked;
             if (changed(BINDING_GROUP))
             {
-                syncBindings();
+                syncBindings(block);
             }
             if (changed(TEXTURE_GROUP))
             {
-                syncTextures();
+                syncTextures(block);
             }
-            if (changed(STAGE_STATE_GROUP))
-            {
-                syncStageStates();
-            }
+            marked = takeMarked(block, SHADOW.STAGE_STATE_MARKS, adoptStageState) || marked;
             if (changed(MATERIAL_GROUP))
             {
-                syncMaterial();
+                syncMaterial(block);
             }
-            seenCounters.set(counters);
+            if (marked)
+            {
+                deps.writeMemory(address + SHADOW.MARKS, ZERO_MARKS);
+            }
+            for (let group = 0; group < COUNTERS.length; group++)
+            {
+                seenCounters[group] = counters[group];
+            }
 
             const ringHead = counters[RING_GROUP];
             if (ringHead !== 0)
             {
-                const ring = readWords(address + SHADOW.RING,
-                    Math.min(ringHead, SHADOW.RING_CAPACITY));
-                for (const block of ring)
+                const ring = block.slice((SHADOW.RING >>> 2),
+                    (SHADOW.RING >>> 2) + Math.min(ringHead, SHADOW.RING_CAPACITY));
+                for (const buffer of ring)
                 {
-                    settle(block);
+                    settle(buffer);
                 }
-                deps.writeMemory(address + SHADOW.RING_HEAD, dwordBytes(0));
+                deps.writeMemory(address + SHADOW.RING_HEAD, ZERO_MARKS.subarray(0, 4));
                 seenCounters[RING_GROUP] = 0;
             }
         },
@@ -1661,14 +1794,14 @@ export function createShadow(deps){
             placed: address !== 0 ? 1 : 0,
             slowPath: slow ? 1 : 0,
             // What never crossed into the host, which is the point of all this.
-            renderStateCalls: calls.renderStates,
-            transformCalls: calls.transforms,
-            bindingCalls: calls.bindings,
-            lockCalls: calls.locks,
-            unlockCalls: calls.unlocks,
-            textureCalls: calls.textures,
-            stageStateCalls: calls.stageStates,
-            materialCalls: calls.materials,
+            renderStateCalls: absorbed[RENDER_STATE_GROUP],
+            transformCalls: absorbed[TRANSFORM_GROUP],
+            bindingCalls: absorbed[BINDING_GROUP],
+            lockCalls: absorbed[LOCK_GROUP],
+            unlockCalls: absorbed[UNLOCK_GROUP],
+            textureCalls: absorbed[TEXTURE_GROUP],
+            stageStateCalls: absorbed[STAGE_STATE_GROUP],
+            materialCalls: absorbed[MATERIAL_GROUP],
             buffers: blocks.size,
             // Levels handed out in the guest, as the references charged for
             // them: a level the program still holds is counted once the host
@@ -1678,6 +1811,9 @@ export function createShadow(deps){
             // the counters said there was nothing.
             synced,
             skipped,
+            // Words compared with the host's copy: what the entries cost,
+            // which follows what the guest set, not the size of the block.
+            compared,
             refused,
         }),
     };

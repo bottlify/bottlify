@@ -214,8 +214,15 @@ function fakeDevice(){
 /** @param {{ readU32?: boolean }} [options] */
 function machine(options = {}){
     const memory = new Uint8Array(0x20000);
-    /** How often the block was copied out, and which regions of it, by offset. */
-    const reads = { memory: 0, regions: /** @type {[number, number][]} */ ([]) };
+    /**
+     * How often the block was copied out, which regions of it, and which
+     * words were read in place, by offset.
+     */
+    const reads = {
+        memory: 0,
+        regions: /** @type {[number, number][]} */ ([]),
+        words: /** @type {number[]} */ ([]),
+    };
     let free = 0x1008;
     const device = fakeDevice();
     /** @type {string[]} */
@@ -237,7 +244,12 @@ function machine(options = {}){
             reads.regions.push([address - shadow.address(), length]);
             return memory.slice(address, address + length);
         },
-        readU32: options.readU32 ? address=>view.getUint32(address, true) : undefined,
+        readU32: options.readU32
+            ? address=>{
+                reads.words.push(address - shadow.address());
+                return view.getUint32(address, true);
+            }
+            : undefined,
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         device,
         objectAt: pointer=>published.get(pointer) ?? null,
@@ -267,6 +279,60 @@ function machine(options = {}){
         bump(at){
             view.setUint32(at, view.getUint32(at, true) + 1, true);
         },
+        /**
+         * A call a routine took: its group's counter, and the count of every
+         * call, which a routine raises last.
+         *
+         * @param {number} counter  The group's counter, as an offset in the block.
+         */
+        count(counter){
+            this.bump(shadow.address() + counter);
+            this.bump(shadow.address() + SHADOW.CALLS);
+        },
+        /**
+         * The mark a routine leaves on word `index` of a group, as `bts` sets it.
+         *
+         * @param {number} marks  The group's marks, as an offset in the block.
+         * @param {number} index
+         */
+        mark(marks, index){
+            const word = shadow.address() + marks + (index >>> 5) * 4;
+            view.setUint32(word, (view.getUint32(word, true) | 1 << (index & 31)) >>> 0, true);
+        },
+        /** What SetRenderState does in the guest. @param {number} state @param {number} value */
+        setState(state, value){
+            const at = shadow.address();
+            view.setUint32(at + SHADOW.RENDER_STATES + state * 4, value >>> 0, true);
+            this.mark(SHADOW.RENDER_STATE_MARKS, state);
+            this.count(SHADOW.RENDER_STATE_CALLS);
+        },
+        /**
+         * What SetTextureStageState does in the guest.
+         *
+         * @param {number} stage @param {number} type @param {number} value
+         */
+        setStageState(stage, type, value){
+            const at = shadow.address();
+            const index = stage * SHADOW.STAGE_STATE_STRIDE + type;
+            view.setUint32(at + SHADOW.STAGE_STATES + index * 4, value >>> 0, true);
+            this.mark(SHADOW.STAGE_STATE_MARKS, index);
+            this.count(SHADOW.STAGE_STATE_CALLS);
+        },
+        /**
+         * What SetTransform does in the guest, given the slot.
+         *
+         * @param {number} slot @param {ArrayLike<number>} floats
+         */
+        setTransform(slot, floats){
+            const at = shadow.address();
+            for (let word = 0; word < 16; word++)
+            {
+                view.setFloat32(at + SHADOW.TRANSFORMS + slot * 64 + word * 4,
+                    floats[word] ?? 0, true);
+            }
+            this.mark(SHADOW.TRANSFORM_MARKS, slot);
+            this.count(SHADOW.TRANSFORM_CALLS);
+        },
     };
 }
 
@@ -292,7 +358,18 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.TEXTURES + SHADOW.STAGE_COUNT * 4, SHADOW.MATERIAL);
     assert.equal(SHADOW.MATERIAL + SHADOW.MATERIAL_WORDS * 4, SHADOW.STAGE_STATES);
     assert.equal(SHADOW.STAGE_STATES + SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE * 4,
-        SHADOW.SIZE);
+        SHADOW.MARKS);
+    // A bit per render state, per matrix and per stage state, in one run the
+    // host clears with one write.
+    assert.equal(SHADOW.MARKS, SHADOW.RENDER_STATE_MARKS);
+    assert.equal(SHADOW.RENDER_STATE_MARKS + SHADOW.RENDER_STATE_COUNT / 8, SHADOW.TRANSFORM_MARKS);
+    assert.ok(SHADOW.TRANSFORM_SLOTS <= 32);
+    assert.equal(SHADOW.TRANSFORM_MARKS + 4, SHADOW.STAGE_STATE_MARKS);
+    assert.equal(SHADOW.STAGE_STATE_MARKS + SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE / 8,
+        SHADOW.MARKS + SHADOW.MARK_WORDS * 4);
+    assert.equal(SHADOW.MARKS + SHADOW.MARK_WORDS * 4, SHADOW.SIZE);
+    assert.ok(SHADOW.CALLS > SHADOW.TRANSFORM_CALLS && SHADOW.CALLS < SHADOW.RENDER_STATES,
+        'the count of every call in the header, where a disp8 reaches it');
     assert.equal(BUFFER.SIZE, 32);
     assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.SIZE);
     // Enough for the longest chain a texture of this era can have: a 32768
@@ -339,6 +416,26 @@ test('the routines end in a jump to their own trap, and check the flag first', (
     }
     const lock = rets.lock[0];
     assert.equal(lock[lock.length - 11], 0x5b, 'the lock pops what it pushed first');
+
+    // A routine's last write is the count of every call, in the device's
+    // block: through ECX where the block is `this`'s, through the register
+    // holding it where it is a buffer's device's or the copy took ECX.
+    /** @type {[string, Uint8Array, number, number][]} */
+    const lastWrites = [
+        ['render state', rs, rs.length - 13, 0x41],
+        ['transform', rets.transform[0], rets.transform[0].length - 15, 0x42],
+        ['lock', lock, lock.length - 14, 0x43],
+        ['unlock', rets.unlock[0], rets.unlock[0].length - 13, 0x42],
+        ['stream', rets.stream[0], rets.stream[0].length - 13, 0x41],
+        ['indices', rets.indices[0], rets.indices[0].length - 13, 0x41],
+        ['shader', rets.shader[0], rets.shader[0].length - 13, 0x41],
+        ['material', rets.material[0], rets.material[0].length - 15, 0x42],
+    ];
+    for (const [name, code, at, modrm] of lastWrites)
+    {
+        assert.deepEqual([...code.slice(at, at + 3)], [0xff, modrm, SHADOW.CALLS],
+            `${name} counts the call last`);
+    }
 
     // The level getter refuses a level the texture has not got where the two
     // setters refuse a stage, and reads the count out of the block rather
@@ -432,10 +529,8 @@ test('what the guest wrote is adopted on entry, through the device\'s own setter
     const m = machine();
     const at = m.shadow.address();
 
-    m.put32(at + SHADOW.RENDER_STATES + 8 * 4, 5);
-    m.bump(at + SHADOW.RENDER_STATE_CALLS);
-    m.putF32(at + SHADOW.TRANSFORMS + 24 * 64, 42);   // WORLD[0]
-    m.bump(at + SHADOW.TRANSFORM_CALLS);
+    m.setState(8, 5);
+    m.setTransform(24, [42]);   // WORLD
     m.shadow.sync();
 
     assert.deepEqual(m.device.calls, ['rs 8=5', 'tr 256=42,0']);
@@ -446,6 +541,10 @@ test('what the guest wrote is adopted on entry, through the device\'s own setter
 
     m.shadow.sync();
     assert.equal(m.device.calls.length, 2, 'nothing changed, nothing set again');
+    for (let word = 0; word < SHADOW.MARK_WORDS; word++)
+    {
+        assert.equal(m.u32(at + SHADOW.MARKS + word * 4), 0, 'the marks taken are cleared');
+    }
 });
 
 test('an entry with the counters unchanged does not read the block', ()=>{
@@ -454,29 +553,31 @@ test('an entry with the counters unchanged does not read the block', ()=>{
     m.shadow.sync();
     assert.equal(m.shadow.diagnostics().skipped, 1, 'the counters said nothing moved');
 
-    // A write without a count is a write not made by the routines, and the
-    // routines are the only writer of the block that the fast path knows.
+    // A write without a count or a mark is a write not made by the routines,
+    // and the routines are the only writer of the block that the fast path
+    // knows: nothing is adopted until one of them says where to look.
     m.put32(at + SHADOW.RENDER_STATES + 8 * 4, 5);
     m.shadow.sync();
     assert.deepEqual(m.device.calls, [], 'not adopted until a routine counts');
-    m.bump(at + SHADOW.RENDER_STATE_CALLS);
+    m.count(SHADOW.RENDER_STATE_CALLS);
+    m.shadow.sync();
+    assert.deepEqual(m.device.calls, [], 'nor while no routine marks it');
+    m.mark(SHADOW.RENDER_STATE_MARKS, 8);
+    m.count(SHADOW.RENDER_STATE_CALLS);
     m.shadow.sync();
     assert.deepEqual(m.device.calls, ['rs 8=5']);
-    assert.equal(m.shadow.diagnostics().synced, 1);
+    assert.equal(m.shadow.diagnostics().synced, 2);
     assert.equal(m.shadow.diagnostics().skipped, 2);
 });
 
 test('a value the device refuses is reported once and not set again', ()=>{
     const m = machine();
-    const at = m.shadow.address();
 
-    m.put32(at + SHADOW.RENDER_STATES + 9 * 4, 1);    // state 9: not the device's
-    m.putF32(at + SHADOW.TRANSFORMS + 5 * 64, 1);     // type 5: refused
-    m.bump(at + SHADOW.RENDER_STATE_CALLS);
-    m.bump(at + SHADOW.TRANSFORM_CALLS);
+    m.setState(9, 1);                                 // state 9: not the device's
+    m.setTransform(5, [1]);                           // type 5: refused
     m.shadow.sync();
-    m.bump(at + SHADOW.RENDER_STATE_CALLS);
-    m.bump(at + SHADOW.TRANSFORM_CALLS);
+    m.setState(9, 1);
+    m.setTransform(5, [1]);
     m.shadow.sync();
 
     assert.equal(m.device.calls.length, 2, 'each tried once');
@@ -506,7 +607,7 @@ test('the slow-path flag is the host\'s, and a re-mirror brings the block to the
     const view = new DataView(m.memory.buffer);
     assert.equal(view.getFloat32(at + SHADOW.TRANSFORMS + 3 * 64, true), 9);
     assert.equal(m.u32(at + SHADOW.VERTEX_SHADER), 0x104);
-    m.bump(at + SHADOW.RENDER_STATE_CALLS);
+    m.count(SHADOW.RENDER_STATE_CALLS);
     m.shadow.sync();
     assert.deepEqual(m.device.calls, [], 'and the block agrees with the device again');
 });
@@ -526,7 +627,7 @@ test('bindings the guest wrote reach the device as the objects the pointers name
     m.put32(at + SHADOW.INDICES, 0x5200);
     m.put32(at + SHADOW.BASE_VERTEX, 7);
     m.put32(at + SHADOW.VERTEX_SHADER, 0x112);
-    m.bump(at + SHADOW.BINDING_CALLS);
+    m.count(SHADOW.BINDING_CALLS);
     m.shadow.sync();
 
     assert.deepEqual(m.device.calls, ['stream 0=vb/32', 'indices=ib+7', 'shader=0x112']);
@@ -538,9 +639,9 @@ test('bindings the guest wrote reach the device as the objects the pointers name
     m.put32(at + SHADOW.STREAMS, 0);
     m.put32(at + SHADOW.INDICES, 0x5300);
     m.put32(at + SHADOW.VERTEX_SHADER, 0xbad0);
-    m.bump(at + SHADOW.BINDING_CALLS);
+    m.count(SHADOW.BINDING_CALLS);
     m.shadow.sync();
-    m.bump(at + SHADOW.BINDING_CALLS);
+    m.count(SHADOW.BINDING_CALLS);
     m.shadow.sync();
 
     assert.deepEqual(m.device.calls.slice(3), ['stream 0=none/32', 'shader=0xbad0']);
@@ -579,10 +680,10 @@ test('a lock and unlock taken in the guest are replayed before the host goes on'
     m.put32(block + BUFFER.FROM, 16);
     m.put32(block + BUFFER.TO, 48);
     m.put32(block + BUFFER.LOCK_FLAGS, 0x2000);
-    m.bump(at + SHADOW.LOCK_CALLS);
+    m.count(SHADOW.LOCK_CALLS);
     m.put32(at + SHADOW.RING, block);
     m.put32(at + SHADOW.RING_HEAD, 1);
-    m.bump(at + SHADOW.UNLOCK_CALLS);
+    m.count(SHADOW.UNLOCK_CALLS);
     m.shadow.sync();
 
     assert.deepEqual(vb.calls, ['lock 16+32 0x2000', 'unlock']);
@@ -600,7 +701,7 @@ test('a lock and unlock taken in the guest are replayed before the host goes on'
     m.put32(at + SHADOW.RING, block);
     m.put32(at + SHADOW.RING + 4, block);
     m.put32(at + SHADOW.RING_HEAD, 2);
-    m.bump(at + SHADOW.UNLOCK_CALLS);
+    m.count(SHADOW.UNLOCK_CALLS);
     m.shadow.sync();
     assert.deepEqual(vb.calls.slice(2), ['lock 0+256 0x0', 'unlock']);
 });
@@ -616,7 +717,7 @@ test('a lock the guest holds across an entry is held by the host until the guest
     m.put32(block + BUFFER.LOCKED, 1);
     m.put32(block + BUFFER.FROM, 0);
     m.put32(block + BUFFER.TO, 64);
-    m.bump(at + SHADOW.LOCK_CALLS);
+    m.count(SHADOW.LOCK_CALLS);
     m.shadow.settleBuffer(vb);
     assert.deepEqual(vb.calls, ['lock 0+64 0x0']);
     assert.equal(vb.Lock(0, 0, {}), -1, 'the real buffer is locked');
@@ -630,7 +731,7 @@ test('a lock the guest holds across an entry is held by the host until the guest
     m.put32(block + BUFFER.TO, 128);
     m.put32(at + SHADOW.RING, block);
     m.put32(at + SHADOW.RING_HEAD, 1);
-    m.bump(at + SHADOW.UNLOCK_CALLS);
+    m.count(SHADOW.UNLOCK_CALLS);
     m.shadow.sync();
     assert.deepEqual(vb.calls, ['unlock', 'lock 64+64 0x0', 'unlock']);
     assert.equal(vb.Lock(0, 0, {}), 0, 'free again');
@@ -655,7 +756,7 @@ test('a lock the host took itself is one the guest routine sees', ()=>{
     m.put32(block + BUFFER.TO, 16);
     m.put32(at + SHADOW.RING, block);
     m.put32(at + SHADOW.RING_HEAD, 1);
-    m.bump(at + SHADOW.UNLOCK_CALLS);
+    m.count(SHADOW.UNLOCK_CALLS);
     m.shadow.sync();
     assert.deepEqual(vb.calls, []);
     assert.equal(m.shadow.diagnostics().buffers, 0);
@@ -672,64 +773,123 @@ test('a sync before the block exists is nothing', ()=>{
     assert.equal(m.shadow.diagnostics().placed, 0);
 });
 
-test('a call that changed nothing reads nine words in place and copies none', ()=>{
+test('a call that changed nothing reads one word in place and copies none', ()=>{
     // The block is looked at on every device call; with a dword reader the
-    // unchanged case costs nine reads, one per counter, and no view of the block.
+    // unchanged case costs one read, the count of every call, and no view.
     const m = machine({ readU32: true });
     m.shadow.address();
     m.shadow.sync();
     const before = m.reads.memory;
+    m.reads.words.length = 0;
     m.shadow.sync();
     m.shadow.sync();
     assert.equal(m.reads.memory, before, 'no copy of the block for a call that changed nothing');
-    m.put32(m.shadow.address() + SHADOW.RENDER_STATES + 8 * 4, 5);
-    m.bump(m.shadow.address() + SHADOW.RENDER_STATE_CALLS);
+    assert.deepEqual(m.reads.words, [SHADOW.CALLS, SHADOW.CALLS]);
+    m.setState(8, 5);
     m.shadow.sync();
-    assert.ok(m.reads.memory > before, 'a change is read out of the block');
     assert.equal(m.device.states.get(8), 5);
+    assert.deepEqual(m.reads.regions.slice(-1), [[0, SHADOW.SIZE]],
+        'a change is read out of one view of the block');
 });
 
-test('a sync reads the groups whose counters moved, and no other', ()=>{
-    const m = machine({ readU32: true });
+test('an entry compares what the routines marked, and no other word of those groups', ()=>{
+    const m = machine();
     const at = m.shadow.address();
     m.shadow.sync();
-    /** The regions read by the next sync, as [offset, bytes]. */
-    const regionsOf = (/** @type {() => void} */ change)=>{
-        m.reads.regions.length = 0;
+    /** What the next entry compared and set. @param {() => void} change */
+    const entry = change=>{
+        const compared = m.shadow.diagnostics().compared;
+        const calls = m.device.calls.length;
         change();
         m.shadow.sync();
-        return m.reads.regions.slice();
+        return { compared: m.shadow.diagnostics().compared - compared,
+            set: m.device.calls.slice(calls) };
     };
 
-    assert.deepEqual(regionsOf(()=>{
-        m.put32(at + SHADOW.RENDER_STATES + 8 * 4, 5);
-        m.bump(at + SHADOW.RENDER_STATE_CALLS);
-    }), [[SHADOW.RENDER_STATES, SHADOW.RENDER_STATE_COUNT * 4]], 'one state: the states');
-    assert.deepEqual(regionsOf(()=>{
-        m.putF32(at + SHADOW.TRANSFORMS + 24 * 64, 42);
-        m.bump(at + SHADOW.TRANSFORM_CALLS);
-    }), [[SHADOW.TRANSFORMS, SHADOW.TRANSFORM_SLOTS * 64]], 'one transform: the transforms');
-    assert.deepEqual(regionsOf(()=>{
+    assert.deepEqual(entry(()=>m.setState(40, 5)), { compared: 1, set: ['rs 40=5'] },
+        'one state: that state');
+    assert.deepEqual(entry(()=>{
+        m.setState(200, 3);
+        m.setState(8, 5);
+        m.setState(9, 1);
+        m.setState(8, 5);
+    }), { compared: 3, set: ['rs 8=5', 'rs 9=1', 'rs 200=3'] },
+    'three states, one set twice: each once, in the order of the block');
+    assert.deepEqual(entry(()=>m.setTransform(24, [42])), { compared: 16, set: ['tr 256=42,0'] },
+        'one transform: its matrix');
+    assert.deepEqual(entry(()=>m.setTransform(24, [42])), { compared: 16, set: [] },
+        'the same matrix again: compared, not set');
+    assert.deepEqual(entry(()=>m.setStageState(3, D3DTSS.COLOROP, 7)),
+        { compared: 1, set: ['tss 3.1=7'] }, 'one stage state');
+    // The small groups are compared whole, and only when their count moved.
+    assert.deepEqual(entry(()=>{
         m.put32(at + SHADOW.TEXTURES, 0);
-        m.bump(at + SHADOW.TEXTURE_CALLS);
-    }), [[SHADOW.TEXTURES, SHADOW.STAGE_COUNT * 4]], 'one texture: the textures');
-    assert.deepEqual(regionsOf(()=>{
-        m.put32(at + SHADOW.STAGE_STATES + D3DTSS.COLOROP * 4, 7);
-        m.bump(at + SHADOW.STAGE_STATE_CALLS);
-    }), [[SHADOW.STAGE_STATES, SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE * 4]]);
-    assert.deepEqual(regionsOf(()=>{
+        m.count(SHADOW.TEXTURE_CALLS);
+    }), { compared: SHADOW.STAGE_COUNT, set: ['tex 0=none'] }, 'one texture: the textures');
+    assert.deepEqual(entry(()=>{
         m.putF32(at + SHADOW.MATERIAL + 16 * 4, 8);
-        m.bump(at + SHADOW.MATERIAL_CALLS);
-    }), [[SHADOW.MATERIAL, SHADOW.MATERIAL_WORDS * 4]], 'a material: the material');
-    assert.deepEqual(regionsOf(()=>{
+        m.count(SHADOW.MATERIAL_CALLS);
+    }), { compared: SHADOW.MATERIAL_WORDS, set: ['mat 0,8'] }, 'a material: the material');
+    assert.deepEqual(entry(()=>{
         m.put32(at + SHADOW.VERTEX_SHADER, 0x112);
-        m.bump(at + SHADOW.BINDING_CALLS);
-    }), [[SHADOW.STREAMS, (SHADOW.STREAM_COUNT * 2 + 3) * 4]], 'a binding: the bindings');
-    assert.deepEqual(regionsOf(()=>{
-        m.bump(at + SHADOW.LOCK_CALLS);
-    }), [], 'a lock held across the entry reads nothing of the device\'s block');
-    assert.deepEqual(m.device.calls,
-        ['rs 8=5', 'tr 256=42,0', 'tex 0=none', 'tss 0.1=7', 'mat 0,8', 'shader=0x112']);
+        m.count(SHADOW.BINDING_CALLS);
+    }), { compared: SHADOW.STREAM_COUNT * 2 + 3, set: ['shader=0x112'] },
+    'a binding: the bindings');
+    assert.deepEqual(entry(()=>m.count(SHADOW.LOCK_CALLS)), { compared: 0, set: [] },
+        'a lock held across the entry compares nothing');
+    // Sixty-four states set between two entries cost sixty-four comparisons,
+    // where a scan of the group cost 256 whatever was set.
+    assert.deepEqual(entry(()=>{
+        for (let state = 0; state < 256; state += 4)
+        {
+            m.setState(state, 1);
+        }
+    }).compared, 64);
+});
+
+test('a routine cut short is adopted by an entry that finds its mark, or by the next', ()=>{
+    const m = machine();
+    const at = m.shadow.address();
+
+    // Interrupted after its write and before its mark -- another thread
+    // entered the host there: not seen yet, and nothing lost.
+    m.put32(at + SHADOW.RENDER_STATES + 8 * 4, 5);
+    m.setState(14, 1);
+    m.shadow.sync();
+    assert.deepEqual(m.device.calls, ['rs 14=1']);
+    m.mark(SHADOW.RENDER_STATE_MARKS, 8);
+    m.count(SHADOW.RENDER_STATE_CALLS);
+    m.shadow.sync();
+    assert.deepEqual(m.device.calls, ['rs 14=1', 'rs 8=5']);
+
+    // Interrupted after its mark and before its count: an entry that looks
+    // for another call's sake takes it with the rest, and clears its mark,
+    // and the count, when it comes, finds the work done.
+    m.put32(at + SHADOW.STAGE_STATES + D3DTSS.MAGFILTER * 4, 2);
+    m.mark(SHADOW.STAGE_STATE_MARKS, D3DTSS.MAGFILTER);
+    m.setState(7, 0);
+    m.shadow.sync();
+    assert.deepEqual(m.device.calls.slice(2), ['rs 7=0', 'tss 0.16=2']);
+    for (let word = 0; word < SHADOW.MARK_WORDS; word++)
+    {
+        assert.equal(m.u32(at + SHADOW.MARKS + word * 4), 0);
+    }
+    m.count(SHADOW.STAGE_STATE_CALLS);
+    m.shadow.sync();
+    assert.equal(m.device.calls.length, 4);
+});
+
+test('a mark no routine sets names nothing', ()=>{
+    const m = machine();
+    const at = m.shadow.address();
+    // Matrices past the 28: written by other means than the routines, and
+    // dropped with the marks they came with.
+    m.put32(at + SHADOW.TRANSFORM_MARKS, 0xf0000000);
+    m.count(SHADOW.TRANSFORM_CALLS);
+    m.shadow.sync();
+    assert.deepEqual(m.device.calls, []);
+    assert.deepEqual(m.divergences, []);
+    assert.equal(m.u32(at + SHADOW.TRANSFORM_MARKS), 0);
 });
 
 test('textures the guest bound reach the device as the objects the pointers name', ()=>{
@@ -742,7 +902,7 @@ test('textures the guest bound reach the device as the objects the pointers name
 
     m.put32(at + SHADOW.TEXTURES, 0x6100);
     m.put32(at + SHADOW.TEXTURES + 4, 0x6200);
-    m.bump(at + SHADOW.TEXTURE_CALLS);
+    m.count(SHADOW.TEXTURE_CALLS);
     m.shadow.sync();
     assert.deepEqual(m.device.calls, ['tex 0=grass', 'tex 1=stone']);
     assert.equal(m.device.textures.get(0), grass);
@@ -752,9 +912,9 @@ test('textures the guest bound reach the device as the objects the pointers name
     // divergence, reported once, and the device keeps what it had.
     m.put32(at + SHADOW.TEXTURES, 0);
     m.put32(at + SHADOW.TEXTURES + 4, 0x6300);
-    m.bump(at + SHADOW.TEXTURE_CALLS);
+    m.count(SHADOW.TEXTURE_CALLS);
     m.shadow.sync();
-    m.bump(at + SHADOW.TEXTURE_CALLS);
+    m.count(SHADOW.TEXTURE_CALLS);
     m.shadow.sync();
     assert.deepEqual(m.device.calls.slice(2), ['tex 0=none']);
     assert.equal(m.device.textures.get(1), stone);
@@ -771,11 +931,11 @@ test('a texture the program let go of stays bound, and its pointer\'s next use i
     m.published.set(0x6100, grass);
     m.published.set(0x5100, vb);
     m.put32(at + SHADOW.TEXTURES + 2 * 4, 0x6100);
-    m.bump(at + SHADOW.TEXTURE_CALLS);
+    m.count(SHADOW.TEXTURE_CALLS);
     m.put32(at + SHADOW.STREAMS, 0x5100);
     m.put32(at + SHADOW.STREAMS + 4, 32);
     m.put32(at + SHADOW.INDICES, 0x5100);
-    m.bump(at + SHADOW.BINDING_CALLS);
+    m.count(SHADOW.BINDING_CALLS);
     m.shadow.sync();
     m.device.calls.length = 0;
 
@@ -789,8 +949,8 @@ test('a texture the program let go of stays bound, and its pointer\'s next use i
     assert.equal(m.u32(at + SHADOW.STREAMS), STALE_POINTER);
     assert.equal(m.u32(at + SHADOW.INDICES), STALE_POINTER);
     assert.equal(m.u32(at + SHADOW.STREAMS + 4), 32, 'the stride is not a pointer');
-    m.bump(at + SHADOW.TEXTURE_CALLS);
-    m.bump(at + SHADOW.BINDING_CALLS);
+    m.count(SHADOW.TEXTURE_CALLS);
+    m.count(SHADOW.BINDING_CALLS);
     m.shadow.sync();
     assert.deepEqual(m.device.calls, [], 'the device keeps the texture it had bound');
     assert.equal(m.device.textures.get(2), grass);
@@ -801,7 +961,7 @@ test('a texture the program let go of stays bound, and its pointer\'s next use i
     const stone = { name: 'stone' };
     m.published.set(0x6100, stone);
     m.put32(at + SHADOW.TEXTURES + 2 * 4, 0x6100);
-    m.bump(at + SHADOW.TEXTURE_CALLS);
+    m.count(SHADOW.TEXTURE_CALLS);
     m.shadow.sync();
     assert.deepEqual(m.device.calls, ['tex 2=stone']);
 
@@ -813,23 +973,20 @@ test('a texture the program let go of stays bound, and its pointer\'s next use i
 
 test('stage states the guest wrote reach the device by stage and type', ()=>{
     const m = machine();
-    const at = m.shadow.address();
-    const slot = (/** @type {number} */ stage, /** @type {number} */ type)=>
-        at + SHADOW.STAGE_STATES + (stage * SHADOW.STAGE_STATE_STRIDE + type) * 4;
 
-    m.put32(slot(0, D3DTSS.COLOROP), 7);
-    m.put32(slot(5, D3DTSS.MAGFILTER), 2);
-    m.put32(slot(7, D3DTSS.ADDRESSU), 3);   // a type this device has not got
-    m.bump(at + SHADOW.STAGE_STATE_CALLS);
+    // Set last to first; taken, as a scan would take them, by stage and type.
+    m.setStageState(7, D3DTSS.ADDRESSU, 3);   // a type this device has not got
+    m.setStageState(5, D3DTSS.MAGFILTER, 2);
+    m.setStageState(0, D3DTSS.COLOROP, 7);
     m.shadow.sync();
-    m.bump(at + SHADOW.STAGE_STATE_CALLS);
+    m.setStageState(7, D3DTSS.ADDRESSU, 3);
     m.shadow.sync();
 
     assert.deepEqual(m.device.calls, ['tss 0.1=7', 'tss 5.16=2', 'tss 7.13=3']);
     assert.equal(m.device.stageStates[5].get(D3DTSS.MAGFILTER), 2);
     assert.equal(m.divergences.length, 1);
     assert.match(m.divergences[0], /SetTextureStageState.*stage 7 state 13 set to 3/);
-    assert.equal(m.shadow.diagnostics().stageStateCalls, 2);
+    assert.equal(m.shadow.diagnostics().stageStateCalls, 4);
 });
 
 test('a material the guest wrote reaches the device as its seventeen floats', ()=>{
@@ -837,7 +994,7 @@ test('a material the guest wrote reaches the device as its seventeen floats', ()
     const at = m.shadow.address();
     const floats = Float32Array.from({ length: 17 }, (unused, i)=>i + 0.5);
     m.memory.set(new Uint8Array(floats.buffer), at + SHADOW.MATERIAL);
-    m.bump(at + SHADOW.MATERIAL_CALLS);
+    m.count(SHADOW.MATERIAL_CALLS);
     m.shadow.sync();
 
     assert.deepEqual(m.device.calls, ['mat 0.5,16.5']);
@@ -846,7 +1003,7 @@ test('a material the guest wrote reaches the device as its seventeen floats', ()
     assert.equal(m.shadow.diagnostics().materialCalls, 1);
 
     // Set again with the same contents, as programs do: counted, not set.
-    m.bump(at + SHADOW.MATERIAL_CALLS);
+    m.count(SHADOW.MATERIAL_CALLS);
     m.shadow.sync();
     assert.equal(m.device.calls.length, 1);
     assert.equal(m.shadow.diagnostics().materialCalls, 2);
@@ -921,4 +1078,240 @@ test('the references the guest took on levels are charged before any is given ba
     // block at all still has a working GetSurfaceLevel through the host.
     m.shadow.settleTexture(fakeTexture(1));
     assert.equal(m.shadow.diagnostics().surfaceLevelCalls, 3);
+});
+
+/**
+ * The comparison an entry made before the routines marked what they wrote:
+ * every word of each group whose count moved, against a copy of its own, in
+ * the block's order, through a device of its own. The shadow is held to what
+ * this sets, in the order it sets it.
+ *
+ * @param {ReturnType<typeof machine>} m
+ */
+function wholeScan(m){
+    const at = m.shadow.address();
+    const device = fakeDevice();
+    /** @type {string[]} */
+    const divergences = [];
+    /** @param {number} offset @param {number} count */
+    const words = (offset, count)=>
+        Array.from({ length: count }, (unused, i)=>m.u32(at + offset + i * 4));
+    const counterOffsets = [SHADOW.RENDER_STATE_CALLS, SHADOW.TRANSFORM_CALLS,
+        SHADOW.BINDING_CALLS, SHADOW.TEXTURE_CALLS, SHADOW.STAGE_STATE_CALLS,
+        SHADOW.MATERIAL_CALLS];
+    const seen = {
+        states: words(SHADOW.RENDER_STATES, SHADOW.RENDER_STATE_COUNT),
+        transforms: words(SHADOW.TRANSFORMS, SHADOW.TRANSFORM_SLOTS * 16),
+        bound: words(SHADOW.STREAMS, SHADOW.STREAM_COUNT * 2 + 3),
+        textures: words(SHADOW.TEXTURES, SHADOW.STAGE_COUNT),
+        stageStates: words(SHADOW.STAGE_STATES, SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE),
+        material: words(SHADOW.MATERIAL, SHADOW.MATERIAL_WORDS),
+        counters: counterOffsets.map(offset=>m.u32(at + offset)),
+    };
+    /** @param {string} api @param {number} hr */
+    const check = (api, hr)=>{
+        if (hr !== 0)
+        {
+            divergences.push(`IDirect3DDevice8::${api}`);
+        }
+    };
+    /** @param {number} pointer */
+    const objectAt = pointer=>(pointer === 0 ? null : m.published.get(pointer) ?? null);
+    return {
+        device, divergences,
+        sync(){
+            const now = counterOffsets.map(offset=>m.u32(at + offset));
+            const moved = now.map((count, group)=>count !== seen.counters[group]);
+            seen.counters = now;
+            if (moved[0])
+            {
+                const block = words(SHADOW.RENDER_STATES, SHADOW.RENDER_STATE_COUNT);
+                block.forEach((value, state)=>{
+                    if (value !== seen.states[state])
+                    {
+                        seen.states[state] = value;
+                        check('SetRenderState', device.SetRenderState(state, value));
+                    }
+                });
+            }
+            if (moved[1])
+            {
+                const block = words(SHADOW.TRANSFORMS, SHADOW.TRANSFORM_SLOTS * 16);
+                for (let slot = 0; slot < SHADOW.TRANSFORM_SLOTS; slot++)
+                {
+                    const matrix = block.slice(slot * 16, slot * 16 + 16);
+                    if (matrix.some((word, i)=>word !== seen.transforms[slot * 16 + i]))
+                    {
+                        seen.transforms.splice(slot * 16, 16, ...matrix);
+                        check('SetTransform', device.SetTransform(transformType(slot),
+                            new Float32Array(Uint32Array.from(matrix).buffer)));
+                    }
+                }
+            }
+            if (moved[2])
+            {
+                const block = words(SHADOW.STREAMS, SHADOW.STREAM_COUNT * 2 + 3);
+                for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
+                {
+                    const [pointer, stride] = block.slice(index * 2, index * 2 + 2);
+                    if (pointer === seen.bound[index * 2] && stride === seen.bound[index * 2 + 1])
+                    {
+                        continue;
+                    }
+                    seen.bound[index * 2] = pointer;
+                    seen.bound[index * 2 + 1] = stride;
+                    const buffer = objectAt(pointer);
+                    check('SetStreamSource', pointer !== 0 && !buffer
+                        ? -1 : device.SetStreamSource(index, buffer, stride));
+                }
+                const tail = SHADOW.STREAM_COUNT * 2;
+                if (block[tail] !== seen.bound[tail] || block[tail + 1] !== seen.bound[tail + 1])
+                {
+                    seen.bound[tail] = block[tail];
+                    seen.bound[tail + 1] = block[tail + 1];
+                    const buffer = objectAt(block[tail]);
+                    check('SetIndices', block[tail] !== 0 && !buffer
+                        ? -1 : device.SetIndices(buffer, block[tail + 1]));
+                }
+                if (block[tail + 2] !== seen.bound[tail + 2])
+                {
+                    seen.bound[tail + 2] = block[tail + 2];
+                    check('SetVertexShader', device.SetVertexShader(block[tail + 2]));
+                }
+            }
+            if (moved[3])
+            {
+                words(SHADOW.TEXTURES, SHADOW.STAGE_COUNT).forEach((pointer, stage)=>{
+                    if (pointer !== seen.textures[stage])
+                    {
+                        seen.textures[stage] = pointer;
+                        const texture = objectAt(pointer);
+                        check('SetTexture', pointer !== 0 && !texture
+                            ? -1 : device.SetTexture(stage, texture));
+                    }
+                });
+            }
+            if (moved[4])
+            {
+                const block = words(SHADOW.STAGE_STATES,
+                    SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE);
+                block.forEach((value, index)=>{
+                    if (value !== seen.stageStates[index])
+                    {
+                        seen.stageStates[index] = value;
+                        check('SetTextureStageState',
+                            device.SetTextureStageState(index >>> 5, index & 31, value));
+                    }
+                });
+            }
+            if (moved[5])
+            {
+                const block = words(SHADOW.MATERIAL, SHADOW.MATERIAL_WORDS);
+                if (block.some((word, i)=>word !== seen.material[i]))
+                {
+                    seen.material = block;
+                    check('SetMaterial', device.SetMaterial(
+                        materialOf(new Float32Array(Uint32Array.from(block).buffer))));
+                }
+            }
+        },
+    };
+}
+
+/** @param {number} seed @returns {() => number} a number in [0, 1) */
+function random(seed){
+    let state = seed >>> 0;
+    return ()=>{
+        state = (state + 0x6d2b79f5) >>> 0;
+        let t = state;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 0x100000000;
+    };
+}
+
+test('an entry sets what a scan of the whole block set, in the order it set it', ()=>{
+    const matrices = [
+        Float32Array.from({ length: 16 }, (unused, i)=>(i % 5 === 0 ? 1 : 0)),
+        Float32Array.from({ length: 16 }, (unused, i)=>i * 0.5),
+        Float32Array.from({ length: 16 }, (unused, i)=>-i),
+    ];
+    const materials = [
+        Float32Array.from({ length: 17 }, (unused, i)=>i / 16),
+        Float32Array.from({ length: 17 }, (unused, i)=>1 - i / 32),
+    ];
+    const types = Object.values(D3DTSS);
+    let entries = 0;
+    let set = 0;
+    for (let seed = 1; seed <= 40; seed++)
+    {
+        const next = random(seed);
+        /** @param {number} n */
+        const pick = n=>Math.floor(next() * n);
+        /** @template T @param {readonly T[]} list @returns {T} */
+        const one = list=>list[pick(list.length)];
+        const m = machine();
+        const at = m.shadow.address();
+        const vb = fakeBuffer(0x8000, 0x100);
+        vb.name = 'vb';
+        m.published.set(0x5100, vb);
+        m.published.set(0x6100, { name: 'grass' });
+        m.published.set(0x6200, { name: 'stone' });
+        const reference = wholeScan(m);
+        for (let step = 0; step < 400; step++)
+        {
+            const what = pick(20);
+            if (what < 6)
+            {
+                // Mostly the states the device has, now and then one it refuses.
+                m.setState(next() < 0.75 ? one([7, 8, 14]) : pick(256), pick(4));
+            }
+            else if (what < 10)
+            {
+                m.setStageState(pick(8), one(types), pick(4));
+            }
+            else if (what < 13)
+            {
+                m.setTransform(pick(SHADOW.TRANSFORM_SLOTS), one(matrices));
+            }
+            else if (what === 13)
+            {
+                m.put32(at + SHADOW.TEXTURES + pick(8) * 4, one([0, 0x6100, 0x6200, 0x6300]));
+                m.count(SHADOW.TEXTURE_CALLS);
+            }
+            else if (what === 14)
+            {
+                m.memory.set(new Uint8Array(one(materials).buffer), at + SHADOW.MATERIAL);
+                m.count(SHADOW.MATERIAL_CALLS);
+            }
+            else if (what === 15)
+            {
+                const index = pick(SHADOW.STREAM_COUNT);
+                const pointer = one([0, 0x5100, 0x5200]);
+                m.put32(at + SHADOW.STREAMS + index * 8, pointer);
+                if (pointer !== 0)
+                {
+                    m.put32(at + SHADOW.STREAMS + index * 8 + 4, one([12, 24]));
+                }
+                m.put32(at + SHADOW.VERTEX_SHADER, one([0x102, 0x112, 0xbad0]));
+                m.count(SHADOW.BINDING_CALLS);
+            }
+            else
+            {
+                m.shadow.sync();
+                reference.sync();
+                entries++;
+                assert.deepEqual(m.device.calls, reference.device.calls,
+                    `seed ${seed}, step ${step}: the same calls in the same order`);
+            }
+        }
+        m.shadow.sync();
+        reference.sync();
+        assert.deepEqual(m.device.calls, reference.device.calls, `seed ${seed}, at the end`);
+        assert.deepEqual(m.divergences.map(line=>line.split(': ')[0]), reference.divergences,
+            `seed ${seed}: the same refusals`);
+        assert.equal(m.shadow.diagnostics().refused, reference.divergences.length);
+        set += m.device.calls.length;
+    }
+    assert.ok(entries > 1000 && set > 3000, `${entries} entries setting ${set} values`);
 });
