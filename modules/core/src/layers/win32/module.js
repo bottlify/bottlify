@@ -35,6 +35,7 @@ import { createFileTimeFunctions } from './kernel32/filetime.js';
 import { createConsoleIoFunctions } from './kernel32/consoleio.js';
 import { createVolume } from './kernel32/vfs.js';
 import { createMsvcrtFunctions } from './msvcrt/functions.js';
+import { createCrtdllFunctions } from './msvcrt/crtdll.js';
 import { createWindowFunctions } from './user32/windows.js';
 import { createMessageQueue } from './user32/messages.js';
 import { createRegistryFunctions } from './advapi32/functions.js';
@@ -1707,6 +1708,10 @@ export function createWin32Module(){
                 SHGetFolderPathA: libraries['SHELL32.dll'].SHGetFolderPathA,
                 SHGetFolderPathW: libraries['SHELL32.dll'].SHGetFolderPathW,
             };
+
+            // The runtime before msvcrt, built from it: the same entries under the
+            // same names, and its own few beside them.
+            libraries['CRTDLL.dll'] = createCrtdllFunctions(libraries['msvcrt.dll']);
 
             // Added after the rest because it is built from them: nearly everything
             // ntdll exports is a second name for a function another library already
