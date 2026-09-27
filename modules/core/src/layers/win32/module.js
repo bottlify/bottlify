@@ -112,6 +112,16 @@ const CDECL_LIBRARIES = /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase)\.dll$/i
 const DLL_PROCESS_DETACH = 0;
 
 /**
+ * Every version of the D3DX 9 helper library, d3dx9_24 to d3dx9_43, bound to
+ * one table: the versions' mathematics is the same, and a program imports the
+ * one its SDK named.
+ *
+ * @param {Record<string, any>} table
+ */
+const d3dxLibraries = table=>Object.fromEntries(Array.from({ length: 20 },
+    (_, i)=>[`d3dx9_${24 + i}.dll`, table]));
+
+/**
  * The libraries Windows keeps under
  * `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs`.
  *
@@ -1572,9 +1582,7 @@ export function createWin32Module(){
                 // The maths half of the Direct3D helper: pure vector and matrix
                 // functions, here for their stack width as much as their answers,
                 // since d3dx9 exports them undecorated though they are stdcall.
-                'd3dx9_26.dll': createD3dxFunctions({ readMemory, writeMemory }),
-                'd3dx9_25.dll': createD3dxFunctions({ readMemory, writeMemory }),
-                'd3dx9_27.dll': createD3dxFunctions({ readMemory, writeMemory }),
+                ...d3dxLibraries(createD3dxFunctions({ readMemory, writeMemory })),
 
                 'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError }),
 

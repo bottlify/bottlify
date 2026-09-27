@@ -26,6 +26,10 @@
  *           entry points, whose arguments arrive on the FPU stack rather than
  *           on the caller's stack.
  * @property {() => void} pop                     Discards ST(0).
+ * @property {() => number} [controlWord]         The x87 control word.
+ * @property {(word: number) => void} [setControlWord]
+ * @property {() => number} [statusWord]          The x87 status word, without the top.
+ * @property {() => void} [clearExceptions]       The exception flags cleared, as `fnclex`.
  */
 
 /**

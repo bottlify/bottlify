@@ -24,6 +24,8 @@ import { ERANGE } from './globals.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
+import * as inGuestFloat from './inguest-float.js';
+import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -142,6 +144,38 @@ export function scanFloat(text){
     return literal.trim().length === 0
         ? null
         : { value: Number(literal.trim()), end: literal.length };
+}
+
+/**
+ * What strtod and atof read, as msvcrt reads it: white space, a sign, digits
+ * with a point among them, and an exponent after `e`, `E`, `d` or `D` where a
+ * digit follows (Wine's test_strtod reads "12.1d2" as 1210 and "0.1D-4736" as
+ * an underflow). No infinity or NaN is spelt: "INF" converts nothing.
+ */
+const DECIMAL
+    = /^[ \t\n\v\f\r]*[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eEdD][+-]?[0-9]+)?/;
+
+/**
+ * The double strtod reads, where it stops, and whether it is out of range:
+ * an infinity from finite digits, or a zero from digits that were not all
+ * zeros -- which msvcrt answers with ERANGE.
+ *
+ * @param {string} text
+ * @returns {{ value: number, end: number, range: boolean } | null}
+ */
+export function scanDecimal(text){
+    const match = DECIMAL.exec(text);
+    if (!match)
+    {
+        return null;
+    }
+    const literal = match[0].trim().replace(/[dD]/, 'e');
+    const value = Number(literal);
+    return {
+        value,
+        end: match[0].length,
+        range: !Number.isFinite(value) || value === 0 && /^[^eE]*[1-9]/.test(literal),
+    };
 }
 
 /**
@@ -419,24 +453,45 @@ export function createConversionFunctions(host){
         return table;
     }
 
-    /** @param {number[]} args */
-    const strtod = args=>{
-        const text = readString(args[0]);
-        const scanned = scanFloat(text);
-        writeInt(args[1], scanned ? args[0] + scanned.end : args[0]);
+    /**
+     * The value, and errno set where it is out of range.
+     *
+     * @param {ReturnType<typeof scanDecimal>} scanned
+     */
+    const decimal = scanned=>{
+        if (scanned?.range)
+        {
+            host.errno?.(ERANGE);
+        }
         return scanned ? scanned.value : 0;
     };
 
-    return {
-        ...table,
+    /** @param {number[]} args */
+    const strtod = args=>{
+        const scanned = scanDecimal(readString(args[0]));
+        writeInt(args[1], scanned ? args[0] + scanned.end : args[0]);
+        return decimal(scanned);
+    };
 
+    const handlers = {
         /** double atof(const char *str) */
-        atof: returningDouble(host.fpu, 4, args=>{
-            const scanned = scanFloat(readString(args[0]));
-            return scanned ? scanned.value : 0;
-        }),
+        atof: returningDouble(host.fpu, 4, args=>decimal(scanDecimal(readString(args[0])))),
 
         /** double strtod(const char *str, char **end) */
         strtod: returningDouble(host.fpu, 8, strtod),
+    };
+
+    // Code in the guest (`inguest-float.js`), which reads the number and
+    // computes the values Clinger's fast path makes exact; the handlers above
+    // answer the rest, and set errno for an overflow or an underflow.
+    const guest = { readMemory, writeMemory, fpu: host.fpu };
+    return {
+        ...table,
+        atof: readMemory
+            ? guestEntry(inGuestFloat.atof, FLOAT_CODE.atof, guest, handlers.atof)
+            : handlers.atof,
+        strtod: readMemory
+            ? guestEntry(inGuestFloat.strtod, FLOAT_CODE.strtod, guest, handlers.strtod)
+            : handlers.strtod,
     };
 }

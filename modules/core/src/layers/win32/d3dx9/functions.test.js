@@ -8,6 +8,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createD3dxFunctions } from './functions.js';
 import { COMPILED } from './inguest.x86.js';
+import { COMPILED as MATRIX } from './inguest-matrix.x86.js';
+import { COMPILED as VECTOR } from './inguest-vector.x86.js';
+import { COMPILED as QUATERNION } from './inguest-quaternion.x86.js';
 
 const E_NOTIMPL = 0x80004001;
 
@@ -38,19 +41,53 @@ const OUT = 0x100;
 const A = 0x200;
 const B = 0x300;
 
-test('the maths functions declare the stdcall bytes they pop -- the whole point of the file', ()=>{
+/**
+ * Every mathematical export of d3dx9, and the arguments each takes -- the
+ * library's own list, as Wine's d3dx9_36.spec gives it: none may be missing,
+ * since a program's import of one that is would stop it at the first call.
+ */
+const MATHEMATICS = {
+    D3DXColorAdjustContrast: 3, D3DXColorAdjustSaturation: 3, D3DXFloat16To32Array: 3,
+    D3DXFloat32To16Array: 3, D3DXFresnelTerm: 2, D3DXMatrixAffineTransformation: 5,
+    D3DXMatrixAffineTransformation2D: 5, D3DXMatrixDecompose: 4, D3DXMatrixDeterminant: 1,
+    D3DXMatrixInverse: 3, D3DXMatrixLookAtLH: 4, D3DXMatrixLookAtRH: 4, D3DXMatrixMultiply: 3,
+    D3DXMatrixMultiplyTranspose: 3, D3DXMatrixOrthoLH: 5, D3DXMatrixOrthoOffCenterLH: 7,
+    D3DXMatrixOrthoOffCenterRH: 7, D3DXMatrixOrthoRH: 5, D3DXMatrixPerspectiveFovLH: 5,
+    D3DXMatrixPerspectiveFovRH: 5, D3DXMatrixPerspectiveLH: 5,
+    D3DXMatrixPerspectiveOffCenterLH: 7, D3DXMatrixPerspectiveOffCenterRH: 7,
+    D3DXMatrixPerspectiveRH: 5, D3DXMatrixReflect: 2, D3DXMatrixRotationAxis: 3,
+    D3DXMatrixRotationQuaternion: 2, D3DXMatrixRotationX: 2, D3DXMatrixRotationY: 2,
+    D3DXMatrixRotationYawPitchRoll: 4, D3DXMatrixRotationZ: 2, D3DXMatrixScaling: 4,
+    D3DXMatrixShadow: 3, D3DXMatrixTransformation: 7, D3DXMatrixTransformation2D: 7,
+    D3DXMatrixTranslation: 4, D3DXMatrixTranspose: 2, D3DXPlaneFromPointNormal: 3,
+    D3DXPlaneFromPoints: 4, D3DXPlaneIntersectLine: 4, D3DXPlaneNormalize: 2,
+    D3DXPlaneTransform: 3, D3DXPlaneTransformArray: 6, D3DXQuaternionBaryCentric: 6,
+    D3DXQuaternionExp: 2, D3DXQuaternionInverse: 2, D3DXQuaternionLn: 2,
+    D3DXQuaternionMultiply: 3, D3DXQuaternionNormalize: 2, D3DXQuaternionRotationAxis: 3,
+    D3DXQuaternionRotationMatrix: 2, D3DXQuaternionRotationYawPitchRoll: 4,
+    D3DXQuaternionSlerp: 4, D3DXQuaternionSquad: 6, D3DXQuaternionSquadSetup: 7,
+    D3DXQuaternionToAxisAngle: 3, D3DXVec2BaryCentric: 6, D3DXVec2CatmullRom: 6,
+    D3DXVec2Hermite: 6, D3DXVec2Normalize: 2, D3DXVec2Transform: 3, D3DXVec2TransformArray: 6,
+    D3DXVec2TransformCoord: 3, D3DXVec2TransformCoordArray: 6, D3DXVec2TransformNormal: 3,
+    D3DXVec2TransformNormalArray: 6, D3DXVec3BaryCentric: 6, D3DXVec3CatmullRom: 6,
+    D3DXVec3Hermite: 6, D3DXVec3Normalize: 2, D3DXVec3Project: 6, D3DXVec3ProjectArray: 9,
+    D3DXVec3Transform: 3, D3DXVec3TransformArray: 6, D3DXVec3TransformCoord: 3,
+    D3DXVec3TransformCoordArray: 6, D3DXVec3TransformNormal: 3,
+    D3DXVec3TransformNormalArray: 6, D3DXVec3Unproject: 6, D3DXVec3UnprojectArray: 9,
+    D3DXVec4BaryCentric: 6, D3DXVec4CatmullRom: 6, D3DXVec4Cross: 4, D3DXVec4Hermite: 6,
+    D3DXVec4Normalize: 2, D3DXVec4Transform: 3, D3DXVec4TransformArray: 6,
+};
+
+test('every mathematical export is there, stdcall, and pops its arguments', ()=>{
     const { fns } = machine();
-    const expected = {
-        D3DXMatrixMultiply: 12, D3DXMatrixTranspose: 8, D3DXMatrixInverse: 12,
-        D3DXMatrixTranslation: 16, D3DXMatrixOrthoLH: 20, D3DXMatrixPerspectiveLH: 20,
-        D3DXVec4Transform: 12, D3DXVec3Transform: 12, D3DXVec3TransformNormal: 12,
-        D3DXVec3TransformCoord: 12, D3DXVec3TransformCoordArray: 24, D3DXVec3Normalize: 8,
-        D3DXCreateEffectPool: 4, D3DXCreateEffectFromResourceA: 36,
-    };
-    for (const [name, argBytes] of Object.entries(expected))
+    for (const [name, count] of Object.entries(MATHEMATICS))
     {
-        assert.equal(fns[name].argBytes, argBytes, name);
+        assert.ok(fns[name], `${name} is exported`);
+        assert.equal(fns[name].argBytes, count * 4, name);
+        assert.equal(fns[name].convention, 'stdcall', name);
     }
+    assert.equal(fns.D3DXCreateEffectPool.argBytes, 4);
+    assert.equal(fns.D3DXCreateEffectFromResourceA.argBytes, 36);
 });
 
 test('a transpose swaps rows and columns and answers the output pointer', ()=>{
@@ -83,11 +120,14 @@ test('a translation carries a point, and its inverse carries it back', ()=>{
     assert.deepEqual(getFloats(OUT, 4), [1, 2, 3, 1], 'through the inverse, back to the start');
 });
 
-test('a singular matrix inverts to NULL and its determinant is zero', ()=>{
+test('a singular matrix inverts to NULL, the output and the determinant as they were', ()=>{
     const { fns, putFloats, getFloats } = machine();
     putFloats(A, new Array(16).fill(0));
+    putFloats(OUT, [7]);
+    putFloats(0x40, [5]);
     assert.equal(fns.D3DXMatrixInverse.handler([OUT, 0x40, A]), 0);
-    assert.deepEqual(getFloats(0x40, 1), [0]);
+    assert.deepEqual(getFloats(0x40, 1), [5]);
+    assert.deepEqual(getFloats(OUT, 1), [7]);
 });
 
 test('normalising makes a unit vector and leaves a zero vector zero', ()=>{
@@ -119,11 +159,14 @@ test('the effect facilities report E_NOTIMPL and leave a null pointer behind', (
 
 test('the arithmetic is code in the guest, stdcall, its handler the same JavaScript', ()=>{
     const { fns } = machine();
-    for (const name of Object.keys(COMPILED))
+    for (const compiled of [COMPILED, MATRIX, VECTOR, QUATERNION])
     {
-        assert.equal(fns[name].convention, 'stdcall', name);
-        assert.deepEqual(fns[name].code(), COMPILED[/** @type {keyof typeof COMPILED} */ (name)]
-            .code, name);
+        for (const [name, { code }] of Object.entries(compiled))
+        {
+            assert.equal(fns[name].convention, 'stdcall', name);
+            assert.deepEqual(fns[name].code(), code, name);
+            assert.equal(typeof fns[name].handler, 'function', name);
+        }
     }
 });
 

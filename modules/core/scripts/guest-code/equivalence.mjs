@@ -12,8 +12,10 @@
  * must leave the same result registers, x87 stack and memory. The x86 is also
  * held to what a callee owes its caller: EBX, ESI, EDI and EBP as they were,
  * ESP past the return address (and the arguments, for stdcall), the direction
- * flag clear, the control word as it was, and the x87 stack empty but for a
- * double result.
+ * flag clear, the control word as it was -- or as the JavaScript left it, for
+ * a function that loads one -- and the x87 stack empty but for a double
+ * result; a function that clears the exception flags leaves the ones the
+ * JavaScript does.
  *
  * A function that hands a call to the host (`return host()`) jumps, on the
  * machine, to a halt where the host's trap would be; there it must have left
@@ -26,7 +28,9 @@
  * Under a single-precision control word the reference is the model of the
  * x87 (`model.mjs`): the same source with each double's `+ - * /` and square
  * root rounded to 24 bits, as the x87 rounds them and the translator does;
- * under any other, the source itself, which is the model there.
+ * under any other, the source itself, which is the model there -- but for a
+ * function that loads a control word, whose model rounds as the word it
+ * loads says.
  *
  * For the tests: the machine is cork's own test machine, not the engine.
  */
@@ -51,6 +55,7 @@ const SAVED = { ebx: 0x11111111, esi: 0x22222222, edi: 0x33333333, ebp: 0x444444
  * @property {number[]} [x87]         Doubles pushed before the call, the last in ST0.
  * @property {[number, ArrayLike<number>][]} [memory]  Bytes at addresses in the data area.
  * @property {number} [control]       The x87 control word the call is made under.
+ * @property {number} [status]        The x87 status word the call finds, its top aside.
  */
 
 /**
@@ -64,6 +69,53 @@ const SAVED = { ebx: 0x11111111, esi: 0x22222222, edi: 0x33333333, ebp: 0x444444
  *     with the x87 arguments (the last in ST0) as the call left them: EAX, or
  *     a double that replaces them in ST0.
  */
+
+/** One machine per piece of code run by `runCode`, its translations kept. */
+/** @type {WeakMap<Uint8Array, ReturnType<typeof createTestMachine>>} */
+const codeMachines = new WeakMap();
+
+/**
+ * Runs code assembled by hand on cork's test machine, called from a return
+ * address that halts, with the registers and the stack slots given: what a
+ * test holds a routine the compiler cannot express to.
+ *
+ * @param {Uint8Array} code
+ * @param {{ stack?: number[], registers?: Record<string, number> }} input
+ * @returns {{ eax: number, ecx: number, edx: number, ebx: number, esp: number, ebp: number,
+ *     esi: number, edi: number, halted: boolean, popped: number }}
+ *     Each of the eight registers after, whether it returned to the halt,
+ *     and the bytes of arguments its return popped.
+ */
+export function runCode(code, { stack = [], registers = {} }){
+    let m = codeMachines.get(code);
+    if (!m)
+    {
+        m = createTestMachine();
+        m.write(CODE, Array.from(code));
+        m.write(HALT, [0xf4]);
+        codeMachines.set(code, m);
+    }
+    m.writeU32(STACK, HALT);
+    stack.forEach((word, i)=>m.writeU32(STACK + 4 + i * 4, word >>> 0));
+    m.setReg('esp', STACK);
+    for (const [reg, value] of Object.entries({ eax: 0xa5a5a5a5, ecx: 0xc5c5c5c5,
+        edx: 0xd5d5d5d5, ...SAVED, ...registers }))
+    {
+        m.setReg(reg, value >>> 0);
+    }
+    m.setEflags(2);
+    const exit = m.runProgram(CODE);
+    const after = (/** @type {string} */ name)=>m.reg(name) >>> 0;
+    const esp = after('esp');
+    return {
+        eax: after('eax'), ecx: after('ecx'), edx: after('edx'), ebx: after('ebx'), esp,
+        ebp: after('ebp'), esi: after('esi'), edi: after('edi'),
+        halted: exit.kind === 3 && m.eip() === HALT + 1, popped: esp - (STACK + 4),
+    };
+}
+
+/** The registers a callee keeps, as `runCode` sets them. */
+export const KEPT = SAVED;
 
 /** A small generator with a seed, so a failure is the same failure each run. @param {number} seed */
 export function random(seed){
@@ -162,6 +214,7 @@ export function equivalence(compiled, sources, model){
         }
         m.setEflags(2);
         view.setUint16(m.layout.x87Control, input.control ?? 0x37f, true);
+        view.setUint16(m.layout.x87Status, (input.status ?? 0) & 0xc7ff, true);
         let top = 0;
         let empty = 0xff;
         for (const value of input.x87 ?? [])
@@ -207,6 +260,7 @@ export function equivalence(compiled, sources, model){
             saved: { ebx: m.reg('ebx'), esi: m.reg('esi'), edi: m.reg('edi'), ebp: m.reg('ebp') },
             df: (m.eflags() & 0x400) !== 0,
             control: view.getUint16(m.layout.x87Control, true),
+            status: view.getUint16(m.layout.x87Status, true),
             data: m.read(DATA, span),
             handedOver: false,
         };
@@ -259,8 +313,8 @@ export function equivalence(compiled, sources, model){
         return {
             eax: typeof answer === 'number' ? answer >>> 0 : 0, edx: 0, esp: STACK + 4 + popped,
             st: typeof answer === 'number' ? [] : [answer.st0], saved: SAVED, df: false,
-            control: input.control ?? 0x37f, data: memory.slice(DATA, DATA + data.length),
-            handedOver: true,
+            control: input.control ?? 0x37f, status: (input.status ?? 0) & 0xc7ff,
+            data: memory.slice(DATA, DATA + data.length), handedOver: true,
         };
     };
 
@@ -269,6 +323,10 @@ export function equivalence(compiled, sources, model){
      * @param {Record<string, unknown>} module  The source, or the model's copy of it.
      */
     const runJs = (name, input, double, module)=>{
+        // The x87's words as the call finds them; a control word the source
+        // loads is the one the model's arithmetic rounds to from there on.
+        let control = input.control ?? 0x37f;
+        let status = (input.status ?? 0) & 0xc7ff;
         const span = spanOf(compiledOf(name));
         const memory = new Uint8Array(span > 0 ? 1 << 20 : DATA);
         for (const [address, bytes] of input.memory ?? [])
@@ -300,6 +358,18 @@ export function equivalence(compiled, sources, model){
                 setResult: value=>void st.unshift(value),
                 get: index=>st[index],
                 pop: ()=>void st.shift(),
+                controlWord: ()=>control,
+                setControlWord: word=>{
+                    control = word & 0xffff;
+                    if (model && module === model.module)
+                    {
+                        model.$.control = control;
+                    }
+                },
+                statusWord: ()=>status,
+                clearExceptions: ()=>{
+                    status &= 0x7f00;
+                },
             },
             setRegisters: values=>{
                 edx = values.edx >>> 0;
@@ -324,7 +394,8 @@ export function equivalence(compiled, sources, model){
             throw new Error(`${name} calls the guest, and the case gives no stand-in`);
         }
         const eax = entry.handler([...input.stack ?? []]) >>> 0;
-        return { eax, edx, st, data: memory.slice(DATA, DATA + span), handedOver };
+        return { eax, edx, st, data: memory.slice(DATA, DATA + span), handedOver, control,
+            status };
     };
 
     return {
@@ -341,7 +412,10 @@ export function equivalence(compiled, sources, model){
             {
                 model.$.control = input.control ?? 0x37f;
             }
-            const js = runJs(name, input, double, single && model ? model.module : sources);
+            // A function that loads a control word may round from there on: the
+            // model follows the word it loads, whatever the call came under.
+            const rounds = single || fn.uses.includes('setControlWord');
+            const js = runJs(name, input, double, rounds && model ? model.module : sources);
             const what = `${name}(${JSON.stringify(input.stack ?? [])}${input.x87
                 ? `, st ${JSON.stringify(input.x87)}` : ''}) under 0x${(input.control ?? 0x37f)
                 .toString(16)}`;
@@ -354,7 +428,12 @@ export function equivalence(compiled, sources, model){
                 : 0;
             assert.equal(x86.esp, STACK + 4 + popped, `${what}: ESP past the return address`);
             assert.equal(x86.df, false, `${what}: the direction flag clear`);
-            assert.equal(x86.control, input.control ?? 0x37f, `${what}: the control word`);
+            assert.equal(x86.control, js.control, `${what}: the control word`);
+            if (fn.uses.includes('clearExceptions'))
+            {
+                assert.equal(x86.status & 0xbf, js.status & 0xbf,
+                    `${what}: the exception flags`);
+            }
             if (fn.returns === 'f64' || fn.returns === 'f32')
             {
                 assert.equal(x86.st.length, 1, `${what}: one double on the x87 stack`);

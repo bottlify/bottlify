@@ -256,38 +256,6 @@ test('_initterm_e stops at the first initialiser that fails', ()=>{
 
 // --- the runtime's own state ---
 
-test('_controlfp changes only the bits the mask names, and reports the word', ()=>{
-    // A program sets this to make its arithmetic reproducible and reads it back
-    // to check; an answer that is not what it asked for fails that check.
-    const { fns } = fakeMachine();
-
-    const initial = fns._controlfp.handler([0, 0]);
-    assert.equal(initial, 0x0009001f, 'the MSVC default');
-
-    // The rounding-control pair, which the default leaves clear.
-    assert.equal(fns._controlfp.handler([0x00000200, 0x00000300]), 0x0009021f);
-    assert.equal(fns._controlfp.handler([0, 0]), 0x0009021f, 'and it stays changed');
-    assert.equal(fns._controlfp.handler([0xffffffff, 0]), 0x0009021f,
-        'a mask of nothing changes nothing, whatever is asked for');
-    assert.equal(fns._controlfp.handler([0, 0x00000300]), 0x0009001f, 'and it clears back');
-});
-
-test('_control87 is _controlfp under its older name, reading and writing one word', ()=>{
-    // The two names reach one control word: a program of either vintage may
-    // set through one and read back through the other, and a runtime whose
-    // two names answered from two words would make every read-back a coin
-    // toss. The demo-era link libraries import `_control87` while the newer
-    // CRTs import `_controlfp`; the state cannot be per-name.
-    const { fns } = fakeMachine();
-
-    assert.equal(fns._control87.handler([0, 0]), fns._controlfp.handler([0, 0]));
-    assert.equal(fns._control87.handler([0x00000200, 0x00000300]), 0x0009021f);
-    assert.equal(fns._controlfp.handler([0, 0]), 0x0009021f,
-        'the word the old name set is the word the new name reports');
-    assert.equal(fns._control87.handler([0, 0x00000300]), 0x0009001f);
-    assert.equal(fns._control87.argBytes, 8);
-});
-
 test('the runtime\'s globals are reachable and stay at one address', ()=>{
     // A program linked against the DLL cannot name these, so it reaches them
     // through an accessor -- and it writes through what it gets back, so the
@@ -415,7 +383,6 @@ test('every entry point is cdecl and declares the stack it does not pop', ()=>{
     }
     assert.equal(fns.__getmainargs.argBytes, 20);
     assert.equal(fns._initterm.argBytes, 8);
-    assert.equal(fns._controlfp.argBytes, 8);
     assert.equal(fns.__p__commode.argBytes, 0);
     assert.equal(fns.exit.argBytes, 4);
 });
