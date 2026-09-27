@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHive, HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
+import { buildImage, buildResources } from '../../loader/internal/resources.test.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS } from './functions.js';
 import { IID_ITYPELIB } from './objects.js';
 
@@ -446,10 +447,18 @@ test('without a volume or vtables no type library loads, and the pointer says so
     assert.equal(fx.UnRegisterTypeLib.argBytes, 20);
 });
 
-/** The fixture library, on a one-file volume, with a hive and a publisher. */
-function libraryHost(){
+/** An MSFT type library, as a .tlb file holds it. */
+const FIXTURE_LIBRARY = new Uint8Array(
+    readFileSync(new URL('./msft-typelib.bin', import.meta.url)));
+
+/**
+ * The fixture library, on a one-file volume, with a hive and a publisher.
+ *
+ * @param {string} [where]  The one file's path. @param {Uint8Array} [content]  Its bytes.
+ */
+function libraryHost(where = 'c:\\lib\\engine.tlb', content = undefined){
     const base = fakeHost();
-    const bytes = new Uint8Array(readFileSync(new URL('./msft-typelib.bin', import.meta.url)));
+    const bytes = content ?? FIXTURE_LIBRARY;
     /** @type {{ object: any, id: string }[]} */
     const published = [];
     /** @type {string[]} */
@@ -462,7 +471,7 @@ function libraryHost(){
         opened,
         files: {
             /** @param {string} path */
-            stat: path=>(path.toLowerCase() === 'c:\\lib\\engine.tlb'
+            stat: path=>(path.toLowerCase() === where
                 ? { exists: true, isDirectory: false, size: bytes.length }
                 : { exists: false, isDirectory: false, size: 0 }),
             /** @param {string} path */
@@ -486,6 +495,21 @@ function libraryHost(){
         call: ()=>Promise.resolve(0),
     };
 }
+
+test('LoadTypeLib reads a library an executable carries as its TYPELIB resource', async()=>{
+    // A COM server names its own image to register its library: the library
+    // is resource TYPELIB 1 inside it, and \\N after the path names another.
+    const rsrc = buildResources([{ type: 'TYPELIB',
+        names: [{ name: 1, langs: [{ lang: 0, data: [...FIXTURE_LIBRARY] }] }] }]);
+    const lib = libraryHost('c:\\lib\\kernel.exe', buildImage(rsrc).bytes);
+    const fns = createAutomationFunctions(lib);
+    lib.putWide(TEXT, 'C:\\lib\\kernel.exe');
+    assert.equal(await fns.LoadTypeLib.handler([TEXT, SLOT]), 0);
+    assert.equal(lib.published[0].id, IID_ITYPELIB);
+    lib.putWide(TEXT, 'C:\\lib\\kernel.exe\\2');
+    assert.equal(await fns.LoadTypeLib.handler([TEXT, SLOT]) | 0, 0x80029c4a | 0,
+        'no second library in it: TYPE_E_CANTLOADLIBRARY');
+});
 
 test('LoadTypeLib reads the file off the volume, and the library registers and loads back',
     async()=>{
@@ -569,7 +593,8 @@ test('LoadTypeLibEx registers when asked to, and DispGetIDsOfNames reaches a typ
     lib.putWide(TEXT, 'C:\\lib\\engine.tlb');
     assert.equal(fns.LoadTypeLibEx.handler([TEXT, 2, SLOT]), 0, 'REGKIND_NONE');
     const root = /** @type {any} */ (lib.hive.root(HKEY_CLASSES_ROOT));
-    assert.equal(lib.hive.open(root, 'TypeLib'), null);
+    assert.equal(lib.hive.open(root, 'TypeLib\\{94636247-BC39-4B8B-A728-2D1FBEBFA76A}'), null,
+        'the library is not registered yet');
     // The fake volume's second read arrives later, so the registration waits.
     assert.equal(await fns.LoadTypeLibEx.handler([TEXT, 1, SLOT]), 0, 'REGKIND_REGISTER');
     assert.ok(lib.hive.open(root, 'TypeLib\\{94636247-BC39-4B8B-A728-2D1FBEBFA76A}\\1.0'));

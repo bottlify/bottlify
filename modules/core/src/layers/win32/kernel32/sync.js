@@ -353,6 +353,9 @@ export function createSyncFunctions(host){
                 const view = new DataView(host.readMemory(handles >>> 0, total * 4).buffer);
                 /** @type {any[]} */
                 const objects = [];
+                /** Where each of `objects` sits in the caller's handle array. */
+                /** @type {number[]} */
+                const indices = [];
                 /** @type {any} */
                 let child = null;
                 /** Where a finished process sits in the caller's handle array. */
@@ -378,6 +381,7 @@ export function createSyncFunctions(host){
                         continue;
                     }
                     objects.push(target);
+                    indices.push(at);
                 }
 
                 const thread = host.currentThread();
@@ -395,17 +399,33 @@ export function createSyncFunctions(host){
                 // parent can look -- it runs once the parent has nothing else
                 // to do -- so a real wait on a set containing one is the parent
                 // handing over to it. A wait for any of the set is noted on
-                // the child and answered with the child's own index when it
-                // exits, the engine having run it beside this process; nothing
-                // else in the set can be signalled meanwhile, since nothing of
-                // the parent's runs. A wait for all of a set with more in it
+                // the child and answered when it exits, the engine having run
+                // it beside this process. Nothing of the parent's runs
+                // meanwhile, but the child can signal the rest of the set: a
+                // named event the parent made and the child opened by name.
+                // One it signalled came before its exit, and is the answer --
+                // taken as a wait takes it -- where Windows would have woken
+                // the parent with it while the child ran on; otherwise the
+                // child's own index. A wait for all of a set with more in it
                 // than the child cannot be satisfied by the child alone, and
                 // stays the old handover: the parent is replaced.
                 if (child !== null && (timeout >>> 0) !== 0)
                 {
                     if (waitAll === 0 || objects.length === 0)
                     {
-                        (child.waiters ??= []).push({ thread, result: WAIT_OBJECT_0 + childAt });
+                        const settle = ()=>{
+                            if (!objects.some(target=>ready(target, thread)))
+                            {
+                                return WAIT_OBJECT_0 + childAt;
+                            }
+                            const any = /** @type {{ index: number, result: number }} */ (
+                                kernel.waitAny(objects, thread));
+                            const base = any.result === KERNEL_ABANDONED
+                                ? WAIT_ABANDONED_0 : WAIT_OBJECT_0;
+                            return base + indices[any.index];
+                        };
+                        (child.waiters ??= []).push(
+                            { thread, result: WAIT_OBJECT_0 + childAt, settle });
                     }
                     kernel.block(thread, `child process ${child.imagePath}`);
                     return host.park(thread);

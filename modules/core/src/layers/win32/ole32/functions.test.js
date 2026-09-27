@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { GUID_NULL, GUID_SIZE, formatGuid, parseGuid } from './guid.js';
 import { IID_IUNKNOWN, createComObject, createComRegistry } from './objects.js';
 import { createOleFunctions, createTaskAllocator } from './functions.js';
+import { HKEY_CLASSES_ROOT, createHive } from '../advapi32/registry.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -731,6 +732,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         OleUninitialize: 0,
         CreateStreamOnHGlobal: 12,
         CoFreeUnusedLibraries: 0,
+        CoFreeAllLibraries: 0,
         CoLoadLibrary: 8,
         CoFreeLibrary: 4,
         CoCreateInstance: 20,
@@ -744,6 +746,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoTaskMemRealloc: 8,
         CoGetMalloc: 8,
         StringFromGUID2: 12,
+        CoTreatAsClass: 8,
         ProgIDFromCLSID: 8,
         StgCreateDocfile: 16,
         StgOpenStorage: 24,
@@ -1067,4 +1070,26 @@ test('the OLE clipboard never holds an object, and flushing it needs OLE', ()=>{
     assert.equal(fns.OleInitialize.handler(), S_OK);
     assert.equal(fns.OleFlushClipboard.handler(), S_OK);
     assert.equal(fns.OleIsCurrentClipboard.handler(), S_FALSE, 'whatever the object');
+});
+
+test('CoTreatAsClass writes the emulation into the registry, and GUID_NULL takes it away', ()=>{
+    const { host } = setup();
+    const hive = createHive();
+    host.hive = hive;
+    const fns = createOleFunctions(host);
+    const NEW_ARG = 0x1040;
+    const replacement = '{66666666-7777-8888-9999-AAAAAAAAAAAA}';
+    host.bytes.set(/** @type {Uint8Array} */ (parseGuid(replacement)), NEW_ARG);
+    assert.equal(fns.CoTreatAsClass.handler([CLSID_ARG, NEW_ARG]), 0);
+    const root = /** @type {any} */ (hive.root(HKEY_CLASSES_ROOT));
+    const path = `CLSID\\${CLSID_TEST}\\TreatAs`;
+    const key = hive.open(root, path);
+    assert.ok(key);
+    const data = hive.getValue(key, '')?.data ?? new Uint8Array(0);
+    const text = String.fromCharCode(...data.subarray(0, data.indexOf(0)));
+    assert.equal(text, replacement);
+
+    host.bytes.set(/** @type {Uint8Array} */ (parseGuid(GUID_NULL)), NEW_ARG);
+    assert.equal(fns.CoTreatAsClass.handler([CLSID_ARG, NEW_ARG]), 0);
+    assert.equal(hive.open(root, path), null, 'removed');
 });

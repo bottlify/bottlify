@@ -7,8 +7,9 @@ Win32 file API built on top of this layer is described in [`win32.md`](./win32.m
 ## 1. Purpose
 
 `filesystem` is the volume: drive letters, Windows path rules, a read-only source under a writable
-layer (copy-on-write), open files with positions and sharing, and the bundle reader that turns a
-`.btl` container into that read-only source. It reports failures by name and hands back handle
+layer (copy-on-write), open files with positions and sharing, the bundle reader that turns a
+`.btl` container into that read-only source, and the disc reader that turns an ISO 9660 image into
+a read-only drive of its own. It reports failures by name and hands back handle
 objects rather than numbers.
 
 It is not the Win32 file API. Which error number `CreateFile` answers with, what a `HANDLE` is
@@ -44,12 +45,13 @@ store folds no case and invents no directories — every Windows rule lives one 
 | method | one line |
 |--------|----------|
 | `ErrorCode`, `Disposition`, `SeekFrom` | The vocabularies (below). |
-| `mount(letter, { source?, system?, writable? })` | Mount or replace a drive. `letter` must be a single letter. |
+| `mount(letter, { source?, system?, writable?, readOnly?, volume? })` | Mount or replace a drive. `letter` must be a single letter. `readOnly: true` is read-only media, a disc: every write, create and delete on the drive is `WRITE_PROTECTED`, and its writable layer is an empty one of its own. `volume` is what the drive says of itself -- for a disc `{ kind: 'cdrom', label, serial, size, unicode }` -- kept as given for `volume()`. |
 | `drives() → string[]` | Mounted letters, in mount order. |
+| `volume(letter)` | `{ readOnly, ...volume }` as the drive was mounted, or `null` for a letter nothing is mounted under. |
 | `resolve(path)` | `{ drive, components, device, wildcard, path }` without touching the volume — how a caller learns a path names a device before opening it. |
 | `currentDirectory() → string` | The current directory as a full path. |
 | `setCurrentDirectory(path)` | Move it; refuses a path that is not an existing directory. |
-| `stat(path)` | `{ name, path, directory, size }` or `null`. |
+| `stat(path)` | `{ name, path, directory, size, modified, hidden, readOnly }` or `null`. `readOnly` is the drive's; `hidden` and `modified` are the source's where it records them (a disc does), the overlay's otherwise. |
 | `list(path, pattern?)` | Entries of a directory, filtered by a wildcard; a trailing wildcard component of `path` is taken as the pattern when none is given. |
 | `createDirectory(path) → boolean` | `true` when created, `false` when it was already there. |
 | `removeDirectory(path)` / `deleteFile(path)` | Remove; a directory must be empty. |
@@ -76,8 +78,8 @@ position and size calls zero) and the mutating calls are no-ops, and nothing thr
 
 `ErrorCode` (`src/layers/filesystem/internal/errors.js`): `INVALID_PATH`, `INVALID_PARAMETER`,
 `NO_SUCH_DRIVE`, `NOT_FOUND`, `PATH_NOT_FOUND`, `ALREADY_EXISTS`, `NOT_A_DIRECTORY`,
-`IS_A_DIRECTORY`, `DIRECTORY_NOT_EMPTY`, `ACCESS_DENIED`, `SHARING_VIOLATION`, `IS_DEVICE`,
-`INVALID_HANDLE`. `NOT_FOUND` and `PATH_NOT_FOUND` are told apart because Win32 tells them apart.
+`IS_A_DIRECTORY`, `DIRECTORY_NOT_EMPTY`, `ACCESS_DENIED`, `WRITE_PROTECTED`, `SHARING_VIOLATION`,
+`IS_DEVICE`, `INVALID_HANDLE`. `NOT_FOUND` and `PATH_NOT_FOUND` are told apart because Win32 tells them apart.
 Every failure is an `Error` with a `code` from this set. `Disposition` is `CREATE_NEW`,
 `CREATE_ALWAYS`, `OPEN_EXISTING`, `OPEN_ALWAYS`, `TRUNCATE_EXISTING`; `SeekFrom` is `BEGIN`,
 `CURRENT`, `END`.
@@ -90,6 +92,7 @@ Every failure is an `Error` with a `code` from this set. `Disposition` is `CREAT
 | `volumes["C:"].tombstones` | Source entries deleted by the program and hidden. |
 | `volumes["C:"].copied` | Files present in both layers — copied up on first write. |
 | `volumes["C:"].layered` | Whether the drive has a source. |
+| `volumes["D:"].readOnly` / `.kind` / `.label` | Present for read-only media: `true`, and for a disc `'cdrom'` and its label. |
 | `handles.open` / `.opened` / `.closed` | Open handles now, and totals. |
 | `handles.byPath` | Up to forty paths, ordered by bytes read, as `"n opens, m bytes"` — which files a run actually spent its reads on. |
 | `current` | The current directory as a full path. |
@@ -197,6 +200,46 @@ engine; `src/bundle.js` (`@bottlify/core/bundle`) publishes the constants and ch
   and a background fill of the whole bundle in container order, one request at a time, that stands
   aside whenever a read is parked and is off when there is no durable store.
 
+### Disc images (`src/layers/filesystem/internal/iso/`)
+
+A disc image is a read-only drive of its own rather than a layer under a bundle: an installer
+started from a disc finds its archives beside itself, on a drive that answers as a CD-ROM, and
+nothing of the disc ever lands in the writable layer, so nothing has to be told apart afterwards.
+
+- **Reader** (`iso9660.js`, published as `@bottlify/core/iso`): written from ECMA-119 and the
+  Joliet specification. `openIso(read)` reads the volume descriptors from sector 16 to the
+  terminator and walks the directory tree of the Joliet supplementary descriptor where there is
+  one (escape sequences `%/@`, `%/C`, `%/E`), of the primary descriptor otherwise. `read(offset,
+  length)` may answer at once or with a promise: the page reads a chosen file asynchronously, the
+  engine synchronously, and the image's own `read(entry, offset, length)` answers in the manner it
+  was given. Opening reads the descriptors and the directories and no file; a file's bytes are
+  read when asked for, a range at a time. Names are the Joliet ones as the files carry them, or
+  the primary tree's, with the `;1` version and the dot of a name without an extension dropped, as
+  Windows shows them. A file recorded as several extents (the multi-extent flag) reads as one;
+  an interleaved file is read unit by unit, the gaps skipped; an associated file is not a file of
+  its own and is left out. The existence bit is `hidden`; the recording time, with its zone, is
+  `modified`. `volume` is `{ label, serial, blockSize, blocks, size, joliet }`: the label of the
+  descriptor the tree was read from, and the serial number Windows reports for a disc -- the bytes
+  of that descriptor summed four ways into the four bytes of a word, the first byte into the most
+  significant. A directory reached twice, a tree deeper than 64 levels or wider than 2^20 entries
+  is a damaged image and refused. `isIsoImage(read)` tells an image apart by its contents: a
+  volume descriptor at sector 16.
+- **Source** (`source.js`): `createIsoSource(image)` is a `SourceStore` over an image opened with a
+  synchronous reader; one opened with an asynchronous reader is refused on the first read rather
+  than handing a promise to a guest read. `chunkedReads(read, { size })` is that reader with the
+  last sixty-four 64 KiB-aligned chunks kept, so an installer reading a cabinet's headers a few bytes
+  at a time costs one read of the image per chunk; a read of 256 KiB or more goes straight through.
+- **Mounting** is the assembler's (`src/discs.js`, the `discs` option of
+  [`host.md`](./host.md)): a `Blob` is read with `FileReaderSync` in a worker, a range at a time;
+  on a thread without it, into memory once. The drive is mounted `readOnly` with
+  `volume: { kind: 'cdrom', label, serial, size, unicode }`, on D: or the first free letter after
+  it.
+- **Read-only media**: the overlay refuses every change on the drive with `WRITE_PROTECTED` before
+  it looks the name up -- the device refuses, not the file, so a name that is not there is refused
+  the same way; an open asking for write access is refused the same way in the handle table. An
+  open to read an existing file succeeds whatever its disposition; one that would create or empty
+  a file is refused.
+
 ### The system volume
 
 A second read-only layer can sit under the bundle: the engine's own volume, mounted at
@@ -242,6 +285,10 @@ tree its consumer is the bundle block cache.
   `BLOCK_MISS` gets a thrown error. The engine's `vfs.js` fetches once and retries once — a second
   miss is a fetch that did not deliver.
 - **Format versions 1 and 2 only**; version 1 blocks arrive without checksums.
+- **A disc is read as ISO 9660 and Joliet only.** Rock Ridge is not read, and neither is UDF: a
+  disc that carries a UDF volume beside its ISO 9660 one (a DVD of the era, a bridge disc) is read
+  through its ISO 9660 tree and reported as `CDFS`, where Windows would mount the UDF one. One
+  image per drive, and no way to change the disc in a drive while a program runs.
 - **The heap block cache is not persistence**: a build without OPFS pays the network again for
   anything it let go.
 - **`handles.byPath` tracks at most 4096 distinct paths.**
@@ -264,7 +311,13 @@ engine journals what its callers decide to say.
 | `src/layers/filesystem/internal/bundle/bundle.test.js` | Byte-exact round trip through all three codecs, ranges across blocks, reads past the end, case folding, empty directories, `BLOCK_MISS` naming every absent block, LRU eviction, header checks. |
 | `src/layers/filesystem/internal/bundle/cache.test.js` | Slot arithmetic, the presence bitmap across sessions, a foreign bitmap discarded, the heap fallback and its pinning. |
 | `src/layers/filesystem/internal/bundle/crc32.test.js` | The checksum. |
-| `src/layers/filesystem/module.test.js` | The module comes up with no configuration; case; relative paths; drives isolated; search patterns; wildcards refused outside enumeration; devices reported; the source survives everything; diagnostics before and after. |
+| `src/layers/filesystem/internal/iso/iso9660.test.js` | Over images written by `iso.fixture.js` (both descriptors, both trees, path tables): the Joliet tree preferred and its names kept, the primary tree's names cleaned, byte-exact reads whole and in pieces from a synchronous and an asynchronous reader, opening that reads no file, multi-extent and interleaved files, the hidden bit and the recording time in UTC, the serial number, refusal of what is not an image and of a directory that contains itself, the source store and the chunked reader. |
+| `src/layers/filesystem/module.test.js` | The module comes up with no configuration; case; relative paths; drives isolated; search patterns; wildcards refused outside enumeration; devices reported; the source survives everything; diagnostics before and after; a disc mounted as D: reads like any other drive, reports its volume, hidden names and recording times, and refuses every change as `WRITE_PROTECTED`. |
+| `src/discs.test.js` | The first free letter from D; a `Blob` read a range at a time through `FileReaderSync`, and whole without it; mounted discs as CD-ROM drives; a letter asked for that is taken is refused. |
 
 Integration tests that drive a bundle and a session through the whole engine live beside the
 application entry point (`src/bundle.itest.js`, `src/session.itest.js`; `npm run test:integration`).
+`src/disc.itest.js` runs a program started from a disc image: the drive is a CD-ROM labelled as
+the disc is, on CDFS, the current directory is the disc's root, a file on it reads, a create there
+fails with `ERROR_WRITE_PROTECT`, and a copy to C: lands whole; and the image crosses the port
+protocol as the `Blob` it was chosen as.

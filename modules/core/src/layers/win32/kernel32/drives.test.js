@@ -11,9 +11,13 @@ import { decodeAnsi } from './locale.js';
 
 const DRIVE_NO_ROOT_DIR = 1;
 const DRIVE_FIXED = 3;
+const DRIVE_CDROM = 5;
 
-/** @param {string[]} [mounted] */
-function setup(mounted = ['C']){
+/**
+ * @param {string[]} [mounted]
+ * @param {Record<string, any>} [volumes]  What each letter says of itself.
+ */
+function setup(mounted = ['C'], volumes = {}){
     const bytes = new Uint8Array(0x1000);
     /** @type {number[]} */
     const errors = [];
@@ -47,6 +51,7 @@ function setup(mounted = ['C']){
             errors.push(code);
         },
         drives: ()=>mounted,
+        volume: letter=>volumes[letter] ?? (mounted.includes(letter) ? { readOnly: false } : null),
     });
     return { fns, bytes, errors };
 }
@@ -93,8 +98,8 @@ test('a buffer with no room is told the size instead of being written', ()=>{
 });
 
 test('a mounted drive is fixed and an unmounted one has no root', ()=>{
-    // Never removable and never a CD: both send a program down a path that ends
-    // at a disc nobody can insert.
+    // Never removable, and never a CD unless it is one: both send a program
+    // down a path that ends at a disc nobody can insert.
     const { fns, bytes } = setup(['C']);
     plant(bytes, 0x200, 'C:' + String.fromCharCode(92));
     plant(bytes, 0x220, 'E:' + String.fromCharCode(92));
@@ -206,4 +211,66 @@ test('a label in the upper half of the ANSI page reads back as the bytes it was 
     assert.equal(fns.SetVolumeLabelA.handler([0x100, 0x120]), 1);
     assert.equal(fns.GetVolumeInformationA.handler([0x100, 0x200, 32, 0, 0, 0, 0, 0]), 1);
     assert.deepEqual([...bytes.subarray(0x200, 0x200 + label.length + 1)], [...label, 0]);
+});
+
+const DISC = { kind: 'cdrom', label: 'NFS_DEMO', serial: 0x1234abcd, size: 616 * 1024 * 1024,
+    unicode: true, readOnly: true };
+
+test('a disc is a CD-ROM with its own label, serial and file system', ()=>{
+    const { fns, bytes } = setup(['C', 'D'], { D: DISC });
+    plant(bytes, 0x100, 'D:\\');
+    plant(bytes, 0x110, 'C:\\');
+    assert.equal(fns.GetDriveTypeA.handler([0x100]), DRIVE_CDROM);
+    assert.equal(fns.GetDriveTypeA.handler([0x110]), DRIVE_FIXED);
+
+    assert.equal(fns.GetVolumeInformationA.handler(
+        [0x100, 0x200, 32, 0x240, 0x244, 0x248, 0x260, 16]), 1);
+    assert.equal(decodeAnsi(bytes.subarray(0x200, 0x208)), 'NFS_DEMO');
+    assert.equal(bytes[0x208], 0);
+    assert.equal(dword(bytes, 0x240), 0x1234abcd);
+    assert.equal(dword(bytes, 0x244), 110, 'the longest Joliet name, in characters');
+    assert.equal(dword(bytes, 0x248) & 0x00080000, 0x00080000, 'a read-only volume');
+    assert.equal(dword(bytes, 0x248) & 0x4, 0x4, 'with its names in Unicode');
+    assert.equal(decodeAnsi(bytes.subarray(0x260, 0x264)), 'CDFS');
+
+    // The machine's own disk still answers as itself.
+    assert.equal(fns.GetVolumeInformationA.handler([0x110, 0x200, 32, 0x240, 0, 0, 0x260, 16]), 1);
+    assert.equal(decodeAnsi(bytes.subarray(0x200, 0x208)), 'Bottlify');
+    assert.equal(decodeAnsi(bytes.subarray(0x260, 0x264)), 'NTFS');
+});
+
+test('the wide form of the volume information writes the same answers in UTF-16', ()=>{
+    const { fns, bytes, errors } = setup(['C', 'D'], { D: DISC });
+    const root = 'D:\\\0';
+    for (const [at, character] of [...root].entries())
+    {
+        bytes[0x100 + at * 2] = character.charCodeAt(0);
+    }
+    assert.equal(fns.GetVolumeInformationW.handler([0x100, 0x200, 9, 0x240, 0, 0, 0x280, 5]), 1);
+    assert.equal(String.fromCharCode(...new Uint16Array(bytes.slice(0x200, 0x212).buffer)),
+        'NFS_DEMO\0');
+    assert.equal(String.fromCharCode(...new Uint16Array(bytes.slice(0x280, 0x28a).buffer)),
+        'CDFS\0');
+    // A buffer one character short of the label is refused, counted in characters.
+    assert.equal(fns.GetVolumeInformationW.handler([0x100, 0x200, 8, 0, 0, 0, 0, 0]), 0);
+    assert.equal(errors.at(-1), 87);
+});
+
+test('a disc is full, sized as the disc, and keeps its own label', ()=>{
+    const { fns, bytes, errors } = setup(['C', 'D'], { D: DISC });
+    plant(bytes, 0x100, 'D:\\');
+    assert.equal(fns.GetDiskFreeSpaceA.handler([0x100, 0x120, 0x124, 0x128, 0x12c]), 1);
+    assert.equal(dword(bytes, 0x120), 1);
+    assert.equal(dword(bytes, 0x124), 2048);
+    assert.equal(dword(bytes, 0x128), 0);
+    assert.equal(dword(bytes, 0x12c), DISC.size / 2048);
+
+    assert.equal(fns.GetDiskFreeSpaceExA.handler([0x100, 0x130, 0x138, 0x140]), 1);
+    assert.equal(dword(bytes, 0x130), 0);
+    assert.equal(dword(bytes, 0x138), DISC.size);
+    assert.equal(dword(bytes, 0x140), 0);
+
+    plant(bytes, 0x160, 'MINE');
+    assert.equal(fns.SetVolumeLabelA.handler([0x100, 0x160]), 0);
+    assert.equal(errors.at(-1), 19, 'ERROR_WRITE_PROTECT');
 });

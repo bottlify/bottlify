@@ -8,6 +8,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { filesystemModule } from './module.js';
 import { createMemoryStore } from './internal/memory-store.js';
+import { buildIso } from './internal/iso/iso.fixture.js';
+import { openIso } from './internal/iso/iso9660.js';
+import { createIsoSource } from './internal/iso/source.js';
 
 /** @param {string} text */
 const bytes = text=>Uint8Array.from([...text].map(character=>character.charCodeAt(0)));
@@ -281,5 +284,79 @@ test('diagnostics answers for the live instance', async()=>{
     assert.equal(report.metrics.current, 'C:\\');
     assert.deepEqual(Object.keys(report.metrics.volumes), ['C:'],
         'the live instance mounts one drive, whatever the one before it mounted');
+    await filesystemModule.dispose();
+});
+
+/** A disc image mounted as D:, beside an ordinary C:. */
+async function withDisc(){
+    const image = buildIso({
+        label: 'DEMO',
+        files: {
+            'AUTORUN.INF': '[autorun]\r\nopen=Setup.exe\r\n',
+            'Setup.exe': 'MZ setup',
+            'Data/Big Cabinet.cab': 'cabinet',
+            'Hidden.dat': 'h',
+        },
+        hidden: ['Hidden.dat'],
+    });
+    const iso = await openIso((offset, length)=>image.subarray(offset, offset + length));
+    const fs = await filesystemModule.create({});
+    fs.mount('D', {
+        source: createIsoSource(iso),
+        readOnly: true,
+        volume: { kind: 'cdrom', label: iso.volume.label, serial: iso.volume.serial },
+    });
+    return fs;
+}
+
+test('a disc is a drive of its own that reads like any other', async()=>{
+    const fs = await withDisc();
+    assert.deepEqual(fs.drives(), ['C', 'D']);
+    assert.deepEqual(fs.list('D:\\*').map((/** @type {any} */ entry)=>entry.name).sort(),
+        ['AUTORUN.INF', 'Data', 'Hidden.dat', 'Setup.exe']);
+    const handle = fs.open('d:\\data\\big cabinet.CAB');
+    assert.equal(text(fs.read(handle, 100)), 'cabinet');
+    fs.close(handle);
+    fs.setCurrentDirectory('D:\\');
+    assert.equal(fs.currentDirectory(), 'D:\\');
+    assert.equal(fs.stat('Setup.exe')?.readOnly, true);
+    assert.equal(fs.stat('Hidden.dat')?.hidden, true);
+    assert.equal(fs.stat('Setup.exe')?.hidden, false);
+    // The disc's own recording time, rather than the date a source file
+    // nobody recorded one for carries.
+    assert.equal(fs.stat('Setup.exe')?.modified, Date.UTC(2001, 1, 3, 4, 5, 6));
+    assert.equal(fs.stat('C:\\')?.readOnly, false);
+    assert.deepEqual(fs.volume('d:'), { kind: 'cdrom', label: 'DEMO',
+        serial: fs.volume('D').serial, readOnly: true });
+    assert.deepEqual(fs.volume('C'), { readOnly: false });
+    assert.equal(fs.volume('Q'), null);
+    await filesystemModule.dispose();
+});
+
+test('nothing on a disc can be written, made or removed', async()=>{
+    const fs = await withDisc();
+    const refused = { code: 'WRITE_PROTECTED' };
+    assert.throws(()=>fs.open('D:\\Setup.exe', { write: true }), refused);
+    // The device refuses the access, so a name that is not there is refused the same way.
+    assert.throws(()=>fs.open('D:\\missing.txt', { write: true }), refused);
+    assert.throws(()=>fs.open('D:\\new.txt',
+        { disposition: fs.Disposition.CREATE_NEW }), refused);
+    assert.throws(()=>fs.open('D:\\Setup.exe',
+        { disposition: fs.Disposition.CREATE_ALWAYS }), refused);
+    assert.throws(()=>fs.createDirectory('D:\\Saves'), refused);
+    assert.throws(()=>fs.deleteFile('D:\\Setup.exe'), refused);
+    assert.throws(()=>fs.removeDirectory('D:\\Data'), refused);
+    assert.throws(()=>fs.rename('D:\\Setup.exe', 'D:\\Other.exe'), refused);
+    assert.throws(()=>fs.setModified('D:\\Setup.exe', 0), refused);
+    assert.throws(()=>fs.apply([{ path: 'D:\\x.txt', bytes: bytes('x') }]), refused);
+    // Opening to read an existing file, whatever the disposition says of a
+    // missing one, is still a read.
+    const handle = fs.open('D:\\Setup.exe', { disposition: fs.Disposition.OPEN_ALWAYS });
+    assert.equal(text(fs.read(handle, 2)), 'MZ');
+    fs.close(handle);
+    // Moving a file off the disc copies it; the original stays where it is.
+    assert.throws(()=>fs.rename('D:\\AUTORUN.INF', 'C:\\autorun.inf'), refused);
+    assert.ok(fs.stat('D:\\AUTORUN.INF'));
+    assert.deepEqual(fs.export('D'), []);
     await filesystemModule.dispose();
 });

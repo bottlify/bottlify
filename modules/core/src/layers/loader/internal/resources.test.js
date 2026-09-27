@@ -31,7 +31,7 @@ const RSRC_FILE = 0x200;
  *           names: { name: number | string,
  *                    langs: { lang: number, data: number[] }[] }[] }[]} types
  */
-function buildResources(types){
+export function buildResources(types){
     let at = 16 + types.length * 8;
 
     const typeNodes = types.map(type=>{
@@ -134,7 +134,7 @@ function buildResources(types){
  *
  * @param {Uint8Array} rsrc
  */
-function buildImage(rsrc){
+export function buildImage(rsrc){
     const SECTION_TABLE = 0x178;
     const bytes = new Uint8Array(RSRC_FILE + rsrc.length);
     const view = new DataView(bytes.buffer);

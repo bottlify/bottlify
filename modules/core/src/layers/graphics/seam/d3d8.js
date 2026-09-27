@@ -2303,12 +2303,12 @@ export function createDirect3D8Seam(
     };
 
     /**
-     * The one format an adapter's mode list is offered in: 32-bit colour.
-     * Direct3D 8 lists every mode in every format under one index, and a
-     * display that can show 32 bits has no reason to offer 16 -- a program
-     * given both defaults to whichever it finds first and looks worse for it.
+     * The formats an adapter's modes are offered in, as a driver of the era
+     * lists them: 32-bit colour and 16-bit. Direct3D 8 lists every mode in
+     * every format under one index, and a program given both takes whichever
+     * it finds first, so every 32-bit mode comes before the first 16-bit one.
      */
-    const ADAPTER_FORMATS = Object.freeze([22]);
+    const ADAPTER_FORMATS = Object.freeze([22, 23]);
 
     /**
      * Every mode the adapter offers, in the order a program walks them: each
@@ -2316,10 +2316,8 @@ export function createDirect3D8Seam(
      *
      * @returns {{ width: number, height: number, refresh: number, format: number }[]}
      */
-    const adapterModes = ()=>displayModes(screen())
-        .flatMap(mode=>ADAPTER_FORMATS.map(format=>({
-            width: mode.width, height: mode.height, refresh: mode.refresh, format,
-        })));
+    const adapterModes = ()=>ADAPTER_FORMATS.flatMap(format=>displayModes(screen())
+        .map(mode=>({ width: mode.width, height: mode.height, refresh: mode.refresh, format })));
 
     /**
      * What this device says it can do.

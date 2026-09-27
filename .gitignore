@@ -6,6 +6,7 @@ roadmap/00-*
 .claude/
 .certs/
 
+to_install/
 dist/
 # Copied from the repository root by the build so the package carries its own.
 modules/core/LICENSE

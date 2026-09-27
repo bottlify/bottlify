@@ -1409,3 +1409,23 @@ test('a name in the upper half of the ANSI page goes back as the bytes it was re
     const found = FIND_DATA + WIN32_FIND_DATAA.cFileName;
     assert.deepEqual([...memory.bytes.subarray(found, found + name.length + 1)], [...name, 0]);
 });
+
+test('CreateFile hands the volume the write sharing it was asked for', ()=>{
+    // A second writer the first open agreed to share with must get in: an
+    // installer extracting a package opens it for writing twice, both times
+    // with FILE_SHARE_READ | FILE_SHARE_WRITE.
+    const { files, fns, at } = setup();
+    files.put('C:\\TEMP\\PKG.DAT', 'data');
+    /** @type {any[]} */
+    const asked = [];
+    const open = files.open.bind(files);
+    files.open = (/** @type {string} */ path, /** @type {any} */ mode)=>{
+        asked.push(mode);
+        return open(path, mode);
+    };
+    fns.CreateFileA.handler(
+        [at(NAME, 'C:\\TEMP\\PKG.DAT'), GENERIC_READ | GENERIC_WRITE, 3, 0, OPEN_ALWAYS, 0, 0]);
+    fns.CreateFileA.handler(
+        [at(NAME, 'C:\\TEMP\\PKG.DAT'), GENERIC_READ | GENERIC_WRITE, 1, 0, OPEN_ALWAYS, 0, 0]);
+    assert.deepEqual(asked.map(mode=>mode.shareWrite), [true, false]);
+});

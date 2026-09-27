@@ -12,6 +12,7 @@
     ".": "./src/index.js",
     "./prefix": "./src/prefix.js",
     "./silent": "./src/silent.js",
+    "./disc": "./src/disc.js",
     "./pack": "./src/pack.js",
     "./upload": "./src/upload.js",
     "./server": "./src/server/index.js"

@@ -32,6 +32,7 @@ import { resolveTranslationStore } from './layers/cpu/internal/translation-store
 import { createBlockCache, resolveBlockStore }
     from './layers/filesystem/internal/bundle/cache.js';
 import { decompressZstd } from './zstd.js';
+import { mountDiscs } from './discs.js';
 import { loadZstdWasm } from './zstd-wasm.js';
 
 /**
@@ -223,6 +224,11 @@ import { loadZstdWasm } from './zstd-wasm.js';
  *           session's at every start: a realm list, a line of configuration.
  *           They win over what the program last saved, and the bundle itself
  *           is never changed.
+ * @property {import('./discs.js').DiscOption[]} [discs]
+ *           Disc images, each mounted as a CD-ROM drive: D:, or the first free
+ *           letter after it, unless `letter` names one. An image is a `Blob`
+ *           (read a range at a time in a worker, whole on a thread without
+ *           `FileReaderSync`), bytes, or a synchronous `{ size, read }`.
  * @property {Object} [bundle]       A .btl mounted as the volume's read-only source.
  * @property {(offset: number, length: number) => Promise<Uint8Array>} bundle.fetch
  *           Brings a byte range of the bundle in, from wherever it is kept.
@@ -3789,6 +3795,9 @@ async function buildApp(options){
     // Mounted after the machine is up. A zstd block is decoded by this
     // project's own decoder now, so the mount no longer needs the emulator.
     blocks = await mountBundle({ options, cpu, filesystem, events, translationStore });
+    // A disc is a drive of its own, and takes D: or the first letter nothing
+    // holds once the machine's own disk is mounted.
+    await mountDiscs({ discs: options.discs, filesystem, events });
 
     // The session's files go onto the volume once the bundle is under it, so
     // that a saved file the bundle also carries is the one the program sees.
