@@ -1397,14 +1397,15 @@ export function createSystemFunctions({ host, live, windows, classes }){
      * A name's number in the global atom table registered messages and
      * clipboard formats share: the same for the same name in any case.
      *
-     * @param {number[]} args
+     * @param {number[]} args @param {boolean} [wide]  Whether the name is UTF-16.
      */
-    const registerName = ([name])=>{
+    const registerName = ([name], wide = false)=>{
         if ((name >>> 0) === 0)
         {
             return 0;
         }
-        const key = host.readCString(name >>> 0, MAX_NAME).toLowerCase();
+        const key = (wide ? readWideString(name >>> 0).slice(0, MAX_NAME)
+            : host.readCString(name >>> 0, MAX_NAME)).toLowerCase();
         if (key.length === 0)
         {
             return 0;
@@ -2346,7 +2347,14 @@ export function createSystemFunctions({ host, live, windows, classes }){
         RegisterWindowMessageA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: registerName,
+            handler: args=>registerName(args),
+        },
+
+        /** UINT RegisterWindowMessageW(LPCWSTR lpString) */
+        RegisterWindowMessageW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: args=>registerName(args, true),
         },
 
         /**
@@ -2359,7 +2367,14 @@ export function createSystemFunctions({ host, live, windows, classes }){
         RegisterClipboardFormatA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: registerName,
+            handler: args=>registerName(args),
+        },
+
+        /** UINT RegisterClipboardFormatW(LPCWSTR lpszFormat) */
+        RegisterClipboardFormatW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: args=>registerName(args, true),
         },
 
         /** BOOL MessageBeep(UINT uType) */

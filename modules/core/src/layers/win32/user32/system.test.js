@@ -2451,6 +2451,25 @@ test('a message registered by name is the same number every time, whatever the c
         fns.RegisterWindowMessageA.handler([FORMAT_BUFFER]), 'a clipboard format is the same atom');
 });
 
+test('a message registered by a UTF-16 name is the number its narrow name has', ()=>{
+    // MFC42U registers its messages through the wide call, which did not
+    // exist: InstallShield's IKernel stopped on the import and its client
+    // was left with RPC_E_DISCONNECTED.
+    const { memory, fns } = setup();
+    memory.putString(TEXT_BUFFER, 'MSWHEEL_ROLLMSG');
+    const text = 'mswheel_rollmsg';
+    const bytes = new Uint8Array((text.length + 1) * 2);
+    [...text].forEach((character, at)=>{
+        bytes[at * 2] = character.charCodeAt(0);
+    });
+    memory.writeMemory(FORMAT_BUFFER, bytes);
+
+    const narrow = fns.RegisterWindowMessageA.handler([TEXT_BUFFER]);
+    assert.equal(fns.RegisterWindowMessageW.handler([FORMAT_BUFFER]), narrow);
+    assert.equal(fns.RegisterClipboardFormatW.handler([FORMAT_BUFFER]), narrow);
+    assert.equal(fns.RegisterWindowMessageW.argBytes, 4);
+});
+
 test('a message box with neither text nor caption still reports', ()=>{
     const { fns, notices } = setup();
     assert.equal(fns.MessageBoxA.handler([0, 0, 0, 0]), 1);
