@@ -11,6 +11,7 @@ import { decode } from '../decode/decoder.js';
 import { formRegion } from '../region.js';
 import { CF, PF, ZF } from '../decode/table.js';
 import { step, trackRegion } from './x87.js';
+import { fpremStatus, fpremValue } from '../ir-x87.js';
 
 const CODE = 0x1000;
 const DATA = 0x2000;
@@ -60,6 +61,9 @@ function run(bytes, start = {}){
         u32: address=>view.getUint32(m.layout.ramBase + address, true),
     };
 }
+
+/** @param {number} value */
+const u32 = value=>[value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255];
 
 /** @param {number} value */
 function f64bytes(value){
@@ -364,6 +368,74 @@ test('fprem and fprem1 leave the exact remainder, and the quotient\'s low bits i
     ], { data: [...f64bytes(3), ...f64bytes(1e300)] });
     assert.equal(r.m.reg('eax') & 0x4700, 0x400, 'C2 alone');
     assert.equal(r.f64(DATA + 16) % 3, 1e300 % 3, 'congruent to the dividend');
+});
+
+test('fprem and fprem1 in a loop over random operands are the model\'s remainder and bits', ()=>{
+    // The shared helper translated code calls against `remainder` in
+    // ir-x87.js, which the interpreters call: magnitudes across the whole
+    // range, subnormals, quotients past 2^64 (a partial reduction), and
+    // dividends a step below a multiple of the divisor.
+    let seed = 29;
+    const random = ()=>{
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        return seed / 2 ** 32;
+    };
+    const bits = new DataView(new ArrayBuffer(8));
+    /** @type {[number, number][]} */
+    const pairs = [[-0, 3], [0, -7], [7, Infinity], [-7, -Infinity], [5e-324, 3e-323],
+        [3e-323, 5e-324], [Number.MAX_VALUE, 5e-324], [0.75, 1], [-0.75, -1], [0.5, 1],
+        [2.5, 1], [3.5, 1], [1e300, 3], [2 ** 63 + 2 ** 11, 3]];
+    while (pairs.length < 3000)
+    {
+        const c = (random() + 0.5) * 2 ** Math.floor(random() * 2100 - 1080)
+            * (random() < 0.5 ? -1 : 1);
+        let a = pairs.length % 2 === 0
+            ? (random() + 0.5) * 2 ** Math.floor(random() * 2100 - 1080)
+            : Math.floor(random() * 1000 + 1) * c * 2 ** Math.floor(random() * 80 - 4);
+        if (pairs.length % 3 === 0 && Number.isFinite(a) && a !== 0)
+        {
+            bits.setFloat64(0, a);
+            bits.setBigUint64(0, bits.getBigUint64(0) - 1n);
+            a = bits.getFloat64(0);
+        }
+        if (Number.isFinite(a) && Number.isFinite(c) && c !== 0)
+        {
+            pairs.push([random() < 0.5 ? a : -a, c]);
+        }
+    }
+    const PAIRS = 0x10000;
+    const OUT = 0x30000;
+    const data = new DataView(new ArrayBuffer(pairs.length * 16));
+    pairs.forEach(([a, c], i)=>{
+        data.setFloat64(i * 16, a, true);
+        data.setFloat64(i * 16 + 8, c, true);
+    });
+    for (const [opcode, nearest] of [[0xf8, 0], [0xf5, 1]])
+    {
+        const m = createTestMachine();
+        const view = new DataView(m.memory.buffer);
+        m.write(PAIRS, new Uint8Array(data.buffer));
+        m.write(CODE, [
+            0xbe, ...u32(PAIRS), 0xbf, ...u32(OUT), 0xb9, ...u32(pairs.length),
+            0xdd, 0x46, 0x08, 0xdd, 0x06,       // fld qword [esi+8] (c); fld qword [esi] (a)
+            0xd9, opcode, 0xdf, 0xe0,           // fprem or fprem1; fnstsw ax
+            0xdd, 0x1f, 0xdd, 0xd8,             // fstp qword [edi]; fstp st0
+            0x89, 0x47, 0x08,                   // mov [edi+8], eax
+            0x83, 0xc6, 0x10, 0x83, 0xc7, 0x10, // add esi, 16; add edi, 16
+            0x49, 0x75, 0xe7,                   // dec ecx; jnz the loop
+            0xf4,
+        ]);
+        m.setReg('esp', 0x80000);
+        const exit = m.runProgram(CODE);
+        assert.equal(exit.kind, 3, 'halted');
+        pairs.forEach(([a, c], i)=>{
+            const at = m.layout.ramBase + OUT + i * 16;
+            const name = `${nearest ? 'fprem1' : 'fprem'}(${a}, ${c})`;
+            assert.ok(Object.is(view.getFloat64(at, true), fpremValue(a, c, nearest)), name);
+            assert.equal(view.getUint32(at + 8, true) & 0x4700, fpremStatus(a, c, nearest),
+                `${name}: C0 C1 C2 C3`);
+        });
+    }
 });
 
 test('an 80-bit load and store round-trip through the conversion helpers', ()=>{

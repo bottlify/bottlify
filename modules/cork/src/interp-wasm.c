@@ -348,8 +348,9 @@ enum { L_ADD = 1, L_ADC, L_SUB, L_SBB, L_LOGIC, L_INC, L_DEC };
  * are), a signalling NaN loaded is not seen as one, and C1 is left as it was
  * by a push that did not overflow and by fcomi: their tests were some six per
  * cent of an x87 transform loop's time here. The transcendentals are the
- * host's `Math`, and the partial remainder the model's own, imported as
- * translated code imports them, so the three agree. A quadword fild's
+ * host's `Math`, imported as translated code imports them, so the three
+ * agree; the partial remainder is the model's in integers, as translated
+ * code's shared helper computes it (`remainderOf`). A quadword fild's
  * integer is kept beside the double it rounds to, for a quadword fistp or
  * fisttp of it to store the eight bytes whole (exactWrites in ir-x87.js).
  * What it leaves to the JavaScript tier: the environment and save images
@@ -363,8 +364,6 @@ IMPORT("atan2") double hostAtan2(double, double);
 IMPORT("expm1") double hostExpm1(double);
 IMPORT("log2") double hostLog2(double);
 IMPORT("log1p") double hostLog1p(double);
-IMPORT("fprem") double hostFprem(double, double, u32);
-IMPORT("fpremStatus") u32 hostFpremStatus(double, double, u32);
 
 #define S_IE 0x1u
 #define S_ZE 0x4u
@@ -410,6 +409,79 @@ static inline double byPrecision(double v, u32 control)
 static inline double hostNaN(double v, double a, double c)
 {
     return isNaN(v) && !isNaN(a) && !isNaN(c) ? fromBits(bitsOf(v) | SIGN64) : v;
+}
+
+/* fprem (nearest 0) and fprem1 of a finite a by a nonzero c that is not a NaN:
+ * the exact remainder, and in *bits C2 for a partial reduction or else the
+ * quotient's low three bits in C0, C3 and C1 -- the model's `remainder` and
+ * translated code's `addRemainderHelper` (emit/x87.js), the same long division
+ * of the significands eleven bits a step, past a difference of 63 by the divisor
+ * times a power of two that leaves 32 plus the difference mod 32 of it. */
+static double remainderOf(double a, double c, u32 nearest, u32 *bits)
+{
+    if (a == 0 || __builtin_fabs(c) == __builtin_inf())
+    {
+        *bits = 0;
+        return a;
+    }
+    u64 ma = bitsOf(a) & 0xfffffffffffffull, mc = bitsOf(c) & 0xfffffffffffffull;
+    i32 ea = (i32)(bitsOf(a) >> 52 & 0x7ff), ec = (i32)(bitsOf(c) >> 52 & 0x7ff);
+    if (ea == 0)
+    {
+        i32 shift = __builtin_clzll(ma) - 11;
+        ma <<= shift;
+        ea = -1022 - shift;
+    }
+    else
+    {
+        ma |= 1ull << 52;
+        ea -= 1023;
+    }
+    if (ec == 0)
+    {
+        i32 shift = __builtin_clzll(mc) - 11;
+        mc <<= shift;
+        ec = -1022 - shift;
+    }
+    else
+    {
+        mc |= 1ull << 52;
+        ec -= 1023;
+    }
+    i32 n = ea - ec;
+    if (n < 0)
+    {
+        /* fprem1's quotient of a dividend past half the divisor rounds to 1. */
+        if (nearest && n == -1 && __builtin_fabs(a) * 2 > __builtin_fabs(c))
+        {
+            *bits = S_C1;
+            return a - __builtin_copysign(__builtin_fabs(c), a);
+        }
+        *bits = 0;
+        return a;
+    }
+    u32 partial = n >= 64;
+    if (partial) n = 32 + (n & 31);
+    i32 e = ea - n - 52;
+    u32 q = 0;
+    do
+    {
+        i32 k = n < 11 ? n : 11;
+        ma <<= k;
+        u64 step = ma / mc;
+        q = ((q << k) + (u32)step) & 7;
+        ma -= step * mc;
+        n -= k;
+    } while (n > 0);
+    if (nearest && !partial && (ma * 2 > mc || (ma * 2 == mc && (q & 1))))
+    {
+        ma = mc - ma;
+        q = (q + 1) & 7;
+        a = -a;
+    }
+    i32 k = e > -1022 ? e : -1022;
+    *bits = partial ? S_C2 : ((q & 4) ? S_C0 : 0) | ((q & 2) ? S_C3 : 0) | ((q & 1) ? S_C1 : 0);
+    return __builtin_copysign((double)ma * pow2(k) * pow2(e - k), a);
 }
 
 /* The host's log2 and log1p of a negative NaN are signalling NaNs, which the call
@@ -1050,10 +1122,9 @@ static u32 x87(const u8 *p)
                 ST(0) = fromBits(INDEFINITE_BITS);
                 break;
             }
-            u32 nearest = modrm == 0xf5;
-            status &= ~(S_C2 | S_C0 | S_C3 | S_C1);
-            ST(0) = hostFprem(a, c, nearest);
-            status |= hostFpremStatus(a, c, nearest);
+            u32 bits;
+            ST(0) = remainderOf(a, c, modrm == 0xf5, &bits);
+            status = (status & ~(S_C2 | S_C0 | S_C3 | S_C1)) | bits;
             break;
         }
         case 0xf6:

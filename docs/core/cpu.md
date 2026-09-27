@@ -529,13 +529,17 @@ iteration, the SSE one 122.1 -> 85.4, the x87 entity update 171.2 -> 162.1, the 
 translated module, as the emulator's do, so the two agree on one engine. Out of the reduction range
 (|x| >= 2^63) they leave the operand as it was and set C2, as the processor does, and `fptan` and
 `fsincos` push nothing there: the region leaves past the instruction with the stack as it was, where
-it had moved the top for the push the tracker counts on and pushed no value. `fprem` and `fprem1` go
-through the host too (the `fprem` and `fpremStatus` imports, the interpreter's own `remainder` in
-`ir-x87.js`), exactly: JS's `%` is the IEEE fmod, `fprem1`'s quotient rounded to nearest moves that
-remainder by the divisor exactly, and the quotient's low bits for C0, C3 and C1 come from the
-remainder of eight times the divisor; both tiers had computed `a - trunc(a / c) * c` in doubles, so a
-quotient that rounded up gave a remainder of the wrong sign and bits off by one, and one past 2^53 lost
-the remainder. Past an exponent difference of 63 the reduction is partial, C2 set, by 32 plus the
+it had moved the top for the push the tracker counts on and pushed no value. `fprem` and `fprem1` are
+exact: the JavaScript interpreter's `remainder` (`ir-x87.js`) takes JS's `%`, the IEEE fmod, moves it
+by the divisor where `fprem1`'s quotient rounds to nearest, and finds the quotient's low bits for C0,
+C3 and C1 from the remainder of eight times the divisor; translated code (the shared helpers'
+`remainder`, `addRemainderHelper`) and the wasm tier (`remainderOf`) compute the same in integers --
+the significands' long division, eleven quotient bits a step so the partial remainder stays below
+2^64, the low three carried along -- where they called the host twice an instruction, for the value
+and for the bits (a loop of `fprem` until C2 clears, as `fmod` reduces, 109 -> 15 ns a turn in
+`math-bench.mjs`). Every tier had once computed `a - trunc(a / c) * c` in doubles, so a quotient that
+rounded up gave a remainder of the wrong sign and bits off by one, and one past 2^53 lost the
+remainder. Past an exponent difference of 63 the reduction is partial, C2 set, by 32 plus the
 difference mod 32 bits, so a loop of them ends at the exact remainder. `fnstenv` and
 `fnsave` write the protected-mode environment as the emulator does (the instruction and data
 pointers zero, which neither keeps); `fldenv` and `frstor` read it back into the locals and
@@ -847,8 +851,9 @@ The tier runs x87 and the XMM forms of SSE too, each as its JavaScript model (`i
 physical number, the stack faults, C1 on a push, single precision control's rounding, the extended
 loads and stores, a quadword `fild`'s integer kept beside its double for a quadword `fistp` or
 `fisttp` to store whole (dropped at every run's start, as the JavaScript interpreter drops its own
-at every sync), the host's `Math` for the transcendentals and the model's exact partial remainder
-for `fprem` and `fprem1` (imported, as translated code imports them); it leaves the environment and
+at every sync), the host's `Math` for the transcendentals (imported, as translated code imports
+them) and the model's exact partial remainder for `fprem` and `fprem1` in integers, as translated
+code's helper computes it; it leaves the environment and
 save images (`fldenv`, `fnstenv`, `frstor`, `fnsave`) and packed BCD to the JavaScript interpreter.
 SSE: the moves, the logic, the scalar and packed arithmetic, square roots, minimum and maximum, the
 compares, the conversions (by MXCSR's rounding), the shuffles and unpacks, the packed integer family

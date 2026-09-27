@@ -24,6 +24,7 @@ import { WASM_INTERPRETER_AREA, WasmExit, createWasmInterpreter } from './interp
 import { ownLayout, pagesFor, Tables } from './runtime/layout.js';
 import { createPageTable } from './runtime/pages.js';
 import { eflagsOf } from './emit/flags.js';
+import { fpremStatus, fpremValue } from './ir-x87.js';
 
 const RAM = 1 << 20;
 const CODE = 0x1000;
@@ -610,6 +611,74 @@ test('fprem and fprem1 leave the model\'s exact remainder, and its quotient bits
             assert.equal(m.view.getUint16(m.layout.x87Status, true) & 0x4700, bits(quotient),
                 `${name}: C0 C1 C2 C3`);
         }
+    }
+});
+
+test('fprem and fprem1 over random operands are the model\'s remainder and bits', ()=>{
+    // The tier's own long division against `remainder` in ir-x87.js, which
+    // the JavaScript interpreter calls: magnitudes across the whole range,
+    // subnormals, quotients past 2^64 (a partial reduction), and dividends a
+    // step below a multiple of the divisor.
+    const next = random(31);
+    const unit = ()=>next(1 << 24) / (1 << 24);
+    const bits = new DataView(new ArrayBuffer(8));
+    /** @type {[number, number][]} */
+    const pairs = [[-0, 3], [7, -Infinity], [5e-324, 3e-323], [3e-323, 5e-324], [0.75, 1],
+        [-0.75, -1], [0.5, 1], [2.5, 1], [3.5, 1], [1e300, 3], [2 ** 63 + 2 ** 11, 3]];
+    while (pairs.length < 3000)
+    {
+        const c = (unit() + 0.5) * 2 ** (next(2100) - 1080) * (next(2) === 0 ? -1 : 1);
+        let a = pairs.length % 2 === 0 ? (unit() + 0.5) * 2 ** (next(2100) - 1080)
+            : (next(1000) + 1) * c * 2 ** (next(80) - 4);
+        if (pairs.length % 3 === 0 && Number.isFinite(a) && a !== 0)
+        {
+            bits.setFloat64(0, a);
+            bits.setBigUint64(0, bits.getBigUint64(0) - 1n);
+            a = bits.getFloat64(0);
+        }
+        if (Number.isFinite(a) && Number.isFinite(c) && c !== 0)
+        {
+            pairs.push([next(2) === 0 ? a : -a, c]);
+        }
+    }
+    const PAIRS = 0x40000;
+    const OUT = 0x60000;
+    /** @param {number} value */
+    const u32 = value=>[value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255];
+    for (const [opcode, nearest] of [[0xf8, 0], [0xf5, 1]])
+    {
+        const m = machine();
+        reset(m, [
+            0xbe, ...u32(PAIRS), 0xbf, ...u32(OUT), 0xb9, ...u32(pairs.length),
+            0xdd, 0x46, 0x08, 0xdd, 0x06,       // fld qword [esi+8] (c); fld qword [esi] (a)
+            0xd9, opcode, 0xdf, 0xe0,           // fprem or fprem1; fnstsw ax
+            0xdd, 0x1f, 0xdd, 0xd8,             // fstp qword [edi]; fstp st0
+            0x89, 0x47, 0x08,                   // mov [edi+8], eax
+            0x83, 0xc6, 0x10, 0x83, 0xc7, 0x10, // add esi, 16; add edi, 16
+            0x49, 0x75, 0xe7,                   // dec ecx; jnz the loop
+            0xf4,
+        ], random(5));
+        m.view.setUint8(m.layout.x87Top, 0);
+        m.view.setUint8(m.layout.x87Empty, 0xff);
+        m.view.setUint16(m.layout.x87Control, 0x37f, true);
+        pairs.forEach(([a, c], i)=>{
+            m.view.setFloat64(m.layout.ramBase + PAIRS + i * 16, a, true);
+            m.view.setFloat64(m.layout.ramBase + PAIRS + i * 16 + 8, c, true);
+        });
+        // A jump back that turns hot leaves for the runtime, which enters again.
+        let exit = m.tier.run(1e6);
+        while (exit === WasmExit.HOT)
+        {
+            exit = m.tier.run(1e6);
+        }
+        assert.equal(exit, WasmExit.HALT);
+        pairs.forEach(([a, c], i)=>{
+            const at = m.layout.ramBase + OUT + i * 16;
+            const name = `${nearest ? 'fprem1' : 'fprem'}(${a}, ${c})`;
+            assert.ok(Object.is(m.view.getFloat64(at, true), fpremValue(a, c, nearest)), name);
+            assert.equal(m.view.getUint32(at + 8, true) & 0x4700, fpremStatus(a, c, nearest),
+                `${name}: C0 C1 C2 C3`);
+        });
     }
 });
 

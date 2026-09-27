@@ -26,7 +26,6 @@
 
 import { MODULE_BASE64 } from './interp-wasm.bytes.js';
 import { eflagsOf } from './emit/flags.js';
-import { fpremStatus, fpremValue } from './ir-x87.js';
 import { Tables } from './runtime/layout.js';
 
 /** How a run of the tier ended. `interp-wasm.c` has the same numbers. */
@@ -60,12 +59,11 @@ export const WASM_INTERPRETER_AREA = HOT_SLOTS + RING_STARTS * 4 + 8;
 /** Where the module's own data and stack end (the build fails past it): below guest RAM. */
 const MODULE_END = 16384;
 
-/** The transcendentals and the partial remainder the module imports: the host's
- * and the model's, as the JavaScript interpreter's and translated code's are, so
- * every tier computes the same. */
+/** The transcendentals the module imports: the host's, as the JavaScript
+ * interpreter's and translated code's are, so every tier computes the same. */
 export const HOST_MATH = Object.freeze({
     sin: Math.sin, cos: Math.cos, tan: Math.tan, atan2: Math.atan2, expm1: Math.expm1,
-    log2: Math.log2, log1p: Math.log1p, fprem: fpremValue, fpremStatus,
+    log2: Math.log2, log1p: Math.log1p,
 });
 
 /** @type {WebAssembly.Module | null} */

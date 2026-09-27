@@ -305,8 +305,9 @@ function remainder(a, c, nearest){
 }
 
 /**
- * `remainder` as the translator's host import: `fprem` for `nearest` 0,
- * `fprem1` otherwise, and the status bits by the second import.
+ * `remainder` as the reference the translator's and the wasm tier's integer
+ * forms are held to: `fprem` for `nearest` 0, `fprem1` otherwise, and the
+ * status bits by `fpremStatus`.
  *
  * @param {number} a @param {number} c @param {number} nearest
  */
