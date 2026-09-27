@@ -60,6 +60,7 @@ export const IID_IDirectSoundBuffer8 = '{6825A449-7524-4D82-920F-50E36AB3AB1E}';
 export const IID_IDirectSoundNotify = '{B0210783-89CD-11D0-AF08-00A0C925CD16}';
 export const IID_IDirectSound3DListener = '{279AFA84-4981-11CE-A521-0020AF0BE560}';
 export const IID_IDirectSound3DBuffer = '{279AFA86-4981-11CE-A521-0020AF0BE560}';
+export const IID_IKsPropertySet = '{31EFAC30-515C-11D0-A9AA-00AA0061BE93}';
 
 /** WAVEFORMATEX. The two-byte fields are why this is not a table of dwords. */
 export const WAVEFORMATEX = Object.freeze({
@@ -280,6 +281,16 @@ export const IDIRECTSOUNDBUFFER8_SLOTS = /** @type {[string, number][]} */ ([
     ['AcquireResources', 3],
     ['GetObjectInPath', 4],
 ]);
+
+/** IKsPropertySet, after IUnknown's three. */
+export const IKSPROPERTYSET_SLOTS = /** @type {[string, number][]} */ ([
+    ['Get', 7],
+    ['Set', 6],
+    ['QuerySupport', 3],
+]);
+
+/** HRESULT_FROM_WIN32(ERROR_NOT_FOUND): a property set this device does not have. */
+const E_PROP_ID_UNSUPPORTED = 0x80070490;
 
 /** IDirectSoundNotify, after IUnknown's three. */
 export const IDIRECTSOUNDNOTIFY_SLOTS = /** @type {[string, number][]} */ ([
@@ -559,12 +570,13 @@ export function createDirectSound(
     // Described once: the bridge shares one table of stubs per method list, and
     // a list per buffer was a table per buffer. Built on first use, because the
     // methods it names are defined below.
-    /** @type {{ buffer: any, buffer8: any, notify: any } | null} */
+    /** @type {{ buffer: any, buffer8: any, notify: any, properties: any } | null} */
     let describedBuffer = null;
     const bufferDescriptors = ()=>describedBuffer ??= {
         buffer: describe(IID_IDirectSoundBuffer, IDIRECTSOUNDBUFFER_SLOTS, bufferMethods),
         buffer8: describe(IID_IDirectSoundBuffer8, IDIRECTSOUNDBUFFER8_SLOTS, bufferMethods),
         notify: describe(IID_IDirectSoundNotify, IDIRECTSOUNDNOTIFY_SLOTS, notifyMethods),
+        properties: describe(IID_IKsPropertySet, IKSPROPERTYSET_SLOTS, propertySetMethods),
     };
     /**
      * What one buffer answers QueryInterface for. IDirectSoundNotify only when
@@ -577,16 +589,42 @@ export function createDirectSound(
      * calls slot 3 and jumps off the end of it. E_NOINTERFACE is an answer a
      * program handles; a short vtable is not.
      *
+     * IKsPropertySet is every buffer's, primary too, as on Windows: a program
+     * asks it for EAX and the voice manager, and is told the device has
+     * neither.
+     *
      * @param {any} buffer
      */
     const bufferInterfaces = buffer=>{
-        const { buffer: base, buffer8, notify } = bufferDescriptors();
+        const { buffer: base, buffer8, notify, properties } = bufferDescriptors();
         return [
             base,
+            properties,
             // The primary buffer is the one IDirectSoundBuffer8 is not.
             ...buffer.primary ? [] : [buffer8],
             ...(buffer.capabilities & DSBCAPS_CTRLPOSITIONNOTIFY) !== 0 ? [notify] : [],
         ];
+    };
+
+    /**
+     * IKsPropertySet over a device with no property set of its own: no EAX
+     * environment, no voice manager. Every set is E_PROP_ID_UNSUPPORTED, the
+     * answer a program asking after EAX takes as "play without it", and a
+     * support query clears the caller's flags first.
+     *
+     * @type {Record<string, (target: any, args: number[]) => number>}
+     */
+    const propertySetMethods = {
+        Get: ()=>E_PROP_ID_UNSUPPORTED,
+        Set: ()=>E_PROP_ID_UNSUPPORTED,
+        /** HRESULT QuerySupport(REFGUID, ULONG, PULONG pTypeSupport) */
+        QuerySupport(_buffer, [, , support]){
+            if ((support >>> 0) !== 0)
+            {
+                memory.writeMemory(support >>> 0, new Uint8Array(4));
+            }
+            return E_PROP_ID_UNSUPPORTED;
+        },
     };
 
     /** @type {Record<string, (target: any, args: number[]) => number>} */
@@ -1322,7 +1360,25 @@ export function createDirectSound(
                 /** HRESULT DirectSoundCaptureCreate(...) — there is no capture device. */
                 DirectSoundCaptureCreate: { argBytes: 12, handler: ()=>DSERR_UNSUPPORTED },
                 DirectSoundCaptureCreate8: { argBytes: 12, handler: ()=>DSERR_UNSUPPORTED },
-                /** HRESULT DllGetClassObject / DllCanUnloadNow, which COM asks for. */
+                /**
+                 * HRESULT DllGetClassObject(REFCLSID, REFIID, LPVOID *ppv)
+                 *
+                 * The classes COM makes through ole32 are made there; asked
+                 * directly, as a program asks for the private property set,
+                 * this library has no class to hand out.
+                 */
+                DllGetClassObject: {
+                    argBytes: 12,
+                    /** @param {number[]} args */
+                    handler: ([, , out])=>{
+                        if ((out >>> 0) !== 0)
+                        {
+                            memory.writeMemory(out >>> 0, new Uint8Array(4));
+                        }
+                        return 0x80040111; // CLASS_E_CLASSNOTAVAILABLE
+                    },
+                },
+                /** HRESULT DllCanUnloadNow(void), which COM asks for. */
                 DllCanUnloadNow: { argBytes: 0, handler: ()=>DS_OK },
             },
         },
