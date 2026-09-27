@@ -93,5 +93,13 @@ export function createImmFunctions(host){
 
         /** BOOL ImmNotifyIME(HIMC, DWORD, DWORD, DWORD) */
         ImmNotifyIME: { argBytes: 16, handler: ()=>1 },
+
+        /**
+         * BOOL ImmDisableIME(DWORD idThread)
+         *
+         * No input method runs here for any thread, so turning it off for one,
+         * for the process (-1) or for the caller (0) is already done.
+         */
+        ImmDisableIME: { argBytes: 4, handler: ()=>1 },
     };
 }
