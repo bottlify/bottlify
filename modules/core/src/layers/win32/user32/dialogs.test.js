@@ -524,7 +524,7 @@ test('Enter and Escape in a modal loop reach the procedure as a button\'s comman
     assert.equal(commands[1].thread, 'the caller');
 });
 
-test('IsDialogMessage takes Enter for IDOK and nothing else', ()=>{
+test('IsDialogMessage takes Enter for IDOK and dispatches anything else inside the dialog', ()=>{
     /** @type {any[]} */
     const delivered = [];
     const { memory, fns } = setup({
@@ -547,8 +547,16 @@ test('IsDialogMessage takes Enter for IDOK and nothing else', ()=>{
     assert.deepEqual(delivered.map(one=>[one.message, one.wParam & 0xffff]),
         [[0x0400, 0], [0x0111, 1]]);
 
+    // Any other message for a window inside is translated and dispatched by
+    // the call itself, so it answers TRUE and the caller does not dispatch it
+    // again (Wine's test_IsDialogMessage).
     memory.writeMemory(MSG + 8, Uint8Array.of(0x41));
-    assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 0, 'a letter is not taken');
+    delivered.length = 0;
+    assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 1, 'a letter is dispatched');
+    memory.writeMemory(MSG, Uint8Array.of(dialog, dialog >>> 8, 0, 0, 0x00, 0x04, 0, 0, 0x05));
+    assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 1);
+    assert.deepEqual(delivered.map(one=>[one.message, one.wParam]), [[0x0400, 5]],
+        'a message for the dialog itself reached its procedure');
     memory.writeMemory(MSG, Uint8Array.of(0x99, 0, 0, 0, 0, 0x01, 0, 0, 0x0d));
     assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 0,
         'nor is Enter in a window outside the dialog');

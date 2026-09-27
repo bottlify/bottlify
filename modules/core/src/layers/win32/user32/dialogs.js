@@ -35,8 +35,9 @@
  *   default button, or IDOK when there is none, Escape is IDCANCEL, each
  *   reaching the dialog procedure as the WM_COMMAND a button would have sent,
  *   and Tab moves the focus between the controls that stop it. That is what
- *   IsDialogMessageA does too; every other message is reported as not a
- *   dialog message and the caller goes on to translate and dispatch it.
+ *   IsDialogMessage does too, and it translates and dispatches every other
+ *   message for the dialog or a window inside it itself, answering TRUE;
+ *   only a message for another window is left to the caller.
  * - **WM_INITDIALOG is sent, not posted.** The dialog procedure runs during
  *   `CreateDialogParam`/`DialogBoxParam`, after every control exists and has
  *   set itself up, and before a template's WS_VISIBLE shows the window -- so a
@@ -860,6 +861,30 @@ export function createDialogFunctions(options){
     };
 
     /**
+     * IsDialogMessage in either encoding.
+     *
+     * @param {number} dialog
+     * @param {{ hwnd: number, message: number, wParam: number, lParam: number, time: number,
+     *     unicode?: boolean }} message
+     * @returns {number | Promise<number>}
+     */
+    const isDialogMessage = (dialog, message)=>{
+        if (!live(dialog) || !within(message.hwnd, dialog))
+        {
+            return 0;
+        }
+        const thread = host.callerThread?.();
+        return after(dialogKey(dialog, message, thread), taken=>{
+            if (taken !== null)
+            {
+                return 1;
+            }
+            host.translate?.(message);
+            return after(deliver({ x: 0, y: 0, ...message }, thread), ()=>1);
+        });
+    };
+
+    /**
      * The modal loop: the dialog's thread pumps until EndDialog destroys the
      * window, and what EndDialog was given is the answer.
      *
@@ -1301,20 +1326,24 @@ export function createDialogFunctions(options){
         /**
          * BOOL IsDialogMessageA(HWND hDlg, LPMSG lpMsg)
          *
-         * Enter, Escape and Tab are taken; everything else is reported as
-         * not a dialog message, so the caller goes on to translate and
-         * dispatch it. That is the answer that loses nothing: claiming a
-         * message was handled would swallow every keystroke a dialog is
-         * open for.
+         * Enter, Escape and Tab are the dialog manager's; any other message
+         * for the dialog or a window inside it is translated and dispatched
+         * here, and the answer is TRUE either way -- a caller that goes on to
+         * dispatch what it was told was processed would deliver it twice. A
+         * message for any other window is FALSE and left to the caller.
          */
         IsDialogMessageA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([dialog, msg])=>{
-                const message = readMessage(host, msg >>> 0);
-                const answered = dialogKey(dialog >>> 0, message, host.callerThread?.());
-                return after(answered, taken=>(taken === null ? 0 : 1));
-            },
+            handler: ([dialog, msg])=>isDialogMessage(dialog >>> 0, readMessage(host, msg >>> 0)),
+        },
+
+        /** BOOL IsDialogMessageW(HWND hDlg, LPMSG lpMsg), a wide caller's message. */
+        IsDialogMessageW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([dialog, msg])=>isDialogMessage(dialog >>> 0,
+                { ...readMessage(host, msg >>> 0), unicode: true }),
         },
     };
 }
