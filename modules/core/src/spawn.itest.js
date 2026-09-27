@@ -135,8 +135,11 @@ test('under cork, the child runs on a machine of its own beside the parent\'s as
 /**
  * The origin's file system as a worker has it: a file with a synchronous
  * access handle open refuses a second one, and a writable, as OPFS does.
+ * `held(name)` says whether a file of that name has one open now.
  */
 function exclusiveDirectory(){
+    /** @type {Set<string>} */
+    const holding = new Set();
     /** @param {any} directory */
     const wrap = directory=>({
         ...directory,
@@ -155,8 +158,10 @@ function exclusiveDirectory(){
                     }
                     const access = await file.createSyncAccessHandle();
                     file.held = true;
+                    holding.add(name);
                     return { ...access, close(){
                         file.held = false;
+                        holding.delete(name);
                     } };
                 },
                 // Refused while a synchronous handle holds the file, as OPFS does;
@@ -177,7 +182,24 @@ function exclusiveDirectory(){
             };
         },
     });
-    return wrap(createMemoryDirectory());
+    return Object.assign(wrap(createMemoryDirectory()),
+        { held: (/** @type {string} */ name)=>holding.has(name) });
+}
+
+/**
+ * The origin's file system for a test's run, put where the engine asks for it.
+ *
+ * @param {any} t @param {any} directory @param {() => void} [asked]
+ */
+function withOrigin(t, directory, asked = ()=>{}){
+    const was = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', { configurable: true,
+        value: { storage: { getDirectory: async()=>{
+            asked();
+            return directory;
+        } } } });
+    t.after(()=>(was ? Object.defineProperty(globalThis, 'navigator', was)
+        : delete (/** @type {any} */ (globalThis)).navigator));
 }
 
 test('a child beside its parent writes to the run\'s one translation store', { timeout: 120000 },
@@ -187,17 +209,46 @@ test('a child beside its parent writes to the run\'s one translation store', { t
         // records file: Warcraft III's launcher stopped at its child's first
         // append.
         let opened = 0;
-        const directory = exclusiveDirectory();
-        const was = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
-        Object.defineProperty(globalThis, 'navigator', { configurable: true,
-            value: { storage: { getDirectory: async()=>{
-                opened++;
-                return directory;
-            } } } });
-        t.after(()=>(was ? Object.defineProperty(globalThis, 'navigator', was)
-            : delete (/** @type {any} */ (globalThis)).navigator));
+        withOrigin(t, exclusiveDirectory(), ()=>{
+            opened++;
+        });
         await spawnOn(t, 'cork');
         assert.equal(opened, 1, 'one store for the run, the children\'s machines included');
+    });
+
+test('the run\'s translation store keeps its records file open past a child, until the run goes',
+    { timeout: 120000 }, async t=>{
+        // A child's machine going let go of the store every process shares:
+        // the processes still running then wrote each record by copying the
+        // whole records file, and the next machine to go waited on those
+        // copies -- forty seconds of an installer's COM server standing still.
+        const directory = exclusiveDirectory();
+        withOrigin(t, directory);
+        const [wasm, parent, child] = await Promise.all([
+            readFile(new URL('v86.wasm', PREBUILT)),
+            readFile(new URL('../test/fixtures/spawn.exe', import.meta.url)),
+            readFile(new URL('../test/fixtures/spawn_child.exe', import.meta.url)),
+        ]);
+        const app = await createApp({
+            executable: new Uint8Array(parent),
+            imagePath: 'C:\\App\\spawn.exe',
+            engine: 'cork',
+            files: [{ path: 'C:\\App\\spawn_child.exe', bytes: new Uint8Array(child) }],
+            v86: {
+                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+            },
+        });
+        /** @type {boolean[]} */
+        const heldAfterChild = [];
+        app.on('process-resumed', ()=>heldAfterChild.push(directory.held('records')));
+
+        await app.run({ timeoutMs: 60000 });
+        assert.ok(heldAfterChild.length > 0, 'a child ran and its parent went on');
+        assert.deepEqual(heldAfterChild, heldAfterChild.map(()=>true),
+            'still the run\'s once each child\'s machine had gone');
+        await app.dispose();
+        assert.equal(directory.held('records'), false, 'let go of with the run');
     });
 
 /** @param {number} value */

@@ -2942,9 +2942,13 @@ async function buildApp(options){
     // The translator's cache goes with the bundle's blocks: local by default,
     // the bundle's name its namespace, resolved here in the engine's own
     // thread as the block store is. Held here as well, for the bundle's seed.
-    const translationStore = await resolveTranslationStore(
-        options.cork?.config?.store === undefined ? 'local' : options.cork.config.store,
+    const storeSpec = options.cork?.config?.store === undefined ? 'local'
+        : options.cork.config.store;
+    const translationStore = await resolveTranslationStore(storeSpec,
         options.bundle?.id ?? options.id ?? 'bundle');
+    // Closed with this machine only when opened for it: a store handed in is
+    // the run's, shared with the machines of the processes still running.
+    const ownsTranslationStore = storeSpec === 'local';
 
     const core = await assembleModules({
         filesystem: {
@@ -6331,7 +6335,12 @@ async function buildApp(options){
             // on asking for blocks nobody can put anywhere.
             blocks?.stop();
             breathe.close();
-            return core.dispose();
+            return core.dispose().then(()=>{
+                if (ownsTranslationStore)
+                {
+                    translationStore?.close?.();
+                }
+            });
         },
     };
 }
@@ -6451,8 +6460,9 @@ export async function createApp(options){
     // beside its paused parent's, and a second store opened on the same
     // directory cannot write while the first holds its records file's
     // synchronous handle -- the child stopped at its first append.
-    const translationStore = await resolveTranslationStore(
-        options.cork?.config?.store === undefined ? 'local' : options.cork.config.store,
+    const runStoreSpec = options.cork?.config?.store === undefined ? 'local'
+        : options.cork.config.store;
+    const translationStore = await resolveTranslationStore(runStoreSpec,
         options.bundle?.id ?? options.id ?? 'bundle');
 
     /** @param {any} [extra] */
@@ -6969,6 +6979,14 @@ export async function createApp(options){
          */
         dispose: ()=>Promise.all([...serving].map(line=>line.current.dispose()))
             .then(()=>current.dispose())
+            .then(()=>{
+                // The run's store outlives each machine it was handed to, and
+                // goes with the last of them.
+                if (runStoreSpec === 'local')
+                {
+                    translationStore?.close?.();
+                }
+            })
             .finally(()=>presenter?.dispose?.()),
 
         /**
