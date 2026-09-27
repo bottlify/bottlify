@@ -704,6 +704,9 @@ renderer `Bottlify OpenGL`, 25 GL extensions and 4 WGL extensions (`extensions.j
 string is a promise that every function it defines is obtainable, and the test checks the list, the
 context and the marshalling agree). The context records state (`context*.js`, `state.js`) and reads
 it into one `Scene` per draw (`context-scene.js`); where that scene is drawn depends on the build.
+The vertices a draw assembles are that draw's own: the context keeps no record of what it drew
+unless it was made with `keepPrimitives` (a test's option, which `submittedPrimitives` then
+answers), because such a record grows by every draw's vertices for as long as the program runs.
 It takes every sized internal format GL 1.1 names, and texture 0 is one object per target shared by
 every texture unit. A handler is reachable without the trap through `entry(name)` -- the same
 function, the same dwords, the same current-context rule -- which is how a bundle's kernel issues GL

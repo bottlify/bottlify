@@ -93,6 +93,9 @@ import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './
  * @property {boolean} [raster]
  *           Handed to every context: `false` skips the processor's
  *           rasterisation of primitives (see `GlContextOptions.raster`).
+ * @property {boolean} [keepPrimitives]
+ *           Handed to every context: keep what each one draws for a test to
+ *           read back (see `GlContextOptions.keepPrimitives`).
  */
 
 /**
@@ -291,6 +294,7 @@ export function createWgl(options){
                 divergence: options.divergence,
                 gpu: options.gpu,
                 raster: options.raster,
+                keepPrimitives: options.keepPrimitives,
             });
             live.set(context, {
                 key: drawable.key,

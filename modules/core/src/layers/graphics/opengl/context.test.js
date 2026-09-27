@@ -25,6 +25,7 @@ function fixture(){
     const wgl = createWgl({
         gdi: { describeDrawable: hdc=>drawables.get(hdc) ?? null },
         currentThread: ()=>1,
+        keepPrimitives: true,
     });
     const index = wgl.ChoosePixelFormat(WINDOW_DC, {
         ...PIXEL_FORMATS[0],
