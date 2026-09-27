@@ -1708,3 +1708,109 @@ test('NtCreateFile names what is missing, and takes only object names', ()=>{
     assert.equal(fns.CloseHandle.handler([memory.dword(NT_HANDLE)]), 1,
         'and its handle closes as any other');
 });
+
+const ERROR_SHARING_VIOLATION = 32;
+const ERROR_INVALID_NAME = 123;
+const ERROR_REQUEST_ABORTED = 1235;
+
+test('a file copied onto itself is a sharing violation, and a NULL name a missing path', ()=>{
+    // kernel32's CopyFileA test, which on Windows opens the source and then
+    // collides with it opening the destination.
+    const { files, error, fns, at } = setup();
+    files.put('C:\\GAME\\A.TXT', 'a');
+    assert.equal(fns.CopyFileA.handler([at(NAME, 'C:\\GAME\\A.TXT'), NAME, 0]), 0);
+    assert.equal(error.code, ERROR_SHARING_VIOLATION);
+    assert.equal(fns.CopyFileA.handler([NAME, at(NAME2, 'c:\\game\\a.txt'), 0]), 0,
+        'however the second name is spelled');
+    assert.equal(fns.CopyFileA.handler([0, NAME, 1]), 0);
+    assert.equal(error.code, ERROR_PATH_NOT_FOUND);
+    assert.equal(fns.CopyFileA.handler([NAME, 0, 1]), 0);
+    assert.equal(error.code, ERROR_PATH_NOT_FOUND);
+});
+
+test('CopyFileW and CopyFileEx copy as CopyFileA does, and a success clears the error', ()=>{
+    const { files, error, fns, memory } = setup();
+    files.put('C:\\GAME\\A.TXT', 'abc');
+    putWide(memory, NAME, 'C:\\GAME\\A.TXT');
+    putWide(memory, NAME2, 'C:\\GAME\\B.TXT');
+    error.code = 0xdeadbeef;
+    assert.equal(fns.CopyFileW.handler([NAME, NAME2, 1]), 1);
+    assert.equal(error.code, ERROR_SUCCESS);
+    assert.equal(files.text('C:\\GAME\\B.TXT'), 'abc');
+    assert.equal(fns.CopyFileW.handler([NAME, NAME2, 1]), 0);
+    assert.equal(error.code, ERROR_FILE_EXISTS);
+    assert.equal(fns.CopyFileExW.handler([NAME, NAME2, 0, 0, 0, 1]), 0,
+        'COPY_FILE_FAIL_IF_EXISTS is bFailIfExists');
+    assert.equal(fns.CopyFileExW.handler([NAME, NAME2, 0, 0, 0, 0]), 1);
+    memory.putDword(OUT_COUNT, 1);
+    assert.equal(fns.CopyFileExW.handler([NAME, NAME2, 0, 0, OUT_COUNT, 0]), 0,
+        'a cancel already set stops the copy');
+    assert.equal(error.code, ERROR_REQUEST_ABORTED);
+});
+
+test('_lopen with OF_WRITE alone opens for writing only', ()=>{
+    const { files, error, fns, at, memory } = setup();
+    files.put('C:\\GAME\\W.TXT', 'text');
+    const handle = fns._lopen.handler([at(NAME, 'C:\\GAME\\W.TXT'), 1]);
+    assert.notEqual(handle, HFILE_ERROR);
+    assert.equal(fns._lread.handler([handle, BUFFER, 1]), HFILE_ERROR);
+    assert.equal(error.code, ERROR_ACCESS_DENIED);
+    memory.putString(BUFFER, 'new!');
+    assert.equal(fns._lwrite.handler([handle, BUFFER, 4]), 4);
+});
+
+test('a wildcard or a trailing separator is not a name a file is opened or made by', ()=>{
+    const { files, error, fns, at } = setup();
+    files.put('C:\\GAME\\F.TXT', 'f');
+    assert.equal(fns._lcreat.handler([at(NAME, 'testfi/'), 0]), HFILE_ERROR);
+    assert.equal(error.code, ERROR_INVALID_NAME);
+    assert.equal(files.stat('C:\\GAME\\testfi'), null, 'and nothing was made');
+    assert.equal(fns.CreateFileA.handler([at(NAME, 'C:\\*.*'), GENERIC_READ, 1, 0,
+        OPEN_EXISTING, 0, 0]), INVALID_HANDLE_VALUE);
+    assert.equal(error.code, ERROR_INVALID_NAME);
+    assert.equal(fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\'), GENERIC_READ, 1, 0,
+        OPEN_EXISTING, 0, 0]), INVALID_HANDLE_VALUE);
+    assert.equal(error.code, ERROR_PATH_NOT_FOUND, 'a directory spelled as one');
+    assert.equal(fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\NEW\\'), GENERIC_READ, 1, 0,
+        OPEN_EXISTING, 0, 0]), INVALID_HANDLE_VALUE);
+    assert.equal(error.code, ERROR_FILE_NOT_FOUND);
+});
+
+test('a lock is the file\'s, seen through every handle, and goes with its handle', ()=>{
+    // Wine's kernel32 file test_LockFile: an exclusive lock refuses any
+    // overlapping one from another handle, shared locks sit together, and an
+    // unlock names exactly a range it holds.
+    const ERROR_LOCK_VIOLATION = 33;
+    const ERROR_NOT_LOCKED = 158;
+    const LOCKFILE_EXCLUSIVE_LOCK = 0x2;
+    const OVERLAPPED = 0x700;
+    const { files, error, fns, open, memory } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'x');
+    const first = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    const second = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+
+    assert.equal(fns.LockFile.handler([first, 0, 0, 100, 0]), 1);
+    assert.equal(fns.LockFile.handler([second, 50, 0, 10, 0]), 0, 'another handle\'s range');
+    assert.equal(error.code, ERROR_LOCK_VIOLATION);
+    assert.equal(fns.LockFile.handler([first, 50, 0, 10, 0]), 0, 'and the taker\'s own');
+    assert.equal(fns.LockFile.handler([second, 100, 0, 10, 0]), 1, 'past it is free');
+    assert.equal(fns.UnlockFile.handler([first, 0, 0, 50, 0]), 0, 'only the range it took');
+    assert.equal(error.code, ERROR_NOT_LOCKED);
+    assert.equal(fns.UnlockFile.handler([second, 0, 0, 100, 0]), 0, 'by the handle that took it');
+    assert.equal(fns.UnlockFile.handler([first, 0, 0, 100, 0]), 1);
+
+    memory.putDword(OVERLAPPED + 8, 200);
+    assert.equal(fns.LockFileEx.handler([first, 0, 0, 10, 0, OVERLAPPED]), 1, 'shared');
+    assert.equal(fns.LockFileEx.handler([second, 0, 0, 10, 0, OVERLAPPED]), 1,
+        'beside another shared one');
+    assert.equal(fns.LockFileEx.handler([second, LOCKFILE_EXCLUSIVE_LOCK, 0, 10, 0,
+        OVERLAPPED]), 0, 'which an exclusive one is refused over');
+    assert.equal(error.code, ERROR_LOCK_VIOLATION);
+
+    assert.equal(fns.CloseHandle.handler([second]), 1);
+    assert.equal(fns.LockFile.handler([first, 100, 0, 10, 0]), 1,
+        'a handle\'s locks close with it');
+    assert.equal(fns.LockFile.handler([first, 0xffffffff, 0xffffffff, 2, 0]), 0,
+        'a range past the last offset is not one');
+    assert.equal(error.code, ERROR_INVALID_PARAMETER);
+});

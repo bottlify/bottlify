@@ -21,18 +21,24 @@
  * same folder, and nothing of them goes into the repository, a bundle or dist.
  * The official i386 build is the `build-daily-winetest` job artifact of Wine's
  * own CI (`winetest.exe`), or a mingw i686 cross build of Wine's tree.
+ * `--fetch` downloads the latest such artifact into that folder (WINETEST_URL);
+ * it is a daily build, so the tests it carries move with Wine's tree, and the
+ * build a report names is the one to compare against.
  *
  * The test programs are run directly, as `winetest.exe` itself runs them -- one
  * process per `<dll>_test.exe <test>` -- and each in a child node process of
  * its own: a test that hangs the engine inside a turn is ended from outside, and
  * a host exception is a result rather than the end of the run.
  *
+ *     node tools/wine-tests.mjs --fetch
  *     node tools/wine-tests.mjs ddraw:ddraw7 kernel32:file msvcrt
  *     node tools/wine-tests.mjs --preset games --baseline <earlier report.json>
  *
  * A bare library name runs every test its program lists. Options:
  *
  *     --winetest <path>   the winetest.exe to take tests from
+ *     --fetch             download winetest.exe first (again, if one is there)
+ *     --winetest-url <u>  where --fetch takes it from (WINETEST_URL by default)
  *     --preset games      the libraries games lean on (PRESETS below)
  *     --timeout <s>       wall seconds per test (default 120)
  *     --jobs <n>          tests run at once (default half the processors)
@@ -53,12 +59,17 @@
 
 import { fork } from 'node:child_process';
 import { availableParallelism } from 'node:os';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = new URL('../', import.meta.url);
 const PREBUILT = new URL('modules/core/vendor/prebuilt/', ROOT);
 const LOCAL = new URL('to_install/wine-tests/', ROOT);
+
+/** The i386 winetest.exe of Wine's daily CI build, the newest one. */
+export const WINETEST_URL = 'https://gitlab.winehq.org/wine/wine/-/jobs/artifacts/master/raw/'
+    + 'winetest.exe?job=build-daily-winetest';
 
 /**
  * The libraries games call into, and the tests of each that exercise what they
@@ -575,7 +586,7 @@ function parseArgs(argv){
         return at === -1 ? fallback : argv[at + 1];
     };
     const flags = new Set(['--winetest', '--preset', '--timeout', '--jobs', '--failures', '--out',
-        '--baseline', '--engine', '--cork-config', '--reference']);
+        '--baseline', '--engine', '--cork-config', '--reference', '--winetest-url']);
     /** @type {string[]} */
     const specs = [];
     for (let i = 0; i < argv.length; i++)
@@ -591,6 +602,8 @@ function parseArgs(argv){
     }
     return {
         winetest: value('--winetest', fileURLToPath(new URL('winetest.exe', LOCAL))),
+        fetch: argv.includes('--fetch'),
+        winetestUrl: value('--winetest-url', WINETEST_URL),
         preset: value('--preset'),
         timeout: Number(value('--timeout', '120')),
         jobs: Number(value('--jobs', String(Math.max(1, Math.floor(availableParallelism() / 2))))),
@@ -602,6 +615,34 @@ function parseArgs(argv){
         reference: value('--reference'),
         specs,
     };
+}
+
+/**
+ * Downloads winetest.exe, into a file beside the destination first so that an
+ * interrupted download never stands in for the program.
+ *
+ * @param {string} url @param {string} destination
+ */
+async function download(url, destination){
+    console.log(`downloading ${url}`);
+    const response = await fetch(url, { redirect: 'follow' });
+    if (!response.ok)
+    {
+        throw new Error(`${url}: HTTP ${response.status} -- the CI artifact may have expired;`
+            + ' pass another with --winetest-url');
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    // A page saying the artifact is gone is not a program.
+    if (bytes.length < 1 << 20 || bytes[0] !== 0x4d || bytes[1] !== 0x5a)
+    {
+        throw new Error(`${url}: answered ${bytes.length} bytes that are not a Windows program`);
+    }
+    await mkdir(new URL('./', pathToFileURL(destination)), { recursive: true });
+    const partial = `${destination}.partial`;
+    await writeFile(partial, bytes);
+    await rename(partial, destination);
+    const build = await buildId(bytes);
+    console.log(`${destination}: ${bytes.length} bytes, build ${build ?? 'unknown'}`);
 }
 
 /**
@@ -884,9 +925,23 @@ async function main(){
         const [module, test] = spec.split(':');
         wanted.push([module, test ? test.split(',') : null]);
     }
+    if (options.fetch || !existsSync(options.winetest))
+    {
+        if (!options.fetch)
+        {
+            console.error(`${options.winetest} is not there: run with --fetch to download it`
+                + ` from ${options.winetestUrl}`);
+            process.exit(2);
+        }
+        await download(options.winetestUrl, options.winetest);
+    }
     if (wanted.length === 0)
     {
-        console.error('usage: node tools/wine-tests.mjs [--preset games]'
+        if (options.fetch)
+        {
+            return;
+        }
+        console.error('usage: node tools/wine-tests.mjs [--fetch] [--preset games]'
             + ' <dll>[:<test>[,<test>]] ...');
         process.exit(2);
     }

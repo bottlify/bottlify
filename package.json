@@ -17,6 +17,8 @@
     "build:vendor": "npm run build:v86 -- --docker && npm run build:video-decoder -- --docker && npm run build:zstd -- --docker",
     "fetch:v86": "npm run fetch:v86 -w @bottlify/core",
     "fetch:corpus": "npm run fetch:corpus -w @bottlify/cork",
+    "fetch:winetest": "node tools/wine-tests.mjs --fetch",
+    "wine-tests": "node tools/wine-tests.mjs",
     "fetch:video-decoder": "npm run fetch:video-decoder -w @bottlify/core",
     "fetch:zstd": "npm run fetch:zstd -w @bottlify/core",
     "verify:reproducibility": "npm run verify:reproducibility -w @bottlify/core",
