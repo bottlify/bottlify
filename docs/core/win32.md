@@ -252,7 +252,12 @@ EBP as the caller left them -- and the code jumps to a trap into the handler, wh
 call as it came, arguments and all. The jump is a `jmp rel32` whose displacement the compiler
 leaves empty and names (`host` in the compiled module): the binding registers the trap
 (`guestEntry`'s fallback, the handler the function stood for) and the loader, which places the
-code, aims the jump at it ([`loader.md`](./loader.md)). A parameter such a function assigns is a
+code, aims the jump at it ([`loader.md`](./loader.md)). A function with x87 instructions jumps
+through a register instead, `mov eax, trap; jmp eax`, the trap's address written in as the export
+is bound: cork forms the trap's stub into the region a direct jump comes from, and a region with
+x87 instructions leaves to its host's loop for a trap, where the stub's own region calls it from
+its code (`_CIpow` handing a power over, `_CIsqrt` of a negative, 942 and 661 ns a call through
+the direct jump, 725 and 413 through EAX). A parameter such a function assigns is a
 variable of its own, copied from the argument at entry, so the arguments the handler reads are the
 call's. The function goes to the host before it writes anything, so there is nothing to undo; one
 with x87 parameters pushes them back first, the last in ST0, as the call left them.
@@ -352,6 +357,9 @@ match); `atoi`/`atol`;
 assembled by hand (`EH_PROLOG_CODE`, `msvcrt/cxx.js`): it takes its handler in EAX and builds the
 frame on its caller's stack and in the caller's EBP, which neither a handler nor the compiler's
 subset can express.
+Each keeps the answers of the handler it replaced (see the divergences below); `strtol` and
+`strtoul` are held to theirs input by input as well, the JavaScript against the handler, since
+the handler is part of them.
 
 The mathematics is in the guest too (`msvcrt/inguest-math.js`), in both its shapes -- `sqrt`,
 `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`, `log10`, `pow`, `fmod`,
@@ -367,14 +375,11 @@ argument by ln 2 in two parts (Cody and Waite's) where the runtime multiplies by
 x87's 64 bits: in a double's 53 that product costs up to 187 units in the last place, the
 reduction one. `pow` answers the powers exact in any precision -- x squared, the square root of a
 positive, x, its reciprocal, 1 -- and hands every other to the handler: 2^(y log2 x) in doubles
-missed the power a program gets on Windows (pow(10, 2) was 99.99999999999997). A case msvcrt
+missed powers that are exact (pow(10, 2) was 99.99999999999997). A case msvcrt
 answers with errno goes to the handler (`math.js`), which answers JavaScript's value and sets
 errno as msvcrt does -- `EDOM` for a NaN of arguments that were none, `ERANGE` for an infinity of
 finite ones -- and so does an argument past `fsin`'s reduction (2^63), a NaN or an infinity where
 the function checks for one, and a result past a double's range.
-Each keeps the answers of the handler it replaced (see the divergences below); `strtol` and
-`strtoul` are held to theirs input by input as well, the JavaScript against the handler, since
-the handler is part of them.
 
 ### The process model
 

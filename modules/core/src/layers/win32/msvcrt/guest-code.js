@@ -37,14 +37,16 @@
  * @property {'i32' | 'u32' | 'f64' | 'f32' | 'i64' | 'void'} returns
  * @property {readonly string[]} uses   The guest's helpers the source takes.
  * @property {Uint8Array} code
- * @property {number} [host]  Where the displacement of the jump to the host's
- *     handler is, in a function that hands some calls to it (`return host()`).
+ * @property {number} [host]  Where the jump to the trap into the host's handler
+ *     takes its target, in a function that hands some calls to it (`return
+ *     host()`): a `jmp rel32`'s displacement (the byte before 0xe9), or the
+ *     address a `jmp eax` goes to (0xb8, `mov eax`).
  */
 
 /**
  * What the binding hands a `code` export: the means to register the trap its
  * code jumps to, a trap into the host answering as the export, and to have
- * the jump's displacement filled in where the code lands.
+ * a direct jump's displacement filled in where the code lands.
  *
  * @typedef {Object} CodeBuilder
  * @property {(trap: { convention: string, argBytes: number, handler: Function }) => number}
@@ -234,8 +236,16 @@ export function guestExport(compiled, fallback){
             throw new Error('guest code: a function that hands calls to the host is bound with '
                 + 'a builder to register its trap');
         }
-        builder.jump(host, builder.register({ convention, argBytes, handler: fallback.handler }));
-        return compiled.code;
+        const trap = builder.register({ convention, argBytes, handler: fallback.handler });
+        if (compiled.code[host - 1] !== MOV_EAX)
+        {
+            builder.jump(host, trap);
+            return compiled.code;
+        }
+        // The address itself, which no placement moves: the trap's stub is the bridge's.
+        const bytes = compiled.code.slice();
+        new DataView(bytes.buffer).setUint32(host, trap >>> 0, true);
+        return bytes;
     };
     return { convention, argBytes, code };
 }
@@ -340,6 +350,9 @@ export function guestEntry(source, compiled, host, fallback){
     };
     return { ...guestExport(compiled, fallback), handler };
 }
+
+/** `mov eax, imm32`: a hand-over that jumps through EAX to the trap's address. */
+const MOV_EAX = 0xb8;
 
 /** Where a double's or a float's argument slots are put together. */
 const SCRATCH = new DataView(new ArrayBuffer(8));

@@ -1051,6 +1051,18 @@ function refused(text, message){
         });
 }
 
+test('a hand-over jumps to its trap directly from integer code, through EAX from x87 code',
+    async()=>{
+        const { compiled } = await load(SAMPLE);
+        const floats = (await load(FLOATS)).compiled;
+        /** @param {any} fn */
+        const jump = fn=>[...fn.code.subarray(fn.host - 1, fn.host + 6)];
+        assert.deepEqual(jump(compiled.handOver).slice(0, 5), [0xe9, 0, 0, 0, 0]);
+        // A double negated: an x87 instruction in the function.
+        assert.deepEqual(jump(compiled.assignedThenHost), [0xb8, 0, 0, 0, 0, 0xff, 0xe0]);
+        assert.deepEqual(jump(floats.x87HandOver), [0xb8, 0, 0, 0, 0, 0xff, 0xe0]);
+    });
+
 test('everything outside the subset is refused where it is written', ()=>{
     const p = 'a, c, x';
     refused(one(p, 'return ({ a }).a;'), /member is read only from a table/);

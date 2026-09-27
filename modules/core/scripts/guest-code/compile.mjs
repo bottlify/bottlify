@@ -48,9 +48,10 @@
  * `return host()` hands the call to the host's handler of the same function
  * with the arguments it came with, for a case the function leaves to it --
  * errno to set, a base it does not take: the frame is taken down and the code
- * jumps to the handler's trap -- a `jmp rel32` whose displacement, at the
- * offset `host` names, the loader fills in where it places the code -- so the
- * handler finds the stack, EBX, ESI, EDI and EBP as the caller left them.
+ * jumps to the handler's trap -- a `jmp rel32`, or `mov eax, trap; jmp eax`
+ * in a function with x87 instructions, the four bytes at the offset `host`
+ * names filled in when the export is bound -- so the handler finds the
+ * stack, EBX, ESI, EDI and EBP as the caller left them.
  * A parameter such a function assigns is a variable of its own, copied from
  * the argument at entry, so the arguments are still the call's own. Nothing
  * the function wrote before is undone: it goes to the host before it writes.
@@ -153,8 +154,11 @@ import {
  * @property {ReturnType} returns
  * @property {string[]} uses        The helpers the first parameter takes, in order.
  * @property {Uint8Array} code
- * @property {number} [host]        Where in the code the displacement of the jump
- *                                  to the host's handler is, when it returns host().
+ * @property {number} [host]        Where in the code the jump to the host's handler's
+ *                                  trap takes its target, when it returns host():
+ *                                  a `jmp rel32`'s displacement, or the address
+ *                                  `mov eax` loads for a `jmp eax`, as the byte
+ *                                  before says (0xe9 or 0xb8).
  */
 
 /**
@@ -501,6 +505,8 @@ class FunctionCompiler {
         /** @type {Set<number>} */
         this.saves = new Set();
         this.fpu = 0;
+        /** Whether the code holds an x87 instruction. */
+        this.x87Used = false;
         /** @type {{ breakTo: string, continueTo: string }[]} */
         this.loops = [];
         /** @type {Map<string, TableInfo>} */
@@ -807,7 +813,19 @@ class FunctionCompiler {
                 out.emit(0xdd, ...memory(0, { base: ESP, disp: this.locals + v.disp }));
             }
             takeDown();
-            out.emit(0xe9).label('hostJump').emit(0, 0, 0, 0);   // jmp the handler's trap
+            if (this.x87Used || this.x87.length > 0)
+            {
+                // Through a register: cork follows a direct jump into the
+                // trap's stub, and a region with x87 instructions leaves to
+                // its host's loop for the trap; after `jmp eax` the stub is a
+                // region of its own, which calls the trap from its code.
+                out.emit(0xb8).label('hostJump').emit(0, 0, 0, 0);   // mov eax, the trap
+                out.emit(0xff, 0xe0);                                // jmp eax
+            }
+            else
+            {
+                out.emit(0xe9).label('hostJump').emit(0, 0, 0, 0);   // jmp the handler's trap
+            }
         }
         if (thunk)
         {
@@ -2153,6 +2171,7 @@ class FunctionCompiler {
                 && !this.a.items.some(item=>item.kind !== 'bytes');
         }
         this.x87Clean = false;
+        this.x87Used = true;
         if (++this.fpu > X87_DEPTH)
         {
             this.fail(node, 'the expression holds more doubles at once than the x87 has room for');
@@ -2263,6 +2282,7 @@ class FunctionCompiler {
                         this.fail(node, `X87.${node.property.name} is not a constant the x87 `
                             + `loads: ${Object.keys(X87_CONSTANTS).join(', ')}`);
                     }
+                    this.x87Used = true;
                     if (++this.fpu > X87_DEPTH)
                     {
                         this.fail(node, 'the expression holds more doubles at once than the x87 '
@@ -2904,6 +2924,7 @@ class FunctionCompiler {
                 if (isFloat(load.type))
                 {
                     this.x87Clean = false;
+                    this.x87Used = true;
                     if (++this.fpu > X87_DEPTH)
                     {
                         this.fail(node, 'the expression holds more doubles at once than the x87 '

@@ -131,16 +131,30 @@ test('modf gives both halves the sign of the original', ()=>{
 
 test('every function is code in the guest, hypot the same as _hypot', ()=>{
     const { table } = build();
+    const TRAP = 0x7ffe1230;
+    /** The compiled code, the trap's address where it hands over. @param {string} name */
+    const bound = name=>{
+        const { code, host } = /** @type {import('./guest-code.js').CompiledGuestCode} */ (
+            MATH_CODE[/** @type {keyof typeof MATH_CODE} */ (name)]);
+        const bytes = code.slice();
+        if (host !== undefined)
+        {
+            // Maths is x87 code, and x87 code jumps to its trap through a register.
+            assert.deepEqual([...bytes.subarray(host - 1, host + 6)],
+                [0xb8, 0, 0, 0, 0, 0xff, 0xe0], `${name}: mov eax, the trap; jmp eax`);
+            new DataView(bytes.buffer).setUint32(host, TRAP, true);
+        }
+        return bytes;
+    };
+    const builder = { register: ()=>TRAP, jump: ()=>assert.fail('a direct jump') };
     for (const name of ['sqrt', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2', 'exp', 'log',
         'log10', 'pow', 'fmod', 'sinh', 'cosh', 'tanh', '_hypot', 'ldexp', 'frexp', 'modf',
         '_CIsqrt', '_CIsin', '_CIpow', '_CIatan2', '_CIfmod', '_CIfloor', '_CIceil', '_CIfabs'])
     {
-        const code = typeof table[name].code === 'function' ? table[name].code({
-            register: ()=>0x1000, jump: ()=>{},
-        }) : null;
-        assert.deepEqual(code, MATH_CODE[/** @type {keyof typeof MATH_CODE} */ (name)].code, name);
+        assert.equal(typeof table[name].code, 'function', name);
+        assert.deepEqual(table[name].code(builder), bound(name), name);
     }
-    assert.deepEqual(table.hypot.code({ register: ()=>0, jump: ()=>{} }), MATH_CODE._hypot.code);
+    assert.deepEqual(table.hypot.code(builder), bound('_hypot'));
 });
 
 test('errno as msvcrt sets it: EDOM for a NaN of arguments that were none, ERANGE for an '

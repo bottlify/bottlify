@@ -130,8 +130,9 @@ export function equivalence(compiled, sources, model){
             const code = fn.code.slice();
             if (fn.host !== undefined)
             {
-                new DataView(code.buffer).setUint32(fn.host,
-                    (HOST - (CODE + fn.host + 4)) >>> 0, true);
+                // The trap's address for a `jmp eax`, a displacement to it for a `jmp rel32`.
+                new DataView(code.buffer).setUint32(fn.host, code[fn.host - 1] === 0xb8 ? HOST
+                    : (HOST - (CODE + fn.host + 4)) >>> 0, true);
             }
             m.write(CODE, code);
             m.write(HALT, [0xf4]);
