@@ -312,13 +312,13 @@ export function interpret(state, maxInstructions = 1, options = {}){
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     onCodeWrite?: (address: number, size: number) => void,
- *     rdtsc?: () => bigint }} what
+ *     rdtsc?: () => bigint, ports?: import('./ir.js').EvalState['ports'] }} what
  *     `onCodeWrite` is called after an interpreted store lands in a page
  *     holding translated code, so the caller can invalidate the region it
  *     translated there, as a translated store's `stale` exit does.
  * @returns {import('./ir.js').EvalState & { syncIn: () => void, syncOut: () => void }}
  */
-export function blockState({ memory, layout, onCodeWrite, rdtsc }){
+export function blockState({ memory, layout, onCodeWrite, rdtsc, ports }){
     const view = new DataView(memory.buffer);
     // The decoder reads code a byte at a time, so the byte path skips the
     // DataView call and its bounds check; wider accesses keep the DataView.
@@ -590,6 +590,7 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
     state.retired = 0;
     state.trapped = [];
     state.rdtsc = rdtsc;
+    state.ports = ports;
     // The instruction's own address, kept by `interpret` for a fault's EIP.
     state.faultEip = 0;
     return state;

@@ -273,7 +273,7 @@ test('blockState keeps its fields fast and sees code rewritten in place', ()=>{
     // The step's fields are the object's own and the accessors its
     // prototype's: one literal holding both fell into V8's dictionary mode.
     assert.deepEqual(Object.keys(state).sort(), ['eflags', 'eip', 'faultEip', 'halted',
-        'memory', 'rdtsc', 'reg', 'retired', 'trapped', 'x87Exact', 'x87Shadow']);
+        'memory', 'ports', 'rdtsc', 'reg', 'retired', 'trapped', 'x87Exact', 'x87Shadow']);
     // mov eax, imm32 across a page boundary, then hlt; run, rewrite the
     // immediate's byte in the second page, run again.
     const at = 0x1ffe;
