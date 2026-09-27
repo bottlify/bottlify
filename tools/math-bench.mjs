@@ -232,6 +232,14 @@ const ROWS = [
             ...fstpOut(x.at('out'))],
         base: x=>[...pushText(x), 0x58, 0xd9, 0xee, ...fstpOut(x.at('out'))],
     },
+    ...['strtod', 'strtod(long)'].map(name=>/** @type {Row} */ ({
+        // The same texts, the end written where a program keeps it.
+        name, imports: { 'msvcrt.dll': ['strtod'] }, out: 'double', exact: true,
+        body: x=>[0x68, ...u32(x.at('slack')), ...pushText(x), ...callIat(x.iat('strtod')),
+            0x83, 0xc4, 0x08, ...fstpOut(x.at('out'))],
+        base: x=>[0x68, ...u32(x.at('slack')), ...pushText(x), 0x58, 0x58, 0xd9, 0xee,
+            ...fstpOut(x.at('out'))],
+    })),
     {
         // _controlfp(_PC_53, _MCW_PC): the precision set, as a program keeps setting it.
         name: '_controlfp', imports: { 'msvcrt.dll': ['_controlfp'] }, out: 'int', exact: true,
@@ -425,7 +433,7 @@ export function program(row, n, withOp, control){
         in: bytes(doubles(row.domain, 1)), in2: bytes(second),
         mA: bytes(matrices(3)), mB: bytes(matrices(4)), v: bytes(vectors),
         q: bytes(quaternions(6)),
-        texts: texts(row.name === 'atof(long)'),
+        texts: texts(row.name.endsWith('(long)')),
         viewport: [...[10, 5, 800, 600].flatMap(u32), ...bytes(Float32Array.of(0, 1))],
         hex: new Array(2 * DUMPED).fill(0),
         digits: [...'0123456789abcdef'].map(c=>c.charCodeAt(0)),

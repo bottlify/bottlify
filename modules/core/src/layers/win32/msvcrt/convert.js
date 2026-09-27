@@ -156,6 +156,19 @@ const DECIMAL
     = /^[ \t\n\v\f\r]*[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eEdD][+-]?[0-9]+)?/;
 
 /**
+ * The bytes `DECIMAL` is spelt with. No match reaches past a byte outside
+ * them, so the text up to the first such byte matches as the whole text does.
+ */
+const SPELLS_DECIMAL = new Uint8Array(256);
+for (const c of ' \t\n\v\f\r+-.0123456789eEdD')
+{
+    SPELLS_DECIMAL[c.charCodeAt(0)] = 1;
+}
+
+/** How many bytes of a number's text strtod and atof read before reading it whole. */
+const DECIMAL_WINDOW = 64;
+
+/**
  * The double strtod reads, where it stops, and whether it is out of range:
  * an infinity from finite digits, or a zero from digits that were not all
  * zeros -- which msvcrt answers with ERANGE.
@@ -466,16 +479,55 @@ export function createConversionFunctions(host){
         return scanned ? scanned.value : 0;
     };
 
+    /**
+     * The text of the number at `pointer`, as far as `DECIMAL` could read it:
+     * a window's bytes up to the first that spells no number, or the whole
+     * string where the window holds no such byte or runs past what is mapped.
+     * A call here is one the guest's code handed over -- a sixteenth digit, a
+     * larger scale -- and the whole string's read and decode cost it more than
+     * the rest of the call.
+     *
+     * @param {number} pointer
+     */
+    const decimalText = pointer=>{
+        if (readMemory)
+        {
+            /** @type {Uint8Array} */
+            let bytes = new Uint8Array(0);
+            try
+            {
+                bytes = readMemory(pointer, DECIMAL_WINDOW);
+            }
+            catch {
+                // The window runs past the string's region: the walk below
+                // stops at the region's end.
+            }
+            for (let at = 0; at < bytes.length; at++)
+            {
+                if (SPELLS_DECIMAL[bytes[at]] === 0)
+                {
+                    let text = '';
+                    for (let i = 0; i < at; i++)
+                    {
+                        text += String.fromCharCode(bytes[i]);
+                    }
+                    return text;
+                }
+            }
+        }
+        return readString(pointer);
+    };
+
     /** @param {number[]} args */
     const strtod = args=>{
-        const scanned = scanDecimal(readString(args[0]));
+        const scanned = scanDecimal(decimalText(args[0]));
         writeInt(args[1], scanned ? args[0] + scanned.end : args[0]);
         return decimal(scanned);
     };
 
     const handlers = {
         /** double atof(const char *str) */
-        atof: returningDouble(host.fpu, 4, args=>decimal(scanDecimal(readString(args[0])))),
+        atof: returningDouble(host.fpu, 4, args=>decimal(scanDecimal(decimalText(args[0])))),
 
         /** double strtod(const char *str, char **end) */
         strtod: returningDouble(host.fpu, 8, strtod),

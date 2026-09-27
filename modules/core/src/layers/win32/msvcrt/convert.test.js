@@ -216,6 +216,61 @@ test('atof and strtod leave their result on the FPU stack', ()=>{
     assert.equal(memory.text(memory.u32(end)), 'rest');
 });
 
+test('strtod and atof hand over a long number, which the handler reads through a window', ()=>{
+    const fpu = fakeFpu();
+    const memory = fakeMemory();
+    let whole = 0;
+    // A string that ends 40 bytes before the end of what is mapped: a
+    // window of 64 from it would run past, as the memory layer refuses.
+    const mapped = 0x20000;
+    const table = /** @type {Record<string, any>} */ (createConversionFunctions({
+        ...memory, fpu,
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>{
+            if (address + length > mapped)
+            {
+                throw new Error(`unmapped at 0x${mapped.toString(16)}`);
+            }
+            return memory.readMemory(address, length);
+        },
+        /** @param {number} address @param {number} max */
+        readCString: (address, max)=>{
+            whole++;
+            return memory.readCString(address, max);
+        },
+    }));
+    const seventeen = '0.12345678901234567';
+    /** @type {[string, number, number, number][]} text, value, end, reads of the whole */
+    const cases = [
+        // Seventeen digits and a kilobyte of text after them: the window alone.
+        [`${seventeen}e-3 ${'x'.repeat(1024)}`, Number(`${seventeen}e-3`), 22, 0],
+        // Bytes no number is spelt with end it too, a NUL or not.
+        [`-${seventeen}\xe9\xe9`, -Number(seventeen), 20, 0],
+        // Longer than the window: read whole.
+        [`1${'0'.repeat(80)}e-80`, 1, 85, 1],
+    ];
+    for (const [text, value, stop, reads] of cases)
+    {
+        whole = 0;
+        const at = memory.put(text);
+        table.atof.handler([at]);
+        assert.ok(Object.is(fpu.result, value), `atof(${JSON.stringify(text)}) is ${fpu.result}`);
+        const end = memory.allocate(4);
+        table.strtod.handler([at, end]);
+        assert.ok(Object.is(fpu.result, value), `strtod(${JSON.stringify(text)})`);
+        assert.equal(memory.u32(end) - at, stop, 'strtod\'s end');
+        assert.equal(whole, 2 * reads, `${JSON.stringify(text)}: read whole ${reads} times`);
+    }
+    // At the end of what is mapped, the window refused: read whole.
+    const tail = `${seventeen}5`;
+    const last = mapped - tail.length - 1 - 40;
+    memory.writeMemory(last, new Uint8Array([...tail].map(c=>c.charCodeAt(0)).concat(0)));
+    whole = 0;
+    table.atof.handler([last]);
+    assert.ok(Object.is(fpu.result, Number(tail)));
+    assert.equal(whole, 1);
+});
+
 test('a float literal ending in a bare exponent gives back the exponent', ()=>{
     const scanned = scanFloat('1e');
     assert.equal(scanned?.value, 1);
