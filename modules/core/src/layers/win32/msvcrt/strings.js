@@ -19,6 +19,9 @@
  */
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { guestEntry } from './guest-code.js';
+import * as inGuest from './inguest.js';
+import { COMPILED } from './inguest.x86.js';
 
 /**
  * @typedef {Object} StringHost
@@ -58,14 +61,6 @@ const CT_HEX = 0x0080;
  */
 const CT_ALPHA_MARK = 0x0100;
 
-/** Only the sign is defined by C; this runtime normalises it to -1, 0 or 1. */
-const compare = (/** @type {string} */ a, /** @type {string} */ b)=>{
-    if (a === b)
-    {
-        return 0;
-    }
-    return a < b ? -1 : 1;
-};
 
 /** msvcrt's case folding under the C locale is ASCII and nothing else. */
 const foldCase = (/** @type {string} */ text)=>
@@ -210,16 +205,8 @@ export function createStringFunctions(host){
             },
         },
 
-        /** int _strnicmp(const char *l, const char *r, size_t count) */
-        _strnicmp: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([left, right, count])=>compare(
-                foldCase(readString(left).slice(0, count >>> 0)),
-                foldCase(readString(right).slice(0, count >>> 0)),
-            ),
-        },
+        /** int _strnicmp(const char *l, const char *r, size_t count) -- in the guest */
+        _strnicmp: guestEntry(inGuest._strnicmp, COMPILED._strnicmp, host),
 
         /** char *_strupr(char *str) */
         _strupr: inPlace(text=>text.replace(/[a-z]/g, c=>c.toUpperCase())),
@@ -328,20 +315,12 @@ export function createStringFunctions(host){
             },
         },
 
-        /** int isalpha/isdigit/... — the classifiers, under the C locale */
-        isalpha: classify(/[A-Za-z]/),
-        isdigit: classify(/[0-9]/),
-        isalnum: classify(/[0-9A-Za-z]/),
-        isspace: classify(/[ \t\n\v\f\r]/),
-        isupper: classify(/[A-Z]/),
-        islower: classify(/[a-z]/),
-        ispunct: classify(/[!-/:-@[-`{-~]/),
-        isxdigit: classify(/[0-9A-Fa-f]/),
-        isprint: classify(/[ -~]/),
-        // Expressed as a range rather than a pattern: a control character in a
-        // regular expression is the kind of thing that survives a copy-paste
-        // and then does not.
-        iscntrl: range(code=>code < 0x20 || code === 0x7f),
+        // The classifiers, under the C locale, in the guest (`inguest.js`):
+        // 1 for a byte of the class, 0 for anything else, EOF included.
+        ...Object.fromEntries(['isalpha', 'isdigit', 'isalnum', 'isspace', 'isupper', 'islower',
+            'ispunct', 'isxdigit', 'isprint', 'iscntrl'].map(name=>[name, guestEntry(
+            /** @type {Function} */ (inGuest[/** @type {'isalpha'} */ (name)]),
+            COMPILED[/** @type {'isalpha'} */ (name)], host)])),
     };
 
     // The table `_pctype` points at and `_isctype` reads: one mask per byte,
@@ -425,33 +404,3 @@ export function createStringFunctions(host){
 
     return table;
 }
-
-/**
- * One character classifier.
- *
- * C says the argument must be representable as unsigned char or EOF, and every
- * one of these is called with a value that came from getc or an array index.
- * Anything outside that range classifies as nothing, which is what a table
- * lookup with a bounded table does.
- *
- * @param {(code: number) => boolean} holds
- */
-function range(holds){
-    return {
-        convention: 'cdecl',
-        argBytes: 4,
-        /** @param {number[]} args */
-        handler: ([code])=>{
-            const value = code | 0;
-            if (value < 0 || value > 0xff)
-            {
-                return 0;
-            }
-            return holds(value) ? 1 : 0;
-        },
-    };
-}
-
-/** The same, written as a pattern where one reads more clearly than a range. */
-const classify = (/** @type {RegExp} */ pattern)=>
-    range(code=>pattern.test(String.fromCharCode(code)));

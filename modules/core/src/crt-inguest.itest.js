@@ -140,9 +140,11 @@ function buildSortExe(count, width){
 /**
  * @typedef {Object} Call
  * @property {string} name
- * @property {(at: (name: string) => number) => number[]} args  The stack slots, first first.
+ * @property {(at: (name: string) => number, comparator: number) => number[]} args
+ *     The stack slots, first first; `comparator` the address of COMPARATOR.
  * @property {'eax' | 'st0'} returns
- * @property {number[]} expected  EAX, or the double's two halves, low first.
+ * @property {number[] | ((at: (name: string) => number) => number[])} expected
+ *     EAX, or the double's two halves, low first.
  */
 
 /** @param {number} value */
@@ -154,6 +156,19 @@ const halves = value=>{
 
 /** @param {string} text */
 const cString = text=>[...text].map(c=>c.charCodeAt(0)).concat(0);
+
+/** Where the comparator sits in the code of a program that calls the runtime. */
+const COMPARATOR_AT = 0x780;
+
+/**
+ * compare(a, b): the signed dwords at a and b, as -1, 0 or 1.
+ *
+ * mov eax, [esp+4]; mov eax, [eax]; mov ecx, [esp+8]; mov ecx, [ecx]; xor edx, edx;
+ * cmp eax, ecx; setg dl; setl al; movzx eax, al; sub edx, eax; mov eax, edx; ret
+ */
+const COMPARATOR = [0x8b, 0x44, 0x24, 0x04, 0x8b, 0x00, 0x8b, 0x4c, 0x24, 0x08, 0x8b, 0x09,
+    0x31, 0xd2, 0x39, 0xc8, 0x0f, 0x9f, 0xc2, 0x0f, 0x9c, 0xc0, 0x0f, 0xb6, 0xc0, 0x29, 0xc2,
+    0x89, 0xd0, 0xc3];
 
 /**
  * Calls each import in turn with ESI and EDI holding marks of the program's
@@ -169,10 +184,12 @@ function buildCallsExe(calls, data){
         imports: { 'msvcrt.dll': names, 'KERNEL32.dll': ['ExitProcess'] },
         data: { out: new Array(8).fill(0), ...data },
         codeSize: 0x800,
-        code: ({ iat, at })=>[...assemble([
+        code: ({ iat, at, code })=>[...assemble([
             [0xbe, ...u32(0x5e5e5e5e), 0xbf, ...u32(0xd1d1d1d1)],        // esi, edi: marks
             ...calls.flatMap((call, i)=>{
-                const args = call.args(at);
+                const args = call.args(at, code(COMPARATOR_AT));
+                const expected = typeof call.expected === 'function'
+                    ? call.expected(at) : call.expected;
                 return [
                     [0xbb, ...u32(i + 1)],                                // mov ebx, i+1
                     ...[...args].reverse().map(arg=>[0x68, ...u32(arg)]), // push each, last first
@@ -181,12 +198,12 @@ function buildCallsExe(calls, data){
                     ...(call.returns === 'st0' ? [
                         [0xdd, 0x1d, ...u32(at('out'))],                  // fstp qword [out]
                         [0xa1, ...u32(at('out'))],                        // mov eax, [out]
-                        [0x3d, ...u32(call.expected[0])],                 // cmp eax, low
+                        [0x3d, ...u32(expected[0])],                      // cmp eax, low
                         { jump: [0x0f, 0x85], to: 'fail' },
                         [0xa1, ...u32(at('out') + 4)],                    // mov eax, [out+4]
-                        [0x3d, ...u32(call.expected[1])],                 // cmp eax, high
+                        [0x3d, ...u32(expected[1])],                      // cmp eax, high
                     ] : [
-                        [0x3d, ...u32(call.expected[0])],                 // cmp eax, expected
+                        [0x3d, ...u32(expected[0])],                      // cmp eax, expected
                     ]),
                     { jump: [0x0f, 0x85], to: 'fail' },
                     [0x81, 0xfe, ...u32(0x5e5e5e5e)],                     // cmp esi, mark
@@ -198,7 +215,8 @@ function buildCallsExe(calls, data){
             [0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],         // exit 0
             'fail',
             [0x53, 0xff, 0x15, ...u32(iat('ExitProcess'))],               // exit ebx
-        ])],
+        ])].concat(new Array(COMPARATOR_AT).fill(0xcc)).slice(0, COMPARATOR_AT)
+            .concat(COMPARATOR),
     });
 }
 
@@ -230,6 +248,63 @@ function buildPrototypeExe(){
         // 0x80, the euro sign, sorts above 0xff: the order the handlers compared in.
         euro: [0x80, 0], yen: [0xa5, 0],
     });
+}
+
+/**
+ * The classifiers, the case functions, the case-blind comparisons, atoi and
+ * bsearch through the import, with what the handlers answered.
+ */
+function buildLibraryExe(){
+    /** @type {Call[]} */
+    const calls = [];
+    /** @param {string} name @param {number[]} args @param {number} answer */
+    const plain = (name, args, answer)=>calls.push({ name, args: ()=>args, returns: 'eax',
+        expected: [answer >>> 0] });
+    plain('tolower', [0x41], 0x61);
+    plain('tolower', [0xc9], 0xc9);
+    plain('isdigit', [0x37], 1);
+    plain('isdigit', [0x61], 0);
+    plain('isspace', [0x0b], 1);
+    plain('isspace', [0xa0], 0);
+    plain('isalpha', [0xffffffff], 0);
+    plain('iswspace', [0xa0], 1);
+    plain('iswspace', [0x3000], 0);
+    plain('iswalpha', [0xe9], 1);
+    plain('towupper', [0x10061], 0x41);
+    /**
+     * @param {string} name @param {string[]} texts @param {number[]} rest
+     * @param {number} answer
+     */
+    const strings = (name, texts, rest, answer)=>calls.push({ name, returns: 'eax',
+        args: at=>[...texts.map(text=>at(text)), ...rest], expected: [answer >>> 0] });
+    strings('_strnicmp', ['HeLLo', 'hello'], [5], 0);
+    strings('_strnicmp', ['abc', 'ABD'], [3], -1);
+    strings('_strnicmp', ['abc', 'ABD'], [2], 0);
+    strings('_stricmp', ['Zeta', 'zetA'], [], 0);
+    strings('_stricmp', ['Zeta', 'zetB'], [], -1);
+    strings('atoi', ['  -123x'], [], -123);
+    strings('atoi', ['99999999999'], [], 0x7fffffff);
+    strings('atol', ['+42'], [], 42);
+    const sorted = [-7, -3, 0, 4, 4, 9, 12, 30];
+    for (const [wanted, index] of [[9, 5], [-7, 0], [30, 7], [5, -1]])
+    {
+        calls.push({
+            name: 'bsearch',
+            args: (at, comparator)=>[at(`key${wanted}`), at('sorted'), sorted.length, 4,
+                comparator],
+            returns: 'eax',
+            // The element's address, or null for a key that is not there.
+            expected: at=>[index < 0 ? 0 : at('sorted') + index * 4],
+        });
+    }
+    const data = Object.fromEntries(['HeLLo', 'hello', 'abc', 'ABD', 'Zeta', 'zetA', 'zetB',
+        '  -123x', '99999999999', '+42'].map(text=>[text, cString(text)]));
+    for (const wanted of [9, -7, 30, 5])
+    {
+        data[`key${wanted}`] = u32(wanted >>> 0);
+    }
+    data.sorted = sorted.flatMap(key=>u32(key >>> 0));
+    return buildCallsExe(calls, data);
 }
 
 /** @param {Uint8Array} executable @param {'emulator' | 'cork'} engine */
@@ -266,6 +341,12 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
             assert.equal(await exitCodeOf(buildPrototypeExe(), engine), 0,
                 'the number of the first call that came back wrong');
         });
+
+    test(`the classifiers, the case-blind comparisons, atoi and bsearch, in the guest, under `
+        + `${engine}`, { timeout: 60000 }, async()=>{
+        assert.equal(await exitCodeOf(buildLibraryExe(), engine), 0,
+            'the number of the first call that came back wrong');
+    });
 
     test(`qsort sorts through the program's comparator, in the guest, under ${engine}`,
         { timeout: 60000 }, async()=>{

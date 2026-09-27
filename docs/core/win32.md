@@ -273,10 +273,15 @@ guest has no handler in the engine -- a handler cannot run the guest and wait fo
 synchronously -- and is `guestExport`, the x86 alone; its tests run the JavaScript with a
 stand-in for the call.
 
-In the guest now: `floor`, `toupper`, `strncmp`, `qsort` (Shell's sort, the program's
-comparator called with a `call`) and `_ftol`/`_ftol2`/`_ftol2_sse` (ST0 popped, EDX:EAX; a
-handler only where the host can set EDX). Each keeps the answers of the handler it replaced (see
-the divergences below).
+In the guest now: `floor`, `_ftol`/`_ftol2`/`_ftol2_sse` (ST0 popped, EDX:EAX; a handler only
+where the host can set EDX); `toupper`, `tolower`, the classifiers `isalpha`, `isdigit`,
+`isalnum`, `isspace`, `isupper`, `islower`, `ispunct`, `isxdigit`, `isprint`, `iscntrl` and
+their wide forms `iswalpha` ... `iswgraph`, `iswascii`, `towupper`, `towlower` (the classes in
+`CLASSES` and `WIDE_CLASSES`, which `_pctype`, `_isctype` and `iswctype` read too); `strncmp`,
+`_strnicmp`, `_stricmp`; `atoi`/`atol`; `qsort` (Shell's sort) and `bsearch`, the program's
+comparator called with a `call`. Each keeps the answers of the handler it replaced (see the
+divergences below). `strtol`/`strtoul` stay handlers: they set `errno`, which is the calling
+thread's own and reached only through the host.
 
 ### The process model
 
@@ -772,12 +777,12 @@ nothing implements).
   one piece of state — because a program may set the FPU control word through one entry point and
   read it back through the other, and answering from two separate words would make that read-back a
   coin toss (`msvcrt/startup.js`).
-- **The `isw*`/`tow*` wide-character classifiers are bound to the byte classifiers** so the two
-  families cannot disagree below `0x80`; above it they follow the C locale as a real Windows
-  answers through `iswctype`: the Latin-1 letters are alpha (except the multiplication and division
-  signs among them), `0x85` and `0xa0` are the two extra spaces the ASCII table does not carry, and
-  case folding stays ASCII, so those letters are alpha with no upper or lower answer of their own
-  (`msvcrt/mbstring.js`).
+- **The `isw*`/`tow*` wide-character classifiers are built from the byte classifiers' classes**
+  so the two families cannot disagree below `0x80`; above it they follow the C locale as a real
+  Windows answers through `iswctype`: the Latin-1 letters are alpha (except the multiplication and
+  division signs among them), `0x85` and `0xa0` are the two extra spaces the ASCII table does not
+  carry, and case folding stays ASCII, so those letters are alpha with no upper or lower answer of
+  their own (`CLASSES` and `WIDE_CLASSES` in `msvcrt/inguest.js`).
 - **A `va_list` is read as a fixed window**, since the list carries no argument count of its own:
   `varargsSlots` reads slots up to the end of the memory region the pointer sits in — a thread's
   stack has a top, and a program formatting from just below it is within its rights, since every
@@ -814,7 +819,8 @@ Stated as the code states them.
   msvcrt compares unsigned bytes. `strncmp` in the guest keeps that order (`ORDER` in
   `msvcrt/inguest.js`) so the handler and the x86 answer alike; a string past 1 MiB, which the
   handlers read no further than, is compared whole by the x86. The classifiers answer 1 rather
-  than msvcrt's class bit.
+  than msvcrt's class bit. `atoi` clamps to `INT_MIN`/`INT_MAX`, as its handler did. `bsearch`
+  takes its count as a signed number, so an array of 2^31 elements or more is not searched.
 
 - **Every listed display mode can be set.** `ChangeDisplaySettingsA`/`ExA` switch the screen to
   any mode `EnumDisplaySettingsA` lists -- the metrics, the desktop rectangle and the current

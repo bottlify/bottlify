@@ -151,3 +151,98 @@ test('qsort: the same order, through the same comparator calls, for any width', 
             { callback: COMPARE, call: compareJs });
     }
 });
+
+/**
+ * Every byte and EOF, units past a byte and past sixteen bits, and random values.
+ *
+ * @param {number} seed
+ */
+function characters(seed){
+    const next = random(seed);
+    const values = [...Array.from({ length: 300 }, (_, i)=>i), 0xffffffff, 0xffff, 0xfffe,
+        0x10000, 0x10041, 0x100e9, 0x80000000, 0x7fffffff, 0x161, 0x17a, 0x2028, 0x3000];
+    for (let i = 0; i < 40; i++)
+    {
+        values.push(next());
+    }
+    return values;
+}
+
+test('the classifiers and the case functions, narrow and wide', ()=>{
+    const names = ['tolower', 'isalpha', 'isdigit', 'isalnum', 'isspace', 'isupper', 'islower',
+        'ispunct', 'isxdigit', 'isprint', 'iscntrl', 'iswalpha', 'iswdigit', 'iswalnum',
+        'iswspace', 'iswupper', 'iswlower', 'iswpunct', 'iswxdigit', 'iswcntrl', 'iswprint',
+        'iswgraph', 'iswascii', 'towupper', 'towlower'];
+    const values = characters(6);
+    for (const name of names)
+    {
+        for (const c of values)
+        {
+            same(name, { stack: [c] });
+        }
+    }
+});
+
+test('_strnicmp and _stricmp: case folded, counts, terminators, the upper half', ()=>{
+    const next = random(7);
+    const alphabet = [0x41, 0x61, 0x5a, 0x7a, 0x5b, 0x60, 0x40, 0x80, 0x9f, 0xc9, 0xe9, 0xff, 0];
+    const left = DATA;
+    const right = DATA + 0x1000;
+    /** @param {number} length */
+    const text = length=>Array.from({ length }, ()=>alphabet[next() % alphabet.length]);
+    /** Each ASCII letter's case flipped at random. @param {number[]} bytes */
+    const recase = bytes=>bytes.map(byte=>(/[A-Za-z]/.test(String.fromCharCode(byte))
+        && next() % 2 === 0 ? byte ^ 0x20 : byte));
+    for (let i = 0; i < 150; i++)
+    {
+        const a = text(next() % 12);
+        const b = next() % 2 === 0 ? recase(a) : text(next() % 12);
+        const memory = /** @type {[number, number[]][]} */ ([[left, [...a, 0]],
+            [right, [...b, 0]]]);
+        same('_stricmp', { stack: [left, right], memory });
+        for (const count of [0, 1, a.length, b.length + 1, 0xffffffff, next() % 14])
+        {
+            same('_strnicmp', { stack: [left, right, count], memory });
+        }
+    }
+});
+
+test('atoi: white space, signs, digits, the clamp at both ends, and what is not a number', ()=>{
+    const next = random(8);
+    const texts = ['', '0', '-0', '+0', '42', '  42', '\t\n\v\f\r 42', '+', '-', '- 5', '+-5',
+        '007', '12abc', '2147483647', '2147483648', '-2147483648', '-2147483649',
+        '99999999999999999999', '-99999999999999999999', '214748364', '2147483646', '21474836470',
+        ' 42', '\u008542', 'x42', '4\u00002'];
+    for (let i = 0; i < 80; i++)
+    {
+        const digits = Array.from({ length: next() % 14 }, ()=>String(next() % 10)).join('');
+        const sign = ['', '-', '+'][next() % 3];
+        const space = [' ', '\t', ''][next() % 3].repeat(next() % 3);
+        texts.push(`${space}${sign}${digits}${next() % 2 ? 'z' : ''}`);
+    }
+    for (const text of texts)
+    {
+        const bytes = [...text].map(c=>c.charCodeAt(0) & 0xff);
+        same('atoi', { stack: [DATA], memory: [[DATA, [...bytes, 0]]] });
+    }
+});
+
+test('bsearch: the key found, missed, at either end, among repeats, and in nothing', ()=>{
+    const next = random(9);
+    for (const [count, width] of [[0, 4], [1, 4], [2, 4], [3, 8], [16, 4], [100, 4], [37, 12]])
+    {
+        const keys = Array.from({ length: count }, ()=>(next() % 60) - 30).sort((a, b)=>a - b);
+        const bytes = new Uint8Array(count * width + 4);
+        const view = new DataView(bytes.buffer);
+        keys.forEach((key, i)=>view.setInt32(i * width, key, true));
+        for (const wanted of [-31, -30, 0, 7, 29, 30, ...keys.slice(0, 5), next() % 60 - 30])
+        {
+            const key = new Uint8Array(4);
+            new DataView(key.buffer).setInt32(0, wanted, true);
+            same('bsearch', {
+                stack: [DATA + 0x2000, DATA, count, width, CALLBACK],
+                memory: [[DATA, bytes], [DATA + 0x2000, key]],
+            }, { callback: COMPARE, call: compareJs });
+        }
+    }
+});

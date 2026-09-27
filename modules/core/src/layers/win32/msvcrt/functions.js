@@ -55,14 +55,9 @@ const MAX_STRING = 1 << 20;
 /** A scan table marking nothing: a walk only the terminator ends. */
 const NO_BYTES = new Uint8Array(256);
 
-const INT_MAX = 0x7fffffff;
-const INT_MIN = -0x80000000;
-
 /** The largest number `rand` produces, which a caller scales its range by. */
 const RAND_MAX = 0x7fff;
 
-/** Leading whitespace atoi skips, then an optional sign and decimal digits. */
-const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
 
 /**
  * @typedef {Object} MsvcrtHost
@@ -143,13 +138,6 @@ function compare(a, b){
     }
     return a < b ? -1 : 1;
 }
-
-/**
- * msvcrt's case folding is locale-driven; ours is the C locale, ASCII only.
- *
- * @param {string} text
- */
-const foldCase = text=>text.replace(/[A-Z]/g, letter=>letter.toLowerCase());
 
 /**
  * Builds the function table: name -> { convention, argBytes, handler }.
@@ -238,22 +226,8 @@ export function createMsvcrtFunctions(host){
         return text.length > limit ? -1 : text.length;
     };
 
-    /** int atoi(const char *str) */
-    const atoi = {
-        convention: 'cdecl',
-        argBytes: 4,
-        /** @param {number[]} args */
-        handler: ([string])=>{
-            const match = LEADING_INTEGER.exec(readString(string));
-            if (!match)
-            {
-                return 0;
-            }
-            // C leaves overflow undefined; msvcrt clamps, and a clamped value is
-            // at least ordered the way the digits were.
-            return Math.min(Math.max(Number(match[1]), INT_MIN), INT_MAX);
-        },
-    };
+    /** int atoi(const char *str) -- in the guest */
+    const atoi = guestEntry(inGuest.atoi, COMPILED.atoi, host);
 
     /** char *_itoa(int value, char *buffer, int radix) */
     const itoa = {
@@ -416,16 +390,8 @@ export function createMsvcrtFunctions(host){
         /** int strncmp(const char *left, const char *right, size_t count) -- in the guest */
         strncmp: guestEntry(inGuest.strncmp, COMPILED.strncmp, host),
 
-        /** int _stricmp(const char *left, const char *right) */
-        _stricmp: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([left, right])=>compare(
-                foldCase(readString(left)),
-                foldCase(readString(right)),
-            ),
-        },
+        /** int _stricmp(const char *left, const char *right) -- in the guest */
+        _stricmp: guestEntry(inGuest._stricmp, COMPILED._stricmp, host),
 
         /** char *strcpy(char *dest, const char *src) */
         strcpy: {
@@ -499,13 +465,8 @@ export function createMsvcrtFunctions(host){
         /** int toupper(int ch) -- in the guest */
         toupper: guestEntry(inGuest.toupper, COMPILED.toupper, host),
 
-        /** int tolower(int ch) */
-        tolower: {
-            convention: 'cdecl',
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([ch])=>(ch >= 0x41 && ch <= 0x5a ? ch + 0x20 : ch),
-        },
+        /** int tolower(int ch) -- in the guest */
+        tolower: guestEntry(inGuest.tolower, COMPILED.tolower, host),
 
         /** void *memcpy(void *dest, const void *src, size_t count) */
         memcpy: {
@@ -745,46 +706,10 @@ export function createMsvcrtFunctions(host){
          * void *bsearch(const void *key, const void *base, size_t num,
          *               size_t width, int (*compare)(const void *, const void *))
          *
-         * The comparator is guest code, so this suspends across every step the
-         * way qsort does. The key is the first argument to it, which is the
-         * order a caller's comparator was written for and the reason a
-         * comparator shared with qsort is often subtly wrong here.
+         * Code in the guest's own msvcrt, as qsort is: the comparator is the
+         * program's, called with a `call`.
          */
-        bsearch: {
-            convention: 'cdecl',
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: async([key, base, num, width, ordering])=>{
-                const size = width >>> 0;
-                // Whose call this is, read before the first await. Every one of
-                // these calls the guest back more than once, and only the first
-                // is made while this handler still holds the processor: the
-                // loop turns between them and hands the machine to somebody
-                // else, whose stack the rest would otherwise be built on.
-                const asked = host.currentThread?.();
-                let low = 0;
-                let high = (num >>> 0) - 1;
-                while (low <= high)
-                {
-                    const middle = (low + high) >> 1;
-                    const element = base + middle * size;
-                    const order = await host.callGuest(ordering, [key, element], asked);
-                    if (order === 0)
-                    {
-                        return element;
-                    }
-                    if (order < 0)
-                    {
-                        high = middle - 1;
-                    }
-                    else
-                    {
-                        low = middle + 1;
-                    }
-                }
-                return 0;
-            },
-        },
+        bsearch: guestExport(COMPILED.bsearch),
     };
 
     const allocate = host.allocate ?? (()=>0);
@@ -880,7 +805,7 @@ export function createMsvcrtFunctions(host){
         ...narrow,
         // Bound to the byte functions above, so the two families cannot drift.
         ...createMultiByteFunctions(narrow),
-        ...createWideClassificationFunctions(narrow),
+        ...createWideClassificationFunctions(),
         ...createWideFunctions({
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
