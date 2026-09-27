@@ -70,6 +70,53 @@ const SAVED = { ebx: 0x11111111, esi: 0x22222222, edi: 0x33333333, ebp: 0x444444
  *     a double that replaces them in ST0.
  */
 
+/** One machine per piece of code run by `runCode`, its translations kept. */
+/** @type {WeakMap<Uint8Array, ReturnType<typeof createTestMachine>>} */
+const codeMachines = new WeakMap();
+
+/**
+ * Runs code assembled by hand on cork's test machine, called from a return
+ * address that halts, with the registers and the stack slots given: what a
+ * test holds a routine the compiler cannot express to.
+ *
+ * @param {Uint8Array} code
+ * @param {{ stack?: number[], registers?: Record<string, number> }} input
+ * @returns {{ eax: number, ecx: number, edx: number, ebx: number, esp: number, ebp: number,
+ *     esi: number, edi: number, halted: boolean, popped: number }}
+ *     Each of the eight registers after, whether it returned to the halt,
+ *     and the bytes of arguments its return popped.
+ */
+export function runCode(code, { stack = [], registers = {} }){
+    let m = codeMachines.get(code);
+    if (!m)
+    {
+        m = createTestMachine();
+        m.write(CODE, Array.from(code));
+        m.write(HALT, [0xf4]);
+        codeMachines.set(code, m);
+    }
+    m.writeU32(STACK, HALT);
+    stack.forEach((word, i)=>m.writeU32(STACK + 4 + i * 4, word >>> 0));
+    m.setReg('esp', STACK);
+    for (const [reg, value] of Object.entries({ eax: 0xa5a5a5a5, ecx: 0xc5c5c5c5,
+        edx: 0xd5d5d5d5, ...SAVED, ...registers }))
+    {
+        m.setReg(reg, value >>> 0);
+    }
+    m.setEflags(2);
+    const exit = m.runProgram(CODE);
+    const after = (/** @type {string} */ name)=>m.reg(name) >>> 0;
+    const esp = after('esp');
+    return {
+        eax: after('eax'), ecx: after('ecx'), edx: after('edx'), ebx: after('ebx'), esp,
+        ebp: after('ebp'), esi: after('esi'), edi: after('edi'),
+        halted: exit.kind === 3 && m.eip() === HALT + 1, popped: esp - (STACK + 4),
+    };
+}
+
+/** The registers a callee keeps, as `runCode` sets them. */
+export const KEPT = SAVED;
+
 /** A small generator with a seed, so a failure is the same failure each run. @param {number} seed */
 export function random(seed){
     let state = seed >>> 0;

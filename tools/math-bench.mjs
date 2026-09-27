@@ -10,8 +10,9 @@
  * over 256 doubles (or sixteen matrices and vectors), and the same loop runs
  * with the operation's loads and stores but not the operation; the
  * difference over N is the operation's cost. Each operation is either a
- * call into a library -- msvcrt's maths in its cdecl and `_CI` forms, d3dx9's
- * matrices, vectors, quaternions, planes and halves -- or the x87's own
+ * call into a library -- msvcrt's maths in its cdecl and `_CI` forms and its
+ * number reading, d3dx9's matrices, vectors, quaternions, planes and halves,
+ * kernel32's MulDiv and ntdll's 64-bit division -- or the x87's own
  * instructions inline, the ones a compiler emits for the same mathematics,
  * so the cost of the call's way stands beside the cost of the translator's
  * own code.
@@ -254,6 +255,26 @@ const ROWS = [
         base: x=>[0x6a, 0x07, 0x68, ...u32(1000), 0x83, 0xc4, 0x08,
             0x89, 0x87, ...u32(x.at('out')), 0x89, 0x97, ...u32(x.at('out') + 4)],
     },
+    {
+        // MulDiv(a double's low word, 7, 3000), stdcall: a scaling a program does per item.
+        name: 'MulDiv', imports: { 'KERNEL32.dll': ['MulDiv'] }, out: 'int', exact: true,
+        body: x=>[0x68, ...u32(3000), 0x6a, 0x07, 0xff, 0xb7, ...u32(x.at('in')),
+            ...callIat(x.iat('MulDiv')), 0x89, 0x87, ...u32(x.at('out'))],
+        base: x=>[0x68, ...u32(3000), 0x6a, 0x07, 0xff, 0xb7, ...u32(x.at('in')), 0x83, 0xc4, 0x0c,
+            0x89, 0x87, ...u32(x.at('out'))],
+    },
+    {
+        // _alldiv(a double's bits, the high word of another's): a 64-bit value by a
+        // divisor of one word, as a program divides a count of ticks; callee pops.
+        name: '_alldiv', imports: { 'ntdll.dll': ['_alldiv'] }, out: 'int', exact: true,
+        body: x=>[0x6a, 0x00, 0xff, 0xb7, ...u32(x.at('in2') + 4),
+            0xff, 0xb7, ...u32(x.at('in') + 4), 0xff, 0xb7, ...u32(x.at('in')),
+            ...callIat(x.iat('_alldiv')),
+            0x89, 0x87, ...u32(x.at('out')), 0x89, 0x97, ...u32(x.at('out') + 4)],
+        base: x=>[0x6a, 0x00, 0xff, 0xb7, ...u32(x.at('in2') + 4),
+            0xff, 0xb7, ...u32(x.at('in') + 4), 0xff, 0xb7, ...u32(x.at('in')), 0x83, 0xc4, 0x10,
+            0x89, 0x87, ...u32(x.at('out')), 0x89, 0x97, ...u32(x.at('out') + 4)],
+    },
     intrinsic('_CIsqrt', 1, true, 'positive'),
     intrinsic('_CIsin', 1, false, 'small'),
     intrinsic('_CIcos', 1, false, 'small'),
@@ -412,7 +433,8 @@ export function program(row, n, withOp, control){
     };
     const imports = {
         ...row.imports,
-        'KERNEL32.dll': ['ExitProcess', 'GetStdHandle', 'WriteFile'],
+        'KERNEL32.dll': [...row.imports?.['KERNEL32.dll'] ?? [], 'ExitProcess', 'GetStdHandle',
+            'WriteFile'],
     };
     return buildExe({
         imports,
