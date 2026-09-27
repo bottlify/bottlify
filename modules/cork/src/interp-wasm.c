@@ -1083,6 +1083,13 @@ static u32 x87(const u8 *p)
         {
             t1 = GUARD(1, 1);
             double original = ST(0), v = original, exponent = 0, significand;
+            /* An infinity is its own significand with an exponent of +inf, a NaN both. */
+            if (isNaN(v) || __builtin_fabs(v) == __builtin_inf())
+            {
+                ST(0) = OR_INDEFINITE(isNaN(v) ? original : __builtin_inf(), t1);
+                PUSH_ST(OR_INDEFINITE(original, t1));
+                break;
+            }
             if (v == 0)
             {
                 if (precise) status |= S_ZE;
@@ -1099,12 +1106,6 @@ static u32 x87(const u8 *p)
                 u64 word = bitsOf(v);
                 exponent += (double)((i32)((word >> 52) & 0x7ff) - 1023);
                 significand = fromBits((word & 0x800fffffffffffffull) | 0x3ff0000000000000ull);
-            }
-            if (isNaN(v) || __builtin_fabs(v) == __builtin_inf())
-            {
-                ST(0) = OR_INDEFINITE(original, t1);
-                PUSH_ST(OR_INDEFINITE(original, t1));
-                break;
             }
             ST(0) = OR_INDEFINITE(exponent, t1);
             PUSH_ST(OR_INDEFINITE(significand, t1));

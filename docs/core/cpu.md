@@ -550,7 +550,11 @@ and for the bits (a loop of `fprem` until C2 clears, as `fmod` reduces, 109 -> 1
 `math-bench.mjs`). Every tier had once computed `a - trunc(a / c) * c` in doubles, so a quotient that
 rounded up gave a remainder of the wrong sign and bits off by one, and one past 2^53 lost the
 remainder. Past an exponent difference of 63 the reduction is partial, C2 set, by 32 plus the
-difference mod 32 bits, so a loop of them ends at the exact remainder. `fnstenv` and
+difference mod 32 bits, so a loop of them ends at the exact remainder. `fxtract` splits a finite
+value from the double's fields (a denormal normalised, a zero its own significand with an
+exponent of -inf and ZE), and leaves an infinity as its own significand with an exponent of
++inf and a NaN in both, as the processor does; translated code had split those two by their
+fields too, a significand of 1 or 1.5 and an exponent of 1024. `fnstenv` and
 `fnsave` write the protected-mode environment as the emulator does (the instruction and data
 pointers zero, which neither keeps); `fldenv` and `frstor` read it back into the locals and
 leave for the next block, since the top they set is known only at run time and every block

@@ -614,6 +614,30 @@ test('fprem and fprem1 leave the model\'s exact remainder, and its quotient bits
     }
 });
 
+test('fxtract of an infinity, a NaN, a zero and a denormal is the model\'s', ()=>{
+    // [the value, the significand (ST0), the exponent (ST1)]: an infinity is its
+    // own significand with an exponent of +inf, a NaN both, a zero its own with
+    // -inf, a denormal normalised.
+    /** @type {[bigint, bigint, bigint][]} */
+    const cases = [
+        [0x7ff0000000000000n, 0x7ff0000000000000n, 0x7ff0000000000000n],
+        [0xfff0000000000000n, 0xfff0000000000000n, 0x7ff0000000000000n],
+        [0x7ff8000000000123n, 0x7ff8000000000123n, 0x7ff8000000000123n],
+        [0xfff8000000000000n, 0xfff8000000000000n, 0xfff8000000000000n],
+        [0x8000000000000000n, 0x8000000000000000n, 0xfff0000000000000n],
+        [0x8000000000000003n, 0xbff8000000000000n, 0xc090c40000000000n],
+    ];
+    for (const [value, significand, exponent] of cases)
+    {
+        // fld qword [ebx]; fxtract; fstp qword [ebx+8]; fstp qword [ebx+16]
+        const { m, at } = onEmptyStack([0xdd, 0x03, 0xd9, 0xf4, 0xdd, 0x5b, 0x08, 0xdd, 0x5b, 0x10],
+            (view, where)=>view.setBigUint64(where, value, true));
+        const name = `fxtract of 0x${value.toString(16)}`;
+        assert.equal(m.view.getBigUint64(at + 8, true), significand, `${name}: the significand`);
+        assert.equal(m.view.getBigUint64(at + 16, true), exponent, `${name}: the exponent`);
+    }
+});
+
 test('fprem and fprem1 over random operands are the model\'s remainder and bits', ()=>{
     // The tier's own long division against `remainder` in ir-x87.js, which
     // the JavaScript interpreter calls: magnitudes across the whole range,

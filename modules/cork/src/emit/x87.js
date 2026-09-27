@@ -2062,10 +2062,14 @@ export function emitX87(e, instruction, flagsLive){
         case 'fxtract':
         {
             // ST0 becomes the exponent and the significand is pushed: for a
-            // normal, from the double's fields; zero gives -inf and ZE; a
-            // denormal is scaled up first.
+            // finite value, from the double's fields, a denormal scaled up
+            // first; zero gives -inf and ZE and is its own significand; an
+            // infinity is its own significand with an exponent of +inf, and a
+            // NaN both. The test is of the value, before the fields replace it.
             guard();
             b.localGet(st(0)).localSet(x.temp);
+            b.localGet(x.temp).op(F64.abs).f64const(Infinity).op(F64.lt);
+            e.openIf('finite', EMPTY);
             b.localGet(x.temp).f64const(0).op(F64.eq);
             e.openIf('zero', EMPTY);
             setStatus(Status.ZE);
@@ -2085,12 +2089,10 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(x.temp).op(I64.reinterpretF64).i64const(-0x7ff0000000000001n).op(I64.and)
                 .i64const(0x3ff0000000000000n).op(I64.or).op(F64.reinterpretI64).localSet(x.temp);
             e.close();
-            // Infinity and NaN keep their value in both.
-            b.localGet(x.temp).localGet(x.temp).op(F64.ne);
-            b.localGet(x.temp).op(F64.abs).f64const(Infinity).op(F64.eq).op(I32.or);
-            e.openIf('special', EMPTY);
-            b.localGet(st(0)).localSet(x.temp);
-            b.localGet(st(0)).localSet(x.temp2);
+            b.else();
+            // The exponent: +inf of an infinity, the NaN itself of a NaN.
+            b.localGet(x.temp).f64const(Infinity).localGet(x.temp).localGet(x.temp).op(F64.ne)
+                .select().localSet(x.temp2);
             e.close();
             b.localGet(x.temp2);
             orIndefinite();
