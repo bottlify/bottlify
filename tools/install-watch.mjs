@@ -13,7 +13,7 @@
  *
  *   node tools/install-watch.mjs <setup.exe> [--every 30] [--minutes 20]
  *       [--journal SECONDS] [--memory MB] [--key Code@S]... [--click X,Y@S]...
- *       [--shots DIR] [--list 'C:\Program Files']
+ *       [--shots DIR] [--list 'C:\Program Files'] [--collect]
  *
  * `--journal S` prints, S seconds in, the last cross-process COM calls and
  * message waits from the call journal (every call area on).
@@ -28,13 +28,15 @@
  * desktop the facade's process paints into as a PNG at every status, which is
  * what a person would have seen, pixel for pixel. `--list DIR` prints the
  * files under a directory of the volume once the run is over -- what an
- * install left behind, which is what a bottle is made of.
+ * install left behind, which is what a bottle is made of. `--collect` takes
+ * that prefix off the finished run as the installer's own wizard does
+ * (`collectFrom`) and says which root, entry and files a bottle would get.
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { createApp } from '../modules/core/src/app.js';
-import { prefixOptions } from '../modules/installer/src/index.js';
+import { collectFrom, prefixOptions } from '../modules/installer/src/index.js';
 
 const argv = process.argv.slice(2);
 /** @param {string} flag @param {number} fallback */
@@ -63,7 +65,8 @@ const journalAt = number('--journal', 0);
 const memory = number('--memory', 0);
 const listAt = argv.includes('--list') ? argv[argv.indexOf('--list') + 1] : null;
 
-const prefix = prefixOptions({ name: basename(file), bytes: new Uint8Array(readFileSync(file)) });
+const media = { name: basename(file), bytes: new Uint8Array(readFileSync(file)) };
+const prefix = prefixOptions(media);
 const started = Date.now();
 const seconds = ()=>((Date.now() - started) / 1000).toFixed(1);
 const app = await createApp({
@@ -318,6 +321,23 @@ if (listAt)
     }
     catch (e){
         console.log('list failed:', e instanceof Error ? e.message : e);
+    }
+}
+if (argv.includes('--collect'))
+{
+    try
+    {
+        const collected = collectFrom(app, media);
+        const bytes = collected.files.reduce((total, one)=>total + one.bytes.length, 0);
+        console.log('COLLECT root', collected.root, 'entry', collected.entry,
+            'files', collected.files.length, 'bytes', bytes, 'outside', collected.outside.length);
+        for (const one of collected.files.slice(0, 60))
+        {
+            console.log('COLLECT file', String(one.bytes.length).padStart(10), one.path);
+        }
+    }
+    catch (e){
+        console.log('collect failed:', e instanceof Error ? e.message : e);
     }
 }
 for (const [library, names] of unresolved)
