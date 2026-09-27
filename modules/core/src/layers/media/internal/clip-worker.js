@@ -35,16 +35,9 @@ const STEPS_PER_ROUND = 64;
  *
  * @param {ClipPort} port
  * @param {Promise<any>} decoderReady  A decoder made by `createDecoder`.
- * @param {((picture: { width: number, height: number, bgra: Uint8Array },
- *     out: Uint8Array, shape: any) => void) | null} [fit]
- *     Lays a frame out on the screen the engine last described, so the engine
- *     shows it as it comes rather than scaling it on its own thread.
  * @returns {(message: any) => void} what to do with each message that arrives
  */
-export function serveClips(port, decoderReady, fit = null){
-    /** The screen and placement frames are laid out for, with the key naming it. */
-    /** @type {{ key: string, width: number, height: number } | null} */
-    let shape = null;
+export function serveClips(port, decoderReady){
     /** @type {Map<number, { clip: any, owed: number, ended: boolean }>} */
     const clips = new Map();
     let scheduled = false;
@@ -68,23 +61,11 @@ export function serveClips(port, decoderReady, fit = null){
             if (what === 'frame')
             {
                 const view = entry.clip.frame();
-                const width = entry.clip.width;
-                const height = entry.clip.height;
-                let bgra = null;
-                let fitted = null;
-                if (view && fit && shape)
-                {
-                    bgra = new Uint8Array(shape.width * shape.height * 4);
-                    fit({ width, height, bgra: view }, bgra, shape);
-                    fitted = shape.key;
-                }
-                else if (view)
-                {
-                    bgra = view.slice();
-                }
+                const bgra = view ? view.slice() : null;
                 entry.owed--;
-                port.post({ type: 'event', id, kind: 'frame', bgra, width, height, fitted },
-                    bgra ? [bgra.buffer] : []);
+                port.post({ type: 'event', id, kind: 'frame', bgra,
+                    width: entry.clip.width, height: entry.clip.height },
+                bgra ? [bgra.buffer] : []);
             }
             else if (what === 'audio')
             {
@@ -152,9 +133,6 @@ export function serveClips(port, decoderReady, fit = null){
                 }
                 break;
             }
-            case 'fit':
-                shape = message.shape;
-                break;
             case 'credit':
             {
                 const entry = clips.get(message.id);

@@ -70,26 +70,6 @@ test('byte-exact: a 32-bit surface passes through in storage order with an opaqu
         'blue first, and the undefined byte became opaque');
 });
 
-test('byte-exact: a picture in host memory is read from there, and an opaque one as it is',
-    ()=>{
-        const h = harness();
-        h.ram.fill(0x77);
-        // An opaque picture is not converted: a fourth byte its producer left
-        // is what arrives, where a conversion would have made it 0xff.
-        const pixels = Uint8Array.of(1, 2, 3, 0x80, 4, 5, 6, 0x80);
-        h.presenter.present({ buffer: 0, pixels, opaque: true, width: 2, height: 1, pitch: 8,
-            bitCount: 32, palette: null });
-        h.settle();
-        assert.deepEqual([...h.uploaded()], [1, 2, 3, 0x80, 4, 5, 6, 0x80]);
-
-        const loose = Uint8Array.of(1, 2, 3, 0, 4, 5, 6, 0);
-        h.presenter.present({ buffer: 0, pixels: loose, width: 2, height: 1, pitch: 8,
-            bitCount: 32, palette: null });
-        h.settle();
-        assert.deepEqual([...h.uploaded()], [1, 2, 3, 0xff, 4, 5, 6, 0xff],
-            'one not said to be opaque is converted, and guest memory is never read');
-    });
-
 test('byte-exact: a 16-bit surface expands 5-6-5 with the top bits replicated', ()=>{
     const h = harness();
     // 0xf800 red, 0x07e0 green, 0x001f blue, 0x8410 every channel at its midpoint.

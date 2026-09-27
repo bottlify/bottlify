@@ -224,23 +224,6 @@ export function createMediaModule(){
                 },
 
                 /**
-                 * Where films are shown, for the thread decoding them to lay
-                 * their frames out there. False when films decode in the call,
-                 * and whoever shows them lays them out itself.
-                 *
-                 * @param {{ key: string, width: number, height: number }} shape
-                 * @returns {boolean}
-                 */
-                fitFilms(shape){
-                    if (!live() || !state.remote)
-                    {
-                        return false;
-                    }
-                    state.remote.clips.fitTo(shape);
-                    return true;
-                },
-
-                /**
                  * The decoder this machine uses, shared with the run: the next
                  * machine attaches to the same instance rather than compiling the
                  * binary again, and the counters of everything decoded through it

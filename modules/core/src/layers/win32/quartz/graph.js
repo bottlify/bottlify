@@ -153,8 +153,6 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  * @property {number} sampleRate  The film's own rate, not the device's.
  * @property {number} channels
  * @property {() => 'frame' | 'audio' | 'end' | 'pending'} decode
- * @property {() => string | null} [fitted]
- *           The key of the screen shape a frame decoded elsewhere was laid out for.
  * @property {() => Uint8Array | null} frame
  *           The current frame as BGRA. A view into the decoder's own memory,
  *           valid until the next call into it.
@@ -597,7 +595,7 @@ export function createQuartz(host){
      * @returns {{ hwnd: number, width: number, height: number,
      *             window: { left: number, top: number, width: number, height: number,
      *                       visible: boolean, fullScreen: boolean },
-     *             bgra: Uint8Array | null, fitted: string | null, audio: Int16Array[],
+     *             bgra: Uint8Array | null, audio: Int16Array[],
      *             sampleRate: number, channels: number,
      *             positionMs: number, film: number } | null}
      */
@@ -663,8 +661,6 @@ export function createQuartz(host){
             const audio = [];
             /** @type {Uint8Array | null} */
             let frame = null;
-            /** @type {string | null} */
-            let fitted = null;
             let decoded = 0;
             let steps = 0;
             while (graph.shown < want && decoded < FRAMES_PER_TICK && steps++ < STEPS_PER_TICK)
@@ -675,7 +671,6 @@ export function createQuartz(host){
                     graph.shown++;
                     decoded++;
                     frame = clip.frame();
-                    fitted = clip.fitted?.() ?? null;
                     continue;
                 }
                 if (what === 'audio')
@@ -739,9 +734,6 @@ export function createQuartz(host){
                         fullScreen: graph.window.FullScreenMode !== OAFALSE,
                     },
                     bgra: frame,
-                    // The shape the decoding thread already laid the frame out
-                    // for, when it did; otherwise the frame is the film's own.
-                    fitted,
                     audio,
                     // Where this frame sits in the film, so that whoever plays
                     // the sound can say how far apart the two have got.

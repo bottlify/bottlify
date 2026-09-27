@@ -716,11 +716,9 @@ export function createGraphicsModule(){
                     const width = rect.right - rect.left;
                     for (let y = rect.top; y < rect.bottom; y++)
                     {
-                        const offset = y * surface.pitch + rect.left * bytesPerPixel;
-                        const row = surface.pixels
-                            ? surface.pixels.subarray(offset, offset + width * bytesPerPixel)
-                            : services.windowMemory(surface.buffer + offset,
-                                width * bytesPerPixel);
+                        const row = services.windowMemory(
+                            surface.buffer + y * surface.pitch + rect.left * bytesPerPixel,
+                            width * bytesPerPixel);
                         const at = target.surface.offset + y * target.pitch + rect.left * 4;
                         const out = target.surface.bytes.subarray(at, at + width * 4);
                         if (surface.bitCount === 32)

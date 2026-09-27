@@ -74,8 +74,6 @@ export function createRemoteClips(port){
             clips.set(id, state);
             /** @type {Uint8Array | null} */
             let current = null;
-            /** @type {string | null} */
-            let fitted = null;
             /** @type {Int16Array[]} */
             let audio = [];
             let closed = false;
@@ -98,7 +96,6 @@ export function createRemoteClips(port){
                     {
                         counters.frames++;
                         current = event.bgra;
-                        fitted = event.fitted ?? null;
                         clip.width = event.width;
                         clip.height = event.height;
                         port.post({ type: 'credit', id, frames: 1 });
@@ -116,16 +113,8 @@ export function createRemoteClips(port){
                     return 'end';
                 },
 
-                /**
-                 * The current frame: the film's own pixels, or -- when `fitted`
-                 * names a shape -- already laid out on that screen.
-                 *
-                 * @returns {Uint8Array | null}
-                 */
+                /** @returns {Uint8Array | null} */
                 frame: ()=>current,
-
-                /** The key of the shape the current frame was laid out for, if any. */
-                fitted: ()=>fitted,
 
                 /** Bytes of sound taken from the thread and not read yet. */
                 audioPending: ()=>audio.reduce((sum, block)=>sum + block.byteLength, 0),
@@ -165,16 +154,6 @@ export function createRemoteClips(port){
                 },
             };
             return clip;
-        },
-
-        /**
-         * Tells the decoding thread the screen and placement to lay frames
-         * out for, from the next frame it decodes.
-         *
-         * @param {{ key: string, width: number, height: number }} shape
-         */
-        fitTo(shape){
-            port.post({ type: 'fit', shape });
         },
 
         /** Closes every clip still open. */

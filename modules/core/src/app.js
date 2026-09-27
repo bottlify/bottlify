@@ -5045,17 +5045,14 @@ async function buildApp(options){
      * Where a film's frames go, and its sound.
      *
      * The graph decodes and hands a frame back; showing one is this layer's
-     * business because win32 may not reach graphics. The picture is presented
-     * from host memory and never written into the guest's: a frame laid out on
-     * the decoding thread goes to the screen as it arrived, and one decoded in
-     * the call is laid out here, into this buffer. A program that reads the
-     * screen back while a film plays does not find the film in it.
+     * business because win32 may not reach graphics. The pixels are copied into
+     * guest memory rather than handed over as a view: presenting takes a
+     * surface the guest owns, which is also what a real video renderer writes
+     * into -- the window's own bits.
      *
-     * @type {Uint8Array | null}
+     * @type {{ address: number, bytes: number, pixels: Uint8Array } | null}
      */
-    let filmPixels = null;
-    /** The screen and placement the decoding thread was last told to lay frames out for. */
-    let filmShape = '';
+    let filmSurface = null;
 
     /**
      * The track a film's sound goes to, opened at the film's own rate, with
@@ -5095,7 +5092,7 @@ async function buildApp(options){
      * says nothing arrived cannot tell them apart.
      */
     const film = {
-        ticks: 0, frames: 0, silent: 0, hidden: 0, offScreen: 0, noScreen: 0,
+        ticks: 0, frames: 0, silent: 0, hidden: 0, offScreen: 0, noScreen: 0, noRoom: 0,
         shown: 0,
         // How far the picture is ahead of the sound, in milliseconds of the
         // film's own timeline. A film has one timeline and two ways to advance
@@ -5195,38 +5192,30 @@ async function buildApp(options){
             film.offScreen++;
             return;
         }
-        // Told whenever it changes, so the frames after it come laid out.
-        const key = `${width}x${height}:${JSON.stringify(placement)}`;
-        if (key !== filmShape)
+        const needed = width * height * 4;
+        if (!filmSurface || filmSurface.bytes < needed)
         {
-            filmShape = key;
-            core.api('media').fitFilms?.({ key, width, height, placement });
+            const address = win32.heap().allocate(needed);
+            if (address === 0)
+            {
+                film.noRoom++;
+                return;
+            }
+            filmSurface = { address, bytes: needed, pixels: new Uint8Array(needed) };
         }
         film.shown++;
-        let pixels = shown.bgra;
-        let opaque = true;
-        if (shown.fitted !== key)
+        const surface = filmSurface;
+        if (placement)
         {
-            const needed = width * height * 4;
-            if (!filmPixels || filmPixels.length !== needed)
-            {
-                filmPixels = new Uint8Array(needed);
-            }
-            pixels = filmPixels;
-            opaque = false;
-            if (placement)
-            {
-                stretchFrame(shown, pixels, width, height, placement);
-            }
-            else
-            {
-                fitFrame(shown, pixels, width, height);
-            }
+            stretchFrame(shown, surface.pixels, width, height, placement);
         }
+        else
+        {
+            fitFrame(shown, surface.pixels, width, height);
+        }
+        memory.writeBytes(surface.address, surface.pixels);
         screen.present({
-            buffer: 0,
-            pixels,
-            opaque,
+            buffer: surface.address,
             width,
             height,
             pitch: width * 4,
