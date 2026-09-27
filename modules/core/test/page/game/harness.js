@@ -705,14 +705,25 @@ export function listen(app, collected){
 }
 
 /**
- * Types a key at a wall-clock moment, not a presented frame: a screen that
- * stops presenting while it waits for a key cannot be reached by a frame
- * number, because the frame it would be sent on never comes.
+ * Types a key or clicks at a wall-clock moment, not a presented frame: a
+ * screen that stops presenting while it waits for a key or a click -- a
+ * dialog box, a film waiting on its first frame -- cannot be reached by a
+ * frame number, because the frame it would be sent on never comes.
  *
  * @param {any} app
- * @param {{ keyTimes?: { code: string, atMs: number, holdMs?: number }[] }} request
+ * @param {{ keyTimes?: { code: string, atMs: number, holdMs?: number }[],
+ *     clickTimes?: { x: number, y: number, atMs: number, holdMs?: number }[] }} request
  */
 export function scheduleKeyTimes(app, request){
+    for (const click of request.clickTimes ?? [])
+    {
+        setTimeout(()=>{
+            app.input.send({ kind: 'pointerMove', x: click.x, y: click.y, dx: 0, dy: 0 });
+            app.input.send({ kind: 'pointerButton', button: 'left', down: true });
+        }, click.atMs);
+        setTimeout(()=>app.input.send({ kind: 'pointerButton', button: 'left', down: false }),
+            click.atMs + (click.holdMs ?? 120));
+    }
     for (const key of request.keyTimes ?? [])
     {
         setTimeout(()=>app.input.send({ kind: 'key', code: key.code, down: true }),
@@ -1124,6 +1135,7 @@ export function createHarness(canvas, how = {}){
      *           logMatch?: string,
      *           network?: { module: string, url: string, room: string },
      *           keyTimes?: { code: string, atMs: number, holdMs?: number }[],
+     *           clickTimes?: { x: number, y: number, atMs: number, holdMs?: number }[],
      *           files?: { path: string, base64: string }[],
      *           wholeFiles?: boolean,
      *           sampling?: boolean,
@@ -1211,6 +1223,9 @@ export function createHarness(canvas, how = {}){
                 // that decodes and is never seen is the difference between these
                 // two and nothing else.
                 presenter: layers.graphics?.presenter ?? null,
+                // Every layer's own metrics, for a run that never answers: what
+                // it waits on is in the kernel's and the bridge's.
+                layers,
                 media: layers.media ?? null,
                 // The translator's account, when the engine has one.
                 cork: layers.cpu?.cork ?? null,

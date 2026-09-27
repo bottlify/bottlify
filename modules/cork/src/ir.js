@@ -67,6 +67,9 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @property {number} retired
  * @property {number[]} trapped    the values written to the trap port, in order
  * @property {() => bigint} [rdtsc]  the host's time-stamp counter; absent, it reads zero
+ * @property {{ trapPort: number, read: (port: number, size: number) => number,
+ *     write: (port: number, size: number, value: number) => void }} [ports]
+ *     the machine's I/O ports; absent, every `out` is a trap-port write
  * @property {number} top          the x87 stack's top, 0-7
  * @property {number} empty        the empty-register mask, bit k for physical k
  * @property {number} status       the x87 status word
@@ -787,11 +790,24 @@ export function evaluate(instruction, state){
             return;
         case 'ud2': case 'ud1':
             throw new Fault(6, instruction.eip);
-        case 'out':
-            // The trap port, as the model sees it: the value is recorded and
-            // whoever runs the model answers it.
-            state.trapped.push(read(operands[1]));
+        case 'in':
+            write(operands[0], state.ports
+                ? state.ports.read(read(operands[1]) & 0xffff, operands[0].size)
+                : MASK[operands[0].size]);
             return;
+        case 'out':
+        {
+            // The trap port, as the model sees it: the value is recorded and
+            // whoever runs the model answers it. Any other port is a device's.
+            const port = read(operands[0]) & 0xffff;
+            if (state.ports === undefined || port === state.ports.trapPort)
+            {
+                state.trapped.push(read(operands[1]));
+                return;
+            }
+            state.ports.write(port, operands[1].size, read(operands[1]));
+            return;
+        }
         case 'salc':
             write({ kind: 'reg', size: 1, reg: 0, high: false }, cf ? 0xff : 0);
             return;

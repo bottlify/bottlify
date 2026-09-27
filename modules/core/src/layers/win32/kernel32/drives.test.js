@@ -169,6 +169,12 @@ test('GetComputerName reports the length it wrote, and the length it needed', ()
     assert.equal(fns.GetComputerNameA.handler([0x140, 0x104]), 1);
     assert.equal(dword(bytes, 0x104), 8, 'and now the length written, without it');
     assert.equal(String.fromCharCode(...bytes.slice(0x140, 0x148)), 'BOTTLIFY');
+
+    bytes.set([32, 0, 0, 0], 0x104);
+    assert.equal(fns.GetComputerNameW.handler([0x180, 0x104]), 1);
+    assert.equal(dword(bytes, 0x104), 8, 'the wide one counts characters');
+    assert.equal(String.fromCharCode(...new Uint16Array(bytes.slice(0x180, 0x192).buffer)),
+        'BOTTLIFY\0');
 });
 
 test('a label set on a volume is the one its information reads back', ()=>{

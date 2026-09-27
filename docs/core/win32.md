@@ -312,12 +312,16 @@ a handler only where the host can set EDX); `abs`/`labs`; `toupper`, `tolower`, 
 `isprint`, `iscntrl` and their wide forms `iswalpha` ... `iswgraph`, `iswascii`, `towupper`,
 `towlower` (the classes in `CLASSES` and `WIDE_CLASSES`, which `_pctype`, `_isctype` and
 `iswctype` read too); `strlen`, `strcpy`, `strcat`, `strncpy` (padded, and unterminated when cut
-short), `strcmp`, `strncmp`, `_strnicmp`, `_stricmp`, `strchr`, `strrchr`, `strstr`, `_strlwr`,
-`_strupr` (ASCII only, in place), and the `_mbs` names bound to them; `wcslen`, `wcscmp`,
-`wcscpy`; `memcpy`/`memmove` (one function: as if the source were read whole first, copied up
-or down), `memset`, `memcmp` (four bytes at a time while they match); `atoi`/`atol`;
+short), `strcmp`, `strncmp`, `_strnicmp`, `_stricmp` (and `_strcmpi`, its older name),
+`strchr`, `strrchr`, `strstr`, `_strlwr`, `_strupr` (ASCII only, in place), and the `_mbs` names
+bound to them; `wcslen`, `wcscmp`, `wcscpy`; `memcpy`/`memmove` (one function: as if the source
+were read whole first, copied up or down), `memset`, `memcmp` (four bytes at a time while they
+match); `atoi`/`atol`;
 `strtol`/`strtoul`, handing the host what they leave to it; `qsort` (Shell's sort) and
-`bsearch`, the program's comparator called with a `call`.
+`bsearch`, the program's comparator called with a `call`. `_EH_prolog` is a `code` export too,
+assembled by hand (`EH_PROLOG_CODE`, `msvcrt/cxx.js`): it takes its handler in EAX and builds the
+frame on its caller's stack and in the caller's EBP, which neither a handler nor the compiler's
+subset can express.
 Each keeps the answers of the handler it replaced (see the divergences below); `strtol` and
 `strtoul` are held to theirs input by input as well, the JavaScript against the handler, since
 the handler is part of them.

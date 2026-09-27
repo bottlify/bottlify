@@ -351,16 +351,15 @@ const WAVEFORMATEX = Object.freeze({
 });
 
 /**
- * WAVEOUTCAPSA. The two paddings are the reason this is a table rather than a
- * running total: szPname ends at 38 and dwFormats is a DWORD, so it starts at
- * 40 rather than 38, and a reader that counts fields lands every later field
- * two bytes early.
+ * WAVEOUTCAPSA. MMVERSION is a UINT in Win32, not the WORD it was in 16-bit
+ * Windows: the version takes four bytes and the name starts at 8, and a name
+ * at 6 reads back to a caller two characters short.
  */
 const WAVEOUTCAPS = Object.freeze({
     wMid: 0,
     wPid: 2,
     vDriverVersion: 4,
-    szPname: 6,
+    szPname: 8,
     szPnameLength: 32,
     dwFormats: 40,
     wChannels: 44,

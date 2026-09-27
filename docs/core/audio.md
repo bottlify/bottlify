@@ -129,10 +129,30 @@ any page that is not cross-origin isolated -- because nothing but this thread ca
 exactly that reason, and a measurement taken through it still carries this backend's own
 converting-and-mixing cost.
 
+**A DirectSound buffer is a voice of the sound device**, as a sound card holds one, whenever the
+table has its arena (the shared backend): `openVoice` gives a playing buffer a slot of kind
+`KIND_DMA` and a mirror of the whole buffer in the arena (`BASE`, `LENGTH`), and the audio thread
+reads that mirror on its own clock from `POSITION` -- round and round while `LOOPING`, counting
+`LAPS`, or to the end once, where it clears `PLAYING`, puts `POSITION` back to 0 and counts
+`ENDS` -- at the voice's `RATE`, gain and pan. The engine thread moves no bytes per turn: an
+unlock copies what the program wrote into the mirror (the attach copies the whole buffer), Play,
+Stop, SetCurrentPosition and SetFrequency write the voice's header, and GetCurrentPosition,
+GetStatus and the position notifications read the play cursor, the end and the laps the device
+keeps. So a stretch in which the engine thread is busy -- a load, a translation, a long host call
+-- is not heard as long as the program's own buffer holds sound for it, where the bytes used to
+reach the audio thread only when the engine ran and the device replayed its ring (heard as a
+crackle) whenever it waited longer than the write cursor's 30 ms lead. A voice is what plays now:
+a buffer that stops or runs out gives its slot and its span back, and the next Play attaches
+again. A buffer that finds no slot or no room plays through a queue as before, and so does every
+buffer under the engine mixer (no shared memory). `module.test.js` holds a playing buffer through
+300 ms of device blocks with no pump: no block starved, and GetCurrentPosition answers where the
+device read to.
+
 **With shared memory** (`createSharedMixer`): the engine writes each track's own guest PCM,
-unconverted, into a per-track byte ring inside one `SharedArrayBuffer` "track table" (`SLOTS = 32`
-slots of `SLOT_BYTES = 65536` bytes each, one 64-byte header per slot ahead of it, a 32-byte global
-header ahead of all of them -- `output/mix.js`'s `TABLE_BYTES`); `write` copies as many bytes as fit
+unconverted, into a per-track byte ring inside one `SharedArrayBuffer` "track table" (`SLOTS = 64`
+slots of `SLOT_BYTES = 65536` bytes each, one 128-byte header per slot ahead of it, a 32-byte global
+header ahead of all of them, and the 16 MiB arena after the last slot -- `output/mix.js`'s
+`TABLE_BYTES`); `write` copies as many bytes as fit
 into the slot's ring and advances `WRITTEN`, and nothing here converts or mixes at all, so `pump()`
 only calls `fill` and touches no `Float32Array`. `output/worklet.js` -- the audio thread --
 resamples, scales by `GAIN` and each side by what `LEFT_CUT` and `RIGHT_CUT` take off it (stored as

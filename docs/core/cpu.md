@@ -137,7 +137,11 @@ holding x87 registers in its locals takes the older form instead, a `trap` exit 
 instruction that the hybrid host and the cork host answer the same way (the cork host once
 ignored it, and a hook stub reached with the x87 stack live ran on into its `int3` padding); either way a call into the bridge
 costs no emulator turn. `out` to any other port, `in`,
-`cli`, `sti`, `int n`, `int3` and `into` are the emulator's, before the instruction.
+`cli`, `sti`, `int n`, `int3` and `into` are the emulator's, before the instruction. Under engine cork the interpreter runs
+`in` and `out` to any other port against the ports Windows 9x left a program: the interval timer
+(0x40-0x43), its channel 0 counting down at 1.193182 MHz on the guest's clock with the latch
+command honoured, and every other port a floating bus (reads all ones, writes ignored);
+`metrics.ports` lists each port a program touched and how often.
 `bound` is translated as the no-op the emulator's own decoder makes of it — it consumes the
 instruction, register form included (`62 d0`), and neither checks the pair nor raises `#BR`,
 so a guest that returns into a page of data (the entry vector is the shape seen on a real

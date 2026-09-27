@@ -24,7 +24,7 @@
  * its deadline is heard as a click by everyone listening.
  */
 
-const SLOTS = 32;
+const SLOTS = 64;
 
 /* WORKLET-SHARED:BEGIN */
 
@@ -37,11 +37,11 @@ const SLOT_BYTES = 65536;
 const PCM_MASK = SLOT_BYTES - 1;
 
 /**
- * Ints in one slot's header. Thirteen are named below; the rest are unused
- * padding that rounds the header to 64 bytes -- one cache line -- so two
+ * Ints in one slot's header. Twenty-one are named below; the rest are unused
+ * padding that rounds the header to 128 bytes -- two cache lines -- so two
  * adjacent slots' headers, written by different threads, never share one.
  */
-const SLOT_HEADER_INT32 = 16;
+const SLOT_HEADER_INT32 = 32;
 const SLOT_HEADER_BYTES = SLOT_HEADER_INT32 * 4;
 
 /** Slot header fields. STATE and GENERATION and the format are engine-owned. */
@@ -69,6 +69,35 @@ const MIXED_FRAMES = 10;
 const LEFT_CUT = 11;
 const RIGHT_CUT = 12;
 
+/**
+ * What the slot is. A queue (`KIND_QUEUE`, the default a zeroed header reads
+ * as) is PCM pushed into the slot's own ring and played once, in order: a wave
+ * device's buffers. A DMA voice (`KIND_DMA`) is a sound buffer the way a
+ * sound card has one: a mirror of the program's whole buffer in the arena,
+ * which the device reads on its own clock -- round and round while
+ * `LOOPING`, to the end once otherwise -- moving `POSITION` as it goes,
+ * whatever the engine thread is doing. The engine writes the mirror when the
+ * program unlocks what it wrote, and reads `POSITION` as the play cursor.
+ */
+const KIND = 13;
+const KIND_QUEUE = 0;
+const KIND_DMA = 1;
+/** Bytes, engine-owned: where the voice's mirror starts in the arena, and how long it is. */
+const BASE = 14;
+const LENGTH = 15;
+/** Bytes into the mirror, device-owned while playing: the play cursor. */
+const POSITION = 16;
+/** Engine-owned: 1 to go round at the end, 0 to stop there. */
+const LOOPING = 17;
+/** 1 while playing. The engine sets it to play and clears it to stop; the
+ * device clears it when a voice that does not loop reaches its end. */
+const PLAYING = 18;
+/** Device-owned counters: laps a looping voice has come round, and ends a
+ * voice that does not loop has reached -- what a program's notifications and
+ * status are told from. */
+const LAPS = 19;
+const ENDS = 20;
+
 const STATE_FREE = 0;
 const STATE_OPEN = 1;
 /** Closed by the engine; the reader frees it (back to `STATE_FREE`) once it
@@ -77,6 +106,14 @@ const STATE_OPEN = 1;
 const STATE_CLOSING = 2;
 
 const GAIN_SCALE = 65536;
+
+/**
+ * The arena: the DMA voices' mirrors, after the last slot. Sixteen MiB holds
+ * a generation's streaming buffers many times over (a sound library's is a
+ * few hundred KiB) and a good many whole sounds; a buffer that does not fit
+ * plays through the engine's queue as before.
+ */
+const ARENA_BYTES = 16 << 20;
 
 /** Ints in the global header, ahead of the first slot. */
 const GLOBAL_HEADER_INT32 = 8;
@@ -133,12 +170,20 @@ function createSeam(){
  * @param {number} p.blockFrames        Frames of `block` to fill, from 0.
  * @param {Int32Array} p.header         This slot's `SLOT_HEADER_INT32` ints.
  * @param {Uint8Array} p.pcm            This slot's `SLOT_BYTES` PCM ring.
+ * @param {Uint8Array | null} [p.arena] The DMA voices' mirrors (`ARENA_BYTES`).
  * @param {number} p.outputRate
  * @param {Seam} p.seam
  * @returns {number} output frames this slot produced
  */
-function resampleInto({ block, blockFrames, header, pcm, outputRate, seam }){
+function resampleInto({ block, blockFrames, header, pcm, arena, outputRate, seam }){
     const state = Atomics.load(header, STATE);
+    const kind = Atomics.load(header, KIND);
+    if (state === STATE_OPEN && kind !== KIND_QUEUE)
+    {
+        // A voice, or a kind this reader does not know, which it leaves silent.
+        return kind === KIND_DMA && arena
+            ? playVoice({ block, blockFrames, header, arena, outputRate, seam }) : 0;
+    }
     if (state === STATE_CLOSING)
     {
         // The engine is done feeding this slot; free it here, on the reader's
@@ -291,6 +336,115 @@ function resampleInto({ block, blockFrames, header, pcm, outputRate, seam }){
 }
 
 /**
+ * A DMA voice into an output block: the mirror read from `POSITION` at the
+ * voice's rate, gained and panned, added into the block; `POSITION` moved by
+ * what was read, round the mirror while it loops, and the voice stopped at the
+ * end -- `PLAYING` cleared, `POSITION` back to 0, `ENDS` counted -- when it
+ * does not. What the engine thread does meanwhile does not matter to it.
+ *
+ * @param {Object} p
+ * @param {Float32Array} p.block @param {number} p.blockFrames
+ * @param {Int32Array} p.header @param {Uint8Array} p.arena
+ * @param {number} p.outputRate @param {Seam} p.seam
+ * @returns {number} output frames this voice produced
+ */
+function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
+    if (Atomics.load(header, PLAYING) === 0)
+    {
+        return 0;
+    }
+    const generation = Atomics.load(header, GENERATION);
+    if (generation !== seam.generation)
+    {
+        seam.generation = generation;
+        seam.pos = 0;
+        seam.tail = null;
+    }
+    const rate = Atomics.load(header, RATE);
+    const channels = Atomics.load(header, CHANNELS);
+    const bits = Atomics.load(header, BITS);
+    const base = Atomics.load(header, BASE);
+    const bytesPerSample = bits === 8 ? 1 : 2;
+    const stride = bytesPerSample * channels;
+    const frames = Math.floor(Atomics.load(header, LENGTH) / stride);
+    if (rate <= 0 || frames <= 0)
+    {
+        return 0;
+    }
+    const looping = Atomics.load(header, LOOPING) !== 0;
+    const gain = Atomics.load(header, GAIN) / GAIN_SCALE;
+    const leftGain = gain * (1 - Atomics.load(header, LEFT_CUT) / GAIN_SCALE);
+    const rightGain = gain * (1 - Atomics.load(header, RIGHT_CUT) / GAIN_SCALE);
+    const start = Math.floor(Atomics.load(header, POSITION) / stride) % frames;
+
+    /** @param {number} frame frames from `start` @param {number} channel @returns {number} */
+    const sample = (frame, channel)=>{
+        const at = base + ((start + frame) % frames) * stride + channel * bytesPerSample;
+        if (bytesPerSample === 1)
+        {
+            return (arena[at] - 128) / 128;
+        }
+        let value = arena[at] | (arena[at + 1] << 8);
+        if (value >= 0x8000)
+        {
+            value -= 0x10000;
+        }
+        return value / 32768;
+    };
+
+    // Past the last frame a voice that does not loop has nothing: the
+    // interpolation holds that frame rather than reading round to the first.
+    const last = looping ? Infinity : frames - 1 - start;
+    const step = rate / outputRate;
+    let pos = seam.pos;
+    let produced = 0;
+    let ended = false;
+    while (produced < blockFrames)
+    {
+        const left = Math.floor(pos);
+        if (left > last)
+        {
+            ended = true;
+            break;
+        }
+        const blend = pos - left;
+        const right = Math.min(left + 1, last);
+        for (let channel = 0; channel < 2; channel++)
+        {
+            const which = Math.min(channel, channels - 1);
+            block[produced * 2 + channel] +=
+                (sample(left, which) * (1 - blend) + sample(right, which) * blend)
+                * (channel === 0 ? leftGain : rightGain);
+        }
+        pos += step;
+        produced++;
+    }
+    if (ended)
+    {
+        seam.pos = 0;
+        Atomics.store(header, POSITION, 0);
+        Atomics.store(header, PLAYING, 0);
+        Atomics.add(header, ENDS, 1);
+    }
+    else
+    {
+        const consumed = Math.floor(pos);
+        seam.pos = pos - consumed;
+        const reached = start + consumed;
+        if (reached >= frames)
+        {
+            Atomics.add(header, LAPS, Math.floor(reached / frames));
+        }
+        Atomics.store(header, POSITION, (reached % frames) * stride);
+    }
+    if (produced > 0)
+    {
+        Atomics.add(header, MIXED_FRAMES, produced);
+    }
+    return produced;
+}
+
+/**
  * One output block: every slot resampled and summed into it, the block and
  * starvation counters advanced.
  *
@@ -306,16 +460,17 @@ function resampleInto({ block, blockFrames, header, pcm, outputRate, seam }){
  * @param {Float32Array} p.block          Zeroed by the caller or not yet used.
  * @param {number} p.blockFrames
  * @param {number} p.outputRate
+ * @param {Uint8Array | null} [p.arena] The DMA voices' mirrors.
  * @returns {number} the most any one slot produced
  */
-function mixBlock({ global, slots, seams, block, blockFrames, outputRate }){
+function mixBlock({ global, slots, seams, block, blockFrames, outputRate, arena }){
     block.fill(0, 0, blockFrames * 2);
     Atomics.add(global, BLOCKS, 1);
     let maxProduced = 0;
     for (let slot = 0; slot < slots.length; slot++)
     {
         const produced = resampleInto({
-            block, blockFrames, header: slots[slot].header, pcm: slots[slot].pcm,
+            block, blockFrames, header: slots[slot].header, pcm: slots[slot].pcm, arena,
             outputRate, seam: seams[slot],
         });
         if (produced > maxProduced)
@@ -352,6 +507,11 @@ class BottlifyOutput extends AudioWorkletProcessor {
             });
             this.seams.push(createSeam());
         }
+        // The DMA voices' mirrors, after the last slot; a table made without
+        // one plays its queues alone.
+        const arenaAt = GLOBAL_HEADER_BYTES + SLOTS * SLOT_STRIDE;
+        this.arena = table.byteLength >= arenaAt + ARENA_BYTES
+            ? new Uint8Array(table, arenaAt, ARENA_BYTES) : null;
         // 128 is the largest block WebAudio has ever asked for; grown on a
         // bigger request rather than assumed, so a future engine's bigger
         // quantum does not overrun it.
@@ -388,7 +548,7 @@ class BottlifyOutput extends AudioWorkletProcessor {
         const outputRate = Atomics.load(this.global, OUTPUT_RATE);
         mixBlock({
             global: this.global, slots: this.slots, seams: this.seams,
-            block: this.block, blockFrames, outputRate,
+            block: this.block, blockFrames, outputRate, arena: this.arena,
         });
         for (let channel = 0; channel < output.length; channel++)
         {

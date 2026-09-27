@@ -75,7 +75,23 @@ export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
  * @property {number} eip
  * @property {string} opcode
  * @property {string} reason
+ * @property {boolean} invalid  the encoding is no instruction at all, and a
+ *     processor raises #UD on it -- as against one this decoder does not know
  */
+
+/**
+ * The slots of the one-byte groups that name no instruction on any x86: a
+ * processor raises #UD there, and a program may run one on purpose (a
+ * protection's probe, a deliberate trap its own handler answers).
+ */
+const INVALID_SLOTS = new Set([
+    ...[2, 3, 4, 5, 6, 7].map(reg=>`fe /${reg}`), 'ff /7',
+    ...[1, 2, 3, 4, 5, 6, 7].flatMap(reg=>[`8f /${reg}`, `c6 /${reg}`, `c7 /${reg}`]),
+]);
+
+/** Refusals whose encoding a processor rejects with #UD whatever it supports. */
+const INVALID_REASONS = new Set(['no such segment register', 'register form only',
+    'memory form only', 'lock on a register form']);
 
 /**
  * What a table entry's forms need, worked out once an entry: whether they take
@@ -189,7 +205,9 @@ class TooLong extends Error {}
 
 /** @param {number} eip @param {string} opcode @param {string} reason @returns {Refusal} */
 function refusal(eip, opcode, reason){
-    return { refused: true, eip, opcode, reason };
+    const invalid = INVALID_REASONS.has(reason)
+        || (reason === 'not in table' && INVALID_SLOTS.has(opcode));
+    return { refused: true, eip, opcode, reason, invalid };
 }
 
 /**
