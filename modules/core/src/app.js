@@ -11,7 +11,6 @@ import { captureTrace, describeAddress, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
 import { DEFAULT_ENGINE, DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
 import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
-import { spawnMediaWorker } from './host/media.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loader/internal/pe.js';
@@ -76,9 +75,6 @@ import { createReplicas } from './replicas.js';
  *           it attaches to the same compiled module and linear memory rather
  *           than instantiate the binary again. Set by `createApp` on a rebuilt
  *           machine and not something a caller supplies.
- * @property {boolean} [media.worker]
- *           False decodes films in the engine's own thread even where a worker
- *           could be started; by default they are decoded on one of their own.
  * @property {Object} [system]            The engine's own read-only volume.
  * @property {{ path: string, bytes: Uint8Array }[]} [system.files]
  *           Files to mount read-only under `C:\WINDOWS\system32\`, a name
@@ -2981,9 +2977,6 @@ async function buildApp(options){
             // and linear memory instead of compiling the binary again. Absent
             // on the first process, which makes its own.
             instance: options.media?.instance,
-            // Films are decoded on a thread of their own wherever one can be
-            // started, off the thread that translates and runs the program.
-            clipWorker: options.media?.worker === false ? undefined : spawnMediaWorker,
             // The hosted JPEG library reads a program's buffers and writes its
             // pictures; handed the same thunks the sound layer's provider gets.
             readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>

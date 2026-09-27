@@ -6,7 +6,6 @@
 
 import { createDecoder, decoderSession } from './internal/decoder.js';
 import { createIjlLibrary } from './internal/ijl.js';
-import { createRemoteClips } from './internal/remote-clip.js';
 
 /**
  * media -- the video and audio inside a cinematic, decoded.
@@ -68,8 +67,7 @@ export function createMediaModule(){
              *
              * @type {{ decoderInstance: any, decoder: any, binary: BufferSource | null,
              *     loading: Promise<any> | null, issues: string[],
-             *     ijl: ReturnType<typeof createIjlLibrary> | null, disposed: boolean,
-             *     remote: { port: any, clips: ReturnType<typeof createRemoteClips> } | null }}
+             *     ijl: ReturnType<typeof createIjlLibrary> | null, disposed: boolean }}
              */
             const state = {
                 decoderInstance: null,
@@ -79,20 +77,6 @@ export function createMediaModule(){
                 issues: [],
                 ijl: null,
                 disposed: false,
-                remote: null,
-            };
-            // Where a film is decoded when there is a thread to decode it on:
-            // the assembling caller's to say, since only it knows how a thread
-            // is started here. Tried once; without one, films decode in the call.
-            let remoteTried = false;
-            const remote = ()=>{
-                if (!remoteTried && state.binary && typeof config?.clipWorker === 'function')
-                {
-                    remoteTried = true;
-                    const port = config.clipWorker(state.binary);
-                    state.remote = port ? { port, clips: createRemoteClips(port) } : null;
-                }
-                return state.remote;
             };
             // A decoder another machine in this run already made. Given, this
             // machine's clips are opened over its memory and codecs instead of a
@@ -184,8 +168,7 @@ export function createMediaModule(){
                     {
                         throw new Error('media: this build has no decoder binary');
                     }
-                    const away = remote();
-                    return away ? away.clips.open(bytes) : (await load()).open(bytes);
+                    return (await load()).open(bytes);
                 },
 
                 /**
@@ -219,7 +202,6 @@ export function createMediaModule(){
                     if (live())
                     {
                         state.decoder?.closeAll();
-                        state.remote?.clips.closeAll();
                     }
                 },
 
@@ -274,9 +256,6 @@ export function createMediaModule(){
                     // accounts for.
                     libraries: instance.ijl ? Object.keys(instance.ijl.libraries) : [],
                     jpeg: instance.ijl ? instance.ijl.diagnostics() : null,
-                    // Films decoded on their own thread: how many frames came
-                    // across, and how often one was asked for before it had.
-                    films: instance.remote ? instance.remote.clips.diagnostics() : null,
                 },
                 issues: [...instance.issues],
             };
@@ -289,8 +268,6 @@ export function createMediaModule(){
             if (current)
             {
                 current.decoder?.closeAll();
-                current.remote?.clips.closeAll();
-                current.remote?.port.close?.();
                 current.disposed = true;
             }
             current = null;
