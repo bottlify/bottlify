@@ -834,6 +834,11 @@ export function createMsvcrtFunctions(host){
                 systemTimeMs: host.systemTimeMs,
                 now: host.now,
                 fpu: host.fpu,
+                getenv: name=>environment?.value(name) ?? null,
+                ...host.addressOf ? { addressOf: host.addressOf } : {},
+                cell: (name, initial)=>globals.address(name, initial),
+                errno,
+                ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
             })
             : {}),
         ...(host.files
