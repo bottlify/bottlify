@@ -28,6 +28,10 @@ const THREAD = { name: 'main' };
 const WH_CBT = 5;
 const WH_KEYBOARD = 2;
 const HCBT_CREATEWND = 3;
+const HCBT_DESTROYWND = 4;
+const HCBT_ACTIVATE = 5;
+const HCBT_SYSCOMMAND = 8;
+const HCBT_SETFOCUS = 9;
 const HOOK_PROC = 0x403000;
 const OLDER_HOOK_PROC = 0x403100;
 
@@ -164,7 +168,11 @@ const QS_KEY = 0x0001;
 const QS_MOUSEBUTTON = 0x0004;
 const QS_POSTMESSAGE = 0x0008;
 const QS_INPUT = 0x0007;
+const QS_SENDMESSAGE = 0x0040;
 const ERROR_INVALID_THREAD_ID = 1444;
+const ISMEX_NOSEND = 0;
+const ISMEX_SEND = 1;
+const ISMEX_REPLIED = 8;
 const PARKED = Object.freeze({ parked: true });
 
 /**
@@ -208,9 +216,12 @@ function paintedHost(fills, presents){
  * @param {(message: any) => void} [options.trace] Told every message a procedure receives.
  * @param {boolean} [options.paint] Whether the build has a display to paint the
  *        desktop on, so a test can see what is painted and what is shown.
+ * @param {{ current: unknown }} [options.caller] Whose call the bridge names, for a
+ *        test that moves between threads; THREAD otherwise.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
+    caller = { current: THREAD },
 } = {})
 {
     const memory = fakeMemory();
@@ -269,7 +280,7 @@ function setup({
             called.push({ entry, args, thread });
             return hookReply ? hookReply(entry, args) : 0;
         },
-        callerThread: ()=>THREAD,
+        callerThread: ()=>caller.current,
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         threadExists,
         /** @param {number} code */
@@ -2039,10 +2050,11 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
     + 'tests pin', ()=>{
     // WmCreateOverlappedSeq and WmCreatePopupSeq, less what this layer does
     // not send (WM_GETMINMAXINFO, WM_NCCALCSIZE, the WM_WINDOWPOS pair, the
-    // painting, HCBT_ACTIVATE and HCBT_SETFOCUS): HCBT_CREATEWND, WM_NCCREATE,
-    // WM_CREATE, and for a window created visible WM_SIZE (SIZE_RESTORED),
-    // WM_MOVE, WM_SHOWWINDOW(1) and the activation -- WM_ACTIVATEAPP to each
-    // of the application's top-level windows, the hidden one too.
+    // painting): HCBT_CREATEWND, WM_NCCREATE, WM_CREATE, and for a window
+    // created visible WM_SIZE (SIZE_RESTORED), WM_MOVE, WM_SHOWWINDOW(1) and
+    // the activation -- HCBT_ACTIVATE, WM_ACTIVATEAPP to each of the
+    // application's top-level windows, the hidden one too, and HCBT_SETFOCUS
+    // before the focus follows.
     /** @type {string[]} */
     const log = [];
     const { memory, fns } = setup({
@@ -2066,7 +2078,8 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
     log.length = 0;
     createWindow(fns, memory, { style: 0x80000000 | WS_VISIBLE });
     assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0', '0x5:0', '0x3:0',
-        '0x18:1', '0x1c:1', '0x1c:1', '0x86:1', '0x6:1', '0x7:0'], 'visible');
+        '0x18:1', `hook:${HCBT_ACTIVATE}`, '0x1c:1', '0x1c:1', '0x86:1', '0x6:1',
+        `hook:${HCBT_SETFOCUS}`, '0x7:0'], 'visible');
 });
 
 test('WM_NCCREATE answered FALSE refuses the window, which hears WM_NCDESTROY alone', ()=>{
@@ -2398,6 +2411,97 @@ test('the newest hook is called first and reaches the older through CallNextHook
     assert.equal(called.at(-1)?.entry, OLDER_HOOK_PROC, 'the older is the newest now');
 });
 
+test('a hook set for one thread hears that thread alone, and one set for none every thread', ()=>{
+    const main = { id: 1, name: 'main' };
+    const other = { id: 2, name: 'thread-2' };
+    const caller = { current: /** @type {unknown} */ (main) };
+    const { memory, fns, called } = setup({ heap: true, caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const local = fns.SetWindowsHookExA.handler([WH_CBT, OLDER_HOOK_PROC, 0, main.id]);
+    const global = fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 0]);
+
+    caller.current = other;
+    createWindow(fns, memory);
+    assert.deepEqual(called.map(call=>call.entry), [HOOK_PROC], 'the global hook alone');
+    assert.equal(fns.CallNextHookEx.handler([global, HCBT_CREATEWND, 0x40, 0x50]), 0);
+    assert.equal(called.length, 1, 'the next in the chain is the main thread\'s own');
+
+    caller.current = main;
+    createWindow(fns, memory);
+    assert.equal(called.at(-1)?.entry, OLDER_HOOK_PROC,
+        'a thread\'s own hooks come before the global ones, however new');
+    fns.CallNextHookEx.handler([local, HCBT_CREATEWND, 0x40, 0x50]);
+    assert.equal(called.at(-1)?.entry, HOOK_PROC, 'and pass on to them');
+    const count = called.length;
+    assert.equal(fns.CallNextHookEx.handler([global, HCBT_CREATEWND, 0x40, 0x50]), 0);
+    assert.equal(called.length, count, 'the last global hook ends the chain');
+});
+
+test('a window its CBT hook hears of is not yet among its siblings', ()=>{
+    // win.c's cbt_hook_proc: at HCBT_CREATEWND neither GW_HWNDPREV nor
+    // GW_HWNDNEXT names a window, and FindWindowEx does not find it.
+    const GW_HWNDNEXT = 2;
+    const GW_HWNDPREV = 3;
+    /** @type {any} */
+    let table = null;
+    /** @type {number[][]} */
+    const seen = [];
+    const { memory, fns } = setup({
+        heap: true,
+        hookReply: (entry, args)=>{
+            if (args[0] === HCBT_CREATEWND)
+            {
+                seen.push([table.GetWindow.handler([args[1], GW_HWNDNEXT]),
+                    table.GetWindow.handler([args[1], GW_HWNDPREV]),
+                    table.FindWindowExA.handler([0, 0, CLASS_NAME, 0])]);
+            }
+            return 0;
+        },
+    });
+    table = fns;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const first = createWindow(fns, memory);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+    const second = createWindow(fns, memory);
+    const child = createWindow(fns, memory, { style: WS_CHILD, parent: first });
+    createWindow(fns, memory, { style: WS_CHILD, parent: first });
+    assert.deepEqual(seen, [[0, 0, first], [0, 0, first], [0, 0, first]]);
+    assert.equal(fns.GetWindow.handler([second, GW_HWNDNEXT]), first, 'and then it is');
+    assert.notEqual(fns.GetWindow.handler([child, GW_HWNDNEXT]), 0);
+});
+
+test('a CBT hook hears a window activated, focused, commanded and destroyed, and can forbid '
+    + 'each', ()=>{
+    const { memory, fns, called, dispatched } = setup({
+        heap: true,
+        hookReply: (entry, args)=>(args[0] === HCBT_DESTROYWND || args[0] === HCBT_SYSCOMMAND
+            ? 1 : 0),
+    });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+
+    fns.SetFocus.handler([hwnd]);
+    assert.deepEqual(called.map(call=>call.args[0]), [HCBT_SETFOCUS, HCBT_ACTIVATE]);
+    assert.equal(called[0].args[1], hwnd);
+    assert.equal(called[1].args[1], hwnd);
+    assert.equal(memory.u32(called[1].args[2] + 4), 0, 'nothing was active before it');
+
+    called.length = 0;
+    const SC_CLOSE = 0xf060;
+    assert.equal(fns.DefWindowProcA.handler([hwnd, 0x0112, SC_CLOSE, 0]), 0);
+    assert.deepEqual(called.map(call=>call.args.slice(0, 2)), [[HCBT_SYSCOMMAND, SC_CLOSE]]);
+    assert.equal(dispatched.some(m=>m.message === WM_CLOSE), false, 'the command was forbidden');
+
+    called.length = 0;
+    assert.equal(fns.DestroyWindow.handler([hwnd]), 0);
+    assert.deepEqual(called.map(call=>call.args.slice(0, 2)), [[HCBT_DESTROYWND, hwnd]]);
+    assert.equal(fns.IsWindow.handler([hwnd]), 1, 'and the window is kept');
+});
+
 test('a hook of a type that is never called says so once, and is still installed', ()=>{
     const { memory, fns, called, divergences } = setup({ heap: true });
     putClass(memory);
@@ -2478,6 +2582,186 @@ test('a thread message is not handed to a retrieval that named a window', ()=>{
         'a filter naming a window skips thread messages, as Windows documents');
     assert.equal(queue.depth(), 1, 'and leaves the message where it was');
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+});
+
+test('a window\'s messages wait for the thread that made it, and a thread\'s for that thread', ()=>{
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    const { fns, memory } = setup({ caller, threadExists: id=>id === 1 || id === 2 });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    assert.equal(fns.GetWindowThreadProcessId.handler([hwnd, 0]), worker.id,
+        'the thread that made it, whoever asks');
+
+    caller.current = main;
+    assert.equal(fns.GetWindowThreadProcessId.handler([hwnd, 0]), worker.id);
+    assert.equal(fns.PostMessageA.handler([hwnd, WM_USER, 1, 0]), 1);
+    assert.equal(fns.PostThreadMessageA.handler([worker.id, WM_USER + 1, 0, 0]), 1);
+    assert.equal(fns.PostMessageA.handler([0, WM_USER + 2, 0, 0]), 1, 'the poster\'s own');
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_USER + 2);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
+        'the other thread\'s are not the main thread\'s to take');
+    assert.equal(fns.GetQueueStatus.handler([QS_POSTMESSAGE]), 0);
+
+    caller.current = worker;
+    assert.equal(fns.GetQueueStatus.handler([QS_POSTMESSAGE]) >>> 16, QS_POSTMESSAGE);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_USER);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_USER + 1);
+});
+
+test('PostQuitMessage ends the loop of the thread that posted it', ()=>{
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (main) };
+    const { fns, memory } = setup({ caller });
+    fns.PostQuitMessage.handler([4]);
+
+    caller.current = worker;
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0);
+    caller.current = main;
+    assert.equal(fns.GetMessageA.handler([MSG_BUFFER, 0, 0, 0]), 0);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.wParam), 4);
+});
+
+test('a window ends with the thread that made it, and what was posted to it goes too', ()=>{
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    const { fns, memory, queue, dispatched } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    const child = createWindow(fns, memory, { style: WS_CHILD, parent: hwnd });
+    fns.PostMessageA.handler([hwnd, WM_USER, 0, 0]);
+
+    caller.current = main;
+    worker.state = 'terminated';
+    const told = dispatched.length;
+    assert.equal(fns.IsWindow.handler([hwnd]), 0);
+    assert.equal(fns.IsWindow.handler([child]), 0, 'and its children with it');
+    assert.equal(queue.depth(), 0);
+    assert.equal(dispatched.length, told, 'no procedure is told: its thread is gone');
+});
+
+test('SendMessage to another thread\'s window waits for that thread to take it', async()=>{
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    /** @type {any} */
+    let table = null;
+    /** @type {number[]} */
+    const flags = [];
+    const context = setup({
+        caller,
+        reply: message=>{
+            if (message.message === WM_USER)
+            {
+                flags.push(table.InSendMessageEx.handler([0]));
+                assert.equal(table.ReplyMessage.handler([7]), 1);
+                flags.push(table.InSendMessageEx.handler([0]));
+            }
+            if (message.message === WM_USER + 1)
+            {
+                flags.push(table.InSendMessageEx.handler([0]));
+            }
+            return 0x1234;
+        },
+    });
+    const { fns, memory, dispatched, tick } = context;
+    table = fns;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+
+    caller.current = main;
+    const answer = fns.SendMessageA.handler([hwnd, WM_USER, 1, 2]);
+    assert.ok(answer instanceof Promise, 'the sender waits');
+    assert.equal(dispatched.some(m=>m.message === WM_USER), false, 'and nothing has run yet');
+    assert.equal(fns.GetQueueStatus.handler([QS_SENDMESSAGE]), 0, 'it is not the main thread\'s');
+
+    caller.current = worker;
+    assert.equal(fns.GetQueueStatus.handler([QS_SENDMESSAGE]),
+        (QS_SENDMESSAGE << 16 | QS_SENDMESSAGE) >>> 0);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
+        'a look runs what was sent, and has nothing posted to hand back');
+    const ran = dispatched.find(m=>m.message === WM_USER);
+    assert.equal(ran?.thread, worker, 'on the thread that made the window');
+    assert.deepEqual(flags, [ISMEX_SEND, ISMEX_SEND | ISMEX_REPLIED]);
+    await tick();
+    await tick();
+    assert.equal(await answer, 7, 'the answer ReplyMessage gave');
+
+    assert.equal(fns.SendMessageA.handler([hwnd, WM_USER + 1, 0, 0]), 0x1234,
+        'a send to its own window runs at once');
+    assert.equal(flags.at(-1), ISMEX_NOSEND, 'and is no message from another thread');
+    assert.equal(fns.ReplyMessage.handler([0]), 0);
+});
+
+test('what the window manager sends another thread\'s window runs on the sender, and says so',
+    ()=>{
+        const main = { id: 1, name: 'main', state: 'running' };
+        const worker = { id: 2, name: 'thread-2', state: 'running' };
+        const caller = { current: /** @type {unknown} */ (worker) };
+        const { fns, memory, dispatched, divergences } = setup({ caller });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const hwnd = createWindow(fns, memory);
+        assert.equal(divergences.length, 0, 'nothing to say for its own window');
+
+        caller.current = main;
+        fns.SetFocus.handler([hwnd]);
+        assert.equal(dispatched.at(-1)?.message, 0x0007, 'WM_SETFOCUS, sent at once');
+        assert.equal(dispatched.at(-1)?.thread, main, 'on the thread that set the focus');
+        assert.ok(divergences.some(text=>text.startsWith('SendMessage:')), 'and says so');
+    });
+
+test('SendNotifyMessage leaves another thread\'s window a message and does not wait', ()=>{
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    const { fns, memory, dispatched, queue } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+
+    assert.equal(fns.SendNotifyMessageA.handler([hwnd, WM_USER, 0, 0]), 1);
+    assert.equal(dispatched.at(-1)?.message, WM_USER, 'to its own window it is a send');
+    assert.equal(queue.depth(), 0, 'and nothing is posted');
+
+    caller.current = main;
+    assert.equal(fns.SendNotifyMessageA.handler([hwnd, WM_USER + 1, 0, 0]), 1, 'at once');
+    assert.notEqual(dispatched.at(-1)?.message, WM_USER + 1);
+    caller.current = worker;
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    assert.equal(dispatched.at(-1)?.message, WM_USER + 1);
+    assert.equal(fns.SendNotifyMessageA.handler([0x9999, WM_USER, 0, 0]), 0, 'no window');
+});
+
+test('AttachThreadInput joins two threads with queues, and refuses one without', ()=>{
+    // input.c's test_AttachThreadInput: a thread that has made no window and
+    // looked at no queue has none to attach, and neither has a thread that
+    // does not exist; a thread is not attached to itself.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (main) };
+    const { fns, memory, errors } = setup({ caller, threadExists: id=>id === 1 || id === 2 });
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    assert.equal(fns.AttachThreadInput.handler([1, 2, 1]), 0, 'the worker has no queue yet');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+
+    caller.current = worker;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    createWindow(fns, memory);
+    assert.equal(fns.AttachThreadInput.handler([1, 2, 1]), 1);
+    assert.equal(fns.AttachThreadInput.handler([2, 1, 0]), 1);
+    assert.equal(fns.AttachThreadInput.handler([2, 2, 1]), 0, 'not to itself');
+    assert.equal(fns.AttachThreadInput.handler([2, 7, 1]), 0, 'nor to nobody');
 });
 
 test('PostThreadMessageA refuses a thread that does not exist, and says why', ()=>{

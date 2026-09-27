@@ -175,8 +175,8 @@ test('a slow handler does not build a backlog of ticks', ()=>{
 /** A queue whose pump is run by one thread or another, as a test says. */
 function threaded(){
     const clock = { at: 0 };
-    const first = { name: 'first', state: 'running' };
-    const second = { name: 'second', state: 'running' };
+    const first = { id: 1, name: 'first', state: 'running' };
+    const second = { id: 2, name: 'second', state: 'running' };
     const running = { thread: /** @type {any} */ (first) };
     const queue = createMessageQueue({ now: ()=>clock.at, currentThread: ()=>running.thread });
     return { clock, queue, first, second, running };
@@ -201,6 +201,52 @@ test('a window\'s timer goes to whichever thread pumps', ()=>{
     clock.at = 50;
     running.thread = second;
     assert.equal(queue.peek(ALL)?.hwnd, 0x40);
+});
+
+test('a window\'s messages and its timer wait for the thread that made the window', ()=>{
+    const { clock, queue, first, second, running } = threaded();
+    queue.ownersFrom(hwnd=>(hwnd === 0x40 ? second.id : first.id));
+    queue.post({ hwnd: 0x40, message: WM_USER, wParam: 0, lParam: 0 });
+    queue.setTimer(0x40, 1, 50, 0);
+    clock.at = 50;
+
+    assert.equal(queue.peek(ALL), null, 'the main thread is handed neither');
+    assert.equal(queue.status().inQueue, 0, 'nor sees them waiting');
+    assert.equal(queue.peek({ ...ALL, thread: second.id })?.message, WM_USER,
+        'the thread named is handed them');
+    running.thread = second;
+    assert.equal(queue.status().inQueue & QS_TIMER, QS_TIMER);
+    assert.equal(queue.peek(ALL)?.message, WM_TIMER);
+});
+
+test('a thread\'s message and its quit are that thread\'s alone', ()=>{
+    const { queue, first, second, running } = threaded();
+    queue.post({ hwnd: 0, message: WM_USER, wParam: 0, lParam: 0, thread: second.id });
+    queue.postQuit(3);
+
+    running.thread = second;
+    assert.equal(queue.peek(ALL)?.message, WM_USER);
+    assert.equal(queue.peek(ALL), null, 'the quit the main thread posted is not this one\'s');
+    assert.equal(queue.quitPending(), true);
+
+    running.thread = first;
+    const quit = queue.peek(ALL);
+    assert.equal(quit?.message, WM_QUIT);
+    assert.equal(quit?.wParam, 3);
+    assert.equal(queue.quitPending(), false);
+});
+
+test('a message with no window is the poster\'s own, and news is each thread\'s', ()=>{
+    const { queue, second, running } = threaded();
+    queue.post({ hwnd: 0, message: WM_USER, wParam: 0, lParam: 0 });
+
+    running.thread = second;
+    assert.equal(queue.news(), 0, 'nothing arrived for this thread');
+    assert.equal(queue.status().changed, 0);
+    assert.equal(queue.peek(ALL), null);
+    assert.equal(queue.news(1), QS_POSTMESSAGE | 0x100, 'the poster has news');
+    assert.equal(queue.peek({ ...ALL, thread: null })?.message, WM_USER,
+        'a look naming no thread sees every queue');
 });
 
 test('a thread\'s timer ends with the thread, and no wait wakes for it again', ()=>{

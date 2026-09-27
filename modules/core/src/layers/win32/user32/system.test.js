@@ -314,6 +314,29 @@ test('GetWindow walks top-level windows from the top, and children in creation o
     assert.equal(fns.GetWindow.handler([firstControl, GW_OWNER]), 0, 'a child has no owner');
 });
 
+test('GetWindowInfo answers what the single queries do, and refuses no window as they do', ()=>{
+    // win.c's test_window_info: no window is ERROR_INVALID_WINDOW_HANDLE, the
+    // atom is GetClassLong's GCW_ATOM and the status WS_ACTIVECAPTION exactly
+    // when the window is the active one.
+    const GCW_ATOM = -32;
+    const WINDOWINFO_SIZE = 60;
+    const ERROR_INVALID_WINDOW_HANDLE = 1400;
+    const { memory, fns, errors } = setup();
+    const hwnd = makeWindow(memory, fns, WS_OVERLAPPED | WS_VISIBLE);
+    const other = makeWindow(memory, fns);
+    assert.equal(fns.GetWindowInfo.handler([0, OUT_BUFFER]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_WINDOW_HANDLE);
+
+    memory.fill(OUT_BUFFER, WINDOWINFO_SIZE / 4);
+    assert.equal(fns.GetWindowInfo.handler([hwnd, OUT_BUFFER]), 1);
+    assert.equal(memory.u32(OUT_BUFFER + 56) & 0xffff, fns.GetClassLongA.handler([hwnd, GCW_ATOM]));
+    assert.notEqual(memory.u32(OUT_BUFFER + 56) & 0xffff, 0);
+    assert.equal(fns.GetActiveWindow.handler([]), hwnd);
+    assert.equal(memory.u32(OUT_BUFFER + 44), 1, 'WS_ACTIVECAPTION on the active window');
+    fns.GetWindowInfo.handler([other, OUT_BUFFER]);
+    assert.equal(memory.u32(OUT_BUFFER + 44), 0, 'and on no other');
+});
+
 test('a child is hit where GetWindow stacks it, and SetWindowPos restacks it', ()=>{
     // user32's window tests: children made one after another are stacked
     // first-made on top (GW_CHILD, then GW_HWNDNEXT, walks them in creation
@@ -461,6 +484,12 @@ test('GetAncestor walks parents and owners as GA_PARENT, GA_ROOT and GA_ROOTOWNE
     {
         assert.equal(fns.IsChild.handler([over, under]), answer, `IsChild(${over}, ${under})`);
     }
+    // A popup sits on the desktop whatever window it was made over; placed
+    // inside one, it is a child of it once its style says so.
+    fns.SetParent.handler([child4, child3]);
+    fns.SetParent.handler([child3, child2]);
+    fns.SetParent.handler([child2, child1]);
+    assert.equal(fns.IsChild.handler([child3, child4]), 0);
     fns.SetWindowLongA.handler([child4, GWL_STYLE, WS_CHILD]);
     assert.equal(fns.IsChild.handler([child3, child4]), 1);
     assert.equal(fns.IsChild.handler([child2, child4]), 1);
@@ -468,6 +497,53 @@ test('GetAncestor walks parents and owners as GA_PARENT, GA_ROOT and GA_ROOTOWNE
     fns.SetWindowLongA.handler([child2, GWL_STYLE, WS_CHILD]);
     assert.equal(fns.IsChild.handler([child1, child4]), 1);
     assert.equal(fns.IsChild.handler([parent, child4]), 1);
+});
+
+test('a window made over a child is owned by that child\'s top-level window, and SetParent '
+    + 'refuses a window inside itself', ()=>{
+    // check_parents in user32's window tests: the owner of a popup made with a
+    // child window as its hWndParent is the child's top-level window, which
+    // is what GWL_HWNDPARENT, GetParent and GW_OWNER all report; SetParent
+    // into the window itself or one of its descendants fails, and answers
+    // the desktop as the previous parent of a window that was no child.
+    const GWL_HWNDPARENT = -8;
+    const GW_OWNER = 4;
+    const WS_CHILD = 0x40000000;
+    const WS_POPUP = 0x80000000;
+    const ERROR_INVALID_PARAMETER = 87;
+    const ERROR_TLW_WITH_WSCHILD = 1406;
+    const { memory, fns, errors } = setup();
+    const desktop = fns.GetDesktopWindow.handler([]);
+    const parent = makeWindow(memory, fns);
+    /** @param {number} style @param {number} over */
+    const make = (style, over)=>fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, style,
+        0, 0, 50, 50, over, 0, HINSTANCE, 0]);
+    const child1 = make(WS_CHILD, parent);
+    const child2 = make(WS_POPUP, child1);
+    const child3 = make(WS_CHILD, child2);
+    /** @param {number} hwnd */
+    const parents = hwnd=>[fns.GetWindowLongA.handler([hwnd, GWL_HWNDPARENT]),
+        fns.GetParent.handler([hwnd]), fns.GetWindow.handler([hwnd, GW_OWNER])];
+    assert.deepEqual(parents(parent), [0, 0, 0]);
+    assert.deepEqual(parents(child1), [parent, parent, 0]);
+    assert.deepEqual(parents(child2), [parent, parent, parent], 'owned by child1\'s top level');
+    assert.deepEqual(parents(child3), [child2, child2, 0]);
+    assert.equal(make(WS_CHILD, 0), 0, 'a child needs a parent');
+    assert.equal(errors.at(-1), ERROR_TLW_WITH_WSCHILD);
+
+    assert.equal(fns.SetParent.handler([parent, child1]), 0, 'not into its own child');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(fns.SetParent.handler([child2, child3]), 0);
+    assert.equal(fns.SetParent.handler([child3, child3]), 0, 'nor into itself');
+    assert.deepEqual(parents(child3), [child2, child2, 0], 'and a refusal changes nothing');
+    assert.equal(fns.SetParent.handler([child1, parent]), parent);
+    assert.equal(fns.SetParent.handler([child3, 0]), child2);
+    const popup = make(WS_POPUP, 0);
+    assert.equal(fns.SetParent.handler([popup, child1]), desktop,
+        'a window that was no child had the desktop for its parent');
+    assert.deepEqual([1, 2, 3].map(flags=>fns.GetAncestor.handler([popup, flags])),
+        [child1, parent, popup], 'inside child1, rooted in its window, owned by nobody');
+    assert.equal(fns.DestroyWindow.handler([parent]), 1);
 });
 
 // --- painting ---
@@ -738,6 +814,31 @@ test('SendMessageTimeoutA is a send whose answer goes out through the pointer', 
         [hwnd, 0x0400, 21, 0, SMTO_NORMAL, 1000, OUT_BUFFER]), 1);
     assert.equal(memory.u32(OUT_BUFFER), 42, 'the procedure answered in time, as it always does');
     assert.equal(fns.SendMessageTimeoutA.handler([0x9999, 0x0400, 0, 0, 0, 1000, OUT_BUFFER]), 0);
+});
+
+test('GetWindowRgnBox answers the rectangle of the region SetWindowRgn gave, and ERROR for none',
+    ()=>{
+        const SIMPLEREGION = 2;
+        const box = { left: 1, top: 2, right: 30, bottom: 40 };
+        const { memory, fns } = setup({ regionBox: region=>(region === 0x1234 ? box : null) });
+        const hwnd = makeWindow(memory, fns);
+        assert.equal(fns.GetWindowRgnBox.handler([hwnd, RECT_BUFFER]), 0, 'no region yet');
+        fns.SetWindowRgn.handler([hwnd, 0x1234, 1]);
+        assert.equal(fns.GetWindowRgnBox.handler([hwnd, RECT_BUFFER]), SIMPLEREGION);
+        assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)), [1, 2, 30, 40]);
+        fns.SetWindowRgn.handler([hwnd, 0, 1]);
+        assert.equal(fns.GetWindowRgnBox.handler([hwnd, RECT_BUFFER]), 0, 'and none again');
+    });
+
+test('MonitorFromPoint finds the monitor for a point on the screen, and none off it only when '
+    + 'asked for none', ()=>{
+    const { fns } = setup();
+    const monitor = fns.MonitorFromWindow.handler([0, 0]);
+    assert.equal(fns.MonitorFromPoint.argBytes, 12, 'the point by value');
+    assert.equal(fns.MonitorFromPoint.handler([10, 10, 0]), monitor);
+    assert.equal(fns.MonitorFromPoint.handler([-5, 10, 0]), 0, 'MONITOR_DEFAULTTONULL');
+    assert.equal(fns.MonitorFromPoint.handler([-5, 10, 1]), monitor, 'MONITOR_DEFAULTTOPRIMARY');
+    assert.equal(fns.MonitorFromPoint.handler([5000, 10, 2]), monitor, 'MONITOR_DEFAULTTONEAREST');
 });
 
 test('SetWindowRgn accepts a shape it does not clip to, and says so', ()=>{
@@ -1666,6 +1767,34 @@ test('the keyboard is the enhanced one, and anything else asked of it is nothing
     assert.equal(fns.GetKeyboardType.argBytes, 4);
 });
 
+test('the double-click time starts at 500 and is what SetDoubleClickTime sets', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.GetDoubleClickTime.handler([]), 500);
+    assert.equal(fns.SetDoubleClickTime.handler([1]), 1);
+    assert.equal(fns.GetDoubleClickTime.handler([]), 1);
+    fns.SetDoubleClickTime.handler([0]);
+    assert.equal(fns.GetDoubleClickTime.handler([]), 500, 'zero is the default again');
+});
+
+test('the one layout there is is named, listed, activated and loaded', ()=>{
+    // input.c's test_keyboard_layout_name and test_ActivateKeyboardLayout:
+    // no buffer is ERROR_NOACCESS, the name is eight hexadecimal digits, and
+    // the list, activation and loading all answer that one layout.
+    const { memory, fns, errors } = setup();
+    const layout = fns.GetKeyboardLayout.handler([0]);
+    assert.equal(fns.GetKeyboardLayoutNameW.handler([0]), 0);
+    assert.equal(errors.at(-1), 998);
+    assert.equal(fns.GetKeyboardLayoutNameA.handler([TEXT_BUFFER]), 1);
+    assert.equal(memory.readCString(TEXT_BUFFER, 16), '00000409');
+    assert.equal(fns.GetKeyboardLayoutNameW.handler([TEXT_BUFFER]), 1);
+    assert.equal(memory.u32(TEXT_BUFFER), 0x00300030, 'wide');
+    assert.equal(fns.GetKeyboardLayoutList.handler([0, 0]), 1);
+    assert.equal(fns.GetKeyboardLayoutList.handler([4, OUT_BUFFER]), 1);
+    assert.equal(memory.u32(OUT_BUFFER), layout);
+    assert.equal(fns.ActivateKeyboardLayout.handler([layout, 0]), layout);
+    assert.equal(fns.LoadKeyboardLayoutA.handler([TEXT_BUFFER, 1]), layout);
+});
+
 test('GetKeyboardLayout answers the one supported layout for any thread, including zero', ()=>{
     const { fns } = setup();
     const layout = fns.GetKeyboardLayout.handler([0]);
@@ -2142,6 +2271,19 @@ test('a cbSize that is not an INPUT is refused whole, with the last error set', 
     assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 24]), 0);
     assert.deepEqual(errors, [87], 'ERROR_INVALID_PARAMETER');
     assert.deepEqual(sent, [], 'and nothing was inserted');
+});
+
+test('SendInput refuses no events and no array, and counts an event that does nothing', ()=>{
+    // input.c's test_SendInput: a count of none is ERROR_INVALID_PARAMETER,
+    // no array ERROR_NOACCESS, and zeroed INPUTs -- a mouse event with no
+    // flags -- are each inserted.
+    const { memory, fns, errors } = setup();
+    assert.equal(fns.SendInput.handler([0, INPUT_BUFFER, 28]), 0);
+    assert.equal(errors.at(-1), 87);
+    assert.equal(fns.SendInput.handler([1, 0, 28]), 0);
+    assert.equal(errors.at(-1), 998);
+    memory.putU32s(INPUT_BUFFER, new Array(28 * 16 / 4).fill(0));
+    assert.equal(fns.SendInput.handler([16, INPUT_BUFFER, 28]), 16);
 });
 
 test('SendInput injects a keyboard event named by virtual key', ()=>{

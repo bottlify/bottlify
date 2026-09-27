@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { synthesiseModule } from '../../loader/internal/synth.js';
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
+import { writeGuid } from '../../win32/ole32/guid.js';
 import {
     createDirectSound, createPublisher, describe,
     DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBCAPS, DSCAPS, DSCAPS_FLAGS, DSBPOSITIONNOTIFY,
@@ -1013,7 +1014,8 @@ test('the library\'s entry points keep the ordinals Windows gives them', ()=>{
     const pinned = f.dsound.ordinals['DSOUND.dll'];
     assert.deepEqual(pinned, {
         1: 'DirectSoundCreate', 2: 'DirectSoundEnumerateA', 3: 'DirectSoundEnumerateW',
-        6: 'DirectSoundCaptureCreate', 9: 'GetDeviceID', 11: 'DirectSoundCreate8',
+        6: 'DirectSoundCaptureCreate', 7: 'DirectSoundCaptureEnumerateA',
+        8: 'DirectSoundCaptureEnumerateW', 9: 'GetDeviceID', 11: 'DirectSoundCreate8',
         12: 'DirectSoundCaptureCreate8',
     });
     for (const name of Object.values(pinned))
@@ -1512,11 +1514,58 @@ test('every buffer has IKsPropertySet, which has no property set to offer', ()=>
     assert.equal(f.memory.u32(support), 0, 'the caller\'s flags are cleared');
 });
 
-test('DllGetClassObject has no class to hand out, and clears the pointer', ()=>{
+test('DllGetClassObject has no class but DirectSound\'s to hand out, and clears the pointer', ()=>{
     const f = createRoot();
     const out = 0x1f20;
     f.memory.writeMemory(out, Uint8Array.of(1, 2, 3, 4));
     assert.equal(f.dsound.libraries['DSOUND.dll'].DllGetClassObject.handler([0x1f30, 0x1f40, out])
         >>> 0, 0x80040111);
     assert.equal(f.memory.u32(out), 0);
+});
+
+test('DirectSound\'s class object makes objects that wait for Initialize', ()=>{
+    // Wine's dsound IDirectSound_tests: CoGetClassObject, then CoCreateInstance
+    // through the class object, then an object that answers DSERR_UNINITIALIZED
+    // until Initialize, and DSERR_ALREADYINITIALIZED after.
+    const g = guestMachine();
+    const dll = g.dsound.libraries['DSOUND.dll'];
+    const CLSID = 0x1e00;
+    const IID = 0x1e20;
+    const out = 0x1e40;
+    writeGuid(g.memory, CLSID, '{47D4D946-62E8-11CF-93BC-444553540000}');
+    writeGuid(g.memory, IID, '{00000001-0000-0000-C000-000000000046}');
+    assert.equal(dll.DllGetClassObject.handler([CLSID, IID, out]), DS_OK);
+    const factory = g.memory.u32(out);
+    assert.notEqual(factory, 0);
+
+    writeGuid(g.memory, IID, IID_IDirectSound);
+    assert.equal(g.call(factory, 3, [0x5000, IID, out]) >>> 0, 0x80040110,
+        'CLASS_E_NOAGGREGATION');
+    assert.equal(g.call(factory, 3, [0, IID, out]), DS_OK, 'CreateInstance');
+    const sound = g.memory.u32(out);
+    const caps = 0x1f00;
+    assert.equal(g.call(sound, slotOf(IDIRECTSOUND_SLOTS, 'GetCaps'), [caps]) >>> 0, 0x889000aa);
+    assert.equal(g.call(sound, slotOf(IDIRECTSOUND_SLOTS, 'Compact')) >>> 0, 0x889000aa);
+    assert.equal(g.call(sound, slotOf(IDIRECTSOUND_SLOTS, 'Initialize'), [0]), DS_OK);
+    assert.equal(g.call(sound, slotOf(IDIRECTSOUND_SLOTS, 'Initialize'), [0]) >>> 0, 0x88780082,
+        'DSERR_ALREADYINITIALIZED');
+    g.memory.setU32(caps, 96);
+    assert.equal(g.call(sound, slotOf(IDIRECTSOUND_SLOTS, 'GetCaps'), [caps]), DS_OK);
+    assert.equal(g.call(sound, slotOf(IDIRECTSOUND_SLOTS, 'Initialize'), [0]) >>> 0, 0x88780082,
+        'and one DirectSoundCreate made is named already');
+});
+
+test('there is no capture device, as Windows says of a machine without one', ()=>{
+    const f = createRoot();
+    const dll = f.dsound.libraries['DSOUND.dll'];
+    const out = 0x1f20;
+    f.memory.setU32(out, 0xdeadbeef);
+    assert.equal(dll.DirectSoundCaptureCreate.handler([0, out, 0x5000]) >>> 0, 0x80040110,
+        'an aggregation is refused first');
+    assert.equal(f.memory.u32(out), 0xdeadbeef, 'with the pointer left alone');
+    assert.equal(dll.DirectSoundCaptureCreate8.handler([0, out, 0]) >>> 0, 0x88780078,
+        'DSERR_NODRIVER');
+    assert.equal(f.memory.u32(out), 0);
+    assert.equal(/** @type {any} */ (dll.DirectSoundCaptureEnumerateA).handler([0x7000, 0]),
+        DS_OK);
 });
