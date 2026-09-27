@@ -120,7 +120,8 @@ import { createReplicas } from './replicas.js';
  *     A frame shown faster than a display can show it is a read of the surface
  *     and an upload that nobody sees.
  * @property {{ categories?: Record<string, string>, capacity?: number,
- *     bytes?: number, sequenceBase?: number }} [log]
+ *     bytes?: number, sequenceBase?: number, journal?: any,
+ *     now?: () => number }} [log]
  *     Which call areas are recorded from the first instruction, and how much of
  *     the journal is kept -- `capacity` records in the index, `bytes` for the
  *     records themselves (default 1 MiB; a call area logging every argument as
@@ -128,7 +129,8 @@ import { createReplicas } from './replicas.js';
  *     Everything a program decides about a device it decides while starting
  *     up, so a category switched on once the engine exists is switched on too
  *     late to see any of it. `sequenceBase` is set by `createApp` on a rebuilt
- *     machine and is not something a caller supplies.
+ *     machine, `journal` and `now` on every process of the run; none is
+ *     something a caller supplies.
  * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean, shared?: boolean,
  *     memory?: { control: ArrayBufferLike, samples: ArrayBufferLike }
  *         | { table: ArrayBufferLike } }} [audio]
@@ -2861,6 +2863,10 @@ async function buildApp(options){
     const areaOfCall = (/** @type {any} */ call)=>areaOf(call, areaCache);
     /** @type {Map<string, { revision: number, area: string, on: boolean }>} */
     const tracedCalls = new Map();
+    // Every process of a run names its first thread "main", so in the run's one
+    // journal a later process's threads carry its image name as well.
+    const callerTag = options.log?.journal
+        ? `${String(options.imagePath ?? '').split(/[\\/]/).pop()}:` : '';
     /** @type {any} */
     let win32Api = null;
 
@@ -2900,7 +2906,7 @@ async function buildApp(options){
             call.name, (call.args ?? []).slice(0, 4)
                 .map((/** @type {number} */ value)=>`0x${(value >>> 0).toString(16)}`)
                 .join(', '), call.result,
-            core.api('kernel').currentThread()?.name ?? '?');
+            callerTag + (core.api('kernel').currentThread()?.name ?? '?'));
     };
 
     // The translator's cache goes with the bundle's blocks: local by default,
@@ -3012,11 +3018,13 @@ async function buildApp(options){
             // from that journal keeps reading rather than falling behind a
             // block that started over.
             sequenceBase: options.log?.sequenceBase,
+            // The run's journal, when this machine is one of its later processes.
+            journal: options.log?.journal,
             // The guest's clock, for the same reason the sound buffers use it:
             // a phase timed against the host and a phase timed against the
             // guest cannot be added together, and the number this layer exists
             // to produce -- how much of a frame was ours -- is a sum.
-            now: ()=>core.api('kernel').clock.virtualTime(),
+            now: options.log?.now ?? (()=>core.api('kernel').clock.virtualTime()),
         },
         audio: {
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
@@ -3696,13 +3704,21 @@ async function buildApp(options){
     // a program that calls a missing import in a loop would otherwise fill the
     // page's queue with a clone and a wake-up per call.
     const selfJournalled = new Set(['unimplemented']);
-    events.onAny((/** @type {string} */ name, /** @type {any} */ payload)=>{
-        if (selfJournalled.has(name))
-        {
-            return;
-        }
-        journal.write(SEVERITY[name] ?? 'info', name, '{0}', describeEvent(payload));
-    });
+    // The run's processes share one event bus and one journal, so only the
+    // machine that made the journal writes the bus into it, and straight into
+    // the journal rather than through its own view: that view closes with the
+    // machine, and a process that replaced it still fires events.
+    if (!options.log?.journal)
+    {
+        const into = journal.journal?.() ?? journal;
+        events.onAny((/** @type {string} */ name, /** @type {any} */ payload)=>{
+            if (selfJournalled.has(name))
+            {
+                return;
+            }
+            into.write(SEVERITY[name] ?? 'info', name, '{0}', describeEvent(payload));
+        });
+    }
 
     const cpu = core.api('cpu');
     const memory = core.api('memory');
@@ -5867,6 +5883,8 @@ async function buildApp(options){
             drain: (since, limit)=>core.api('log').drain(since, limit),
             /** @param {number} [count] */
             recent: count=>core.api('log').recent(count),
+            /** The journal this machine writes into, for the next process of the run to share. */
+            journal: ()=>core.api('log').journal?.() ?? null,
             /** @param {string} category @param {string | number} level */
             setLevel: (category, level)=>core.api('log').setLevel(category, level),
             /** @param {string | number} level */
@@ -6307,6 +6325,13 @@ export async function createApp(options){
     /** @type {string | number | null} */
     let logDefaultLevel = null;
     let logSequence = 0;
+    /** The journal every process of the run writes into; the first one's. @type {any} */
+    let runJournal = null;
+    // The journal's own clock, one for the run. A process's guest clock is
+    // not it: each machine has its own, a parent's stands still while the
+    // child beside it runs, and a replacement's starts again from zero.
+    const journalOrigin = performance.now();
+    const journalClock = ()=>performance.now() - journalOrigin;
     // The sound output's storage outlives the process for the same reason, and
     // for one more: the page was handed it before any of this ran and builds
     // its audio graph over that memory once. A rebuilt machine has to mix into
@@ -6363,7 +6388,10 @@ export async function createApp(options){
         spawned: remember,
         logSinks,
         namedObjects,
-        log: { ...options.log, sequenceBase: logSequence },
+        log: {
+            ...options.log, sequenceBase: logSequence, ...runJournal ? { journal: runJournal } : {},
+            now: journalClock,
+        },
         audio: { ...options.audio, memory: audioMemory },
         media: { ...options.media, instance: mediaInstance },
         graphics: { ...options.graphics, presenter },
@@ -6445,6 +6473,10 @@ export async function createApp(options){
 
     /** @type {any} */
     let current = await build();
+    // The first process's journal is the run's: every process built after it,
+    // beside it or in its place, writes there, and a reader of the facade's
+    // log sees them all in one order on one clock.
+    runJournal = current.log.journal?.() ?? null;
 
     // Read from the machine that made it, while it still stands, and handed to
     // every rebuild from here on.

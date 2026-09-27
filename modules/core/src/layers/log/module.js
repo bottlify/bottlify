@@ -129,7 +129,12 @@ export function createLogModule(){
                 categories[name] = toLevel(level);
             }
 
-            const journal = createJournal({
+            // A journal handed in is the run's: a process started beside another,
+            // or in place of it, writes into the one its first process made, so a
+            // run has one journal, one clock and one order of records whatever
+            // it starts. Its sinks are its maker's and are not added again.
+            const shared = config?.journal ?? null;
+            const journal = shared ?? createJournal({
                 now,
                 capacity: config?.capacity,
                 bytes: config?.bytes,
@@ -206,7 +211,7 @@ export function createLogModule(){
                 profiler?.mirror(rows, indices);
             };
 
-            for (const sink of config?.sinks ?? [])
+            for (const sink of shared ? [] : config?.sinks ?? [])
             {
                 journal.addSink(sink);
             }
@@ -258,6 +263,8 @@ export function createLogModule(){
 
                 /** @param {string} category @param {number} level */
                 enabled: (category, level)=>live() && journal.enabled(category, level),
+                /** The journal itself, for a machine built beside this one to write into. */
+                journal: ()=>journal,
                 /** Moves with every level change: an `enabled` answer holds until it does. */
                 revision: ()=>(live() ? journal.revision() : -1),
                 /** @param {string} category @param {unknown} level */
