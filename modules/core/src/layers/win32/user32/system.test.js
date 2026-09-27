@@ -1742,6 +1742,25 @@ test('the keyboard is the enhanced one, and anything else asked of it is nothing
     assert.equal(fns.GetKeyboardType.argBytes, 4);
 });
 
+test('the one layout there is is named, listed, activated and loaded', ()=>{
+    // input.c's test_keyboard_layout_name and test_ActivateKeyboardLayout:
+    // no buffer is ERROR_NOACCESS, the name is eight hexadecimal digits, and
+    // the list, activation and loading all answer that one layout.
+    const { memory, fns, errors } = setup();
+    const layout = fns.GetKeyboardLayout.handler([0]);
+    assert.equal(fns.GetKeyboardLayoutNameW.handler([0]), 0);
+    assert.equal(errors.at(-1), 998);
+    assert.equal(fns.GetKeyboardLayoutNameA.handler([TEXT_BUFFER]), 1);
+    assert.equal(memory.readCString(TEXT_BUFFER, 16), '00000409');
+    assert.equal(fns.GetKeyboardLayoutNameW.handler([TEXT_BUFFER]), 1);
+    assert.equal(memory.u32(TEXT_BUFFER), 0x00300030, 'wide');
+    assert.equal(fns.GetKeyboardLayoutList.handler([0, 0]), 1);
+    assert.equal(fns.GetKeyboardLayoutList.handler([4, OUT_BUFFER]), 1);
+    assert.equal(memory.u32(OUT_BUFFER), layout);
+    assert.equal(fns.ActivateKeyboardLayout.handler([layout, 0]), layout);
+    assert.equal(fns.LoadKeyboardLayoutA.handler([TEXT_BUFFER, 1]), layout);
+});
+
 test('GetKeyboardLayout answers the one supported layout for any thread, including zero', ()=>{
     const { fns } = setup();
     const layout = fns.GetKeyboardLayout.handler([0]);

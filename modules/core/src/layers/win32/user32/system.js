@@ -48,7 +48,7 @@ import {
     writeU16,
     writeU32s,
 } from './structs.js';
-import { readText } from './unicode.js';
+import { readText, textBytes } from './unicode.js';
 import { threadIdOf } from './messages.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
@@ -619,6 +619,22 @@ export function createSystemFunctions({ host, live, windows, classes }){
         cursorShape = shape;
         host.reportCursor?.(shape ? { shown, width: shape.width, height: shape.height,
             hotSpot: { ...shape.hotSpot }, bgra: shape.bgra } : { shown });
+    };
+
+    /**
+     * GetKeyboardLayoutName in either encoding.
+     *
+     * @param {number} into @param {boolean} wide
+     */
+    const layoutName = (into, wide)=>{
+        if ((into >>> 0) === 0)
+        {
+            host.setLastError?.(ERROR_NOACCESS);
+            return 0;
+        }
+        const name = `0000${LANGID_EN_US.toString(16).padStart(4, '0')}`;
+        host.writeMemory(into >>> 0, textBytes(name, wide));
+        return 1;
     };
 
     /**
@@ -3322,6 +3338,95 @@ export function createSystemFunctions({ host, live, windows, classes }){
         GetKeyboardLayout: {
             argBytes: 4,
             handler: ()=>HKL_EN_US,
+        },
+
+        /**
+         * BOOL GetKeyboardLayoutNameA(LPSTR pwszKLID)
+         *
+         * The active layout's identifier, eight hexadecimal digits: the one
+         * layout there is, United States. No buffer is ERROR_NOACCESS.
+         */
+        GetKeyboardLayoutNameA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([into])=>layoutName(into, false),
+        },
+
+        /** BOOL GetKeyboardLayoutNameW(LPWSTR pwszKLID) */
+        GetKeyboardLayoutNameW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([into])=>layoutName(into, true),
+        },
+
+        /**
+         * int GetKeyboardLayoutList(int nBuff, HKL *lpList)
+         *
+         * The layouts there are -- one -- counted when nBuff is zero and
+         * written as far as the buffer goes otherwise.
+         */
+        GetKeyboardLayoutList: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([room, list])=>{
+                if ((room | 0) === 0)
+                {
+                    return 1;
+                }
+                if ((room | 0) < 0 || (list >>> 0) === 0)
+                {
+                    return 0;
+                }
+                writeU32s(host, list >>> 0, [HKL_EN_US]);
+                return 1;
+            },
+        },
+
+        /**
+         * HKL ActivateKeyboardLayout(HKL hkl, UINT Flags)
+         *
+         * The layout active until now, when the one asked for is the one
+         * there is or the next or previous of the list, which is the same.
+         */
+        ActivateKeyboardLayout: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([layout])=>{
+                const HKL_PREV = 0;
+                const HKL_NEXT = 1;
+                const wanted = layout >>> 0;
+                if (wanted === HKL_PREV || wanted === HKL_NEXT || wanted === HKL_EN_US)
+                {
+                    return HKL_EN_US;
+                }
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
+                return 0;
+            },
+        },
+
+        /**
+         * HKL LoadKeyboardLayoutA(LPCSTR pwszKLID, UINT Flags)
+         *
+         * The layout of that identifier, which is the one layout there is:
+         * any other falls back to the system's default, as documented for a
+         * layout that cannot be had.
+         */
+        LoadKeyboardLayoutA: {
+            argBytes: 8,
+            handler: ()=>HKL_EN_US,
+        },
+
+        /** HKL LoadKeyboardLayoutW(LPCWSTR pwszKLID, UINT Flags) */
+        LoadKeyboardLayoutW: {
+            argBytes: 8,
+            handler: ()=>HKL_EN_US,
+        },
+
+        /** BOOL UnloadKeyboardLayout(HKL hkl) */
+        UnloadKeyboardLayout: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([layout])=>((layout >>> 0) === HKL_EN_US ? 1 : 0),
         },
 
         /**
