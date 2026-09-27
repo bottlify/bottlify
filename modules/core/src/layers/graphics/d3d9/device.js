@@ -1008,18 +1008,28 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     /** @type {any} */
     let autoDepthStencil = null;
 
-    /** The implicit surfaces at the size the presentation parameters name. */
-    const makeImplicitSurfaces = ()=>{
+    /**
+     * The device's own surfaces give their storage back: those a Reset
+     * replaces, and all of them when the device's last reference goes -- no
+     * program can hold one then, since each it holds is a reference on the
+     * device.
+     */
+    const retireImplicitSurfaces = ()=>{
         for (const surface of backBuffers)
         {
-            free(surface.base);
-            renderer?.retire(surface);
+            retireSurface(surface);
         }
         if (autoDepthStencil)
         {
-            free(autoDepthStencil.base);
-            renderer?.retire(autoDepthStencil);
+            retireSurface(autoDepthStencil);
         }
+        backBuffers = [];
+        autoDepthStencil = null;
+    };
+
+    /** The implicit surfaces at the size the presentation parameters name. */
+    const makeImplicitSurfaces = ()=>{
+        retireImplicitSurfaces();
         const width = presentParameters.backBufferWidth ?? 640;
         const height = presentParameters.backBufferHeight ?? 480;
         const format = presentParameters.backBufferFormat ?? D3DFMT.X8R8G8B8;
@@ -1750,6 +1760,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 stopWatchingLoss?.();
                 showGamma(true);
+                retireImplicitSurfaces();
                 // The reference CreateDevice took on the object that made it.
                 identity?.direct3D?.release?.();
             }

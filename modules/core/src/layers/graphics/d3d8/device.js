@@ -923,17 +923,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         const height = presentParameters.backBufferHeight ?? 480;
         // The surfaces a Reset replaces give their storage back, as Direct3D 9's
         // do: each Reset to another size kept the old ones' otherwise.
-        for (const surface of backBuffers)
-        {
-            free(surface.base);
-            renderer?.retire(surface);
-        }
-        if (autoDepthStencil)
-        {
-            free(autoDepthStencil.base);
-            renderer?.retire(autoDepthStencil);
-        }
-        backBuffers = [];
+        retireImplicitResources();
         for (let index = 0; index < (presentParameters.backBufferCount ?? 1); index++)
         {
             backBuffers.push(createSurface({
@@ -979,6 +969,25 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         renderTarget = backBuffers[0];
         depthStencil = autoDepthStencil;
         viewport = fullTarget({ width, height });
+    }
+
+    /**
+     * The device's own surfaces give their storage back: those a Reset
+     * replaces, and all of them when the device's last reference goes -- no
+     * program can hold one then, since each it holds is a reference on the
+     * device.
+     */
+    function retireImplicitResources(){
+        for (const surface of backBuffers)
+        {
+            retireSurface(surface);
+        }
+        if (autoDepthStencil)
+        {
+            retireSurface(autoDepthStencil);
+        }
+        backBuffers = [];
+        autoDepthStencil = null;
     }
 
     buildImplicitResources();
@@ -1438,6 +1447,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 stopWatchingLoss?.();
                 showGamma(true);
+                retireImplicitResources();
                 // The reference CreateDevice took on the object that made it.
                 identity?.direct3D?.release?.();
             }

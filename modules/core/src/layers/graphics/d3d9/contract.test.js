@@ -1162,4 +1162,5 @@ test('a surface made on its own gives its storage back with its last reference',
     }
     assert.equal(held.size, before, 'every block went back');
     assert.equal(device.release(), 0);
+    assert.equal(held.size, 0, 'and the device\'s own surfaces go with its last reference');
 });
