@@ -573,7 +573,8 @@ those levels reads what the guest put there.
 
 A draw is prepared once per state change rather than once per draw. The device raises one counter,
 `drawStateVersion`, for every state change a preparation depends on -- a render state, a stage
-state, a texture binding, a material, a light, the viewport, a transform other than the world one,
+state, a texture binding, a material, a light's type or whether it is enabled (a light that only
+moves or changes colour raises `lightsVersion` alone), the viewport, a transform other than the world one,
 the vertex or pixel shader, a state block applied, a reset -- and raises it for a change of value,
 not for a call that sets the value already there. While that counter and the draw's stride and
 topology are what the last preparation was built from, the next draw reuses its vertex layout, its
@@ -584,11 +585,12 @@ world transform is the one state the counter deliberately ignores, because it mo
 draws of a frame; whoever reads the counter therefore owes the world matrix a fresh read on every
 draw. The renderer compares it, the view and the projection with the matrices its products were last
 formed from, bit for bit, and forms world-view, world-view-projection and the two normal matrices
-again only when one differs, into arrays of its own. The Direct3D 8 device writes a new world into
-the matrix it holds rather than making one (a state block, `GetTransform` and the renderer copy it),
-takes a light set again with the values it holds, or enabled or disabled as it already is, as
-nothing set, and its seam reads a light's dwords in place and answers the same dwords at the same
-index with the same light. A texture whose bytes the program rewrites raises a counter of its own, so the upload
+again only when one differs, into arrays of its own. The Direct3D 8 and 9 devices write a new world into
+the matrix they hold rather than making one (a state block, `GetTransform` and the renderer copy it),
+take a matrix or a light set again with the values held, or a light enabled or disabled as it
+already is, as nothing set, and keep what they answer for a draw's stage processing while the
+shaders and declaration bound are the same; their seams read a light's dwords in place and answer
+the same dwords at the same index with the same light. A texture whose bytes the program rewrites raises a counter of its own, so the upload
 owed to it still happens inside the next draw that samples it. When the counter has moved, the
 preparation is looked up by the state's values among those the frame has built. That name is made in
 two parts so that the common changes stay cheap: the device also publishes
@@ -614,7 +616,12 @@ The Direct3D 7 device does not publish them yet and is prepared for on every dra
 translations, vertex layout, pipeline state and samplers while `stateVersionBesideTextures`, the
 shaders, the declaration, the stride and the topology hold still -- setting constants raises no
 version, so a frame that sets its constants and binds a texture before every draw prepares once --
-and copies only the constant blocks and takes the texture views per draw.
+and copies only the constant blocks and takes the texture views per draw. When they move, those
+pieces are looked up by the state's number, the shaders, the declaration, the stride, the topology
+and every stream's stride and frequency among the ones the renderer has made, so a program that
+flips a render state between shader draws makes them once per state; the pieces hold the pipeline's
+place in the frame's recording, asked for once per recording, and the list of sampler bindings a
+draw shares with the one before when it binds the same views and samplers.
 
 A texture the program releases for the last time gives its guest storage back at once, and its GPU
 texture at the first present that finds it bound on no stage, after that frame's replay: a binding

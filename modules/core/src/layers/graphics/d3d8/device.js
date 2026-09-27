@@ -2137,7 +2137,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             }
             lights.set(index, { light: { ...light }, enabled: existing?.enabled ?? false });
             lightsVersion++;
-            drawStateVersion++;
+            // A draw's preparation is shaped by a light's type, and packs its
+            // values into the block for each draw by `lightsVersion`: a light
+            // that moves keeps the preparation it had.
+            if (existing?.light.Type !== light.Type)
+            {
+                drawStateVersion++;
+            }
             return D3D_OK;
         },
 
