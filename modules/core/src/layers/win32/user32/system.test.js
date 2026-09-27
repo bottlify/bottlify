@@ -1742,6 +1742,15 @@ test('the keyboard is the enhanced one, and anything else asked of it is nothing
     assert.equal(fns.GetKeyboardType.argBytes, 4);
 });
 
+test('the double-click time starts at 500 and is what SetDoubleClickTime sets', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.GetDoubleClickTime.handler([]), 500);
+    assert.equal(fns.SetDoubleClickTime.handler([1]), 1);
+    assert.equal(fns.GetDoubleClickTime.handler([]), 1);
+    fns.SetDoubleClickTime.handler([0]);
+    assert.equal(fns.GetDoubleClickTime.handler([]), 500, 'zero is the default again');
+});
+
 test('the one layout there is is named, listed, activated and loaded', ()=>{
     // input.c's test_keyboard_layout_name and test_ActivateKeyboardLayout:
     // no buffer is ERROR_NOACCESS, the name is eight hexadecimal digits, and

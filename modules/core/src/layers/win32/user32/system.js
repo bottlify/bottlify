@@ -223,6 +223,9 @@ const ERROR_TIMEOUT = 1460;
  */
 const HKL_EN_US = (LANGID_EN_US << 16 | LANGID_EN_US) >>> 0;
 
+/** The double-click time Windows starts with, in milliseconds. */
+const DOUBLE_CLICK_TIME = 500;
+
 /**
  * The modifiers a 256-byte key state holds: shift and control down, caps lock
  * toggled on -- all a key's character depends on for this layout.
@@ -620,6 +623,9 @@ export function createSystemFunctions({ host, live, windows, classes }){
         host.reportCursor?.(shape ? { shown, width: shape.width, height: shape.height,
             hotSpot: { ...shape.hotSpot }, bgra: shape.bgra } : { shown });
     };
+
+    /** GetDoubleClickTime's answer, which SetDoubleClickTime changes. */
+    let doubleClickTime = DOUBLE_CLICK_TIME;
 
     /**
      * GetKeyboardLayoutName in either encoding.
@@ -3338,6 +3344,27 @@ export function createSystemFunctions({ host, live, windows, classes }){
         GetKeyboardLayout: {
             argBytes: 4,
             handler: ()=>HKL_EN_US,
+        },
+
+        /**
+         * UINT GetDoubleClickTime(void)
+         *
+         * How far apart two clicks may be and still be a double click, in
+         * milliseconds: 500 until a program sets another.
+         */
+        GetDoubleClickTime: {
+            argBytes: 0,
+            handler: ()=>doubleClickTime,
+        },
+
+        /** BOOL SetDoubleClickTime(UINT uInterval), zero meaning the default again. */
+        SetDoubleClickTime: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([interval])=>{
+                doubleClickTime = (interval >>> 0) === 0 ? DOUBLE_CLICK_TIME : interval >>> 0;
+                return 1;
+            },
         },
 
         /**
