@@ -167,6 +167,9 @@ function lookUp(table, value, what){
  * @property {number} ambientSource
  * @property {number} specularSource
  * @property {number} emissiveSource
+ * @property {boolean} [localViewer]  D3DRS_LOCALVIEWER; absent is on, its default.
+ *           Off, the highlight's direction to the viewer is one direction for
+ *           every vertex, which the block carries in `eye` instead of the eye.
  */
 
 /**
@@ -292,7 +295,7 @@ function lightingKey(lighting){
     return `L${lighting.colorVertex ? 1 : 0}`
         + `,${lighting.diffuseSource},${lighting.ambientSource}`
         + `,${lighting.specularSource},${lighting.emissiveSource}`
-        + `[${lighting.lights.join(',')}]`;
+        + `[${lighting.lights.join(',')}]${lighting.localViewer === false ? 'v' : ''}`;
 }
 
 /**

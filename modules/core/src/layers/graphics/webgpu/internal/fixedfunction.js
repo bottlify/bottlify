@@ -458,7 +458,11 @@ function lightContribution(index, type, specular){
             // the light sums to zero and normalising that is a not-a-number.
             '        let halfway = toLight + toEye;',
             '        let halfNormal = halfway / max(length(halfway), 1e-8);',
-            '        let highlight = pow(max(dot(worldNormal, halfNormal), 0.0), uniforms.eye.w);',
+            // Only a face the light reaches has a highlight: behind it, a
+            // power of zero would light every vertex at full.
+            '        let highlight = select(0.0,',
+            '            pow(max(dot(worldNormal, halfNormal), 0.0), uniforms.eye.w),'
+                + ' ndotl > 0.0);',
             '        lightSpecular += light.specular.rgb * (highlight * scale);');
     }
     lines.push('    }');
@@ -505,7 +509,11 @@ function lightingBody(lighting, has, specular, normalizeNormals){
     ];
     if (highlights)
     {
-        lines.push('    let toEye = normalize(uniforms.eye.xyz - worldPosition);');
+        // D3DRS_LOCALVIEWER off puts the viewer at infinity: one direction
+        // towards it for every vertex, carried in place of the eye.
+        lines.push(lighting.localViewer === false
+            ? '    let toEye = uniforms.eye.xyz;'
+            : '    let toEye = normalize(uniforms.eye.xyz - worldPosition);');
     }
     lines.push(
         '    var lightAmbient = vec3f(0.0, 0.0, 0.0);',

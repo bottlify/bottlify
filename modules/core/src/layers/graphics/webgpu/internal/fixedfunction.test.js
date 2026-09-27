@@ -828,7 +828,7 @@ test('the specular term is computed only when it is enabled, and added after the
     const on = generate(baseState({
         fvf: LIT_FVF, lighting: lighting(), specularEnable: true,
     })).code;
-    assert.match(on, /let highlight = pow\(max\(dot\(worldNormal, halfNormal\), 0\.0\),/);
+    assert.match(on, /pow\(max\(dot\(worldNormal, halfNormal\), 0\.0\), uniforms\.eye\.w\), ndotl > 0\.0\);/);
     assert.match(on, /uniforms\.eye\.w\)/, 'the exponent is the material power');
     assert.match(on, /current = vec4f\(current\.rgb \+ input\.specular\.rgb, current\.a\);/);
 

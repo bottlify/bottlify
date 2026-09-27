@@ -34,7 +34,7 @@ import {
 import { createDirect3D8 } from './device.js';
 import {
     IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, colorToFloats, expandTexels, eyePosition,
-    normalMatrixOf,
+    normalMatrixOf, viewerDirection,
     HARDWARE_SAMPLER, filledIndices, listIndices, multiplyMatrices, packLight, pipelineStateOf,
     samplerFlagsOf,
     screenExtent, transformPosition, uniformBlock, fogModeOf, fogOf, isAffine,
@@ -2004,6 +2004,12 @@ test('the camera is the point the view matrix sends to the origin', ()=>{
     assert.deepEqual(eyePosition(new Array(16).fill(0)), [0, 0, 0]);
 });
 
+test('a viewer at infinity is the line of sight turned back into the world', ()=>{
+    assert.deepEqual(viewerDirection(IDENTITY), [0, 0, -1]);
+    const turned = [0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 2, 3, 1];
+    assert.deepEqual(viewerDirection(turned), [1, 0, 0], 'a translation does not move it');
+});
+
 test('a normal goes through the inverse transpose of the world matrix', ()=>{
     // Wine's d3d9 lighting_test lights a quad whose normal faces the default
     // directional light under four world matrices: identity, a singular one
@@ -2156,7 +2162,8 @@ test('recorded: a lit draw carries its lights, its material and the scene ambien
         ambientSource: D3DMCS.MATERIAL,
         specularSource: D3DMCS.COLOR2,
         emissiveSource: D3DMCS.MATERIAL,
-    }, 'the enabled lights in index order, and the default material sources');
+        localViewer: true,
+    }, 'the enabled lights in index order, the default material sources, a local viewer');
 
     assert.equal(draw.uniforms.length, UNIFORM_FLOATS + 2 * LIGHT_FLOATS,
         'the block is exactly as long as the shader\'s array declaration');

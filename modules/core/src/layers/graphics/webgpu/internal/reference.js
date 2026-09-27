@@ -485,7 +485,8 @@ export function lightVertex(vertex){
         const { toLight, scale } = illumination(light, vertex.position);
         const lambert = Math.max(dot(normal, toLight), 0) * scale;
         let highlight = 0;
-        if (vertex.specular)
+        // A face the light does not reach has no highlight either.
+        if (vertex.specular && dot(normal, toLight) > 0)
         {
             const halfway = unit({
                 x: toLight.x + toEye.x, y: toLight.y + toEye.y, z: toLight.z + toEye.z,

@@ -1095,20 +1095,11 @@ function minorOf(m, row, column){
  * @returns {number[]} x, y, z
  */
 export function eyePosition(view){
-    const a = view[0], b = view[1], c = view[2];
-    const d = view[4], e = view[5], f = view[6];
-    const g = view[8], h = view[9], i = view[10];
-    const cofactor = [e * i - f * h, f * g - d * i, d * h - e * g];
-    const determinant = a * cofactor[0] + b * cofactor[1] + c * cofactor[2];
-    if (determinant === 0)
+    const inverse = inverseRotation(view);
+    if (!inverse)
     {
         return [0, 0, 0];
     }
-    const inverse = [
-        cofactor[0], c * h - b * i, b * f - c * e,
-        cofactor[1], a * i - c * g, c * d - a * f,
-        cofactor[2], b * g - a * h, a * e - b * d,
-    ].map(value=>value / determinant);
     const t = [view[12], view[13], view[14]];
     return [0, 1, 2].map(column=>{
         const along = t[0] * inverse[column] + t[1] * inverse[3 + column]
@@ -1117,6 +1108,51 @@ export function eyePosition(view){
         // worse thing to read in a diagnostic.
         return along === 0 ? 0 : -along;
     });
+}
+
+/**
+ * The direction towards a viewer infinitely far along the line of sight, in
+ * world space: what D3DRS_LOCALVIEWER off lights a highlight by.
+ *
+ * @param {ArrayLike<number>} view
+ * @returns {number[]} x, y, z
+ */
+export function viewerDirection(view){
+    // Camera space's (0, 0, -1) -- towards a viewer infinitely far along the
+    // line of sight -- through the inverse of the view's rotation, rows as
+    // Direct3D multiplies them.
+    const inverse = inverseRotation(view);
+    if (!inverse)
+    {
+        return [0, 0, -1];
+    }
+    const direction = [-inverse[6], -inverse[7], -inverse[8]];
+    const length = Math.hypot(...direction) || 1;
+    return direction.map(value=>(value === 0 ? 0 : value / length));
+}
+
+/**
+ * The inverse of a view matrix's upper three by three, row-major, or null
+ * for a singular one.
+ *
+ * @param {ArrayLike<number>} view
+ * @returns {number[] | null}
+ */
+function inverseRotation(view){
+    const a = view[0], b = view[1], c = view[2];
+    const d = view[4], e = view[5], f = view[6];
+    const g = view[8], h = view[9], i = view[10];
+    const cofactor = [e * i - f * h, f * g - d * i, d * h - e * g];
+    const determinant = a * cofactor[0] + b * cofactor[1] + c * cofactor[2];
+    if (determinant === 0)
+    {
+        return null;
+    }
+    return [
+        cofactor[0], c * h - b * i, b * f - c * e,
+        cofactor[1], a * i - c * g, c * d - a * f,
+        cofactor[2], b * g - a * h, a * e - b * d,
+    ].map(value=>value / determinant);
 }
 
 /**
@@ -1299,6 +1335,7 @@ export function lightingOf(model, layout){
         ambientSource: rs('AMBIENTMATERIALSOURCE'),
         specularSource: rs('SPECULARMATERIALSOURCE'),
         emissiveSource: rs('EMISSIVEMATERIALSOURCE'),
+        localViewer: (model.renderStates.get(D3DRS.LOCALVIEWER) ?? 1) !== 0,
     };
 }
 
@@ -1337,7 +1374,7 @@ export function uniformsOf(model, lighting, take, mips = true){
         textureTransforms: stageTransforms(model),
         material: model.material,
         ambient: rs('AMBIENT'),
-        eye: eyePosition(view),
+        eye: lighting?.localViewer === false ? viewerDirection(view) : eyePosition(view),
         ...(lighting ? { normalMatrix: normalMatrixOf(world, NORMAL_MATRIX) } : {}),
         ...(generatesFromNormal(model)
             ? { cameraNormalMatrix: normalMatrixOf(worldView, CAMERA_NORMAL_MATRIX) }
