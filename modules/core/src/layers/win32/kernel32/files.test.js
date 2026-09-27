@@ -1708,3 +1708,14 @@ test('NtCreateFile names what is missing, and takes only object names', ()=>{
     assert.equal(fns.CloseHandle.handler([memory.dword(NT_HANDLE)]), 1,
         'and its handle closes as any other');
 });
+
+test('_lopen with OF_WRITE alone opens for writing only', ()=>{
+    const { files, error, fns, at, memory } = setup();
+    files.put('C:\\GAME\\W.TXT', 'text');
+    const handle = fns._lopen.handler([at(NAME, 'C:\\GAME\\W.TXT'), 1]);
+    assert.notEqual(handle, HFILE_ERROR);
+    assert.equal(fns._lread.handler([handle, BUFFER, 1]), HFILE_ERROR);
+    assert.equal(error.code, ERROR_ACCESS_DENIED);
+    memory.putString(BUFFER, 'new!');
+    assert.equal(fns._lwrite.handler([handle, BUFFER, 4]), 4);
+});

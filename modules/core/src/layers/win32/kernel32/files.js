@@ -2217,6 +2217,8 @@ export function createFileFunctions(host){
             handler: ([name, mode])=>{
                 const path = pathArgument(name);
                 const write = (mode & OF_READWRITE) !== 0 || (mode & OF_WRITE) !== 0;
+                // OF_WRITE alone is write-only: a read through it is refused.
+                const read = (mode & (OF_READWRITE | OF_WRITE)) !== OF_WRITE;
                 const entry = files.stat(path);
                 if (!entry || !entry.exists)
                 {
@@ -2226,13 +2228,13 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
                 }
-                const node = files.open(path, { read: true, write, create: false });
+                const node = files.open(path, { read, write, create: false });
                 if (!node)
                 {
                     return fail(denied(path), HFILE_ERROR);
                 }
                 host.setLastError(ERROR_SUCCESS);
-                return host.handles.open('file', { path, node, read: true, write, position: 0 });
+                return host.handles.open('file', { path, node, read, write, position: 0 });
             },
         },
 
@@ -2277,6 +2279,10 @@ export function createFileFunctions(host){
                 if (!file)
                 {
                     return fail(ERROR_INVALID_HANDLE, HFILE_ERROR);
+                }
+                if (!file.read)
+                {
+                    return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
                 }
                 const bytes = files.read(file.node, file.position, count >>> 0);
                 // A bundle-backed volume can answer with a promise. This family
