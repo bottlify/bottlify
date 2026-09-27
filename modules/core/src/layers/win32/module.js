@@ -206,6 +206,9 @@ export function createWin32Module(){
             // replacement to survive; a caller with nothing to carry across a
             // rebuild gets one that does not.
             const namedObjects = createNamedObjects({ table: config?.namedObjects });
+            // What GetCurrentProcessId answers: a child is the process its parent
+            // was told of in PROCESS_INFORMATION, not a second copy of the first.
+            const processId = (config?.processId ?? 0x1000) >>> 0;
 
             /** @type {Record<string, Record<string, any>>} */
             let libraries = {};
@@ -1022,7 +1025,7 @@ export function createWin32Module(){
                         // first time a thread is made, because registering it costs
                         // a stub and a build that never makes a thread needs none.
                         threadReturn: ()=>threadReturnAddress(),
-                        processId: 0x1000,
+                        processId,
                         imagePath: ()=>modules.imagePath(),
                         divergence: config?.divergence,
                         // Every thread gets a block of its own, made by whoever
@@ -1069,6 +1072,7 @@ export function createWin32Module(){
                     }),
                     ...createProcessFunctions({
                         readMemory,
+                        processId,
                         writeMemory,
                         readCString,
                         readWideString,
@@ -1247,6 +1251,7 @@ export function createWin32Module(){
                     }),
                     ...createSpawnFunctions({
                         kernel,
+                        processId,
                         readMemory,
                         writeMemory,
                         readCString,
@@ -1638,6 +1643,7 @@ export function createWin32Module(){
 
                 'USER32.dll': createWindowFunctions({
                     readMemory,
+                    processId,
                     writeMemory,
                     readCString,
                     // wvsprintfA reads a `va_list` window too, clamped the same way.

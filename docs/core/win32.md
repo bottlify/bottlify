@@ -1218,6 +1218,8 @@ Stated as the code states them.
   runs it (its own children the same way), copies back the files it wrote and the registry as it
   left it -- the parent's with the child's changes -- and wakes the wait with `WAIT_OBJECT_0` (or
   the child's place in the set); `GetExitCodeProcess` then answers the child's exit code.
+  The child's `GetCurrentProcessId` (and the TEB's process field and `GetWindowThreadProcessId`)
+  answers the `dwProcessId` its parent was handed; the first process is `0x1000`.
   `childWaitedOn`/`childExited`/`refreshWindows` on the win32 API are that seam. A parent that
   exits, is idle for another reason, or waits for *all* of a set holding a child is replaced by the
   child as before. While the child runs nothing of the parent's does -- no time passes for it, so a
