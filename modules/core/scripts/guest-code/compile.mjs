@@ -73,6 +73,23 @@
  * wanted. There is no double arithmetic: under a program's single-precision
  * control word the x87 would not compute what JavaScript does.
  *
+ * Integer variables and parameters live in registers where they pay: the
+ * function is compiled twice, the first time to count each variable's uses
+ * (a use inside a loop weighing eight times one outside it), the second with
+ * the heaviest in registers -- EDX, which costs nothing to take, then EBX,
+ * ESI, EDI and EBP, which are saved and put back. A register the code needs for
+ * itself is not given: EDX to a variable in scope across a call of the
+ * guest (the callee may change it) or in a function that copies, EBX where
+ * the function reads a table (its base), ESI and EDI where it copies or
+ * fills. EAX and ECX are the expressions' own; a load a variable is given
+ * is made into the variable's register. The frame -- the variables left in
+ * it, the parameters above it -- is addressed from ESP, the bytes an
+ * expression has pushed counted in, so EBP is free to be given; its size and
+ * the registers saved above it are what a second compilation found, and a
+ * third emits the code. The one x87 parameter of a function that reads it
+ * once, before anything else touches the x87 stack or jumps, stays where the
+ * caller left it, in ST0, until that read.
+ *
  * A module-level constant is folded in. A module-level `Uint8Array`,
  * `Int8Array`, `Uint16Array`, `Int16Array`, `Uint32Array` or `Int32Array`
  * the module exports is a table: its contents when the module is imported
@@ -83,7 +100,7 @@
 
 import * as espree from 'espree';
 import {
-    ALU, Assembler, CC, EAX, EBX, ECX, EDI, ESI, ESP, fitsByte, frame, invert, le32, memory,
+    ALU, Assembler, CC, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, fitsByte, invert, le32, memory,
 } from './x86.mjs';
 
 /**
@@ -112,8 +129,22 @@ import {
  * @typedef {Object} Variable
  * @property {string} name
  * @property {'i32' | 'u32' | 'nat' | 'f64'} type
- * @property {number} disp     From EBP.
+ * @property {number} disp     From EBP, for one in the frame.
+ * @property {number} [reg]    The register it lives in instead.
  * @property {boolean} mutable
+ * @property {any} [key]       The node that declares it: what its uses are counted by.
+ * @property {boolean} [onStack]  An x87 parameter left in ST0 until its one read.
+ */
+
+/**
+ * What the first compilation of a function tells the second.
+ *
+ * @typedef {Object} Plan
+ * @property {Map<any, number>} registers  Each variable given one, by the node declaring it.
+ * @property {boolean} keepX87             The x87 parameter stays in ST0 until it is read.
+ * @property {{ locals: number, saved: number }} [frame]
+ *     The bytes of variables in the frame and the registers saved above it,
+ *     once a compilation with the registers has found them.
  */
 
 /**
@@ -178,6 +209,12 @@ const ROUNDING = /** @type {Record<string, number>} */ ({ floor: 0x04, ceil: 0x0
 /** How many x87 registers an expression may hold at once. */
 const X87_DEPTH = 7;
 
+/** The registers a callee keeps for its caller, and so saves to use. */
+const CALLEE_SAVED = new Set([EBX, ESI, EDI, EBP]);
+
+/** How much more a use inside a loop weighs than one outside it, per level. */
+const LOOP_WEIGHT = 8;
+
 /** @param {number} value @returns {Type} */
 function constType(value){
     if (!Number.isInteger(value) || Object.is(value, -0))
@@ -201,6 +238,17 @@ function constType(value){
 
 /** Brought back to 32 bits. @param {Type} type */
 const isTyped = type=>type === 'i32' || type === 'u32' || type === 'nat';
+
+/** The load of a table's entry: `mov`, or `movzx`/`movsx` of its width. @param {TableInfo} table */
+const tableOp = table=>(table.size === 4 ? [0x8b]
+    : table.size === 2 ? [0x0f, table.signed ? 0xbf : 0xb7] : [0x0f, table.signed ? 0xbe : 0xb6]);
+
+/** `[ebx + index * size]`'s SIB. @param {TableInfo} table @param {number} index */
+const tableSib = (table, index)=>(table.size === 1 ? 0 : table.size === 2 ? 1 : 2) << 6
+    | index << 3 | EBX;
+
+/** What an entry is. @param {TableInfo} table @returns {Type} */
+const tableType = table=>(table.signed ? 'i32' : table.size === 4 ? 'u32' : 'nat');
 
 /**
  * The module's view the compiler needs: what each top-level name is.
@@ -306,7 +354,17 @@ export function compileModule(text, { file, values = {} }){
             scope.tables.set(name, { name, bytes, size, signed });
         }
     }
-    return marked.map(({ node, doc })=>new FunctionCompiler(scope, node, doc).compile());
+    return marked.map(({ node, doc })=>{
+        // Once to count the uses, once with the registers they earn to find
+        // the frame that leaves, and once to address it.
+        const first = new FunctionCompiler(scope, node, doc, null);
+        first.compile();
+        const plan = first.plan();
+        const second = new FunctionCompiler(scope, node, doc, plan);
+        second.compile();
+        return new FunctionCompiler(scope, node, doc, { ...plan, frame: second.frame() })
+            .compile();
+    });
 }
 
 /** A function whose body is a single `return` of an expression, or an expression arrow. @param {any} node */
@@ -348,8 +406,11 @@ function fail(scope, node, message){
 }
 
 class FunctionCompiler {
-    /** @param {ModuleScope} scope @param {any} node @param {string} doc */
-    constructor(scope, node, doc){
+    /**
+     * @param {ModuleScope} scope @param {any} node @param {string} doc
+     * @param {Plan | null} planned  Null for the first compilation, which counts.
+     */
+    constructor(scope, node, doc, planned){
         this.scope = scope;
         this.node = node;
         this.doc = doc;
@@ -375,6 +436,46 @@ class FunctionCompiler {
         /** @type {Variable[]} */
         this.x87 = [];
         this.inlining = 0;
+        this.planned = planned;
+        /** @type {Map<any, number>} Each variable's uses, weighed by the loops around them. */
+        this.weights = new Map();
+        /** @type {Set<any>} The parameters among them, which cost a load to put in a register. */
+        this.params = new Set();
+        this.depth = 0;
+        this.peeking = 0;
+        /** The bytes expression code has pushed where the next instruction goes. */
+        this.pushed = 0;
+        this.calls = false;
+        this.bulkUsed = false;
+        /** @type {Set<any>} The variables in scope, and those among them a call was made in. */
+        this.live = new Set();
+        /** @type {Set<any>} */
+        this.acrossCalls = new Set();
+        /** @type {Set<any>} The variables a byte is stored from, better in a register with one. */
+        this.byteStored = new Set();
+        /**
+         * The load just emitted into EAX, while it is the last instruction:
+         * what a store into a register variable can aim at the register.
+         *
+         * @type {{ item: { bytes: number[] }, modrm: number, length: number, count: number }
+         *     | null}
+         */
+        this.loaded = null;
+        this.frameUsed = false;
+        // The x87 parameter's reads, and whether the one read found it in
+        // ST0 with nothing done before -- no double pushed, no jump, no call.
+        this.x87Reads = 0;
+        this.x87Clean = true;
+        this.x87ReadClean = false;
+        this.x87Stored = false;
+        this.x87Consumed = false;
+        for (const reg of planned?.registers.values() ?? [])
+        {
+            if (CALLEE_SAVED.has(reg))
+            {
+                this.saves.add(reg);
+            }
+        }
     }
 
     /** @param {any} node @param {string} message @returns {never} */
@@ -430,6 +531,8 @@ class FunctionCompiler {
         const types = [];
         /** @type {Variable[]} */
         const x87 = [];
+        /** @type {Variable[]} */
+        const inRegisters = [];
         let stack = 8;
         for (const param of params)
         {
@@ -445,14 +548,33 @@ class FunctionCompiler {
             types.push(/** @type {ParamType} */ (type));
             if (type === 'x87')
             {
-                const v = this.declare(param, param.name, 'f64', true);
+                /** @type {Variable} */
+                const v = this.planned?.keepX87
+                    ? { name: param.name, type: 'f64', disp: 0, mutable: true, key: param,
+                        onStack: true }
+                    : this.newVariable(param.name, 'f64', true, param);
+                this.bind(param, v);
                 x87.push(v);
                 this.x87.push(v);
                 continue;
             }
-            this.bind(param, { name: param.name, type: /** @type {'i32' | 'u32' | 'f64'} */ (type),
-                disp: stack, mutable: true });
+            /** @type {Variable} */
+            const v = { name: param.name, type: /** @type {'i32' | 'u32' | 'f64'} */ (type),
+                disp: stack, mutable: true, key: param };
+            const reg = type === 'f64' ? undefined : this.planned?.registers.get(param);
+            if (reg !== undefined)
+            {
+                v.reg = reg;
+                inRegisters.push(v);
+            }
+            this.params.add(param);
+            this.live.add(param);
+            this.bind(param, v);
             stack += type === 'f64' ? 8 : 4;
+        }
+        if (x87.some(v=>v.onStack))
+        {
+            this.fpu = 1;
         }
 
         this.statements(node.body.body);
@@ -466,45 +588,56 @@ class FunctionCompiler {
             this.a.items.pop();
         }
 
+        this.checkPlan();
         const out = new Assembler();
-        out.emit(0x55, 0x89, 0xe5);                          // push ebp; mov ebp, esp
-        if (this.tables.size > 0)
+        const saved = [EBX, ESI, EDI, EBP].filter(reg=>this.saves.has(reg));
+        const planned = this.planned?.frame;
+        if (planned && (planned.locals !== this.locals || planned.saved !== saved.length))
         {
-            this.saves.add(EBX);
+            throw new Error(`guest code: ${name}'s frame is not the one it was addressed as`);
         }
-        const saved = [EBX, ESI, EDI].filter(reg=>this.saves.has(reg));
+        // The saved registers, then the variables below them: the frame from
+        // ESP up, the parameters above the return address.
+        for (const reg of saved)
+        {
+            out.emit(0x50 | reg);
+        }
         if (this.locals > 0)
         {
             out.emit(...fitsByte(this.locals)
                 ? [0x83, 0xec, this.locals] : [0x81, 0xec, ...le32(this.locals)]);
-        }
-        for (const reg of saved)
-        {
-            out.emit(0x50 | reg);
         }
         if (this.tables.size > 0)
         {
             // The address of the pop, which every table is reached from.
             out.emit(0xe8, 0, 0, 0, 0).label('picBase').emit(0x5b);
         }
-        // The last x87 parameter is ST0: each popped into its variable.
+        for (const v of inRegisters)
+        {
+            out.emit(0x8b, ...memory(/** @type {number} */ (v.reg), {    // mov reg, the parameter
+                base: ESP, disp: this.locals + saved.length * 4 + v.disp - 4 }));
+        }
+        // The last x87 parameter is ST0: each popped into its variable, but
+        // one read where it is.
         for (const v of [...x87].reverse())
         {
-            out.emit(0xdd, ...frame(3, v.disp));
+            if (!v.onStack)
+            {
+                out.emit(0xdd, ...memory(3, { base: ESP, disp: this.locals + v.disp }));
+            }
         }
         out.append(this.a);
-        /** The frame taken down: ESP, EBP and the saved registers as the caller left them. */
+        /** The frame taken down: ESP and the saved registers as the caller left them. */
         const takeDown = ()=>{
-            if (saved.length > 0)
+            if (this.locals > 0)
             {
-                const below = -(this.locals + saved.length * 4);
-                out.emit(0x8d, ...frame(ESP, below));         // lea esp, [ebp - ...]
-                for (const reg of [...saved].reverse())
-                {
-                    out.emit(0x58 | reg);
-                }
+                out.emit(...fitsByte(this.locals)
+                    ? [0x83, 0xc4, this.locals] : [0x81, 0xc4, ...le32(this.locals)]);
             }
-            out.emit(0xc9);                                   // leave
+            for (const reg of [...saved].reverse())
+            {
+                out.emit(0x58 | reg);
+            }
         };
         out.label(this.epilogue);
         takeDown();
@@ -545,23 +678,188 @@ class FunctionCompiler {
     }
 
     /**
-     * A variable in the frame.
+     * A variable of this scope: in the register the plan gives it, or in the frame.
      *
      * @param {any} node @param {string} name @param {Variable['type']} type
      * @param {boolean} mutable
      */
     declare(node, name, type, mutable){
-        const size = type === 'f64' ? 8 : 4;
-        this.locals = Math.ceil((this.locals + size) / size) * size;
-        /** @type {Variable} */
-        const v = { name, type, disp: -this.locals, mutable };
         const top = this.scopes[this.scopes.length - 1];
         if (this.lookupLocal(name) !== undefined)
         {
             this.fail(node, `${name} is declared twice`);
         }
+        const v = this.newVariable(name, type, mutable, node);
         top.set(name, v);
         return v;
+    }
+
+    /**
+     * A variable bound to no name yet, placed.
+     *
+     * @param {string} name @param {Variable['type']} type @param {boolean} mutable
+     * @param {any} key  The node it is counted and planned by.
+     * @returns {Variable}
+     */
+    newVariable(name, type, mutable, key){
+        this.live.add(key);
+        const reg = type === 'f64' ? undefined : this.planned?.registers.get(key);
+        if (reg !== undefined)
+        {
+            return { name, type, disp: 0, reg, mutable, key };
+        }
+        const size = type === 'f64' ? 8 : 4;
+        this.locals = Math.ceil((this.locals + size) / size) * size;
+        return { name, type, disp: -this.locals, mutable, key };
+    }
+
+    // --- registers -------------------------------------------------------
+
+    /**
+     * Counts a use of a variable, the first time through.
+     *
+     * @param {Variable} v
+     */
+    use(v){
+        if (this.planned === null && this.peeking === 0 && v.key !== undefined)
+        {
+            this.weights.set(v.key, (this.weights.get(v.key) ?? 0)
+                + LOOP_WEIGHT ** Math.min(this.depth, 6));
+        }
+    }
+
+    /**
+     * The ModRM (and displacement) naming a variable, with `field` in the reg
+     * field: its register, or its slot in the frame.
+     *
+     * @param {number} field @param {Variable} v
+     * @returns {number[]}
+     */
+    rm(field, v){
+        this.use(v);
+        return v.reg !== undefined ? [0xc0 | field << 3 | v.reg] : this.frameAt(field, v.disp);
+    }
+
+    /**
+     * A variable or parameter in the frame, from ESP: `disp` below the frame's
+     * top for a variable, above the return address (less four) for a
+     * parameter, as EBP would have named them.
+     *
+     * @param {number} field @param {number} disp
+     */
+    frameAt(field, disp){
+        this.frameUsed = true;
+        const { locals, saved } = this.planned?.frame ?? { locals: 0, saved: 0 };
+        const offset = disp < 0 ? locals + disp : locals + saved * 4 + disp - 4;
+        return memory(field, { base: ESP, disp: this.pushed + offset });
+    }
+
+    /** What this compilation left in the frame, and saved above it. */
+    frame(){
+        return {
+            locals: this.locals,
+            saved: [EBX, ESI, EDI, EBP].filter(reg=>this.saves.has(reg)).length,
+        };
+    }
+
+    /** Expression code pushed (or popped, negative) `bytes`. @param {number} bytes */
+    grew(bytes){
+        this.pushed += bytes;
+    }
+
+    /** The register a node names, when it is a variable that has one. @param {any} node */
+    registerOf(node){
+        const value = this.simple(node);
+        return value?.where === 'var' ? value.v.reg : undefined;
+    }
+
+    /**
+     * What the first compilation found: the variables that earn a register,
+     * heaviest first, each given the cheapest one still free that its uses
+     * pay for, and whether the x87 parameter can stay where it is.
+     *
+     * @returns {Plan}
+     */
+    plan(){
+        /** @type {{ reg: number, cost: number }[]} */
+        const free = [];
+        if (!this.bulkUsed)
+        {
+            free.push({ reg: EDX, cost: 0 });
+        }
+        if (this.tables.size === 0)
+        {
+            free.push({ reg: EBX, cost: 2 });
+        }
+        if (!this.bulkUsed)
+        {
+            free.push({ reg: ESI, cost: 2 }, { reg: EDI, cost: 2 });
+        }
+        free.push({ reg: EBP, cost: 2 });
+        /** @type {Map<any, number>} */
+        const registers = new Map();
+        const heaviest = [...this.weights].sort((left, right)=>right[1] - left[1]);
+        for (const [key, weight] of heaviest)
+        {
+            const load = this.params.has(key) ? 1 : 0;
+            const at = free.findIndex(({ reg, cost })=>weight > cost + load
+                && (reg !== EDX || !this.acrossCalls.has(key)));
+            if (at >= 0)
+            {
+                registers.set(key, free[at].reg);
+                free.splice(at, 1);
+            }
+        }
+        return {
+            registers: this.arrange(registers),
+            keepX87: this.x87.length === 1 && this.x87Reads === 1 && this.x87ReadClean
+                && !this.x87Stored,
+        };
+    }
+
+    /**
+     * The same registers dealt again so that a variable a byte is stored from
+     * has one with a low byte (EDX or EBX; ESI, EDI and EBP have none), the
+     * others taking ESI, EDI and EBP first -- and EDX never to a variable in scope
+     * across a call. As they were, when that cannot be done.
+     *
+     * @param {Map<any, number>} registers
+     */
+    arrange(registers){
+        const pool = new Set(registers.values());
+        const order = [...registers.keys()].sort((left, right)=>
+            Number(this.acrossCalls.has(right)) - Number(this.acrossCalls.has(left)));
+        /** @type {Map<any, number>} */
+        const dealt = new Map();
+        for (const key of order)
+        {
+            const preference = this.byteStored.has(key) ? [EDX, EBX, ESI, EDI, EBP]
+                : [ESI, EDI, EBP, EBX, EDX];
+            const reg = preference.find(candidate=>pool.has(candidate)
+                && (candidate !== EDX || !this.acrossCalls.has(key)));
+            if (reg === undefined)
+            {
+                return registers;
+            }
+            dealt.set(key, reg);
+            pool.delete(reg);
+        }
+        return dealt;
+    }
+
+    /** The second compilation keeps the registers it was planned with to itself. */
+    checkPlan(){
+        const registers = this.planned?.registers ?? new Map();
+        const used = new Set(registers.values());
+        const clash = this.bulkUsed && used.has(EDX)
+            || [...registers].some(([key, reg])=>reg === EDX && this.acrossCalls.has(key))
+            || this.tables.size > 0 && used.has(EBX)
+            || this.bulkUsed && (used.has(ESI) || used.has(EDI));
+        if (clash)
+        {
+            throw new Error(`guest code: ${this.node.id.name} was planned a register its code `
+                + 'needs for itself');
+        }
     }
 
     /** @param {string} name */
@@ -677,6 +975,10 @@ class FunctionCompiler {
     /** @param {any} node */
     statement(node){
         const a = this.a;
+        if (this.pushed !== 0)
+        {
+            throw new Error(`guest code: ${this.pushed} bytes left pushed between statements`);
+        }
         switch (node.type)
         {
             case 'EmptyStatement':
@@ -684,7 +986,7 @@ class FunctionCompiler {
             case 'BlockStatement':
                 this.scopes.push(new Map());
                 this.statements(node.body);
-                this.scopes.pop();
+                this.popScope();
                 return;
             case 'VariableDeclaration':
                 this.variables(node);
@@ -827,6 +1129,7 @@ class FunctionCompiler {
             }
         }
         const always = !node.test || node.test.type === 'Literal' && node.test.value === true;
+        this.depth++;
         if (node.type !== 'DoWhileStatement' && !always)
         {
             a.jump(-1, test);
@@ -850,7 +1153,16 @@ class FunctionCompiler {
             this.branch(node.test, top, true);
         }
         a.label(end);
-        this.scopes.pop();
+        this.depth--;
+        this.popScope();
+    }
+
+    /** Leaves a block: its variables go out of scope. */
+    popScope(){
+        for (const what of /** @type {Map<string, any>} */ (this.scopes.pop()).values())
+        {
+            this.live.delete(what.key);
+        }
     }
 
     /** @param {any} node */
@@ -918,21 +1230,80 @@ class FunctionCompiler {
      * @param {Variable} v @param {Value} value @param {any} node
      */
     store(v, value, node){
+        const a = this.a;
         if (v.type === 'f64')
         {
+            if (this.x87.includes(v))
+            {
+                this.x87Stored = true;
+            }
             this.toSt0(value, node);
-            this.a.emit(0xdd, ...frame(3, v.disp));        // fstp qword [v]
+            a.emit(0xdd, ...this.frameAt(3, v.disp));      // fstp qword [v]
             this.fpu--;
             return;
         }
         this.assignable(v, value.type, node);
+        if (value.where === 'imm' && v.reg !== undefined)
+        {
+            a.emit(...value.value === 0 ? [0x31, 0xc0 | v.reg << 3 | v.reg]   // xor reg, reg
+                : [0xb8 | v.reg, ...le32(value.value)]);                     // mov reg, imm
+            return;
+        }
         if (value.where === 'imm')
         {
-            this.a.emit(0xc7, ...frame(0, v.disp), ...le32(value.value));
+            a.emit(0xc7, ...this.rm(0, v), ...le32(value.value));
+            return;
+        }
+        if (value.where === 'var' && v.reg !== undefined)
+        {
+            a.emit(0x8b, ...this.rm(v.reg, value.v));                     // mov reg, [value]
+            return;
+        }
+        if (value.where === 'var' && value.v.reg !== undefined)
+        {
+            a.emit(0x89, ...this.rm(value.v.reg, v));                     // mov [v], reg
+            return;
+        }
+        if (value.where === 'eax' && v.reg !== undefined && this.retarget(v.reg))
+        {
             return;
         }
         this.toEax(value, node);
-        this.a.emit(0x89, ...frame(EAX, v.disp));
+        a.emit(0x89, ...this.rm(EAX, v));
+    }
+
+    /**
+     * Notes the load just emitted into EAX, whose ModRM ends `bytes` less
+     * `after` bytes from the end of what has been emitted.
+     *
+     * @param {number} tail  The bytes after its ModRM: SIB and displacement.
+     */
+    noteLoad(tail){
+        const items = this.a.items;
+        const at = items.length - 1 - (items[items.length - 1].kind === 'ref' ? 1 : 0);
+        const item = /** @type {{ kind: 'bytes', bytes: number[] }} */ (items[at]);
+        this.loaded = {
+            item, modrm: item.bytes.length - 1 - tail, length: item.bytes.length,
+            count: items.length,
+        };
+    }
+
+    /**
+     * Makes the load just emitted into EAX a load into `reg`, when it is still
+     * the last instruction.
+     *
+     * @param {number} reg
+     */
+    retarget(reg){
+        const loaded = this.loaded;
+        this.loaded = null;
+        if (!loaded || this.a.items.length !== loaded.count
+            || loaded.item.bytes.length !== loaded.length)
+        {
+            return false;
+        }
+        loaded.item.bytes[loaded.modrm] |= reg << 3;
+        return true;
     }
 
     /** @param {Variable} v @param {Type} type @param {any} node */
@@ -955,6 +1326,12 @@ class FunctionCompiler {
             case 'AssignmentExpression':
             {
                 const v = this.variable(node.left);
+                const inPlace = node.operator === '=' ? this.inPlace(v, node.right) : null;
+                if (inPlace !== null)
+                {
+                    this.effect(inPlace);
+                    return;
+                }
                 if (node.operator === '=')
                 {
                     this.store(v, this.expr(node.right), node.right);
@@ -983,12 +1360,19 @@ class FunctionCompiler {
                 {
                     if (value.where === 'imm')
                     {
-                        a.emit(0xc1, ...frame(shift, v.disp), value.value & 31);
+                        a.emit(0xc1, ...this.rm(shift, v), value.value & 31);
                         return;
                     }
-                    this.toEax(value, node.right);
-                    a.emit(0x89, 0xc1);                           // mov ecx, eax
-                    a.emit(0xd3, ...frame(shift, v.disp));        // shl/sar/shr [v], cl
+                    if (value.where === 'var')
+                    {
+                        a.emit(0x8b, ...this.rm(ECX, value.v));   // mov ecx, [count]
+                    }
+                    else
+                    {
+                        this.toEax(value, node.right);
+                        a.emit(0x89, 0xc1);                       // mov ecx, eax
+                    }
+                    a.emit(0xd3, ...this.rm(shift, v));           // shl/sar/shr [v], cl
                     return;
                 }
                 const alu = { '+': ALU.add, '-': ALU.sub, '|': ALU.or, '&': ALU.and,
@@ -996,12 +1380,22 @@ class FunctionCompiler {
                 if (value.where === 'imm')
                 {
                     const imm = value.value | 0;
-                    a.emit(...fitsByte(imm) ? [0x83, ...frame(alu, v.disp), imm & 0xff]
-                        : [0x81, ...frame(alu, v.disp), ...le32(imm)]);
+                    a.emit(...fitsByte(imm) ? [0x83, ...this.rm(alu, v), imm & 0xff]
+                        : [0x81, ...this.rm(alu, v), ...le32(imm)]);
+                    return;
+                }
+                if (value.where === 'var' && value.v.reg !== undefined)
+                {
+                    a.emit(alu << 3 | 1, ...this.rm(value.v.reg, v));   // op [v], reg
+                    return;
+                }
+                if (value.where === 'var' && v.reg !== undefined)
+                {
+                    a.emit(alu << 3 | 3, ...this.rm(v.reg, value.v));   // op reg, [value]
                     return;
                 }
                 this.toEax(value, node.right);
-                a.emit(alu << 3 | 1, ...frame(EAX, v.disp));      // op [v], eax
+                a.emit(alu << 3 | 1, ...this.rm(EAX, v));          // op [v], eax
                 return;
             }
             case 'UpdateExpression':
@@ -1011,7 +1405,7 @@ class FunctionCompiler {
                 {
                     this.fail(node, 'there is no double arithmetic in the subset');
                 }
-                a.emit(0xff, ...frame(node.operator === '++' ? 0 : 1, v.disp));
+                a.emit(0xff, ...this.rm(node.operator === '++' ? 0 : 1, v));
                 return;
             }
             case 'CallExpression':
@@ -1043,6 +1437,29 @@ class FunctionCompiler {
             default:
                 this.fail(node, `${describe(node)} as a statement is not in the subset`);
         }
+    }
+
+    /**
+     * `x = (x + y) | 0` and its kin -- `+` or `-` of the variable itself,
+     * brought back to the variable's own type -- as the `x += y` it is in 32
+     * bits, done in place; null for anything else.
+     *
+     * @param {Variable} v @param {any} right @returns {any}
+     */
+    inPlace(v, right){
+        const back = right.type === 'BinaryExpression' && (right.operator === '|'
+            || right.operator === '>>>') && this.fold(right.right) === 0;
+        const sum = back ? right.left : null;
+        if (v.type === 'f64' || v.type !== (right.operator === '|' ? 'i32' : 'u32')
+            || sum?.type !== 'BinaryExpression' || sum.operator !== '+' && sum.operator !== '-'
+            || sum.left.type !== 'Identifier' || this.lookupLocal(sum.left.name) !== v)
+        {
+            return null;
+        }
+        return {
+            type: 'AssignmentExpression', operator: `${sum.operator}=`, left: sum.left,
+            right: sum.right, loc: right.loc,
+        };
     }
 
     /** @param {any} node @returns {Variable} */
@@ -1190,8 +1607,15 @@ class FunctionCompiler {
                 ? 'a double is tested by a comparison'
                 : 'a sum is tested once it is brought back to 32 bits');
         }
-        this.toEax(value, node);
-        a.emit(0x85, 0xc0);                                        // test eax, eax
+        if (value.where === 'var' && value.v.reg !== undefined)
+        {
+            a.emit(0x85, 0xc0 | value.v.reg * 9);                  // test reg, reg
+        }
+        else
+        {
+            this.toEax(value, node);
+            a.emit(0x85, 0xc0);                                    // test eax, eax
+        }
         a.jump(when ? CC.ne : CC.e, target);
     }
 
@@ -1236,8 +1660,36 @@ class FunctionCompiler {
             return;
         }
         const signed = this.signedness(node, leftType, rightType);
-        const operand = this.pair(node.left, node.right);
-        this.alu(ALU.cmp, operand);
+        const left = this.simple(node.left);
+        const right = this.simple(node.right);
+        if (left?.where === 'var' && left.v.reg !== undefined && right !== null)
+        {
+            // A register compared as it stands, with no load into EAX.
+            const reg = left.v.reg;
+            this.integer(right, node.right, 'intish');
+            if (right.where === 'imm' && right.value === 0)
+            {
+                a.emit(0x85, 0xc0 | reg * 9);                              // test reg, reg
+            }
+            else if (right.where === 'imm')
+            {
+                const imm = right.value | 0;
+                a.emit(...fitsByte(imm) ? [0x83, 0xf8 | reg, imm & 0xff]
+                    : [0x81, 0xf8 | reg, ...le32(imm)]);                   // cmp reg, imm
+            }
+            else
+            {
+                a.emit(0x3b, ...this.rm(reg, right.v));                     // cmp reg, [right]
+            }
+        }
+        else if (left?.where === 'var' && right?.where === 'var' && right.v.reg !== undefined)
+        {
+            a.emit(0x39, ...this.rm(right.v.reg, left.v));                   // cmp [left], reg
+        }
+        else
+        {
+            this.alu(ALU.cmp, this.pair(node.left, node.right));
+        }
         /** @type {Record<string, number>} */
         const codes = signed
             ? { '<': CC.l, '<=': CC.le, '>': CC.g, '>=': CC.ge, '===': CC.e, '!==': CC.ne }
@@ -1283,7 +1735,19 @@ class FunctionCompiler {
         const tables = new Map(this.tables);
         const saves = new Set(this.saves);
         const scopes = this.scopes.map(scope=>new Map(scope));
-        const value = this.expr(node);
+        const { x87Consumed, x87Reads, x87ReadClean, x87Clean, frameUsed } = this;
+        this.peeking++;
+        /** @type {Value} */
+        let value;
+        try
+        {
+            value = this.expr(node);
+        }
+        finally
+        {
+            this.peeking--;
+        }
+        Object.assign(this, { x87Consumed, x87Reads, x87ReadClean, x87Clean, frameUsed });
         this.a.items.length = mark;
         if (last?.kind === 'bytes')
         {
@@ -1360,11 +1824,24 @@ class FunctionCompiler {
         const lv = this.expr(left);
         this.integer(lv, left, 'intish');
         this.toEax(lv, left);
+        const load = this.registerLoad(right);
+        if (load !== null)
+        {
+            // Nothing to make first: EAX stands while ECX is loaded.
+            load.emit(ECX);
+            return { right: { where: 'ecx', type: load.type }, leftType: lv.type };
+        }
         a.emit(0x50);                                                  // push eax
+        this.grew(4);
         const rv = this.expr(right);
         this.integer(rv, right, 'intish');
-        this.toEax(rv, right);
-        a.emit(0x89, 0xc1, 0x58);                                      // mov ecx, eax; pop eax
+        if (rv.where !== 'eax' || !this.retarget(ECX))
+        {
+            this.toEax(rv, right);
+            a.emit(0x89, 0xc1);                                        // mov ecx, eax
+        }
+        a.emit(0x58);                                                  // pop eax
+        this.grew(-4);
         return { right: { where: 'ecx', type: rv.type }, leftType: lv.type };
     }
 
@@ -1387,7 +1864,7 @@ class FunctionCompiler {
         }
         else if (right.where === 'var')
         {
-            a.emit(op << 3 | 3, ...frame(EAX, right.v.disp));
+            a.emit(op << 3 | 3, ...this.rm(EAX, right.v));
         }
         else
         {
@@ -1438,7 +1915,7 @@ class FunctionCompiler {
                 }
                 return;
             case 'var':
-                a.emit(0x8b, ...frame(EAX, value.v.disp));
+                a.emit(0x8b, ...this.rm(EAX, value.v));
                 return;
             default:
                 return;
@@ -1457,13 +1934,30 @@ class FunctionCompiler {
         {
             return;
         }
+        if (value.where === 'var' && value.v.onStack)
+        {
+            // In ST0 since the call, and counted there: this is its one read.
+            if (this.x87Consumed)
+            {
+                throw new Error(`guest code: ${value.v.name}, left in ST0, is read twice`);
+            }
+            this.x87Consumed = true;
+            return;
+        }
+        if (value.where === 'var' && this.x87.includes(value.v))
+        {
+            this.x87Reads++;
+            this.x87ReadClean = this.x87Reads === 1 && this.x87Clean && this.fpu === 0
+                && !this.a.items.some(item=>item.kind !== 'bytes');
+        }
+        this.x87Clean = false;
         if (++this.fpu > X87_DEPTH)
         {
             this.fail(node, 'the expression holds more doubles at once than the x87 has room for');
         }
         if (value.where === 'var' && value.type === 'f64')
         {
-            a.emit(0xdd, ...frame(0, value.v.disp));                    // fld qword [v]
+            a.emit(0xdd, ...this.frameAt(0, value.v.disp));             // fld qword [v]
             return;
         }
         if (value.where === 'imm')
@@ -1639,6 +2133,10 @@ class FunctionCompiler {
                 const folded = op === '|' ? value.value | 0 : value.value >>> 0;
                 return { where: 'imm', type: constType(folded), value: folded };
             }
+            if (value.where === 'var')
+            {
+                return { where: 'var', type: op === '|' ? 'i32' : 'u32', v: value.v };
+            }
             this.toEax(value, node.left);
             return { where: 'eax', type: op === '|' ? 'i32' : 'u32' };
         }
@@ -1677,7 +2175,7 @@ class FunctionCompiler {
                     const { right } = this.pair(node.left, node.right);
                     if (right.where === 'var')
                     {
-                        a.emit(0x8b, ...frame(ECX, right.v.disp));        // mov ecx, [count]
+                        a.emit(0x8b, ...this.rm(ECX, right.v));          // mov ecx, [count]
                     }
                     a.emit(0xd3, 0xc0 | digit << 3);                     // shl/sar/shr eax, cl
                 }
@@ -1729,7 +2227,7 @@ class FunctionCompiler {
                 }
                 else if (right.where === 'var')
                 {
-                    a.emit(0x0f, 0xaf, ...frame(EAX, right.v.disp));
+                    a.emit(0x0f, 0xaf, ...this.rm(EAX, right.v));
                 }
                 else
                 {
@@ -1777,6 +2275,7 @@ class FunctionCompiler {
                 const operand = this.address(node.arguments[0]);
                 if (load.type === 'f64')
                 {
+                    this.x87Clean = false;
                     if (++this.fpu > X87_DEPTH)
                     {
                         this.fail(node, 'the expression holds more doubles at once than the x87 '
@@ -1785,7 +2284,9 @@ class FunctionCompiler {
                     a.emit(...load.op, ...memory(0, operand));
                     return { where: 'st0', type: 'f64' };
                 }
-                a.emit(...load.op, ...memory(EAX, operand));
+                const modrm = memory(EAX, operand);
+                a.emit(...load.op, ...modrm);
+                this.noteLoad(modrm.length - 1);
                 return { where: 'eax', type: load.type };
             }
             if (name === 'call')
@@ -1862,21 +2363,18 @@ class FunctionCompiler {
             {
                 this.fail(argument, 'an argument is brought back to 32 bits');
             }
-            const type = value.type;
-            const size = type === 'f64' ? 8 : 4;
-            this.locals = Math.ceil((this.locals + size) / size) * size;
-            /** @type {Variable} */
-            const v = { name: param.name, type, disp: -this.locals, mutable: false };
-            if (type === 'f64')
+            // Keyed by the argument: each place a function is inlined has its own.
+            const v = this.newVariable(param.name,
+                /** @type {Variable['type']} */ (value.type), false, argument);
+            if (v.type === 'f64')
             {
                 this.toSt0(value, argument);
-                this.a.emit(0xdd, ...frame(3, v.disp));
+                this.a.emit(0xdd, ...this.frameAt(3, v.disp));
                 this.fpu--;
             }
             else
             {
-                this.toEax(value, argument);
-                this.a.emit(0x89, ...frame(EAX, v.disp));
+                this.store(v, value, argument);
             }
             bound.set(param.name, v);
         });
@@ -1892,52 +2390,155 @@ class FunctionCompiler {
         {
             this.inlining--;
             this.scopes = saved;
+            for (const argument of node.arguments)
+            {
+                this.live.delete(argument);
+            }
         }
     }
 
     /**
-     * Emits an address into EAX (and ECX, for a sum of two values) and
-     * answers the memory operand that names it.
+     * The memory operand of an address made of variables in registers and a
+     * constant, with nothing to emit first; null for any other.
+     *
+     * @param {any} node @returns {import('./x86.mjs').Memory | null}
+     */
+    registerAddress(node){
+        let disp = 0;
+        let inner = node;
+        while (inner.type === 'BinaryExpression' && (inner.operator === '+'
+            || inner.operator === '-'))
+        {
+            const constant = this.fold(inner.right);
+            if (constant === undefined || !Number.isInteger(constant)
+                || Math.abs(constant) >= 2 ** 31)
+            {
+                break;
+            }
+            disp = disp + (inner.operator === '+' ? constant : -constant) | 0;
+            inner = inner.left;
+        }
+        if (inner.type === 'BinaryExpression' && inner.operator === '+')
+        {
+            const left = this.registerOf(inner.left);
+            const right = this.registerOf(inner.right);
+            return left !== undefined && right !== undefined
+                ? { base: left, index: right, disp } : null;
+        }
+        const reg = this.registerOf(inner);
+        return reg === undefined ? null : { base: reg, disp };
+    }
+
+    /**
+     * An integer load -- a helper's, or a table's by an index in a register
+     * -- that can be made into any register with nothing emitted before it:
+     * its opcode, the ModRM for a destination, and its type. Null for anything
+     * else.
+     *
+     * @param {any} node
+     * @returns {{ emit: (reg: number) => void, type: Type } | null}
+     */
+    registerLoad(node){
+        const a = this.a;
+        if (node.type === 'CallExpression' && node.callee.type === 'Identifier'
+            && this.helpers.has(node.callee.name) && Object.hasOwn(LOADS, node.callee.name)
+            && LOADS[node.callee.name].type !== 'f64' && node.arguments.length === 1)
+        {
+            const operand = this.registerAddress(node.arguments[0]);
+            const load = LOADS[node.callee.name];
+            return operand === null ? null : {
+                emit: reg=>void a.emit(...load.op, ...memory(reg, operand)), type: load.type,
+            };
+        }
+        const table = node.type === 'MemberExpression' && node.computed
+            && node.object.type === 'Identifier' && this.lookupLocal(node.object.name) === undefined
+            ? this.scope.tables.get(node.object.name) : undefined;
+        if (table === undefined)
+        {
+            return null;
+        }
+        const { index, addend } = this.tableIndex(node, table);
+        const at = this.registerOf(index);
+        if (at === undefined)
+        {
+            return null;
+        }
+        this.tables.set(table.name, table);
+        this.saves.add(EBX);
+        return {
+            emit: reg=>void a.emit(...tableOp(table), 0x84 | reg << 3, tableSib(table, at))
+                .ref(table.name, addend),
+            type: tableType(table),
+        };
+    }
+
+    /**
+     * Answers the memory operand that names an address: the variables that
+     * are in registers named as they are, the rest emitted into EAX (and
+     * ECX), and the constants added or taken away the displacement.
      *
      * @param {any} node @returns {import('./x86.mjs').Memory}
      */
     address(node){
         const a = this.a;
-        if (node.type === 'BinaryExpression' && (node.operator === '+' || node.operator === '-'))
+        let disp = 0;
+        let inner = node;
+        while (inner.type === 'BinaryExpression' && (inner.operator === '+'
+            || inner.operator === '-'))
         {
-            const constant = this.fold(node.right);
-            if (constant !== undefined && Math.abs(constant) < 2 ** 31)
+            const constant = this.fold(inner.right);
+            if (constant === undefined || !Number.isInteger(constant)
+                || Math.abs(constant) >= 2 ** 31)
             {
-                const value = this.expr(node.left);
-                this.integer(value, node.left, 'intish');
-                this.toEax(value, node.left);
-                return { base: EAX, disp: node.operator === '+' ? constant : -constant };
+                break;
             }
-            if (node.operator === '+')
-            {
-                this.pair(node.left, node.right);
-                const r = this.simple(node.right);
-                if (r !== null)
-                {
-                    if (r.where === 'imm')
-                    {
-                        return { base: EAX, disp: r.value | 0 };
-                    }
-                    a.emit(0x8b, ...frame(ECX, /** @type {Variable} */ (
-                        /** @type {any} */ (r).v).disp));
-                }
-                return { base: EAX, index: ECX };
-            }
+            // An address wraps at 2^32, as the helpers' does.
+            disp = disp + (inner.operator === '+' ? constant : -constant) | 0;
+            inner = inner.left;
         }
-        const value = this.expr(node);
-        this.integer(value, node, 'intish');
-        this.toEax(value, node);
-        return { base: EAX };
+        if (inner.type === 'BinaryExpression' && inner.operator === '+')
+        {
+            const left = this.registerOf(inner.left);
+            const right = this.registerOf(inner.right);
+            if (left !== undefined && right !== undefined)
+            {
+                return { base: left, index: right, disp };
+            }
+            if (left !== undefined || right !== undefined)
+            {
+                // The other part into EAX: nothing in it can change a register.
+                const other = left !== undefined ? inner.right : inner.left;
+                const value = this.expr(other);
+                this.integer(value, other, 'intish');
+                this.toEax(value, other);
+                return { base: EAX, index: /** @type {number} */ (left ?? right), disp };
+            }
+            const { right: operand } = this.pair(inner.left, inner.right);
+            if (operand.where === 'imm')
+            {
+                return { base: EAX, disp: disp + operand.value | 0 };
+            }
+            if (operand.where === 'var')
+            {
+                a.emit(0x8b, ...this.rm(ECX, operand.v));                  // mov ecx, [right]
+            }
+            return { base: EAX, index: ECX, disp };
+        }
+        const reg = this.registerOf(inner);
+        if (reg !== undefined)
+        {
+            return { base: reg, disp };
+        }
+        const value = this.expr(inner);
+        this.integer(value, inner, 'intish');
+        this.toEax(value, inner);
+        return { base: EAX, disp };
     }
 
     /** @param {any} node @returns {Value} */
     tableLoad(node){
         const a = this.a;
+        this.saves.add(EBX);
         if (!node.computed || node.object.type !== 'Identifier')
         {
             this.fail(node, 'a member is read only from a table, by index');
@@ -1949,6 +2550,26 @@ class FunctionCompiler {
                 + 'array');
         }
         this.tables.set(table.name, table);
+        const { index, addend } = this.tableIndex(node, table);
+        const value = this.expr(index);
+        this.integer(value, index, 'intish');
+        const at = value.where === 'var' && value.v.reg !== undefined ? value.v.reg : EAX;
+        if (at === EAX)
+        {
+            this.toEax(value, index);
+        }
+        // op eax, [ebx + index*scale + disp32]
+        a.emit(...tableOp(table), 0x84, tableSib(table, at)).ref(table.name, addend);
+        this.noteLoad(1);
+        return { where: 'eax', type: tableType(table) };
+    }
+
+    /**
+     * A table read's index, and a constant added to it as the bytes it moves.
+     *
+     * @param {any} node @param {TableInfo} table
+     */
+    tableIndex(node, table){
         let index = node.property;
         let addend = 0;
         if (index.type === 'BinaryExpression' && (index.operator === '+' || index.operator === '-'))
@@ -1960,46 +2581,38 @@ class FunctionCompiler {
                 index = index.left;
             }
         }
-        const value = this.expr(index);
-        this.integer(value, index, 'intish');
-        this.toEax(value, index);
-        const scale = table.size;
-        const sib = (scale === 1 ? 0 : scale === 2 ? 1 : 2) << 6 | EAX << 3 | EBX;
-        /** @type {number[]} */
-        let op;
-        if (scale === 4)
-        {
-            op = [0x8b];
-        }
-        else if (scale === 2)
-        {
-            op = table.signed ? [0x0f, 0xbf] : [0x0f, 0xb7];
-        }
-        else
-        {
-            op = table.signed ? [0x0f, 0xbe] : [0x0f, 0xb6];
-        }
-        // op eax, [ebx + eax*scale + disp32]
-        a.emit(...op, 0x84, sib).ref(table.name, addend);
-        const type = table.signed ? 'i32' : scale === 4 ? 'u32' : 'nat';
-        return { where: 'eax', type };
+        return { index, addend };
     }
 
     /** @param {any} node @param {string} name */
     storeCall(node, name){
         const a = this.a;
         this.arity(node, 2);
+        const stored = this.simple(node.arguments[1]);
+        if (name === 'setU8' && stored?.where === 'var')
+        {
+            this.byteStored.add(stored.v.key);
+        }
         const operand = this.address(node.arguments[0]);
+        const scratch = [operand.base, operand.index].some(reg=>reg === EAX || reg === ECX);
+        if (!scratch)
+        {
+            // Named by registers the value cannot change: stored where it is.
+            this.storeTo(operand, node.arguments[1], name);
+            return;
+        }
         if (operand.index !== undefined)
         {
-            a.emit(0x01, 0xc8);                                            // add eax, ecx
+            a.emit(0x8d, ...memory(EAX, { base: operand.base, index: operand.index })); // lea
         }
         a.emit(0x50);                                                      // push eax
+        this.grew(4);
         const value = this.expr(node.arguments[1]);
         if (name === 'setF64')
         {
             this.toSt0(value, node.arguments[1]);
             a.emit(0x59);                                                  // pop ecx
+            this.grew(-4);
             a.emit(0xdd, ...memory(3, { base: ECX, disp: operand.disp ?? 0 }));
             this.fpu--;
             return;
@@ -2007,7 +2620,45 @@ class FunctionCompiler {
         this.integer(value, node.arguments[1], 'intish');
         this.toEax(value, node.arguments[1]);
         a.emit(0x59);                                                      // pop ecx
+        this.grew(-4);
         a.emit(...STORES[name], ...memory(EAX, { base: ECX, disp: operand.disp ?? 0 }));
+    }
+
+    /**
+     * A store to an operand no expression changes: a constant as it is, any
+     * other value from EAX or ST0.
+     *
+     * @param {import('./x86.mjs').Memory} operand @param {any} node @param {string} name
+     */
+    storeTo(operand, node, name){
+        const a = this.a;
+        const value = this.expr(node);
+        if (name === 'setF64')
+        {
+            this.toSt0(value, node);
+            a.emit(0xdd, ...memory(3, operand));                           // fstp qword
+            this.fpu--;
+            return;
+        }
+        this.integer(value, node, 'intish');
+        if (value.where === 'var' && value.v.reg !== undefined
+            && (name !== 'setU8' || value.v.reg === EDX || value.v.reg === EBX))
+        {
+            // ESI, EDI and EBP have no low byte of their own.
+            a.emit(...STORES[name], ...memory(value.v.reg, operand));
+            return;
+        }
+        if (value.where === 'imm')
+        {
+            const imm = value.value;
+            a.emit(...name === 'setU8' ? [0xc6, ...memory(0, operand), imm & 0xff]
+                : name === 'setU16' ? [0x66, 0xc7, ...memory(0, operand), imm & 0xff,
+                    imm >>> 8 & 0xff]
+                    : [0xc7, ...memory(0, operand), ...le32(imm)]);
+            return;
+        }
+        this.toEax(value, node);
+        a.emit(...STORES[name], ...memory(EAX, operand));
     }
 
     /**
@@ -2025,6 +2676,7 @@ class FunctionCompiler {
     bulk(node, name){
         const a = this.a;
         this.arity(node, 3);
+        this.bulkUsed = true;
         this.saves.add(ESI);
         this.saves.add(EDI);
         for (const argument of node.arguments)
@@ -2033,8 +2685,10 @@ class FunctionCompiler {
             this.integer(value, argument, 'intish');
             this.toEax(value, argument);
             a.emit(0x50);                                                  // push eax
+            this.grew(4);
         }
         a.emit(0x59);                                                      // pop ecx: the count
+        this.grew(-12);
         if (name === 'fill')
         {
             a.emit(0x58, 0x5f);                                            // pop eax; pop edi
@@ -2079,9 +2733,14 @@ class FunctionCompiler {
             const imm = value.value | 0;
             this.a.emit(...fitsByte(imm) ? [0x6a, imm & 0xff] : [0x68, ...le32(imm)]);
         }
+        else if (value.where === 'var' && value.v.reg !== undefined)
+        {
+            this.use(value.v);
+            this.a.emit(0x50 | value.v.reg);                                // push reg
+        }
         else if (value.where === 'var')
         {
-            this.a.emit(0xff, ...frame(6, value.v.disp));                   // push [v]
+            this.a.emit(0xff, ...this.rm(6, value.v));                      // push [v]
         }
     }
 
@@ -2106,6 +2765,12 @@ class FunctionCompiler {
         {
             this.fail(node, 'call() passes at most thirty arguments');
         }
+        this.calls = true;
+        this.x87Clean = false;
+        for (const key of this.live)
+        {
+            this.acrossCalls.add(key);
+        }
         const bytes = args.length * 4;
         const simple = [target, ...args].map(arg=>this.simple(arg));
         if (simple.every(value=>value !== null))
@@ -2118,12 +2783,14 @@ class FunctionCompiler {
             }
             for (const value of simple.slice(1).reverse())
             {
+                // The operand's address is taken before ESP moves.
                 this.pushOperand(/** @type {Value} */ (value));
+                this.grew(4);
             }
             const fn = /** @type {Value} */ (simple[0]);
             if (fn.where === 'var')
             {
-                a.emit(0xff, ...frame(2, fn.v.disp));                      // call [fn]
+                a.emit(0xff, ...this.rm(2, fn.v));                         // call [fn]
             }
             else
             {
@@ -2134,6 +2801,7 @@ class FunctionCompiler {
             {
                 a.emit(0x83, 0xc4, bytes);                                 // add esp, 4n
             }
+            this.grew(-bytes);
             return;
         }
         const fn = this.expr(target);
@@ -2144,6 +2812,7 @@ class FunctionCompiler {
         {
             a.emit(0x83, 0xec, bytes);                                     // sub esp, 4n
         }
+        this.grew(bytes + 4);
         args.forEach((/** @type {any} */ argument, /** @type {number} */ i)=>{
             const value = this.expr(argument);
             this.integer(value, argument, 'typed');
@@ -2152,6 +2821,7 @@ class FunctionCompiler {
         });
         a.emit(0xff, ...memory(2, { base: ESP, disp: bytes }));            // call [esp+4n]
         a.emit(0x83, 0xc4, bytes + 4);                                     // add esp, 4n+4
+        this.grew(-(bytes + 4));
     }
 }
 

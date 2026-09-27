@@ -261,11 +261,22 @@ other than 0, and answer everything else themselves.
 brings; nothing the running product loads -- into the module beside its source, `inguest.x86.js`,
 which is committed: the source tree runs with no build step, and the compiler is a development
 tool. `scripts/build-guest-code.test.js` fails when a committed module is not what its source
-compiles to. The code generation is a plain stack machine -- every variable in the frame, EAX and
-ECX for an expression, EBX for the tables' base -- with no register allocation; each function is
-position-independent (the loader places a `code` export wherever the module's `.text` has room,
-and nothing tells the bytes their address), a table reached through the address a `call $+5`
-pushes.
+compiles to. EAX and ECX are an expression's, EBX the tables' base; the integer variables and
+parameters that earn one are in registers. A function is compiled three times: once to count
+each variable's uses, a use in a loop weighing eight times one outside it; once with the
+heaviest in registers -- EDX first, which costs nothing to take, then EBX, ESI, EDI and EBP,
+saved and put back -- to find the frame that leaves; and once to emit it. EDX goes only to a
+variable in whose scope no call through a pointer is made, and not in a function that copies or
+fills; EBX not where the function reads a table, ESI and EDI not where it copies or fills; a
+variable a byte is stored from is dealt EDX or EBX, which have a low byte. The frame is
+addressed from ESP, the bytes an expression pushed counted in, so there is no frame pointer and
+EBP is a register like the others; a load a variable is given is made straight into its
+register, `x = (x + y) | 0` is done in place, and a load named by registers alone is made into
+ECX with EAX standing. The one x87 parameter of a function that reads it once, before any
+other double, jump or call, stays in ST0 until that read: `_ftol` is `sub esp, 8; fisttp qword
+[esp]; pop eax; pop edx; ret`. Each function is position-independent (the loader places a
+`code` export wherever the module's `.text` has room, and nothing tells the bytes their
+address), a table reached through the address a `call $+5` pushes.
 
 The subset is the part of JavaScript 32-bit integer and x87 code reproduces exactly, and everything
 outside it is a compile error naming its place in the source (the full rules are at the top of
