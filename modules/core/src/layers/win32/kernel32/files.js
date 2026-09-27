@@ -959,6 +959,7 @@ export function createFileFunctions(host){
      * open colliding with the source's, a sharing violation.
      *
      * @param {string} source @param {string} destination @param {boolean} failIfExists
+     * @returns {number | Promise<number>}
      */
     const copyPath = (source, destination, failIfExists)=>{
         if (source === '' || destination === '')
@@ -997,32 +998,60 @@ export function createFileFunctions(host){
         }
         // A chunk at a time: the files a game copies are the ones it
         // shipped, and holding one of those whole is a copy that works
-        // in a test and runs out of memory on a real install.
-        for (let at = 0; at < entry.size; at += COPY_CHUNK)
-        {
-            const chunk = files.read(input, at, COPY_CHUNK);
-            if (typeof (/** @type {any} */ (chunk))?.then === 'function')
+        // in a test and runs out of memory on a real install. A chunk of a
+        // bundle's file whose blocks are not here yet is a promise: the
+        // thread is parked until they are, as ReadFile's is, and the copy
+        // goes on from that chunk -- the source stays open until then, since
+        // the read that fetches it reads it again once they have come.
+        const owner = host.currentThread?.() ?? null;
+        /** @param {number} code @param {boolean} parked */
+        const answer = (code, parked)=>{
+            if (parked && owner && host.setLastErrorFor)
             {
-                // A copy that would have to wait is not expressible
-                // here: the call is one operation to the guest and has
-                // no partial answer. Copying from a bundle-backed file
-                // needs the same treatment ReadFile got, and until then
-                // failing is better than silently truncating.
-                files.close(input);
-                files.close(output);
-                return fail(ERROR_ACCESS_DENIED);
+                host.setLastErrorFor(owner, code);
             }
-            files.write(output, at, /** @type {any} */ (chunk));
-        }
-        files.close(input);
-        files.close(output);
-        files.setAttributes?.(destination, entry.attributes ?? null);
-        if (entry.modified)
-        {
-            files.setModified?.(destination, entry.modified);
-        }
-        host.setLastError(ERROR_SUCCESS);
-        return 1;
+            else
+            {
+                host.setLastError(code);
+            }
+        };
+        /** @param {boolean} parked */
+        const finish = parked=>{
+            files.close(input);
+            files.close(output);
+            files.setAttributes?.(destination, entry.attributes ?? null);
+            if (entry.modified)
+            {
+                files.setModified?.(destination, entry.modified);
+            }
+            answer(ERROR_SUCCESS, parked);
+            return 1;
+        };
+        /**
+         * @param {number} from @param {boolean} parked
+         * @returns {number | Promise<number>}
+         */
+        const copyFrom = (from, parked)=>{
+            for (let at = from; at < entry.size; at += COPY_CHUNK)
+            {
+                const chunk = files.read(input, at, COPY_CHUNK);
+                if (typeof (/** @type {any} */ (chunk))?.then === 'function')
+                {
+                    return /** @type {Promise<Uint8Array>} */ (chunk).then(bytes=>{
+                        files.write(output, at, bytes);
+                        return copyFrom(at + COPY_CHUNK, true);
+                    }, ()=>{
+                        files.close(input);
+                        files.close(output);
+                        answer(ERROR_IO_DEVICE, true);
+                        return 0;
+                    });
+                }
+                files.write(output, at, /** @type {Uint8Array} */ (chunk));
+            }
+            return finish(parked);
+        };
+        return copyFrom(0, false);
     };
 
     const copyFile = bothForms(12, ([from, to, failIfExists], text)=>
