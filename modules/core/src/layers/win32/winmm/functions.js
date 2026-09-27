@@ -39,6 +39,7 @@ import { MAX_PERIOD } from './timers.js';
 
 /** Success, and the errors a caller distinguishes. */
 const MMSYSERR_NOERROR = 0;
+const MMSYSERR_ERROR = 1;
 const MMSYSERR_BADDEVICEID = 2;
 const MMSYSERR_INVALHANDLE = 5;
 const MMSYSERR_NOTSUPPORTED = 8;
@@ -440,7 +441,10 @@ const SND_RESOURCE = 0x00040004;
 
 /** MMTIME's wType values. Milliseconds is 1, not 0 -- zero is no unit at all. */
 const TIME_MS = 0x0001;
+const TIME_SAMPLES = 0x0002;
 const TIME_BYTES = 0x0004;
+/** MMTIME: its unit, then a union whose largest member, the SMPTE time, is eight bytes. */
+const MMTIME_SIZE = 12;
 
 /**
  * @typedef {Object} WinmmHost
@@ -528,6 +532,8 @@ export function createWinmmFunctions(host){
      * @property {number} callbackInstance
      * @property {{ header: number, length: number }[]} queue
      * @property {number} playedBytes  Into the buffer at the head of the queue.
+     * @property {number} position     Bytes played to the end since the open or the last reset.
+     * @property {number} blockAlign   Bytes a sample frame takes, for TIME_SAMPLES.
      * @property {number} sinceMs      When the cursor was last settled.
      * @property {boolean} paused
      * @property {any} track           The mixer's source, or null.
@@ -907,6 +913,7 @@ export function createWinmmFunctions(host){
             const done = /** @type {{ header: number, length: number }} */
                 (device.queue.shift());
             device.playedBytes -= done.length;
+            device.position += done.length;
             // The flag is set before the notice is queued, and so before any
             // callback runs: a program told a buffer is back reads the flag to
             // find out which, and finding it clear would be a lie about the
@@ -964,7 +971,14 @@ export function createWinmmFunctions(host){
             {
                 return MMSYSERR_INVALPARAM;
             }
-            setFlags(header >>> 0, flagsOf(header >>> 0) | WHDR_PREPARED);
+            // A header already prepared is left as it is; one that is not
+            // starts afresh, neither done nor queued whatever its flags said,
+            // as winmm's wave tests read them back.
+            const flags = flagsOf(header >>> 0);
+            if ((flags & WHDR_PREPARED) === 0)
+            {
+                setFlags(header >>> 0, flags & ~(WHDR_DONE | WHDR_INQUEUE) | WHDR_PREPARED);
+            }
             return MMSYSERR_NOERROR;
         },
     };
@@ -1251,8 +1265,9 @@ export function createWinmmFunctions(host){
             /** @param {number[]} args */
             handler: ([device, caps, size])=>{
                 // WAVE_MAPPER is -1 and names whichever device the system would
-                // pick, which here is the only one.
-                if ((device | 0) !== -1 && (device >>> 0) !== 0)
+                // pick, which here is the only one; an open handle names its
+                // own device, as winmm's wave tests ask it.
+                if (volumeTarget(device) !== MMSYSERR_NOERROR)
                 {
                     return MMSYSERR_BADDEVICEID;
                 }
@@ -1283,7 +1298,7 @@ export function createWinmmFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([device, caps, size])=>{
-                if ((device | 0) !== -1 && (device >>> 0) !== 0)
+                if (volumeTarget(device) !== MMSYSERR_NOERROR)
                 {
                     return MMSYSERR_BADDEVICEID;
                 }
@@ -1334,20 +1349,27 @@ export function createWinmmFunctions(host){
          * does not wait on anything, and polling it is what moves the cursor at
          * all -- there is no interrupt here, so time is credited to the device
          * whenever the device is asked about.
+         *
+         * The position counts from the open or the last reset and stands
+         * still once everything written has played, as winmm's wave tests
+         * read it after a whole queue. The device answers in bytes or in
+         * samples; any other unit asked for is answered in bytes, with
+         * `wType` saying so, and an MMTIME shorter than its twelve bytes is
+         * MMSYSERR_ERROR.
          */
         waveOutGetPosition: onDevice(12, (device, [, time, size])=>{
-            if ((size >>> 0) < 8)
+            if ((size >>> 0) < MMTIME_SIZE)
             {
-                return MMSYSERR_INVALPARAM;
+                return MMSYSERR_ERROR;
             }
             const wanted = u32(host.readMemory(time >>> 0, 4), 0);
-            const bytes = Math.floor(device.playedBytes);
-            host.writeMemory(time >>> 0, dword(wanted === TIME_BYTES
-                ? TIME_BYTES
-                : TIME_MS));
-            host.writeMemory((time >>> 0) + 4, dword(wanted === TIME_BYTES
-                ? bytes
-                : Math.floor(bytes * 1000 / device.bytesPerSecond)));
+            const head = device.queue[0]?.length ?? 0;
+            const bytes = device.position + Math.floor(Math.min(device.playedBytes, head));
+            const unit = wanted === TIME_SAMPLES ? TIME_SAMPLES : TIME_BYTES;
+            host.writeMemory(time >>> 0, dword(unit));
+            host.writeMemory((time >>> 0) + 4, dword(unit === TIME_SAMPLES
+                ? Math.floor(bytes / device.blockAlign)
+                : bytes));
             return MMSYSERR_NOERROR;
         }),
 
@@ -1399,6 +1421,8 @@ export function createWinmmFunctions(host){
                     callbackInstance: instance >>> 0,
                     queue: [],
                     playedBytes: 0,
+                    position: 0,
+                    blockAlign: u16(header, WAVEFORMATEX.nBlockAlign) || 1,
                     sinceMs: host.now(),
                     paused: false,
                     track: mixer?.open({
@@ -1534,6 +1558,7 @@ export function createWinmmFunctions(host){
                 }
                 device.queue = [];
                 device.playedBytes = 0;
+                device.position = 0;
                 device.trackBytes = 0;
                 device.track?.reset();
                 device.sinceMs = host.now();

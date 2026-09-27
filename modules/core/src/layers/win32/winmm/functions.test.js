@@ -154,19 +154,78 @@ test('the cursor does not run while nothing is queued', ()=>{
 test('a drained device does not keep counting', ()=>{
     // The position is what a program polls to decide how far ahead to write. A
     // device that kept counting through silence would report a cursor running
-    // away from a queue that is empty.
+    // away from a queue that is empty; it stands at what was written, as
+    // winmm's wave tests read it after a whole queue has played.
     const m = machine();
     const device = opened(m);
     const at = header(m, device, 0x300, BYTES_PER_SECOND / 10);
     m.winmm.waveOutWrite.handler([device, at, 32]);
 
+    m.put32(0x220, 4);
     m.tick(200);
-    m.winmm.waveOutGetPosition.handler([device, 0x220, 8]);
-    assert.equal(m.get32(0x220 + 4), 0, 'everything queued has been played');
+    m.winmm.waveOutGetPosition.handler([device, 0x220, 12]);
+    assert.equal(m.get32(0x220 + 4), BYTES_PER_SECOND / 10, 'everything queued has been played');
 
     m.tick(5000);
-    m.winmm.waveOutGetPosition.handler([device, 0x220, 8]);
-    assert.equal(m.get32(0x220 + 4), 0, 'and five seconds of silence added nothing');
+    m.winmm.waveOutGetPosition.handler([device, 0x220, 12]);
+    assert.equal(m.get32(0x220 + 4), BYTES_PER_SECOND / 10,
+        'and five seconds of silence added nothing');
+
+    m.winmm.waveOutReset.handler([device]);
+    m.winmm.waveOutGetPosition.handler([device, 0x220, 12]);
+    assert.equal(m.get32(0x220 + 4), 0, 'a reset starts it again');
+});
+
+test('the position counts across buffers, in bytes or samples and in bytes otherwise', ()=>{
+    // winmm's wave tests: TIME_SAMPLES is answered in samples, TIME_MS,
+    // TIME_SMPTE, TIME_MIDI and TIME_TICKS in bytes with wType saying so, and
+    // an MMTIME a byte short is MMSYSERR_ERROR.
+    const m = machine();
+    const device = opened(m);
+    const first = header(m, device, 0x300, BYTES_PER_SECOND / 10);
+    const second = header(m, device, 0x340, BYTES_PER_SECOND / 10);
+    m.winmm.waveOutWrite.handler([device, first, 32]);
+    m.winmm.waveOutWrite.handler([device, second, 32]);
+    m.tick(150);
+
+    m.put32(0x220, 4);
+    assert.equal(m.winmm.waveOutGetPosition.handler([device, 0x220, 11]), 1, 'MMSYSERR_ERROR');
+    assert.equal(m.winmm.waveOutGetPosition.handler([device, 0x220, 13]), 0);
+    assert.equal(m.get32(0x220), 4);
+    assert.equal(m.get32(0x224), BYTES_PER_SECOND * 15 / 100, 'into the second buffer');
+
+    m.put32(0x220, 2);
+    m.winmm.waveOutGetPosition.handler([device, 0x220, 12]);
+    assert.equal(m.get32(0x220), 2, 'TIME_SAMPLES');
+    assert.equal(m.get32(0x224), BYTES_PER_SECOND * 15 / 100 / 4, 'four bytes a sample frame');
+
+    for (const unit of [1, 8, 0x10, 0x20])
+    {
+        m.put32(0x220, unit);
+        m.winmm.waveOutGetPosition.handler([device, 0x220, 12]);
+        assert.equal(m.get32(0x220), 4, `unit ${unit} is answered in bytes`);
+        assert.equal(m.get32(0x224), BYTES_PER_SECOND * 15 / 100);
+    }
+});
+
+test('preparing a header starts it afresh, and a prepared one is left alone', ()=>{
+    // winmm's wave tests set WHDR_DONE and WHDR_INQUEUE before preparing.
+    const m = machine();
+    const device = opened(m);
+    const WHDR_PREPARED = 2;
+    m.put32(0x300 + 16, WHDR_DONE | WHDR_INQUEUE);
+    assert.equal(m.winmm.waveOutPrepareHeader.handler([device, 0x300, 32]), 0);
+    assert.equal(m.get32(0x300 + 16), WHDR_PREPARED);
+    m.put32(0x300 + 16, WHDR_PREPARED | WHDR_INQUEUE);
+    assert.equal(m.winmm.waveOutPrepareHeader.handler([device, 0x300, 32]), 0);
+    assert.equal(m.get32(0x300 + 16), WHDR_PREPARED | WHDR_INQUEUE);
+});
+
+test('the capabilities answer for an open handle as for its device', ()=>{
+    const m = machine();
+    const device = opened(m);
+    assert.equal(m.winmm.waveOutGetDevCapsA.handler([device, 0x10400, 52]), 0);
+    assert.equal(m.winmm.waveOutGetDevCapsW.handler([device, 0x10400, 84]), 0);
 });
 
 test('two buffers come back in the order they were written', ()=>{
