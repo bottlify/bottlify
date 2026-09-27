@@ -115,7 +115,7 @@ self.onmessage = ({ data })=>{
             });
             break;
         case 'standing':
-            (harness ? harness.standing() : Promise.resolve([])).then(value=>{
+            (harness ? harness.standing(data.list) : Promise.resolve(null)).then(value=>{
                 self.postMessage({ type: 'answer', id: data.id, value });
             });
             break;

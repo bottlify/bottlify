@@ -153,7 +153,7 @@ if (inWorker)
     namespace.frameReport = ()=>ask('frameReport');
     namespace.frameShot = ()=>ask('frameShot');
     namespace.journalRecent = (/** @type {number} */ count)=>ask('journalRecent', { count });
-    namespace.standing = ()=>ask('standing');
+    namespace.standing = (/** @type {string | undefined} */ list)=>ask('standing', { list });
     namespace.exactRestart = ()=>ask('exactRestart');
     namespace.exactStop = ()=>ask('exactStop');
     namespace.clearLog = ()=>{
