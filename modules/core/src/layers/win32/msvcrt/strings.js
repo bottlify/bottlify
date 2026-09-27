@@ -259,13 +259,18 @@ export function createStringFunctions(host){
          * char *_strdup(const char *str)
          *
          * The caller frees this, so it comes from the same allocator everything
-         * else does rather than from storage this file keeps.
+         * else does rather than from storage this file keeps. A null string
+         * duplicates to null, errno untouched, as msvcrt checks for it.
          */
         _strdup: {
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([string])=>{
+                if ((string >>> 0) === 0)
+                {
+                    return 0;
+                }
                 const text = readString(string);
                 const address = host.allocate(text.length + 1);
                 if (address === 0)

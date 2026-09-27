@@ -94,6 +94,16 @@ test('_strdup allocates, and answers null when it cannot', ()=>{
     assert.equal(starved._strdup.handler([memory.put('text')]), 0);
 });
 
+test('_strdup of no string is null, nothing read or allocated', ()=>{
+    const { memory } = build();
+    const table = createStringFunctions({
+        ...memory,
+        readCString: ()=>assert.fail('address zero read'),
+        allocate: ()=>assert.fail('allocated for nothing'),
+    });
+    assert.equal(table._strdup.handler([0]), 0);
+});
+
 test('memchr searches bytes rather than a string, terminators included', ()=>{
     const { memory, table } = build();
     const buffer = memory.allocate(8);
