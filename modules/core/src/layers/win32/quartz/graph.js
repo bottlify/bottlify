@@ -152,7 +152,7 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  * @property {boolean} hasAudio
  * @property {number} sampleRate  The film's own rate, not the device's.
  * @property {number} channels
- * @property {() => 'frame' | 'audio' | 'end'} decode
+ * @property {() => 'frame' | 'audio' | 'end' | 'pending'} decode
  * @property {() => Uint8Array | null} frame
  *           The current frame as BGRA. A view into the decoder's own memory,
  *           valid until the next call into it.
@@ -681,6 +681,12 @@ export function createQuartz(host){
                         audio.push(block);
                     }
                     continue;
+                }
+                if (what === 'pending')
+                {
+                    // Decoded on another thread and not here yet: the frame is
+                    // late, and the picture already shown stays up until it comes.
+                    break;
                 }
                 complete(graph);
                 break;

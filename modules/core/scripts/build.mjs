@@ -167,6 +167,7 @@ await build({
         join(SRC, 'index.js'),
         join(SRC, 'host', 'engine.worker.js'),
         join(SRC, 'host', 'log.worker.js'),
+        join(SRC, 'host', 'media.worker.js'),
     ],
     bundle: true,
     format: 'esm',
@@ -226,5 +227,5 @@ for (const name of LEGAL)
     await copyFile(join(REPO, name), join(ROOT, name));
 }
 await writeChecksums();
-console.log('dist: core.js + engine.worker.js + log.worker.js + cork/ + '
+console.log('dist: core.js + engine.worker.js + log.worker.js + media.worker.js + cork/ + '
     + `${vendored} vendor artifacts + checksums.json`);
