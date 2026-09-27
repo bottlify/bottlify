@@ -67,12 +67,14 @@ function doubleBits(next){
     }
 }
 
+/** The x87's exception bits and the runtime's for each. */
+const EXCEPTION_BITS = [[0x1, 0x10], [0x2, 0x80000], [0x4, 0x8], [0x8, 0x4], [0x10, 0x2],
+    [0x20, 0x1]];
+
 /** The runtime's reading of an x87 control word, bit by bit. @param {number} word */
 function abstract(word){
     let bits = 0;
-    const exceptions = [[0x1, 0x10], [0x2, 0x80000], [0x4, 0x8], [0x8, 0x4], [0x10, 0x2],
-        [0x20, 0x1]];
-    for (const [x87, runtime] of exceptions)
+    for (const [x87, runtime] of EXCEPTION_BITS)
     {
         bits |= (word & x87) !== 0 ? runtime : 0;
     }
@@ -114,6 +116,53 @@ test('_control87 and _controlfp: the bits the mask names, loaded and read back',
     {
         assert.equal(answer('_controlfp', control, [0, 0]), abstract(control),
             `0x${control.toString(16)} read`);
+    }
+});
+
+/** The runtime's bits as an x87 control word, bit by bit. @param {number} bits */
+function hardware(bits){
+    let word = 0;
+    for (const [x87, runtime] of EXCEPTION_BITS)
+    {
+        word |= (bits & runtime) !== 0 ? x87 : 0;
+    }
+    word |= (bits & 0x300) << 2;
+    word |= [0x300, 0x200, 0, 0][bits >>> 16 & 3];
+    word |= (bits & 0x40000) !== 0 ? 0x1000 : 0;
+    return word;
+}
+
+test('_control87 and _controlfp read every control word and load every setting bit by bit', ()=>{
+    // The JavaScript the x86 is held to above, over every word the x87 can
+    // hold and every setting of the bits the runtime changes: its tables
+    // against the bits one at a time.
+    const next = random(46);
+    for (let word = 0; word < 0x10000; word++)
+    {
+        const [newControl, mask] = word < 0x2000 ? [0, 0] : [next(), next()];
+        for (const name of /** @type {const} */ (['_control87', '_controlfp']))
+        {
+            let loaded = -1;
+            const answer = sources[name](/** @type {any} */ ({
+                controlWord: ()=>word,
+                setControlWord: (/** @type {number} */ value)=>{
+                    loaded = value;
+                },
+            }), newControl, mask);
+            const changed = mask & 0xf031f & (name === '_controlfp' ? ~0x80000 : ~0);
+            const wanted = abstract(word) & ~changed | newControl & changed;
+            const expected = word & 0xe0c0 | hardware(wanted);
+            assert.equal(loaded, expected, `${name} under 0x${word.toString(16)} loads`);
+            assert.equal(answer, abstract(expected), `${name} under 0x${word.toString(16)}`);
+        }
+    }
+    for (let bits = 0; bits < 1 << 13; bits++)
+    {
+        // Every setting of _MCW_EM, _MCW_RC, _MCW_PC and _MCW_IC, spread to
+        // the runtime's places: back where the runtime reads it.
+        const setting = bits & 0x1f | (bits & 0x20) << 14 | (bits & 0xc0) << 2
+            | (bits & 0x300) << 8 | (bits & 0x400) << 8;
+        assert.equal(abstract(hardware(setting)) & ~0x30000, setting & ~0x30000);
     }
 });
 

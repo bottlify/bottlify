@@ -992,29 +992,13 @@ export function createUniformArena(floats = 1 << 16){
  * @returns {Float32Array}
  */
 export function normalMatrixOf(m, out = new Float32Array(16)){
-    /** @param {number} row @param {number} column */
-    const minor = (row, column)=>{
-        /** @type {number[]} */
-        const cells = [];
-        for (let r = 0; r < 4; r++)
-        {
-            for (let c = 0; c < 4; c++)
-            {
-                if (r !== row && c !== column)
-                {
-                    cells.push(m[r * 4 + c]);
-                }
-            }
-        }
-        const [a, b, c, d, e, f, g, h, i] = cells;
-        return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
-    };
     for (let row = 0; row < 4; row++)
     {
         for (let column = 0; column < 4; column++)
         {
             // Negative zero is the same matrix and a worse one to read.
-            out[row * 4 + column] = ((row + column) % 2 === 0 ? 1 : -1) * minor(row, column) || 0;
+            out[row * 4 + column] = ((row + column) % 2 === 0 ? 1 : -1) * minorOf(m, row, column)
+                || 0;
         }
     }
     const determinant = m[0] * out[0] + m[1] * out[1] + m[2] * out[2] + m[3] * out[3];
@@ -1026,6 +1010,48 @@ export function normalMatrixOf(m, out = new Float32Array(16)){
         }
     }
     return out;
+}
+
+/**
+ * For each of the sixteen cells, the nine others outside its row and column,
+ * row by row: the 3x3 whose determinant is that cell's minor.
+ */
+const MINOR_CELLS = (()=>{
+    const cells = new Uint8Array(16 * 9);
+    let at = 0;
+    for (let row = 0; row < 4; row++)
+    {
+        for (let column = 0; column < 4; column++)
+        {
+            for (let r = 0; r < 4; r++)
+            {
+                for (let c = 0; c < 4; c++)
+                {
+                    if (r !== row && c !== column)
+                    {
+                        cells[at++] = r * 4 + c;
+                    }
+                }
+            }
+        }
+    }
+    return cells;
+})();
+
+/**
+ * The determinant of the 3x3 left when a row and a column are struck out,
+ * expanded along its first row -- read through a table rather than gathered
+ * into an array, which a draw would otherwise make sixteen of.
+ *
+ * @param {ArrayLike<number>} m @param {number} row @param {number} column
+ */
+function minorOf(m, row, column){
+    const at = (row * 4 + column) * 9;
+    const cells = MINOR_CELLS;
+    const a = m[cells[at]], b = m[cells[at + 1]], c = m[cells[at + 2]];
+    const d = m[cells[at + 3]], e = m[cells[at + 4]], f = m[cells[at + 5]];
+    const g = m[cells[at + 6]], h = m[cells[at + 7]], i = m[cells[at + 8]];
+    return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
 }
 
 /**
@@ -1154,15 +1180,59 @@ export function enabledLights(model){
     {
         return kept.lights;
     }
-    const lights = [...model.lights.entries()]
-        .filter(([, record])=>record.enabled)
-        .sort(([left], [right])=>left - right)
-        .map(([, record])=>record.light);
+    listedCount = 0;
+    model.lights.forEach(listEnabled);
+    /** @type {Light[]} */
+    const lights = new Array(listedCount);
+    // By index, in place: a handful of lights, listed again only when one changed.
+    for (let count = 0; count < listedCount; count++)
+    {
+        const index = listedIndices[count];
+        let at = count;
+        while (at > 0 && listedIndices[at - 1] > index)
+        {
+            listedIndices[at] = listedIndices[at - 1];
+            lights[at] = lights[at - 1];
+            at--;
+        }
+        listedIndices[at] = index;
+        lights[at] = /** @type {Light} */ (listedLights[count]);
+    }
+    listedLights.fill(null, 0, listedCount);
     if (model.lightsVersion !== undefined)
     {
-        enabledLightsKept.set(model, { version: model.lightsVersion, lights });
+        if (kept)
+        {
+            kept.version = model.lightsVersion;
+            kept.lights = lights;
+        }
+        else
+        {
+            enabledLightsKept.set(model, { version: model.lightsVersion, lights });
+        }
     }
     return lights;
+}
+
+/**
+ * The enabled lights of the map `enabledLights` is walking, and their indices:
+ * the first `listedCount` of each, kept from call to call rather than emptied,
+ * which would give their storage back only to take it again.
+ */
+/** @type {number[]} */
+const listedIndices = [];
+/** @type {(Light | null)[]} */
+const listedLights = [];
+let listedCount = 0;
+
+/** @param {{ light: Light, enabled: boolean }} record @param {number} index */
+function listEnabled(record, index){
+    if (record.enabled)
+    {
+        listedIndices[listedCount] = index;
+        listedLights[listedCount] = record.light;
+        listedCount++;
+    }
 }
 
 /**
@@ -1304,6 +1374,76 @@ const WORLD_VIEW_PROJECTION = new Float32Array(16);
 const NORMAL_MATRIX = new Float32Array(16);
 /** Scratch for the camera-space one of a draw generating from the normal. */
 const CAMERA_NORMAL_MATRIX = new Float32Array(16);
+
+/**
+ * Whether two matrices hold the same bits: equal elements, zeros of the same
+ * sign, and no not-a-number (which is never taken to be the same).
+ *
+ * @param {ArrayLike<number>} a @param {ArrayLike<number>} b
+ */
+function sameBits(a, b){
+    for (let at = 0; at < 16; at++)
+    {
+        const x = a[at];
+        if (x !== b[at] || (x === 0 && 1 / x !== 1 / b[at]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Writes a value where it differs from what is there, zeros of either sign
+ * and not-a-number told apart as `Object.is` tells them (which, called here,
+ * would box each double it is handed).
+ *
+ * @param {Float64Array} values @param {number} at @param {number} value
+ * @returns {number} 1 when it differed
+ */
+function keepValue(values, at, value){
+    const held = values[at];
+    if (held === value ? held !== 0 || 1 / held === 1 / value
+        : Number.isNaN(held) && Number.isNaN(value))
+    {
+        return 0;
+    }
+    values[at] = value;
+    return 1;
+}
+
+/**
+ * A colour's four channels by `keepValue`, and whether there is one at all.
+ *
+ * @param {Float64Array} values @param {number} at @param {ColourValue | undefined} colour
+ * @returns {number}
+ */
+function keepColour(values, at, colour){
+    if (!colour)
+    {
+        // No colour is sampled as '-', which no four numbers are.
+        return keepValue(values, at + 4, 0) | keepValue(values, at, NaN) | 1;
+    }
+    return keepValue(values, at + 4, 1) | keepValue(values, at, colour.r)
+        | keepValue(values, at + 1, colour.g) | keepValue(values, at + 2, colour.b)
+        | keepValue(values, at + 3, colour.a);
+}
+
+/**
+ * Whether a stage of a cascade generates its coordinates from the normal.
+ *
+ * @param {readonly { texCoordIndex: number }[]} stages
+ */
+function readsNormalAnywhere(stages){
+    for (let index = 0; index < stages.length; index++)
+    {
+        if (readsNormal(stages[index].texCoordIndex))
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 /**
  * Whether a stage the cascade runs generates its coordinates from the
@@ -2309,23 +2449,39 @@ export function createRenderer(options){
         }
         tally.lit++;
         tally.mostLights = Math.max(tally.mostLights, lighting.lights.length);
-        for (const type of lighting.lights)
+        for (let index = 0; index < lighting.lights.length; index++)
         {
-            tally.types.add(type);
+            tally.types.add(lighting.lights[index]);
         }
-        if (tally.ambients.size < SAMPLE_LIMIT)
+        // Each sample below is text, and a set whose values repeat never
+        // fills: what was sampled last is remembered, so a draw under the
+        // same ambient, lights, world or material as the one before builds
+        // nothing. Each of them is replaced, never written into, when it
+        // changes.
+        const ambient = (model.renderStates.get(D3DRS.AMBIENT) ?? 0) >>> 0;
+        if (tally.ambients.size < SAMPLE_LIMIT && ambient !== lastSampled.ambient)
         {
-            tally.ambients.add(
-                ((model.renderStates.get(D3DRS.AMBIENT) ?? 0) >>> 0).toString(16).padStart(8, '0'));
+            lastSampled.ambient = ambient;
+            tally.ambients.add(ambient.toString(16).padStart(8, '0'));
         }
-        for (const light of enabledLights(model))
+        const lights = enabledLights(model);
+        if (lights !== lastSampled.lights && tally.lightValues.size < SAMPLE_LIMIT)
         {
-            sample(tally.lightValues, ()=>`type=${light.Type} range=${round(light.Range)}`
-                + ` atten=${round(light.Attenuation0)}/${round(light.Attenuation1)}`
-                + `/${round(light.Attenuation2)}`
-                + ` at=${round(light.Position.x)},${round(light.Position.y)}`
-                + `,${round(light.Position.z)}`
-                + ` diffuse=${colourText(light.Diffuse)} ambient=${colourText(light.Ambient)}`);
+            lastSampled.lights = lights;
+            for (let index = 0; index < lights.length; index++)
+            {
+                const light = lights[index];
+                if (!lightMoved(index, light))
+                {
+                    continue;
+                }
+                sample(tally.lightValues, ()=>`type=${light.Type} range=${round(light.Range)}`
+                    + ` atten=${round(light.Attenuation0)}/${round(light.Attenuation1)}`
+                    + `/${round(light.Attenuation2)}`
+                    + ` at=${round(light.Position.x)},${round(light.Position.y)}`
+                    + `,${round(light.Position.z)}`
+                    + ` diffuse=${colourText(light.Diffuse)} ambient=${colourText(light.Ambient)}`);
+            }
         }
         // A light lives in world space and a vertex reaches it through the
         // world matrix. A program that leaves the world matrix at identity and
@@ -2335,13 +2491,66 @@ export function createRenderer(options){
         // translations is what tells that apart from a light that is simply
         // dim, and nothing else in a frame does.
         const world = transformOf(model, D3DTS.WORLD);
-        sample(tally.worlds, ()=>`origin=${round(world[12])},${round(world[13])}`
-            + `,${round(world[14])}`
-            + ` scale=${round(Math.hypot(world[0], world[1], world[2]))}`);
+        if (world !== lastSampled.world && tally.worlds.size < SAMPLE_LIMIT)
+        {
+            lastSampled.world = world;
+            sample(tally.worlds, ()=>`origin=${round(world[12])},${round(world[13])}`
+                + `,${round(world[14])}`
+                + ` scale=${round(Math.hypot(world[0], world[1], world[2]))}`);
+        }
         const material = model.material;
-        sample(tally.materials, ()=>`diffuse=${colourText(material?.Diffuse)}`
-            + ` ambient=${colourText(material?.Ambient)}`
-            + ` emissive=${colourText(material?.Emissive)}`);
+        if (material !== lastSampled.material && tally.materials.size < SAMPLE_LIMIT)
+        {
+            lastSampled.material = material;
+            sample(tally.materials, ()=>`diffuse=${colourText(material?.Diffuse)}`
+                + ` ambient=${colourText(material?.Ambient)}`
+                + ` emissive=${colourText(material?.Emissive)}`);
+        }
+    };
+
+    /**
+     * Whether the light at a place in the enabled list holds other values
+     * than the one sampled there last, of those its sample reads: a program
+     * that sets the same light again before every draw makes a new object
+     * each time, with nothing new to say.
+     *
+     * @param {number} slot @param {Light} light
+     */
+    const lightMoved = (slot, light)=>{
+        const need = (slot + 1) * LIGHT_SAMPLE_FLOATS;
+        if (need > sampledLightValues.length)
+        {
+            const grown = new Float64Array(need * 2).fill(NaN);
+            grown.set(sampledLightValues);
+            sampledLightValues = grown;
+        }
+        const values = sampledLightValues;
+        const at = slot * LIGHT_SAMPLE_FLOATS;
+        let moved = 0;
+        moved |= keepValue(values, at, light.Type);
+        moved |= keepValue(values, at + 1, light.Range);
+        moved |= keepValue(values, at + 2, light.Attenuation0);
+        moved |= keepValue(values, at + 3, light.Attenuation1);
+        moved |= keepValue(values, at + 4, light.Attenuation2);
+        moved |= keepValue(values, at + 5, light.Position.x);
+        moved |= keepValue(values, at + 6, light.Position.y);
+        moved |= keepValue(values, at + 7, light.Position.z);
+        moved |= keepColour(values, at + 8, light.Diffuse);
+        moved |= keepColour(values, at + 13, light.Ambient);
+        return moved !== 0;
+    };
+    const LIGHT_SAMPLE_FLOATS = 18;
+    let sampledLightValues = new Float64Array(8 * LIGHT_SAMPLE_FLOATS).fill(NaN);
+
+    /** What `countLighting` sampled last, of each thing it samples. */
+    const lastSampled = {
+        ambient: -1,
+        /** @type {unknown} */
+        lights: null,
+        /** @type {unknown} */
+        world: null,
+        /** @type {unknown} */
+        material: null,
     };
 
     /**
@@ -3109,13 +3318,18 @@ export function createRenderer(options){
      * @param {readonly { stream: number, stride: number, instanced?: boolean }[] | undefined}
      *        streams
      * @param {number} bias
-     * @returns {{ slot: number, gpu: any, offset: number }[] | null}
+     * @returns {readonly { slot: number, gpu: any, offset: number }[] | null}
      */
     const streamBindings = (model, streams, bias)=>{
+        if (!streams || streams.length === 0)
+        {
+            return NO_STREAM_BINDINGS;
+        }
         /** @type {{ slot: number, gpu: any, offset: number }[]} */
         const bound = [];
-        for (const [index, { stream, instanced }] of (streams ?? []).entries())
+        for (let index = 0; index < streams.length; index++)
         {
+            const { stream, instanced } = streams[index];
             const source = model.streamAt?.(stream);
             if (!source?.buffer)
             {
@@ -3140,6 +3354,10 @@ export function createRenderer(options){
         }
         return bound;
     };
+
+    /** What a draw reading stream zero alone binds beside it. */
+    const NO_STREAM_BINDINGS = Object.freeze(
+        /** @type {{ slot: number, gpu: any, offset: number }[]} */ ([]));
 
     let layoutReported = false;
     let instancingReported = false;
@@ -4707,19 +4925,20 @@ export function createRenderer(options){
      * @param {RenderModel} model
      * @param {PreparedDraw} prepared
      * @param {any} geometry
-     * @param {{ scissored?: boolean, bias?: number }} [drawing]
-     *     `scissored` false for a draw that sets its own scissor -- a partial
-     *     clear, cut to its area already; `bias` the vertices stream zero's
-     *     offset was folded into the first vertex as.
+     * @param {boolean} [scissored]
+     *     False for a draw that sets its own scissor -- a partial clear, cut to
+     *     its area already.
+     * @param {number} [bias]
+     *     The vertices stream zero's offset was folded into the first vertex as.
      */
-    const record = (model, prepared, geometry, drawing = {})=>{
+    const record = (model, prepared, geometry, scissored = true, bias = 0)=>{
         if (maxDraws >= 0 && kept >= maxDraws)
         {
             return;
         }
         const streams = streamBindings(model,
             prepared.layout?.streams ?? prepared.program?.source?.layout?.streams,
-            drawing.bias ?? 0);
+            bias);
         if (!streams)
         {
             skip('stream');
@@ -4756,7 +4975,7 @@ export function createRenderer(options){
             }
         }
         const frame = ensureViewport(model);
-        if (drawing.scissored !== false)
+        if (scissored)
         {
             ensureScissor(model, frame);
         }
@@ -4772,7 +4991,7 @@ export function createRenderer(options){
                 ? programs.get(prepared.state, prepared.program.source)
                 : backend.pipelineFor(prepared.state));
         }
-        frame.commands.push({
+        const command = {
             kind: 'draw',
             pipeline: prepared.pipelineIndex,
             state: prepared.state,
@@ -4780,9 +4999,16 @@ export function createRenderer(options){
             stageBindings: prepared.stageBindings,
             program: prepared.program,
             ...geometry,
-            ...(streams.length === 0 ? {} : { streams }),
-            ...(instances === 1 ? {} : { instances }),
-        });
+        };
+        if (streams.length !== 0)
+        {
+            command.streams = streams;
+        }
+        if (instances !== 1)
+        {
+            command.instances = instances;
+        }
+        frame.commands.push(command);
     };
 
     /**
@@ -4797,6 +5023,8 @@ export function createRenderer(options){
      * @property {Float32Array} uniforms        This draw's block: the one field that is per draw.
      * @property {Float32Array | null} template
      *     The block every draw of this state copies, with the two world rows still to write.
+     * @property {readonly Light[] | null} [packedLights]
+     *     The lights the template's rows hold, as `enabledLights` listed them.
      * @property {{ view: any, sampler: any, placeholder?: boolean }[]} stageBindings
      * @property {import('../webgpu/internal/pipeline.js').LightingState | null} lighting
      * @property {string} fogSetting            Built on first use; a frame's diagnostics read it.
@@ -4835,10 +5063,37 @@ export function createRenderer(options){
      * every draw. Bounded because a frame's distinct states are few and one
      * that is no longer drawn with should not be kept for ever.
      *
-     * @type {Map<string, PreparedDraw>}
+     * @type {Map<number, PreparedDraw>}
      */
     const preparedCache = new Map();
     const PREPARED_CACHE_LIMIT = 64;
+
+    /**
+     * The entries a fixed-function draw binds its group with, made once for
+     * the stage bindings of a preparation: the uniform block at binding zero,
+     * which the caller writes before each draw, and each stage's view and
+     * sampler after it. The group is looked up and made from them at once,
+     * so a draw's block written over the last draw's is never read late.
+     *
+     * @param {{ view: any, sampler: any }[]} stageBindings
+     * @returns {{ binding: number, resource: any }[]}
+     */
+    const bindingEntriesOf = stageBindings=>{
+        let entries = bindingEntries.get(stageBindings);
+        if (entries === undefined)
+        {
+            entries = [{ binding: 0, resource: null }];
+            stageBindings.forEach((stage, index)=>{
+                /** @type {{ binding: number, resource: any }[]} */ (entries).push(
+                    { binding: 1 + index * 2, resource: stage.view },
+                    { binding: 2 + index * 2, resource: stage.sampler });
+            });
+            bindingEntries.set(stageBindings, entries);
+        }
+        return entries;
+    };
+    /** @type {WeakMap<object, { binding: number, resource: any }[]>} */
+    const bindingEntries = new WeakMap();
 
     /** @type {WeakMap<object, number>} */
     const surfaceIds = new WeakMap();
@@ -4855,14 +5110,90 @@ export function createRenderer(options){
     };
 
     /**
+     * Numbers name states for as long as the renderer lives and are never
+     * reused, so a key made before a table was cleared cannot name a different
+     * state after it.
+     */
+    let nextStateNumber = 0;
+    const STATE_NUMBERS_LIMIT = 1024;
+
+    /** @param {Int32Array} stored @param {Int32Array} scratch @returns {boolean} */
+    const sameWords = (stored, scratch)=>{
+        for (let index = 0; index < stored.length; index++)
+        {
+            if (stored[index] !== scratch[index])
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    /**
+     * A table numbering states laid out as words: equal numbers are equal
+     * words. Looked up by an FNV-1a hash of them, with nothing built for a
+     * hit; a hit is compared in full, so a collision costs a comparison and
+     * never names two states alike.
+     */
+    const createNumbering = ()=>{
+        /** @type {Map<number, { values: Int32Array, number: number }[]>} */
+        const buckets = new Map();
+        let size = 0;
+        /** @param {Int32Array} words @param {number} count @returns {number} */
+        return (words, count)=>{
+            let hash = 0x811c9dc5;
+            for (let index = 0; index < count; index++)
+            {
+                hash = Math.imul(hash ^ words[index], 0x01000193);
+            }
+            const bucket = buckets.get(hash);
+            if (bucket !== undefined)
+            {
+                for (let index = 0; index < bucket.length; index++)
+                {
+                    const entry = bucket[index];
+                    if (entry.values.length === count && sameWords(entry.values, words))
+                    {
+                        return entry.number;
+                    }
+                }
+            }
+            if (size >= STATE_NUMBERS_LIMIT)
+            {
+                buckets.clear();
+                size = 0;
+            }
+            const entry = { values: words.slice(0, count), number: nextStateNumber++ };
+            const held = buckets.get(hash);
+            if (held !== undefined)
+            {
+                held.push(entry);
+            }
+            else
+            {
+                buckets.set(hash, [entry]);
+            }
+            size++;
+            return entry.number;
+        };
+    };
+
+    /**
      * The targets and their formats, the transforms beside the world ones, the
-     * material, the enabled lights and the viewport, as a number: equal numbers
-     * are equal values. Printing their floats is most of what naming a state
-     * costs, and a program that flips a render state between draws changes
-     * none of them; so, for a device that replaces these objects rather than
-     * writing into them (one that offers `stateVersionBesideTextures`), the
-     * number is kept while every one of them is the same object and the lights
-     * have not changed.
+     * material, the types of the enabled lights and the viewport, as a number:
+     * equal numbers are equal values. They are laid out as doubles and
+     * numbered by their bits, so a program that moves a light or changes its
+     * material between draws names the state without a string built for it.
+     * A program that flips a render state between draws changes none of them;
+     * so, for a device that replaces these objects rather than writing into
+     * them (one that offers `stateVersionBesideTextures` and `lightsVersion`),
+     * the number is kept while every one of them is the same object and the
+     * enabled lights are of the same types.
+     *
+     * What the lights hold is not in it: a light moves more often than
+     * anything else here, and the shader is shaped by the types alone. Its
+     * values are packed into the preparation's block by `blockFor`, as the
+     * lights stand at the draw.
      *
      * Surface identity is part of it because a Reset rebuilds the implicit
      * surfaces: two states that read alike across one are not the same
@@ -4874,81 +5205,190 @@ export function createRenderer(options){
     const slowStateOf = model=>{
         const replaces = model.stateVersionBesideTextures !== undefined
             && model.lightsVersion !== undefined;
-        /** @type {unknown[]} */
-        const sources = [model.renderTarget, model.depthStencil, model.material, model.viewport,
-            model.lightsVersion];
-        for (const [type, matrix] of model.transforms)
-        {
-            if (type < D3DTS.WORLD || type > D3DTS.WORLD_LAST)
-            {
-                sources.push(type, matrix);
-            }
-        }
-        if (replaces && sources.length === floatSources.length
-            && sources.every((source, index)=>source === floatSources[index]))
+        const lights = enabledLights(model);
+        if (replaces && slowHeld && slowSourcesHeld(model) && sameLightTypes(lights))
         {
             return slowNumber;
         }
+        const needed = 8 + 17 * model.transforms.size + 17 + 1 + lights.length + 8;
+        if (needed > slowFloats.length)
+        {
+            slowFloats = new Float64Array(Math.max(needed, slowFloats.length * 2));
+            slowWords = new Int32Array(slowFloats.buffer);
+        }
+        const floats = slowFloats;
+        let at = 0;
         const formats = formatsOf(model);
-        /** @type {(string | number)[]} */
-        const parts = [formats.targetFormat, formats.targetHasAlpha ? 1 : 0,
-            formats.depthFormat ?? '-', surfaceIdOf(surfaceFor(model.renderTarget)),
-            model.depthStencil ? surfaceIdOf(surfaceFor(model.depthStencil)) : '-'];
-        for (const [type, matrix] of model.transforms)
-        {
-            if (type >= D3DTS.WORLD && type <= D3DTS.WORLD_LAST)
-            {
-                continue;
-            }
-            parts.push(type, ...matrix);
-        }
+        floats[at++] = formatIdOf(formats.targetFormat);
+        floats[at++] = formats.targetHasAlpha ? 1 : 0;
+        floats[at++] = formats.depthFormat === undefined ? -1 : formatIdOf(formats.depthFormat);
+        floats[at++] = surfaceIdOf(surfaceFor(model.renderTarget));
+        floats[at++] = model.depthStencil ? surfaceIdOf(surfaceFor(model.depthStencil)) : -1;
+        slowAt = at;
+        model.transforms.forEach(putTransform);
+        at = slowAt;
         const material = model.material;
-        for (const colour of [material.Diffuse, material.Ambient, material.Specular,
-            material.Emissive])
+        at = putColourFloats(floats, at, material.Diffuse);
+        at = putColourFloats(floats, at, material.Ambient);
+        at = putColourFloats(floats, at, material.Specular);
+        at = putColourFloats(floats, at, material.Emissive);
+        floats[at++] = material.Power;
+        floats[at++] = lights.length;
+        for (let index = 0; index < lights.length; index++)
         {
-            parts.push(colour.r, colour.g, colour.b, colour.a);
+            floats[at++] = lights[index].Type;
         }
-        parts.push(material.Power);
-        for (const light of enabledLights(model))
+        const viewport = model.viewport;
+        floats[at++] = viewport.rect.x;
+        floats[at++] = viewport.rect.y;
+        floats[at++] = viewport.rect.width;
+        floats[at++] = viewport.rect.height;
+        floats[at++] = viewport.offset[0];
+        floats[at++] = viewport.offset[1];
+        floats[at++] = viewport.scale[0];
+        floats[at++] = viewport.scale[1];
+        slowNumber = slowNumbering(slowWords, at * 2);
+        slowHeld = replaces;
+        if (replaces)
         {
-            parts.push(light.Type, light.Range, light.Falloff, light.Theta, light.Phi,
-                light.Diffuse.r, light.Diffuse.g, light.Diffuse.b, light.Diffuse.a,
-                light.Specular.r, light.Specular.g, light.Specular.b, light.Specular.a,
-                light.Ambient.r, light.Ambient.g, light.Ambient.b, light.Ambient.a,
-                light.Position.x, light.Position.y, light.Position.z,
-                light.Direction.x, light.Direction.y, light.Direction.z,
-                light.Attenuation0, light.Attenuation1, light.Attenuation2);
+            holdSlowSources(model);
         }
-        parts.push(model.viewport.rect.x, model.viewport.rect.y,
-            model.viewport.rect.width, model.viewport.rect.height,
-            ...model.viewport.offset, ...model.viewport.scale);
-        const text = parts.join('|');
-        let number = slowNumbers.get(text);
-        if (number === undefined)
+        heldLightTypes.length = lights.length;
+        for (let index = 0; index < lights.length; index++)
         {
-            if (slowNumbers.size >= STATE_NUMBERS_LIMIT)
-            {
-                slowNumbers.clear();
-            }
-            number = nextStateNumber++;
-            slowNumbers.set(text, number);
+            heldLightTypes[index] = lights[index].Type;
         }
-        slowNumber = number;
-        floatSources = replaces ? sources : [];
         return slowNumber;
     };
-    /** @type {Map<string, number>} */
-    const slowNumbers = new Map();
-    let slowNumber = -1;
-    /** @type {unknown[]} */
-    let floatSources = [];
+
+    /** @param {Float64Array} floats @param {number} at @param {ColourValue} colour */
+    const putColourFloats = (floats, at, colour)=>{
+        floats[at] = colour.r;
+        floats[at + 1] = colour.g;
+        floats[at + 2] = colour.b;
+        floats[at + 3] = colour.a;
+        return at + 4;
+    };
+
     /**
-     * Numbers name states for as long as the renderer lives and are never
-     * reused, so a key made before a table was cleared cannot name a different
-     * state after it.
+     * A transform beside the world ones into the slow state's floats, at
+     * `slowAt`: a `forEach` callback made once, where `for...of` over the map
+     * would make an array of every entry.
+     *
+     * @param {ArrayLike<number>} matrix @param {number} type
      */
-    let nextStateNumber = 0;
-    const STATE_NUMBERS_LIMIT = 1024;
+    const putTransform = (matrix, type)=>{
+        if (type >= D3DTS.WORLD && type <= D3DTS.WORLD_LAST)
+        {
+            return;
+        }
+        const floats = slowFloats;
+        floats[slowAt++] = type;
+        for (let index = 0; index < 16; index++)
+        {
+            floats[slowAt++] = matrix[index];
+        }
+    };
+
+    /**
+     * Whether the objects the slow state was last numbered from are the
+     * model's still: its targets, material and viewport, and each transform
+     * beside the world ones, in the map's order.
+     *
+     * @param {RenderModel} model
+     */
+    const slowSourcesHeld = model=>{
+        if (model.renderTarget !== heldTarget || model.depthStencil !== heldDepth
+            || model.material !== heldMaterial || model.viewport !== heldViewport)
+        {
+            return false;
+        }
+        slowAt = 0;
+        slowMatch = true;
+        model.transforms.forEach(matchTransform);
+        return slowMatch && slowAt === heldTransforms.length;
+    };
+
+    /** @param {ArrayLike<number>} matrix @param {number} type */
+    const matchTransform = (matrix, type)=>{
+        if (type >= D3DTS.WORLD && type <= D3DTS.WORLD_LAST)
+        {
+            return;
+        }
+        if (heldTransforms[slowAt] !== type || heldTransforms[slowAt + 1] !== matrix)
+        {
+            slowMatch = false;
+        }
+        slowAt += 2;
+    };
+
+    /** @param {RenderModel} model */
+    const holdSlowSources = model=>{
+        heldTarget = model.renderTarget;
+        heldDepth = model.depthStencil;
+        heldMaterial = model.material;
+        heldViewport = model.viewport;
+        heldTransforms.length = 0;
+        model.transforms.forEach(holdTransform);
+    };
+
+    /** @param {ArrayLike<number>} matrix @param {number} type */
+    const holdTransform = (matrix, type)=>{
+        if (type < D3DTS.WORLD || type > D3DTS.WORLD_LAST)
+        {
+            heldTransforms.push(type, matrix);
+        }
+    };
+
+    /** @param {readonly Light[]} lights */
+    const sameLightTypes = lights=>{
+        if (lights.length !== heldLightTypes.length)
+        {
+            return false;
+        }
+        for (let index = 0; index < lights.length; index++)
+        {
+            if (lights[index].Type !== heldLightTypes[index])
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    /** @param {string} format */
+    const formatIdOf = format=>{
+        let id = formatIds.get(format);
+        if (id === undefined)
+        {
+            id = formatIds.size;
+            formatIds.set(format, id);
+        }
+        return id;
+    };
+
+    const slowNumbering = createNumbering();
+    let slowFloats = new Float64Array(256);
+    let slowWords = new Int32Array(slowFloats.buffer);
+    /** Where `putTransform` writes next, and where `matchTransform` reads. */
+    let slowAt = 0;
+    let slowMatch = false;
+    let slowNumber = -1;
+    let slowHeld = false;
+    /** @type {unknown} */
+    let heldTarget = null;
+    /** @type {unknown} */
+    let heldDepth = null;
+    /** @type {unknown} */
+    let heldMaterial = null;
+    /** @type {unknown} */
+    let heldViewport = null;
+    /** Type then matrix, for each transform beside the world ones. @type {unknown[]} */
+    const heldTransforms = [];
+    /** @type {number[]} */
+    const heldLightTypes = [];
+    /** @type {Map<string, number>} */
+    const formatIds = new Map();
 
     /**
      * A stable number for the device state a preparation is built from: equal
@@ -4962,10 +5402,10 @@ export function createRenderer(options){
      * with. The world transform is the one state left out, because it moves
      * between most draws and the block is written afresh from it on every one.
      *
-     * The render and stage states are laid out as words and looked up by
-     * their hash, with no string built: a program that flips one render state
-     * between draws names a state on every draw. Texture bindings and the
-     * draw's own shape are not in it: see `preparationKeyOf`, which adds them.
+     * The render and stage states are laid out as words and numbered with no
+     * string built: a program that flips one render state between draws names
+     * a state on every draw. Texture bindings and the draw's own shape are not
+     * in it: see `preparationKeyOf`, which adds them.
      *
      * @param {RenderModel} model
      * @param {{ fvf: number, fixedFunctionLayout?: { id: number, streams?: number[] } | null }}
@@ -4973,7 +5413,7 @@ export function createRenderer(options){
      * @returns {number}
      */
     const stateNumberOf = (model, processing)=>{
-        const streams = processing.fixedFunctionLayout?.streams ?? [];
+        const streams = processing.fixedFunctionLayout?.streams ?? NO_STREAMS;
         // Sized once for the words below, so that writing them tests nothing.
         let needed = 4 + streams.length + 2 * model.renderStates.size;
         for (let stage = 0; stage < STAGE_COUNT; stage++)
@@ -4991,129 +5431,118 @@ export function createRenderer(options){
         // A declaration read without a format is told apart by its own id,
         // and by the strides its further streams are bound at.
         words[at++] = processing.fixedFunctionLayout?.id ?? 0;
-        for (const stream of streams)
+        for (let index = 0; index < streams.length; index++)
         {
-            words[at++] = strideOf(model, stream);
+            words[at++] = strideOf(model, streams[index]);
         }
-        // Through `forEach` rather than `for...of`, which makes an array of
-        // each entry, and a state has some hundreds of them.
-        /** @param {number} value @param {number} state */
-        const putEntry = (value, state)=>{
-            words[at++] = state;
-            words[at++] = value;
-        };
         words[at++] = model.renderStates.size;
+        stateAt = at;
+        // Through `forEach` with a callback made once rather than `for...of`,
+        // which makes an array of each entry, and a state has some hundreds.
         model.renderStates.forEach(putEntry);
         for (let stage = 0; stage < STAGE_COUNT; stage++)
         {
             const states = model.stageStates(stage);
-            words[at++] = states.size;
+            stateScratch[stateAt++] = states.size;
             states.forEach(putEntry);
         }
-        const count = at;
-        // FNV-1a over the words; a hit is compared in full, so a collision
-        // costs a comparison and never names two states alike.
-        let hash = 0x811c9dc5;
-        for (let index = 0; index < count; index++)
-        {
-            hash = Math.imul(hash ^ words[index], 0x01000193);
-        }
-        const bucket = intStates.get(hash);
-        if (bucket !== undefined)
-        {
-            for (const entry of bucket)
-            {
-                if (entry.values.length === count && sameWords(entry.values, words))
-                {
-                    return entry.number;
-                }
-            }
-        }
-        if (intStateCount >= STATE_NUMBERS_LIMIT)
-        {
-            intStates.clear();
-            intStateCount = 0;
-        }
-        const entry = { values: words.slice(0, count), number: nextStateNumber++ };
-        if (bucket !== undefined && intStates.has(hash))
-        {
-            bucket.push(entry);
-        }
-        else
-        {
-            intStates.set(hash, [entry]);
-        }
-        intStateCount++;
-        return entry.number;
+        return stateNumbering(stateScratch, stateAt);
     };
 
-    /** @param {Int32Array} stored @param {Int32Array} scratch @returns {boolean} */
-    const sameWords = (stored, scratch)=>{
-        for (let index = 0; index < stored.length; index++)
-        {
-            if (stored[index] !== scratch[index])
-            {
-                return false;
-            }
-        }
-        return true;
+    /** @param {number} value @param {number} state */
+    const putEntry = (value, state)=>{
+        stateScratch[stateAt++] = state;
+        stateScratch[stateAt++] = value;
     };
 
+    /** @type {readonly number[]} */
+    const NO_STREAMS = Object.freeze([]);
     let stateScratch = new Int32Array(2048);
-    /** @type {Map<number, { values: Int32Array, number: number }[]>} */
-    const intStates = new Map();
-    let intStateCount = 0;
-    let stateKey = '';
+    /** Where `putEntry` writes next. */
+    let stateAt = 0;
+    const stateNumbering = createNumbering();
+    let stateKey = -1;
     /** @type {number | undefined} */
     let stateKeyVersion;
 
     /**
-     * The whole key: the state beside textures, kept while
-     * `stateVersionBesideTextures` holds still -- a program that binds a new
-     * texture before most draws changes nothing else between them -- then the
-     * draw's own shape and every stage's texture with the generation of its
-     * bytes, which change without the device hearing of it.
+     * The whole key, as a number numbered like the state's: the state beside
+     * textures, kept while `stateVersionBesideTextures` holds still -- a
+     * program that binds a new texture before most draws changes nothing else
+     * between them -- then the draw's own shape and every stage's texture with
+     * the generation of its bytes, which change without the device hearing of
+     * it.
      *
      * @param {RenderModel} model
      * @param {{ fvf: number, fixedFunctionLayout?: { id: number, streams?: number[] } | null }}
      *     processing
      * @param {number} stride
      * @param {string} topology
-     * @returns {string}
+     * @returns {number}
      */
     const preparationKeyOf = (model, processing, stride, topology)=>{
         const version = model.stateVersionBesideTextures;
         if (version === undefined || version !== stateKeyVersion)
         {
-            stateKey = `s${stateNumberOf(model, processing)}`;
+            stateKey = stateNumberOf(model, processing);
             stateKeyVersion = version;
         }
-        let key = `${stateKey}|${stride}|${topology}`;
+        const words = keyWords;
+        let at = 0;
+        words[at++] = stateKey;
+        words[at++] = stride;
+        words[at++] = topologyIdOf(topology);
         for (let stage = 0; stage < STAGE_COUNT; stage++)
         {
             const texture = model.textures.get(stage);
             const held = texture ? textures.get(texture) : null;
-            key += held ? `|${held.id}:${held.soil}` : '|-';
+            words[at++] = held ? held.serial : -1;
+            words[at++] = held ? held.soil : 0;
             // A managed texture's level of detail is sampled by, and set on
             // the texture where no state counter sees it.
-            const lod = lodOf(texture);
-            if (lod !== 0)
-            {
-                key += `:l${lod}`;
-            }
+            words[at++] = lodOf(texture);
             // A Direct3D 7 texture's colour key is set on the surface and
             // shapes the shader, and no state counter sees it change.
             if (texture?.colorKey)
             {
-                key += `:${texture.colorKey()}`;
+                const colorKey = texture.colorKey();
+                words[at++] = colorKey === null ? 1 : 2;
+                words[at++] = colorKey ?? 0;
+            }
+            else
+            {
+                words[at++] = 0;
+                words[at++] = 0;
             }
         }
-        return key;
+        return keyNumbering(words, at);
+    };
+
+    const keyWords = new Int32Array(3 + STAGE_COUNT * 5);
+    const keyNumbering = createNumbering();
+    /** @type {Map<string, number>} */
+    const topologyIds = new Map();
+    /** @param {string} topology */
+    const topologyIdOf = topology=>{
+        let id = topologyIds.get(topology);
+        if (id === undefined)
+        {
+            id = topologyIds.size;
+            topologyIds.set(topology, id);
+        }
+        return id;
     };
 
     /**
      * This draw's uniform block: the prepared state's block with the fields
-     * the world transform reaches written over it.
+     * the world transform reaches written over it, and the lights as they
+     * stand, which the state's number leaves out.
+     *
+     * World then view, its product with the projection and the two normal
+     * matrices are formed again only when a matrix they come from holds other
+     * bits than the one they were last formed from: a program draws a model
+     * in several state changes under one world, and the view and projection
+     * hold still for a frame.
      *
      * @param {RenderModel} model
      * @param {PreparedDraw} prepared
@@ -5121,28 +5550,77 @@ export function createRenderer(options){
      */
     const blockFor = (model, prepared)=>{
         const template = /** @type {Float32Array} */ (prepared.template);
+        if (prepared.lighting)
+        {
+            const lights = enabledLights(model);
+            if (lights !== prepared.packedLights)
+            {
+                for (let index = 0; index < lights.length; index++)
+                {
+                    packLight(template, UNIFORM_AT.lights + index * LIGHT_FLOATS, lights[index]);
+                }
+                prepared.packedLights = lights;
+            }
+        }
         const block = ensureFrame().arena.take(template.length);
         block.set(template);
         const world = transformOf(model, D3DTS.WORLD);
-        const worldView = multiplyMatrices(world, transformOf(model, D3DTS.VIEW), WORLD_VIEW);
-        block.set(multiplyMatrices(worldView, transformOf(model, D3DTS.PROJECTION),
-            WORLD_VIEW_PROJECTION), UNIFORM_AT.worldViewProjection);
-        block.set(world, UNIFORM_AT.world);
+        const worldMoved = !sameBits(world, formedWorld);
+        if (worldMoved || !sameBits(transformOf(model, D3DTS.VIEW), formedView))
+        {
+            formedWorld.set(world);
+            formedView.set(transformOf(model, D3DTS.VIEW));
+            multiplyMatrices(formedWorld, formedView, formedWorldView);
+            formedProjection.set(transformOf(model, D3DTS.PROJECTION));
+            multiplyMatrices(formedWorldView, formedProjection, formedWorldViewProjection);
+            normalFormed = worldMoved ? false : normalFormed;
+            cameraNormalFormed = false;
+        }
+        else if (!sameBits(transformOf(model, D3DTS.PROJECTION), formedProjection))
+        {
+            formedProjection.set(transformOf(model, D3DTS.PROJECTION));
+            multiplyMatrices(formedWorldView, formedProjection, formedWorldViewProjection);
+        }
+        block.set(formedWorldViewProjection, UNIFORM_AT.worldViewProjection);
+        block.set(formedWorld, UNIFORM_AT.world);
         // World then view too: vertex fog's depth and a generated coordinate's
         // camera space move with the model as its position does, and a lit
         // normal with the model's own transform.
-        block.set(worldView, UNIFORM_AT.worldView);
+        block.set(formedWorldView, UNIFORM_AT.worldView);
         if (prepared.lighting)
         {
-            block.set(normalMatrixOf(world, NORMAL_MATRIX), UNIFORM_AT.normalMatrix);
+            if (!normalFormed)
+            {
+                normalMatrixOf(formedWorld, formedNormal);
+                normalFormed = true;
+            }
+            block.set(formedNormal, UNIFORM_AT.normalMatrix);
         }
-        if (prepared.state.stages.some(stage=>readsNormal(stage.texCoordIndex)))
+        if (readsNormalAnywhere(prepared.state.stages))
         {
-            block.set(normalMatrixOf(worldView, CAMERA_NORMAL_MATRIX),
-                UNIFORM_AT.cameraNormalMatrix);
+            if (!cameraNormalFormed)
+            {
+                normalMatrixOf(formedWorldView, formedCameraNormal);
+                cameraNormalFormed = true;
+            }
+            block.set(formedCameraNormal, UNIFORM_AT.cameraNormalMatrix);
         }
         return block;
     };
+
+    /**
+     * What `blockFor` last formed its matrices from, and what it formed. The
+     * copies start as not-a-number, which no matrix compares equal to.
+     */
+    const formedWorld = new Float32Array(16).fill(NaN);
+    const formedView = new Float32Array(16).fill(NaN);
+    const formedProjection = new Float32Array(16).fill(NaN);
+    const formedWorldView = new Float32Array(16);
+    const formedWorldViewProjection = new Float32Array(16);
+    const formedNormal = new Float32Array(16);
+    const formedCameraNormal = new Float32Array(16);
+    let normalFormed = false;
+    let cameraNormalFormed = false;
 
     /**
      * Serves a draw from a preparation already built for its state, giving it a
@@ -5338,6 +5816,7 @@ export function createRenderer(options){
             state,
             uniforms: EMPTY_BLOCK,
             template: uniformsOf(model, lighting, undefined, mipsApplied),
+            packedLights: lighting ? enabledLights(model) : null,
             stageBindings,
             lighting,
             fogSetting: '',
@@ -5526,6 +6005,7 @@ export function createRenderer(options){
                 // level missing shows the gap at the distance that level
                 // covers.
                 dirtyLevels: new Set(Array.from({ length: levels * faces }, (_, index)=>index)),
+                serial: nextTextureId,
                 id: `t${nextTextureId++}`,
                 // A per-texture generation of its contents, so a preparation
                 // key can say which bytes it was built against without a
@@ -6004,7 +6484,7 @@ export function createRenderer(options){
                     indices: null,
                     count: 6,
                     first: 0,
-                }, { scissored: false });
+                }, false);
             }
             frame.commands.push({ kind: 'scissor', rect: {
                 x: rect.x, y: rect.y, width: rect.width, height: rect.height,
@@ -6038,7 +6518,7 @@ export function createRenderer(options){
                 ...(rewrite
                     ? expandedGeometry(type, ascending(count), startVertex, fill)
                     : { indices: null, count, first: startVertex }),
-            }, { bias: streamZeroBias(model) });
+            }, true, streamZeroBias(model));
             if (dumpDraws && prepared.program)
             {
                 dumpProgram(model, prepared, count);
@@ -6095,7 +6575,7 @@ export function createRenderer(options){
                     count,
                     first: 0,
                     baseVertex: model.baseVertexIndex,
-                }, { bias: streamZeroBias(model) });
+                }, true, streamZeroBias(model));
                 if (dumpDraws && prepared.program)
                 {
                     dumpProgram(model, prepared, count);
@@ -6114,7 +6594,7 @@ export function createRenderer(options){
             record(model, prepared, {
                 vertices,
                 ...expandedGeometry(type, order, model.baseVertexIndex, fill),
-            }, { bias: streamZeroBias(model) });
+            }, true, streamZeroBias(model));
             if (dumpDraws && prepared.program)
             {
                 dumpProgram(model, prepared, count);
@@ -6815,12 +7295,8 @@ export function createRenderer(options){
                     + command.stageBindings.map((/** @type {any} */ stage)=>
                         ` tv${resourceId(stage.view)}/sm${resourceId(stage.sampler)}`).join('');
             }
-            const entries = [{ binding: 0, resource: block }];
-            command.stageBindings.forEach((/** @type {any} */ stage, /** @type {number} */ index)=>{
-                entries.push(
-                    { binding: 1 + index * 2, resource: stage.view },
-                    { binding: 2 + index * 2, resource: stage.sampler });
-            });
+            const entries = bindingEntriesOf(command.stageBindings);
+            entries[0].resource = block;
             pass.setBindings(0, pipeline.bindGroupLayout, entries);
             pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
             bindStreams(pass, command);

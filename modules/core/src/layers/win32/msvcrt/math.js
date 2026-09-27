@@ -248,8 +248,10 @@ export function createMathFunctions(host){
     for (const name of [...Object.keys(handlers), 'frexp', 'modf'])
     {
         const code = CODE_OF[name] ?? name;
+        // Through unknown: the float module exports its tables beside its functions.
         const source = /** @type {Record<string, Function>} */ (inGuestMath)[code]
-            ?? /** @type {Record<string, Function>} */ (inGuestFloat)[code];
+            ?? /** @type {Record<string, Function>} */ (/** @type {unknown} */ (
+                inGuestFloat))[code];
         const compiled = /** @type {Record<string, any>} */ (MATH_CODE)[code]
             ?? /** @type {Record<string, any>} */ (FLOAT_CODE)[code];
         if (source && compiled)

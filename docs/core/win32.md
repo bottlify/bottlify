@@ -399,12 +399,15 @@ emulator's.
 The rest of the runtime's floating point is in the guest as well (`msvcrt/inguest-float.js`).
 `_control87` and `_controlfp` read the thread's x87 control word, translate it into `float.h`'s
 portable bits (`_MCW_EM`, `_MCW_RC`, `_MCW_PC`, `_MCW_IC`; `_controlfp` leaves `_EM_DENORMAL` out
-of its mask), change the ones the mask names and load the word back, answering it as they read it
-again -- so a precision a program sets is the precision its arithmetic then rounds to, where the
-handler remembered a word and applied nothing; `_statusfp` and `_clearfp` read the status word's
-exception flags, and `_clearfp` clears them. `_isnan`, `_finite` and `_fpclass` read a double's
-bits as integers (no x87 load, so a signalling NaN raises nothing); `_copysign` and `_chgsign`
-are `fabs` and `fchs`; `_logb` is `fxtract`'s exponent (0 the handler's, -infinity and ERANGE);
+of its mask) -- a table read for each group of bits the translation moves apart, the exception
+bits, the rounding and precision, back the other way the same, the tables the bit-by-bit
+functions' own answers --, change the ones the mask names and load the word back, answering it
+as they read it again -- so a precision a program sets is the precision its arithmetic then
+rounds to, where the handler remembered a word and applied nothing; `_statusfp` and `_clearfp`
+read the status word's exception flags through the same table, and `_clearfp` clears them.
+`_isnan`, `_finite` and `_fpclass` read a double's bits as integers (no x87 load, so a signalling
+NaN raises nothing); `_copysign` and `_chgsign` are `fabs` and `fchs`; `_logb` is `fxtract`'s
+exponent (0 the handler's, -infinity and ERANGE);
 `_scalb` is `ldexp`'s code; `_nextafter` steps by the unit in the last place on its side, under
 double precision, a step past the largest double the handler's (ERANGE). `strtod` and `atof` read
 their number in the guest -- white space, a sign, digits and a point, an exponent after `e`, `E`,
