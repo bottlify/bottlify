@@ -1365,6 +1365,9 @@ drives `ReadFileEx`, `WriteFileEx` and `SleepEx`; `src/loadex.itest.js` loads a 
 data file and unresolved, and a program by name; `src/unload.itest.js` counts a library's loads and
 watches the last `FreeLibrary` detach and unload it; `src/exitdetach.itest.js` watches a library
 the program imports be attached and then detached by `ExitProcess`; `src/arena.itest.js` ships a
-library that ends just short of the stack pool and starts a thread.
+library that ends just short of the stack pool and starts a thread; `src/system-modules.itest.js`
+holds the system modules to their own images' room in the module window, each where the one before
+it ends, and has a program import `d3dx9_30`, `d3dx9_43` and `msvcrt`, load and free `d3dx9_36`,
+and find each version's handle, exports and file name its own, on cork and on the emulator.
 End-to-end tests that drive a program through the whole surface live beside the application entry
 point (`src/*.itest.js`) and in `tools/cdp_test/` (a real browser and GPU).

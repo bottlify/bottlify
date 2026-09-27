@@ -2690,7 +2690,6 @@ async function buildApp(options){
     const mainImage = parsePe(options.executable);
     const { moduleBase: MODULE_BASE, stackPoolBase: STACK_POOL_BASE, heapBase: HEAP_BASE }
         = spaceAbove(mainImage.imageBase + mainImage.sizeOfImage);
-    const MODULE_STRIDE = 0x00100000;
     // Where a thread that is not the first gets its stack. Above the space
     // libraries are mapped into and below the heap, because a stack of the size
     // a program was linked for is a megabyte or more and the megabyte under the
@@ -3963,7 +3962,12 @@ async function buildApp(options){
         });
         return { code, jumps };
     };
-    Object.entries(allLibraries).forEach(([name, table], index)=>{
+    // Each system module where the one before it ends, at the granularity
+    // every image is placed at: the window they share is the room left for
+    // the libraries a program brings, and a module is a few pages -- a
+    // megabyte apart, sixty of them left a third of the window to those.
+    let systemModulesEnd = MODULE_BASE;
+    Object.entries(allLibraries).forEach(([name, table])=>{
         // A library imported by number has to be synthesised with the numbers
         // the program compiled against; one we assigned ourselves would bind to
         // a different function, silently.
@@ -3992,13 +3996,14 @@ async function buildApp(options){
             },
         }));
 
-        const base = MODULE_BASE + index * MODULE_STRIDE;
+        const base = systemModulesEnd;
         // A table with a DllMain is a module with an entry point, run when a
         // program first loads it -- which is how a library the program did not
         // import announces itself to the one that asked for it.
         const placed = loader.synthesise({
             name, base, exports, entryPoint: 'DllMain' in table ? 'DllMain' : undefined,
         });
+        systemModulesEnd = base + Math.ceil(placed.size / LIBRARY_ALIGN) * LIBRARY_ALIGN;
 
         // An export's address is its trampoline inside the module, and that is
         // what both the import table and GetProcAddress hand out -- so a program
@@ -4703,14 +4708,13 @@ async function buildApp(options){
         byName, byBase,
         // Straight after the system modules, which is the first address nothing
         // else has claimed, and up to the pool of thread stacks.
-        base: MODULE_BASE + Object.keys(allLibraries).length * MODULE_STRIDE,
+        base: systemModulesEnd,
         ...librarySpace,
     });
     // Where a library asked for later goes: after the ones that came with the
     // program, or after the system modules when there were none.
     nextLibraryBase = shipped.reduce(
-        (highest, library)=>Math.max(highest, library.base + library.size),
-        MODULE_BASE + Object.keys(allLibraries).length * MODULE_STRIDE);
+        (highest, library)=>Math.max(highest, library.base + library.size), systemModulesEnd);
 
     const image = loader.load(options.executable, { resolveImport, missing: missingImport });
 
