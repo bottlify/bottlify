@@ -1095,6 +1095,39 @@ export function heapSizeFor(memorySize, asked, base = 0x0c000000){
 }
 
 /**
+ * Hands a film's sound to its track and says how much of the film's timeline
+ * that was, in the device's frames -- all of it, whether the track took it or
+ * not.
+ *
+ * The picture is decoded to just ahead of the sound heard, and heard is what
+ * was handed over less what is still owed. A track that refuses part of a
+ * block (full, or a queue the device is behind on) still moves the film on by
+ * the whole block: counted as taken only, the refused part would be heard the
+ * moment it was offered, the picture would race ahead to meet it and more would
+ * be refused -- a film run through in a fraction of its length on a sound
+ * mostly dropped.
+ *
+ * @param {{ write: (bytes: Uint8Array) => number }} track
+ * @param {Int16Array[]} blocks
+ * @param {number} channels     the film's
+ * @param {number} rate         the film's sample rate
+ * @param {number} deviceRate   the rate the track counts `played()` in
+ * @returns {{ offered: number, refused: number }} device frames
+ */
+export function feedFilmSound(track, blocks, channels, rate, deviceRate){
+    let offered = 0;
+    let refused = 0;
+    for (const block of blocks)
+    {
+        const frames = Math.round(block.length / channels * deviceRate / rate);
+        const taken = track.write(new Uint8Array(block.buffer, block.byteOffset, block.byteLength));
+        offered += frames;
+        refused += Math.max(0, frames - taken);
+    }
+    return { offered, refused };
+}
+
+/**
  * Credits the guest's clock with the wall time that has passed, all of it.
  *
  * Between two slices of the guest the loop yields to the browser, mixes sound,
@@ -5012,6 +5045,8 @@ async function buildApp(options){
         // film's own timeline. A film has one timeline and two ways to advance
         // along it, and nothing else in a report says whether they agree.
         driftMs: 0, worstDriftMs: 0, soundMs: 0, queuedMs: 0,
+        // The film's sound its track would not take: heard as a gap.
+        refusedMs: 0,
     };
 
     /** @param {{ hwnd: number, width: number, height: number, bgra: Uint8Array | null,
@@ -5055,11 +5090,10 @@ async function buildApp(options){
                     written: 0,
                 };
             }
-            for (const block of shown.audio)
-            {
-                filmTrack.written += filmTrack.track.write(new Uint8Array(
-                    block.buffer, block.byteOffset, block.byteLength));
-            }
+            const fed = feedFilmSound(filmTrack.track, shown.audio, shown.channels,
+                shown.sampleRate, sound.sampleRate);
+            filmTrack.written += fed.offered;
+            film.refusedMs += Math.round(fed.refused * 1000 / sound.sampleRate);
         }
         if (filmTrack && sound)
         {
