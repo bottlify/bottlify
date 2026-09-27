@@ -109,7 +109,12 @@ const ENDS = 20;
 const FRESH = 21;
 const STREAMING = 22;
 const HELD = 23;
-/** How long a stream is waited for before it is played on regardless. */
+/**
+ * How long a stream is waited for before it is played on regardless: this, or
+ * a whole lap of the buffer if that is longer. Until the writer has been gone
+ * a lap, everything past what it wrote is the lap before -- played, it is the
+ * same passage heard twice; a writer silent for a whole lap has stopped.
+ */
 const GIVE_UP_SECONDS = 0.25;
 
 const STATE_FREE = 0;
@@ -449,7 +454,7 @@ function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
         // A writer gone this long has stopped streaming, not fallen behind:
         // the buffer plays on round the circle, as the hardware would.
         seam.held += blockFrames - produced;
-        if (seam.held > outputRate * GIVE_UP_SECONDS)
+        if (seam.held > outputRate * Math.max(GIVE_UP_SECONDS, frames / rate))
         {
             Atomics.store(header, STREAMING, 0);
             seam.held = 0;

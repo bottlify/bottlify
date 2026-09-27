@@ -778,3 +778,12 @@ test('a streaming buffer whose writer stalls is held where it was written, not r
     assert.ok(stalled.movedInStallMs < 80,
         `the cursor stops where the writing did (${stalled.movedInStallMs.toFixed(0)} ms on)`);
 });
+
+test('a stream whose writer stalls for longer than a quarter second is still not replayed',
+    async()=>{
+        // Given up on after 250 ms, the device played on round the circle --
+        // the lap before, a passage heard twice -- while the writer was only
+        // late: until it has been gone a whole lap, what lies ahead is stale.
+        const stalled = await refillAcrossAStall(600);
+        assert.equal(stalled.stale, 0, 'nothing the program had not written is played');
+    });
