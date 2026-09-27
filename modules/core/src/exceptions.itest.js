@@ -19,8 +19,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
+import { buildExe } from '../../../tools/make-pe.mjs';
 
 const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
+
+/** @param {number} value */
+const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
 /**
  * @param {import('node:test').TestContext} t
@@ -28,12 +32,19 @@ const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
  * @param {'emulator' | 'cork'} [engine]
  */
 async function run(t, name, engine = 'emulator'){
-    const [wasm, exe] = await Promise.all([
-        readFile(new URL('v86.wasm', PREBUILT)),
-        readFile(new URL(`../test/fixtures/${name}.exe`, import.meta.url)),
-    ]);
+    const exe = await readFile(new URL(`../test/fixtures/${name}.exe`, import.meta.url));
+    return runExecutable(t, new Uint8Array(exe), engine);
+}
+
+/**
+ * @param {import('node:test').TestContext} t
+ * @param {Uint8Array} executable
+ * @param {'emulator' | 'cork'} engine
+ */
+async function runExecutable(t, executable, engine){
+    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
     const app = await createApp({
-        executable: new Uint8Array(exe),
+        executable,
         engine,
         v86: {
             moduleUrl: new URL('libv86.mjs', PREBUILT).href,
@@ -108,3 +119,92 @@ test('a C++ exception nothing catches ends the process with its code', { timeout
         assert.equal(code, 0xe06d7363, 'the exception code is the exit code, as on Windows');
         assert.deepEqual(boxes, [], 'and a run that failed is not told as a game that finished');
     });
+
+/**
+ * A fault taken with the direction flag set, as one inside a copy going down
+ * (`std; rep movsd`) is taken -- here an invalid opcode, which faults at the
+ * same place on every engine. The handler reads the flags it runs with and
+ * the context's, fills four bytes with `rep stosb` -- forwards only if DF is
+ * clear -- and continues at a block of its choosing with DF left set in the
+ * context, and the block reads the flags it continues with.
+ *
+ * Exits 0, or with a bit per property that failed: 1 the handler ran with DF
+ * set, 2 the context did not have it, 4 the handler's fill went down, 8 the
+ * block continued without it.
+ */
+function buildDirectionFlagExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        data: {
+            savedEsp: [0, 0, 0, 0], inHandler: [0xff, 0, 0, 0], inContext: [0, 0, 0, 0],
+            fill: [0, 0, 0, 0, 0, 0, 0, 0],
+        },
+        codeSize: 0x180,
+        code: ({ iat, at, code })=>{
+            const handler = code(0x100);
+            const recover = code(0x80);
+            const main = [
+                0x68, ...u32(handler),                           // push handler
+                0x64, 0xff, 0x35, 0, 0, 0, 0,                    // push dword fs:[0]
+                0x64, 0x89, 0x25, 0, 0, 0, 0,                    // mov fs:[0], esp
+                0x89, 0x25, ...u32(at('savedEsp')),              // mov [savedEsp], esp
+                0xfd,                                            // std
+                0x0f, 0x0b,                                      // ud2
+                0xfc, 0x6a, 0x10, 0xff, 0x15, ...u32(iat('ExitProcess')), // not reached
+            ];
+            const block = [
+                0x9c, 0x5b,                                      // pushfd; pop ebx
+                0xfc,                                            // cld
+                0x64, 0x8f, 0x05, 0, 0, 0, 0,                    // pop dword fs:[0]
+                0x83, 0xc4, 0x04,                                // add esp, 4
+                0x31, 0xc0,                                      // xor eax, eax
+                0x83, 0x3d, ...u32(at('inHandler')), 0x00,       // cmp dword [inHandler], 0
+                0x74, 0x03, 0x83, 0xc8, 0x01,                    // je +3; or eax, 1
+                0x83, 0x3d, ...u32(at('inContext')), 0x00,       // cmp dword [inContext], 0
+                0x75, 0x03, 0x83, 0xc8, 0x02,                    // jne +3; or eax, 2
+                0x80, 0x3d, ...u32(at('fill') + 7), 0x5a,        // cmp byte [fill+7], 0x5a
+                0x74, 0x03, 0x83, 0xc8, 0x04,                    // je +3; or eax, 4
+                0xf7, 0xc3, ...u32(0x400),                       // test ebx, DF
+                0x75, 0x03, 0x83, 0xc8, 0x08,                    // jnz +3; or eax, 8
+                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),    // exit eax
+            ];
+            const handle = [
+                0x9c, 0x58,                                      // pushfd; pop eax
+                0x25, ...u32(0x400),                             // and eax, DF
+                0xa3, ...u32(at('inHandler')),                   // mov [inHandler], eax
+                0x8b, 0x4c, 0x24, 0x0c,                          // mov ecx, [esp+12]: CONTEXT
+                0x8b, 0x81, ...u32(0xc0),                        // mov eax, [ecx+EFlags]
+                0x25, ...u32(0x400),                             // and eax, DF
+                0xa3, ...u32(at('inContext')),                   // mov [inContext], eax
+                0x57,                                            // push edi
+                0x51,                                            // push ecx
+                0xbf, ...u32(at('fill') + 4),                    // mov edi, fill+4
+                0xb9, ...u32(4),                                 // mov ecx, 4
+                0xb0, 0x5a,                                      // mov al, 0x5a
+                0xf3, 0xaa,                                      // rep stosb
+                0x59,                                            // pop ecx
+                0x5f,                                            // pop edi
+                0xc7, 0x81, ...u32(0xb8), ...u32(recover),       // context.Eip = block
+                0xa1, ...u32(at('savedEsp')),                    // mov eax, [savedEsp]
+                0x89, 0x81, ...u32(0xc4),                        // context.Esp = eax
+                0x31, 0xc0,                                      // xor eax, eax: continue
+                0xc3,                                            // ret
+            ];
+            const bytes = new Array(0x180).fill(0xcc);
+            bytes.splice(0, main.length, ...main);
+            bytes.splice(0x80, block.length, ...block);
+            bytes.splice(0x100, handle.length, ...handle);
+            return bytes;
+        },
+    });
+}
+
+for (const engine of /** @type {const} */ (['cork', 'emulator']))
+{
+    test(`a handler runs with DF clear and the context gives it back, under ${engine}`,
+        { timeout: 60000 }, async t=>{
+            const { code } = await runExecutable(t, buildDirectionFlagExe(), engine);
+            assert.equal(code, 0, '1: DF set in the handler; 2: not in the context; 4: the'
+                + ' handler\'s fill went down; 8: the block continued without it');
+        });
+}

@@ -271,8 +271,9 @@ export function tlsGetValueCode(at, trap){
  *
  * A slot in the array is written whether or not anybody allocated it, and
  * success leaves the last error alone, as on Windows: the array is the
- * thread's own, and what keeps a freed slot's old value from its next tenant
- * is TlsFree clearing that slot in every thread's array.
+ * thread's own, and what keeps a freed slot's old value -- or one set in it
+ * while it was free -- from its next tenant is TlsFree and TlsAlloc clearing
+ * that slot in every thread's array.
  *
  * @param {number} at    Where the code lands, for the jump to the trap.
  * @param {number} trap  The host's TlsSetValue.
@@ -589,6 +590,33 @@ export function createProcessFunctions(host){
 
     /** @param {number} index */
     const validSlot = index=>index >= 0 && index < TLS_SLOTS && slots[index] !== null;
+
+    /**
+     * Clears a slot of the array in every thread's block, or in the running
+     * thread's alone where the host cannot name the others.
+     *
+     * @param {number} index  Below TLS_SLOTS_IN_BLOCK.
+     */
+    const zeroInEveryBlock = index=>{
+        if (!host.allThreads)
+        {
+            const block = blockFor(index);
+            if (block !== 0)
+            {
+                memory.writeU32(block + index * 4, 0);
+            }
+            return;
+        }
+        for (const thread of host.allThreads())
+        {
+            const teb = thread.tebAddress ?? 0;
+            const block = teb === 0 ? 0 : memory.readU32(teb + TEB.TLS_POINTER);
+            if (block !== 0)
+            {
+                memory.writeU32(block + index * 4, 0);
+            }
+        }
+    };
 
     /** @param {number} address @param {bigint} value */
     const writeU64 = (address, value)=>{
@@ -984,6 +1012,16 @@ export function createProcessFunctions(host){
                 }
                 generation++;
                 slots[index] = generation;
+                // The guest-side TlsSetValue writes a slot of the array whether
+                // or not it is allocated, as Windows does, so a freed slot may
+                // hold something again by now; its new owner reads zero. Every
+                // thread's, not only the caller's as Windows clears it: a slot
+                // past the array is unreachable in every thread once handed
+                // out again (the generation), and the two halves agree.
+                if (index < TLS_SLOTS_IN_BLOCK)
+                {
+                    zeroInEveryBlock(index);
+                }
                 return index;
             },
         },
@@ -1002,17 +1040,9 @@ export function createProcessFunctions(host){
                 // The slot reads as zero in every thread from now on, as it
                 // does on Windows, and the guest-side read has no generation
                 // to compare: every block is cleared.
-                if (index < TLS_SLOTS_IN_BLOCK && host.allThreads)
+                if (index < TLS_SLOTS_IN_BLOCK)
                 {
-                    for (const thread of host.allThreads())
-                    {
-                        const teb = thread.tebAddress ?? 0;
-                        const block = teb === 0 ? 0 : memory.readU32(teb + TEB.TLS_POINTER);
-                        if (block !== 0)
-                        {
-                            memory.writeU32(block + index * 4, 0);
-                        }
-                    }
+                    zeroInEveryBlock(index);
                 }
                 return 1;
             },

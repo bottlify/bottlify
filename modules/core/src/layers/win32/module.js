@@ -684,8 +684,10 @@ export function createWin32Module(){
                 /** @param {number} address */
                 isMapped: address=>memory.find(address) !== null,
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
+                // With the flags: a raised exception's context carries them as a
+                // fault's does, and a handler that continues from it gets them back.
                 registers: ()=>Object.fromEntries(
-                    registerNames.map(name=>[name, cpuRegisters.read(name)])),
+                    [...registerNames, 'eflags'].map(name=>[name, cpuRegisters.read(name)])),
                 setRegisters,
                 /** @param {any} call */
                 callGuest: call=>bridge.callGuest(call),
