@@ -23,7 +23,7 @@
  * want of a right succeeds here.
  */
 
-import { encodeAnsi } from '../kernel32/locale.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -191,6 +191,24 @@ export function createRegistryFunctions(host){
         return encodeAnsi(text);
     };
 
+    /**
+     * The wide form of a string the hive holds in the ANSI page, as a W read
+     * answers it: MultiByteToWideChar(CP_ACP), a unit a character.
+     *
+     * @param {Uint8Array} bytes
+     */
+    const widened = bytes=>{
+        const text = decodeAnsi(bytes);
+        const out = new Uint8Array(text.length * 2);
+        for (let at = 0; at < text.length; at++)
+        {
+            const unit = text.charCodeAt(at);
+            out[at * 2] = unit & 0xff;
+            out[at * 2 + 1] = unit >>> 8;
+        }
+        return out;
+    };
+
     /** @param {number} pointer @returns {string | null} */
     const readWideText = pointer=>{
         if (pointer === 0)
@@ -294,15 +312,20 @@ export function createRegistryFunctions(host){
             createKey(key, readText(subKey), result, disposition)),
     };
 
-    /** LONG RegOpenKeyExA(HKEY, LPCSTR, DWORD ulOptions, REGSAM, PHKEY) */
-    const openKeyEx = {
+    /**
+     * LONG RegOpenKeyExA(HKEY, LPCSTR, DWORD ulOptions, REGSAM, PHKEY), and
+     * with `read` the wide name its W form brings.
+     *
+     * @param {(pointer: number) => string | null} read
+     */
+    const openKeyExWith = read=>({
         argBytes: 20,
         handler: onKey((key, [, subKey, , , result])=>{
             if (result === 0)
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const found = hive.open(key, readText(subKey));
+            const found = hive.open(key, read(subKey));
             if (!found)
             {
                 // Windows leaves *phkResult undefined here; zeroing it keeps a
@@ -313,10 +336,54 @@ export function createRegistryFunctions(host){
             writeDword(result, allocate(found));
             return ERROR_SUCCESS;
         }),
-    };
+    });
+    const openKeyEx = openKeyExWith(readText);
+
+    /**
+     * LONG RegQueryValueExA(HKEY, LPCSTR, LPDWORD, LPDWORD lpType, LPBYTE lpData,
+     * LPDWORD lpcbData), and its W form: a wide name, and a string value
+     * answered in UTF-16 with its byte count doubled.
+     *
+     * @param {boolean} wide
+     */
+    const queryValueEx = wide=>({
+        argBytes: 24,
+        handler: onKey((key, [, name, , type, data, size])=>{
+            const value = hive.getValue(key, (wide ? readWideText(name) : readText(name)) ?? '');
+            if (!value)
+            {
+                return ERROR_FILE_NOT_FOUND;
+            }
+            writeDwordIf(type, value.type);
+            if (size === 0)
+            {
+                // Asking for data without saying how much room there is is
+                // the one combination Windows rejects outright.
+                return data === 0 ? ERROR_SUCCESS : ERROR_INVALID_PARAMETER;
+            }
+            const bytes = wide && STRING_TYPES.has(value.type) ? widened(value.data) : value.data;
+            const required = bytes.length;
+            if (data === 0)
+            {
+                writeDword(size, required);
+                return ERROR_SUCCESS;
+            }
+            if (readDword(size) < required)
+            {
+                writeDword(size, required);
+                return ERROR_MORE_DATA;
+            }
+            host.writeMemory(data, bytes);
+            writeDword(size, required);
+            return ERROR_SUCCESS;
+        }),
+    });
 
     return {
         RegOpenKeyExA: openKeyEx,
+
+        /** LONG RegOpenKeyExW(HKEY, LPCWSTR, DWORD, REGSAM, PHKEY) */
+        RegOpenKeyExW: openKeyExWith(readWideText),
 
         /**
          * LONG RegOpenKeyA(HKEY, LPCSTR, PHKEY)
@@ -478,6 +545,27 @@ export function createRegistryFunctions(host){
             },
         },
 
+        /** BOOL GetUserNameW(LPWSTR, LPDWORD): the same sizes, in wide characters. */
+        GetUserNameW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([buffer, size])=>{
+                if ((size >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const needed = USER_NAME.length + 1;
+                if ((buffer >>> 0) === 0 || readDword(size >>> 0) < needed)
+                {
+                    writeDword(size >>> 0, needed);
+                    return 0;
+                }
+                host.writeMemory(buffer >>> 0, widened(encodeAnsi(`${USER_NAME}\0`)));
+                writeDword(size >>> 0, needed);
+                return 1;
+            },
+        },
+
         /**
          * BOOL GetFileSecurityA(LPCSTR, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
          *                      DWORD nLength, LPDWORD lpnLengthNeeded)
@@ -623,37 +711,10 @@ export function createRegistryFunctions(host){
          * size, then again with one. Both paths have to work, and the first
          * must not require a buffer.
          */
-        RegQueryValueExA: {
-            argBytes: 24,
-            handler: onKey((key, [, name, , type, data, size])=>{
-                const value = hive.getValue(key, readText(name) ?? '');
-                if (!value)
-                {
-                    return ERROR_FILE_NOT_FOUND;
-                }
-                writeDwordIf(type, value.type);
-                if (size === 0)
-                {
-                    // Asking for data without saying how much room there is is
-                    // the one combination Windows rejects outright.
-                    return data === 0 ? ERROR_SUCCESS : ERROR_INVALID_PARAMETER;
-                }
-                const required = value.data.length;
-                if (data === 0)
-                {
-                    writeDword(size, required);
-                    return ERROR_SUCCESS;
-                }
-                if (readDword(size) < required)
-                {
-                    writeDword(size, required);
-                    return ERROR_MORE_DATA;
-                }
-                host.writeMemory(data, value.data);
-                writeDword(size, required);
-                return ERROR_SUCCESS;
-            }),
-        },
+        RegQueryValueExA: queryValueEx(false),
+
+        /** LONG RegQueryValueExW: the same, its name and its string values wide. */
+        RegQueryValueExW: queryValueEx(true),
 
         /** LONG RegSetValueExA(HKEY, LPCSTR, DWORD, DWORD dwType, const BYTE*, DWORD cbData) */
         RegSetValueExA: {

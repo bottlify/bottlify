@@ -169,6 +169,27 @@ test('a key made and a value set through the wide calls read back through the na
         ERROR_SUCCESS);
     assert.equal(memory.dword(OUT_DATA), 0x01020304);
     assert.deepEqual([fns.RegCreateKeyExW.argBytes, fns.RegSetValueExW.argBytes], [36, 24]);
+
+    // And the W reads: the key opened by a wide name, the string answered wide,
+    // its byte count doubled -- the terminator too, as it was stored.
+    putWide(SUBKEY, 'Software\\Vendor\\Wide');
+    assert.equal(fns.RegOpenKeyExW.handler([HKEY_LOCAL_MACHINE, SUBKEY, 0, 0, OUT_HANDLE]),
+        ERROR_SUCCESS);
+    const opened = memory.dword(OUT_HANDLE);
+    putWide(NAME, 'InstallPath');
+    memory.putDword(OUT_SIZE, 0);
+    assert.equal(fns.RegQueryValueExW.handler([opened, NAME, 0, OUT_TYPE, 0, OUT_SIZE]),
+        ERROR_SUCCESS);
+    assert.equal(memory.dword(OUT_SIZE), 9 * 2, 'the room a wide copy needs');
+    assert.equal(fns.RegQueryValueExW.handler([opened, NAME, 0, OUT_TYPE, OUT_DATA, OUT_SIZE]),
+        ERROR_SUCCESS);
+    assert.equal(String.fromCharCode(...new Uint16Array(
+        memory.bytes.slice(OUT_DATA, OUT_DATA + 16).buffer)), 'C:\\Games');
+    putWide(NAME, 'Flags');
+    memory.putDword(OUT_SIZE, 0x40);
+    assert.equal(fns.RegQueryValueExW.handler([opened, NAME, 0, OUT_TYPE, OUT_DATA, OUT_SIZE]),
+        ERROR_SUCCESS);
+    assert.equal(memory.dword(OUT_SIZE), 4, 'a binary value is not widened');
 });
 
 test('names and strings are kept in the ANSI page, whichever form set them', ()=>{
@@ -642,6 +663,12 @@ test('the user name is reported with a length that counts the terminator', ()=>{
     const name = memory.string(OUT_NAME);
     assert.ok(name.length > 0);
     assert.equal(memory.dword(OUT_SIZE), name.length + 1);
+
+    memory.putDword(OUT_SIZE, 0x100);
+    assert.equal(fns.GetUserNameW.handler([OUT_NAME, OUT_SIZE]), 1);
+    assert.equal(memory.dword(OUT_SIZE), name.length + 1, 'the wide one counts characters');
+    assert.equal(String.fromCharCode(...new Uint16Array(
+        memory.bytes.slice(OUT_NAME, OUT_NAME + name.length * 2).buffer)), name);
 });
 
 test('too small a buffer is refused, and the size needed is written back', ()=>{
