@@ -137,6 +137,49 @@ function buildSortExe(count, width){
     });
 }
 
+/**
+ * Calls _EH_prolog as a compiled function's prologue does, with EBP and the
+ * handler in EAX set, then exits 0 when the frame is the runtime's -- EBP one
+ * slot below the caller's stack, the old EBP under it, -1 and the handler
+ * below that, the record linked in fs:[0] at ESP -- or with the number of the
+ * first check that failed.
+ */
+function buildPrologExe(){
+    return buildExe({
+        imports: { 'msvcrt.dll': ['_EH_prolog'], 'KERNEL32.dll': ['ExitProcess'] },
+        codeSize: 0x80,
+        code: ({ iat })=>{
+            const bytes = [
+                0x89, 0xe6,                                  // mov esi, esp
+                0xbd, ...u32(0x12345678),                    // mov ebp, 0x12345678
+                0xb8, ...u32(0xcafe0000),                    // mov eax, handler
+                0xff, 0x15, ...u32(iat('_EH_prolog')),       // call [_EH_prolog]
+            ];
+            /** @type {number[]} */
+            const fails = [];
+            const check = (/** @type {number} */ n, /** @type {number[]} */ compare)=>{
+                bytes.push(0xbb, ...u32(n), ...compare);
+                fails.push(bytes.length);
+                bytes.push(0x75, 0);                         // jne fail
+            };
+            check(1, [0x8d, 0x46, 0xfc, 0x39, 0xc5]);        // lea eax, [esi-4]; cmp ebp, eax
+            check(2, [0x81, 0x7d, 0x00, ...u32(0x12345678)]); // cmp [ebp], old ebp
+            check(3, [0x83, 0x7d, 0xfc, 0xff]);              // cmp [ebp-4], -1
+            check(4, [0x81, 0x7d, 0xf8, ...u32(0xcafe0000)]); // cmp [ebp-8], handler
+            check(5, [0x64, 0x3b, 0x25, 0, 0, 0, 0]);        // cmp esp, fs:[0]
+            check(6, [0x8d, 0x46, 0xf0, 0x39, 0xc4]);        // lea eax, [esi-16]; cmp esp, eax
+            bytes.push(0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess')));
+            const fail = bytes.length;
+            bytes.push(0x53, 0xff, 0x15, ...u32(iat('ExitProcess')));
+            for (const jump of fails)
+            {
+                bytes[jump + 1] = fail - (jump + 2);
+            }
+            return bytes;
+        },
+    });
+}
+
 /** @param {Uint8Array} executable @param {'emulator' | 'cork'} engine */
 async function exitCodeOf(executable, engine){
     const wasm = await readFile(new URL('v86.wasm', PREBUILT));
@@ -164,6 +207,12 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
         async()=>{
             assert.equal(await exitCodeOf(buildCastExe(), engine), 0,
                 'the number of the first cast that came back wrong');
+        });
+
+    test(`_EH_prolog builds the caller's frame on its own stack under ${engine}`,
+        { timeout: 60000 }, async()=>{
+            assert.equal(await exitCodeOf(buildPrologExe(), engine), 0,
+                'the number of the first check that failed');
         });
 
     test(`qsort sorts through the program's comparator, in the guest, under ${engine}`,
