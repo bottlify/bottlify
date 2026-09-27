@@ -30,6 +30,7 @@ import { createCountedStringFunctions } from './strings.js';
 import { createQueryFunctions } from './query.js';
 import { createIntegerFunctions } from './integer.js';
 import { createWaitFunctions } from './waits.js';
+import { createPathFunctions } from './paths.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
 import { STATUS, toDosError } from './status.js';
 
@@ -188,9 +189,33 @@ export function createNtdllFunctions(host){
             ? createWaitFunctions({ readMemory: host.readMemory, kernel32, allocate })
             : {}),
 
+        ...(kernel32.GetFullPathNameW
+            ? createPathFunctions({ readMemory: host.readMemory,
+                writeMemory: host.writeMemory, readWideString: host.readWideString,
+                kernel32, allocate, free })
+            : {}),
+
         ...(MEMORY_ENTRIES.every(name=>kernel32[name])
             ? createMemoryFunctions({ readMemory: host.readMemory,
                 writeMemory: host.writeMemory, kernel32, allocate })
+            : {}),
+
+        /**
+         * NTSTATUS NtClose(HANDLE Handle)
+         *
+         * CloseHandle answered as a status: one handle table, so whatever the
+         * handle names -- a file NtCreateFile opened, an event, a thread -- it
+         * closes the same way.
+         */
+        ...(kernel32.CloseHandle
+            ? {
+                NtClose: {
+                    argBytes: 4,
+                    /** @param {number[]} args */
+                    handler: ([handle])=>(kernel32.CloseHandle.handler([handle]) !== 0
+                        ? STATUS.SUCCESS : STATUS.INVALID_HANDLE),
+                },
+            }
             : {}),
 
         /**

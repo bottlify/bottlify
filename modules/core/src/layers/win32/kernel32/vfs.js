@@ -109,18 +109,82 @@ export function createVolume(fs, fetchBlocks = null){
         ...entry.hidden ? { hidden: true } : {},
     });
 
+    /**
+     * The attributes programs set, by name folded to one case as the volume
+     * folds it. The filesystem below keeps no attribute bits, and read-only
+     * is not decoration: a program marks a file read-only and expects the
+     * delete and the write it did not mean to allow to be refused. Kept for
+     * the life of the process, following a name through a rename, a delete
+     * and a directory's removal.
+     *
+     * @type {Map<string, number>}
+     */
+    const recorded = new Map();
+    /** @param {string} path */
+    const keyOf = path=>path.toLowerCase();
+    /** @param {string} path */
+    const setBy = path=>{
+        const attributes = recorded.get(keyOf(path));
+        return attributes === undefined ? {} : { attributes };
+    };
+    /**
+     * Moves what was recorded under one name, and under every name below it,
+     * to another; with no destination, forgets it.
+     *
+     * @param {string} from @param {string | null} to
+     */
+    const carry = (from, to)=>{
+        const key = keyOf(from);
+        for (const [name, attributes] of [...recorded])
+        {
+            if (name !== key && !name.startsWith(`${key}\\`))
+            {
+                continue;
+            }
+            recorded.delete(name);
+            if (to !== null)
+            {
+                recorded.set(keyOf(to) + name.slice(key.length), attributes);
+            }
+        }
+    };
+
     return {
         /**
          * @param {string} path
          * @returns {{ exists: boolean, isDirectory: boolean, size: number,
-         *             modified: number, readOnly?: boolean, hidden?: boolean } | null}
+         *             modified: number, readOnly?: boolean, hidden?: boolean,
+         *             attributes?: number } | null}
          */
         stat(path){
             const entry = attempt(()=>fs.stat(path), null);
             return entry
                 ? { exists: true, isDirectory: Boolean(entry.directory), size: entry.size,
-                    modified: entry.modified ?? 0, ...marks(entry) }
+                    modified: entry.modified ?? 0, ...marks(entry), ...setBy(path) }
                 : null;
+        },
+
+        /**
+         * Records the attributes a program set on a name, or forgets them
+         * with `null`, which leaves the name as the volume reports it.
+         *
+         * @param {string} path @param {number | null} attributes
+         * @returns {boolean} whether the name is there to carry them
+         */
+        setAttributes(path, attributes){
+            if (!attempt(()=>fs.stat(path), null))
+            {
+                return false;
+            }
+            if (attributes === null)
+            {
+                recorded.delete(keyOf(path));
+            }
+            else
+            {
+                recorded.set(keyOf(path), attributes >>> 0);
+            }
+            return true;
         },
 
         /**
@@ -245,6 +309,7 @@ export function createVolume(fs, fetchBlocks = null){
                 {
                     fs.deleteFile(path);
                 }
+                carry(path, null);
                 return true;
             }, false);
         },
@@ -255,6 +320,7 @@ export function createVolume(fs, fetchBlocks = null){
         /** @param {string} from @param {string} to @returns {boolean} */
         rename: (from, to)=>attempt(()=>{
             fs.rename(from, to);
+            carry(from, to);
             return true;
         }, false),
 
@@ -269,6 +335,7 @@ export function createVolume(fs, fetchBlocks = null){
                 size: entry.size,
                 modified: entry.modified ?? 0,
                 ...marks(entry),
+                ...setBy(`${path.replace(/\\$/, '')}\\${entry.name}`),
             })), []),
 
         /**

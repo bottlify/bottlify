@@ -65,14 +65,54 @@ const INVALID_FILE_SIZE = 0xffffffff;
 const INVALID_FILE_ATTRIBUTES = 0xffffffff;
 
 /**
- * The access rights we decode. The specific rights (FILE_READ_DATA and its
- * neighbours) are not: a mask that names none of these opens the file for
- * neither reading nor writing, which is what Windows does for the query-only
- * access of zero and is a defined answer for the rest.
+ * The access rights we decode: the generic ones and the specific data rights
+ * they stand for. A mask that names none of these opens the file for neither
+ * reading nor writing, which is what Windows does for the query-only access of
+ * zero and for DELETE alone.
  */
+const FILE_READ_DATA = 0x0001;
+const FILE_WRITE_DATA = 0x0002;
+const FILE_APPEND_DATA = 0x0004;
+const DELETE = 0x00010000;
 const GENERIC_ALL = 0x10000000;
 const GENERIC_WRITE = 0x40000000;
 const GENERIC_READ = 0x80000000;
+
+/** dwFlagsAndAttributes' flag that ends the file with its handle. */
+const FILE_FLAG_DELETE_ON_CLOSE = 0x04000000;
+
+/** NtCreateFile's CreateDisposition, and what IO_STATUS_BLOCK.Information reports. */
+const FILE_SUPERSEDE = 0;
+const FILE_OPEN = 1;
+const FILE_CREATE = 2;
+const FILE_OPEN_IF = 3;
+const FILE_OVERWRITE = 4;
+const FILE_OVERWRITE_IF = 5;
+const FILE_SUPERSEDED = 0;
+const FILE_OPENED = 1;
+const FILE_CREATED = 2;
+const FILE_OVERWRITTEN = 3;
+
+/** NtCreateFile's CreateOptions this surface acts on. */
+const FILE_DIRECTORY_FILE = 0x0001;
+const FILE_NON_DIRECTORY_FILE = 0x0040;
+const FILE_DELETE_ON_CLOSE = 0x1000;
+
+/** The statuses the native opens answer with. */
+const STATUS_SUCCESS = 0;
+const STATUS_UNSUCCESSFUL = 0xc0000001;
+const STATUS_INVALID_HANDLE = 0xc0000008;
+const STATUS_INVALID_PARAMETER = 0xc000000d;
+const STATUS_ACCESS_DENIED = 0xc0000022;
+const STATUS_OBJECT_NAME_INVALID = 0xc0000033;
+const STATUS_OBJECT_NAME_NOT_FOUND = 0xc0000034;
+const STATUS_OBJECT_NAME_COLLISION = 0xc0000035;
+const STATUS_OBJECT_PATH_NOT_FOUND = 0xc000003a;
+const STATUS_OBJECT_PATH_SYNTAX_BAD = 0xc000003b;
+const STATUS_MEDIA_WRITE_PROTECTED = 0xc00000a2;
+const STATUS_FILE_IS_A_DIRECTORY = 0xc00000ba;
+const STATUS_NOT_A_DIRECTORY = 0xc0000103;
+const STATUS_CANNOT_DELETE = 0xc0000121;
 
 /** dwCreationDisposition. */
 const CREATE_NEW = 1;
@@ -87,10 +127,16 @@ const FILE_CURRENT = 1;
 const FILE_END = 2;
 
 /**
- * The attributes answered are `fileAttributes`'s. SetFileAttributes accepts
- * what it is told and stores nothing, because nothing below enforces read-only
- * or hidden on a writable volume anyway.
+ * The attributes answered are `fileAttributes`'s, over what the volume records
+ * of what SetFileAttributes and a creating call set. The ones a program may
+ * set are these; the rest (directory, compressed, encrypted, reparse point)
+ * say what a file is, and a request naming them sets nothing of them.
  */
+const FILE_ATTRIBUTE_READONLY = 0x0001;
+const FILE_ATTRIBUTE_ARCHIVE = 0x0020;
+const FILE_ATTRIBUTE_NORMAL = 0x0080;
+const SETTABLE_ATTRIBUTES = 0x0001 | 0x0002 | 0x0004 | 0x0020 | 0x0080 | 0x0100
+    | 0x1000 | 0x2000;
 
 /** The ANSI path limit, and the size of cFileName with it. */
 const MAX_PATH = 260;
@@ -178,6 +224,7 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {number} [modified]  Milliseconds since the epoch; absent means unknown.
  * @property {boolean} [readOnly]  On read-only media.
  * @property {boolean} [hidden]
+ * @property {number} [attributes]  What a program set, when one did.
  */
 
 /**
@@ -188,6 +235,7 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {number} [modified]  Milliseconds since the epoch; absent means unknown.
  * @property {boolean} [readOnly]
  * @property {boolean} [hidden]
+ * @property {number} [attributes]
  */
 
 /**
@@ -222,6 +270,9 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {(path: string) => void} setCurrentDirectory
  * @property {(path: string) => boolean} [writeProtected]
  *           Whether the path is on read-only media, a disc.
+ * @property {(path: string, attributes: number | null) => boolean} [setAttributes]
+ *           Records the attributes a program set on a name; `null` forgets
+ *           them. Absent, SetFileAttributes changes nothing a later call sees.
  */
 
 /**
@@ -558,6 +609,29 @@ export function createFileFunctions(host){
     const denied = path=>onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT : ERROR_ACCESS_DENIED;
 
     /**
+     * Whether a file carries the read-only attribute a program set. Such a
+     * file refuses to be written, truncated or deleted by name with "access
+     * denied" until the attribute is taken off; renaming it is allowed. A
+     * directory's read-only bit is advice to the shell and refuses nothing.
+     *
+     * @param {FileStat | null | undefined} entry
+     */
+    const readOnlyFile = entry=>Boolean(entry?.exists && !entry.isDirectory
+        && ((entry.attributes ?? 0) & FILE_ATTRIBUTE_READONLY) !== 0);
+
+    /**
+     * The attributes a creating call gives a new file: what it asked for,
+     * archived as every new file is, or nothing recorded when it asked for
+     * none.
+     *
+     * @param {string} path @param {number} asked
+     */
+    const giveAttributes = (path, asked)=>{
+        const bits = (asked >>> 0) & SETTABLE_ATTRIBUTES & ~FILE_ATTRIBUTE_NORMAL;
+        files.setAttributes?.(path, bits === 0 ? null : bits | FILE_ATTRIBUTE_ARCHIVE);
+    };
+
+    /**
      * Fills in a whole WIN32_FIND_DATAA. Written in one piece so that no field
      * can be left holding whatever the caller's buffer had in it -- the times
      * and the alternate 8.3 name we have nothing to say about are zeros the
@@ -741,7 +815,7 @@ export function createFileFunctions(host){
         {
             return fail(missing(path));
         }
-        if (entry.isDirectory)
+        if (entry.isDirectory || (readOnlyFile(entry) && !onReadOnlyMedia(path)))
         {
             return fail(ERROR_ACCESS_DENIED);
         }
@@ -758,13 +832,14 @@ export function createFileFunctions(host){
         {
             return fail(missing(source));
         }
-        if (files.stat(destination)?.exists)
+        const present = files.stat(destination);
+        if (present?.exists)
         {
             if (!replace)
             {
                 return fail(ERROR_ALREADY_EXISTS);
             }
-            if (!files.remove(destination))
+            if (readOnlyFile(present) || !files.remove(destination))
             {
                 return fail(denied(destination));
             }
@@ -942,13 +1017,18 @@ export function createFileFunctions(host){
         return attributesOf(entry);
     });
 
-    const setFileAttributes = bothForms(8, ([name], text)=>{
+    const setFileAttributes = bothForms(8, ([name, attributes], text)=>{
         const path = text.path(name);
         if (!files.stat(path)?.exists)
         {
             return fail(missing(path));
         }
-        return onReadOnlyMedia(path) ? fail(ERROR_WRITE_PROTECT) : 1;
+        if (onReadOnlyMedia(path))
+        {
+            return fail(ERROR_WRITE_PROTECT);
+        }
+        files.setAttributes?.(path, (attributes >>> 0) & SETTABLE_ATTRIBUTES);
+        return 1;
     });
 
     const setCurrentDirectory = bothForms(4, ([name], text)=>{
@@ -1060,23 +1140,34 @@ export function createFileFunctions(host){
      * open agreed to share with gets in; reading is always shared, so an open
      * Windows would refuse for want of FILE_SHARE_READ still succeeds here.
      */
-    const createFile = bothForms(28, ([name, access, share, , disposition], text)=>{
-        const path = text.path(name);
+    /**
+     * The open CreateFile and NtCreateFile share, over a resolved path: a
+     * handle and whether the file was already there, or the Win32 error it
+     * failed with. `cannotDelete` marks the one refusal the native call names
+     * differently -- a read-only file asked to go away when it closes.
+     *
+     * @param {string} path
+     * @param {{ access: number, share: number, disposition: number, flags: number }} request
+     * @returns {{ handle: number, existed: boolean } | { error: number, cannotDelete?: boolean }}
+     */
+    const openPath = (path, { access, share, disposition, flags })=>{
         const mode = openModes[disposition >>> 0];
         if (!mode)
         {
-            return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+            return { error: ERROR_INVALID_PARAMETER };
         }
         const rights = access >>> 0;
-        const read = (rights & GENERIC_READ) !== 0 || (rights & GENERIC_ALL) !== 0;
-        const write = (rights & GENERIC_WRITE) !== 0 || (rights & GENERIC_ALL) !== 0;
+        const read = (rights & (GENERIC_READ | GENERIC_ALL | FILE_READ_DATA)) !== 0;
+        const write = (rights
+            & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA)) !== 0;
+        const deleteOnClose = ((flags >>> 0) & FILE_FLAG_DELETE_ON_CLOSE) !== 0;
         if (disposition === TRUNCATE_EXISTING && !write)
         {
-            return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+            return { error: ERROR_INVALID_PARAMETER };
         }
-        if (write && onReadOnlyMedia(path))
+        if ((write || deleteOnClose) && onReadOnlyMedia(path))
         {
-            return fail(ERROR_WRITE_PROTECT, INVALID_HANDLE_VALUE);
+            return { error: ERROR_WRITE_PROTECT };
         }
 
         const existing = files.stat(path);
@@ -1085,16 +1176,27 @@ export function createFileFunctions(host){
         {
             // Opening a directory needs FILE_FLAG_BACKUP_SEMANTICS,
             // which nothing here honours.
-            return fail(ERROR_ACCESS_DENIED, INVALID_HANDLE_VALUE);
+            return { error: ERROR_ACCESS_DENIED };
         }
         if (exists && disposition === CREATE_NEW)
         {
-            return fail(ERROR_FILE_EXISTS, INVALID_HANDLE_VALUE);
+            return { error: ERROR_FILE_EXISTS };
         }
         if (!exists && (disposition === OPEN_EXISTING
                 || disposition === TRUNCATE_EXISTING))
         {
-            return fail(missing(path), INVALID_HANDLE_VALUE);
+            return { error: missing(path) };
+        }
+        if (readOnlyFile(existing))
+        {
+            if (write || disposition === CREATE_ALWAYS || disposition === TRUNCATE_EXISTING)
+            {
+                return { error: ERROR_ACCESS_DENIED };
+            }
+            if (deleteOnClose)
+            {
+                return { error: ERROR_ACCESS_DENIED, cannotDelete: true };
+            }
         }
 
         const node = files.open(path, {
@@ -1102,18 +1204,237 @@ export function createFileFunctions(host){
         });
         if (!node)
         {
-            return fail(onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT
-                : exists ? ERROR_ACCESS_DENIED : missing(path), INVALID_HANDLE_VALUE);
+            return { error: onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT
+                : exists ? ERROR_ACCESS_DENIED : missing(path) };
         }
+        // A new file takes the attributes it was created with; one that is
+        // replaced takes them too, as a file made afresh would.
+        if (!exists || disposition === CREATE_ALWAYS)
+        {
+            giveAttributes(path, flags);
+        }
+        const handle = host.handles.open('file', {
+            path, node, read, write, position: 0, ...deleteOnClose ? { deleteOnClose } : {},
+        });
+        return { handle, existed: exists };
+    };
 
+    /**
+     * CreateFile, in terms of a resolved path, so both spellings open the same
+     * file. Security and the template are accepted and ignored: there is no
+     * security descriptor to check against, and no attribute of a template file
+     * we could copy. FILE_SHARE_WRITE is honoured, so a second writer the first
+     * open agreed to share with gets in; reading is always shared, so an open
+     * Windows would refuse for want of FILE_SHARE_READ still succeeds here.
+     */
+    const createFile = bothForms(28, ([name, access, share, , disposition, flags], text)=>{
+        const opened = openPath(text.path(name), { access, share, disposition, flags });
+        if ('error' in opened)
+        {
+            return fail(opened.error, INVALID_HANDLE_VALUE);
+        }
         // A program reads the error after a *successful* CreateFile:
         // ERROR_ALREADY_EXISTS is how the two dispositions that accept
         // either state say which one they found, and clearing it
         // otherwise is what makes that test mean anything.
-        const opened = disposition === CREATE_ALWAYS || disposition === OPEN_ALWAYS;
-        host.setLastError(exists && opened ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS);
-        return host.handles.open('file', { path, node, read, write, position: 0 });
+        const either = disposition === CREATE_ALWAYS || disposition === OPEN_ALWAYS;
+        host.setLastError(opened.existed && either ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS);
+        return opened.handle;
     });
+
+    /**
+     * An object name as the native calls take it -- `\??\C:\dir\file`, or
+     * `\??\UNC\server\share\file` -- as the path the volume takes, or the
+     * status that says why it is not one. A name relative to a directory
+     * handle joins that directory's path; the only directory handles are the
+     * native open's own.
+     *
+     * @param {number} attributes  OBJECT_ATTRIBUTES
+     * @returns {{ path: string } | { status: number }}
+     */
+    const nativeName = attributes=>{
+        const root = readDword(attributes + 4);
+        const string = readDword(attributes + 8);
+        if (string === 0)
+        {
+            return { status: STATUS_OBJECT_NAME_INVALID };
+        }
+        const descriptor = host.readMemory(string, 8);
+        const length = descriptor[0] | (descriptor[1] << 8);
+        const buffer = readDword(string + 4);
+        const raw = buffer === 0 || length === 0 ? new Uint8Array(0)
+            : host.readMemory(buffer, length & ~1);
+        let name = '';
+        for (let at = 0; at + 1 < raw.length; at += 2)
+        {
+            name += String.fromCharCode(raw[at] | (raw[at + 1] << 8));
+        }
+        if (root !== 0)
+        {
+            const directory = object(root, 'directory');
+            if (!directory)
+            {
+                return { status: STATUS_INVALID_HANDLE };
+            }
+            return name.startsWith(SEPARATOR)
+                ? { status: STATUS_INVALID_PARAMETER }
+                : { path: fullPath(name === '' ? directory.path
+                    : `${directory.path.replace(/\\$/, '')}${SEPARATOR}${name}`) };
+        }
+        const prefix = /^\\(\?\?|DosDevices|GLOBAL\?\?)\\/i.exec(name);
+        if (!prefix)
+        {
+            return { status: name.startsWith(SEPARATOR)
+                ? STATUS_OBJECT_PATH_NOT_FOUND : STATUS_OBJECT_PATH_SYNTAX_BAD };
+        }
+        const rest = name.slice(prefix[0].length);
+        if (/^UNC\\/i.test(rest))
+        {
+            return { path: fullPath(`\\\\${rest.slice(4)}`) };
+        }
+        return /^[A-Za-z]:(\\|$)/.test(rest)
+            ? { path: fullPath(rest.length === 2 ? `${rest}\\` : rest) }
+            : { status: STATUS_OBJECT_PATH_NOT_FOUND };
+    };
+
+    /** @type {Record<number, number>} */
+    const NATIVE_FAILURES = {
+        [ERROR_FILE_NOT_FOUND]: STATUS_OBJECT_NAME_NOT_FOUND,
+        [ERROR_PATH_NOT_FOUND]: STATUS_OBJECT_PATH_NOT_FOUND,
+        [ERROR_ACCESS_DENIED]: STATUS_ACCESS_DENIED,
+        [ERROR_FILE_EXISTS]: STATUS_OBJECT_NAME_COLLISION,
+        [ERROR_ALREADY_EXISTS]: STATUS_OBJECT_NAME_COLLISION,
+        [ERROR_INVALID_PARAMETER]: STATUS_INVALID_PARAMETER,
+        [ERROR_WRITE_PROTECT]: STATUS_MEDIA_WRITE_PROTECTED,
+    };
+
+    /**
+     * The native dispositions, as CreateFile's; FILE_SUPERSEDE replaces the
+     * file as FILE_OVERWRITE_IF does, and differs only in what it reports.
+     *
+     * @type {Record<number, number>}
+     */
+    const NATIVE_DISPOSITIONS = {
+        [FILE_SUPERSEDE]: CREATE_ALWAYS,
+        [FILE_OPEN]: OPEN_EXISTING,
+        [FILE_CREATE]: CREATE_NEW,
+        [FILE_OPEN_IF]: OPEN_ALWAYS,
+        [FILE_OVERWRITE]: TRUNCATE_EXISTING,
+        [FILE_OVERWRITE_IF]: CREATE_ALWAYS,
+    };
+
+    /**
+     * NTSTATUS NtCreateFile(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
+     *   PIO_STATUS_BLOCK, PLARGE_INTEGER AllocationSize, ULONG FileAttributes,
+     *   ULONG ShareAccess, ULONG CreateDisposition, ULONG CreateOptions,
+     *   PVOID EaBuffer, ULONG EaLength)
+     *
+     * The same open as CreateFile's, reached by the native name and answered
+     * with a status. What the native call adds is its options: a directory
+     * may be asked for or ruled out, and a file asked to delete itself when
+     * its handle closes must have been opened for DELETE -- a read-only file
+     * refuses that with STATUS_CANNOT_DELETE, after any refusal of the write
+     * access it was also asked for.
+     *
+     * @param {number[]} args
+     */
+    const ntCreateFile = ([out, access, attributes, status, , givenAttributes, share,
+        disposition, options])=>{
+        const named = nativeName(attributes >>> 0);
+        if ('status' in named)
+        {
+            return named.status;
+        }
+        const path = named.path;
+        const wanted = options >>> 0;
+        const directoryOnly = (wanted & FILE_DIRECTORY_FILE) !== 0;
+        const fileOnly = (wanted & FILE_NON_DIRECTORY_FILE) !== 0;
+        const deleteOnClose = (wanted & FILE_DELETE_ON_CLOSE) !== 0;
+        const creation = NATIVE_DISPOSITIONS[disposition >>> 0];
+        if (creation === undefined || (directoryOnly && fileOnly)
+            || (deleteOnClose && ((access >>> 0) & DELETE) === 0))
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+        /** @param {number} handle @param {number} information */
+        const opened = (handle, information)=>{
+            writeDword(out >>> 0, handle);
+            if ((status >>> 0) !== 0)
+            {
+                writeDword(status >>> 0, STATUS_SUCCESS);
+                writeDword((status >>> 0) + 4, information);
+            }
+            return STATUS_SUCCESS;
+        };
+
+        const existing = files.stat(path);
+        if (existing?.exists && existing.isDirectory)
+        {
+            if (fileOnly)
+            {
+                return STATUS_FILE_IS_A_DIRECTORY;
+            }
+            if (creation === CREATE_NEW)
+            {
+                return STATUS_OBJECT_NAME_COLLISION;
+            }
+            return opened(host.handles.open('directory',
+                { path, ...deleteOnClose ? { deleteOnClose } : {} }), FILE_OPENED);
+        }
+        if (directoryOnly)
+        {
+            if (existing?.exists)
+            {
+                return STATUS_NOT_A_DIRECTORY;
+            }
+            if (creation !== CREATE_NEW && creation !== OPEN_ALWAYS)
+            {
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+            if (!files.mkdir(path))
+            {
+                return onReadOnlyMedia(path)
+                    ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_OBJECT_PATH_NOT_FOUND;
+            }
+            return opened(host.handles.open('directory', { path }), FILE_CREATED);
+        }
+
+        const result = openPath(path, {
+            access, share, disposition: creation,
+            flags: (givenAttributes >>> 0) | (deleteOnClose ? FILE_FLAG_DELETE_ON_CLOSE : 0),
+        });
+        if ('error' in result)
+        {
+            return result.cannotDelete
+                ? STATUS_CANNOT_DELETE
+                : NATIVE_FAILURES[result.error] ?? STATUS_UNSUCCESSFUL;
+        }
+        const replaced = disposition === FILE_SUPERSEDE ? FILE_SUPERSEDED : FILE_OVERWRITTEN;
+        return opened(result.handle, !result.existed ? FILE_CREATED
+            : creation === CREATE_ALWAYS || creation === TRUNCATE_EXISTING
+                ? replaced : FILE_OPENED);
+    };
+
+    /**
+     * The native calls over this table's opens, which ntdll publishes.
+     */
+    const natives = {
+        NtCreateFile: { argBytes: 44, handler: ntCreateFile },
+
+        /**
+         * NTSTATUS NtOpenFile(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
+         *                     PIO_STATUS_BLOCK, ULONG ShareAccess, ULONG OpenOptions)
+         *
+         * NtCreateFile's FILE_OPEN, with no attributes and no extended ones.
+         */
+        NtOpenFile: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([out, access, attributes, status, share, options])=>
+                ntCreateFile([out, access, attributes, status, 0, 0, share, FILE_OPEN,
+                    options]),
+        },
+    };
 
     const findNextFile = bothForms(8, ([handle, data], text)=>{
         const search = object(handle, 'find');
@@ -1139,7 +1460,7 @@ export function createFileFunctions(host){
          * One body, both spellings.
          */
         CreateFileA: createFile.ansi,
-        CreateFileW: createFile.wide,
+        CreateFileW: { ...createFile.wide, natives },
 
         /**
          * BOOL ReadFile(HANDLE, LPVOID, DWORD, LPDWORD lpNumberOfBytesRead,
@@ -1550,6 +1871,10 @@ export function createFileFunctions(host){
                     {
                         files.close(closed.node);
                     }
+                    if (closed?.deleteOnClose)
+                    {
+                        files.remove(closed.path);
+                    }
                     // A no-op on anything that was never named.
                     host.namedObjects?.forget(closed);
                     // Handle numbers are recycled, so anything keyed by this one
@@ -1593,9 +1918,14 @@ export function createFileFunctions(host){
                 {
                     return fail(entry?.isDirectory ? ERROR_ACCESS_DENIED : missing(source));
                 }
-                if (failIfExists !== 0 && files.stat(destination)?.exists)
+                const present = files.stat(destination);
+                if (failIfExists !== 0 && present?.exists)
                 {
                     return fail(ERROR_FILE_EXISTS);
+                }
+                if (readOnlyFile(present))
+                {
+                    return fail(ERROR_ACCESS_DENIED);
                 }
                 const input = files.open(source, { read: true });
                 if (!input)
@@ -1631,6 +1961,9 @@ export function createFileFunctions(host){
                 }
                 files.close(input);
                 files.close(output);
+                // The copy carries the source's attributes, read-only among
+                // them, as a copy on Windows does.
+                files.setAttributes?.(destination, entry.attributes ?? null);
                 return 1;
             },
         },
@@ -1829,6 +2162,10 @@ export function createFileFunctions(host){
                     {
                         return fail(missing(path), HFILE_ERROR);
                     }
+                    if (readOnlyFile(entry))
+                    {
+                        return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
+                    }
                     return files.remove(path) ? 1 : fail(denied(path), HFILE_ERROR);
                 }
 
@@ -1837,6 +2174,10 @@ export function createFileFunctions(host){
                 if (!exists && !create)
                 {
                     return fail(missing(path), HFILE_ERROR);
+                }
+                if ((write || create) && readOnlyFile(entry))
+                {
+                    return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
                 }
                 const node = files.open(path,
                     { read: !write, write, create, truncate: create });
@@ -1881,6 +2222,10 @@ export function createFileFunctions(host){
                 {
                     return fail(missing(path), HFILE_ERROR);
                 }
+                if (write && readOnlyFile(entry))
+                {
+                    return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
+                }
                 const node = files.open(path, { read: true, write, create: false });
                 if (!node)
                 {
@@ -1897,19 +2242,26 @@ export function createFileFunctions(host){
          * Always creates and always truncates, which is the difference from
          * `_lopen`: a self-extractor calls this for every file it unpacks and
          * relies on a second pass finding an empty one rather than the tail of
-         * the first.
+         * the first. The attribute is the DOS one -- read-only, hidden, system
+         * in its low bits -- and the new file carries it, while the handle
+         * that made it still writes.
          */
         _lcreat: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([name])=>{
+            handler: ([name, attribute])=>{
                 const path = pathArgument(name);
+                if (readOnlyFile(files.stat(path)))
+                {
+                    return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
+                }
                 const node = files.open(path,
                     { read: true, write: true, create: true, truncate: true });
                 if (!node)
                 {
                     return fail(denied(path), HFILE_ERROR);
                 }
+                giveAttributes(path, (attribute >>> 0) & 0x7);
                 host.setLastError(ERROR_SUCCESS);
                 return host.handles.open('file',
                     { path, node, read: true, write: true, position: 0 });
