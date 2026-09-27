@@ -370,6 +370,38 @@ test('fprem and fprem1 leave the exact remainder, and the quotient\'s low bits i
     assert.equal(r.f64(DATA + 16) % 3, 1e300 % 3, 'congruent to the dividend');
 });
 
+test('call $+5 in x87 code that returns a value on the stack runs through, in one region', ()=>{
+    // CODE: call F; fstp qword [DATA+8]; hlt -- F: call $+5; pop ebx; fld qword
+    // [ebx + DATA - (F + 5)]; ret: position-independent code that finds its constant
+    // by its own address and returns it in ST0, the stack one deeper at its ret
+    // than at its call. As a call returning to the pop, the pop's block was the
+    // ret's target too, at the other top: cut, and every entry there left at once.
+    const F = CODE + 0x10;
+    const code = new Array(0x20).fill(0x90);
+    code.splice(0, 12, 0xe8, ...u32(F - (CODE + 5)), 0xdd, 0x1d, ...u32(DATA + 8), 0xf4);
+    code.splice(0x10, 13, 0xe8, 0, 0, 0, 0, 0x5b, 0xdd, 0x83, ...u32(DATA - (F + 5)), 0xc3);
+    const r = run(code, { data: f64bytes(2.5) });
+    assert.equal(r.exit.kind, 3, 'halted');
+    assert.equal(r.f64(DATA + 8), 2.5, 'the constant through the stack');
+    assert.equal(r.top(), 0);
+    assert.equal(r.m.reg('ebx'), F + 5, 'the address the call pushed');
+    assert.equal(r.exit.regions, 1, 'F formed into its caller');
+    // A leaf reached from two calls at different tops is cut in its caller's region,
+    // the first at the region's own top: the test machine forms a region there for the
+    // top the machine has, as the runtime does, where it entered the caller's again
+    // and came straight back. CODE: call L; call L; faddp; fstp qword [DATA+8]; hlt
+    // -- L: fld1; ret.
+    const L = CODE + 0x20;
+    const twice = new Array(0x28).fill(0x90);
+    twice.splice(0, 19, 0xe8, ...u32(L - (CODE + 5)), 0xe8, ...u32(L - (CODE + 10)),
+        0xde, 0xc1, 0xdd, 0x1d, ...u32(DATA + 8), 0xf4);
+    twice.splice(0x20, 3, 0xd9, 0xe8, 0xc3);
+    const t = run(twice);
+    assert.equal(t.exit.kind, 3, 'halted');
+    assert.equal(t.f64(DATA + 8), 2, 'the two ones added');
+    assert.equal(t.top(), 0);
+});
+
 test('fprem and fprem1 in a loop over random operands are the model\'s remainder and bits', ()=>{
     // The shared helper translated code calls against `remainder` in
     // ir-x87.js, which the interpreters call: magnitudes across the whole

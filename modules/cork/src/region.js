@@ -855,6 +855,16 @@ function exitOf(instruction, next){
                 ? exit('jump', [target])
                 : exit('indirect', []);
         case 'call':
+            // `call $+5` pushes its own return address and goes on to it: a
+            // push, not a call -- a program's way to find its own address,
+            // which ends no block. Taken as a call, its callee and its return
+            // address would be one block, the target of the `ret` the callee
+            // is formed in with: x87 code whose stack is deeper or shallower
+            // at that `ret` than at the call would give the block two tops.
+            if (operands[0].kind === 'rel' && target === next && !instruction.prefixes.operand)
+            {
+                return null;
+            }
             return operands[0].kind === 'rel'
                 ? exit('call', [target])
                 : exit('indirect', []);

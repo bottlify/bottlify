@@ -564,6 +564,11 @@ export function emitInstruction(e, instruction, flagsLive){
                 b.localSet(Local.count);
             }
             push(e, 4, ()=>b.i32const(next));
+            if (dst.kind === 'rel' && dst.target === next && !instruction.prefixes.operand)
+            {
+                // `call $+5`: the push, and the block goes on (`exitOf`).
+                return true;
+            }
             if (dst.kind === 'rel' && e.labels.has(/** @type {number} */ (dst.target)))
             {
                 // The callee is a block of this region: the block's exit jumps
