@@ -38,6 +38,8 @@ const ERROR_INVALID_FUNCTION = 1;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_ACCESS_DENIED = 5;
+/** CreateFile's dwShareMode bit that lets another handle write the file too. */
+const FILE_SHARE_WRITE = 0x2;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NO_MORE_FILES = 18;
 const ERROR_FILE_EXISTS = 80;
@@ -191,6 +193,7 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {boolean} [create]        Make the file when it is not there.
  * @property {boolean} [truncate]      Discard whatever it already holds.
  * @property {boolean} [failIfExists]  Refuse rather than open an existing file.
+ * @property {boolean} [shareWrite]    Another handle may write the file while this one is open.
  */
 
 /**
@@ -967,12 +970,13 @@ export function createFileFunctions(host){
 
     /**
      * CreateFile, in terms of a resolved path, so both spellings open the same
-     * file. Sharing, security and the template are accepted and ignored: there
-     * is one process, no security descriptor to check against, and no attribute
-     * of a template file we could copy. A request Windows would refuse for want
-     * of a share mode succeeds here.
+     * file. Security and the template are accepted and ignored: there is no
+     * security descriptor to check against, and no attribute of a template file
+     * we could copy. FILE_SHARE_WRITE is honoured, so a second writer the first
+     * open agreed to share with gets in; reading is always shared, so an open
+     * Windows would refuse for want of FILE_SHARE_READ still succeeds here.
      */
-    const createFile = bothForms(28, ([name, access, , , disposition], text)=>{
+    const createFile = bothForms(28, ([name, access, share, , disposition], text)=>{
         const path = text.path(name);
         const mode = openModes[disposition >>> 0];
         if (!mode)
@@ -1005,7 +1009,9 @@ export function createFileFunctions(host){
             return fail(missing(path), INVALID_HANDLE_VALUE);
         }
 
-        const node = files.open(path, { read, write, ...mode });
+        const node = files.open(path, {
+            read, write, ...mode, shareWrite: ((share >>> 0) & FILE_SHARE_WRITE) !== 0,
+        });
         if (!node)
         {
             return fail(exists ? ERROR_ACCESS_DENIED : missing(path),

@@ -133,6 +133,7 @@ export function createVolume(fs, fetchBlocks = null){
             return attempt(()=>fs.open(path, {
                 read: mode.read !== false,
                 write: Boolean(mode.write),
+                shareWrite: mode.shareWrite === true,
                 disposition: dispositionOf(mode),
             }), null);
         },
