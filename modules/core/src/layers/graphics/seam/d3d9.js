@@ -30,7 +30,7 @@
 import { IDIRECT3D9_SLOTS, describe } from './vtables.js';
 import {
     D3DBOX, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_BOX, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS9,
-    POINT, RECT, createFields, dwordsOf, floatsOf, intsOf,
+    POINT, RECT, createFields, dwordsOf, floatsOf, intsOf, putLight, putMaterial,
 } from './structs.js';
 import {
     IDIRECT3DBASETEXTURE9_SLOTS, IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS,
@@ -234,17 +234,14 @@ export function createDirect3D9Seam(
         return dwordsOf(read(pointer >>> 0, count * 4), count);
     };
 
+    // An answer of several dwords is put together in the fields' own buffer
+    // and written as one block, not made into an array of its own first:
+    // asking a small array for its buffer moves it off the heap.
     /** @param {number} address @param {ArrayLike<number>} values */
-    const writeDwords = (address, values)=>{
-        const dwords = Uint32Array.from(values);
-        memory.writeMemory(address >>> 0, new Uint8Array(dwords.buffer));
-    };
+    const writeDwords = (address, values)=>fields.writeDwords(address, values);
 
     /** @param {number} address @param {ArrayLike<number>} values */
-    const writeFloats = (address, values)=>{
-        const floats = Float32Array.from(values);
-        memory.writeMemory(address >>> 0, new Uint8Array(floats.buffer));
-    };
+    const writeFloats = (address, values)=>fields.writeFloats(address, values);
 
     /**
      * Bytes a drawing call reads straight out of the program's own arrays.
@@ -272,12 +269,8 @@ export function createDirect3D9Seam(
 
     /** @param {number} address @param {any} material */
     const writeMaterial = (address, material)=>{
-        const colours = [material.Diffuse, material.Ambient, material.Specular,
-            material.Emissive];
-        writeFloats(address, [
-            ...colours.flatMap(one=>[one.r, one.g, one.b, one.a]),
-            material.Power,
-        ]);
+        putMaterial(fields.staged(17).floats, material);
+        fields.writeStaged(address, 17);
     };
 
     /** D3DLIGHT9 is D3DLIGHT7's layout under this version's names. */
@@ -309,21 +302,9 @@ export function createDirect3D9Seam(
 
     /** @param {number} address @param {any} light */
     const writeLight = (address, light)=>{
-        fields.writeU32(address + D3DLIGHT7.dltType, light.Type >>> 0);
-        const colour = (/** @type {number} */ at, /** @type {any} */ value)=>
-            writeFloats(address + at, [value.r, value.g, value.b, value.a]);
-        const vector = (/** @type {number} */ at, /** @type {any} */ value)=>
-            writeFloats(address + at, [value.x, value.y, value.z]);
-        colour(D3DLIGHT7.dcvDiffuse, light.Diffuse);
-        colour(D3DLIGHT7.dcvSpecular, light.Specular);
-        colour(D3DLIGHT7.dcvAmbient, light.Ambient);
-        vector(D3DLIGHT7.dvPosition, light.Position);
-        vector(D3DLIGHT7.dvDirection, light.Direction);
-        writeFloats(address + D3DLIGHT7.dvRange, [
-            light.Range, light.Falloff,
-            light.Attenuation0, light.Attenuation1, light.Attenuation2,
-            light.Theta, light.Phi,
-        ]);
+        const { floats, dwords } = fields.staged(D3DLIGHT7.SIZE >>> 2);
+        putLight(floats, dwords, light);
+        fields.writeStaged(address, D3DLIGHT7.SIZE >>> 2);
     };
 
     /** @param {number} pointer */

@@ -43,7 +43,8 @@ import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js'
 import { queryAs, readGuid } from './guid.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DSURFACE_DESC8, D3DLOCKED_RECT, D3DLIGHT7, RECT, POINT, createFields,
-    D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, dwordsOf, floatsOf } from './structs.js';
+    D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, dwordsOf, floatsOf, putLight,
+    putMaterial } from './structs.js';
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
@@ -59,7 +60,7 @@ import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { declarationLength } from '../d3d8/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import {
-    createShadow, getSurfaceLevelCode, lockCode, materialFloats, materialOf, setIndicesCode,
+    createShadow, getSurfaceLevelCode, lockCode, materialOf, setIndicesCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
     setTextureStageStateCode, setTransformCode, setVertexShaderCode, unlockCode,
 } from './shadow.js';
@@ -938,13 +939,13 @@ export function createDirect3D8Seam(
         ? null
         : memory.readMemory(pointer >>> 0, length));
 
-    /** @param {number} address @param {ArrayLike<number>} values */
-    const writeFloats = (address, values)=>{
-        for (let index = 0; index < values.length; index++)
-        {
-            fields.writeF32(address + index * 4, values[index]);
-        }
-    };
+    /**
+     * An answer of floats -- a matrix, a plane, shader constants -- as one
+     * block rather than a write per float.
+     *
+     * @param {number} address @param {ArrayLike<number>} values
+     */
+    const writeFloats = (address, values)=>fields.writeFloats(address, values);
 
     /** @param {number} pointer @param {number} count @returns {Uint32Array} */
     const readDwords = (pointer, count)=>dwordsOf(memory.readMemory(pointer >>> 0, count * 4),
@@ -1016,7 +1017,10 @@ export function createDirect3D8Seam(
     const readMaterial = pointer=>materialOf(readFloats(pointer, 17));
 
     /** @param {number} address @param {any} material */
-    const writeMaterial = (address, material)=>writeFloats(address, materialFloats(material));
+    const writeMaterial = (address, material)=>{
+        putMaterial(fields.staged(17).floats, material);
+        fields.writeStaged(address, 17);
+    };
 
     /**
      * D3DLIGHT8, which is D3DLIGHT7's layout under D3D8's names: a type, three
@@ -1053,21 +1057,9 @@ export function createDirect3D8Seam(
 
     /** @param {number} address @param {any} light */
     const writeLight = (address, light)=>{
-        fields.writeU32(address + D3DLIGHT7.dltType, light.Type >>> 0);
-        const colour = (/** @type {number} */ at, /** @type {any} */ value)=>
-            writeFloats(address + at, [value.r, value.g, value.b, value.a]);
-        const vector = (/** @type {number} */ at, /** @type {any} */ value)=>
-            writeFloats(address + at, [value.x, value.y, value.z]);
-        colour(D3DLIGHT7.dcvDiffuse, light.Diffuse);
-        colour(D3DLIGHT7.dcvSpecular, light.Specular);
-        colour(D3DLIGHT7.dcvAmbient, light.Ambient);
-        vector(D3DLIGHT7.dvPosition, light.Position);
-        vector(D3DLIGHT7.dvDirection, light.Direction);
-        writeFloats(address + D3DLIGHT7.dvRange, [
-            light.Range, light.Falloff,
-            light.Attenuation0, light.Attenuation1, light.Attenuation2,
-            light.Theta, light.Phi,
-        ]);
+        const { floats, dwords } = fields.staged(D3DLIGHT7.SIZE >>> 2);
+        putLight(floats, dwords, light);
+        fields.writeStaged(address, D3DLIGHT7.SIZE >>> 2);
     };
 
     /**
