@@ -1605,3 +1605,31 @@ test('an unread message for a hidden window paints nothing and the desktop stays
     assert.deepEqual(context.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0);
     void MSG;
 });
+
+test('a MoveWindow that leaves a control where it was repaints nothing', async()=>{
+    // MoveWindow is SetWindowPos with the z-order left alone, and a placement
+    // that changes neither the position nor the size uncovers nothing: the
+    // parent has nothing to repaint. A dialog that lays its controls out from
+    // its own WM_PAINT, to where they already are, repainted without end.
+    const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
+    const dialog = await openDialog(context);
+    const button = context.fns.GetDlgItem.handler([dialog, 3]);
+    context.fns.GetWindowRect.handler([button, OUT]);
+    context.fns.MapWindowPoints.handler([0, dialog, OUT, 2]);
+    const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at) | 0);
+    const face = context.desktop.read(0, 0);
+    context.fns.GetWindowRect.handler([button, OUT]);
+    const onScreen = { x: context.memory.u32(OUT) + 1, y: context.memory.u32(OUT + 4) + 1 };
+    const pixel = context.desktop.read(onScreen.x, onScreen.y);
+    assert.notEqual(pixel, face, 'the button is on the screen, not the desktop');
+
+    const before = context.dispatched.length;
+    assert.equal(context.fns.MoveWindow.handler([button, left, top, right - left, bottom - top, 1]),
+        1);
+    assert.equal(context.fns.GetUpdateRect.handler([dialog, 0, 0]), 0, 'the dialog is still valid');
+    assert.equal(context.desktop.read(onScreen.x, onScreen.y), pixel,
+        'and nothing was drawn where the button is');
+    await context.pump(dialog);
+    assert.deepEqual(context.dispatched.slice(before)
+        .filter(one=>one.message === WM_PAINT && one.wndProc === DIALOGPROC), []);
+});

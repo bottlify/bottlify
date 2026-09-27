@@ -55,6 +55,9 @@ import { threadIdOf } from './messages.js';
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
 
+const SWP_NOZORDER = 0x0004;
+const SWP_NOACTIVATE = 0x0010;
+
 const SM_CXSCREEN = 0;
 const SM_CYSCREEN = 1;
 const SM_CXVSCROLL = 2;
@@ -771,7 +774,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
     const setWindowPos = ([hwnd, after, x, y, cx, cy, flags])=>{
         const SWP_NOSIZE = 0x0001;
         const SWP_NOMOVE = 0x0002;
-        const SWP_NOZORDER = 0x0004;
         const SWP_SHOWWINDOW = 0x0040;
         const SWP_HIDEWINDOW = 0x0080;
         const HWND_BOTTOM = 1;
@@ -2237,6 +2239,20 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 28,
             /** @param {number[]} args */
             handler: args=>setWindowPos(args),
+        },
+
+        /**
+         * BOOL MoveWindow(HWND, int X, int Y, int nWidth, int nHeight, BOOL bRepaint)
+         *
+         * SetWindowPos with the z-order and the activation left alone, so a
+         * window put back where it already is uncovers nothing and repaints
+         * nothing.
+         */
+        MoveWindow: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([hwnd, x, y, width, height])=>setWindowPos([hwnd, 0, x, y, width, height,
+                SWP_NOZORDER | SWP_NOACTIVATE]),
         },
 
         /** HWND BringWindowToTop(HWND hWnd) */

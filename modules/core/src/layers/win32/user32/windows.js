@@ -4369,30 +4369,6 @@ export function createWindowFunctions(host){
             },
         },
 
-        /** BOOL MoveWindow(HWND, int X, int Y, int nWidth, int nHeight, BOOL bRepaint) */
-        MoveWindow: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([hwnd, x, y, width, height])=>{
-                const record = live(hwnd);
-                if (!record)
-                {
-                    return 0;
-                }
-                const covered = shown(record) ? geometry.windowRect(record) : null;
-                record.x = x | 0;
-                record.y = y | 0;
-                record.width = width | 0;
-                record.height = height | 0;
-                if (covered)
-                {
-                    uncover(covered);
-                    appear(record);
-                }
-                return 1;
-            },
-        },
-
         /** BOOL SetWindowTextA(HWND hWnd, LPCSTR lpString) */
         SetWindowTextA: {
             argBytes: 8,
