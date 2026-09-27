@@ -525,7 +525,10 @@ export function createHive({ processorMhz = PROCESSOR.mhz, windows = windowsVers
      */
     const listeners = [];
     let announcing = false;
+    /** Moves with every change, for a copy kept elsewhere to tell it has none. */
+    let revision = 0;
     const changed = ()=>{
+        revision++;
         if (announcing || listeners.length === 0)
         {
             return;
@@ -867,6 +870,9 @@ export function createHive({ processorMhz = PROCESSOR.mhz, windows = windowsVers
             }
             return deleted;
         },
+
+        /** Moves with every change and never with a restore. */
+        revision: ()=>revision,
 
         /**
          * Asks to be told when the hive has changed. A restore is not a change.
