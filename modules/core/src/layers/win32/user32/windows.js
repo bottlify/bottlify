@@ -23,6 +23,7 @@ import { createPaintFunctions } from './paint.js';
 import { HOVER_SIZE, HOVER_TIME, SYS_COLORS, createSystemFunctions } from './system.js';
 import { createObjectFunctions } from './objects.js';
 import { createDialogFunctions } from './dialogs.js';
+import { createDesktopFunctions } from './desktops.js';
 import { createRawInput } from './rawinput.js';
 import {
     WS_CHILD, WS_DISABLED, contains, createGeometry, intersect, isEmpty,
@@ -3930,6 +3931,11 @@ export function createWindowFunctions(host){
             }),
             live, windows, classes,
         }),
+        ...createDesktopFunctions({ host,
+            topLevel: ()=>[...windows.values()]
+                .filter(record=>!record.destroyed && !isChild(record))
+                .reverse()
+                .map(record=>record.hwnd) }),
         ...createObjectFunctions({ host, live,
             clipboardService: service=>{
                 clipboardAccess = service;
