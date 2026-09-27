@@ -204,13 +204,13 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  *           Guest memory, for the one caller that asks for it:
  *           FormatMessage with FORMAT_MESSAGE_ALLOCATE_BUFFER. Without
  *           it that one flag is refused and everything else works.
- * @property {number} [ramTop]  Where guest RAM ends. With it lstrlen and lstrcpy in
- *           both widths are guest code (`lstr.js`), for the pointers it can read
- *           without a fault.
  * @property {(thread: any, result: number) => void} [wake]
  *           Ends a thread's wait with its answer: how a thread waiting on a
  *           child another one terminates goes on. Without it that thread
  *           stays waiting.
+ * @property {number} [ramTop]  Where guest RAM ends. With it lstrlen and lstrcpy in
+ *           both widths are guest code (`lstr.js`), for the pointers it can read
+ *           without a fault.
  */
 
 /**
