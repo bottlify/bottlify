@@ -746,7 +746,7 @@ test('the wide file security call is refused like the narrow one, popping what i
     assert.equal(fns.SetFileSecurityW.argBytes, 12);
 });
 
-test('the token, impersonation and access-check calls refuse plainly and pop their arguments', ()=>{
+test('impersonating oneself succeeds, and the file security calls refuse plainly', ()=>{
     const memory = fakeMemory();
     /** @type {number[]} */
     const errors = [];
@@ -762,13 +762,7 @@ test('the token, impersonation and access-check calls refuse plainly and pop the
     assert.equal(fns.RevertToSelf.handler(), 1);
     assert.equal(fns.ImpersonateSelf.argBytes, 4);
     assert.equal(fns.RevertToSelf.argBytes, 0);
-    const expected = {
-        LookupPrivilegeValueA: 12, AdjustTokenPrivileges: 24, AccessCheck: 32,
-        GetFileSecurityA: 20, SetFileSecurityA: 12,
-        InitializeSecurityDescriptor: 8, IsValidSecurityDescriptor: 4,
-        SetSecurityDescriptorOwner: 12, SetSecurityDescriptorGroup: 12,
-        SetSecurityDescriptorDacl: 16, InitializeAcl: 12, AddAccessAllowedAce: 16,
-    };
+    const expected = { GetFileSecurityA: 20, SetFileSecurityA: 12 };
     const table = /** @type {Record<string, { argBytes: number, handler: (args: number[]) => number }>} */ (
         /** @type {unknown} */ (fns));
     for (const [name, argBytes] of Object.entries(expected))

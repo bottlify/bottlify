@@ -97,6 +97,20 @@ const PLAYING = 18;
  * status are told from. */
 const LAPS = 19;
 const ENDS = 20;
+/**
+ * A stream: a buffer the program writes into while it plays. Engine-owned:
+ * `STREAMING` 1 once it is one, and `FRESH` the absolute byte -- laps times
+ * the length, plus the offset, in 32 bits that wrap -- the program has written
+ * up to. The device plays a stream no further than that and waits there,
+ * silent, as a stream waits for its data: played on round the circle it would
+ * replay the lap before whenever the program's writer was late. Device-owned
+ * `HELD`: the output frames it has waited so.
+ */
+const FRESH = 21;
+const STREAMING = 22;
+const HELD = 23;
+/** How long a stream is waited for before it is played on regardless. */
+const GIVE_UP_SECONDS = 0.25;
 
 const STATE_FREE = 0;
 const STATE_OPEN = 1;
@@ -148,11 +162,12 @@ function slotPcmOffset(slot){
  *                                  ring ran dry, per output channel.
  * @property {number} generation   The slot `GENERATION` this seam was built
  *                                  against; a mismatch means start over.
+ * @property {number} held         Output frames a stream has waited, unbroken.
  */
 
 /** @returns {Seam} */
 function createSeam(){
-    return { pos: 0, tail: null, generation: -1 };
+    return { pos: 0, tail: null, generation: -1, held: 0 };
 }
 
 /**
@@ -394,7 +409,16 @@ function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
 
     // Past the last frame a voice that does not loop has nothing: the
     // interpolation holds that frame rather than reading round to the first.
-    const last = looping ? Infinity : frames - 1 - start;
+    const end = looping ? Infinity : frames - 1 - start;
+    // And a stream has nothing past what was written of it.
+    let written = Infinity;
+    if (Atomics.load(header, STREAMING) !== 0)
+    {
+        const readAt = (Atomics.load(header, LAPS) * frames + start) * stride;
+        const ahead = (Atomics.load(header, FRESH) - readAt) | 0;
+        written = Math.floor(Math.max(ahead, 0) / stride) - 1;
+    }
+    const last = Math.min(end, written);
     const step = rate / outputRate;
     let pos = seam.pos;
     let produced = 0;
@@ -404,7 +428,7 @@ function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
         const left = Math.floor(pos);
         if (left > last)
         {
-            ended = true;
+            ended = left > end;
             break;
         }
         const blend = pos - left;
@@ -418,6 +442,22 @@ function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
         }
         pos += step;
         produced++;
+    }
+    if (!ended && produced < blockFrames)
+    {
+        Atomics.add(header, HELD, blockFrames - produced);
+        // A writer gone this long has stopped streaming, not fallen behind:
+        // the buffer plays on round the circle, as the hardware would.
+        seam.held += blockFrames - produced;
+        if (seam.held > outputRate * GIVE_UP_SECONDS)
+        {
+            Atomics.store(header, STREAMING, 0);
+            seam.held = 0;
+        }
+    }
+    else
+    {
+        seam.held = 0;
     }
     if (ended)
     {

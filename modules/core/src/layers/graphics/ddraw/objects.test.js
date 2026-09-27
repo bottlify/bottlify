@@ -1513,3 +1513,17 @@ test('a surface gives its pixels back with its last reference, a flip chain each
     assert.deepEqual([...freed.slice(1)].sort(), [...chain].sort(),
         'every buffer of the chain once, whichever member held it at the end');
 });
+
+test('a surface whose descriptor names no pixel format is in the display mode\'s', ()=>{
+    // The format fields count only under DDSD_PIXELFORMAT: a program that
+    // leaves them zeroed and the flag unset gets the mode's format, not a
+    // format of no depth that every blit then refuses.
+    const ddraw = withLevel({ level: DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN });
+    assert.equal(ddraw.setDisplayMode(800, 600, 16), DD_OK);
+    const made = ddraw.createSurface({
+        flags: SIZED, caps: DDSCAPS_OFFSCREENPLAIN, width: 64, height: 64,
+        pixelFormat: { ...RGB32, bitCount: 0 },
+    });
+    assert.equal(made.hr, DD_OK);
+    assert.equal(made.surface?.bytesPerPixel, 2, 'the 16-bit mode\'s');
+});

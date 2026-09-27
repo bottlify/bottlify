@@ -30,13 +30,22 @@ import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { readGuid } from '../ole32/guid.js';
 import { createAdapter, createTypeLibraryObjects } from './objects.js';
 import { createErrorInfoObjects } from './errorinfo.js';
-import { parseTypeLib } from './typelib.js';
+import { TKIND_DISPATCH, TKIND_INTERFACE } from './typelib.js';
+import { parseTypeLibrary } from './sltg.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
 const PREFIX_BYTES = 4;
+
+/** TYPEFLAG_* bits that make an interface one the universal marshaler carries. */
+const TYPEFLAG_FDUAL = 0x40;
+const TYPEFLAG_FOLEAUTOMATION = 0x100;
+
+/** The universal marshaler's proxies: for a vtable interface, and for a dispinterface. */
+const PSOAINTERFACE = '{00020424-0000-0000-C000-000000000046}';
+const PSDISPATCH = '{00020420-0000-0000-C000-000000000046}';
 
 /** A VARIANT, and the offset of the union inside it. */
 const VARIANT_BYTES = 16;
@@ -713,7 +722,7 @@ export function createAutomationFunctions(host){
             let library;
             try
             {
-                library = parseTypeLib(data[0] === 0x4d && data[1] === 0x5a
+                library = parseTypeLibrary(data[0] === 0x4d && data[1] === 0x5a
                     ? typeLibResource(data, index) : data);
             }
             catch (e){
@@ -885,6 +894,30 @@ export function createAutomationFunctions(host){
             hive.setValue(hive.create(key, 'FLAGS').key, '', REG_SZ, ansi(String(library.flags)));
             const help = wideAt(helpDir >>> 0) || path.slice(0, path.lastIndexOf('\\'));
             hive.setValue(hive.create(key, 'HELPDIR').key, '', REG_SZ, ansi(help));
+            // Every interface the universal marshaler can carry is registered
+            // to it, with the library that describes it: that is how a proxy
+            // for one is found when it crosses into another process.
+            const root = hive.root(HKEY_CLASSES_ROOT);
+            for (const type of library.typeInfos)
+            {
+                const dual = (type.flags & TYPEFLAG_FDUAL) !== 0;
+                const carried = type.kind === TKIND_DISPATCH || (type.kind === TKIND_INTERFACE
+                    && (type.flags & (TYPEFLAG_FOLEAUTOMATION | TYPEFLAG_FDUAL)) !== 0);
+                if (!carried || type.guid === null)
+                {
+                    continue;
+                }
+                const entry = hive.create(root, `Interface\\${type.guid}`).key;
+                hive.setValue(entry, '', REG_SZ, ansi(type.name));
+                const proxy = ansi(type.kind === TKIND_DISPATCH && !dual
+                    ? PSDISPATCH : PSOAINTERFACE);
+                hive.setValue(hive.create(entry, 'ProxyStubClsid').key, '', REG_SZ, proxy);
+                hive.setValue(hive.create(entry, 'ProxyStubClsid32').key, '', REG_SZ, proxy);
+                const reference = hive.create(entry, 'TypeLib').key;
+                hive.setValue(reference, '', REG_SZ, ansi(library.guid ?? ''));
+                hive.setValue(reference, 'Version', REG_SZ,
+                    ansi(versionKey(library.majorVersion, library.minorVersion)));
+            }
             return S_OK;
         },
     };

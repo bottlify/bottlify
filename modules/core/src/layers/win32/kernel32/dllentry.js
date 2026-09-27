@@ -18,6 +18,11 @@
  * handlers run with the unwinding flag, as for any catch -- and sends the
  * thread to a routine that answers 0 from where the entry point's own return
  * would have landed.
+ *
+ * The same guard serves any call the host makes into guest code on behalf of
+ * someone the exception must not reach: a COM stub running a method for
+ * another process catches what the method raises and answers the caller with
+ * RPC_E_SERVERFAULT, as COM's own stubs do.
  */
 
 /** The flags a handler is shown during an unwind rather than a dispatch. */
@@ -25,38 +30,58 @@ const EH_UNWINDING = 0x2;
 const EH_EXIT_UNWIND = 0x4;
 /** ExceptionContinueSearch: not this frame's. */
 const CONTINUE_SEARCH = 1;
-/** Room left between the caller's stack pointer and the loader's record. */
+/** Room left between the caller's stack pointer and the guard's record. */
 const CLEARANCE = 64;
-/** The words bridge.callGuest puts below its resting stack: return, three arguments, spare. */
-const CALL_WORDS = 5;
 
 /**
- * @param {Object} host
- * @param {(name: string, fn: any) => number} host.register  A guest address for a host routine.
- * @param {(call: any) => Promise<number>} host.callGuest
- * @param {(registers: Record<string, number>, options?: { below?: number }) => any} host.continueAt
- * @param {(frame: number, address: number, options?: any) => Promise<any>} host.unwind
- * @param {(address: number) => number} host.readU32
- * @param {(address: number, value: number) => void} host.writeU32
- * @param {() => number} host.stackPointer  The calling thread's, now.
- * @param {(thread: any) => number} host.teb
- * @param {(detail: string) => void} [host.divergence]
+ * @typedef {Object} GuardHost
+ * @property {(name: string, fn: any) => number} register  A guest address for a host routine.
+ * @property {(call: any) => Promise<number>} callGuest
+ * @property {(registers: Record<string, number>, options?: { below?: number }) => any} continueAt
+ * @property {(frame: number, address: number, options?: any) => Promise<any>} unwind
+ * @property {(address: number) => number} readU32
+ * @property {(address: number, value: number) => void} writeU32
+ * @property {(thread: any) => number} stackPointer  Where the calling thread's stack is free from.
+ * @property {(thread: any) => number} teb
+ * @property {(detail: string) => void} [divergence]
  */
-export function createEntryPointCaller(host){
-    /** The loader's frames in flight, by the record's address. @type {Map<number, any>} */
+
+/**
+ * A stdcall into guest code inside a frame of the host's own: an exception
+ * the routine raises and does not handle ends the routine, whose caller is
+ * answered `failed`.
+ *
+ * @param {GuardHost} host
+ */
+export function createGuardedCaller(host){
+    /** The frames in flight, by the record's address. @type {Map<number, any>} */
     const guarded = new Map();
+    /** Where a caught routine returns from, by its argument words and answer. */
+    /** @type {Map<string, number>} */
+    const abandoned = new Map();
     let handler = 0;
-    let abandoned = 0;
+
+    /** @param {number} words @param {number} answer */
+    const abandonedFor = (words, answer)=>{
+        const key = `${words}:${answer >>> 0}`;
+        let address = abandoned.get(key);
+        if (address === undefined)
+        {
+            // `ret` over the routine's own arguments to the callback's own
+            // return, with the answer in EAX.
+            address = host.register(`<guarded-abandoned-${key}>`,
+                { argBytes: 4 * words, handler: ()=>answer | 0 });
+            abandoned.set(key, address);
+        }
+        return address;
+    };
 
     const place = ()=>{
         if (handler !== 0)
         {
             return;
         }
-        // Where a caught entry point returns from: `ret 12` to the callback's
-        // own return, with 0 in EAX.
-        abandoned = host.register('<dll-entry-abandoned>', { argBytes: 12, handler: ()=>0 });
-        handler = host.register('<dll-entry-guard>', {
+        handler = host.register('<guarded-call>', {
             convention: 'cdecl',
             argBytes: 16,
             /** @param {number[]} args */
@@ -66,45 +91,63 @@ export function createEntryPointCaller(host){
                 {
                     return CONTINUE_SEARCH;
                 }
-                const code = (host.readU32(record) >>> 0).toString(16);
-                host.divergence?.(`exception 0x${code} in the entry point of the library at`
-                    + ` 0x${call.base.toString(16)}, taken by the loader`);
-                return host.unwind(frame >>> 0, abandoned,
+                call.report?.((host.readU32(record) >>> 0).toString(16),
+                    (host.readU32(record + 12) >>> 0).toString(16));
+                return host.unwind(frame >>> 0, call.resume,
                     { record: record >>> 0, thread: call.thread })
-                    .then(()=>host.continueAt({ eip: abandoned, esp: call.frameBase },
+                    .then(()=>host.continueAt({ eip: call.resume, esp: call.frameBase },
                         { below: call.frameBase }));
             },
         });
     };
 
     /**
-     * @param {{ entry: number, base: number, reason: number, reserved: number, thread: any }} call
-     * @returns {Promise<number>} what the entry point answered, 0 when it raised
+     * @param {{ entry: number, args: number[], thread: any, failed: number,
+     *     report?: (code: string, address: string) => void }} call
+     * @returns {Promise<number>} what the routine answered, `failed` when it raised
      */
-    return ({ entry, base, reason, reserved, thread })=>{
+    return ({ entry, args, thread, failed, report })=>{
         const teb = host.teb(thread);
         // A thread with no TEB has no chain to stand on.
         if (teb === 0)
         {
-            return host.callGuest({ entry, args: [base, reason, reserved], thread });
+            return host.callGuest({ entry, args, thread });
         }
         place();
-        const record = (host.stackPointer() - CLEARANCE & ~3) >>> 0;
+        const record = (host.stackPointer(thread) - CLEARANCE & ~3) >>> 0;
         const previous = host.readU32(teb) >>> 0;
         host.writeU32(record, previous);
         host.writeU32(record + 4, handler);
         host.writeU32(teb, record);
-        guarded.set(record, { base: base >>> 0, thread, frameBase: record - 4 * CALL_WORDS });
+        // bridge.callGuest puts the return, the arguments and a spare word
+        // below the resting stack.
+        const frameBase = record - 4 * (args.length + 2);
+        guarded.set(record, { thread, frameBase, report,
+            resume: abandonedFor(args.length, failed) });
         const done = ()=>{
             guarded.delete(record);
             host.writeU32(teb, previous);
         };
-        return host.callGuest({
-            entry, args: [base, reason, reserved], thread, stackAtRest: record,
-        })
+        return host.callGuest({ entry, args, thread, stackAtRest: record })
             .then(answer=>{
                 done();
                 return answer;
             });
     };
+}
+
+/**
+ * @param {GuardHost} host
+ */
+export function createEntryPointCaller(host){
+    const call = createGuardedCaller(host);
+    /**
+     * @param {{ entry: number, base: number, reason: number, reserved: number, thread: any }} entry
+     * @returns {Promise<number>} what the entry point answered, 0 when it raised
+     */
+    return ({ entry, base, reason, reserved, thread })=>call({
+        entry, args: [base, reason, reserved], thread, failed: 0,
+        report: code=>host.divergence?.(`exception 0x${code} in the entry point of the library`
+            + ` at 0x${(base >>> 0).toString(16)}, taken by the loader`),
+    });
 }

@@ -241,6 +241,9 @@ test('a system library the engine answers for has the version of the system it b
             ['kernel32.dll', 5 << 16 | 1, 2600 << 16 | 0, '5.1.2600.0'],
             ['KERNEL32', 5 << 16 | 1, 2600 << 16 | 0, '5.1.2600.0'],
             ['C:\\WINDOWS\\system32\\ddraw.dll', 4 << 16 | 9, 0 << 16 | 904, '4.09.00.0904'],
+            // The 16-bit USER every 32-bit Windows keeps, which a setup reads
+            // the system's language from.
+            ['C:\\WINDOWS\\system32\\user.exe', 5 << 16 | 1, 2600 << 16 | 0, '5.1.2600.0'],
         ]))
         {
             const size = version.GetFileVersionInfoSizeA.handler([put(path), 0]);

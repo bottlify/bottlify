@@ -581,39 +581,6 @@ export function createRegistryFunctions(host){
         SetFileSecurityA: { argBytes: 12, handler: notImplemented },
 
         /**
-         * The token and impersonation calls, and the access check built on
-         * them. This process has no security context: there is no token to
-         * open, nobody to impersonate and no descriptor to check against,
-         * which is what the consumer line of Windows said too, with the same
-         * code. A program of the era asks before it decides whether a
-         * directory is writable and takes the refusal as "cannot tell"; each
-         * is declared so it pops what it was pushed.
-         *
-         * BOOL LookupPrivilegeValueA(LPCSTR, LPCSTR, PLUID)
-         * BOOL AdjustTokenPrivileges(HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD,
-         *                            PTOKEN_PRIVILEGES, PDWORD)
-         * BOOL AccessCheck(PSECURITY_DESCRIPTOR, HANDLE, DWORD, PGENERIC_MAPPING,
-         *                  PPRIVILEGE_SET, LPDWORD, LPDWORD, LPBOOL)
-         * BOOL InitializeSecurityDescriptor(PSECURITY_DESCRIPTOR, DWORD)
-         * BOOL IsValidSecurityDescriptor(PSECURITY_DESCRIPTOR)
-         * BOOL SetSecurityDescriptorOwner(PSECURITY_DESCRIPTOR, PSID, BOOL)
-         * BOOL SetSecurityDescriptorGroup(PSECURITY_DESCRIPTOR, PSID, BOOL)
-         * BOOL SetSecurityDescriptorDacl(PSECURITY_DESCRIPTOR, BOOL, PACL, BOOL)
-         * BOOL InitializeAcl(PACL, DWORD, DWORD)
-         * BOOL AddAccessAllowedAce(PACL, DWORD, DWORD, PSID)
-         */
-        InitializeSecurityDescriptor: { argBytes: 8, handler: notImplemented },
-        IsValidSecurityDescriptor: { argBytes: 4, handler: notImplemented },
-        SetSecurityDescriptorOwner: { argBytes: 12, handler: notImplemented },
-        SetSecurityDescriptorGroup: { argBytes: 12, handler: notImplemented },
-        SetSecurityDescriptorDacl: { argBytes: 16, handler: notImplemented },
-        InitializeAcl: { argBytes: 12, handler: notImplemented },
-        AddAccessAllowedAce: { argBytes: 16, handler: notImplemented },
-        LookupPrivilegeValueA: { argBytes: 12, handler: notImplemented },
-        AdjustTokenPrivileges: { argBytes: 24, handler: notImplemented },
-        AccessCheck: { argBytes: 32, handler: notImplemented },
-
-        /**
          * BOOL ImpersonateSelf(SECURITY_IMPERSONATION_LEVEL)
          * BOOL RevertToSelf(VOID)
          *

@@ -47,6 +47,9 @@
  */
 export const STORE_VERSION = 3;
 
+/** How long the records' writes may hold the thread before letting it go, in ms. */
+const WRITE_SLICE_MS = 4;
+
 /** The file every record is appended to, and the one naming their places. */
 const RECORDS = 'records';
 const INDEX = 'index';
@@ -549,9 +552,19 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
     const appendRecords = async writes=>{
         if (access !== null)
         {
+            // A few milliseconds at a time, the thread let go between: the
+            // writes run on the engine's own thread, and a seed's thousands
+            // held it for hundreds of milliseconds while the program loaded --
+            // long enough for a guest's sound mixer to miss its turns.
+            let since = performance.now();
             for (const [offset, bytes] of writes)
             {
                 access.write(bytes, { at: offset });
+                if (performance.now() - since >= WRITE_SLICE_MS)
+                {
+                    await new Promise(resolve=>setTimeout(resolve, 0));
+                    since = performance.now();
+                }
             }
             return;
         }
