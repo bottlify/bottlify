@@ -68,6 +68,7 @@ function defaultState(){
         bkColor: WHITE,
         bkMode: OPAQUE,
         rop2: R2_COPYPEN,
+        textAlign: 0,
         position: { x: 0, y: 0 },
     };
 }
@@ -175,7 +176,6 @@ export function createGdiDrawing(options = {}){
                 surface,
                 state: state ?? defaultState(),
                 clip: surfaceBounds(surface),
-                textAlign: 0,
                 stretchMode: BLACKONWHITE,
                 brushOrigin: { x: 0, y: 0 },
             };
@@ -240,14 +240,14 @@ export function createGdiDrawing(options = {}){
             {
                 return CLR_INVALID;
             }
-            const previous = context.textAlign;
-            context.textAlign = align >>> 0;
+            const previous = context.state.textAlign;
+            context.state.textAlign = align >>> 0;
             return previous;
         },
 
         /** @param {number} hdc @returns {number} */
         getTextAlign(hdc){
-            return contextOf(hdc)?.textAlign ?? CLR_INVALID;
+            return contextOf(hdc)?.state.textAlign ?? CLR_INVALID;
         },
 
         /**
@@ -300,6 +300,22 @@ export function createGdiDrawing(options = {}){
                 return CLR_INVALID;
             }
             return pixelToColor(context.surface.read(x | 0, y | 0));
+        },
+
+        /**
+         * @param {number} hdc
+         * @param {number} color
+         * @returns {number} the COLORREF a SetPixel of `color` would read back
+         *          as, or CLR_INVALID for a context there is not
+         */
+        nearestColor(hdc, color){
+            const context = contextOf(hdc);
+            if (!context)
+            {
+                return CLR_INVALID;
+            }
+            const pixel = colorToPixel(color);
+            return pixelToColor(context.surface.nearest ? context.surface.nearest(pixel) : pixel);
         },
 
         /**
@@ -597,7 +613,7 @@ export function createGdiDrawing(options = {}){
             // With TA_UPDATECP the coordinates the call carries are ignored and
             // the current position is the origin, which is the whole point of
             // the flag.
-            const updating = (context.textAlign & 1) !== 0;
+            const updating = (context.state.textAlign & 1) !== 0;
             const origin = updating ? context.state.position : { x: x | 0, y: y | 0 };
             const result = extTextOut(painterOf(context), {
                 x: origin.x,
@@ -607,7 +623,7 @@ export function createGdiDrawing(options = {}){
                 textColor: context.state.textColor,
                 bkColor: context.state.bkColor,
                 bkMode: context.state.bkMode,
-                align: context.textAlign,
+                align: context.state.textAlign,
                 flags,
                 rect: rect ?? undefined,
                 dx,

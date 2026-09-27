@@ -149,6 +149,16 @@ test('__getmainargs hands back a vector the program can walk', ()=>{
     assert.deepEqual(machine.vector(machine.u32(ENV)), []);
 });
 
+test('__wgetmainargs hands back the same arguments in UTF-16', ()=>{
+    const { machine, fns } = fakeMachine('"C:\\App\\Setup.exe" /S');
+    assert.equal(fns.__wgetmainargs.handler([0x1000, 0x1010, 0x1020, 0, 0]), 0);
+    assert.equal(machine.u32(0x1000), 2);
+    const second = machine.u32(machine.u32(0x1010) + 4);
+    assert.deepEqual([machine.bytes[second], machine.bytes[second + 1],
+        machine.bytes[second + 2], machine.bytes[second + 3]], [0x2f, 0, 0x53, 0]);
+    assert.notEqual(machine.u32(0x1020), 0, 'an environment, empty without one given');
+});
+
 test('asking twice gets the same vector, not a second one', ()=>{
     // Some start-up paths ask more than once, and two vectors leave a program
     // comparing pointers that are both its own and never equal.

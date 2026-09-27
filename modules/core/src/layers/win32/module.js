@@ -1371,6 +1371,14 @@ export function createWin32Module(){
                         // The standard streams are records in the runtime's own
                         // image, wherever the loader put its `_iob`.
                         iob: ()=>modules.find('msvcrt.dll')?.addressOf?.('_iob') ?? 0,
+                        // And the tables a program reads in place -- `_mbctype`,
+                        // `_environ`, the time zone's -- are rewritten where the
+                        // loader placed them.
+                        addressOf: name=>modules.find('msvcrt.dll')?.addressOf?.(name) ?? 0,
+                        // The runtime's copy of the environment starts as the
+                        // variables kernel32 starts the process with.
+                        environment: ()=>config?.environment
+                            ?? defaultEnvironment(windows, folders),
                         // The same set GetLogicalDrives reports, from the same
                         // place: a program populates its drive list from whichever
                         // of the two it happens to call.
@@ -2150,6 +2158,14 @@ export function createWin32Module(){
                  * allocators hand out the same address.
                  */
                 heap: ()=>heap,
+                /**
+                 * Sets the calling thread's last error, as SetLastError does:
+                 * for a layer outside win32 whose calls a program checks with
+                 * GetLastError, as it does WGL's.
+                 *
+                 * @param {number} code
+                 */
+                setLastError: code=>setError(code),
                 /** Views of files: how many were mapped, waited for their bytes, or failed. */
                 mappings: ()=>mappings,
 

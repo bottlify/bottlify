@@ -22,8 +22,8 @@
 
 import { createGdiObjects } from './objects.js';
 import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
-import { FACES, faceNamed } from './faces.js';
-import { decodeAnsi } from '../kernel32/locale.js';
+import { FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed } from './faces.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import {
     BITMAP,
     BITMAPINFOHEADER,
@@ -69,12 +69,24 @@ const DEFAULT_PALETTE = 15;
 const SYSTEM_FIXED_FONT = 16;
 const DEFAULT_GUI_FONT = 17;
 
-/** GetCurrentObject's uObjectType. Only the selectable ones are answered. */
+/**
+ * The object types GetCurrentObject is asked for and GetObjectType answers.
+ * Only the selectable ones are answered by the first.
+ */
 const OBJ_PEN = 1;
 const OBJ_BRUSH = 2;
+const OBJ_DC = 3;
 const OBJ_PAL = 5;
 const OBJ_FONT = 6;
 const OBJ_BITMAP = 7;
+const OBJ_REGION = 8;
+const OBJ_MEMDC = 10;
+
+/** @type {Record<string, number>} */
+const OBJECT_TYPES = {
+    pen: OBJ_PEN, brush: OBJ_BRUSH, palette: OBJ_PAL, font: OBJ_FONT, bitmap: OBJ_BITMAP,
+    region: OBJ_REGION,
+};
 
 /** Brush styles. BS_PATTERN's hatch field is a bitmap handle instead of an index. */
 const BS_SOLID = 0;
@@ -202,6 +214,7 @@ const BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 /** The longest side CreateBitmap takes. */
 const MAX_BITMAP_SIDE = 0x7ffffff;
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INVALID_HANDLE = 6;
 
 /**
  * Depths a device context over somebody else's surface can be made at.
@@ -475,11 +488,14 @@ export function createGdiFunctions(host){
                 return { type: 'pen', attributes: { style: PS_NULL, width: 1, color: BLACK } };
             case SYSTEM_FONT:
             case DEVICE_DEFAULT_FONT:
-                return { type: 'font', attributes: logFont({ height: 16, weight: 700 }) };
+                return { type: 'font',
+                    attributes: logFont({ height: 16, weight: 700, faceName: 'System' }) };
             case SYSTEM_FIXED_FONT:
-                return { type: 'font', attributes: logFont({ height: 16, pitchAndFamily: 1 }) };
+                return { type: 'font',
+                    attributes: logFont({ height: 16, pitchAndFamily: 1, faceName: 'Fixedsys' }) };
             case DEFAULT_GUI_FONT:
-                return { type: 'font', attributes: logFont({ height: -11 }) };
+                return { type: 'font',
+                    attributes: logFont({ height: -11, faceName: 'MS Shell Dlg' }) };
             case DEFAULT_PALETTE:
                 // PALETTEENTRYs, red in the low byte.
                 return { type: 'palette', attributes: { version: 0x300,
@@ -583,6 +599,12 @@ export function createGdiFunctions(host){
             textAlign: 0,
             mapMode: MM_TEXT,
             layout: 0,
+            /** Whether the program selected a clip, which GetClipRgn answers. */
+            clipSelected: false,
+            /** SetTextCharacterExtra's spacing, in logical units. */
+            characterExtra: 0,
+            /** The miter limit, a FLOAT's value; 10 until the program sets one. */
+            miterLimit: 10,
             viewportOrg: { x: 0, y: 0 },
             windowOrg: { x: 0, y: 0 },
             viewportExt: { cx: 1, cy: 1 },
@@ -632,6 +654,8 @@ export function createGdiFunctions(host){
         textAlign: dc.textAlign,
         mapMode: dc.mapMode,
         layout: dc.layout,
+        characterExtra: dc.characterExtra,
+        miterLimit: dc.miterLimit,
         viewportOrg: { ...dc.viewportOrg },
         windowOrg: { ...dc.windowOrg },
         viewportExt: { ...dc.viewportExt },
@@ -694,8 +718,11 @@ export function createGdiFunctions(host){
         dc.bkColor = state.bkColor;
         dc.bkMode = state.bkMode;
         dc.rop2 = state.rop2;
+        dc.textAlign = state.textAlign;
         dc.mapMode = state.mapMode;
         dc.layout = state.layout;
+        dc.characterExtra = state.characterExtra;
+        dc.miterLimit = state.miterLimit;
         dc.viewportOrg = state.viewportOrg;
         dc.windowOrg = state.windowOrg;
         dc.viewportExt = state.viewportExt;
@@ -937,6 +964,28 @@ export function createGdiFunctions(host){
     const currentMetrics = dc=>metricsOf(currentFont(dc));
 
     /**
+     * The face a context's font is drawn in, as GetTextFace names it: the one
+     * asked for when there is a face of that name, a substitute's included,
+     * and otherwise the face its family stands in with.
+     *
+     * @param {any} dc @returns {string}
+     */
+    const currentFace = dc=>{
+        const font = currentFont(dc);
+        const named = font.faceName === '' ? null : faceNamed(font.faceName);
+        if (named)
+        {
+            return named.name;
+        }
+        if ((font.pitchAndFamily & 0xf0) === FF_ROMAN)
+        {
+            return 'Times New Roman';
+        }
+        const fixed = (font.pitchAndFamily & 3) === FIXED_PITCH;
+        return fixed || (font.pitchAndFamily & 0xf0) === FF_MODERN ? 'Courier New' : 'Arial';
+    };
+
+    /**
      * How wide a string is in a context's font: what the engine draws, or
      * the estimate's fixed pitch without one.
      *
@@ -954,7 +1003,11 @@ export function createGdiFunctions(host){
      * @returns {number}
      */
     const deviceCaps = (dc, index)=>{
-        const surface = surfaceOf(dc);
+        // A memory context answers for the device it is compatible with, the
+        // display, whatever bitmap is selected into it (Wine's dc.c
+        // test_CreateCompatibleDC compares one over a 1-bit 10x10 bitmap with
+        // the screen's, capability by capability).
+        const surface = surfaceOf(dc.kind === 'memory' ? { kind: 'display' } : dc);
         const depth = surface.bitCount;
         switch (index | 0){
             case DRIVERVERSION:
@@ -1422,6 +1475,17 @@ export function createGdiFunctions(host){
             },
         },
 
+        /** HDC CreateDCW(LPCWSTR, LPCWSTR, LPCWSTR, const DEVMODEW *): CreateDCA in wide text */
+        CreateDCW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([driver, device])=>{
+                const named = (driver >>> 0) !== 0 ? wideText(driver >>> 0, 32)
+                    : (device >>> 0) !== 0 ? wideText(device >>> 0, 32) : '';
+                return named.toUpperCase() === 'DISPLAY' ? createContext(0, 'display').hdc : 0;
+            },
+        },
+
         /** HDC CreateCompatibleDC(HDC hdc) */
         CreateCompatibleDC: {
             argBytes: 4,
@@ -1570,6 +1634,31 @@ export function createGdiFunctions(host){
                     default:
                         return 0;
                 }
+            },
+        },
+
+        /**
+         * DWORD GetObjectType(HGDIOBJ h)
+         *
+         * A context is OBJ_MEMDC when it is a memory one and OBJ_DC otherwise;
+         * a handle that is no GDI object is 0 with ERROR_INVALID_HANDLE.
+         */
+        GetObjectType: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                if (dc)
+                {
+                    return dc.kind === 'memory' ? OBJ_MEMDC : OBJ_DC;
+                }
+                const type = OBJECT_TYPES[objects.get(handle)?.type ?? ''];
+                if (type === undefined)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                return type;
             },
         },
 
@@ -2780,6 +2869,73 @@ export function createGdiFunctions(host){
                 }
                 writeTextMetrics(host, out, currentMetrics(dc));
                 return 1;
+            },
+        },
+
+        /**
+         * int GetTextFaceA(HDC hdc, int c, LPSTR lpName)
+         *
+         * With a buffer, the bytes written before the terminator, the name
+         * cut to fit; with none, the size a buffer needs, terminator and all.
+         * A count of zero writes nothing.
+         */
+        GetTextFaceA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, count, out])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                const name = encodeAnsi(currentFace(dc));
+                if ((out >>> 0) === 0)
+                {
+                    return name.length + 1;
+                }
+                if ((count | 0) <= 0)
+                {
+                    return 0;
+                }
+                const kept = name.subarray(0, (count | 0) - 1);
+                host.writeMemory(out >>> 0, Uint8Array.of(...kept, 0));
+                return kept.length;
+            },
+        },
+
+        /**
+         * int GetTextFaceW(HDC hdc, int c, LPWSTR lpName)
+         *
+         * As the ANSI call, but what a buffer was given counts the terminator
+         * too, as Windows' wide call does.
+         */
+        GetTextFaceW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, count, out])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                const name = currentFace(dc);
+                if ((out >>> 0) === 0)
+                {
+                    return name.length + 1;
+                }
+                if ((count | 0) <= 0)
+                {
+                    return 0;
+                }
+                const kept = name.slice(0, (count | 0) - 1);
+                const bytes = new Uint8Array((kept.length + 1) * 2);
+                for (let at = 0; at < kept.length; at++)
+                {
+                    bytes[at * 2] = kept.charCodeAt(at) & 0xff;
+                    bytes[at * 2 + 1] = kept.charCodeAt(at) >>> 8;
+                }
+                host.writeMemory(out >>> 0, bytes);
+                return kept.length + 1;
             },
         },
 

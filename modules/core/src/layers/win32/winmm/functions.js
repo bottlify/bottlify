@@ -410,7 +410,7 @@ const WAVE_FORMATS = 0x00000f00 | 0x000000f0;
  * WAVECAPS_LRVOLUME: a track has a single gain, and a device without separate
  * left and right control is documented to take the low word of a volume.
  */
-const WAVE_SUPPORT = 0x0001 | 0x0002;
+const WAVE_SUPPORT = 0x0004 | 0x0020;
 
 /** How the caller asked to be told. The low word of the flags is unrelated. */
 const CALLBACK_TYPEMASK = 0x00070000;
@@ -534,6 +534,7 @@ export function createWinmmFunctions(host){
      * @property {number} playedBytes  Into the buffer at the head of the queue.
      * @property {number} position     Bytes played to the end since the open or the last reset.
      * @property {number} blockAlign   Bytes a sample frame takes, for TIME_SAMPLES.
+     * @property {number} openedAs     The device id it was opened by, WAVE_MAPPER's included.
      * @property {number} sinceMs      When the cursor was last settled.
      * @property {boolean} paused
      * @property {any} track           The mixer's source, or null.
@@ -1338,7 +1339,9 @@ export function createWinmmFunctions(host){
 
         /** MMRESULT waveOutGetID(HWAVEOUT hwo, LPUINT puDeviceID) */
         waveOutGetID: onDevice(8, (device, [, out])=>{
-            host.writeMemory(out >>> 0, dword(0));
+            // The id the device was opened by: WAVE_MAPPER's -1 for one the
+            // mapper chose, as winmm's wave tests read it back.
+            host.writeMemory(out >>> 0, dword(device.openedAs));
             return MMSYSERR_NOERROR;
         }),
 
@@ -1389,6 +1392,10 @@ export function createWinmmFunctions(host){
                 {
                     return MMSYSERR_BADDEVICEID;
                 }
+                if ((format >>> 0) === 0)
+                {
+                    return MMSYSERR_INVALPARAM;
+                }
 
                 const header = host.readMemory(format >>> 0, WAVEFORMATEX.size);
                 let bytesPerSecond = u32(header, WAVEFORMATEX.nAvgBytesPerSec);
@@ -1415,6 +1422,7 @@ export function createWinmmFunctions(host){
                 /** @type {WaveOut} */
                 const opened = {
                     handle,
+                    openedAs: device >>> 0,
                     bytesPerSecond,
                     callbackKind: (flags >>> 0) & CALLBACK_TYPEMASK,
                     callbackTarget: callback >>> 0,
@@ -1593,6 +1601,24 @@ export function createWinmmFunctions(host){
             handler: ([sound, , flags])=>playSound(sound, flags >>> 0),
         },
         sndPlaySoundA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([sound, flags])=>playSound(sound, flags >>> 0),
+        },
+
+        /**
+         * BOOL PlaySoundW(LPCWSTR, HMODULE, DWORD) and
+         * BOOL sndPlaySoundW(LPCWSTR, UINT)
+         *
+         * The same calls: a sound is played only from a WAVE image in
+         * memory, and no name -- the one thing the width is about -- is read.
+         */
+        PlaySoundW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([sound, , flags])=>playSound(sound, flags >>> 0),
+        },
+        sndPlaySoundW: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([sound, flags])=>playSound(sound, flags >>> 0),

@@ -224,7 +224,23 @@ any other GUID is `DIERR_DEVICENOTREG`. Each `DirectInputCreate`, `DirectInputCr
 (`Initialize` sets it too), and a device answers as the version of the object that made it. The
 object counts its references as one whichever interface each came through, and the devices it made
 hold none a program sees: its last `Release` answers zero while a device is still held, and the
-device goes on answering (Wine's `device8.c` releases it so).
+device goes on answering (Wine's `device8.c` releases it so). A device released to nothing is
+over: the next `CreateDevice` for it makes a new one, and one still held is handed out again with a
+reference for the new caller.
+
+Creation and `Initialize` refuse as Windows does (Wine's `dinput.c`): a null out-pointer is
+`E_POINTER`; an interface of the other generation `DIERR_NOINTERFACE` (`DirectInputCreateEx` looks
+at the interface before the pointer, and leaves the pointer as it was); a null module handle
+`DIERR_INVALIDPARAM`, except for version 0x300; a version of 0 `DIERR_NOTINITIALIZED`; a version
+no DirectInput before 8 was released as (0x300, 0x500, 0x50A, 0x5B2, 0x602, 0x61A, 0x700) is
+`DIERR_BETADIRECTINPUTVERSION` up to 0x700 and `DIERR_OLDDIRECTINPUTVERSION` past it, and
+DirectInput 8 takes 0x800 alone on the same terms. A creation asked to aggregate makes nothing and
+answers `DI_OK` with the pointer null. A root before 8 is one pointer per width: `IDirectInputA`,
+`2A` and `7A` are the `7A` table's pointer, the wide ones and `IUnknown` the `7W` table's, and
+neither family answers the other's (the bridge's `sharedWith`). `CreateDevice` and
+`GetDeviceStatus` refuse a null with `E_POINTER`, `RunControlPanel` a handle that is no window with
+`E_HANDLE` and any flags with `DIERR_INVALIDPARAM` (there is no control panel to show), and
+`EnumDevices` a device type or flags there are not with `DIERR_INVALIDPARAM`.
 `SetDataFormat` does not walk the caller's `DIOBJECTDATAFORMAT` array: it recognises the layout by
 `dwDataSize` -- 256 for `c_dfDIKeyboard`, 16 for `c_dfDIMouse`, 20 for `c_dfDIMouse2` -- and
 answers `DIERR_UNSUPPORTED` to any other size rather than writing at the wrong offsets, and

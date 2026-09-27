@@ -2353,6 +2353,7 @@ test('a buffer gives its storage back with its last reference, a Reset the surfa
         }
         assert.equal(held.size, before, 'a Reset keeps one back buffer and one depth stencil');
         assertFullyReleased(device);
+        assert.equal(held.size, 0, 'and the device\'s own surfaces go with its last reference');
     });
 
 test('a buffer released to nothing while bound is answered as NULL, and said, not thrown on', ()=>{
