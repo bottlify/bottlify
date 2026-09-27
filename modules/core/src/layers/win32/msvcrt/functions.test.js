@@ -969,3 +969,9 @@ test('bytes in the upper half of the ANSI page are copied and printed as themsel
     assert.equal(fns._snprintf.handler([0x320, 3, 0x140, 0x101, 0x97, 0x180]), -1);
     assert.deepEqual(bytesAt(0x320, 3), [0x80, 0x99, 0x97]);
 });
+
+test('rand_s fills an unsigned int from the random source and refuses no pointer', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.rand_s.handler([0x300]), 0);
+    assert.equal(fns.rand_s.handler([0]), 22);
+});

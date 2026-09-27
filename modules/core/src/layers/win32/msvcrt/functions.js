@@ -21,6 +21,7 @@
 import { formatToString, guestAccess, varargsSlots } from './format.js';
 import { createStringFunctions } from './strings.js';
 import { createSecureFunctions } from './secure.js';
+import { createErrorFunctions } from './errors.js';
 import { createConversionFunctions } from './convert.js';
 import { createScanFunctions, VARIADIC_SLOTS } from './scan.js';
 import { createHeapFunctions } from './heap.js';
@@ -794,6 +795,30 @@ export function createMsvcrtFunctions(host){
         ...createWideClassificationFunctions(),
         ...createSecureFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory,
             errno }),
+        ...createErrorFunctions({
+            writeMemory: host.writeMemory,
+            allocate,
+            errno: ()=>globals.get(errnoName()),
+            setErrno: errno,
+            doserrno: ()=>globals.get('doserrno'),
+            setDoserrno: code=>globals.set('doserrno', code),
+        }),
+
+        /** errno_t rand_s(unsigned int *value) -- from the machine's random source */
+        rand_s: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                if ((pointer >>> 0) === 0)
+                {
+                    errno(EINVAL);
+                    return EINVAL;
+                }
+                host.writeMemory(pointer, crypto.getRandomValues(new Uint8Array(4)));
+                return 0;
+            },
+        },
         ...createWideFunctions({
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
