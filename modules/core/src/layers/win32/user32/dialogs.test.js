@@ -85,9 +85,10 @@ function fakeHandles(){
 /**
  * @param {{ resources?: Record<string, number>,
  *           dispatch?: (wndProc: number, message: any, thread?: unknown) => number,
- *           allocate?: (bytes: number) => number }} [options]
+ *           allocate?: (bytes: number) => number,
+ *           call?: (entry: number, args: number[], thread?: unknown) => any }} [options]
  */
-function setup({ resources = {}, dispatch = ()=>0, allocate } = {}){
+function setup({ resources = {}, dispatch = ()=>0, allocate, call } = {}){
     const memory = fakeMemory();
     const queue = createMessageQueue();
     const fns = createWindowFunctions({
@@ -99,6 +100,7 @@ function setup({ resources = {}, dispatch = ()=>0, allocate } = {}){
         queue,
         dispatch,
         allocate,
+        call,
         release: ()=>{},
         callerThread: ()=>'the caller',
         park: ()=>({ parked: true }),
@@ -234,6 +236,49 @@ test('a template is walked into a dialog and the controls it names', ()=>{
     assert.notEqual(first, second);
     assert.equal(fns.GetDlgCtrlID.handler([first]), 100);
     assert.equal(fns.GetDlgItem.handler([dialog, 999]), 0);
+});
+
+test('a CBT hook hears of the dialog window and may subclass it before its first message', ()=>{
+    // A framework attaches its dialog object to the window from the hook and
+    // puts its own procedure in; the dialog's creation messages then reach
+    // that procedure, and the dialog procedure hears none of them.
+    const HOOK = 0x7000;
+    const FRAMEWORK = 0x7100;
+    let heap = 0x9000;
+    /** @type {number[][]} */
+    const hooked = [];
+    /** @type {{ hwnd: number, message: number }[]} */
+    const reached = [];
+    /** @type {any} */
+    let table = null;
+    const { memory, fns } = setup({
+        allocate: (/** @type {number} */ size)=>{
+            heap += size;
+            return heap - size;
+        },
+        call: (/** @type {number} */ entry, /** @type {number[]} */ args)=>{
+            hooked.push([entry, ...args]);
+            table.SetWindowLongA.handler([args[1], -4, FRAMEWORK]);
+            return 0;
+        },
+        dispatch: (/** @type {number} */ address, /** @type {any} */ message)=>{
+            if (address === FRAMEWORK)
+            {
+                reached.push({ hwnd: message.hwnd, message: message.message });
+                return message.message === 0x81 ? 1 : 0;
+            }
+            return 0;
+        },
+    });
+    table = fns;
+    putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
+    fns.SetWindowsHookExA.handler([5, HOOK, 0, 0]);
+
+    const dialog = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    assert.notEqual(dialog, 0);
+    assert.deepEqual(hooked[0].slice(0, 3), [HOOK, 3, dialog], 'HCBT_CREATEWND, for the dialog');
+    assert.deepEqual(reached.filter(m=>m.hwnd === dialog).slice(0, 2).map(m=>m.message),
+        [0x81, 0x1], 'WM_NCCREATE and WM_CREATE reached the procedure the hook put in');
 });
 
 test('a dialog named in the resources is the template read where it was mapped', ()=>{

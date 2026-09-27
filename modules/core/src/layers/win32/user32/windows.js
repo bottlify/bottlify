@@ -1615,14 +1615,9 @@ export function createWindowFunctions(host){
         const thread = host.callerThread?.();
         /** The window, activated first when it was created visible. */
         const activated = ()=>andThen(activateCreated(record, thread), ()=>record.hwnd);
-        if (record.wndProc === 0)
-        {
-            return activated();
-        }
         // A procedure on this side reads nothing out of a CREATESTRUCT.
-        if (procedures.has(record.wndProc))
-        {
-            return andThen(callProcedure(record.wndProc, {
+        const onThisSide = ()=>(record.wndProc === 0 ? activated()
+            : andThen(callProcedure(record.wndProc, {
                 hwnd: record.hwnd, message: WM_CREATE, wParam: 0, lParam: 0,
             }, thread), created=>{
                 if ((created | 0) === -1)
@@ -1630,7 +1625,15 @@ export function createWindowFunctions(host){
                     return andThen(destroyWindow(record.hwnd, undefined, 'ncdestroy'), ()=>0);
                 }
                 return activated();
-            });
+            }));
+        /** Whether the window's procedure is still one this side runs. */
+        const systemProcedure = ()=>record.wndProc === 0 || procedures.has(record.wndProc);
+        // A CBT hook hears of every window, a system class's too: a framework
+        // subclasses a dialog there, and the messages that follow go to it.
+        const hooked = hooks.some(hook=>hook.type === WH_CBT);
+        if (systemProcedure() && !hooked)
+        {
+            return onThisSide();
         }
         if (!host.allocate)
         {
@@ -1689,6 +1692,12 @@ export function createWindowFunctions(host){
             if ((refused | 0) !== 0)
             {
                 return andThen(destroyWindow(record.hwnd, thread, 'none'), ()=>done(0));
+            }
+            // Left with its own procedure by the hook: created as a system
+            // window is.
+            if (systemProcedure())
+            {
+                return andThen(onThisSide(), created=>done(created));
             }
             // WM_NCCREATE before WM_CREATE, with the same structure: a
             // procedure that keeps lpCreateParams takes it from the first.
