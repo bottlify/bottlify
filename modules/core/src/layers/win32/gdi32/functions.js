@@ -1471,6 +1471,17 @@ export function createGdiFunctions(host){
             },
         },
 
+        /** HDC CreateDCW(LPCWSTR, LPCWSTR, LPCWSTR, const DEVMODEW *): CreateDCA in wide text */
+        CreateDCW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([driver, device])=>{
+                const named = (driver >>> 0) !== 0 ? wideText(driver >>> 0, 32)
+                    : (device >>> 0) !== 0 ? wideText(device >>> 0, 32) : '';
+                return named.toUpperCase() === 'DISPLAY' ? createContext(0, 'display').hdc : 0;
+            },
+        },
+
         /** HDC CreateCompatibleDC(HDC hdc) */
         CreateCompatibleDC: {
             argBytes: 4,

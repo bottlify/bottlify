@@ -337,6 +337,19 @@ test('CreateDCA opens the display and nothing else, and DeleteDC closes it', ()=
     assert.equal(fns.CreateDCA.argBytes, 16);
 });
 
+test('CreateDCW opens the display from a wide name', ()=>{
+    const { fns, memory } = setup();
+    const wide = (/** @type {string} */ text)=>memory.writeMemory(FACE_NAME,
+        new Uint8Array(new Uint16Array([...text].map(c=>c.charCodeAt(0)).concat([0])).buffer));
+    wide('display');
+    const display = fns.CreateDCW.handler([FACE_NAME, 0, 0, 0]);
+    assert.equal(fns.GetDeviceCaps.handler([display, BITSPIXEL]), 32);
+    assert.equal(fns.DeleteDC.handler([display]), 1);
+    wide('WINSPOOL');
+    assert.equal(fns.CreateDCW.handler([FACE_NAME, 0, 0, 0]), 0);
+    assert.equal(fns.CreateDCW.handler([0, 0, 0, 0]), 0);
+});
+
 test('CreateCompatibleDC starts with the one-pixel bitmap it is documented to have', ()=>{
     const { fns, hdc } = withDC();
     const memoryDC = fns.CreateCompatibleDC.handler([hdc]);
