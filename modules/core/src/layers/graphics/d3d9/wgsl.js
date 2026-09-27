@@ -1479,8 +1479,8 @@ export function translateShader(parsed, options = {}){
     const bumpRegister = bumps ? constants : undefined;
     const reach = fogRegister !== undefined ? fogRegister + 2
         : viewportRegister !== undefined ? viewportRegister + 1
-        : bumpRegister !== undefined ? bumpRegister + 16
-            : constants === Infinity ? 224 : constants;
+            : bumpRegister !== undefined ? bumpRegister + 16
+                : constants === Infinity ? 224 : constants;
     const wgsl = [
         ...moduleHeader({
             vertex, constants: reach, samplers, inputFields, outputFields,
