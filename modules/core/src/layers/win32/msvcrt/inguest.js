@@ -646,8 +646,8 @@ export function bsearch({ call }, key, base, num, width, compare){
  *
  * As if the source were read whole before a byte of it was written: a
  * destination above the source and inside it is copied from the last byte
- * down, anything else from the first up -- `rep movsb`, which the translator
- * runs a page at a time.
+ * down, anything else from the first up -- a dword at a time where that
+ * leaves the same bytes.
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count

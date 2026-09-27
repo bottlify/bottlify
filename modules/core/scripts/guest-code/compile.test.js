@@ -180,6 +180,7 @@ export function widenUnsigned(b){
 export function bulk({ copyUp, copyDown, fill, call, u8 }, d, s, n, fn){
     copyUp(d, s, n);
     copyDown(d + 3, d, n);
+    copyDown(s, (s + (n & 3)) >>> 0, n);
     fill(d + n + 8, 0x1ff, 5);
     call(fn, s, 1);
     return (call(fn, d, n) + call(fn, s, 3) + u8(d)) | 0;
@@ -300,11 +301,13 @@ test('x87 arguments popped, and an i64 from a double and from each integer', asy
 test('copies up and down, over themselves, a fill, and calls through a pointer', async()=>{
     const { same } = await load(SAMPLE);
     const next = random(15);
-    for (let i = 0; i < 60; i++)
+    for (let i = 0; i < 400; i++)
     {
         const bytes = Array.from({ length: 96 }, ()=>next() & 0xff);
-        const s = DATA + next() % 32;
-        const d = DATA + next() % 64;
+        const s = DATA + 8 + next() % 32;
+        // Half the copies with their ends within four bytes of each other,
+        // where a dword read differs from a byte read.
+        const d = i % 2 === 0 ? s + next() % 9 - 4 : DATA + next() % 64;
         same('bulk', { stack: [d, s, next() % 40, CALLBACK], memory: [[DATA, bytes]] },
             { callback: CALLBACK_X86, call: callbackJs });
     }

@@ -254,8 +254,8 @@ test('memmove and memcpy: apart, overlapping either way, onto themselves, and no
         const bytes = Array.from({ length: 256 }, ()=>next() & 0xff);
         const source = DATA + next() % 96;
         const destination = DATA + [next() % 96, source - DATA, source - DATA + 1,
-            source - DATA - 1][next() % 4];
-        const count = [0, 1, 2, 7, 64, next() % 128][next() % 6];
+            source - DATA - 1, source - DATA + 2, source - DATA - 3, source - DATA + 4][next() % 7];
+        const count = [0, 1, 2, 3, 5, 7, 64, next() % 128][next() % 8];
         same('memmove', { stack: [destination, source, count], memory: [[DATA, bytes]] });
     }
 });

@@ -235,7 +235,10 @@ left on the x87 stack and the callee pops (`_ftol`), `i64` EDX:EAX (a double tru
 truncates, or an integer extended), `void`. A function that touches guest memory takes the helpers
 it uses from its first parameter: loads `u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `f32`, `f64`,
 stores `setU8`, `setU16`, `setU32`, `setF64`, `call(fn, ...args)` through a cdecl pointer, and
-`copyUp`/`copyDown`/`fill` (`rep movsb`, `std; rep movsb`, `rep stosb`).
+`copyUp`/`copyDown`/`fill` (`rep movsd` or `rep stosd` for the whole dwords, down with the
+direction flag set for `copyDown`, the bytes left as the byte forms leave them -- a turn of a
+`rep` counts as an instruction of the thread's quantum, and a dword a turn is a quarter of the
+turns; a copy whose ends are one to three bytes apart goes a byte at a time).
 
 `npm run build` (and `npm run build:guest-code` alone) compiles every `@guestCode` function under
 `src/` with `scripts/guest-code/compile.mjs` -- parsed by `espree`, the parser ESLint already
@@ -282,8 +285,8 @@ where the host can set EDX); `toupper`, `tolower`, the classifiers `isalpha`, `i
 their wide forms `iswalpha` ... `iswgraph`, `iswascii`, `towupper`, `towlower` (the classes in
 `CLASSES` and `WIDE_CLASSES`, which `_pctype`, `_isctype` and `iswctype` read too); `strlen`,
 `strcpy`, `strcmp`, `strncmp`, `_strnicmp`, `_stricmp`; `memcpy`/`memmove` (one function: as if
-the source were read whole first, `rep movsb` up or `std; rep movsb` down), `memset`
-(`rep stosb`), `memcmp`; `atoi`/`atol`; `qsort` (Shell's sort) and `bsearch`, the program's
+the source were read whole first, copied up or down), `memset`, `memcmp` (four bytes at a
+time while they match); `atoi`/`atol`; `qsort` (Shell's sort) and `bsearch`, the program's
 comparator called with a `call`. Each keeps the answers of the handler it replaced (see the
 divergences below). `strtol`/`strtoul` stay handlers: they set `errno`, which is the calling
 thread's own and reached only through the host.
