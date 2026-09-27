@@ -979,6 +979,30 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             || (autoDepthStencil !== null && autoDepthStencil.refCount > 0);
     };
 
+    /**
+     * A bound resource handed back with the reference the call owes. One the
+     * program released to nothing while it stayed bound is gone here, where
+     * Windows keeps it until it is unbound; it is answered as nothing, and
+     * said once, rather than ending the run on a reference it cannot take.
+     *
+     * @param {any} resource @param {string} what  The getter, for the report.
+     * @returns {any}
+     */
+    const handOut = (resource, what)=>{
+        if (!resource)
+        {
+            return null;
+        }
+        if (resource.refCount === 0 && resource.destroyed !== false)
+        {
+            report(`released-while-bound:${what}`, `${what} answers NULL for a resource released `
+                + 'to nothing while bound, which Windows keeps until it is unbound');
+            return null;
+        }
+        resource.addRef();
+        return resource;
+    };
+
     /** @type {any[]} */
     let backBuffers = [];
     /** @type {any} */
@@ -2170,12 +2194,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            const texture = textures.get(stage) ?? null;
-            if (texture)
-            {
-                texture.addRef();
-            }
-            out.texture = texture;
+            out.texture = handOut(textures.get(stage) ?? null, 'GetTexture');
             return D3D_OK;
         },
 
@@ -2954,11 +2973,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         /** @param {{ buffer?: any }} out */
         GetIndices(out){
-            if (indices)
-            {
-                indices.addRef();
-            }
-            out.buffer = indices;
+            out.buffer = handOut(indices, 'GetIndices');
             return D3D_OK;
         },
 
@@ -3007,11 +3022,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3DERR_INVALIDCALL;
             }
             const record = stream(index);
-            if (record.buffer)
-            {
-                record.buffer.addRef();
-            }
-            out.buffer = record.buffer;
+            out.buffer = handOut(record.buffer, 'GetStreamSource');
             out.offset = record.offset;
             out.stride = record.stride;
             return D3D_OK;

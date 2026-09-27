@@ -2354,3 +2354,30 @@ test('a buffer gives its storage back with its last reference, a Reset the surfa
         assert.equal(held.size, before, 'a Reset keeps one back buffer and one depth stencil');
         assertFullyReleased(device);
     });
+
+test('a buffer released to nothing while bound is answered as NULL, and said, not thrown on', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const device = createDevice({ caps: {
+        divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
+            said.push(`${api}: ${detail}`),
+    } });
+    /** @type {{ buffer?: any }} */
+    const made = {};
+    assert.equal(device.CreateVertexBuffer(64, 0, 0, D3DPOOL.DEFAULT, made), D3D_OK);
+    assert.equal(device.SetStreamSource(0, made.buffer, 16), D3D_OK);
+    /** @type {{ buffer?: any, stride?: number }} */
+    const held = {};
+    assert.equal(device.GetStreamSource(0, held), D3D_OK);
+    assert.equal(held.buffer, made.buffer, 'a live one, with a reference taken');
+    assert.equal(made.buffer.release(), 1);
+    assert.equal(made.buffer.release(), 0);
+    /** @type {{ buffer?: any, stride?: number }} */
+    const after = {};
+    assert.equal(device.GetStreamSource(0, after), D3D_OK);
+    assert.equal(after.buffer, null);
+    assert.equal(after.stride, 16);
+    assert.equal(said.filter(line=>line.includes('GetStreamSource')).length, 1);
+    assert.equal(device.SetStreamSource(0, null, 0), D3D_OK);
+    assertFullyReleased(device);
+});
