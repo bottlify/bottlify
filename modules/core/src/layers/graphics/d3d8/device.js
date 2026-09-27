@@ -1176,6 +1176,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             },
             addRef: ()=>bufferCount.addRef(),
             release: ()=>bufferCount.release(),
+            get destroyed(){
+                return bufferCount.destroyed;
+            },
+            /** The device binds it (see `createReferenceCount`). */
+            hold: ()=>bufferCount.hold?.(),
+            letGo: ()=>bufferCount.letGo?.(),
 
             /**
              * What the buffer was made as. A vertex buffer's format is
@@ -1401,7 +1407,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * buffer afterwards has to bind it again.
      */
     const unbindStreamZero = ()=>{
+        stream(0).buffer?.letGo?.();
         stream(0).buffer = null;
+        indices?.letGo?.();
         indices = null;
         baseVertexIndex = 0;
     };
@@ -2469,6 +2477,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 recording.indices = { buffer: buffer ?? null, base };
                 return D3D_OK;
             }
+            buffer?.hold?.();
+            indices?.letGo?.();
             indices = buffer ?? null;
             baseVertexIndex = base;
             return D3D_OK;
@@ -2502,6 +2512,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 return D3D_OK;
             }
             const record = stream(index);
+            buffer?.hold?.();
+            record.buffer?.letGo?.();
             record.buffer = buffer ?? null;
             if (buffer)
             {

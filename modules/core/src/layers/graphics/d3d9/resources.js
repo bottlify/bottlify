@@ -57,6 +57,9 @@ export const D3DLOCK_NO_DIRTY_UPDATE = 0x00008000;
  * @property {boolean} destroyed
  * @property {() => number} addRef
  * @property {() => number} release
+ * @property {() => void} [hold]   The device's own reference, kept while the
+ *           resource is bound and never counted in `value` (see below).
+ * @property {() => void} [letGo]
  */
 
 /**
@@ -67,6 +70,15 @@ export function createReferenceCount(options = {}){
     const implicit = options.implicit === true;
     let count = implicit ? 0 : 1;
     let destroyed = false;
+    // The device's references to a resource bound to it. Windows keeps a
+    // bound resource alive past the program's last Release, with a count of
+    // zero, and hands the same object back when asked for what is bound; it
+    // goes once it is unbound too.
+    let held = 0;
+    const gone = ()=>{
+        options.onLastRef?.();
+        destroyed = !implicit;
+    };
 
     return {
         get value(){
@@ -96,14 +108,27 @@ export function createReferenceCount(options = {}){
                 return 0;
             }
             count--;
-            if (count === 0)
+            // An implicit resource outlives its own count: the device owns
+            // it, so the pointer a program kept stays the same one.
+            if (count === 0 && held === 0)
             {
-                options.onLastRef?.();
-                // An implicit resource outlives its own count: the device owns
-                // it, so the pointer a program kept stays the same one.
-                destroyed = !implicit;
+                gone();
             }
             return count;
+        },
+        hold(){
+            held++;
+        },
+        letGo(){
+            if (held === 0)
+            {
+                return;
+            }
+            held--;
+            if (held === 0 && count === 0 && !destroyed)
+            {
+                gone();
+            }
         },
     };
 }

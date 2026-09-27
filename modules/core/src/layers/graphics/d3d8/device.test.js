@@ -2432,29 +2432,25 @@ test('a buffer gives its storage back with its last reference, a Reset the surfa
         assert.equal(held.size, 0, 'and the device\'s own surfaces go with its last reference');
     });
 
-test('a buffer released to nothing while bound is answered as NULL, and said, not thrown on', ()=>{
-    /** @type {string[]} */
-    const said = [];
-    const device = createDevice({ caps: {
-        divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
-            said.push(`${api}: ${detail}`),
-    } });
+test('a buffer released to nothing while bound lives until it is unbound, and is handed back', ()=>{
+    // Wine's d3d8 visual test releases a bound vertex buffer to a count of
+    // zero and asks for the stream again: Windows keeps it for the device and
+    // hands back the same object. Answered NULL, the test released NULL and
+    // hung there.
+    const device = createDevice();
     /** @type {{ buffer?: any }} */
     const made = {};
     assert.equal(device.CreateVertexBuffer(64, 0, 0, D3DPOOL.DEFAULT, made), D3D_OK);
     assert.equal(device.SetStreamSource(0, made.buffer, 16), D3D_OK);
-    /** @type {{ buffer?: any, stride?: number }} */
-    const held = {};
-    assert.equal(device.GetStreamSource(0, held), D3D_OK);
-    assert.equal(held.buffer, made.buffer, 'a live one, with a reference taken');
-    assert.equal(made.buffer.release(), 1);
-    assert.equal(made.buffer.release(), 0);
+    assert.equal(made.buffer.release(), 0, 'what the device keeps is not counted');
     /** @type {{ buffer?: any, stride?: number }} */
     const after = {};
     assert.equal(device.GetStreamSource(0, after), D3D_OK);
-    assert.equal(after.buffer, null);
+    assert.equal(after.buffer, made.buffer, 'the same buffer, alive');
     assert.equal(after.stride, 16);
-    assert.equal(said.filter(line=>line.includes('GetStreamSource')).length, 1);
+    assert.equal(after.buffer.release(), 0);
+    assert.equal(made.buffer.destroyed, false, 'kept while bound');
     assert.equal(device.SetStreamSource(0, null, 0), D3D_OK);
+    assert.equal(made.buffer.destroyed, true, 'and gone once unbound');
     assertFullyReleased(device);
 });
