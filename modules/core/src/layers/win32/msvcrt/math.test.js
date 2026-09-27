@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FTOL_CODE, createMathFunctions } from './math.js';
+import { createMathFunctions } from './math.js';
+import { COMPILED } from './inguest.x86.js';
 import { fakeMemory, fakeFpu, doubleSlots } from './harness.test.js';
 
 const build = ()=>{
@@ -66,16 +67,27 @@ test('the _CI form of a binary function reads ST(1) as the left operand', ()=>{
     assert.equal(fpu.stack.length, 1);
 });
 
-test('_ftol and its two other names are one body of guest code: fisttp into EDX:EAX', ()=>{
-    // What it answers is held in crt-inguest.itest.js, run on both engines.
+test('_ftol and its two other names are one body of guest code, into EDX:EAX', ()=>{
+    // What it answers is held in inguest.test.js and crt-inguest.itest.js.
     const { table } = build();
-    assert.deepEqual(table._ftol.data(), FTOL_CODE);
+    assert.deepEqual(table._ftol.data(), COMPILED._ftol.code);
     assert.equal(table._ftol2, table._ftol);
     assert.equal(table._ftol2_sse, table._ftol);
-    assert.equal('handler' in table._ftol, false, 'no crossing into the host');
-    assert.deepEqual([...FTOL_CODE.subarray(0, 4)], [0xdd, 0x4c, 0x24, 0xf8],
-        'fisttp qword [esp-8]');
-    assert.equal(FTOL_CODE[FTOL_CODE.length - 1], 0xc3, 'and a ret');
+    assert.equal('handler' in table._ftol, false, 'no EDX to answer in: the x86 alone');
+});
+
+test('_ftol\'s handler, where EDX can be set, pops ST0 and answers both halves', ()=>{
+    const fpu = fakeFpu();
+    /** @type {Record<string, number>} */
+    const registers = {};
+    const table = /** @type {Record<string, any>} */ (createMathFunctions({
+        writeMemory: fakeMemory().writeMemory, fpu,
+        setRegisters: values=>Object.assign(registers, values),
+    }));
+    fpu.load([-(2 ** 40) - 0.5]);
+    assert.equal(table._ftol.handler([]) >>> 0, 0);
+    assert.equal(registers.edx >>> 0, 0xffffff00);
+    assert.equal(fpu.stack.length, 0, 'the argument popped');
 });
 
 test('ldexp scales by a power of two given as a plain integer slot', ()=>{

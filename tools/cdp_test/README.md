@@ -223,16 +223,33 @@ Reading it:
 - An unresolved import is a real answer, not noise: a program that cannot bind
   one may take a different path silently.
 
-## `../host-call-bench.mjs` -- what a call into the host costs
+## `../host-call-bench.mjs` -- what a call into an import costs
 
-`node tools/host-call-bench.mjs [N] [--rounds R] [--profile]` runs, in node and under cork, a
-program that calls `KERNEL32!lstrlenA` N times (1 000 000 by default) against the same loop
-without the call, and prints the difference over N: one call out of translated code into a
-host handler and back. The bridge's own count of host calls is printed beside it, because
-some imports never cross (`GetLastError` and `GetTickCount` run in the guest's kernel32), and
-a count of one means the loop timed nothing. `--profile` runs the calling loop once under the
-V8 profiler and prints the functions a crossing spends its time in -- the dispatch, the reads
-of guest memory, the bookkeeping -- which is what a change to the crossing is judged by.
+`node tools/host-call-bench.mjs [N] [--rounds R] [--call SPEC]... [--engine cork|emulator]
+[--root DIR] [--baseline DIR] [--json]` runs, in node, a program that calls an import N times
+(1 000 000 by default) against the same loop with the call's pushes and pops but no call, and
+prints the difference over N: for a host handler one call out of translated code into the host
+and back, for an import that is code in the guest's own library that code. A SPEC is
+`DLL!name(arg,...)[:st0][@cdecl|@stdcall]`, each argument `s:text` (a pointer to the string,
+`s:"a,b"` with a comma), `b:N` (a pointer to N zeroed bytes), `i:N` (a dword), `d:X` (a double,
+two slots), `x:X` (a double on the x87 stack, for `_ftol`) or `c:` (a pointer to a cdecl
+comparator of two signed dwords in the program's own code, for `qsort` and `bsearch`); `:st0`
+pops a double result; the
+convention is cdecl for the C runtimes and stdcall otherwise unless one is named. Several
+`--call`s are timed in one run; each is timed in every round, in turn with its loop, and printed
+as the median over the rounds with the spread and the bridge's count of host calls -- some
+imports never cross (`GetLastError` runs in the guest's kernel32, `strncmp` in its msvcrt), and a
+count of one (the program's `ExitProcess`) means the call never reached the host. The default call
+is `KERNEL32.dll!lstrlenA(s:a)`.
+
+`--root DIR` times another checkout's engine; `--baseline DIR` times another checkout round for
+round with this one and prints the two side by side with their ratio -- a host handler against
+the same function as code in the guest, with no switch in the engine for it (a checkout of the
+commit before is `git worktree add --detach ../base <commit>`). `--json` prints the rounds for
+`--compare BEFORE.json AFTER.json`. `--profile` runs the first call's loop once under the V8
+profiler and prints the functions a crossing spends its time in -- the dispatch, the reads of
+guest memory, the bookkeeping -- which is what a change to the crossing is judged by. Pin it to
+one core (`taskset -c N`) on a quiet machine: the spread printed is how far to trust a median.
 
 ## Two rules the numbers depend on
 

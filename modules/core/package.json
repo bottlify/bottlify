@@ -55,6 +55,7 @@
     "build:v86": "node scripts/build-v86.mjs",
     "build:video-decoder": "node scripts/build-video-decoder.mjs",
     "build:zstd": "node scripts/build-zstd.mjs",
+    "build:guest-code": "node scripts/build-guest-code.mjs",
     "fetch:v86": "node scripts/fetch-v86.mjs",
     "fetch:video-decoder": "node scripts/fetch-video-decoder.mjs",
     "fetch:zstd": "node scripts/fetch-zstd.mjs",

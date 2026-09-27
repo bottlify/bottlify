@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { copyFile, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildGuestCode } from './build-guest-code.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const REPO = resolve(ROOT, '..', '..');
@@ -152,6 +153,14 @@ async function copyVendor(){
 }
 
 await mkdir(DIST, { recursive: true });
+// The runtime functions written as @guestCode are compiled to x86 again before
+// anything is bundled: the committed modules are what the source tree runs,
+// and the bundle carries what their source says.
+const rewritten = await buildGuestCode();
+if (rewritten.length > 0)
+{
+    console.log(`guest code: wrote ${rewritten.join(', ')}`);
+}
 // A production bundle leaves its diagnostic instruments out of itself: every
 // guard reads `import.meta.BOTTLIFY_DIAGNOSTICS !== false`, which this folds to
 // `false`, and the minifier drops what it guards -- the clock reads, the
