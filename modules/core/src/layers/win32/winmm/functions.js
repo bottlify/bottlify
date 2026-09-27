@@ -1011,6 +1011,9 @@ export function createWinmmFunctions(host){
          *
          * The guest's own clock. A frame loop divides by the difference between
          * two of these, so it must be the clock that advances with the guest.
+         * Where kernel32 keeps its clock block the export is GetTickCount's
+         * routine in the guest instead (`win32/module.js`); this answers for a
+         * build without one, and is the reference that routine keeps to.
          */
         timeGetTime: {
             argBytes: 0,

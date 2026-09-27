@@ -1708,6 +1708,20 @@ export function createWin32Module(){
                 SHGetFolderPathW: libraries['SHELL32.dll'].SHGetFolderPathW,
             };
 
+            // timeGetTime answers the milliseconds GetTickCount answers, off the
+            // same clock and with the same wrap -- timeBeginPeriod changes nothing
+            // here -- so where GetTickCount is the guest's own read of the clock
+            // block, timeGetTime is the same routine: a frame loop reads it tens of
+            // times a frame, each a crossing into the host for one dword. Its
+            // handler stays for a build with no block to read.
+            const ticks = libraries['KERNEL32.dll'].GetTickCount;
+            if (ticks?.guest)
+            {
+                libraries['WINMM.dll'].timeGetTime = {
+                    ...libraries['WINMM.dll'].timeGetTime, guest: ticks.guest,
+                };
+            }
+
             // Added after the rest because it is built from them: nearly everything
             // ntdll exports is a second name for a function another library already
             // publishes, and it has to be the same entry rather than a second

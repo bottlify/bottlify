@@ -357,9 +357,10 @@ export function queryPerformanceFrequencyCode(at, trap){
 }
 
 /**
- * GetTickCount as guest code -- and timeGetTime, which answers the same
- * milliseconds. Neither takes an argument and neither can fail, so there is
- * no case left for the host and no trap to leave for.
+ * GetTickCount as guest code -- and WINMM's timeGetTime, bound to the same
+ * routine (`win32/module.js`), which answers the same milliseconds. Neither
+ * takes an argument and neither can fail, so there is no case left for the
+ * host and no trap to leave for.
  *
  * @param {number} block
  */

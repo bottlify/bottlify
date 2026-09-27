@@ -101,6 +101,7 @@ import { isParkedCall } from './parking.js';
  *     is here and the stack arguments above it.
  * @property {number} restingStack Where the stack will be once the stub returns.
  * @property {number} hostReturn
+ * @property {any} thread           Whose call this is: parking stamps it as the call begins.
  */
 
 /**
@@ -122,6 +123,11 @@ const CALL_RING = 4096;
  */
 const DETAIL_RING = 4096;
 
+/** Indices into the cpu's register file, in the encoding's order. */
+const EAX = 0;
+const ECX = 1;
+const ESP = 4;
+
 /** How far a pointer argument is read for the text it may point at. */
 const PEEK_LIMIT = 96;
 
@@ -139,6 +145,47 @@ const hookClock = import.meta.BOTTLIFY_DIAGNOSTICS !== false && typeof performan
     ? ()=>performance.now() : Date.now;
 
 /**
+ * @typedef {Object} CallRecord
+ * @property {string} name
+ * @property {number} from
+ * @property {number[]} args
+ * @property {(string | null)[] | null} strings
+ * @property {number} error
+ * @property {number} answer   What the handler returned, when it returned a number.
+ * @property {string} kind     How the call ended: 'answered', 'parked', 'waiting',
+ *     'forwarded' or 'threw'.
+ * @property {string} result   The answer as a reader wants it, made when read.
+ */
+
+/**
+ * @param {CallRecord} record
+ * @returns {string}
+ */
+const describe = record=>record.kind === 'answered'
+    ? `0x${(record.answer >>> 0).toString(16)}`
+    : record.kind;
+
+/**
+ * A record's `result`, made from its answer when read.
+ *
+ * One getter for every dispatcher in the realm, not one per instance. The
+ * getter is part of a record's hidden class, so a getter of each instance's
+ * own gave the records of a second machine in a process classes of their
+ * own; the crossing's code, compiled once for the whole realm, then met
+ * records it had never seen and wrote each of their fields through V8's
+ * generic property path: the largest single part of a second machine's
+ * crossing costing several times its first's.
+ */
+const RESULT = {
+    /** @this {CallRecord} */
+    get(){
+        return describe(this);
+    },
+    enumerable: true,
+    configurable: true,
+};
+
+/**
  * @param {Object} deps
  * @param {any} deps.cpu       For the registers a call frame is read from.
  * @param {any} deps.memory    For the stack itself, so a wild ESP is caught here.
@@ -148,6 +195,11 @@ const hookClock = import.meta.BOTTLIFY_DIAGNOSTICS !== false && typeof performan
  * @param {() => number} [deps.lastError]
  *        The running thread's last error, for the trace. Injected because it
  *        belongs to a layer above this one.
+ * @param {number} [deps.lastErrorOffset]
+ *        Where a thread's last error lives in its thread block (the kernel's
+ *        `tebAddress`), handed down as a number by the layer that owns the
+ *        block's layout: read there after the call rather than through
+ *        `lastError`, which then answers only for a thread with no block.
  * @param {boolean} [deps.traceStrings]
  * @param {boolean} [deps.callPhases]  Time each call as a phase of its own.
  * @param {{ begin: (name: string, kind?: string) => void,
@@ -175,6 +227,27 @@ export function createDispatcher(deps){
     const { cpu, memory, parking, suspend } = deps;
 
     /**
+     * The cpu's general registers as a view, when it lends one (`cpu.registerFile`):
+     * ESP read and EAX written in place rather than through `readReg32` and
+     * `writeReg32`, each a walk through the cpu layer's api, its host and a
+     * search of the register names. Taken again when it reads empty -- an
+     * emulator that grows its memory detaches the buffer the view was on --
+     * and never asked for again once the cpu says it has none.
+     *
+     * @type {Int32Array | null}
+     */
+    let file = null;
+    let lends = typeof cpu?.registerFile === 'function';
+    const registers = ()=>{
+        if (lends && (file === null || file.length === 0))
+        {
+            file = cpu.registerFile() ?? null;
+            lends = file !== null;
+        }
+        return file;
+    };
+
+    /**
      * Reads a call's stack words one at a time up to the end of the region
      * they start in, and zeroes the rest. Only reached when the span runs past
      * that region; a read that fails for any other reason fails as it did.
@@ -196,6 +269,22 @@ export function createDispatcher(deps){
         }
     };
 
+    /**
+     * Where a call's frame words land before they are handed out: grown to
+     * the longest frame seen and kept.
+     *
+     * @type {number[]}
+     */
+    let spanWords = new Array(8).fill(0);
+    /** @param {number} count */
+    const frameWords = count=>{
+        if (spanWords.length < count)
+        {
+            spanWords = new Array(count).fill(0);
+        }
+        return spanWords;
+    };
+
     const journal = deps.journal ?? null;
     const HOOK_AREA = 'call.hook';
     /**
@@ -212,6 +301,10 @@ export function createDispatcher(deps){
         ? /** @type {(slot: number) => number} */ (memory.charging)
         : null;
     const lastError = deps.lastError ?? (()=>0);
+    // The dword itself rather than `lastError`, which walked the kernel for
+    // the running thread and the memory layer for its block on every call --
+    // measured at a fifth of a call to a handler that does nothing.
+    const errorOffset = deps.lastErrorOffset ?? -1;
     const traceStrings = deps.traceStrings ?? false;
     // A ring holds the end of a run, and the end of a run is rarely where the
     // decision was made: a program that gives up after opening its archives
@@ -240,10 +333,22 @@ export function createDispatcher(deps){
     // sample. Every eighth call of a program that draws in a fixed sequence of
     // calls is the same few calls of that sequence every time, and the estimate
     // was those calls' cost eight times over: more host time than the frame had,
-    // and a guest phase whose own time came out below nothing. Which call is
-    // timed is drawn from a xorshift instead, one in eight on average.
-    const TRAP_SAMPLE = 8;
+    // and a guest phase whose own time came out below nothing. So the calls
+    // between two timed ones are drawn from a xorshift, TRAP_SAMPLE on average.
+    // One in thirty-two rather than one in eight: the timed call's two clock
+    // readings and phase were most of what the sampling cost every call, and a
+    // title's thirty thousand calls a second still time about a thousand.
+    const TRAP_SAMPLE = 32;
+    const TRAP_WEIGHT = Object.freeze({ weight: TRAP_SAMPLE });
     let sampler = 0x9e3779b9;
+    /** Two draws of 0..31 and one: 32 calls on average, never none. */
+    const sampleInterval = ()=>{
+        sampler ^= sampler << 13;
+        sampler ^= sampler >>> 17;
+        sampler ^= sampler << 5;
+        return (sampler & 31) + (sampler >>> 5 & 31) + 1;
+    };
+    let untilSample = sampleInterval();
     // Indexed by trap id: the cpu hands them out in sequence from zero.
     /** @type {(Entry | undefined)[]} */
     const functions = [];
@@ -252,9 +357,16 @@ export function createDispatcher(deps){
      * Frames by depth of nesting, reused: a guest callback can trap into
      * another host call, so there is one per level rather than one.
      *
-     * @type {(CallFrame | undefined)[]}
+     * Made holding what it will hold, as the rings below are, so every
+     * dispatcher's arrays have the one hidden class from the start: an
+     * array's class moves with the kind of element it holds, and the
+     * crossing's code, shared by every machine in a process, would otherwise
+     * find a new machine's arrays in the class the first machine's left
+     * behind.
+     *
+     * @type {(CallFrame | null | undefined)[]}
      */
-    const frames = [];
+    const frames = [null];
     let depth = 0;
     /**
      * The names of recent calls, as a ring.
@@ -269,41 +381,11 @@ export function createDispatcher(deps){
      *
      * @type {string[]}
      */
-    const called = new Array(CALL_RING);
+    const called = new Array(CALL_RING).fill('');
     let ringAt = 0;
-    /**
-     * @typedef {Object} CallRecord
-     * @property {string} name
-     * @property {number} from
-     * @property {number[]} args
-     * @property {(string | null)[] | null} strings
-     * @property {number} error
-     * @property {number} answer   What the handler returned, when it returned a number.
-     * @property {string} kind     How the call ended: 'answered', 'parked', 'waiting',
-     *     'forwarded' or 'threw'.
-     * @property {string} result   The answer as a reader wants it, made when read.
-     */
-
     /** @type {CallRecord[]} */
-    const detailed = new Array(DETAIL_RING);
+    const detailed = new Array(DETAIL_RING).fill(null);
     let detailAt = 0;
-
-    /**
-     * @param {CallRecord} record
-     * @returns {string}
-     */
-    const describe = record=>record.kind === 'answered'
-        ? `0x${(record.answer >>> 0).toString(16)}`
-        : record.kind;
-    /** A record's `result`, made from its answer when read. */
-    const RESULT = {
-        /** @this {CallRecord} */
-        get(){
-            return describe(this);
-        },
-        enumerable: true,
-        configurable: true,
-    };
 
     /**
      * A ring record. The text of the answer is the one thing about a call that
@@ -449,6 +531,501 @@ export function createDispatcher(deps){
     /** @type {Map<string, number>} */
     const hooksByName = new Map();
 
+    /**
+     * A site hook's eight registers, off the stub's own `pushad` before it
+     * trapped: pushed lowest to highest is edi, esi, ebp, the original esp,
+     * ebx, edx, ecx, eax -- so eax is the last one pushed, at `pushed + 28`.
+     * Read into `args` in declaration order rather than straight into
+     * `entry.registers` so a fallthrough can restore exactly what the site's
+     * own call site held even if the handler edited the mutable object it
+     * was given.
+     *
+     * @param {Entry} entry @param {number} pushed @param {number} esp
+     * @returns {number} the dword at the site's ESP
+     */
+    const readSite = (entry, pushed, esp)=>{
+        const args = entry.args;
+        const block = frameWords(8);
+        memory.readU32sInto(pushed, 8, block, 0);
+        args[0] = block[7]; // eax
+        args[1] = block[6]; // ecx
+        args[2] = block[5]; // edx
+        args[3] = block[4]; // ebx
+        args[4] = esp | 0;  // esp: the site's own
+        args[5] = block[2]; // ebp
+        args[6] = block[1]; // esi
+        args[7] = block[0]; // edi
+        // Non-null: `entry.registers` is only null for a non-site entry.
+        const r = /** @type {NonNullable<Entry['registers']>} */ (entry.registers);
+        r.eax = args[0];
+        r.ecx = args[1];
+        r.edx = args[2];
+        r.ebx = args[3];
+        r.esp = args[4];
+        r.ebp = args[5];
+        r.esi = args[6];
+        r.edi = args[7];
+        return memory.readU32(esp);
+    };
+
+    /**
+     * A call's arguments into its entry's own array, which the handler reads
+     * and this layer writes over on the next call -- a handler that answers
+     * later than it returns keeps the array (see `settleLate`).
+     *
+     * @param {Entry} entry @param {Int32Array | null} regs
+     * @param {number} pushed @param {number} esp
+     * @returns {number} the return address at ESP
+     */
+    const readCall = (entry, regs, pushed, esp)=>{
+        const args = entry.args;
+        let at = 0;
+        if (entry.registerArgs >= 1)
+        {
+            // Live: nothing in the trap sequence touches ECX.
+            args[at++] = regs === null ? cpu.readReg32('ecx') | 0 : regs[ECX];
+        }
+        if (entry.registerArgs >= 2)
+        {
+            // Fastcall's EDX is not live by this point: `mov dx, port`
+            // spends the low half of the very register the argument is
+            // in, so the stub pushed it first and this reads it from
+            // there -- the one word between `pushed` and the caller's
+            // own frame at `esp`.
+            args[at++] = memory.readU32(pushed) | 0;
+        }
+        // The return address and the stack arguments above it in one read of
+        // the span: the memory layer validates it once and hands it to the
+        // machine in one call, where each word, and the return address on its
+        // own, was a walk down through the memory and cpu layers of its own.
+        const count = entry.stackWords + 1;
+        const words = frameWords(count);
+        try
+        {
+            memory.readU32sInto(esp, count, words, 0);
+        }
+        catch {
+            if (count > 1)
+            {
+                try
+                {
+                    memory.readU32sInto(esp + 4, count - 1, args, at);
+                }
+                catch (e){
+                    // A variadic entry reads a fixed number of slots, and a
+                    // call made near the top of its thread's stack has fewer
+                    // words above it than that: past the stack is nothing the
+                    // caller passed, so it reads as zero rather than stopping
+                    // the machine.
+                    readWithinStack(esp + 4, count - 1, args, at, e);
+                }
+            }
+            // The return address alone fails as the stack does.
+            return memory.readU32(esp);
+        }
+        for (let word = 1; word < count; word++)
+        {
+            args[at++] = words[word];
+        }
+        return words[0] >>> 0;
+    };
+
+    /**
+     * Whether a hook's crossing is traced, and its entry line when it is:
+     * written before the handler runs, so a handler that never comes back
+     * still leaves the frame it was handed on the record.
+     *
+     * @param {Entry} entry @param {number} esp @param {number} hostReturn
+     * @param {number[]} args
+     */
+    const traceHookEntry = (entry, esp, hostReturn, args)=>{
+        if (journal === null || !journal.enabled(HOOK_AREA, journal.Level.TRACE))
+        {
+            return false;
+        }
+        journal.write(journal.Level.TRACE, HOOK_AREA,
+            '{0} entry esp={1} ret={2} args={3}',
+            entry.name, `0x${esp.toString(16)}`,
+            `0x${(hostReturn >>> 0).toString(16)}`,
+            args.map(value=>`0x${(value >>> 0).toString(16)}`).join(','));
+        return true;
+    };
+
+    /**
+     * Where a hook sent the call, for a traced crossing.
+     *
+     * @param {Entry} entry @param {string} kind
+     */
+    const traceHookExit = (entry, kind)=>{
+        /** @type {NonNullable<typeof journal>} */ (journal).write(journal?.Level.TRACE ?? 0,
+            HOOK_AREA, '{0} {1} eip={2} esp={3}',
+            entry.name, kind,
+            `0x${(cpu.readReg32('eip') >>> 0).toString(16)}`,
+            `0x${(cpu.readReg32('esp') >>> 0).toString(16)}`);
+    };
+
+    /**
+     * A slot or site hook's decision, carried out: where EIP and the
+     * registers go now that the handler has said whether it computed the
+     * call itself.
+     *
+     * @param {Entry} entry @param {CallRecord} record @param {number[]} args
+     * @param {number} pushed @param {number} esp
+     */
+    const finishHook = (entry, record, args, pushed, esp)=>{
+        if (entry.site)
+        {
+            if (record.kind === 'answered')
+            {
+                // The kernel may have edited any of the eight; every one
+                // is written back, ESP last of the registers (it may have
+                // moved) and EIP last of all. EFLAGS are not restored --
+                // a `pushad`/`popad` pair does not touch them either --
+                // so the resume point must not depend on flags a branch
+                // between the site and it would have set.
+                const r = /** @type {NonNullable<Entry['registers']>} */ (entry.registers);
+                cpu.writeReg32('eax', r.eax >>> 0);
+                cpu.writeReg32('ecx', r.ecx >>> 0);
+                cpu.writeReg32('edx', r.edx >>> 0);
+                cpu.writeReg32('ebx', r.ebx >>> 0);
+                cpu.writeReg32('ebp', r.ebp >>> 0);
+                cpu.writeReg32('esi', r.esi >>> 0);
+                cpu.writeReg32('edi', r.edi >>> 0);
+                cpu.writeReg32('esp', (r.esp + entry.stackAdjust) >>> 0);
+                cpu.writeReg32('eip', entry.resume);
+            }
+            else
+            {
+                // Not handled: every register restored to exactly what
+                // the site's own call site held -- `args`, never
+                // `entry.registers`, so a handler that fell through after
+                // editing the object it was given leaves nothing behind
+                // -- and EIP goes to the trampoline: the displaced
+                // instructions, then a jump back into the function right
+                // after the site, as though it had never been patched.
+                cpu.writeReg32('eax', args[0] >>> 0);
+                cpu.writeReg32('ecx', args[1] >>> 0);
+                cpu.writeReg32('edx', args[2] >>> 0);
+                cpu.writeReg32('ebx', args[3] >>> 0);
+                cpu.writeReg32('ebp', args[5] >>> 0);
+                cpu.writeReg32('esi', args[6] >>> 0);
+                cpu.writeReg32('edi', args[7] >>> 0);
+                cpu.writeReg32('esp', esp);
+                cpu.writeReg32('eip', entry.trampoline);
+            }
+            return;
+        }
+        // Whichever way this goes, EDX reads exactly as the guest's
+        // own call set it: the trap sequence's `mov dx, port` spent
+        // half of it getting here, and the pushed word is the only
+        // place that still holds it. ECX was never touched.
+        cpu.writeReg32('edx', memory.readU32(pushed));
+        if (record.kind === 'answered')
+        {
+            // The kernel computed the call itself: return to the
+            // caller as the guest function's own `ret cleanup` would,
+            // since no such instruction is baked into this stub for
+            // the CPU to run on its own.
+            const returnTo = memory.readU32(esp);
+            cpu.writeReg32('eax', 0);
+            cpu.writeReg32('esp', esp + 4 + entry.cleanup);
+            cpu.writeReg32('eip', returnTo);
+        }
+        else
+        {
+            // Not handled: drop the saved block and hand the call to
+            // the guest's own function exactly as its caller made it
+            // -- the return address and stack arguments untouched,
+            // now that ECX/EDX are restored.
+            cpu.writeReg32('esp', esp);
+            cpu.writeReg32('eip', entry.target);
+        }
+    };
+
+    /**
+     * A call that did not answer by returning: parked, or waiting on a
+     * promise.
+     *
+     * @param {Entry} entry @param {number[]} args @param {CallRecord} record
+     * @param {any} result @param {CallFrame} frame
+     */
+    const settleLate = (entry, args, record, result, frame)=>{
+        // The handler still holds these and will read them after whatever it
+        // is waiting for: they are its now, and the next call gets fresh
+        // ones. Paid only by a call that already costs a wait, never by the
+        // prompt ones.
+        entry.args = new Array(args.length);
+        frames[depth] = undefined;
+        // A parked call's EAX belongs to whatever wakes the thread, and it
+        // carries the wait's own result. Writing a placeholder here would
+        // overwrite the answer before the guest ever sees it.
+        if (record.kind === 'parked')
+        {
+            return;
+        }
+        if (!suspend)
+        {
+            throw new Error(
+                `bridge: ${entry.name} answered asynchronously with nowhere to wait`);
+        }
+        // The trace says "waiting" and nothing after it, which for a read of
+        // a game's own archive is the whole question: whether it eventually
+        // delivered, and how much. Recorded when the answer arrives, as a
+        // line of its own -- the first line is already written and in order,
+        // and moving it would put the call somewhere it did not happen.
+        if (onCall !== null)
+        {
+            const asked = copyOf(record);
+            result.then((/** @type {number} */ value)=>{
+                asked.result = `0x${(value >>> 0).toString(16)} (was waiting)`;
+                onCall(asked);
+            }, ()=>{
+                // The failure itself is whoever suspended the call's to
+                // report; a rejection nobody listened to here would bring the
+                // host down before it could.
+                asked.kind = 'threw';
+                asked.result = 'threw (was waiting)';
+                onCall(asked);
+            });
+        }
+        suspend(result, frame);
+    };
+
+    /**
+     * The crossing itself: marshal, invoke, place the result.
+     *
+     * Everything a call of every kind needs is here, and every kind's own
+     * business -- a hook's trace and clock, a site's registers, a late
+     * answer -- is a function of its own reached only by that kind. This is
+     * the code every host call runs, and it runs as one compilation shared
+     * by every machine in the process: the less of it there is, the less a
+     * second machine pays for the first machine's having shaped it
+     * (`docs/core/bridge.md`).
+     *
+     * @param {number} id
+     */
+    const cross = id=>{
+        const entry = functions[id];
+        if (entry === undefined)
+        {
+            throw new Error(`bridge: trap ${id} has no implementation`);
+        }
+
+        const regs = registers();
+        const pushed = regs === null ? cpu.readReg32('esp') : regs[ESP] >>> 0;
+        const esp = pushed + entry.saved;
+        const args = entry.args;
+        const hostReturn = entry.site
+            ? readSite(entry, pushed, esp)
+            : readCall(entry, regs, pushed, esp);
+
+        calls++;
+        called[ringAt++ % CALL_RING] = entry.name;
+
+        // Everything the handler might need about where it was called from,
+        // read before it runs: a handler that calls the guest back writes
+        // into the stack, and by then some of this is no longer there to
+        // read. `freeStack` is what is safe to write below *now*, while the
+        // return address at ESP is still live; `restingStack` is where the
+        // stack will be once the stub has returned. `thread` is in the
+        // literal, for the class reason the arrays above give: parking
+        // stamps it on every frame it is handed.
+        const frame = frames[depth] ??= {
+            name: '', freeStack: 0, callerStack: 0, restingStack: 0, hostReturn: 0,
+            thread: null,
+        };
+        frame.name = entry.name;
+        frame.freeStack = pushed;
+        frame.callerStack = esp;
+        frame.restingStack = esp + 4 + entry.cleanup;
+        frame.hostReturn = hostReturn;
+
+        // The ring's records are made once and written over: a record and
+        // an argument array allocated per call, thirty thousand times a
+        // second, was the garbage collector's whole share of a frame.
+        // Whoever reads the ring gets a copy; a sink gets the record for
+        // the length of its call and nothing longer.
+        const record = detailed[detailAt++ % DETAIL_RING] ??= makeRecord();
+        record.name = entry.name;
+        // Which instruction made this call. Read from the frame that was
+        // captured above rather than the stack, because a handler that
+        // calls the guest back has overwritten the stack by the time
+        // anybody reads this.
+        record.from = hostReturn;
+        // Copied, because a handler that writes through a pointer can
+        // change what the arguments describe before anyone reads them.
+        const kept = Math.min(args.length, 6);
+        // A fresh array only when the length differs: setting `length` is
+        // a trip into the runtime every time, a fifth of the crossing.
+        if (record.args.length !== kept)
+        {
+            record.args = new Array(kept);
+        }
+        for (let i = 0; i < kept; i++)
+        {
+            record.args[i] = args[i];
+        }
+        // Read now rather than later when asked for: a string a program
+        // assembled on its own stack has been overwritten several
+        // frames deep by the time anybody reads the trace, and what
+        // comes back then belongs to whatever ran next.
+        if (traceStrings)
+        {
+            const strings = record.strings ??= [];
+            strings.length = kept;
+            for (let i = 0; i < kept; i++)
+            {
+                strings[i] = peekString(args[i]);
+            }
+        }
+        else
+        {
+            record.strings = null;
+        }
+        record.kind = 'threw';
+        record.error = 0;
+
+        const hookTraced = entry.hook && traceHookEntry(entry, esp, hostReturn, args);
+
+        parking.beginCall(frame);
+        depth++;
+        const charged = charging !== null && entry.writer >= 0
+            ? charging(entry.writer) : -1;
+        let result;
+        let late = false;
+        // A hook's `ms` times only the handler call itself, every time --
+        // unlike the sampled `trap` phase this is the number a kernel's own
+        // cost is read from, so it is not sampled.
+        const hookStart = import.meta.BOTTLIFY_DIAGNOSTICS !== false && entry.hookStats !== null
+            ? hookClock() : 0;
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && phased)
+        {
+            profiler.begin(entry.name, 'host');
+        }
+        try
+        {
+            // A site kernel edits registers, not stack arguments: it sees
+            // the mutable object built above, not `args` (which stays the
+            // pristine reading a fallthrough restores from).
+            result = entry.handler(entry.site ? entry.registers : args, frame);
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && entry.hookStats !== null)
+            {
+                entry.hookStats.ms += hookClock() - hookStart;
+            }
+            // A promise is neither a value nor the parked token: it is a
+            // call that has not finished, and the thread is about to be
+            // parked on it. Rendering it as a number turns every such call
+            // into a plain zero -- a failure under most conventions -- and
+            // a reader then chases a failure that did not happen.
+            if (entry.forwards)
+            {
+                record.kind = 'forwarded';
+            }
+            else if (entry.hook)
+            {
+                // A hook's handler answers synchronously with whether it
+                // computed the call itself; there is no guest to park or
+                // wait for on this side of the decision.
+                record.kind = result === true ? 'answered' : 'fellThrough';
+                record.answer = record.kind === 'answered' ? 1 : 0;
+            }
+            else if (isParkedCall(result))
+            {
+                record.kind = 'parked';
+                late = true;
+            }
+            else if (typeof (/** @type {any} */ (result))?.then === 'function')
+            {
+                record.kind = 'waiting';
+                late = true;
+            }
+            else
+            {
+                record.kind = 'answered';
+                record.answer = Number(result);
+            }
+        }
+        finally
+        {
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && phased)
+            {
+                profiler.end(entry.name);
+            }
+            if (charging !== null && charged >= 0)
+            {
+                charging(charged);
+            }
+            depth--;
+            parking.endCall();
+            // What this call left in the thread's last error. A program
+            // reports a code long after whatever produced it returned, and
+            // this is the only record that ties the two together. Not read
+            // for a function that cannot have set it.
+            if (entry.readsError)
+            {
+                const block = errorOffset < 0 ? 0 : frame.thread?.tebAddress ?? 0;
+                record.error = block === 0 ? lastError() : cpu.readU32(block + errorOffset);
+            }
+            if (onCall !== null)
+            {
+                // As recorded, strings included only when tracing asked
+                // for them. Peeking every argument for a sink that does
+                // not read the strings cost more than the whole dispatch:
+                // measured at 1.6 of 2.3 microseconds per call.
+                onCall(record);
+            }
+        }
+
+        if (entry.hookStats !== null)
+        {
+            entry.hookStats.calls++;
+            if (record.kind === 'answered')
+            {
+                entry.hookStats.handled++;
+            }
+            else
+            {
+                entry.hookStats.fellThrough++;
+            }
+        }
+        if (late)
+        {
+            settleLate(entry, args, record, result, frame);
+            return;
+        }
+        if (entry.hook)
+        {
+            finishHook(entry, record, args, pushed, esp);
+            if (hookTraced)
+            {
+                traceHookExit(entry, record.kind);
+            }
+            return;
+        }
+        if (entry.saved !== 0)
+        {
+            // The stub saved with `pushad`, EAX first and EDI last; the
+            // trap spent EAX and DX and nothing else. Put those two back
+            // and drop the block, so the function it forwards into sees
+            // the registers exactly as its caller set them.
+            cpu.writeReg32('eax', memory.readU32(pushed + 28));
+            cpu.writeReg32('edx', memory.readU32(pushed + 20));
+            cpu.writeReg32('esp', esp);
+            return;
+        }
+        // Asked again rather than reusing `regs`: the handler may have
+        // grown the emulator's memory under the view.
+        const answerTo = registers();
+        if (answerTo === null)
+        {
+            cpu.writeReg32('eax', result >>> 0);
+        }
+        else
+        {
+            answerTo[EAX] = /** @type {number} */ (result) | 0;
+        }
+    };
+
     return {
         /**
          * @param {number} id
@@ -546,27 +1123,21 @@ export function createDispatcher(deps){
             // until this existed there was no way to tell a machine slowed by
             // its own emulation from one slowed by leaving it so often.
             // A production bundle times no crossing at all.
-            if (import.meta.BOTTLIFY_DIAGNOSTICS === false || profiler === null)
+            if (import.meta.BOTTLIFY_DIAGNOSTICS === false || profiler === null
+                || --untilSample > 0)
             {
-                this.dispatchNow(id);
+                cross(id);
                 return;
             }
-            sampler ^= sampler << 13;
-            sampler ^= sampler >>> 17;
-            sampler ^= sampler << 5;
-            if ((sampler & (TRAP_SAMPLE - 1)) !== 0)
-            {
-                this.dispatchNow(id);
-                return;
-            }
+            untilSample = sampleInterval();
             profiler.begin('trap', 'host');
             try
             {
-                this.dispatchNow(id);
+                cross(id);
             }
             finally
             {
-                profiler.end('trap', { weight: TRAP_SAMPLE });
+                profiler.end('trap', TRAP_WEIGHT);
             }
         },
 
@@ -575,415 +1146,7 @@ export function createDispatcher(deps){
          *
          * @param {number} id
          */
-        dispatchNow(id){
-            const entry = functions[id];
-            if (entry === undefined)
-            {
-                throw new Error(`bridge: trap ${id} has no implementation`);
-            }
-
-            const pushed = cpu.readReg32('esp');
-            const esp = pushed + entry.saved;
-            // Straight off the stack into the entry's own array, which the
-            // handler reads and this layer writes over on the next call. A
-            // handler that answers later than it returns -- a promise, a
-            // parked thread -- keeps the array: see below.
-            const args = entry.args;
-            if (entry.site)
-            {
-                // The stub's own `pushad` before it trapped: pushed lowest to
-                // highest is edi, esi, ebp, the original esp, ebx, edx, ecx,
-                // eax -- so eax is the last one pushed, at `pushed + 28`.
-                // Read into `args` in declaration order rather than straight
-                // into `entry.registers` so a fallthrough can restore exactly
-                // what the site's own call site held even if the handler
-                // edited the mutable object it was given.
-                args[0] = memory.readU32(pushed + 28) | 0; // eax
-                args[1] = memory.readU32(pushed + 24) | 0; // ecx
-                args[2] = memory.readU32(pushed + 20) | 0; // edx
-                args[3] = memory.readU32(pushed + 16) | 0; // ebx
-                args[4] = esp | 0;                          // esp: the site's own
-                args[5] = memory.readU32(pushed + 8) | 0;  // ebp
-                args[6] = memory.readU32(pushed + 4) | 0;  // esi
-                args[7] = memory.readU32(pushed + 0) | 0;  // edi
-                // Non-null: `entry.registers` is only null for a non-site
-                // entry, and this branch runs only when `entry.site` is true.
-                const r = /** @type {NonNullable<Entry['registers']>} */ (entry.registers);
-                r.eax = args[0];
-                r.ecx = args[1];
-                r.edx = args[2];
-                r.ebx = args[3];
-                r.esp = args[4];
-                r.ebp = args[5];
-                r.esi = args[6];
-                r.edi = args[7];
-            }
-            else
-            {
-                let at = 0;
-                if (entry.registerArgs >= 1)
-                {
-                    // Live: nothing in the trap sequence touches ECX.
-                    args[at++] = cpu.readReg32('ecx') | 0;
-                }
-                if (entry.registerArgs >= 2)
-                {
-                    // Fastcall's EDX is not live by this point: `mov dx, port`
-                    // spends the low half of the very register the argument is
-                    // in, so the stub pushed it first and this reads it from
-                    // there -- the one word between `pushed` and the caller's
-                    // own frame at `esp`.
-                    args[at++] = memory.readU32(pushed) | 0;
-                }
-                if (entry.stackWords > 0)
-                {
-                    // One call for the whole span rather than a read per word:
-                    // each of those cost its own region check and cache lookup,
-                    // and a call takes several words at once. The memory layer
-                    // validates the span once and falls back to per-word reads
-                    // itself when a stack straddles two adjacent regions (legal
-                    // layout, if rare).
-                    try
-                    {
-                        memory.readU32sInto(esp + 4, entry.stackWords, args, at);
-                    }
-                    catch (e){
-                        // A variadic entry reads a fixed number of slots, and a
-                        // call made near the top of its thread's stack has
-                        // fewer words above it than that: past the stack is
-                        // nothing the caller passed, so it reads as zero rather
-                        // than stopping the machine.
-                        readWithinStack(esp + 4, entry.stackWords, args, at, e);
-                    }
-                }
-            }
-
-            calls++;
-            called[ringAt++ % CALL_RING] = entry.name;
-
-            // Everything the handler might need about where it was called from,
-            // read before it runs: a handler that calls the guest back writes
-            // into the stack, and by then some of this is no longer there to
-            // read. `freeStack` is what is safe to write below *now*, while the
-            // return address at ESP is still live; `restingStack` is where the
-            // stack will be once the stub has returned.
-            const frame = frames[depth] ??= {
-                name: '', freeStack: 0, callerStack: 0, restingStack: 0, hostReturn: 0,
-            };
-            frame.name = entry.name;
-            frame.freeStack = pushed;
-            frame.callerStack = esp;
-            frame.restingStack = esp + 4 + entry.cleanup;
-            frame.hostReturn = memory.readU32(esp);
-
-            // The ring's records are made once and written over: a record and
-            // an argument array allocated per call, thirty thousand times a
-            // second, was the garbage collector's whole share of a frame.
-            // Whoever reads the ring gets a copy; a sink gets the record for
-            // the length of its call and nothing longer.
-            const slot = detailAt++ % DETAIL_RING;
-            const record = detailed[slot] ??= makeRecord();
-            record.name = entry.name;
-            // Which instruction made this call. Read from the frame that was
-            // captured above rather than the stack, because a handler that
-            // calls the guest back has overwritten the stack by the time
-            // anybody reads this.
-            record.from = frame.hostReturn;
-            // Copied, because a handler that writes through a pointer can
-            // change what the arguments describe before anyone reads them.
-            const kept = Math.min(args.length, 6);
-            // A fresh array only when the length differs: setting `length` is
-            // a trip into the runtime every time, a fifth of the crossing.
-            if (record.args.length !== kept)
-            {
-                record.args = new Array(kept);
-            }
-            for (let i = 0; i < kept; i++)
-            {
-                record.args[i] = args[i];
-            }
-            // Read now rather than later when asked for: a string a program
-            // assembled on its own stack has been overwritten several
-            // frames deep by the time anybody reads the trace, and what
-            // comes back then belongs to whatever ran next.
-            if (traceStrings)
-            {
-                const strings = record.strings ??= [];
-                strings.length = kept;
-                for (let i = 0; i < kept; i++)
-                {
-                    strings[i] = peekString(args[i]);
-                }
-            }
-            else
-            {
-                record.strings = null;
-            }
-            record.kind = 'threw';
-            record.error = 0;
-
-            // Written before the handler runs, so a handler that never comes
-            // back still leaves the frame it was handed on the record.
-            const hookTraced = entry.hook && journal !== null
-                && journal.enabled(HOOK_AREA, journal.Level.TRACE);
-            if (hookTraced)
-            {
-                journal.write(journal.Level.TRACE, HOOK_AREA,
-                    '{0} entry esp={1} ret={2} args={3}',
-                    entry.name, `0x${esp.toString(16)}`,
-                    `0x${(frame.hostReturn >>> 0).toString(16)}`,
-                    args.map(value=>`0x${(value >>> 0).toString(16)}`).join(','));
-            }
-
-            parking.beginCall(frame);
-            depth++;
-            const charged = charging !== null && entry.writer >= 0
-                ? charging(entry.writer) : -1;
-            let result;
-            let late = false;
-            // A hook's `ms` times only the handler call itself, every time --
-            // unlike the `trap` phase above (sampled one call in eight,
-            // weighted back up), this is the number a kernel's own cost is
-            // read from, so it is not sampled.
-            const hookStart = import.meta.BOTTLIFY_DIAGNOSTICS !== false && entry.hookStats !== null
-                ? hookClock() : 0;
-            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && phased)
-            {
-                profiler.begin(entry.name, 'host');
-            }
-            try
-            {
-                // A site kernel edits registers, not stack arguments: it sees
-                // the mutable object built above, not `args` (which stays the
-                // pristine reading a fallthrough restores from).
-                result = entry.handler(entry.site ? entry.registers : args, frame);
-                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && entry.hookStats !== null)
-                {
-                    entry.hookStats.ms += hookClock() - hookStart;
-                }
-                // A promise is neither a value nor the parked token: it is a
-                // call that has not finished, and the thread is about to be
-                // parked on it. Rendering it as a number turns every such call
-                // into a plain zero -- a failure under most conventions -- and
-                // a reader then chases a failure that did not happen.
-                if (entry.forwards)
-                {
-                    record.kind = 'forwarded';
-                }
-                else if (entry.hook)
-                {
-                    // A hook's handler answers synchronously with whether it
-                    // computed the call itself; there is no guest to park or
-                    // wait for on this side of the decision.
-                    record.kind = result === true ? 'answered' : 'fellThrough';
-                    record.answer = record.kind === 'answered' ? 1 : 0;
-                }
-                else if (isParkedCall(result))
-                {
-                    record.kind = 'parked';
-                    late = true;
-                }
-                else if (typeof (/** @type {any} */ (result))?.then === 'function')
-                {
-                    record.kind = 'waiting';
-                    late = true;
-                }
-                else
-                {
-                    record.kind = 'answered';
-                    record.answer = Number(result);
-                }
-            }
-            finally
-            {
-                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && phased)
-                {
-                    profiler.end(entry.name);
-                }
-                if (charging !== null && charged >= 0)
-                {
-                    charging(charged);
-                }
-                depth--;
-                parking.endCall();
-                // What this call left in the thread's last error. A program
-                // reports a code long after whatever produced it returned, and
-                // this is the only record that ties the two together. Not read
-                // for a function that cannot have set it.
-                if (entry.readsError)
-                {
-                    record.error = lastError();
-                }
-                if (onCall !== null)
-                {
-                    // As recorded, strings included only when tracing asked
-                    // for them. Peeking every argument for a sink that does
-                    // not read the strings cost more than the whole dispatch:
-                    // measured at 1.6 of 2.3 microseconds per call.
-                    onCall(record);
-                }
-            }
-
-            if (entry.hookStats !== null)
-            {
-                entry.hookStats.calls++;
-                if (record.kind === 'answered')
-                {
-                    entry.hookStats.handled++;
-                }
-                else
-                {
-                    entry.hookStats.fellThrough++;
-                }
-            }
-
-            if (late)
-            {
-                // The handler still holds these and will read them after
-                // whatever it is waiting for: they are its now, and the next
-                // call gets fresh ones. Paid only by a call that already costs
-                // a wait, never by the prompt ones.
-                entry.args = new Array(args.length);
-                frames[depth] = undefined;
-            }
-            // A parked call's EAX belongs to whatever wakes the thread, and it
-            // carries the wait's own result. Writing a placeholder here would
-            // overwrite the answer before the guest ever sees it.
-            if (record.kind === 'parked')
-            {
-                return;
-            }
-            if (record.kind === 'waiting')
-            {
-                if (!suspend)
-                {
-                    throw new Error(
-                        `bridge: ${entry.name} answered asynchronously with nowhere to wait`);
-                }
-                // The trace says "waiting" and nothing after it, which for a
-                // read of a game's own archive is the whole question: whether
-                // it eventually delivered, and how much. Recorded when the
-                // answer arrives, as a line of its own -- the first line is
-                // already written and in order, and moving it would put the
-                // call somewhere it did not happen.
-                if (onCall !== null)
-                {
-                    const asked = copyOf(record);
-                    result.then((/** @type {number} */ value)=>{
-                        asked.result = `0x${(value >>> 0).toString(16)} (was waiting)`;
-                        onCall(asked);
-                    }, ()=>{
-                        // The failure itself is whoever suspended the call's
-                        // to report; a rejection nobody listened to here would
-                        // bring the host down before it could.
-                        asked.kind = 'threw';
-                        asked.result = 'threw (was waiting)';
-                        onCall(asked);
-                    });
-                }
-                suspend(result, frame);
-                return;
-            }
-            if (entry.hook && entry.site)
-            {
-                if (record.kind === 'answered')
-                {
-                    // The kernel may have edited any of the eight; every one
-                    // is written back, ESP last of the registers (it may have
-                    // moved) and EIP last of all. EFLAGS are not restored --
-                    // a `pushad`/`popad` pair does not touch them either --
-                    // so the resume point must not depend on flags a branch
-                    // between the site and it would have set.
-                    const r = /** @type {NonNullable<Entry['registers']>} */ (entry.registers);
-                    cpu.writeReg32('eax', r.eax >>> 0);
-                    cpu.writeReg32('ecx', r.ecx >>> 0);
-                    cpu.writeReg32('edx', r.edx >>> 0);
-                    cpu.writeReg32('ebx', r.ebx >>> 0);
-                    cpu.writeReg32('ebp', r.ebp >>> 0);
-                    cpu.writeReg32('esi', r.esi >>> 0);
-                    cpu.writeReg32('edi', r.edi >>> 0);
-                    cpu.writeReg32('esp', (r.esp + entry.stackAdjust) >>> 0);
-                    cpu.writeReg32('eip', entry.resume);
-                }
-                else
-                {
-                    // Not handled: every register restored to exactly what
-                    // the site's own call site held -- `args`, never
-                    // `entry.registers`, so a handler that fell through after
-                    // editing the object it was given leaves nothing behind
-                    // -- and EIP goes to the trampoline: the displaced
-                    // instructions, then a jump back into the function right
-                    // after the site, as though it had never been patched.
-                    cpu.writeReg32('eax', args[0] >>> 0);
-                    cpu.writeReg32('ecx', args[1] >>> 0);
-                    cpu.writeReg32('edx', args[2] >>> 0);
-                    cpu.writeReg32('ebx', args[3] >>> 0);
-                    cpu.writeReg32('ebp', args[5] >>> 0);
-                    cpu.writeReg32('esi', args[6] >>> 0);
-                    cpu.writeReg32('edi', args[7] >>> 0);
-                    cpu.writeReg32('esp', esp);
-                    cpu.writeReg32('eip', entry.trampoline);
-                }
-                if (hookTraced)
-                {
-                    journal.write(journal.Level.TRACE, HOOK_AREA,
-                        '{0} {1} eip={2} esp={3}',
-                        entry.name, record.kind,
-                        `0x${(cpu.readReg32('eip') >>> 0).toString(16)}`,
-                        `0x${(cpu.readReg32('esp') >>> 0).toString(16)}`);
-                }
-                return;
-            }
-            if (entry.hook)
-            {
-                // Whichever way this goes, EDX reads exactly as the guest's
-                // own call set it: the trap sequence's `mov dx, port` spent
-                // half of it getting here, and the pushed word is the only
-                // place that still holds it. ECX was never touched.
-                cpu.writeReg32('edx', memory.readU32(pushed));
-                if (record.kind === 'answered')
-                {
-                    // The kernel computed the call itself: return to the
-                    // caller as the guest function's own `ret cleanup` would,
-                    // since no such instruction is baked into this stub for
-                    // the CPU to run on its own.
-                    const returnTo = memory.readU32(esp);
-                    cpu.writeReg32('eax', 0);
-                    cpu.writeReg32('esp', esp + 4 + entry.cleanup);
-                    cpu.writeReg32('eip', returnTo);
-                }
-                else
-                {
-                    // Not handled: drop the saved block and hand the call to
-                    // the guest's own function exactly as its caller made it
-                    // -- the return address and stack arguments untouched,
-                    // now that ECX/EDX are restored.
-                    cpu.writeReg32('esp', esp);
-                    cpu.writeReg32('eip', entry.target);
-                }
-                if (hookTraced)
-                {
-                    journal.write(journal.Level.TRACE, HOOK_AREA,
-                        '{0} {1} eip={2} esp={3}',
-                        entry.name, record.kind,
-                        `0x${(cpu.readReg32('eip') >>> 0).toString(16)}`,
-                        `0x${(cpu.readReg32('esp') >>> 0).toString(16)}`);
-                }
-                return;
-            }
-            if (entry.saved !== 0)
-            {
-                // The stub saved with `pushad`, EAX first and EDI last; the
-                // trap spent EAX and DX and nothing else. Put those two back
-                // and drop the block, so the function it forwards into sees
-                // the registers exactly as its caller set them.
-                cpu.writeReg32('eax', memory.readU32(pushed + 28));
-                cpu.writeReg32('edx', memory.readU32(pushed + 20));
-                cpu.writeReg32('esp', esp);
-                return;
-            }
-            cpu.writeReg32('eax', result >>> 0);
-        },
+        dispatchNow: cross,
 
         diagnostics: ()=>({
             implemented,

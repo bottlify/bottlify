@@ -1093,6 +1093,18 @@ export function createCorkHost(config){
         readPhysical: (address, length)=>ram.subarray(address, address + length),
         /** @param {number} address */
         readU32: address=>whole.getUint32(ramOffset(address), true),
+        /**
+         * Dwords, signed, into an array: a host call's stack words in one call.
+         *
+         * @param {number} address @param {number} count @param {number[]} into @param {number} at
+         */
+        readU32sInto: (address, count, into, at)=>{
+            const from = ramOffset(address);
+            for (let word = 0; word < count; word++)
+            {
+                into[at + word] = whole.getInt32(from + word * 4, true);
+            }
+        },
         /** @param {number} address */
         readF32: address=>whole.getFloat32(ramOffset(address), true),
 
@@ -1155,6 +1167,8 @@ export function createCorkHost(config){
             reg32[index] = value | 0;
         },
 
+        /** The general registers in place, for the bridge's crossing. @returns {Int32Array} */
+        registerFile: ()=>reg32,
         /** The state block, for the block-based context capture and the tests. */
         block: ()=>block,
         blockLayout: ()=>layout,

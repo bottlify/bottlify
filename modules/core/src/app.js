@@ -20,7 +20,7 @@ import { readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
-import { createProcessBlocks } from './layers/win32/kernel32/teb.js';
+import { createProcessBlocks, TEB } from './layers/win32/kernel32/teb.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
@@ -2891,6 +2891,9 @@ async function buildApp(options){
             // call and buys a trace that says which call left an error behind.
             // Looked up once: it is asked on every crossing.
             lastError: ()=>(win32Api ??= core.api('win32')).lastError(),
+            // Where the reader above finds it for a thread with a block,
+            // read there directly (bridge.md).
+            lastErrorOffset: TEB.LAST_ERROR,
             // Costly and off unless asked for; see the dispatcher.
             traceStrings: options.traceStrings ?? false,
             callPhases: options.profileCalls ?? false,
