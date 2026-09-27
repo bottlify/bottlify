@@ -18,6 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
+import { buildExe } from '../../../tools/make-pe.mjs';
 import {
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_DWORD,
 } from './layers/win32/advapi32/registry.js';
@@ -197,4 +198,74 @@ test('a child beside its parent writes to the run\'s one translation store', { t
             : delete (/** @type {any} */ (globalThis)).navigator));
         await spawnOn(t, 'cork');
         assert.equal(opened, 1, 'one store for the run, the children\'s machines included');
+    });
+
+/** @param {number} value */
+const u32 = value=>[value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255];
+/** @param {string} text */
+const ascii = text=>[...text].map(character=>character.charCodeAt(0)).concat(0);
+
+/**
+ * A launcher: it names an event, starts its game, and waits for either the
+ * game's process or the event, exiting with the index WaitForMultipleObjects
+ * answered. The game opens the event by name, signals it, and exits.
+ */
+function buildLauncher(){
+    const parent = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateEventA', 'CreateProcessA',
+            'WaitForMultipleObjects', 'ExitProcess'] },
+        data: {
+            name: ascii('LAUNCHED_OK'),
+            command: ascii('C:\\App\\game.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+            set: new Array(8).fill(0),
+        },
+        codeSize: 0x60,
+        code: ({ iat, at })=>[
+            // CreateEventA(0, 0, 0, name)
+            0x68, ...u32(at('name')), 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateEventA')),
+            0xa3, ...u32(at('set') + 4),                              // set[1] = event
+            // CreateProcessA(0, command, ..., &startup, &info)
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            0xa1, ...u32(at('info')), 0xa3, ...u32(at('set')),         // set[0] = the process
+            // WaitForMultipleObjects(2, set, FALSE, INFINITE)
+            0x6a, 0xff, 0x6a, 0, 0x68, ...u32(at('set')), 0x6a, 2,
+            0xff, 0x15, ...u32(iat('WaitForMultipleObjects')),
+            0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),              // exit with its answer
+        ],
+    });
+    const game = buildExe({
+        imports: { 'KERNEL32.dll': ['OpenEventA', 'SetEvent', 'ExitProcess'] },
+        data: { name: ascii('LAUNCHED_OK') },
+        code: ({ iat, at })=>[
+            // OpenEventA(EVENT_ALL_ACCESS, FALSE, name)
+            0x68, ...u32(at('name')), 0x6a, 0, 0x68, ...u32(0x1f0003),
+            0xff, 0x15, ...u32(iat('OpenEventA')),
+            0x50, 0xff, 0x15, ...u32(iat('SetEvent')),
+            0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    return { parent, game };
+}
+
+test('a launcher waiting on its game or the event the game sets is woken by the event',
+    { timeout: 60000 }, async t=>{
+        // Warcraft III's front end waits so, and takes the game's process
+        // ending first for a failure to start. The game ran beside it here and
+        // the launcher resumed only once it had exited -- with the process's
+        // index, though the event had come first.
+        const { parent, game } = buildLauncher();
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\launcher.exe',
+            engine: 'cork',
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\game.exe', bytes: game }] }) },
+        });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run({ timeoutMs: 30000 }), 1, 'WAIT_OBJECT_0 + 1: the event');
     });

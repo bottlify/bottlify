@@ -2061,9 +2061,9 @@ export function createWin32Module(){
                     child.completed = true;
                     const waiters = child.waiters ?? [];
                     child.waiters = [];
-                    for (const { thread, result } of waiters)
+                    for (const { thread, result, settle } of waiters)
                     {
-                        kernel.wake(thread, result);
+                        kernel.wake(thread, settle ? settle() : result);
                     }
                 },
 

@@ -668,9 +668,8 @@ test('a wait on a set holding a child process is where the parent hands over', (
 });
 
 test('a child among other objects still hands over, waiting for all or any', ()=>{
-    // Nothing of the parent's runs while the child does, so nothing else in
-    // the set can be signalled meanwhile. A wait for any is answered with the
-    // child's own place in the set when it exits; a wait for all cannot be
+    // A wait for any is noted on the child, whose own place in the set is the
+    // answer unless something else in it came first; a wait for all cannot be
     // satisfied by the child alone, and is left to the replacement.
     for (const all of [0, 1])
     {
@@ -729,4 +728,30 @@ test('polling for any of a set with a child still reports one that is ready', ()
 
     assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 0, 0]), WAIT_OBJECT_0,
         'the event, which is the only thing in the set that can be');
+});
+
+test('an event of the set the child signalled before it exited is the answer, taken', ()=>{
+    // A launcher waits for its game's process or a named event the game sets
+    // once it is running. The game opens the event by name and signals it; on
+    // Windows that wakes the launcher, which goes on while the game runs. Here
+    // the launcher only resumes once the game has exited -- and must still be
+    // told the event came first, not that the game ended.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    /** @type {any} */
+    const child = { imagePath: 'C:\\App\\war3.exe' };
+    const event = host.kernel.createEvent({ signalled: false, manualReset: false });
+    host.register(0x20, 'process', child);
+    host.register(0x10, 'event', event);
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(0x400, 0x20, true);
+    view.setUint32(0x404, 0x10, true);
+
+    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 0, INFINITE]), PARKED);
+    const [waiter] = child.waiters;
+    assert.equal(waiter.settle(), 0, 'nothing signalled: the child exiting is the answer');
+
+    event.signalled = true;
+    assert.equal(waiter.settle(), 1, 'the event the child set came before its exit');
+    assert.equal(event.signalled, false, 'and the wait took it, as an auto-reset event is taken');
 });
