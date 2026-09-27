@@ -61,7 +61,7 @@ Threads and turns:
 | `writeThreadId` | `(address, id) => void` | Writes a thread id into guest memory (an out-parameter helper). |
 | `runOnce` | `() => { ran, instructions, switched }` | One turn. `ran: null` means nothing could run. |
 | `nextDeadline` | `() => number \| null` | The soonest guest time a blocked thread or an armed timer waits for. |
-| `exitThread` | `(thread, exitCode) => void` | Abandons the thread's mutexes, terminates it, releases everything waiting on it. A thread that ends itself gives its stack back to the pool; one ended by another thread keeps it. |
+| `exitThread` | `(thread, exitCode) => void` | Abandons the thread's mutexes, takes it off any wait it was blocked in (so a thread terminated while waiting is never woken by that object later), terminates it, releases everything waiting on it. A thread that ends itself gives its stack back to the pool; one ended by another thread keeps it. |
 | `suspendThread` | `(thread) => number \| null` | Adds one to the thread's suspend count. It keeps its state -- a wait stays a wait, deadline and all -- but gets no turn, and no object it waits on is handed to it, until it has been resumed as often. The count before, or `null` when it already carries `MAXIMUM_SUSPEND_COUNT` (127) and nothing is counted. |
 | `resumeThread` | `(thread) => number` | Takes one from the count, never below zero; the count before. The resume that brings it to zero looks again at the wait the thread is still in: an object signalled meanwhile, and still signalled, ends the wait then. |
 | `block` | `(thread, reason?, { deadline?, result? }?) => void` | Blocks a thread on something the kernel does not hold a queue for. |
@@ -340,7 +340,8 @@ id), for the same reason handles step by four.
 
 ### Exits
 
-`exitThread` abandons the thread's mutexes, terminates it and releases every joiner. Process
+`exitThread` abandons the thread's mutexes, takes it off the wait it was blocked in, terminates it and
+releases every joiner. Process
 exit is not the kernel's: a terminating call parks its caller through the bridge and the driver
 stops the machine from outside the trap.
 
