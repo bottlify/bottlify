@@ -462,6 +462,10 @@ const MAX_WINDOW_TEXT = 1 << 16;
  * @property {(instance: number) => number} [moduleBase]
  *           Where a module is mapped, which with a resource's own offset is
  *           the address of its bytes -- a dialog template is read in place.
+ * @property {(info: number, bits: number) => number} [bitmapFromDib]
+ *           A bitmap for the display made from a packed DIB in guest memory
+ *           (its header and colours at `info`, its pixels at `bits`), as
+ *           CreateDIBitmap on a screen context makes one; zero when it cannot.
  * @property {{ text: string | null, version: number }} [pasteboard]
  *           What the host last pasted, with a version that rises on every
  *           paste: the clipboard's contents until a program empties it.

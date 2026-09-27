@@ -1499,6 +1499,22 @@ export function createWin32Module(){
                         modules.findResource?.(instance, type, name) ?? null,
                     /** @param {number} instance */
                     moduleBase: instance=>modules.moduleBase?.(instance) ?? 0,
+                    // A bitmap resource made a bitmap for the display: CreateDIBitmap
+                    // on a screen context, as LoadBitmap and LoadImage make one.
+                    /** @param {number} info @param {number} bits */
+                    bitmapFromDib: (info, bits)=>{
+                        const CBM_INIT = 4;
+                        const hdc = gdi.windowContext(0, null);
+                        try
+                        {
+                            return gdi.table.CreateDIBitmap.handler(
+                                [hdc, info, CBM_INIT, bits, info, 0]);
+                        }
+                        finally
+                        {
+                            gdi.table.ReleaseDC.handler([0, hdc]);
+                        }
+                    },
                     // Where the pointer is and what is held down. The input layer
                     // is above this one and cannot be imported from here, so both
                     // are handed down as thunks; a build without one answers what
