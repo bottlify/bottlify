@@ -132,7 +132,12 @@ own on the pages after the code, each aligned like a slot, named in the section 
 initialised read-write data -- the runtime's `_iob`, twenty records, is one of those. A program
 and the runtime's own functions both write those variables (a stream's `_flag`, the file mode),
 where the code beside them stays read-only; a module that exports no variable is the one
-section.
+section. An export given `code` is a function that is code of its own -- the C runtime's
+compiled `@guestCode` functions ([`win32.md`](./win32.md)) -- placed in `.text` after the
+directory's strings, each aligned like a slot: read-only, and on no page a variable shares. A
+write from the host moves its page on for cork, and a translation formed from a page that moved
+is dropped when it lands, so a function on the page of a variable the host keeps writing (a
+standard stream's record in `_iob`) was never translated at all.
 
 Declared ordinals are honoured exactly and the rest are assigned above them, so an import by
 number binds to the function the program compiled against. The name table is sorted so a
@@ -359,7 +364,7 @@ Unit tests (`npm test`; filter with `node --test src/layers/loader/internal/<fil
 | file | kind | covers |
 |------|------|--------|
 | `internal/pe.test.js` | contract | Headers of a real 32-bit console executable, refusals (no MZ, truncated PE header, wrong machine), import names, RVA translation past raw data, an image without relocations refusing to move, a program not a library until its COFF header says `IMAGE_FILE_DLL`, building the image binds the IAT, an unclaimed import is reported, the export directory round-trips the synthesiser's output, a forwarder is a string not code. |
-| `internal/synth.test.js` | contract | The image parses as PE32 at its base, directory 0 leads to the exports, every name resolves to a trampoline that jumps to its stub, sorted name table, dense and explicit ordinals with gaps, signed displacements, an export-less module, invalid inputs refused, a pinned-and-assigned mix, an export as the entry point, variables in a writable data section apart from the code. |
+| `internal/synth.test.js` | contract | The image parses as PE32 at its base, directory 0 leads to the exports, every name resolves to a trampoline that jumps to its stub, sorted name table, dense and explicit ordinals with gaps, signed displacements, an export-less module, invalid inputs refused, a pinned-and-assigned mix, an export as the entry point, variables in a writable data section apart from the code, a function that is code of its own in `.text` below every variable's page and never also a variable. |
 | `internal/mangling.test.js` | contract | A C runtime class's member is `thiscall` popping its parameters only, a class returned by value goes through a hidden pointer, `stdcall` pops every parameter (eight bytes for the wide ones), `fastcall` only what did not fit in `ECX` and `EDX`, `cdecl` nothing; what the name does not carry is not known, and a name that is not a decorated function is not read as one. |
 | `internal/delayload.test.js` | contract | RVA versus VA descriptors reading the same, the report shaped like an ordinary import, slots as RVAs, ordinal imports, the terminator, images without the directory, binding both storage forms alike, unclaimed entries left as written or pointed by `missing`, bound/unload tables, multiple descriptors, the module-handle slot untouched. |
 | `internal/tls.test.js` | contract | The four addresses come back as RVAs, template and zero-fill, callbacks in order to their terminator, images without callbacks or without TLS, an uninitialised template. |

@@ -345,6 +345,37 @@ function buildMemoryExe(){
     });
 }
 
+/** How many times the program below calls floor and writes stdout's record. */
+const TURNS = 100000;
+
+/**
+ * Calls floor, then `_flsbuf('.', stdout)`, TURNS times: the runtime writes
+ * stdout's record in `_iob` from the host at every turn, a variable of the
+ * library whose code floor is. A write from the host moves its page on, and
+ * a translation formed from a page that moved is dropped when it lands: with
+ * floor on `_iob`'s page it was never translated, and ran in the interpreter
+ * to the end.
+ */
+function buildNeighbourExe(){
+    const [low, high] = halves(2.5);
+    return buildExe({
+        imports: { 'msvcrt.dll': ['floor', '_flsbuf', '_iob'], 'KERNEL32.dll': ['ExitProcess'] },
+        codeSize: 0x80,
+        code: ({ iat })=>[...assemble([
+            [0xbe, ...u32(TURNS)],                                        // mov esi, TURNS
+            'turn',
+            [0x68, ...u32(high), 0x68, ...u32(low)],                      // push 2.5
+            [0xff, 0x15, ...u32(iat('floor')), 0x83, 0xc4, 0x08],         // call [floor]
+            [0xdd, 0xd8],                                                 // fstp st0
+            [0xa1, ...u32(iat('_iob')), 0x83, 0xc0, 0x20, 0x50],          // push &_iob[1]
+            [0x6a, 0x2e, 0xff, 0x15, ...u32(iat('_flsbuf'))],             // _flsbuf('.', ...)
+            [0x83, 0xc4, 0x08, 0x4e],                                     // add esp, 8; dec esi
+            { jump: [0x0f, 0x85], to: 'turn' },
+            [0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        ])],
+    });
+}
+
 /** @param {Uint8Array} executable @param {'emulator' | 'cork'} engine */
 async function exitCodeOf(executable, engine){
     const wasm = await readFile(new URL('v86.wasm', PREBUILT));
@@ -365,6 +396,24 @@ async function exitCodeOf(executable, engine){
         await app.dispose();
     }
 }
+
+test('a host write into the runtime\'s variables keeps none of its code from translation',
+    { timeout: 120000 }, async()=>{
+        const app = await createApp({ executable: buildNeighbourExe(), engine: 'cork' });
+        try
+        {
+            assert.equal(await app.run({ timeoutMs: 60000 }), 0);
+            const cpu = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'cpu');
+            const cork = /** @type {any} */ (cpu).metrics.cork;
+            assert.ok(cork.translatedShare > 0.9, `${TURNS} writes to stdout's record left `
+                + `${(100 * (1 - cork.translatedShare)).toFixed(0)} % of the run untranslated, `
+                + `${cork.invalidations} translations dropped`);
+        }
+        finally
+        {
+            await app.dispose();
+        }
+    });
 
 for (const engine of /** @type {const} */ (['cork', 'emulator']))
 {

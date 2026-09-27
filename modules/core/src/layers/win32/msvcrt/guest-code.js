@@ -6,8 +6,9 @@
 
 /**
  * Runtime functions that are code in the guest's own msvcrt rather than
- * handlers on the host: an export whose data is these bytes is called as any
- * function is, and the translator runs it with the program's own code. A
+ * handlers on the host: an export whose `code` is these bytes is placed in
+ * the module's code section, on pages apart from its variables, is called as
+ * any function is, and the translator runs it with the program's own code. A
  * function that calls back into the program -- qsort's comparator -- then
  * makes an ordinary `call`, where a handler had to run the guest from the host
  * once a comparison.
@@ -15,7 +16,7 @@
  * Such a function is written once, in JavaScript, marked `@guestCode`
  * (`inguest.js`); the build compiles it to i386 (`scripts/guest-code/`) into
  * a module beside it (`inguest.x86.js`), and `guestEntry` makes the export of
- * the two: the x86 in its slot, the JavaScript as its handler -- the
+ * the two: the x86 as its code, the JavaScript as its handler -- the
  * reference the x86 is tested against, and the answer wherever a handler is
  * asked for directly.
  */
@@ -171,7 +172,7 @@ export function guestMemory(host){
  */
 
 /**
- * An export whose slot holds the compiled x86, with no handler: what a
+ * An export that is the compiled x86, with no handler: what a
  * function that calls a guest function is, since the engine cannot run the
  * guest from a handler and wait for it.
  *
@@ -180,18 +181,18 @@ export function guestMemory(host){
 export function guestExport(compiled){
     const argBytes = compiled.params.reduce((sum, type)=>
         sum + (type === 'f64' ? 8 : type === 'x87' ? 0 : 4), 0);
-    return { convention: compiled.convention, argBytes, data: ()=>compiled.code };
+    return { convention: compiled.convention, argBytes, code: ()=>compiled.code };
 }
 
 /**
- * An export whose slot holds the compiled x86 and whose handler is the
+ * An export that is the compiled x86 and whose handler is the
  * same function in JavaScript, its arguments read off the stack as the x86
  * reads them and its result answered where the x86 leaves it.
  *
  * @param {Function} source  The `@guestCode` function.
  * @param {CompiledGuestCode} compiled
  * @param {EntryHost} host
- * @returns {{ convention: string, argBytes: number, data: () => Uint8Array,
+ * @returns {{ convention: string, argBytes: number, code: () => Uint8Array,
  *     handler: (args: number[]) => number }}
  */
 export function guestEntry(source, compiled, host){

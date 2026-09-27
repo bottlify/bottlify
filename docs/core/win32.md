@@ -166,8 +166,9 @@ A table entry is `{ argBytes, handler }` — the bytes the callee pops (zero for
 instead carry `guest`, a builder that emits guest code and registers the traps it falls back to
 (kernel32's critical sections, interlocked arithmetic, last error, TLS reads and writes and clocks
 do this, and such an export is bound to its code, crossing into the host only where the code
-jumps to a trap), or `data`, the bytes the export's slot holds: a variable the program reads
-through the address it imported, or a function that is code in the guest's own library (below).
+jumps to a trap), `data`, a variable the program reads through the address it imported, or
+`code`, a function that is code in the guest's own library (below), placed in the module's
+read-only code section apart from every variable ([`loader.md`](./loader.md)).
 The assembler (`src/app.js`) merges `win32.libraries()` with the
 tables from `graphics`, `audio`, `input` and `media`, registers every handler with the bridge under
 `DLL!Name`, and asks the loader to synthesise one in-guest module per library, with the ordinals
@@ -243,9 +244,9 @@ which is committed: the source tree runs with no build step, and the compiler is
 tool. `scripts/build-guest-code.test.js` fails when a committed module is not what its source
 compiles to. The code generation is a plain stack machine -- every variable in the frame, EAX and
 ECX for an expression, EBX for the tables' base -- with no register allocation; each function is
-position-independent (the loader places a `data` export wherever the module's `.data` section
-falls, and nothing tells the bytes their address), a table reached through the address a
-`call $+5` pushes.
+position-independent (the loader places a `code` export wherever the module's `.text` has room,
+and nothing tells the bytes their address), a table reached through the address a `call $+5`
+pushes.
 
 The subset is the part of JavaScript 32-bit integer and x87 code reproduces exactly, and everything
 outside it is a compile error naming its place in the source (the full rules are at the top of
@@ -838,15 +839,6 @@ Stated as the code states them.
   handlers read no further than (`strlen`'s stopped the run without a terminator by then), is
   measured, copied and compared whole by the x86, as msvcrt's are. `strcpy` copies as `memmove`
   does, as if the source were read whole first, where C leaves an overlap undefined.
-- **The runtime's code in the guest shares the `.data` pages with its variables.** A `data`
-  export is placed with the variables, so `_iob`'s standard records sit on a page with code
-  (`floor` and `_ftol` among it, `_ftol` since before it was compiled); under cork a write from the
-  host into a page drops every translation on it, and stdio writes a standard stream's `_flag`
-  and `_cnt` from the host when a program's `putc` or `getc` macros fall back to it. The loader
-  placing code exports in an executable section of their own would end it. The classifiers answer 1 rather
-  than msvcrt's class bit. `atoi` clamps to `INT_MIN`/`INT_MAX`, as its handler did. `bsearch`
-  takes its count as a signed number, so an array of 2^31 elements or more is not searched.
-
 - **Every listed display mode can be set.** `ChangeDisplaySettingsA`/`ExA` switch the screen to
   any mode `EnumDisplaySettingsA` lists -- the metrics, the desktop rectangle and the current
   settings follow, the refresh rate is accepted as asked, `CDS_TEST` answers without switching, and
@@ -993,10 +985,13 @@ every slot refused, a freed slot zero; three threads through one critical sectio
 sleeping while they hold it, the count exact, every entry through the fast path and every waiter
 handed the section; and a thread that finds a section held refused by `TryEnterCriticalSection`,
 then waiting in the host, with the lock count showing it queued, while the owner's own try is a
-recursion, until the owner's last leave hands it over. `src/crt-inguest.itest.js` calls the runtime's in-guest functions through the import
-of a small program, under cork and under the emulator: `_ftol`'s two halves, `qsort` through the
-program's comparator, and `floor`, `toupper` and `strncmp` against the handlers' answers with the
-program's ESI and EDI kept across each call. `src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe`, `cxxeh.exe`,
+recursion, until the owner's last leave hands it over. `src/crt-inguest.itest.js` calls the
+runtime's in-guest functions through the import of a small program, under cork and under the
+emulator: `_ftol`'s two halves, `qsort` and `bsearch` through the program's comparator, and the
+rest against the handlers' answers -- each copy, fill or move read back by a comparison -- with
+the program's ESI and EDI kept across each call; and under cork a program that calls `floor`
+while the host writes stdout's record in `_iob` at every turn has every instruction translated.
+`src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe`, `cxxeh.exe`,
 `unhandled.exe`, built from `test/fixtures/src/` by `scripts/build-fixtures.mjs` with clang and
 lld against the MSVC ABI -- through every path above, processor faults and two threads throwing
 at once included. `src/apc.itest.js` runs `apc.exe`, built the same way: APCs to itself and to

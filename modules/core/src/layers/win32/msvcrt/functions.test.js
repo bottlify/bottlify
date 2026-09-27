@@ -577,7 +577,7 @@ test('qsort is code in the guest\'s msvcrt, which calls the comparator itself', 
     const fns = /** @type {any} */ (createMsvcrtFunctions({ ...fakeMemory(), write: ()=>{},
         callGuest: async()=>0 }));
     assert.equal('handler' in fns.qsort, false, 'no crossing into the host');
-    assert.deepEqual(fns.qsort.data(), COMPILED.qsort.code);
+    assert.deepEqual(fns.qsort.code(), COMPILED.qsort.code);
 });
 
 test('_set_error_mode hands back what was put in, and refuses a mode it has not got', ()=>{

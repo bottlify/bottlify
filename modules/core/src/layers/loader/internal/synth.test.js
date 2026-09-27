@@ -390,3 +390,37 @@ test('a variable larger than a slot gets room of its own, outside the export dir
     assert.deepEqual([...module.bytes.subarray(small, small + 4)], [1, 2, 3, 4],
         'a small one has room of its own too');
 });
+
+test('a function that is code of its own lies in the code section, on no variable\'s page', ()=>{
+    // A write to a variable -- a stream's record, written from the host --
+    // must not land on a page with code: a translator drops what it made of it.
+    const body = Uint8Array.of(0x8b, 0x44, 0x24, 0x04, 0xc3);
+    const long = new Uint8Array(0x1400).fill(0x90);
+    const module = synthesiseModule({
+        name: 'MSVCRT.dll',
+        base: BASE,
+        exports: [{ name: '_iob', data: new Uint8Array(20 * 32) }, { name: 'floor', code: body },
+            { name: 'exit', target: 0x2000 }, { name: 'long', code: long },
+            { name: '_fmode', data: new Uint8Array(4) }],
+    });
+    const image = parsePe(module.bytes);
+    const [text, data] = image.sections;
+    const decoded = decodeExports(module.bytes);
+    for (const [name, bytes] of /** @type {[string, Uint8Array][]} */ ([['floor', body],
+        ['long', long]]))
+    {
+        const rva = decoded.functionRvas[decoded.nameOrdinals[decoded.names.indexOf(name)]];
+        assert.equal(module.addressOf(name), BASE + rva);
+        assert.deepEqual(module.bytes.subarray(rva, rva + bytes.length), bytes, `${name}'s body`);
+        assert.equal(rva % 16, 0);
+        assert.ok(rva >= decoded.directoryRva + decoded.directorySize,
+            `${name} past the directory, so it is not read as a forwarder`);
+        assert.ok(rva + bytes.length <= text.virtualAddress + text.virtualSize,
+            `${name} in .text, read-only and executable`);
+        assert.ok(rva + bytes.length <= data.virtualAddress, 'below every variable\'s page');
+    }
+    assert.ok(text.executable && !text.writable);
+    assert.ok(module.dataRva % 0x1000 === 0 && module.dataRva === data.virtualAddress);
+    assert.throws(()=>synthesiseModule({ name: 'K.dll', base: BASE, exports: [
+        { name: 'f', code: body, data: body }] }), /both code and a variable/);
+});

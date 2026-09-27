@@ -306,7 +306,7 @@ export function createLoaderModule(){
                  * @param {Object} options
                  * @param {string} options.name    As an import descriptor names it.
                  * @param {number} options.base
-                 * @param {{ name: string, target: number }[]} options.exports
+                 * @param {import('./internal/synth.js').SynthExport[]} options.exports
                  * @param {string} [options.entryPoint]  The export that is its DllMain.
                  * @returns {{ base: number, size: number, entryPoint: number,
                  *   addressOf: (name: string) => number | null,
