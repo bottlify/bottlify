@@ -1536,6 +1536,8 @@ export function createWindowFunctions(host){
             }
         }
         record.hwnd = host.handles.open('window', record);
+        // Its messages are this thread's: another thread's GetMessage leaves them.
+        record.thread = host.callerThread?.();
         windows.set(record.hwnd, record);
         if ((record.style & WS_VISIBLE) !== 0)
         {
@@ -2609,6 +2611,26 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * A retrieval's filter narrowed to what `thread` may take: on Windows every
+     * thread has a queue of its own and a window's messages go to the thread
+     * that made it. Here one queue serves them all, so two threads pumping at
+     * once must not take each other's -- an apartment's COM call posted to one
+     * thread's window was taken by another, which found nothing of its own to
+     * run and left the caller waiting for ever. A window made with no thread
+     * behind it, and a message for no window, are anyone's.
+     *
+     * @param {import('./messages.js').MessageFilter} filter @param {unknown} thread
+     * @returns {import('./messages.js').MessageFilter}
+     */
+    const ownedBy = (filter, thread)=>(thread === undefined ? filter : {
+        ...filter,
+        owns: hwnd=>{
+            const owner = windows.get(hwnd)?.thread;
+            return owner === undefined || owner === thread;
+        },
+    });
+
+    /**
      * The next message a retrieval takes, placed where the program's
      * procedures say the pointer is, a press having activated its window
      * first and the window under the pointer asked for its cursor; a press
@@ -2618,7 +2640,7 @@ export function createWindowFunctions(host){
      * @returns {any}
      */
     const takeThrough = (filter, thread)=>andThen(placeWaiting(filter, thread), ()=>{
-        const entry = host.queue.peek(filter);
+        const entry = host.queue.peek(ownedBy(filter, thread));
         if (!entry)
         {
             return null;
@@ -3874,7 +3896,8 @@ export function createWindowFunctions(host){
                 // Only a message taken activates: a look leaves the press,
                 // and the activation, for the call that takes it.
                 const entry = remove ? takeThrough(filter, thread)
-                    : andThen(placeWaiting(filter, thread), ()=>host.queue.peek(filter));
+                    : andThen(placeWaiting(filter, thread),
+                        ()=>host.queue.peek(ownedBy(filter, thread)));
                 return andThen(entry, (/** @type {any} */ taken)=>{
                     if (!taken)
                     {

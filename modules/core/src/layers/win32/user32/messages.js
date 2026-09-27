@@ -54,6 +54,9 @@ export const ANY_WINDOW = null;
  * @property {number} first        Lowest message accepted; 0 with `last` means all.
  * @property {number} last
  * @property {boolean} remove      Whether retrieving it takes it out of the queue.
+ * @property {(hwnd: number) => boolean} [owns]  Whether the retrieving thread may
+ *           take a message for this window: a window's messages are its own
+ *           thread's, and another thread pumping the same queue passes them by.
  */
 
 /** WM_TIMER, which is synthesised rather than queued -- see `timers` below. */
@@ -465,6 +468,10 @@ export function createMessageQueue(options = {}){
      */
     const accepts = (entry, filter)=>{
         if (filter.hwnd !== ANY_WINDOW && entry.hwnd !== filter.hwnd)
+        {
+            return false;
+        }
+        if (entry.hwnd !== 0 && filter.owns && !filter.owns(entry.hwnd))
         {
             return false;
         }

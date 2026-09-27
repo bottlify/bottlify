@@ -208,9 +208,12 @@ function paintedHost(fills, presents){
  * @param {(message: any) => void} [options.trace] Told every message a procedure receives.
  * @param {boolean} [options.paint] Whether the build has a display to paint the
  *        desktop on, so a test can see what is painted and what is shown.
+ * @param {() => unknown} [options.callerThread] Which thread is calling, for
+ *        what belongs to a thread.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
+    callerThread = ()=>THREAD,
 } = {})
 {
     const memory = fakeMemory();
@@ -269,7 +272,7 @@ function setup({
             called.push({ entry, args, thread });
             return hookReply ? hookReply(entry, args) : 0;
         },
-        callerThread: ()=>THREAD,
+        callerThread,
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         threadExists,
         /** @param {number} code */
@@ -1288,6 +1291,25 @@ test('PeekMessageA only reports messages for the window it was asked about', ()=
 
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, hwnd, 0, 0, PM_REMOVE]), 0);
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, other, 0, 0, PM_REMOVE]), 1);
+});
+
+test('messages for a window are taken only by the thread that made it', ()=>{
+    // One queue serves every thread here; a second thread pumping it took an
+    // apartment's COM call posted to the first thread's window, found nothing
+    // of its own to run, and the caller waited for ever.
+    let thread = 'maker';
+    const { fns, memory, queue } = setup({ callerThread: ()=>thread });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    queue.post({ hwnd, message: WM_USER, wParam: 0, lParam: 0 });
+
+    thread = 'another';
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
+        'passed by for the thread that owns it');
+    thread = 'maker';
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_USER);
 });
 
 test('a message loop runs until PostQuitMessage ends it', ()=>{
