@@ -129,7 +129,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `WSOCK32.dll`, `WS2_32.dll` | `wsock32/` | 38 each | One socket registry under both names, over an injected adapter (loopback by default); readiness delivered as a window message (`WSAAsyncSelect`) or a signalled kernel event (`WSAEventSelect`/`WSAEnumNetworkEvents`), and name resolution the same way (`WSAAsyncGetHostByName`/`WSACancelAsyncRequest`). |
 | `SHELL32.dll` | `shell32/` | 24 | Launching a program (`ShellExecute`, `ShellExecuteEx`, `FindExecutable`), file operations on the volume (`fileop.js`: `SHFileOperationA/W` copying, moving, renaming and deleting by the rules shell32's tests check, `SHCreateDirectoryExA/W`), documented refusals where a registry or a person is needed (a document's handler, folder browse), the drag-and-drop truths, the namespace (`namespace.js`: `IShellFolder`/`IEnumIDList` over the volume), and `CLSID_ShellLink` (`IShellLinkA/W`, `IPersistFile`). |
 | `COMCTL32.dll` | `comctl32/` | 29 | Image lists (`imagelist.js`), which copy each image, and its mask with `ILC_MASK`, into bitmaps of their own and draw them through gdi32 (`ImageList_Draw`, `DrawEx`, `DrawIndirect`: through the mask, onto the background colour for `ILD_NORMAL`, the mask for `ILD_MASK`, the image alone for `ILD_IMAGE`, by `ILD_ROP`'s operation; alpha, the blend flags and the state effects are not drawn), `_TrackMouseEvent` (user32's `TrackMouseEvent`), `msctls_progress32`, `SysTreeView32` and `SysTabControl32` (`tab.js`) as built-in window classes, and property sheets and wizards (`propsheet.js`: `PropertySheetA/W`, `CreatePropertySheetPageA/W`, `DestroyPropertySheetPage`) -- a `#32770` dialog built through user32's own calls around a tab control, each page the program's own template and dialog procedure, told the `PSN_*` notifications through `WM_NOTIFY`, and every message the sheet sends -- to a page, to its own window, to a control -- answered before it sends the next, since any of them may run the program's code; Tab walks into a page's controls (`WS_EX_CONTROLPARENT`), `PSM_ISDIALOGMESSAGE` changes page on Ctrl+Tab, Ctrl+Shift+Tab and Ctrl+PgDn/PgUp, as a modal sheet does in its own loop (user32's, lent through the window service), `PSH_WIZARD97` and `PSH_WIZARD_LITE` make a wizard whose interior pages stand under a header band with the header title and subtitle, a page that cannot be made is dropped, and a modal sheet answers 1 when changes were saved, 0 when none were, and `ID_PSRESTARTWINDOWS`/`ID_PSREBOOTSYSTEM` only when OK or Finish closed it. |
-| `d3dx9_25.dll`, `d3dx9_26.dll`, `d3dx9_27.dll` | `d3dx9/` | 14 each | Tables for the D3DX helper libraries, shadowed by the real DLL wherever the program ships one or its installer put one in `system32` ([`decisions.md`](../../roadmap/decisions.md)): the matrix and vector arithmetic -- `D3DXMatrixMultiply`, `Transpose`, `Inverse` (the determinant written where a pointer is given, NULL for a singular matrix), `Translation`, `OrthoLH`, `PerspectiveLH`, `D3DXVec4Transform`, `D3DXVec3Transform`, `TransformNormal`, `TransformCoord` and its `Array` form, `D3DXVec3Normalize` -- is code in the guest's own library (`d3dx9/inguest.js`, compiled as msvcrt's is), floats read, computed on the x87 under the program's control word and stored rounded to nearest, every input read before the output is written, so an output over its input answers what it would elsewhere; the effect facilities answer `E_NOTIMPL`. |
+| `d3dx9_24.dll` ... `d3dx9_43.dll` | `d3dx9/` | 89 each | One table for every version of the D3DX helper library, shadowed by the real DLL wherever the program ships one or its installer put one in `system32` ([`decisions.md`](../../roadmap/decisions.md)): the whole of its mathematics as the library exports it -- the 87 matrix, vector, quaternion, plane, colour, Fresnel and half-float functions of `d3dx9_36.spec`, each with its own stack width (below, "d3dx9's mathematics") -- is code in the guest's own library (`d3dx9/inguest.js`, `inguest-matrix.js`, `inguest-vector.js`, `inguest-quaternion.js`, compiled as msvcrt's is), floats read, computed on the x87 under the program's control word and stored rounded to nearest; the effect facilities answer `E_NOTIMPL`. The inline helpers of the SDK's headers (`D3DXMatrixIdentity`, `D3DXVec3Dot`, `D3DXVec3Cross`, `D3DXQuaternionConjugate` and their kin) are not exports and compile into the program. |
 | `WININET.dll` | `wininet/` | 12 | HTTP as a handle tree; a request parks the caller. |
 | `IMM32.dll` | `imm32/` | 10 | "There is no input method" — which is the state a game asks for. |
 | `RPCRT4.dll` | `rpcrt4/` | 8 | `UuidCreate` and the other GUID/status helpers a COM-adjacent program links directly; `UuidToStringA` spells a UUID without braces, in lower case, into a string the library allocates on the process heap, which `RpcStringFreeA` frees before clearing the caller's pointer. |
@@ -385,6 +385,65 @@ the function checks for one, and a result past a double's range.
 `tools/math-bench.mjs` times each of these calls in a loop, d3dx9's arithmetic beside them and
 the x87's instructions inline, under both precisions, and sets cork's answers beside the
 emulator's.
+
+### d3dx9's mathematics
+
+Every mathematical export of the D3DX 9 library is code in the guest, the same table under each
+name from `d3dx9_24.dll` to `d3dx9_43.dll` (their mathematics does not differ): the matrices --
+`D3DXMatrixMultiply`, `MultiplyTranspose`, `Transpose`, `Inverse`, `Determinant`, `Translation`,
+`Scaling`, `RotationX`/`Y`/`Z`, `RotationAxis`, `RotationYawPitchRoll`, `RotationQuaternion`,
+`LookAtLH`/`RH`, `PerspectiveLH`/`RH`, `PerspectiveFovLH`/`RH`, `PerspectiveOffCenterLH`/`RH`,
+`OrthoLH`/`RH`, `OrthoOffCenterLH`/`RH`, `Reflect`, `Shadow`, `Transformation`,
+`AffineTransformation`, their `2D` forms, and `Decompose`; the vectors -- `D3DXVec2`/`3`/`4`
+`Normalize`, `Hermite`, `CatmullRom`, `BaryCentric`, `Transform`, `TransformCoord`,
+`TransformNormal` and their `Array` forms, `D3DXVec3Project`/`Unproject` and theirs,
+`D3DXVec4Cross`; the quaternions -- `Multiply`, `Normalize`, `Inverse`, `Ln`, `Exp`,
+`RotationAxis`, `RotationYawPitchRoll`, `RotationMatrix`, `ToAxisAngle`, `Slerp`, `Squad`,
+`SquadSetup`, `BaryCentric`; the planes -- `FromPoints`, `FromPointNormal`, `Normalize`,
+`IntersectLine`, `Transform` and its `Array` form; `D3DXColorAdjustContrast`/`Saturation`,
+`D3DXFresnelTerm`, `D3DXFloat32To16Array` and `D3DXFloat16To32Array`. Each reads its floats,
+computes on the x87 under the program's control word -- to 24 bits under the single precision
+Direct3D leaves, as the library does -- and stores floats rounded to nearest; an angle past
+`fsin`'s reach (2^63) is reduced by 2π first. Each reads every input before it writes an output,
+so an output over an input answers what it would elsewhere, but for
+`D3DXPlaneFromPointNormal`, which writes (a, b, c) before it reads the point, as the library does
+(d is -1826, not -950, for a plane made over its own point in Wine's test).
+
+The library's forms, as Wine's conformance tests (`dlls/d3dx9_36/tests/math.c`) pin them, and
+`d3dx9/conformance.test.js` holds each function to their values and tolerances: a quaternion is
+used as it is, not normalised -- the matrix of (1, -4, 7, -11) is the formula's, -129 on the
+diagonal -- and `D3DXMatrixTransformation` turns its scaling by R' S R, the transposed matrix
+the scaling rotation's inverse, its scaling rotation and centre unused without a scaling; the
+logarithm of (v, w) is v acos(w) / sin(acos(w)) for |w| below 1 and v itself otherwise, whatever
+v's length; the exponential ignores w; a slerp goes toward the nearer of q2 and -q2 and is a
+straight line where their product is 1 or more; `D3DXQuaternionSquadSetup` negates q0, q2 and q3
+toward their predecessors and takes true inverses; `D3DXQuaternionRotationMatrix` roots the
+diagonal's sum and 1 where the sum is above 0, the largest diagonal element otherwise;
+`D3DXMatrixInverse` of a singular matrix answers NULL and leaves both the output and the
+determinant as they were; `D3DXMatrixDecompose` answers `D3DERR_INVALIDCALL` for a row of length
+0; a vector, plane or axis of length 0 normalises to zero; `D3DXPlaneIntersectLine` answers NULL
+for a line parallel to the plane; `D3DXVec3Project`/`Unproject` take NULL for any matrix (the
+identity) and for the viewport (the transformed point itself). A half is converted as the
+library's 32-bit build does it: exponent 31 is an exponent like the others, not infinity (80000
+is `0x7ce2`, `0x7c00` reads back as 65536), every magnitude from 131008 up is `0x7fff` with its
+sign, a NaN `0xffff`, a normal half rounded to nearest even and a subnormal one truncated.
+
+Where the tests leave the library's answer open, these answer: a point transformed to a w of 0 is
+divided by 1 in every `TransformCoord`, `Project` and `Unproject`, as before; `D3DXVec3Unproject`
+and its `Array` form answer NULL and write nothing for a product with no inverse;
+`D3DXQuaternionBaryCentric` answers q1 where f + g is 0, the limit of its two slerps. Under
+single precision every value of Wine's tests is within its tolerance but one:
+`D3DXMatrixTransformation2D` with a scaling centre and rotation, whose translation cancels terms
+near 100 down to 13, answers -13.4019327, the value in doubles, where the library's floats leave
+-13.401899 (148 units in the last place). Under double precision the answers are the doubles'
+rounded once, a few units from the library's floats.
+
+`d3dx9/inguest-matrix.test.js`, `inguest-vector.test.js` and `inguest-quaternion.test.js` hold
+each function's x86 to its JavaScript on cork's test machine under three control words and to the
+x87's model under single precision -- random floats of every size, angles past 2^63, NULL for
+every pointer that may be one, zero vectors, singular products, strides, outputs over inputs --
+and `src/d3dx9-math.itest.js` calls a selection through the import on cork and on the emulator,
+both of which answer the model's floats to the bit, and none of which crosses into the host.
 
 ### The process model
 
@@ -1010,8 +1069,13 @@ Stated as the code states them.
   word and to 24 bits under Direct3D's, and stores floats rounded to nearest; the library picks
   its own code by the processor, and the last bit of a result may differ from Windows'. `D3DXVec3TransformNormal` takes no part of the matrix's last row, as the
   library does, where the handler added it times zero (a NaN out of an infinity there);
-  `D3DXVec3TransformCoord` and its `Array` form divide by 1 a point that comes to a w of 0, as the
-  handler did; `D3DXMatrixTranspose` moves the floats' bits as they are.
+  every `TransformCoord`, `Project` and `Unproject` divides by 1 a point that comes to a w of 0,
+  `D3DXVec3Unproject` answers NULL for a product with no inverse and `D3DXQuaternionBaryCentric`
+  q1 for an f + g of 0, cases Wine's tests leave the library's answer open in;
+  `D3DXMatrixTranspose` moves the floats'
+  bits as they are. `D3DXMatrixTransformation2D` with a scaling centre and rotation answers its
+  translation as doubles compute it, up to 150 units in the last place from the library's floats
+  ("d3dx9's mathematics").
 - **Every listed display mode can be set.** `ChangeDisplaySettingsA`/`ExA` switch the screen to
   any mode `EnumDisplaySettingsA` lists -- the metrics, the desktop rectangle and the current
   settings follow, the refresh rate is accepted as asked, `CDS_TEST` answers without switching, and

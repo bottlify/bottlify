@@ -23,24 +23,35 @@
  *
  * Matrices are row-major, sixteen floats, `m[row * 4 + col]` -- the layout
  * D3DXMATRIX has in memory and the one every function here reads and writes.
- * The arithmetic is code in the guest's own d3dx9 (`inguest.js`), compiled
- * from its JavaScript: a program that multiplies its matrices every frame
- * pays for the x87's instructions, not a crossing into the host.
+ * The arithmetic is code in the guest's own d3dx9 (`inguest.js`,
+ * `inguest-matrix.js`, `inguest-vector.js`, `inguest-quaternion.js`),
+ * compiled from its JavaScript: a program that multiplies its matrices every
+ * frame pays for the x87's instructions, not a crossing into the host. Every
+ * function each of those modules compiles is an export, and the table is the
+ * same for every version of the library from d3dx9_24 to d3dx9_43, whose
+ * mathematics does not differ.
  */
 
 import { guestEntry } from '../msvcrt/guest-code.js';
 import * as inGuest from './inguest.js';
+import * as matrix from './inguest-matrix.js';
+import * as vector from './inguest-vector.js';
+import * as quaternion from './inguest-quaternion.js';
 import { COMPILED } from './inguest.x86.js';
+import { COMPILED as MATRIX } from './inguest-matrix.x86.js';
+import { COMPILED as VECTOR } from './inguest-vector.x86.js';
+import { COMPILED as QUATERNION } from './inguest-quaternion.x86.js';
 
 const E_NOTIMPL = 0x80004001;
 
-/** The functions that are code in the guest, by name. */
-const IN_GUEST = /** @type {const} */ ([
-    'D3DXMatrixMultiply', 'D3DXMatrixTranspose', 'D3DXMatrixInverse', 'D3DXMatrixTranslation',
-    'D3DXMatrixOrthoLH', 'D3DXMatrixPerspectiveLH', 'D3DXVec4Transform', 'D3DXVec3Transform',
-    'D3DXVec3TransformNormal', 'D3DXVec3TransformCoord', 'D3DXVec3TransformCoordArray',
-    'D3DXVec3Normalize',
-]);
+/**
+ * Each module of guest code and what the build made of it: every function
+ * compiled is exported under its own name.
+ *
+ * @type {[Record<string, any>, Record<string, import('../msvcrt/guest-code.js').CompiledGuestCode>][]}
+ */
+const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
+    [quaternion, QUATERNION]];
 
 /**
  * @typedef {Object} D3dxHost
@@ -57,8 +68,8 @@ export function createD3dxFunctions(host){
         new Uint8Array(values.buffer, values.byteOffset, values.byteLength));
 
     return {
-        ...Object.fromEntries(IN_GUEST.map(name=>[name,
-            guestEntry(inGuest[name], COMPILED[name], host)])),
+        ...Object.fromEntries(IN_GUEST.flatMap(([source, compiled])=>Object.keys(compiled)
+            .map(name=>[name, guestEntry(source[name], compiled[name], host)]))),
 
         /**
          * The effect facilities, which build objects on a device this maths
