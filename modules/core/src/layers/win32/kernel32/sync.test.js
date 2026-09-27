@@ -292,6 +292,13 @@ test('a critical section is initialised in the guest structure, not beside it', 
     assert.equal(host.readI32(section + CS_LOCK_COUNT), CS_UNLOCKED);
     assert.equal(host.readI32(section + CS_RECURSION_COUNT), 0);
     assert.equal(host.readI32(section + CS_OWNING_THREAD), 0);
+    // Windows 8 and later keep no debug record and say so with -1, which
+    // DeleteCriticalSection clears (Wine's kernel32 sync test_crit_section).
+    assert.equal(host.readI32(section), -1);
+    fns.DeleteCriticalSection.handler([section]);
+    assert.equal(host.readI32(section), 0);
+    fns.InitializeCriticalSectionAndSpinCount.handler([section, 4000]);
+    assert.equal(host.readI32(section), -1);
 });
 
 test('entering, leaving and trying a section are guest code, placed once', ()=>{

@@ -42,11 +42,14 @@ import { isStandardHandle, untagged } from './handle-tags.js';
 /**
  * Offsets into RTL_CRITICAL_SECTION, 32-bit.
  *
- * DebugInfo and LockSemaphore are at 0x00 and 0x10 and are deliberately left at
- * zero: the first is a pointer into a structure only a debugger walks, and the
- * second is created lazily by Windows itself, so a guest that finds either null
- * is looking at something Windows also produces.
+ * DebugInfo at 0x00 is a pointer into a structure only a debugger walks, and
+ * Windows 8 and later make none: they write -1 there, which DeleteCriticalSection
+ * clears. LockSemaphore at 0x10 is left at zero: Windows creates it lazily
+ * itself, so a guest that finds it null is looking at something Windows also
+ * produces.
  */
+const CS_DEBUG_INFO = 0x00;
+const CS_NO_DEBUG_INFO = -1;
 const CS_LOCK_COUNT = 0x04;
 const CS_SPIN_COUNT = 0x14;
 const CS_SIZE = 0x18;
@@ -269,6 +272,7 @@ export function createSyncFunctions(host){
         // Written whole rather than field by field: the guest allocated this and
         // its contents are whatever was there before.
         host.writeMemory(address, new Uint8Array(CS_SIZE));
+        writeI32(address + CS_DEBUG_INFO, CS_NO_DEBUG_INFO);
         writeI32(address + CS_LOCK_COUNT, CS_UNLOCKED);
         writeI32(address + CS_SPIN_COUNT, spinCount);
     };
