@@ -2954,11 +2954,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         /**
          * Every level a system-memory texture and a device-memory one share.
          *
-         * The rules are this layer's reading of what the call has to mean and
-         * are narrower than the header's: the source is system memory, the
-         * destination is not, the format is the same on both sides, and level
-         * zero is the same size. A destination with fewer levels takes the
-         * levels it has.
+         * The source is system memory and the destination is not. A smaller
+         * destination starts from the source level of its own size, the
+         * source's larger levels skipped, and takes as many levels as it has.
+         * Windows also accepts a destination whose size no source level has,
+         * and one of another format; this layer carries the overlap of the
+         * level it lines up by the larger side, and bytes only between formats
+         * of one texel size, and says so.
          *
          * As with CopyRects, the moves are described rather than made.
          *
@@ -2975,11 +2977,23 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 const update = source.volume && destination.volume && source !== destination
                     && source.pool === D3DPOOL.SYSTEMMEM && destination.pool !== D3DPOOL.SYSTEMMEM
-                    ? volumeUpdate(source, destination)
+                    && source.width >= destination.width && source.height >= destination.height
+                    && source.depth >= destination.depth
+                    ? volumeUpdate(source, destination, { bySize: true })
                     : null;
                 if (!update)
                 {
                     return D3DERR_INVALIDCALL;
+                }
+                if (update.overlapped)
+                {
+                    reportOnce('update-size', 'UpdateTexture between volumes with no level of'
+                        + ' one size: they were carried where they overlap');
+                }
+                if (update.converted)
+                {
+                    reportOnce('update-format', 'UpdateTexture between volume formats of two'
+                        + ' texel sizes carried nothing: the texels are not converted');
                 }
                 for (const volume of update.written)
                 {
@@ -2997,28 +3011,54 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const from = describe(top);
             const to = describe(into);
             if (from.Pool !== D3DPOOL.SYSTEMMEM || to.Pool === D3DPOOL.SYSTEMMEM
-                || from.Format !== to.Format
                 || (source.cube ?? false) !== (destination.cube ?? false)
-                || from.Width !== to.Width || from.Height !== to.Height)
+                || from.Width < to.Width || from.Height < to.Height)
             {
                 return D3DERR_INVALIDCALL;
             }
+            const sourceLevels = source.levels ?? 1;
+            const sizeAt = (/** @type {number} */ level)=>[
+                Math.max(1, from.Width >>> level), Math.max(1, from.Height >>> level)];
+            let skip = 0;
+            const side = Math.max(to.Width, to.Height);
+            while (skip < sourceLevels - 1 && Math.max(...sizeAt(skip)) > side)
+            {
+                skip++;
+            }
+            const [skippedWidth, skippedHeight] = sizeAt(skip);
+            if (skippedWidth !== to.Width || skippedHeight !== to.Height)
+            {
+                reportOnce('update-size', `UpdateTexture into ${to.Width}x${to.Height}, a size`
+                    + ` no level of the ${from.Width}x${from.Height} source has: its level`
+                    + ` ${skip} was carried where the two overlap`);
+            }
+            const sameTexel = from.Format === to.Format
+                || FORMAT_INFO[from.Format]?.bytesPerPixel === FORMAT_INFO[to.Format]?.bytesPerPixel
+                    && !isCompressed(from.Format) && !isCompressed(to.Format);
+            if (!sameTexel)
+            {
+                reportOnce('update-format', `UpdateTexture from format ${from.Format} into`
+                    + ` ${to.Format} carried nothing: the texels are not converted`);
+            }
             /** @type {SurfaceMove[]} */
             const moves = [];
-            const levels = Math.min(source.levels ?? 1, destination.levels ?? 1);
+            const levels = Math.min(sourceLevels - skip, destination.levels ?? 1);
             for (let face = 0; face < (source.cube ? 6 : 1); face++)
             {
                 // What the face was written in since it was last carried, and
                 // nothing more: an update of a source nobody touched moves nothing.
                 const region = source.takeDirtyRegion?.(face) ?? null;
-                for (let level = 0; level < (region ? levels : 0); level++)
+                for (let level = 0; level < (region && sameTexel ? levels : 0); level++)
                 {
-                    const one = levelSurface(source, level, face);
+                    const one = levelSurface(source, skip + level, face);
                     const other = levelSurface(destination, level, face);
                     if (one && other)
                     {
                         const desc = describe(one);
-                        const rect = regionAtLevel(region, level, desc.Width, desc.Height);
+                        const bounds = describe(other);
+                        const rect = regionAtLevel(region, skip + level,
+                            Math.min(desc.Width, bounds.Width),
+                            Math.min(desc.Height, bounds.Height));
                         moves.push(rectMoveOf(one, rect, other, { x: rect.left, y: rect.top }));
                         renderer?.markDirty(other);
                     }

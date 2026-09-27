@@ -2302,6 +2302,87 @@ test('UpdateTexture carries what the source was written in since it was last car
     device.release();
 });
 
+test('UpdateTexture into a smaller texture starts from the source level of its size', ()=>{
+    // Wine's d3d8 visual test_texture_blending cases: Windows skips the
+    // source's larger levels, and accepts another size or format as well.
+    /** @type {string[]} */
+    const reported = [];
+    const device = createDevice({
+        caps: { divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
+            reported.push(`${api}: ${detail}`) },
+    });
+    /** @param {number[]} size @param {number} levels @param {number} format @param {number} pool */
+    const texture = ([width, height], levels, format, pool)=>{
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(width, height, levels, 0, format, pool, out), D3D_OK);
+        return out.texture;
+    };
+    /** @param {any} of @param {number} level */
+    const baseOf = (of, level)=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        assert.equal(of.GetSurfaceLevel(level, held), D3D_OK);
+        held.surface.release();
+        return held.surface.base;
+    };
+    /** @param {any} source @param {any} destination */
+    const update = (source, destination)=>{
+        /** @type {{ moves?: any[] }} */
+        const out = {};
+        const result = device.UpdateTexture(source, destination, out);
+        source.release();
+        destination.release();
+        return { result, moves: out.moves ?? [] };
+    };
+    const { SYSTEMMEM, DEFAULT } = D3DPOOL;
+
+    const deep = texture([8, 8], 4, D3DFMT.A8R8G8B8, SYSTEMMEM);
+    const at = baseOf(deep, 2);
+    const skipped = update(deep, texture([2, 2], 2, D3DFMT.A8R8G8B8, DEFAULT));
+    assert.equal(skipped.result, D3D_OK);
+    assert.deepEqual(skipped.moves.map(move=>[move.rowBytes, move.rows]), [[8, 2], [4, 1]]);
+    assert.equal(skipped.moves[0].from, at, 'from the 2x2 level');
+    assert.deepEqual(reported, [], 'a level of the size is the real rule');
+
+    const odd = update(texture([8, 4], 4, D3DFMT.A8R8G8B8, SYSTEMMEM),
+        texture([2, 4], 2, D3DFMT.A8R8G8B8, DEFAULT));
+    assert.equal(odd.result, D3D_OK);
+    assert.deepEqual(odd.moves.map(move=>[move.rowBytes, move.rows]), [[8, 2], [4, 1]],
+        'the 4x2 level where it overlaps 2x4, then 2x1 over 1x2');
+    assert.equal(reported.length, 1, 'and it says so');
+
+    const alpha = update(texture([8, 8], 1, D3DFMT.A8R8G8B8, SYSTEMMEM),
+        texture([8, 8], 1, D3DFMT.X8R8G8B8, DEFAULT));
+    assert.equal(alpha.result, D3D_OK);
+    assert.equal(alpha.moves.length, 1, 'one texel size, so the bytes are carried');
+
+    const narrow = update(texture([8, 8], 1, D3DFMT.A8R8G8B8, SYSTEMMEM),
+        texture([8, 8], 1, D3DFMT.R5G6B5, DEFAULT));
+    assert.equal(narrow.result, D3D_OK);
+    assert.deepEqual(narrow.moves, [], 'texels are not converted');
+    assert.equal(reported.length, 2);
+
+    /** @param {number} size @param {number} levels @param {number} format @param {number} pool */
+    const volume = (size, levels, format, pool)=>{
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateVolumeTexture(size, size, size, levels, 0, format, pool, out),
+            D3D_OK);
+        return out.texture;
+    };
+    const kept = update(volume(8, 4, D3DFMT.A8R8G8B8, SYSTEMMEM),
+        volume(8, 2, D3DFMT.X8R8G8B8, DEFAULT));
+    assert.equal(kept.result, D3D_OK);
+    assert.equal(kept.moves.length, 8 + 4, 'a volume of the same size keeps its top levels,'
+        + ' a slice at a time');
+
+    const small = update(texture([4, 4], 1, D3DFMT.A8R8G8B8, SYSTEMMEM),
+        texture([8, 8], 1, D3DFMT.A8R8G8B8, DEFAULT));
+    assert.equal(small.result, D3DERR_INVALIDCALL, 'a smaller source is refused');
+    assertFullyReleased(device);
+});
+
 test('a full-screen device\'s gamma ramp is the display\'s, and a windowed one\'s is kept', ()=>{
     // D3DCAPS2_FULLSCREENGAMMA: the ramp is the display's in full-screen mode;
     // windowed, SetGammaRamp succeeds and changes nothing on the screen.

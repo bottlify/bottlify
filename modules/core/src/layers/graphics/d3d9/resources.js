@@ -1415,11 +1415,19 @@ export function createVolumeTexture(options){
  * two formats, or levels of two sizes. The source's dirty box is taken only
  * when they can.
  *
+ * `bySize` is Direct3D 8's reading: the source's levels larger than the
+ * destination are skipped by size rather than by count, levels of two sizes
+ * carry where they overlap (`overlapped` says so), and a format of the same
+ * texel size is carried as bytes; one of another size carries nothing
+ * (`converted` says so).
+ *
  * @param {any} source @param {any} destination  Both volume textures.
- * @returns {{ moves: SurfaceMove[], written: any[] } | null}
+ * @param {{ bySize?: boolean }} [options]
+ * @returns {{ moves: SurfaceMove[], written: any[], overlapped?: boolean, converted?: boolean }
+ *     | null}
  */
-export function volumeUpdate(source, destination){
-    if (source.format !== destination.format)
+export function volumeUpdate(source, destination, { bySize = false } = {}){
+    if (source.format !== destination.format && !bySize)
     {
         return null;
     }
@@ -1434,32 +1442,55 @@ export function volumeUpdate(source, destination){
         held.volume.release();
         return held.volume;
     };
-    const skipped = Math.max(0, source.levels - destination.levels);
+    /** @param {any} volume */
+    const largest = volume=>Math.max(volume.width, volume.height, volume.depth);
+    const top = levelOf(destination, 0);
+    let skipped = Math.max(0, source.levels - destination.levels);
+    if (bySize && top)
+    {
+        skipped = 0;
+        while (skipped < source.levels - 1 && largest(levelOf(source, skipped)) > largest(top))
+        {
+            skipped++;
+        }
+    }
+    let overlapped = false;
     /** @type {{ one: any, other: any, level: number }[]} */
     const pairs = [];
     for (let level = 0; level + skipped < source.levels && level < destination.levels; level++)
     {
         const one = levelOf(source, level + skipped);
         const other = levelOf(destination, level);
-        if (!one || !other || one.width !== other.width || one.height !== other.height
-            || one.depth !== other.depth)
+        if (!one || !other)
         {
             return null;
+        }
+        if (one.width !== other.width || one.height !== other.height || one.depth !== other.depth)
+        {
+            if (!bySize)
+            {
+                return null;
+            }
+            overlapped = true;
         }
         pairs.push({ one, other, level: level + skipped });
     }
     const region = source.takeDirtyRegion();
+    const carried = source.format === destination.format
+        || pairs.every(({ one, other })=>one.texelBytes === other.texelBytes);
     /** @type {SurfaceMove[]} */
     const moves = [];
-    for (const { one, other, level } of region ? pairs : [])
+    for (const { one, other, level } of region && carried ? pairs : [])
     {
-        const box = boxAtLevel(region, level, one.width, one.height, one.depth);
+        const box = boxAtLevel(region, level, Math.min(one.width, other.width),
+            Math.min(one.height, other.height), Math.min(one.depth, other.depth));
         const offset = box.top * one.rowPitch + box.left * one.texelBytes;
         for (let slice = box.front; slice < box.back; slice++)
         {
             moves.push({
                 from: one.base + slice * one.slicePitch + offset,
-                to: other.base + slice * other.slicePitch + offset,
+                to: other.base + slice * other.slicePitch + box.top * other.rowPitch
+                    + box.left * other.texelBytes,
                 rowBytes: (box.right - box.left) * one.texelBytes,
                 rows: box.bottom - box.top,
                 fromPitch: one.rowPitch,
@@ -1467,5 +1498,8 @@ export function volumeUpdate(source, destination){
             });
         }
     }
-    return { moves, written: region ? pairs.map(pair=>pair.other) : [] };
+    return {
+        moves, written: region && carried ? pairs.map(pair=>pair.other) : [],
+        ...(bySize ? { overlapped, converted: !carried } : {}),
+    };
 }
