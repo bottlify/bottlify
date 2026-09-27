@@ -138,7 +138,13 @@ export function createBindingCache(options){
                 reused++;
                 return cached;
             }
-            const group = options.device.createBindGroup({ label, layout, entries });
+            // The entries are the caller's, and may be written over for its
+            // next draw: the group is made from a copy of them as they are.
+            const group = options.device.createBindGroup({
+                label,
+                layout,
+                entries: entries.map(entry=>({ binding: entry.binding, resource: entry.resource })),
+            });
             groups.set(key, group);
             created++;
             return group;

@@ -579,10 +579,12 @@ not for a call that sets the value already there. While that counter and the dra
 topology are what the last preparation was built from, the next draw reuses its vertex layout, its
 stage cascade, its texture and sampler bindings, its pipeline state and the pipeline itself, and the
 block of uniforms all but the fields the world transform reaches -- the world, world-view and
-world-view-projection matrices, and a lit draw's normal matrix. The world transform is the one state
-the counter deliberately ignores, because it moves between most draws of a frame; whoever reads the
-counter therefore owes the world matrix a fresh read on every draw, and nothing else derived from it
-may be kept. A texture whose bytes the program rewrites raises a counter of its own, so the upload
+world-view-projection matrices, and a lit draw's normal matrix -- and the lights' own values. The
+world transform is the one state the counter deliberately ignores, because it moves between most
+draws of a frame; whoever reads the counter therefore owes the world matrix a fresh read on every
+draw. The renderer compares it, the view and the projection with the matrices its products were last
+formed from, bit for bit, and forms world-view, world-view-projection and the two normal matrices
+again only when one differs, into arrays of its own. A texture whose bytes the program rewrites raises a counter of its own, so the upload
 owed to it still happens inside the next draw that samples it. When the counter has moved, the
 preparation is looked up by the state's values among those the frame has built. That name is made in
 two parts so that the common changes stay cheap: the device also publishes
@@ -592,8 +594,15 @@ every draw pays for a lookup of that number and the bindings, not for the whole 
 and stage states are named as words by their hash (compared in full on a hit) -- written into a
 scratch sized for them before the first, each map walked with `forEach` rather than `for...of`,
 which makes an array of every entry, and a state has some hundreds -- and the targets,
-transforms, material, lights and viewport are named once per change of the objects the device holds,
-which it replaces rather than writes into. The Direct3D 9 device publishes both counters the same
+transforms, material, the types of the enabled lights and the viewport are laid out as doubles and
+named by their bits the same way, once per change of the objects the device holds, which it replaces
+rather than writes into. What a light holds -- its colours, place, direction, range, attenuation and
+cone -- is not in the name, because a program may move its lights between draws and the shader is
+shaped by their types alone: a draw whose lights are not the ones its preparation's block was packed
+with packs them into it. The whole key, with the stride, the topology and each stage's texture, is a
+number, and none of this builds a string or an array on a draw. The lighting tallies of
+`diagnostics()` sample a light, the world, the material and the ambient only when they differ from
+what was sampled last. The Direct3D 9 device publishes both counters the same
 way: every setter goes through its one `setState`, and a state block applied, a reset and a new
 target or depth surface raise them as well; a value set again that is already there changes nothing.
 The Direct3D 7 device does not publish them yet and is prepared for on every draw.
