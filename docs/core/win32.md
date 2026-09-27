@@ -273,9 +273,10 @@ guest has no handler in the engine -- a handler cannot run the guest and wait fo
 synchronously -- and is `guestExport`, the x86 alone; its tests run the JavaScript with a
 stand-in for the call.
 
-In the guest now, compiled: `floor`, `toupper`, `strncmp`; hand-assembled: `qsort`
-(`guest-code.js`) and `_ftol`/`_ftol2`/`_ftol2_sse` (`math.js`). Each keeps the answers of the
-handler it replaced (see the divergences below).
+In the guest now: `floor`, `toupper`, `strncmp`, `qsort` (Shell's sort, the program's
+comparator called with a `call`) and `_ftol`/`_ftol2`/`_ftol2_sse` (ST0 popped, EDX:EAX; a
+handler only where the host can set EDX). Each keeps the answers of the handler it replaced (see
+the divergences below).
 
 ### The process model
 

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { createMsvcrtFunctions } from './functions.js';
 import { doubleSlots, fakeMemory, fakeVolume } from './harness.test.js';
 import { decodeAnsi } from '../kernel32/locale.js';
-import { QSORT_CODE } from './guest-code.js';
+import { COMPILED } from './inguest.x86.js';
 
 /**
  * A stand-in for guest memory, with the same contract as the real one.
@@ -573,12 +573,11 @@ test('every function is cdecl and declares the stack its arguments occupy', ()=>
 });
 
 test('qsort is code in the guest\'s msvcrt, which calls the comparator itself', ()=>{
-    // What it sorts, and how, is held in crt-inguest.itest.js on both engines.
+    // What it sorts, and how, is held in inguest.test.js and crt-inguest.itest.js.
     const fns = /** @type {any} */ (createMsvcrtFunctions({ ...fakeMemory(), write: ()=>{},
         callGuest: async()=>0 }));
     assert.equal('handler' in fns.qsort, false, 'no crossing into the host');
-    assert.deepEqual(fns.qsort.data(), QSORT_CODE);
-    assert.equal(QSORT_CODE[QSORT_CODE.length - 1], 0xc3, 'a function: it returns');
+    assert.deepEqual(fns.qsort.data(), COMPILED.qsort.code);
 });
 
 test('_set_error_mode hands back what was put in, and refuses a mode it has not got', ()=>{

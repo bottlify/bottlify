@@ -24,6 +24,8 @@
  *   i:N      a 32-bit integer (0x.. or decimal, negative too)
  *   d:X      a double on the stack, two slots
  *   x:X      a double pushed on the x87 stack before the call (_ftol, _CIsin)
+ *   c:       a pointer to a cdecl comparator of two signed dwords, in the
+ *            program's own code (qsort, bsearch)
  *
  *   :eax     the result in EAX (the default), or EDX:EAX
  *   :st0     a double left in ST0, which the loop pops
@@ -62,7 +64,7 @@ const CDECL_LIBRARIES = /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase)\.dll$/i
 /**
  * @typedef {{ kind: 's', text: string } | { kind: 'b', size: number }
  *     | { kind: 'i', value: number } | { kind: 'd', value: number }
- *     | { kind: 'x', value: number }} Arg
+ *     | { kind: 'x', value: number } | { kind: 'c' }} Arg
  */
 
 /**
@@ -92,9 +94,9 @@ export function parseSpec(text){
     while (rest.length > 0)
     {
         const kind = rest[0];
-        if (rest[1] !== ':' || !'sbidx'.includes(kind))
+        if (rest[1] !== ':' || !'sbidxc'.includes(kind))
         {
-            throw new Error(`an argument is s:, b:, i:, d: or x:, at "${rest}" in ${text}`);
+            throw new Error(`an argument is s:, b:, i:, d:, x: or c:, at "${rest}" in ${text}`);
         }
         rest = rest.slice(2);
         /** @type {string} */
@@ -124,6 +126,10 @@ export function parseSpec(text){
         {
             args.push({ kind, size: Number(value) });
         }
+        else if (kind === 'c')
+        {
+            args.push({ kind });
+        }
         else if (kind === 'i')
         {
             args.push({ kind, value: Number(value) });
@@ -149,6 +155,21 @@ const doubleWords = value=>{
     view.setFloat64(0, value, true);
     return [view.getUint32(0, true), view.getUint32(4, true)];
 };
+
+/** Where the comparator a `c:` argument points at sits in the program's code. */
+const COMPARATOR = 0x1c0;
+
+/**
+ * compare(a, b): the signed dwords at a and b, as -1, 0 or 1 -- a qsort
+ * comparator as a compiler makes one.
+ */
+const COMPARATOR_CODE = [
+    0x8b, 0x44, 0x24, 0x04, 0x8b, 0x00,     // mov eax, [esp+4]; mov eax, [eax]
+    0x8b, 0x4c, 0x24, 0x08, 0x8b, 0x09,     // mov ecx, [esp+8]; mov ecx, [ecx]
+    0x31, 0xd2, 0x39, 0xc8,                 // xor edx, edx; cmp eax, ecx
+    0x0f, 0x9f, 0xc2, 0x0f, 0x9c, 0xc0,     // setg dl; setl al
+    0x0f, 0xb6, 0xc0, 0x29, 0xc2, 0x89, 0xd0, 0xc3, // movzx eax, al; sub edx, eax; ...
+];
 
 /**
  * The loop: esi counts down from N; each turn loads the x87 arguments,
@@ -181,7 +202,7 @@ export function program(spec, n, withCall){
         imports,
         data,
         codeSize: 0x200,
-        code: ({ iat, at })=>{
+        code: ({ iat, at, code })=>{
             /** @type {number[]} */
             const turn = [];
             let slots = 0;
@@ -204,6 +225,11 @@ export function program(spec, n, withCall){
                 else if (arg.kind === 'i')
                 {
                     turn.push(0x68, ...u32(arg.value));                      // push value
+                    slots++;
+                }
+                else if (arg.kind === 'c')
+                {
+                    turn.push(0x68, ...u32(code(COMPARATOR)));               // push comparator
                     slots++;
                 }
                 else if (arg.kind === 'd')
@@ -241,12 +267,18 @@ export function program(spec, n, withCall){
             {
                 throw new Error(`${spec.text}: the loop's turn is too long for its jump`);
             }
-            return [
+            const loop = [
                 0xbe, ...u32(n),                                             // mov esi, N
                 ...turn,
                 0x4e, 0x75, 0x100 - back,                                    // dec esi; jnz
                 0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess')),
             ];
+            if (loop.length > COMPARATOR)
+            {
+                throw new Error(`${spec.text}: the loop runs into the comparator`);
+            }
+            return [...loop, ...new Array(COMPARATOR - loop.length).fill(0xcc),
+                ...COMPARATOR_CODE];
         },
     });
 }

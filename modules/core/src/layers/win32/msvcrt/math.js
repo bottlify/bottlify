@@ -19,7 +19,7 @@
  */
 
 import { readDouble, returningDouble } from './float.js';
-import { guestEntry } from './guest-code.js';
+import { guestEntry, guestExport } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 
@@ -27,6 +27,8 @@ import { COMPILED } from './inguest.x86.js';
  * @typedef {Object} MathHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {import('./float.js').FloatHost} fpu
+ * @property {(values: Record<string, number>) => void} [setRegisters]
+ *     Where `_ftol`'s handler puts EDX; without it `_ftol` is its x86 alone.
  */
 
 /** @param {number} value */
@@ -69,10 +71,6 @@ const BINARY = {
     _hypot: Math.hypot,
     hypot: Math.hypot,
 };
-
-/** `_ftol`'s body: fisttp qword [esp-8]; mov eax, [esp-8]; mov edx, [esp-4]; ret. */
-export const FTOL_CODE = Uint8Array.of(
-    0xdd, 0x4c, 0x24, 0xf8, 0x8b, 0x44, 0x24, 0xf8, 0x8b, 0x54, 0x24, 0xfc, 0xc3);
 
 /**
  * @param {MathHost} host
@@ -125,14 +123,11 @@ export function createMathFunctions(host){
     /**
      * __int64 _ftol(double value)
      *
-     * The cast every `(int)` in compiled C goes through: ST0 truncated toward
-     * zero into EDX:EAX, the integer indefinite for NaN and out of range. It is
-     * code in the guest's own module rather than a handler -- `fisttp` and the
-     * two halves read back -- so a cast costs an instruction, not a crossing,
-     * and the high half is there. `fisttp` stores below ESP, where the call has
-     * just written its return address: bytes the program gave up.
+     * Code in the guest's own module (`inguest.js`), so a cast costs a few
+     * instructions, not a crossing, and the high half is there.
      */
-    const ftol = { data: ()=>FTOL_CODE };
+    const ftol = host.setRegisters
+        ? guestEntry(inGuest._ftol, COMPILED._ftol, host) : guestExport(COMPILED._ftol);
 
     return {
         ...table,

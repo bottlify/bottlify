@@ -14,7 +14,7 @@ import { test } from 'node:test';
 import { COMPILED } from './inguest.x86.js';
 import * as sources from './inguest.js';
 import {
-    DATA, doubleWords, equivalence, random,
+    CALLBACK, DATA, doubleWords, equivalence, random,
 } from '../../../../scripts/guest-code/equivalence.mjs';
 
 const { same } = equivalence(COMPILED, sources);
@@ -92,5 +92,62 @@ test('strncmp: prefixes, counts, terminators and the upper half of the page', ()
         {
             same('strncmp', { stack: [left, right, count], memory: [[left, a], [right, b]] });
         }
+    }
+});
+
+test('_ftol: truncated into EDX:EAX, the argument popped, under any control word', ()=>{
+    const values = [0, -0, 0.5, -0.5, 3.75, -3.75, 2 ** 31, -(2 ** 31) - 0.5, 2 ** 32 + 7.25,
+        2 ** 40 + 0.5, -(2 ** 52) + 0.5, 2 ** 63, -(2 ** 63), 2 ** 62 * 1.5, 1e20, -1e20, NaN,
+        Infinity, -Infinity, 5e-324];
+    const next = random(4);
+    for (let i = 0; i < 40; i++)
+    {
+        values.push((next() - 2 ** 31) * 2 ** (next() % 40) / 7);
+    }
+    for (const control of CONTROLS)
+    {
+        for (const value of values)
+        {
+            same('_ftol', { x87: [value], control });
+        }
+    }
+});
+
+/**
+ * compare(a, b): the signed dwords at a and b, as -1, 0 or 1.
+ *
+ * mov eax, [esp+4]; mov eax, [eax]; mov ecx, [esp+8]; mov ecx, [ecx]; xor edx, edx;
+ * cmp eax, ecx; setg dl; setl al; movzx eax, al; sub edx, eax; mov eax, edx; ret
+ */
+const COMPARE = [0x8b, 0x44, 0x24, 0x04, 0x8b, 0x00, 0x8b, 0x4c, 0x24, 0x08, 0x8b, 0x09,
+    0x31, 0xd2, 0x39, 0xc8, 0x0f, 0x9f, 0xc2, 0x0f, 0x9c, 0xc0, 0x0f, 0xb6, 0xc0, 0x29, 0xc2,
+    0x89, 0xd0, 0xc3];
+
+/** @type {(memory: Uint8Array, fn: number, args: number[]) => number} */
+const compareJs = (memory, fn, [a, b])=>{
+    if (fn !== CALLBACK)
+    {
+        throw new Error(`called 0x${fn.toString(16)}`);
+    }
+    const view = new DataView(memory.buffer);
+    const left = view.getInt32(a, true);
+    const right = view.getInt32(b, true);
+    return left < right ? -1 : left > right ? 1 : 0;
+};
+
+test('qsort: the same order, through the same comparator calls, for any width', ()=>{
+    const next = random(5);
+    for (const [count, width] of [[0, 4], [1, 4], [2, 4], [5, 0], [7, 1], [40, 4], [33, 12],
+        [64, 8], [200, 4], [17, 6]])
+    {
+        const bytes = new Uint8Array(count * width + 16);
+        const view = new DataView(bytes.buffer);
+        for (let i = 0; i + 4 <= bytes.length; i += 4)
+        {
+            // Keys with repeats and both signs.
+            view.setInt32(i, (next() % 50) - 25, true);
+        }
+        same('qsort', { stack: [DATA, count, width, CALLBACK], memory: [[DATA, bytes]] },
+            { callback: COMPARE, call: compareJs });
     }
 });

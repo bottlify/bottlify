@@ -22,6 +22,8 @@ import { decodeAnsi } from '../kernel32/locale.js';
 /** @typedef {import('./guest-code.js').i32} i32 */
 /** @typedef {import('./guest-code.js').u32} u32 */
 /** @typedef {import('./guest-code.js').f64} f64 */
+/** @typedef {import('./guest-code.js').x87} x87 */
+/** @typedef {import('./guest-code.js').i64} i64 */
 
 /**
  * The order the comparisons put bytes in: each byte's character in the ANSI
@@ -84,4 +86,60 @@ export function strncmp({ u8 }, left, right, count){
         }
     }
     return 0;
+}
+
+/**
+ * __int64 _ftol(double value), and `_ftol2` and `_ftol2_sse` with it
+ *
+ * The cast every `(int)` in compiled C goes through: the value the caller
+ * left in ST0, popped, truncated toward zero into EDX:EAX -- the integer
+ * indefinite for NaN and out of range, as `fisttp` stores it.
+ *
+ * @guestCode cdecl
+ * @param {x87} value
+ * @returns {i64}
+ */
+export function _ftol(value){
+    return value;
+}
+
+/**
+ * void qsort(void *base, size_t num, size_t width,
+ *            int (*compare)(const void *, const void *))
+ *
+ * Shell's sort with the gaps halved, in place: the elements are swapped in
+ * the program's memory as they move, so the comparator is always handed the
+ * real addresses of the array as it stands. The order of equal elements is
+ * not kept -- the standard promises none, and msvcrt's own sort keeps none.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} base @param {u32} num @param {u32} width
+ * @param {u32} compare
+ */
+export function qsort({ u8, setU8, call }, base, num, width, compare){
+    if (width === 0)
+    {
+        return;
+    }
+    for (let gap = num >>> 1; gap !== 0; gap = gap >>> 1)
+    {
+        for (let i = gap; i < num; i++)
+        {
+            for (let j = i; j >= gap; j -= gap)
+            {
+                const a = (base + Math.imul(j - gap, width)) >>> 0;
+                const b = (base + Math.imul(j, width)) >>> 0;
+                if (call(compare, a, b) <= 0)
+                {
+                    break;
+                }
+                for (/** @type {u32} */ let k = 0; k < width; k++)
+                {
+                    const kept = u8(a + k);
+                    setU8(a + k, u8(b + k));
+                    setU8(b + k, kept);
+                }
+            }
+        }
+    }
 }

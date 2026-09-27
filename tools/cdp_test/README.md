@@ -232,7 +232,9 @@ prints the difference over N: for a host handler one call out of translated code
 and back, for an import that is code in the guest's own library that code. A SPEC is
 `DLL!name(arg,...)[:st0][@cdecl|@stdcall]`, each argument `s:text` (a pointer to the string,
 `s:"a,b"` with a comma), `b:N` (a pointer to N zeroed bytes), `i:N` (a dword), `d:X` (a double,
-two slots) or `x:X` (a double on the x87 stack, for `_ftol`); `:st0` pops a double result; the
+two slots), `x:X` (a double on the x87 stack, for `_ftol`) or `c:` (a pointer to a cdecl
+comparator of two signed dwords in the program's own code, for `qsort` and `bsearch`); `:st0`
+pops a double result; the
 convention is cdecl for the C runtimes and stdcall otherwise unless one is named. Several
 `--call`s are timed in one run; each is timed in every round, in turn with its loop, and printed
 as the median over the rounds with the spread and the bridge's count of host calls -- some

@@ -29,7 +29,7 @@ import {
     createWideFunctions, createWideClassificationFunctions, createMultiByteFunctions,
 } from './mbstring.js';
 import { createCxxFunctions } from './cxx.js';
-import { QSORT_CODE, guestEntry } from './guest-code.js';
+import { guestEntry, guestExport } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import { createMathFunctions } from './math.js';
@@ -621,12 +621,12 @@ export function createMsvcrtFunctions(host){
         /**
          * void qsort(void *base, size_t num, size_t width, int (*cmp)(const void*, const void*))
          *
-         * Code in the guest's own msvcrt (`QSORT_CODE`): the comparator is the
+         * Code in the guest's own msvcrt (`inguest.js`): the comparator is the
          * program's, and a sort on the host ran the guest from the host once a
          * comparison -- a hundred milliseconds a frame for Warcraft III's two
          * hundred translucent objects, sorted every frame by depth.
          */
-        qsort: { data: ()=>QSORT_CODE },
+        qsort: guestExport(COMPILED.qsort),
 
         /**
          * int sprintf(char *buffer, const char *format, ...)
@@ -975,6 +975,7 @@ export function createMsvcrtFunctions(host){
             ? createMathFunctions({
                 writeMemory: host.writeMemory,
                 fpu: host.fpu,
+                ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
             })
             : {}),
     };

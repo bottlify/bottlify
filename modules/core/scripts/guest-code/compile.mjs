@@ -667,6 +667,14 @@ class FunctionCompiler {
                 return;
             case 'IfStatement':
             {
+                const only = node.alternate ? null : this.jumpOnly(node.consequent);
+                if (only !== null)
+                {
+                    // `if (c) break;` and its kin: one conditional jump, not
+                    // a jump around a jump.
+                    this.branch(node.test, only, true);
+                    return;
+                }
                 const otherwise = a.fresh('else');
                 this.branch(node.test, otherwise, false);
                 this.statement(node.consequent);
@@ -711,6 +719,32 @@ class FunctionCompiler {
             default:
                 this.fail(node, `${describe(node)} is not in the subset`);
         }
+    }
+
+    /**
+     * Where a statement that is nothing but a jump goes: a `break`, a
+     * `continue`, or a void function's `return`; null for anything else.
+     *
+     * @param {any} node @returns {string | null}
+     */
+    jumpOnly(node){
+        const statement = node.type === 'BlockStatement' && node.body.length === 1
+            ? node.body[0] : node;
+        const loop = this.loops[this.loops.length - 1];
+        if (loop && !statement.label && statement.type === 'BreakStatement')
+        {
+            return loop.breakTo;
+        }
+        if (loop && !statement.label && statement.type === 'ContinueStatement')
+        {
+            return loop.continueTo;
+        }
+        if (statement.type === 'ReturnStatement' && !statement.argument
+            && this.returns === 'void' && this.fpu === 0 && this.inlining === 0)
+        {
+            return this.epilogue;
+        }
+        return null;
     }
 
     /** @param {any} node */
@@ -1217,12 +1251,13 @@ class FunctionCompiler {
      * Emits the left operand into EAX and answers the right as an operand:
      * a constant or a variable as it is, anything else in ECX. JavaScript's
      * order holds: the left is read first unless it is a constant or a
-     * variable, which nothing on the right can change.
+     * variable, which nothing on the right can change. For an operation
+     * that commutes, a left constant or variable is the operand as it is.
      *
-     * @param {any} left @param {any} right
+     * @param {any} left @param {any} right @param {boolean} [commutes]
      * @returns {{ right: Value | { where: 'ecx', type: Type }, leftType: Type }}
      */
-    pair(left, right){
+    pair(left, right, commutes = false){
         const a = this.a;
         const r = this.simple(right);
         if (r !== null)
@@ -1240,6 +1275,10 @@ class FunctionCompiler {
             this.integer(value, right, 'intish');
             this.integer(l, left, 'intish');
             this.toEax(value, right);
+            if (commutes)
+            {
+                return { right: l, leftType: value.type };
+            }
             a.emit(0x89, 0xc1);                                        // mov ecx, eax
             this.toEax(l, left);
             return { right: { where: 'ecx', type: value.type }, leftType: l.type };
@@ -1262,7 +1301,11 @@ class FunctionCompiler {
      */
     alu(op, { right }){
         const a = this.a;
-        if (right.where === 'imm')
+        if (right.where === 'imm' && op === ALU.cmp && right.value === 0)
+        {
+            a.emit(0x85, 0xc0);                                        // test eax, eax
+        }
+        else if (right.where === 'imm')
         {
             const imm = right.value | 0;
             a.emit(...fitsByte(imm) ? [0x83, 0xc0 | op << 3, imm & 0xff]
@@ -1530,7 +1573,7 @@ class FunctionCompiler {
             case '+':
             case '-':
             {
-                const pair = this.pair(node.left, node.right);
+                const pair = this.pair(node.left, node.right, op === '+');
                 this.alu(op === '+' ? ALU.add : ALU.sub, pair);
                 return { where: 'eax', type: 'intish' };
             }
@@ -1538,7 +1581,7 @@ class FunctionCompiler {
             case '|':
             case '^':
             {
-                const pair = this.pair(node.left, node.right);
+                const pair = this.pair(node.left, node.right, true);
                 this.alu(op === '&' ? ALU.and : op === '|' ? ALU.or : ALU.xor, pair);
                 return { where: 'eax', type: 'i32' };
             }
@@ -1602,7 +1645,7 @@ class FunctionCompiler {
             if (name === 'imul')
             {
                 this.arity(node, 2);
-                const pair = this.pair(node.arguments[0], node.arguments[1]);
+                const pair = this.pair(node.arguments[0], node.arguments[1], true);
                 const right = pair.right;
                 if (right.where === 'imm')
                 {
@@ -1727,6 +1770,13 @@ class FunctionCompiler {
             if (constant !== undefined)
             {
                 bound.set(param.name, { constant });
+                return;
+            }
+            // A variable is read where it is: nothing in an expression assigns.
+            const simple = this.simple(argument);
+            if (simple?.where === 'var')
+            {
+                bound.set(param.name, { ...simple.v, mutable: false });
                 return;
             }
             const value = this.expr(argument);
@@ -1912,6 +1962,19 @@ class FunctionCompiler {
         a.emit(0xf3, 0xa4);                                                // rep movsb
     }
 
+    /** `push` a constant or a variable. @param {Value} value */
+    pushOperand(value){
+        if (value.where === 'imm')
+        {
+            const imm = value.value | 0;
+            this.a.emit(...fitsByte(imm) ? [0x6a, imm & 0xff] : [0x68, ...le32(imm)]);
+        }
+        else if (value.where === 'var')
+        {
+            this.a.emit(0xff, ...frame(6, value.v.disp));                   // push [v]
+        }
+    }
+
     /**
      * call(fn, ...args): a cdecl call through a pointer, the arguments
      * evaluated in order into the space they are passed in.
@@ -1933,11 +1996,40 @@ class FunctionCompiler {
         {
             this.fail(node, 'call() passes at most thirty arguments');
         }
+        const bytes = args.length * 4;
+        const simple = [target, ...args].map(arg=>this.simple(arg));
+        if (simple.every(value=>value !== null))
+        {
+            // Constants and variables: nothing to evaluate in order, so each
+            // is pushed where it goes, the last first.
+            for (const [i, value] of [...simple].entries())
+            {
+                this.integer(/** @type {Value} */ (value), [target, ...args][i], 'typed');
+            }
+            for (const value of simple.slice(1).reverse())
+            {
+                this.pushOperand(/** @type {Value} */ (value));
+            }
+            const fn = /** @type {Value} */ (simple[0]);
+            if (fn.where === 'var')
+            {
+                a.emit(0xff, ...frame(2, fn.v.disp));                      // call [fn]
+            }
+            else
+            {
+                this.toEax(fn, target);
+                a.emit(0xff, 0xd0);                                        // call eax
+            }
+            if (bytes > 0)
+            {
+                a.emit(0x83, 0xc4, bytes);                                 // add esp, 4n
+            }
+            return;
+        }
         const fn = this.expr(target);
         this.integer(fn, target, 'typed');
         this.toEax(fn, target);
         a.emit(0x50);                                                      // push eax
-        const bytes = args.length * 4;
         if (bytes > 0)
         {
             a.emit(0x83, 0xec, bytes);                                     // sub esp, 4n
@@ -1967,6 +2059,30 @@ function ends(node){
             return node.body.length > 0 && ends(node.body[node.body.length - 1]);
         case 'IfStatement':
             return !!node.alternate && ends(node.consequent) && ends(node.alternate);
+        case 'ForStatement':
+        case 'WhileStatement':
+            // A loop with no test, and no break of its own, is left only by a return.
+            return (!node.test || node.test.type === 'Literal' && node.test.value === true)
+                && !breaks(node.body);
+        default:
+            return false;
+    }
+}
+
+/**
+ * Whether a loop's body breaks out of it: a `break` not inside a loop of its own.
+ *
+ * @param {any} node @returns {boolean}
+ */
+function breaks(node){
+    switch (node?.type)
+    {
+        case 'BreakStatement':
+            return true;
+        case 'BlockStatement':
+            return node.body.some(breaks);
+        case 'IfStatement':
+            return breaks(node.consequent) || !!node.alternate && breaks(node.alternate);
         default:
             return false;
     }
