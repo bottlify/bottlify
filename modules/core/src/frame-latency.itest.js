@@ -208,33 +208,28 @@ async function run(maxFrameLatency, engine){
     }
 }
 
-// Under cork only. The stand-in finishes its work on a host timer, and under
-// Node a run loop that yields through a message port reaches the timers
-// rarely: a loop of half-millisecond turns yielding that way saw a 3 ms
-// interval fire three times in two seconds. Under the emulator this program's
-// device finished four submits in fifteen seconds, which measures Node's event
-// loop rather than the bound; the wait itself is the bridge's, whatever the
-// engine.
-test('a program presenting faster than its device waits at Present while its other threads'
-    + ' run', { timeout: 60000 }, async t=>{
-    const bound = await run(undefined, 'cork');
-    t.diagnostic(`bound: ${JSON.stringify(bound)}`);
-    assert.equal(bound.code, 0);
-    assert.equal(bound.failed, 0, 'every present answered D3D_OK');
-    assert.ok(bound.latency, 'the run presenter counts frames in flight');
-    assert.equal(bound.latency.limit, 3, 'three by default');
-    assert.equal(bound.latency.frames, FRAMES);
-    assert.ok(bound.latency.held > 0, 'presents waited for the device');
-    assert.ok(bound.latency.peak <= 4,
-        `the device was never more than the bound and the waiting frame behind (${
-            bound.latency.peak})`);
-    assert.ok(/** @type {number} */ (bound.moved) > 0,
-        'the counting thread ran while a present waited');
-});
+for (const engine of /** @type {const} */ (['cork', 'emulator']))
+{
+    test(`a program presenting faster than its device waits at Present while its other threads`
+        + ` run, under ${engine}`, { timeout: 60000 }, async t=>{
+        const bound = await run(undefined, engine);
+        t.diagnostic(`bound: ${JSON.stringify(bound)}`);
+        assert.equal(bound.code, 0);
+        assert.equal(bound.failed, 0, 'every present answered D3D_OK');
+        assert.ok(bound.latency, 'the run presenter counts frames in flight');
+        assert.equal(bound.latency.limit, 3, 'three by default');
+        assert.equal(bound.latency.frames, FRAMES);
+        assert.ok(bound.latency.held > 0, 'presents waited for the device');
+        assert.ok(bound.latency.peak <= 4,
+            `the device was never more than the bound and the waiting frame behind (${
+                bound.latency.peak})`);
+        assert.ok(/** @type {number} */ (bound.moved) > 0,
+            'the counting thread ran while a present waited');
+    });
 
-test('with no bound the program runs ahead of its device and no present waits',
-    { timeout: 60000 }, async t=>{
-        const free = await run(0, 'cork');
+    test(`with no bound the program runs ahead of its device and no present waits, under ${
+        engine}`, { timeout: 60000 }, async t=>{
+        const free = await run(0, engine);
         t.diagnostic(`free: ${JSON.stringify(free)}`);
         assert.equal(free.code, 0);
         assert.equal(free.failed, 0);
@@ -242,3 +237,4 @@ test('with no bound the program runs ahead of its device and no present waits',
         assert.ok(free.latency.peak > 4, `${free.latency.peak} frames behind at most`);
         assert.equal(free.moved, 0, 'every present answered within its own call');
     });
+}

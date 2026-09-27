@@ -54,6 +54,10 @@ function buildLoopExe(){
             0x81, 0xe7, ...u32(0xff),            //     and edi, 0xff
             0x57,                                //     push edi
             0xff, 0x15, ...u32(iat('ExitProcess')), // call [ExitProcess]
+            // Never reached. Without it the emulator's compiler takes the
+            // data after the call for code and compiles it and the zeros
+            // after it with the loop (cpu.md, Limitations).
+            0xf4,                                //     hlt
         ],
     });
 }

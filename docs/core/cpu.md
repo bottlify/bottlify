@@ -1280,6 +1280,18 @@ to its end: tens of microseconds each, which ran a title's scene at 240 ns an in
   build could move them.
 - **Profiler counters** (`profile.*`, `instructionStats`, most of `jit.*`) exist only in a
   build of the emulator that carries them; they answer `null` or `-1` otherwise.
+- **The emulator's compiler takes what follows a call for code**, since the call may return
+  there, and follows it on through the page and the pages after. A program whose last call runs
+  into its data has the data and the zeros after it compiled with its code: a test program's
+  loop, `call [ExitProcess]` followed by its strings and import tables, made one function of
+  1.8 MB, 12 162 of its instructions `add [eax], al`, which V8 optimised once the loop made it
+  hot in 32.5 s of a background thread (`--trace-wasm-compilation-times`). A page pays that in the
+  background. Node waits for its background tasks whenever its event loop has nothing else to
+  wait on -- an asynchronous compile with nothing else pending, the process's exit -- so there
+  the next machine's `createApp` and the exit waited half a minute each. An `int3` after the call
+  does not end the decoding; a `hlt` or a `jmp` does, and the looping test programs in
+  `src/cork-programs.itest.js` and `src/hybrid-programs.itest.js` put a `hlt` after their last
+  call for that reason.
 - **Under `cork`, translated code relaxes what games do not observe** unless the engine's
   `precise` is set (`cork: { precise: true }`), which restores each of these exactly:
   - the x87 sticky exception flags: IE from an invalid operation, a NaN compared or an
