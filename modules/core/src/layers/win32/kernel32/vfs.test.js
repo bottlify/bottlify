@@ -160,14 +160,15 @@ test('a device is not a file, and saying so is not an exception', async()=>{
 
 test('a second writer gets in when the first agreed to share writing, and not otherwise', async()=>{
     const { fs, volume: vol } = await volume();
-    const first = vol.open('C:\pkg.dat', { read: true, write: true, create: true, shareWrite: true });
+    const first = vol.open('C:\\pkg.dat',
+        { read: true, write: true, create: true, shareWrite: true });
     assert.notEqual(first, null);
-    assert.notEqual(vol.open('C:\pkg.dat', { read: true, write: true, shareWrite: true }), null,
+    assert.notEqual(vol.open('C:\\pkg.dat', { read: true, write: true, shareWrite: true }), null,
         'both agreed to share writing');
 
-    const lone = vol.open('C:\lone.dat', { read: true, write: true, create: true });
+    const lone = vol.open('C:\\lone.dat', { read: true, write: true, create: true });
     assert.notEqual(lone, null);
-    assert.equal(vol.open('C:\lone.dat', { read: true, write: true, shareWrite: true }), null,
+    assert.equal(vol.open('C:\\lone.dat', { read: true, write: true, shareWrite: true }), null,
         'the first open shared no writing');
     await filesystemModule.dispose();
     void fs;
