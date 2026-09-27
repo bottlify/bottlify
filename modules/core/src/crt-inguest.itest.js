@@ -251,8 +251,7 @@ function buildMsvcrtAnswersExe(){
         args: at=>[...texts.map(text=>at(text)), ...rest], expected: [answer >>> 0] });
     strings('strcmp', ['euro', 'nbsp'], [], -1);
     strings('strcmp', ['top', 'euro'], [], 1);
-    // strncmp, unlike strcmp, answers the difference of the bytes in the
-    // 32-bit runtime (Wine's msvcrt string.c test_strcmp, outside _WIN64).
+    // 32-bit msvcrt.dll's strncmp answers the difference of the bytes, strcmp only the sign.
     strings('strncmp', ['euro', 'nbsp'], [1], 0x80 - 0xa0);
     strings('_stricmp', ['euro', 'nbsp'], [], -1);
     strings('_strnicmp', ['euro', 'nbsp'], [1], -1);
@@ -305,8 +304,7 @@ function buildPrototypeExe(){
     return buildCallsExe(calls, {
         abcX: cString('abcX'), abcY: cString('abcY'), ab: cString('ab'), abc: cString('abc'),
         abd: cString('abd'),
-        // 0x80, the euro sign in the ANSI page, sorts below 0xa5: bytes as unsigned
-        // chars, and strncmp answers their difference in the 32-bit runtime.
+        // 0x80, the euro sign in the ANSI page, sorts below 0xa5: bytes as unsigned chars.
         euro: [0x80, 0], yen: [0xa5, 0],
     });
 }
