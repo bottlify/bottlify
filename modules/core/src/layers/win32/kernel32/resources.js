@@ -23,6 +23,8 @@
 /** Codes this surface reports. */
 const ERROR_RESOURCE_DATA_NOT_FOUND = 1812;
 const ERROR_RESOURCE_TYPE_NOT_FOUND = 1813;
+const ERROR_RESOURCE_NAME_NOT_FOUND = 1814;
+const ERROR_RESOURCE_LANG_NOT_FOUND = 1815;
 
 /**
  * A pointer below this cannot be a string, so it is an integer identifier.
@@ -46,6 +48,9 @@ const MAX_NAME = 260;
 /**
  * @typedef {Object} ResourceHost
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, maxLength: number) => string} [readWideString]
+ *           For the W calls' names. Absent, a W call finds by integer
+ *           identifier alone.
  * @property {(code: number) => void} setLastError
  * @property {(instance: number, type: number | string, name: number | string,
  *            language?: number | null) => { rva: number, size: number } | null} findResource
@@ -85,14 +90,35 @@ export function createResourceFunctions(host){
     /**
      * A resource type or name argument. Below 64 KiB it is an integer; above,
      * a pointer to a string. Reading the wrong one of the two turns a numeric
-     * type into a wild pointer.
+     * type into a wild pointer. A string that is `#` and decimal digits names
+     * that integer, which is how a resource script's numeric id travels as
+     * text.
      *
      * @param {number} value
-     * @returns {number | string}
+     * @param {boolean} [wide]
+     * @returns {number | string | null}  null for a wide name there is no reader for
      */
-    const identifier = value=>{
+    const identifier = (value, wide = false)=>{
         const raw = value >>> 0;
-        return raw < MAX_INTEGER_RESOURCE ? raw : host.readCString(raw, MAX_NAME);
+        if (raw < MAX_INTEGER_RESOURCE)
+        {
+            return raw;
+        }
+        if (wide && !host.readWideString)
+        {
+            return null;
+        }
+        const text = wide
+            ? /** @type {NonNullable<typeof host.readWideString>} */ (host.readWideString)(
+                raw, MAX_NAME)
+            : host.readCString(raw, MAX_NAME);
+        const numbered = /^#(\d+)$/.exec(text);
+        if (numbered)
+        {
+            const number = Number(numbered[1]);
+            return number < MAX_INTEGER_RESOURCE ? number : text;
+        }
+        return text;
     };
 
     /** @param {number} code */
@@ -101,20 +127,46 @@ export function createResourceFunctions(host){
         return 0;
     };
 
+    /** @param {number | string} key @param {number | string | null} asked */
+    const sameKey = (key, asked)=>typeof key === 'string' && typeof asked === 'string'
+        ? key.toLowerCase() === asked.toLowerCase()
+        : key === asked;
+
+    /**
+     * Which level of the tree a failed lookup stopped at: Windows says whether
+     * the type, the name within it or the language was missing, and a program
+     * that falls back from one language to another reads which.
+     *
+     * @param {number} instance @param {number | string | null} type
+     * @param {number | string | null} name
+     */
+    const missing = (instance, type, name)=>{
+        const listed = host.listResources?.(instance);
+        if (!listed)
+        {
+            return ERROR_RESOURCE_TYPE_NOT_FOUND;
+        }
+        const ofType = listed.filter(entry=>sameKey(entry.type, type));
+        if (ofType.length === 0)
+        {
+            return ERROR_RESOURCE_TYPE_NOT_FOUND;
+        }
+        return ofType.some(entry=>sameKey(entry.name, name))
+            ? ERROR_RESOURCE_LANG_NOT_FOUND : ERROR_RESOURCE_NAME_NOT_FOUND;
+    };
+
     /**
      * @param {number} instance @param {number} type @param {number} name
-     * @param {number | null} language
+     * @param {number | null} language @param {boolean} [wide]
      */
-    const find = (instance, type, name, language)=>{
-        const entry = host.findResource(
-            instance >>> 0, identifier(type), identifier(name), language);
+    const find = (instance, type, name, language, wide = false)=>{
+        const wantedType = identifier(type, wide);
+        const wantedName = identifier(name, wide);
+        const entry = wantedType === null || wantedName === null ? null
+            : host.findResource(instance >>> 0, wantedType, wantedName, language);
         if (!entry)
         {
-            // Windows distinguishes a type nothing has from a name missing
-            // within a type that exists. We cannot tell the two apart from
-            // here, and the one a caller acts on is the general "not found",
-            // so that is what is reported.
-            return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
+            return fail(missing(instance >>> 0, wantedType, wantedName));
         }
         const handle = nextHandle;
         nextHandle += 4;
@@ -122,10 +174,51 @@ export function createResourceFunctions(host){
         return handle;
     };
 
-    /** @param {number | string} key @param {number | string} asked */
-    const sameKey = (key, asked)=>typeof key === 'string' && typeof asked === 'string'
-        ? key.toLowerCase() === asked.toLowerCase()
-        : key === asked;
+    /**
+     * EnumResourceLanguages, either width.
+     *
+     * @param {number[]} args @param {boolean} wide
+     * @returns {number | Promise<number>}
+     */
+    const enumLanguages = ([instance, type, name, callback, lParam], wide)=>{
+        if (!host.call || (callback >>> 0) === 0)
+        {
+            return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
+        }
+        const wantedType = identifier(type, wide);
+        const wantedName = identifier(name, wide);
+        const languages = (host.listResources?.(instance >>> 0) ?? [])
+            .filter(entry=>sameKey(entry.type, wantedType)
+                && sameKey(entry.name, wantedName))
+            .map(entry=>entry.language);
+        if (languages.length === 0)
+        {
+            return fail(missing(instance >>> 0, wantedType, wantedName));
+        }
+        const thread = host.callerThread?.();
+        const call = /** @type {NonNullable<typeof host.call>} */ (host.call);
+        /** @param {number} at @returns {number | Promise<number>} */
+        const next = at=>{
+            if (at === languages.length)
+            {
+                return 1;
+            }
+            const answer = call(callback >>> 0,
+                [instance >>> 0, type >>> 0, name >>> 0, languages[at], lParam >>> 0],
+                thread);
+            /** @param {number} went */
+            const then = went=>((went | 0) === 0 ? 1 : next(at + 1));
+            return typeof answer === 'number' ? then(answer) : answer.then(then);
+        };
+        return next(0);
+    };
+
+    /**
+     * A language of zero, MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL), is none.
+     *
+     * @param {number} value
+     */
+    const languageOf = value=>((value & 0xffff) === 0 ? null : value & 0xffff);
 
     return {
         /**
@@ -142,7 +235,18 @@ export function createResourceFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([instance, type, name, language])=>
-                find(instance, type, name, (language & 0xffff) === 0 ? null : language & 0xffff),
+                find(instance, type, name, languageOf(language)),
+        },
+
+        /**
+         * HRSRC FindResourceExW(HMODULE hModule, LPCWSTR lpType, LPCWSTR lpName,
+         *                       WORD wLanguage)
+         */
+        FindResourceExW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([instance, type, name, language])=>
+                find(instance, type, name, languageOf(language), true),
         },
 
         /**
@@ -158,38 +262,17 @@ export function createResourceFunctions(host){
         EnumResourceLanguagesA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([instance, type, name, callback, lParam])=>{
-                if (!host.call || (callback >>> 0) === 0)
-                {
-                    return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
-                }
-                const wantedType = identifier(type);
-                const wantedName = identifier(name);
-                const languages = (host.listResources?.(instance >>> 0) ?? [])
-                    .filter(entry=>sameKey(entry.type, wantedType)
-                        && sameKey(entry.name, wantedName))
-                    .map(entry=>entry.language);
-                if (languages.length === 0)
-                {
-                    return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
-                }
-                const thread = host.callerThread?.();
-                const call = /** @type {NonNullable<typeof host.call>} */ (host.call);
-                /** @param {number} at @returns {number | Promise<number>} */
-                const next = at=>{
-                    if (at === languages.length)
-                    {
-                        return 1;
-                    }
-                    const answer = call(callback >>> 0,
-                        [instance >>> 0, type >>> 0, name >>> 0, languages[at], lParam >>> 0],
-                        thread);
-                    /** @param {number} went */
-                    const then = went=>((went | 0) === 0 ? 1 : next(at + 1));
-                    return typeof answer === 'number' ? then(answer) : answer.then(then);
-                };
-                return next(0);
-            },
+            handler: args=>enumLanguages(args, false),
+        },
+
+        /**
+         * BOOL EnumResourceLanguagesW(HMODULE hModule, LPCWSTR lpType, LPCWSTR lpName,
+         *                             ENUMRESLANGPROCW lpEnumFunc, LONG_PTR lParam)
+         */
+        EnumResourceLanguagesW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>enumLanguages(args, true),
         },
 
         /**
@@ -203,6 +286,13 @@ export function createResourceFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([instance, name, type])=>find(instance, type, name, null),
+        },
+
+        /** HRSRC FindResourceW(HMODULE hModule, LPCWSTR lpName, LPCWSTR lpType) */
+        FindResourceW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([instance, name, type])=>find(instance, type, name, null, true),
         },
 
         /** DWORD SizeofResource(HMODULE hModule, HRSRC hResInfo) */

@@ -111,6 +111,15 @@ test('an SRW lock is taken, shared, and handed on to its waiters in arrival orde
     assert.equal(fns.TryAcquireSRWLockExclusive.handler([LOCK]), 1);
 });
 
+test('releasing a lock the program set by hand clears the word', ()=>{
+    // Wine's kernel32 sync test_srwlock_quirk: a word of 1 released
+    // exclusively is 0, though no acquire was ever seen.
+    const { fns, bytes, word } = setup();
+    new DataView(bytes.buffer).setUint32(LOCK, 1, true);
+    fns.ReleaseSRWLockExclusive.handler([LOCK]);
+    assert.equal(word(LOCK), 0);
+});
+
 test('a reader does not overtake a writer already waiting', ()=>{
     const { fns, threads, woken, run } = setup();
     fns.AcquireSRWLockShared.handler([LOCK]);

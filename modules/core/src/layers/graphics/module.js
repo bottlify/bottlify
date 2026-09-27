@@ -492,6 +492,9 @@ export function createGraphicsModule(){
                     // WGL's refusals are read with GetLastError.
                     /** @param {number} code */
                     setLastError: code=>win32.setLastError?.(code),
+                    // A context is current on one thread at a time, and another
+                    // thread's MakeCurrent or DeleteContext of it is ERROR_BUSY.
+                    currentThread: ()=>bridge.callerThread()?.id ?? 0,
                     // On the configuration rather than the device handle: it
                     // concerns the build that has no device.
                     raster: config?.raster,

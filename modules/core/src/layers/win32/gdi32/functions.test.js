@@ -2219,3 +2219,34 @@ test('GetObjectType names each kind of GDI object, a context by whether it is in
     assert.equal(fns.GetObjectType.handler([fns.CreateRectRgn.handler([0, 0, 4, 4])]), 8);
     assert.equal(fns.GetObjectType.handler([0x9999]), 0, 'no such object');
 });
+
+test('D3DKMTCreateDCFromMemory makes a memory DC over the program\'s own pixels', ()=>{
+    const context = setup();
+    const { fns, memory } = context;
+    const DESC = 0x2000;
+    const PIXELS = 0x2400;
+    const view = new DataView(memory.bytes.buffer);
+    // pMemory, Format (A8R8G8B8), Width, Height, Pitch, hDeviceDc, pColorTable
+    [PIXELS, 21, 4, 4, 16, 0, 0].forEach((value, at)=>view.setUint32(DESC + at * 4, value, true));
+    assert.equal(fns.D3DKMTCreateDCFromMemory.handler([DESC]), 0);
+    const hdc = view.getUint32(DESC + 28, true);
+    const bitmap = view.getUint32(DESC + 32, true);
+    assert.equal(fns.GetObjectType.handler([hdc]), 10, 'OBJ_MEMDC');
+    assert.equal(fns.GetCurrentObject.handler([hdc, OBJ_BITMAP]), bitmap);
+    const DIB = 0x3000;
+    assert.equal(fns.GetObjectA.handler([bitmap, 24, DIB]), 24);
+    assert.equal(view.getUint32(DIB + 20, true), PIXELS, 'bmBits is the program\'s memory');
+
+    view.setUint32(DESC + 4, 99, true);
+    assert.equal(fns.D3DKMTCreateDCFromMemory.handler([DESC]), 0xc000000d, 'no such format');
+    view.setUint32(DESC + 4, 21, true);
+    view.setUint32(DESC + 16, 8, true);
+    assert.equal(fns.D3DKMTCreateDCFromMemory.handler([DESC]), 0xc000000d, 'a pitch too short');
+
+    view.setUint32(DESC + 0x40, hdc, true);
+    view.setUint32(DESC + 0x44, bitmap, true);
+    assert.equal(fns.D3DKMTDestroyDCFromMemory.handler([DESC + 0x40]), 0);
+    assert.equal(fns.GetObjectType.handler([hdc]), 0, 'the DC is gone');
+    assert.equal(fns.GetObjectType.handler([bitmap]), 0, 'and the bitmap');
+    assert.ok(!context.surfaces.freed.includes(PIXELS), 'the pixels stay the program\'s');
+});

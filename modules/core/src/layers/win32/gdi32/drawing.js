@@ -159,6 +159,8 @@ const isRle = header=>(header.compression === 1 && header.bitCount === 8)
     || (header.compression === 2 && header.bitCount === 4);
 
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_PIXEL_FORMAT = 2000;
 /** Bits per pixel the DIB decoder reads. */
 const DIB_BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 
@@ -392,6 +394,12 @@ export function createDrawingFunctions(
      * because the object table it is given has to be this one -- a second copy
      * would resolve a pen handle to a different pen.
      */
+    /** A refusal the program reads with GetLastError. @param {number} code */
+    const refuse = code=>{
+        host.setLastError?.(code);
+        return 0;
+    };
+
     /** @type {any} */
     let drawing;
     const draw = ()=>{
@@ -1806,7 +1814,11 @@ export function createDrawingFunctions(
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, descriptor])=>{
-                if (!dcOf(handle) || !services.pixelFormat || (descriptor >>> 0) === 0)
+                if (!dcOf(handle))
+                {
+                    return refuse(ERROR_INVALID_HANDLE);
+                }
+                if (!services.pixelFormat || (descriptor >>> 0) === 0)
                 {
                     return 0;
                 }
@@ -1826,7 +1838,11 @@ export function createDrawingFunctions(
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([handle, index, bytes, out])=>{
-                if (!dcOf(handle) || !services.pixelFormat)
+                if (!dcOf(handle))
+                {
+                    return refuse(ERROR_INVALID_HANDLE);
+                }
+                if (!services.pixelFormat)
                 {
                     return 0;
                 }
@@ -1849,9 +1865,16 @@ export function createDrawingFunctions(
         GetPixelFormat: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>(dcOf(handle) && services.pixelFormat
-                ? services.pixelFormat.get(handle >>> 0) | 0
-                : 0),
+            handler: ([handle])=>{
+                // A handle that is no context has no format: Windows answers
+                // ERROR_INVALID_PIXEL_FORMAT here, where its siblings say the
+                // handle is bad (Wine's opengl32 test_setpixelformat).
+                if (!dcOf(handle))
+                {
+                    return refuse(ERROR_INVALID_PIXEL_FORMAT);
+                }
+                return services.pixelFormat ? services.pixelFormat.get(handle >>> 0) | 0 : 0;
+            },
         },
 
         /**
@@ -1864,8 +1887,14 @@ export function createDrawingFunctions(
         SetPixelFormat: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, format])=>(dcOf(handle) && services.pixelFormat
-                && services.pixelFormat.set(handle >>> 0, format | 0) ? 1 : 0),
+            handler: ([handle, format])=>{
+                if (!dcOf(handle))
+                {
+                    return refuse(ERROR_INVALID_HANDLE);
+                }
+                return services.pixelFormat && services.pixelFormat.set(handle >>> 0, format | 0)
+                    ? 1 : 0;
+            },
         },
 
         /**
@@ -1882,7 +1911,11 @@ export function createDrawingFunctions(
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                if (!dcOf(handle) || !services.swapBuffers)
+                if (!dcOf(handle))
+                {
+                    return refuse(ERROR_INVALID_HANDLE);
+                }
+                if (!services.swapBuffers)
                 {
                     return 0;
                 }

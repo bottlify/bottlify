@@ -454,8 +454,9 @@ export function createSurface(options){
  *
  * @param {{ width: number, height: number, bitCount: number, bits: number,
  *           topDown?: boolean, palette?: number[], format?: string,
- *           compression?: number, bitfields?: number[] }} attributes
- *        A bitmap object's own attributes.
+ *           compression?: number, bitfields?: number[], pitch?: number }} attributes
+ *        A bitmap object's own attributes; `pitch` when the rows are laid out
+ *        at a stride of the program's choosing rather than a DIB's.
  * @param {Uint8Array} memory   Guest memory, or the window of it holding the bits.
  * @param {number} [base]       The guest address `memory` starts at.
  * @returns {import("./contract.js").Surface | null}
@@ -471,7 +472,8 @@ export function surfaceForDibSection(attributes, memory, base = 0){
         width: attributes.width,
         height: attributes.height,
         topDown: attributes.topDown === true,
-        pitch: dibPitch(attributes.width, depth),
+        // A section over memory the program laid out itself says its stride.
+        pitch: attributes.pitch ?? dibPitch(attributes.width, depth),
         bytes: memory,
         offset: (attributes.bits >>> 0) - base,
         bitCount: depth,

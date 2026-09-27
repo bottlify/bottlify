@@ -36,6 +36,8 @@ const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
+/** ReadProcessMemory of a range nothing is at. */
+const ERROR_PARTIAL_COPY = 299;
 
 /** dwCreationFlags, the one bit that changes what a create does here. */
 const CREATE_SUSPENDED = 0x00000004;
@@ -500,6 +502,71 @@ export function createSpawnFunctions(host){
                     writeDword(written >>> 0, count);
                 }
                 host.setLastError(ERROR_SUCCESS);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL ReadProcessMemory(HANDLE hProcess, LPCVOID lpBaseAddress,
+         *   LPVOID lpBuffer, SIZE_T nSize, SIZE_T *lpNumberOfBytesRead)
+         *
+         * Against the running process this reads memory. A child's image is
+         * not mapped yet, so what it holds is the bytes written into it and
+         * nothing else: a read inside those answers them, the last write to a
+         * byte winning as it would in memory, and any other is ERROR_PARTIAL_COPY,
+         * what Windows says of memory it cannot read.
+         */
+        ReadProcessMemory: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, base, buffer, size, read])=>{
+                const count = size >>> 0;
+                const from = base >>> 0;
+                /** @type {Uint8Array | null} */
+                let bytes;
+                if ((handle >>> 0) === CURRENT_PROCESS)
+                {
+                    bytes = count === 0 ? new Uint8Array(0) : host.readMemory(from, count).slice();
+                }
+                else
+                {
+                    const target = processOf(handle);
+                    if (!target)
+                    {
+                        host.setLastError(ERROR_INVALID_HANDLE);
+                        return 0;
+                    }
+                    const gathered = new Uint8Array(count);
+                    const covered = new Uint8Array(count);
+                    for (const { address, bytes: patch } of target.patches ?? [])
+                    {
+                        const start = Math.max(address, from);
+                        const end = Math.min(address + patch.length, from + count);
+                        for (let at = start; at < end; at++)
+                        {
+                            gathered[at - from] = patch[at - address];
+                            covered[at - from] = 1;
+                        }
+                    }
+                    bytes = covered.every(byte=>byte === 1) ? gathered : null;
+                }
+                if (bytes === null)
+                {
+                    if ((read >>> 0) !== 0)
+                    {
+                        writeDword(read >>> 0, 0);
+                    }
+                    host.setLastError(ERROR_PARTIAL_COPY);
+                    return 0;
+                }
+                if (count > 0)
+                {
+                    host.writeMemory(buffer >>> 0, bytes);
+                }
+                if ((read >>> 0) !== 0)
+                {
+                    writeDword(read >>> 0, count);
+                }
                 return 1;
             },
         },

@@ -1142,3 +1142,42 @@ test('VirtualQuery at or above the top of user address space is refused, not ans
             'an address above the limit is refused outright, not answered as a huge free region');
         assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
     });
+
+test('VirtualProtect with nowhere to write the old protection fails with ERROR_NOACCESS', ()=>{
+    // Wine's kernel32 virtual test_VirtualProtect: the old protection is not
+    // optional, and nothing is changed without it.
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost(RESERVING_ARENA), setLastError: (/** @type {number} */ code)=>
+        errors.push(code) };
+    const fns = createHeapFunctions(host);
+    const base = fns.VirtualAlloc.handler([0, 4096, 0x3000, 0x04]);
+    assert.notEqual(base, 0);
+    assert.equal(fns.VirtualProtect.handler([base, 4096, 0x02, 0]), 0);
+    assert.deepEqual(errors, [998]);
+});
+
+test('the Ex forms act on the running process, and refuse any other', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost(RESERVING_ARENA), setLastError: (/** @type {number} */ code)=>
+        errors.push(code) };
+    const fns = createHeapFunctions(host);
+    const self = 0xffffffff;
+
+    const base = fns.VirtualAllocEx.handler([self, 0, 0x8000, 0x1000, 0x40]);
+    assert.notEqual(base, 0);
+    assert.equal(fns.VirtualQueryEx.handler([self, base, 0x100, 28]), 28);
+    assert.equal(fns.VirtualProtectEx.handler([self, base, 4096, 0x04, 0x200]), 1);
+    assert.equal(fns.VirtualFreeEx.handler([0, base, 0, 0x8000]), 0, 'no process at all');
+    assert.equal(fns.VirtualAllocEx.handler([0, 0, 0x8000, 0x1000, 0x40]), 0);
+    assert.deepEqual(errors, [6, 6], 'ERROR_INVALID_HANDLE, as Windows says for NULL');
+    assert.equal(fns.VirtualFreeEx.handler([self, base, 0, 0x8000]), 1);
+
+    assert.equal(fns.VirtualAllocEx.handler([0x44, 0, 0x8000, 0x1000, 0x40]), 0,
+        'a child\'s address space does not exist before it runs');
+    assert.equal(fns.VirtualAllocEx.argBytes, 20);
+    assert.equal(fns.VirtualFreeEx.argBytes, 16);
+    assert.equal(fns.VirtualProtectEx.argBytes, 20);
+    assert.equal(fns.VirtualQueryEx.argBytes, 16);
+});

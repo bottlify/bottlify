@@ -1099,3 +1099,71 @@ test('an operation still pending is incomplete without bWait, and waited for wit
         'with no event the file is waited on, and it must be a handle');
     assert.equal(parts.errors.at(-1), 6);
 });
+
+test('a wait on the running process times out wherever the kernel keeps process records', ()=>{
+    // The records the kernel keeps are children's, and a record that is not
+    // STILL_ACTIVE (259) is finished: the running process is none of them.
+    const { fns, kernel } = setup();
+    /** @type {any} */ (kernel).processes = {
+        finished: (/** @type {any} */ record)=>record.exitCode !== 259,
+    };
+    assert.equal(fns.WaitForSingleObject.handler([0xffffffff, 0]), 0x102);
+});
+
+test('a handle that names nothing fails the wait with ERROR_INVALID_HANDLE', ()=>{
+    const { fns, errors } = setup();
+    for (const tag of [0, 1, 2, 3])
+    {
+        assert.equal(fns.WaitForSingleObject.handler([0xdeadbee0 + tag, 0]), 0xffffffff);
+    }
+    assert.deepEqual(errors, [ERROR_INVALID_HANDLE, ERROR_INVALID_HANDLE,
+        ERROR_INVALID_HANDLE, ERROR_INVALID_HANDLE]);
+});
+
+test('the low two bits of a handle are the program\'s, and a lookup ignores them', ()=>{
+    const { fns, errors } = setup();
+    const unset = fns.CreateEventA.handler([0, 1, 0, 0]);
+    const set = fns.CreateEventA.handler([0, 1, 1, 0]);
+    errors.length = 0;
+    for (const tag of [1, 2, 3])
+    {
+        assert.equal(fns.WaitForSingleObject.handler([unset + tag, 0]), 0x102);
+        assert.equal(fns.WaitForSingleObject.handler([set + tag, 0]), 0);
+    }
+    assert.equal(fns.SetEvent.handler([unset + 3]), 1);
+    assert.equal(fns.WaitForSingleObject.handler([unset, 0]), 0);
+    assert.deepEqual(errors, [], 'and nothing touched the last error');
+});
+
+test('the pseudo-handles that are no waitable object fail, and the standard streams are ready',
+    ()=>{
+        const { fns, errors } = setup();
+        // (HANDLE)~2 and the three token pseudo-handles, -4 to -6.
+        for (const handle of [0xfffffffd, 0xfffffffc, 0xfffffffb, 0xfffffffa])
+        {
+            assert.equal(fns.WaitForSingleObject.handler([handle, 0]), 0xffffffff);
+        }
+        assert.equal(errors.length, 4);
+        assert.ok(errors.every(code=>code === ERROR_INVALID_HANDLE));
+        // STD_INPUT_HANDLE and its siblings stand for the streams themselves,
+        // as do the console handles GetStdHandle answers.
+        for (const handle of [0xfffffff6, 0xfffffff5, 0xfffffff4, 1, 2, 3])
+        {
+            assert.equal(fns.WaitForSingleObject.handler([handle, 0]), 0);
+        }
+    });
+
+test('an Open call with no name at all is ERROR_INVALID_PARAMETER, not "no such thing"', ()=>{
+    // Wine's kernel32 sync test asks each Open*A and Open*W with a NULL name.
+    const { fns, errors } = setup({ 0x500: 'unused' });
+    for (const open of /** @type {const} */ (['OpenMutexA', 'OpenMutexW', 'OpenEventA',
+        'OpenEventW', 'OpenSemaphoreA', 'OpenSemaphoreW', 'OpenWaitableTimerA',
+        'OpenWaitableTimerW']))
+    {
+        assert.equal(fns[open].handler([0x1f0003, 0, 0]), 0, open);
+    }
+    assert.equal(errors.length, 8);
+    assert.ok(errors.every(code=>code === ERROR_INVALID_PARAMETER));
+    assert.equal(fns.OpenEventA.handler([0x1f0003, 0, 0x500]), 0);
+    assert.equal(errors.at(-1), ERROR_FILE_NOT_FOUND, 'a name nothing holds');
+});

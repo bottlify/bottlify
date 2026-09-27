@@ -472,3 +472,29 @@ test('an ordinary child is still held pending for the replacement', ()=>{
     assert.equal(host.kernel.processes.all()[0].completed, false);
     assert.equal(host.kernel.processes.pending()?.imagePath, 'C:\\App\\game.exe');
 });
+
+test('ReadProcessMemory reads this process, and of a child only what was written into it', ()=>{
+    const host = fakeHost({ files: ['C:\\App\\child.exe'] });
+    const fns = createSpawnFunctions(host);
+    host.bytes.set([5, 6, 7, 8], 0x400);
+    assert.equal(fns.ReadProcessMemory.handler([CURRENT_PROCESS, 0x400, 0x600, 4, 0x700]), 1);
+    assert.deepEqual([...host.bytes.slice(0x600, 0x604)], [5, 6, 7, 8]);
+    assert.equal(host.view.getUint32(0x700, true), 4);
+
+    fns.CreateProcessA.handler(
+        [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, CREATE_SUSPENDED, 0, 0, 0, 0x300]);
+    const child = pending(host, { suspended: true });
+    host.bytes.set([0x11, 0x22, 0x33, 0x44], 0x400);
+    fns.WriteProcessMemory.handler([child.handle, 0x401000, 0x400, 4, 0]);
+    assert.equal(fns.ReadProcessMemory.handler([child.handle, 0x401001, 0x800, 2, 0x700]), 1);
+    assert.deepEqual([...host.bytes.slice(0x800, 0x802)], [0x22, 0x33],
+        'the bytes it was handed, which is all of it there is yet');
+
+    host.errors.length = 0;
+    assert.equal(fns.ReadProcessMemory.handler([child.handle, 0x402000, 0x800, 2, 0x700]), 0);
+    assert.equal(host.view.getUint32(0x700, true), 0);
+    assert.deepEqual(host.errors, [299], 'ERROR_PARTIAL_COPY: nothing is mapped there yet');
+    assert.equal(fns.ReadProcessMemory.handler([0x1234, 0x400, 0x800, 2, 0]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_HANDLE);
+    assert.equal(fns.ReadProcessMemory.argBytes, 20);
+});

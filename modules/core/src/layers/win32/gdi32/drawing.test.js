@@ -1235,3 +1235,29 @@ test('the display\'s ramp is the graphics layer\'s: set there, read back from th
     assert.equal(fns.GetDeviceCaps.handler([hdc, COLORMGMTCAPS]), 0,
         'claimed only where a ramp reaches the picture');
 });
+
+test('the pixel-format calls on a handle that is no DC say why with the last error', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const graphics = fakeDrawing();
+    const memory = fakeMemory();
+    const fns = /** @type {any} */ (createGdiFunctions({
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
+            memory.writeMemory(a, d),
+        readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
+        handles: fakeHandles(),
+        surfaces: fakeSurfaces(),
+        graphics: graphics.services,
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+    }).table);
+    const STALE = 0x9999;
+    assert.equal(fns.GetPixelFormat.handler([STALE]), 0);
+    assert.equal(fns.SetPixelFormat.handler([STALE, 1, 0]), 0);
+    assert.equal(fns.DescribePixelFormat.handler([STALE, 0, 0, 0]), 0);
+    assert.equal(fns.ChoosePixelFormat.handler([STALE, 0x100]), 0);
+    assert.equal(fns.SwapBuffers.handler([STALE]), 0);
+    // Wine's opengl32 test_setpixelformat: the format query alone says the
+    // format is bad; the rest say the handle is.
+    assert.deepEqual(errors, [2000, 6, 6, 6, 6]);
+});

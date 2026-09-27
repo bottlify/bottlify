@@ -8,6 +8,7 @@ import { enterCode, leaveCode, tryEnterCode } from './critical.js';
 import { INTERLOCKED } from './interlocked.js';
 import { createSlimSync } from './slimsync.js';
 import { createSListFunctions } from './slist.js';
+import { isStandardHandle, untagged } from './handle-tags.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -41,11 +42,14 @@ import { createSListFunctions } from './slist.js';
 /**
  * Offsets into RTL_CRITICAL_SECTION, 32-bit.
  *
- * DebugInfo and LockSemaphore are at 0x00 and 0x10 and are deliberately left at
- * zero: the first is a pointer into a structure only a debugger walks, and the
- * second is created lazily by Windows itself, so a guest that finds either null
- * is looking at something Windows also produces.
+ * DebugInfo at 0x00 is a pointer into a structure only a debugger walks, and
+ * Windows 8 and later make none: they write -1 there, which DeleteCriticalSection
+ * clears. LockSemaphore at 0x10 is left at zero: Windows creates it lazily
+ * itself, so a guest that finds it null is looking at something Windows also
+ * produces.
  */
+const CS_DEBUG_INFO = 0x00;
+const CS_NO_DEBUG_INFO = -1;
 const CS_LOCK_COUNT = 0x04;
 const CS_SPIN_COUNT = 0x14;
 const CS_SIZE = 0x18;
@@ -70,6 +74,10 @@ const CURRENT_THREAD = 0xfffffffe;
 
 /** More than this in one wait is a caller that has lost track of its handles. */
 const MAXIMUM_WAIT_OBJECTS = 64;
+
+/** A handle in a wait's set that names nothing; a count out of range. */
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_PARAMETER = 87;
 
 /** A thread already carries MAXIMUM_SUSPEND_COUNT suspensions. */
 const ERROR_SIGNAL_REFUSED = 156;
@@ -200,12 +208,25 @@ export function createSyncFunctions(host){
     const object = (handle, type)=>{
         try
         {
-            return kernel.handles.resolve(handle, type);
+            return kernel.handles.resolve(untagged(handle), type);
         }
         catch (e){
             void e;
             return null;
         }
+    };
+
+    /** @type {any} */
+    let standing = null;
+    /**
+     * What a standard stream is in a set: an event that stays set, since the
+     * stream is always ready and a wait for all of a set must still take the
+     * rest.
+     */
+    const alwaysReady = ()=>{
+        standing ??= kernel.createEvent({ manualReset: true, signalled: true,
+            name: 'standard stream' });
+        return standing;
     };
 
     /** @param {number} handle */
@@ -251,6 +272,7 @@ export function createSyncFunctions(host){
         // Written whole rather than field by field: the guest allocated this and
         // its contents are whatever was there before.
         host.writeMemory(address, new Uint8Array(CS_SIZE));
+        writeI32(address + CS_DEBUG_INFO, CS_NO_DEBUG_INFO);
         writeI32(address + CS_LOCK_COUNT, CS_UNLOCKED);
         writeI32(address + CS_SPIN_COUNT, spinCount);
     };
@@ -349,6 +371,7 @@ export function createSyncFunctions(host){
                 const total = count >>> 0;
                 if (total === 0 || total > MAXIMUM_WAIT_OBJECTS)
                 {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return WAIT_FAILED;
                 }
                 const view = new DataView(host.readMemory(handles >>> 0, total * 4).buffer);
@@ -366,12 +389,15 @@ export function createSyncFunctions(host){
                 for (let at = 0; at < total; at++)
                 {
                     const handle = view.getUint32(at * 4, true);
-                    const target = object(handle);
+                    // No pseudo-handle is a member of a set, not even the two
+                    // WaitForSingleObject takes: none is in the table.
+                    const target = isStandardHandle(handle) ? alwaysReady() : object(handle);
                     if (!target)
                     {
+                        host.setLastError?.(ERROR_INVALID_HANDLE);
                         return WAIT_FAILED;
                     }
-                    if (kernel.handles.typeOf?.(handle) === 'process')
+                    if (kernel.handles.typeOf?.(untagged(handle)) === 'process')
                     {
                         if (kernel.processes?.finished?.(target))
                         {
