@@ -289,6 +289,15 @@ export function createGraphicsModule(){
                 };
             };
 
+            /**
+             * A presenting call queued a frame: what it waits on before it
+             * answers, or null. The count is the run presenter's, since every
+             * machine's frames go onto the one queue.
+             *
+             * @type {import('./webgpu/internal/latency.js').FrameQueued}
+             */
+            const frameQueued = submitted=>state.shown?.queued(submitted) ?? null;
+
             /** Everything an API needs from outside itself, in one place. */
             const services = {
                 /** @param {number} address @param {number} length */
@@ -380,6 +389,7 @@ export function createGraphicsModule(){
                     onDeviceLost,
                     // Where a full-screen device's gamma ramp is shown.
                     gamma: displayGamma,
+                    frameQueued,
                 }),
                 // The same wiring, except that the backend is asked for only when
                 // this build has a GPU: a Direct3D 9 object made in a headless
@@ -416,6 +426,7 @@ export function createGraphicsModule(){
                     mips: device?.mips,
                     onDeviceLost,
                     gamma: displayGamma,
+                    frameQueued,
                 }),
                 // OpenGL asks for a device only when there is one, so it is the
                 // one API here that a headless build can run to a finished frame.
@@ -439,6 +450,7 @@ export function createGraphicsModule(){
                     // guest's own code.
                     compressedTextures,
                     presenter: ()=>state.shown,
+                    frameQueued,
                     // The same per-draw account the Direct3D 8 device takes, on
                     // the device handle for the same reason: only the assembling
                     // caller decides it wants one.
@@ -478,6 +490,7 @@ export function createGraphicsModule(){
                     // Only a device made with the feature can leave depth
                     // unclipped, which is what DepthClipEnable = FALSE asks.
                     depthClipControl: device?.device?.features?.has('depth-clip-control') === true,
+                    frameQueued,
                 }),
                 /** @returns {any} */
                 vulkan: (/** @type {any} */ options)=>createVulkan({
@@ -607,6 +620,7 @@ export function createGraphicsModule(){
                 now: config?.now,
                 schedule: config?.schedule,
                 maxFps: config?.maxFps,
+                maxFrameLatency: config?.maxFrameLatency,
             });
             // The backend is asked for on the first present rather than now, so a
             // build that never shows one of these surfaces never builds a GPU.
@@ -812,6 +826,13 @@ export function createGraphicsModule(){
                 },
 
                 present: presentPrimary,
+                // A flip ends a frame of the primary: the one the presenter
+                // makes of the burst the flip is in, once that is on the queue
+                // -- a Direct3D 7 target's replay, or the guest bytes' upload.
+                flipQueued: ()=>{
+                    const burst = state.shown?.flushed() ?? null;
+                    return burst ? frameQueued(burst) : null;
+                },
                 // A DirectDraw primary's gamma ramp is the display's.
                 gamma: displayGamma,
                 // What exclusive mode is lost on. Asked on each TestCooperativeLevel

@@ -315,6 +315,10 @@ const LIST_TYPES = new Map([
  * @property {() => { claim: (buffer: number, show: () => void) => void } | null} [presenter]
  *           Where a picture the device drew is claimed by its address, so a
  *           present of that address shows the texture and reads no memory.
+ * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
+ *           Told of every frame a swap queues on the device; what it answers
+ *           is what the swap waits on before it answers the program. Absent,
+ *           a swap never waits.
  * @property {boolean} [dumpDraws]
  *           Describe every draw of the last frame in the diagnostics: a
  *           per-draw account is a thing only the assembling caller decides it
@@ -591,20 +595,26 @@ export function createOpengl(services){
      *
      * ponytail: the whole buffer travels every time. A damage rectangle would
      * cut it, and is worth doing once the rasteriser tracks one.
+     *
+     * @returns {Promise<void> | null} what a swap on the device waits on
+     *     before it answers, or null
      */
     const presentCurrentFrame = ()=>{
         const context = current();
         if (!context || !services.present)
         {
-            return;
+            return null;
         }
         if (gpu)
         {
             const shown = gpu.present(context);
             const handle = handles.get(context) ?? 0;
+            // Counted once its replay is on the queue, whether or not a
+            // handle names its picture for the presenter.
+            const held = shown ? services.frameQueued?.(gpu.settled()) ?? null : null;
             if (!shown || handle === 0)
             {
-                return;
+                return held;
             }
             // The handle stands in for a surface address: the presenter is
             // told the device owns the picture there, and a present of it
@@ -623,16 +633,16 @@ export function createOpengl(services){
                 bitCount: 32,
                 palette: null,
             });
-            return;
+            return held;
         }
         if (!services.scratch)
         {
-            return;
+            return null;
         }
         const frame = context.framebuffer;
         if (frame.bytes.length === 0)
         {
-            return;
+            return null;
         }
         if (frameBytes < frame.bytes.length)
         {
@@ -641,7 +651,7 @@ export function createOpengl(services){
         }
         if (frameAddress === 0)
         {
-            return;
+            return null;
         }
         services.writeMemory(frameAddress, frame.bytes);
         services.present({
@@ -652,6 +662,7 @@ export function createOpengl(services){
             bitCount: 32,
             palette: null,
         });
+        return null;
     };
 
     /**
@@ -1082,25 +1093,6 @@ export function createOpengl(services){
             }
             const wanted = readCString(name);
             return wgl.wglGetProcAddress(wanted) ? exportAddress(wanted) : 0;
-        },
-
-        wglSwapBuffers: ([hdc])=>{
-            if (!wgl.SwapBuffers(hdc >>> 0))
-            {
-                return 0;
-            }
-            presentCurrentFrame();
-            return 1;
-        },
-
-        /** The layer form, where layer bit 0 is the main plane. */
-        wglSwapLayerBuffers: ([hdc, planes])=>{
-            if ((planes & 1) === 0 || !wgl.SwapBuffers(hdc >>> 0))
-            {
-                return 0;
-            }
-            presentCurrentFrame();
-            return 1;
         },
 
         wglChoosePixelFormat: ([hdc, descriptor])=>((descriptor >>> 0) === 0
@@ -1635,13 +1627,46 @@ export function createOpengl(services){
     };
     Object.assign(implemented, handlers);
 
+    /**
+     * The two calls here that may wait before they answer: a swap on the
+     * device waits, once it is enough frames behind, for the oldest to
+     * finish. Kept apart from `implemented` so that `entry` never hands one
+     * out -- a caller already on this side of the boundary has no thread to
+     * park.
+     *
+     * @type {Record<string, (args: number[]) => number | Promise<number>>}
+     */
+    const swaps = {
+        wglSwapBuffers: ([hdc])=>{
+            if (!wgl.SwapBuffers(hdc >>> 0))
+            {
+                return 0;
+            }
+            const held = presentCurrentFrame();
+            return held ? held.then(()=>1) : 1;
+        },
+
+        /** The layer form, where layer bit 0 is the main plane. */
+        wglSwapLayerBuffers: ([hdc, planes])=>{
+            if ((planes & 1) === 0 || !wgl.SwapBuffers(hdc >>> 0))
+            {
+                return 0;
+            }
+            const held = presentCurrentFrame();
+            return held ? held.then(()=>1) : 1;
+        },
+    };
+
     /** @param {number} address @returns {import('./pixelformat.js').PixelFormat} */
     function readDescriptor(address){
         return decodePixelFormat(
             services.readMemory(address >>> 0, PIXELFORMATDESCRIPTOR.SIZE));
     }
 
-    /** @type {Record<string, { argBytes: number, handler: (args: number[]) => number }>} */
+    /**
+     * @type {Record<string, { argBytes: number,
+     *     handler: (args: number[]) => number | Promise<number> }>}
+     */
     const table = {};
     for (const [words, names] of Object.entries(ARGUMENT_WORDS))
     {
@@ -1656,7 +1681,7 @@ export function createOpengl(services){
             };
         }
     }
-    for (const [name, handler] of Object.entries(implemented))
+    for (const [name, handler] of Object.entries({ ...implemented, ...swaps }))
     {
         if (!table[name])
         {
@@ -1676,7 +1701,7 @@ export function createOpengl(services){
         wgl,
 
         /** Which entry points do something, for the test that checks the extension promise. */
-        implemented: Object.keys(implemented),
+        implemented: [...Object.keys(implemented), ...Object.keys(swaps)],
 
         /**
          * A named entry point for a caller already on this side of the boundary
@@ -1684,7 +1709,8 @@ export function createOpengl(services){
          * the trap table binds, taking the same raw dwords a guest call pushes --
          * a GLfloat as its bits, a GLdouble as two words low first, a pointer as a
          * guest address -- so a kernel that reads a pointer out of guest memory hands
-         * it straight through. Null for a name this library does not implement.
+         * it straight through. Null for a name this library does not implement,
+         * and for the two swaps, which may wait.
          *
          * @param {string} name
          * @returns {((args: number[]) => number) | null}
@@ -1700,14 +1726,16 @@ export function createOpengl(services){
          * presents is not the frame the program drew.
          *
          * @param {number} hdc
+         * @returns {boolean | Promise<boolean>} whether it presented; a promise
+         *     when the swap waits for the device before it answers
          */
         swapBuffers(hdc){
             if (!wgl.SwapBuffers(hdc >>> 0))
             {
                 return false;
             }
-            presentCurrentFrame();
-            return true;
+            const held = presentCurrentFrame();
+            return held ? held.then(()=>true) : true;
         },
 
         /**

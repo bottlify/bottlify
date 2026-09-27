@@ -55,6 +55,13 @@ function machine(){
 }
 
 /**
+ * The export table as these tests call it: with no device behind it no call
+ * waits, a swap included, so every handler answers a number.
+ *
+ * @typedef {Record<string, { argBytes: number, handler: (args: number[]) => number }>} Table
+ */
+
+/**
  * A library over a 4x4 screen, with whatever it presented recorded.
  *
  * @param {{ present?: boolean, raster?: boolean }} [options]
@@ -71,7 +78,7 @@ function library(options = {}){
         present: options.present === false ? undefined : (/** @type {any} */ s)=>presented.push(s),
         raster: options.raster,
     });
-    return { box, opengl, presented, table: opengl.table };
+    return { box, opengl, presented, table: /** @type {Table} */ (opengl.table) };
 }
 
 test('no export is declared twice, and every one takes a whole number of words', ()=>{
@@ -592,7 +599,7 @@ test('two consecutive glProgramEnvParameter4fvARB calls hand the context the sam
             }
         },
     });
-    const { table } = opengl;
+    const table = /** @type {Table} */ (opengl.table);
     startDrawing(table);
     [1.5, -2, 0.25, 8].forEach((value, i)=>view.setFloat32(0x3000 + i * 4, value, true));
     [4, 5, 6, 7].forEach((value, i)=>view.setFloat32(0x3100 + i * 4, value, true));

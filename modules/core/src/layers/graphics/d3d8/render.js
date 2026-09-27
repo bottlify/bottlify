@@ -5840,6 +5840,7 @@ export function createRenderer(options){
             return { state: 'pending', settled: count.settled };
         },
 
+        /** @returns {Promise<void>} settled when this frame has been submitted */
         submit(){
             const recorded = ensureFrame();
             recording = null;
@@ -5847,6 +5848,7 @@ export function createRenderer(options){
             dump = [];
             kept = 0;
             chain = chain.then(()=>replay(recorded, null)).catch(failure);
+            return chain;
         },
 
         /**

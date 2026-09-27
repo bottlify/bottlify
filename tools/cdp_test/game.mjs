@@ -755,6 +755,16 @@ function describe(result, context, calls, symbols){
             say(`    texture uploads=${graphics.uploads.textures}`
                 + ` staged=${graphics.uploads.staged} bytes=${graphics.uploads.bytes}`);
         }
+        // How often a present waited for the device, and how far behind the
+        // device ever was: a run on a slow adapter goes at the device's pace.
+        const latency = graphics.presenter?.latency;
+        if (latency?.frames > 0)
+        {
+            say(`    frames in flight: bound ${latency.limit || 'none'}; ${latency.held} of`
+                + ` ${latency.frames} presents waited for the device,`
+                + ` ${(latency.heldMs / 1000).toFixed(1)} s in all;`
+                + ` at most ${latency.peak} unfinished`);
+        }
         const device = graphics.device;
         if (device)
         {

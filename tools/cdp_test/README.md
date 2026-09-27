@@ -43,7 +43,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 
 | flag | default | what it does |
 |---|---|---|
-| `--wait SECONDS` | 900 | how long to wait for the page's result, from the start: the run, then the report, whose read-back of the last frame waits for the device to finish every frame queued before it -- on a software adapter far longer than the run (see *A page that does not answer*). Bound the run itself with `--run-seconds` or a scene that ends |
+| `--wait SECONDS` | 900 | how long to wait for the page's result, from the start: the run, then the report, whose read-back of the last frame waits for the device to finish every frame queued before it -- a few frames with the graphics layer's bound, on a software adapter far longer than the run without it (see *A page that does not answer*). Bound the run itself with `--run-seconds` or a scene that ends |
 | `--turns N` | 200000 | scheduler turns before the run gives up |
 | `--calls N` | 40 | how many of the last host calls the report prints |
 | `--log-match REGEX` | off | keep only the host calls whose formatted line matches, so a question about one family of calls (`"EnumDisplay|CreateDevice"`) is answered across the whole run instead of the last N lines of the frame loop |
@@ -226,24 +226,32 @@ Reading it:
 
 ### A page that does not answer
 
-A present never waits for the device, so the engine runs as far ahead of it as
-the program goes; the page's report reads the last frame back, and that read
-waits until the device has finished every frame queued before it. On a
-software adapter (SwiftShader, which is what a machine without a GPU hands
-out) the device finishes frames several times slower than the engine submits
-them, so a run whose program has long stopped still has minutes of frames
-queued, and a `--wait` shorter than that ends in `the page did not answer`.
-Measured with the engine and the browser on the same two cores: Doom 3's
-timed demo presented 16 to 19 frames a second and the device finished 1.6 to
-3.3, so a run of 60 s answered 120 to 190 s after its start; a 45 s run in its
-menu answered 90 s after the run ended, and a 150 s one had not answered nine
-minutes after. The result is read a piece at a time, since a run's is larger
-than one answer carries -- Doom 3's is 6 MB, and a 4 MB answer closed the
-connection where 2 MB did not.
+The page's report reads the last frame back, and that read waits until the
+device has finished every frame queued before it. A present waits for the
+device once it is the graphics layer's bound of frames behind
+(`maxFrameLatency`, three by default; `docs/core/graphics.md`, *Frames in
+flight*), so the queue holds a few frames and the report answers soon after
+the run: on a software adapter (SwiftShader, which is what a machine without
+a GPU hands out) the program then goes at the device's pace, which is several
+times slower than it would present. Measured with the engine in a worker and
+the browser on the same two cores, Doom 3's timed demo ran at 2.2 to 3.1
+frames a second by the wall clock and its report answered 1.0 to 2.7 s after
+the run. With the bound off (`--graphics-config '{"maxFrameLatency":0}'`),
+as it was before there was one, the program presents 15.4 to 16.4 frames a
+second while the device finishes 1.7 to 3.3, a run whose program has long
+stopped still has minutes of frames queued -- the report answered 53 to
+118 s after a 58 s run -- and a `--wait` shorter than that ends in `the page
+did not answer`. The whole takes about as long either way, the device being
+what sets it: one run each of this tool, the demo's run lasting 61.3 s
+before the bound and 115.5 s with it, answered 117.0 and 116.6 s after the
+start. The result is read a piece at a time, since a run's is larger than one
+answer carries -- Doom 3's is 6 MB, and a 4 MB answer closed the connection
+where 2 MB did not.
 
 So bound the run -- `--run-seconds`, or a scene that ends by itself, such as a
 title's own timed demo that quits when done -- and give `--wait` the run plus
-its drain. Doom 3's demo build reads a demo file only with `fs_restrict` off:
+its drain, which the program's own pace now includes. Doom 3's demo build
+reads a demo file only with `fs_restrict` off:
 `--file <bench.demo>=C:\App\demo\demos\bench.demo --command-line
 '"C:\App\Doom3.exe" +set fs_restrict 0 +set logFile 2 +timeDemoQuit bench'`
 plays every frame of it, writes `frames rendered in ... = ... fps` (on the
@@ -251,7 +259,8 @@ guest's clock) to `qconsole.log` and exits. While it waits, the driver says how 
 30 s once the oldest unfinished submit is five seconds old, and a timeout's
 reason ends with the same count (`device-lag.mjs` wraps `GPUQueue.submit` in
 the realm the engine runs in, the page or its worker); a report that did
-answer says how long after the start it did.
+answer says how long after the start it did, and how many presents waited for
+the device and for how long in all.
 
 ## `../host-call-bench.mjs` -- what a call into an import costs
 

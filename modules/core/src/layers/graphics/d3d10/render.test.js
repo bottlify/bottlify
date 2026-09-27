@@ -42,6 +42,7 @@ import {
 } from './shader-fixtures.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { createFrameLatency } from '../webgpu/internal/latency.js';
 import {
     clear as referenceClear, createReferenceSurface, toBase64,
 } from '../webgpu/internal/reference.js';
@@ -51,7 +52,8 @@ import {
  *
  * @param {{ width?: number, height?: number, compressedTextures?: boolean,
  *           depthClipControl?: boolean,
- *           fake?: Parameters<typeof createFakeDevice>[0] }} [options]
+ *           fake?: Parameters<typeof createFakeDevice>[0],
+ *           frameQueued?: import('../webgpu/internal/latency.js').FrameQueued }} [options]
  */
 function harness(options = {}){
     const gpu = createFakeDevice(options.fake);
@@ -81,6 +83,7 @@ function harness(options = {}){
             divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
             compressedTextures: options.compressedTextures,
             depthClipControl: options.depthClipControl,
+            frameQueued: options.frameQueued,
         }), S_OK);
     const device = deviceOut.device;
     const swapChain = chainOut.swapChain;
@@ -1718,3 +1721,26 @@ test('a shader with an instruction that has no translation refuses its draws by 
         'counted as untranslatable, apart from a pipeline the GPU refused');
         assert.ok(h.divergences.some(line=>line.includes('lod')), h.divergences.join('\n'));
     });
+
+test('a swap chain\'s present past the bound waits for the oldest frame to finish', async()=>{
+    /** @type {ReturnType<typeof createFrameLatency> | null} */
+    let latency = null;
+    const h = harness({
+        fake: { workDone: true },
+        frameQueued: submitted=>latency?.queued(submitted) ?? null,
+    });
+    latency = createFrameLatency({ queue: h.gpu.queue, limit: 1, now: ()=>0 });
+    assert.equal(h.swapChain.Present(0, 0), S_OK);
+    const second = h.swapChain.Present(0, 0);
+    assert.ok(second instanceof Promise, 'one frame is the bound, and a second waits');
+    let answered = null;
+    second.then((/** @type {number} */ hr)=>{
+        answered = hr;
+    });
+    await h.device.idle();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(answered, null, 'both frames are on the queue and neither is finished');
+    h.gpu.finish(1);
+    await second;
+    assert.equal(answered, S_OK);
+});

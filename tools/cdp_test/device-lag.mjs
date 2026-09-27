@@ -7,13 +7,14 @@
 /**
  * How far the device is behind the engine.
  *
- * A present never waits for the device, so a device slower than the program
- * -- a software adapter is -- finishes frames long after the engine submitted
- * them, and the page's report, which reads the last frame back, waits for
- * every submit queued before it. A run whose program has long stopped then
- * looks like a page that does not answer. This counts the submits of the realm
- * the engine runs in and when the device finished them, so a run that waits
- * says what it is waiting for.
+ * A present waits for the device only once it is the graphics layer's bound
+ * of frames behind (`maxFrameLatency`), so with no bound a device slower than
+ * the program -- a software adapter is -- finishes frames long after the
+ * engine submitted them, and the page's report, which reads the last frame
+ * back, waits for every submit queued before it. A run whose program has long
+ * stopped then looks like a page that does not answer. This counts the
+ * submits of the realm the engine runs in and when the device finished them,
+ * so a run that waits says what it is waiting for.
  */
 
 /**

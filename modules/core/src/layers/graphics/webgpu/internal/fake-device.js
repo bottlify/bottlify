@@ -29,13 +29,22 @@ const KEPT_FORMATS = /** @type {Record<string, number>} */ ({
 /**
  * @param {{ compilationMessages?: Record<string, any[]>,
  *           refusePipeline?: (descriptor: any) => string | null | undefined,
- *           occlusionSamples?: (index: number) => number }} [options]
+ *           occlusionSamples?: (index: number) => number,
+ *           workDone?: boolean }} [options]
  *        `occlusionSamples` is what the occlusion query at each slot of a query
  *        set resolves to, standing in for the rasteriser; zero when absent.
+ *        `workDone` gives the queue an `onSubmittedWorkDone` whose answers the
+ *        test decides: the device finishes submits, in order, only when told
+ *        to (`finish`). Without it the queue has none, as a double that
+ *        cannot say when anything is done should not pretend to.
  */
 export function createFakeDevice(options = {}){
     /** @type {any[]} */
     const calls = [];
+    /** Submits made, and how many of them the device has finished. */
+    const work = { submitted: 0, finished: 0 };
+    /** @type {{ mark: number, resolve: () => void }[]} answers owed, oldest first */
+    const workWaiters = [];
     const messages = /** @type {Record<string, any[]>} */ (options.compilationMessages || {});
     let nextId = 0;
 
@@ -379,8 +388,22 @@ export function createFakeDevice(options = {}){
                 }
             }
             calls.push({ op: 'submit', buffers });
+            work.submitted++;
         },
     };
+    if (options.workDone)
+    {
+        // Settled once every submit made before the call is finished.
+        /** @type {any} */ (queue).onSubmittedWorkDone = ()=>new Promise(resolve=>{
+            const mark = work.submitted;
+            if (work.finished >= mark)
+            {
+                resolve(undefined);
+                return;
+            }
+            workWaiters.push({ mark, resolve: ()=>resolve(undefined) });
+        });
+    }
 
     /**
      * The canvas the presenter configures and copies into. Recorded like the
@@ -420,5 +443,20 @@ export function createFakeDevice(options = {}){
         reset(){
             calls.length = 0;
         },
+        /**
+         * The device finishes the oldest `count` submits it has not finished
+         * yet, or every one of them, and answers whoever asked after them.
+         *
+         * @param {number} [count]
+         */
+        finish(count = Infinity){
+            work.finished = Math.min(work.submitted, work.finished + count);
+            while (workWaiters.length > 0 && workWaiters[0].mark <= work.finished)
+            {
+                /** @type {typeof workWaiters[number]} */ (workWaiters.shift()).resolve();
+            }
+        },
+        /** Submits the device has not finished. */
+        unfinished: ()=>work.submitted - work.finished,
     };
 }

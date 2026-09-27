@@ -192,15 +192,18 @@ import { loadZstdWasm } from './zstd-wasm.js';
  *           has finished and its process has stopped. On by default; a
  *           nonzero code is the page's error report instead.
  * @property {any} [device]          The GPU to draw on, when there is one.
- * @property {{ presenter?: any, compressedTextures?: boolean }} [graphics]
+ * @property {{ presenter?: any, compressedTextures?: boolean, maxFrameLatency?: number }}
+ *           [graphics]
  *           The graphics layer's configuration (docs/core/graphics.md, the
  *           Configuration table), forwarded to it as given: `compressedTextures`
  *           turns the block-compressed upload path on where the device has the
- *           feature. `graphics.presenter` is the run's presenter -- the canvas,
- *           its configured format, the pacer and the texture the primary is
- *           copied into. Absent, one is made from `device` and handed to every
- *           machine; set by `createApp` on a rebuilt machine and not something
- *           a caller supplies.
+ *           feature, and `maxFrameLatency` is how many frames the device may
+ *           still be working on when a present answers (three; zero for no
+ *           bound), a bound the run's presenter keeps. `graphics.presenter` is
+ *           the run's presenter -- the canvas, its configured format, the pacer
+ *           and the texture the primary is copied into. Absent, one is made
+ *           from `device` and handed to every machine; set by `createApp` on a
+ *           rebuilt machine and not something a caller supplies.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           What the program is told its display is.
  * @property {any} [storage]
@@ -6272,6 +6275,8 @@ export async function createApp(options){
             canvas: options.device.canvas,
             now: options.device.now,
             maxFps: options.maxFps,
+            // One bound for the run: every machine's frames go onto one queue.
+            maxFrameLatency: options.graphics?.maxFrameLatency,
             // A build with no canvas but with a sink of its own -- a test
             // harness reading the frame back -- still gets its frames.
             presentTo: options.device.presentTo,

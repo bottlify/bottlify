@@ -228,6 +228,9 @@ export function versionOf(id){
  * @param {SurfaceDcServices} [deps.gdi]
  * @param {(surface: PresentedSurface, window: number, exclusive: boolean) => void}
  *     [deps.present]  Shows the primary, told whose window it is.
+ * @param {() => Promise<void> | null} [deps.flipQueued]
+ *     A flip queued a frame of the primary: what the call waits on before it
+ *     answers, or null. Absent, a flip never waits.
  * @param {(call: { entry: number, args: number[], thread?: any })
  *          => Promise<number>} [deps.callGuest]
  * @param {() => any} [deps.currentThread]
@@ -257,7 +260,7 @@ export function versionOf(id){
  *        video memory each time.
  */
 export function createDirectDrawSeam(
-    { publisher, memory, screen, gdi, present, callGuest, currentThread, scratch,
+    { publisher, memory, screen, gdi, present, flipQueued, callGuest, currentThread, scratch,
         extraInterfaces = [], extraSurfaceInterfaces = [], now = ()=>performance.now(),
         schedule = (ms, run)=>{
             setTimeout(run, ms);
@@ -799,9 +802,19 @@ export function createDirectDrawSeam(
                     callback >>> 0, context >>> 0);
             },
 
-            /** @param {any} surface @param {number[]} args */
-            Flip: (surface, [target, flags])=>
-                surface.flip(publisher.objectAt(target), flags >>> 0),
+            /**
+             * A flip is the end of a frame, and like a present it waits, once
+             * the device is enough frames behind, for the oldest to finish.
+             * Only the flip does: a blit or an unlock onto the primary is as
+             * often one piece of a frame as the whole of it.
+             *
+             * @param {any} surface @param {number[]} args
+             */
+            Flip: (surface, [target, flags])=>{
+                const hr = surface.flip(publisher.objectAt(target), flags >>> 0);
+                const held = hr === DD_OK ? flipQueued?.() ?? null : null;
+                return held ? held.then(()=>hr) : hr;
+            },
 
             /** @param {any} surface @param {number[]} args */
             GetAttachedSurface: (surface, [caps, out])=>{

@@ -5,6 +5,7 @@
  */
 
 import { createPacer } from './pacer.js';
+import { createFrameLatency } from './latency.js';
 
 /**
  * A surface in guest memory, put on the screen -- and the canvas itself.
@@ -239,6 +240,10 @@ export function expandRow(row, width, bitCount, palette, out){
  * @param {(frame: any) => void} [options.presentTo]
  *        Where a frame goes in a build with no canvas: the caller's own sink,
  *        for a test harness that reads a frame back.
+ * @param {number} [options.maxFrameLatency]
+ *        The frames the device may still be working on when a presenting call
+ *        answers; three by default, zero for no bound (see `latency.js`). One
+ *        count for the run, as there is one queue.
  */
 export function createPresenter(options = {}){
     const gpu = options.device ?? null;
@@ -269,6 +274,11 @@ export function createPresenter(options = {}){
             targetFps: maxFps > 0 ? maxFps : undefined,
         })
         : null;
+    // Every presenting call of every machine counts against one bound: the
+    // frames are all on the one queue.
+    const latency = createFrameLatency({
+        queue, limit: options.maxFrameLatency, lost: gpu?.lost ?? null, now,
+    });
     // The presenter still coalesces a burst of blits onto one flush; the pacer
     // only decides when that flush happens.
     const schedule = pacer
@@ -287,7 +297,7 @@ export function createPresenter(options = {}){
      *
      * @typedef {{ backend: (() => any) | null,
      *     readMemory: (address: number, length: number) => Uint8Array,
-     *     claims: Map<number, () => void>, live: boolean }} Attachment
+     *     claims: Map<number, () => unknown>, live: boolean }} Attachment
      */
     /** @type {Attachment[]} the construction's own first, the newest last */
     const attachments = [{
@@ -304,6 +314,13 @@ export function createPresenter(options = {}){
     let uploadedLabel = 'guest bytes';
     /** @type {{ surface: PresentableSurface, from: Attachment } | null} what to show at the next flush */
     let pending = null;
+    /**
+     * Settled when the pending burst's frame is on the queue, for a flip that
+     * counts it as a frame queued; made only when one asks.
+     *
+     * @type {{ promise: Promise<unknown>, settle: (value: unknown) => void } | null}
+     */
+    let burst = null;
     /** @type {Uint8Array | null} */
     let converted = null;
     const counters = {
@@ -454,11 +471,30 @@ export function createPresenter(options = {}){
     };
 
     const flush = ()=>{
+        const shown = burst;
+        burst = null;
+        /** @type {unknown} */
+        let submitted;
+        try
+        {
+            submitted = flushPending();
+        }
+        finally
+        {
+            shown?.settle(submitted);
+        }
+    };
+
+    /**
+     * @returns {unknown} what settles once the frame is on the queue, when it
+     *     is not yet: the promise an owner answers with
+     */
+    const flushPending = ()=>{
         const held = pending;
         pending = null;
         if (!held)
         {
-            return;
+            return undefined;
         }
         const { surface, from } = held;
         if (!from.live)
@@ -466,14 +502,13 @@ export function createPresenter(options = {}){
             // Presented by a machine that has gone since: the address named a
             // place in its address space, which went with it.
             counters.dropped++;
-            return;
+            return undefined;
         }
         const owner = from.claims.get(surface.buffer);
         if (owner)
         {
             counters.shownByOwner++;
-            owner();
-            return;
+            return owner();
         }
         let using;
         try
@@ -492,7 +527,7 @@ export function createPresenter(options = {}){
             {
                 failures.push(e instanceof Error ? e.message : String(e));
             }
-            return;
+            return undefined;
         }
         const target = textureFor(using, surface);
         uploadedLabel = surface.label ?? 'guest bytes';
@@ -523,6 +558,31 @@ export function createPresenter(options = {}){
         const frame = using.beginFrame();
         frame.present(target);
         frame.end();
+        return undefined;
+    };
+
+    /**
+     * What settles once the frame the pending burst makes is on the queue,
+     * or null when nothing is pending: every present of the burst is one
+     * frame.
+     *
+     * @returns {Promise<unknown> | null}
+     */
+    const flushed = ()=>{
+        if (pending === null)
+        {
+            return null;
+        }
+        if (!burst)
+        {
+            /** @type {(value: unknown) => void} */
+            let settle = ()=>{};
+            const promise = new Promise(resolve=>{
+                settle = resolve;
+            });
+            burst = { promise, settle };
+        }
+        return burst.promise;
     };
 
     /**
@@ -660,11 +720,20 @@ export function createPresenter(options = {}){
         /** Shows whatever is pending now, rather than after the burst. */
         flush,
 
+        flushed,
+
+        /**
+         * A presenting call of this machine queued a frame; see `latency.js`.
+         * The bound is the run's, as the queue is.
+         */
+        queued: latency.queued,
+
         /**
          * A GPU owns the picture at this address. Presenting the address
-         * calls `show` instead of reading guest memory, until released.
+         * calls `owner` instead of reading guest memory, until released; what
+         * it answers, when a promise, settles once its frame is on the queue.
          *
-         * @param {number} buffer @param {() => void} owner
+         * @param {number} buffer @param {() => unknown} owner
          */
         claim(buffer, owner){
             from.claims.set(buffer >>> 0, owner);
@@ -715,7 +784,9 @@ export function createPresenter(options = {}){
         // presenter for itself and holds nothing else.
         present: (/** @type {PresentableSurface} */ surface)=>machineView(newest()).present(surface),
         flush,
-        claim: (/** @type {number} */ buffer, /** @type {() => void} */ owner)=>
+        flushed,
+        queued: latency.queued,
+        claim: (/** @type {number} */ buffer, /** @type {() => unknown} */ owner)=>
             machineView(newest()).claim(buffer, owner),
         release: (/** @type {number} */ buffer)=>machineView(newest()).release(buffer),
         isClaimed: (/** @type {number} */ buffer)=>machineView(newest()).isClaimed(buffer),
@@ -782,6 +853,7 @@ export function createPresenter(options = {}){
                 gamma: gammaInEffect !== null,
                 attached: attachments.length - 1,
                 failures: [...failures],
+                latency: latency.diagnostics(),
                 disposed,
             };
         },
@@ -796,6 +868,9 @@ export function createPresenter(options = {}){
             texture = null;
             converted = null;
             pending = null;
+            burst?.settle(undefined);
+            burst = null;
+            latency.close();
             for (const attached of attachments)
             {
                 attached.claims.clear();

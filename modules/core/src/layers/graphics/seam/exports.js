@@ -58,6 +58,9 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {(surface: import('./ddraw.js').PresentedSurface, window?: number,
  *     exclusive?: boolean) => void} [deps.present]
  *        Told whenever the DirectDraw primary surface may have changed.
+ * @param {() => Promise<void> | null} [deps.flipQueued]
+ *        A flip queued a frame of the primary: what the call waits on before
+ *        it answers, or null (`webgpu/internal/latency.js`).
  * @param {any} [deps.publisher]
  *        The publisher to share, for a caller that needs the way back from a
  *        pointer to the object; one is made otherwise.
@@ -110,13 +113,13 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *                                          Uint8Array | null,
  *                                      set: (hdc: number, index: number) => boolean,
  *                                      get: (hdc: number) => number },
- *                       swapBuffers: (hdc: number) => boolean,
+ *                       swapBuffers: (hdc: number) => boolean | Promise<boolean>,
  *                       entry: (name: string) => ((args: number[]) => number) | null },
  *             diagnostics: () => any,
  *             shadow: () => any }}
  */
 export function createGraphicsLibraries(
-    { graphics, memory, publishInterface, unpublishInterface, screen, gdi, present,
+    { graphics, memory, publishInterface, unpublishInterface, screen, gdi, present, flipQueued,
         publisher: shared, callGuest,
         free, exportAddress,
         currentThread,
@@ -154,7 +157,8 @@ export function createGraphicsLibraries(
         ownerOf: surface=>ddraw.ownerOf(surface),
     });
     const ddraw = createDirectDrawSeam({
-        publisher, memory, screen, gdi, present, callGuest, currentThread, scratch, now, schedule,
+        publisher, memory, screen, gdi, present, flipQueued, callGuest, currentThread, scratch,
+        now, schedule,
         extraInterfaces: [d3d7.interface, ...d3dLegacy.interfaces],
         extraSurfaceInterfaces: d3dLegacy.surfaceInterfaces,
         identity: ()=>graphics.adapter?.() ?? null,

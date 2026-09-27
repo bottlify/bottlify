@@ -156,6 +156,9 @@ test('recorded: a burst of changes is one upload, one frame and one present', ()
         presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, shown: 0, gammaShown: 0,
         dropped: 0, shownBy: {}, lastBuffer: 0x1000, pending: false, claimed: 0,
         attached: 0, gamma: false, failures: [], disposed: false,
+        // No queue was handed over, so nothing is counted against the bound.
+        latency: { limit: 3, counting: false, inFlight: 0, peak: 0, frames: 0, held: 0,
+            heldMs: 0, waiting: 0 },
     });
 
     h.presenter.present(surface);
@@ -364,6 +367,80 @@ test('a machine that goes takes its pending frame and its claims with it', ()=>{
     assert.equal(parent.reached.backend, 1);
     assert.deepEqual([...gpu.of('writeTexture').at(-1).bytes], [0x56, 0x34, 0x12, 0xff]);
     assert.equal(presenter.diagnostics().shown, 1);
+});
+
+test('a flip\'s frame is the burst it is in: on the queue once that burst is flushed',
+    async()=>{
+        // A DirectDraw flip counts a frame against the bound, and the frame is
+        // what the presenter makes of the burst -- guest bytes uploaded at the
+        // flush, or a Direct3D 7 target's replay, which reaches the queue when
+        // the promise its owner answers with settles.
+        const h = harness();
+        const surface = { buffer: 0x1000, width: 4, height: 4, pitch: 16, bitCount: 32,
+            palette: null };
+        assert.equal(h.presenter.flushed(), null, 'nothing pending, nothing to wait for');
+        h.presenter.present(surface);
+        const burst = h.presenter.flushed();
+        assert.ok(burst instanceof Promise);
+        h.presenter.present(surface);
+        assert.equal(h.presenter.flushed(), burst, 'every present of a burst is its one frame');
+        let settled = false;
+        burst.then(()=>{
+            settled = true;
+        });
+        await Promise.resolve();
+        assert.equal(settled, false, 'nothing is on the queue before the flush');
+        h.settle();
+        await burst;
+        assert.equal(h.gpu.count('submit'), 1, 'settled with the upload submitted');
+
+        /** @type {() => void} */
+        let replayed = ()=>{};
+        const replay = new Promise(resolve=>{
+            replayed = ()=>resolve(undefined);
+        });
+        h.presenter.claim(0x2000, ()=>replay);
+        h.presenter.present({ ...surface, buffer: 0x2000 });
+        const owned = h.presenter.flushed();
+        let ownedSettled = false;
+        owned?.then(()=>{
+            ownedSettled = true;
+        });
+        h.settle();
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(ownedSettled, false, 'an owner\'s frame is on the queue once its replay is');
+        replayed();
+        await owned;
+
+        h.presenter.present(surface);
+        const dropped = h.presenter.flushed();
+        h.presenter.dispose();
+        await dropped;
+    });
+
+test('every machine attached to one presenter counts against one bound', async()=>{
+    // One queue under every machine of a run: a child started beside its
+    // parent presents onto the queue its parent's frames are on.
+    const gpu = createFakeDevice({ workDone: true });
+    const presenter = createPresenter({
+        device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+        now: ()=>0, maxFrameLatency: 2,
+    });
+    const reader = ()=>new Uint8Array(4);
+    const parent = presenter.attach({ backend: ()=>null, readMemory: reader });
+    const child = presenter.attach({ backend: ()=>null, readMemory: reader });
+    gpu.queue.submit([]);
+    assert.equal(parent.queued(), null);
+    gpu.queue.submit([]);
+    assert.equal(child.queued(), null);
+    gpu.queue.submit([]);
+    const held = parent.queued();
+    assert.ok(held instanceof Promise, 'the parent\'s third frame waits on the child\'s too');
+    assert.equal(presenter.diagnostics().latency.inFlight, 3);
+    gpu.finish(1);
+    await held;
+    assert.equal(presenter.diagnostics().latency.held, 1);
 });
 
 test('every canvas copy is recorded under the label of what was shown', ()=>{

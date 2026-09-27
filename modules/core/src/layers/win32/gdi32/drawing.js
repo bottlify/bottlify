@@ -247,10 +247,11 @@ function readGammaRamp(bytes){
  *           program sets it through this library and creates its context
  *           through OPENGL32, and the two must be reading one record. Absent
  *           in a build with no rendering surface.
- * @property {(hdc: number) => boolean} [swapBuffers]
+ * @property {(hdc: number) => boolean | Promise<boolean>} [swapBuffers]
  *           Presents the frame an OpenGL context drew into a device context.
  *           Absent in a build that cannot draw, where SwapBuffers fails rather
- *           than presenting nothing.
+ *           than presenting nothing. A promise is a frame presented and the
+ *           call held until the device has room for another.
  * @property {(ramp: GammaRamp) => void} [setGammaRamp]
  *           Makes a ramp the display's, which every frame is then shown
  *           through. Absent, a ramp set is kept here and read back only.
@@ -1668,7 +1669,10 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                return services.swapBuffers(handle >>> 0) ? 1 : 0;
+                const presented = services.swapBuffers(handle >>> 0);
+                return presented instanceof Promise
+                    ? presented.then(done=>(done ? 1 : 0))
+                    : (presented ? 1 : 0);
             },
         },
     };
