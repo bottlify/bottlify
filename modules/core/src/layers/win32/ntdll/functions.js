@@ -80,6 +80,12 @@ const KERNEL32_ALIASES = Object.freeze({
     // Forwarded the same way (kernel32.spec), so a mask built through either
     // name is the one both comparisons read.
     VerSetConditionMask: 'VerSetConditionMask',
+    // The interlocked lists: kernel32's are ntdll's on Windows.
+    RtlInitializeSListHead: 'InitializeSListHead',
+    RtlQueryDepthSList: 'QueryDepthSList',
+    RtlInterlockedPushEntrySList: 'InterlockedPushEntrySList',
+    RtlInterlockedPopEntrySList: 'InterlockedPopEntrySList',
+    RtlInterlockedFlushSList: 'InterlockedFlushSList',
 });
 
 /**
