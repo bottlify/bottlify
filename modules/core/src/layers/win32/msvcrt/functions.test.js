@@ -175,11 +175,11 @@ test('the comparisons order bytes as unsigned chars, the upper half of the page 
         assert.equal(fns[name].handler([space, euro]), 1, name);
         assert.equal(fns[name].handler([last, top]), -1, name);
     }
-    for (const name of ['strncmp', '_strnicmp'])
-    {
-        assert.equal(fns[name].handler([euro, space, 1]), -1, name);
-        assert.equal(fns[name].handler([top, last, 1]), 1, name);
-    }
+    assert.equal(fns._strnicmp.handler([euro, space, 1]), -1);
+    assert.equal(fns._strnicmp.handler([top, last, 1]), 1);
+    assert.equal(fns.strncmp.handler([euro, space, 1]), 0x80 - 0xa0,
+        'strncmp answers the difference of the bytes');
+    assert.equal(fns.strncmp.handler([top, last, 1]), 0xff - 0x9f);
     assert.equal(fns._stricmp.handler([put(0x140, 'A\x80'), put(0x150, 'a\xa0')]), -1,
         'folded ASCII first, then the byte');
     assert.equal(fns._stricmp.handler([put(0x160, '\xc9'), put(0x170, '\xe9')]), -1,
@@ -195,6 +195,8 @@ test('strncmp stops after n bytes, and n of zero compares nothing', ()=>{
     assert.equal(fns.strncmp.handler([a, b, 4]), -1);
     assert.equal(fns.strncmp.handler([a, b, 0]), 0);
     assert.equal(fns.strncmp.handler([a, b, 99]), -1, 'n past both terminators is harmless');
+    assert.equal(fns.strncmp.handler([put(0x120, ''), put(0x130, 'abc'), 3]), -0x61,
+        'the terminator against a letter');
 });
 
 test('_stricmp ignores case, and only for ASCII letters', ()=>{

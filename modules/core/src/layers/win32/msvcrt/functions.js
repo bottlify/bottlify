@@ -672,6 +672,7 @@ export function createMsvcrtFunctions(host){
             readCString: host.readCString,
             scanCString: host.scanCString,
             allocate,
+            errno,
         }),
     };
 
@@ -692,6 +693,7 @@ export function createMsvcrtFunctions(host){
             writeMemory: host.writeMemory,
             readCString: host.readCString,
             errno,
+            ...host.allocate ? { allocate: host.allocate } : {},
         }),
         ...createConversionFunctions({
             readCString: host.readCString,

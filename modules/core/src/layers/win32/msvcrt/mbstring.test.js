@@ -31,6 +31,17 @@ test('wcscpy and wcscat write terminated wide strings', ()=>{
     assert.equal(memory.wide(destination), 'onetwo');
 });
 
+test('_wcsdup copies onto the heap, and duplicates no string to null', ()=>{
+    const { memory, table } = build();
+    const copy = table._wcsdup.handler([memory.putWide('あb')]);
+    assert.equal(memory.wide(copy), 'あb');
+    assert.equal(table._wcsdup.handler([0]), 0);
+    const without = /** @type {Record<string, any>} */ (createWideFunctions({
+        ...memory, allocate: undefined,
+    }));
+    assert.equal(without._wcsdup, undefined, 'no heap, no export');
+});
+
 test('wcsncpy pads to the count and does not terminate when it truncates', ()=>{
     const { memory, table } = build();
     const destination = memory.allocate(64);

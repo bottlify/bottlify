@@ -36,6 +36,8 @@ const MAX_STRING = 1 << 20;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(code: number) => void} [errno]  Where a failure says why.
+ * @property {(bytes: number) => number} [allocate]  The heap a duplicate is
+ *           made on; without it `_wcsdup` stays unexported.
  */
 
 /**
@@ -129,6 +131,34 @@ export function createWideFunctions(host){
                 return destination;
             },
         },
+
+        ...host.allocate ? {
+            /**
+             * wchar_t *_wcsdup(const wchar_t *text)
+             *
+             * On the heap the caller frees it from; no string duplicates to
+             * null, errno untouched.
+             */
+            _wcsdup: {
+                convention: 'cdecl',
+                argBytes: 4,
+                /** @param {number[]} args */
+                handler: ([text])=>{
+                    if ((text >>> 0) === 0)
+                    {
+                        return 0;
+                    }
+                    const units = readWide(text);
+                    const copy = /** @type {(bytes: number) => number} */ (host.allocate)(
+                        (units.length + 1) * 2);
+                    if (copy !== 0)
+                    {
+                        writeWide(copy, units);
+                    }
+                    return copy;
+                },
+            },
+        } : {},
 
         /** wchar_t *wcscat(wchar_t *dest, const wchar_t *src) */
         wcscat: {

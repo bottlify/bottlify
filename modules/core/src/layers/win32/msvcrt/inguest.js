@@ -13,9 +13,9 @@
  *
  * Each answers under the C locale as msvcrt.dll does, where its comment says
  * no otherwise: ASCII case, bytes compared as unsigned chars. A comparison
- * answers -1, 0 or 1, as the handlers it replaced did; C promises only the
- * sign, and 32-bit msvcrt.dll's own strncmp answers the difference of the
- * bytes.
+ * answers -1, 0 or 1, as the handlers it replaced did -- C promises only the
+ * sign -- but strncmp, which in 32-bit msvcrt.dll answers the difference of
+ * the first two bytes that differ.
  */
 
 /** @typedef {import('./guest-code.js').Guest} Guest */
@@ -154,7 +154,8 @@ export function toupper(c){
 /**
  * int strncmp(const char *left, const char *right, size_t count)
  *
- * No further than either terminator, and no further than `count`.
+ * No further than either terminator, and no further than `count`; the
+ * difference of the first two bytes that differ.
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
@@ -167,7 +168,7 @@ export function strncmp({ u8 }, left, right, count){
         const b = u8(right + i);
         if (a !== b)
         {
-            return a < b ? -1 : 1;
+            return (a - b) | 0;
         }
         if (a === 0)
         {

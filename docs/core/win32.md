@@ -363,8 +363,8 @@ assembled by hand (`EH_PROLOG_CODE`, `msvcrt/cxx.js`): it takes its handler in E
 frame on its caller's stack and in the caller's EBP, which neither a handler nor the compiler's
 subset can express.
 Each keeps the answers of the handler it replaced (see the divergences below) but where
-msvcrt.dll answers otherwise: bytes compare as unsigned chars, `atoi` wraps, `towupper` and
-`towlower` hand WEOF back, and the wide classes of the Latin-1 page are msvcrt's; `strtol` and
+msvcrt.dll answers otherwise: bytes compare as unsigned chars, `strncmp` answers the difference of
+the first two that differ, `atoi` wraps, `towupper` and `towlower` hand WEOF back, and the wide classes of the Latin-1 page are msvcrt's; `strtol` and
 `strtoul` are held to theirs input by input as well, the JavaScript against the handler, since
 the handler is part of them.
 

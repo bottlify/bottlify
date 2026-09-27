@@ -19,6 +19,7 @@
  */
 
 import { encodeAnsi } from '../kernel32/locale.js';
+import { EINVAL } from './globals.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
@@ -36,10 +37,17 @@ import { COMPILED } from './inguest.x86.js';
  *     front of buffers that reach megabytes; reading the text to find it was
  *     the largest host cost in an install that scans while it copies.
  * @property {(bytes: number) => number} allocate  Guest memory that outlives a call.
+ * @property {(code: number) => void} [errno]  Where a refused parameter says why.
  */
 
 /** A string is scanned no further than this, since nothing in C bounds one. */
 const MAX_STRING = 1 << 20;
+
+/** What a length answers for a parameter msvcrt refuses. */
+const INT_MAX = 0x7fffffff;
+
+/** What a locale comparison answers for one: `_NLSCMPERROR`. */
+const NLS_COMPARE_ERROR = 0x7fffffff;
 
 /**
  * The bits `_isctype`/`_pctype` classify a character with, at the values
@@ -279,6 +287,100 @@ export function createStringFunctions(host){
                 }
                 writeString(address, text);
                 return address;
+            },
+        },
+
+        /**
+         * void _swab(char *source, char *destination, int count)
+         *
+         * Each pair of bytes swapped, `count` bytes, an odd last byte left
+         * where it is -- in the destination as it was, not copied. The
+         * source is read whole first, so a swap in place is one.
+         */
+        _swab: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([source, destination, count])=>{
+                const length = (count | 0) & ~1;
+                if (length <= 0)
+                {
+                    return 0;
+                }
+                const bytes = host.readMemory(source, length).slice();
+                for (let at = 0; at < length; at += 2)
+                {
+                    const first = bytes[at];
+                    bytes[at] = bytes[at + 1];
+                    bytes[at + 1] = first;
+                }
+                host.writeMemory(destination, bytes);
+                return 0;
+            },
+        },
+
+        /**
+         * size_t strxfrm(char *destination, const char *source, size_t count)
+         *
+         * Under the C locale a string is its own collation key: as much of
+         * the source and its terminator as `count` holds, and the source's
+         * length whatever fits. No source, or no destination for a count, is
+         * INT_MAX and EINVAL.
+         */
+        strxfrm: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([destination, source, count])=>{
+                const room = count >>> 0;
+                if ((source >>> 0) === 0 || ((destination >>> 0) === 0 && room !== 0))
+                {
+                    host.errno?.(EINVAL);
+                    return INT_MAX;
+                }
+                const length = host.scanCString(source, MAX_STRING, scanTable.fill(0)).index;
+                if (room !== 0)
+                {
+                    host.writeMemory(destination,
+                        host.readMemory(source, Math.min(room, length + 1)).slice());
+                }
+                return length;
+            },
+        },
+
+        /**
+         * int _memicmp(const void *left, const void *right, size_t count)
+         *
+         * memcmp with the ASCII letters folded to lower case, the answer the
+         * difference of the first two bytes that differ; no buffer for a
+         * count is _NLSCMPERROR and EINVAL.
+         */
+        _memicmp: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([left, right, count])=>{
+                const length = count >>> 0;
+                if (length === 0)
+                {
+                    return 0;
+                }
+                if ((left >>> 0) === 0 || (right >>> 0) === 0)
+                {
+                    host.errno?.(EINVAL);
+                    return NLS_COMPARE_ERROR;
+                }
+                const a = host.readMemory(left, length).slice();
+                const b = host.readMemory(right, length);
+                for (let at = 0; at < length; at++)
+                {
+                    const difference = inGuest.LOWER[a[at]] - inGuest.LOWER[b[at]];
+                    if (difference !== 0)
+                    {
+                        return difference;
+                    }
+                }
+                return 0;
             },
         },
 

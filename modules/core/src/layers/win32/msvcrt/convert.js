@@ -24,6 +24,7 @@ import { ERANGE } from './globals.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
+import { wideStringAt } from './widetext.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -118,6 +119,84 @@ export function scanInteger(text, requestedBase, zeroBeforeX = false){
     return at === start ? null : { magnitude, negative, end: at };
 }
 
+/**
+ * The zero of each run of ten decimal digits past ASCII that msvcrt's wide
+ * conversions read as digits: the Arabic-Indic and extended Arabic-Indic,
+ * Devanagari, Bengali, Gurmukhi, Gujarati, Oriya, Telugu, Kannada, Malayalam,
+ * Thai, Lao, Tibetan, Myanmar, Khmer and Mongolian digits and the fullwidth
+ * forms -- not Tamil's, whose zero came into Unicode after them.
+ */
+const WIDE_ZEROS = [0x660, 0x6f0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xc66, 0xce6, 0xd66,
+    0xe50, 0xed0, 0xf20, 0x1040, 0x17e0, 0x1810, 0xff10];
+
+/**
+ * A wide character's value as a digit: a decimal digit of any of the scripts
+ * above, or an ASCII letter from ten; -1 for anything else.
+ *
+ * @param {string | undefined} character
+ */
+function wideDigitValue(character){
+    const ascii = digitValue(character ?? '');
+    if (ascii >= 0 || character === undefined)
+    {
+        return ascii;
+    }
+    const code = character.charCodeAt(0);
+    const zero = WIDE_ZEROS.find(first=>code >= first && code <= first + 9);
+    return zero === undefined ? -1 : code - zero;
+}
+
+/**
+ * The white space the wide conversions skip: the C locale's below U+0100,
+ * where the no-break space is one, and Unicode's separators past it.
+ *
+ * @param {string | undefined} character
+ */
+const isWideSpace = character=>character !== undefined && (WHITESPACE.includes(character)
+    || character === '\xa0' || /[\p{Zs}\p{Zl}\p{Zp}]/u.test(character) && character > '\xff');
+
+/**
+ * scanInteger over a wide string: its digits any script's above, a zero of
+ * any of them the one a `0x` prefix or an octal number begins with.
+ *
+ * @param {string} text @param {number} requestedBase
+ * @returns {{ magnitude: bigint, negative: boolean, end: number } | null}
+ */
+export function scanWideInteger(text, requestedBase){
+    let at = 0;
+    while (isWideSpace(text[at]))
+    {
+        at++;
+    }
+    let negative = false;
+    if (text[at] === '+' || text[at] === '-')
+    {
+        negative = text[at] === '-';
+        at++;
+    }
+    let base = requestedBase;
+    const zero = wideDigitValue(text[at]) === 0;
+    const hexPrefix = zero && (text[at + 1] === 'x' || text[at + 1] === 'X');
+    if ((base === 0 || base === 16) && hexPrefix)
+    {
+        base = 16;
+        at += 2;
+    }
+    else if (base === 0)
+    {
+        base = zero ? 8 : 10;
+    }
+    const start = at;
+    let magnitude = 0n;
+    for (let digit = wideDigitValue(text[at]); digit >= 0 && digit < base;
+        digit = wideDigitValue(text[at]))
+    {
+        magnitude = magnitude * BigInt(base) + BigInt(digit);
+        at++;
+    }
+    return at === start ? null : { magnitude, negative, end: at };
+}
+
 /** As much of a floating-point literal as C recognises, and where it ends. */
 const LEADING_FLOAT
     = /^[ \t\n\v\f\r]*[+-]?(?:[0-9]+\.?[0-9]*(?:[eE][+-]?[0-9]+)?|\.[0-9]+(?:[eE][+-]?[0-9]+)?)/;
@@ -206,17 +285,20 @@ export function createConversionFunctions(host){
      * @param {(magnitude: bigint, negative: boolean) => bigint | null} convert
      *        The value, or null when it is out of range and `limit` answers.
      * @param {(negative: boolean) => bigint} limit
+     * @param {boolean} [wide]  A wide string, two bytes a character.
      */
-    const strtoInteger = (argBytes, convert, limit)=>({
+    const strtoInteger = (argBytes, convert, limit, wide = false)=>({
         convention: 'cdecl',
         argBytes,
         /** @param {number[]} args */
         handler: ([string, end, base])=>{
-            const text = readString(string);
-            const scanned = scanInteger(text, base | 0);
+            const scanned = wide
+                ? scanWideInteger(wideStringAt(/** @type {(address: number, length: number)
+                    => Uint8Array} */ (host.readMemory), string), base | 0)
+                : scanInteger(readString(string), base | 0);
             // Nothing converted: the end pointer goes back to the start, so a
             // caller comparing it against the input sees no progress.
-            writeInt(end, scanned ? string + scanned.end : string);
+            writeInt(end, scanned ? string + scanned.end * (wide ? 2 : 1) : string);
             if (scanned === null)
             {
                 return 0;
@@ -269,10 +351,14 @@ export function createConversionFunctions(host){
     });
 
     /** long strtol(const char *str, char **end, int base) */
-    const strtol = strtoInteger(12, (magnitude, negative)=>{
+    /** @param {bigint} magnitude @param {boolean} negative */
+    const toLong = (magnitude, negative)=>{
         const value = negative ? -magnitude : magnitude;
         return value > LONG_MAX || value < LONG_MIN ? null : value;
-    }, negative=>(negative ? LONG_MIN : LONG_MAX));
+    };
+    /** @param {boolean} negative */
+    const longLimit = negative=>(negative ? LONG_MIN : LONG_MAX);
+    const strtol = strtoInteger(12, toLong, longLimit);
 
     /**
      * unsigned long strtoul(const char *str, char **end, int base)
@@ -283,13 +369,17 @@ export function createConversionFunctions(host){
      * negative one comes back as ULONG_MAX negated, 1 (Wine's msvcrt
      * test_strtol).
      */
-    const strtoul = strtoInteger(12, (magnitude, negative)=>{
+    /** @param {bigint} magnitude @param {boolean} negative */
+    const toUnsignedLong = (magnitude, negative)=>{
         if (magnitude > ULONG_MAX)
         {
             return null;
         }
         return negative ? BigInt.asUintN(32, -magnitude) : magnitude;
-    }, negative=>(negative ? BigInt.asUintN(32, -ULONG_MAX) : ULONG_MAX));
+    };
+    /** @param {boolean} negative */
+    const unsignedLongLimit = negative=>(negative ? BigInt.asUintN(32, -ULONG_MAX) : ULONG_MAX);
+    const strtoul = strtoInteger(12, toUnsignedLong, unsignedLongLimit);
 
     const { readMemory, writeMemory } = host;
     const table = {
@@ -303,6 +393,17 @@ export function createConversionFunctions(host){
         strtoul: readMemory
             ? guestEntry(inGuest.strtoul, COMPILED.strtoul, { readMemory, writeMemory }, strtoul)
             : strtoul,
+
+        ...readMemory ? {
+            /**
+             * long wcstol(const wchar_t *str, wchar_t **end, int base) and
+             * unsigned long wcstoul: strtol and strtoul over a wide string,
+             * reading the decimal digits of the scripts msvcrt reads and the
+             * separators Unicode has as white space.
+             */
+            wcstol: strtoInteger(12, toLong, longLimit, true),
+            wcstoul: strtoInteger(12, toUnsignedLong, unsignedLongLimit, true),
+        } : {},
 
         /** char *_ltoa(long value, char *buffer, int radix) */
         _ltoa: toText(1, true),
