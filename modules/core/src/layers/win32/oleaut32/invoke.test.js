@@ -278,6 +278,25 @@ test('a VARIANT parameter travels by value, and a pointer to one by address', as
     assert.equal(host.u32(RESULT + 8), 0x9990);
 });
 
+test('a VT_ARRAY variant is a SAFEARRAY parameter, and a pointer to one through a slot',
+    async()=>{
+        // Add(SAFEARRAY(VARIANT) PropValues, SAFEARRAY(VARIANT) *PrevValues): an
+        // InstallShield script's arrays arrive as VT_ARRAY | VT_VARIANT, and
+        // with no conversion to VT_SAFEARRAY every Add failed as a type
+        // mismatch and setup stopped.
+        const host = fakeHost();
+        const invoker = createInvoker(host);
+        const { type, fn } = describe('ISetupOpSequence', 'Add', METHOD);
+        host.params(2);
+        host.variant(ARGS, 0x200c, 0x8888);
+        host.variant(ARGS + 16, 0x200c, 0x7777);
+        assert.equal(await invoker.invoke(library, type, fn, INSTANCE, METHOD, PARAMS, RESULT,
+            0, 0), 0);
+        const { args } = host.calls[0];
+        assert.equal(args[1], 0x7777, 'the array itself');
+        assert.equal(host.u32(args[2]), 0x8888, 'a slot holding the other');
+    });
+
 test('what a described type is passed as', ()=>{
     /** @param {number} hreftype @returns {import('./typelib.js').TypeDescription} */
     const userDefined = hreftype=>({ vt: 29, element: null, hreftype, array: null });

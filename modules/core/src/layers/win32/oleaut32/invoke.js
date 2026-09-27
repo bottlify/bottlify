@@ -24,7 +24,7 @@
 
 import {
     TKIND_ALIAS, TKIND_DISPATCH, TKIND_ENUM, TKIND_INTERFACE,
-    VT_BOOL, VT_BSTR, VT_I2, VT_PTR, VT_R4, VT_R8, VT_UI2, VT_USERDEFINED,
+    VT_BOOL, VT_BSTR, VT_I2, VT_PTR, VT_R4, VT_R8, VT_SAFEARRAY, VT_UI2, VT_USERDEFINED,
     isImport, resolveReference,
 } from './typelib.js';
 
@@ -37,6 +37,8 @@ const VT_DATE = 7;
 const VT_DISPATCH = 9;
 const VT_ERROR = 10;
 const VT_VARIANT = 12;
+/** The flag a variant carrying a SAFEARRAY of its type sets. */
+const VT_ARRAY = 0x2000;
 const VT_UNKNOWN = 13;
 const VT_I1 = 16;
 const VT_UI1 = 17;
@@ -442,6 +444,13 @@ export function createInvoker(host){
                     words.push(slot);
                     continue;
                 }
+                if (element === VT_SAFEARRAY && (value.vt & VT_ARRAY) !== 0)
+                {
+                    // SAFEARRAY(T) *: a slot holding the array the variant carries.
+                    host.writeMemory(slot, host.readMemory(argument + VARIANT_VALUE, WORD).slice());
+                    words.push(slot);
+                    continue;
+                }
                 const laid = layOut(element, value, temporaryStrings);
                 if (laid === null)
                 {
@@ -458,6 +467,13 @@ export function createInvoker(host){
             if (wanted === VT_VARIANT)
             {
                 words.push(...wordsOf(host.readMemory(argument, VARIANT_BYTES)));
+                continue;
+            }
+            if (wanted === VT_SAFEARRAY && (value.vt & VT_ARRAY) !== 0)
+            {
+                // SAFEARRAY(T) is passed as the array itself: the pointer a
+                // VT_ARRAY variant holds, or the one its reference points at.
+                words.push(readU32(byref ? value.reference : argument + VARIANT_VALUE));
                 continue;
             }
             const laid = layOut(wanted, value, temporaryStrings);
