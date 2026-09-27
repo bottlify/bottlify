@@ -474,3 +474,28 @@ test('the profile\'s directories are every folder under it, each parent before i
     assert.ok(profileDirectories(WINDOWS_VERSIONS.winxp)
         .includes('C:\\Documents and Settings\\User\\Local Settings'));
 });
+
+test('a saved tree fills in what the hive lacks and leaves what it has as it is', ()=>{
+    // An installation's registry beneath a session's: the key a launcher
+    // looks for to know the game is installed comes from the installation,
+    // and a value the program has changed since stays changed.
+    const installed = createHive();
+    const game = machine(installed, 'SOFTWARE\\Monolith Productions\\TRON 2.0 Demo\\1.0');
+    installed.setValue(game, 'InstallDir', REG_SZ, latin1('C:\\Games\\Tron\0'));
+    installed.setValue(game, 'Language', REG_SZ, latin1('English\0'));
+    installed.setValue(installed.create(/** @type {any} */ (installed.root(HKEY_CLASSES_ROOT)),
+        '.rez').key, '', REG_SZ, latin1('TronData\0'));
+
+    const hive = createHive();
+    hive.setValue(machine(hive, 'SOFTWARE\\Monolith Productions\\Tron 2.0 Demo\\1.0'),
+        'Language', REG_SZ, latin1('French\0'));
+    hive.fillFromJSON(JSON.parse(JSON.stringify(installed.toJSON())));
+
+    const at = 'SOFTWARE\\Monolith Productions\\Tron 2.0 Demo\\1.0';
+    assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, at, 'InstallDir'), 'C:\\Games\\Tron',
+        'filled in, under the name as the hive already spelled it');
+    assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, at, 'Language'), 'French',
+        'what the hive already had is kept');
+    assert.equal(valueOf(hive, HKEY_CLASSES_ROOT, '.rez', ''), 'TronData',
+        'and a class registration is found where classes are');
+});

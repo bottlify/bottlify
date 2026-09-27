@@ -182,8 +182,16 @@ engine; `src/bundle.js` (`@bottlify/core/bundle`) publishes the constants and ch
   `code === 'BLOCK_MISS'` and `blocks: [{ index, offset, packed }]` naming *every* missing block in
   ascending order, so one round trip satisfies the retry. `BLOCK_MISS` is deliberately not an
   `ErrorCode`: it is a request for bytes, not a failure. `prefix` places the whole bundle under a
-  directory: the engine mounts it under `App`, so a game lives at `C:\App\…` rather than at the
-  root, where "where do I live" would happen to work whether the program answered it right or not.
+  directory: the engine mounts it under `App` unless the caller names another, so a game lives at
+  `C:\App\…` rather than at the root, where "where do I live" would happen to work whether the
+  program answered it right or not. A bottle an installation made is mounted where the installation
+  put it: its manifest's `root`, which `@bottlify/installer`'s `placementOf` turns into `prefix`
+  and the image path.
+- **The bottle's registry**: a bundle that carries `.bottlify\registry.json` (`BOTTLE_REGISTRY_PATH`,
+  the hive's `toJSON` as the installer saved it) has it read at mount, before the program's first
+  instruction, and merged into the machine's registry with `fillFromJSON`: every key and value the
+  session's saved registry lacks is added, and what the session holds is kept. A process started
+  by another is given that one's registry instead and skips it.
 - **Block cache** (`cache.js`): where fetched blocks live between the network and a read. With a
   synchronous store (`resolveBlockStore('local')` → OPFS through `createOpfsStore`, worker-only) a
   block occupies the fixed slot `index * blockSize` in `/<name>.blocks`, and a presence bitmap
