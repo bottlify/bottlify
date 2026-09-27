@@ -37,7 +37,9 @@ import { windowsChoice } from './windows.js';
 export { MEDIA_DIRECTORY, REGISTRY_PATH, chooseRoot, collect, guessEntry, prefixOptions }
     from './prefix.js';
 export { DEFAULT_BLOCK_SIZE, packBundle, packBlock, sha256 } from './pack.js';
-export { DESTINATION, detectFamily, responseFile, silentOptions } from './silent.js';
+export {
+    DESTINATION, detectFamily, dialogCalled, responseFile, responseFileV5, silentOptions,
+} from './silent.js';
 export { PART_BYTES, finish, partSink } from './upload.js';
 export { WINDOWS_CHOICES, windowsChoice } from './windows.js';
 

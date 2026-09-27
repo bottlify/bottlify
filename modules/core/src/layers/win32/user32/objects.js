@@ -588,6 +588,33 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         },
     });
 
+    /** @param {boolean} wide */
+    const menuString = wide=>({
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [handle, id, buffer, room, flags])=>{
+            const menu = menuOf(handle);
+            const found = menu ? findItem(menu, id, flags) : null;
+            const text = found ? String(found.menu.items[found.at].text ?? '') : '';
+            if ((buffer >>> 0) === 0)
+            {
+                return text.length;
+            }
+            if ((room | 0) <= 0)
+            {
+                return 0;
+            }
+            const clipped = text.slice(0, (room | 0) - 1);
+            if (!wide)
+            {
+                return writeString(buffer >>> 0, clipped, room | 0);
+            }
+            host.writeMemory(buffer >>> 0,
+                new Uint8Array(Uint16Array.from(`${clipped} `, c=>c.charCodeAt(0)).buffer));
+            return clipped.length;
+        },
+    });
+
     /** In the ANSI page. @param {number} address @param {string} text @param {number} limit */
     const writeString = (address, text, limit)=>{
         const clipped = limit > 0 ? text.slice(0, limit - 1) : '';
@@ -916,6 +943,19 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 return found ? found.menu.items[found.at].submenu >>> 0 : 0;
             },
         },
+
+        /**
+         * int GetMenuStringA(HMENU hMenu, UINT uIDItem, LPSTR lpString, int cchMax,
+         *                    UINT flags)
+         *
+         * The item's text, cut to the room given with its terminator, and the
+         * count of characters copied; a null buffer asks for the length.
+         * An item that is not there answers 0, as a separator does.
+         */
+        GetMenuStringA: menuString(false),
+
+        /** int GetMenuStringW: the same, in UTF-16 and counted in characters. */
+        GetMenuStringW: menuString(true),
 
         /**
          * UINT GetMenuItemID(HMENU hMenu, int nPos)
