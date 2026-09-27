@@ -1569,7 +1569,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             out.swapChain = createAdditionalChain({
                 parameters: wanted,
                 count: explicitCount(D3DPOOL.DEFAULT),
-                makeBackBuffer: chainCount=>createSurface({
+                // A back buffer's count is its own and not the chain's, as the
+                // device's own back buffer's is: a reference on it is one on
+                // the device, and one released to nothing leaves it the
+                // chain's to take again (Wine's d3d8 test_refcount). Direct3D 9
+                // shares the chain's.
+                makeBackBuffer: ()=>createSurface({
                     type: SURFACE_TYPE.RENDER_TARGET,
                     width,
                     height,
@@ -1580,7 +1585,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     divergence: services.divergence ?? null,
                     pixels: targetPixels(),
                     base: allocate(surfaceBytes(format, width, height)),
-                    count: chainCount,
+                    count: implicitCount(),
                 }),
                 present: presentChain,
                 retire: surface=>{
