@@ -622,6 +622,14 @@ test('a working-set request is accepted and pops its three arguments', ()=>{
     assert.equal(fns.SetProcessWorkingSetSize.argBytes, 12);
 });
 
+test('the working set a process is asked for is the default a fresh one has', ()=>{
+    const { fns, host } = setup();
+    assert.equal(fns.GetProcessWorkingSetSize.handler([0xffffffff, 0x200, 0x204]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 204800);
+    assert.equal(host.view.getUint32(0x204, true), 1413120);
+    assert.equal(fns.GetProcessWorkingSetSize.argBytes, 12);
+});
+
 test('the clock routines read one block, and what they read is what a trap would answer', ()=>{
     const at = 0x20000;
     const trap = 0x7f000010;

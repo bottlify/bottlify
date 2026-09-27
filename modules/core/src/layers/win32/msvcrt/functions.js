@@ -433,6 +433,17 @@ export function createMsvcrtFunctions(host){
             ),
         },
 
+        /** int _strcmpi(const char *, const char *): the older name of _stricmp. */
+        _strcmpi: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([left, right])=>compare(
+                foldCase(readString(left)),
+                foldCase(readString(right)),
+            ),
+        },
+
         /** char *strcpy(char *dest, const char *src) */
         strcpy: {
             convention: 'cdecl',
@@ -593,6 +604,14 @@ export function createMsvcrtFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: args=>(Number.isNaN(readDouble(args, 0)) ? 1 : 0),
+        },
+
+        /** int _finite(double x): nonzero unless x is infinite or a NaN. */
+        _finite: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>(Number.isFinite(readDouble(args, 0)) ? 1 : 0),
         },
 
         /**

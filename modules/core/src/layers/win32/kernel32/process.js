@@ -900,6 +900,29 @@ export function createProcessFunctions(host){
             handler: ()=>1,
         },
 
+        /**
+         * BOOL GetProcessWorkingSetSize(HANDLE hProcess, PSIZE_T lpMinimumWorkingSetSize,
+         *                               PSIZE_T lpMaximumWorkingSetSize)
+         *
+         * The bounds a fresh process has on Windows, 50 and 345 pages: there is
+         * no working set here, and those are what a program would read.
+         */
+        GetProcessWorkingSetSize: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, minimum, maximum])=>{
+                if ((minimum >>> 0) !== 0)
+                {
+                    memory.writeU32(minimum >>> 0, 50 * 4096);
+                }
+                if ((maximum >>> 0) !== 0)
+                {
+                    memory.writeU32(maximum >>> 0, 345 * 4096);
+                }
+                return 1;
+            },
+        },
+
         /** DWORD TlsAlloc(VOID) */
         TlsAlloc: {
             argBytes: 0,
