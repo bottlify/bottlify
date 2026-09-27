@@ -49,6 +49,7 @@ const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_DIR_NOT_EMPTY = 145;
 const ERROR_ALREADY_EXISTS = 183;
+const ERROR_INVALID_NAME = 123;
 const ERROR_DIRECTORY = 267;
 const ERROR_IO_DEVICE = 1117;
 const ERROR_HANDLE_EOF = 38;
@@ -1133,13 +1134,34 @@ export function createFileFunctions(host){
     });
 
     /**
-     * CreateFile, in terms of a resolved path, so both spellings open the same
-     * file. Security and the template are accepted and ignored: there is no
-     * security descriptor to check against, and no attribute of a template file
-     * we could copy. FILE_SHARE_WRITE is honoured, so a second writer the first
-     * open agreed to share with gets in; reading is always shared, so an open
-     * Windows would refuse for want of FILE_SHARE_READ still succeeds here.
+     * What is wrong with a name a file is opened by, before anything is
+     * looked up, or 0. Resolution forgives what the open must not: a wildcard
+     * names no one file, and a trailing separator says the name is a
+     * directory -- an existing directory spelled so is not a file to open,
+     * and a new file cannot be made under a name that ends in one.
+     *
+     * @param {string} raw  What the caller wrote.
+     * @param {string} path  The same, resolved.
+     * @param {boolean} creating  Whether the disposition may make the file.
      */
+    const nameRefusal = (raw, path, creating)=>{
+        const last = path.slice(path.lastIndexOf(SEPARATOR) + 1);
+        if (/[*?]/.test(last))
+        {
+            return ERROR_INVALID_NAME;
+        }
+        if (!/[\\/]$/.test(raw) || /^[A-Za-z]:[\\/]$/.test(raw))
+        {
+            return 0;
+        }
+        const entry = files.stat(path);
+        if (entry?.exists)
+        {
+            return entry.isDirectory ? ERROR_PATH_NOT_FOUND : ERROR_INVALID_NAME;
+        }
+        return creating ? ERROR_INVALID_NAME : missing(path);
+    };
+
     /**
      * The open CreateFile and NtCreateFile share, over a resolved path: a
      * handle and whether the file was already there, or the Win32 error it
@@ -1228,6 +1250,12 @@ export function createFileFunctions(host){
      * Windows would refuse for want of FILE_SHARE_READ still succeeds here.
      */
     const createFile = bothForms(28, ([name, access, share, , disposition, flags], text)=>{
+        const refusal = nameRefusal(text.raw(name), text.path(name),
+            disposition !== OPEN_EXISTING && disposition !== TRUNCATE_EXISTING);
+        if (refusal !== 0)
+        {
+            return fail(refusal, INVALID_HANDLE_VALUE);
+        }
         const opened = openPath(text.path(name), { access, share, disposition, flags });
         if ('error' in opened)
         {
@@ -2253,6 +2281,11 @@ export function createFileFunctions(host){
             /** @param {number[]} args */
             handler: ([name, attribute])=>{
                 const path = pathArgument(name);
+                const refusal = nameRefusal(ANSI.raw(name), path, true);
+                if (refusal !== 0)
+                {
+                    return fail(refusal, HFILE_ERROR);
+                }
                 if (readOnlyFile(files.stat(path)))
                 {
                     return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);

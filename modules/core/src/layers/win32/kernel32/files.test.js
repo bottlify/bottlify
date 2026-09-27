@@ -1709,6 +1709,8 @@ test('NtCreateFile names what is missing, and takes only object names', ()=>{
         'and its handle closes as any other');
 });
 
+const ERROR_INVALID_NAME = 123;
+
 test('_lopen with OF_WRITE alone opens for writing only', ()=>{
     const { files, error, fns, at, memory } = setup();
     files.put('C:\\GAME\\W.TXT', 'text');
@@ -1718,4 +1720,21 @@ test('_lopen with OF_WRITE alone opens for writing only', ()=>{
     assert.equal(error.code, ERROR_ACCESS_DENIED);
     memory.putString(BUFFER, 'new!');
     assert.equal(fns._lwrite.handler([handle, BUFFER, 4]), 4);
+});
+
+test('a wildcard or a trailing separator is not a name a file is opened or made by', ()=>{
+    const { files, error, fns, at } = setup();
+    files.put('C:\\GAME\\F.TXT', 'f');
+    assert.equal(fns._lcreat.handler([at(NAME, 'testfi/'), 0]), HFILE_ERROR);
+    assert.equal(error.code, ERROR_INVALID_NAME);
+    assert.equal(files.stat('C:\\GAME\\testfi'), null, 'and nothing was made');
+    assert.equal(fns.CreateFileA.handler([at(NAME, 'C:\\*.*'), GENERIC_READ, 1, 0,
+        OPEN_EXISTING, 0, 0]), INVALID_HANDLE_VALUE);
+    assert.equal(error.code, ERROR_INVALID_NAME);
+    assert.equal(fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\'), GENERIC_READ, 1, 0,
+        OPEN_EXISTING, 0, 0]), INVALID_HANDLE_VALUE);
+    assert.equal(error.code, ERROR_PATH_NOT_FOUND, 'a directory spelled as one');
+    assert.equal(fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\NEW\\'), GENERIC_READ, 1, 0,
+        OPEN_EXISTING, 0, 0]), INVALID_HANDLE_VALUE);
+    assert.equal(error.code, ERROR_FILE_NOT_FOUND);
 });
