@@ -1658,3 +1658,50 @@ test('an edit with a client edge is sunken into its dialog', async()=>{
     assert.deepEqual([read(left + 4, bottom - 2), read(right - 2, top + 4)],
         [0x00c0c0c0, 0x00c0c0c0], 'the light inside it');
 });
+
+test('a multi-line radio\'s label is centred down it, as its ring is, unless BS_TOP', async()=>{
+    // DrawText centres a single line only; a BS_MULTILINE button measures its
+    // label and puts the block in its middle, level with the ring.
+    const BS_MULTILINE = 0x2000;
+    const BS_TOP = 0x0400;
+    const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
+    const radio = { className: 'Button', title: 'Typical User\nDefault directory', x: 4, cx: 90,
+        cy: 40 };
+    const dialog = await openDialog(context, {
+        ...WIZARD_PAGE, cy: 100,
+        controls: [
+            { ...radio, id: 20, y: 4, style: WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON
+                | BS_MULTILINE },
+            { ...radio, id: 21, y: 50, style: WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON
+                | BS_MULTILINE | BS_TOP },
+        ],
+    });
+    /** The rows of a button's label that have ink, top and bottom, in its own pixels. */
+    const inked = (/** @type {number} */ id)=>{
+        const button = context.fns.GetDlgItem.handler([dialog, id]);
+        context.fns.GetWindowRect.handler([button, OUT]);
+        const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at));
+        /** @type {number[]} */
+        const rows = [];
+        for (let y = top; y < bottom; y++)
+        {
+            for (let x = left + 20; x < right; x++)
+            {
+                if (context.desktop.read(x, y) === 0)
+                {
+                    rows.push(y - top);
+                    break;
+                }
+            }
+        }
+        return { first: rows[0], last: rows[rows.length - 1], height: bottom - top };
+    };
+    const centred = inked(20);
+    const topped = inked(21);
+    // The ink sits inside its cells, so the block's middle is compared, and
+    // within a few pixels.
+    assert.ok(Math.abs((centred.first + centred.last) / 2 - (centred.height - 1) / 2) <= 4,
+        `the block's middle is the button's: ${JSON.stringify(centred)}`);
+    assert.equal(topped.last - topped.first, centred.last - centred.first, 'the same block');
+    assert.ok(topped.first < centred.first - 10, `BS_TOP at the top: ${JSON.stringify(topped)}`);
+});

@@ -133,6 +133,13 @@ const ODS_SELECTED = 0x1;
 const ODS_DISABLED = 0x4;
 const ODS_FOCUS = 0x10;
 const BS_LEFTTEXT = 0x20;
+/** Where a button's label sits: two bits across, two down; neither is the default. */
+const BS_LEFT = 0x0100;
+const BS_RIGHT = 0x0200;
+const BS_CENTER = 0x0300;
+const BS_TOP = 0x0400;
+const BS_BOTTOM = 0x0800;
+const BS_VCENTER = 0x0c00;
 const BS_MULTILINE = 0x2000;
 /** Without this a button reports clicks and nothing else. */
 const BS_NOTIFY = 0x4000;
@@ -378,6 +385,7 @@ export const IDCANCEL = 2;
 const DT_CENTER = 0x0001;
 const DT_RIGHT = 0x0002;
 const DT_VCENTER = 0x0004;
+const DT_BOTTOM = 0x0008;
 const DT_WORDBREAK = 0x0010;
 const DT_SINGLELINE = 0x0020;
 const DT_NOPREFIX = 0x0800;
@@ -684,12 +692,12 @@ export function createControlProcedures(host){
 
     /**
      * Text laid out in a rectangle the way DrawText lays it, drawn in a
-     * colour, with the mnemonic's underline.
+     * colour, with the mnemonic's underline, and cut to `clip`.
      *
      * @param {number} hdc @param {string} text @param {Rect} rect @param {number} format
-     * @param {number} rgb
+     * @param {number} rgb @param {boolean} [opaque] @param {Rect} [clip]
      */
-    const drawText = (hdc, text, rect, format, rgb, opaque = false)=>{
+    const drawText = (hdc, text, rect, format, rgb, opaque = false, clip = rect)=>{
         const draw = /** @type {Drawing} */ (host.draw);
         const metrics = draw.measure(hdc, 'M');
         /** @param {string} piece */
@@ -700,7 +708,7 @@ export function createControlProcedures(host){
         for (const line of lines)
         {
             draw.text(hdc, line.x, line.y, line.text,
-                { color: rgb, clip: rect, transparent: !opaque });
+                { color: rgb, clip, transparent: !opaque });
             if (line.underline !== null)
             {
                 const at = line.x + widthOf(line.text.slice(0, line.underline));
@@ -709,6 +717,45 @@ export function createControlProcedures(host){
                     bottom: line.y + metrics.ascent + 1 }, rgb);
             }
         }
+    };
+
+    /**
+     * A button's label, placed as the button places it: across by BS_LEFT,
+     * BS_RIGHT or BS_CENTER -- centred on a push button and at the left of
+     * the rest when it says neither -- and down by BS_TOP, BS_BOTTOM or, by
+     * default, the middle. One line DrawText places itself; a BS_MULTILINE
+     * label is measured and its block put there, since DrawText centres
+     * only a single line and leaves every other at the top.
+     *
+     * @param {any} record @param {number} hdc @param {Rect} rect @param {number} rgb
+     * @param {boolean} [opaque]
+     */
+    const drawLabel = (record, hdc, rect, rgb, opaque = false)=>{
+        const draw = /** @type {Drawing} */ (host.draw);
+        const style = record.style;
+        const across = style & BS_CENTER;
+        const horizontal = across === BS_CENTER ? DT_CENTER : across === BS_RIGHT ? DT_RIGHT
+            : across === BS_LEFT || !PUSH_KINDS.has(buttonKind(record)) ? 0 : DT_CENTER;
+        const down = style & BS_VCENTER;
+        if ((style & BS_MULTILINE) === 0)
+        {
+            drawText(hdc, record.title, rect, horizontal | DT_SINGLELINE
+                | (down === BS_TOP ? 0 : down === BS_BOTTOM ? DT_BOTTOM : DT_VCENTER), rgb, opaque);
+            return;
+        }
+        const metrics = draw.measure(hdc, 'M');
+        const lines = layoutText(record.title, rect, horizontal | DT_WORDBREAK, {
+            cellWidth: metrics.width, cellHeight: metrics.height,
+            width: (/** @type {string} */ piece)=>draw.measure(hdc, piece).width,
+        });
+        const height = lines.length === 0 ? 0
+            : lines[lines.length - 1].y + metrics.height - lines[0].y;
+        const room = rect.bottom - rect.top;
+        const top = down === BS_TOP ? rect.top
+            : down === BS_BOTTOM ? rect.bottom - height
+                : rect.top + Math.floor((room - height) / 2);
+        drawText(hdc, record.title, { ...rect, top, bottom: top + height },
+            horizontal | DT_WORDBREAK, rgb, opaque, rect);
     };
 
     /** @param {any} record @returns {Rect} */
@@ -958,7 +1005,6 @@ export function createControlProcedures(host){
         const kind = buttonKind(record);
         const text = record.title;
         const ink = color(disabled(record) ? COLOR_GRAYTEXT : COLOR_BTNTEXT);
-        const multi = (record.style & BS_MULTILINE) !== 0 ? DT_WORDBREAK : DT_SINGLELINE;
 
         if (PUSH_KINDS.has(kind))
         {
@@ -976,7 +1022,7 @@ export function createControlProcedures(host){
                 ? { left: inside.left + 1, top: inside.top + 1, right: inside.right + 1,
                     bottom: inside.bottom + 1 }
                 : inside;
-            drawText(hdc, text, shifted, DT_CENTER | DT_VCENTER | multi, ink);
+            drawLabel(record, hdc, shifted, ink);
             return;
         }
 
@@ -1030,8 +1076,7 @@ export function createControlProcedures(host){
         const textRect = leftText
             ? { ...rect, right: box.left - CHECK_GAP }
             : { ...rect, left: box.right + CHECK_GAP };
-        drawText(hdc, text, textRect, DT_VCENTER | multi, staticInk(record, hdc),
-            staticOpaque(hdc));
+        drawLabel(record, hdc, textRect, staticInk(record, hdc), staticOpaque(hdc));
     };
 
     /** @param {any} record  How an owner-drawn button's parent is told it stands. */
