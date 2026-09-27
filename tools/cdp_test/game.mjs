@@ -399,6 +399,50 @@ function parse(argv){
     };
 }
 
+/** The engine's RGBA read-back as the BGRA the PNG writer takes. @param {Buffer} rgba */
+const toBgra = rgba=>{
+    const bgra = Buffer.alloc(rgba.length);
+    for (let at = 0; at < rgba.length; at += 4)
+    {
+        bgra[at] = rgba[at + 2];
+        bgra[at + 1] = rgba[at + 1];
+        bgra[at + 2] = rgba[at];
+        bgra[at + 3] = rgba[at + 3];
+    }
+    return bgra;
+};
+
+/**
+ * Where a page that answers nothing is running: the debugger's pause
+ * interrupts the thread even inside a loop that never yields, and the frames
+ * it stops in are named, then the page is let go again.
+ *
+ * @param {CdpEndpoint} cdp
+ * @param {string} sessionId
+ * @returns {Promise<string>}
+ */
+async function pausedStack(cdp, sessionId){
+    /** @type {(frames: any[]) => void} */
+    let paused = ()=>{};
+    /** @type {Promise<any[]>} */
+    const frames = new Promise(settle=>{
+        paused = settle;
+    });
+    // Enabling the debugger announces every script, which a paused frame
+    // names only by id.
+    /** @type {Map<string, string>} */
+    const scripts = new Map();
+    cdp.on('Debugger.scriptParsed', params=>scripts.set(params.scriptId, params.url));
+    cdp.on('Debugger.paused', params=>paused(params.callFrames));
+    await cdp.send('Debugger.enable', {}, sessionId);
+    await cdp.send('Debugger.pause', {}, sessionId);
+    const stack = await Promise.race([frames, new Promise((_, reject)=>
+        setTimeout(()=>reject(new Error('the page did not pause')), 10000))]);
+    await cdp.send('Debugger.resume', {}, sessionId).catch(()=>{});
+    return stack.slice(0, 25).map(frame=>`  ${frame.functionName || '(anonymous)'} `
+        + `${(scripts.get(frame.location.scriptId) ?? '').split('/').slice(-3).join('/')}:${frame.location.lineNumber + 1}`).join('\n');
+}
+
 /**
  * Waits for an expression to answer something other than null.
  *
@@ -1330,6 +1374,37 @@ export async function game(options){
                 },
                 capture: async()=>(await cdp.send(
                     'Page.captureScreenshot', { format: 'png' }, sessionId)).data,
+                stack: async()=>{
+                    const stack = await pausedStack(cdp, sessionId);
+                    // The page answers between the engine's turns: every layer's
+                    // metrics as the run stands, since no report will come.
+                    const live = await cdp.send('Runtime.evaluate', {
+                        expression: 'window.__bottlify__.frameReport()', returnByValue: true,
+                    }, sessionId).catch(()=>null);
+                    if (live?.result?.value)
+                    {
+                        const path = join(REPORTS_DIR, `game-${stampOut}-live.json`);
+                        writeFileSync(path, live.result.value);
+                        // And the frame presented last, which a page screenshot
+                        // of a WebGPU canvas does not hold.
+                        const shot = await cdp.send('Runtime.evaluate', {
+                            expression: 'window.__bottlify__.frameShot()'
+                                + '.then(function(s){ return JSON.stringify(s); })',
+                            returnByValue: true, awaitPromise: true,
+                        }, sessionId).catch(()=>null);
+                        const frame = shot?.result?.value ? JSON.parse(shot.result.value) : null;
+                        if (frame)
+                        {
+                            writeFileSync(join(REPORTS_DIR, `game-${stampOut}-frame.png`),
+                                toPng(frame.width, frame.height, frame.format.startsWith('bgra')
+                                    ? Buffer.from(frame.pixels, 'base64')
+                                    : toBgra(Buffer.from(frame.pixels, 'base64'))));
+                        }
+                        return `${stack}
+the run as it stands: ${path}`;
+                    }
+                    return stack;
+                },
                 write: data=>writeFileSync(join(REPORTS_DIR, `game-${stampOut}.png`),
                     Buffer.from(data, 'base64')),
             });
@@ -1366,18 +1441,6 @@ export async function game(options){
         // The last presented frame as the engine read it back, beside the
         // page's screenshot: the screenshot is what the compositor showed at
         // the moment of the stop, the frame is what the program drew.
-        /** The engine's RGBA read-back as the BGRA the PNG writer takes. @param {Buffer} rgba */
-        const toBgra = rgba=>{
-            const bgra = Buffer.alloc(rgba.length);
-            for (let at = 0; at < rgba.length; at += 4)
-            {
-                bgra[at] = rgba[at + 2];
-                bgra[at + 1] = rgba[at + 1];
-                bgra[at + 2] = rgba[at];
-                bgra[at + 3] = rgba[at + 3];
-            }
-            return bgra;
-        };
         for (const [index, one] of (result.snaps ?? []).entries())
         {
             // The first as -snap.png as before, every one also by its frame.

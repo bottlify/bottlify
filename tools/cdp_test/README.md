@@ -184,6 +184,13 @@ dumped, one PNG per texture the engine uploaded (and its device-side copy),
 and every file the program itself wrote. A game's own crash report is its
 account of what went wrong and beats any trace taken from outside it.
 
+A run that never answers within `--wait` -- a program still running, not only a
+hung page -- leaves no report; instead the debugger pauses the page and the
+JS stack it was running is printed, `game-<stamp>-live.json` holds every
+layer's metrics as the run stood (the kernel's threads and time, the
+bridge's last call, the cpu's ports), and `game-<stamp>-frame.png` the frame
+presented last, which a page screenshot of the WebGPU canvas does not show.
+
 `game-<stamp>-presents.json` holds every present's wall-clock time. Two runs are
 compared over the same frames rather than the same seconds with
 `node tools/frame-span.mjs <presents.json>... [--skip N] [--frames N]`: the span

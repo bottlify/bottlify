@@ -1223,6 +1223,9 @@ export function createHarness(canvas, how = {}){
                 // that decodes and is never seen is the difference between these
                 // two and nothing else.
                 presenter: layers.graphics?.presenter ?? null,
+                // Every layer's own metrics, for a run that never answers: what
+                // it waits on is in the kernel's and the bridge's.
+                layers,
                 media: layers.media ?? null,
                 // The translator's account, when the engine has one.
                 cork: layers.cpu?.cork ?? null,
