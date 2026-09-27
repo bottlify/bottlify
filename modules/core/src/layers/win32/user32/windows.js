@@ -165,7 +165,13 @@ const HOST_PROCEDURE_BASE = 0x7ff00000;
 
 /** The one hook type this build calls, and the one event it calls it for. */
 const WH_CBT = 5;
+/** The CBT hook's codes: what is about to happen, which it may forbid. */
+const HCBT_MINMAX = 1;
 const HCBT_CREATEWND = 3;
+const HCBT_DESTROYWND = 4;
+const HCBT_ACTIVATE = 5;
+const HCBT_SYSCOMMAND = 8;
+const HCBT_SETFOCUS = 9;
 
 /** CBT_CREATEWNDA: what a CBT hook is handed for HCBT_CREATEWND. */
 const CBT_CREATEWNDA = Object.freeze({ lpcs: 0, hwndInsertAfter: 4, SIZE: 8 });
@@ -254,6 +260,8 @@ const SW_MINIMIZE = 6;
 const SW_SHOWNA = 8;
 /** The show commands that leave the window minimised. */
 const MINIMISING = new Set([2, SW_MINIMIZE, 7]);
+/** The show commands that bring a minimised window back: SW_SHOWNORMAL, SW_RESTORE, SW_SHOWDEFAULT. */
+const RESTORING = new Set([1, 9, 10]);
 const WS_MINIMIZE = 0x20000000;
 const WS_POPUP = 0x80000000;
 /** The ShowWindow commands that leave activation where it is. */
@@ -1295,7 +1303,53 @@ export function createWindowFunctions(host){
      *        WA_CLICKACTIVE when a click did it.
      * @returns {number | Promise<number>} once every procedure told has answered
      */
-    const activate = (hwnd, { thread, how = WA_ACTIVE } = {})=>{
+    const activate = (hwnd, options = {})=>{
+        const record = live(hwnd);
+        const target = record ? topLevelOf(record).hwnd : 0;
+        if (target === 0 || target === active)
+        {
+            return activateNow(hwnd, options);
+        }
+        // A CBT hook hears first, while the window losing activation is
+        // still the active one, and may forbid it.
+        return andThen(askActivate(target, options.how ?? WA_ACTIVE,
+            options.thread ?? host.callerThread?.()),
+        refused=>((refused | 0) !== 0 ? 0 : activateNow(hwnd, options)));
+    };
+
+    /**
+     * HCBT_ACTIVATE, whose lParam is a CBTACTIVATESTRUCT: whether a click
+     * did it, and the window active until now.
+     *
+     * @param {number} target @param {number} how @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const askActivate = (target, how, thread)=>{
+        if (chainOf(WH_CBT, thread).length === 0)
+        {
+            return 0;
+        }
+        const at = host.allocate?.(8) ?? 0;
+        if (at !== 0)
+        {
+            writeU32s(host, at, [how === WA_CLICKACTIVE ? 1 : 0, active]);
+        }
+        return andThen(callHook(WH_CBT, null, [HCBT_ACTIVATE, target, at], thread), answer=>{
+            if (at !== 0)
+            {
+                host.release?.(at);
+            }
+            return answer;
+        });
+    };
+
+    /**
+     * The activation itself, once nothing has forbidden it.
+     *
+     * @param {number} hwnd @param {{ thread?: unknown, how?: number }} options
+     * @returns {number | Promise<number>}
+     */
+    const activateNow = (hwnd, { thread, how = WA_ACTIVE })=>{
         const record = live(hwnd);
         const previous = active;
         active = record ? topLevelOf(record).hwnd : 0;
@@ -1345,14 +1399,6 @@ export function createWindowFunctions(host){
         {
             told.push([gained, WM_NCACTIVATE, 1, 0], [gained, WM_ACTIVATE, how, previous]);
         }
-        if (moved)
-        {
-            if (current !== 0)
-            {
-                told.push([current, WM_KILLFOCUS, gained, 0]);
-            }
-            told.push([gained, WM_SETFOCUS, current, 0]);
-        }
         /** @param {number} index @returns {number | Promise<number>} */
         const tell = index=>{
             if (index >= told.length)
@@ -1363,7 +1409,23 @@ export function createWindowFunctions(host){
             return andThen(live(target) ? send(target, message, wParam, lParam, thread) : 0,
                 ()=>tell(index + 1));
         };
-        return tell(0);
+        if (!moved)
+        {
+            return tell(0);
+        }
+        // The focus follows as SetFocus moves it, a CBT hook first: one that
+        // forbids it leaves the focus where it was.
+        return andThen(tell(0), ()=>andThen(askCbt(HCBT_SETFOCUS, gained, current,
+            thread ?? host.callerThread?.()), refused=>{
+            if ((refused | 0) !== 0)
+            {
+                focus = current;
+                return 0;
+            }
+            return andThen(current !== 0 && live(current)
+                ? send(current, WM_KILLFOCUS, gained, 0, thread) : 0,
+            ()=>(live(gained) ? send(gained, WM_SETFOCUS, current, 0, thread) : 0));
+        }));
     };
 
     /**
@@ -1393,14 +1455,22 @@ export function createWindowFunctions(host){
         {
             return previous;
         }
-        focus = target;
-        // Activation is told first, then the focus: a window gaining both
-        // hears WM_ACTIVATE before WM_SETFOCUS.
-        const activated = target !== 0 ? activate(target, { thread }) : 0;
-        return andThen(activated, ()=>
-            andThen(previous !== 0 ? send(previous, WM_KILLFOCUS, target, 0, thread) : 0,
-                ()=>andThen(target !== 0 ? send(target, WM_SETFOCUS, previous, 0, thread) : 0,
-                    ()=>previous)));
+        const on = thread ?? host.callerThread?.();
+        // A CBT hook hears first, and may forbid it: then nothing moves.
+        return andThen(askCbt(HCBT_SETFOCUS, target, previous, on), refused=>{
+            if ((refused | 0) !== 0)
+            {
+                return 0;
+            }
+            focus = target;
+            // Activation is told first, then the focus: a window gaining both
+            // hears WM_ACTIVATE before WM_SETFOCUS.
+            const activated = target !== 0 ? activate(target, { thread: on }) : 0;
+            return andThen(activated, ()=>
+                andThen(previous !== 0 ? send(previous, WM_KILLFOCUS, target, 0, on) : 0,
+                    ()=>andThen(target !== 0 ? send(target, WM_SETFOCUS, previous, 0, on) : 0,
+                        ()=>previous)));
+        });
     };
 
     /** The window that has the mouse, or zero. */
@@ -1547,6 +1617,25 @@ export function createWindowFunctions(host){
                     return 1;
                 }));
         });
+    };
+
+    /**
+     * DestroyWindow as a program calls it: a CBT hook hears first, and one
+     * that answers non-zero keeps the window.
+     *
+     * @param {number} hwnd @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const destroyAsked = (hwnd, thread)=>{
+        const record = live(hwnd);
+        if (!record || record === desktop)
+        {
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+            return 0;
+        }
+        const on = thread ?? host.callerThread?.();
+        return andThen(askCbt(HCBT_DESTROYWND, record.hwnd, 0, on),
+            refused=>((refused | 0) !== 0 ? 0 : destroyWindow(record.hwnd, on)));
     };
 
     /**
@@ -1750,8 +1839,10 @@ export function createWindowFunctions(host){
      * window's procedure runs.
      *
      * A hook set for one thread hears what happens on that thread alone; one
-     * set for none -- a global hook -- hears every thread of the process, and
-     * a chain on a thread is its own hooks and the global ones, newest first.
+     * set for none -- a global hook -- hears every thread of the process. A
+     * chain on a thread is its own hooks, newest first, and after them the
+     * global ones, newest first: the last of a thread's own passes on to the
+     * newest global hook.
      *
      * @type {{ handle: number, type: number, proc: number, thread: number }[]}
      */
@@ -1770,27 +1861,41 @@ export function createWindowFunctions(host){
     };
 
     /**
-     * Calls the newest hook of a type, or the one older than `after`.
+     * A thread's chain of hooks of a type, in the order they are called.
      *
-     * @param {number} type @param {number | null} after  A hook handle, or null for the newest.
+     * @param {number} type @param {unknown} thread
+     */
+    const chainOf = (type, thread)=>{
+        const heard = hooks.filter(hook=>hook.type === type && hears(hook, thread)).reverse();
+        return [...heard.filter(hook=>hook.thread !== 0), ...heard.filter(hook=>hook.thread === 0)];
+    };
+
+    /**
+     * Calls the first hook of a thread's chain of a type, or the one after `after`.
+     *
+     * @param {number} type @param {number | null} after  A hook handle, or null for the first.
      * @param {number[]} args @param {unknown} thread
      * @returns {number | Promise<number>} what the hook answered; 0 with none to call.
      */
     const callHook = (type, after, args, thread)=>{
-        let from = hooks.length - 1;
-        if (after !== null)
-        {
-            from = hooks.findIndex(hook=>hook.handle === after) - 1;
-        }
-        for (let at = from; at >= 0; at--)
-        {
-            if (hooks[at].type === type && hears(hooks[at], thread) && host.call)
-            {
-                return host.call(hooks[at].proc, args, thread);
-            }
-        }
-        return 0;
+        const chain = chainOf(type, thread);
+        // A hook not in this thread's chain has nothing after it here.
+        const next = after === null ? chain[0] : chain.findIndex(hook=>hook.handle === after) < 0
+            ? undefined : chain[chain.findIndex(hook=>hook.handle === after) + 1];
+        return next && host.call ? host.call(next.proc, args, thread) : 0;
     };
+
+    /**
+     * Asks a thread's CBT hooks about what is about to happen to a window;
+     * an answer other than zero forbids it. A thread with no CBT hook is
+     * asked nothing, and nothing waits.
+     *
+     * @param {number} code @param {number} wParam @param {number} lParam
+     * @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const askCbt = (code, wParam, lParam, thread)=>(chainOf(WH_CBT, thread).length === 0 ? 0
+        : callHook(WH_CBT, null, [code, wParam >>> 0, lParam >>> 0], thread));
 
     /**
      * A window record and the handle that names it, with everything a window
@@ -3021,7 +3126,7 @@ export function createWindowFunctions(host){
                 return 1;
             }
             case WM_CLOSE:
-                return andThen(destroyWindow(record.hwnd, thread), ()=>0);
+                return andThen(destroyAsked(record.hwnd, thread), ()=>0);
             // Validates the window: a procedure that hands WM_PAINT here has
             // nothing to draw, and the area has to be cleared or the same
             // paint is retrieved for ever. The frame and background still
@@ -3049,11 +3154,15 @@ export function createWindowFunctions(host){
                 return 0;
             }
             case WM_SYSCOMMAND:
-                if ((message.wParam & 0xfff0) === SC_CLOSE)
-                {
-                    return send(record.hwnd, WM_CLOSE, 0, 0, thread);
-                }
-                return 0;
+                // A CBT hook hears the command before it is carried out.
+                return andThen(askCbt(HCBT_SYSCOMMAND, message.wParam, message.lParam,
+                    thread ?? host.callerThread?.()), refused=>{
+                    if ((refused | 0) === 0 && (message.wParam & 0xfff0) === SC_CLOSE)
+                    {
+                        return send(record.hwnd, WM_CLOSE, 0, 0, thread);
+                    }
+                    return 0;
+                });
             case WM_SETCURSOR: {
                 // The parent decides first -- a dialog chooses for its
                 // controls -- except on a sizing border, which is the
@@ -3526,6 +3635,23 @@ export function createWindowFunctions(host){
      * @param {any} record @param {number} cmdShow
      */
     const showWindow = (record, cmdShow)=>{
+        const minimised = (record.style & WS_MINIMIZE) !== 0;
+        if ((MINIMISING.has(cmdShow) && !minimised) || (RESTORING.has(cmdShow) && minimised))
+        {
+            // Minimising and restoring are a CBT hook's to forbid; the window
+            // is still shown as asked, in the state it had.
+            return andThen(askCbt(HCBT_MINMAX, record.hwnd, cmdShow, host.callerThread?.()),
+                refused=>showNow(record, cmdShow, (refused | 0) !== 0));
+        }
+        return showNow(record, cmdShow, false);
+    };
+
+    /**
+     * @param {any} record @param {number} cmdShow
+     * @param {boolean} keepState  Whether a hook forbade minimising or restoring.
+     * @returns {number | Promise<number>}
+     */
+    const showNow = (record, cmdShow, keepState)=>{
         const wasVisible = (record.style & WS_VISIBLE) !== 0;
         const hide = cmdShow === SW_HIDE;
         const covered = wasVisible && hide && shown(record)
@@ -3550,11 +3676,11 @@ export function createWindowFunctions(host){
         // Minimised is a state IsIconic reads back and a restore clears; the
         // window keeps its place in the picture, there being no taskbar to
         // shrink to.
-        if (MINIMISING.has(cmdShow))
+        if (!keepState && MINIMISING.has(cmdShow))
         {
             record.style = (record.style | WS_MINIMIZE) >>> 0;
         }
-        else if (!hide)
+        else if (!keepState && !hide)
         {
             record.style = (record.style & ~WS_MINIMIZE) >>> 0;
         }
@@ -4095,7 +4221,7 @@ export function createWindowFunctions(host){
         DestroyWindow: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>destroyWindow(hwnd),
+            handler: ([hwnd])=>destroyAsked(hwnd),
         },
 
         /** BOOL ShowWindow(HWND hWnd, int nCmdShow) */

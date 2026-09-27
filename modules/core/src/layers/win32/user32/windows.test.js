@@ -28,6 +28,10 @@ const THREAD = { name: 'main' };
 const WH_CBT = 5;
 const WH_KEYBOARD = 2;
 const HCBT_CREATEWND = 3;
+const HCBT_DESTROYWND = 4;
+const HCBT_ACTIVATE = 5;
+const HCBT_SYSCOMMAND = 8;
+const HCBT_SETFOCUS = 9;
 const HOOK_PROC = 0x403000;
 const OLDER_HOOK_PROC = 0x403100;
 
@@ -2046,10 +2050,11 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
     + 'tests pin', ()=>{
     // WmCreateOverlappedSeq and WmCreatePopupSeq, less what this layer does
     // not send (WM_GETMINMAXINFO, WM_NCCALCSIZE, the WM_WINDOWPOS pair, the
-    // painting, HCBT_ACTIVATE and HCBT_SETFOCUS): HCBT_CREATEWND, WM_NCCREATE,
-    // WM_CREATE, and for a window created visible WM_SIZE (SIZE_RESTORED),
-    // WM_MOVE, WM_SHOWWINDOW(1) and the activation -- WM_ACTIVATEAPP to each
-    // of the application's top-level windows, the hidden one too.
+    // painting): HCBT_CREATEWND, WM_NCCREATE, WM_CREATE, and for a window
+    // created visible WM_SIZE (SIZE_RESTORED), WM_MOVE, WM_SHOWWINDOW(1) and
+    // the activation -- HCBT_ACTIVATE, WM_ACTIVATEAPP to each of the
+    // application's top-level windows, the hidden one too, and HCBT_SETFOCUS
+    // before the focus follows.
     /** @type {string[]} */
     const log = [];
     const { memory, fns } = setup({
@@ -2073,7 +2078,8 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
     log.length = 0;
     createWindow(fns, memory, { style: 0x80000000 | WS_VISIBLE });
     assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0', '0x5:0', '0x3:0',
-        '0x18:1', '0x1c:1', '0x1c:1', '0x86:1', '0x6:1', '0x7:0'], 'visible');
+        '0x18:1', `hook:${HCBT_ACTIVATE}`, '0x1c:1', '0x1c:1', '0x86:1', '0x6:1',
+        `hook:${HCBT_SETFOCUS}`, '0x7:0'], 'visible');
 });
 
 test('WM_NCCREATE answered FALSE refuses the window, which hears WM_NCDESTROY alone', ()=>{
@@ -2412,7 +2418,7 @@ test('a hook set for one thread hears that thread alone, and one set for none ev
     const { memory, fns, called } = setup({ heap: true, caller });
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
-    fns.SetWindowsHookExA.handler([WH_CBT, OLDER_HOOK_PROC, 0, main.id]);
+    const local = fns.SetWindowsHookExA.handler([WH_CBT, OLDER_HOOK_PROC, 0, main.id]);
     const global = fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 0]);
 
     caller.current = other;
@@ -2423,9 +2429,43 @@ test('a hook set for one thread hears that thread alone, and one set for none ev
 
     caller.current = main;
     createWindow(fns, memory);
-    assert.equal(called.at(-1)?.entry, HOOK_PROC);
-    fns.CallNextHookEx.handler([global, HCBT_CREATEWND, 0x40, 0x50]);
-    assert.equal(called.at(-1)?.entry, OLDER_HOOK_PROC, 'and the main thread hears its own');
+    assert.equal(called.at(-1)?.entry, OLDER_HOOK_PROC,
+        'a thread\'s own hooks come before the global ones, however new');
+    fns.CallNextHookEx.handler([local, HCBT_CREATEWND, 0x40, 0x50]);
+    assert.equal(called.at(-1)?.entry, HOOK_PROC, 'and pass on to them');
+    const count = called.length;
+    assert.equal(fns.CallNextHookEx.handler([global, HCBT_CREATEWND, 0x40, 0x50]), 0);
+    assert.equal(called.length, count, 'the last global hook ends the chain');
+});
+
+test('a CBT hook hears a window activated, focused, commanded and destroyed, and can forbid '
+    + 'each', ()=>{
+    const { memory, fns, called, dispatched } = setup({
+        heap: true,
+        hookReply: (entry, args)=>(args[0] === HCBT_DESTROYWND || args[0] === HCBT_SYSCOMMAND
+            ? 1 : 0),
+    });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+
+    fns.SetFocus.handler([hwnd]);
+    assert.deepEqual(called.map(call=>call.args[0]), [HCBT_SETFOCUS, HCBT_ACTIVATE]);
+    assert.equal(called[0].args[1], hwnd);
+    assert.equal(called[1].args[1], hwnd);
+    assert.equal(memory.u32(called[1].args[2] + 4), 0, 'nothing was active before it');
+
+    called.length = 0;
+    const SC_CLOSE = 0xf060;
+    assert.equal(fns.DefWindowProcA.handler([hwnd, 0x0112, SC_CLOSE, 0]), 0);
+    assert.deepEqual(called.map(call=>call.args.slice(0, 2)), [[HCBT_SYSCOMMAND, SC_CLOSE]]);
+    assert.equal(dispatched.some(m=>m.message === WM_CLOSE), false, 'the command was forbidden');
+
+    called.length = 0;
+    assert.equal(fns.DestroyWindow.handler([hwnd]), 0);
+    assert.deepEqual(called.map(call=>call.args.slice(0, 2)), [[HCBT_DESTROYWND, hwnd]]);
+    assert.equal(fns.IsWindow.handler([hwnd]), 1, 'and the window is kept');
 });
 
 test('a hook of a type that is never called says so once, and is still installed', ()=>{
