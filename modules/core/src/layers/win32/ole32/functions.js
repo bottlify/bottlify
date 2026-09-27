@@ -32,6 +32,7 @@ import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { createStorageFunctions } from './storage.js';
 import { createPropVariantFunctions } from './propvariant.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { createClassTable, createRemoting } from './remote.js';
 
 /** HRESULTs this file produces. */
 const S_OK = 0x00000000;
@@ -57,6 +58,10 @@ const CO_E_ERRORINDLL = 0x800401f9;
 const DRAGDROP_E_NOTREGISTERED = 0x80040100;
 const DRAGDROP_E_ALREADYREGISTERED = 0x80040101;
 const DRAGDROP_E_INVALIDHWND = 0x80040102;
+
+/** CLSCTX bits: where a program will accept the object being made. */
+const CLSCTX_INPROC = 0x3;
+const CLSCTX_LOCAL_SERVER = 0x4;
 
 /** IID_IClassFactory: what a class object answers to. */
 const IID_ICLASSFACTORY = '{00000001-0000-0000-C000-000000000046}';
@@ -152,6 +157,22 @@ const MAX_PROGID = 255;
  *           IUnknown it got through two interfaces to decide whether they belong
  *           to one object, and two addresses for one interface fails that test
  *           however correct the object model underneath is.
+ * @property {{ table: ReturnType<typeof createClassTable>, process: unknown }} [com]
+ *           The run's table of class objects served out of process, and what
+ *           names this process to it. Absent, this process has a table of its
+ *           own and can start no server.
+ * @property {{ create: (handler: (message: number) => number | Promise<number>)
+ *         => number | Promise<number>,
+ *     post: (window: number, message: number) => unknown }} [apartmentWindow]
+ *           A hidden window on the calling thread, for the calls another
+ *           process makes on this apartment's objects.
+ * @property {(entry: number, args: number[], thread: unknown) => Promise<number>} [guardedCall]
+ *           A call into guest code inside a frame that takes what it raises:
+ *           how a method runs for another process.
+ * @property {{ allocate?: (bytes: Uint8Array) => number }} [strings]
+ *           A BSTR made from its content, for a string that crosses in.
+ * @property {(vt: number, bounds: { elements: number, lower: number }[]) => number}
+ *           [createSafeArray]
  */
 
 /**
@@ -407,8 +428,93 @@ export function createOleFunctions(host){
             return null;
         }
         classObjects.delete(cookie);
-        return callMethod(entry.object, SLOT_RELEASE, [], thread);
+        return andThen(remoting?.revokeClass(cookie),
+            ()=>callMethod(entry.object, SLOT_RELEASE, [], thread));
     };
+
+    /**
+     * This process's end of the channel to the others, made the first time a
+     * class crosses: a program that never serves or asks for an out-of-process
+     * class never has one.
+     *
+     * @type {ReturnType<typeof createRemoting> | null}
+     */
+    let remoting = null;
+    const remote = ()=>{
+        if (remoting || !host.call || !host.callerThread || !host.bstr)
+        {
+            return remoting;
+        }
+        const call = host.call;
+        const callerThread = host.callerThread;
+        const bstr = host.bstr;
+        remoting = createRemoting({
+            table: host.com?.table ?? createClassTable(),
+            process: host.com?.process ?? null,
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            heap: host.heap,
+            call: (entry, args, thread)=>call(entry, args, thread),
+            guardedCall: host.guardedCall,
+            callerThread,
+            vtables: host.vtables,
+            bstr: {
+                allocate: bytes=>host.strings?.allocate?.(bytes) ?? 0,
+                free: pointer=>bstr.free(pointer),
+            },
+            safeArray: {
+                create: (vt, bounds)=>host.createSafeArray?.(vt, bounds) ?? 0,
+                destroy: array=>host.safeArray?.destroy(array),
+            },
+            apartmentWindow: host.apartmentWindow,
+            catalog: { hive: host.hive, readFile: wholeFile },
+            divergence: host.divergence,
+        });
+        return remoting;
+    };
+
+    /**
+     * A file off the volume whole, or null: the type library that describes
+     * an interface crossing to another process.
+     *
+     * @param {string} path
+     * @returns {Uint8Array | Promise<Uint8Array> | null}
+     */
+    const wholeFile = path=>{
+        const files = host.files;
+        const entry = files?.stat(path);
+        const node = files && entry?.exists && !entry.isDirectory
+            ? files.open(path, { read: true })
+            : null;
+        if (!files || !entry || !node)
+        {
+            return null;
+        }
+        const bytes = files.read(node, 0, entry.size);
+        if (bytes instanceof Promise)
+        {
+            return bytes.finally(()=>files.close(node));
+        }
+        files.close(node);
+        return bytes;
+    };
+
+    /**
+     * The command line that starts the class's local server, or null.
+     *
+     * @param {string} clsid
+     */
+    const localServer = clsid=>classKeyValue(clsid, 'LocalServer32')
+        ?? classKeyValue(clsid, 'LocalServer');
+
+    /**
+     * Whether a class is made in another process: the caller accepts a local
+     * server, and either has not asked for one in process or there is none.
+     *
+     * @param {string} clsid @param {number} context  CLSCTX_*.
+     */
+    const outOfProcess = (clsid, context)=>(context & CLSCTX_LOCAL_SERVER) !== 0
+        && ((context & CLSCTX_INPROC) === 0 || classKeyValue(clsid, 'InprocServer32') === null);
 
     /**
      * A string value of the class's key under HKEY_CLASSES_ROOT\CLSID, or
@@ -880,14 +986,16 @@ export function createOleFunctions(host){
          * HRESULT CoCreateInstance(REFCLSID rclsid, LPUNKNOWN pUnkOuter,
          *   DWORD dwClsContext, REFIID riid, LPVOID *ppv)
          *
-         * dwClsContext is not consulted: every class here is in-process, and a
-         * program asking for CLSCTX_LOCAL_SERVER gets the same object rather than
-         * a failure it has no fallback for.
+         * A class built in here is in-process whatever dwClsContext says: a
+         * program asking for CLSCTX_LOCAL_SERVER gets the same object rather
+         * than a failure it has no fallback for. A class whose server is an
+         * executable is made in that server's process, started for it if no
+         * process serves it yet, and the caller holds a proxy (`remote.js`).
          */
         CoCreateInstance: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([classId, outer, , interfaceId, ppv])=>{
+            handler: ([classId, outer, context, interfaceId, ppv])=>{
                 const out = ppv >>> 0;
                 if (out === 0)
                 {
@@ -919,6 +1027,27 @@ export function createOleFunctions(host){
                 if (host.registry.isRegistered(clsid))
                 {
                     return createBuiltIn(clsid, outer, iid, out);
+                }
+
+                // An executable serves it, and the caller cannot take it in
+                // process: the object is made over there.
+                const channel = outOfProcess(clsid, context) ? remote() : null;
+                if (channel)
+                {
+                    if ((outer >>> 0) !== 0)
+                    {
+                        return CLASS_E_NOAGGREGATION;
+                    }
+                    const made = channel.activate(clsid, iid, out, localServer(clsid), 'activate');
+                    return andThen(made,
+                        (/** @type {number} */ hr)=>{
+                            if (hr === REGDB_E_CLASSNOTREG)
+                            {
+                                host.divergence?.('COM', `no class ${clsid} is registered,`
+                                    + ' so CoCreateInstance refused it');
+                            }
+                            return hr;
+                        });
                 }
 
                 // A server the registry names: its class object, asked for
@@ -969,7 +1098,7 @@ export function createOleFunctions(host){
         CoGetClassObject: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([classId, , , interfaceId, ppv])=>{
+            handler: ([classId, context, , interfaceId, ppv])=>{
                 const out = ppv >>> 0;
                 if (out === 0)
                 {
@@ -1024,6 +1153,11 @@ export function createOleFunctions(host){
                     writeU32(out, pointer);
                     return S_OK;
                 }
+                const channel = outOfProcess(clsid, context) ? remote() : null;
+                if (channel)
+                {
+                    return channel.activate(clsid, iid, out, localServer(clsid), 'classobject');
+                }
                 const served = fromServer(clsid, classId, interfaceId, out, thread);
                 return served ?? REGDB_E_CLASSNOTREG;
             },
@@ -1041,7 +1175,7 @@ export function createOleFunctions(host){
         CoRegisterClassObject: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([classId, object, , , cookieOut])=>{
+            handler: ([classId, object, context, flags, cookieOut])=>{
                 const thread = host.currentThread();
                 if (!thread.ole32)
                 {
@@ -1055,8 +1189,13 @@ export function createOleFunctions(host){
                 const cookie = nextCookie++;
                 classObjects.set(cookie, { clsid, object: object >>> 0, thread });
                 writeU32(cookieOut >>> 0, cookie);
-                return andThen(callMethod(object >>> 0, SLOT_ADD_REF, [], host.callerThread?.()),
-                    ()=>S_OK);
+                const held = callMethod(object >>> 0, SLOT_ADD_REF, [], host.callerThread?.());
+                // Served to other processes too, through the run's table.
+                const channel = (context & CLSCTX_LOCAL_SERVER) !== 0 ? remote() : null;
+                return andThen(held, ()=>(channel
+                    ? channel.registerClass(clsid, object >>> 0, flags >>> 0, cookie)
+                        .then(()=>S_OK)
+                    : S_OK));
             },
         },
 
@@ -1067,6 +1206,20 @@ export function createOleFunctions(host){
             handler: ([cookie])=>{
                 const released = revoke(cookie >>> 0, host.callerThread?.());
                 return released === null ? CO_E_OBJNOTREG : andThen(released, ()=>S_OK);
+            },
+        },
+
+        /**
+         * HRESULT CoResumeClassObjects(void)
+         *
+         * What a server registered with REGCLS_SUSPENDED becomes visible to
+         * other processes, all at once.
+         */
+        CoResumeClassObjects: {
+            argBytes: 0,
+            handler: ()=>{
+                remote()?.resume();
+                return S_OK;
             },
         },
 

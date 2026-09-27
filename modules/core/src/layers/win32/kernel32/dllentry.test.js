@@ -23,7 +23,7 @@ function setup(){
     const call = createEntryPointCaller({
         register: (name, fn)=>{
             registered[name] = fn;
-            return name === '<dll-entry-guard>' ? 0x100 : 0x200;
+            return name === '<guarded-call>' ? 0x100 : 0x200;
         },
         callGuest: request=>{
             log.push({ call: request });
@@ -72,7 +72,7 @@ test('an exception out of the entry point is taken, unwound, and answered with 0
     words.set(exception, 0xc0000005);
     words.set(exception + 4, 0);
 
-    const guard = registered['<dll-entry-guard>'];
+    const guard = registered['<guarded-call>'];
     assert.equal(guard.convention, 'cdecl');
     assert.equal(await guard.handler([exception, record, 0, 0]), 'continued');
     assert.deepEqual(log[1], { unwind: record, record: exception },
@@ -80,9 +80,9 @@ test('an exception out of the entry point is taken, unwound, and answered with 0
     const frameBase = record - 20;
     assert.deepEqual(log[2], { continueAt: { eip: 0x200, esp: frameBase },
         options: { below: frameBase } }, 'then the call ends where its own return would land');
-    assert.equal(registered['<dll-entry-abandoned>'].argBytes, 12,
+    assert.equal(registered['<guarded-abandoned-3:0>'].argBytes, 12,
         'popping the three arguments');
-    assert.equal(registered['<dll-entry-abandoned>'].handler([]), 0);
+    assert.equal(registered['<guarded-abandoned-3:0>'].handler([]), 0);
 
     words.set(exception + 4, 2);
     assert.equal(guard.handler([exception, record, 0, 0]), 1,
