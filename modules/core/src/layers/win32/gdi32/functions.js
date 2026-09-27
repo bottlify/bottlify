@@ -1003,7 +1003,11 @@ export function createGdiFunctions(host){
      * @returns {number}
      */
     const deviceCaps = (dc, index)=>{
-        const surface = surfaceOf(dc);
+        // A memory context answers for the device it is compatible with, the
+        // display, whatever bitmap is selected into it (Wine's dc.c
+        // test_CreateCompatibleDC compares one over a 1-bit 10x10 bitmap with
+        // the screen's, capability by capability).
+        const surface = surfaceOf(dc.kind === 'memory' ? { kind: 'display' } : dc);
         const depth = surface.bitCount;
         switch (index | 0){
             case DRIVERVERSION:

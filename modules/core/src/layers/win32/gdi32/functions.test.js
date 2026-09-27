@@ -350,14 +350,20 @@ test('CreateDCW opens the display from a wide name', ()=>{
     assert.equal(fns.CreateDCW.handler([0, 0, 0, 0]), 0);
 });
 
-test('CreateCompatibleDC starts with the one-pixel bitmap it is documented to have', ()=>{
+test('CreateCompatibleDC starts with the one-pixel bitmap, and answers for the display', ()=>{
     const { fns, hdc } = withDC();
     const memoryDC = fns.CreateCompatibleDC.handler([hdc]);
 
     const bitmap = fns.GetCurrentObject.handler([memoryDC, OBJ_BITMAP]);
     assert.ok(bitmap > 0, 'a memory DC is one monochrome pixel until something is selected');
-    assert.equal(fns.GetDeviceCaps.handler([memoryDC, BITSPIXEL]), 1,
-        'and its depth is that bitmap\'s, not the screen\'s');
+    // Its capabilities are the display's it is compatible with, whatever is
+    // selected: Wine's dc.c compares one over a 1-bit bitmap with the screen.
+    assert.equal(fns.GetDeviceCaps.handler([memoryDC, BITSPIXEL]),
+        fns.GetDeviceCaps.handler([hdc, BITSPIXEL]));
+    fns.SelectObject.handler([memoryDC, fns.CreateBitmap.handler([10, 10, 1, 1, 0])]);
+    assert.equal(fns.GetDeviceCaps.handler([memoryDC, BITSPIXEL]), 32);
+    assert.equal(fns.GetDeviceCaps.handler([memoryDC, HORZRES]),
+        fns.GetDeviceCaps.handler([hdc, HORZRES]));
 });
 
 test('deleting a DC lets go of what it had selected', ()=>{
