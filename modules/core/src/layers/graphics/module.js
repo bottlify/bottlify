@@ -659,6 +659,7 @@ export function createGraphicsModule(){
             state.shown = state.presenter.attach({
                 backend: ()=>api.backend(),
                 readMemory: services.readMemory,
+                windowMemory: services.windowMemory,
             });
 
             /**
@@ -755,25 +756,33 @@ export function createGraphicsModule(){
                     return;
                 }
                 const bytesPerPixel = surface.bitCount >>> 3;
+                const out = target.surface.bytes;
                 for (const rect of region)
                 {
                     const width = rect.right - rect.left;
+                    if (width <= 0 || rect.bottom <= rect.top)
+                    {
+                        continue;
+                    }
+                    const rows = services.windowMemory(
+                        surface.buffer + rect.top * surface.pitch + rect.left * bytesPerPixel,
+                        (rect.bottom - rect.top - 1) * surface.pitch + width * bytesPerPixel);
                     for (let y = rect.top; y < rect.bottom; y++)
                     {
-                        const row = services.windowMemory(
-                            surface.buffer + y * surface.pitch + rect.left * bytesPerPixel,
-                            width * bytesPerPixel);
+                        const from = (y - rect.top) * surface.pitch;
                         const at = target.surface.offset + y * target.pitch + rect.left * 4;
-                        const out = target.surface.bytes.subarray(at, at + width * 4);
                         if (surface.bitCount === 32)
                         {
-                            out.set(row);
+                            for (let byte = 0; byte < width * 4; byte++)
+                            {
+                                out[at + byte] = rows[from + byte];
+                            }
                             continue;
                         }
-                        expandRow(row, width, surface.bitCount, surface.palette, out);
+                        expandRow(rows, width, surface.bitCount, surface.palette, out, from, at);
                         // The desktop's fourth byte is padding, as GDI keeps it,
                         // not the alpha a presented row carries.
-                        for (let x = 3; x < out.length; x += 4)
+                        for (let x = at + 3; x < at + width * 4; x += 4)
                         {
                             out[x] = 0;
                         }

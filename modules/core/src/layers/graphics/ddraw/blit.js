@@ -58,6 +58,9 @@ import {
  * @typedef {Object} BlitMemory
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, length: number) => Uint8Array} [windowMemory]
+ *     The bytes themselves rather than a copy, valid until the guest runs:
+ *     what a blit reads its rectangles through where the memory offers it.
  */
 
 /** @param {BlitSurface} surface */
@@ -89,8 +92,74 @@ const keyed = (value, key, surface)=>{
 };
 
 /** @param {Rect[] | undefined} clipList @param {number} x @param {number} y */
-const clippedOut = (clipList, x, y)=>clipList !== undefined && clipList.length > 0
-    && !clipList.some(rect=>x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom);
+const clippedOut = (clipList, x, y)=>{
+    if (clipList === undefined || clipList.length === 0)
+    {
+        return false;
+    }
+    for (let index = 0; index < clipList.length; index++)
+    {
+        const rect = clipList[index];
+        if (x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom)
+        {
+            return false;
+        }
+    }
+    return true;
+};
+
+/**
+ * A rectangle's rows of a surface, from the first byte of its top row to the
+ * last of its bottom one, through a window where the memory has one.
+ *
+ * @param {BlitMemory} memory @param {BlitSurface} surface @param {Rect} rect
+ */
+const spanOf = (memory, surface, rect)=>{
+    const bpp = surface.bytesPerPixel;
+    const address = surface.buffer + rect.top * surface.pitch + rect.left * bpp;
+    const length = (rect.bottom - rect.top - 1) * surface.pitch + (rect.right - rect.left) * bpp;
+    return memory.windowMemory
+        ? memory.windowMemory(address, length)
+        : memory.readMemory(address, length);
+};
+
+/**
+ * The pixel of `bpp` little-endian bytes at `at`.
+ *
+ * @param {Uint8Array} bytes @param {number} at @param {number} bpp
+ */
+const pixelAt = (bytes, at, bpp)=>{
+    if (bpp === 4)
+    {
+        return (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16) | (bytes[at + 3] << 24))
+            >>> 0;
+    }
+    return bpp === 2 ? bytes[at] | (bytes[at + 1] << 8) : bytes[at];
+};
+
+/**
+ * Where a blit keeps the source rectangle and builds each destination row:
+ * grown when a blit needs more, and kept, so a blit costs no allocation for
+ * its rows -- a sprite is dozens of them and a screen hundreds.
+ */
+let snapshotBytes = new Uint8Array(1 << 16);
+let rowBytes = new Uint8Array(1 << 12);
+/** A view of `rowBytes`' first bytes, kept while blits write rows of that length. */
+let rowView = rowBytes.subarray(0, 0);
+
+/** @param {number} length */
+const rowOf = length=>{
+    if (length > rowBytes.length)
+    {
+        rowBytes = new Uint8Array(Math.max(length, rowBytes.length * 2));
+        rowView = rowBytes.subarray(0, 0);
+    }
+    if (rowView.length !== length)
+    {
+        rowView = rowBytes.subarray(0, length);
+    }
+    return rowView;
+};
 
 /**
  * @param {BlitMemory} memory
@@ -152,77 +221,96 @@ export function writePixel(memory, surface, x, y, value){
 /**
  * The one loop every blit is: for each destination row, a source of pixels
  * (a row of the snapshot, or a constant), and the keys and clip deciding
- * which land.
+ * which land. Each row is built whole -- a pixel that does not land keeps what
+ * the destination held -- and written back in one piece.
  *
  * @param {Object} job
  * @param {BlitMemory} job.memory
  * @param {BlitSurface} job.dest
  * @param {Rect} job.destRect
- * @param {(row: number, column: number) => number} job.sample
- * @param {BlitSurface} [job.src]  Whose pixels the samples are, for the source key.
+ * @param {number} job.fill   The constant, where `src` is absent.
+ * @param {BlitSurface} [job.src]  Whose pixels the snapshot holds, for the source key.
+ * @param {Rect} [job.srcRect]     The snapshot's extent, which a stretch samples by.
  * @param {ColorKey} [job.srcColorKey]
  * @param {ColorKey} [job.destColorKey]
  * @param {Rect[]} [job.clipList]
  */
 function transfer(job){
-    const { destRect } = job;
+    const { memory, dest, destRect, src, srcColorKey, destColorKey, clipList } = job;
+    const bpp = dest.bytesPerPixel;
     const width = destRect.right - destRect.left;
-    const mask = pixelMask(job.dest);
-    for (let row = 0; row < destRect.bottom - destRect.top; row++)
+    const height = destRect.bottom - destRect.top;
+    const mask = pixelMask(dest);
+    const current = spanOf(memory, dest, destRect);
+    const row = rowOf(width * bpp);
+    const srcRect = job.srcRect;
+    const srcWidth = srcRect ? srcRect.right - srcRect.left : width;
+    const srcHeight = srcRect ? srcRect.bottom - srcRect.top : height;
+    const held = snapshotBytes;
+    for (let r = 0; r < height; r++)
     {
-        const y = destRect.top + row;
-        const current = readRow(job.memory, job.dest, y, destRect.left, width);
+        const y = destRect.top + r;
+        const from = r * dest.pitch;
+        const sampledRow = srcHeight === height ? r : Math.floor((r * srcHeight) / height);
         for (let column = 0; column < width; column++)
         {
-            const value = (job.sample(row, column) & mask) >>> 0;
-            if ((job.src && keyed(value, job.srcColorKey, job.src))
-                || (job.destColorKey !== undefined
-                    && !keyed(current[column], job.destColorKey, job.dest))
-                || clippedOut(job.clipList, destRect.left + column, y))
+            const at = from + column * bpp;
+            let value = job.fill;
+            if (src)
             {
+                const sampledColumn = srcWidth === width
+                    ? column
+                    : Math.floor((column * srcWidth) / width);
+                value = pixelAt(held, (sampledRow * srcWidth + sampledColumn) * bpp, bpp);
+            }
+            value = (value & mask) >>> 0;
+            const out = column * bpp;
+            if ((src && keyed(value, srcColorKey, src))
+                || (destColorKey !== undefined
+                    && !keyed(pixelAt(current, at, bpp), destColorKey, dest))
+                || clippedOut(clipList, destRect.left + column, y))
+            {
+                for (let byte = 0; byte < bpp; byte++)
+                {
+                    row[out + byte] = current[at + byte];
+                }
                 continue;
             }
-            current[column] = value;
+            for (let byte = 0; byte < bpp; byte++)
+            {
+                row[out + byte] = (value >>> (byte * 8)) & 0xff;
+            }
         }
-        writeRow(job.memory, job.dest, y, destRect.left, current);
+        memory.writeMemory(dest.buffer + y * dest.pitch + destRect.left * bpp, row);
     }
 }
 
 /**
- * The source rectangle, read before anything is written. The snapshot is what
+ * The source rectangle, read into `snapshotBytes` before anything is
+ * written, row after row with no pitch between them. The snapshot is what
  * makes a self-overlapping blit and a stretched one the same loop.
  *
  * @param {BlitMemory} memory @param {BlitSurface} src @param {Rect} rect
- * @returns {(row: number, column: number) => number} a sampler over the snapshot
  */
 function snapshot(memory, src, rect){
-    const width = rect.right - rect.left;
-    /** @type {Uint32Array[]} */
-    const rows = [];
-    for (let y = rect.top; y < rect.bottom; y++)
+    const bpp = src.bytesPerPixel;
+    const rowLength = (rect.right - rect.left) * bpp;
+    const rows = rect.bottom - rect.top;
+    if (rowLength * rows > snapshotBytes.length)
     {
-        rows.push(readRow(memory, src, y, rect.left, width));
+        snapshotBytes = new Uint8Array(Math.max(rowLength * rows, snapshotBytes.length * 2));
     }
-    return (row, column)=>rows[row][column];
-}
-
-/**
- * @param {Rect} destRect @param {Rect} srcRect
- * @param {(row: number, column: number) => number} sample
- * @returns {(row: number, column: number) => number} the same sampler in destination coordinates
- */
-function stretched(destRect, srcRect, sample){
-    const destWidth = destRect.right - destRect.left;
-    const destHeight = destRect.bottom - destRect.top;
-    const srcWidth = srcRect.right - srcRect.left;
-    const srcHeight = srcRect.bottom - srcRect.top;
-    if (destWidth === srcWidth && destHeight === srcHeight)
+    const span = spanOf(memory, src, rect);
+    const into = snapshotBytes;
+    for (let row = 0; row < rows; row++)
     {
-        return sample;
+        const from = row * src.pitch;
+        const to = row * rowLength;
+        for (let at = 0; at < rowLength; at++)
+        {
+            into[to + at] = span[from + at];
+        }
     }
-    return (row, column)=>sample(
-        Math.floor((row * srcHeight) / destHeight),
-        Math.floor((column * srcWidth) / destWidth));
 }
 
 /**
@@ -235,18 +323,27 @@ function stretched(destRect, srcRect, sample){
  */
 function depthFill(memory, dest, rect, value, clipList){
     const mask = (dest.depthMask ?? pixelMask(dest)) >>> 0;
+    const bpp = dest.bytesPerPixel;
     const width = rect.right - rect.left;
+    const current = spanOf(memory, dest, rect);
+    const row = rowOf(width * bpp);
     for (let y = rect.top; y < rect.bottom; y++)
     {
-        const row = readRow(memory, dest, y, rect.left, width);
+        const from = (y - rect.top) * dest.pitch;
         for (let column = 0; column < width; column++)
         {
+            const at = from + column * bpp;
+            let pixel = pixelAt(current, at, bpp);
             if (!clippedOut(clipList, rect.left + column, y))
             {
-                row[column] = ((row[column] & ~mask) | (value & mask)) >>> 0;
+                pixel = ((pixel & ~mask) | (value & mask)) >>> 0;
+            }
+            for (let byte = 0; byte < bpp; byte++)
+            {
+                row[column * bpp + byte] = (pixel >>> (byte * 8)) & 0xff;
             }
         }
-        writeRow(memory, dest, y, rect.left, row);
+        memory.writeMemory(dest.buffer + y * dest.pitch + rect.left * bpp, row);
     }
     return DD_OK;
 }
@@ -295,8 +392,7 @@ export function blt(request){
         {
             return DDERR_INVALIDPARAMS;
         }
-        const fill = (fx.fillColor ?? 0) >>> 0;
-        transfer({ ...common, sample: ()=>fill });
+        transfer({ ...common, fill: (fx.fillColor ?? 0) >>> 0 });
         return DD_OK;
     }
 
@@ -314,12 +410,8 @@ export function blt(request){
     {
         return DDERR_INVALIDRECT;
     }
-    transfer({
-        ...common,
-        src,
-        srcColorKey,
-        sample: stretched(destRect, srcRect, snapshot(memory, src, srcRect)),
-    });
+    snapshot(memory, src, srcRect);
+    transfer({ ...common, fill: 0, src, srcRect, srcColorKey });
     return DD_OK;
 }
 
@@ -361,12 +453,14 @@ export function bltFast(request){
         return DDERR_INVALIDRECT;
     }
     const flags = request.flags >>> 0;
+    snapshot(memory, src, srcRect);
     transfer({
         memory,
         dest,
         destRect,
-        sample: snapshot(memory, src, srcRect),
+        fill: 0,
         src,
+        srcRect,
         srcColorKey: (flags & DDBLTFAST_SRCCOLORKEY) !== 0 ? request.srcColorKey : undefined,
         destColorKey: (flags & DDBLTFAST_DESTCOLORKEY) !== 0 ? request.destColorKey : undefined,
     });

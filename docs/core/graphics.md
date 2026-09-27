@@ -258,7 +258,9 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
 - **Presenter and pacer** (`internal/presenter.js`, `internal/pacer.js`). A DirectDraw or GDI
   program draws into guest memory; the presenter keeps one `bgra8unorm` texture the size of the
   primary, converts 8-, 16- and 32-bit surfaces into it, coalesces a burst of blits onto one
-  upload and presents inside a backend frame. A surface a GPU drew has no bytes worth reading, so a
+  upload and presents inside a backend frame. It reads the surface through one window over its rows
+  where the attaching machine offers `windowMemory` (the graphics layer's does), and a copy of each
+  row otherwise; the desktop composition over a window reads each uncovered rectangle the same way. A surface a GPU drew has no bytes worth reading, so a
   Direct3D 7 device claims its target's address and the presenter shows the texture instead. The
   pacer remembers the newest request, arms one scheduler tick, delivers at most once per
   `1000 / maxFps` ms, and never makes the caller wait. **The presenter is a service of the run,
@@ -481,7 +483,10 @@ set at creation or after and reported by `GetSurfaceDesc`; a
 range collapses to its low value, a colour-space key is `DDERR_NOCOLORKEYHW`, and a blit compares
 the colour bits alone, so an X8R8G8B8 pixel's unused byte does not defeat the key. `blit.js` reads
 the whole source rectangle before writing a destination pixel, so overlapping and stretched blits
-are right; stretching floors, the same rule GDI uses; a blit between depths is refused. A colour
+are right; stretching floors, the same rule GDI uses; a blit between depths is refused. It reads
+both rectangles through a window where the memory offers one, keeps the source and the row it
+builds in buffers of its own, and writes each destination row in one piece through `writeMemory`,
+so a blit makes no allocation per row. A colour
 fill on a Z-buffer is refused, and `DDBLT_DEPTHFILL` fills its depth bits, keeping any stencil
 beside them, and tells whoever watches the DirectDraw object -- a Direct3D 7 device whose target has
 that buffer attached clears its own GPU depth to match. `GetGDISurface` and `FlipToGDISurface`

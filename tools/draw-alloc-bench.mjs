@@ -33,6 +33,9 @@
  *   d3d9-shader   Direct3D 9 through a vertex and a pixel shader, the matrix
  *                 constants set before every draw with the texture and the
  *                 cull mode
+ *   ddraw-32, ddraw-8   DirectDraw: a back buffer filled, N sprites put on it
+ *                 with BltFast and a colour key, copied to the primary and
+ *                 presented, at 32 and 8 bits a pixel (a draw is a sprite)
  *
  * `--top K` prints the K functions of the engine's own code that allocated
  * the most, with the file and line each starts at. `--root DIR` measures the
@@ -61,6 +64,9 @@ const { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, versionToken } =
 const { createBackend } = await import(`${GRAPHICS}/webgpu/backend.js`);
 const { createFakeDevice } = await import(`${GRAPHICS}/webgpu/internal/fake-device.js`);
 const { FVF } = await import(`${GRAPHICS}/webgpu/internal/vertexformat.js`);
+const { blt, bltFast } = await import(`${GRAPHICS}/ddraw/blit.js`);
+const DDRAW = await import(`${GRAPHICS}/ddraw/constants.js`);
+const { createPresenter } = await import(`${GRAPHICS}/webgpu/internal/presenter.js`);
 
 /** @param {string[]} argv */
 function parse(argv){
@@ -371,8 +377,71 @@ function directScene({ version, draws, moving = false, shader = false }){
     };
 }
 
-/** @type {Record<string, (draws: number) => ReturnType<typeof directScene>>} */
+/**
+ * DirectDraw as a sprite game draws: a 640x480 back buffer filled with one
+ * Blt, `draws` 32x32 sprites put on it with BltFast and a source colour key,
+ * the whole of it copied to the primary with one Blt, and the primary
+ * presented -- read out of guest memory and uploaded, as a flip shows it --
+ * through the graphics layer's services over a flat memory.
+ *
+ * @param {{ draws: number, depth: 8 | 16 | 32 }} scene
+ */
+function ddrawScene({ draws, depth }){
+    const gpu = quietPasses(createFakeDevice());
+    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+        now: ()=>0 });
+    const ram = new Uint8Array(8 << 20);
+    const memory = {
+        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+            ram.slice(address, address + length),
+        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+            ram.set(bytes, address),
+        windowMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+            ram.subarray(address, address + length),
+    };
+    /** @type {(() => void)[]} */
+    const flushes = [];
+    const presenter = createPresenter({ schedule: flush=>flushes.push(flush) });
+    const shown = presenter.attach({ backend: ()=>backend, ...memory });
+    const bpp = depth >>> 3;
+    /** @param {number} buffer @param {number} width @param {number} height */
+    const surface = (buffer, width, height)=>({ buffer, pitch: width * bpp, width, height,
+        bytesPerPixel: bpp });
+    const primary = surface(0x100000, 640, 480);
+    const back = surface(0x200000, 640, 480);
+    const sprite = surface(0x300000, 32, 32);
+    for (let at = 0; at < 32 * 32 * bpp; at++)
+    {
+        ram[sprite.buffer + at] = (at * 7) % 5 === 0 ? 0 : (at * 13) & 0xff;
+    }
+    const palette = depth === 8 ? Array.from({ length: 256 }, (_, i)=>i * 0x010101) : null;
+    const places = Array.from({ length: draws }, (_, index)=>({
+        x: (index * 37) % (640 - 32), y: (index * 53) % (480 - 32),
+    }));
+    const key = { low: 0, high: 0 };
+    const fillFx = { fillColor: 0x203040 };
+    return {
+        gpu,
+        async frame(){
+            blt({ memory, dest: back, flags: DDRAW.DDBLT_COLORFILL, fx: fillFx });
+            for (let index = 0; index < draws; index++)
+            {
+                bltFast({ memory, dest: back, x: places[index].x, y: places[index].y, src: sprite,
+                    flags: DDRAW.DDBLTFAST_SRCCOLORKEY, srcColorKey: key });
+            }
+            blt({ memory, dest: primary, src: back, flags: 0 });
+            shown.present({ buffer: primary.buffer, width: 640, height: 480, pitch: primary.pitch,
+                bitCount: depth, palette });
+            flushes.splice(0).forEach(flush=>flush());
+            gpu.reset();
+        },
+    };
+}
+
+/** @type {Record<string, (draws: number) => { frame: () => Promise<void> }>} */
 const SCENES = {
+    'ddraw-32': draws=>ddrawScene({ draws, depth: 32 }),
+    'ddraw-8': draws=>ddrawScene({ draws, depth: 8 }),
     'd3d8-lit': draws=>directScene({ version: 8, draws }),
     'd3d8-moving': draws=>directScene({ version: 8, draws, moving: true }),
     'd3d9-lit': draws=>directScene({ version: 9, draws }),
@@ -412,7 +481,7 @@ function flatten(node, into = [], caller = null){
 const isDouble = url=>url.includes('fake-device.js') || url.includes('draw-alloc-bench');
 
 /**
- * @param {ReturnType<typeof directScene>} scene @param {number} frames
+ * @param {{ frame: () => Promise<void> }} scene @param {number} frames
  * @param {number} interval
  */
 async function allocationsOf(scene, frames, interval){
@@ -454,7 +523,7 @@ async function allocationsOf(scene, frames, interval){
     return { engine, double, byFunction };
 }
 
-/** @param {ReturnType<typeof directScene>} scene @param {number} frames */
+/** @param {{ frame: () => Promise<void> }} scene @param {number} frames */
 async function timeOf(scene, frames){
     /** @type {number[]} */
     const pauses = [];

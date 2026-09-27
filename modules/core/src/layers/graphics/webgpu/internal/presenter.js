@@ -172,16 +172,20 @@ const six = value=>(value << 2) | (value >>> 4);
  * @param {number} bitCount
  * @param {number[] | null} palette
  * @param {Uint8Array} out      `width * 4` bytes.
+ * @param {number} [rowAt]      Where the row starts in `row`, and the pixels in
+ * @param {number} [outAt]      `out`: a surface is read and written a row at a
+ *     time without a view made for every row.
  */
-export function expandRow(row, width, bitCount, palette, out){
+export function expandRow(row, width, bitCount, palette, out, rowAt = 0, outAt = 0){
     if (bitCount === 32)
     {
         for (let x = 0; x < width; x++)
         {
-            const at = x * 4;
-            out[at] = row[at];
-            out[at + 1] = row[at + 1];
-            out[at + 2] = row[at + 2];
+            const from = rowAt + x * 4;
+            const at = outAt + x * 4;
+            out[at] = row[from];
+            out[at + 1] = row[from + 1];
+            out[at + 2] = row[from + 2];
             out[at + 3] = 0xff;
         }
         return;
@@ -190,8 +194,8 @@ export function expandRow(row, width, bitCount, palette, out){
     {
         for (let x = 0; x < width; x++)
         {
-            const word = row[x * 2] | (row[x * 2 + 1] << 8);
-            const at = x * 4;
+            const word = row[rowAt + x * 2] | (row[rowAt + x * 2 + 1] << 8);
+            const at = outAt + x * 4;
             out[at] = five(word & 0x1f);
             out[at + 1] = six((word >>> 5) & 0x3f);
             out[at + 2] = five(word >>> 11);
@@ -203,8 +207,8 @@ export function expandRow(row, width, bitCount, palette, out){
     {
         for (let x = 0; x < width; x++)
         {
-            const entry = palette ? (palette[row[x]] ?? 0) : 0;
-            const at = x * 4;
+            const entry = palette ? (palette[row[rowAt + x]] ?? 0) : 0;
+            const at = outAt + x * 4;
             out[at] = (entry >>> 16) & 0xff;
             out[at + 1] = (entry >>> 8) & 0xff;
             out[at + 2] = entry & 0xff;
@@ -227,6 +231,9 @@ export function expandRow(row, width, bitCount, palette, out){
  *        first present rather than at construction, so a build that never
  *        shows a DirectDraw surface never builds a GPU.
  * @param {(address: number, length: number) => Uint8Array} [options.readMemory]
+ * @param {(address: number, length: number) => Uint8Array} [options.windowMemory]
+ *        The bytes themselves rather than a copy, which a present reads the
+ *        surface through at once where it is given.
  * @param {(flush: () => void) => void} [options.schedule]
  *        When to flush a burst. A microtask by default; a test passes its own.
  * @param {() => number} [options.now]  Monotonic milliseconds, for the pacer and
@@ -297,12 +304,14 @@ export function createPresenter(options = {}){
      *
      * @typedef {{ backend: (() => any) | null,
      *     readMemory: (address: number, length: number) => Uint8Array,
+     *     windowMemory?: (address: number, length: number) => Uint8Array,
      *     claims: Map<number, () => unknown>, live: boolean }} Attachment
      */
     /** @type {Attachment[]} the construction's own first, the newest last */
     const attachments = [{
         backend: options.backend ?? null,
         readMemory: options.readMemory ?? (()=>new Uint8Array(0)),
+        windowMemory: options.windowMemory,
         claims: new Map(),
         live: true,
     }];
@@ -538,13 +547,28 @@ export function createPresenter(options = {}){
             converted = new Uint8Array(needed);
         }
         // Read a row at a time by the pitch, which may be wider than the
-        // pixels: the padding is not part of the picture.
-        for (let y = 0; y < surface.height; y++)
+        // pixels: the padding is not part of the picture. Through one window
+        // over the rows where the machine offers one, which is read here and
+        // not kept; a copy of each row otherwise.
+        const guestRow = surface.width * (surface.bitCount >>> 3);
+        if (from.windowMemory && surface.height > 0)
         {
-            const row = from.readMemory(surface.buffer + y * surface.pitch,
-                surface.width * (surface.bitCount >>> 3));
-            expandRow(row, surface.width, surface.bitCount, surface.palette,
-                converted.subarray(y * rowBytes, (y + 1) * rowBytes));
+            const rows = from.windowMemory(surface.buffer,
+                (surface.height - 1) * surface.pitch + guestRow);
+            for (let y = 0; y < surface.height; y++)
+            {
+                expandRow(rows, surface.width, surface.bitCount, surface.palette, converted,
+                    y * surface.pitch, y * rowBytes);
+            }
+        }
+        else
+        {
+            for (let y = 0; y < surface.height; y++)
+            {
+                const row = from.readMemory(surface.buffer + y * surface.pitch, guestRow);
+                expandRow(row, surface.width, surface.bitCount, surface.palette, converted,
+                    0, y * rowBytes);
+            }
         }
         using.uploadTexture({
             texture: target.texture,
@@ -760,11 +784,14 @@ export function createPresenter(options = {}){
          * claimed are no longer its GPU's.
          *
          * @param {{ backend: () => any, readMemory: (address: number, length: number)
-         *     => Uint8Array }} deps
+         *     => Uint8Array, windowMemory?: (address: number, length: number) => Uint8Array }} deps
+         *     `windowMemory`, where the machine has one, is the bytes themselves
+         *     rather than a copy: a present reads the surface through it at once.
          */
-        attach({ backend: accessor, readMemory: reader }){
+        attach({ backend: accessor, readMemory: reader, windowMemory }){
             /** @type {Attachment} */
-            const own = { backend: accessor, readMemory: reader, claims: new Map(), live: true };
+            const own = { backend: accessor, readMemory: reader, windowMemory, claims: new Map(),
+                live: true };
             attachments.push(own);
             return {
                 ...machineView(own),

@@ -20,8 +20,12 @@ import {
     GAMMA_ENTRIES, GAMMA_WGSL, createPresenter, expandRow, gammaTable, isIdentityRamp,
 } from './presenter.js';
 
-/** Guest memory is a flat buffer; surfaces are wherever the test puts them. */
-function harness(){
+/**
+ * Guest memory is a flat buffer; surfaces are wherever the test puts them.
+ *
+ * @param {{ windowed?: boolean }} [options]  Whether the machine offers a window.
+ */
+function harness(options = {}){
     const gpu = createFakeDevice();
     /** @type {any[]} */
     const presented = [];
@@ -34,12 +38,23 @@ function harness(){
     const ram = new Uint8Array(0x10000);
     /** @type {(() => void)[]} */
     const scheduled = [];
+    const reads = { copies: 0, windows: 0 };
     const presenter = createPresenter({
         backend: ()=>backend,
-        readMemory: (address, length)=>ram.slice(address, address + length),
+        readMemory: (address, length)=>{
+            reads.copies++;
+            return ram.slice(address, address + length);
+        },
+        windowMemory: options.windowed
+            ? (address, length)=>{
+                reads.windows++;
+                return ram.subarray(address, address + length);
+            }
+            : undefined,
         schedule: flush=>scheduled.push(flush),
     });
     return {
+        reads,
         gpu,
         ram,
         presented,
@@ -606,4 +621,32 @@ test('without a canvas no ramp reaches the picture, and the presenter says so', 
     const h = harness();
     assert.equal(h.presenter.appliesGamma(), false);
     assert.equal(canvasHarness().presenter.appliesGamma(), true);
+});
+
+test('byte-exact: a surface read through a window is the picture its rows copied give', ()=>{
+    // One window over the rows in place of a copy of each: the padding past
+    // each row is still no part of the picture, whatever the depth.
+    /** @type {[number, number[] | null][]} */
+    const depths = [[32, null], [16, null], [8, Array.from({ length: 256 }, (_, i)=>i * 0x010203)]];
+    for (const [bitCount, palette] of depths)
+    {
+        const copied = harness();
+        const windowed = harness({ windowed: true });
+        const width = 5;
+        const height = 3;
+        const pitch = width * (bitCount >>> 3) + 6;
+        for (const h of [copied, windowed])
+        {
+            for (let at = 0; at < pitch * height; at++)
+            {
+                h.ram[0x2000 + at] = (at * 37 + 11) & 0xff;
+            }
+            h.presenter.present({ buffer: 0x2000, width, height, pitch, bitCount, palette });
+            h.settle();
+        }
+        assert.deepEqual([...windowed.uploaded()], [...copied.uploaded()], `${bitCount} bits`);
+        assert.equal(windowed.reads.copies, 0, 'no row was copied');
+        assert.equal(windowed.reads.windows, 1, 'one window for the surface');
+        assert.equal(copied.reads.copies, height);
+    }
 });
