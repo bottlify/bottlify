@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, markdown, parseOutput, summarise } from './wine-tests.mjs';
+import { againstReference, classify, markdown, parseOutput, summarise } from './wine-tests.mjs';
 
 /** @param {Partial<import('./wine-tests.mjs').ChildResult>} [extra] */
 const result = (extra = {})=>({
@@ -99,4 +99,35 @@ test('the markdown groups a failing line checked in a loop and compares with a b
         { failures: 20, baseline: { tests: [before] } });
     assert.match(text, /`a\.c:5` \(x2\): n=1/);
     assert.match(text, /\| lib:t \| fail \| 10 \| 3 \| 0 \| 0 \| 0\.0 \| fail, 7 -> 3 \|/);
+});
+
+test('a check that fails only on the tested engine is the translator\'s, set apart', ()=>{
+    const tested = summarise('lib', 't', result({ output: [
+        'a.c:5: Test failed: x87', 'a.c:7: Test failed: layer', 'a.c:7: Test failed: layer',
+        '0001:t: 10 tests executed (0 marked as todo, 0 as flaky, 3 failures), 0 skipped.',
+    ].join('\n') }));
+    const reference = summarise('lib', 't', result({ output: [
+        'a.c:7: Test failed: layer',
+        '0001:t: 10 tests executed (0 marked as todo, 0 as flaky, 1 failure), 0 skipped.',
+    ].join('\n') }));
+    const against = againstReference(tested, reference, 'emulator');
+    assert.deepEqual(against.onlyHere.map(check=>check.message), ['x87']);
+    assert.equal(against.statusOnlyHere, false);
+
+    tested.reference = against;
+    const text = markdown({ build: 'b', engine: 'cork', started: 's', tests: [tested] },
+        { failures: 20, baseline: null });
+    assert.match(text, /## Only on cork \(held on emulator\)[\s\S]*`a\.c:5`: x87/);
+    // The shared failure is the layers', listed under the failed checks and not
+    // with the translator's.
+    assert.match(text, /## Failed checks\n\n### lib:t \(3 failures, 1 of them cork-only\)\n\n- `a\.c:7` \(x2\)/);
+});
+
+test('a run that stops where the reference finished ended worse there', ()=>{
+    const stopped = summarise('lib', 't',
+        result({ error: { reason: 'guest-fault', message: 'x' } }));
+    const finished = summarise('lib', 't', result({
+        output: '0001:t: 1 tests executed (0 marked as todo, 0 failures), 0 skipped.' }));
+    assert.equal(againstReference(stopped, finished, 'emulator').statusOnlyHere, true);
+    assert.equal(againstReference(finished, stopped, 'emulator').statusOnlyHere, false);
 });

@@ -41,6 +41,14 @@
  *     --baseline <json>   an earlier report to compare against, before -> after
  *     --engine <name>     the execution engine (the translator by default)
  *     --cork-config <json>  the translator's settings, over the ones used here
+ *     --reference <engine>  runs each test that did not pass again on this engine
+ *                         (`emulator`) and sets apart what fails only on the first
+ *
+ * The translator is built to run games fast rather than to be every corner of
+ * the x86 architecture, so a check that fails only under it is a different kind
+ * of finding from one that fails on the reference processor too: the first is
+ * the translator's, and may not matter to any game; the second is the Win32
+ * layers', whichever engine runs them. `--reference` measures which is which.
  */
 
 import { fork } from 'node:child_process';
@@ -269,6 +277,19 @@ export function classify(result, parsed){
  * @property {string[]} divergences
  * @property {string[]} missing
  * @property {string} tail       the last lines the program printed
+ * @property {ReferenceRun | null} [reference]  the same test on the reference engine
+ */
+
+/**
+ * @typedef {Object} ReferenceRun
+ * @property {string} engine
+ * @property {string} status
+ * @property {number | null} executed
+ * @property {number} failures
+ * @property {FailedCheck[]} onlyHere  checks that failed on the tested engine and
+ *     not on this one, by file:line
+ * @property {boolean} statusOnlyHere  the run ended worse on the tested engine: it
+ *     stopped where the reference finished, or failed where it passed
  */
 
 /**
@@ -297,6 +318,33 @@ export function summarise(module, test, result){
         divergences: result.divergences,
         missing: result.missing,
         tail: result.output.split('\n').slice(-12).join('\n'),
+    };
+}
+
+/** How far a run got, for telling which of two runs ended worse. */
+const FINISHED = new Set(['pass', 'fail']);
+
+/**
+ * Sets a test's result against the same test on the reference engine.
+ *
+ * A check is the translator's when its line fails here and not there: the
+ * Win32 layers are the same code on both engines, and the processor is the
+ * one thing that differs. A line checked in a loop counts by its line, since
+ * a loop's iterations need not fail alike on both.
+ *
+ * @param {TestReport} tested @param {TestReport} reference @param {string} engine
+ * @returns {ReferenceRun}
+ */
+export function againstReference(tested, reference, engine){
+    const there = new Set(reference.failed.map(check=>`${check.file}:${check.line}`));
+    return {
+        engine,
+        status: reference.status,
+        executed: reference.executed,
+        failures: reference.failures,
+        onlyHere: tested.failed.filter(check=>!there.has(`${check.file}:${check.line}`)),
+        statusOnlyHere: (!FINISHED.has(tested.status) && FINISHED.has(reference.status))
+            || (tested.status === 'fail' && reference.status === 'pass'),
     };
 }
 
@@ -345,7 +393,9 @@ async function buildId(winetest){
  * @param {{ timeout: number, engine?: string, corkConfig: object }} settings
  */
 async function runChild(exePath, test, settings){
-    const send = (/** @type {any} */ message)=>process.send?.(message);
+    const send = (/** @type {any} */ message)=>new Promise(resolve=>{
+        process.send?.(message, undefined, {}, ()=>resolve(undefined));
+    });
     const { createApp } = await import('../modules/core/src/app.js');
     const { DEFAULT_ENGINE } = await import('../modules/core/src/layers/cpu/module.js');
     const executable = new Uint8Array(await readFile(exePath));
@@ -412,7 +462,9 @@ async function runChild(exePath, test, settings){
             trace: thrown.traceText,
         };
     }
-    send({
+    // Waited for: the process exits next, and a message still in the channel
+    // when it does is lost.
+    await send({
         type: 'done',
         exitCode,
         error,
@@ -496,7 +548,7 @@ function parseArgs(argv){
         return at === -1 ? fallback : argv[at + 1];
     };
     const flags = new Set(['--winetest', '--preset', '--timeout', '--jobs', '--failures', '--out',
-        '--baseline', '--engine', '--cork-config']);
+        '--baseline', '--engine', '--cork-config', '--reference']);
     /** @type {string[]} */
     const specs = [];
     for (let i = 0; i < argv.length; i++)
@@ -520,6 +572,7 @@ function parseArgs(argv){
         baseline: value('--baseline'),
         engine: value('--engine'),
         corkConfig: JSON.parse(value('--cork-config', '{}') ?? '{}'),
+        reference: value('--reference'),
         specs,
     };
 }
@@ -587,31 +640,51 @@ export function markdown(report, { failures, baseline }){
     {
         byModule.set(test.module, [...byModule.get(test.module) ?? [], test]);
     }
+    const referenced = report.tests.find(t=>t.reference)?.reference?.engine ?? null;
+    /** The failed checks of a test that are the translator's alone. @param {TestReport} t */
+    const onlyHere = t=>t.reference?.onlyHere.length ?? 0;
+    if (referenced)
+    {
+        lines.push(`Every test that did not pass ran again on the ${referenced} engine; `
+            + `\`${report.engine}-only\` counts the failed checks that held there, `
+            + `and \`*\` marks a run that ended worse than it did there.`, '');
+    }
     lines.push('## By library', '');
-    lines.push(`| library | tests | pass | executed | failures | todo | skipped | not finished |${
+    lines.push(`| library | tests | pass | executed | failures |${
+        referenced ? ` ${report.engine}-only |` : ''} todo | skipped | not finished |${
         baseline ? ' failures before |' : ''}`);
-    lines.push(`|---|---|---|---|---|---|---|---|${baseline ? '---|' : ''}`);
+    lines.push(`|---|---|---|---|---|${referenced ? '---|' : ''}---|---|---|${
+        baseline ? '---|' : ''}`);
     for (const [module, tests] of byModule)
     {
         const sum = (/** @type {(t: TestReport) => number} */ pick)=>tests
             .reduce((total, t)=>total + pick(t), 0);
         const failedBefore = tests.map(t=>earlier.get(key(t)))
             .reduce((total, t)=>total + (t?.failures ?? 0), 0);
-        const unfinished = tests.filter(t=>t.status !== 'pass' && t.status !== 'fail');
+        const unfinished = tests.filter(t=>!FINISHED.has(t.status));
         lines.push(`| ${module} | ${tests.length} | ${tests.filter(t=>t.status === 'pass').length}`
-            + ` | ${sum(t=>t.executed ?? 0)} | ${sum(t=>t.failures)} | ${sum(t=>t.todo ?? 0)}`
-            + ` | ${sum(t=>t.skipped)} | ${unfinished.map(t=>`${t.test} (${t.status})`).join(', ')}`
+            + ` | ${sum(t=>t.executed ?? 0)} | ${sum(t=>t.failures)} |${
+                referenced ? ` ${sum(onlyHere)} |` : ''} ${sum(t=>t.todo ?? 0)}`
+            + ` | ${sum(t=>t.skipped)} | ${unfinished.map(t=>`${t.test} (${t.status}${
+                t.reference?.statusOnlyHere ? '*' : ''})`).join(', ')}`
             + ` |${baseline ? ` ${failedBefore} |` : ''}`);
     }
 
     lines.push('', '## By test', '');
-    lines.push(`| test | status | executed | failures | todo | skipped | seconds |${
-        baseline ? ' before -> after |' : ''}`);
-    lines.push(`|---|---|---|---|---|---|---|${baseline ? '---|' : ''}`);
+    lines.push(`| test | status | executed | failures |${
+        referenced ? ` ${report.engine}-only | on ${referenced} |` : ''}`
+        + ` todo | skipped | seconds |${
+            baseline ? ' before -> after |' : ''}`);
+    lines.push(`|---|---|---|---|${referenced ? '---|---|' : ''}---|---|---|${
+        baseline ? '---|' : ''}`);
     for (const test of report.tests)
     {
-        lines.push(`| ${key(test)} | ${test.status} | ${test.executed ?? '-'} | ${test.failures}`
-            + ` | ${test.todo ?? '-'} | ${test.skipped} | ${(test.wallMs / 1000).toFixed(1)} |${
+        const there = test.reference;
+        lines.push(`| ${key(test)} | ${test.status}${there?.statusOnlyHere ? '*' : ''}`
+            + ` | ${test.executed ?? '-'} | ${test.failures} |${referenced
+                ? ` ${there ? onlyHere(test) : '-'} | ${there
+                    ? `${there.status}, ${there.failures}` : '-'} |` : ''}`
+            + ` ${test.todo ?? '-'} | ${test.skipped} | ${(test.wallMs / 1000).toFixed(1)} |${
                 baseline ? ` ${compared(test, earlier.get(key(test)))} |` : ''}`);
     }
 
@@ -652,15 +725,16 @@ export function markdown(report, { failures, baseline }){
         }
     }
 
-    lines.push('', '## Failed checks', '');
-    for (const test of report.tests.filter(t=>t.failed.length > 0 || t.exceptions.length > 0))
-    {
-        lines.push(`### ${key(test)} (${test.failures} failures)`, '');
-        // The lines that fail most first: one wrong answer checked in a loop is
-        // one fix, and it would otherwise fill the listing.
+    /**
+     * A test's failed checks, the line that fails most first: one wrong answer
+     * checked in a loop is one fix, and it would otherwise fill the listing.
+     *
+     * @param {FailedCheck[]} checks
+     */
+    const listChecks = checks=>{
         /** @type {Map<string, { count: number, first: FailedCheck }>} */
         const grouped = new Map();
-        for (const check of test.failed)
+        for (const check of checks)
         {
             const where = `${check.file}:${check.line}`;
             const held = grouped.get(where);
@@ -684,11 +758,39 @@ export function markdown(report, { failures, baseline }){
         {
             lines.push(`- ... ${grouped.size - top.length} more lines`);
         }
+    };
+
+    // What fails on the reference processor too is the Win32 layers'; what
+    // fails on the tested engine alone is listed apart, below.
+    lines.push('', '## Failed checks', '');
+    for (const test of report.tests.filter(t=>t.failed.length > 0 || t.exceptions.length > 0))
+    {
+        const translator = new Set(test.reference?.onlyHere ?? []);
+        const shared = test.failed.filter(check=>!translator.has(check));
+        lines.push(`### ${key(test)} (${test.failures} failures${
+            translator.size > 0 ? `, ${translator.size} of them ${report.engine}-only` : ''})`, '');
+        listChecks(shared);
         for (const exception of test.exceptions)
         {
             lines.push(`- ${cell(exception)}${test.lastSeen ? ` (after ${test.lastSeen})` : ''}`);
         }
         lines.push('');
+    }
+
+    const translatorTests = report.tests.filter(t=>onlyHere(t) > 0 || t.reference?.statusOnlyHere);
+    if (translatorTests.length > 0)
+    {
+        lines.push(`## Only on ${report.engine} (held on ${referenced})`, '');
+        lines.push('The translator is built to run games fast, not to be the whole '
+            + 'architecture: these may matter to no game, and are set apart for that.', '');
+        for (const test of translatorTests)
+        {
+            const there = /** @type {ReferenceRun} */ (test.reference);
+            lines.push(`### ${key(test)}: ${test.status} here, ${there.status} on ${referenced}`
+                + ` (${there.failures} failures there)`, '');
+            listChecks(there.onlyHere);
+            lines.push('');
+        }
     }
 
     /** @type {Map<string, number>} */
@@ -804,6 +906,25 @@ async function main(){
             + (report.died ? `  ${report.died.split('\n')[0]}` : ''));
         return report;
     }), options.jobs);
+
+    if (options.reference)
+    {
+        const referenceSettings = { ...settings, engine: options.reference };
+        const again = results
+            .map((report, index)=>({ report, exePath: plan[index].exePath }))
+            .filter(({ report })=>report.status !== 'pass' && report.status !== 'no-such-test');
+        console.log(`\n${again.length} tests again on ${options.reference}:`);
+        await pool(again.map(({ report, exePath })=>async()=>{
+            const reference = summarise(report.module, report.test,
+                await runInChild(exePath, report.test, referenceSettings));
+            report.reference = againstReference(report, reference, options.reference);
+            console.log(`  ${`${report.module}:${report.test}`.padEnd(28)}`
+                + ` ${reference.status.padEnd(15)}`
+                + ` failures ${String(reference.failures).padStart(5)}`
+                + ` ${options.engine ?? DEFAULT_ENGINE}-only ${report.reference.onlyHere.length}`
+                + (report.reference.statusOnlyHere ? ', ended worse' : ''));
+        }), options.jobs);
+    }
 
     const report = {
         build,
