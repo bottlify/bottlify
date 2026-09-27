@@ -69,6 +69,8 @@ import { createImmFunctions } from './imm32/functions.js';
 import { createShlwapiFunctions } from './shlwapi/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
+import { createIostreamFunctions } from './msvcirt/functions.js';
+import { formatToString } from './msvcrt/format.js';
 import { createSetupapiFunctions } from './setupapi/functions.js';
 import { createWintrustFunctions } from './wintrust/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
@@ -1638,6 +1640,41 @@ export function createWin32Module(){
                 }),
 
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
+
+                // The old iostream library: its objects live in the program's
+                // memory and its methods run over the C runtime's heap, locks
+                // and descriptors, calling the program's own overrides through
+                // their vtables.
+                'MSVCIRT.dll': createIostreamFunctions({
+                    readMemory,
+                    writeMemory,
+                    readCString,
+                    addressOf: name=>modules.find('msvcirt.dll')?.addressOf?.(name) ?? 0,
+                    allocate: bytes=>libraries['msvcrt.dll'].malloc.handler([bytes]) >>> 0,
+                    release: address=>void libraries['msvcrt.dll'].free.handler([address]),
+                    locks: {
+                        init: cs=>libraries['KERNEL32.dll'].InitializeCriticalSection.handler([cs]),
+                        remove: cs=>libraries['KERNEL32.dll'].DeleteCriticalSection.handler([cs]),
+                        enter: cs=>libraries['KERNEL32.dll'].EnterCriticalSection.handler([cs]),
+                        leave: cs=>libraries['KERNEL32.dll'].LeaveCriticalSection.handler([cs]),
+                    },
+                    crt: {
+                        open: (path, flags, prot)=>
+                            libraries['msvcrt.dll']._open.handler([path, flags, prot]),
+                        close: fd=>libraries['msvcrt.dll']._close.handler([fd]),
+                        read: (fd, buffer, count)=>
+                            libraries['msvcrt.dll']._read.handler([fd, buffer, count]),
+                        write: (fd, buffer, count)=>
+                            libraries['msvcrt.dll']._write.handler([fd, buffer, count]),
+                        seek: (fd, offset, origin)=>
+                            libraries['msvcrt.dll']._lseek.handler([fd, offset, origin]),
+                        setmode: (fd, mode)=>libraries['msvcrt.dll']._setmode.handler([fd, mode]),
+                    },
+                    call: ({ entry, args, ecx, thread })=>
+                        bridge.callGuest({ entry, args, thread, registers: { ecx } }),
+                    callerThread: ()=>bridge.callerThread(),
+                    format: (format, words)=>formatToString(format, words, ()=>''),
+                }),
 
                 // An installer's INF files, cabinets and file queues, over the
                 // volume every file call uses; a queue's notifications go to the
