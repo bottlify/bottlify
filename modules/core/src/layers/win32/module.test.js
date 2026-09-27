@@ -128,6 +128,17 @@ test('WINMM\'s ordinal 2 is PlaySoundA, as winmm.spec numbers it', async()=>{
     await win32Module.dispose();
 });
 
+test('dsetup is a library here, so an autorun that loads it by name finds DirectX', async()=>{
+    // An autorun that cannot load it reads the installed DirectX as none and
+    // refuses to install, whatever the registry says.
+    const api = await win32Module.create({ screen: SCREEN }, stubHost());
+    const dsetup = api.libraries()['DSETUP.dll'];
+    assert.ok(dsetup, 'in the table of libraries the loader synthesises');
+    assert.deepEqual(['DirectXSetupA', 'DirectXSetupGetVersion']
+        .map(name=>dsetup[name]?.argBytes), [12, 8]);
+    await win32Module.dispose();
+});
+
 test('a DC taken through user32 is one GDI answers for', async()=>{
     // A program asks the display about itself through its own window: GetDC
     // on the window, GetDeviceCaps on what came back. Both libraries live in
