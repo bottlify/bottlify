@@ -171,6 +171,7 @@ test('errno as msvcrt sets it: EDOM for a NaN of arguments that were none, ERANG
         ['cosh', [1000], ERANGE], ['sinh', [-Infinity], null],
         ['_hypot', [1.5e308, 1.5e308], ERANGE],
         ['ldexp', [1, 5000], ERANGE], ['ldexp', [1, -5000], null], ['ldexp', [Infinity, 1], null],
+        ['atan', [NaN], EDOM], ['tanh', [NaN], EDOM], ['exp', [NaN], EDOM],
     ];
     for (const [name, args, code] of cases)
     {
@@ -179,6 +180,17 @@ test('errno as msvcrt sets it: EDOM for a NaN of arguments that were none, ERANG
             : args.flatMap(doubleSlots);
         table[name].handler(slots);
         assert.deepEqual(errors, code === null ? [] : [code], `${name}(${args})`);
+    }
+});
+
+test('atan, tanh and exp hand a NaN back as it came, payload and all', ()=>{
+    const { fpu, table } = build();
+    const nan = new Float64Array(new BigUint64Array([0xfff8000123456780n]).buffer)[0];
+    for (const name of ['atan', 'tanh', 'exp'])
+    {
+        table[name].handler(doubleSlots(nan));
+        const bits = new BigUint64Array(new Float64Array([fpu.result]).buffer)[0];
+        assert.equal(bits, 0xfff8000123456780n, name);
     }
 });
 

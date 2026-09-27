@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatToString } from './format.js';
+import { formatToString, guestAccess } from './format.js';
 
 /** Pointers the guest would hold; the engine never invents one of its own. */
 const HELLO = 0x100;
@@ -73,8 +73,11 @@ test('left alignment wins over zero padding, as C says it must', ()=>{
     assert.equal(render('%-05d|', [42]), '42   |');
 });
 
-test('zero padding is for numbers only', ()=>{
-    assert.equal(render('%08s|', [HELLO]), '   world|');
+test('zero padding is for every conversion but a pointer', ()=>{
+    // Wine's msvcrt test_sprintf: "%04s" of "foo" is "0foo", "%04c" "0001".
+    assert.equal(render('%08s|', [HELLO]), '000world|');
+    assert.equal(render('%04c|', [0x31]), '0001|');
+    assert.equal(render('%#012p|', [57]), '  0X00000039|');
 });
 
 test('precision sets a minimum digit count and a maximum string length', ()=>{
@@ -105,15 +108,21 @@ test('a format no argument satisfies still produces output', ()=>{
     assert.equal(render('%s %s', [HELLO]), 'world (null)');
 });
 
-test('an unrecognised conversion is emitted verbatim', ()=>{
-    assert.equal(render('%q'), '%q');
-    assert.equal(render('%5.2q'), '%5.2q');
-    assert.equal(render('a%zb', [1]), 'a%zb');
-});
+test('an unrecognised conversion is its own character, the specification before it dropped',
+    ()=>{
+        assert.equal(render('%q'), 'q');
+        assert.equal(render('%5.2q'), 'q');
+        assert.equal(render('a%zb', [1]), 'azb');
+        assert.equal(render('%I|%z|%t'), 'I|z|t', 'and at the format\'s end');
+        assert.equal(render('%w0s'), '0s', 'a modifier the conversion does not follow');
+        assert.equal(render('%Iq %I64D'), 'Iq D', 'I alone before no integer conversion');
+        assert.equal(render('%Ix|%zx|%tx', [0x123456, 1, 2]), '123456|1|2');
+    });
 
-test('a format ending inside a specifier stops there', ()=>{
-    assert.equal(render('end%'), 'end%');
-    assert.equal(render('end%-05'), 'end%');
+test('a format ending inside a specifier writes none of it', ()=>{
+    assert.equal(render('end%'), 'end');
+    assert.equal(render('end%-05'), 'end');
+    assert.equal(render('end%3h'), 'end');
 });
 
 test('a narrow format under the C locale reads %S and %ls as wide text, a byte a character', ()=>{
@@ -136,4 +145,85 @@ test('a narrow format under the C locale reads %S and %ls as wide text, a byte a
     assert.equal(narrow('%S|', [0x700]), 'ab|', 'the string stops where a byte cannot follow');
     assert.equal(formatToString('%C', [0x3042], readString), 'あ',
         'without the option the character is left to the caller');
+});
+
+/** A double's two stack slots, low word first. @param {number} value */
+const slots = value=>{
+    const view = new DataView(new ArrayBuffer(8));
+    view.setFloat64(0, value, true);
+    return [view.getUint32(0, true), view.getUint32(4, true)];
+};
+
+/** The x87's indefinite: a quiet NaN with the sign and no payload. */
+const INDEFINITE = [0, 0xfff80000];
+
+test('%e writes an exponent of three digits at least, and # keeps the point', ()=>{
+    assert.equal(render('%+#23.15e', slots(789456123)), '+7.894561230000000e+008');
+    assert.equal(render('%2.4e', slots(8.6)), '8.6000e+000');
+    assert.equal(render('% 014.4e', slots(8.6)), ' 008.6000e+000');
+    assert.equal(render('%E', slots(1e-300)), '1.000000E-300');
+    assert.equal(render('%e', slots(0)), '0.000000e+000');
+    assert.equal(render('%#.0e', slots(3)), '3.e+000');
+});
+
+test('%g chooses its form by the exponent at its precision, and drops the fraction\'s zeros',
+    ()=>{
+        assert.equal(render('%g', slots(0.0005)), '0.0005');
+        assert.equal(render('%g', slots(0.00005)), '5e-005');
+        assert.equal(render('%g', slots(999999999999999)), '1e+015');
+        assert.equal(render('%.15g', slots(999999999999999)), '999999999999999');
+        assert.equal(render('%2.4g', slots(8.6)), '8.6');
+        assert.equal(render('%#1.1g', slots(789456123)), '8.e+008');
+        assert.equal(render('%g', slots(0)), '0');
+        assert.equal(render('%g', slots(100000)), '100000');
+    });
+
+test('a float is converted to seventeen significant digits and rounded from them, half up',
+    ()=>{
+        assert.equal(render('%.30f', slots(1 / 3)), '0.333333333333333310000000000000');
+        assert.equal(render('%.15f', slots(Math.PI)), '3.141592653589793');
+        assert.equal(render('%.13f', slots(37.866261574537077)), '37.8662615745371');
+        assert.deepEqual(['%.0f', '%.0f', '%.0f', '%.0f'].map((format, i)=>
+            render(format, slots([-1.5, -0.5, 0.5, 1.5][i]))), ['-2', '-1', '1', '2']);
+        assert.equal(render('%#.0f', slots(2)), '2.');
+    });
+
+test('an infinity and the NaNs are msvcrt\'s digits that are not digits, rounded as digits',
+    ()=>{
+        assert.equal(render('%lf', INDEFINITE), '-1.#IND00');
+        assert.equal(render('%lf', slots(NaN)), '1.#QNAN0');
+        assert.equal(render('%lf', slots(Infinity)), '1.#INF00');
+        assert.equal(render('%le', slots(-Infinity)), '-1.#INF00e+000');
+        assert.equal(render('%lg', INDEFINITE), '-1.#IND');
+        assert.equal(render('%lg', slots(NaN)), '1.#QNAN');
+        assert.equal(render('%010.2lf', INDEFINITE), '-000001.#J', 'I rounded up to J');
+        assert.equal(render('%010.2lf', slots(NaN)), '0000001.#R');
+        assert.equal(render('%lf', [0, 0x7ff00001]), '1.#SNAN0');
+    });
+
+test('h makes an integer its low sixteen bits, and the modifiers run together', ()=>{
+    assert.equal(render('%hx|%hhx|%hd', [0x12345, 0x123, 0x18000]), '2345|123|-32768');
+    assert.equal(render('%I64d|%lld', [0xffffffff, 0xffffffff, 1, 0]), '-1|1');
+    assert.equal(render('%#+ -03whlls|', [HELLO]), 'world|');
+});
+
+test('%Z prints a counted string and %n writes the count, where the guest memory is given', ()=>{
+    const memory = new Uint8Array(0x1000);
+    const view = new DataView(memory.buffer);
+    const read = (/** @type {number} */ at, /** @type {number} */ length)=>
+        memory.subarray(at, at + length);
+    const write = (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
+        memory.set(bytes, at);
+    memory.set([...'not wide'].map(c=>c.charCodeAt(0)), 0x100);
+    view.setUint16(0x10, 2, true);
+    view.setUint32(0x14, 0x100, true);
+    [...'wide'].forEach((c, i)=>view.setUint16(0x200 + i * 2, c.charCodeAt(0), true));
+    view.setUint16(0x20, 4, true);
+    view.setUint32(0x24, 0x200, true);
+    view.setUint32(0x34, 0, true);
+    const options = { ...guestAccess(read, write) };
+    assert.equal(formatToString('%Z|%wZ|%Z|%Z', [0x10, 0x20, 0, 0x30], readString, options),
+        'no|wi|(null)|(null)');
+    assert.equal(formatToString('asdf%n!', [0x40], readString, options), 'asdf!');
+    assert.equal(view.getInt32(0x40, true), 4);
 });

@@ -67,9 +67,9 @@ function inputs(seed, count, more = []){
 /** What the handler answers for a case handed to it: JavaScript's value. */
 const ANSWERS = /** @type {Record<string, (...args: number[]) => number>} */ ({
     sqrt: Math.sqrt, sin: Math.sin, cos: Math.cos, tan: Math.tan, asin: Math.asin,
-    acos: Math.acos, exp: Math.exp, log: Math.log, log10: Math.log10, sinh: Math.sinh,
-    cosh: Math.cosh, pow: Math.pow, _hypot: Math.hypot, _CI_hypot: Math.hypot,
-    ldexp: (x, n)=>x * 2 ** n,
+    acos: Math.acos, atan: Math.atan, exp: Math.exp, log: Math.log, log10: Math.log10,
+    sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh, pow: Math.pow, _hypot: Math.hypot,
+    _CI_hypot: Math.hypot, ldexp: (x, n)=>x * 2 ** n,
 });
 
 /**

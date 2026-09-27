@@ -23,6 +23,7 @@
 
 import { scanInteger, scanFloat } from './convert.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { wideStringAt } from './widetext.js';
 
 /**
  * How many stack slots a variadic function reads past its fixed arguments.
@@ -40,7 +41,7 @@ const MAX_STRING = 1 << 20;
 /** Returned when the input ended before the first conversion could start. */
 export const SCAN_EOF = -1;
 
-/** @param {string} character */
+/** @param {string | undefined} character */
 const isSpace = character=>character !== undefined && ' \t\n\v\f\r'.includes(character);
 
 /**
@@ -49,22 +50,22 @@ const isSpace = character=>character !== undefined && ' \t\n\v\f\r'.includes(cha
  * @param {string} modifier
  */
 function integerWidth(modifier){
-    if (modifier === 'hh')
+    if (/ll|I64|j/.test(modifier))
     {
-        return 1;
+        return 8;
     }
-    if (modifier === 'h')
-    {
-        return 2;
-    }
-    return modifier === 'll' || modifier === 'I64' ? 8 : 4;
+    // One h is a short; msvcrt reads a second as taking the first back.
+    return (modifier.match(/h/g) ?? []).length === 1 ? 2 : 4;
 }
 
 /**
  * Expands a scanset -- the bracketed form of `%[...]` -- into a membership test.
  *
  * `]` first is a literal `]`, and `^` first negates. Both are positional rules
- * with no escape available, because the set has no escape character.
+ * with no escape available, because the set has no escape character. A dash
+ * between two characters is a range -- run the other way, the same range, as
+ * msvcrt reads it -- but a dash at either end, or right after a range, is
+ * itself.
  *
  * @param {string} body
  * @returns {(character: string) => boolean}
@@ -78,22 +79,24 @@ function scanset(body){
         text = text.slice(1);
     }
     const members = new Set();
+    let afterRange = false;
     for (let at = 0; at < text.length; at++)
     {
-        // A dash between two characters is a range, but a dash at either end is
-        // itself. The range runs over byte values, as the runtime compares
-        // them, not over the characters the ANSI page makes of those bytes.
-        if (text[at] === '-' && at > 0 && at + 1 < text.length)
+        if (text[at] === '-' && at > 0 && at + 1 < text.length && !afterRange)
         {
-            const [from, to] = encodeAnsi(text[at - 1] + text[at + 1]);
-            for (let byte = from + 1; byte <= to; byte++)
+            // The range runs over byte values, as the runtime compares them,
+            // not over the characters the ANSI page makes of those bytes.
+            const [start, end] = encodeAnsi(text[at - 1] + text[at + 1]);
+            for (let byte = Math.min(start, end); byte <= Math.max(start, end); byte++)
             {
                 members.add(decodeAnsi(Uint8Array.of(byte)));
             }
             at++;
+            afterRange = true;
             continue;
         }
         members.add(text[at]);
+        afterRange = false;
     }
     return character=>character !== undefined && members.has(character) !== negated;
 }
@@ -102,7 +105,16 @@ function scanset(body){
  * @typedef {Object} ScanStore
  * @property {(pointer: number, value: bigint, bytes: number) => void} integer
  * @property {(pointer: number, value: number, bytes: number) => void} real
- * @property {(pointer: number, text: string, terminate: boolean) => void} text
+ * @property {(pointer: number, text: string, terminate: boolean, wide: boolean) => void} text
+ */
+
+/**
+ * How far a scan read: the characters it consumed, and whether it looked for
+ * one past the end of what it had -- the case more input could change.
+ *
+ * @typedef {Object} ScanProgress
+ * @property {number} consumed
+ * @property {boolean} starved
  */
 
 /**
@@ -113,14 +125,47 @@ function scanset(body){
  * @param {() => number} nextPointer  The next argument, taken only when a
  *        conversion is actually going to store through it.
  * @param {ScanStore} store
+ * @param {{ wide?: boolean, progress?: ScanProgress }} [options]
+ *        `wide` for the wscanf family, where %s and %c are wide and %S and
+ *        %C narrow; `progress` is filled in with how far the scan read.
  * @returns {number} Assignments made, or SCAN_EOF.
  */
-export function runScan(input, format, nextPointer, store){
+export function runScan(input, format, nextPointer, store, options = {}){
     let at = 0;
     let assigned = 0;
+    let starved = false;
+
+    /** The character at `index`, noting a look past the end. @param {number} index */
+    const peek = index=>{
+        if (index >= input.length)
+        {
+            starved = true;
+            return undefined;
+        }
+        return input[index];
+    };
+
+    const done = (/** @type {number} */ answer)=>{
+        if (options.progress)
+        {
+            options.progress.consumed = at;
+            options.progress.starved = starved;
+        }
+        return answer;
+    };
 
     /** Nothing converted yet and no input left: the caller's loop should stop. */
-    const stop = ()=>(assigned === 0 && at >= input.length ? SCAN_EOF : assigned);
+    const stop = ()=>done(assigned === 0 && at >= input.length ? SCAN_EOF : assigned);
+
+    /** A literal the input must have next. @param {string} character */
+    const literal = character=>{
+        if (peek(at) !== character)
+        {
+            return false;
+        }
+        at++;
+        return true;
+    };
 
     for (let f = 0; f < format.length; f++)
     {
@@ -130,7 +175,7 @@ export function runScan(input, format, nextPointer, store){
         {
             // Any whitespace in the format matches any run of it in the input,
             // including none at all.
-            while (isSpace(input[at]))
+            while (isSpace(peek(at)))
             {
                 at++;
             }
@@ -139,25 +184,14 @@ export function runScan(input, format, nextPointer, store){
 
         if (directive !== '%')
         {
-            if (input[at] !== directive)
+            if (!literal(directive))
             {
                 return stop();
             }
-            at++;
             continue;
         }
 
         f++;
-        if (format[f] === '%')
-        {
-            if (input[at] !== '%')
-            {
-                return stop();
-            }
-            at++;
-            continue;
-        }
-
         let suppress = false;
         if (format[f] === '*')
         {
@@ -165,33 +199,58 @@ export function runScan(input, format, nextPointer, store){
             f++;
         }
 
+        // Digits and length modifiers in any order, as msvcrt takes them:
+        // every digit adds to the one width, so "%2h0d" reads twenty.
         let width = '';
-        while (format[f] >= '0' && format[f] <= '9')
-        {
-            width += format[f++];
-        }
-        const limit = width === '' ? Infinity : Number(width);
-
         let modifier = '';
-        if (format.startsWith('I64', f))
+        for (;;)
         {
-            modifier = 'I64';
-            f += 3;
-        }
-        else
-        {
-            while ('hlLjzt'.includes(format[f]))
+            if (format[f] >= '0' && format[f] <= '9')
+            {
+                width += format[f++];
+            }
+            else if (format.startsWith('I64', f))
+            {
+                modifier += 'I64';
+                f += 3;
+            }
+            else if (format.startsWith('I32', f))
+            {
+                f += 3;
+            }
+            else if ('hlLjztwFN'.includes(format[f] ?? '_'))
             {
                 modifier += format[f++];
             }
+            else
+            {
+                break;
+            }
         }
+        const limit = Number(width) > 0 ? Number(width) : Infinity;
 
         const conversion = format[f];
+        if (conversion === undefined)
+        {
+            return stop();
+        }
+        const known = 'cCsSdiouxXpPneEfgGaA['.includes(conversion);
+        if (!known)
+        {
+            // msvcrt matches a character it does not know as a conversion
+            // the way it matches any other: "%%" and "%\"" alike.
+            if (!literal(conversion))
+            {
+                return stop();
+            }
+            continue;
+        }
+
         // Every conversion but these three skips leading whitespace first, and
         // the ones that do not are exactly the ones that can match it.
-        if (!'c[n'.includes(conversion))
+        if (!'cC[n'.includes(conversion))
         {
-            while (isSpace(input[at]))
+            while (isSpace(peek(at)))
             {
                 at++;
             }
@@ -208,17 +267,22 @@ export function runScan(input, format, nextPointer, store){
             continue;
         }
 
-        if (at >= input.length)
+        if (peek(at) === undefined)
         {
             return stop();
         }
 
-        if (conversion === 'c')
+        const upper = conversion === 'S' || conversion === 'C';
+        const wide = /[lw]/.test(modifier) || (!modifier.includes('h')
+            && upper !== (options.wide === true));
+
+        if (conversion === 'c' || conversion === 'C')
         {
             const count = limit === Infinity ? 1 : limit;
             const taken = input.slice(at, at + count);
             if (taken.length < count)
             {
+                peek(at + count);
                 return stop();
             }
             at += count;
@@ -226,13 +290,13 @@ export function runScan(input, format, nextPointer, store){
             {
                 // No terminator: %c reads characters, not a string, and the
                 // caller's buffer is exactly as long as it asked for.
-                store.text(nextPointer(), taken, false);
+                store.text(nextPointer(), taken, false, wide);
                 assigned++;
             }
             continue;
         }
 
-        if (conversion === 's' || conversion === '[')
+        if (conversion === 's' || conversion === 'S' || conversion === '[')
         {
             let accepts = (/** @type {string} */ character)=>!isSpace(character);
             if (conversion === '[')
@@ -249,7 +313,7 @@ export function runScan(input, format, nextPointer, store){
             }
 
             const start = at;
-            while (at < input.length && at - start < limit && accepts(input[at]))
+            while (at - start < limit && peek(at) !== undefined && accepts(input[at]))
             {
                 at++;
             }
@@ -259,13 +323,17 @@ export function runScan(input, format, nextPointer, store){
             }
             if (!suppress)
             {
-                store.text(nextPointer(), input.slice(start, at), true);
+                store.text(nextPointer(), input.slice(start, at), true, wide);
                 assigned++;
             }
             continue;
         }
 
         const field = limit === Infinity ? input.slice(at) : input.slice(at, at + limit);
+        if (field.length < limit)
+        {
+            starved = true;
+        }
 
         if ('eEfgGaA'.includes(conversion))
         {
@@ -280,21 +348,18 @@ export function runScan(input, format, nextPointer, store){
                 // Plain %f is a float. The `l` that makes it a double is not
                 // decoration: without it, storing eight bytes overruns.
                 store.real(nextPointer(), scanned.value,
-                    modifier === 'l' || modifier === 'L' ? 8 : 4);
+                    /[lL]/.test(modifier) ? 8 : 4);
                 assigned++;
             }
             continue;
         }
 
-        const base = { d: 10, u: 10, i: 0, o: 8, x: 16, X: 16, p: 16 }[conversion];
-        if (base === undefined)
-        {
-            // An unknown conversion is undefined behaviour; stopping is the
-            // reading of it that loses the least.
-            return stop();
-        }
-
-        const scanned = scanInteger(field, base, true);
+        // A pointer is hexadecimal digits alone: "0x" is not its prefix, and
+        // reads as the zero before the x.
+        const pointer = conversion === 'p' || conversion === 'P';
+        const base = /** @type {Record<string, number>} */ ({ d: 10, u: 10, i: 0, o: 8, x: 16,
+            X: 16 })[conversion] ?? 16;
+        const scanned = scanInteger(field, pointer ? 16 : base, true, !pointer);
         if (scanned === null)
         {
             return stop();
@@ -304,29 +369,23 @@ export function runScan(input, format, nextPointer, store){
         {
             store.integer(nextPointer(),
                 scanned.negative ? -scanned.magnitude : scanned.magnitude,
-                conversion === 'p' ? 4 : integerWidth(modifier));
+                pointer ? 4 : integerWidth(modifier));
             assigned++;
         }
     }
 
-    return assigned;
+    return done(assigned);
 }
 
 /**
- * @typedef {Object} ScanHost
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * The stores a scan makes, into guest memory: an integer of its width, a
+ * float or a double, and text in the ANSI page or UTF-16.
+ *
+ * @param {{ writeMemory: (address: number, bytes: Uint8Array) => void }} host
+ * @returns {ScanStore}
  */
-
-/**
- * @param {ScanHost} host
- */
-export function createScanFunctions(host){
-    /** @param {number} pointer */
-    const readString = pointer=>host.readCString(pointer, MAX_STRING);
-
-    /** @type {ScanStore} */
-    const store = {
+export function createScanStore(host){
+    return {
         integer(pointer, value, bytes){
             const buffer = new Uint8Array(bytes);
             const view = new DataView(buffer.buffer);
@@ -364,18 +423,49 @@ export function createScanFunctions(host){
             host.writeMemory(pointer, buffer);
         },
 
-        text(pointer, value, terminate){
+        text(pointer, value, terminate, wide){
+            if (wide)
+            {
+                const buffer = new Uint8Array((value.length + (terminate ? 1 : 0)) * 2);
+                const view = new DataView(buffer.buffer);
+                for (let at = 0; at < value.length; at++)
+                {
+                    view.setUint16(at * 2, value.charCodeAt(at), true);
+                }
+                host.writeMemory(pointer, buffer);
+                return;
+            }
             const buffer = new Uint8Array(value.length + (terminate ? 1 : 0));
             buffer.set(encodeAnsi(value));
             host.writeMemory(pointer, buffer);
         },
     };
+}
+
+/**
+ * @typedef {Object} ScanHost
+ * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ *           For the wide input and format of swscanf. Absent, it stays unexported.
+ */
+
+/**
+ * @param {ScanHost} host
+ */
+export function createScanFunctions(host){
+    /** @param {number} pointer */
+    const readString = pointer=>host.readCString(pointer, MAX_STRING);
+
+    const store = createScanStore(host);
 
     /**
      * @param {number} fixed  Slots before the variadic tail begins.
      * @param {(args: number[]) => string} inputOf
+     * @param {(pointer: number) => string} [formatOf]
+     * @param {boolean} [wide]
      */
-    const scanf = (fixed, inputOf)=>({
+    const scanf = (fixed, inputOf, formatOf = readString, wide = false)=>({
         convention: 'cdecl',
         // The pointers to store through are the variadic tail, and only as
         // many slots as are declared are read: with the fixed part alone,
@@ -384,10 +474,18 @@ export function createScanFunctions(host){
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ args)=>{
             let taken = fixed;
-            return runScan(inputOf(args), readString(args[fixed - 1]),
-                ()=>args[taken++] ?? 0, store);
+            const assigned = runScan(inputOf(args), formatOf(args[fixed - 1]),
+                ()=>args[taken++] ?? 0, store, { wide });
+            // msvcrt's wide scan answers no input with nothing assigned, not
+            // with EOF, as the later runtimes do.
+            return wide && assigned === SCAN_EOF ? 0 : assigned;
         },
     });
+
+    const { readMemory } = host;
+    /** @param {number} pointer */
+    const readWide = pointer=>wideStringAt(/** @type {(address: number, length: number)
+        => Uint8Array} */ (readMemory), pointer);
 
     return {
         /** int sscanf(const char *buffer, const char *format, ...) */
@@ -400,5 +498,14 @@ export function createScanFunctions(host){
          * is not terminated at all is still safe to read from.
          */
         _snscanf: scanf(3, args=>readString(args[0]).slice(0, args[1] >>> 0)),
+
+        ...readMemory ? {
+            /**
+             * int swscanf(const wchar_t *buffer, const wchar_t *format, ...)
+             *
+             * %s and %c store wide text here, %S, %C and an h narrow.
+             */
+            swscanf: scanf(2, args=>readWide(args[0]), readWide, true),
+        } : {},
     };
 }

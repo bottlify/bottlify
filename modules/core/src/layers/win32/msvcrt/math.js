@@ -23,6 +23,8 @@
  * arguments that were none (a square root or a logarithm of a negative, an
  * arcsine past one, a sine of an infinity), ERANGE for an infinity out of
  * finite ones (a logarithm of zero, an overflow); an underflow sets nothing.
+ * `atan`, `tanh` and `exp` answer a NaN with that NaN and EDOM as well
+ * (Wine's msvcrt test_math_errors).
  *
  * Both shapes need the FPU seam, so this whole table is conditional on it.
  */
@@ -108,6 +110,12 @@ const UNARY = {
     ceil: Math.ceil,
 };
 
+/**
+ * The ones whose NaN argument is a domain error, answered with the NaN
+ * itself -- its payload kept, as the x87 hands an operand NaN through.
+ */
+const NAN_IS_DOMAIN = new Set(['atan', 'tanh', 'exp']);
+
 /** @type {Record<string, (left: number, right: number) => number>} */
 const BINARY = {
     pow: Math.pow,
@@ -153,12 +161,20 @@ export function createMathFunctions(host){
      */
     const handlers = {};
 
+    /** @param {string} name @param {(value: number) => number} compute */
+    const unary = (name, compute)=>(/** @type {number} */ value)=>{
+        if (Number.isNaN(value) && NAN_IS_DOMAIN.has(name))
+        {
+            host.errno?.(EDOM);
+            return value;
+        }
+        return answer([value], compute(value));
+    };
+
     for (const [name, compute] of Object.entries(UNARY))
     {
-        handlers[name] = returningDouble(fpu, 8, args=>{
-            const value = readDouble(args, 0);
-            return answer([value], compute(value));
-        });
+        const respond = unary(name, compute);
+        handlers[name] = returningDouble(fpu, 8, args=>respond(readDouble(args, 0)));
 
         // The FPU-stack form: one argument, consumed, replaced by the result.
         handlers[`_CI${name}`] = {
@@ -167,7 +183,7 @@ export function createMathFunctions(host){
             handler: ()=>{
                 const value = fpu.get(0);
                 fpu.pop();
-                fpu.setResult(answer([value], compute(value)));
+                fpu.setResult(respond(value));
                 return 0;
             },
         };

@@ -1306,6 +1306,13 @@ test('a back buffer and the swap chain come back as the device\'s own', ()=>{
     assert.ok(h.divergences.some(line=>line.includes('GetFrontBufferData was refused')));
     h.release(plain);
     h.release(chain);
+    // The device keeps its implicit chain: released to nothing by the program,
+    // the pointer still answers while the device lives (Wine's test_swapchain).
+    assert.equal(h.box.call(chain, 2 + 3, [0, 0, out]), D3D_OK, 'GetBackBuffer after Release');
+    h.release(h.box.memory.readU32(out));
+    h.box.memory.writeU32(out, 0xdeadbeef);
+    assert.equal(h.device(device, 'GetBackBuffer', [1, 0, 0, out]), D3DERR_INVALIDCALL);
+    assert.equal(h.box.memory.readU32(out), 0, 'a refusal clears the pointer');
     assert.equal(h.release(device), 0);
     h.release(root);
 });

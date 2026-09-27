@@ -182,6 +182,31 @@ test('_fcvt counts digits after the point, and a small value loses leading zeros
     assert.equal(memory.i32(sign), 0);
 });
 
+test('_ecvt and _fcvt round where the count says, keep the point of a value rounded to '
+    + 'nothing, and give the sign of a negative zero', ()=>{
+    const { memory, table } = build();
+    const decimal = memory.allocate(4);
+    const sign = memory.allocate(4);
+    /** @param {string} name @param {number[]} value @param {number} count */
+    const cvt = (name, value, count)=>{
+        const text = memory.text(table[name].handler([...value, count, decimal, sign]));
+        return [text, memory.i32(decimal), memory.i32(sign)];
+    };
+    assert.deepEqual(cvt('_ecvt', doubleSlots(999999999999.9), 3), ['100', 13, 0]);
+    assert.deepEqual(cvt('_fcvt', doubleSlots(999999999999.9), 3), ['999999999999900', 12, 0]);
+    assert.deepEqual(cvt('_ecvt', doubleSlots(0.6), 0), ['', 1, 0], 'no digits, one carried');
+    assert.deepEqual(cvt('_fcvt', doubleSlots(0.6), 0), ['1', 1, 0]);
+    assert.deepEqual(cvt('_fcvt', doubleSlots(0.4), 0), ['', 0, 0]);
+    assert.deepEqual(cvt('_fcvt', doubleSlots(0.0001), 1), ['', -3, 0]);
+    assert.deepEqual(cvt('_fcvt', doubleSlots(-123.0001), -1), ['12', 3, 1]);
+    assert.deepEqual(cvt('_fcvt', doubleSlots(-0), 5), ['00000', 0, 1]);
+    assert.deepEqual(cvt('_ecvt', doubleSlots(123456789012345680000), 30),
+        ['123456789012345680000000000000', 21, 0], 'seventeen digits, then zeros');
+    assert.deepEqual(cvt('_ecvt', doubleSlots(NaN), 5), ['1#QNB', 1, 0]);
+    assert.deepEqual(cvt('_fcvt', doubleSlots(Infinity), 2), ['1#J', 1, 0]);
+    assert.deepEqual(cvt('_fcvt', [0, 0xfff80000], 5), ['1#IND0', 1, 1]);
+});
+
 test('_ecvt and _fcvt hand back the same buffer every time', ()=>{
     const { memory, table } = build();
     const decimal = memory.allocate(4);
@@ -276,3 +301,42 @@ test('a float literal ending in a bare exponent gives back the exponent', ()=>{
     assert.equal(scanned?.value, 1);
     assert.equal(scanned?.end, 1);
 });
+
+test('wcstol and wcstoul read any script\'s decimal digits, and Unicode\'s separators as space',
+    ()=>{
+        const memory = fakeMemory();
+        /** @type {number[]} */
+        const errno = [];
+        const table = /** @type {Record<string, any>} */ (createConversionFunctions({
+            ...memory, errno: code=>void errno.push(code),
+        }));
+        const end = memory.allocate(4);
+        /** @param {string} name @param {number[]} units @param {number} [base] */
+        const convert = (name, units, base = 0)=>{
+            const at = memory.putWide(String.fromCharCode(...units));
+            const value = table[name].handler([at, end, base]);
+            return [value, (new DataView(memory.bytes.buffer).getUint32(end, true) - at) / 2];
+        };
+        assert.deepEqual(convert('wcstol', [0x39], 10), [9, 1]);
+        assert.deepEqual(convert('wcstol', [0x09, 0xa0, 0x2002, 0x2028, 0x3000, 0x2b, 0x34, 0x34]),
+            [44, 8]);
+        assert.deepEqual(convert('wcstol', [0x0e59]), [9, 1], 'a Thai digit');
+        assert.deepEqual(convert('wcstol', [0xff19]), [9, 1], 'a fullwidth digit');
+        assert.deepEqual(convert('wcstol', [0x0bef]), [0, 0], 'no Tamil digit, and no progress');
+        assert.deepEqual(convert('wcstol', [0x00b9]), [0, 0], 'a superscript is no digit');
+        assert.deepEqual(convert('wcstol', [0x2d, 0x0e50, 0x78, 0xff19, 0x31]), [-0x91, 5],
+            'a zero of any script begins the hex prefix');
+        assert.deepEqual(convert('wcstol', [0x2b, 0x0e50, 0xff17, 0x31]), [0o71, 4],
+            'and an octal number');
+        assert.deepEqual(convert('wcstol', [0xff19, 0x66, 0x0e59, 0xff46], 16), [0x9f9, 3],
+            'a fullwidth letter is no hex digit');
+        for (const zero of [0x660, 0x966, 0x17e0, 0xff10])
+        {
+            assert.equal(convert('wcstol', [zero + 4, zero, zero + 5])[0], 405);
+        }
+        assert.deepEqual(errno, []);
+        assert.equal(convert('wcstol', [...'2147483648'].map(c=>c.charCodeAt(0)))[0], 0x7fffffff);
+        assert.equal(convert('wcstoul', [...'-4294967296'].map(c=>c.charCodeAt(0)))[0], 1);
+        assert.deepEqual(errno, [34, 34]);
+        assert.equal(convert('wcstoul', [...'-1234'].map(c=>c.charCodeAt(0)))[0] | 0, -1234);
+    });

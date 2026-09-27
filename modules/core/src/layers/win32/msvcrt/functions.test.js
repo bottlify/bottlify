@@ -175,11 +175,11 @@ test('the comparisons order bytes as unsigned chars, the upper half of the page 
         assert.equal(fns[name].handler([space, euro]), 1, name);
         assert.equal(fns[name].handler([last, top]), -1, name);
     }
-    for (const name of ['strncmp', '_strnicmp'])
-    {
-        assert.equal(fns[name].handler([euro, space, 1]), -1, name);
-        assert.equal(fns[name].handler([top, last, 1]), 1, name);
-    }
+    assert.equal(fns._strnicmp.handler([euro, space, 1]), -1);
+    assert.equal(fns._strnicmp.handler([top, last, 1]), 1);
+    assert.equal(fns.strncmp.handler([euro, space, 1]), 0x80 - 0xa0,
+        'strncmp answers the difference of the bytes');
+    assert.equal(fns.strncmp.handler([top, last, 1]), 0xff - 0x9f);
     assert.equal(fns._stricmp.handler([put(0x140, 'A\x80'), put(0x150, 'a\xa0')]), -1,
         'folded ASCII first, then the byte');
     assert.equal(fns._stricmp.handler([put(0x160, '\xc9'), put(0x170, '\xe9')]), -1,
@@ -195,6 +195,8 @@ test('strncmp stops after n bytes, and n of zero compares nothing', ()=>{
     assert.equal(fns.strncmp.handler([a, b, 4]), -1);
     assert.equal(fns.strncmp.handler([a, b, 0]), 0);
     assert.equal(fns.strncmp.handler([a, b, 99]), -1, 'n past both terminators is harmless');
+    assert.equal(fns.strncmp.handler([put(0x120, ''), put(0x130, 'abc'), 3]), -0x61,
+        'the terminator against a letter');
 });
 
 test('_stricmp ignores case, and only for ASCII letters', ()=>{
@@ -409,8 +411,14 @@ test('itoa writes the digits and returns the buffer', ()=>{
     fns.itoa.handler([-1, 0x230, 16]);
     assert.equal(at(0x230), 'ffffffff', 'only radix ten is signed');
     put(0x240, 'untouched');
-    assert.equal(fns.itoa.handler([7, 0x240, 1]), 0, 'a radix out of range writes nothing');
+    assert.equal(fns.itoa.handler([7, 0x240, 1]), 0, 'a radix below two writes nothing');
     assert.equal(at(0x240), 'untouched');
+    fns._itoa.handler([100, 0x250, 100]);
+    assert.equal(at(0x250), '10', 'past thirty-six the digits go on counting');
+    fns._itoa.handler([46, 0x260, 40]);
+    assert.equal(at(0x260), '16');
+    fns._itoa.handler([39, 0x270, 40]);
+    assert.equal(at(0x270), '~', "digit 39 is the fourth character after 'z'");
 });
 
 test('puts writes the string with a newline', ()=>{
@@ -473,6 +481,34 @@ test('sprintf reads %S and %ls as the wide strings they are', ()=>{
     view.setUint32(list, 0x100, true);
     assert.equal(fns._vsnprintf.handler([0x200, 16, put(0x140, '<%S>'), list]), 6);
     assert.equal(at(0x200), '<wide>');
+});
+
+test('swprintf takes no count, and _snwprintf its arguments as _vsnwprintf takes a list', ()=>{
+    // Wine's msvcrt test_swprintf: msvcrt's swprintf has no count, %S is a
+    // narrow string in it and %I64d eight bytes.
+    const { fns, host } = setup();
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} address @param {string} text */
+    const wide = (address, text)=>{
+        [...text, '\0'].forEach((c, at)=>view.setUint16(address + at * 2, c.charCodeAt(0), true));
+        return address;
+    };
+    /** @param {number} address */
+    const read = address=>{
+        let text = '';
+        for (let at = address; view.getUint16(at, true) !== 0; at += 2)
+        {
+            text += String.fromCharCode(view.getUint16(at, true));
+        }
+        return text;
+    };
+    host.bytes.set([...'string'].map(c=>c.charCodeAt(0)).concat(0), 0x180);
+    assert.equal(fns.swprintf.handler([0x200, wide(0x100, '%S|%I64d'), 0x180, 1, 1]),
+        'string|4294967297'.length);
+    assert.equal(read(0x200), 'string|4294967297');
+    assert.equal(fns._swprintf, fns.swprintf);
+    assert.equal(fns._snwprintf.handler([0x200, 3, wide(0x100, '%d'), 12345]), -1);
+    assert.equal(read(0x200).slice(0, 3), '123');
 });
 
 test('_vsnwprintf formats wide text from a list, terminated only when there is room', ()=>{
@@ -932,4 +968,10 @@ test('bytes in the upper half of the ANSI page are copied and printed as themsel
     assert.deepEqual(bytesAt(0x300, 6), [0x80, 0x99, 0x97, 0x97, 0x80, 0]);
     assert.equal(fns._snprintf.handler([0x320, 3, 0x140, 0x101, 0x97, 0x180]), -1);
     assert.deepEqual(bytesAt(0x320, 3), [0x80, 0x99, 0x97]);
+});
+
+test('rand_s fills an unsigned int from the random source and refuses no pointer', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.rand_s.handler([0x300]), 0);
+    assert.equal(fns.rand_s.handler([0]), 22);
 });

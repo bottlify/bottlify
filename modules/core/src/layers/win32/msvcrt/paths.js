@@ -66,10 +66,15 @@ const A_ARCH = 0x20;
 /**
  * Splits a path into drive, directory, filename and extension.
  *
- * @param {string} path
+ * Under a double-byte code page a byte that trails a lead byte is part of its
+ * character, whatever byte it is: the second byte of a Shift-JIS character
+ * may be a backslash's, and is no separator.
+ *
+ * @param {string} path  Read in the ANSI page, a character a byte.
+ * @param {(byte: number) => boolean} [isLead]  The multibyte page's lead bytes.
  * @returns {{ drive: string, directory: string, name: string, extension: string }}
  */
-export function splitPath(path){
+export function splitPath(path, isLead = ()=>false){
     let rest = path;
     let drive = '';
     if (/^[A-Za-z]:/.test(rest))
@@ -80,7 +85,19 @@ export function splitPath(path){
 
     // Both separators count: a path assembled from a configuration file and a
     // constant usually contains one of each.
-    const lastSeparator = Math.max(rest.lastIndexOf('\\'), rest.lastIndexOf('/'));
+    const bytes = encodeAnsi(rest);
+    let lastSeparator = -1;
+    for (let at = 0; at < bytes.length; at++)
+    {
+        if (isLead(bytes[at]) && at + 1 < bytes.length)
+        {
+            at++;
+        }
+        else if (bytes[at] === 0x5c || bytes[at] === 0x2f)
+        {
+            lastSeparator = at;
+        }
+    }
     const directory = lastSeparator === -1 ? '' : rest.slice(0, lastSeparator + 1);
     const file = rest.slice(lastSeparator + 1);
 
@@ -136,6 +153,11 @@ export function fullPath(path, current){
  * @property {(code: number) => void} [errno]  Where a failure says why.
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
  *           For a wide pattern. Absent, the wide finds stay unexported.
+ * @property {(name: string) => string | null} [getenv]
+ *           The runtime's own environment, where `_tempnam` finds TMP and
+ *           `_searchenv` the list of directories it is named.
+ * @property {(byte: number) => boolean} [isLead]
+ *           The multibyte code page's lead bytes, which `_splitpath` reads by.
  */
 
 /**
@@ -165,13 +187,15 @@ export function createPathFunctions(host){
     /**
      * @param {number} argBytes
      * @param {(args: number[]) => number} act  Zero, or the errno it failed with.
+     * @param {number} [paths]  How many of the first arguments are paths, which
+     *     msvcrt refuses when null with -1 and EINVAL rather than reading.
      */
-    const operation = (argBytes, act)=>({
+    const operation = (argBytes, act, paths = 1)=>({
         convention: 'cdecl',
         argBytes,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ args)=>{
-            const code = act(args);
+            const code = args.slice(0, paths).some(path=>(path >>> 0) === 0) ? EINVAL : act(args);
             if (code === 0)
             {
                 return 0;
@@ -180,6 +204,181 @@ export function createPathFunctions(host){
             return -1;
         },
     });
+
+    /** @param {number} pointer @param {string} text */
+    const writeWide = (pointer, text)=>{
+        if ((pointer >>> 0) === 0)
+        {
+            return;
+        }
+        const bytes = new Uint8Array((text.length + 1) * 2);
+        const view = new DataView(bytes.buffer);
+        for (let at = 0; at < text.length; at++)
+        {
+            view.setUint16(at * 2, text.charCodeAt(at), true);
+        }
+        host.writeMemory(pointer, bytes);
+    };
+
+    /**
+     * A directory and a name in it, one separator between.
+     *
+     * @param {string} directory @param {string} name
+     */
+    const within = (directory, name)=>(/[\\/]$/.test(directory) ? `${directory}${name}`
+        : `${directory}\\${name}`);
+
+    /**
+     * _makepath's joining: the drive's first character and a colon, the
+     * directory with a separator after it, the name, and the extension after
+     * a dot -- each only where it is given.
+     *
+     * @param {string} drive @param {string} directory @param {string} name
+     * @param {string} extension
+     */
+    const makePath = (drive, directory, name, extension)=>{
+        const folder = directory === '' ? '' : within(directory, '');
+        const suffix = extension === '' || extension.startsWith('.') ? extension
+            : `.${extension}`;
+        return (drive === '' ? '' : `${drive[0]}:`) + folder + name + suffix;
+    };
+
+    /**
+     * _searchenv's search: the current directory, then each directory of the
+     * variable's list in turn -- separated by semicolons outside quotes, the
+     * quotes themselves dropped, an empty one skipped.
+     *
+     * @param {string} file @param {string} variable
+     * @returns {string | null}
+     */
+    const searchEnvironment = (file, variable)=>{
+        const here = within(host.files.currentDirectory(), file);
+        if (exists(here))
+        {
+            return here;
+        }
+        /** @type {string[]} */
+        const directories = [''];
+        let quoted = false;
+        for (const character of host.getenv?.(variable) ?? '')
+        {
+            if (character === '"')
+            {
+                quoted = !quoted;
+            }
+            else if (character === ';' && !quoted)
+            {
+                directories.push('');
+            }
+            else
+            {
+                directories[directories.length - 1] += character;
+            }
+        }
+        return directories.filter(entry=>entry !== '').map(entry=>within(entry, file))
+            .find(exists) ?? null;
+    };
+
+    /**
+     * The secure forms' writing of a path: EINVAL for no buffer or no room at
+     * all; of a path that does not fit with its terminator, as many characters
+     * as leave room for one are written, as msvcrt writes them before it finds
+     * it is short, and the first then cleared -- ERANGE.
+     *
+     * @param {number} pointer @param {number} size  In characters.
+     * @param {string | null} text  Null to refuse the arguments.
+     * @param {boolean} wide
+     */
+    const writeSecure = (pointer, size, text, wide)=>{
+        if ((pointer >>> 0) === 0 || (size >>> 0) === 0 || text === null)
+        {
+            fail(EINVAL);
+            return EINVAL;
+        }
+        const units = wide ? Array.from(text, character=>character.charCodeAt(0))
+            : Array.from(encodeAnsi(text));
+        const fits = units.length < (size >>> 0);
+        const written = fits ? [...units, 0] : [0, ...units.slice(1, (size >>> 0) - 1)];
+        const bytes = new Uint8Array(written.length * (wide ? 2 : 1));
+        const view = new DataView(bytes.buffer);
+        written.forEach((unit, at)=>{
+            if (wide)
+            {
+                view.setUint16(at * 2, unit, true);
+            }
+            else
+            {
+                bytes[at] = unit;
+            }
+        });
+        host.writeMemory(pointer, bytes);
+        if (fits)
+        {
+            return 0;
+        }
+        fail(ERANGE);
+        return ERANGE;
+    };
+
+    /**
+     * _searchenv_s and _wsearchenv_s: ENOENT, the result empty, for a file
+     * none of the directories has; ERANGE for a path that does not fit.
+     *
+     * @param {(pointer: number) => string} read
+     * @param {(pointer: number, text: string) => void} write
+     * @param {number} unit  Bytes a character.
+     */
+    const searchSecure = (read, write, unit)=>({
+        convention: /** @type {'cdecl'} */ ('cdecl'),
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [file, variable, result, size])=>{
+            if ((file >>> 0) === 0 || (result >>> 0) === 0 || (size >>> 0) === 0)
+            {
+                fail(EINVAL);
+                return EINVAL;
+            }
+            const found = searchEnvironment(read(file),
+                (variable >>> 0) === 0 ? '' : read(variable));
+            const length = found === null ? 0
+                : unit === 1 ? encodeAnsi(found).length : found.length;
+            if (found === null || length + 1 > (size >>> 0))
+            {
+                write(result, '');
+                const code = found === null ? ENOENT : ERANGE;
+                fail(code);
+                return code;
+            }
+            write(result, found);
+            return 0;
+        },
+    });
+
+    /** Where a name comes from next: each one given differs from the last. */
+    let nextTemporary = 1;
+
+    /**
+     * _tempnam's name: the first directory of TMP's, `dir` and the current
+     * one that is a directory, and in it the prefix and a number no file has.
+     *
+     * @param {string | null} dir @param {string} prefix
+     */
+    const temporaryName = (dir, prefix)=>{
+        /** @param {string | null | undefined} path */
+        const isDirectory = path=>!!path && host.files.stat(path)?.isDirectory === true;
+        const tmp = host.getenv?.('TMP');
+        const directory = [tmp, dir].find(isDirectory) ?? host.files.currentDirectory();
+        const joined = /[\\/]$/.test(directory) ? directory : `${directory}\\`;
+        for (;; nextTemporary++)
+        {
+            const name = `${joined}${prefix}${nextTemporary.toString(32)}`;
+            if (!exists(name))
+            {
+                nextTemporary++;
+                return name;
+            }
+        }
+    };
 
     /**
      * The searches `_findfirst` opened, by the handle it answered with: what
@@ -348,7 +547,7 @@ export function createPathFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([path, drive, directory, name, extension])=>{
-                const parts = splitPath(readString(path));
+                const parts = splitPath(readString(path), host.isLead);
                 writeString(drive, parts.drive);
                 writeString(directory, parts.directory);
                 writeString(name, parts.name);
@@ -368,25 +567,106 @@ export function createPathFunctions(host){
             handler: ([path, drive, directory, name, extension])=>{
                 const read = (/** @type {number} */ pointer)=>(
                     (pointer >>> 0) === 0 ? '' : readString(pointer));
-                let text = read(drive);
-                if (text.length > 0 && !text.endsWith(':'))
-                {
-                    text += ':';
-                }
-                let folder = read(directory);
-                if (folder.length > 0 && !/[\\/]$/.test(folder))
-                {
-                    folder += '\\';
-                }
-                let suffix = read(extension);
-                if (suffix.length > 0 && !suffix.startsWith('.'))
-                {
-                    suffix = `.${suffix}`;
-                }
-                writeString(path, text + folder + read(name) + suffix);
+                writeString(path, makePath(read(drive), read(directory), read(name),
+                    read(extension)));
                 return 0;
             },
         },
+
+        /**
+         * errno_t _makepath_s(char *path, size_t size, const char *drive,
+         *                     const char *dir, const char *fname, const char *ext)
+         */
+        _makepath_s: {
+            convention: 'cdecl',
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([path, size, drive, directory, name, extension])=>{
+                const read = (/** @type {number} */ pointer)=>(
+                    (pointer >>> 0) === 0 ? '' : readString(pointer));
+                const text = (path >>> 0) === 0 || (size >>> 0) === 0 ? null
+                    : makePath(read(drive), read(directory), read(name), read(extension));
+                return writeSecure(path, size, text, false);
+            },
+        },
+
+        ...host.readMemory ? {
+            /**
+             * void _wmakepath(wchar_t *path, const wchar_t *drive, const wchar_t *dir,
+             *                 const wchar_t *fname, const wchar_t *ext)
+             */
+            _wmakepath: {
+                convention: 'cdecl',
+                argBytes: 20,
+                /** @param {number[]} args */
+                handler: ([path, drive, directory, name, extension])=>{
+                    const read = (/** @type {number} */ pointer)=>(
+                        (pointer >>> 0) === 0 ? '' : readWide(pointer));
+                    writeWide(path, makePath(read(drive), read(directory), read(name),
+                        read(extension)));
+                    return 0;
+                },
+            },
+
+            /** void _wsearchenv(const wchar_t *file, const wchar_t *variable, wchar_t *result) */
+            _wsearchenv: {
+                convention: 'cdecl',
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([file, variable, result])=>{
+                    writeWide(result, searchEnvironment(readWide(file), readWide(variable)) ?? '');
+                    return 0;
+                },
+            },
+
+            /**
+             * errno_t _wmakepath_s(wchar_t *path, size_t size, const wchar_t *drive,
+             *                      const wchar_t *dir, const wchar_t *fname,
+             *                      const wchar_t *ext)
+             */
+            _wmakepath_s: {
+                convention: 'cdecl',
+                argBytes: 24,
+                /** @param {number[]} args */
+                handler: ([path, size, drive, directory, name, extension])=>{
+                    const read = (/** @type {number} */ pointer)=>(
+                        (pointer >>> 0) === 0 ? '' : readWide(pointer));
+                    const text = (path >>> 0) === 0 || (size >>> 0) === 0 ? null
+                        : makePath(read(drive), read(directory), read(name), read(extension));
+                    return writeSecure(path, size, text, true);
+                },
+            },
+
+            /**
+             * errno_t _wsearchenv_s(const wchar_t *file, const wchar_t *variable,
+             *                       wchar_t *result, size_t size)
+             */
+            _wsearchenv_s: searchSecure(readWide, writeWide, 2),
+        } : {},
+
+        /**
+         * void _searchenv(const char *file, const char *variable, char *result)
+         *
+         * The file in the current directory, or else in the first of the
+         * directories the variable lists that has it: the directory as the
+         * list spells it and the name, or an empty string for none.
+         */
+        _searchenv: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([file, variable, result])=>{
+                writeString(result, searchEnvironment(readString(file), readString(variable))
+                    ?? '');
+                return 0;
+            },
+        },
+
+        /**
+         * errno_t _searchenv_s(const char *file, const char *variable, char *result,
+         *                      size_t size)
+         */
+        _searchenv_s: searchSecure(readString, writeString, 1),
 
         /**
          * char *_fullpath(char *absolute, const char *relative, size_t max)
@@ -443,6 +723,48 @@ export function createPathFunctions(host){
             },
         },
 
+        /**
+         * char *_tempnam(const char *dir, const char *prefix)
+         *
+         * A name no file has: in the directory TMP names, if it is one, else
+         * in `dir` if that is one, else in the current directory -- the
+         * prefix and a number, on the heap for the caller to free.
+         */
+        _tempnam: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([dir, prefix])=>{
+                const text = temporaryName((dir >>> 0) === 0 ? null : readString(dir),
+                    (prefix >>> 0) === 0 ? '' : readString(prefix));
+                const address = host.allocate(encodeAnsi(text).length + 1);
+                writeString(address, text);
+                return address;
+            },
+        },
+
+        ...host.readMemory ? {
+            /** wchar_t *_wtempnam(const wchar_t *dir, const wchar_t *prefix) */
+            _wtempnam: {
+                convention: 'cdecl',
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([dir, prefix])=>{
+                    const text = temporaryName((dir >>> 0) === 0 ? null : readWide(dir),
+                        (prefix >>> 0) === 0 ? '' : readWide(prefix));
+                    const bytes = new Uint8Array((text.length + 1) * 2);
+                    [...text].forEach((c, at)=>new DataView(bytes.buffer)
+                        .setUint16(at * 2, c.charCodeAt(0), true));
+                    const address = host.allocate(bytes.length);
+                    if (address !== 0)
+                    {
+                        host.writeMemory(address, bytes);
+                    }
+                    return address;
+                },
+            },
+        } : {},
+
         /** int _chdir(const char *path) */
         _chdir: operation(4, ([path])=>{
             const text = readString(path);
@@ -491,7 +813,7 @@ export function createPathFunctions(host){
                 return 0;
             }
             return exists(source) ? EACCES : ENOENT;
-        }),
+        }, 2),
 
         /**
          * int _access(const char *path, int mode)
@@ -557,6 +879,6 @@ export function createPathFunctions(host){
             : {}),
 
         /** int _findclose(intptr_t handle) -- EBADF for a handle not open. */
-        _findclose: operation(4, ([handle])=>(searches.delete(handle | 0) ? 0 : EBADF)),
+        _findclose: operation(4, ([handle])=>(searches.delete(handle | 0) ? 0 : EBADF), 0),
     };
 }

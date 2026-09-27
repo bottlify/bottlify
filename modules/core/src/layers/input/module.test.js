@@ -191,7 +191,7 @@ test('a mouse a program holds exclusively through DirectInput stops reaching the
 
     writeGuid(guids, 0x100, IID_IDirectInput8A);
     assert.equal(api.libraries()['DINPUT8.dll'].DirectInput8Create
-        .handler([0, 0x0800, 0x100, 0x200, 0]), 0);
+        .handler([0x400000, 0x0800, 0x100, 0x200, 0]), 0);
     writeGuid(guids, 0x120, GUID_SysMouse);
     assert.equal(call(u32(0x200), 'CreateDevice', [0x120, 0x204, 0]), 0);
     const mouse = u32(0x204);
@@ -253,7 +253,7 @@ test('SetCooperativeLevel asks win32 what a window handle names', async()=>{
         return method.invoke(entry.object, args) | 0;
     };
     writeGuid(guids, 0x100, IID_IDirectInput8A);
-    api.libraries()['DINPUT8.dll'].DirectInput8Create.handler([0, 0x0800, 0x100, 0x200, 0]);
+    api.libraries()['DINPUT8.dll'].DirectInput8Create.handler([0x400000, 0x0800, 0x100, 0x200, 0]);
     writeGuid(guids, 0x120, GUID_SysMouse);
     call(u32(0x200), 'CreateDevice', [0x120, 0x204, 0]);
     const mouse = u32(0x204);

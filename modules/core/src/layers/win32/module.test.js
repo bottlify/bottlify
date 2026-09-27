@@ -400,6 +400,19 @@ test('the configured Windows is the one every library answers with', async()=>{
     await win32Module.dispose();
 });
 
+test('the C runtime\'s copy of the environment starts as the process\'s', async()=>{
+    const machine = hostWithMemory();
+    const api = await win32Module.create({ arena: { base: 0x1000, size: 0x1000 } }, machine.host);
+    const libraries = /** @type {Record<string, any>} */ (api.libraries());
+    const kernel32 = libraries['KERNEL32.dll'];
+    const name = machine.put(0x300, 'APPDATA');
+    kernel32.GetEnvironmentVariableA.handler([name, 0x400, 260]);
+    const value = libraries['msvcrt.dll'].getenv.handler([name]);
+    assert.ok(value >= 0x1000, 'on the heap');
+    assert.equal(machine.text(value), machine.text(0x400));
+    await win32Module.dispose();
+});
+
 test('a program Windows 10 knows nothing of is told 6.2, and the machine stays 10', async()=>{
     const machine = hostWithMemory();
     const api = await win32Module.create({
