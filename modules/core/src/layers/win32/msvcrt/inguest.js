@@ -680,14 +680,22 @@ export function memset({ fill }, destination, value, count){
 /**
  * int memcmp(const void *left, const void *right, size_t count)
  *
- * The bytes as unsigned values, the answer -1, 0 or 1.
+ * The bytes as unsigned values, the answer -1, 0 or 1. Four at a time while
+ * they match, and never past the count: the first difference is in the
+ * first four that differ.
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
  * @returns {i32}
  */
-export function memcmp({ u8 }, left, right, count){
-    for (/** @type {u32} */ let i = 0; i < count; i++)
+export function memcmp({ u8, u32 }, left, right, count){
+    /** @type {u32} */
+    let i = 0;
+    while ((count - i) >>> 0 >= 4 && u32(left + i) === u32(right + i))
+    {
+        i += 4;
+    }
+    for (; i < count; i++)
     {
         const a = u8(left + i);
         const b = u8(right + i);
