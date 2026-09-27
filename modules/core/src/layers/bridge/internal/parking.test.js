@@ -110,3 +110,15 @@ test('parking a thread other than the one whose call is in flight is refused', (
     made.beginCall(frame('KERNEL32.dll!ReadFile', 0x1ff000));
     assert.throws(()=>made.park(main), /parks the thread whose call is in flight/);
 });
+
+test('every machine\'s calls in flight begin and end through one set of functions', ()=>{
+    // Every host call begins and ends one; a pair of closures per machine was
+    // optimised afresh for every machine a process made.
+    const first = parking(thread('main')).made;
+    const second = parking(thread('main')).made;
+    for (const name of /** @type {const} */ (['beginCall', 'endCall', 'park', 'freeStackFor']))
+    {
+        assert.equal(first[name], second[name], `${name} is one function for both`);
+        assert.equal(Object.hasOwn(first, name), false, `${name} is not the instance's own`);
+    }
+});

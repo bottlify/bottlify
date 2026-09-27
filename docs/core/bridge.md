@@ -318,21 +318,28 @@ memory layer's `readU32sInto`, which checks the span once and hands it to the ma
 A variadic call whose slots run past the top of its stack falls back to reading the arguments on
 their own, zero past the region, and the return address alone.
 
-**A process's second machine.** The crossing's code is compiled once for every machine in a
-process -- V8 keeps one set of type feedback and one optimised body per function in the source,
-however many closures a `create()` makes of it -- and it is compiled first around the first
-machine's own objects and functions, which it may then treat as constants. A later machine's
-objects and closures are strangers to it, and each difference costs: an object whose hidden class
-differs between machines is written through V8's generic property path, and every call into
-another machine's closure is a check and a load where the first machine's was folded away. So the
-crossing keeps its objects in one shape for every machine -- the records' `result` getter is one
-function for the realm rather than one per dispatcher (a getter is part of the class), a frame is
-made with its `thread` slot rather than given it by parking, and the rings are made holding what
-they will hold -- and makes as few calls through another layer's closures as it can, which is the
-list above. A loop of `GetCurrentThreadId` under cork in node, one process, machines one after
-another: the first 295-363 ns a call and each later one 661-755 before, 259-275 and 419-470 after
--- the later machines still pay for the calls they make into the other layers, and the handlers'
-own code is subject to the same thing.
+**A process's second machine.** V8 optimises a function per closure. A closure that `create()`
+makes afresh for a later machine starts unoptimised and runs so until it is hot again, and the
+code it then gets is compiled around the feedback the machines before it left: the first call
+target or object shape of its own machine is a deoptimisation (`wrong call target`, `wrong map`)
+and it starts over. A first machine's closures are, besides, compiled specialised to their own
+context, everything they captured folded in as a constant. So the crossing is two classes, the
+dispatcher (`Dispatcher`, `internal/dispatch.js`) and the calls in flight (`Parking`,
+`internal/parking.js`): their state is the instance's and their code the prototype's, one set of
+functions for the realm that stays optimised from one machine to the next. What they write keeps
+one shape for every machine too -- the records' `result` getter is one function for the realm
+rather than one per dispatcher (a getter is part of the class), a frame is made with its `thread`
+slot rather than given it by parking, the rings are made holding what they will hold, and the
+sampler's state is an int32 from the start, where a first value above the int32 range gave the
+field a representation the next machine's instance changed, and every method reading it
+deoptimised. `createDispatcher` and `createParking` answer an instance; its methods are called on
+it. A loop of each call under cork in node, four machines one after another in a process, three
+processes, the median of the first machines and of the later ones (N 2M, load 3.4-4.4), the tree
+before and this one: `GetCurrentThreadId` 262 and 427 ns a turn before, 264 and 346 after;
+`lstrlenA` 590/782 -> 554/674; `lstrcmpA` 730/1024 -> 732/872; `MulDiv` 366/497 -> 358/383.
+What a later machine still pays is its calls into the other layers' closures -- the engine's trap
+route, the memory layer's reads, the kernel's current thread -- and the handlers' own code, which
+is subject to the same thing.
 
 ### Parking (`internal/parking.js`)
 
@@ -499,8 +506,8 @@ Unit tests (`npm test`; filter with `node --test src/layers/bridge/internal/<fil
 | file | kind | covers |
 |------|------|--------|
 | `internal/conventions.test.js` | contract | Cleanup per convention including fastcall, unknown convention refused, stack and ECX argument reads, signed arguments. |
-| `internal/dispatch.test.js` | unit | Marshal/invoke/EAX, negative results, forwarding stubs, fastcall's registers read from the saved block, a hook that answers vs. one that falls through (EIP/ESP either way), a hook's counters and a reported mismatch, parked calls leaving EAX, the parked token's identity, unimplemented/duplicate traps, a throwing handler, the bounded rings, the sampled `trap` phase, record reuse, the sink; a site hook: all eight registers read off the pushad block into a plain object, an answer writing back every edited register with ESP by `stackAdjust` and EIP to `resume`, a fallthrough restoring every register to the pristine reading even after the handler edited the object, counters and diagnostics shared with a slot hook, and the `call.hook` trace unchanged; two dispatchers' records answering through one getter; a register file carrying ESP and EAX, asked for again once it reads empty, and a cpu lending none answered by name; the last error read from the calling thread's block at `lastErrorOffset`, through `lastError` for a thread without one, and not at all for a function that cannot set it. |
-| `internal/parking.test.js` | unit | `freeStackFor` per thread, nothing in flight, the token only inside a call. |
+| `internal/dispatch.test.js` | unit | Marshal/invoke/EAX, negative results, forwarding stubs, fastcall's registers read from the saved block, a hook that answers vs. one that falls through (EIP/ESP either way), a hook's counters and a reported mismatch, parked calls leaving EAX, the parked token's identity, unimplemented/duplicate traps, a throwing handler, the bounded rings, the sampled `trap` phase, record reuse, the sink; a site hook: all eight registers read off the pushad block into a plain object, an answer writing back every edited register with ESP by `stackAdjust` and EIP to `resume`, a fallthrough restoring every register to the pristine reading even after the handler edited the object, counters and diagnostics shared with a slot hook, and the `call.hook` trace unchanged; two dispatchers' records answering through one getter, and their crossing through one set of methods, the class's; a register file carrying ESP and EAX, asked for again once it reads empty, and a cpu lending none answered by name; the last error read from the calling thread's block at `lastErrorOffset`, through `lastError` for a thread without one, and not at all for a function that cannot set it. |
+| `internal/parking.test.js` | unit | `freeStackFor` per thread, nothing in flight, the token only inside a call; every instance's calls begun and ended through the class's methods. |
 | `internal/callback.test.js` | unit | Suspended-call naming, `answered()`, nested frames below the stack in use, no call in flight, the right thread, address zero refused, `recentlyStarted`; a callback entered with registers of its own; a transfer abandoning every call and frame below its line and keeping the window procedure's above it, and drawing the line at the new ESP when none is given. |
 | `internal/vtable.test.js` | unit | Refusal when stubs or arena run out, pointer identity, guest-code slots, shared tables finding their object, a pointer kept at zero while its object is reachable and forgotten once it is not, every pointer of an object that reports itself destroyed forgotten with it, one generation of a per-interface count ending alone, and the object told of each pointer as it is forgotten. |
 | `module.test.js` | unit | A handler calling back onto its own thread; a handler that awaited being refused without a thread and building on the named thread's stack; an off-stack frame refused; a second instance in one realm does not take the first one's traps; a disposed bridge answers harmlessly rather than throwing; `diagnostics()` answers for the most recently created instance; a handler answering with a continuation sends the thread there and leaves nothing waiting; a continuation without ESP refused; a thread held for its fault spinning in the park loop until its answer sends it on. |

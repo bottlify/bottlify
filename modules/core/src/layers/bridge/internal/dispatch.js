@@ -185,6 +185,60 @@ const RESULT = {
     configurable: true,
 };
 
+/** The journal area a hook's crossings are written under. */
+const HOOK_AREA = 'call.hook';
+
+/** How many calls one timed crossing stands for, on average (`sampleInterval`). */
+const TRAP_SAMPLE = 32;
+const TRAP_WEIGHT = Object.freeze({ weight: TRAP_SAMPLE });
+
+/**
+ * A ring record. The text of the answer is the one thing about a call that
+ * costs an allocation to write down, and almost nobody reads it: so it is
+ * made from the number when it is read, not when the call is made.
+ *
+ * The getter is defined onto the record after its fields rather than
+ * written in the literal: a getter in an object literal puts the object in
+ * V8's dictionary mode, and every call writes seven of a record's fields
+ * -- each a hash lookup there. Defined, it stays an own enumerable
+ * property, so a sink's `{ ...record }` still carries it.
+ *
+ * @returns {CallRecord}
+ */
+function makeRecord(){
+    const record = {
+        name: '',
+        from: 0,
+        /** @type {number[]} */
+        args: [],
+        /** @type {(string | null)[] | null} */
+        strings: null,
+        error: 0,
+        answer: 0,
+        kind: 'threw',
+    };
+    return /** @type {CallRecord} */ (Object.defineProperty(record, 'result', RESULT));
+}
+
+/**
+ * A record as a reader may keep it: the ring writes over its own when it
+ * comes round.
+ *
+ * @param {CallRecord} record
+ */
+const copyOf = record=>({
+    name: record.name,
+    from: record.from,
+    args: record.args.slice(),
+    strings: record.strings ? record.strings.slice() : null,
+    kind: record.kind,
+    result: describe(record),
+    error: record.error,
+});
+
+/** The last error of a dispatcher that was handed no reader. */
+const NO_ERROR = ()=>0;
+
 /**
  * @param {Object} deps
  * @param {any} deps.cpu       For the registers a call frame is read from.
@@ -224,28 +278,200 @@ const RESULT = {
  *        this record is the only account of whether that word held.
  */
 export function createDispatcher(deps){
-    const { cpu, memory, parking, suspend } = deps;
+    return new Dispatcher(deps);
+}
+
+/**
+ * The dispatcher of one machine: its state is the instance's, its code the
+ * class's.
+ *
+ * The code every host call runs is one set of functions for the realm rather
+ * than closures each machine makes afresh. V8 optimises a function per
+ * closure it has, and a closure a later machine makes starts over: it runs
+ * unoptimised until it is hot again, and the code it gets is compiled around
+ * feedback the machines before it left -- a call target one of them had is a
+ * deoptimisation for the next -- so each later machine of a process paid for
+ * much of its run what the first paid for a moment. A method is one function
+ * for every machine, optimised once; what differs between machines is data
+ * it reads off the instance (`docs/core/bridge.md`).
+ */
+class Dispatcher {
+    /** @param {Parameters<typeof createDispatcher>[0]} deps */
+    constructor(deps){
+        const { cpu, memory, parking } = deps;
+        /** @type {any} */
+        this.cpu = cpu;
+        /** @type {any} */
+        this.memory = memory;
+        /** @type {any} */
+        this.parking = parking;
+        /** @type {((answer: Promise<number>, frame: any) => void) | null} */
+        this.suspend = deps.suspend ?? null;
+
+        /**
+         * The cpu's general registers as a view, when it lends one
+         * (`cpu.registerFile`): ESP read and EAX written in place rather than
+         * through `readReg32` and `writeReg32`, each a walk through the cpu
+         * layer's api, its host and a search of the register names. Taken
+         * again when it reads empty -- an emulator that grows its memory
+         * detaches the buffer the view was on -- and never asked for again
+         * once the cpu says it has none.
+         *
+         * @type {Int32Array | null}
+         */
+        this.file = null;
+        this.lends = typeof cpu?.registerFile === 'function';
+
+        /**
+         * Where a call's frame words land before they are handed out: grown to
+         * the longest frame seen and kept.
+         *
+         * @type {number[]}
+         */
+        this.spanWords = new Array(8).fill(0);
+
+        /** @type {Parameters<typeof createDispatcher>[0]['journal'] | null} */
+        this.journal = deps.journal ?? null;
+        /**
+         * Whose writes into guest memory these are.
+         *
+         * Bytes written by the host are one number for the whole run unless
+         * somebody says which call was in flight, and this is the only place
+         * that knows. A slot in, the previous slot out, restored on the way
+         * back: a handler that calls the guest back into another host call
+         * nests without a stack of its own, and a write made with nothing in
+         * flight keeps the name the account gives it rather than the last
+         * call's.
+         *
+         * @type {((slot: number) => number) | null}
+         */
+        this.charging = typeof memory?.charging === 'function' ? memory.charging : null;
+        this.lastError = deps.lastError ?? NO_ERROR;
+        this.errorReader = deps.lastError !== undefined;
+        // The dword itself rather than `lastError`, which walked the kernel
+        // for the running thread and the memory layer for its block on every
+        // call -- measured at a fifth of a call to a handler that does nothing.
+        this.errorOffset = deps.lastErrorOffset ?? -1;
+        this.traceStrings = deps.traceStrings ?? false;
+        // A ring holds the end of a run, and the end of a run is rarely where
+        // the decision was made: a program that gives up after opening its
+        // archives made up its mind thousands of calls earlier. A sink keeps
+        // all of it, for whoever is willing to pay for the file.
+        this.onCall = deps.onCall ?? null;
+        /**
+         * Where a host call's time is accounted, when the caller wired one.
+         *
+         * Optional because this layer is testable without one, and because a
+         * phase that nobody reads is work nobody asked for.
+         */
+        this.profiler = deps.profiler ?? null;
+        // Whether each call is timed as a phase of its own, under the
+        // crossing's. That is what a report's cost per API comes from, and it
+        // costs two clock readings per call -- measured at three percent of a
+        // frame in a match, where a frame makes fifteen hundred calls. Off
+        // unless a measurement asks; the crossing is sampled whenever there is
+        // a profiler, so the host's share is known -- and a production bundle,
+        // which has none, times nothing.
+        this.phased = import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.profiler !== null
+            && (deps.callPhases ?? false);
+        // An int32 from the start, so the field keeps one representation.
+        this.sampler = 0x9e3779b9 | 0;
+        this.untilSample = this.sampleInterval();
+
+        // Indexed by trap id: the cpu hands them out in sequence from zero.
+        /** @type {(Entry | undefined)[]} */
+        this.functions = [];
+        this.implemented = 0;
+        /**
+         * Frames by depth of nesting, reused: a guest callback can trap into
+         * another host call, so there is one per level rather than one.
+         *
+         * Made holding what it will hold, as the rings below are, so every
+         * dispatcher's arrays have the one hidden class from the start: an
+         * array's class moves with the kind of element it holds, and the
+         * crossing's code, shared by every machine in a process, would
+         * otherwise find a new machine's arrays in the class the first
+         * machine's left behind.
+         *
+         * @type {(CallFrame | null | undefined)[]}
+         */
+        this.frames = [null];
+        this.depth = 0;
+        /**
+         * The names of recent calls, as a ring.
+         *
+         * Bounded, and that is the whole point of it. This is diagnostics: a
+         * failure report wants the last handful of calls, and nothing wants
+         * the millionth. Kept as a growing list it is a leak that scales with
+         * how well the engine works -- a program that runs for an hour makes
+         * hundreds of millions of calls, and the array eventually refuses to
+         * grow at all, failing inside the dispatcher with a message about
+         * array length that says nothing about the guest.
+         *
+         * @type {string[]}
+         */
+        this.called = new Array(CALL_RING).fill('');
+        this.ringAt = 0;
+        /** @type {CallRecord[]} */
+        this.records = new Array(DETAIL_RING).fill(null);
+        this.detailAt = 0;
+        /** Guest address of each stub, so a return address can be given a name. */
+        /** @type {Map<number, string>} */
+        this.byAddress = new Map();
+        this.callCount = 0;
+        /** A hook's name to its trap id, for `reportMismatch`. */
+        /** @type {Map<string, number>} */
+        this.hooksByName = new Map();
+    }
 
     /**
-     * The cpu's general registers as a view, when it lends one (`cpu.registerFile`):
-     * ESP read and EAX written in place rather than through `readReg32` and
-     * `writeReg32`, each a walk through the cpu layer's api, its host and a
-     * search of the register names. Taken again when it reads empty -- an
-     * emulator that grows its memory detaches the buffer the view was on --
-     * and never asked for again once the cpu says it has none.
+     * The crossing is timed one call in this many on average, each standing
+     * for all of them: two clock readings a call were a measured share of a
+     * frame in a match, and a share is as true of a sample as of the whole --
+     * of a random sample. Every eighth call of a program that draws in a
+     * fixed sequence of calls is the same few calls of that sequence every
+     * time, and the estimate was those calls' cost eight times over: more
+     * host time than the frame had, and a guest phase whose own time came out
+     * below nothing. So the calls between two timed ones are drawn from a
+     * xorshift, TRAP_SAMPLE on average. One in thirty-two rather than one in
+     * eight: the timed call's two clock readings and phase were most of what
+     * the sampling cost every call, and a title's thirty thousand calls a
+     * second still time about a thousand.
      *
-     * @type {Int32Array | null}
+     * Two draws of 0..31 and one: 32 calls on average, never none.
      */
-    let file = null;
-    let lends = typeof cpu?.registerFile === 'function';
-    const registers = ()=>{
-        if (lends && (file === null || file.length === 0))
+    sampleInterval(){
+        let sampler = this.sampler;
+        sampler ^= sampler << 13;
+        sampler ^= sampler >>> 17;
+        sampler ^= sampler << 5;
+        this.sampler = sampler;
+        return (sampler & 31) + (sampler >>> 5 & 31) + 1;
+    }
+
+    /** The register file, asked for again when it reads empty. */
+    registers(){
+        const file = this.file;
+        if (file !== null && file.length !== 0)
         {
-            file = cpu.registerFile() ?? null;
-            lends = file !== null;
+            return file;
         }
-        return file;
-    };
+        if (this.lends)
+        {
+            this.file = this.cpu.registerFile() ?? null;
+            this.lends = this.file !== null;
+        }
+        return this.file;
+    }
+
+    /** @param {number} count */
+    frameWords(count){
+        if (this.spanWords.length < count)
+        {
+            this.spanWords = new Array(count).fill(0);
+        }
+        return this.spanWords;
+    }
 
     /**
      * Reads a call's stack words one at a time up to the end of the region
@@ -255,8 +481,8 @@ export function createDispatcher(deps){
      * @param {number} from @param {number} count @param {number[]} into
      * @param {number} at @param {unknown} failure
      */
-    const readWithinStack = (from, count, into, at, failure)=>{
-        const region = memory.find?.(from);
+    readWithinStack(from, count, into, at, failure){
+        const region = this.memory.find?.(from);
         if (!region)
         {
             throw failure;
@@ -265,155 +491,9 @@ export function createDispatcher(deps){
         for (let word = 0; word < count; word++)
         {
             const address = from + word * 4;
-            into[at + word] = address + 4 <= end ? memory.readU32(address) | 0 : 0;
+            into[at + word] = address + 4 <= end ? this.memory.readU32(address) | 0 : 0;
         }
-    };
-
-    /**
-     * Where a call's frame words land before they are handed out: grown to
-     * the longest frame seen and kept.
-     *
-     * @type {number[]}
-     */
-    let spanWords = new Array(8).fill(0);
-    /** @param {number} count */
-    const frameWords = count=>{
-        if (spanWords.length < count)
-        {
-            spanWords = new Array(count).fill(0);
-        }
-        return spanWords;
-    };
-
-    const journal = deps.journal ?? null;
-    const HOOK_AREA = 'call.hook';
-    /**
-     * Whose writes into guest memory these are.
-     *
-     * Bytes written by the host are one number for the whole run unless
-     * somebody says which call was in flight, and this is the only place that
-     * knows. A slot in, the previous slot out, restored on the way back: a
-     * handler that calls the guest back into another host call nests without a
-     * stack of its own, and a write made with nothing in flight keeps the
-     * name the account gives it rather than the last call's.
-     */
-    const charging = typeof memory?.charging === 'function'
-        ? /** @type {(slot: number) => number} */ (memory.charging)
-        : null;
-    const lastError = deps.lastError ?? (()=>0);
-    // The dword itself rather than `lastError`, which walked the kernel for
-    // the running thread and the memory layer for its block on every call --
-    // measured at a fifth of a call to a handler that does nothing.
-    const errorOffset = deps.lastErrorOffset ?? -1;
-    const traceStrings = deps.traceStrings ?? false;
-    // A ring holds the end of a run, and the end of a run is rarely where the
-    // decision was made: a program that gives up after opening its archives
-    // made up its mind thousands of calls earlier. A sink keeps all of it, for
-    // whoever is willing to pay for the file.
-    const onCall = deps.onCall ?? null;
-    /**
-     * Where a host call's time is accounted, when the caller wired one.
-     *
-     * Optional because this layer is testable without one, and because a phase
-     * that nobody reads is work nobody asked for.
-     */
-    const profiler = deps.profiler ?? null;
-    // Whether each call is timed as a phase of its own, under the crossing's.
-    // That is what a report's cost per API comes from, and it costs two clock
-    // readings per call -- measured at three percent of a frame in a match,
-    // where a frame makes fifteen hundred calls. Off unless a measurement
-    // asks; the crossing is sampled whenever there is a profiler, so the
-    // host's share is known -- and a production bundle, which has none, times
-    // nothing.
-    const callPhases = deps.callPhases ?? false;
-    const phased = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiler !== null && callPhases;
-    // The crossing is timed one call in this many, each standing for all of
-    // them: two clock readings a call were a measured share of a frame in a
-    // match, and a share is as true of a sample as of the whole -- of a random
-    // sample. Every eighth call of a program that draws in a fixed sequence of
-    // calls is the same few calls of that sequence every time, and the estimate
-    // was those calls' cost eight times over: more host time than the frame had,
-    // and a guest phase whose own time came out below nothing. So the calls
-    // between two timed ones are drawn from a xorshift, TRAP_SAMPLE on average.
-    // One in thirty-two rather than one in eight: the timed call's two clock
-    // readings and phase were most of what the sampling cost every call, and a
-    // title's thirty thousand calls a second still time about a thousand.
-    const TRAP_SAMPLE = 32;
-    const TRAP_WEIGHT = Object.freeze({ weight: TRAP_SAMPLE });
-    let sampler = 0x9e3779b9;
-    /** Two draws of 0..31 and one: 32 calls on average, never none. */
-    const sampleInterval = ()=>{
-        sampler ^= sampler << 13;
-        sampler ^= sampler >>> 17;
-        sampler ^= sampler << 5;
-        return (sampler & 31) + (sampler >>> 5 & 31) + 1;
-    };
-    let untilSample = sampleInterval();
-    // Indexed by trap id: the cpu hands them out in sequence from zero.
-    /** @type {(Entry | undefined)[]} */
-    const functions = [];
-    let implemented = 0;
-    /**
-     * Frames by depth of nesting, reused: a guest callback can trap into
-     * another host call, so there is one per level rather than one.
-     *
-     * Made holding what it will hold, as the rings below are, so every
-     * dispatcher's arrays have the one hidden class from the start: an
-     * array's class moves with the kind of element it holds, and the
-     * crossing's code, shared by every machine in a process, would otherwise
-     * find a new machine's arrays in the class the first machine's left
-     * behind.
-     *
-     * @type {(CallFrame | null | undefined)[]}
-     */
-    const frames = [null];
-    let depth = 0;
-    /**
-     * The names of recent calls, as a ring.
-     *
-     * Bounded, and that is the whole point of it. This is diagnostics: a
-     * failure report wants the last handful of calls, and nothing wants the
-     * millionth. Kept as a growing list it is a leak that scales with how well
-     * the engine works -- a program that runs for an hour makes hundreds of
-     * millions of calls, and the array eventually refuses to grow at all,
-     * failing inside the dispatcher with a message about array length that says
-     * nothing about the guest.
-     *
-     * @type {string[]}
-     */
-    const called = new Array(CALL_RING).fill('');
-    let ringAt = 0;
-    /** @type {CallRecord[]} */
-    const detailed = new Array(DETAIL_RING).fill(null);
-    let detailAt = 0;
-
-    /**
-     * A ring record. The text of the answer is the one thing about a call that
-     * costs an allocation to write down, and almost nobody reads it: so it is
-     * made from the number when it is read, not when the call is made.
-     *
-     * The getter is defined onto the record after its fields rather than
-     * written in the literal: a getter in an object literal puts the object in
-     * V8's dictionary mode, and every call writes seven of a record's fields
-     * -- each a hash lookup there. Defined, it stays an own enumerable
-     * property, so a sink's `{ ...record }` still carries it.
-     *
-     * @returns {CallRecord}
-     */
-    const makeRecord = ()=>{
-        const record = {
-            name: '',
-            from: 0,
-            /** @type {number[]} */
-            args: [],
-            /** @type {(string | null)[] | null} */
-            strings: null,
-            error: 0,
-            answer: 0,
-            kind: 'threw',
-        };
-        return /** @type {CallRecord} */ (Object.defineProperty(record, 'result', RESULT));
-    };
+    }
 
     /**
      * The most-called names in the ring, with their counts, commonest first.
@@ -421,15 +501,15 @@ export function createDispatcher(deps){
      * @param {number} count
      * @returns {[string, number][]}
      */
-    const hot = count=>{
+    hot(count){
         /** @type {Map<string, number>} */
         const counts = new Map();
-        for (const name of history(CALL_RING))
+        for (const name of this.history(CALL_RING))
         {
             counts.set(name, (counts.get(name) ?? 0) + 1);
         }
         return [...counts].sort((left, right)=>right[1] - left[1]).slice(0, count);
-    };
+    }
 
     /**
      * An argument as the text it points at, or null when it is not a pointer
@@ -450,7 +530,7 @@ export function createDispatcher(deps){
      * @param {number} value
      * @returns {string | null}
      */
-    const peekString = value=>{
+    peekString(value){
         const address = value >>> 0;
         if (address < 0x1000)
         {
@@ -461,13 +541,13 @@ export function createDispatcher(deps){
         // at nothing, and a read that throws carries a formatted message and
         // a stack -- measured at ten microseconds an argument, which with
         // tracing on was the whole cost of a call several times over.
-        const region = memory.find(address);
+        const region = this.memory.find(address);
         if (region === undefined || region.access === 'none')
         {
             return null;
         }
         const span = Math.min(PEEK_LIMIT, region.base + region.size - address);
-        const bytes = memory.window(address, span);
+        const bytes = this.memory.window(address, span);
         let text = '';
         for (let at = 0; at < span; at++)
         {
@@ -489,23 +569,7 @@ export function createDispatcher(deps){
             text += String.fromCharCode(byte);
         }
         return null;
-    };
-
-    /**
-     * A record as a reader may keep it: the ring writes over its own when it
-     * comes round.
-     *
-     * @param {CallRecord} record
-     */
-    const copyOf = record=>({
-        name: record.name,
-        from: record.from,
-        args: record.args.slice(),
-        strings: record.strings ? record.strings.slice() : null,
-        kind: record.kind,
-        result: describe(record),
-        error: record.error,
-    });
+    }
 
     /**
      * The last `count` calls, oldest first.
@@ -513,23 +577,16 @@ export function createDispatcher(deps){
      * @param {number} count
      * @returns {string[]}
      */
-    const history = count=>{
-        const kept = Math.min(count, ringAt, CALL_RING);
+    history(count){
+        const kept = Math.min(count, this.ringAt, CALL_RING);
         /** @type {string[]} */
         const out = [];
         for (let back = kept; back > 0; back--)
         {
-            out.push(called[(ringAt - back) % CALL_RING]);
+            out.push(this.called[(this.ringAt - back) % CALL_RING]);
         }
         return out;
-    };
-    /** Guest address of each stub, so a return address can be given a name. */
-    /** @type {Map<number, string>} */
-    const byAddress = new Map();
-    let calls = 0;
-    /** A hook's name to its trap id, for `reportMismatch`. */
-    /** @type {Map<string, number>} */
-    const hooksByName = new Map();
+    }
 
     /**
      * A site hook's eight registers, off the stub's own `pushad` before it
@@ -543,10 +600,10 @@ export function createDispatcher(deps){
      * @param {Entry} entry @param {number} pushed @param {number} esp
      * @returns {number} the dword at the site's ESP
      */
-    const readSite = (entry, pushed, esp)=>{
+    readSite(entry, pushed, esp){
         const args = entry.args;
-        const block = frameWords(8);
-        memory.readU32sInto(pushed, 8, block, 0);
+        const block = this.frameWords(8);
+        this.memory.readU32sInto(pushed, 8, block, 0);
         args[0] = block[7]; // eax
         args[1] = block[6]; // ecx
         args[2] = block[5]; // edx
@@ -565,8 +622,8 @@ export function createDispatcher(deps){
         r.ebp = args[5];
         r.esi = args[6];
         r.edi = args[7];
-        return memory.readU32(esp);
-    };
+        return this.memory.readU32(esp);
+    }
 
     /**
      * A call's arguments into its entry's own array, which the handler reads
@@ -577,13 +634,13 @@ export function createDispatcher(deps){
      * @param {number} pushed @param {number} esp
      * @returns {number} the return address at ESP
      */
-    const readCall = (entry, regs, pushed, esp)=>{
+    readCall(entry, regs, pushed, esp){
         const args = entry.args;
         let at = 0;
         if (entry.registerArgs >= 1)
         {
             // Live: nothing in the trap sequence touches ECX.
-            args[at++] = regs === null ? cpu.readReg32('ecx') | 0 : regs[ECX];
+            args[at++] = regs === null ? this.cpu.readReg32('ecx') | 0 : regs[ECX];
         }
         if (entry.registerArgs >= 2)
         {
@@ -592,24 +649,24 @@ export function createDispatcher(deps){
             // in, so the stub pushed it first and this reads it from
             // there -- the one word between `pushed` and the caller's
             // own frame at `esp`.
-            args[at++] = memory.readU32(pushed) | 0;
+            args[at++] = this.memory.readU32(pushed) | 0;
         }
         // The return address and the stack arguments above it in one read of
         // the span: the memory layer validates it once and hands it to the
         // machine in one call, where each word, and the return address on its
         // own, was a walk down through the memory and cpu layers of its own.
         const count = entry.stackWords + 1;
-        const words = frameWords(count);
+        const words = this.frameWords(count);
         try
         {
-            memory.readU32sInto(esp, count, words, 0);
+            this.memory.readU32sInto(esp, count, words, 0);
         }
         catch {
             if (count > 1)
             {
                 try
                 {
-                    memory.readU32sInto(esp + 4, count - 1, args, at);
+                    this.memory.readU32sInto(esp + 4, count - 1, args, at);
                 }
                 catch (e){
                     // A variadic entry reads a fixed number of slots, and a
@@ -617,18 +674,18 @@ export function createDispatcher(deps){
                     // words above it than that: past the stack is nothing the
                     // caller passed, so it reads as zero rather than stopping
                     // the machine.
-                    readWithinStack(esp + 4, count - 1, args, at, e);
+                    this.readWithinStack(esp + 4, count - 1, args, at, e);
                 }
             }
             // The return address alone fails as the stack does.
-            return memory.readU32(esp);
+            return this.memory.readU32(esp);
         }
         for (let word = 1; word < count; word++)
         {
             args[at++] = words[word];
         }
         return words[0] >>> 0;
-    };
+    }
 
     /**
      * Whether a hook's crossing is traced, and its entry line when it is:
@@ -638,8 +695,9 @@ export function createDispatcher(deps){
      * @param {Entry} entry @param {number} esp @param {number} hostReturn
      * @param {number[]} args
      */
-    const traceHookEntry = (entry, esp, hostReturn, args)=>{
-        if (journal === null || !journal.enabled(HOOK_AREA, journal.Level.TRACE))
+    traceHookEntry(entry, esp, hostReturn, args){
+        const journal = this.journal;
+        if (!journal || !journal.enabled(HOOK_AREA, journal.Level.TRACE))
         {
             return false;
         }
@@ -649,20 +707,20 @@ export function createDispatcher(deps){
             `0x${(hostReturn >>> 0).toString(16)}`,
             args.map(value=>`0x${(value >>> 0).toString(16)}`).join(','));
         return true;
-    };
+    }
 
     /**
      * Where a hook sent the call, for a traced crossing.
      *
      * @param {Entry} entry @param {string} kind
      */
-    const traceHookExit = (entry, kind)=>{
-        /** @type {NonNullable<typeof journal>} */ (journal).write(journal?.Level.TRACE ?? 0,
-            HOOK_AREA, '{0} {1} eip={2} esp={3}',
+    traceHookExit(entry, kind){
+        const journal = /** @type {NonNullable<Dispatcher['journal']>} */ (this.journal);
+        journal.write(journal.Level.TRACE, HOOK_AREA, '{0} {1} eip={2} esp={3}',
             entry.name, kind,
-            `0x${(cpu.readReg32('eip') >>> 0).toString(16)}`,
-            `0x${(cpu.readReg32('esp') >>> 0).toString(16)}`);
-    };
+            `0x${(this.cpu.readReg32('eip') >>> 0).toString(16)}`,
+            `0x${(this.cpu.readReg32('esp') >>> 0).toString(16)}`);
+    }
 
     /**
      * A slot or site hook's decision, carried out: where EIP and the
@@ -672,7 +730,8 @@ export function createDispatcher(deps){
      * @param {Entry} entry @param {CallRecord} record @param {number[]} args
      * @param {number} pushed @param {number} esp
      */
-    const finishHook = (entry, record, args, pushed, esp)=>{
+    finishHook(entry, record, args, pushed, esp){
+        const cpu = this.cpu;
         if (entry.site)
         {
             if (record.kind === 'answered')
@@ -719,14 +778,14 @@ export function createDispatcher(deps){
         // own call set it: the trap sequence's `mov dx, port` spent
         // half of it getting here, and the pushed word is the only
         // place that still holds it. ECX was never touched.
-        cpu.writeReg32('edx', memory.readU32(pushed));
+        cpu.writeReg32('edx', this.memory.readU32(pushed));
         if (record.kind === 'answered')
         {
             // The kernel computed the call itself: return to the
             // caller as the guest function's own `ret cleanup` would,
             // since no such instruction is baked into this stub for
             // the CPU to run on its own.
-            const returnTo = memory.readU32(esp);
+            const returnTo = this.memory.readU32(esp);
             cpu.writeReg32('eax', 0);
             cpu.writeReg32('esp', esp + 4 + entry.cleanup);
             cpu.writeReg32('eip', returnTo);
@@ -740,7 +799,7 @@ export function createDispatcher(deps){
             cpu.writeReg32('esp', esp);
             cpu.writeReg32('eip', entry.target);
         }
-    };
+    }
 
     /**
      * A call that did not answer by returning: parked, or waiting on a
@@ -749,13 +808,13 @@ export function createDispatcher(deps){
      * @param {Entry} entry @param {number[]} args @param {CallRecord} record
      * @param {any} result @param {CallFrame} frame
      */
-    const settleLate = (entry, args, record, result, frame)=>{
+    settleLate(entry, args, record, result, frame){
         // The handler still holds these and will read them after whatever it
         // is waiting for: they are its now, and the next call gets fresh
         // ones. Paid only by a call that already costs a wait, never by the
         // prompt ones.
         entry.args = new Array(args.length);
-        frames[depth] = undefined;
+        this.frames[this.depth] = undefined;
         // A parked call's EAX belongs to whatever wakes the thread, and it
         // carries the wait's own result. Writing a placeholder here would
         // overwrite the answer before the guest ever sees it.
@@ -763,7 +822,7 @@ export function createDispatcher(deps){
         {
             return;
         }
-        if (!suspend)
+        if (this.suspend === null)
         {
             throw new Error(
                 `bridge: ${entry.name} answered asynchronously with nowhere to wait`);
@@ -773,6 +832,7 @@ export function createDispatcher(deps){
         // delivered, and how much. Recorded when the answer arrives, as a
         // line of its own -- the first line is already written and in order,
         // and moving it would put the call somewhere it did not happen.
+        const onCall = this.onCall;
         if (onCall !== null)
         {
             const asked = copyOf(record);
@@ -788,39 +848,35 @@ export function createDispatcher(deps){
                 onCall(asked);
             });
         }
-        suspend(result, frame);
-    };
+        this.suspend(result, frame);
+    }
 
     /**
      * The crossing itself: marshal, invoke, place the result.
      *
      * Everything a call of every kind needs is here, and every kind's own
      * business -- a hook's trace and clock, a site's registers, a late
-     * answer -- is a function of its own reached only by that kind. This is
-     * the code every host call runs, and it runs as one compilation shared
-     * by every machine in the process: the less of it there is, the less a
-     * second machine pays for the first machine's having shaped it
-     * (`docs/core/bridge.md`).
+     * answer -- is a method of its own reached only by that kind.
      *
      * @param {number} id
      */
-    const cross = id=>{
-        const entry = functions[id];
+    cross(id){
+        const entry = this.functions[id];
         if (entry === undefined)
         {
             throw new Error(`bridge: trap ${id} has no implementation`);
         }
 
-        const regs = registers();
-        const pushed = regs === null ? cpu.readReg32('esp') : regs[ESP] >>> 0;
+        const regs = this.registers();
+        const pushed = regs === null ? this.cpu.readReg32('esp') : regs[ESP] >>> 0;
         const esp = pushed + entry.saved;
         const args = entry.args;
         const hostReturn = entry.site
-            ? readSite(entry, pushed, esp)
-            : readCall(entry, regs, pushed, esp);
+            ? this.readSite(entry, pushed, esp)
+            : this.readCall(entry, regs, pushed, esp);
 
-        calls++;
-        called[ringAt++ % CALL_RING] = entry.name;
+        this.callCount++;
+        this.called[this.ringAt++ % CALL_RING] = entry.name;
 
         // Everything the handler might need about where it was called from,
         // read before it runs: a handler that calls the guest back writes
@@ -830,7 +886,8 @@ export function createDispatcher(deps){
         // stack will be once the stub has returned. `thread` is in the
         // literal, for the class reason the arrays above give: parking
         // stamps it on every frame it is handed.
-        const frame = frames[depth] ??= {
+        const depth = this.depth;
+        const frame = this.frames[depth] ??= {
             name: '', freeStack: 0, callerStack: 0, restingStack: 0, hostReturn: 0,
             thread: null,
         };
@@ -845,7 +902,7 @@ export function createDispatcher(deps){
         // second, was the garbage collector's whole share of a frame.
         // Whoever reads the ring gets a copy; a sink gets the record for
         // the length of its call and nothing longer.
-        const record = detailed[detailAt++ % DETAIL_RING] ??= makeRecord();
+        const record = this.records[this.detailAt++ % DETAIL_RING] ??= makeRecord();
         record.name = entry.name;
         // Which instruction made this call. Read from the frame that was
         // captured above rather than the stack, because a handler that
@@ -869,13 +926,13 @@ export function createDispatcher(deps){
         // assembled on its own stack has been overwritten several
         // frames deep by the time anybody reads the trace, and what
         // comes back then belongs to whatever ran next.
-        if (traceStrings)
+        if (this.traceStrings)
         {
             const strings = record.strings ??= [];
             strings.length = kept;
             for (let i = 0; i < kept; i++)
             {
-                strings[i] = peekString(args[i]);
+                strings[i] = this.peekString(args[i]);
             }
         }
         else
@@ -885,12 +942,12 @@ export function createDispatcher(deps){
         record.kind = 'threw';
         record.error = 0;
 
-        const hookTraced = entry.hook && traceHookEntry(entry, esp, hostReturn, args);
+        const hookTraced = entry.hook && this.traceHookEntry(entry, esp, hostReturn, args);
 
-        parking.beginCall(frame);
-        depth++;
-        const charged = charging !== null && entry.writer >= 0
-            ? charging(entry.writer) : -1;
+        this.parking.beginCall(frame);
+        this.depth = depth + 1;
+        const charging = this.charging;
+        const charged = charging !== null && entry.writer >= 0 ? charging(entry.writer) : -1;
         let result;
         let late = false;
         // A hook's `ms` times only the handler call itself, every time --
@@ -898,9 +955,11 @@ export function createDispatcher(deps){
         // cost is read from, so it is not sampled.
         const hookStart = import.meta.BOTTLIFY_DIAGNOSTICS !== false && entry.hookStats !== null
             ? hookClock() : 0;
-        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && phased)
+        const phased = import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.phased;
+        if (phased)
         {
-            profiler.begin(entry.name, 'host');
+            /** @type {NonNullable<Dispatcher['profiler']>} */ (this.profiler)
+                .begin(entry.name, 'host');
         }
         try
         {
@@ -947,32 +1006,35 @@ export function createDispatcher(deps){
         }
         finally
         {
-            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && phased)
+            if (phased)
             {
-                profiler.end(entry.name);
+                /** @type {NonNullable<Dispatcher['profiler']>} */ (this.profiler)
+                    .end(entry.name);
             }
             if (charging !== null && charged >= 0)
             {
                 charging(charged);
             }
-            depth--;
-            parking.endCall();
+            this.depth = depth;
+            this.parking.endCall();
             // What this call left in the thread's last error. A program
             // reports a code long after whatever produced it returned, and
             // this is the only record that ties the two together. Not read
             // for a function that cannot have set it.
             if (entry.readsError)
             {
-                const block = errorOffset < 0 ? 0 : frame.thread?.tebAddress ?? 0;
-                record.error = block === 0 ? lastError() : cpu.readU32(block + errorOffset);
+                const block = this.errorOffset < 0 ? 0 : frame.thread?.tebAddress ?? 0;
+                record.error = block === 0
+                    ? this.lastError()
+                    : this.cpu.readU32(block + this.errorOffset);
             }
-            if (onCall !== null)
+            if (this.onCall !== null)
             {
                 // As recorded, strings included only when tracing asked
                 // for them. Peeking every argument for a sink that does
                 // not read the strings cost more than the whole dispatch:
                 // measured at 1.6 of 2.3 microseconds per call.
-                onCall(record);
+                this.onCall(record);
             }
         }
 
@@ -990,15 +1052,15 @@ export function createDispatcher(deps){
         }
         if (late)
         {
-            settleLate(entry, args, record, result, frame);
+            this.settleLate(entry, args, record, result, frame);
             return;
         }
         if (entry.hook)
         {
-            finishHook(entry, record, args, pushed, esp);
+            this.finishHook(entry, record, args, pushed, esp);
             if (hookTraced)
             {
-                traceHookExit(entry, record.kind);
+                this.traceHookExit(entry, record.kind);
             }
             return;
         }
@@ -1008,223 +1070,234 @@ export function createDispatcher(deps){
             // trap spent EAX and DX and nothing else. Put those two back
             // and drop the block, so the function it forwards into sees
             // the registers exactly as its caller set them.
-            cpu.writeReg32('eax', memory.readU32(pushed + 28));
-            cpu.writeReg32('edx', memory.readU32(pushed + 20));
-            cpu.writeReg32('esp', esp);
+            this.cpu.writeReg32('eax', this.memory.readU32(pushed + 28));
+            this.cpu.writeReg32('edx', this.memory.readU32(pushed + 20));
+            this.cpu.writeReg32('esp', esp);
             return;
         }
         // Asked again rather than reusing `regs`: the handler may have
         // grown the emulator's memory under the view.
-        const answerTo = registers();
+        const answerTo = this.registers();
         if (answerTo === null)
         {
-            cpu.writeReg32('eax', result >>> 0);
+            this.cpu.writeReg32('eax', result >>> 0);
         }
         else
         {
             answerTo[EAX] = /** @type {number} */ (result) | 0;
         }
-    };
+    }
 
-    return {
-        /**
-         * @param {number} id
-         * @param {HostFunction} fn
-         */
-        register(id, fn){
-            if (functions[id] !== undefined)
-            {
-                throw new Error(`bridge: trap ${id} is already implemented by ${fn.name}`);
-            }
-            const site = fn.site === true;
-            // A site hook marshals nothing through a convention: its eight
-            // registers come straight off the pushad block, not off a
-            // calling convention nobody chose -- the call was never a call.
-            // `convention`/`argBytes` are optional only for a `site` entry;
-            // every other caller still provides them, checked at `register`'s
-            // own call sites (`bridge/module.js`).
-            const convention = /** @type {string} */ (fn.convention);
-            const argBytes = /** @type {number} */ (fn.argBytes);
-            const registerArgs = site ? 0 : registerArgumentCount(convention);
-            // Validates the convention and the byte count here, once, rather
-            // than on every call.
-            const cleanup = site ? 0 : calleeCleanup(convention, argBytes);
-            const stackWords = site ? 0 : (argBytes - registerArgs * 4) >>> 2;
-            // A site hook shares a slot hook's counters and journal record --
-            // both are "a guest call this engine decided by a sidecar word,
-            // rather than by declaration" -- so it is a `hook` for every
-            // purpose downstream except how its registers are marshalled.
-            const hook = fn.hook === true || site;
-            functions[id] = {
-                fn,
-                name: fn.name,
-                handler: fn.handler,
-                registerArgs,
-                stackWords,
-                cleanup,
-                saved: fn.saved ?? 0,
-                forwards: fn.forwards === true,
-                hook,
-                target: fn.target ?? 0,
-                site,
-                trampoline: fn.trampoline ?? 0,
-                resume: fn.resume ?? 0,
-                stackAdjust: fn.stackAdjust ?? 0,
-                registers: site
-                    ? { eax: 0, ecx: 0, edx: 0, ebx: 0, esp: 0, ebp: 0, esi: 0, edi: 0 }
-                    : null,
-                hookStats: hook
-                    ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
-                readsError: deps.lastError !== undefined && fn.lastError !== false,
-                args: new Array(site ? 8 : stackWords + registerArgs),
-                writer: typeof memory?.writer === 'function' ? memory.writer(fn.name) : -1,
-            };
-            if (hook)
-            {
-                hooksByName.set(fn.name, id);
-            }
-            implemented++;
-        },
+    /**
+     * @param {number} id
+     * @param {HostFunction} fn
+     */
+    register(id, fn){
+        if (this.functions[id] !== undefined)
+        {
+            throw new Error(`bridge: trap ${id} is already implemented by ${fn.name}`);
+        }
+        const site = fn.site === true;
+        // A site hook marshals nothing through a convention: its eight
+        // registers come straight off the pushad block, not off a
+        // calling convention nobody chose -- the call was never a call.
+        // `convention`/`argBytes` are optional only for a `site` entry;
+        // every other caller still provides them, checked at `register`'s
+        // own call sites (`bridge/module.js`).
+        const convention = /** @type {string} */ (fn.convention);
+        const argBytes = /** @type {number} */ (fn.argBytes);
+        const registerArgs = site ? 0 : registerArgumentCount(convention);
+        // Validates the convention and the byte count here, once, rather
+        // than on every call.
+        const cleanup = site ? 0 : calleeCleanup(convention, argBytes);
+        const stackWords = site ? 0 : (argBytes - registerArgs * 4) >>> 2;
+        // A site hook shares a slot hook's counters and journal record --
+        // both are "a guest call this engine decided by a sidecar word,
+        // rather than by declaration" -- so it is a `hook` for every
+        // purpose downstream except how its registers are marshalled.
+        const hook = fn.hook === true || site;
+        this.functions[id] = {
+            fn,
+            name: fn.name,
+            handler: fn.handler,
+            registerArgs,
+            stackWords,
+            cleanup,
+            saved: fn.saved ?? 0,
+            forwards: fn.forwards === true,
+            hook,
+            target: fn.target ?? 0,
+            site,
+            trampoline: fn.trampoline ?? 0,
+            resume: fn.resume ?? 0,
+            stackAdjust: fn.stackAdjust ?? 0,
+            registers: site
+                ? { eax: 0, ecx: 0, edx: 0, ebx: 0, esp: 0, ebp: 0, esi: 0, edi: 0 }
+                : null,
+            hookStats: hook
+                ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
+            readsError: this.errorReader && fn.lastError !== false,
+            args: new Array(site ? 8 : stackWords + registerArgs),
+            writer: typeof this.memory?.writer === 'function' ? this.memory.writer(fn.name) : -1,
+        };
+        if (hook)
+        {
+            this.hooksByName.set(fn.name, id);
+        }
+        this.implemented++;
+    }
 
-        /** @param {number} id */
-        lookup: id=>functions[id]?.fn ?? null,
+    /** @param {number} id */
+    lookup(id){
+        return this.functions[id]?.fn ?? null;
+    }
 
-        /**
-         * What lives at a guest address, when it is one of our stubs.
-         *
-         * @param {number} address
-         * @returns {string | null}
-         */
-        symbolize: address=>byAddress.get(address >>> 0) ?? null,
+    /**
+     * What lives at a guest address, when it is one of our stubs.
+     *
+     * @param {number} address
+     * @returns {string | null}
+     */
+    symbolize(address){
+        return this.byAddress.get(address >>> 0) ?? null;
+    }
 
-        /**
-         * @param {number} address
-         * @param {string} name
-         */
-        placed(address, name){
-            byAddress.set(address >>> 0, name);
-        },
+    /**
+     * @param {number} address
+     * @param {string} name
+     */
+    placed(address, name){
+        this.byAddress.set(address >>> 0, name);
+    }
 
-        /**
-         * Handles one trap: marshal, invoke, place the result.
-         *
-         * @param {number} id
-         */
-        dispatch(id){
-            // Everything a crossing costs that is not the handler itself:
-            // reading the frame, marshalling the arguments, the bookkeeping a
-            // trace needs, and the return. Opened around the whole of it, so
-            // what is left as this phase's own time -- the handler runs inside
-            // it and takes its own -- is the price of the boundary.
-            //
-            // It is the number that decides where speed is lost. A title's menu
-            // makes about thirty thousand of these a second while every handler
-            // in the report costs a fraction of a millisecond a frame, and
-            // until this existed there was no way to tell a machine slowed by
-            // its own emulation from one slowed by leaving it so often.
-            // A production bundle times no crossing at all.
-            if (import.meta.BOTTLIFY_DIAGNOSTICS === false || profiler === null
-                || --untilSample > 0)
-            {
-                cross(id);
-                return;
-            }
-            untilSample = sampleInterval();
-            profiler.begin('trap', 'host');
-            try
-            {
-                cross(id);
-            }
-            finally
-            {
-                profiler.end('trap', TRAP_WEIGHT);
-            }
-        },
+    /**
+     * Handles one trap: marshal, invoke, place the result.
+     *
+     * @param {number} id
+     */
+    dispatch(id){
+        // Everything a crossing costs that is not the handler itself:
+        // reading the frame, marshalling the arguments, the bookkeeping a
+        // trace needs, and the return. Opened around the whole of it, so
+        // what is left as this phase's own time -- the handler runs inside
+        // it and takes its own -- is the price of the boundary.
+        //
+        // It is the number that decides where speed is lost. A title's menu
+        // makes about thirty thousand of these a second while every handler
+        // in the report costs a fraction of a millisecond a frame, and
+        // until this existed there was no way to tell a machine slowed by
+        // its own emulation from one slowed by leaving it so often.
+        // A production bundle times no crossing at all.
+        const profiler = this.profiler;
+        if (import.meta.BOTTLIFY_DIAGNOSTICS === false || profiler === null
+            || --this.untilSample > 0)
+        {
+            this.cross(id);
+            return;
+        }
+        this.untilSample = this.sampleInterval();
+        profiler.begin('trap', 'host');
+        try
+        {
+            this.cross(id);
+        }
+        finally
+        {
+            profiler.end('trap', TRAP_WEIGHT);
+        }
+    }
 
-        /**
-         * The crossing itself, with the phase above already open.
-         *
-         * @param {number} id
-         */
-        dispatchNow: cross,
+    /**
+     * The crossing itself, with the phase above already open.
+     *
+     * @param {number} id
+     */
+    dispatchNow(id){
+        this.cross(id);
+    }
 
-        diagnostics: ()=>({
-            implemented,
-            calls,
-            lastCall: ringAt === 0 ? null : called[(ringAt - 1) % CALL_RING],
+    diagnostics(){
+        return {
+            implemented: this.implemented,
+            calls: this.callCount,
+            lastCall: this.ringAt === 0 ? null : this.called[(this.ringAt - 1) % CALL_RING],
             // What the guest has been doing, rather than the one thing it did
             // last. A program stuck in a loop says so here in a line; a stack
             // trace only shows where the loop was when it was interrupted.
-            hot: hot(40),
-        }),
+            hot: this.hot(40),
+        };
+    }
 
-        /**
-         * The last few calls with what was asked and what was answered, oldest
-         * first. Read backwards from a failure, this is where an answer that
-         * was wrong rather than missing shows itself.
-         *
-         * @param {number} [count]
-         */
-        detailed(count = DETAIL_RING){
-            const kept = Math.min(count, detailAt, DETAIL_RING);
-            /** @type {any[]} */
-            const out = [];
-            for (let back = kept; back > 0; back--)
+    /**
+     * The last few calls with what was asked and what was answered, oldest
+     * first. Read backwards from a failure, this is where an answer that
+     * was wrong rather than missing shows itself.
+     *
+     * @param {number} [count]
+     */
+    detailed(count = DETAIL_RING){
+        const kept = Math.min(count, this.detailAt, DETAIL_RING);
+        /** @type {any[]} */
+        const out = [];
+        for (let back = kept; back > 0; back--)
+        {
+            const record = this.records[(this.detailAt - back) % DETAIL_RING];
+            const copy = copyOf(record);
+            copy.strings ??= record.args.map(value=>this.peekString(value));
+            out.push(copy);
+        }
+        return out;
+    }
+
+    /**
+     * The calls the guest has made, oldest first -- as many as the ring
+     * still holds, which is every one of them until it wraps.
+     */
+    calls(){
+        return this.history(this.ringAt);
+    }
+
+    /** @param {number} count @returns {string[]} the last few, oldest first */
+    recent(count){
+        return this.history(Math.min(count, CALL_RING));
+    }
+
+    /**
+     * A kernel's own comparison against the guest failed. Named rather
+     * than aimed at an id, because whoever built the kernel only ever
+     * knew the hook by its name -- the oracle's own differential check is
+     * the kernel's business, not this dispatcher's; this only counts it.
+     *
+     * @param {string} name
+     */
+    reportMismatch(name){
+        const id = this.hooksByName.get(name);
+        const entry = id === undefined ? undefined : this.functions[id];
+        if (entry?.hookStats)
+        {
+            entry.hookStats.mismatches++;
+        }
+    }
+
+    /**
+     * Every hook's own counters, for a frame report: how often it ran,
+     * how often it answered the call itself, how often the guest's own
+     * code ran instead, how often -- in oracle mode -- the two
+     * disagreed, and the wall time spent inside the handler call itself
+     * (every call, not sampled -- unlike the `trap` phase).
+     */
+    hooks(){
+        /** @type {{ name: string, calls: number, handled: number,
+         *   fellThrough: number, mismatches: number, ms: number }[]} */
+        const out = [];
+        for (const [name, id] of this.hooksByName)
+        {
+            const stats = this.functions[id]?.hookStats;
+            if (stats)
             {
-                const record = detailed[(detailAt - back) % DETAIL_RING];
-                const copy = copyOf(record);
-                copy.strings ??= record.args.map(peekString);
-                out.push(copy);
+                out.push({ name, ...stats });
             }
-            return out;
-        },
-
-        /**
-         * The calls the guest has made, oldest first -- as many as the ring
-         * still holds, which is every one of them until it wraps.
-         */
-        calls: ()=>history(ringAt),
-
-        /** @param {number} count @returns {string[]} the last few, oldest first */
-        recent: count=>history(Math.min(count, CALL_RING)),
-
-        /**
-         * A kernel's own comparison against the guest failed. Named rather
-         * than aimed at an id, because whoever built the kernel only ever
-         * knew the hook by its name -- the oracle's own differential check is
-         * the kernel's business, not this dispatcher's; this only counts it.
-         *
-         * @param {string} name
-         */
-        reportMismatch(name){
-            const id = hooksByName.get(name);
-            const entry = id === undefined ? undefined : functions[id];
-            if (entry?.hookStats)
-            {
-                entry.hookStats.mismatches++;
-            }
-        },
-
-        /**
-         * Every hook's own counters, for a frame report: how often it ran,
-         * how often it answered the call itself, how often the guest's own
-         * code ran instead, how often -- in oracle mode -- the two
-         * disagreed, and the wall time spent inside the handler call itself
-         * (every call, not sampled -- unlike the `trap` phase).
-         */
-        hooks(){
-            /** @type {{ name: string, calls: number, handled: number,
-             *   fellThrough: number, mismatches: number, ms: number }[]} */
-            const out = [];
-            for (const [name, id] of hooksByName)
-            {
-                const stats = functions[id]?.hookStats;
-                if (stats)
-                {
-                    out.push({ name, ...stats });
-                }
-            }
-            return out;
-        },
-    };
+        }
+        return out;
+    }
 }

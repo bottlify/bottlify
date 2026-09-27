@@ -1386,3 +1386,16 @@ test('the last error is read from the calling thread\'s block at the offset hand
         'the block read where there is one, the reader where there is none, neither for a '
         + 'function that cannot set it');
 });
+
+test('every dispatcher crosses through one set of functions, the class\'s', ()=>{
+    // A crossing each machine made of its own closures was optimised afresh
+    // for each: a later machine's ran unoptimised until hot again, then on
+    // code compiled around what the machines before it had left.
+    const first = machine().dispatcher;
+    const second = machine().dispatcher;
+    for (const name of /** @type {const} */ (['dispatch', 'dispatchNow', 'register']))
+    {
+        assert.equal(first[name], second[name], `${name} is one function for both`);
+        assert.equal(Object.hasOwn(first, name), false, `${name} is not the instance's own`);
+    }
+});
