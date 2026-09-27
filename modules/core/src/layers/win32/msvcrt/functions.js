@@ -845,6 +845,7 @@ export function createMsvcrtFunctions(host){
                 drives: host.drives,
                 files: host.files,
                 errno,
+                getenv: name=>environment?.value(name) ?? null,
             })
             : {}),
         ...(descriptors

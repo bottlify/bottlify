@@ -415,3 +415,45 @@ test('a path\'s pieces and a found name are written in the ANSI page', ()=>{
     assert.deepEqual([...memory.bytes.subarray(data + FIND.NAME, data + FIND.NAME + 5)],
         [0x80, 0x99, 0x97, 0xe9, 0x2e]);
 });
+
+test('_tempnam names a file that is not there, in TMP\'s directory, the one asked, or here', ()=>{
+    const memory = fakeMemory();
+    const entries = new Set(['C:\\tmp', 'C:\\work', 'C:\\work\\wne1']);
+    let tmp = /** @type {string | null} */ ('C:\\tmp');
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory,
+        files: {
+            stat: (/** @type {string} */ path)=>({ exists: entries.has(path),
+                isDirectory: entries.has(path) && !/wne/.test(path) }),
+            currentDirectory: ()=>'C:\\here',
+        },
+        getenv: name=>(name === 'TMP' ? tmp : null),
+    }));
+    const first = memory.text(table._tempnam.handler([memory.put('C:\\work'), memory.put('wne')]));
+    assert.match(first, /^C:\\tmp\\wne[0-9a-v]+$/, 'TMP first, when it is a directory');
+    const second = memory.text(table._tempnam.handler([memory.put('C:\\work'), memory.put('wne')]));
+    assert.notEqual(second, first, 'each name another');
+    tmp = 'C:\\nowhere';
+    const asked = memory.text(table._tempnam.handler([memory.put('C:\\work'), memory.put('wne')]));
+    assert.match(asked, /^C:\\work\\wne/);
+    assert.notEqual(asked, 'C:\\work\\wne1', 'a name a file has is passed over');
+    assert.match(memory.text(table._tempnam.handler([0, 0])), /^C:\\here\\[0-9a-v]+$/);
+});
+
+test('a path operation refuses no path with -1 and EINVAL, reading nothing', ()=>{
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory,
+        readCString: ()=>assert.fail('address zero read'),
+        files: fakeVolume(),
+        errno: code=>void errno.push(code),
+    }));
+    for (const name of ['_unlink', 'remove', '_rmdir', '_mkdir', '_chdir', '_access'])
+    {
+        assert.equal(table[name].handler([0, 0]), -1, name);
+    }
+    assert.equal(table.rename.handler([0x100, 0]), -1);
+    assert.deepEqual(errno, new Array(7).fill(22));
+});

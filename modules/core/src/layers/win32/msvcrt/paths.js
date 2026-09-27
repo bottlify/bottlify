@@ -136,6 +136,8 @@ export function fullPath(path, current){
  * @property {(code: number) => void} [errno]  Where a failure says why.
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
  *           For a wide pattern. Absent, the wide finds stay unexported.
+ * @property {(name: string) => string | null} [getenv]
+ *           The runtime's own environment, where `_tempnam` finds TMP.
  */
 
 /**
@@ -165,13 +167,15 @@ export function createPathFunctions(host){
     /**
      * @param {number} argBytes
      * @param {(args: number[]) => number} act  Zero, or the errno it failed with.
+     * @param {number} [paths]  How many of the first arguments are paths, which
+     *     msvcrt refuses when null with -1 and EINVAL rather than reading.
      */
-    const operation = (argBytes, act)=>({
+    const operation = (argBytes, act, paths = 1)=>({
         convention: 'cdecl',
         argBytes,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ args)=>{
-            const code = act(args);
+            const code = args.slice(0, paths).some(path=>(path >>> 0) === 0) ? EINVAL : act(args);
             if (code === 0)
             {
                 return 0;
@@ -180,6 +184,32 @@ export function createPathFunctions(host){
             return -1;
         },
     });
+
+    /** Where a name comes from next: each one given differs from the last. */
+    let nextTemporary = 1;
+
+    /**
+     * _tempnam's name: the first directory of TMP's, `dir` and the current
+     * one that is a directory, and in it the prefix and a number no file has.
+     *
+     * @param {string | null} dir @param {string} prefix
+     */
+    const temporaryName = (dir, prefix)=>{
+        /** @param {string | null | undefined} path */
+        const isDirectory = path=>!!path && host.files.stat(path)?.isDirectory === true;
+        const tmp = host.getenv?.('TMP');
+        const directory = [tmp, dir].find(isDirectory) ?? host.files.currentDirectory();
+        const joined = /[\\/]$/.test(directory) ? directory : `${directory}\\`;
+        for (;; nextTemporary++)
+        {
+            const name = `${joined}${prefix}${nextTemporary.toString(32)}`;
+            if (!exists(name))
+            {
+                nextTemporary++;
+                return name;
+            }
+        }
+    };
 
     /**
      * The searches `_findfirst` opened, by the handle it answered with: what
@@ -443,6 +473,48 @@ export function createPathFunctions(host){
             },
         },
 
+        /**
+         * char *_tempnam(const char *dir, const char *prefix)
+         *
+         * A name no file has: in the directory TMP names, if it is one, else
+         * in `dir` if that is one, else in the current directory -- the
+         * prefix and a number, on the heap for the caller to free.
+         */
+        _tempnam: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([dir, prefix])=>{
+                const text = temporaryName((dir >>> 0) === 0 ? null : readString(dir),
+                    (prefix >>> 0) === 0 ? '' : readString(prefix));
+                const address = host.allocate(encodeAnsi(text).length + 1);
+                writeString(address, text);
+                return address;
+            },
+        },
+
+        ...host.readMemory ? {
+            /** wchar_t *_wtempnam(const wchar_t *dir, const wchar_t *prefix) */
+            _wtempnam: {
+                convention: 'cdecl',
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([dir, prefix])=>{
+                    const text = temporaryName((dir >>> 0) === 0 ? null : readWide(dir),
+                        (prefix >>> 0) === 0 ? '' : readWide(prefix));
+                    const bytes = new Uint8Array((text.length + 1) * 2);
+                    [...text].forEach((c, at)=>new DataView(bytes.buffer)
+                        .setUint16(at * 2, c.charCodeAt(0), true));
+                    const address = host.allocate(bytes.length);
+                    if (address !== 0)
+                    {
+                        host.writeMemory(address, bytes);
+                    }
+                    return address;
+                },
+            },
+        } : {},
+
         /** int _chdir(const char *path) */
         _chdir: operation(4, ([path])=>{
             const text = readString(path);
@@ -491,7 +563,7 @@ export function createPathFunctions(host){
                 return 0;
             }
             return exists(source) ? EACCES : ENOENT;
-        }),
+        }, 2),
 
         /**
          * int _access(const char *path, int mode)
@@ -557,6 +629,6 @@ export function createPathFunctions(host){
             : {}),
 
         /** int _findclose(intptr_t handle) -- EBADF for a handle not open. */
-        _findclose: operation(4, ([handle])=>(searches.delete(handle | 0) ? 0 : EBADF)),
+        _findclose: operation(4, ([handle])=>(searches.delete(handle | 0) ? 0 : EBADF), 0),
     };
 }
