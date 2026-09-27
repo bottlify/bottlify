@@ -1348,7 +1348,8 @@ then waiting in the host, with the lock count showing it queued, while the owner
 recursion, until the owner's last leave hands it over. `src/heap-inguest.itest.js` calls the
 heap through the import on cork and on the emulator: a block sized, validated by the host, grown in
 place and moved past its cell, freed and no longer valid; `HEAP_ZERO_MEMORY` over a recycled cell;
-a heap of the program's own added up by `HeapSummary` and taken whole by `HeapDestroy`; the
+a heap of the program's own added up by `HeapSummary`, walked by `HeapWalk` (which ends at once,
+over its blocks as over the host's) and taken whole by `HeapDestroy`; the
 runtime's family; another heap's block refused; and ten thousand pairs with next to none of them
 crossing -- and three threads preempted every 97 instructions allocating, filling, checking and
 freeing eight blocks a turn from the process heap and from `malloc`. `src/winmm-inguest.itest.js` calls
