@@ -1784,6 +1784,8 @@ export function createWin32Module(){
                         modules.findResource?.(instance, type, name) ?? null,
                     /** @param {number} instance */
                     moduleBase: instance=>modules.moduleBase?.(instance) ?? 0,
+                    // Where LoadImage reads a bitmap a program names by its file.
+                    files: volume,
                     // A bitmap resource made a bitmap for the display: CreateDIBitmap
                     // on a screen context, as LoadBitmap and LoadImage make one.
                     /** @param {number} info @param {number} bits */

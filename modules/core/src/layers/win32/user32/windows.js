@@ -503,6 +503,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           A bitmap for the display made from a packed DIB in guest memory
  *           (its header and colours at `info`, its pixels at `bits`), as
  *           CreateDIBitmap on a screen context makes one; zero when it cannot.
+ * @property {import('../kernel32/files.js').FileSystem} [files]
+ *           The volume every file call uses, which an image loaded from a
+ *           file is read from. Absent, no file is there to load.
  * @property {{ text: string | null, version: number }} [pasteboard]
  *           What the host last pasted, with a version that rises on every
  *           paste: the clipboard's contents until a program empties it.
