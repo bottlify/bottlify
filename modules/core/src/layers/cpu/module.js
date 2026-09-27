@@ -705,6 +705,16 @@ export function createCpuModule(){
                  * @returns {Int32Array | null}
                  */
                 registerFile: ()=>started().registerFile?.() ?? null,
+                /**
+                 * The guest's RAM as a view, byte 0 at address 0, for a caller
+                 * that reads it on every crossing and checks its own spans;
+                 * null when the engine keeps it nowhere a view can reach. A
+                 * view that reads empty or detached is stale and is asked for
+                 * again.
+                 *
+                 * @returns {Uint8Array | null}
+                 */
+                ramView: ()=>started().ramView?.() ?? null,
                 /** @param {string} name @param {number} value */
                 writeReg32: (name, value)=>started().writeReg32(name, value),
 

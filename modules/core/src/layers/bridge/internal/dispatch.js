@@ -346,6 +346,25 @@ class Dispatcher {
          * @type {((slot: number) => number) | null}
          */
         this.charging = typeof memory?.charging === 'function' ? memory.charging : null;
+        /**
+         * The same account's cell, where the memory layer lends it: the slot
+         * swapped in and back with two stores rather than two calls into
+         * that layer.
+         *
+         * @type {Int32Array | null}
+         */
+        this.chargeSlot = typeof memory?.chargeSlot === 'function'
+            ? memory.chargeSlot() ?? null : null;
+        /**
+         * The memory layer's checked dword reads as an object of its own
+         * class, where it lends one: the stack words and the thread block's
+         * last error read through methods that are one for the realm, not
+         * through that layer's closures and the cpu's under them.
+         *
+         * @type {{ readU32sInto: (address: number, count: number, into: number[],
+         *     at: number) => void, readU32: (address: number) => number } | null}
+         */
+        this.reader = typeof memory?.reader === 'function' ? memory.reader() ?? null : null;
         this.lastError = deps.lastError ?? NO_ERROR;
         this.errorReader = deps.lastError !== undefined;
         // The dword itself rather than `lastError`, which walked the kernel
@@ -659,7 +678,15 @@ class Dispatcher {
         const words = this.frameWords(count);
         try
         {
-            this.memory.readU32sInto(esp, count, words, 0);
+            const reader = this.reader;
+            if (reader !== null)
+            {
+                reader.readU32sInto(esp, count, words, 0);
+            }
+            else
+            {
+                this.memory.readU32sInto(esp, count, words, 0);
+            }
         }
         catch {
             if (count > 1)
@@ -946,8 +973,21 @@ class Dispatcher {
 
         this.parking.beginCall(frame);
         this.depth = depth + 1;
+        const slot = this.chargeSlot;
         const charging = this.charging;
-        const charged = charging !== null && entry.writer >= 0 ? charging(entry.writer) : -1;
+        let charged = -1;
+        if (entry.writer >= 0)
+        {
+            if (slot !== null)
+            {
+                charged = slot[0];
+                slot[0] = entry.writer;
+            }
+            else if (charging !== null)
+            {
+                charged = charging(entry.writer);
+            }
+        }
         let result;
         let late = false;
         // A hook's `ms` times only the handler call itself, every time --
@@ -1011,9 +1051,16 @@ class Dispatcher {
                 /** @type {NonNullable<Dispatcher['profiler']>} */ (this.profiler)
                     .end(entry.name);
             }
-            if (charging !== null && charged >= 0)
+            if (charged >= 0)
             {
-                charging(charged);
+                if (slot !== null)
+                {
+                    slot[0] = charged;
+                }
+                else
+                {
+                    /** @type {(slot: number) => number} */ (charging)(charged);
+                }
             }
             this.depth = depth;
             this.parking.endCall();
@@ -1024,9 +1071,12 @@ class Dispatcher {
             if (entry.readsError)
             {
                 const block = this.errorOffset < 0 ? 0 : frame.thread?.tebAddress ?? 0;
+                const reader = this.reader;
                 record.error = block === 0
                     ? this.lastError()
-                    : this.cpu.readU32(block + this.errorOffset);
+                    : reader !== null
+                        ? reader.readU32(block + this.errorOffset)
+                        : this.cpu.readU32(block + this.errorOffset);
             }
             if (this.onCall !== null)
             {

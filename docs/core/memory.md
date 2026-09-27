@@ -60,8 +60,9 @@ Accessors (all validated through `assert`):
 | `readBytes` | `(address, length) => Uint8Array` | A **copy** of guest bytes. |
 | `window` | `(address, length) => Uint8Array` | The emulator's own bytes, valid only until control returns to the guest. For a measured hot path. |
 | `writeBytes` | `(address, bytes) => void` | Writes; routes to `cpu.writeData` when the target region is not executable, `cpu.writePhysical` otherwise. |
-| `readU8` / `readU16` / `readU32` | `(address) => number` | Little-endian unsigned integers. `readU32` reads in place through `cpu.readU32` with nothing allocated. |
-| `readU32sInto` | `(address, count, into, at = 0) => void` | `count` signed dwords, written into `into` starting at `at`: one span check for the whole run, then one call to `cpu.readU32sInto` for the span (per word through `cpu.readU32` where the cpu has no such path), nothing allocated. A span a region boundary refuses falls back inside this call to a per-word read, so a caller never sees the boundary case. |
+| `readU8` / `readU16` / `readU32` | `(address) => number` | Little-endian unsigned integers. `readU32` reads through the reader (below): in place out of the RAM the cpu lends, or through `cpu.readU32`, with nothing allocated. |
+| `readU32sInto` | `(address, count, into, at = 0) => void` | `count` signed dwords, written into `into` starting at `at`: one span check for the whole run, then the span read through the reader -- out of the RAM the cpu lends, or in one call to `cpu.readU32sInto` (per word through `cpu.readU32` where the cpu has no such path) -- nothing allocated. A span a region boundary refuses falls back inside this call to a per-word read, so a caller never sees the boundary case. |
+| `reader` | `() => DwordReader \| null` | The checked dword reads as an object: `readU32(address)` and `readU32sInto(address, count, into, at)`, the same checks and answers as the two above. For a caller on every host call's path -- the bridge's crossing -- which calls its methods without this layer's closures in the way (below). |
 | `readF32sInto` | `(address, count, into) => void` | The float form of the same read, through `cpu.readF32`, for a fixed-count vector argument a handler decodes into a reused scratch. |
 | `writeU8` / `writeU16` / `writeU32` | `(address, value) => void` | Little-endian writes through a shared scratch buffer. |
 | `readCString` | `(address, limit = 4096) => string` | NUL-terminated Latin-1 string. Throws if no NUL within `limit` bytes (clamped to the region). |
@@ -73,6 +74,7 @@ Who is writing (see [§3](#who-writes-into-guest-memory)):
 |--------|-----------|---------|
 | `writer` | `(name) => number` | The number a name's writes are charged under, resolved once by whoever registers the name. `-1` with no log registry. |
 | `charging` | `(slot) => number` | Charges what follows to a number and answers who was being charged, for the caller to put back on the way out. A number outside the table leaves the charge where it was. |
+| `chargeSlot` | `() => Int32Array \| null` | Who is being charged, as a one-element cell: what `charging` swaps, for a caller that swaps it itself with numbers `writer` gave it. `null` with no log registry. |
 
 An instance owns its address space. `create()` may run more than once in the same realm (a
 process replacement runs it again; the plan for two machines in one worker needs two at once), so
@@ -80,7 +82,8 @@ the region map, the accessors and the writer account live in the instance the ap
 and a second `create()` cannot take the first one's layout; `diagnostics()` answers for the most
 recently created instance. After `dispose()`, a call that was in flight answers harmlessly rather
 than throwing: `register` answers `null`, `find` and `nextRegionAfter` answer `undefined`, `list` answers `[]`,
-`assert` answers `undefined` instead of validating, `writer`/`charging` answer `-1`, `readBytes`/
+`assert` answers `undefined` instead of validating, `writer`/`charging` answer `-1`, `reader`/
+`chargeSlot` answer `null`, `readBytes`/
 `window` answer an empty `Uint8Array`, `readU8`/`readU16`/`readU32` answer `0`, `readU32sInto`/
 `readF32sInto` fill `into` with zeroes, `readCString`/`readWideString` answer `''`, `scanCString`
 answers `{ index: -1, byte: 0 }`, and `unregister`/`protect`/`writeBytes`/`fillBytes`/`writeU8`/
@@ -140,6 +143,16 @@ decisions shape it:
   of regions; the accessor remembers the span and version of the last four regions reads fell
   in and skips `assert` while a read stays inside one. Asking the map every time cost a fifth of
   a call, and two entries missed on every read of the stack–TEB–data cycle a call makes.
+- **Dword reads are one class for the realm.** `DwordReader` (`internal/reader.js`) makes them:
+  a span checked against its own four remembered regions and the map's `version`, then read out
+  of the RAM the cpu lends (`cpu.ramView`, a DataView over it taken once, and asked for again
+  when a read finds it detached), or through `cpu.readU32`/`readU32sInto` where it lends none.
+  Its methods are the class's, one set of functions for every machine a process makes, where the
+  accessors and the api over them are closures each `create()` makes afresh: a later machine's
+  start unoptimised and are compiled around what the machines before it left ([bridge](./bridge.md),
+  "A process's second machine"), and the bridge reads a call's stack and its thread's last error
+  on every call. `createAccessors({ raw, regions, charge, reader })` makes its dword reads through
+  the reader when given one, and the module gives it one whenever the cpu reads dwords at all.
 - **Writes that cannot be code skip the compiler.** `writeBytes` calls `cpu.writeData` unless
   the region is executable, in which case it calls `cpu.writePhysical`, which tells the
   emulator to discard compiled code on those pages. The cpu layer explains why the ordinary
@@ -155,7 +168,9 @@ itself that is one number for the whole run — the number that rises fastest in
 and the one that cannot be acted on. So each write is charged to whoever is in flight: the
 [bridge](./bridge.md) resolves each registered function's name to a number once and hands it to
 `charging` around the call, restoring the previous number on the way out, so a handler that
-calls guest code back into another host call nests without a stack of its own. A write with no
+calls guest code back into another host call nests without a stack of its own. The number being
+charged is the one element of `chargeSlot`, which the bridge swaps itself: two stores a call
+where `charging` was two calls into this layer. A write with no
 host call in flight is charged to `<no host call>` rather than to whoever ran last.
 
 The account is published as the `memory/writers` table (`WRITER_COLUMNS`: `name` as a journal
@@ -258,6 +273,15 @@ from `modules/core/`):
 | readU32sInto refuses an unmapped word with the same error readU32 gives | Same errors, one call or many. |
 | readF32sInto decodes floats through raw.readF32 with one span check | The float form of the same read. |
 | readF32sInto falls back without raw.readF32, decoding the same bits readU32 would | A build with no `cpu.readF32`. |
+| with a reader the dword reads are its own: over a boundary word by word, refused where the map refuses | The accessors over `DwordReader`: nothing asked of the machine but its RAM, the same fallback and errors. |
+
+`internal/reader.test.js` holds `DwordReader` to reading out of the RAM the machine lends, signed
+into an array or unsigned alone and nothing else asked of the machine; to the region map's refusals;
+to validating a call's stack, TEB and data once each until the map changes, and refusing a region
+at once when its access moves; to asking again for RAM that moved (an emulator growing its memory)
+and reading it where it is now; and to reading through the machine's own calls, checked the same,
+where it lends no RAM. `internal/writers.test.js` holds the slot to what `charging` swaps, and
+`module.test.js` the reader and the slot to the open instance.
 
 The tests drive the accessors against an in-memory `RawMemory` and need no emulator. The
 layer's behaviour under a running guest is exercised indirectly by every integration test

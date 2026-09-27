@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Access, RegionKind, createRegionMap } from './regions.js';
 import { createAccessors, decodeAnsiBytes } from './accessors.js';
+import { DwordReader } from './reader.js';
 
 /**
  * A stand-in for guest physical memory.
@@ -695,4 +696,45 @@ test('a program\'s bytes read as the ANSI page on every host, 0x80 to 0x9F as Wi
         '\u0081\u008d\u008f\u0090\u009d',
         'the five positions the page leaves undefined read as their own code points');
     assert.equal(decodeAnsiBytes(new Uint8Array(0)), '');
+});
+
+test('with a reader the dword reads are its own: over a boundary word by word, refused where the '
+    + 'map refuses', ()=>{
+    const bytes = new Uint8Array(0x2000);
+    const view = new DataView(bytes.buffer);
+    /** @type {string[]} */
+    const machine = [];
+    const raw = {
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>bytes.slice(address, address + length),
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>bytes.set(data, address),
+        /** @param {number} address */
+        readU32: address=>{
+            machine.push(`readU32 ${address.toString(16)}`);
+            return view.getUint32(address, true);
+        },
+        ramView: ()=>bytes,
+    };
+    const regions = createRegionMap();
+    regions.register({
+        name: 'first', base: 0x1000, size: 8,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE,
+    });
+    regions.register({
+        name: 'second', base: 0x1008, size: 8,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE,
+    });
+    const accessors = createAccessors({ raw, regions, reader: new DwordReader(regions, raw) });
+    accessors.writeU32(0x1004, 11);
+    accessors.writeU32(0x1008, 22);
+
+    /** @type {number[]} */
+    const into = new Array(2);
+    accessors.readU32sInto(0x1004, 2, into);
+    assert.deepEqual(into, [11, 22], 'a span over two regions, word by word');
+    assert.equal(accessors.readU32(0x1008), 22);
+    assert.deepEqual(machine, [], 'every word out of the RAM the machine lends');
+    assert.throws(()=>accessors.readU32sInto(0x9000, 1, [0]), /Unmapped read/);
+    assert.throws(()=>accessors.readU32(0x9000), /Unmapped read/);
 });

@@ -6,6 +6,7 @@
 
 import { Access, RegionKind, createRegionMap } from './internal/regions.js';
 import { createAccessors } from './internal/accessors.js';
+import { DwordReader } from './internal/reader.js';
 import { WRITER_COLUMNS, WRITER_ROWS, createWriterAccount } from './internal/writers.js';
 
 /**
@@ -83,10 +84,13 @@ export function createMemoryModule(){
              * own region map, accessors and writer account.
              *
              * @type {{ regions: any, accessors: any,
+             *          reader: DwordReader | null,
              *          writers: import('./internal/writers.js').WriterAccount | null,
              *          disposed: boolean }}
              */
-            const state = { regions: null, accessors: null, writers: null, disposed: false };
+            const state = {
+                regions: null, accessors: null, reader: null, writers: null, disposed: false,
+            };
             state.regions = createRegionMap();
 
             // Who wrote what into the guest, by name. Nothing published means no
@@ -109,8 +113,14 @@ export function createMemoryModule(){
                     counters[1] = busiest.bytes;
                 });
             }
-            state.accessors = createAccessors(
-                { raw: cpu, regions: state.regions, charge: account?.charge ?? null });
+            state.reader = typeof cpu.readU32 === 'function'
+                ? new DwordReader(state.regions,
+                    /** @type {import('./internal/reader.js').ReaderMachine} */ (cpu))
+                : null;
+            state.accessors = createAccessors({
+                raw: cpu, regions: state.regions, charge: account?.charge ?? null,
+                reader: state.reader,
+            });
 
             // The layout as a table a reader elsewhere can name a page from:
             // one row per region, its name as a dictionary id. Written when a
@@ -207,6 +217,20 @@ export function createMemoryModule(){
                  * @param {number} slot
                  */
                 charging: slot=>live() ? (state.writers?.charging(slot) ?? -1) : -1,
+                /**
+                 * The slot being charged, as a cell a caller that brackets
+                 * every host call sets and puts back itself (`charging`
+                 * without the call); null where nothing keeps the account.
+                 *
+                 * @returns {Int32Array | null}
+                 */
+                chargeSlot: ()=>live() ? state.writers?.slot ?? null : null,
+                /**
+                 * The checked dword reads as an object whose methods are one
+                 * set for the realm: a caller on every host call's path calls
+                 * them without a closure of this instance's in the way.
+                 */
+                reader: ()=>live() ? state.reader : null,
 
                 readBytes: (/** @type {number} */ address, /** @type {number} */ length)=>
                     live() ? state.accessors.readBytes(address, length) : EMPTY,

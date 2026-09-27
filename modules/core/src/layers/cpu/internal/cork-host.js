@@ -1172,6 +1172,8 @@ export function createCorkHost(config){
 
         /** The general registers in place, for the bridge's crossing. @returns {Int32Array} */
         registerFile: ()=>reg32,
+        /** The guest's RAM in place, byte 0 at address 0. @returns {Uint8Array} */
+        ramView: ()=>ram,
         /** The state block, for the block-based context capture and the tests. */
         block: ()=>block,
         blockLayout: ()=>layout,

@@ -56,6 +56,9 @@ const RESERVED = 2;
  * @property {(slot: number) => number} charging
  *     Charges what follows to `slot` and answers who was being charged, so a
  *     caller restores that on the way out and nesting needs no stack.
+ * @property {Int32Array} slot
+ *     Who is being charged, one element: what `charging` swaps, for a caller
+ *     that swaps it itself with numbers `writer` gave it.
  * @property {(length: number) => void} charge
  * @property {() => { writer: number, bytes: number }} publish
  *     The busiest writer of the frame just closed, as a dictionary id, and
@@ -113,7 +116,11 @@ export function createWriterAccount({ table, intern }){
     let generation = 1;
     let topSlot = NO_CALL;
     let topBytes = 0;
-    let current = NO_CALL;
+    // Who is being charged, as a cell rather than a variable: the bridge sets
+    // it around every host call, and a typed array's element is a store
+    // where `charging` is a call into this instance.
+    const slot = new Int32Array(1);
+    slot[0] = NO_CALL;
 
     return {
         writer(text){
@@ -128,35 +135,38 @@ export function createWriterAccount({ table, intern }){
             return id;
         },
 
+        slot,
+
         charging(id){
-            const was = current;
+            const was = slot[0];
             // A caller with no number of its own -- a build whose bridge
             // predates the account, a handler registered before the table
             // existed -- leaves the charge where it was rather than moving it
             // nowhere.
-            current = id >= 0 && id < names.length ? id : current;
+            slot[0] = id >= 0 && id < names.length ? id : was;
             return was;
         },
 
         charge(length){
-            let slot = rows[current];
-            if (slot < 0)
+            const current = slot[0];
+            let row = rows[current];
+            if (row < 0)
             {
-                slot = rowFor(current);
+                row = rowFor(current);
             }
-            const at = slot * width;
+            const at = row * width;
             values[at + 1] += length;
             values[at + 2] += 1;
-            if (frameStamp[slot] !== generation)
+            if (frameStamp[row] !== generation)
             {
-                frameStamp[slot] = generation;
-                frameBytes[slot] = 0;
+                frameStamp[row] = generation;
+                frameBytes[row] = 0;
             }
-            const bytes = frameBytes[slot] += length;
+            const bytes = frameBytes[row] += length;
             if (bytes > topBytes)
             {
                 topBytes = bytes;
-                topSlot = slot;
+                topSlot = row;
             }
         },
 

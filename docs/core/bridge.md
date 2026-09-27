@@ -37,7 +37,7 @@ marshalling whatever bytes live at it.
 |--------|------|---------|---------|
 | `record` | number | `0` | How many seam events to keep for `recorded()`; 0 disables recording. |
 | `lastError` | `() => number` | `undefined` | Reads the running thread's last error after each call that can have set it, for the detailed trace. Handed down by the assembler because it belongs to `win32`, which is above this layer. |
-| `lastErrorOffset` | number | `undefined` | Where a thread's last error lives in its thread block (the kernel's `tebAddress`): the dword there is read through `cpu.readU32` after a call from a thread that has a block, and `lastError` answers only for one that has none. The assembler hands down `TEB.LAST_ERROR`. |
+| `lastErrorOffset` | number | `undefined` | Where a thread's last error lives in its thread block (the kernel's `tebAddress`): the dword there is read through the memory layer's reader (`cpu.readU32` where it lends none) after a call from a thread that has a block, and `lastError` answers only for one that has none. The assembler hands down `TEB.LAST_ERROR`. |
 | `traceStrings` | boolean | `false` | Read the text behind pointer arguments at call time (a scan of guest memory per pointer per call). |
 | `callPhases` | boolean | `false` | Time every handler as a phase of its own in the profiler; the crossing itself is always sampled. |
 | `onCall` | `(record) => void` | `undefined` | A sink handed every call record as it is made (and again when a waiting call answers). |
@@ -313,8 +313,17 @@ call of a function with no arguments (`GetCurrentThreadId` in a loop, alternatin
 
 What a call reads, it reads in as few calls down as there are pieces: ESP and EAX through the
 cpu's register file (`registerFile`, falling back to `readReg32`/`writeReg32` where the engine
-lends none), and the return address with the stack arguments above it as one span through the
-memory layer's `readU32sInto`, which checks the span once and hands it to the machine in one call.
+lends none), and the return address with the stack arguments above it as one span, and the
+calling thread's last error, through the memory layer's reader (`memory.reader`, `DwordReader`
+in [memory](./memory.md)), which checks the span against the regions it remembers and reads it
+out of the RAM the cpu lends -- methods of one class for the realm, where the memory layer's api
+and the cpu's under it are closures each machine makes -- or through the memory layer's
+`readU32sInto` and the cpu's `readU32` where it lends none. The write account's number is
+swapped in and back around the handler as the one element of `memory.chargeSlot`, where it was
+two calls to `memory.charging`, which answers where there is no slot. Four machines one after
+another in a process, three processes, the medians of the first machines and of the later ones
+(N 2M, load 2.1-4.7), before and after: `GetCurrentThreadId` 268/347 -> 250/257 ns a turn,
+`lstrlenA` 599/721 -> 588/629, `lstrcmpA` 748/910 -> 708/835, `MulDiv` 370/404 -> 344/321.
 A variadic call whose slots run past the top of its stack falls back to reading the arguments on
 their own, zero past the region, and the return address alone.
 
@@ -506,7 +515,7 @@ Unit tests (`npm test`; filter with `node --test src/layers/bridge/internal/<fil
 | file | kind | covers |
 |------|------|--------|
 | `internal/conventions.test.js` | contract | Cleanup per convention including fastcall, unknown convention refused, stack and ECX argument reads, signed arguments. |
-| `internal/dispatch.test.js` | unit | Marshal/invoke/EAX, negative results, forwarding stubs, fastcall's registers read from the saved block, a hook that answers vs. one that falls through (EIP/ESP either way), a hook's counters and a reported mismatch, parked calls leaving EAX, the parked token's identity, unimplemented/duplicate traps, a throwing handler, the bounded rings, the sampled `trap` phase, record reuse, the sink; a site hook: all eight registers read off the pushad block into a plain object, an answer writing back every edited register with ESP by `stackAdjust` and EIP to `resume`, a fallthrough restoring every register to the pristine reading even after the handler edited the object, counters and diagnostics shared with a slot hook, and the `call.hook` trace unchanged; two dispatchers' records answering through one getter, and their crossing through one set of methods, the class's; a register file carrying ESP and EAX, asked for again once it reads empty, and a cpu lending none answered by name; the last error read from the calling thread's block at `lastErrorOffset`, through `lastError` for a thread without one, and not at all for a function that cannot set it. |
+| `internal/dispatch.test.js` | unit | Marshal/invoke/EAX, negative results, forwarding stubs, fastcall's registers read from the saved block, a hook that answers vs. one that falls through (EIP/ESP either way), a hook's counters and a reported mismatch, parked calls leaving EAX, the parked token's identity, unimplemented/duplicate traps, a throwing handler, the bounded rings, the sampled `trap` phase, record reuse, the sink; a site hook: all eight registers read off the pushad block into a plain object, an answer writing back every edited register with ESP by `stackAdjust` and EIP to `resume`, a fallthrough restoring every register to the pristine reading even after the handler edited the object, counters and diagnostics shared with a slot hook, and the `call.hook` trace unchanged; two dispatchers' records answering through one getter, and their crossing through one set of methods, the class's; a register file carrying ESP and EAX, asked for again once it reads empty, and a cpu lending none answered by name; the last error read from the calling thread's block at `lastErrorOffset`, through `lastError` for a thread without one, and not at all for a function that cannot set it; a reader lent by the memory layer carrying the stack words and the last error, neither the memory layer's api nor the cpu asked; the charge slot swapped in around a call, nested or thrown, and put back. |
 | `internal/parking.test.js` | unit | `freeStackFor` per thread, nothing in flight, the token only inside a call; every instance's calls begun and ended through the class's methods. |
 | `internal/callback.test.js` | unit | Suspended-call naming, `answered()`, nested frames below the stack in use, no call in flight, the right thread, address zero refused, `recentlyStarted`; a callback entered with registers of its own; a transfer abandoning every call and frame below its line and keeping the window procedure's above it, and drawing the line at the new ESP when none is given. |
 | `internal/vtable.test.js` | unit | Refusal when stubs or arena run out, pointer identity, guest-code slots, shared tables finding their object, a pointer kept at zero while its object is reachable and forgotten once it is not, every pointer of an object that reports itself destroyed forgotten with it, one generation of a per-interface count ending alone, and the object told of each pointer as it is forgotten. |

@@ -838,6 +838,14 @@ export async function createV86Host(config){
         registerFile: ()=>v().reg32,
 
         /**
+         * The guest's RAM in place, byte 0 at address 0: the view of the
+         * moment, detached once the emulator grows its memory.
+         *
+         * @returns {Uint8Array}
+         */
+        ramView: ()=>v().ram,
+
+        /**
          * The emulator's CPU object, for code inside this layer that works with
          * the raw state -- context capture and restore. It must not travel any
          * further: the layer boundary exists so that only this directory knows

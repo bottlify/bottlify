@@ -537,3 +537,13 @@ test('rdtsc counts the guest\'s clock once one is given, at CORK_TSC_MHZ, never 
     const third = read();
     assert.ok(third > second, 'the guest clock standing still, the counter still moves on');
 });
+
+test('the RAM lent to the memory layer is the machine\'s own, byte 0 at address 0', ()=>{
+    const h = host();
+    const ram = h.ramView();
+    h.writePhysical(0x2000, new Uint8Array([0x78, 0x56, 0x34, 0x12]));
+    assert.equal(new DataView(ram.buffer, ram.byteOffset).getUint32(0x2000, true), 0x12345678);
+    ram[0x3000] = 0xab;
+    assert.equal(h.readU32(0x3000) & 0xff, 0xab, 'and a byte written in place reads back');
+    assert.equal(h.ramView(), ram, 'one view for the life of the machine');
+});

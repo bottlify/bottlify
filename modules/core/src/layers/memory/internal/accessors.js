@@ -33,6 +33,8 @@
  * @property {(address: number, count: number, into: number[], at: number) => void}
  *     [readU32sInto]  Several dwords at once, signed, into an array. Absent in
  *     a build whose memory has no such path.
+ * @property {() => Uint8Array | null} [ramView]
+ *     The RAM in place, byte 0 at address 0; stale once empty or detached.
  * @property {(address: number, bytes: Uint8Array) => void} writePhysical
  */
 
@@ -90,8 +92,10 @@ export const decodeAnsiBytes = bytes=>{
  * @param {((length: number) => void) | null} [options.charge]
  *     Charges a write to whoever is in flight. Absent where nothing publishes
  *     the account, so the write path keeps a branch rather than a call.
+ * @param {import('./reader.js').DwordReader | null} [options.reader]
+ *     The dword reads, checked and made out of the machine's RAM.
  */
-export function createAccessors({ raw, regions, charge = null }){
+export function createAccessors({ raw, regions, charge = null, reader = null }){
     /**
      * The last regions a read validated, by span and the table's version. A
      * host call reads several dwords -- its arguments on the stack, the fields
@@ -239,6 +243,10 @@ export function createAccessors({ raw, regions, charge = null }){
      * @returns {number}
      */
     const readInteger = (address, length)=>{
+        if (length === 4 && reader !== null)
+        {
+            return reader.readU32(address);
+        }
         if (length === 4 && raw.readU32)
         {
             // The one read every host call makes several of -- an argument, a
@@ -271,7 +279,19 @@ export function createAccessors({ raw, regions, charge = null }){
      * @param {number} [at]  Where in `into` the first word lands.
      */
     const readU32sInto = (address, count, into, at = 0)=>{
-        if (raw.readU32)
+        if (reader !== null)
+        {
+            try
+            {
+                reader.readU32sInto(address, count, into, at);
+                return;
+            }
+            catch {
+                // Not one readable region: word by word below, each word
+                // failing as a read of it alone does.
+            }
+        }
+        else if (raw.readU32)
         {
             let region;
             try

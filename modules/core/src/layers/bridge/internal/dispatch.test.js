@@ -1399,3 +1399,106 @@ test('every dispatcher crosses through one set of functions, the class\'s', ()=>
         assert.equal(Object.hasOwn(first, name), false, `${name} is not the instance's own`);
     }
 });
+
+test('a reader lent by the memory layer carries the stack words and the thread\'s last error',
+    ()=>{
+        // The memory layer's reads are methods of one class for the realm;
+        // its api's own and the cpu's under them are closures of each
+        // machine, which a process's later machines paid for on every call.
+        const m = machine({ esp: 0x3000, args: [7, 5] });
+        /** @type {string[]} */
+        const asked = [];
+        const reader = {
+            /**
+             * @param {number} address @param {number} count
+             * @param {number[]} into @param {number} at
+             */
+            readU32sInto: (address, count, into, at)=>{
+                asked.push(`words 0x${address.toString(16)} ${count}`);
+                m.memory.readU32sInto(address, count, into, at);
+            },
+            /** @param {number} address */
+            readU32: address=>{
+                asked.push(`dword 0x${address.toString(16)}`);
+                return 0x57;
+            },
+        };
+        const memory = {
+            ...m.memory,
+            reader: ()=>reader,
+            readU32sInto: ()=>{
+                throw new Error('not through the memory layer\'s api');
+            },
+        };
+        const cpu = {
+            ...m.cpu,
+            readU32: ()=>{
+                throw new Error('nor through the cpu\'s');
+            },
+        };
+        /** @type {number[]} */
+        const errors = [];
+        const dispatcher = createDispatcher({
+            cpu, memory, parking: m.parking, lastErrorOffset: 0x34, lastError: ()=>0,
+            onCall: record=>errors.push(record.error),
+        });
+        dispatcher.register(1, {
+            name: 'X.dll!Sub', ...STDCALL, argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([a, b])=>a - b,
+        });
+        /** @type {any} */ (m.current).tebAddress = 0x7000;
+        dispatcher.dispatch(1);
+
+        assert.equal(m.registers.eax, 2);
+        assert.deepEqual(asked, ['words 0x3000 3', 'dword 0x7034']);
+        assert.deepEqual(errors, [0x57]);
+    });
+
+test('the charge slot lent by the memory layer is swapped in around a call, nested or thrown, '
+    + 'and put back', ()=>{
+    const m = machine({ esp: 0x3000 });
+    const slot = new Int32Array(1);
+    slot[0] = 1;
+    const writers = { 'X.dll!Outer': 5, 'X.dll!Inner': 6, 'X.dll!Fails': 7 };
+    const memory = {
+        ...m.memory,
+        /** @param {string} name */
+        writer: name=>writers[/** @type {keyof typeof writers} */ (name)],
+        chargeSlot: ()=>slot,
+        charging: ()=>{
+            throw new Error('no call into the memory layer where there is a slot');
+        },
+    };
+    /** @type {number[]} */
+    const seen = [];
+    const dispatcher = createDispatcher({ cpu: m.cpu, memory, parking: m.parking });
+    dispatcher.register(1, {
+        name: 'X.dll!Outer', ...STDCALL, argBytes: 0,
+        handler: ()=>{
+            seen.push(slot[0]);
+            dispatcher.dispatch(2);
+            seen.push(slot[0]);
+            return 0;
+        },
+    });
+    dispatcher.register(2, {
+        name: 'X.dll!Inner', ...STDCALL, argBytes: 0,
+        handler: ()=>{
+            seen.push(slot[0]);
+            return 0;
+        },
+    });
+    dispatcher.register(3, {
+        name: 'X.dll!Fails', ...STDCALL, argBytes: 0,
+        handler: ()=>{
+            seen.push(slot[0]);
+            throw new Error('the handler failed');
+        },
+    });
+
+    dispatcher.dispatch(1);
+    assert.throws(()=>dispatcher.dispatch(3), /the handler failed/);
+    assert.deepEqual(seen, [5, 6, 5, 7], 'each call charged while it runs, the outer again after');
+    assert.equal(slot[0], 1, 'whoever was charged before the calls is charged after them');
+});

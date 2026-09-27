@@ -251,3 +251,42 @@ test('diagnostics answers for the live instance', async()=>{
 
     await memoryModule.dispose();
 });
+
+test('the reader and the charge slot are lent while the instance is open', async()=>{
+    // What the bridge takes on every host call: the checked dword reads out
+    // of the machine's RAM, and the cell a call's writes are charged by.
+    const log = fakeLog();
+    const bytes = new Uint8Array(0x2000);
+    const view = new DataView(bytes.buffer);
+    const memory = await open(log, {
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>bytes.slice(address, address + length),
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>bytes.set(data, address),
+        /** @param {number} address */
+        readU32: address=>view.getUint32(address, true),
+        ramView: ()=>bytes,
+    });
+    memory.register({ name: 'data', base: 0x1000, size: 0x1000, kind: 'thunk-data',
+        access: 'rw' });
+    view.setUint32(0x1010, 0x12345678, true);
+    assert.equal(memory.reader().readU32(0x1010), 0x12345678);
+    assert.equal(memory.readU32(0x1010), 0x12345678, 'the api reads through the same');
+    assert.throws(()=>memory.reader().readU32(0x3000), /Unmapped read/);
+
+    const slot = memory.chargeSlot();
+    const lock = memory.writer('LockRect');
+    const was = slot[0];
+    slot[0] = lock;
+    memory.writeBytes(0x1000, new Uint8Array(8));
+    slot[0] = was;
+    const table = readTable(log.metrics.describe().memory.writers);
+    const charged = Object.fromEntries(table.all()
+        .filter(row=>row.writes > 0)
+        .map(row=>[log.words[row.name], [row.bytes, row.writes]]));
+    assert.deepEqual(charged, { LockRect: [8, 1] });
+
+    await memoryModule.dispose();
+    assert.equal(memory.reader(), null);
+    assert.equal(memory.chargeSlot(), null);
+});

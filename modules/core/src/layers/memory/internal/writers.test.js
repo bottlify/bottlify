@@ -147,3 +147,19 @@ test('the write path allocates nothing', ()=>{
     assert.ok(grew < 1 << 20, `the write path grew the heap by ${grew} bytes`);
     assert.equal(it.rows().DrawIndexedPrimitive.writes, 1_000_000);
 });
+
+test('the slot is what charging swaps, and a write goes to whoever it holds', ()=>{
+    // The bridge swaps the slot itself around every host call: two stores
+    // where `charging` was two calls into this layer.
+    const it = account();
+    const call = it.writer('ReadFile');
+    assert.equal(it.slot[0], 0, 'no host call in flight');
+    const was = it.slot[0];
+    it.slot[0] = call;
+    it.charge(64);
+    assert.equal(it.charging(was), call, 'charging answers what the slot held');
+    assert.equal(it.slot[0], was);
+    it.charge(1);
+    assert.deepEqual(it.rows().ReadFile, { bytes: 64, writes: 1 });
+    assert.deepEqual(it.rows()['<no host call>'], { bytes: 1, writes: 1 });
+});
