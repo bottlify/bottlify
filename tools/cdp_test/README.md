@@ -95,6 +95,29 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 The run is headless and always on a fresh profile. The browser flags it needs
 are in `browser.mjs` (below).
 
+## `live/` -- watching a title a person is playing
+
+A person plays in the shared headed browser; these scripts attach to it over
+CDP (port 9333, `CDP_PORT` to change) and read the launcher tab and its
+workers while it runs. Nothing here drives the page. A worker is reached
+through the page's auto-attach (`connect.mjs`), because a cross-origin-isolated
+page's workers answer nothing to a direct attach.
+
+| script | what it answers | run it as |
+|---|---|---|
+| `browser.mjs` | opens the headed browser on the launcher, profile kept in `dbg/chrome-profile` | `node tools/cdp_test/live/browser.mjs [url]` |
+| `eval.mjs` | the value of an expression in the launcher tab (`window.__bottlify__` is the engine) | `node tools/cdp_test/live/eval.mjs "<expression>"` |
+| `audio-watch.mjs` | four times a second, with the clock: laps replayed, silence held, blocks starved, writer skips, late guest threads -- what a crackle was | `node tools/cdp_test/live/audio-watch.mjs` |
+| `memory-watch.mjs` | every five seconds: the tab's private memory and each worker's JS heap | `node tools/cdp_test/live/memory-watch.mjs` |
+| `worker-profile.mjs` | the engine worker's time: idle, GC, top functions, and every pause outside guest code with when it began | `node tools/cdp_test/live/worker-profile.mjs [seconds] [minMs]` |
+| `allocations.mjs` | which functions of the engine worker allocate the most, garbage included | `node tools/cdp_test/live/allocations.mjs [seconds]` |
+| `big-buffers.mjs` | every backing store over a size in the engine worker, and what holds it | `node tools/cdp_test/live/big-buffers.mjs [minMB]` |
+
+`tools/install-watch.mjs` is the same question for an installer in Node: it
+runs one unattended and prints every process's threads, waits and parked
+calls every few seconds (`app.standing()`), and with `--journal S` the last
+cross-process COM calls S seconds in.
+
 ## `frames.mjs` -- where a frame's time goes
 
 The whole-run scenario is the wrong question for a frame rate: a run is
