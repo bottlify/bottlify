@@ -39,11 +39,13 @@
  * @param {number} at   Index of the low half.
  */
 export function readDouble(args, at){
-    const bytes = new DataView(new ArrayBuffer(8));
-    bytes.setUint32(0, (args[at] ?? 0) >>> 0, true);
-    bytes.setUint32(4, (args[at + 1] ?? 0) >>> 0, true);
-    return bytes.getFloat64(0, true);
+    SCRATCH.setUint32(0, (args[at] ?? 0) >>> 0, true);
+    SCRATCH.setUint32(4, (args[at + 1] ?? 0) >>> 0, true);
+    return SCRATCH.getFloat64(0, true);
 }
+
+/** The eight bytes a double is put together in: one, not a buffer made at every call. */
+const SCRATCH = new DataView(new ArrayBuffer(8));
 
 /**
  * Builds a cdecl entry whose result is a double.

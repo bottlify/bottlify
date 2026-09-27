@@ -284,17 +284,15 @@ export function guestEntry(source, compiled, host, fallback){
             }
             else if (type === 'f64')
             {
-                const bits = new DataView(new ArrayBuffer(8));
-                bits.setUint32(0, args[slot] >>> 0, true);
-                bits.setUint32(4, args[slot + 1] >>> 0, true);
-                values.push(bits.getFloat64(0, true));
+                SCRATCH.setUint32(0, args[slot] >>> 0, true);
+                SCRATCH.setUint32(4, args[slot + 1] >>> 0, true);
+                values.push(SCRATCH.getFloat64(0, true));
                 slot += 2;
             }
             else if (type === 'f32')
             {
-                const bits = new DataView(new ArrayBuffer(4));
-                bits.setUint32(0, args[slot] >>> 0, true);
-                values.push(bits.getFloat32(0, true));
+                SCRATCH.setUint32(0, args[slot] >>> 0, true);
+                values.push(SCRATCH.getFloat32(0, true));
                 slot++;
             }
             else
@@ -342,6 +340,9 @@ export function guestEntry(source, compiled, host, fallback){
     };
     return { ...guestExport(compiled, fallback), handler };
 }
+
+/** Where a double's or a float's argument slots are put together. */
+const SCRATCH = new DataView(new ArrayBuffer(8));
 
 /**
  * An i64 result as the x86 makes it: an integer as it is, a double truncated

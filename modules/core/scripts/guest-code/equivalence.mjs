@@ -88,6 +88,16 @@ export function doubleWords(value){
 const sameDouble = (a, b)=>Object.is(a, b) || Number.isNaN(a) && Number.isNaN(b);
 
 /**
+ * The data area a function is held to: all of it for one that takes a
+ * helper of the guest's memory or calls the guest, none for one that takes
+ * nothing but `host` -- it names no address, and a run of maths is spared
+ * copying and comparing the area at every input.
+ *
+ * @param {{ uses: readonly string[] }} fn
+ */
+const spanOf = fn=>(fn.uses.some(use=>use !== 'host') ? DATA_END - DATA : 0);
+
+/**
  * @param {Record<string, import('../../src/layers/win32/msvcrt/guest-code.js').CompiledGuestCode>}
  *     compiled
  * @param {Record<string, unknown>} sources  The module the functions are in.
@@ -133,7 +143,8 @@ export function equivalence(compiled, sources, model){
             machines.set(name, m);
         }
         const view = new DataView(m.memory.buffer);
-        new Uint8Array(m.memory.buffer, m.layout.ramBase + DATA, DATA_END - DATA).fill(0);
+        const span = spanOf(fn);
+        new Uint8Array(m.memory.buffer, m.layout.ramBase + DATA, span).fill(0);
         for (const [address, bytes] of input.memory ?? [])
         {
             m.write(address, Array.from(bytes));
@@ -160,7 +171,7 @@ export function equivalence(compiled, sources, model){
         }
         view.setUint8(m.layout.x87Top, top);
         view.setUint8(m.layout.x87Empty, empty);
-        const before = fn.host === undefined ? null : m.read(DATA, DATA_END - DATA);
+        const before = fn.host === undefined ? null : m.read(DATA, span);
         const slots = fn.params.reduce((sum, type)=>sum + (type === 'f64' ? 2
             : type === 'x87' ? 0 : 1), 0);
         const exit = m.runProgram(CODE);
@@ -185,12 +196,17 @@ export function equivalence(compiled, sources, model){
             }
             st.push(view.getFloat64(m.layout.x87 + physical * 16, true));
         }
+        // The x87's top where the stack left it: its arguments popped, a double pushed.
+        const popped = fn.params.filter(type=>type === 'x87').length;
+        const pushed = fn.returns === 'f64' || fn.returns === 'f32' ? 1 : 0;
+        assert.equal(after, top + popped - pushed & 7,
+            `${name}: the x87 stack's top where the call and its result leave it`);
         return {
             eax: m.reg('eax'), edx: m.reg('edx'), esp: m.reg('esp'), st,
             saved: { ebx: m.reg('ebx'), esi: m.reg('esi'), edi: m.reg('edi'), ebp: m.reg('ebp') },
             df: (m.eflags() & 0x400) !== 0,
             control: view.getUint16(m.layout.x87Control, true),
-            data: m.read(DATA, DATA_END - DATA),
+            data: m.read(DATA, span),
             handedOver: false,
         };
     };
@@ -224,7 +240,7 @@ export function equivalence(compiled, sources, model){
             + ((x87.top + (input.x87 ?? []).length - 1 - i) & 7) * 16, true));
         pushed.forEach((value, i)=>assert.ok(sameDouble(value, (input.x87 ?? [])[i]),
             `${what}: x87 argument ${i} ${value} where the call left ${(input.x87 ?? [])[i]}`));
-        const data = m.read(DATA, DATA_END - DATA);
+        const data = m.read(DATA, before.length);
         if (!Buffer.from(data).equals(Buffer.from(before)))
         {
             const at = data.findIndex((byte, i)=>byte !== before[i]);
@@ -242,7 +258,8 @@ export function equivalence(compiled, sources, model){
         return {
             eax: typeof answer === 'number' ? answer >>> 0 : 0, edx: 0, esp: STACK + 4 + popped,
             st: typeof answer === 'number' ? [] : [answer.st0], saved: SAVED, df: false,
-            control: input.control ?? 0x37f, data: memory.slice(DATA, DATA_END), handedOver: true,
+            control: input.control ?? 0x37f, data: memory.slice(DATA, DATA + data.length),
+            handedOver: true,
         };
     };
 
@@ -251,7 +268,8 @@ export function equivalence(compiled, sources, model){
      * @param {Record<string, unknown>} module  The source, or the model's copy of it.
      */
     const runJs = (name, input, double, module)=>{
-        const memory = new Uint8Array(1 << 20);
+        const span = spanOf(compiledOf(name));
+        const memory = new Uint8Array(span > 0 ? 1 << 20 : DATA);
         for (const [address, bytes] of input.memory ?? [])
         {
             memory.set(Array.from(bytes), address);
@@ -305,7 +323,7 @@ export function equivalence(compiled, sources, model){
             throw new Error(`${name} calls the guest, and the case gives no stand-in`);
         }
         const eax = entry.handler([...input.stack ?? []]) >>> 0;
-        return { eax, edx, st, data: memory.slice(DATA, DATA_END), handedOver };
+        return { eax, edx, st, data: memory.slice(DATA, DATA + span), handedOver };
     };
 
     return {

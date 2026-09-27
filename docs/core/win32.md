@@ -352,6 +352,26 @@ match); `atoi`/`atol`;
 assembled by hand (`EH_PROLOG_CODE`, `msvcrt/cxx.js`): it takes its handler in EAX and builds the
 frame on its caller's stack and in the caller's EBP, which neither a handler nor the compiler's
 subset can express.
+
+The mathematics is in the guest too (`msvcrt/inguest-math.js`), in both its shapes -- `sqrt`,
+`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`, `log10`, `pow`, `fmod`,
+`sinh`, `cosh`, `tanh`, `_hypot`/`hypot`, `ldexp`, `frexp`, `modf`, and the `_CI` forms of each
+the runtime has, with `_CIfabs`, `_CIfloor` and `_CIceil` -- computed on the x87 under the
+program's control word, as the runtime computes: a program under Direct3D gets its square roots,
+arcsines and exponentials to 24 bits, where the handlers answered in doubles whatever the word
+said. Each answers what the x87 answers for the instructions it is (`fsqrt`, `fsin`, `fcos`,
+`fptan`, `fpatan`; `asin` and `acos` as the runtime's own, `fpatan` of x and `fsqrt((1 + x)(1 -
+x))`; `log` and `log10` `fyl2x` of ln 2 and of log10(2); `fmod` `fprem`; `ldexp` `fscale`; `frexp`
+`fxtract`), and `exp` -- and `sinh`, `cosh`, `tanh` through it, `f2xm1` below ln 2 -- reduces its
+argument by ln 2 in two parts (Cody and Waite's) where the runtime multiplies by `fldl2e` in the
+x87's 64 bits: in a double's 53 that product costs up to 187 units in the last place, the
+reduction one. `pow` answers the powers exact in any precision -- x squared, the square root of a
+positive, x, its reciprocal, 1 -- and hands every other to the handler: 2^(y log2 x) in doubles
+missed the power a program gets on Windows (pow(10, 2) was 99.99999999999997). A case msvcrt
+answers with errno goes to the handler (`math.js`), which answers JavaScript's value and sets
+errno as msvcrt does -- `EDOM` for a NaN of arguments that were none, `ERANGE` for an infinity of
+finite ones -- and so does an argument past `fsin`'s reduction (2^63), a NaN or an infinity where
+the function checks for one, and a result past a double's range.
 Each keeps the answers of the handler it replaced (see the divergences below); `strtol` and
 `strtoul` are held to theirs input by input as well, the JavaScript against the handler, since
 the handler is part of them.
@@ -917,6 +937,23 @@ Stated as the code states them.
   read 128 KiB from the pointer whatever the string's length. `strcpy`
   copies as `memmove` does, as if the source were read whole first, where C leaves an overlap
   undefined.
+- **The C runtime's mathematics is the x87's, under the program's control word, and not the
+  runtime's own to the last bit.** It rounds to the precision control the program set, as msvcrt
+  does, and to nearest whatever the rounding control says, as msvcrt sets it for its maths. Where
+  the engines' x87 is a double, `exp`, `sinh`, `cosh` and `tanh` are within a unit or two in the
+  last place of JavaScript's (`exp` the same double in 92 % of arguments), `log` and `log10`
+  within one (`log10` of a power of ten exact), `asin` and `acos` within two -- the runtime
+  computes them with the x87's 64 bits and Windows answers nearer; `pow` hands a power it cannot
+  make exact to the handler, which answers JavaScript's. `sin`, `cos` and `tan` of an argument past
+  2^63 answer JavaScript's value, where msvcrt reduces it by its own 2π; `sinh`, `cosh`, `tanh` and
+  `_hypot` are written here, not after the runtime's code. errno is set as msvcrt sets it for
+  a domain or a range error; a NaN argument sets none. `ldexp` of a count past a double's range
+  scales in two steps and answers the double the result is (`ldexp(1e300, -1100)` is 7.4e-32),
+  where the handler multiplied by `Math.pow(2, n)`, zero or an infinity by then. The emulator's
+  `f2xm1` is 2^x less one in doubles and its `fldlg2` and `fldl2t` a unit off the doubles cork
+  loads: of the calls `crt-math.itest.js` makes, `exp(1)` and `log(10)` come a unit from cork's
+  under it and `sinh(0.1)` five, and `log10` takes the double nearest log10(2) rather than
+  `fldlg2`, which made `log10(1000)` 2.999999999999999 there.
 - **Every listed display mode can be set.** `ChangeDisplaySettingsA`/`ExA` switch the screen to
   any mode `EnumDisplaySettingsA` lists -- the metrics, the desktop rectangle and the current
   settings follow, the refresh rate is accepted as asked, `CDS_TEST` answers without switching, and
@@ -1046,7 +1083,7 @@ Unit tests are colocated with each file, `node:test`, over `fakeMemory`
 | area | files (all `src/layers/win32/…`) |
 |------|----------------------------------|
 | kernel32 | `apc`, `atoms`, `code-arena`, `consoleio`, `critical`, `drives`, `environment`, `file-holds`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `modules`, `named-objects`, `process`, `processor`, `profile`, `resources`, `seh`, `slimsync`, `spawn`, `sync`, `system`, `teb`, `threading`, `versions`, `vfs` `.test.js` |
-| msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `globals`, `heap`, `inguest`, `io`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `stdio`, `strings`, `threads`, `time`, `widetext`, `x87` `.test.js` -- `inguest.test.js` holds each `@guestCode` function's x86 to its JavaScript on cork's test machine, and `x87.test.js` `X87`'s JavaScript to the instructions on it; the compiler's own tests (every form of the subset against JavaScript, and against the x87's model under single precision, every refusal with its place) are `scripts/guest-code/compile.test.js`, and `scripts/build-guest-code.test.js` fails on a stale `inguest.x86.js` |
+| msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `globals`, `heap`, `inguest`, `inguest-math`, `io`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `stdio`, `strings`, `threads`, `time`, `widetext`, `x87` `.test.js` -- `inguest.test.js` and `inguest-math.test.js` hold each `@guestCode` function's x86 to its JavaScript on cork's test machine, and `x87.test.js` `X87`'s JavaScript to the instructions on it; the compiler's own tests (every form of the subset against JavaScript, and against the x87's model under single precision, every refusal with its place) are `scripts/guest-code/compile.test.js`, and `scripts/build-guest-code.test.js` fails on a stale `inguest.x86.js` |
 | user32 | `controls`, `cursors`, `dialogs`, `display`, `keys`, `messages`, `objects`, `paint`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |
 | the rest | `advapi32/{crypto,functions,registry,services,tokens}`, `advpack/functions`, `cabinet/{cabinet,inflate,lzx}`, `crypto/{der,digest,pkcs7,pki,rc4,rsa,signature,x509}` (`pki.test.js` builds the keys, certificates and signed messages the others read), `comctl32/{functions,imagelist,progress,propsheet,tab,treeview}`, `comdlg32/functions`, `d3dx9/functions`, `imm32/functions`, `lz32/{expand,functions}`, `mpr/functions`, `msacm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{cfb,functions,guid,objects,propvariant,storage,wbem}`, `oleaut32/{errorinfo,functions,invoke,objects,typelib}`, `quartz/graph`, `rpcrt4/functions`, `setupapi/{functions,inf}`, `sfc/functions`, `shell32/{fileop,functions,namespace,shelllink}`, `shlwapi/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,mmio,thread,timers,wave}`, `winspool/functions`, `wintrust/{authenticode,fixtures,functions,roots}` (`fixtures.test.js` signs cabinets and images with a chain of its own), `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |

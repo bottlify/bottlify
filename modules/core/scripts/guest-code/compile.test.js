@@ -582,6 +582,21 @@ export function negativeZero(x){
 }
 
 /**
+ * Number.isNaN, a condition: in an if, a conditional and a negation.
+ *
+ * @guestCode cdecl
+ * @param {f64} x @param {f64} y
+ * @returns {i32}
+ */
+export function nans(x, y){
+    if (Number.isNaN(x))
+    {
+        return 1;
+    }
+    return Number.isNaN(x * y) ? 2 : !Number.isNaN(y) && x < y ? 3 : 4;
+}
+
+/**
  * x87 arguments handed to the host as they came, one of them assigned first.
  *
  * @guestCode cdecl
@@ -916,6 +931,10 @@ test('integers in the frame as the x87\'s operands, and a negative zero\'s const
             same('mixed', { stack: [...doubleWords(x), next(), next() % 100, next(),
                 next() | 0x80000000], control });
             same('negativeZero', { stack: doubleWords(x), control });
+            for (const y of [NaN, 0, Infinity, 1.5])
+            {
+                same('nans', { stack: [...doubleWords(x), ...doubleWords(y)], control });
+            }
         }
         for (const x of [-0, 0])
         {

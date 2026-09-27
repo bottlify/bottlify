@@ -79,7 +79,8 @@
  * range: past it the instruction leaves the argument), `Math.atan2` and
  * `Math.atan` `fpatan`, `Math.log2` `fyl2x` of 1, `Math.abs` `fabs`,
  * `Math.floor`, `Math.ceil` and `Math.trunc` `frndint` under the rounding
- * control they name, and `Math.fround` a store to a float and back. Under
+ * control they name, `Math.fround` a store to a float and back, and
+ * `Number.isNaN` a condition, a double compared with itself. Under
  * a double-precision control word each answers what JavaScript does, as
  * the engines compute the x87 in doubles and its transcendentals through
  * the host's `Math`; under the control word the program set, each rounds as
@@ -1776,6 +1777,19 @@ class FunctionCompiler {
         if (node.type === 'BinaryExpression' && (node.operator === '==' || node.operator === '!='))
         {
             this.fail(node, `${node.operator} is written ${node.operator}=`);
+        }
+        if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression'
+            && !node.callee.computed && node.callee.object.type === 'Identifier'
+            && node.callee.object.name === 'Number' && node.callee.property.name === 'isNaN'
+            && this.lookupLocal('Number') === undefined)
+        {
+            // A double compared with itself is unordered, PF set, only as a NaN.
+            this.arity(node, 1);
+            this.toSt0(this.expr(node.arguments[0]), node.arguments[0]);
+            a.emit(0xdf, 0xe8);                                    // fucomip st0: popped
+            this.fpu--;
+            a.jump(when ? CC.p : CC.np, target);
+            return;
         }
         const value = this.expr(node);
         if (!isTyped(value.type))
