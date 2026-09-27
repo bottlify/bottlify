@@ -6483,6 +6483,8 @@ export async function createApp(options){
     const processes = new Map();
     /** @type {Map<any, unknown>} */
     const names = new Map();
+    /** Which image each machine was built for, for `standing()`. @type {Map<any, string>} */
+    const images = new Map();
     /** @type {Set<Promise<unknown>>} */
     const servers = new Set();
     /** @type {Set<any>} */
@@ -6521,6 +6523,7 @@ export async function createApp(options){
         const built = await buildApp(machine({ ...extra, com: { table: classTable, process } }));
         processes.set(process, built);
         names.set(built, process);
+        images.set(built, extra?.imagePath ?? '');
         if (servers.size > 0)
         {
             replicas.track(built);
@@ -6931,6 +6934,21 @@ export async function createApp(options){
     };
 
     const own = {
+        /**
+         * Every process standing, each with its image and its own diagnostics:
+         * the facade speaks for one of them, and an install several processes
+         * deep that waits on itself shows nothing through one.
+         *
+         * @returns {Promise<{ image: string, diagnostics: any }[]>}
+         */
+        async standing(){
+            const machines = new Set([current, ...processes.values()]);
+            return Promise.all([...machines].map(async made=>({
+                image: images.get(made) || imagePath,
+                diagnostics: await made.diagnostics(),
+            })));
+        },
+
         /**
          * Runs the program, and whatever replaces it, to completion.
          *

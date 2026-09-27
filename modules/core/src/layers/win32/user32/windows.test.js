@@ -1301,6 +1301,27 @@ test('PeekMessageA only reports messages for the window it was asked about', ()=
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, other, 0, 0, PM_REMOVE]), 1);
 });
 
+test('messages for a window are taken only by the thread that made it', ()=>{
+    // A second thread that took an apartment's COM call posted to the first
+    // thread's window would find nothing of its own to run, and the caller
+    // would wait for ever.
+    const maker = { id: 1, name: 'maker' };
+    const another = { id: 2, name: 'another' };
+    const caller = { current: /** @type {unknown} */ (maker) };
+    const { fns, memory } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+
+    caller.current = another;
+    assert.equal(fns.PostMessageA.handler([hwnd, WM_USER, 0, 0]), 1);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
+        'passed by for the thread that owns it');
+    caller.current = maker;
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_USER);
+});
+
 test('a message loop runs until PostQuitMessage ends it', ()=>{
     const { fns, memory, queue, hwnd } = withWindow();
     queue.post({ hwnd, message: WM_USER, wParam: 0, lParam: 0 });
