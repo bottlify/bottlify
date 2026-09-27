@@ -99,6 +99,14 @@ test('the process block points at its parameters, and they say they are normalis
     assert.equal(memory.view.getUint32(peb + PEB.IMAGE_BASE_ADDRESS, true), 0x00400000);
 });
 
+test('the process block holds the process heap, for GetProcessHeap compiled inline', ()=>{
+    // NtCurrentTeb()->Peb->ProcessHeap, read with no call: zero there is a
+    // heap every allocation from fails on.
+    const memory = guest();
+    const { peb } = build(memory, { processHeap: 0x50004 });
+    assert.equal(memory.view.getUint32(peb + PEB.PROCESS_HEAP, true), 0x50004);
+});
+
 test('the process block holds the version and its service pack where a program reads them', ()=>{
     // A program that reads the block directly finds what GetVersionEx says:
     // the build is a WORD, and the WORD after it is the service pack, major

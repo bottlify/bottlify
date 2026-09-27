@@ -12,7 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createFields, dwordsOf, floatsOf, intsOf } from './structs.js';
+import { D3DVIEWPORT8, createFields, dwordsOf, floatsOf, intsOf } from './structs.js';
 
 /**
  * What the readers answered before the staging buffer: a fresh array, its
@@ -97,4 +97,77 @@ test('a dword field is written in place where the memory offers it, and as bytes
     // A float field is a dword with a float's bits, by either path.
     createFields(inPlace).writeF32(16, 1.5);
     assert.equal(new DataView(bytes.buffer).getFloat32(16, true), 1.5);
+});
+
+/**
+ * A memory that records every write it takes, as [address, length].
+ *
+ * @param {number} [size]
+ */
+function recording(size = 1024){
+    const bytes = new Uint8Array(size).fill(0xcd);
+    /** @type {[number, number][]} */
+    const writes = [];
+    return {
+        bytes, writes,
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            bytes.slice(at, at + length),
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>{
+            writes.push([at, value.length]);
+            bytes.set(value, at);
+        },
+    };
+}
+
+test('a structure is written a run of named fields at a time, each as a dword would be', ()=>{
+    const view = (/** @type {Uint8Array} */ bytes)=>new DataView(bytes.buffer);
+    // Every field named: one write of the whole.
+    const whole = recording();
+    createFields(whole).writeStruct(0x40, D3DVIEWPORT8,
+        { X: 1, Y: 2, Width: 640, Height: 480, MinZ: 0.25, MaxZ: 1 }, ['MinZ', 'MaxZ']);
+    assert.deepEqual(whole.writes, [[0x40, D3DVIEWPORT8.SIZE]]);
+    assert.equal(view(whole.bytes).getUint32(0x40 + D3DVIEWPORT8.Height, true), 480);
+    assert.equal(view(whole.bytes).getFloat32(0x40 + D3DVIEWPORT8.MinZ, true), 0.25);
+
+    // Some named, in no particular order: a write per run, the rest left as
+    // they were, and each value what a dword or a float of it holds.
+    const some = recording();
+    createFields(some).writeStruct(0x40, D3DVIEWPORT8,
+        { MaxZ: 0.5, Height: -1, Y: 2 ** 32 + 5, X: 1.75, Unknown: 9 }, ['MaxZ']);
+    assert.deepEqual(some.writes, [[0x40, 8], [0x40 + D3DVIEWPORT8.Height, 4],
+        [0x40 + D3DVIEWPORT8.MaxZ, 4]]);
+    const at = view(some.bytes);
+    assert.equal(at.getUint32(0x40 + D3DVIEWPORT8.X, true), 1);
+    assert.equal(at.getUint32(0x40 + D3DVIEWPORT8.Y, true), 5);
+    assert.equal(at.getUint32(0x40 + D3DVIEWPORT8.Height, true), 0xffffffff);
+    assert.equal(at.getFloat32(0x40 + D3DVIEWPORT8.MaxZ, true), 0.5);
+    assert.equal(at.getUint32(0x40 + D3DVIEWPORT8.Width, true), 0xcdcdcdcd,
+        'not named, not written');
+    assert.equal(at.getUint32(0x40 + D3DVIEWPORT8.MinZ, true), 0xcdcdcdcd);
+    assert.equal(at.getUint32(0x40 + D3DVIEWPORT8.SIZE, true), 0xcdcdcdcd, 'nothing past it');
+
+    // Fields sharing an offset are written one at a time, in the order they
+    // are named, as they always were: the last one named is what is left.
+    const shared = recording();
+    createFields(shared).writeStruct(0x40, { a: 0, b: 0, c: 4, SIZE: 8 }, { b: 1, c: 3, a: 2 });
+    assert.equal(view(shared.bytes).getUint32(0x40, true), 2);
+    assert.equal(view(shared.bytes).getUint32(0x44, true), 3);
+    assert.equal(shared.writes.length, 3);
+});
+
+test('floats and dwords are written as one block, however many', ()=>{
+    for (const count of [1, 4, 16, 300])
+    {
+        const target = recording(8 + count * 4);
+        const floats = Float32Array.from({ length: count }, (unused, i)=>i * 0.75 - 2);
+        createFields(target).writeFloats(8, floats);
+        assert.deepEqual(target.writes, [[8, count * 4]]);
+        assert.deepEqual(new Float32Array(target.bytes.slice(8, 8 + count * 4).buffer), floats);
+        const dwords = Array.from({ length: count }, (unused, i)=>(i % 2 ? -i : 2 ** 32 + i));
+        target.writes.length = 0;
+        createFields(target).writeDwords(8, dwords);
+        assert.deepEqual(target.writes, [[8, count * 4]]);
+        assert.deepEqual([...new Uint32Array(target.bytes.slice(8, 8 + count * 4).buffer)],
+            dwords.map(value=>value >>> 0));
+    }
 });

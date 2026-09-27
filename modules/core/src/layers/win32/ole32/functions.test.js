@@ -739,6 +739,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoGetClassObject: 20,
         CoRegisterClassObject: 20,
         CoRevokeClassObject: 4,
+        CoResumeClassObjects: 0,
         CoSetProxyBlanket: 32,
         CoCreateGuid: 4,
         CoTaskMemAlloc: 4,

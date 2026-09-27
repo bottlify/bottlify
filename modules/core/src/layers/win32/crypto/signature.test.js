@@ -38,7 +38,7 @@ test('a PKCS#1 v1.5 signature verifies under the digest it names, and only that'
     assert.ok(!verifySigned(publicKey, OID.SHA1_RSA, data, signature), 'a changed signature');
 });
 
-test('a DigestInfo without its NULL parameters is accepted, one with more after it is not', ()=>{
+test('a DigestInfo without its NULL parameters, or the bare hash, is accepted', ()=>{
     const hash = hashOf('sha1', data);
     const bare = der.seq(der.seq(der.oid(OID.SHA1)), der.octets(hash));
     assert.ok(verifyPkcs1(publicKey, OID.SHA1, hash,
@@ -47,8 +47,10 @@ test('a DigestInfo without its NULL parameters is accepted, one with more after 
         der.octets(hash)), 0]);
     assert.ok(!verifyPkcs1(publicKey, OID.SHA1, hash,
         new Uint8Array(privateEncrypt(key.privateKey, trailing))));
-    assert.ok(!verifyPkcs1(publicKey, OID.SHA1, hash,
-        new Uint8Array(privateEncrypt(key.privateKey, hash))), 'a bare hash is no DigestInfo');
+    const alone = new Uint8Array(privateEncrypt(key.privateKey, hash));
+    assert.ok(verifyPkcs1(publicKey, OID.SHA1, hash, alone), 'as CryptoAPI accepts it');
+    const other = new Uint8Array(privateEncrypt(key.privateKey, hashOf('sha1', data.subarray(1))));
+    assert.ok(!verifyPkcs1(publicKey, OID.SHA1, hash, other), 'but only that hash');
 });
 
 test('a signature longer than the modulus, or as large, is refused rather than reduced', ()=>{

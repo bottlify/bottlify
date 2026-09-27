@@ -687,3 +687,94 @@ test('the decoder behind the provider follows the configuration', async()=>{
     } }, host);
     assert.deepEqual(api.decoder(), { name: 'custom' });
 });
+
+/**
+ * A mixer fed as a guest mixing thread feeds one: every 5 ms it writes, 1424
+ * bytes at a time, up to 65 ms past the play cursor it reads -- until the
+ * machine running it stalls for `stallMs` in its second lap, when it writes
+ * nothing and the device plays on. Answers what the device played that
+ * nobody had written since the lap before, and how far the cursor moved over
+ * the stall.
+ *
+ * @param {number} stallMs
+ */
+async function refillAcrossAStall(stallMs){
+    const f = await playing({ shared: true });
+    const [held] = f.api.buffers();
+    const table = f.api.output().table;
+    const outputRate = f.api.output().sampleRate;
+    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
+    const slots = Array.from({ length: SLOTS }, (_, slot)=>({
+        header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+        pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
+    }));
+    const seams = slots.map(()=>createSeam());
+    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const block = new Float32Array(128 * 2);
+    const bytesPerMs = RATE * CHANNELS * (BITS / 8) / 1000;
+    const LOCK_AT = 0x380;
+    /** @param {number} from @param {number} length */
+    const write = (from, length)=>{
+        assert.equal(f.call(f.buffer, 'Lock',
+            [from, length, LOCK_AT, LOCK_AT + 4, LOCK_AT + 8, LOCK_AT + 12, 0]), DS_OK);
+        const [a, al, b, bl] = [0, 4, 8, 12].map(at=>f.view.getUint32(LOCK_AT + at, true));
+        assert.equal(f.call(f.buffer, 'Unlock', [a, al, b, bl]), DS_OK);
+    };
+    const cursor = ()=>{
+        assert.equal(f.call(f.buffer, 'GetCurrentPosition', [OUT_AT, OUT_AT + 4]), DS_OK);
+        return f.view.getUint32(OUT_AT, true);
+    };
+    // Primed whole before it plays, as a program primes a streaming buffer.
+    write(0, BUFFER_BYTES);
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.api.pump();
+    const staleBefore = held.stale.bytes;
+    let written = BUFFER_BYTES;
+    let played = 0;
+    let last = 0;
+    let movedInStall = 0;
+    for (let ms = 0; ms < 1700; ms += 5)
+    {
+        for (let frames = 0; frames < outputRate * 0.005; frames += 128)
+        {
+            mixBlock({ global, slots, seams, block, blockFrames: 128, outputRate, arena });
+        }
+        f.advance(5);
+        if (ms >= 1200 && ms < 1200 + stallMs)
+        {
+            continue;
+        }
+        f.api.pump();
+        const play = cursor();
+        const moved = (play - last + BUFFER_BYTES) % BUFFER_BYTES;
+        if (ms === 1200 + stallMs)
+        {
+            movedInStall = moved;
+        }
+        played += moved;
+        last = play;
+        while (written < played + 65 * bytesPerMs)
+        {
+            const at = written % BUFFER_BYTES;
+            const length = Math.min(1424, BUFFER_BYTES - at);
+            write(at, length);
+            written += length;
+        }
+    }
+    return { stale: held.stale.bytes - staleBefore, movedInStallMs: movedInStall / bytesPerMs };
+}
+
+test('a streaming buffer whose writer stalls is held where it was written, not replayed', async()=>{
+    // A guest thread mixes into a looping buffer a few tens of milliseconds
+    // past the play cursor, and the machine that runs it can stall for longer
+    // than that -- a load, a translation. Played on round the circle, the
+    // device replays the lap before: the crackle. A buffer the program writes
+    // into while it plays is a stream, and the device waits at the end of
+    // what was written, as a stream waits for its data, silent meanwhile.
+    const steady = await refillAcrossAStall(0);
+    assert.equal(steady.stale, 0, 'a writer that keeps up is never waited for');
+    const stalled = await refillAcrossAStall(120);
+    assert.equal(stalled.stale, 0, 'nothing the program had not written is played');
+    assert.ok(stalled.movedInStallMs < 80,
+        `the cursor stops where the writing did (${stalled.movedInStallMs.toFixed(0)} ms on)`);
+});

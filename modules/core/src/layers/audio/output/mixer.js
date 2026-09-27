@@ -9,7 +9,7 @@ import {
     SLOTS, SLOT_BYTES, PCM_MASK, SLOT_HEADER_INT32, GLOBAL_HEADER_INT32, TABLE_BYTES,
     STATE, GENERATION, RATE, CHANNELS, BITS, GAIN, PAUSED, WRITTEN, READ, DROP_TO, MIXED_FRAMES,
     LEFT_CUT, RIGHT_CUT, KIND, KIND_QUEUE, KIND_DMA, BASE, LENGTH, POSITION, LOOPING, PLAYING,
-    LAPS, ENDS, ARENA_OFFSET, ARENA_BYTES,
+    LAPS, ENDS, FRESH, STREAMING, HELD, ARENA_OFFSET, ARENA_BYTES,
     STATE_FREE, STATE_OPEN, STATE_CLOSING, GAIN_SCALE,
     OUTPUT_RATE, BLOCKS, STARVED_BLOCKS, STARVED_FRAMES,
     slotHeaderOffset, slotPcmOffset,
@@ -760,6 +760,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
                 [BITS, format.bitsPerSample],
                 [GAIN, GAIN_SCALE], [LEFT_CUT, 0], [RIGHT_CUT, 0], [PAUSED, 0],
                 [POSITION, 0], [LOOPING, 0], [PLAYING, 0], [MIXED_FRAMES, 0],
+                [FRESH, 0], [STREAMING, 0], [HELD, 0],
             ])
             {
                 Atomics.store(header, field, value);
@@ -768,6 +769,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
             Atomics.store(header, STATE, STATE_OPEN);
             voices++;
             let closed = false;
+            let nextWrite = -1;
             return {
                 slot,
                 /** Bytes of the program's buffer into the mirror, at `offset`. @param {number} offset @param {Uint8Array} data */
@@ -775,8 +777,56 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
                     const room = Math.max(0, format.bytes - offset);
                     arena.set(data.length > room ? data.subarray(0, room) : data, base + offset);
                 },
+                /**
+                 * The program wrote `length` bytes at `offset` while it plays:
+                 * the voice is a stream from now on, written up to where that
+                 * write ends -- measured from the cursor, round the circle, so
+                 * a write behind it is the next lap's. Never moved back.
+                 *
+                 * @param {number} offset @param {number} length
+                 */
+                wrote(offset, length){
+                    const size = format.bytes;
+                    if (size <= 0 || length <= 0)
+                    {
+                        return;
+                    }
+                    // The cursor's lap and offset as one moment: read round
+                    // the lap count, since the device moves both.
+                    let laps = Atomics.load(header, LAPS);
+                    let at = Atomics.load(header, POSITION);
+                    if (laps !== Atomics.load(header, LAPS))
+                    {
+                        laps = Atomics.load(header, LAPS);
+                        at = Atomics.load(header, POSITION);
+                    }
+                    // A stream is written in sequence, each write where the
+                    // last ended; a buffer rewritten once while it loops is not
+                    // one, and is played round as it is. Once one, a write that
+                    // jumps ahead still moves it on: the gap is the program's.
+                    const sequential = offset === nextWrite;
+                    nextWrite = (offset + length) % size;
+                    if (!sequential && Atomics.load(header, STREAMING) === 0)
+                    {
+                        return;
+                    }
+                    const ahead = ((offset + length - at) % size + size) % size || size;
+                    const fresh = (laps * size + at + ahead) | 0;
+                    if (Atomics.load(header, STREAMING) === 0
+                        || ((fresh - Atomics.load(header, FRESH)) | 0) > 0)
+                    {
+                        Atomics.store(header, FRESH, fresh);
+                    }
+                    Atomics.store(header, STREAMING, 1);
+                },
+                /** Output frames the device waited, silent, for a stream to be written. */
+                get held(){
+                    return Atomics.load(header, HELD);
+                },
                 /** @param {boolean} looping */
                 play(looping){
+                    Atomics.store(header, STREAMING, 0);
+                    nextWrite = -1;
                     Atomics.store(header, LOOPING, looping ? 1 : 0);
                     Atomics.store(header, PLAYING, 1);
                 },
@@ -792,6 +842,8 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
                 },
                 /** Moves the cursor; the device starts its interpolation afresh there. */
                 set position(value){
+                    Atomics.store(header, STREAMING, 0);
+                    nextWrite = -1;
                     Atomics.store(header, POSITION, value);
                     Atomics.add(header, GENERATION, 1);
                 },

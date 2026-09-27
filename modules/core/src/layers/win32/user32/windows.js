@@ -47,6 +47,10 @@ import {
     writeU32s,
     writeWindowClassA,
 } from './structs.js';
+import { convertCharacter, readText, translated, writeText } from './unicode.js';
+
+/** The messages whose wParam is a character code, in the encoding of the procedure. */
+const CHARACTER_MESSAGES = new Set([0x0102, 0x0103, 0x0106, 0x0107]);
 
 /** Messages this layer has an opinion about. */
 const WM_DESTROY = 0x0002;
@@ -336,6 +340,7 @@ const MAX_WINDOW_TEXT = 1 << 16;
  * @property {number} message
  * @property {number} wParam
  * @property {number} lParam
+ * @property {boolean} [unicode]  whether its text is wide (`unicode.js`)
  */
 
 /**
@@ -594,9 +599,10 @@ export function createWindowFunctions(host){
      * back -- an atom stuffed into the low word.
      *
      * @param {number} pointer
+     * @param {boolean} [unicode]  whether the name is a wide string
      * @returns {any | null}
      */
-    const classOf = pointer=>{
+    const classOf = (pointer, unicode = false)=>{
         const value = pointer >>> 0;
         if (value === 0)
         {
@@ -604,7 +610,7 @@ export function createWindowFunctions(host){
         }
         const name = value <= LAST_ATOM
             ? atoms.get(value)
-            : host.readCString(value, MAX_CLASS_NAME);
+            : readText(host, value, unicode, MAX_CLASS_NAME);
         return name === undefined ? null : classNamed(name);
     };
 
@@ -679,16 +685,24 @@ export function createWindowFunctions(host){
     const callProcedure = (address, message, thread)=>{
         host.trace?.(message);
         const procedure = procedures.get(address >>> 0);
+        const record = windows.get(message.hwnd >>> 0);
         if (procedure)
         {
             // Named now, while the call that brought us here still holds the
             // processor: a procedure on this side that sends to guest code
             // and goes on afterwards is past an await by then.
             const on = thread ?? host.callerThread?.();
-            const record = windows.get(message.hwnd >>> 0);
-            return record ? watchDispatch(host, message, procedure(record, message, on)) : 0;
+            // The procedures on this side read the ANSI page.
+            return record ? translated(host, message, false,
+                ansi=>watchDispatch(host, ansi, procedure(record, ansi, on))) : 0;
         }
-        return watchDispatch(host, message, host.dispatch(address >>> 0, message, thread));
+        // A window's own procedure reads text in the encoding it was set in; a
+        // procedure named by its address, as CallWindowProc names one, is
+        // handed the message as it came.
+        const unicode = record && (address >>> 0) === record.wndProc
+            ? record.unicode === true : message.unicode === true;
+        return translated(host, message, unicode,
+            text=>watchDispatch(host, text, host.dispatch(address >>> 0, text, thread)));
     };
 
     /**
@@ -697,9 +711,10 @@ export function createWindowFunctions(host){
      *
      * @param {number} hwnd @param {number} message @param {number} wParam @param {number} lParam
      * @param {unknown} [thread]
+     * @param {boolean} [unicode]  whether the text the message carries is wide
      * @returns {number | Promise<number>}
      */
-    const send = (hwnd, message, wParam, lParam, thread)=>{
+    const send = (hwnd, message, wParam, lParam, thread, unicode = false)=>{
         const record = live(hwnd);
         if (!record || record.wndProc === 0)
         {
@@ -707,6 +722,7 @@ export function createWindowFunctions(host){
         }
         return callProcedure(record.wndProc, {
             hwnd: record.hwnd, message: message >>> 0, wParam: wParam >>> 0, lParam: lParam >>> 0,
+            ...unicode ? { unicode } : {},
         }, thread);
     };
 
@@ -799,16 +815,17 @@ export function createWindowFunctions(host){
      * @param {number} after   Resume after this one, for a caller walking them.
      * @param {number} classPointer  A name or an atom; zero matches any class.
      * @param {number} namePointer   Zero matches any title.
+     * @param {boolean} [unicode]     Whether the two names are wide strings.
      */
-    const findWindow = (parent, after, classPointer, namePointer)=>{
-        const cls = classPointer === 0 ? null : classOf(classPointer);
+    const findWindow = (parent, after, classPointer, namePointer, unicode = false)=>{
+        const cls = classPointer === 0 ? null : classOf(classPointer, unicode);
         if (classPointer !== 0 && !cls)
         {
             return 0;
         }
         const title = namePointer === 0
             ? null
-            : host.readCString(namePointer, MAX_WINDOW_TEXT).toLowerCase();
+            : readText(host, namePointer, unicode, MAX_WINDOW_TEXT).toLowerCase();
         let reached = after === 0;
         for (const record of windows.values())
         {
@@ -1195,24 +1212,50 @@ export function createWindowFunctions(host){
 
     /**
      * @param {import('./structs.js').WindowClassFields} fields
+     * @param {boolean} [unicode]  registered through the wide form, so its
+     *     procedure reads wide text
      * @returns {number} the atom, or zero if the class cannot be registered
      */
-    const register = fields=>{
+    const register = (fields, unicode = false)=>{
         // A class is named by a string here: an atom is what registration
         // produces, never something it can be handed.
         if ((fields.className >>> 0) <= LAST_ATOM)
         {
             return 0;
         }
-        const name = host.readCString(fields.className, MAX_CLASS_NAME);
+        const name = readText(host, fields.className, unicode, MAX_CLASS_NAME);
         if (name.length === 0 || classes.has(name) || nextAtom > LAST_ATOM)
         {
             return 0;
         }
         const atom = nextAtom++;
-        classes.set(name, { ...fields, name, atom });
+        classes.set(name, { ...fields, name, atom, unicode });
         atoms.set(atom, name);
         return atom;
+    };
+
+    /**
+     * Forgets a class, which only a class with no window left may be.
+     *
+     * @param {number} className  A name or an atom.
+     * @param {boolean} unicode   Whether the name is a wide string.
+     */
+    const unregister = (className, unicode)=>{
+        const cls = classOf(className, unicode);
+        if (!cls || !classes.has(cls.name))
+        {
+            return 0;
+        }
+        for (const record of windows.values())
+        {
+            if (record.className === cls.name && !record.destroyed)
+            {
+                return 0;
+            }
+        }
+        classes.delete(cls.name);
+        atoms.delete(cls.atom);
+        return 1;
     };
 
     /**
@@ -1350,11 +1393,16 @@ export function createWindowFunctions(host){
         return at >= 0 && at + 4 <= record.extra.byteLength ? record.extra.getUint32(at, true) : 0;
     };
 
-    /** @param {any} record @param {number} index @param {number} value */
-    const writeLong = (record, index, value)=>{
+    /**
+     * @param {any} record @param {number} index @param {number} value
+     * @param {boolean} [unicode]  Set through SetWindowLongW: a procedure set
+     *     so reads wide text, and one set through the ANSI form reads bytes.
+     */
+    const writeLong = (record, index, value, unicode = false)=>{
         switch (index | 0){
             case GWL_WNDPROC:
                 record.wndProc = value >>> 0;
+                record.unicode = unicode;
                 return;
             case GWL_HWNDPARENT:
                 record.parent = value >>> 0;
@@ -1383,6 +1431,18 @@ export function createWindowFunctions(host){
             record.extra.setUint32(at, value >>> 0, true);
         }
     };
+
+    /**
+     * A retrieved message as the retrieving call's encoding reads it: a
+     * character posted by one kind of caller, or made by TranslateMessage out
+     * of a key, reaches the other kind as its own code for the character.
+     *
+     * @param {any} entry @param {boolean} unicode  The retrieving call's.
+     */
+    const retrieved = (entry, unicode)=>(CHARACTER_MESSAGES.has(entry.message >>> 0)
+        && (entry.unicode === true) !== unicode
+        ? { ...entry, wParam: convertCharacter(entry.wParam, unicode), unicode }
+        : entry);
 
     /**
      * @param {number} hwnd  The window filter PeekMessage and GetMessage take.
@@ -1439,8 +1499,8 @@ export function createWindowFunctions(host){
             // message goes where a procedure would have sent it anyway, to
             // the default one, which is what keeps a WM_PAINT for such a
             // window from being retrieved for ever.
-            return table.DefWindowProcA.handler(
-                [message.hwnd, message.message, message.wParam, message.lParam]);
+            return translated(host, message, false, ansi=>table.DefWindowProcA.handler(
+                [ansi.hwnd, ansi.message, ansi.wParam, ansi.lParam]));
         }
         // Whatever comes back is the answer, including a promise: running a
         // window procedure means running guest code, and the bridge suspends
@@ -1508,6 +1568,8 @@ export function createWindowFunctions(host){
             instance: 0,
             id: 0,
             wndProc: 0,
+            // Whether the procedure reads wide text: IsWindowUnicode.
+            unicode: false,
             menu: 0,
             x: 0,
             y: 0,
@@ -1556,22 +1618,32 @@ export function createWindowFunctions(host){
         && !isChild(record) && live(record.hwnd) ? activate(record.hwnd, { thread }) : 0);
 
     /**
-     * CreateWindowExA, and CreateWindowA once its missing argument is filled in.
+     * CreateWindowExA and CreateWindowExW, and the forms without the extended
+     * style once its missing argument is filled in.
+     *
+     * A window of a program's class reads text in the encoding its class was
+     * registered in; one of a system class, whose procedure takes both, in the
+     * encoding of the call that created it -- which is what IsWindowUnicode
+     * then answers.
      *
      * @param {number[]} args  The extended style first, then the eleven that
      *                         both entry points share.
+     * @param {boolean} [unicode]  Whether the two names are wide strings.
      */
-    const createWindow = args=>{
+    const createWindow = (args, unicode = false)=>{
         const [exStyle, className, windowName, style, x, y, width, height, parent, menu, instance]
             = args;
-        const cls = classOf(className);
+        const cls = classOf(className, unicode);
         if (!cls)
         {
             return 0;
         }
         const record = makeWindow({
             className: cls.name,
-            title: (windowName >>> 0) === 0 ? '' : host.readCString(windowName, MAX_WINDOW_TEXT),
+            title: (windowName >>> 0) === 0
+                ? '' : readText(host, windowName, unicode, MAX_WINDOW_TEXT),
+            unicode: procedures.has(cls.wndProc) || cls.wndProc === 0
+                ? unicode : cls.unicode === true,
             style: style >>> 0,
             exStyle: exStyle >>> 0,
             // A window made on the desktop is a top-level window, which is
@@ -1596,7 +1668,7 @@ export function createWindowFunctions(host){
         // Telling the host here is the only way it can know a handle it never
         // saw created.
         host.created?.(record.hwnd);
-        return announce(record, args);
+        return announce(record, args, unicode);
     };
 
     /**
@@ -1614,14 +1686,20 @@ export function createWindowFunctions(host){
      * FALSE and WM_CREATE answering -1 each mean the window must not exist, and
      * both are how a program refuses a window it cannot set up.
      *
+     * The CREATESTRUCT holds the caller's own name pointers, so it is in the
+     * encoding of the call, and reaches the procedure converted to its own.
+     *
      * @param {any} record @param {number[]} args
+     * @param {boolean} [unicode]  Whether the call's names are wide strings.
+     * @param {unknown} [caller]  Whose call this answers, when the caller has
+     *     awaited before making the window.
      */
-    const announce = (record, args)=>{
+    const announce = (record, args, unicode = false, caller = undefined)=>{
         const [exStyle, className, windowName, style, x, y, width, height,
             parent, menu, instance, params] = args;
         // Named once, before anything is awaited: a call made after the hook
         // has answered is answering a call the bridge has already let go of.
-        const thread = host.callerThread?.();
+        const thread = caller ?? host.callerThread?.();
         /** The window, activated first when it was created visible. */
         const activated = ()=>andThen(activateCreated(record, thread), ()=>record.hwnd);
         // A procedure on this side reads nothing out of a CREATESTRUCT.
@@ -1681,7 +1759,7 @@ export function createWindowFunctions(host){
 
         /** @param {number} message */
         const tell = message=>callProcedure(record.wndProc, {
-            hwnd: record.hwnd, message, wParam: 0, lParam: create,
+            hwnd: record.hwnd, message, wParam: 0, lParam: create, unicode,
         }, thread);
         /** @param {number} handle */
         const done = handle=>{
@@ -3239,6 +3317,116 @@ export function createWindowFunctions(host){
      *     => Promise<number>) | null}
      */
     let runModal = null;
+
+    /**
+     * PostMessage and SendNotifyMessage, in either encoding.
+     *
+     * @param {number[]} args  hWnd, Msg, wParam, lParam.
+     * @param {boolean} unicode
+     */
+    const postTo = ([hwnd, message, wParam, lParam], unicode)=>{
+        const target = hwnd >>> 0;
+        // A message for a window that no longer exists has nowhere to be
+        // delivered, and the guest is told so rather than finding out
+        // when it dispatches.
+        if (target !== 0 && !live(target))
+        {
+            return 0;
+        }
+        host.queue.post({ hwnd: target, message, wParam, lParam, ...unicode ? { unicode } : {} });
+        return 1;
+    };
+
+    /**
+     * PostThreadMessage, in either encoding.
+     *
+     * @param {number[]} args  idThread, Msg, wParam, lParam.
+     * @param {boolean} unicode
+     */
+    const postToThread = ([thread, message, wParam, lParam], unicode)=>{
+        const id = thread >>> 0;
+        const known = host.threadExists ? host.threadExists(id) : id !== 0;
+        if (!known)
+        {
+            host.setLastError?.(ERROR_INVALID_THREAD_ID);
+            return 0;
+        }
+        host.queue.post({ hwnd: 0, message, wParam, lParam, ...unicode ? { unicode } : {} });
+        return 1;
+    };
+
+    /**
+     * PeekMessage, in either encoding.
+     *
+     * @param {number[]} args  lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg.
+     * @param {boolean} unicode
+     */
+    const peekMessage = ([out, hwnd, filterMin, filterMax, removeFlag], unicode)=>{
+        const remove = (removeFlag & PM_REMOVE) !== 0;
+        const filter = { hwnd: windowFilter(hwnd), first: filterMin >>> 0,
+            last: filterMax >>> 0, remove };
+        const thread = host.callerThread?.();
+        // Only a message taken activates: a look leaves the press,
+        // and the activation, for the call that takes it.
+        const entry = remove ? takeThrough(filter, thread)
+            : andThen(placeWaiting(filter, thread), ()=>host.queue.peek(filter));
+        return andThen(entry, (/** @type {any} */ taken)=>{
+            if (!taken)
+            {
+                return 0;
+            }
+            writeMessage(host, out, retrieved(taken, unicode));
+            return 1;
+        });
+    };
+
+    /**
+     * GetMessage, in either encoding.
+     *
+     * @param {number[]} args  lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax.
+     * @param {boolean} unicode
+     */
+    const getMessage = ([out, hwnd, filterMin, filterMax], unicode)=>{
+        const filter = windowFilter(hwnd);
+        // A window already destroyed counts as none: its record is kept for
+        // a WM_DESTROY still queued, and waiting on a window that can never
+        // receive another message is waiting for ever.
+        if (filter !== ANY_WINDOW && filter !== 0 && !live(filter))
+        {
+            // The documented failure is -1, which is why a loop written
+            // as `while (GetMessage(...))` spins forever on it.
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+            return -1;
+        }
+        const wanted = { hwnd: filter, first: filterMin >>> 0, last: filterMax >>> 0,
+            remove: true };
+        const thread = host.callerThread?.();
+        const next = ()=>takeThrough(wanted, thread);
+        /** @param {any} entry */
+        const answer = entry=>{
+            writeMessage(host, out, retrieved(entry, unicode));
+            return entry.message === WM_QUIT ? 0 : 1;
+        };
+        return andThen(next(), (/** @type {any} */ first)=>{
+            if (first)
+            {
+                return answer(first);
+            }
+            // GetMessage waits; it does not report an empty queue. The
+            // wait is the host's to hold, so the answer is a promise and
+            // the bridge suspends the caller until something arrives.
+            return (async()=>{
+                let entry = null;
+                while (!entry)
+                {
+                    await host.idle();
+                    entry = await next();
+                }
+                return answer(entry);
+            })();
+        });
+    };
+
     // Named, because a message for a window with no procedure of its own is
     // handed to the default procedure in this table by `deliver` above.
     const table = {
@@ -3348,27 +3536,43 @@ export function createWindowFunctions(host){
             },
         },
 
+        /**
+         * ATOM RegisterClassW(const WNDCLASSW *lpWndClass)
+         *
+         * The same structure with wide strings in it, and a class whose
+         * procedure reads wide text: every window of it is a Unicode one.
+         */
+        RegisterClassW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([wndClass])=>register(readWindowClass(host, wndClass, WNDCLASSA), true),
+        },
+
+        /** ATOM RegisterClassExW(const WNDCLASSEXW *lpWndClass) */
+        RegisterClassExW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([wndClassEx])=>{
+                if (readU32(host, wndClassEx + WNDCLASSEXA.cbSize) !== WNDCLASSEXA.SIZE)
+                {
+                    return 0;
+                }
+                return register(readWindowClass(host, wndClassEx, WNDCLASSEXA), true);
+            },
+        },
+
         /** BOOL UnregisterClassA(LPCSTR lpClassName, HINSTANCE hInstance) */
         UnregisterClassA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([className])=>{
-                const cls = classOf(className);
-                if (!cls)
-                {
-                    return 0;
-                }
-                for (const record of windows.values())
-                {
-                    if (record.className === cls.name && !record.destroyed)
-                    {
-                        return 0;
-                    }
-                }
-                classes.delete(cls.name);
-                atoms.delete(cls.atom);
-                return 1;
-            },
+            handler: ([className])=>unregister(className, false),
+        },
+
+        /** BOOL UnregisterClassW(LPCWSTR lpClassName, HINSTANCE hInstance) */
+        UnregisterClassW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([className])=>unregister(className, true),
         },
 
         /** BOOL GetClassInfoA(HINSTANCE, LPCSTR lpClassName, LPWNDCLASSA lpWndClass) */
@@ -3382,6 +3586,44 @@ export function createWindowFunctions(host){
                     return 0;
                 }
                 writeWindowClassA(host, out, cls);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetClassInfoW(HINSTANCE, LPCWSTR lpClassName, LPWNDCLASSW lpWndClass)
+         *
+         * The name reported back is the one asked by: the class may have been
+         * registered through the ANSI form, and its own pointer then names
+         * bytes where the caller reads a wide string.
+         */
+        GetClassInfoW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, className, out])=>{
+                const cls = classOf(className, true);
+                if (!cls)
+                {
+                    return 0;
+                }
+                writeWindowClassA(host, out, { ...cls, className: className >>> 0 });
+                return 1;
+            },
+        },
+
+        /** BOOL GetClassInfoExW(HINSTANCE, LPCWSTR lpClassName, LPWNDCLASSEXW) */
+        GetClassInfoExW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, className, out])=>{
+                const cls = classOf(className, true);
+                if (!cls || (out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                writeWindowClassA(host, (out >>> 0) + WNDCLASSEXA.style,
+                    { ...cls, className: className >>> 0 });
+                writeU32s(host, (out >>> 0) + WNDCLASSEXA.hIconSm, [cls.iconSm ?? 0]);
                 return 1;
             },
         },
@@ -3443,6 +3685,22 @@ export function createWindowFunctions(host){
                 findWindow(0, 0, className >>> 0, windowName >>> 0),
         },
 
+        /** HWND FindWindowW(LPCWSTR lpClassName, LPCWSTR lpWindowName) */
+        FindWindowW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([className, windowName])=>
+                findWindow(0, 0, className >>> 0, windowName >>> 0, true),
+        },
+
+        /** HWND FindWindowExW(HWND, HWND, LPCWSTR lpszClass, LPCWSTR lpszWindow) */
+        FindWindowExW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([parent, after, className, windowName])=>
+                findWindow(parent >>> 0, after >>> 0, className >>> 0, windowName >>> 0, true),
+        },
+
         /**
          * HWND CreateWindowExA(DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName,
          *   DWORD dwStyle, int X, int Y, int nWidth, int nHeight, HWND hWndParent,
@@ -3468,6 +3726,31 @@ export function createWindowFunctions(host){
             argBytes: 44,
             /** @param {number[]} args */
             handler: args=>createWindow([0, ...args]),
+        },
+
+        /**
+         * HWND CreateWindowExW(DWORD dwExStyle, LPCWSTR lpClassName,
+         *   LPCWSTR lpWindowName, ...) -- the same call with wide names, whose
+         *   WM_NCCREATE and WM_CREATE carry a CREATESTRUCTW.
+         */
+        CreateWindowExW: {
+            argBytes: 48,
+            /** @param {number[]} args */
+            handler: args=>createWindow(args, true),
+        },
+
+        /** HWND CreateWindowW(...), without the extended style. */
+        CreateWindowW: {
+            argBytes: 44,
+            /** @param {number[]} args */
+            handler: args=>createWindow([0, ...args], true),
+        },
+
+        /** BOOL IsWindowUnicode(HWND hWnd) */
+        IsWindowUnicode: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>(live(hwnd)?.unicode ? 1 : 0),
         },
 
         /** BOOL DestroyWindow(HWND hWnd) */
@@ -3590,15 +3873,22 @@ export function createWindowFunctions(host){
         /**
          * BOOL SetWindowTextW(HWND hWnd, LPCWSTR lpString)
          *
-         * Every window here is an ANSI one, so the text reaches it as a
-         * wide caller's message reaches an ANSI window on Windows: converted
-         * to the ANSI page, in guest memory for as long as WM_SETTEXT takes.
+         * A wide WM_SETTEXT, which reaches an ANSI procedure converted to the
+         * ANSI page, as SendMessageW's would; the answer is the message's, so
+         * a text that could not be converted is a failure.
          */
         SetWindowTextW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([hwnd, string])=>asAnsi(string,
-                text=>table.SetWindowTextA.handler([hwnd, text])),
+            handler: ([hwnd, string])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                return andThen(send(record.hwnd, WM_SETTEXT, 0, string >>> 0,
+                    host.callerThread?.(), true), (/** @type {number} */ set)=>(set ? 1 : 0));
+            },
         },
 
         /** BOOL SetDlgItemTextW(HWND hDlg, int nIDDlgItem, LPCWSTR lpString) */
@@ -3629,6 +3919,21 @@ export function createWindowFunctions(host){
             },
         },
 
+        /** int GetWindowTextW(HWND hWnd, LPWSTR lpString, int nMaxCount) */
+        GetWindowTextW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, out, maxCount])=>{
+                const record = live(hwnd);
+                const room = maxCount | 0;
+                if (!record || room <= 0)
+                {
+                    return 0;
+                }
+                return writeText(host, out, record.title, room, true);
+            },
+        },
+
         /** LONG GetWindowLongA(HWND hWnd, int nIndex) */
         GetWindowLongA: {
             argBytes: 8,
@@ -3651,6 +3956,29 @@ export function createWindowFunctions(host){
                 }
                 const previous = readLong(record, index);
                 writeLong(record, index, value);
+                return previous;
+            },
+        },
+
+        /** LONG GetWindowLongW(HWND hWnd, int nIndex) */
+        GetWindowLongW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>table.GetWindowLongA.handler(args),
+        },
+
+        /** LONG SetWindowLongW(HWND hWnd, int nIndex, LONG dwNewLong) */
+        SetWindowLongW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, index, value])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                const previous = readLong(record, index);
+                writeLong(record, index, value, true);
                 return previous;
             },
         },
@@ -3689,6 +4017,13 @@ export function createWindowFunctions(host){
                 record.extra.setUint16(at, value & 0xffff, true);
                 return previous;
             },
+        },
+
+        /** HHOOK SetWindowsHookExW(...), as the ANSI form. */
+        SetWindowsHookExW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>table.SetWindowsHookExA.handler(args),
         },
 
         /**
@@ -3759,18 +4094,19 @@ export function createWindowFunctions(host){
         PostMessageA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hwnd, message, wParam, lParam])=>{
-                const target = hwnd >>> 0;
-                // A message for a window that no longer exists has nowhere to be
-                // delivered, and the guest is told so rather than finding out
-                // when it dispatches.
-                if (target !== 0 && !live(target))
-                {
-                    return 0;
-                }
-                host.queue.post({ hwnd: target, message, wParam, lParam });
-                return 1;
-            },
+            handler: args=>postTo(args, false),
+        },
+
+        /**
+         * BOOL PostMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
+         *
+         * A posted character is kept with the encoding it was posted in, and
+         * the retrieving call converts it to its own.
+         */
+        PostMessageW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>postTo(args, true),
         },
 
         /**
@@ -3787,15 +4123,14 @@ export function createWindowFunctions(host){
         SendNotifyMessageA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hwnd, message, wParam, lParam])=>{
-                const target = hwnd >>> 0;
-                if (target !== 0 && !live(target))
-                {
-                    return 0;
-                }
-                host.queue.post({ hwnd: target, message, wParam, lParam });
-                return 1;
-            },
+            handler: args=>postTo(args, false),
+        },
+
+        /** BOOL SendNotifyMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) */
+        SendNotifyMessageW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>postTo(args, true),
         },
 
         /**
@@ -3816,17 +4151,14 @@ export function createWindowFunctions(host){
         PostThreadMessageA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([thread, message, wParam, lParam])=>{
-                const id = thread >>> 0;
-                const known = host.threadExists ? host.threadExists(id) : id !== 0;
-                if (!known)
-                {
-                    host.setLastError?.(ERROR_INVALID_THREAD_ID);
-                    return 0;
-                }
-                host.queue.post({ hwnd: 0, message, wParam, lParam });
-                return 1;
-            },
+            handler: args=>postToThread(args, false),
+        },
+
+        /** BOOL PostThreadMessageW(DWORD idThread, UINT Msg, WPARAM wParam, LPARAM lParam) */
+        PostThreadMessageW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>postToThread(args, true),
         },
 
         /**
@@ -3866,24 +4198,14 @@ export function createWindowFunctions(host){
         PeekMessageA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([out, hwnd, filterMin, filterMax, removeFlag])=>{
-                const remove = (removeFlag & PM_REMOVE) !== 0;
-                const filter = { hwnd: windowFilter(hwnd), first: filterMin >>> 0,
-                    last: filterMax >>> 0, remove };
-                const thread = host.callerThread?.();
-                // Only a message taken activates: a look leaves the press,
-                // and the activation, for the call that takes it.
-                const entry = remove ? takeThrough(filter, thread)
-                    : andThen(placeWaiting(filter, thread), ()=>host.queue.peek(filter));
-                return andThen(entry, (/** @type {any} */ taken)=>{
-                    if (!taken)
-                    {
-                        return 0;
-                    }
-                    writeMessage(host, out, taken);
-                    return 1;
-                });
-            },
+            handler: args=>peekMessage(args, false),
+        },
+
+        /** BOOL PeekMessageW(LPMSG, HWND, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg) */
+        PeekMessageW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>peekMessage(args, true),
         },
 
         /**
@@ -4004,42 +4326,14 @@ export function createWindowFunctions(host){
         GetMessageA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([out, hwnd, filterMin, filterMax])=>{
-                const filter = windowFilter(hwnd);
-                if (filter !== ANY_WINDOW && filter !== 0 && !windows.has(filter))
-                {
-                    // The documented failure is -1, which is why a loop written
-                    // as `while (GetMessage(...))` spins forever on it.
-                    return -1;
-                }
-                const wanted = { hwnd: filter, first: filterMin >>> 0, last: filterMax >>> 0,
-                    remove: true };
-                const thread = host.callerThread?.();
-                const next = ()=>takeThrough(wanted, thread);
-                /** @param {any} entry */
-                const answer = entry=>{
-                    writeMessage(host, out, entry);
-                    return entry.message === WM_QUIT ? 0 : 1;
-                };
-                return andThen(next(), (/** @type {any} */ first)=>{
-                    if (first)
-                    {
-                        return answer(first);
-                    }
-                    // GetMessage waits; it does not report an empty queue. The
-                    // wait is the host's to hold, so the answer is a promise and
-                    // the bridge suspends the caller until something arrives.
-                    return (async()=>{
-                        let entry = null;
-                        while (!entry)
-                        {
-                            await host.idle();
-                            entry = await next();
-                        }
-                        return answer(entry);
-                    })();
-                });
-            },
+            handler: args=>getMessage(args, false),
+        },
+
+        /** BOOL GetMessageW(LPMSG, HWND, UINT wMsgFilterMin, UINT wMsgFilterMax) */
+        GetMessageW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>getMessage(args, true),
         },
 
         /**
@@ -4160,6 +4454,18 @@ export function createWindowFunctions(host){
         },
 
         /**
+         * LRESULT DispatchMessageW(const MSG *lpMsg)
+         *
+         * The message as a wide caller retrieved it: a character in it is a
+         * UTF-16 unit, and reaches an ANSI procedure as the page's byte.
+         */
+        DispatchMessageW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([msg])=>deliver({ ...readMessage(host, msg), unicode: true }),
+        },
+
+        /**
          * LRESULT DefWindowProcA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
          *
          * WM_DESTROY is deliberately not handled, and that is the whole of
@@ -4190,6 +4496,23 @@ export function createWindowFunctions(host){
                     wParam: wParam >>> 0, lParam: lParam >>> 0,
                 }, host.callerThread?.());
             },
+        },
+
+        /**
+         * LRESULT DefWindowProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
+         *
+         * The default procedure reads the ANSI page, so a wide message reaches
+         * it converted and what it writes back -- WM_GETTEXT's text -- comes
+         * back wide.
+         */
+        DefWindowProcW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, message, wParam, lParam])=>translated(host, {
+                hwnd: hwnd >>> 0, message: message >>> 0, wParam: wParam >>> 0,
+                lParam: lParam >>> 0, unicode: true,
+            }, false, ansi=>table.DefWindowProcA.handler(
+                [ansi.hwnd, ansi.message, ansi.wParam, ansi.lParam])),
         },
     };
     return table;

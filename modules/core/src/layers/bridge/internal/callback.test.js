@@ -329,3 +329,38 @@ test('a transfer with no line given draws it at the new stack pointer', ()=>{
         ['outer'], 'a call resting exactly on the line returned into it, and is gone');
     assert.equal(made.pendingCalls(), 1);
 });
+
+test('a callback whose handler jumped to its catch is passed over by the one that returns',
+    async()=>{
+        // A guest exception handler that finds its catch unwinds and jumps
+        // there: the dispatch's call to it never returns, and its frame is
+        // left below everything. The next return belongs to the routine the
+        // host started first, and must answer that one.
+        const registers = { esp: 0, ecx: 0 };
+        const main = thread('main');
+        const made = createCallbacks({
+            cpu: { readReg32: (/** @type {'esp' | 'ecx'} */ name)=>registers[name] },
+            kernel: { threads: ()=>[main], scheduleResume: ()=>{} },
+            memory: { writeU32: ()=>{} },
+            reserveTrap: ()=>({ id: 1, address: SENTINEL }),
+        });
+        made.reserve();
+        const method = made.call({ thread: main, entry: 0x401000, args: [1, 2, 3],
+            stackAtRest: 0x9000 });
+        made.suspended(main, { name: 'KERNEL32.dll!RaiseException', restingStack: 0x8f00,
+            hostReturn: 0x402000 });
+        const handler = made.call({ thread: main, entry: 0x403000, args: [4, 5, 6, 7] });
+        let handlerAnswered = false;
+        handler.then(()=>{
+            handlerAnswered = true;
+        });
+
+        // The method comes back with `ret 12`, its frame at 0x9000 - 20.
+        registers.esp = 0x9000 - 20 + 16;
+        registers.ecx = 0x80004005;
+        assert.equal(made.returned(main), true);
+        assert.equal(await method, 0x80004005 | 0, 'the method\'s answer reaches its caller');
+        await Promise.resolve();
+        assert.equal(handlerAnswered, false, 'the abandoned handler call is never answered');
+        assert.equal(made.pendingCalls(), 0, 'nor is the throw it was dispatched from');
+    });

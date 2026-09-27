@@ -2821,3 +2821,172 @@ test('DrawText with a count draws that many characters of a buffer with no termi
     const [left, , right] = [0, 4, 8].map(at=>memory.u32(RECT_BUFFER + at) | 0);
     assert.equal(right - left, 5 * 8, 'five cells, not the eighty that follow');
 });
+
+// --- wide windows ---
+
+/** @param {ReturnType<typeof fakeMemory>} memory @param {number} address @param {string} text */
+function putWide(memory, address, text){
+    memory.writeMemory(address, new Uint8Array(Buffer.from(`${text}\0`, 'utf16le')));
+    return address;
+}
+
+/** @param {ReturnType<typeof fakeMemory>} memory @param {number} address */
+function readWide(memory, address){
+    let text = '';
+    for (let at = address; ; at += 2)
+    {
+        const code = memory.bytes[at] | memory.bytes[at + 1] << 8;
+        if (code === 0)
+        {
+            return text;
+        }
+        text += String.fromCharCode(code);
+    }
+}
+
+const WIDE_CLASS = 0x10700;
+const WIDE_TITLE = 0x10780;
+const WM_SETTEXT = 0x000c;
+const WM_GETTEXT = 0x000d;
+
+test('a class registered wide makes wide windows, whose CREATESTRUCT names are wide', ()=>{
+    /** @type {{ message: number, name: string, cls: string }[]} */
+    const created = [];
+    const context = setup({
+        heap: true,
+        reply: (/** @type {any} */ message)=>{
+            if (message.message === WM_NCCREATE || message.message === WM_CREATE)
+            {
+                const { memory } = context;
+                created.push({ message: message.message,
+                    name: readWide(memory, memory.u32(message.lParam + 36)),
+                    cls: readWide(memory, memory.u32(message.lParam + 40)) });
+            }
+            return message.message === WM_NCCREATE ? 1 : 0;
+        },
+    });
+    const { fns, memory } = context;
+    putClass(memory);
+    putWide(memory, WIDE_CLASS, 'WideWnd');
+    memory.putU32s(CLASS_STRUCT + WNDCLASSA.lpszClassName, [WIDE_CLASS]);
+    assert.equal(fns.RegisterClassW.argBytes, 4);
+    assert.ok(fns.RegisterClassW.handler([CLASS_STRUCT]) >= 0xc000);
+    putWide(memory, WIDE_TITLE, 'Titre é');
+
+    assert.equal(fns.CreateWindowExW.argBytes, 48);
+    const hwnd = fns.CreateWindowExW.handler(
+        [0, WIDE_CLASS, WIDE_TITLE, 0, 0, 0, 100, 100, 0, 0, HINSTANCE, 0]);
+    assert.ok(hwnd);
+    assert.equal(fns.IsWindowUnicode.handler([hwnd]), 1);
+    assert.deepEqual(created, [
+        { message: WM_NCCREATE, name: 'Titre é', cls: 'WideWnd' },
+        { message: WM_CREATE, name: 'Titre é', cls: 'WideWnd' },
+    ]);
+    assert.equal(fns.GetWindowTextW.handler([hwnd, TEXT_BUFFER, 64]), 7);
+    assert.equal(readWide(memory, TEXT_BUFFER), 'Titre é');
+    assert.equal(fns.FindWindowW.handler([WIDE_CLASS, 0]), hwnd);
+    assert.equal(fns.GetClassNameW.handler([hwnd, TEXT_BUFFER, 4]), 3);
+    assert.equal(readWide(memory, TEXT_BUFFER), 'Wid');
+});
+
+test('an ANSI class created through CreateWindowExW hears its CREATESTRUCT in ANSI', ()=>{
+    /** @type {string[]} */
+    const names = [];
+    const context = setup({
+        heap: true,
+        reply: (/** @type {any} */ message)=>{
+            if (message.message === WM_CREATE)
+            {
+                names.push(context.memory.readCString(context.memory.u32(message.lParam + 36), 64));
+            }
+            return message.message === WM_NCCREATE ? 1 : 0;
+        },
+    });
+    const { fns, memory, released } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    putWide(memory, WIDE_CLASS, 'mainwnd');
+    putWide(memory, WIDE_TITLE, 'Café');
+    const hwnd = fns.CreateWindowExW.handler(
+        [0, WIDE_CLASS, WIDE_TITLE, 0, 0, 0, 100, 100, 0, 0, HINSTANCE, 0]);
+    assert.equal(fns.IsWindowUnicode.handler([hwnd]), 0);
+    assert.deepEqual(names, ['Café']);
+    // Two copies lent for the two messages, and the structure behind them.
+    assert.ok(released.length >= 2);
+});
+
+test('SendMessageW and DefWindowProcW carry text wide to an ANSI window and back', ()=>{
+    const context = setup({
+        heap: true,
+        reply: (/** @type {any} */ message)=>context.fns.DefWindowProcA.handler(
+            [message.hwnd, message.message, message.wParam, message.lParam]),
+    });
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    putWide(memory, WIDE_TITLE, 'Neu €');
+
+    assert.equal(fns.SendMessageW.argBytes, 16);
+    assert.equal(fns.SendMessageW.handler([hwnd, WM_SETTEXT, 0, WIDE_TITLE]), 1);
+    assert.equal(fns.GetWindowTextA.handler([hwnd, TEXT_BUFFER, 64]), 5);
+    assert.equal(memory.bytes[TEXT_BUFFER + 4], 0x80, 'the euro sign in the ANSI page');
+
+    assert.equal(fns.SendMessageW.handler([hwnd, WM_GETTEXT, 4, TEXT_BUFFER]), 3);
+    assert.equal(readWide(memory, TEXT_BUFFER), 'Neu');
+    assert.equal(fns.DefWindowProcW.handler([hwnd, WM_GETTEXT, 64, TEXT_BUFFER]), 5);
+    assert.equal(readWide(memory, TEXT_BUFFER), 'Neu €');
+});
+
+test('a posted character reaches each retrieving call as its own code for it', ()=>{
+    const { fns, memory, hwnd } = withWindow();
+    fns.PostMessageA.handler([hwnd, WM_CHAR, 0x80, 1]);
+    fns.PostMessageW.handler([hwnd, WM_CHAR, 0x20ac, 1]);
+    assert.equal(fns.GetMessageW.handler([MSG_BUFFER, 0, 0, 0]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.wParam), 0x20ac, 'the byte, as a wide character');
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.wParam), 0x80, 'the wide character, as the byte');
+});
+
+test('DispatchMessageW hands an ANSI procedure the page\'s byte for a character', ()=>{
+    const { fns, memory, hwnd, dispatched } = withWindow();
+    memory.putU32s(MSG_BUFFER, [hwnd, WM_CHAR, 0x20ac, 1, 0, 0, 0]);
+    fns.DispatchMessageW.handler([MSG_BUFFER]);
+    assert.equal(dispatched.at(-1).message, WM_CHAR);
+    assert.equal(dispatched.at(-1).wParam, 0x80);
+});
+
+test('a procedure set through SetWindowLongW reads wide text, one set through A bytes', ()=>{
+    const { fns, hwnd } = withWindow();
+    assert.equal(fns.IsWindowUnicode.handler([hwnd]), 0);
+    fns.SetWindowLongW.handler([hwnd, GWL_WNDPROC, 0x402000]);
+    assert.equal(fns.IsWindowUnicode.handler([hwnd]), 1);
+    assert.equal(fns.GetWindowLongW.handler([hwnd, GWL_WNDPROC]), 0x402000);
+    fns.SetWindowLongA.handler([hwnd, GWL_WNDPROC, WNDPROC]);
+    assert.equal(fns.IsWindowUnicode.handler([hwnd]), 0);
+});
+
+test('a class is unregistered by its wide name, and not while a window of it is left', ()=>{
+    const { fns, memory, hwnd } = withWindow();
+    putWide(memory, WIDE_CLASS, 'MainWnd');
+    assert.equal(fns.UnregisterClassW.handler([WIDE_CLASS, HINSTANCE]), 0);
+    fns.DestroyWindow.handler([hwnd]);
+    assert.equal(fns.UnregisterClassW.handler([WIDE_CLASS, HINSTANCE]), 1);
+    assert.equal(fns.GetClassInfoW.handler([HINSTANCE, WIDE_CLASS, 0x10800]), 0);
+});
+
+test('GetClassInfoW reports the class by the wide name it was asked by', ()=>{
+    const { fns, memory } = withWindow();
+    putWide(memory, WIDE_CLASS, 'MAINWND');
+    assert.equal(fns.GetClassInfoW.handler([HINSTANCE, WIDE_CLASS, 0x10800]), 1);
+    assert.equal(memory.u32(0x10800 + WNDCLASSA.lpfnWndProc), WNDPROC);
+    assert.equal(memory.u32(0x10800 + WNDCLASSA.lpszClassName), WIDE_CLASS);
+});
+
+test('GetMessage on a window already destroyed fails at once rather than waiting for ever', ()=>{
+    const { fns, hwnd, errors } = withWindow();
+    fns.DestroyWindow.handler([hwnd]);
+    assert.equal(fns.GetMessageA.handler([MSG_BUFFER, hwnd, 0, 0]), -1);
+    assert.equal(fns.GetMessageW.handler([MSG_BUFFER, hwnd, 0, 0]), -1);
+    assert.equal(errors.at(-1), 1400, 'ERROR_INVALID_WINDOW_HANDLE');
+});

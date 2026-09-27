@@ -15,6 +15,11 @@
  * data here, and only its names and public key are used. Its expiry does not
  * retire it: an Authenticode signature is judged at the time its timestamp
  * states, when the root was valid.
+ *
+ * And Thawte's "Thawte Timestamping CA" (1997-01-01 to 2020-12-31, SHA-1
+ * thumbprint BE36A4562FB2EE05DBB3D32323ADF445084ED656), which XP's root store
+ * carries and which VeriSign's time-stamping service of the 2000s chains to --
+ * the countersignature on files Microsoft signed in those years.
  */
 
 const MICROSOFT_ROOT_AUTHORITY = [
@@ -39,8 +44,24 @@ const MICROSOFT_ROOT_AUTHORITY = [
     '09VUP0bNHFWmcNsSOoeTdZ+n0qA=',
 ].join('');
 
+const THAWTE_TIMESTAMPING_CA = [
+    'MIICoTCCAgqgAwIBAgIBADANBgkqhkiG9w0BAQQFADCBizELMAkGA1UEBhMCWkExFTATBgNVBAgT',
+    'DFdlc3Rlcm4gQ2FwZTEUMBIGA1UEBxMLRHVyYmFudmlsbGUxDzANBgNVBAoTBlRoYXd0ZTEdMBsG',
+    'A1UECxMUVGhhd3RlIENlcnRpZmljYXRpb24xHzAdBgNVBAMTFlRoYXd0ZSBUaW1lc3RhbXBpbmcg',
+    'Q0EwHhcNOTcwMTAxMDAwMDAwWhcNMjAxMjMxMjM1OTU5WjCBizELMAkGA1UEBhMCWkExFTATBgNV',
+    'BAgTDFdlc3Rlcm4gQ2FwZTEUMBIGA1UEBxMLRHVyYmFudmlsbGUxDzANBgNVBAoTBlRoYXd0ZTEd',
+    'MBsGA1UECxMUVGhhd3RlIENlcnRpZmljYXRpb24xHzAdBgNVBAMTFlRoYXd0ZSBUaW1lc3RhbXBp',
+    'bmcgQ0EwgZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGBANYrWHhhRYZT6jR7UZztsOYuGA7+4F+o',
+    'J9O0yeB8WU4WDnNUYMF/9p8u6TqFJBU820cEY8OexJQaWt9MevPZQx08EHp5JduQ/vBR5zDWQQD9',
+    'nyjfeb6Uu522FOMjhdepQeBMpHmwKxqL8vg7ij5FrHGSALSQQZj7X+36ty6K+Ig3AgMBAAGjEzAR',
+    'MA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQEEBQADgYEAZ9viwuaHPUCDhjc1fR/OmsMMZiCo',
+    'uqoEiYbC9RAIDb/LogWK0E02PvTX72nGXuSwlG9KuefeW4i2e9vjJ+V2w/A1wcu1J5szedyQpgCe',
+    'd/r8zSeUQhac0xxo7L9c3eWpexAKMnRUEzGLhQOEkbdYATAUOK8oyvyxUBkZCayJSdM=',
+].join('');
+
 /** @param {string} text */
 const fromBase64 = text=>Uint8Array.from(atob(text), ch=>ch.charCodeAt(0));
 
 /** The default root store, as DER. @returns {Uint8Array[]} */
-export const defaultTrustedRoots = ()=>[fromBase64(MICROSOFT_ROOT_AUTHORITY)];
+export const defaultTrustedRoots = ()=>[MICROSOFT_ROOT_AUTHORITY, THAWTE_TIMESTAMPING_CA]
+    .map(fromBase64);

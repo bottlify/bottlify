@@ -30,6 +30,43 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NO_TOKEN = 1008;
 const ERROR_NO_SUCH_PRIVILEGE = 1313;
+const ERROR_ACCESS_DENIED = 5;
+const ERROR_UNKNOWN_REVISION = 1305;
+const ERROR_INVALID_ACL = 1336;
+const ERROR_INVALID_SID = 1337;
+const ERROR_INVALID_SECURITY_DESCR = 1338;
+const ERROR_ALLOTTED_SPACE_EXCEEDED = 1344;
+
+/**
+ * An absolute SECURITY_DESCRIPTOR: revision, a pad byte, the control word,
+ * then pointers to the owner, the group, the SACL and the DACL.
+ */
+const SD = Object.freeze({ REVISION: 0, CONTROL: 2, OWNER: 4, GROUP: 8, SACL: 12, DACL: 16,
+    SIZE: 20 });
+const SECURITY_DESCRIPTOR_REVISION = 1;
+const SE_OWNER_DEFAULTED = 0x0001;
+const SE_GROUP_DEFAULTED = 0x0002;
+const SE_DACL_PRESENT = 0x0004;
+const SE_DACL_DEFAULTED = 0x0008;
+const SE_SELF_RELATIVE = 0x8000;
+
+/** An ACL's header: revision, a pad, its size, its ACE count, a pad. */
+const ACL = Object.freeze({ REVISION: 0, SIZE: 2, COUNT: 4, HEADER: 8 });
+/** The revisions an ACL may be made with: ACL_REVISION and ACL_REVISION_DS. */
+const ACL_REVISIONS = new Set([2, 4]);
+/** An ACE: type, flags, size, then the mask and the SID of an access ACE. */
+const ACCESS_ALLOWED_ACE_TYPE = 0;
+const ACCESS_DENIED_ACE_TYPE = 1;
+
+/** The generic rights, mapped through a GENERIC_MAPPING, and MAXIMUM_ALLOWED. */
+const GENERIC_READ = 0x80000000;
+const GENERIC_WRITE = 0x40000000;
+const GENERIC_EXECUTE = 0x20000000;
+const GENERIC_ALL = 0x10000000;
+const MAXIMUM_ALLOWED = 0x02000000;
+
+/** PRIVILEGE_SET with no privilege in it: its count and its control word. */
+const PRIVILEGE_SET_EMPTY = 8;
 
 /**
  * The privileges Windows numbers, by name, as LookupPrivilegeValue answers
@@ -183,7 +220,349 @@ export function createTokenFunctions(host){
         }
     };
 
+    /** @param {number} address @returns {number} */
+    const readDword = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+        .getUint32(0, true);
+    /** @param {number} address @returns {number} */
+    const readWord = address=>{
+        const bytes = host.readMemory(address >>> 0, 2);
+        return bytes[0] | bytes[1] << 8;
+    };
+    /** @param {number} address @param {number} value */
+    const writeWord = (address, value)=>host.writeMemory(address >>> 0,
+        new Uint8Array([value & 0xff, value >>> 8 & 0xff]));
+
+    /** A SID in guest memory, laid out, or null when it is not one. @param {number} sid */
+    const sidAt = sid=>{
+        if ((sid >>> 0) === 0)
+        {
+            return null;
+        }
+        const head = host.readMemory(sid >>> 0, 2);
+        return head[0] === 1 && head[1] <= 15 ? host.readMemory(sid >>> 0, 8 + 4 * head[1]).slice()
+            : null;
+    };
+
+    /**
+     * An absolute descriptor the caller made, or null: InitializeSecurity-
+     * Descriptor's revision, and not the self-relative form this surface
+     * does not build.
+     *
+     * @param {number} descriptor
+     */
+    const descriptorAt = descriptor=>{
+        if ((descriptor >>> 0) === 0)
+        {
+            return null;
+        }
+        const head = host.readMemory(descriptor >>> 0, 4);
+        return head[SD.REVISION] === SECURITY_DESCRIPTOR_REVISION
+            && ((head[2] | head[3] << 8) & SE_SELF_RELATIVE) === 0 ? descriptor >>> 0 : null;
+    };
+
+    /**
+     * The owner or group pointer of a descriptor, and the bit that says it
+     * was defaulted.
+     *
+     * @param {number} slot @param {number} bit
+     */
+    const setSidOf = (slot, bit)=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [descriptor, sid, defaulted])=>{
+            const at = descriptorAt(descriptor);
+            if (at === null)
+            {
+                return fail(ERROR_INVALID_SECURITY_DESCR);
+            }
+            writeDword(at + slot, sid >>> 0);
+            const control = readWord(at + SD.CONTROL);
+            writeWord(at + SD.CONTROL, defaulted ? control | bit : control & ~bit);
+            return 1;
+        },
+    });
+
+    /**
+     * Each ACE of an ACL, walked by its sizes: its type, its mask and, for an
+     * access ACE, its SID.
+     *
+     * @param {number} acl
+     * @returns {{ type: number, mask: number, sid: Uint8Array | null, next: number }[] | null}
+     */
+    const acesOf = acl=>{
+        const head = host.readMemory(acl >>> 0, ACL.HEADER);
+        if (!ACL_REVISIONS.has(head[ACL.REVISION]))
+        {
+            return null;
+        }
+        const size = head[ACL.SIZE] | head[ACL.SIZE + 1] << 8;
+        const count = head[ACL.COUNT] | head[ACL.COUNT + 1] << 8;
+        const aces = [];
+        let at = ACL.HEADER;
+        for (let index = 0; index < count; index++)
+        {
+            if (at + 8 > size)
+            {
+                return null;
+            }
+            const ace = host.readMemory((acl >>> 0) + at, 4);
+            const aceSize = ace[2] | ace[3] << 8;
+            if (aceSize < 8 || at + aceSize > size)
+            {
+                return null;
+            }
+            const type = ace[0];
+            const mask = readDword((acl >>> 0) + at + 4);
+            const sid = type <= ACCESS_DENIED_ACE_TYPE ? sidAt((acl >>> 0) + at + 8) : null;
+            aces.push({ type, mask, sid, next: at + aceSize });
+            at += aceSize;
+        }
+        return aces;
+    };
+
+    /**
+     * The generic rights of a mask turned into the specific ones a
+     * GENERIC_MAPPING names, the generic bits themselves taken out.
+     *
+     * @param {number} mask @param {number[]} mapping  read, write, execute, all
+     */
+    const mapGeneric = (mask, mapping)=>{
+        let mapped = mask & ~(GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL);
+        [GENERIC_READ, GENERIC_WRITE, GENERIC_EXECUTE, GENERIC_ALL].forEach((bit, at)=>{
+            if ((mask & bit) !== 0)
+            {
+                mapped |= mapping[at];
+            }
+        });
+        return mapped >>> 0;
+    };
+
     return {
+        /**
+         * BOOL InitializeSecurityDescriptor(PSECURITY_DESCRIPTOR, DWORD dwRevision)
+         *
+         * An empty absolute descriptor: no owner, no group, no DACL -- which
+         * grants everyone everything until a DACL is set.
+         */
+        InitializeSecurityDescriptor: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([descriptor, revision])=>{
+                if ((revision >>> 0) !== SECURITY_DESCRIPTOR_REVISION)
+                {
+                    return fail(ERROR_UNKNOWN_REVISION);
+                }
+                if ((descriptor >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const bytes = new Uint8Array(SD.SIZE);
+                bytes[SD.REVISION] = SECURITY_DESCRIPTOR_REVISION;
+                host.writeMemory(descriptor >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /** BOOL IsValidSecurityDescriptor(PSECURITY_DESCRIPTOR) */
+        IsValidSecurityDescriptor: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([descriptor])=>(descriptorAt(descriptor) === null
+                ? fail(ERROR_INVALID_SECURITY_DESCR) : 1),
+        },
+
+        /** BOOL SetSecurityDescriptorOwner(PSECURITY_DESCRIPTOR, PSID, BOOL bOwnerDefaulted) */
+        SetSecurityDescriptorOwner: setSidOf(SD.OWNER, SE_OWNER_DEFAULTED),
+
+        /** BOOL SetSecurityDescriptorGroup(PSECURITY_DESCRIPTOR, PSID, BOOL bGroupDefaulted) */
+        SetSecurityDescriptorGroup: setSidOf(SD.GROUP, SE_GROUP_DEFAULTED),
+
+        /**
+         * BOOL SetSecurityDescriptorDacl(PSECURITY_DESCRIPTOR, BOOL bDaclPresent,
+         *   PACL pDacl, BOOL bDaclDefaulted)
+         *
+         * Present with a NULL ACL is the null DACL, which grants everything;
+         * absent takes the pointer away.
+         */
+        SetSecurityDescriptorDacl: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([descriptor, present, acl, defaulted])=>{
+                const at = descriptorAt(descriptor);
+                if (at === null)
+                {
+                    return fail(ERROR_INVALID_SECURITY_DESCR);
+                }
+                let control = readWord(at + SD.CONTROL) & ~(SE_DACL_PRESENT | SE_DACL_DEFAULTED);
+                if (present)
+                {
+                    control |= SE_DACL_PRESENT | (defaulted ? SE_DACL_DEFAULTED : 0);
+                }
+                writeWord(at + SD.CONTROL, control);
+                writeDword(at + SD.DACL, present ? acl >>> 0 : 0);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL InitializeAcl(PACL pAcl, DWORD nAclLength, DWORD dwAclRevision)
+         *
+         * An empty ACL of the size given, which is at least its header and a
+         * whole number of DWORDs, and no more than a WORD holds.
+         */
+        InitializeAcl: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([acl, length, revision])=>{
+                const size = length >>> 0;
+                if ((acl >>> 0) === 0 || size < ACL.HEADER || size > 0xffff || size % 4 !== 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if (!ACL_REVISIONS.has(revision >>> 0))
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const bytes = new Uint8Array(ACL.HEADER);
+                bytes[ACL.REVISION] = revision >>> 0;
+                bytes[ACL.SIZE] = size & 0xff;
+                bytes[ACL.SIZE + 1] = size >>> 8;
+                host.writeMemory(acl >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL AddAccessAllowedAce(PACL pAcl, DWORD dwAceRevision, DWORD AccessMask, PSID pSid)
+         *
+         * The ACE goes after the last one, and an ACL with no room for it
+         * refuses it rather than writing past its end.
+         */
+        AddAccessAllowedAce: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([acl, , mask, sid])=>{
+                const aces = (acl >>> 0) === 0 ? null : acesOf(acl);
+                if (aces === null)
+                {
+                    return fail(ERROR_INVALID_ACL);
+                }
+                const bytes = sidAt(sid);
+                if (bytes === null)
+                {
+                    return fail(ERROR_INVALID_SID);
+                }
+                const at = aces.length === 0 ? ACL.HEADER : aces[aces.length - 1].next;
+                const aceSize = 8 + bytes.length;
+                if (at + aceSize > readWord((acl >>> 0) + ACL.SIZE))
+                {
+                    return fail(ERROR_ALLOTTED_SPACE_EXCEEDED);
+                }
+                const ace = new Uint8Array(aceSize);
+                ace[0] = ACCESS_ALLOWED_ACE_TYPE;
+                ace[2] = aceSize & 0xff;
+                ace[3] = aceSize >>> 8;
+                new DataView(ace.buffer).setUint32(4, mask >>> 0, true);
+                ace.set(bytes, 8);
+                host.writeMemory((acl >>> 0) + at, ace);
+                writeWord((acl >>> 0) + ACL.COUNT, aces.length + 1);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL AccessCheck(PSECURITY_DESCRIPTOR, HANDLE ClientToken, DWORD DesiredAccess,
+         *   PGENERIC_MAPPING, PPRIVILEGE_SET, LPDWORD PrivilegeSetLength,
+         *   LPDWORD GrantedAccess, LPBOOL AccessStatus)
+         *
+         * The DACL read ACE by ACE against the one account's SIDs: an
+         * allowed ACE for a SID the token holds grants its rights, a denied
+         * one takes them away. No DACL, or a null one, grants everything.
+         * The check itself succeeds either way; whether access was granted is
+         * the status, and a refusal says ERROR_ACCESS_DENIED. Windows wants an
+         * impersonation token here; the one account's primary token is taken
+         * as well, since there is nothing it could be told apart from.
+         */
+        AccessCheck: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([descriptor, token, desired, mapping, privileges, privilegesLength,
+                granted, status])=>{
+                if (!isToken(token))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const at = descriptorAt(descriptor);
+                if (at === null)
+                {
+                    return fail(ERROR_INVALID_SECURITY_DESCR);
+                }
+                if ((mapping >>> 0) === 0 || (granted >>> 0) === 0 || (status >>> 0) === 0
+                    || (privilegesLength >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if (readDword(privilegesLength) < PRIVILEGE_SET_EMPTY)
+                {
+                    writeDword(privilegesLength >>> 0, PRIVILEGE_SET_EMPTY);
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                if ((privileges >>> 0) !== 0)
+                {
+                    host.writeMemory(privileges >>> 0, new Uint8Array(PRIVILEGE_SET_EMPTY));
+                }
+                const map = [0, 4, 8, 12].map(offset=>readDword((mapping >>> 0) + offset));
+                const wanted = mapGeneric(desired >>> 0, map);
+                const control = readWord(at + SD.CONTROL);
+                const dacl = readDword(at + SD.DACL);
+                let allowed = 0;
+                let denied = 0;
+                if ((control & SE_DACL_PRESENT) === 0 || dacl === 0)
+                {
+                    allowed = 0xffffffff;
+                }
+                else
+                {
+                    const aces = acesOf(dacl);
+                    if (aces === null)
+                    {
+                        return fail(ERROR_INVALID_ACL);
+                    }
+                    for (const ace of aces)
+                    {
+                        if (ace.sid === null || !isTokenMember(ace.sid))
+                        {
+                            continue;
+                        }
+                        // What an ACE already allowed stays allowed, as the
+                        // DACL is read in order and the first word on a right
+                        // decides it.
+                        const rights = mapGeneric(ace.mask, map);
+                        if (ace.type === ACCESS_ALLOWED_ACE_TYPE)
+                        {
+                            allowed |= rights & ~denied;
+                        }
+                        else
+                        {
+                            denied |= rights & ~allowed;
+                        }
+                    }
+                }
+                const asked = (wanted & MAXIMUM_ALLOWED) !== 0
+                    ? (wanted & ~MAXIMUM_ALLOWED) : wanted;
+                const ok = (asked & ~allowed) === 0 && (wanted === MAXIMUM_ALLOWED
+                    ? allowed !== 0 : true);
+                const answer = (wanted & MAXIMUM_ALLOWED) !== 0 ? allowed >>> 0 : asked;
+                writeDword(granted >>> 0, ok ? answer : 0);
+                writeDword(status >>> 0, ok ? 1 : 0);
+                if (!ok)
+                {
+                    host.setLastError(ERROR_ACCESS_DENIED);
+                }
+                return 1;
+            },
+        },
+
         /**
          * BOOL OpenThreadToken(HANDLE hThread, DWORD DesiredAccess,
          *   BOOL OpenAsSelf, PHANDLE TokenHandle)

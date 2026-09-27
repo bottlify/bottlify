@@ -187,7 +187,7 @@ function writer(memory, base){
  *
  * @param {any} memory
  * @param {{ id: number, x: number, y: number, cx: number, cy: number, style?: number,
- *           className?: string, ordinal?: number, title?: string }[]} controls
+ *           className?: string, ordinal?: number, title?: string, data?: number[] }[]} controls
  * @param {{ style?: number, menu?: string, title?: string }} [options]
  */
 function putTemplate(memory, controls, options = {}){
@@ -216,7 +216,12 @@ function putTemplate(memory, controls, options = {}){
             template.sz(control.className ?? 'BUTTON');
         }
         template.sz(control.title ?? '');
-        template.u16(0);
+        // The creation data: in this layout its size word counts itself.
+        template.u16(control.data ? (control.data.length + 1) * 2 : 0);
+        for (const word of control.data ?? [])
+        {
+            template.u16(word);
+        }
     }
     return TEMPLATE;
 }
@@ -519,7 +524,7 @@ test('Enter and Escape in a modal loop reach the procedure as a button\'s comman
     assert.equal(commands[1].thread, 'the caller');
 });
 
-test('IsDialogMessage takes Enter for IDOK and nothing else', ()=>{
+test('IsDialogMessage takes Enter for IDOK and dispatches anything else inside the dialog', ()=>{
     /** @type {any[]} */
     const delivered = [];
     const { memory, fns } = setup({
@@ -542,8 +547,16 @@ test('IsDialogMessage takes Enter for IDOK and nothing else', ()=>{
     assert.deepEqual(delivered.map(one=>[one.message, one.wParam & 0xffff]),
         [[0x0400, 0], [0x0111, 1]]);
 
+    // Any other message for a window inside is translated and dispatched by
+    // the call itself, so it answers TRUE and the caller does not dispatch it
+    // again (Wine's test_IsDialogMessage).
     memory.writeMemory(MSG + 8, Uint8Array.of(0x41));
-    assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 0, 'a letter is not taken');
+    delivered.length = 0;
+    assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 1, 'a letter is dispatched');
+    memory.writeMemory(MSG, Uint8Array.of(dialog, dialog >>> 8, 0, 0, 0x00, 0x04, 0, 0, 0x05));
+    assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 1);
+    assert.deepEqual(delivered.map(one=>[one.message, one.wParam]), [[0x0400, 5]],
+        'a message for the dialog itself reached its procedure');
     memory.writeMemory(MSG, Uint8Array.of(0x99, 0, 0, 0, 0, 0x01, 0, 0, 0x0d));
     assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 0,
         'nor is Enter in a window outside the dialog');
@@ -1388,4 +1401,78 @@ test('SetDlgItemTextW sets a control\'s text through the ANSI page', ()=>{
     assert.deepEqual([...memory.readMemory(OUT, 9)],
         [...Buffer.from('Fertig ', 'latin1'), 0xfc, 0]);
     assert.equal(fns.SetDlgItemTextW.handler([dialog, 999, TEXT]), 0, 'no such control');
+});
+
+test('a template\'s controls are made one after another, each handed its creation data', async()=>{
+    // Each control is CreateWindowEx'd in turn: the second is made only once
+    // the first's WM_CREATE has answered, and its WM_CREATE reads the data
+    // the template carries for it, size word first, as lpCreateParams.
+    const GAUGE_PROC = 0x403000;
+    const CLASS_STRUCT = 0x10800;
+    const CLASS_NAME = 0x10900;
+    const WM_NCCREATE = 0x0081;
+    const WM_CREATE = 0x0001;
+    /** @type {string[]} */
+    const order = [];
+    /** @type {number[][]} */
+    const data = [];
+    /** @type {(() => void) | null} */
+    let finishFirst = null;
+    /** @type {any} */
+    let context = null;
+    let heap = 0x13000;
+    context = setup({
+        allocate: (/** @type {number} */ size)=>{
+            heap += size + 15 & ~15;
+            return heap - (size + 15 & ~15);
+        },
+        dispatch: (wndProc, message)=>{
+            if (wndProc !== GAUGE_PROC)
+            {
+                return 0;
+            }
+            order.push(`${message.hwnd}:${message.message}`);
+            if (message.message === WM_NCCREATE)
+            {
+                return 1;
+            }
+            if (message.message === WM_CREATE)
+            {
+                const params = context.memory.u32(message.lParam);
+                const bytes = context.memory.bytes;
+                data.push(params === 0 ? [] : [0, 2, 4].map(at=>
+                    bytes[params + at] | bytes[params + at + 1] << 8));
+                if (finishFirst === null)
+                {
+                    // A procedure that answers late, as one that runs guest code does.
+                    return /** @type {any} */ (new Promise(resolve=>{
+                        finishFirst = ()=>resolve(0);
+                    }));
+                }
+            }
+            return 0;
+        },
+    });
+    const { memory, fns } = context;
+    memory.putString(CLASS_NAME, 'gauge');
+    memory.writeMemory(CLASS_STRUCT, new Uint8Array(new Uint32Array([
+        0, GAUGE_PROC, 0, 0, HINSTANCE, 0, 0, 0, 0, CLASS_NAME,
+    ]).buffer));
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    putTemplate(memory, [
+        { id: 301, x: 4, y: 4, cx: 30, cy: 4, className: 'gauge', data: [7, 8] },
+        { id: 302, x: 4, y: 10, cx: 30, cy: 4, className: 'gauge' },
+    ]);
+
+    const creating = fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(order.length, 2, 'the second control is not made while the first is answering');
+    /** @type {() => void} */ (/** @type {unknown} */ (finishFirst))();
+    const dialog = await creating;
+    assert.notEqual(dialog, 0);
+    const [first, second] = [301, 302].map(id=>fns.GetDlgItem.handler([dialog, id]));
+    assert.deepEqual(order, [`${first}:${WM_NCCREATE}`, `${first}:${WM_CREATE}`,
+        `${second}:${WM_NCCREATE}`, `${second}:${WM_CREATE}`]);
+    assert.deepEqual(data, [[6, 7, 8], []], 'the size word, then the data; NULL for none');
 });

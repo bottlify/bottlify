@@ -732,6 +732,60 @@ test('a pixel shader is made from guest memory, and its constants and function r
     h.release(root);
 });
 
+test('a getter answers a structure as one write of every byte of it', ()=>{
+    const h = seamed();
+    const device = h.createDevice(h.create());
+    /**
+     * The structure a setter took, as bytes: what the getter must hand back,
+     * byte for byte.
+     *
+     * @param {number} at @param {number[]} words
+     */
+    const put = (at, words)=>{
+        const bytes = new Uint8Array(new Uint32Array(words).buffer);
+        h.box.services.writeMemory(at, bytes);
+        return bytes;
+    };
+    const f = (/** @type {number} */ value)=>floatToDword(value);
+    const matrix = put(0x8000, Array.from({ length: 16 }, (unused, i)=>f(i * 0.5 - 3)));
+    assert.equal(h.device(device, 'SetTransform', [D3DTS.WORLD, 0x8000]), D3D_OK);
+    const material = put(0x8100, Array.from({ length: 17 }, (unused, i)=>f(i / 8)));
+    assert.equal(h.device(device, 'SetMaterial', [0x8100]), D3D_OK);
+    const light = put(0x8200, [3, ...Array.from({ length: 25 }, (unused, i)=>f(i + 0.25))]);
+    assert.equal(h.device(device, 'SetLight', [2, 0x8200]), D3D_OK);
+    const plane = put(0x8300, [f(1), f(-2), f(3), f(-4)]);
+    assert.equal(h.device(device, 'SetClipPlane', [1, 0x8300]), D3D_OK);
+    const viewport = put(0x8400, [2, 4, 32, 16, f(0.25), f(0.75)]);
+    assert.equal(h.device(device, 'SetViewport', [0x8400]), D3D_OK);
+
+    const writeMemory = h.box.services.writeMemory;
+    /** @type {[number, number][]} */
+    const writes = [];
+    h.box.services.writeMemory = (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>{
+        writes.push([at, bytes.length]);
+        writeMemory(at, bytes);
+    };
+    /** @type {[string, number[], Uint8Array][]} */
+    const getters = [
+        ['GetTransform', [D3DTS.WORLD], matrix],
+        ['GetMaterial', [], material],
+        ['GetLight', [2], light],
+        ['GetClipPlane', [1], plane],
+        ['GetViewport', [], viewport],
+    ];
+    for (const [name, args, expected] of getters)
+    {
+        const out = 0x9000;
+        writeMemory(out, new Uint8Array(expected.length).fill(0xcd));
+        writes.length = 0;
+        assert.equal(h.device(device, name, [...args, out]), D3D_OK);
+        assert.deepEqual(writes, [[out, expected.length]], `${name}: one write, the whole answer`);
+        assert.deepEqual(h.box.memory.readBytes(out, expected.length), expected,
+            `${name}: the bytes the setter took`);
+    }
+    h.box.services.writeMemory = writeMemory;
+});
+
 test('state a program reads back is written at the offsets it reads', ()=>{
     const h = seamed();
     const root = h.create();
@@ -1816,6 +1870,79 @@ test('a create with nowhere to put the interface fails instead of answering succ
     assert.equal(h.box.memory.readU32(out), 0);
 });
 
+/**
+ * A group's count as a guest routine leaves it, and the count of every call
+ * raised with it, which is what an entry reads first.
+ *
+ * @param {ReturnType<typeof seamed>} h @param {number} block
+ * @param {number} counter @param {number} value
+ */
+function counted(h, block, counter, value){
+    h.box.memory.writeU32(block + counter, value);
+    h.box.memory.writeU32(block + SHADOW.CALLS, h.box.memory.readU32(block + SHADOW.CALLS) + 1);
+}
+
+test('a value the host set through the trap is one the guest\'s next write is seen to change', ()=>{
+    // The routines leave a shader handle to the host, and MultiplyTransform
+    // is the host's alone: both set a value the block holds. Were the block
+    // left as it was, the guest setting the value before once more would
+    // write what the block already held and read as no change, and the
+    // device would keep the handle, or the product.
+    const h = seamed({ shadow: true });
+    const device = h.createDevice(h.create());
+    const block = h.box.memory.readU32(device + 4);
+    const out = 0xe000;
+    /** @param {number} at @param {number[]} words */
+    const write = (at, words)=>h.box.services.writeMemory(at,
+        new Uint8Array(Uint32Array.from(words).buffer));
+    write(0x7000, [0x20000000, 0x40020000, 0xffffffff]);
+    write(0x7100, [0xfffe0101, 0x00000009, 0xc0010000, 0x90e40000, 0xa0e40000, 0x0000ffff]);
+    assert.equal(h.device(device, 'CreateVertexShader', [0x7000, 0x7100, out, 0]), D3D_OK);
+    const handle = h.box.memory.readU32(out);
+    const fvf = 0x142;
+    /** What the guest routine does with a vertex format. */
+    const guestFormat = ()=>{
+        h.box.memory.writeU32(block + SHADOW.VERTEX_SHADER, fvf);
+        counted(h, block, SHADOW.BINDING_CALLS,
+            h.box.memory.readU32(block + SHADOW.BINDING_CALLS) + 1);
+    };
+    const bound = ()=>{
+        assert.equal(h.device(device, 'GetVertexShader', [out]), D3D_OK);
+        return h.box.memory.readU32(out);
+    };
+
+    guestFormat();
+    assert.equal(bound(), fvf);
+    assert.equal(h.box.trap(device, 'SetVertexShader', [handle]), D3D_OK);
+    assert.equal(bound(), handle);
+    guestFormat();
+    assert.equal(bound(), fvf, 'the format again, after the handle');
+    assert.equal(h.box.trap(device, 'SetVertexShader', [handle]), D3D_OK);
+    assert.equal(h.device(device, 'DeleteVertexShader', [handle]), D3D_OK);
+    assert.equal(bound(), 0, 'deleting the bound shader unbinds it');
+    guestFormat();
+    assert.equal(bound(), fvf);
+
+    // WORLD set in the guest, multiplied by the host, set in the guest again.
+    const matrix = Array.from({ length: 16 }, (_, i)=>floatToDword(i % 5 === 0 ? 2 : 0));
+    const world = block + SHADOW.TRANSFORMS + 24 * 64;
+    const guestWorld = ()=>{
+        write(world, matrix);
+        h.box.memory.writeU32(block + SHADOW.TRANSFORM_MARKS, 1 << 24);
+        counted(h, block, SHADOW.TRANSFORM_CALLS,
+            h.box.memory.readU32(block + SHADOW.TRANSFORM_CALLS) + 1);
+    };
+    write(0x8000, matrix);
+    guestWorld();
+    assert.equal(h.device(device, 'MultiplyTransform', [D3DTS.WORLD, 0x8000]), D3D_OK);
+    assert.equal(h.device(device, 'GetTransform', [D3DTS.WORLD, 0x8100]), D3D_OK);
+    assert.equal(h.fields.readF32(0x8100), 4, 'twice by twice');
+    guestWorld();
+    assert.equal(h.device(device, 'GetTransform', [D3DTS.WORLD, 0x8100]), D3D_OK);
+    assert.equal(h.fields.readF32(0x8100), 2, 'the matrix again, after the product');
+    assert.deepEqual(h.divergences, []);
+});
+
 test('a device is handed out with its block already in place, and reads what the guest wrote', ()=>{
     // The guest methods find the block one word past the interface pointer,
     // and that word is written when the interface is published. A device
@@ -1835,9 +1962,10 @@ test('a device is handed out with its block already in place, and reads what the
     assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + cull * 4),
         h.box.memory.readU32(out), 'mirrored as the device holds it');
 
-    // What the guest method does: write the state, count the call.
+    // What the guest method does: write the state, mark it, count the call.
     h.box.memory.writeU32(block + SHADOW.RENDER_STATES + cull * 4, 1);
-    h.box.memory.writeU32(block + SHADOW.RENDER_STATE_CALLS, 1);
+    h.box.memory.writeU32(block + SHADOW.RENDER_STATE_MARKS, 1 << cull);
+    counted(h, block, SHADOW.RENDER_STATE_CALLS, 1);
     assert.equal(h.device(device, 'GetRenderState', [cull, out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), 1, 'the host answers from the block');
     assert.equal(h.libraries.shadow().renderStateCalls, 1);
@@ -1855,7 +1983,7 @@ test('a device is handed out with its block already in place, and reads what the
     assert.equal(h.box.memory.readU32(vblock + BUFFER.LENGTH), 256);
     h.box.memory.writeU32(block + SHADOW.STREAMS, vb);
     h.box.memory.writeU32(block + SHADOW.STREAMS + 4, 24);
-    h.box.memory.writeU32(block + SHADOW.BINDING_CALLS, 1);
+    counted(h, block, SHADOW.BINDING_CALLS, 1);
     const stride = 0xe200;
     assert.equal(h.device(device, 'GetStreamSource', [0, out, stride]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), vb, 'bound to the buffer the guest named');
@@ -1867,13 +1995,13 @@ test('a device is handed out with its block already in place, and reads what the
     h.box.memory.writeU32(vblock + BUFFER.LOCKED, 1);
     h.box.memory.writeU32(vblock + BUFFER.FROM, 0);
     h.box.memory.writeU32(vblock + BUFFER.TO, 64);
-    h.box.memory.writeU32(block + SHADOW.LOCK_CALLS, 1);
+    counted(h, block, SHADOW.LOCK_CALLS, 1);
     const bits = 0xe300;
     assert.equal(h.buffer(vb, 'Lock', [0, 0, bits, 0]), D3DERR_INVALIDCALL);
     h.box.memory.writeU32(vblock + BUFFER.LOCKED, 0);
     h.box.memory.writeU32(block + SHADOW.RING, vblock);
     h.box.memory.writeU32(block + SHADOW.RING_HEAD, 1);
-    h.box.memory.writeU32(block + SHADOW.UNLOCK_CALLS, 1);
+    counted(h, block, SHADOW.UNLOCK_CALLS, 1);
     assert.equal(h.buffer(vb, 'Lock', [0, 0, bits, 0]), D3D_OK);
     assert.equal(h.box.memory.readU32(vblock + BUFFER.LOCKED), 1, 'the guest routine sees it');
     assert.equal(h.buffer(vb, 'Unlock'), D3D_OK);
@@ -2035,12 +2163,13 @@ test('a texture, a stage state and a material the guest wrote reach the device',
     // What the guest routines leave: a pointer in a stage slot, a value in
     // the stage table, seventeen floats, and a count for each.
     h.box.memory.writeU32(block + SHADOW.TEXTURES + 3 * 4, texture);
-    h.box.memory.writeU32(block + SHADOW.TEXTURE_CALLS, 1);
+    counted(h, block, SHADOW.TEXTURE_CALLS, 1);
     h.box.memory.writeU32(block + SHADOW.STAGE_STATES + (3 * 32 + D3DTSS.COLOROP) * 4, D3DTOP.ADD);
-    h.box.memory.writeU32(block + SHADOW.STAGE_STATE_CALLS, 1);
+    h.box.memory.writeU32(block + SHADOW.STAGE_STATE_MARKS + 3 * 4, 1 << D3DTSS.COLOROP);
+    counted(h, block, SHADOW.STAGE_STATE_CALLS, 1);
     const material = 0xe300;
     h.fields.writeF32(block + SHADOW.MATERIAL + 16 * 4, 12.5);   // Power
-    h.box.memory.writeU32(block + SHADOW.MATERIAL_CALLS, 1);
+    counted(h, block, SHADOW.MATERIAL_CALLS, 1);
 
     assert.equal(h.device(device, 'GetTexture', [3, out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), texture, 'bound to the texture the guest named');
@@ -2064,7 +2193,7 @@ test('a texture, a stage state and a material the guest wrote reach the device',
         created]), D3D_OK);
     const second = h.box.memory.readU32(created);
     h.box.memory.writeU32(block + SHADOW.TEXTURES, second);
-    h.box.memory.writeU32(block + SHADOW.TEXTURE_CALLS, 2);
+    counted(h, block, SHADOW.TEXTURE_CALLS, 2);
     assert.equal(h.release(second), 0);
     assert.equal(h.object(second), null, 'the program holds nothing');
     assert.equal(h.box.memory.readU32(block + SHADOW.TEXTURES), STALE_POINTER);
@@ -2078,7 +2207,7 @@ test('a texture, a stage state and a material the guest wrote reach the device',
         created]), D3D_OK);
     const third = h.box.memory.readU32(created);
     h.box.memory.writeU32(block + SHADOW.TEXTURES, third);
-    h.box.memory.writeU32(block + SHADOW.TEXTURE_CALLS, 3);
+    counted(h, block, SHADOW.TEXTURE_CALLS, 3);
     assert.equal(h.device(device, 'GetTexture', [0, out]), D3D_OK);
     assert.equal(h.object(h.box.memory.readU32(out)), h.object(third));
     h.release(h.box.memory.readU32(out));
@@ -2086,7 +2215,7 @@ test('a texture, a stage state and a material the guest wrote reach the device',
     // Unbinding through the guest leaves it, and a stage the program never
     // wrote is left alone whatever the device holds.
     h.box.memory.writeU32(block + SHADOW.TEXTURES, 0);
-    h.box.memory.writeU32(block + SHADOW.TEXTURE_CALLS, 4);
+    counted(h, block, SHADOW.TEXTURE_CALLS, 4);
     assert.equal(h.device(device, 'GetTexture', [0, out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), 0);
     assert.equal(h.device(device, 'GetTexture', [3, out]), D3D_OK);

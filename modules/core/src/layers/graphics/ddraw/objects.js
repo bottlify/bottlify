@@ -1772,9 +1772,13 @@ export function createDirectDraw(options = {}){
             pixelFormatForDepth(displayMode.bitCount));
         const depthRequest = (request.caps & DDSCAPS_ZBUFFER) !== 0
             && (request.flags & DDSD_ZBUFFERBITDEPTH) !== 0;
+        // The descriptor's format counts only under DDSD_PIXELFORMAT: without it
+        // the fields hold whatever the caller left there, zeroes as often as
+        // not, and the surface is in the display mode's format.
+        const named = (request.flags & DDSD_PIXELFORMAT) !== 0 ? request.pixelFormat : undefined;
         const pixelFormat = depthRequest
             ? depthFormatForDepth(request.zBufferBitDepth ?? 16)
-            : (primary || !request.pixelFormat ? modeFormat : request.pixelFormat);
+            : (primary || !named ? modeFormat : named);
         const levels = mipLevelCount({
             caps: validity.caps,
             width,

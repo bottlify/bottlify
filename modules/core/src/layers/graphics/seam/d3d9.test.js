@@ -268,6 +268,61 @@ function seamed(options = {}){
     };
 }
 
+test('a getter answers a structure as one write of every byte of it', ()=>{
+    const h = seamed();
+    const { device } = h.createDevice(h.create());
+    /** @param {number} value */
+    const f = value=>new Uint32Array(new Float32Array([value]).buffer)[0];
+    /**
+     * The structure a setter took, as bytes: what the getter must hand back,
+     * byte for byte.
+     *
+     * @param {number} at @param {number[]} words
+     */
+    const put = (at, words)=>{
+        const bytes = new Uint8Array(new Uint32Array(words).buffer);
+        h.box.services.writeMemory(at, bytes);
+        return bytes;
+    };
+    const matrix = put(0x8000, Array.from({ length: 16 }, (unused, i)=>f(i * 0.5 - 3)));
+    assert.equal(h.device(device, 'SetTransform', [256, 0x8000]), D3D_OK);
+    const material = put(0x8100, Array.from({ length: 17 }, (unused, i)=>f(i / 8)));
+    assert.equal(h.device(device, 'SetMaterial', [0x8100]), D3D_OK);
+    const light = put(0x8200, [3, ...Array.from({ length: 25 }, (unused, i)=>f(i + 0.25))]);
+    assert.equal(h.device(device, 'SetLight', [2, 0x8200]), D3D_OK);
+    const viewport = put(0x8400, [2, 4, 32, 16, f(0.25), f(0.75)]);
+    assert.equal(h.device(device, 'SetViewport', [0x8400]), D3D_OK);
+    const constants = put(0x8500, Array.from({ length: 8 }, (unused, i)=>f(i - 2.5)));
+    assert.equal(h.device(device, 'SetVertexShaderConstantF', [3, 0x8500, 2]), D3D_OK);
+
+    const writeMemory = h.box.services.writeMemory;
+    /** @type {[number, number][]} */
+    const writes = [];
+    h.box.services.writeMemory = (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>{
+        writes.push([at, bytes.length]);
+        writeMemory(at, bytes);
+    };
+    /** @type {[string, number[], number[], Uint8Array][]} */
+    const getters = [
+        ['GetTransform', [256], [], matrix],
+        ['GetMaterial', [], [], material],
+        ['GetLight', [2], [], light],
+        ['GetViewport', [], [], viewport],
+        ['GetVertexShaderConstantF', [3], [2], constants],
+    ];
+    for (const [name, before, after, expected] of getters)
+    {
+        const out = 0x9000;
+        writeMemory(out, new Uint8Array(expected.length).fill(0xcd));
+        writes.length = 0;
+        assert.equal(h.device(device, name, [...before, out, ...after]), D3D_OK);
+        assert.deepEqual(writes, [[out, expected.length]], `${name}: one write, the whole answer`);
+        assert.deepEqual(h.box.memory.readBytes(out, expected.length), expected,
+            `${name}: the bytes the setter took`);
+    }
+    h.box.services.writeMemory = writeMemory;
+});
+
 test('the root makes a device and describes itself in the shape the header gives', ()=>{
     const h = seamed();
     const root = h.create();

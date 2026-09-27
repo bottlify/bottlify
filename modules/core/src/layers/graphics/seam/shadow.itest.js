@@ -11,13 +11,17 @@
  * bytes are x86 that writes the blocks the way the host reads them, pops
  * exactly its arguments, and leaves for the trap in every case it does not
  * take -- a state past the block, the host's flag, a lock already held, a
- * range past the buffer, a full ring.
+ * range past the buffer, a full ring -- and that the marks it leaves name the
+ * words it wrote. On both engines: the marks are `bts` into a string of bits,
+ * an addressing form each executes on its own.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createV86Host } from '../../cpu/internal/v86-host.js';
+import { createCorkHost } from '../../cpu/internal/cork-host.js';
+import * as cork from '../../../../../cork/src/index.js';
 import {
     BUFFER, FLAG_SLOW_PATH, SHADOW, TEXTURE, getSurfaceLevelCode, lockCode, setIndicesCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
@@ -100,6 +104,11 @@ const STEPS = [
     step(ROUTINES.surfaceLevel, TEX, [0, OUT]),          // 27: not published yet: the trap
     step(ROUTINES.surfaceLevel, TEX, [3, OUT]),          // 28: no such level: refused here
     step(ROUTINES.surfaceLevel, TEX, [1, 0]),            // 29: nowhere to put it: the trap
+    step(ROUTINES.renderState, OBJECT, [255, 3]),        // 30: the last state: bit 31 of row 7
+    step(ROUTINES.renderState, OBJECT, [40, 4]),         // 31: row 1
+    step(ROUTINES.transform, OBJECT, [23, MATRIX]),      // 32: TEXTURE7, slot 23
+    step(ROUTINES.transform, OBJECT, [259, MATRIX]),     // 33: WORLD3, slot 27
+    step(ROUTINES.stageState, OBJECT, [7, D3DTSS.TEXTURETRANSFORMFLAGS, 2]),  // 34: the last stage
 ];
 
 /** @param {typeof STEPS[number]} entry @param {number} at */
@@ -131,16 +140,74 @@ function program(){
     return { bytes: new Uint8Array(code), starts, end: PROGRAM + code.length };
 }
 
-test('the guest routines write the blocks and leave what they cannot take to the trap', async()=>{
+/**
+ * A processor of either engine, as the one thing the test needs of it: run a
+ * step from its first byte on a fresh stack until the halt after it.
+ *
+ * @param {'emulator' | 'cork'} engine
+ */
+async function processor(engine){
+    const config = {
+        memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
+        initialStack: STACK,
+    };
+    if (engine === 'cork')
+    {
+        const host = createCorkHost({ ...config, engine: cork, cork: {} });
+        return {
+            host,
+            /** @param {number} at */
+            run(at){
+                host.writeReg32('eip', at);
+                host.writeReg32('esp', STACK);
+                host.runSlice(1000);
+            },
+            eip: ()=>host.readReg32('eip'),
+            esp: ()=>host.readReg32('esp'),
+            eax: ()=>host.readReg32('eax'),
+            stop: ()=>{},
+        };
+    }
     const wasm = await readFile(new URL('v86.wasm', PREBUILT));
     const host = await createV86Host({
+        ...config,
         moduleUrl: new URL('libv86.mjs', PREBUILT).href,
         wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        memorySize: 64 * 1024 * 1024,
-        trapPort: 0xb077,
-        entryVector: 0x7000,
-        initialStack: STACK,
     });
+    let booted = false;
+    return {
+        host,
+        /** @param {number} at */
+        run(at){
+            if (!booted)
+            {
+                host.cpu().main_loop();
+                booted = true;
+            }
+            host.cpu().instruction_pointer[0] = at;
+            host.cpu().reg32[4] = STACK;
+            host.cpu().in_hlt[0] = 0;
+            host.cpu().run_slice(1000);
+        },
+        eip: ()=>host.cpu().instruction_pointer[0] >>> 0,
+        esp: ()=>host.cpu().reg32[4] >>> 0,
+        eax: ()=>host.cpu().reg32[0] >>> 0,
+        stop: ()=>host.stop(),
+    };
+}
+
+for (const engine of /** @type {const} */ (['emulator', 'cork']))
+{
+    test(`the guest routines write the blocks and leave what they cannot take to the trap, under ${
+        engine}`, async()=>{
+        await routines(engine);
+    });
+}
+
+/** @param {'emulator' | 'cork'} engine */
+async function routines(engine){
+    const machine = await processor(engine);
+    const { host } = machine;
 
     host.writePhysical(ROUTINES.renderState, setRenderStateCode(ROUTINES.renderState, TRAP));
     host.writePhysical(ROUTINES.transform, setTransformCode(ROUTINES.transform, TRAP));
@@ -175,7 +242,6 @@ test('the guest routines write the blocks and leave what they cannot take to the
     const { bytes: image, starts, end } = program();
     host.writePhysical(PROGRAM, image);
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
-    host.cpu().main_loop();
 
     /** @param {number} at */
     const read = at=>{
@@ -184,7 +250,7 @@ test('the guest routines write the blocks and leave what they cannot take to the
     };
     /** @param {number} at @param {number} value */
     const write = (at, value)=>host.writePhysical(at, new Uint8Array(u32(value)));
-    const eip = ()=>host.cpu().instruction_pointer[0] >>> 0;
+    const { eip } = machine;
     /**
      * Runs one step from a fresh stack, and says whether it answered to the
      * program or left for the trap. An answer must also have left the stack
@@ -194,18 +260,15 @@ test('the guest routines write the blocks and leave what they cannot take to the
      * @param {number} index
      */
     const run = index=>{
-        host.cpu().instruction_pointer[0] = starts[index];
-        host.cpu().reg32[4] = STACK;
-        host.cpu().in_hlt[0] = 0;
-        host.cpu().run_slice(1000);
+        machine.run(starts[index]);
         if (eip() === TRAP + 1)
         {
             return 'trap';
         }
         const after = index + 1 < starts.length ? starts[index + 1] : end;
         assert.equal(eip(), after, `step ${index} halted after its call`);
-        assert.equal(host.cpu().reg32[4] >>> 0, STACK, `step ${index} left the stack as it was`);
-        const answer = host.cpu().reg32[0] >>> 0;
+        assert.equal(machine.esp(), STACK, `step ${index} left the stack as it was`);
+        const answer = machine.eax();
         if (answer === D3DERR_INVALIDCALL)
         {
             return 'invalid';
@@ -214,9 +277,24 @@ test('the guest routines write the blocks and leave what they cannot take to the
         return 'ok';
     };
 
+    /** The block's marks, as the host would find them. */
+    const marks = ()=>({
+        states: Array.from({ length: 8 }, (unused, row)=>
+            read(BLOCK + SHADOW.RENDER_STATE_MARKS + row * 4)),
+        stages: Array.from({ length: 8 }, (unused, stage)=>
+            read(BLOCK + SHADOW.STAGE_STATE_MARKS + stage * 4)),
+        transforms: read(BLOCK + SHADOW.TRANSFORM_MARKS),
+    });
+    const unmarked = marks();
+    /** Every call a routine took is counted once more, where an entry looks first. */
+    const calls = ()=>read(BLOCK + SHADOW.CALLS);
+
     assert.equal(run(0), 'ok');
     assert.equal(read(BLOCK + SHADOW.RENDER_STATES + 8 * 4), 7);
     assert.equal(read(BLOCK + SHADOW.RENDER_STATE_CALLS), 1);
+    assert.equal(calls(), 1);
+    assert.deepEqual(marks(), { ...unmarked, states: [1 << 8, 0, 0, 0, 0, 0, 0, 0] },
+        'state 8 marked, and nothing else');
 
     assert.equal(run(1), 'ok');
     const slot = BLOCK + SHADOW.TRANSFORMS + 24 * 64;
@@ -224,9 +302,15 @@ test('the guest routines write the blocks and leave what they cannot take to the
     assert.deepEqual([...written], [...matrix], 'WORLD copied into its slot');
     assert.equal(read(BLOCK + SHADOW.TRANSFORM_CALLS), 1);
     assert.equal(read(BLOCK + SHADOW.RENDER_STATE_CALLS), 1, 'the other counter untouched');
+    assert.equal(marks().transforms, 1 << 24, 'slot 24 marked');
+    assert.equal(read(BLOCK + SHADOW.TRANSFORMS + 25 * 64), 0, 'and the slot after untouched');
+    assert.equal(calls(), 2);
 
+    const before = marks();
     assert.equal(run(2), 'trap', 'a state past the block');
     assert.equal(read(BLOCK + SHADOW.RENDER_STATE_CALLS), 1, 'and not counted');
+    assert.deepEqual(marks(), before, 'nor marked');
+    assert.equal(calls(), 2);
 
     write(BLOCK + SHADOW.FLAGS, FLAG_SLOW_PATH);
     assert.equal(run(3), 'trap', 'with the flag up, a valid state too');
@@ -297,10 +381,14 @@ test('the guest routines write the blocks and leave what they cannot take to the
     assert.equal(run(20), 'ok');
     assert.equal(read(BLOCK + SHADOW.STAGE_STATES + (2 * 32 + D3DTSS.COLOROP) * 4), 5);
     assert.equal(read(BLOCK + SHADOW.STAGE_STATE_CALLS), 1);
+    assert.deepEqual(marks().stages, [0, 0, 1 << D3DTSS.COLOROP, 0, 0, 0, 0, 0],
+        'the type\'s bit in stage 2\'s marks');
+    const staged = marks();
     assert.equal(run(21), 'trap', 'a type this version has not got is the host\'s');
     assert.equal(run(22), 'trap', 'a type past the table is the host\'s');
     assert.equal(run(23), 'invalid');
     assert.equal(read(BLOCK + SHADOW.STAGE_STATE_CALLS), 1);
+    assert.deepEqual(marks(), staged, 'none of those marked');
 
     assert.equal(run(24), 'ok');
     const copied = new Float32Array(host.readPhysical(BLOCK + SHADOW.MATERIAL, 68).slice().buffer);
@@ -324,5 +412,25 @@ test('the guest routines write the blocks and leave what they cannot take to the
     assert.equal(run(29), 'trap', 'a null out-pointer is refused by the host');
     assert.equal(read(TBLOCK + TEXTURE.REFS), 1);
 
-    host.stop();
-});
+    // The far ends of each string of marks: the sign bit of the last row,
+    // the last stage, the last slot.
+    assert.equal(run(30), 'ok');
+    assert.equal(run(31), 'ok');
+    assert.equal(read(BLOCK + SHADOW.RENDER_STATES + 255 * 4), 3);
+    assert.equal(read(BLOCK + SHADOW.RENDER_STATES + 40 * 4), 4);
+    assert.deepEqual(marks().states, [1 << 8, 1 << 8, 0, 0, 0, 0, 0, 0x80000000]);
+    assert.equal(run(32), 'ok');
+    assert.equal(run(33), 'ok');
+    assert.equal(marks().transforms, (1 << 23 | 1 << 24 | 1 << 27) >>> 0);
+    assert.equal(read(BLOCK + SHADOW.TRANSFORM_CALLS), 3);
+    assert.equal(run(34), 'ok');
+    assert.equal(read(BLOCK + SHADOW.STAGE_STATES
+        + (7 * 32 + D3DTSS.TEXTURETRANSFORMFLAGS) * 4), 2);
+    assert.equal(marks().stages[7], 1 << D3DTSS.TEXTURETRANSFORMFLAGS);
+    // One for every call a routine answered on the device's behalf: steps 0,
+    // 1, 5, 7, 10, 11, 12, 14, 15, 18, 20, 24 and 30 to 34. A refusal made
+    // in the guest is not one, and a level handed out is the texture's.
+    assert.equal(calls(), 17);
+
+    machine.stop();
+}

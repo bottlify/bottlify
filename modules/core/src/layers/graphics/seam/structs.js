@@ -471,7 +471,96 @@ export function dwordsOf(bytes, count){
 }
 
 /**
+ * A colour of four floats, as D3DCOLORVALUE lays it out.
+ *
+ * @typedef {{ r: number, g: number, b: number, a: number }} Colour
+ */
+
+/**
+ * A material into seventeen floats from `at`: four colours of four, in the
+ * order D3DMATERIAL7, 8 and 9 lay them out, then the power.
+ *
+ * @param {Float32Array} floats
+ * @param {{ Diffuse: Colour, Ambient: Colour, Specular: Colour, Emissive: Colour,
+ *     Power: number }} material
+ */
+export function putMaterial(floats, material){
+    putColour(floats, 0, material.Diffuse);
+    putColour(floats, 4, material.Ambient);
+    putColour(floats, 8, material.Specular);
+    putColour(floats, 12, material.Emissive);
+    floats[16] = material.Power;
+}
+
+/**
+ * A light into the 26 dwords of D3DLIGHT7, whose layout D3D8's and D3D9's
+ * lights keep under their own names: the type as a dword, three colours, a
+ * position and a direction, and seven floats. `floats` and `dwords` are two
+ * views of the same bytes.
+ *
+ * @param {Float32Array} floats @param {Uint32Array} dwords @param {any} light
+ */
+export function putLight(floats, dwords, light){
+    dwords[D3DLIGHT7.dltType >>> 2] = light.Type >>> 0;
+    putColour(floats, D3DLIGHT7.dcvDiffuse >>> 2, light.Diffuse);
+    putColour(floats, D3DLIGHT7.dcvSpecular >>> 2, light.Specular);
+    putColour(floats, D3DLIGHT7.dcvAmbient >>> 2, light.Ambient);
+    const position = D3DLIGHT7.dvPosition >>> 2;
+    floats[position] = light.Position.x;
+    floats[position + 1] = light.Position.y;
+    floats[position + 2] = light.Position.z;
+    const direction = D3DLIGHT7.dvDirection >>> 2;
+    floats[direction] = light.Direction.x;
+    floats[direction + 1] = light.Direction.y;
+    floats[direction + 2] = light.Direction.z;
+    floats[D3DLIGHT7.dvRange >>> 2] = light.Range;
+    floats[D3DLIGHT7.dvFalloff >>> 2] = light.Falloff;
+    floats[D3DLIGHT7.dvAttenuation0 >>> 2] = light.Attenuation0;
+    floats[D3DLIGHT7.dvAttenuation1 >>> 2] = light.Attenuation1;
+    floats[D3DLIGHT7.dvAttenuation2 >>> 2] = light.Attenuation2;
+    floats[D3DLIGHT7.dvTheta >>> 2] = light.Theta;
+    floats[D3DLIGHT7.dvPhi >>> 2] = light.Phi;
+}
+
+/** @param {Float32Array} floats @param {number} at @param {Colour} colour */
+function putColour(floats, at, colour){
+    floats[at] = colour.r;
+    floats[at + 1] = colour.g;
+    floats[at + 2] = colour.b;
+    floats[at + 3] = colour.a;
+}
+
+/**
+ * A layout's fields in the order of their offsets, and whether two of them
+ * share one -- worked out once per layout, not per structure written.
+ *
+ * @type {WeakMap<Record<string, number>, { order: [string, number][], shared: boolean }>}
+ */
+const fieldOrders = new WeakMap();
+
+/** @param {Record<string, number>} layout */
+function fieldOrder(layout){
+    let known = fieldOrders.get(layout);
+    if (!known)
+    {
+        /** @type {[string, number][]} */
+        const order = Object.entries(layout).filter(([name])=>name !== 'SIZE');
+        order.sort((a, b)=>a[1] - b[1]);
+        const shared = order.some(([, offset], i)=>i > 0 && order[i - 1][1] + 4 > offset);
+        known = { order, shared };
+        fieldOrders.set(layout, known);
+    }
+    return known;
+}
+
+/**
  * Reading and writing dwords through the memory service, in one place.
+ *
+ * What a call answers through a structure or an array is written as one
+ * block: it is put together in a buffer of the module's and handed to
+ * `writeMemory` whole. A write into guest memory costs the same checks and
+ * bookkeeping whether it carries four bytes or sixty-four, so a matrix
+ * written a float at a time paid for sixteen.
  *
  * @param {any} memory  readMemory/writeMemory, as the graphics services give them.
  */
@@ -505,9 +594,67 @@ export function createFields(memory){
     /** A float shares its four bytes with a dword; only the reading differs. */
     const scratch = new DataView(new ArrayBuffer(4));
 
+    /**
+     * Where a block is put together before it is written: the views are the
+     * same bytes, so a structure mixing floats and dwords is put in with
+     * whichever each field needs. Valid until the next write through here;
+     * `writeMemory` copies what it is handed.
+     */
+    const outgoing = { bytes: new Uint8Array(0), floats: new Float32Array(0),
+        dwords: new Uint32Array(0) };
+    /** @param {number} count  Dwords the block needs. */
+    const staged = count=>{
+        if (count > outgoing.dwords.length)
+        {
+            const buffer = new ArrayBuffer(Math.max(256, count * 4));
+            outgoing.bytes = new Uint8Array(buffer);
+            outgoing.floats = new Float32Array(buffer);
+            outgoing.dwords = new Uint32Array(buffer);
+        }
+        return outgoing;
+    };
+    /**
+     * The first `count` dwords put together, written at `address` as one block.
+     *
+     * @param {number} address @param {number} count @param {number} [from]  The first dword.
+     */
+    const writeStaged = (address, count, from = 0)=>{
+        memory.writeMemory(address >>> 0, outgoing.bytes.subarray(from * 4, (from + count) * 4));
+    };
+
     return {
         readU32,
         writeU32,
+        staged,
+        writeStaged,
+
+        /**
+         * Floats, as one block.
+         *
+         * @param {number} address @param {ArrayLike<number>} values
+         */
+        writeFloats(address, values){
+            const { floats } = staged(values.length);
+            for (let index = 0; index < values.length; index++)
+            {
+                floats[index] = values[index];
+            }
+            writeStaged(address, values.length);
+        },
+
+        /**
+         * Dwords, as one block; each value as a dword stores it, modulo 2^32.
+         *
+         * @param {number} address @param {ArrayLike<number>} values
+         */
+        writeDwords(address, values){
+            const { dwords } = staged(values.length);
+            for (let index = 0; index < values.length; index++)
+            {
+                dwords[index] = values[index];
+            }
+            writeStaged(address, values.length);
+        },
         /** @param {number} address */
         readF32(address){
             scratch.setUint32(0, readU32(address), true);
@@ -556,28 +703,76 @@ export function createFields(memory){
         },
 
         /**
+         * A structure, one block for each run of fields named in `values`
+         * that follow one another -- the whole of it, where every field is
+         * named. A field not named is left as it was, and so is a field of
+         * a layout whose fields share an offset, which is written one at a
+         * time in the order `values` names them.
+         *
          * @param {number} address
          * @param {Record<string, number>} layout
          * @param {Record<string, number>} values  Only the named fields are written.
-         * @param {string[]} [floats]
+         * @param {readonly string[]} [floats]
          */
         writeStruct(address, layout, values, floats = []){
-            for (const [name, value] of Object.entries(values))
+            const { order, shared } = fieldOrder(layout);
+            if (shared)
             {
-                const offset = layout[name];
-                if (offset === undefined)
+                for (const [name, value] of Object.entries(values))
+                {
+                    const offset = layout[name];
+                    if (offset === undefined)
+                    {
+                        continue;
+                    }
+                    if (floats.includes(name))
+                    {
+                        scratch.setFloat32(0, value, true);
+                        writeU32(address + offset, scratch.getUint32(0, true));
+                    }
+                    else
+                    {
+                        writeU32(address + offset, value);
+                    }
+                }
+                return;
+            }
+            const block = staged(order.length);
+            // The run being put together: its first field's offset, and
+            // where its next field would have to start to join it.
+            let first = -1;
+            let end = -1;
+            let at = 0;
+            for (let index = 0; index < order.length; index++)
+            {
+                const [name, offset] = order[index];
+                if (!Object.hasOwn(values, name))
                 {
                     continue;
                 }
+                if (offset !== end)
+                {
+                    if (first >= 0)
+                    {
+                        writeStaged(address + first, (end - first) >>> 2);
+                    }
+                    first = offset;
+                    at = 0;
+                }
                 if (floats.includes(name))
                 {
-                    scratch.setFloat32(0, value, true);
-                    writeU32(address + offset, scratch.getUint32(0, true));
+                    block.floats[at] = values[name];
                 }
                 else
                 {
-                    writeU32(address + offset, value);
+                    block.dwords[at] = values[name];
                 }
+                at++;
+                end = offset + 4;
+            }
+            if (first >= 0)
+            {
+                writeStaged(address + first, (end - first) >>> 2);
             }
         },
     };
