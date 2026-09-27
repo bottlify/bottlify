@@ -31,7 +31,9 @@ import {
 
 /** How much of each unbounded collection survives the trip back out. */
 const LIMITS = {
-    events: 400, output: 400, calls: 200,
+    // Output whole: a conformance test prints three pieces per failed check,
+    // and 400 ended Wine's d3d8 visual at its 130th.
+    events: 400, output: 20000, calls: 200,
     // Whole files, not a tail. A game of this age writes its own crash report,
     // and it names the exception, the address and the module -- all of which
     // are at the top of the file, which is exactly what a tail throws away.

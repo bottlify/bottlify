@@ -78,7 +78,8 @@ const FVF_TEXTURED_QUAD = FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
  *           dumpDraws?: boolean, maxDraws?: number, fog?: boolean, mips?: boolean,
  *           probeTexture?: string,
  *           divergence?: (api: string, detail: string)=>void,
- *           skipTexture?: string, compressedTextures?: boolean }} [options]
+ *           skipTexture?: string, compressedTextures?: boolean,
+ *           writable?: boolean }} [options]
  */
 function harness(options = {}){
     const gpu = createFakeDevice();
@@ -102,6 +103,12 @@ function harness(options = {}){
             windows.push(length);
             return ram.subarray(address - RAM_BASE, address - RAM_BASE + length);
         },
+        // Given, what a target holds can be read back into its memory.
+        ...options.writable ? {
+            writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
+                ram.set(bytes, address - RAM_BASE);
+            },
+        } : {},
         createSampler: descriptor=>{
             const sampler = { kind: 'sampler', descriptor };
             samplers.push(sampler);
@@ -365,6 +372,39 @@ function selectTexture(device){
 }
 
 // --- byte-exact: what the engine computes, evaluated on the processor ---
+
+test('a back buffer copied into a system-memory surface is read back first, not copied on the GPU',
+    async()=>{
+        // How Wine's d3d8 tests read a pixel: CopyRects from the back buffer
+        // into a system-memory texture's level, then a lock of that level. The
+        // copy was made on the GPU and the level's memory stayed empty, so
+        // every colour read back was black.
+        const h = harness({ writable: true });
+        const { device } = h;
+        /** @type {{ surface?: any }} */
+        const back = {};
+        assert.equal(device.GetBackBuffer(0, 0, back), D3D_OK);
+        /** @type {{ texture?: any }} */
+        const texture = {};
+        assert.equal(device.CreateTexture(4, 4, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.SYSTEMMEM, texture),
+            D3D_OK);
+        /** @type {{ surface?: any }} */
+        const level = {};
+        assert.equal(texture.texture.GetSurfaceLevel(0, level), D3D_OK);
+
+        /** @type {{ moves?: any[] }} */
+        const held = {};
+        const answer = device.CopyRects(back.surface, null, 0, level.surface, null, held);
+        assert.equal(typeof answer?.then, 'function', 'waits for the target to be read back');
+        assert.equal(await answer, D3D_OK);
+        assert.equal(held.moves?.length, 1, 'and copies through memory');
+        assert.equal(held.moves?.[0].from, back.surface.base);
+        assert.equal(held.moves?.[0].to, level.surface.base);
+
+        level.surface.release();
+        texture.texture.release();
+        back.surface.release();
+    });
 
 test('byte-exact: a solid fill is that colour in every pixel it covers, blue byte first', async()=>{
     const h = harness();

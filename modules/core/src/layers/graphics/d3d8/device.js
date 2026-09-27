@@ -2895,7 +2895,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const copies = chosen && targets
                 ? chosen.map((rect, index)=>({ rect, at: targets[index] }))
                 : [{ rect: whole, at: { x: 0, y: 0 } }];
-            if (renderer?.copySurface
+            // A system-memory surface lives in memory, whatever copy of it the
+            // renderer keeps: copied into on the GPU, a lock of it read nothing.
+            if (renderer?.copySurface && to.Pool !== D3DPOOL.SYSTEMMEM
                 && copies.every(copy=>
                     renderer.copySurface(source, copy.rect, destination, copy.at)))
             {
@@ -2903,29 +2905,38 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 return D3D_OK;
             }
             const bytesPerPixel = FORMAT_INFO[from.Format].bytesPerPixel;
-            out.moves = chosen && targets
-                ? chosen.map((rect, index)=>({
-                    from: source.base + rect.top * pitchOf(from) + rect.left * bytesPerPixel,
-                    to: destination.base + targets[index].y * pitchOf(to)
-                        + targets[index].x * bytesPerPixel,
-                    rowBytes: (rect.right - rect.left) * bytesPerPixel,
-                    rows: rect.bottom - rect.top,
-                    fromPitch: pitchOf(from),
-                    toPitch: pitchOf(to),
-                }))
-                : [wholeSurfaceMove(source, destination)];
-            // A texture level written this way is written as a lock writes
-            // it, which is what the next UpdateTexture from it carries.
-            for (const copy of copies)
-            {
-                destination.noteWritten?.({
-                    left: copy.at.x, top: copy.at.y,
-                    right: copy.at.x + copy.rect.right - copy.rect.left,
-                    bottom: copy.at.y + copy.rect.bottom - copy.rect.top,
-                });
-            }
-            renderer?.markDirty(destination);
-            return D3D_OK;
+            const describeMoves = ()=>{
+                out.moves = chosen && targets
+                    ? chosen.map((rect, index)=>({
+                        from: source.base + rect.top * pitchOf(from) + rect.left * bytesPerPixel,
+                        to: destination.base + targets[index].y * pitchOf(to)
+                            + targets[index].x * bytesPerPixel,
+                        rowBytes: (rect.right - rect.left) * bytesPerPixel,
+                        rows: rect.bottom - rect.top,
+                        fromPitch: pitchOf(from),
+                        toPitch: pitchOf(to),
+                    }))
+                    : [wholeSurfaceMove(source, destination)];
+                // A texture level written this way is written as a lock writes
+                // it, which is what the next UpdateTexture from it carries.
+                for (const copy of copies)
+                {
+                    destination.noteWritten?.({
+                        left: copy.at.x, top: copy.at.y,
+                        right: copy.at.x + copy.rect.right - copy.rect.left,
+                        bottom: copy.at.y + copy.rect.bottom - copy.rect.top,
+                    });
+                }
+                renderer?.markDirty(destination);
+                return D3D_OK;
+            };
+            // A render target's pixels are the GPU's, and its memory holds
+            // nothing drawn: copied from there, a back buffer read back through
+            // an image surface -- how a program samples what it drew -- was
+            // black. They are read back first, as a lock of the target reads.
+            const pixels = surfaceTypeOf(from) === SURFACE_TYPE.RENDER_TARGET
+                ? targetPixels() : undefined;
+            return pixels ? pixels.readBack(source).then(describeMoves) : describeMoves();
         },
 
         /**

@@ -1611,11 +1611,16 @@ export function createDirect3D8Seam(
                 readArrayOf(rects, count >>> 0, RECT), count >>> 0,
                 publisher.objectAt(destination),
                 readArrayOf(points, count >>> 0, POINT), held);
-            if (hr === D3D_OK)
-            {
-                applyMoves(held.moves ?? []);
-            }
-            return hr;
+            /** @param {number} code */
+            const settle = code=>{
+                if (code === D3D_OK)
+                {
+                    applyMoves(held.moves ?? []);
+                }
+                return code;
+            };
+            // A copy out of a render target waits for its pixels to be read back.
+            return typeof hr === 'number' ? settle(hr) : hr.then(settle);
         },
 
         /** @param {any} device @param {number[]} args */
