@@ -90,8 +90,9 @@ const SLOT = {
  * @property {(bytes: number) => number} allocate   The C runtime's operator new.
  * @property {(address: number) => void} release    Its operator delete.
  * @property {{ init: (cs: number) => any, remove: (cs: number) => any,
- *     enter: (cs: number) => any, leave: (cs: number) => any }} locks
- *     The kernel's critical sections; any may answer with a promise.
+ *     enter: (cs: number, thread: any) => any, leave: (cs: number, thread: any) => any }} locks
+ *     The kernel's critical sections; any may answer with a promise. Entering
+ *     and leaving are guest code, run on the thread whose call this is.
  * @property {{ open: (path: number, flags: number, prot: number) => any,
  *     close: (fd: number) => any, read: (fd: number, buffer: number, count: number) => any,
  *     write: (fd: number, buffer: number, count: number) => any,
@@ -1456,22 +1457,22 @@ export function createIostreamFunctions(host){
 
         // --- the runtime's lock, and ios's ---
         _mtlock: cdecl(4, function* (cs){
-            return yield* wait(host.locks.enter(cs >>> 0));
+            return yield* wait(host.locks.enter(cs >>> 0, thread));
         }),
         _mtunlock: cdecl(4, function* (cs){
-            return yield* wait(host.locks.leave(cs >>> 0));
+            return yield* wait(host.locks.leave(cs >>> 0, thread));
         }),
         '?lock@ios@@QAAXXZ': cdecl(4, function* (ios){
             if (i32(ios + IOS.DO_LOCK) < 0)
             {
-                yield* wait(host.locks.enter((ios + IOS.LOCK) >>> 0));
+                yield* wait(host.locks.enter((ios + IOS.LOCK) >>> 0, thread));
             }
             return 0;
         }),
         '?unlock@ios@@QAAXXZ': cdecl(4, function* (ios){
             if (i32(ios + IOS.DO_LOCK) < 0)
             {
-                yield* wait(host.locks.leave((ios + IOS.LOCK) >>> 0));
+                yield* wait(host.locks.leave((ios + IOS.LOCK) >>> 0, thread));
             }
             return 0;
         }),

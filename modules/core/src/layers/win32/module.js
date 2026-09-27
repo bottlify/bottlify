@@ -292,6 +292,8 @@ export function createWin32Module(){
                 /** @type {number} */ length)=>memory.fillBytes(address, value, length);
             const readCString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>
                 memory.readCString(address, maxLength);
+            /** Where kernel32 put one of its routines that runs in the guest. @param {string} name */
+            const kernel32Export = name=>modules.find('kernel32.dll')?.addressOf?.(name) ?? 0;
             // The scan under the C string functions whose answer is a position
             // rather than a text: it walks the same chunks readCString does and
             // never materialises the string.
@@ -1655,8 +1657,10 @@ export function createWin32Module(){
                     locks: {
                         init: cs=>libraries['KERNEL32.dll'].InitializeCriticalSection.handler([cs]),
                         remove: cs=>libraries['KERNEL32.dll'].DeleteCriticalSection.handler([cs]),
-                        enter: cs=>libraries['KERNEL32.dll'].EnterCriticalSection.handler([cs]),
-                        leave: cs=>libraries['KERNEL32.dll'].LeaveCriticalSection.handler([cs]),
+                        enter: (cs, thread)=>bridge.callGuest({ thread, args: [cs],
+                            entry: kernel32Export('EnterCriticalSection') }),
+                        leave: (cs, thread)=>bridge.callGuest({ thread, args: [cs],
+                            entry: kernel32Export('LeaveCriticalSection') }),
                     },
                     crt: {
                         open: (path, flags, prot)=>
