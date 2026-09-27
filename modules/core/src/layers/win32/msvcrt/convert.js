@@ -77,7 +77,7 @@ function digitValue(character){
  * @returns {{ magnitude: bigint, negative: boolean, end: number } | null}
  *          Null when nothing converted, which is not the same as a zero.
  */
-export function scanInteger(text, requestedBase, zeroBeforeX = false){
+export function scanInteger(text, requestedBase, zeroBeforeX = false, prefix = true){
     let at = 0;
     while (at < text.length && WHITESPACE.includes(text[at]))
     {
@@ -94,7 +94,7 @@ export function scanInteger(text, requestedBase, zeroBeforeX = false){
     let base = requestedBase;
     const hexPrefix = text[at] === '0' && (text[at + 1] === 'x' || text[at + 1] === 'X');
     const hexDigitAfter = digitValue(text[at + 2]) >= 0 && digitValue(text[at + 2]) < 16;
-    if ((base === 0 || base === 16) && hexPrefix && (hexDigitAfter || !zeroBeforeX))
+    if ((base === 0 || base === 16) && prefix && hexPrefix && (hexDigitAfter || !zeroBeforeX))
     {
         base = 16;
         at += 2;

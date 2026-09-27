@@ -1114,3 +1114,26 @@ test('the stream calls are cdecl with the argument count each reads', ()=>{
         assert.deepEqual([fns[name].convention, fns[name].argBytes], ['cdecl', argBytes], name);
     }
 });
+
+test('fscanf consumes what its scan reads and leaves the rest for the next read', ()=>{
+    // Wine's msvcrt test_fscanf and test_fprintf: a string per call, EOF at
+    // the end, and the stream's position after the scan where the scan stopped.
+    const { memory, fns } = build();
+    const path = memory.put('C:\\scan.txt');
+    const writer = fns.fopen.handler([path, memory.put('wb')]);
+    fns.fwrite.handler([memory.put('line1\nline2 \n12 34'), 1, 18, writer]);
+    fns.fclose.handler([writer]);
+    const stream = fns.fopen.handler([path, memory.put('rb')]);
+    const buffer = memory.allocate(64);
+    const format = memory.put('%s');
+    assert.equal(fns.fscanf.handler([stream, format, buffer]), 1);
+    assert.equal(memory.text(buffer), 'line1');
+    assert.equal(fns.ftell.handler([stream]), 5, 'the line feed after it is not consumed');
+    assert.equal(fns.fscanf.handler([stream, format, buffer]), 1);
+    assert.equal(memory.text(buffer), 'line2');
+    const numbers = memory.allocate(8);
+    assert.equal(fns.fscanf.handler([stream, memory.put('%d%d'), numbers, numbers + 4]), 2,
+        'a scan that needs the next line reads it');
+    assert.deepEqual([memory.i32(numbers), memory.i32(numbers + 4)], [12, 34]);
+    assert.equal(fns.fscanf.handler([stream, format, buffer]), -1, 'EOF at the end');
+});
