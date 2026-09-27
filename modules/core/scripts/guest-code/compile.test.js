@@ -173,6 +173,225 @@ export function widenUnsigned(b){
 }
 
 /**
+ * @guestCode stdcall
+ * @param {any} guest @param {u32} p @param {i32} k
+ * @returns {i32}
+ */
+export function handOver({ u8, setU8, host }, p, k){
+    if (k < 0)
+    {
+        return host();
+    }
+    let sum = 0;
+    for (let i = 0; i < k; i++)
+    {
+        const b = u8(p + i);
+        if (b === 0xff)
+        {
+            return host();
+        }
+        sum = (sum + T8[b & 15]) | 0;
+    }
+    if (sum > 400)
+    {
+        return host();
+    }
+    setU8(p + 0x100, sum);
+    return sum;
+}
+
+/**
+ * More variables live at once than there are registers to give, in loops
+ * nested three deep, each changed every turn and all of them answered.
+ *
+ * @guestCode cdecl
+ * @param {any} guest @param {u32} p @param {u32} n @param {i32} seed
+ * @returns {i32}
+ */
+export function crowd({ u8, setU32 }, p, n, seed){
+    let a = seed;
+    let b = (seed ^ 0x5555) | 0;
+    let c = 7;
+    let d = -3;
+    let e = 0;
+    /** @type {u32} */
+    let f = n;
+    let g = (seed >> 3) | 0;
+    let h = 1;
+    for (/** @type {u32} */ let i = 0; i < n; i++)
+    {
+        const x = u8(p + i);
+        for (let j = 0; j < 3; j++)
+        {
+            a = (a + x + j) | 0;
+            b = (b ^ a) | 0;
+            for (let k = j; k < 4; k++)
+            {
+                c = (c + Math.imul(b, k) + d) | 0;
+                if ((c & 3) === 0)
+                {
+                    continue;
+                }
+                d = (d - c + e) | 0;
+            }
+            e = (e + (a >> 2)) | 0;
+        }
+        f = (f + i) >>> 0;
+        g = (g - i) | 0;
+        g = (g ^ (x << (i & 7))) | 0;
+        h = (Math.imul(h, 31) + g) | 0;
+        if (x === 0xff)
+        {
+            break;
+        }
+    }
+    setU32(p + 0x100, a);
+    setU32(p + 0x104, b);
+    setU32(p + 0x108, c);
+    setU32(p + 0x10c, d);
+    setU32(p + 0x110, e);
+    setU32(p + 0x114, f);
+    setU32(p + 0x118, g);
+    return (h + a - b + c - d + e) | 0;
+}
+
+/**
+ * Variables that must outlive a call through a pointer, which may change
+ * EAX, ECX and EDX -- the callee's -- and not EBX, ESI or EDI; with a table,
+ * which takes EBX.
+ *
+ * @guestCode stdcall
+ * @param {any} guest @param {u32} p @param {u32} n @param {u32} fn
+ * @returns {i32}
+ */
+export function across({ u8, call }, p, n, fn){
+    let sum = 0;
+    let last = 0;
+    /** @type {u32} */
+    let at = p;
+    for (/** @type {u32} */ let i = 0; i < n; i++)
+    {
+        const before = (sum ^ T8[i & 15]) | 0;
+        const got = call(fn, at, i);
+        sum = (sum + got + before) | 0;
+        last = (got - last + u8(at + 1)) | 0;
+        at = (at + 3) >>> 0;
+    }
+    return (sum ^ last) | 0;
+}
+
+/**
+ * More variables live across a call than the callee keeps registers for.
+ *
+ * @guestCode cdecl
+ * @param {any} guest @param {u32} p @param {u32} n @param {u32} fn
+ * @returns {i32}
+ */
+export function acrossMany({ call }, p, n, fn){
+    let a = 1;
+    let b = 2;
+    let c = 3;
+    let d = 4;
+    let e = 5;
+    for (/** @type {u32} */ let i = 0; i < n; i++)
+    {
+        a = (a + call(fn, p, i)) | 0;
+        b = (b ^ a) | 0;
+        c = (c + b + i) | 0;
+        d = (d - c) | 0;
+        e = (e + d + a) | 0;
+    }
+    return (a + b + c + d + e) | 0;
+}
+
+/**
+ * Ordered comparisons of variables in registers with variables in the
+ * frame, either way round: more of them than there are registers.
+ *
+ * @guestCode cdecl
+ * @param {i32} a @param {i32} b @param {i32} c @param {u32} d @param {u32} e @param {u32} f
+ * @param {i32} g
+ * @returns {i32}
+ */
+export function ranks(a, b, c, d, e, f, g){
+    let r = 0;
+    for (let i = 0; i < 3; i++)
+    {
+        if (a < b) r = (r + 1) | 0;
+        if (b <= c) r = (r + 2) | 0;
+        if (c > a) r = (r + 4) | 0;
+        if (g >= a) r = (r + 8) | 0;
+        if (d < e) r = (r + 16) | 0;
+        if (e > f) r = (r + 32) | 0;
+        if (f <= d) r = (r + 64) | 0;
+        if (g < c) r = (r + 128) | 0;
+        if (b > g) r = (r + 256) | 0;
+        if (e <= d) r = (r + 512) | 0;
+        a = (a + g) | 0;
+        d = (d + f) >>> 0;
+    }
+    return r;
+}
+
+/**
+ * Bytes stored from more variables than there are registers with a low byte
+ * of their own: one of them in ESI or EDI, which have none.
+ *
+ * @guestCode cdecl
+ * @param {any} guest @param {u32} p @param {u32} n
+ */
+export function rotate({ u8, setU8 }, p, n){
+    /** @type {u32} */
+    let at = p;
+    const end = (p + Math.imul(n, 3)) >>> 0;
+    while (at < end)
+    {
+        const a = u8(at);
+        const b = u8(at + 1);
+        const c = u8(at + 2);
+        setU8(at, c);
+        setU8(at + 1, a);
+        setU8(at + 2, b);
+        setU8(at + 0x100, a);
+        setU8(at + 0x101, b);
+        setU8(at + 0x102, c);
+        at = (at + 3) >>> 0;
+    }
+}
+
+/**
+ * An x87 parameter read once, after the integers: where the caller left it.
+ *
+ * @guestCode cdecl
+ * @param {any} guest @param {x87} v @param {u32} p
+ * @returns {i64}
+ */
+export function lateRead({ u8, setU8 }, v, p){
+    const b = u8(p);
+    setU8(p + 1, b + 1);
+    return v;
+}
+
+/**
+ * The same read behind a branch, and after another double: popped at entry.
+ *
+ * @guestCode cdecl
+ * @param {any} guest @param {x87} v @param {u32} p
+ * @returns {i64}
+ */
+export function branchRead({ u8, f64 }, v, p){
+    if (u8(p) === 0)
+    {
+        return 0;
+    }
+    if (f64(p + 8) < 0)
+    {
+        return 1;
+    }
+    return v;
+}
+
+/**
  * @guestCode cdecl
  * @param {any} guest @param {u32} d @param {u32} s @param {u32} n @param {u32} fn
  * @returns {i32}
@@ -313,6 +532,111 @@ test('copies up and down, over themselves, a fill, and calls through a pointer',
     }
 });
 
+test('more variables live than registers, across three loops, and all of them answered',
+    async()=>{
+        const { same } = await load(SAMPLE);
+        const next = random(17);
+        for (let i = 0; i < 120; i++)
+        {
+            const bytes = Array.from({ length: 64 },
+                ()=>(next() % 50 === 0 ? 0xff : next() & 0xff));
+            const n = [0, 1, 2, 5, 40, 64, next() % 65][i % 7];
+            same('crowd', { stack: [DATA, n, next()], memory: [[DATA, bytes]] });
+        }
+    });
+
+test('ordered comparisons of registers and the frame, either way round', async()=>{
+    const { same } = await load(SAMPLE);
+    const next = random(20);
+    const edges = [0, 1, 0xffffffff, 0x80000000, 0x7fffffff, 5];
+    for (let i = 0; i < 300; i++)
+    {
+        const pick = ()=>(next() % 3 === 0 ? edges[next() % edges.length] : next());
+        same('ranks', { stack: Array.from({ length: 7 }, pick) });
+    }
+});
+
+test('more variables across calls than the callee keeps registers for', async()=>{
+    const { same } = await load(SAMPLE);
+    const next = random(21);
+    for (let i = 0; i < 40; i++)
+    {
+        same('acrossMany', { stack: [DATA + next() % 16, next() % 20, CALLBACK],
+            memory: [[DATA, Array.from({ length: 64 }, ()=>next() & 0xff)]] },
+        { callback: CALLBACK_X86, call: callbackJs });
+    }
+});
+
+test('bytes stored from registers with a low byte of their own and from those without',
+    async()=>{
+        const { same } = await load(SAMPLE);
+        const next = random(19);
+        for (let i = 0; i < 40; i++)
+        {
+            const bytes = Array.from({ length: 96 }, ()=>next() & 0xff);
+            same('rotate', { stack: [DATA + next() % 8, next() % 30], memory: [[DATA, bytes]] });
+        }
+    });
+
+test('variables kept across calls through a pointer, which may change EAX, ECX and EDX',
+    async()=>{
+        const { same } = await load(SAMPLE);
+        const next = random(18);
+        for (let i = 0; i < 80; i++)
+        {
+            const bytes = Array.from({ length: 128 }, ()=>next() & 0xff);
+            same('across', { stack: [DATA + next() % 16, next() % 30, CALLBACK],
+                memory: [[DATA, bytes]] }, { callback: CALLBACK_X86, call: callbackJs });
+        }
+    });
+
+test('an x87 parameter read once where the caller left it, and one popped at entry',
+    async()=>{
+        const { same, compiled } = await load(SAMPLE);
+        // Nothing before the read: truncated from ST0 as it stands, no frame.
+        assert.deepEqual([...compiled.ftol.code],
+            [0x83, 0xec, 0x08, 0xdd, 0x0c, 0x24, 0x58, 0x5a, 0xc3]);
+        const values = [0, -0.5, 3.75, -3.75, 2 ** 40 + 0.5, 2 ** 63, NaN, -Infinity];
+        for (const v of values)
+        {
+            for (const control of [0x37f, 0x07f, 0xf7f])
+            {
+                for (const [first, double] of [[0, 1.5], [7, -2], [0xff, NaN], [1, 0]])
+                {
+                    const memory = new Uint8Array(16);
+                    memory[0] = first;
+                    new DataView(memory.buffer).setFloat64(8, double, true);
+                    same('lateRead', { stack: [DATA], x87: [v], control,
+                        memory: [[DATA, memory]] });
+                    same('branchRead', { stack: [DATA], x87: [v], control,
+                        memory: [[DATA, memory]] });
+                }
+            }
+        }
+    });
+
+test('a call handed to the host: the frame down, the stack and the kept registers as they came',
+    async()=>{
+        const { same } = await load(SAMPLE);
+        const next = random(16);
+        /** @type {(memory: Uint8Array, args: number[]) => number} */
+        const host = (memory, [p, k])=>{
+            memory[p + 0x200] = 0x77;
+            return (k ^ 0x5eed) | 0;
+        };
+        let handed = 0;
+        for (let i = 0; i < 200; i++)
+        {
+            const bytes = Array.from({ length: 64 },
+                ()=>(next() % 40 === 0 ? 0xff : next() & 0xff));
+            const k = [-1, 0, 1, 64, next() % 65, (next() | 0x80000000) | 0][i % 6];
+            const js = same('handOver', { stack: [DATA, k >>> 0], memory: [[DATA, bytes]] },
+                { host });
+            handed += js.handedOver ? 1 : 0;
+        }
+        assert.ok(handed > 20 && handed < 180, `${handed} of 200 handed over: both ways taken`);
+    });
+
 const TAGS = '@param {i32} a @param {u32} c @param {f64} x\n * @returns {i32}';
 
 /**
@@ -362,4 +686,10 @@ test('everything outside the subset is refused where it is written', ()=>{
         /names its convention/);
     refused(one(p, 'return a;', '@param {i32} a @param {u32} c @param {f64} x\n * @returns {f32}'),
         /is not i32, u32, f64, i64 or void/);
+    const q = '{ host }, a, c, x';
+    refused(one(q, 'return host(a);'), /host\(\) takes no arguments/);
+    refused(one(q, 'const v = host();\n    return v;'), /only returned: return host\(\)/);
+    refused(one(q, 'host();\n    return 0;'), /only returned: return host\(\)/);
+    refused(one('{ host }, v', 'return host();', '@param {x87} v\n * @returns {i32}'),
+        /x87 parameter/);
 });

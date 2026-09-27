@@ -36,6 +36,29 @@
  * @property {'i32' | 'u32' | 'f64' | 'i64' | 'void'} returns
  * @property {readonly string[]} uses   The guest's helpers the source takes.
  * @property {Uint8Array} code
+ * @property {number} [host]  Where the displacement of the jump to the host's
+ *     handler is, in a function that hands some calls to it (`return host()`).
+ */
+
+/**
+ * What the binding hands a `code` export: the means to register the trap its
+ * code jumps to, a trap into the host answering as the export, and to have
+ * the jump's displacement filled in where the code lands.
+ *
+ * @typedef {Object} CodeBuilder
+ * @property {(trap: { convention: string, argBytes: number, handler: Function }) => number}
+ *     register  Answers the trap's address.
+ * @property {(at: number, target: number) => void} jump
+ *     The four bytes at `at` in the code are a jump's displacement to `target`.
+ */
+
+/**
+ * The host's handler of a function the guest's code hands a call to: the
+ * function as it was before it was code.
+ *
+ * @typedef {Object} HostFallback
+ * @property {number} argBytes
+ * @property {(args: number[]) => number} handler
  */
 
 /**
@@ -63,6 +86,9 @@
  *     Byte by byte from the last, as `std; rep movsb` copies.
  * @property {(destination: number, value: number, count: number) => void} fill
  * @property {(fn: number, ...args: number[]) => number} call
+ * @property {() => number} host
+ *     The call answered by the host's handler, with the arguments it came
+ *     with: only as `return host()`.
  */
 
 /**
@@ -153,6 +179,9 @@ export function guestMemory(host){
             }
             return host.call(fn >>> 0, args.map(arg=>arg >>> 0)) | 0;
         },
+        host: ()=>{
+            throw new Error('guest code: host() is answered only in a handler with a fallback');
+        },
     };
 }
 
@@ -176,12 +205,35 @@ export function guestMemory(host){
  * function that calls a guest function is, since the engine cannot run the
  * guest from a handler and wait for it.
  *
+ * A function that hands some calls to the host (`return host()`) is given
+ * the handler it hands them to: its code, bound, jumps to a trap into it.
+ *
  * @param {CompiledGuestCode} compiled
+ * @param {HostFallback} [fallback]
  */
-export function guestExport(compiled){
+export function guestExport(compiled, fallback){
+    const { convention, host } = compiled;
     const argBytes = compiled.params.reduce((sum, type)=>
         sum + (type === 'f64' ? 8 : type === 'x87' ? 0 : 4), 0);
-    return { convention: compiled.convention, argBytes, code: ()=>compiled.code };
+    if (host !== undefined && !fallback)
+    {
+        throw new Error('guest code: a function that hands calls to the host wants its handler');
+    }
+    /** @param {CodeBuilder} [builder] */
+    const code = builder=>{
+        if (host === undefined || !fallback)
+        {
+            return compiled.code;
+        }
+        if (!builder)
+        {
+            throw new Error('guest code: a function that hands calls to the host is bound with '
+                + 'a builder to register its trap');
+        }
+        builder.jump(host, builder.register({ convention, argBytes, handler: fallback.handler }));
+        return compiled.code;
+    };
+    return { convention, argBytes, code };
 }
 
 /**
@@ -192,10 +244,12 @@ export function guestExport(compiled){
  * @param {Function} source  The `@guestCode` function.
  * @param {CompiledGuestCode} compiled
  * @param {EntryHost} host
- * @returns {{ convention: string, argBytes: number, code: () => Uint8Array,
- *     handler: (args: number[]) => number }}
+ * @param {HostFallback} [fallback]  What `return host()` answers with, in the
+ *     handler and through the trap the code jumps to.
+ * @returns {{ convention: string, argBytes: number,
+ *     code: (builder?: CodeBuilder) => Uint8Array, handler: (args: number[]) => number }}
  */
-export function guestEntry(source, compiled, host){
+export function guestEntry(source, compiled, host, fallback){
     const { params, returns, uses } = compiled;
     if (uses.includes('call') && !host.call)
     {
@@ -210,6 +264,7 @@ export function guestEntry(source, compiled, host){
     const guest = uses.length > 0 && readMemory && writeMemory
         ? guestMemory({ readMemory, writeMemory, ...fillMemory ? { fillMemory } : {},
             ...call ? { call } : {} }) : null;
+    const handsOver = uses.includes('host');
     const onStack = params.filter(type=>type === 'x87').length;
     /** @param {number[]} args */
     const handler = args=>{
@@ -241,7 +296,10 @@ export function guestEntry(source, compiled, host){
         {
             /** @type {import('./float.js').FloatHost} */ (host.fpu).pop();
         }
-        const result = guest === null ? source(...values) : source(guest, ...values);
+        /** @type {Guest | null} */
+        const helpers = handsOver && guest && fallback
+            ? { ...guest, host: ()=>fallback.handler(args) } : guest;
+        const result = helpers === null ? source(...values) : source(helpers, ...values);
         switch (returns)
         {
             case 'f64':
@@ -260,7 +318,7 @@ export function guestEntry(source, compiled, host){
                 return result;
         }
     };
-    return { ...guestExport(compiled), handler };
+    return { ...guestExport(compiled, fallback), handler };
 }
 
 /**

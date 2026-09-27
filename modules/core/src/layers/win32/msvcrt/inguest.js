@@ -775,3 +775,480 @@ export function strcmp({ u8 }, left, right){
         }
     }
 }
+
+/** Each byte's value as a digit: 0-9, then a letter of either case from ten; 255 for any other. */
+export const DIGITS = Uint8Array.from({ length: 256 }, (_, code)=>{
+    if (code >= 0x30 && code <= 0x39)
+    {
+        return code - 0x30;
+    }
+    if (code >= 0x61 && code <= 0x7a)
+    {
+        return code - 0x61 + 10;
+    }
+    return code >= 0x41 && code <= 0x5a ? code - 0x41 + 10 : 255;
+});
+
+/**
+ * The largest magnitude that takes another digit in each base from 2 to 36
+ * with no fear of passing 32 bits: 2^32 - 1 over the base. Past it, or when
+ * the digit carries out, the magnitude is more than 32 bits hold.
+ */
+export const BELOW_CARRY = Uint32Array.from({ length: 37 },
+    (_, base)=>(base < 2 ? 0 : Math.floor(0xffffffff / base)));
+
+/**
+ * long strtol(const char *text, char **end, int base)
+ *
+ * White space, a sign, `0x` or `0X` in base 16 or 0 (a leading 0 is octal in
+ * base 0), and the digits of the base, each letter of either case from ten;
+ * `*end` set to where the digits stopped, or to the text itself when none
+ * converted. A value out of range is the host's: it clamps and sets errno,
+ * which is the calling thread's own; so is a base outside 2..36 other than 0,
+ * which the handler reads as it reads any other. Neither case writes before
+ * it goes, so the host answers the call as it came.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
+ * @returns {i32}
+ */
+export function strtol({ u8, setU32, host }, text, end, base){
+    if (base !== 0 && (base < 2 || base > 36))
+    {
+        return host();
+    }
+    let at = text;
+    let c = u8(at);
+    while (c === 0x20 || c >= 0x09 && c <= 0x0d)
+    {
+        at++;
+        c = u8(at);
+    }
+    let negative = 0;
+    if (c === 0x2d || c === 0x2b)
+    {
+        negative = c === 0x2d ? 1 : 0;
+        at++;
+        c = u8(at);
+    }
+    let radix = base;
+    if ((radix === 0 || radix === 16) && c === 0x30 && (u8(at + 1) | 0x20) === 0x78)
+    {
+        radix = 16;
+        at += 2;
+        c = u8(at);
+    }
+    else if (radix === 0)
+    {
+        radix = c === 0x30 ? 8 : 10;
+    }
+    const start = at;
+    const most = BELOW_CARRY[radix];
+    /** @type {u32} */
+    let magnitude = 0;
+    let digit = DIGITS[c];
+    while (digit < radix)
+    {
+        if (magnitude > most)
+        {
+            return host();
+        }
+        const product = Math.imul(magnitude, radix) >>> 0;
+        magnitude = (product + digit) >>> 0;
+        if (magnitude < product)
+        {
+            return host();
+        }
+        at++;
+        digit = DIGITS[u8(at)];
+    }
+    if (at === start)
+    {
+        if (end !== 0)
+        {
+            setU32(end, text);
+        }
+        return 0;
+    }
+    if (magnitude > (negative !== 0 ? 0x80000000 : 0x7fffffff))
+    {
+        return host();
+    }
+    if (end !== 0)
+    {
+        setU32(end, at);
+    }
+    return negative !== 0 ? (0 - magnitude) | 0 : magnitude | 0;
+}
+
+/**
+ * unsigned long strtoul(const char *text, char **end, int base)
+ *
+ * As strtol reads, and a minus sign negates the magnitude within 32 bits:
+ * strtoul("-1") is ULONG_MAX. A magnitude past 32 bits is the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
+ * @returns {u32}
+ */
+export function strtoul({ u8, setU32, host }, text, end, base){
+    if (base !== 0 && (base < 2 || base > 36))
+    {
+        return host();
+    }
+    let at = text;
+    let c = u8(at);
+    while (c === 0x20 || c >= 0x09 && c <= 0x0d)
+    {
+        at++;
+        c = u8(at);
+    }
+    let negative = 0;
+    if (c === 0x2d || c === 0x2b)
+    {
+        negative = c === 0x2d ? 1 : 0;
+        at++;
+        c = u8(at);
+    }
+    let radix = base;
+    if ((radix === 0 || radix === 16) && c === 0x30 && (u8(at + 1) | 0x20) === 0x78)
+    {
+        radix = 16;
+        at += 2;
+        c = u8(at);
+    }
+    else if (radix === 0)
+    {
+        radix = c === 0x30 ? 8 : 10;
+    }
+    const start = at;
+    const most = BELOW_CARRY[radix];
+    /** @type {u32} */
+    let magnitude = 0;
+    let digit = DIGITS[c];
+    while (digit < radix)
+    {
+        if (magnitude > most)
+        {
+            return host();
+        }
+        const product = Math.imul(magnitude, radix) >>> 0;
+        magnitude = (product + digit) >>> 0;
+        if (magnitude < product)
+        {
+            return host();
+        }
+        at++;
+        digit = DIGITS[u8(at)];
+    }
+    if (at === start)
+    {
+        if (end !== 0)
+        {
+            setU32(end, text);
+        }
+        return 0;
+    }
+    if (end !== 0)
+    {
+        setU32(end, at);
+    }
+    return negative !== 0 ? (0 - magnitude) >>> 0 : magnitude;
+}
+
+/**
+ * int abs(int value), and labs, the same function on a 32-bit target
+ *
+ * INT_MIN, which has no positive counterpart, comes back as itself.
+ *
+ * @guestCode cdecl
+ * @param {i32} value
+ * @returns {i32}
+ */
+export function abs(value){
+    return value < 0 ? (0 - value) | 0 : value;
+}
+
+/**
+ * double ceil(double x)
+ *
+ * @guestCode cdecl
+ * @param {f64} x
+ * @returns {f64}
+ */
+export function ceil(x){
+    return Math.ceil(x);
+}
+
+/**
+ * double fabs(double x)
+ *
+ * @guestCode cdecl
+ * @param {f64} x
+ * @returns {f64}
+ */
+export function fabs(x){
+    return Math.abs(x);
+}
+
+/**
+ * char *strchr(const char *text, int c)
+ *
+ * The first byte that is `c`'s low byte, the terminator among them: a search
+ * for 0 finds the string's end.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} c
+ * @returns {u32}
+ */
+export function strchr({ u8 }, text, c){
+    const wanted = c & 0xff;
+    for (/** @type {u32} */ let at = text; ; at++)
+    {
+        const byte = u8(at);
+        if (byte === wanted)
+        {
+            return at;
+        }
+        if (byte === 0)
+        {
+            return 0;
+        }
+    }
+}
+
+/**
+ * char *strrchr(const char *text, int c)
+ *
+ * The last byte that is `c`'s low byte, the terminator among them.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} c
+ * @returns {u32}
+ */
+export function strrchr({ u8 }, text, c){
+    const wanted = c & 0xff;
+    /** @type {u32} */
+    let found = 0;
+    for (/** @type {u32} */ let at = text; ; at++)
+    {
+        const byte = u8(at);
+        if (byte === wanted)
+        {
+            found = at;
+        }
+        if (byte === 0)
+        {
+            return found;
+        }
+    }
+}
+
+/**
+ * char *strstr(const char *haystack, const char *needle)
+ *
+ * The first place the needle's bytes stand in the haystack, the haystack
+ * itself for an empty needle, and null for none.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} haystack @param {u32} needle
+ * @returns {u32}
+ */
+export function strstr({ u8 }, haystack, needle){
+    for (/** @type {u32} */ let at = haystack; ; at++)
+    {
+        /** @type {u32} */
+        let i = 0;
+        while (u8(needle + i) !== 0 && u8(at + i) === u8(needle + i))
+        {
+            i++;
+        }
+        if (u8(needle + i) === 0)
+        {
+            return at;
+        }
+        if (u8(at) === 0)
+        {
+            return 0;
+        }
+    }
+}
+
+/**
+ * char *strcat(char *destination, const char *source)
+ *
+ * The source and its terminator after the destination's text, as strcpy
+ * copies: as if read whole first.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} source
+ * @returns {u32}
+ */
+export function strcat({ u8, copyUp, copyDown }, destination, source){
+    /** @type {u32} */
+    let end = destination;
+    while (u8(end) !== 0)
+    {
+        end++;
+    }
+    /** @type {u32} */
+    let length = 1;
+    while (u8(source + length - 1) !== 0)
+    {
+        length++;
+    }
+    if ((end - source) >>> 0 < length)
+    {
+        copyDown(end, source, length);
+    }
+    else
+    {
+        copyUp(end, source, length);
+    }
+    return destination;
+}
+
+/**
+ * char *strncpy(char *destination, const char *source, size_t count)
+ *
+ * No more than `count` bytes of the source, as if read whole first, and the
+ * rest of the `count` zeros: a source as long as the count or longer leaves
+ * no terminator.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
+ * @returns {u32}
+ */
+export function strncpy({ u8, copyUp, copyDown, fill }, destination, source, count){
+    /** @type {u32} */
+    let length = 0;
+    while (length < count && u8(source + length) !== 0)
+    {
+        length++;
+    }
+    if ((destination - source) >>> 0 < length)
+    {
+        copyDown(destination, source, length);
+    }
+    else
+    {
+        copyUp(destination, source, length);
+    }
+    fill(destination + length, 0, count - length);
+    return destination;
+}
+
+/**
+ * char *_strlwr(char *text)
+ *
+ * In place, the ASCII capitals only, as the C locale has it.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text
+ * @returns {u32}
+ */
+export function _strlwr({ u8, setU8 }, text){
+    for (/** @type {u32} */ let at = text; ; at++)
+    {
+        const c = u8(at);
+        if (c === 0)
+        {
+            return text;
+        }
+        if (c >= 0x41 && c <= 0x5a)
+        {
+            setU8(at, c + 0x20);
+        }
+    }
+}
+
+/**
+ * char *_strupr(char *text)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text
+ * @returns {u32}
+ */
+export function _strupr({ u8, setU8 }, text){
+    for (/** @type {u32} */ let at = text; ; at++)
+    {
+        const c = u8(at);
+        if (c === 0)
+        {
+            return text;
+        }
+        if (c >= 0x61 && c <= 0x7a)
+        {
+            setU8(at, c - 0x20);
+        }
+    }
+}
+
+/**
+ * size_t wcslen(const wchar_t *text)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text
+ * @returns {u32}
+ */
+export function wcslen({ u16 }, text){
+    /** @type {u32} */
+    let length = 0;
+    while (u16(text + length * 2) !== 0)
+    {
+        length++;
+    }
+    return length;
+}
+
+/**
+ * int wcscmp(const wchar_t *left, const wchar_t *right)
+ *
+ * By unit, as unsigned sixteen-bit values, the answer -1, 0 or 1.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right
+ * @returns {i32}
+ */
+export function wcscmp({ u16 }, left, right){
+    for (/** @type {u32} */ let i = 0; ; i += 2)
+    {
+        const a = u16(left + i);
+        const b = u16(right + i);
+        if (a !== b)
+        {
+            return a < b ? -1 : 1;
+        }
+        if (a === 0)
+        {
+            return 0;
+        }
+    }
+}
+
+/**
+ * wchar_t *wcscpy(wchar_t *destination, const wchar_t *source)
+ *
+ * The source and its terminator, as if read whole first.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} source
+ * @returns {u32}
+ */
+export function wcscpy({ u16, copyUp, copyDown }, destination, source){
+    /** @type {u32} */
+    let length = 2;
+    while (u16(source + length - 2) !== 0)
+    {
+        length += 2;
+    }
+    if ((destination - source) >>> 0 < length)
+    {
+        copyDown(destination, source, length);
+    }
+    else
+    {
+        copyUp(destination, source, length);
+    }
+    return destination;
+}

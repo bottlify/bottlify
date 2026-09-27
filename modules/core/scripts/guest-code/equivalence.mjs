@@ -15,6 +15,13 @@
  * flag clear, the control word as it was, and the x87 stack empty but for a
  * double result.
  *
+ * A function that hands a call to the host (`return host()`) jumps, on the
+ * machine, to a halt where the host's trap would be; there it must have left
+ * everything as the call found it -- ESP at the return address, the
+ * arguments, EBX, ESI, EDI and EBP, the direction flag, the control word, the
+ * x87 stack and every byte of memory -- and the case's stand-in for the
+ * handler answers from there. The JavaScript must hand over the same inputs.
+ *
  * For the tests: the machine is cork's own test machine, not the engine.
  */
 
@@ -25,6 +32,8 @@ import { guestEntry } from '../../src/layers/win32/msvcrt/guest-code.js';
 export const CODE = 0x1000;
 export const HALT = 0x0f00;
 export const CALLBACK = 0x0e00;
+/** Where the host's trap is, for a function that hands a call to it: a halt. */
+export const HOST = 0x0d00;
 export const DATA = 0x10000;
 export const DATA_END = 0x40000;
 const STACK = 0x7fff0;
@@ -43,6 +52,8 @@ const SAVED = { ebx: 0x11111111, esi: 0x22222222, edi: 0x33333333, ebp: 0x444444
  * @property {number[]} [callback]    x86 at CALLBACK, which a call through a pointer reaches.
  * @property {(memory: Uint8Array, fn: number, args: number[]) => number} [call]
  *     Its JavaScript stand-in.
+ * @property {(memory: Uint8Array, args: number[]) => number} [host]
+ *     The host's handler a function hands a call to, over the case's memory.
  */
 
 /** A small generator with a seed, so a failure is the same failure each run. @param {number} seed */
@@ -90,11 +101,19 @@ export function equivalence(compiled, sources){
     /** @param {string} name @param {Case} input @param {Double} double */
     const runX86 = (name, input, double)=>{
         let m = machines.get(name);
+        const fn = compiledOf(name);
         if (!m)
         {
             m = createTestMachine();
-            m.write(CODE, compiledOf(name).code);
+            const code = fn.code.slice();
+            if (fn.host !== undefined)
+            {
+                new DataView(code.buffer).setUint32(fn.host,
+                    (HOST - (CODE + fn.host + 4)) >>> 0, true);
+            }
+            m.write(CODE, code);
             m.write(HALT, [0xf4]);
+            m.write(HOST, [0xf4]);
             if (double.callback)
             {
                 m.write(CALLBACK, double.callback);
@@ -129,8 +148,17 @@ export function equivalence(compiled, sources){
         }
         view.setUint8(m.layout.x87Top, top);
         view.setUint8(m.layout.x87Empty, empty);
+        const before = fn.host === undefined ? null : m.read(DATA, DATA_END - DATA);
+        const slots = fn.params.reduce((sum, type)=>sum + (type === 'f64' ? 2
+            : type === 'x87' ? 0 : 1), 0);
         const exit = m.runProgram(CODE);
         assert.equal(exit.kind, 3, `${name} halts at its return (${JSON.stringify(exit)})`);
+        const handedOver = fn.host !== undefined && m.eip() === HOST + 1;
+        if (handedOver)
+        {
+            return handOver(name, m, input, double, /** @type {Uint8Array} */ (before), slots,
+                { top, empty });
+        }
         assert.equal(m.eip(), HALT + 1, `${name} returns to its caller's address`);
         const after = view.getUint8(m.layout.x87Top);
         const left = view.getUint8(m.layout.x87Empty);
@@ -151,6 +179,52 @@ export function equivalence(compiled, sources){
             df: (m.eflags() & 0x400) !== 0,
             control: view.getUint16(m.layout.x87Control, true),
             data: m.read(DATA, DATA_END - DATA),
+            handedOver: false,
+        };
+    };
+
+    /**
+     * The machine stopped at the host's trap: everything as the call found
+     * it, and the stand-in answering from there as the handler would.
+     *
+     * @param {string} name @param {ReturnType<typeof createTestMachine>} m @param {Case} input
+     * @param {Double} double @param {Uint8Array} before  The data area when the call was made.
+     * @param {number} slots  The argument slots.
+     * @param {{ top: number, empty: number }} x87  The x87 stack as the call was made.
+     */
+    const handOver = (name, m, input, double, before, slots, x87)=>{
+        const view = new DataView(m.memory.buffer);
+        const what = `${name}(${JSON.stringify(input.stack ?? [])}) handed to the host`;
+        assert.equal(m.reg('esp'), STACK, `${what}: ESP at the return address`);
+        assert.equal(m.readU32(STACK), HALT, `${what}: the return address kept`);
+        const args = Array.from({ length: slots }, (_, i)=>m.readU32(STACK + 4 + i * 4));
+        assert.deepEqual(args, (input.stack ?? []).slice(0, slots).map(word=>word >>> 0),
+            `${what}: the arguments kept`);
+        assert.deepEqual({ ebx: m.reg('ebx'), esi: m.reg('esi'), edi: m.reg('edi'),
+            ebp: m.reg('ebp') }, SAVED, `${what}: EBX, ESI, EDI and EBP kept`);
+        assert.equal((m.eflags() & 0x400) !== 0, false, `${what}: the direction flag clear`);
+        assert.equal(view.getUint16(m.layout.x87Control, true), input.control ?? 0x37f,
+            `${what}: the control word`);
+        assert.deepEqual({ top: view.getUint8(m.layout.x87Top),
+            empty: view.getUint8(m.layout.x87Empty) }, x87, `${what}: the x87 stack as it was`);
+        const data = m.read(DATA, DATA_END - DATA);
+        if (!Buffer.from(data).equals(Buffer.from(before)))
+        {
+            const at = data.findIndex((byte, i)=>byte !== before[i]);
+            assert.fail(`${what}: memory written before, first at 0x${(DATA + at).toString(16)}`);
+        }
+        if (!double.host)
+        {
+            throw new Error(`${name} hands a call to the host, and the case gives no stand-in`);
+        }
+        const memory = new Uint8Array(1 << 20);
+        memory.set(data, DATA);
+        const eax = double.host(memory, args) >>> 0;
+        // The trap returns as the export does: a stdcall one pops the arguments.
+        const popped = compiledOf(name).convention === 'stdcall' ? slots * 4 : 0;
+        return {
+            eax, edx: 0, esp: STACK + 4 + popped, st: [], saved: SAVED, df: false,
+            control: input.control ?? 0x37f, data: memory.slice(DATA, DATA_END), handedOver: true,
         };
     };
 
@@ -170,6 +244,8 @@ export function equivalence(compiled, sources){
             throw new Error(`no source function ${name}`);
         }
         const { call } = double;
+        let handedOver = false;
+        const { host } = double;
         const entry = guestEntry(source, compiledOf(name), {
             readMemory: (address, length)=>{
                 if (address + length > memory.length)
@@ -189,13 +265,19 @@ export function equivalence(compiled, sources){
                 edx = values.edx >>> 0;
             },
             ...call ? { call: (fn, args)=>call(memory, fn, args) } : {},
-        });
+        }, host ? {
+            argBytes: 0,
+            handler: args=>{
+                handedOver = true;
+                return host(memory, args);
+            },
+        } : undefined);
         if (!entry.handler)
         {
             throw new Error(`${name} calls the guest, and the case gives no stand-in`);
         }
         const eax = entry.handler([...input.stack ?? []]) >>> 0;
-        return { eax, edx, st, data: memory.slice(DATA, DATA_END) };
+        return { eax, edx, st, data: memory.slice(DATA, DATA_END), handedOver };
     };
 
     return {
@@ -211,6 +293,8 @@ export function equivalence(compiled, sources){
             const what = `${name}(${JSON.stringify(input.stack ?? [])}${input.x87
                 ? `, st ${JSON.stringify(input.x87)}` : ''}) under 0x${(input.control ?? 0x37f)
                 .toString(16)}`;
+            assert.equal(x86.handedOver, js.handedOver,
+                `${what}: handed to the host by both or by neither`);
             assert.deepEqual(x86.saved, SAVED, `${what}: EBX, ESI, EDI and EBP kept`);
             const popped = fn.convention === 'stdcall'
                 ? fn.params.reduce((sum, type)=>sum + (type === 'f64' ? 8

@@ -28,11 +28,9 @@ import {
     W_ALPHA, W_CNTRL, W_DIGIT, W_LOWER, W_PUNCT, W_SPACE, W_UPPER, W_XDIGIT, WEOF, WIDE_CLASSES,
 } from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
+import { wideStringAt } from './widetext.js';
 
 const MAX_STRING = 1 << 20;
-
-/** Sixty-four thousand UTF-16 units is as far as a wide string is scanned. */
-const MAX_WIDE = 1 << 16;
 
 /**
  * @typedef {Object} WideHost
@@ -76,22 +74,14 @@ export function createWideFunctions(host){
     const readNarrowUnits = pointer=>Array.from(encodeAnsi(host.readCString(pointer, MAX_STRING)),
         byte=>String.fromCharCode(byte)).join('');
 
-    /** @param {number} pointer @param {number} [limit] */
-    const readWide = (pointer, limit = MAX_WIDE)=>{
-        const bytes = host.readMemory(pointer, limit * 2);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        let text = '';
-        for (let at = 0; at * 2 + 1 < bytes.length && at < limit; at++)
-        {
-            const unit = view.getUint16(at * 2, true);
-            if (unit === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(unit);
-        }
-        return text;
-    };
+    /**
+     * A wide string up to its terminator, sixty-four thousand units at most:
+     * read a line at a time, never past the terminator's line, so a string
+     * near the end of its region is not read beyond it.
+     *
+     * @param {number} pointer
+     */
+    const readWide = pointer=>wideStringAt(host.readMemory, pointer);
 
     /** @param {number} pointer @param {string} text @param {boolean} terminate */
     const writeWide = (pointer, text, terminate = true)=>{
@@ -121,24 +111,11 @@ export function createWideFunctions(host){
     const foldCase = text=>text.replace(/[A-Z]/g, letter=>letter.toLowerCase());
 
     return {
-        /** size_t wcslen(const wchar_t *) */
-        wcslen: {
-            convention: 'cdecl',
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([string])=>readWide(string).length,
-        },
+        /** size_t wcslen(const wchar_t *) -- in the guest */
+        wcslen: guestEntry(inGuest.wcslen, COMPILED.wcslen, host),
 
-        /** wchar_t *wcscpy(wchar_t *dest, const wchar_t *src) */
-        wcscpy: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([destination, source])=>{
-                writeWide(destination, readWide(source));
-                return destination;
-            },
-        },
+        /** wchar_t *wcscpy(wchar_t *dest, const wchar_t *src) -- in the guest */
+        wcscpy: guestEntry(inGuest.wcscpy, COMPILED.wcscpy, host),
 
         /** wchar_t *wcsncpy(wchar_t *dest, const wchar_t *src, size_t count) */
         wcsncpy: {
@@ -167,13 +144,8 @@ export function createWideFunctions(host){
             },
         },
 
-        /** int wcscmp(const wchar_t *, const wchar_t *) */
-        wcscmp: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([left, right])=>compare(readWide(left), readWide(right)),
-        },
+        /** int wcscmp(const wchar_t *, const wchar_t *) -- in the guest */
+        wcscmp: guestEntry(inGuest.wcscmp, COMPILED.wcscmp, host),
 
         /** int wcsncmp(const wchar_t *, const wchar_t *, size_t) */
         wcsncmp: {

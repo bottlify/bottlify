@@ -424,3 +424,25 @@ test('a function that is code of its own lies in the code section, on no variabl
     assert.throws(()=>synthesiseModule({ name: 'K.dll', base: BASE, exports: [
         { name: 'f', code: body, data: body }] }), /both code and a variable/);
 });
+
+test('a jump out of a function that is code of its own lands where it was aimed', ()=>{
+    // cmp eax, 1; jne +5 (to ret); jmp <a stub>; ret -- the displacement left
+    // for the loader, which alone knows where the code is placed.
+    const body = Uint8Array.of(0x83, 0xf8, 0x01, 0x75, 0x05, 0xe9, 0, 0, 0, 0, 0xc3);
+    for (const target of [0x2000, BASE + 0x10000, 0xfffff000])
+    {
+        const module = synthesiseModule({
+            name: 'MSVCRT.dll',
+            base: BASE,
+            exports: [{ name: 'exit', target: 0x3000 },
+                { name: 'strtol', code: body, jumps: [{ at: 6, target }] }],
+        });
+        const address = /** @type {number} */ (module.addressOf('strtol'));
+        const rva = address - BASE;
+        const view = new DataView(module.bytes.buffer);
+        assert.equal(address + 10 + view.getInt32(rva + 6, true) >>> 0, target,
+            `the jump lands at 0x${target.toString(16)}`);
+        assert.deepEqual([...module.bytes.subarray(rva, rva + 6)], [...body.subarray(0, 6)]);
+        assert.equal(module.bytes[rva + 10], 0xc3, 'the rest of the body as it was');
+    }
+});

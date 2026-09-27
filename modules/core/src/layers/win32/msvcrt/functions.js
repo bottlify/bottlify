@@ -137,13 +137,6 @@ export function createMsvcrtFunctions(host){
     const readWide = pointer=>wideStringAt(host.readMemory, pointer);
 
     /**
-     * The scratch a single-byte search marks in. Handlers answer one call at a
-     * time and never await inside a scan, so one table per runtime is safe and
-     * saves allocating and clearing a fresh one per strchr.
-     */
-    const charTable = new Uint8Array(256);
-
-    /**
      * Text into bytes that may be longer than it, in the ANSI page the text
      * was read in: a string a program passed is copied as its own bytes.
      *
@@ -353,63 +346,21 @@ export function createMsvcrtFunctions(host){
         /** char *strcpy(char *dest, const char *src) -- in the guest */
         strcpy: guestEntry(inGuest.strcpy, COMPILED.strcpy, host),
 
-        /** char *strncpy(char *dest, const char *src, size_t count) */
-        strncpy: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([destination, source, count])=>{
-                const length = count >>> 0;
-                // The surprising half of strncpy, and the reason it is not a
-                // bounded strcpy: it pads to the full count when the source is
-                // short, and writes no terminator at all when it truncates.
-                const text = readString(source).slice(0, length);
-                host.writeMemory(destination, packInto(new Uint8Array(length), text));
-                return destination;
-            },
-        },
+        /**
+         * char *strncpy(char *dest, const char *src, size_t count) -- in the
+         * guest: padded to the full count when the source is short, and no
+         * terminator at all when it truncates
+         */
+        strncpy: guestEntry(inGuest.strncpy, COMPILED.strncpy, host),
 
-        /** char *strcat(char *dest, const char *src) */
-        strcat: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([destination, source])=>{
-                writeString(destination + readString(destination).length, readString(source));
-                return destination;
-            },
-        },
+        /** char *strcat(char *dest, const char *src) -- in the guest */
+        strcat: guestEntry(inGuest.strcat, COMPILED.strcat, host),
 
-        /** char *strchr(const char *str, int ch) */
-        strchr: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([string, ch])=>{
-                const wanted = ch & 0xff;
-                charTable.fill(0);
-                charTable[wanted] = 1;
-                // The terminator ends the scan like any marked byte, and which
-                // of the two stopped it decides the answer: the byte asked for
-                // is a pointer into the caller's string, the terminator is a
-                // miss. Searching for the terminator finds it -- it is part of
-                // the string, and code uses that to find the end -- because
-                // then the byte and the stop are the same one.
-                const found = host.scanCString(string, MAX_STRING, charTable);
-                return found.byte === wanted ? string + found.index : 0;
-            },
-        },
+        /** char *strchr(const char *str, int ch) -- in the guest */
+        strchr: guestEntry(inGuest.strchr, COMPILED.strchr, host),
 
-        /** char *strstr(const char *haystack, const char *needle) */
-        strstr: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([haystack, needle])=>{
-                const index = readString(haystack).indexOf(readString(needle));
-                return index === -1 ? 0 : haystack + index;
-            },
-        },
+        /** char *strstr(const char *haystack, const char *needle) -- in the guest */
+        strstr: guestEntry(inGuest.strstr, COMPILED.strstr, host),
 
         /** int toupper(int ch) -- in the guest */
         toupper: guestEntry(inGuest.toupper, COMPILED.toupper, host),
@@ -721,6 +672,7 @@ export function createMsvcrtFunctions(host){
         }),
         ...createConversionFunctions({
             readCString: host.readCString,
+            readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             allocate,
             fpu: host.fpu,

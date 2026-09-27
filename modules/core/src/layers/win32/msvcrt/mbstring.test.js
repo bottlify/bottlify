@@ -56,6 +56,45 @@ test('wcsstr and wcsrchr scale their index the same way', ()=>{
     assert.equal(table.wcsrchr.handler([string, 'a'.charCodeAt(0)]), string + 6);
 });
 
+test('a wide string that ends where its region does is read no further than its end', ()=>{
+    // The memory layer refuses a read past a region, as it does an image's
+    // last page: every wide function reads to the terminator and stops.
+    const memory = fakeMemory();
+    const end = 0x12000;
+    const table = /** @type {Record<string, any>} */ (createWideFunctions({
+        ...memory,
+        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>{
+            if (address + length > end)
+            {
+                throw new RangeError(`read of ${length} bytes at 0x${address.toString(16)} `
+                    + 'runs past the end of the region');
+            }
+            return memory.readMemory(address, length);
+        },
+    }));
+    const put = (/** @type {string} */ text)=>{
+        const at = end - (text.length + 1) * 2;
+        memory.writeMemory(at, Uint8Array.from([...text, '\0']
+            .flatMap(c=>[c.charCodeAt(0) & 0xff, c.charCodeAt(0) >>> 8])));
+        return at;
+    };
+    const string = put('abcAbc');
+    const other = memory.putWide('ABCabd');
+    const destination = memory.allocate(64);
+    assert.equal(table.wcslen.handler([string]), 6);
+    assert.equal(table.wcschr.handler([string, 'c'.charCodeAt(0)]), string + 4);
+    assert.equal(table.wcsrchr.handler([string, 'b'.charCodeAt(0)]), string + 8);
+    assert.equal(table.wcsstr.handler([string, memory.putWide('cA')]), string + 4);
+    assert.equal(table.wcscmp.handler([string, other]), 1);
+    assert.equal(table.wcsncmp.handler([string, other, 1]), 1);
+    assert.equal(table._wcsicmp.handler([string, other]), -1);
+    table.wcscpy.handler([destination, string]);
+    table.wcscat.handler([destination, string]);
+    assert.equal(memory.wide(destination), 'abcAbcabcAbc');
+    table.wcsncpy.handler([destination, string, 3]);
+    assert.equal(memory.wide(destination, 3), 'abc');
+});
+
 test('the wide comparisons are ordered and case folding is ASCII', ()=>{
     const { memory, table } = build();
     assert.equal(table.wcscmp.handler([memory.putWide('a'), memory.putWide('b')]), -1);

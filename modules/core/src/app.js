@@ -3833,6 +3833,23 @@ async function buildApp(options){
             ...(/** @type {() => string[]} */ (audio.runtimes)?.() ?? []),
             ...(/** @type {() => string[]} */ (core.api('media').runtimes)?.() ?? []),
         ]);
+    /**
+     * An export that is code of its own, with the traps it jumps to registered
+     * and the jumps to them for the loader to fill in.
+     *
+     * @param {any} fn @param {string} qualified  `DLL!Name`.
+     */
+    const codeExport = (fn, qualified)=>{
+        /** @type {{ at: number, target: number }[]} */
+        const jumps = [];
+        const code = fn.code({
+            /** @param {any} trap */
+            register: trap=>bridge.register(qualified, trap),
+            /** @param {number} at @param {number} target */
+            jump: (at, target)=>void jumps.push({ at, target }),
+        });
+        return { code, jumps };
+    };
     Object.entries(allLibraries).forEach(([name, table], index)=>{
         // A library imported by number has to be synthesised with the numbers
         // the program compiled against; one we assigned ourselves would bind to
@@ -3849,8 +3866,10 @@ async function buildApp(options){
             // program reads through its address, a trap into the host, or
             // guest code that decides for itself when to trap: the builder
             // hands such an entry the means to register the traps it falls
-            // back to.
-            ...fn.code ? { code: fn.code() } : fn.data ? { data: fn.data() } : {
+            // back to. Code of its own that hands a call to the host jumps to
+            // a trap answering as the export, and named as it; the jump's
+            // displacement is the loader's, which places the code.
+            ...fn.code ? codeExport(fn, `${name}!${exported}`) : fn.data ? { data: fn.data() } : {
                 target: fn.guest
                     ? fn.guest({
                         /** @param {string} label @param {any} trap */

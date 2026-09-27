@@ -74,6 +74,10 @@ const encoder = new TextEncoder();
  *   pages no variable shares. A write to a variable -- the program's, or the
  *   library's own from the host -- never lands on a page that holds code,
  *   where a translator would have to throw its translations away.
+ * @property {{ at: number, target: number }[]} [jumps]
+ *   In `code`: the four bytes at `at` are a relative jump's displacement to
+ *   the guest address `target`, filled in here, where the code's own address
+ *   is known -- a direct jump into a host stub, as a trampoline makes.
  */
 
 /**
@@ -195,6 +199,10 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
         else if (entry.code)
         {
             bytes.set(entry.code, rva);
+            for (const { at, target } of entry.jumps ?? [])
+            {
+                view.setUint32(rva + at, (target - (base + rva + at + 4)) >>> 0, true);
+            }
         }
         else
         {
