@@ -49,6 +49,7 @@ import { ANY_WINDOW, WM_QUIT } from './messages.js';
 import { readMessage, readRect, writeRect } from './structs.js';
 import { WS_VISIBLE, frameOf } from './frame.js';
 import { createTabWalk } from './tabwalk.js';
+import { readText, translated, writeText } from './unicode.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import {
     DLGC_BUTTON, DLGC_DEFPUSHBUTTON, DLGC_HASSETSEL, DLGC_WANTALLKEYS,
@@ -240,7 +241,7 @@ const MAX_RESOURCE_NAME = 256;
  * @property {ReturnType<typeof import('./messages.js').createMessageQueue>} queue
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  * @property {(hwnd: number, message: number, wParam: number, lParam: number,
- *     thread?: unknown) => number | Promise<number>} send
+ *     thread?: unknown, unicode?: boolean) => number | Promise<number>} send
  * @property {(record: any, message: { hwnd: number, message: number, wParam: number,
  *     lParam: number }, thread?: unknown) => number | Promise<number>} defDlgProc
  *           The dialog class's procedure: DWLP_DLGPROC first, then the default.
@@ -552,8 +553,10 @@ export function createDialogFunctions(options){
      *
      * @param {number} instance @param {number} template @param {number} parent
      * @param {number} dialogFunc @param {number} initParam
+     * @param {boolean} [unicode]  Made through a wide call: the dialog is a
+     *     Unicode window, and its procedure reads wide text.
      */
-    const createDialog = (instance, template, parent, dialogFunc, initParam)=>{
+    const createDialog = (instance, template, parent, dialogFunc, initParam, unicode = false)=>{
         const described = (template >>> 0) === 0
             ? null
             : parseTemplate(template >>> 0);
@@ -611,6 +614,7 @@ export function createDialogFunctions(options){
         const wantsVisible = (described.style & WS_VISIBLE) !== 0;
         const dialog = makeWindow({
             className: '#32770',
+            unicode,
             title: described.title,
             style: (described.style & ~WS_VISIBLE) >>> 0,
             exStyle,
@@ -997,9 +1001,9 @@ export function createDialogFunctions(options){
      *
      * @param {number} instance @param {number} name
      */
-    const templateAddress = (instance, name)=>{
+    const templateAddress = (instance, name, wide = false)=>{
         const raw = name >>> 0;
-        const key = raw < MAX_INTEGER_RESOURCE ? raw : host.readCString(raw, MAX_RESOURCE_NAME);
+        const key = raw < MAX_INTEGER_RESOURCE ? raw : readText(host, raw, wide, MAX_RESOURCE_NAME);
         const found = /** @type {{ rva: number } | null} */ (
             host.findResource?.(instance >>> 0, RT_DIALOG, key) ?? null);
         const base = host.moduleBase?.(instance >>> 0) ?? 0;
@@ -1069,6 +1073,46 @@ export function createDialogFunctions(options){
             },
         },
 
+        /** HWND CreateDialogIndirectParamW(...), a Unicode dialog. */
+        CreateDialogIndirectParamW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([instance, template, parent, dialogFunc, initParam])=>
+                createDialog(instance, template, parent, dialogFunc, initParam, true),
+        },
+
+        /** HWND CreateDialogParamW(HINSTANCE, LPCWSTR lpTemplateName, HWND, DLGPROC, LPARAM) */
+        CreateDialogParamW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([instance, name, parent, dialogFunc, initParam])=>
+                createDialog(instance, templateAddress(instance, name, true), parent, dialogFunc,
+                    initParam, true),
+        },
+
+        /** INT_PTR DialogBoxIndirectParamW(...), modal and Unicode. */
+        DialogBoxIndirectParamW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([instance, template, parent, dialogFunc, initParam])=>{
+                const thread = host.callerThread?.();
+                return once(createDialog(instance, template, parent, dialogFunc, initParam, true),
+                    hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd, thread)));
+            },
+        },
+
+        /** INT_PTR DialogBoxParamW(HINSTANCE, LPCWSTR lpTemplateName, HWND, DLGPROC, LPARAM) */
+        DialogBoxParamW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([instance, name, parent, dialogFunc, initParam])=>{
+                const thread = host.callerThread?.();
+                return once(createDialog(instance, templateAddress(instance, name, true), parent,
+                    dialogFunc, initParam, true),
+                hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd, thread)));
+            },
+        },
+
         /**
          * LRESULT DefDlgProcA(HWND hDlg, UINT Msg, WPARAM wParam, LPARAM lParam)
          *
@@ -1091,6 +1135,29 @@ export function createDialogFunctions(options){
                     hwnd: hwnd >>> 0, message: message >>> 0,
                     wParam: wParam >>> 0, lParam: lParam >>> 0,
                 }, host.callerThread?.());
+            },
+        },
+
+        /**
+         * LRESULT DefDlgProcW(HWND hDlg, UINT Msg, WPARAM wParam, LPARAM lParam)
+         *
+         * The default reads the ANSI page, so a wide message reaches it
+         * converted, and a text it fills comes back wide.
+         */
+        DefDlgProcW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, message, wParam, lParam])=>{
+                const record = windows.get(hwnd >>> 0);
+                if (!record)
+                {
+                    return 0;
+                }
+                const thread = host.callerThread?.();
+                return translated(host, {
+                    hwnd: hwnd >>> 0, message: message >>> 0, wParam: wParam >>> 0,
+                    lParam: lParam >>> 0, unicode: true,
+                }, false, ansi=>host.defDlgProc(record, ansi, thread));
             },
         },
 
@@ -1257,6 +1324,20 @@ export function createDialogFunctions(options){
             },
         },
 
+        /** UINT GetDlgItemTextW(HWND hDlg, int nIDDlgItem, LPWSTR lpString, int cchMax) */
+        GetDlgItemTextW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, id, out, max])=>{
+                const room = max | 0;
+                if ((out >>> 0) === 0 || room <= 0)
+                {
+                    return 0;
+                }
+                return writeText(host, out >>> 0, controlOf(hwnd, id)?.title ?? '', room, true);
+            },
+        },
+
         /**
          * LRESULT SendDlgItemMessageA(HWND hDlg, int nIDDlgItem, UINT Msg,
          *                            WPARAM wParam, LPARAM lParam)
@@ -1276,6 +1357,21 @@ export function createDialogFunctions(options){
                 }
                 return host.send(control.hwnd, message >>> 0, wParam >>> 0, lParam >>> 0,
                     host.callerThread?.());
+            },
+        },
+
+        /** LRESULT SendDlgItemMessageW(...), with wide text in the message. */
+        SendDlgItemMessageW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([hwnd, id, message, wParam, lParam])=>{
+                const control = controlOf(hwnd, id);
+                if (!control)
+                {
+                    return 0;
+                }
+                return host.send(control.hwnd, message >>> 0, wParam >>> 0, lParam >>> 0,
+                    host.callerThread?.(), true);
             },
         },
 

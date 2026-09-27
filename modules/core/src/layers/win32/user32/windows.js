@@ -680,9 +680,11 @@ export function createWindowFunctions(host){
      * case to the callers.
      *
      * @param {number} address @param {DispatchedMessage} message @param {unknown} [thread]
+     * @param {boolean} [unicode]  The encoding a program's procedure reads, when
+     *     the caller knows it -- a dialog's procedure is of its dialog's kind.
      * @returns {number | Promise<number>}
      */
-    const callProcedure = (address, message, thread)=>{
+    const callProcedure = (address, message, thread, unicode = undefined)=>{
         host.trace?.(message);
         const procedure = procedures.get(address >>> 0);
         const record = windows.get(message.hwnd >>> 0);
@@ -699,9 +701,9 @@ export function createWindowFunctions(host){
         // A window's own procedure reads text in the encoding it was set in; a
         // procedure named by its address, as CallWindowProc names one, is
         // handed the message as it came.
-        const unicode = record && (address >>> 0) === record.wndProc
-            ? record.unicode === true : message.unicode === true;
-        return translated(host, message, unicode,
+        const reads = unicode ?? (record && (address >>> 0) === record.wndProc
+            ? record.unicode === true : message.unicode === true);
+        return translated(host, message, reads,
             text=>watchDispatch(host, text, host.dispatch(address >>> 0, text, thread)));
     };
 
