@@ -7,6 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../testing/machine.js';
+import { createState, evaluate } from '../ir.js';
+import { decode } from '../decode/decoder.js';
 
 const CODE = 0x1000;
 const DATA = 0x2000;
@@ -154,6 +156,71 @@ test('fxtract splits a value; of zero it gives -inf and the zero-divide flag', (
     const tiny = run([0xdd, 0x05, 0x00, 0x20, 0, 0, 0xd9, 0xf4], { data: f64bytes(5e-324) });
     assert.equal(tiny.st(0), 1);
     assert.equal(tiny.st(1), -1074);
+});
+
+test('fxtract of an infinity, a NaN, a zero and a denormal, translated and interpreted', ()=>{
+    // [the value's bits, the significand's (ST0), the exponent's (ST1), ZE]: an
+    // infinity is its own significand with an exponent of +inf, a NaN both, a
+    // zero its own with -inf and the zero-divide flag, a denormal normalised.
+    /** @type {[bigint, bigint, bigint, number][]} */
+    const cases = [
+        [0x7ff0000000000000n, 0x7ff0000000000000n, 0x7ff0000000000000n, 0],
+        [0xfff0000000000000n, 0xfff0000000000000n, 0x7ff0000000000000n, 0],
+        [0x7ff8000000000123n, 0x7ff8000000000123n, 0x7ff8000000000123n, 0],
+        [0xfff8000000000000n, 0xfff8000000000000n, 0xfff8000000000000n, 0],
+        [0n, 0n, 0xfff0000000000000n, 4],
+        [0x8000000000000000n, 0x8000000000000000n, 0xfff0000000000000n, 4],
+        [0x8000000000000003n, 0xbff8000000000000n, 0xc090c40000000000n, 0], // -1.5 * 2^-1073
+        [0xc028000000000000n, 0xbff8000000000000n, 0x4008000000000000n, 0], // -12
+    ];
+    const bits = (/** @type {number} */ value)=>{
+        const view = new DataView(new ArrayBuffer(8));
+        view.setFloat64(0, value, true);
+        return view.getBigUint64(0, true);
+    };
+    for (const [value, significand, exponent, ze] of cases)
+    {
+        const data = new Uint8Array(8);
+        new DataView(data.buffer).setBigUint64(0, value, true);
+        // fld qword [DATA]; fxtract; fstp qword [DATA+8]; fstp qword [DATA+16]
+        const code = [0xdd, 0x05, 0x00, 0x20, 0, 0, 0xd9, 0xf4, 0xdd, 0x1d, 0x08, 0x20, 0, 0,
+            0xdd, 0x1d, 0x10, 0x20, 0, 0];
+        const name = `fxtract of 0x${value.toString(16)}`;
+        const r = run(code, { data: [...data] });
+        assert.equal(r.exit.kind, 3, name);
+        assert.equal(bits(r.f64(DATA + 8)), significand, `${name}: the significand`);
+        assert.equal(bits(r.f64(DATA + 16)), exponent, `${name}: the exponent`);
+        assert.equal(r.status() & 4, ze, `${name}: ZE`);
+        const ram = new Uint8Array(0x3000);
+        const words = new DataView(ram.buffer);
+        ram.set(code, CODE);
+        ram.set(data, DATA);
+        const state = createState({
+            read: (address, size)=>(size === 1 ? ram[address]
+                : size === 2 ? words.getUint16(address, true) : words.getUint32(address, true)),
+            write: (address, size, word)=>{
+                if (size === 1)
+                {
+                    ram[address] = word;
+                }
+                else if (size === 2)
+                {
+                    words.setUint16(address, word, true);
+                }
+                else
+                {
+                    words.setUint32(address, word, true);
+                }
+            },
+        }, { eip: CODE });
+        while (state.eip < CODE + code.length)
+        {
+            evaluate(/** @type {any} */ (decode(address=>ram[address], state.eip)), state);
+        }
+        assert.equal(words.getBigUint64(DATA + 8, true), significand, `${name}, interpreted`);
+        assert.equal(words.getBigUint64(DATA + 16, true), exponent, `${name}, interpreted`);
+        assert.equal(state.status & 4, ze, `${name}: ZE, interpreted`);
+    }
 });
 
 test('fprem: the remainder with the quotient bits in C0 C3 C1, and the invalid case', ()=>{

@@ -77,9 +77,9 @@ const F64 = Object.freeze({
     reinterpretI64: 0xbf,
 });
 const I64 = Object.freeze({
-    eqz: 0x50, eq: 0x51, ne: 0x52, ltS: 0x53, gtS: 0x55, add: 0x7c, sub: 0x7d, and: 0x83,
-    or: 0x84, shl: 0x86, shrU: 0x88, clz: 0x79, wrap: 0xa7, extendS: 0xac, extendU: 0xad,
-    reinterpretF64: 0xbd,
+    eqz: 0x50, eq: 0x51, ne: 0x52, ltS: 0x53, gtS: 0x55, gtU: 0x56, add: 0x7c, sub: 0x7d,
+    mul: 0x7e, divU: 0x80, and: 0x83, or: 0x84, shl: 0x86, shrU: 0x88, clz: 0x79, wrap: 0xa7,
+    extendS: 0xac, extendU: 0xad, reinterpretF64: 0xbd,
 });
 const F32 = Object.freeze({ demoteF64: 0xb6 });
 /** i32.trunc_sat_f64_s / i64.trunc_sat_f64_s */
@@ -1236,6 +1236,24 @@ export function x87BlockEnd(e){
 }
 
 /**
+ * After a call out of the region that wrote the state block back and took it
+ * again (the trap port's handler): the locals hold the machine's registers,
+ * each in its own local, and the words as the handler left them. Nothing the
+ * tracker knew of this place holds any more, so the exit that follows moves no
+ * register and writes no stale word over what was taken back.
+ *
+ * @param {E} e
+ */
+export function x87Reloaded(e){
+    const x = e.x87;
+    x.current = null;
+    x.known = unknown();
+    x.stack = NOTHING;
+    x.exact = 0;
+    x.exactNaN = 0;
+}
+
+/**
  * Before an instruction of another class writes the stack words (an MMX
  * instruction's hold, `emms`): the stale ones written first, so the flush
  * does not later overwrite what it wrote, and nothing known after it.
@@ -2044,10 +2062,14 @@ export function emitX87(e, instruction, flagsLive){
         case 'fxtract':
         {
             // ST0 becomes the exponent and the significand is pushed: for a
-            // normal, from the double's fields; zero gives -inf and ZE; a
-            // denormal is scaled up first.
+            // finite value, from the double's fields, a denormal scaled up
+            // first; zero gives -inf and ZE and is its own significand; an
+            // infinity is its own significand with an exponent of +inf, and a
+            // NaN both. The test is of the value, before the fields replace it.
             guard();
             b.localGet(st(0)).localSet(x.temp);
+            b.localGet(x.temp).op(F64.abs).f64const(Infinity).op(F64.lt);
+            e.openIf('finite', EMPTY);
             b.localGet(x.temp).f64const(0).op(F64.eq);
             e.openIf('zero', EMPTY);
             setStatus(Status.ZE);
@@ -2067,12 +2089,10 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(x.temp).op(I64.reinterpretF64).i64const(-0x7ff0000000000001n).op(I64.and)
                 .i64const(0x3ff0000000000000n).op(I64.or).op(F64.reinterpretI64).localSet(x.temp);
             e.close();
-            // Infinity and NaN keep their value in both.
-            b.localGet(x.temp).localGet(x.temp).op(F64.ne);
-            b.localGet(x.temp).op(F64.abs).f64const(Infinity).op(F64.eq).op(I32.or);
-            e.openIf('special', EMPTY);
-            b.localGet(st(0)).localSet(x.temp);
-            b.localGet(st(0)).localSet(x.temp2);
+            b.else();
+            // The exponent: +inf of an infinity, the NaN itself of a NaN.
+            b.localGet(x.temp).f64const(Infinity).localGet(x.temp).localGet(x.temp).op(F64.ne)
+                .select().localSet(x.temp2);
             e.close();
             b.localGet(x.temp2);
             orIndefinite();
@@ -2209,10 +2229,8 @@ export function emitX87(e, instruction, flagsLive){
             // The partial remainder: ST0 - Q * ST1 with Q the quotient
             // rounded toward zero (fprem) or to nearest (fprem1), exact, and
             // C0, C3 and C1 its bits 2, 1 and 0; past an exponent difference of
-            // 63 a partial reduction and C2. The host's (`remainder` in
-            // `ir-x87.js`, the interpreter's too), since its `%` is the exact
-            // IEEE fmod, where a quotient in doubles rounds.
-            const math = e.context.math;
+            // 63 a partial reduction and C2. The shared helper's, the model's
+            // `remainder` (`ir-x87.js`) in integers: a quotient in doubles rounds.
             const nearest = op === 'fprem1' ? 1 : 0;
             guard();
             b.localGet(st(0)).localSet(x.temp);
@@ -2229,11 +2247,10 @@ export function emitX87(e, instruction, flagsLive){
             indefinite();
             b.localSet(st(0));
             b.else();
-            b.localGet(x.temp).localGet(x.temp2).i32const(nearest).call(math.fpremStatus);
+            b.localGet(x.temp).localGet(x.temp2).i32const(nearest).call(e.context.remainder)
+                .localSet(Local.t0).localSet(st(0));
             b.localGet(Local.x87Status).i32const(~(Status.C2 | Status.C0 | Status.C3 | Status.C1))
-                .op(I32.and).op(I32.or).localSet(Local.x87Status);
-            b.localGet(x.temp).localGet(x.temp2).i32const(nearest).call(math.fprem)
-                .localSet(st(0));
+                .op(I32.and).localGet(Local.t0).op(I32.or).localSet(Local.x87Status);
             e.close();
             dirty(0);
             return finish();
@@ -3076,6 +3093,126 @@ export function addInvalidHelper(m, layout){
     b.end();
     b.i32const(0);
     return m.function(type, [], b.toBytes());
+}
+
+/**
+ * The partial remainder helper a module carries: `remainder(a, c, nearest) →
+ * (value, bits)` is `fprem` (`nearest` 0) or `fprem1` of a finite `a` by a
+ * nonzero `c` that is not a NaN, the value exact and `bits` the condition
+ * bits it leaves -- C2 for a partial reduction, otherwise the quotient's low
+ * three bits in C0, C3 and C1 -- the model's `remainder` (`ir-x87.js`) bit for
+ * bit, in integers rather than through two calls into the host.
+ *
+ * The significands, a subnormal's normalised, are divided the way the
+ * processor's long division goes: the dividend's shifted left by the exponent
+ * difference d, eleven bits a step so the partial remainder (below the
+ * divisor's 2^53) stays below 2^64, the quotient's low bits carried along.
+ * Past a difference of 63 the reduction is partial, as `remainder` has it: by
+ * the divisor times a power of two that leaves 32 plus d mod 32 of it. The
+ * result is the integer remainder times the divisor's unit, a power of two
+ * applied in two steps since it may lie below a double's normal range (the
+ * remainder is always a double exactly, so neither step rounds).
+ *
+ * @param {import('../wasm/encoder.js').ModuleBuilder} m
+ * @returns {number} the function index
+ */
+export function addRemainderHelper(m){
+    const { f64, i32, i64 } = ValType;
+    const type = m.type({ params: [f64, f64, i32], results: [f64, i32] });
+    const A = 0; const C = 1; const NEAREST = 2;
+    // locals: the significands (the dividend's the partial remainder once
+    // divided), the exponents (the divisor's the result's scale once known),
+    // the bits left to divide, the quotient's low bits, a step, a partial
+    // reduction's flag, a step's quotient
+    const MA = 3; const MC = 4; const EA = 5; const EC = 6; const N = 7; const Q = 8;
+    const K = 9; const PARTIAL = 10; const STEP = 11;
+    const b = new Body();
+    // A zero dividend or an infinite divisor: the dividend, and a quotient of 0.
+    b.localGet(A).f64const(0).op(F64.eq);
+    b.localGet(C).op(F64.abs).f64const(Infinity).op(F64.eq).op(I32.or);
+    b.if(EMPTY);
+    b.localGet(A).i32const(0).return();
+    b.end();
+    for (const [value, significand, exponent] of [[A, MA, EA], [C, MC, EC]])
+    {
+        b.localGet(value).op(I64.reinterpretF64).localTee(significand).i64const(52n)
+            .op(I64.shrU).op(I64.wrap).i32const(0x7ff).op(I32.and).localSet(exponent);
+        b.localGet(significand).i64const(0xfffffffffffffn).op(I64.and).localSet(significand);
+        b.localGet(exponent).op(I32.eqz);
+        b.if(EMPTY);
+        // A subnormal's leading bit moved to bit 52, its exponent below -1022.
+        b.localGet(significand).op(I64.clz).op(I64.wrap).i32const(11).op(I32.sub).localSet(K);
+        b.localGet(significand).localGet(K).op(I64.extendU).op(I64.shl).localSet(significand);
+        b.i32const(-1022).localGet(K).op(I32.sub).localSet(exponent);
+        b.else();
+        b.localGet(significand).i64const(1n << 52n).op(I64.or).localSet(significand);
+        b.localGet(exponent).i32const(1023).op(I32.sub).localSet(exponent);
+        b.end();
+    }
+    b.localGet(EA).localGet(EC).op(I32.sub).localSet(N);
+    b.localGet(N).i32const(0).op(I32.ltS);
+    b.if(EMPTY);
+    // Below the divisor: the dividend and a quotient of 0 -- but fprem1's
+    // quotient of a dividend past half the divisor (a difference of -1) rounds
+    // to 1, which leaves the difference of the two, exact within a factor of two.
+    b.localGet(NEAREST).localGet(N).i32const(-1).op(I32.eq).op(I32.and);
+    b.localGet(A).op(F64.abs).f64const(2).op(F64.mul).localGet(C).op(F64.abs).op(F64.gt)
+        .op(I32.and);
+    b.if(EMPTY);
+    b.localGet(A).localGet(C).op(F64.abs).localGet(A).op(F64.copysign).op(F64.sub)
+        .i32const(Status.C1).return();
+    b.end();
+    b.localGet(A).i32const(0).return();
+    b.end();
+    b.localGet(N).i32const(64).op(I32.geS).localTee(PARTIAL);
+    b.if(EMPTY);
+    b.localGet(N).i32const(31).op(I32.and).i32const(32).op(I32.add).localSet(N);
+    b.end();
+    // The unit of the divisor the reduction is by: 2^(ea - d - 52).
+    b.localGet(EA).localGet(N).op(I32.sub).i32const(52).op(I32.sub).localSet(EC);
+    b.i32const(0).localSet(Q);
+    b.loop(EMPTY);
+    // k = min(n, 11); r = r << k; q = q << k + r / c; r = r mod c
+    b.localGet(N).i32const(11).localGet(N).i32const(11).op(I32.ltS).select().localSet(K);
+    b.localGet(MA).localGet(K).op(I64.extendU).op(I64.shl).localTee(MA).localGet(MC)
+        .op(I64.divU).localTee(STEP);
+    b.op(I64.wrap).localGet(Q).localGet(K).op(I32.shl).op(I32.add).i32const(7).op(I32.and)
+        .localSet(Q);
+    b.localGet(MA).localGet(STEP).localGet(MC).op(I64.mul).op(I64.sub).localSet(MA);
+    b.localGet(N).localGet(K).op(I32.sub).localTee(N).i32const(0).op(I32.gtS).brIf(0);
+    b.end();
+    // fprem1: past half the divisor, or at half with an odd quotient, the
+    // quotient one more and the remainder the divisor's less it, of the other sign.
+    b.localGet(NEAREST).localGet(PARTIAL).op(I32.eqz).op(I32.and);
+    b.if(EMPTY);
+    b.localGet(MA).i64const(1n).op(I64.shl).localGet(MC).op(I64.gtU);
+    b.localGet(MA).i64const(1n).op(I64.shl).localGet(MC).op(I64.eq)
+        .localGet(Q).i32const(1).op(I32.and).op(I32.and);
+    b.op(I32.or);
+    b.if(EMPTY);
+    b.localGet(MC).localGet(MA).op(I64.sub).localSet(MA);
+    b.localGet(Q).i32const(1).op(I32.add).i32const(7).op(I32.and).localSet(Q);
+    b.localGet(A).op(F64.neg).localSet(A);
+    b.end();
+    b.end();
+    // r * 2^e: first by 2^max(e, -1022), which leaves r (at least 1) normal,
+    // then by what remains of e, at most 104 below.
+    b.localGet(EC).i32const(-1022).localGet(EC).i32const(-1022).op(I32.gtS).select().localSet(K);
+    b.localGet(MA).op(F64.convertI64U);
+    b.localGet(K).i32const(1023).op(I32.add).op(I64.extendU).i64const(52n).op(I64.shl)
+        .op(F64.reinterpretI64).op(F64.mul);
+    b.localGet(EC).localGet(K).op(I32.sub).i32const(1023).op(I32.add).op(I64.extendU)
+        .i64const(52n).op(I64.shl).op(F64.reinterpretI64).op(F64.mul);
+    b.localGet(A).op(F64.copysign);
+    b.localGet(PARTIAL);
+    b.if(i32);
+    b.i32const(Status.C2);
+    b.else();
+    b.localGet(Q).i32const(4).op(I32.and).i32const(6).op(I32.shl);
+    b.localGet(Q).i32const(2).op(I32.and).i32const(13).op(I32.shl).op(I32.or);
+    b.localGet(Q).i32const(1).op(I32.and).i32const(9).op(I32.shl).op(I32.or);
+    b.end();
+    return m.function(type, [i64, i64, i32, i32, i32, i32, i32, i32, i64], b.toBytes());
 }
 
 /**

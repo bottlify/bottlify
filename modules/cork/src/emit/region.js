@@ -59,7 +59,6 @@ import { importHelpers } from './helpers.js';
 import { Tables, blockSlot } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
 import { inlineReturns } from '../region.js';
-import { fpremStatus, fpremValue } from '../ir-x87.js';
 import {
     analyseX87, floatCondition, isX87, prepareX87, sameState, x87BlockEnd, x87BlockStart,
     x87Edge, x87EntryCheck, x87Epilogue, x87LoadRegisters, x87Normalise,
@@ -67,12 +66,11 @@ import {
 } from './x87.js';
 
 /**
- * The host functions a module imports for the transcendentals and the partial
- * remainder, by name; an instantiation supplies each (`mathImports()`), the
- * transcendentals from `Math`.
+ * The host functions a module imports for the transcendentals, by name; an
+ * instantiation supplies each (`mathImports()`), from `Math`.
  */
 export const MATH_IMPORTS = Object.freeze([
-    'sin', 'cos', 'tan', 'atan2', 'exp2m1', 'log2', 'log1p', 'fprem', 'fpremStatus',
+    'sin', 'cos', 'tan', 'atan2', 'exp2m1', 'log2', 'log1p',
 ]);
 
 /**
@@ -113,7 +111,6 @@ export function mathImports(){
         /** @param {number} x */
         exp2m1: x=>Math.expm1(x * Math.LN2),
         log2: Math.log2, log1p: Math.log1p,
-        fprem: fpremValue, fpremStatus,
     };
 }
 
@@ -218,6 +215,7 @@ const LOCAL_TYPES = [
  * @property {number} round            the rounding-control helper
  * @property {number} f64ToBcd         the `fbstp` packed-BCD store
  * @property {number} x87Invalid       an x87 NaN result's IE (`addInvalidHelper`)
+ * @property {number} remainder        `fprem`'s and `fprem1`'s (`addRemainderHelper`)
  * @property {Record<string, number>} math  the transcendentals imported from the host
  * @property {boolean} hash            an untranslated exit probes the entry hash and
  *                                     tail-calls the region found, through the host's table
@@ -289,18 +287,11 @@ export function prepareModule(m, layout, features, memory = {},
     // cork's clock under cork -- so `rdtsc` needs no crossing and the two agree.
     const rdtsc = m.importFunction('env', 'rdtsc',
         m.type({ params: [], results: [ValType.i64] }));
-    // The transcendentals wasm has no operation for, as the host's Math, and
-    // the partial remainder, whose exact fmod is the host's `%`.
+    // The transcendentals wasm has no operation for, as the host's Math.
     const unary = m.type({ params: [ValType.f64], results: [ValType.f64] });
     /** @type {Record<string, number>} the others' types, by name */
     const types = {
         atan2: m.type({ params: [ValType.f64, ValType.f64], results: [ValType.f64] }),
-        fprem: m.type({
-            params: [ValType.f64, ValType.f64, ValType.i32], results: [ValType.f64],
-        }),
-        fpremStatus: m.type({
-            params: [ValType.f64, ValType.f64, ValType.i32], results: [ValType.i32],
-        }),
     };
     /** @type {Record<string, number>} */
     const math = {};
@@ -314,12 +305,12 @@ export function prepareModule(m, layout, features, memory = {},
     // The helpers are one shared module every region imports, rather than a
     // copy in each; the host instantiates it once with the same memory (they
     // are defined in `./helpers.js`).
-    const { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid } =
+    const { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid, remainder } =
         importHelpers(m);
     /** @type {ModuleContext} */
     const context = {
         m, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,
-        hash: hashed, codeHit, f64ToBcd, x87Invalid, rdtsc, leaveOut,
+        hash: hashed, codeHit, f64ToBcd, x87Invalid, remainder, rdtsc, leaveOut,
     };
     if (trapPort !== undefined)
     {

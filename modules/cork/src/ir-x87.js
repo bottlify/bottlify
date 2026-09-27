@@ -305,8 +305,9 @@ function remainder(a, c, nearest){
 }
 
 /**
- * `remainder` as the translator's host import: `fprem` for `nearest` 0,
- * `fprem1` otherwise, and the status bits by the second import.
+ * `remainder` as the reference the translator's and the wasm tier's integer
+ * forms are held to: `fprem` for `nearest` 0, `fprem1` otherwise, and the
+ * status bits by `fpremStatus`.
  *
  * @param {number} a @param {number} c @param {number} nearest
  */
@@ -967,6 +968,16 @@ function stepX87(instruction, state, address){
         {
             const t1 = guard(state, [0], true);
             const original = st(0);
+            // An infinity is its own significand with an exponent of +inf, a
+            // NaN both (its bits as it came, taken before it is asked about).
+            const nan = nanWords(original);
+            if (nan || Math.abs(original) === Infinity)
+            {
+                const same = nan ? scratchF[0] : original;
+                setSt(0, orIndefinite(nan ? same : Infinity, t1));
+                pushValue(orIndefinite(same, t1));
+                return true;
+            }
             let value = original;
             let exponent = 0;
             let significand;
@@ -986,12 +997,6 @@ function stepX87(instruction, state, address){
                 const word = bits(value);
                 exponent += Number(word >> 52n & 0x7ffn) - 1023;
                 significand = fromBits(word & -0x7ff0000000000001n | 0x3ff0000000000000n);
-            }
-            if (Number.isNaN(value) || Math.abs(value) === Infinity)
-            {
-                setSt(0, orIndefinite(original, t1));
-                pushValue(orIndefinite(original, t1));
-                return true;
             }
             setSt(0, orIndefinite(exponent, t1));
             pushValue(orIndefinite(significand, t1));

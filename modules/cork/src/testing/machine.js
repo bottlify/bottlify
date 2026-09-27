@@ -288,9 +288,15 @@ export function createTestMachine(given = {}){
                     {
                         unsupported.set(opcode, (unsupported.get(opcode) ?? 0) + count);
                     }
-                    for (const start of unit.translation.labels.keys())
+                    // A cut block is no entry, as the runtime keeps none: a run
+                    // that leaves at one has a region formed there for the top
+                    // the machine then has.
+                    for (const [start, label] of unit.translation.labels)
                     {
-                        translated.set(start * 16 + top, unit);
+                        if (start === eip || !unit.translation.cut.has(label))
+                        {
+                            translated.set(start * 16 + top, unit);
+                        }
                     }
                 }
                 const before = this.counter();
