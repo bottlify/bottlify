@@ -584,7 +584,11 @@ world transform is the one state the counter deliberately ignores, because it mo
 draws of a frame; whoever reads the counter therefore owes the world matrix a fresh read on every
 draw. The renderer compares it, the view and the projection with the matrices its products were last
 formed from, bit for bit, and forms world-view, world-view-projection and the two normal matrices
-again only when one differs, into arrays of its own. A texture whose bytes the program rewrites raises a counter of its own, so the upload
+again only when one differs, into arrays of its own. The Direct3D 8 device writes a new world into
+the matrix it holds rather than making one (a state block, `GetTransform` and the renderer copy it),
+takes a light set again with the values it holds, or enabled or disabled as it already is, as
+nothing set, and its seam reads a light's dwords in place and answers the same dwords at the same
+index with the same light. A texture whose bytes the program rewrites raises a counter of its own, so the upload
 owed to it still happens inside the next draw that samples it. When the counter has moved, the
 preparation is looked up by the state's values among those the frame has built. That name is made in
 two parts so that the common changes stay cheap: the device also publishes

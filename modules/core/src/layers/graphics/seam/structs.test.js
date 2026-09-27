@@ -12,7 +12,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { D3DVIEWPORT8, createFields, dwordsOf, floatsOf, intsOf } from './structs.js';
+import {
+    D3DLIGHT7, D3DVIEWPORT8, createFields, createLightReader, dwordsOf, floatsOf, intsOf, putLight,
+} from './structs.js';
 
 /**
  * What the readers answered before the staging buffer: a fresh array, its
@@ -170,4 +172,63 @@ test('floats and dwords are written as one block, however many', ()=>{
         assert.deepEqual([...new Uint32Array(target.bytes.slice(8, 8 + count * 4).buffer)],
             dwords.map(value=>value >>> 0));
     }
+});
+
+test('a light is read as the fields read it, and the same dwords again are the same light', ()=>{
+    const bytes = new Uint8Array(256);
+    const view = new DataView(bytes.buffer);
+    const memory = {
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>bytes.slice(address, address + length),
+        /** @param {number} address */
+        readU32: (/** @type {number} */ address)=>view.getUint32(address, true),
+    };
+    const fields = createFields(memory);
+    const read = createLightReader(fields);
+    const words = new Uint32Array(D3DLIGHT7.SIZE >>> 2);
+    const floats = new Float32Array(words.buffer);
+    const light = {
+        Type: 3,
+        Diffuse: { r: 1, g: 0.5, b: -0, a: 1 },
+        Specular: { r: 0.1, g: 0.2, b: 0.3, a: 0.4 },
+        Ambient: { r: 0, g: 0, b: 0, a: 1 },
+        Position: { x: 1.5, y: -2, z: 3 },
+        Direction: { x: 0, y: 0, z: 1 },
+        Range: 100,
+        Falloff: 1,
+        Attenuation0: 1,
+        Attenuation1: 0.25,
+        Attenuation2: 0,
+        Theta: 0.5,
+        Phi: 1.25,
+    };
+    putLight(floats, words, light);
+    bytes.set(new Uint8Array(words.buffer), 16);
+    const a = {};
+    const b = {};
+    const first = read(a, 1, 16);
+    // What each field reads as through the fields, one by one.
+    const f = (/** @type {number} */ offset)=>fields.readF32(16 + offset);
+    assert.deepEqual(first, {
+        Type: fields.readU32(16),
+        Diffuse: { r: f(4), g: f(8), b: f(12), a: f(16) },
+        Specular: { r: f(20), g: f(24), b: f(28), a: f(32) },
+        Ambient: { r: f(36), g: f(40), b: f(44), a: f(48) },
+        Position: { x: f(52), y: f(56), z: f(60) },
+        Direction: { x: f(64), y: f(68), z: f(72) },
+        Range: f(76), Falloff: f(80), Attenuation0: f(84), Attenuation1: f(88),
+        Attenuation2: f(92), Theta: f(96), Phi: f(100),
+    });
+    assert.ok(Object.is(first.Diffuse.b, -0));
+
+    assert.equal(read(a, 1, 16), first, 'the same dwords at the same index');
+    assert.notEqual(read(a, 2, 16), first, 'another index has a light of its own');
+    assert.notEqual(read(b, 1, 16), first, 'and so has another device');
+
+    view.setFloat32(16 + D3DLIGHT7.dvPosition, 7, true);
+    const moved = read(a, 1, 16);
+    assert.notEqual(moved, first);
+    assert.equal(moved.Position.x, 7);
+    assert.equal(first.Position.x, 1.5, 'a light answered before is not written into');
+    assert.equal(read(a, 1, 16), moved);
 });

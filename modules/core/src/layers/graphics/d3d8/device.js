@@ -50,7 +50,7 @@ import {
 import { GAMMA_RAMP_ENTRIES } from './structs.js';
 import { DEFAULT_RENDER_STATES, createDefaultRenderStates } from './renderstates.js';
 import { createDefaultStageStates } from './stagestates.js';
-import { IDENTITY, STAGE_COUNT, createRenderer, vertexCountOf } from './render.js';
+import { IDENTITY, STAGE_COUNT, createRenderer, sameLight, vertexCountOf } from './render.js';
 import { applyBlock, captureBlock, emptyBlock, fillBlock } from './stateblock.js';
 import { processStreams } from './process.js';
 import { POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
@@ -718,6 +718,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     // without leaving the machine at all, which is the only way the crossing
     // itself goes away too.
     let redundantTransforms = 0;
+    /**
+     * What `stageProcessing` last answered, and the bindings it answered for.
+     * A shader object is made once and never changed, so the same objects
+     * bound the same way are the same answer.
+     *
+     * @type {{ vertexShader: number, pixelShader: number, shader: unknown, pixel: unknown,
+     *     answer: any }}
+     */
+    const heldProcessing = { vertexShader: 0, pixelShader: 0, shader: null, pixel: null,
+        answer: null };
     let nextStateBlock = 1;
 
     const count = createReferenceCount();
@@ -1838,6 +1848,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 redundantTransforms++;
                 return D3D_OK;
             }
+            // The world moves before most draws, and nothing keeps the matrix
+            // the device holds past the call that reads it -- a state block,
+            // GetTransform and the renderer copy it -- so a new one is written
+            // over it rather than made. Every other transform is a new object,
+            // which is how the renderer knows it changed.
+            if (type === D3DTS.WORLD && held)
+            {
+                held.set(matrix);
+                return D3D_OK;
+            }
             transforms.set(type, new Float32Array(matrix));
             if (type !== D3DTS.WORLD)
             {
@@ -2108,6 +2128,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 return D3D_OK;
             }
             const existing = lights.get(index);
+            // Set again with what it holds, as a program that sets its lights
+            // before every model does: observably nothing, and a new version
+            // would have every draw after it name its state again.
+            if (existing && sameLight(existing.light, light))
+            {
+                return D3D_OK;
+            }
             lights.set(index, { light: { ...light }, enabled: existing?.enabled ?? false });
             lightsVersion++;
             drawStateVersion++;
@@ -2145,7 +2172,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 recording.lights.set(index, { ...held, enabled: enable === true });
                 return D3D_OK;
             }
-            const record = lights.get(index) ?? { light: defaultLight(), enabled: false };
+            const held = lights.get(index);
+            if (held && held.enabled === (enable === true))
+            {
+                return D3D_OK;
+            }
+            const record = held ?? { light: defaultLight(), enabled: false };
             record.enabled = enable === true;
             lights.set(index, record);
             lightsVersion++;
@@ -3293,10 +3325,23 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const shader = handle ? vertexShaders.get(boundVertexShader) ?? null : null;
             const programmed = shader?.parsed ? shader : null;
             const pixel = pixelShaders.get(boundPixelShader) ?? null;
+            // Asked for by every draw: the answer is kept while the bindings
+            // and the shader objects they name are the ones it was made from.
+            const held = heldProcessing;
+            if (held.answer !== null && held.vertexShader === boundVertexShader
+                && held.pixelShader === boundPixelShader && held.shader === shader
+                && held.pixel === pixel)
+            {
+                return held.answer;
+            }
             // A handle naming no live shader -- a block applied after a
             // delete -- is a stage nothing can draw, so it has no program.
             const drawable = (!handle || shader) && (boundPixelShader === 0 || pixel);
-            return {
+            held.vertexShader = boundVertexShader;
+            held.pixelShader = boundPixelShader;
+            held.shader = shader;
+            held.pixel = pixel;
+            held.answer = {
                 vertexShader: programmed || (handle && !shader) ? boundVertexShader : 0,
                 fvf: handle ? 0 : boundVertexShader,
                 fixedFunctionLayout: shader && !programmed ? shader.layout : null,
@@ -3322,6 +3367,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     }
                     : null,
             };
+            return held.answer;
         },
     };
 

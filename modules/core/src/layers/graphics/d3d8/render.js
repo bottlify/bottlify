@@ -841,6 +841,33 @@ export function packLight(block, at, light){
 }
 
 /**
+ * Whether two lights hold the same values, field for field: a zero's sign and
+ * not-a-number compared as `Object.is` compares them, so a light set again
+ * with what it holds is told apart from one that reads back differently.
+ *
+ * @param {Light} a @param {Light} b
+ */
+export function sameLight(a, b){
+    return a.Type === b.Type && sameColour(a.Diffuse, b.Diffuse)
+        && sameColour(a.Specular, b.Specular) && sameColour(a.Ambient, b.Ambient)
+        && sameNumber(a.Position.x, b.Position.x) && sameNumber(a.Position.y, b.Position.y)
+        && sameNumber(a.Position.z, b.Position.z) && sameNumber(a.Direction.x, b.Direction.x)
+        && sameNumber(a.Direction.y, b.Direction.y) && sameNumber(a.Direction.z, b.Direction.z)
+        && sameNumber(a.Range, b.Range) && sameNumber(a.Falloff, b.Falloff)
+        && sameNumber(a.Attenuation0, b.Attenuation0) && sameNumber(a.Attenuation1, b.Attenuation1)
+        && sameNumber(a.Attenuation2, b.Attenuation2) && sameNumber(a.Theta, b.Theta)
+        && sameNumber(a.Phi, b.Phi);
+}
+
+/** @param {ColourValue} a @param {ColourValue} b */
+const sameColour = (a, b)=>sameNumber(a.r, b.r) && sameNumber(a.g, b.g) && sameNumber(a.b, b.b)
+    && sameNumber(a.a, b.a);
+
+/** `Object.is`, which would box each double handed to it. @param {number} a @param {number} b */
+const sameNumber = (a, b)=>(a === b ? a !== 0 || 1 / a === 1 / b
+    : Number.isNaN(a) && Number.isNaN(b));
+
+/**
  * Four floats into a block, without an array to carry them: a draw packs
  * dozens, and a frame has hundreds of draws.
  *
@@ -2491,9 +2518,8 @@ export function createRenderer(options){
         // translations is what tells that apart from a light that is simply
         // dim, and nothing else in a frame does.
         const world = transformOf(model, D3DTS.WORLD);
-        if (world !== lastSampled.world && tally.worlds.size < SAMPLE_LIMIT)
+        if (tally.worlds.size < SAMPLE_LIMIT && sampledWorldMoved(world))
         {
-            lastSampled.world = world;
             sample(tally.worlds, ()=>`origin=${round(world[12])},${round(world[13])}`
                 + `,${round(world[14])}`
                 + ` scale=${round(Math.hypot(world[0], world[1], world[2]))}`);
@@ -2542,13 +2568,25 @@ export function createRenderer(options){
     const LIGHT_SAMPLE_FLOATS = 18;
     let sampledLightValues = new Float64Array(8 * LIGHT_SAMPLE_FLOATS).fill(NaN);
 
+    /**
+     * Whether the world matrix differs from the one sampled last in what its
+     * sample reads: the translation and the length of the first row. The
+     * device writes a new world into the matrix it holds, so the object says
+     * nothing.
+     *
+     * @param {ArrayLike<number>} world
+     */
+    const sampledWorldMoved = world=>(keepValue(sampledWorld, 0, world[0])
+        | keepValue(sampledWorld, 1, world[1]) | keepValue(sampledWorld, 2, world[2])
+        | keepValue(sampledWorld, 3, world[12]) | keepValue(sampledWorld, 4, world[13])
+        | keepValue(sampledWorld, 5, world[14])) !== 0;
+    const sampledWorld = new Float64Array(6).fill(NaN);
+
     /** What `countLighting` sampled last, of each thing it samples. */
     const lastSampled = {
         ambient: -1,
         /** @type {unknown} */
         lights: null,
-        /** @type {unknown} */
-        world: null,
         /** @type {unknown} */
         material: null,
     };

@@ -522,6 +522,100 @@ export function putLight(floats, dwords, light){
     floats[D3DLIGHT7.dvPhi >>> 2] = light.Phi;
 }
 
+/**
+ * A reader of D3DLIGHT7, and of Direct3D 8's and 9's lights, which are its
+ * layout under their own names, for the setter of each device.
+ *
+ * A program may set its lights before every model, most often with what they
+ * already hold: the dwords are read in place and compared with those the same
+ * device's light at that index was last read from, and the same dwords are
+ * answered with the same light -- which the device, comparing it with what it
+ * holds, takes as nothing set -- where every call made a light and the arrays
+ * to read it through.
+ *
+ * @param {{ readU32: (address: number) => number }} fields
+ * @returns {(device: object, index: number, pointer: number) => any}
+ */
+export function createLightReader(fields){
+    const words = new Uint32Array(D3DLIGHT7.SIZE >>> 2);
+    const floats = new Float32Array(words.buffer);
+    /** @type {WeakMap<object, Map<number, { words: Uint32Array, light: any }>>} */
+    const read = new WeakMap();
+    return (device, index, pointer)=>{
+        for (let at = 0; at < words.length; at++)
+        {
+            words[at] = fields.readU32(pointer + at * 4);
+        }
+        let held = read.get(device);
+        if (held === undefined)
+        {
+            held = new Map();
+            read.set(device, held);
+        }
+        const last = held.get(index);
+        if (last !== undefined && sameDwords(last.words, words))
+        {
+            return last.light;
+        }
+        const light = lightOf(floats, words);
+        if (last !== undefined)
+        {
+            last.words.set(words);
+            last.light = light;
+        }
+        else
+        {
+            held.set(index, { words: words.slice(), light });
+        }
+        return light;
+    };
+}
+
+/** @param {Uint32Array} a @param {Uint32Array} b */
+function sameDwords(a, b){
+    for (let at = 0; at < a.length; at++)
+    {
+        if (a[at] !== b[at])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * A light out of its dwords, as `putLight` lays one out.
+ *
+ * @param {Float32Array} floats @param {Uint32Array} dwords
+ */
+function lightOf(floats, dwords){
+    /** @param {number} offset */
+    const colour = offset=>{
+        const at = offset >>> 2;
+        return { r: floats[at], g: floats[at + 1], b: floats[at + 2], a: floats[at + 3] };
+    };
+    /** @param {number} offset */
+    const vector = offset=>{
+        const at = offset >>> 2;
+        return { x: floats[at], y: floats[at + 1], z: floats[at + 2] };
+    };
+    return {
+        Type: dwords[D3DLIGHT7.dltType >>> 2],
+        Diffuse: colour(D3DLIGHT7.dcvDiffuse),
+        Specular: colour(D3DLIGHT7.dcvSpecular),
+        Ambient: colour(D3DLIGHT7.dcvAmbient),
+        Position: vector(D3DLIGHT7.dvPosition),
+        Direction: vector(D3DLIGHT7.dvDirection),
+        Range: floats[D3DLIGHT7.dvRange >>> 2],
+        Falloff: floats[D3DLIGHT7.dvFalloff >>> 2],
+        Attenuation0: floats[D3DLIGHT7.dvAttenuation0 >>> 2],
+        Attenuation1: floats[D3DLIGHT7.dvAttenuation1 >>> 2],
+        Attenuation2: floats[D3DLIGHT7.dvAttenuation2 >>> 2],
+        Theta: floats[D3DLIGHT7.dvTheta >>> 2],
+        Phi: floats[D3DLIGHT7.dvPhi >>> 2],
+    };
+}
+
 /** @param {Float32Array} floats @param {number} at @param {Colour} colour */
 function putColour(floats, at, colour){
     floats[at] = colour.r;
