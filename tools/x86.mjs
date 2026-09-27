@@ -331,7 +331,7 @@ export class Asm {
             const bytes = piece.emit(ctx, 0, labels, here);
             if (bytes.length !== piece.length)
             {
-                throw new Error(`x86: an op said ${piece.length} bytes and emitted ${bytes.length}`);
+                throw new Error(`x86: an op said ${piece.length} bytes, emitted ${bytes.length}`);
             }
             out.push(...bytes);
             here += piece.length;
