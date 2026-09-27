@@ -895,6 +895,45 @@ test('a store that answers at once has a batch published in the call that formed
         third.runtime.diagnostics().lookedUpLater], [0, 1]);
 });
 
+test('a runtime that goes leaves the store it was handed open for the others sharing it',
+    async()=>{
+        // The shape of a store over a directory: once closed it answers
+        // nothing at once, and a lookup waits a turn -- as the origin file
+        // system's does without its records file's synchronous handle.
+        /** @type {Map<string, Uint8Array>} */
+        const records = new Map();
+        let closed = false;
+        const store = {
+            get: async(/** @type {string} */ key)=>records.get(key) ?? null,
+            put: async(/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+                records.set(key, bytes);
+            },
+            getNow: (/** @type {string} */ key)=>(closed ? undefined : records.get(key) ?? null),
+            flush: async()=>{},
+            close: ()=>{
+                closed = true;
+            },
+        };
+        /** @param {any} which */
+        const hot = which=>{
+            const m = machine({ store: which, bundleId: 'test' });
+            m.write(CODE, COUNTDOWN);
+            m.setReg(4, 0x80000);
+            m.runtime.noteHot(CODE);
+            return m;
+        };
+        const parent = hot(store);
+        assert.equal(await parent.runtime.translatePending(), 1);
+        const child = hot(store);
+        assert.equal(await child.runtime.translatePending(), 1);
+        await child.runtime.flush();
+        assert.equal(closed, false, 'the child\'s machine went; the store is the run\'s');
+        const next = hot(store);
+        assert.equal(await next.runtime.translatePending(), 1, 'answered at once, as before');
+        assert.deepEqual([next.runtime.diagnostics().lookedUpNow,
+            next.runtime.diagnostics().lookedUpLater], [1, 0]);
+    });
+
 test('a region whose code is written while its lookups are out is not published for the old bytes',
     async()=>{
         const { memoryTranslationStore } = await import('./cache.js');

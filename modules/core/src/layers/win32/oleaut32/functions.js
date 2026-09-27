@@ -173,8 +173,10 @@ const DISP_E_OVERFLOW = 0x8002000a;
  * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
  *           Puts an ITypeLib or ITypeInfo into guest memory.
  * @property {AutomationHive} [hive]  Where a library is registered.
- * @property {(entry: number, args: number[]) => Promise<number>} [call]
- *           A stdcall into guest code, which is what ITypeInfo::Invoke is.
+ * @property {(entry: number, args: number[], thread?: unknown) => Promise<number>} [call]
+ *           A stdcall into guest code, which is what ITypeInfo::Invoke is, and
+ *           an interface's AddRef and Release are.
+ * @property {() => unknown} [callerThread]  The thread whose call this is.
  */
 
 /**
@@ -190,6 +192,15 @@ const DISP_E_OVERFLOW = 0x8002000a;
  * @property {number} pointer    A BSTR or an interface pointer, else 0.
  * @property {number | null} number  The value as a number, where it is one.
  * @property {string | null} text    A BSTR's characters, read before any free.
+ */
+
+/**
+ * The references a copy takes and a clear gives back. They are the object's
+ * own code, so they are called once the variant is written, in this order.
+ *
+ * @typedef {Object} Owed
+ * @property {number[]} addRef
+ * @property {number[]} release
  */
 
 /**
@@ -398,11 +409,12 @@ export function createAutomationFunctions(host){
     };
 
     /**
-     * Empties a variant, releasing whatever it owned.
+     * Empties a variant, freeing whatever it owned: a string at once, an
+     * interface by the Release put in `owed`.
      *
-     * @param {number} pvar
+     * @param {number} pvar @param {Owed} owed
      */
-    const clear = pvar=>{
+    const clear = (pvar, owed)=>{
         const declared = readU16(pvar);
         const type = declared & VT_TYPEMASK;
         if ((declared & VT_BYREF) === 0)
@@ -413,29 +425,57 @@ export function createAutomationFunctions(host){
             }
             else if (type === VT_DISPATCH || type === VT_UNKNOWN)
             {
-                // The reference is dropped rather than released: Release lives
-                // on a vtable in the guest, and calling back into it from here
-                // is a re-entrancy this library does not have. Leaking a
-                // reference keeps an object alive that should have died, which
-                // is the safe direction -- releasing one we do not hold would
-                // free an object still in use.
-                report('OLE Automation',
-                    'VariantClear does not Release the interface a variant held');
+                const pointer = readU32(pvar + VARIANT_VALUE);
+                if (pointer !== 0)
+                {
+                    owed.release.push(pointer);
+                }
             }
         }
         host.writeMemory(pvar, new Uint8Array(VARIANT_BYTES));
     };
 
+    /** @returns {Owed} */
+    const nothingOwed = ()=>({ addRef: [], release: [] });
+
+    /**
+     * Takes and gives back the references a call owes, one call into the
+     * program at a time, on the thread whose call this is, then answers `hr`.
+     * Every AddRef comes before any Release, so an object a variant is
+     * copied over with itself is never let go of in between.
+     *
+     * @param {Owed} owed @param {unknown} thread @param {number} hr
+     * @returns {number | Promise<number>}
+     */
+    const settle = (owed, thread, hr)=>{
+        const calls = [...owed.addRef.map(object=>[object, 1]),
+            ...owed.release.map(object=>[object, 2])];
+        if (calls.length === 0)
+        {
+            return hr;
+        }
+        const call = host.call;
+        if (!call)
+        {
+            report('OLE Automation', 'an interface a variant takes or gives up is not counted');
+            return hr;
+        }
+        return calls.reduce((before, [object, slot])=>before.then(()=>
+            call(readU32(readU32(object) + slot * 4), [object], thread)),
+        Promise.resolve(0)).then(()=>hr);
+    };
+
     /**
      * Writes a loaded value into a variant as the given type, converting.
      *
-     * The destination is expected to have been cleared already.
+     * The destination is expected to have been cleared already. An interface
+     * is the variant's own reference, taken by the AddRef put in `owed`.
      *
      * @param {number} pvar @param {number} type @param {LoadedVariant} value
-     * @param {number} flags
+     * @param {number} flags @param {Owed} owed
      * @returns {number} an HRESULT
      */
-    const store = (pvar, type, value, flags)=>{
+    const store = (pvar, type, value, flags, owed)=>{
         const at = pvar + VARIANT_VALUE;
         if (type === VT_EMPTY || type === VT_NULL)
         {
@@ -448,8 +488,15 @@ export function createAutomationFunctions(host){
             {
                 return DISP_E_TYPEMISMATCH;
             }
-            report('OLE Automation',
-                'a variant carrying an interface is copied without an AddRef');
+            if (type !== value.type)
+            {
+                report('OLE Automation', 'an interface converted between IUnknown and IDispatch'
+                    + ' keeps its pointer rather than asking QueryInterface for the other');
+            }
+            if (value.pointer !== 0)
+            {
+                owed.addRef.push(value.pointer);
+            }
             writeU16(pvar, type);
             writeU32(at, value.pointer);
             return S_OK;
@@ -579,8 +626,9 @@ export function createAutomationFunctions(host){
      * locale this build has nothing to do with.
      *
      * @param {number} dest @param {number} src @param {number} flags @param {number} vt
+     * @param {Owed} owed
      */
-    const changeType = (dest, src, flags, vt)=>{
+    const changeType = (dest, src, flags, vt, owed)=>{
         if (dest === 0 || src === 0)
         {
             return E_INVALIDARG;
@@ -595,8 +643,8 @@ export function createAutomationFunctions(host){
         {
             return DISP_E_TYPEMISMATCH;
         }
-        clear(dest);
-        return store(dest, type, value, flags);
+        clear(dest, owed);
+        return store(dest, type, value, flags, owed);
     };
 
     const typeLibraries = host.vtables ? createTypeLibraryObjects({
@@ -609,7 +657,15 @@ export function createAutomationFunctions(host){
         call: (entry, args)=>(host.call
             ? host.call(entry, args)
             : Promise.reject(new Error('no way to call guest code'))),
-        clearVariant: clear,
+        clearVariant: pvar=>{
+            const owed = nothingOwed();
+            clear(pvar, owed);
+            if (owed.release.length !== 0)
+            {
+                report('ITypeInfo::Invoke',
+                    'an interface already in the result variant is overwritten without a Release');
+            }
+        },
         readBstr,
         allocateBstr: text=>allocateBstr(encode(text)),
         freeBstr,
@@ -770,12 +826,13 @@ export function createAutomationFunctions(host){
 
     /**
      * VariantCopy: a reference is copied as a reference, a string is
-     * duplicated, and an interface pointer is copied as it is.
+     * duplicated, and an interface pointer is shared, the copy holding a
+     * reference of its own.
      *
-     * @param {number} dest @param {number} src
+     * @param {number} dest @param {number} src @param {Owed} owed
      * @returns {number} an HRESULT
      */
-    const copyVariant = (dest, src)=>{
+    const copyVariant = (dest, src, owed)=>{
         if (dest === 0 || src === 0)
         {
             return E_INVALIDARG;
@@ -787,7 +844,7 @@ export function createAutomationFunctions(host){
         const declared = readU16(src);
         const type = declared & VT_TYPEMASK;
         const byref = (declared & VT_BYREF) !== 0;
-        clear(dest);
+        clear(dest, owed);
         if (!byref && type === VT_BSTR)
         {
             const source = readU32(src + VARIANT_VALUE);
@@ -804,8 +861,11 @@ export function createAutomationFunctions(host){
         }
         if (!byref && (type === VT_DISPATCH || type === VT_UNKNOWN))
         {
-            report('OLE Automation',
-                'a variant carrying an interface is copied without an AddRef');
+            const pointer = readU32(src + VARIANT_VALUE);
+            if (pointer !== 0)
+            {
+                owed.addRef.push(pointer);
+            }
         }
         host.writeMemory(dest, host.readMemory(src, VARIANT_BYTES).slice());
         return S_OK;
@@ -868,6 +928,28 @@ export function createAutomationFunctions(host){
             stride *= bound.elements;
         }
         return { array, address: array.data + offset * array.elementBytes };
+    };
+
+    /**
+     * Frees what one element owns, as SafeArrayDestroy frees each: a string
+     * at once, a variant as VariantClear clears it, an interface by the
+     * Release put in `owed`.
+     *
+     * @param {number} features @param {number} address @param {Owed} owed
+     */
+    const releaseElement = (features, address, owed)=>{
+        if ((features & FADF_BSTR) !== 0)
+        {
+            freeBstr(readU32(address));
+        }
+        else if ((features & FADF_VARIANT) !== 0)
+        {
+            clear(address, owed);
+        }
+        else if ((features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0 && readU32(address) !== 0)
+        {
+            owed.release.push(readU32(address));
+        }
     };
 
     const registerTypeLib = {
@@ -1064,8 +1146,10 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                clear(variant);
-                return S_OK;
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
+                clear(variant, owed);
+                return settle(owed, thread, S_OK);
             },
         },
 
@@ -1077,7 +1161,11 @@ export function createAutomationFunctions(host){
         VariantCopy: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([pvargDest, pvargSrc])=>copyVariant(pvargDest >>> 0, pvargSrc >>> 0),
+            handler: ([pvargDest, pvargSrc])=>{
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
+                return settle(owed, thread, copyVariant(pvargDest >>> 0, pvargSrc >>> 0, owed));
+            },
         },
 
         /** HRESULT VariantCopyInd(VARIANT *pvarDest, const VARIANTARG *pvargSrc) */
@@ -1091,6 +1179,14 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
+                // What is not a reference is copied as VariantCopy copies it,
+                // which leaves a variant copied onto itself as it was.
+                if ((readU16(src) & VT_BYREF) === 0)
+                {
+                    return settle(owed, thread, copyVariant(dest, src, owed));
+                }
                 const value = load(src, true);
                 if (value === null)
                 {
@@ -1098,13 +1194,13 @@ export function createAutomationFunctions(host){
                 }
                 if (dest !== src)
                 {
-                    clear(dest);
+                    clear(dest, owed);
                 }
                 else
                 {
                     host.writeMemory(dest, new Uint8Array(VARIANT_BYTES));
                 }
-                return store(dest, value.type, value, 0);
+                return settle(owed, thread, store(dest, value.type, value, 0, owed));
             },
         },
 
@@ -1115,8 +1211,12 @@ export function createAutomationFunctions(host){
         VariantChangeType: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([pvargDest, pvarSrc, wFlags, vt])=>
-                changeType(pvargDest >>> 0, pvarSrc >>> 0, wFlags & 0xffff, vt & 0xffff),
+            handler: ([pvargDest, pvarSrc, wFlags, vt])=>{
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
+                return settle(owed, thread, changeType(pvargDest >>> 0, pvarSrc >>> 0,
+                    wFlags & 0xffff, vt & 0xffff, owed));
+            },
         },
 
         /**
@@ -1135,7 +1235,10 @@ export function createAutomationFunctions(host){
                     report('OLE Automation',
                         'VariantChangeTypeEx ignores the locale and converts invariantly');
                 }
-                return changeType(pvargDest >>> 0, pvarSrc >>> 0, wFlags & 0xffff, vt & 0xffff);
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
+                return settle(owed, thread, changeType(pvargDest >>> 0, pvarSrc >>> 0,
+                    wFlags & 0xffff, vt & 0xffff, owed));
             },
         },
 
@@ -1369,24 +1472,20 @@ export function createAutomationFunctions(host){
                 {
                     return DISP_E_ARRAYISLOCKED;
                 }
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
                 const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
                 if (array.data !== 0)
                 {
                     for (let index = 0; index < elements; index++)
                     {
-                        if ((array.features & FADF_BSTR) !== 0)
-                        {
-                            freeBstr(readU32(array.data + index * 4));
-                        }
-                        else if ((array.features & FADF_VARIANT) !== 0)
-                        {
-                            clear(array.data + index * VARIANT_BYTES);
-                        }
+                        releaseElement(array.features, array.data + index * array.elementBytes,
+                            owed);
                     }
                     host.heap.free(array.data);
                 }
                 host.heap.free(psa >>> 0);
-                return S_OK;
+                return settle(owed, thread, S_OK);
             },
         },
 
@@ -1417,23 +1516,18 @@ export function createAutomationFunctions(host){
                 const elements = readU32(psaboundNew >>> 0);
                 const after = elements * inner;
                 const stride = array.elementBytes;
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
                 for (let index = after; index < before; index++)
                 {
-                    if ((array.features & FADF_BSTR) !== 0)
-                    {
-                        freeBstr(readU32(array.data + index * 4));
-                    }
-                    else if ((array.features & FADF_VARIANT) !== 0)
-                    {
-                        clear(array.data + index * VARIANT_BYTES);
-                    }
+                    releaseElement(array.features, array.data + index * stride, owed);
                 }
                 if (after > before)
                 {
                     const data = host.heap.allocate(after * stride);
                     if (data === 0)
                     {
-                        return E_OUTOFMEMORY;
+                        return settle(owed, thread, E_OUTOFMEMORY);
                     }
                     host.fillMemory(data, 0, after * stride);
                     if (array.data !== 0)
@@ -1446,7 +1540,7 @@ export function createAutomationFunctions(host){
                 }
                 host.writeMemory((psa >>> 0) + SAFEARRAY_BOUNDS,
                     host.readMemory(psaboundNew >>> 0, 8).slice());
-                return S_OK;
+                return settle(owed, thread, S_OK);
             },
         },
 
@@ -1455,10 +1549,9 @@ export function createAutomationFunctions(host){
          * HRESULT SafeArrayPutElement(SAFEARRAY *psa, LONG *rgIndices, void *pv)
          *
          * One element, copied the way its type is copied: a string is
-         * duplicated and a variant goes through VariantCopy, so what the
-         * caller gets is its own to free, and what it put stays the array's.
-         * An interface pointer goes in and out as it is, which VariantCopy
-         * already reports.
+         * duplicated, a variant goes through VariantCopy and an interface
+         * takes a reference of its own, so what the caller gets is its own to
+         * free, and what it put stays the array's.
          */
         SafeArrayGetElement: {
             argBytes: 12,
@@ -1486,13 +1579,19 @@ export function createAutomationFunctions(host){
                     writeU32(pv >>> 0, copy);
                     return S_OK;
                 }
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
                 if ((features & FADF_VARIANT) !== 0)
                 {
                     host.writeMemory(pv >>> 0, new Uint8Array(VARIANT_BYTES));
-                    return copyVariant(pv >>> 0, at.address);
+                    return settle(owed, thread, copyVariant(pv >>> 0, at.address, owed));
+                }
+                if ((features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0 && readU32(at.address) !== 0)
+                {
+                    owed.addRef.push(readU32(at.address));
                 }
                 host.writeMemory(pv >>> 0, host.readMemory(at.address, elementBytes).slice());
-                return S_OK;
+                return settle(owed, thread, S_OK);
             },
         },
         SafeArrayPutElement: {
@@ -1523,14 +1622,19 @@ export function createAutomationFunctions(host){
                     writeU32(at.address, copy);
                     return S_OK;
                 }
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
                 if ((features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0)
                 {
+                    // Like the other types, the argument is the value itself.
+                    owed.addRef.push(pv >>> 0);
+                    releaseElement(features, at.address, owed);
                     writeU32(at.address, pv >>> 0);
-                    return S_OK;
+                    return settle(owed, thread, S_OK);
                 }
                 if ((features & FADF_VARIANT) !== 0)
                 {
-                    return copyVariant(at.address, pv >>> 0);
+                    return settle(owed, thread, copyVariant(at.address, pv >>> 0, owed));
                 }
                 host.writeMemory(at.address, host.readMemory(pv >>> 0, elementBytes).slice());
                 return S_OK;
@@ -1677,9 +1781,8 @@ export function createAutomationFunctions(host){
          *
          * A new descriptor and new data, unlocked. Elements that own something
          * are copied the way their type is copied: a string is duplicated, a
-         * variant goes through VariantCopy, and an interface pointer is
-         * copied as it is -- the reference it should carry is not taken,
-         * which is the divergence VariantCopy already reports.
+         * variant goes through VariantCopy, and an interface takes a
+         * reference of its own.
          */
         SafeArrayCopy: {
             argBytes: 8,
@@ -1706,6 +1809,8 @@ export function createAutomationFunctions(host){
                     host.heap.free(data);
                     return E_OUTOFMEMORY;
                 }
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
                 const header = host.readMemory(psa >>> 0, descriptorBytes).slice();
                 host.writeMemory(descriptor, header);
                 writeU32(descriptor + 8, 0);
@@ -1718,7 +1823,7 @@ export function createAutomationFunctions(host){
                         for (let index = 0; index < elements; index++)
                         {
                             copyVariant(data + index * VARIANT_BYTES,
-                                array.data + index * VARIANT_BYTES);
+                                array.data + index * VARIANT_BYTES, owed);
                         }
                     }
                     else
@@ -1736,13 +1841,19 @@ export function createAutomationFunctions(host){
                         }
                         else if ((array.features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0)
                         {
-                            report('OLE Automation',
-                                'an array of interfaces is copied without an AddRef');
+                            for (let index = 0; index < elements; index++)
+                            {
+                                const pointer = readU32(array.data + index * 4);
+                                if (pointer !== 0)
+                                {
+                                    owed.addRef.push(pointer);
+                                }
+                            }
                         }
                     }
                 }
                 writeU32(out >>> 0, descriptor);
-                return S_OK;
+                return settle(owed, thread, S_OK);
             },
         },
 
@@ -1772,12 +1883,14 @@ export function createAutomationFunctions(host){
                     return DISP_E_PARAMNOTFOUND;
                 }
                 const source = args + (count - 1 - (position >>> 0)) * VARIANT_BYTES;
-                const result = changeType(pvarResult >>> 0, source, 0, vtTarg & 0xffff);
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
+                const result = changeType(pvarResult >>> 0, source, 0, vtTarg & 0xffff, owed);
                 if (result !== S_OK && (puArgErr >>> 0) !== 0)
                 {
                     writeU32(puArgErr >>> 0, position >>> 0);
                 }
-                return result;
+                return settle(owed, thread, result);
             },
         },
 

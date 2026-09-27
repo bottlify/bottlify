@@ -720,7 +720,8 @@ export function listen(app, collected){
     for (const name of ['libraries', 'libraries-missing', 'libraries-attached',
         'library-loaded', 'library-missing', 'unimplemented', 'warning', 'debug',
         'bundle', 'bundle-unavailable', 'divergence', 'process-started', 'process-replace',
-        'hooks-bound', 'hook-error'])
+        'hooks-bound', 'hook-error', 'process-create', 'process-resumed', 'process-server',
+        'process-server-exit', 'exit', 'error'])
     {
         app.on(name, (/** @type {any} */ payload)=>{
             if (collected.events.length < LIMITS.events)
@@ -1107,6 +1108,91 @@ export function scalars(layers){
 }
 
 /**
+ * What `standing` reports of each process: the few metrics a stopped run is
+ * read from, small enough to cross from a worker every few seconds.
+ *
+ * @param {any} app
+ */
+async function standingOf(app){
+    return (await app.standing()).map((/** @type {any} */ { image, diagnostics })=>{
+        /** @param {string} layer */
+        const metrics = layer=>diagnostics.find((/** @type {any} */ entry)=>
+            entry.name === layer)?.metrics ?? {};
+        const kernel = metrics('kernel');
+        const bridge = metrics('bridge');
+        const win32 = metrics('win32');
+        const cpu = metrics('cpu');
+        const log = metrics('log');
+        return {
+            image,
+            phases: (log.topPhases ?? []).slice(0, 8),
+            threads: kernel.byState, waiting: kernel.waiting, turns: kernel.turns,
+            calls: bridge.calls, lastCall: bridge.lastCall, suspended: bridge.suspendedCalls,
+            messages: win32.messages,
+            windows: (win32.windows ?? []).filter((/** @type {any} */ window)=>window.visible)
+                .map((/** @type {any} */ window)=>({ hwnd: window.hwnd, parent: window.parent,
+                    className: window.className, title: String(window.title ?? '').slice(0, 60),
+                    x: window.x, y: window.y, width: window.width, height: window.height })),
+            cpu: { recent: (cpu.recent ?? []).slice(-4), top: (cpu.samples?.top ?? []).slice(0, 8),
+                traps: cpu.traps, trapCapacity: cpu.trapCapacity },
+        };
+    });
+}
+
+/**
+ * The desktop the facade's process paints into, as the 32-bit pixels and the
+ * size: what a person would see of a program that draws with GDI, which the
+ * presented frames do not carry.
+ *
+ * @param {any} app
+ * @returns {{ width: number, height: number, pitch: number, pixels: string } | null}
+ */
+function desktopOf(app){
+    const desktop = app.debug?.desktop?.();
+    if (!desktop)
+    {
+        return null;
+    }
+    return { width: desktop.width, height: desktop.height, pitch: desktop.pitch,
+        pixels: toBase64(new Uint8Array(desktop.bytes.buffer, desktop.bytes.byteOffset,
+            desktop.bytes.byteLength)) };
+}
+
+/**
+ * Every file under a directory of the volume, as the program sees it: what an
+ * install has laid down so far.
+ *
+ * @param {any} app @param {string} directory
+ * @returns {{ path: string, size: number }[]}
+ */
+function filesUnder(app, directory){
+    /** @type {{ path: string, size: number }[]} */
+    const out = [];
+    /** @param {string} at */
+    const walk = at=>{
+        for (const entry of app.files.list(at))
+        {
+            if (entry.directory)
+            {
+                walk(entry.path);
+            }
+            else
+            {
+                out.push({ path: entry.path, size: entry.size });
+            }
+        }
+    };
+    try
+    {
+        walk(directory);
+    }
+    catch {
+        // Not there yet: nothing laid down.
+    }
+    return out;
+}
+
+/**
  * @typedef {Object} Harness
  * @property {Promise<{ available: boolean, reason?: string, adapter?: any }>} gpu
  * @property {(request: any) => Promise<any>} run   One title, and what came out of it.
@@ -1127,6 +1213,12 @@ export function scalars(layers){
  * @property {() => boolean} exactRestart
  *     Begins the emulator's own account afresh, so a window measures itself
  *     and not the loading before it.
+ * @property {(list?: string) => Promise<{ processes: any[], events: string[], desktop: any,
+ *     files: { path: string, size: number }[] }>} standing
+ *     Every process standing, read while the run goes on: its threads and
+ *     what they wait on, its parked calls, its windows, and where its
+ *     processor last ran -- what an installer several processes deep that
+ *     has stopped is diagnosed from, which the frames it presents do not say.
  * @property {string[]} errors
  * @property {{ count: number, gaps: number[] }} presents
  *     When each frame was presented, as the gaps between them in
@@ -1150,6 +1242,8 @@ export function createHarness(canvas, how = {}){
     let frameReport = null;
     /** @type {any} */
     let running = null;
+    /** What the run in progress has said so far, for `standing`. @type {string[]} */
+    let runningEvents = [];
     /** The frames `snapFrame` asked for, being read back, by frame. @type {Map<number, Promise<any>>} */
     const snaps = new Map();
     /** @type {PresentState} */
@@ -1161,7 +1255,7 @@ export function createHarness(canvas, how = {}){
     /**
      * Runs one title and reports what came out of it.
      *
-     * @param {{ exe: string, bundleUrl: string, imagePath: string,
+     * @param {{ exe?: string, exeUrl?: string, bundleUrl: string, imagePath: string,
      *           commandLine?: string,
      *           windows?: 'win2000' | 'winxp' | 'win7' | 'win10',
      *           sidecarHooks?: { spec: any, source: string },
@@ -1336,7 +1430,8 @@ export function createHarness(canvas, how = {}){
         const app = await createApp({
             pacing: how.pacing,
             win32: network ? { network } : undefined,
-            executable: fromBase64(request.exe),
+            executable: request.exe ? fromBase64(request.exe)
+                : new Uint8Array(await (await fetch(request.exeUrl)).arrayBuffer()),
             // What the program believes it was started with, so a run can set
             // a command-line-only cvar without touching the bundle.
             commandLine: request.commandLine,
@@ -1383,7 +1478,9 @@ export function createHarness(canvas, how = {}){
                 ? (/** @type {any} */ call)=>{
                     if (callLog.length < (request.logLines || LIMITS.log))
                     {
-                        const line = formatCall(call);
+                        const line = request.logTimes
+                            ? `${performance.now().toFixed(1)} ${formatCall(call)}`
+                            : formatCall(call);
                         // Only the calls a run asked about, when it named
                         // them: a question about one family of calls should
                         // not fill the log with the frame loop's.
@@ -1477,6 +1574,7 @@ export function createHarness(canvas, how = {}){
         const drain = drainSound(app, capture, how.drainElsewhere);
 
         listen(app, collected);
+        runningEvents = collected.events;
         scheduleKeyTimes(app, request);
 
         /** @type {any} */
@@ -1737,6 +1835,10 @@ export function createHarness(canvas, how = {}){
         // switched on has recorded, read while the run is still going.
         /** @param {number} [count] */
         journalRecent: count=>running ? running.log.recent(count) : [],
+        standing: async list=>(running
+            ? { processes: await standingOf(running), events: runningEvents,
+                desktop: desktopOf(running), files: list ? filesUnder(running, list) : [] }
+            : { processes: [], events: runningEvents, desktop: null, files: [] }),
         exactRestart: ()=>{
             // The sampled account is cleared with the emulator's own, so a
             // window that begins here is measured by itself and not by the

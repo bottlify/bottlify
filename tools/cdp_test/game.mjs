@@ -24,10 +24,19 @@
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
  *                                  [--exact] [--cpu-profile SECONDS] [--export-translations FILE]
+ *                                  [--watch SECONDS]
+ *
+ * `--watch S` is for a program that does not present, an installer above
+ * all: every S seconds the desktop it paints with GDI is written as a PNG,
+ * the events since the last look are printed, and every process standing
+ * says what its threads wait on, which call is parked, which windows show and
+ * where its processor last ran.
  */
 
 import { deflateSync } from 'node:zlib';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync }
+    from 'node:fs';
+import { tmpdir } from 'node:os';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -190,6 +199,10 @@ function parse(argv){
         // title that reaches its loop and would otherwise run out the turns
         // hours later. Zero means the turns alone decide.
         runSeconds: number('--run-seconds', 0),
+        watch: number('--watch', 0),
+        // With --watch: the files under this directory of the volume, counted
+        // at every look and listed whenever they change.
+        list: argv.includes('--list') ? argv[argv.indexOf('--list') + 1] : null,
         // The frame averages taken once this many frames came after the last
         // long stall (a load): with a program that advances one step a frame,
         // the same frames of play in every run (0: not taken).
@@ -245,6 +258,9 @@ function parse(argv){
         // Only the calls whose line matches this expression are kept, so a
         // question about one family of calls is answered by the whole run.
         logMatch: argv.includes('--log-match') ? argv[argv.indexOf('--log-match') + 1] : null,
+        // Each line of the call log led by the page's clock in milliseconds:
+        // where a run stood still is the gap between two lines.
+        logTimes: argv.includes('--log-times'),
         // Where every draw of the last frame landed, and under what state.
         // Off unless asked for: it transforms every vertex of every draw a
         // second time on the processor.
@@ -1234,12 +1250,19 @@ export async function game(options){
     const entry = options.entry ?? manifest.entry;
     const executable = await opened.read(entry);
     await opened.close();
+    // The page fetches the image rather than being handed it in the request:
+    // an installer's image carries its whole payload, and a protocol message
+    // of hundreds of megabytes closes the connection instead of arriving.
+    const entryDirectory = mkdtempSync(join(tmpdir(), 'bottlify-entry-'));
+    writeFileSync(join(entryDirectory, 'entry.exe'), executable);
+    process.on('exit', ()=>rmSync(entryDirectory, { recursive: true, force: true }));
 
     const server = await serveStatic({
         sandboxDir: PACKAGE_DIR,
         srcDir: join(PACKAGE_DIR, 'src'),
         extra: [
             { prefix: '/bundle/', root: directory },
+            { prefix: '/entry/', root: entryDirectory },
             // The translator package beside core, where app.js resolves it.
             { prefix: '/cork/', root: join(PACKAGE_DIR, '..', 'cork') },
             // The networking client, for a run that names a relay.
@@ -1290,7 +1313,7 @@ export async function game(options){
         // loaded from inside its own installation.
         const imagePath = `C:\\App\\${entry}`;
         const request = JSON.stringify({
-            exe: Buffer.from(executable).toString('base64'),
+            exeUrl: `http://127.0.0.1:${server.port}/entry/entry.exe`,
             bundleUrl: `http://127.0.0.1:${server.port}/bundle/bundle.btl`,
             imagePath,
             // The bundle's own launch arguments, appended after the quoted
@@ -1336,6 +1359,7 @@ export async function game(options){
             looks: options.looks,
             pasted: options.pasted,
             logMatch: options.logMatch,
+            logTimes: options.logTimes,
             network: options.network
                 ? {
                     module: new URL('/networking/client/index.js', pageUrl).href,
@@ -1397,6 +1421,77 @@ export async function game(options){
             { expression: `window.__bottlify__.start(${request}); null`,
                 returnByValue: true },
             sessionId);
+
+        const watchFrom = Date.now();
+        const watchStamp = new Date().toISOString().replace(/[:.]/g, '-');
+        let eventsSeen = 0;
+        let filesSeen = '';
+        const watchTimer = options.watch > 0
+            ? setInterval(()=>{
+                const at = ((Date.now() - watchFrom) / 1000).toFixed(0).padStart(5, '0');
+                cdp.send('Runtime.evaluate', {
+                    expression: `window.__bottlify__.standing(${JSON.stringify(options.list)})`,
+                    awaitPromise: true, returnByValue: true }, sessionId).then(answer=>{
+                    const { processes = [], events = [], desktop = null, files = [] } =
+                        answer.result?.value ?? {};
+                    if (options.list)
+                    {
+                        const bytes = files.reduce((/** @type {number} */ total,
+                            /** @type {any} */ file)=>total + file.size, 0);
+                        console.log(`${at} s  files ${files.length}, ${bytes} bytes`
+                            + ` under ${options.list}`);
+                        const now = JSON.stringify(files);
+                        if (now !== filesSeen)
+                        {
+                            filesSeen = now;
+                            for (const file of files)
+                            {
+                                console.log(`${at} s    file ${String(file.size).padStart(10)}`
+                                    + ` ${file.path}`);
+                            }
+                        }
+                    }
+                    for (const event of events.slice(eventsSeen))
+                    {
+                        console.log(`${at} s  event ${event}`);
+                    }
+                    eventsSeen = events.length;
+                    for (const one of processes)
+                    {
+                        const { image, windows: shownWindows, cpu, ...rest } = one;
+                        console.log(`${at} s  ${String(image).split('\\').pop()}`
+                            + ` ${JSON.stringify(rest).slice(0, 1200)}`);
+                        console.log(`${at} s    cpu ${JSON.stringify(cpu)}`);
+                        for (const shown of shownWindows)
+                        {
+                            console.log(`${at} s    window ${shown.hwnd}`
+                                + `${shown.parent ? ` in ${shown.parent}` : ''}`
+                                + ` ${shown.className} "${shown.title}"`
+                                + ` ${shown.x},${shown.y} ${shown.width}x${shown.height}`);
+                        }
+                    }
+                    if (desktop)
+                    {
+                        // The desktop's rows are its pitch apart, the PNG's
+                        // exactly a row of pixels; a DIB's fourth byte is not
+                        // an alpha, so every pixel is opaque.
+                        const bytes = Buffer.from(desktop.pixels, 'base64');
+                        const packed = Buffer.alloc(desktop.width * desktop.height * 4, 0xff);
+                        for (let y = 0; y < desktop.height; y++)
+                        {
+                            for (let x = 0; x < desktop.width; x++)
+                            {
+                                bytes.copy(packed, (y * desktop.width + x) * 4,
+                                    y * desktop.pitch + x * 4, y * desktop.pitch + x * 4 + 3);
+                            }
+                        }
+                        const path = join(REPORTS_DIR, `game-${watchStamp}-desktop-${at}.png`);
+                        writeFileSync(path, toPng(desktop.width, desktop.height, packed));
+                        console.log(`${at} s  desktop ${path}`);
+                    }
+                }, ()=>{});
+            }, options.watch * 1000)
+            : null;
 
         // The whole call stream, drained in pieces: a quarter of a million
         // lines is more than one evaluation carries. Factored out so a run that
@@ -1477,8 +1572,10 @@ export async function game(options){
                     const stack = await pausedStack(cdp, sessionId);
                     // The page answers between the engine's turns: every layer's
                     // metrics as the run stands, since no report will come.
+                    // A promise from the worker, a string from the page.
                     const live = await cdp.send('Runtime.evaluate', {
                         expression: 'window.__bottlify__.frameReport()', returnByValue: true,
+                        awaitPromise: true,
                     }, sessionId).catch(()=>null);
                     if (live?.result?.value)
                     {
@@ -1514,6 +1611,10 @@ the run as it stands: ${path}`;
             if (deviceTimer !== null)
             {
                 clearInterval(deviceTimer);
+            }
+            if (watchTimer !== null)
+            {
+                clearInterval(watchTimer);
             }
         }
 

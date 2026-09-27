@@ -2054,8 +2054,9 @@ export function createWin32Module(){
                     files: volume,
                     vtables: comVtables,
                     hive,
-                    /** @param {number} entry @param {number[]} args */
-                    call: (entry, args)=>bridge.callGuest({ entry, args }),
+                    /** @param {number} entry @param {number[]} args @param {unknown} [thread] */
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
                 }),
             };
 

@@ -265,6 +265,8 @@ const MINIMISING = new Set([2, SW_MINIMIZE, 7]);
 const RESTORING = new Set([1, 9, 10]);
 const WS_MINIMIZE = 0x20000000;
 const WS_POPUP = 0x80000000;
+/** Painted only once the siblings beneath it have been: a label over a picture. */
+const WS_EX_TRANSPARENT = 0x20;
 /** The ShowWindow commands that leave activation where it is. */
 const SHOW_WITHOUT_ACTIVATING = new Set([SW_HIDE, 4, 6, 7, 8]);
 
@@ -372,7 +374,7 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *            rect: { left: number, top: number, right: number, bottom: number },
  *            client: { left: number, top: number, right: number, bottom: number },
  *            visible: boolean, className: string, title: string, parent: string | null,
- *            child: boolean, id: number }[]} list
+ *            child: boolean, id: number, style: string, exStyle: string }[]} list
  *           Every live window, children included: a dialog is its controls, and
  *           a report that shows the frame and not the button under the pointer
  *           says nothing about what a click would reach.
@@ -1175,8 +1177,37 @@ export function createWindowFunctions(host){
         .filter(child=>!child.destroyed && child.parent === record.hwnd && isChild(child));
 
     /**
-     * Every live window in the order it is painted and hit: top-level
-     * windows from the bottom up, each followed by its descendants.
+     * A window's children in the order their WM_PAINT comes: from the top of
+     * their stacking down, except that a WS_EX_TRANSPARENT one waits for the
+     * siblings beneath it, as its style promises -- so that a label over a
+     * picture is drawn over the picture, and not first and then painted over.
+     * Taken one window at a time the rule is "the first transparent window
+     * gives way to the first opaque one beneath it"; applied until nothing is
+     * left, that is every opaque sibling in its order, then every transparent
+     * one in its order.
+     *
+     * @param {any} record
+     */
+    const paintedChildrenOf = record=>{
+        const children = childrenOf(record);
+        const transparent = (/** @type {any} */ child)=>(child.exStyle & WS_EX_TRANSPARENT) !== 0;
+        return [...children.filter(child=>!transparent(child)), ...children.filter(transparent)];
+    };
+
+    /**
+     * A window's descendants in the order they paint, each followed by its
+     * own: what RDW_ALLCHILDREN sends WM_PAINT to after the window.
+     *
+     * @param {any} record
+     * @returns {any[]}
+     */
+    const paintedDescendantsOf = record=>paintedChildrenOf(record)
+        .flatMap(child=>[child, ...paintedDescendantsOf(child)]);
+
+    /**
+     * Every live window in the order it is painted: top-level windows from
+     * the bottom up, each followed by its descendants in their painting
+     * order.
      *
      * @returns {any[]}
      */
@@ -1186,7 +1217,7 @@ export function createWindowFunctions(host){
         /** @param {any} record */
         const visit = record=>{
             listed.push(record);
-            childrenOf(record).forEach(visit);
+            paintedChildrenOf(record).forEach(visit);
         };
         for (const record of windows.values())
         {
@@ -3338,7 +3369,7 @@ export function createWindowFunctions(host){
         // for a brush named as a colour index.
         host: Object.assign(Object.create(host), { draw }),
         live, WM_PAINT, geometry, send, invalidated, painted,
-        descendants: (/** @type {any} */ record)=>descendantsOf(record),
+        descendants: (/** @type {any} */ record)=>paintedDescendantsOf(record),
     });
 
     /**
@@ -3610,6 +3641,9 @@ export function createWindowFunctions(host){
                 // window with an owner is still over everything below it.
                 child: isChild(record),
                 id: record.id,
+                // The styles that decide how it paints beside its siblings.
+                style: `0x${(record.style >>> 0).toString(16)}`,
+                exStyle: `0x${(record.exStyle >>> 0).toString(16)}`,
             })),
         /**
          * Places a window the way SetWindowPos does, and tells the program the

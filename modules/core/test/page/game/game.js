@@ -153,6 +153,7 @@ if (inWorker)
     namespace.frameReport = ()=>ask('frameReport');
     namespace.frameShot = ()=>ask('frameShot');
     namespace.journalRecent = (/** @type {number} */ count)=>ask('journalRecent', { count });
+    namespace.standing = (/** @type {string | undefined} */ list)=>ask('standing', { list });
     namespace.exactRestart = ()=>ask('exactRestart');
     namespace.exactStop = ()=>ask('exactStop');
     namespace.clearLog = ()=>{
@@ -170,6 +171,7 @@ else
     namespace.frameReport = harness.frameReport;
     namespace.frameShot = harness.frameShot;
     namespace.journalRecent = harness.journalRecent;
+    namespace.standing = harness.standing;
     namespace.exactRestart = harness.exactRestart;
     namespace.exactStop = harness.exactStop;
     namespace.clearLog = harness.clearLog;

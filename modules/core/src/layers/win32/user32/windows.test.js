@@ -605,6 +605,8 @@ test('placing a window as the system would moves it and tells the program', ()=>
     assert.equal(service.place(0x9999, 0, 0, 1, 1), false,
         'a window that is not there is not placed');
     assert.deepEqual(service.list().map(entry=>[entry.width, entry.height]), [[1024, 768]]);
+    assert.equal(service.list()[0].style.startsWith('0x'), true, 'with its styles, in hex');
+    assert.equal(Number(service.list()[0].exStyle), 0);
 
     // Placed again where it already is -- what a device reset does -- nothing
     // is said: a program that resets its device on WM_SIZE would otherwise
@@ -1619,6 +1621,46 @@ test('a window with an area to paint is handed WM_PAINT when nothing else is que
     fns.DefWindowProcA.handler([hwnd, WM_PAINT, 0, 0]);
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
         'the default procedure validates what nobody painted');
+});
+
+test('a transparent child paints after the siblings beneath it, an opaque one from the top', ()=>{
+    // An installer's welcome page: its text is a WS_EX_TRANSPARENT static
+    // made before the picture it sits on, so it is above the picture, and
+    // the style is what gets it painted over the picture rather than first
+    // and then covered. Without the style the stacking alone decides, and
+    // the topmost child paints first.
+    const WS_EX_TRANSPARENT = 0x20;
+    /** @param {number} exStyle */
+    const page = exStyle=>{
+        const { fns, memory, hwnd } = withWindow();
+        const child = (/** @type {number} */ extended)=>{
+            memory.putString(TITLE, 'child');
+            return fns.CreateWindowExA.handler([extended, CLASS_NAME, TITLE,
+                WS_CHILD | WS_VISIBLE, 10, 10, 200, 100, hwnd, 0, HINSTANCE, 0]);
+        };
+        const label = child(exStyle);
+        const picture = child(0);
+        fns.ShowWindow.handler([hwnd, SW_SHOW]);
+        /** @type {number[]} */
+        const painted = [];
+        while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) === 1)
+        {
+            if (memory.u32(MSG_BUFFER + MSG.message) === WM_PAINT)
+            {
+                const target = memory.u32(MSG_BUFFER + MSG.hwnd);
+                painted.push(target);
+                fns.ValidateRect.handler([target, 0]);
+            }
+        }
+        return { painted, hwnd, label, picture };
+    };
+
+    const over = page(WS_EX_TRANSPARENT);
+    assert.deepEqual(over.painted, [over.hwnd, over.picture, over.label],
+        'the parent, the picture beneath, then the transparent label on it');
+    const opaque = page(0);
+    assert.deepEqual(opaque.painted, [opaque.hwnd, opaque.label, opaque.picture],
+        'the first child made is the topmost, and paints first');
 });
 
 test('a paint dispatched to a window with no procedure is validated as the default one would', ()=>{

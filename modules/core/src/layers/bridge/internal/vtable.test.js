@@ -230,6 +230,73 @@ test('objects of one interface share its stubs, and a call still finds its own o
     assert.notEqual(table.publish(a, IID), pointerA, 'published again, it is a new pointer');
 });
 
+test('objects whose lists are made afresh share the stubs of their shape, each its own method',
+    ()=>{
+        // An object model that builds its method list for every object -- a
+        // stream per file an installer logs -- took a table of stubs per
+        // object, and the stubs are never given back: the thousandth stream
+        // was refused as out of memory.
+        /** @type {Map<string, any>} */
+        const handlers = new Map();
+        let next = 0x2000;
+        const table = createVtables({
+            memory: {
+                writeU32: ()=>{},
+                /** @param {number} address @param {number} length */
+                readBytes: (address, length)=>new Uint8Array(length),
+            },
+            /** @param {string} name @param {any} fn */
+            register: (name, fn)=>{
+                handlers.set(`${name}#${handlers.size}`, fn);
+                return 0x1000 + handlers.size * 0x10;
+            },
+            heap: { allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += bytes;
+                return at;
+            } },
+        });
+        /** @type {string[]} */
+        const drawn = [];
+        /** @param {string} name */
+        const make = name=>{
+            const methods = [
+                ...METHODS.slice(0, 3),
+                { name: 'Draw', argBytes: 8,
+                    /** @param {any} _self @param {number[]} args */
+                    invoke: (_self, args)=>{
+                        drawn.push(`${name}:${args[0]}`);
+                        return 0;
+                    } },
+            ];
+            return {
+                /** @param {string} id */
+                interfaceFor: id=>(id === IID ? { id, methods } : null),
+                addRef: ()=>2,
+                release: ()=>1,
+            };
+        };
+        const pointers = ['a', 'b', 'c'].map(name=>table.publish(make(name), IID));
+        assert.equal(handlers.size, 4, 'one set of stubs, whoever built the list');
+        const draw = [...handlers].find(([name])=>name.includes('::Draw'))?.[1].handler;
+        draw([pointers[2], 1]);
+        draw([pointers[0], 2]);
+        assert.deepEqual(drawn, ['c:1', 'a:2'], 'each call runs its own object\'s method');
+
+        // Another shape is another table: a slot popping a different count
+        // cannot share a stub with it.
+        const wider = {
+            /** @param {string} id */
+            interfaceFor: id=>(id === IID
+                ? { id, methods: [...METHODS.slice(0, 3), { name: 'Draw', argBytes: 12 }] }
+                : null),
+            addRef: ()=>2,
+            release: ()=>1,
+        };
+        table.publish(wider, IID);
+        assert.equal(handlers.size, 8);
+    });
+
 test('a method hands its implementation one argument array, until a call answers late', ()=>{
     // The arguments after the interface pointer are copied into an array the
     // method keeps: one allocation at registration, none per call. An

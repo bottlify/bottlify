@@ -2464,10 +2464,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         seedRecords,
         /** Writes whatever the store keeps aside from its records, so the
          * names of this run's regions are on disk before the run ends and the
-         * next run's index can find them. */
+         * next run's index can find them. The store stays open: it is its
+         * opener's to close, and a run hands one store to the machine of every
+         * process it starts, so a machine that goes would otherwise take it
+         * from the processes still running. */
         async flush(){
             await settings.store?.flush?.();
-            settings.store?.close?.();
             // The worker holds nothing the store needs; end it and drop any
             // batch it still owes.
             workerClosed = true;
