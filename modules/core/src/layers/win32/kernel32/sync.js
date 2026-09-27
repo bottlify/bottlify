@@ -5,6 +5,7 @@
  */
 
 import { enterCode, leaveCode, tryEnterCode } from './critical.js';
+import { INTERLOCKED } from './interlocked.js';
 import { createSlimSync } from './slimsync.js';
 
 /**
@@ -95,7 +96,8 @@ const ERROR_ACCESS_DENIED = 5;
  */
 
 /**
- * Builds the function table: name -> { argBytes, handler }.
+ * Builds the function table: name -> { argBytes, handler } for a trap, or
+ * { argBytes, guest } for guest code.
  *
  * `argBytes` is the size of the argument list the guest compiled against; all of
  * these are stdcall, the bridge's default, so none of them says so.
@@ -104,10 +106,6 @@ const ERROR_ACCESS_DENIED = 5;
  */
 export function createSyncFunctions(host){
     const { kernel } = host;
-
-    /** @param {number} address */
-    const readI32 = address=>new DataView(
-        host.readMemory(address, 4).buffer).getInt32(0, true);
 
     /** @param {number} address @param {number} value */
     const writeI32 = (address, value)=>{
@@ -154,10 +152,42 @@ export function createSyncFunctions(host){
         fastPaths = {
             enter: place(at=>enterCode(at, waitTrap, counters)),
             leave: place(at=>leaveCode(at, wakeTrap, counters)),
-            tryEnter: place(()=>tryEnterCode()),
+            tryEnter: place(()=>tryEnterCode(counters)),
         };
         return fastPaths;
     };
+
+    /**
+     * Where each interlocked export's code was placed, once, on the first
+     * bind of any of them.
+     *
+     * @type {Map<string, number> | null}
+     */
+    let interlocked = null;
+    /** @param {keyof typeof INTERLOCKED} name */
+    const interlockedAt = name=>{
+        if (!interlocked)
+        {
+            const allocate = host.allocateCode ?? host.allocate;
+            interlocked = new Map(Object.entries(INTERLOCKED).map(([exported, { code }])=>{
+                const at = allocate(code.length);
+                host.writeMemory(at, code);
+                return [exported, at];
+            }));
+        }
+        return /** @type {number} */ (interlocked.get(name));
+    };
+
+    /**
+     * An interlocked export: guest code, one locked instruction on the
+     * program's dword (`interlocked.js`), with nothing to trap into.
+     *
+     * @param {keyof typeof INTERLOCKED} name
+     */
+    const interlockedExport = name=>({
+        argBytes: INTERLOCKED[name].argBytes,
+        guest: ()=>interlockedAt(name),
+    });
 
     /**
      * Resolves a handle to a kernel object, or null. A bad handle is a return
@@ -300,57 +330,15 @@ export function createSyncFunctions(host){
             guest: builder=>placed(builder).leave,
         },
 
-        /** LONG InterlockedIncrement(LONG volatile *lpAddend) */
-        InterlockedIncrement: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([pointer])=>{
-                // The value AFTER the operation. A reference count that returns
-                // the value before it releases one object too early, and does it
-                // a long way from here.
-                const next = (readI32(pointer >>> 0) + 1) | 0;
-                writeI32(pointer >>> 0, next);
-                return next >>> 0;
-            },
-        },
-
-        /** LONG InterlockedDecrement(LONG volatile *lpAddend) */
-        InterlockedDecrement: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([pointer])=>{
-                const next = (readI32(pointer >>> 0) - 1) | 0;
-                writeI32(pointer >>> 0, next);
-                return next >>> 0;
-            },
-        },
-
-        /** LONG InterlockedExchange(LONG volatile *Target, LONG Value) */
-        InterlockedExchange: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([pointer, value])=>{
-                // The value BEFORE, unlike the two above. This is the pair a
-                // lock is built from, and it is only useful as the old value.
-                const previous = readI32(pointer >>> 0);
-                writeI32(pointer >>> 0, value);
-                return previous >>> 0;
-            },
-        },
-
-        /** LONG InterlockedCompareExchange(LONG volatile *Destination, LONG Exchange, LONG Comparand) */
-        InterlockedCompareExchange: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([pointer, exchange, comparand])=>{
-                const previous = readI32(pointer >>> 0);
-                if (previous === (comparand | 0))
-                {
-                    writeI32(pointer >>> 0, exchange);
-                }
-                return previous >>> 0;
-            },
-        },
+        // The value after for an increment or a decrement, the value before
+        // for the other three. The two families disagree on purpose: a
+        // reference count that answered the value before would release an
+        // object one call early, a long way from here.
+        InterlockedIncrement: interlockedExport('InterlockedIncrement'),
+        InterlockedDecrement: interlockedExport('InterlockedDecrement'),
+        InterlockedExchange: interlockedExport('InterlockedExchange'),
+        InterlockedExchangeAdd: interlockedExport('InterlockedExchangeAdd'),
+        InterlockedCompareExchange: interlockedExport('InterlockedCompareExchange'),
 
         /** DWORD WaitForMultipleObjects(DWORD nCount, const HANDLE *lpHandles, BOOL bWaitAll, DWORD dwMilliseconds) */
         WaitForMultipleObjects: {

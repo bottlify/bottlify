@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSyncFunctions } from './sync.js';
 import { createCriticalSections, enterCode, leaveCode, tryEnterCode } from './critical.js';
+import { INTERLOCKED } from './interlocked.js';
 
 const CS_LOCK_COUNT = 0x04;
 const CS_RECURSION_COUNT = 0x08;
@@ -313,8 +314,8 @@ test('entering, leaving and trying a section are guest code, placed once', ()=>{
         [...enterCode(enter, 0x105010, counters)], 'the entry falls back to the wait trap');
     assert.deepEqual([...host.bytes.slice(leave, leave + leaveCode(leave, 0, 0).length)],
         [...leaveCode(leave, 0x105020, counters)], 'the release falls back to the wake trap');
-    assert.deepEqual([...host.bytes.slice(attempt, attempt + tryEnterCode().length)],
-        [...tryEnterCode()]);
+    assert.deepEqual([...host.bytes.slice(attempt, attempt + tryEnterCode(0).length)],
+        [...tryEnterCode(counters)], 'the try counts itself where the entry does');
 
     assert.equal(fns.EnterCriticalSection.guest(builder), enter, 'the same place again');
     assert.equal(builder.registered.length, 2, 'and no more traps');
@@ -393,35 +394,63 @@ test('a spin count is recorded where a guest looks for it', ()=>{
     assert.equal(host.readI32(0x200 + CS_LOCK_COUNT), CS_UNLOCKED);
 });
 
-test('increment and decrement answer with the value after, exchange with the value before', ()=>{
-    // The two families disagree on purpose, and getting it backwards is a
-    // reference count that releases one object early -- a long way from here.
+test('the interlocked exports are guest code, placed once where the host keeps code', ()=>{
+    // One locked instruction on the program's dword each: nothing to trap
+    // into, so the export binds to the code and registers no trap at all.
     const host = fakeHost();
-    const fns = createSyncFunctions(host);
-    const counter = 0x300;
-
-    new DataView(host.bytes.buffer).setInt32(counter, 7, true);
-    assert.equal(fns.InterlockedIncrement.handler([counter]), 8);
-    assert.equal(fns.InterlockedDecrement.handler([counter]), 7);
-
-    assert.equal(fns.InterlockedExchange.handler([counter, 99]), 7, 'the value it replaced');
-    assert.equal(host.readI32(counter), 99);
-
-    assert.equal(fns.InterlockedCompareExchange.handler([counter, 1, 99]), 99);
-    assert.equal(host.readI32(counter), 1, 'the comparand matched, so it exchanged');
-
-    assert.equal(fns.InterlockedCompareExchange.handler([counter, 2, 99]), 1);
-    assert.equal(host.readI32(counter), 1, 'and did not, so it did not');
+    /** @type {number[]} */
+    const placed = [];
+    /** @type {any} */ (host).allocateCode = (/** @type {number} */ size)=>{
+        const at = 0x900 + placed.length * 0x20;
+        assert.ok(size <= 0x20);
+        placed.push(at);
+        return at;
+    };
+    const fns = createSyncFunctions(/** @type {any} */ (host));
+    const builder = fakeBuilder();
+    const names = /** @type {(keyof typeof INTERLOCKED)[]} */ (Object.keys(INTERLOCKED));
+    assert.deepEqual(names.sort(), ['InterlockedCompareExchange', 'InterlockedDecrement',
+        'InterlockedExchange', 'InterlockedExchangeAdd', 'InterlockedIncrement']);
+    for (const name of names)
+    {
+        const entry = /** @type {any} */ (fns[name]);
+        assert.equal('handler' in entry, false, `${name} has nothing to trap into`);
+        assert.equal(entry.argBytes, INTERLOCKED[name].argBytes);
+        const at = entry.guest(builder);
+        assert.ok(placed.includes(at), `${name} is in the code pages`);
+        const { code } = INTERLOCKED[name];
+        assert.deepEqual([...host.bytes.slice(at, at + code.length)], [...code]);
+        assert.equal(entry.guest(builder), at, 'the same place again');
+    }
+    assert.equal(placed.length, names.length, 'each placed once');
+    assert.deepEqual(builder.registered, [], 'and no trap registered for any');
 });
 
-test('interlocked arithmetic wraps at 32 bits rather than growing', ()=>{
-    const host = fakeHost();
-    const fns = createSyncFunctions(host);
-    const counter = 0x300;
-
-    new DataView(host.bytes.buffer).setInt32(counter, 0x7fffffff, true);
-    assert.equal(fns.InterlockedIncrement.handler([counter]) | 0, -0x80000000);
-});
+test('each interlocked routine is its one locked instruction, and pops what it was passed',
+    ()=>{
+        // What each answers -- the value after for an increment and a
+        // decrement, the value before for the rest -- is run through the
+        // import on both engines by kernel32-inguest.itest.
+        /** @param {Uint8Array} code @param {number[]} instruction */
+        const holds = (code, instruction)=>code.join(',').includes(instruction.join(','));
+        const { InterlockedIncrement, InterlockedDecrement, InterlockedExchange,
+            InterlockedExchangeAdd, InterlockedCompareExchange } = INTERLOCKED;
+        assert.ok(holds(InterlockedIncrement.code, [0xf0, 0x0f, 0xc1, 0x01, 0x40]),
+            'lock xadd [ecx], eax; inc eax');
+        assert.ok(holds(InterlockedDecrement.code, [0xf0, 0x0f, 0xc1, 0x01, 0x48]),
+            'lock xadd [ecx], eax; dec eax');
+        assert.ok(holds(InterlockedExchange.code, [0x87, 0x01]), 'xchg [ecx], eax');
+        assert.ok(holds(InterlockedExchangeAdd.code, [0xf0, 0x0f, 0xc1, 0x01, 0xc2]),
+            'lock xadd [ecx], eax, and nothing after it');
+        assert.ok(holds(InterlockedCompareExchange.code, [0xf0, 0x0f, 0xb1, 0x11]),
+            'lock cmpxchg [ecx], edx');
+        for (const { argBytes, code } of Object.values(INTERLOCKED))
+        {
+            assert.deepEqual([...code.slice(-3)], [0xc2, argBytes, 0x00], 'ret argBytes');
+            assert.deepEqual([...code.slice(0, 4)], [0x8b, 0x4c, 0x24, 0x04],
+                'the pointer from the first argument');
+        }
+    });
 
 test('waiting for all of several objects reports one answer, not an index', ()=>{
     const host = fakeHost();
@@ -638,7 +667,9 @@ test('argument sizes match what the guest compiled against', ()=>{
     assert.equal(fns.InitializeCriticalSection.argBytes, 4);
     assert.equal(fns.InitializeCriticalSectionAndSpinCount.argBytes, 8);
     assert.equal(fns.InterlockedIncrement.argBytes, 4);
+    assert.equal(fns.InterlockedDecrement.argBytes, 4);
     assert.equal(fns.InterlockedExchange.argBytes, 8);
+    assert.equal(fns.InterlockedExchangeAdd.argBytes, 8);
     assert.equal(fns.InterlockedCompareExchange.argBytes, 12);
     assert.equal(fns.WaitForMultipleObjects.argBytes, 16);
     assert.equal(fns.GetCurrentThread.argBytes, 0);

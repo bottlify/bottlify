@@ -82,7 +82,7 @@ test('enter, leave and try run on the processor and keep the structure Windows k
 
     host.writePhysical(ENTER, enterCode(ENTER, TRAP, COUNTERS_AT));
     host.writePhysical(LEAVE, leaveCode(LEAVE, TRAP, COUNTERS_AT));
-    host.writePhysical(TRY, tryEnterCode());
+    host.writePhysical(TRY, tryEnterCode(COUNTERS_AT));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));               // hlt: never reached
     host.writePhysical(THREAD_ID_AT, new Uint8Array(u32(7)));
     host.writePhysical(SECTION + CS.LOCK_COUNT, new Uint8Array(u32(-1)));
@@ -129,6 +129,7 @@ test('enter, leave and try run on the processor and keep the structure Windows k
     run();
     assert.equal(read(RESULTS), 1, 'a try on a free section takes it');
     assert.equal(read(RESULTS + 4), 0, 'a try on somebody else\'s section is refused');
+    assert.equal(read(COUNTERS_AT + COUNTERS.ENTERED), 3, 'the try that took it is an entry');
     assert.equal(read(SECTION + CS.OWNING_THREAD), 99, 'and leaves it theirs');
     assert.equal(read(SECTION + CS.LOCK_COUNT), 0);
     assert.equal(read(COUNTERS_AT + COUNTERS.LEFT), 3);

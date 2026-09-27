@@ -10,6 +10,7 @@ import { TEB } from './teb.js';
 import {
     CLOCK, TLS_SLOTS, createProcessFunctions, getLastErrorCode, queryPerformanceCounterCode,
     queryPerformanceFrequencyCode, setLastErrorCode, tickCountCode, tlsGetValueCode,
+    tlsSetValueCode,
 } from './process.js';
 import { VER, WINDOWS_VERSIONS, setCondition } from './versions.js';
 
@@ -599,6 +600,73 @@ test('the guest-side paths read the block and fall back to the host past it', ()
     assert.equal((at + slow + 5 + rel) >>> 0, trap, 'which lands on the trap');
     assert.equal(code[slow - 3], 0xc2, 'the fast path returns just before it');
     assert.equal(code.length, slow + 5);
+});
+
+test('TlsSetValue in the guest writes the block and leaves the host the rest', ()=>{
+    const at = 0x20000;
+    const trap = 0x7f000020;
+    const code = tlsSetValueCode(at, trap);
+    const view = new DataView(code.buffer);
+    assert.deepEqual([...code.slice(4, 7)], [0x83, 0xf8, 64], 'cmp eax, 64');
+    assert.equal(code[7], 0x73, 'jae');
+    const slow = 9 + code[8];
+    assert.deepEqual([...code.slice(9, 16)], [0x64, 0x8b, 0x0d, TEB.TLS_POINTER, 0, 0, 0],
+        'mov ecx, fs:[0x2c]: the array the compiler reads');
+    assert.deepEqual([...code.slice(20, 23)], [0x89, 0x14, 0x81], 'mov [ecx+eax*4], edx');
+    assert.deepEqual([...code.slice(slow - 8, slow)], [0xb8, 1, 0, 0, 0, 0xc2, 0x08, 0x00],
+        'TRUE, and both arguments popped');
+    assert.equal(code[slow], 0xe9);
+    assert.equal((at + slow + 5 + view.getInt32(slow + 1, true)) >>> 0, trap,
+        'past the array, the host');
+    assert.equal(code.length, slow + 5);
+    // Windows leaves the last error alone on a successful set; the get is
+    // the one that clears it.
+    assert.equal(code.join(',').includes([0x64, 0xc7, 0x05, TEB.LAST_ERROR].join(',')), false);
+});
+
+test('a slot in a thread\'s array has one record, which the guest and the host share', ()=>{
+    // The guest-side TlsSetValue writes the array and nothing else, so the
+    // host reads a slot there too; a value the host sets is the one the
+    // guest-side TlsGetValue and the compiler's fs:[0x2c] sequence read.
+    const host = fakeHost();
+    const blocks = { first: 0x1100, second: 0x1300 };
+    host.threads.first.tebAddress = 0x1000;
+    host.threads.second.tebAddress = 0x1200;
+    host.view.setUint32(0x1000 + TEB.TLS_POINTER, blocks.first, true);
+    host.view.setUint32(0x1200 + TEB.TLS_POINTER, blocks.second, true);
+    const fns = createProcessFunctions({
+        ...host,
+        tlsBlock: ()=>host.view.getUint32(host.currentThread().tebAddress + TEB.TLS_POINTER, true),
+    });
+    const slot = fns.TlsAlloc.handler();
+    host.view.setUint32(blocks.first + slot * 4, 0xabcd, true);   // as the guest writes it
+    assert.equal(fns.TlsGetValue.handler([slot]), 0xabcd, 'what the guest set');
+    assert.equal(fns.TlsSetValue.handler([slot, 0x5150]), 1);
+    assert.equal(host.view.getUint32(blocks.first + slot * 4, true), 0x5150,
+        'what the host sets is in the array');
+    host.run(host.threads.second);
+    assert.equal(fns.TlsGetValue.handler([slot]), 0, 'and in no other thread\'s');
+});
+
+test('TlsSetValue and FlsSetValue are one routine in the guest, over the host\'s own', ()=>{
+    const { fns } = setup({ arena: 0x4000 });
+    /** @type {{ label: string, trap: any }[]} */
+    const registered = [];
+    const builder = {
+        /** @param {string} label @param {any} trap */
+        register: (label, trap)=>{
+            registered.push({ label, trap });
+            return 0x105000 + registered.length * 0x10;
+        },
+    };
+    const set = boundTo(fns.TlsSetValue, builder);
+    assert.equal(boundTo(fns.FlsSetValue, builder), set);
+    const trap = registered.find(one=>one.label === '<tls-set>');
+    assert.ok(trap, 'the slow path has a trap of its own');
+    assert.equal(trap.trap.argBytes, 8);
+    const slot = fns.TlsAlloc.handler();
+    assert.equal(trap.trap.handler([slot, 0x77]), 1, 'which is the host\'s TlsSetValue');
+    assert.equal(fns.TlsGetValue.handler([slot]), 0x77);
 });
 
 test('the priority and affinity calls pop their own stdcall bytes', ()=>{
