@@ -50,6 +50,8 @@ const ERROR_NOT_SUPPORTED = 50;
 const ERROR_DIR_NOT_EMPTY = 145;
 const ERROR_ALREADY_EXISTS = 183;
 const ERROR_SHARING_VIOLATION = 32;
+const ERROR_LOCK_VIOLATION = 33;
+const ERROR_NOT_LOCKED = 158;
 const ERROR_INVALID_NAME = 123;
 const ERROR_REQUEST_ABORTED = 1235;
 const ERROR_DIRECTORY = 267;
@@ -84,6 +86,9 @@ const GENERIC_READ = 0x80000000;
 /** dwFlagsAndAttributes' flag that ends the file with its handle. */
 const FILE_FLAG_DELETE_ON_CLOSE = 0x04000000;
 
+/** LockFileEx's flag for an exclusive lock; without it the lock is shared. */
+const LOCKFILE_EXCLUSIVE_LOCK = 0x2;
+
 /** NtCreateFile's CreateDisposition, and what IO_STATUS_BLOCK.Information reports. */
 const FILE_SUPERSEDE = 0;
 const FILE_OPEN = 1;
@@ -104,6 +109,7 @@ const FILE_DELETE_ON_CLOSE = 0x1000;
 /** The statuses the native opens answer with. */
 const STATUS_SUCCESS = 0;
 const STATUS_UNSUCCESSFUL = 0xc0000001;
+const STATUS_ACCESS_VIOLATION = 0xc0000005;
 const STATUS_INVALID_HANDLE = 0xc0000008;
 const STATUS_INVALID_PARAMETER = 0xc000000d;
 const STATUS_ACCESS_DENIED = 0xc0000022;
@@ -112,6 +118,8 @@ const STATUS_OBJECT_NAME_NOT_FOUND = 0xc0000034;
 const STATUS_OBJECT_NAME_COLLISION = 0xc0000035;
 const STATUS_OBJECT_PATH_NOT_FOUND = 0xc000003a;
 const STATUS_OBJECT_PATH_SYNTAX_BAD = 0xc000003b;
+const STATUS_LOCK_NOT_GRANTED = 0xc0000055;
+const STATUS_RANGE_NOT_LOCKED = 0xc000007e;
 const STATUS_MEDIA_WRITE_PROTECTED = 0xc00000a2;
 const STATUS_FILE_IS_A_DIRECTORY = 0xc00000ba;
 const STATUS_NOT_A_DIRECTORY = 0xc0000103;
@@ -1541,9 +1549,223 @@ export function createFileFunctions(host){
     };
 
     /**
+     * The byte ranges locked in each file, by the file's name folded to one
+     * case: a lock belongs to the file and is seen through every handle onto
+     * it, while who holds it is the handle that took it.
+     *
+     * @type {Map<string, { handle: number, start: bigint, length: bigint,
+     *     exclusive: boolean }[]>}
+     */
+    const locks = new Map();
+    const QWORD_END = 1n << 64n;
+
+    /** A 64-bit quantity from its two halves. @param {number} lowPart @param {number} highPart */
+    const qword = (lowPart, highPart)=>(BigInt(highPart >>> 0) << 32n) | BigInt(lowPart >>> 0);
+
+    /**
+     * Whether two ranges touch. A lock of no bytes is a point: it collides
+     * with a range that covers it, and with nothing else.
+     *
+     * @param {bigint} start @param {bigint} length @param {bigint} otherStart
+     * @param {bigint} otherLength
+     */
+    const overlaps = (start, length, otherStart, otherLength)=>{
+        if (length === 0n && otherLength === 0n)
+        {
+            return false;
+        }
+        if (length === 0n)
+        {
+            return otherStart <= start && start < otherStart + otherLength;
+        }
+        if (otherLength === 0n)
+        {
+            return start <= otherStart && otherStart < start + length;
+        }
+        return start < otherStart + otherLength && otherStart < start + length;
+    };
+
+    /**
+     * Takes a lock, or says why not. An exclusive lock collides with every
+     * lock it overlaps, the taker's own included; a shared one only with
+     * another handle's exclusive lock. A range running past the end of a
+     * 64-bit offset is not one.
+     *
+     * @param {number} handle @param {bigint} start @param {bigint} length
+     * @param {boolean} exclusive
+     * @returns {number} a Win32 error, ERROR_SUCCESS when taken
+     */
+    const lockRange = (handle, start, length, exclusive)=>{
+        const file = object(handle, 'file');
+        if (!file)
+        {
+            return ERROR_INVALID_HANDLE;
+        }
+        if (start + length > QWORD_END)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        const key = file.path.toLowerCase();
+        const held = locks.get(key) ?? [];
+        const collides = held.some(lock=>overlaps(start, length, lock.start, lock.length)
+            && (exclusive || (lock.exclusive && lock.handle !== handle)));
+        if (collides)
+        {
+            return ERROR_LOCK_VIOLATION;
+        }
+        held.push({ handle, start, length, exclusive });
+        locks.set(key, held);
+        return ERROR_SUCCESS;
+    };
+
+    /**
+     * Gives back a lock the handle holds over exactly this range; an
+     * exclusive one goes before a shared one over the same bytes.
+     *
+     * @param {number} handle @param {bigint} start @param {bigint} length
+     * @returns {number} a Win32 error, ERROR_SUCCESS when given back
+     */
+    const unlockRange = (handle, start, length)=>{
+        const file = object(handle, 'file');
+        if (!file)
+        {
+            return ERROR_INVALID_HANDLE;
+        }
+        const held = locks.get(file.path.toLowerCase()) ?? [];
+        const same = (/** @type {{ handle: number, start: bigint, length: bigint }} */ lock)=>
+            lock.handle === handle && lock.start === start && lock.length === length;
+        let at = held.findIndex(lock=>same(lock) && lock.exclusive);
+        if (at < 0)
+        {
+            at = held.findIndex(same);
+        }
+        if (at < 0)
+        {
+            return ERROR_NOT_LOCKED;
+        }
+        held.splice(at, 1);
+        return ERROR_SUCCESS;
+    };
+
+    /**
+     * Closes a handle of any kind, and whatever it held here with it: the
+     * volume's node, its locks, a file it was to delete.
+     *
+     * @param {number} handle
+     * @returns {boolean} whether it was a handle
+     */
+    const release = handle=>{
+        try
+        {
+            // A file handle and a mapping over the file each hold
+            // the node, and closing either gives back its own hold:
+            // the node closes with the last of them, in whichever
+            // order the program closes them.
+            const type = host.handles.typeOf?.(handle);
+            const closed = host.handles.close(handle);
+            if (closed && closed.node
+                && (type === undefined || type === 'file' || type === 'mapping'))
+            {
+                files.close(closed.node);
+            }
+            if (type === 'file' && closed?.path)
+            {
+                const key = closed.path.toLowerCase();
+                const kept = (locks.get(key) ?? []).filter(lock=>lock.handle !== handle);
+                if (kept.length === 0)
+                {
+                    locks.delete(key);
+                }
+                else
+                {
+                    locks.set(key, kept);
+                }
+            }
+            if (closed?.deleteOnClose)
+            {
+                files.remove(closed.path);
+            }
+            // A no-op on anything that was never named.
+            host.namedObjects?.forget(closed);
+            // Handle numbers are recycled, so anything keyed by this one
+            // has to go now: a completion-port association that outlives
+            // its handle sends the next file's packets to a port nobody
+            // is reading, and a thread parked on a port that has just
+            // closed waits on something nothing can reach.
+            host.ports?.closed(handle, closed);
+            return true;
+        }
+        catch (e){
+            void e;
+            return false;
+        }
+    };
+
+    /**
+     * The status block every native file call writes, success or not.
+     *
+     * @param {number} block @param {number} status @param {number} information
+     */
+    const report = (block, status, information)=>{
+        writeDword(block, status);
+        writeDword(block + 4, information);
+        return status;
+    };
+
+    /**
      * The native calls over this table's opens, which ntdll publishes.
      */
     const natives = {
+        /**
+         * NTSTATUS NtLockFile(HANDLE, HANDLE Event, PIO_APC_ROUTINE, PVOID ApcContext,
+         *   PIO_STATUS_BLOCK, PLARGE_INTEGER ByteOffset, PLARGE_INTEGER Length,
+         *   ULONG Key, BOOLEAN FailImmediately, BOOLEAN ExclusiveLock)
+         *
+         * LockFileEx's lock; one that would wait is not granted, as there.
+         */
+        NtLockFile: {
+            argBytes: 40,
+            /** @param {number[]} args */
+            handler: ([handle, , , , block, offset, length, , , exclusive])=>{
+                if ((block >>> 0) === 0 || (offset >>> 0) === 0 || (length >>> 0) === 0)
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                const answer = lockRange(handle >>> 0,
+                    qword(readDword(offset >>> 0), readDword((offset >>> 0) + 4)),
+                    qword(readDword(length >>> 0), readDword((length >>> 0) + 4)),
+                    (exclusive & 0xff) !== 0);
+                return report(block >>> 0, answer === ERROR_SUCCESS ? STATUS_SUCCESS
+                    : answer === ERROR_LOCK_VIOLATION ? STATUS_LOCK_NOT_GRANTED
+                        : answer === ERROR_INVALID_HANDLE ? STATUS_INVALID_HANDLE
+                            : STATUS_INVALID_PARAMETER, 0);
+            },
+        },
+
+        /**
+         * NTSTATUS NtUnlockFile(HANDLE, PIO_STATUS_BLOCK, PLARGE_INTEGER ByteOffset,
+         *                       PLARGE_INTEGER Length, ULONG Key)
+         *
+         * The status block is written whatever the answer, and a NULL one is
+         * the access violation writing it would be.
+         */
+        NtUnlockFile: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, block, offset, length])=>{
+                if ((block >>> 0) === 0 || (offset >>> 0) === 0 || (length >>> 0) === 0)
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                const answer = unlockRange(handle >>> 0,
+                    qword(readDword(offset >>> 0), readDword((offset >>> 0) + 4)),
+                    qword(readDword(length >>> 0), readDword((length >>> 0) + 4)));
+                return report(block >>> 0, answer === ERROR_SUCCESS ? STATUS_SUCCESS
+                    : answer === ERROR_INVALID_HANDLE ? STATUS_INVALID_HANDLE
+                        : STATUS_RANGE_NOT_LOCKED, 0);
+            },
+        },
+
         NtCreateFile: { argBytes: 44, handler: ntCreateFile },
 
         /**
@@ -1982,39 +2204,7 @@ export function createFileFunctions(host){
         CloseHandle: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>{
-                try
-                {
-                    // A file handle and a mapping over the file each hold
-                    // the node, and closing either gives back its own hold:
-                    // the node closes with the last of them, in whichever
-                    // order the program closes them.
-                    const type = host.handles.typeOf?.(handle >>> 0);
-                    const closed = host.handles.close(handle >>> 0);
-                    if (closed && closed.node
-                        && (type === undefined || type === 'file' || type === 'mapping'))
-                    {
-                        files.close(closed.node);
-                    }
-                    if (closed?.deleteOnClose)
-                    {
-                        files.remove(closed.path);
-                    }
-                    // A no-op on anything that was never named.
-                    host.namedObjects?.forget(closed);
-                    // Handle numbers are recycled, so anything keyed by this one
-                    // has to go now: a completion-port association that outlives
-                    // its handle sends the next file's packets to a port nobody
-                    // is reading, and a thread parked on a port that has just
-                    // closed waits on something nothing can reach.
-                    host.ports?.closed(handle >>> 0, closed);
-                    return 1;
-                }
-                catch (e){
-                    void e;
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-            },
+            handler: ([handle])=>(release(handle >>> 0) ? 1 : fail(ERROR_INVALID_HANDLE)),
         },
 
         /** BOOL DeleteFile(LPCSTR) -- one body, both spellings. */
@@ -2260,13 +2450,6 @@ export function createFileFunctions(host){
         },
 
         /**
-         * BOOL LockFile(HANDLE, DWORD, DWORD, DWORD, DWORD)
-         *
-         * There is one process, so a byte range nobody else can reach is a range
-         * already locked. Succeeding is not a pretence: the guarantee the caller
-         * asked for -- that nothing else writes here meanwhile -- holds.
-         */
-        /**
          * The file family a sixteen-bit program was written against, which an
          * installer of this era is: a self-extractor writes its payload to a
          * temporary directory with these and not with CreateFile.
@@ -2433,41 +2616,40 @@ export function createFileFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                try
+                if (!release(handle >>> 0))
                 {
-                    // A file handle and a mapping over the file each hold
-                    // the node, and closing either gives back its own hold:
-                    // the node closes with the last of them, in whichever
-                    // order the program closes them.
-                    const type = host.handles.typeOf?.(handle >>> 0);
-                    const closed = host.handles.close(handle >>> 0);
-                    if (closed && closed.node
-                        && (type === undefined || type === 'file' || type === 'mapping'))
-                    {
-                        files.close(closed.node);
-                    }
-                    host.namedObjects?.forget(closed);
-                    host.setLastError(ERROR_SUCCESS);
-                    return 0;
-                }
-                catch (e){
-                    void e;
                     return fail(ERROR_INVALID_HANDLE, HFILE_ERROR);
                 }
+                host.setLastError(ERROR_SUCCESS);
+                return 0;
             },
         },
 
+        /**
+         * BOOL LockFile(HANDLE, DWORD dwFileOffsetLow, DWORD dwFileOffsetHigh,
+         *               DWORD nNumberOfBytesToLockLow, DWORD nNumberOfBytesToLockHigh)
+         *
+         * An exclusive lock that does not wait.
+         */
         LockFile: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([handle])=>object(handle, 'file') ? 1 : fail(ERROR_INVALID_HANDLE),
+            handler: ([handle, offsetLow, offsetHigh, lengthLow, lengthHigh])=>{
+                const answer = lockRange(handle >>> 0, qword(offsetLow, offsetHigh),
+                    qword(lengthLow, lengthHigh), true);
+                return answer === ERROR_SUCCESS ? 1 : fail(answer);
+            },
         },
 
         /** BOOL UnlockFile(HANDLE, DWORD, DWORD, DWORD, DWORD) */
         UnlockFile: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([handle])=>object(handle, 'file') ? 1 : fail(ERROR_INVALID_HANDLE),
+            handler: ([handle, offsetLow, offsetHigh, lengthLow, lengthHigh])=>{
+                const answer = unlockRange(handle >>> 0, qword(offsetLow, offsetHigh),
+                    qword(lengthLow, lengthHigh));
+                return answer === ERROR_SUCCESS ? 1 : fail(answer);
+            },
         },
 
         /**
@@ -2475,19 +2657,29 @@ export function createFileFunctions(host){
          *   DWORD nNumberOfBytesToLockLow, DWORD nNumberOfBytesToLockHigh,
          *   LPOVERLAPPED)
          *
-         * LockFile's answer, the range starting at the OVERLAPPED's offset:
-         * shared or exclusive, and whether to wait, change nothing when
-         * nothing else can hold a lock.
+         * LockFile's lock at the OVERLAPPED's offset, shared unless
+         * LOCKFILE_EXCLUSIVE_LOCK says otherwise. A lock that would have to
+         * wait for another handle's is refused rather than waited for: the
+         * wait has no end here unless another thread of this process lets go,
+         * and a caller told no can retry where one parked for ever cannot.
          */
         LockFileEx: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([handle, , reserved, , , overlapped])=>{
+            handler: ([handle, flags, reserved, lengthLow, lengthHigh, overlapped])=>{
                 if (!object(handle, 'file'))
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                return reserved !== 0 || overlapped === 0 ? fail(ERROR_INVALID_PARAMETER) : 1;
+                if (reserved !== 0 || overlapped === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const at = overlapped >>> 0;
+                const answer = lockRange(handle >>> 0,
+                    qword(readDword(at + OVERLAPPED_OFFSET), readDword(at + OVERLAPPED_OFFSET + 4)),
+                    qword(lengthLow, lengthHigh), ((flags >>> 0) & LOCKFILE_EXCLUSIVE_LOCK) !== 0);
+                return answer === ERROR_SUCCESS ? 1 : fail(answer);
             },
         },
 
@@ -2498,12 +2690,20 @@ export function createFileFunctions(host){
         UnlockFileEx: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([handle, reserved, , , overlapped])=>{
+            handler: ([handle, reserved, lengthLow, lengthHigh, overlapped])=>{
                 if (!object(handle, 'file'))
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                return reserved !== 0 || overlapped === 0 ? fail(ERROR_INVALID_PARAMETER) : 1;
+                if (reserved !== 0 || overlapped === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const at = overlapped >>> 0;
+                const answer = unlockRange(handle >>> 0,
+                    qword(readDword(at + OVERLAPPED_OFFSET), readDword(at + OVERLAPPED_OFFSET + 4)),
+                    qword(lengthLow, lengthHigh));
+                return answer === ERROR_SUCCESS ? 1 : fail(answer);
             },
         },
 

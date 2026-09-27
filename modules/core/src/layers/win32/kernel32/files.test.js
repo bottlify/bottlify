@@ -1775,3 +1775,42 @@ test('a wildcard or a trailing separator is not a name a file is opened or made 
         OPEN_EXISTING, 0, 0]), INVALID_HANDLE_VALUE);
     assert.equal(error.code, ERROR_FILE_NOT_FOUND);
 });
+
+test('a lock is the file\'s, seen through every handle, and goes with its handle', ()=>{
+    // Wine's kernel32 file test_LockFile: an exclusive lock refuses any
+    // overlapping one from another handle, shared locks sit together, and an
+    // unlock names exactly a range it holds.
+    const ERROR_LOCK_VIOLATION = 33;
+    const ERROR_NOT_LOCKED = 158;
+    const LOCKFILE_EXCLUSIVE_LOCK = 0x2;
+    const OVERLAPPED = 0x700;
+    const { files, error, fns, open, memory } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'x');
+    const first = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    const second = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+
+    assert.equal(fns.LockFile.handler([first, 0, 0, 100, 0]), 1);
+    assert.equal(fns.LockFile.handler([second, 50, 0, 10, 0]), 0, 'another handle\'s range');
+    assert.equal(error.code, ERROR_LOCK_VIOLATION);
+    assert.equal(fns.LockFile.handler([first, 50, 0, 10, 0]), 0, 'and the taker\'s own');
+    assert.equal(fns.LockFile.handler([second, 100, 0, 10, 0]), 1, 'past it is free');
+    assert.equal(fns.UnlockFile.handler([first, 0, 0, 50, 0]), 0, 'only the range it took');
+    assert.equal(error.code, ERROR_NOT_LOCKED);
+    assert.equal(fns.UnlockFile.handler([second, 0, 0, 100, 0]), 0, 'by the handle that took it');
+    assert.equal(fns.UnlockFile.handler([first, 0, 0, 100, 0]), 1);
+
+    memory.putDword(OVERLAPPED + 8, 200);
+    assert.equal(fns.LockFileEx.handler([first, 0, 0, 10, 0, OVERLAPPED]), 1, 'shared');
+    assert.equal(fns.LockFileEx.handler([second, 0, 0, 10, 0, OVERLAPPED]), 1,
+        'beside another shared one');
+    assert.equal(fns.LockFileEx.handler([second, LOCKFILE_EXCLUSIVE_LOCK, 0, 10, 0,
+        OVERLAPPED]), 0, 'which an exclusive one is refused over');
+    assert.equal(error.code, ERROR_LOCK_VIOLATION);
+
+    assert.equal(fns.CloseHandle.handler([second]), 1);
+    assert.equal(fns.LockFile.handler([first, 100, 0, 10, 0]), 1,
+        'a handle\'s locks close with it');
+    assert.equal(fns.LockFile.handler([first, 0xffffffff, 0xffffffff, 2, 0]), 0,
+        'a range past the last offset is not one');
+    assert.equal(error.code, ERROR_INVALID_PARAMETER);
+});
