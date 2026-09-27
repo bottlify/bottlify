@@ -247,6 +247,10 @@ const MAX_RESOURCE_NAME = 256;
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  * @property {(hwnd: number, message: number, wParam: number, lParam: number,
  *     thread?: unknown, unicode?: boolean) => number | Promise<number>} send
+ * @property {(hwnd: number, message: number, wParam: number, lParam: number,
+ *     thread?: unknown, unicode?: boolean) => number | Promise<number | null>} [sendAcross]
+ *           SendMessage as a program calls it: to another thread's window it
+ *           waits for that thread to take it.
  * @property {(record: any, message: { hwnd: number, message: number, wParam: number,
  *     lParam: number }, thread?: unknown) => number | Promise<number>} defDlgProc
  *           The dialog class's procedure: DWLP_DLGPROC first, then the default.
@@ -1366,8 +1370,8 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                return host.send(control.hwnd, message >>> 0, wParam >>> 0, lParam >>> 0,
-                    host.callerThread?.());
+                return (host.sendAcross ?? host.send)(control.hwnd, message >>> 0,
+                    wParam >>> 0, lParam >>> 0, host.callerThread?.());
             },
         },
 
@@ -1381,8 +1385,8 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                return host.send(control.hwnd, message >>> 0, wParam >>> 0, lParam >>> 0,
-                    host.callerThread?.(), true);
+                return (host.sendAcross ?? host.send)(control.hwnd, message >>> 0,
+                    wParam >>> 0, lParam >>> 0, host.callerThread?.(), true);
             },
         },
 

@@ -745,6 +745,17 @@ export function createWindowFunctions(host){
         {
             return 0;
         }
+        // What the window manager sends itself -- activation, destruction,
+        // the messages a call it answers makes -- runs the procedure on the
+        // thread that caused it, even for another thread's window, where
+        // Windows hands it to that thread as a program's SendMessage is.
+        const owner = creatorOf(record);
+        const sender = threadIdOf(thread);
+        if (owner !== null && sender !== null && owner !== sender)
+        {
+            host.divergence?.('SendMessage', 'a message the window manager sends to another '
+                + 'thread\'s window runs on the thread that sent it');
+        }
         return callProcedure(record.wndProc, {
             hwnd: record.hwnd, message: message >>> 0, wParam: wParam >>> 0, lParam: lParam >>> 0,
             ...unicode ? { unicode } : {},
@@ -3981,7 +3992,8 @@ export function createWindowFunctions(host){
         }),
         ...createDialogFunctions({
             host: Object.assign(Object.create(host), {
-                focus: focusWindow, setFocus, send, callProcedure, geometry, children: childrenOf,
+                focus: focusWindow, setFocus, send, sendAcross, callProcedure, geometry,
+                children: childrenOf,
                 defDlgProc: controls.helpers.dialogProc, markDefault: controls.helpers.markDefault,
                 keyDown: (/** @type {number} */ key)=>
                     ((host.keyState?.(key) ?? 0) & 0x8000) !== 0,

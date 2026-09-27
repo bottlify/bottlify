@@ -2702,6 +2702,24 @@ test('SendMessage to another thread\'s window waits for that thread to take it',
     assert.equal(fns.ReplyMessage.handler([0]), 0);
 });
 
+test('what the window manager sends another thread\'s window runs on the sender, and says so',
+    ()=>{
+        const main = { id: 1, name: 'main', state: 'running' };
+        const worker = { id: 2, name: 'thread-2', state: 'running' };
+        const caller = { current: /** @type {unknown} */ (worker) };
+        const { fns, memory, dispatched, divergences } = setup({ caller });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const hwnd = createWindow(fns, memory);
+        assert.equal(divergences.length, 0, 'nothing to say for its own window');
+
+        caller.current = main;
+        fns.SetFocus.handler([hwnd]);
+        assert.equal(dispatched.at(-1)?.message, 0x0007, 'WM_SETFOCUS, sent at once');
+        assert.equal(dispatched.at(-1)?.thread, main, 'on the thread that set the focus');
+        assert.ok(divergences.some(text=>text.startsWith('SendMessage:')), 'and says so');
+    });
+
 test('SendNotifyMessage leaves another thread\'s window a message and does not wait', ()=>{
     const main = { id: 1, name: 'main', state: 'running' };
     const worker = { id: 2, name: 'thread-2', state: 'running' };
