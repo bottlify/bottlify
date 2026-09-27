@@ -22,7 +22,7 @@ const BYTES_PER_SECOND = 176400;
 
 /** Somewhere for the guest's structures to live, and a clock we move by hand. */
 function machine(){
-    const memory = new Uint8Array(0x1000);
+    const memory = new Uint8Array(0x11000);
     let clock = 1000;
     /** @type {any[]} */
     const notices = [];
@@ -248,11 +248,11 @@ test('a format query opens nothing', ()=>{
 test('the capabilities land on the fields a caller reads', ()=>{
     // MMVERSION is a UINT: the name starts at 8 and runs to dwFormats at 40.
     const m = machine();
-    assert.equal(m.winmm.waveOutGetDevCapsA.handler([0, 0x400, 52]), 0);
-    assert.equal(m.memory[0x400 + 44], 2, 'wChannels at 44');
-    assert.notEqual(m.get32(0x400 + 40), 0, 'dwFormats at 40');
-    assert.equal(m.get32(0x400 + 4), 0, 'the driver version is not the name');
-    assert.equal(String.fromCharCode(...m.memory.slice(0x408, 0x411)), 'Bottlify ');
+    assert.equal(m.winmm.waveOutGetDevCapsA.handler([0, 0x10400, 52]), 0);
+    assert.equal(m.memory[0x10400 + 44], 2, 'wChannels at 44');
+    assert.notEqual(m.get32(0x10400 + 40), 0, 'dwFormats at 40');
+    assert.equal(m.get32(0x10400 + 4), 0, 'the driver version is not the name');
+    assert.equal(String.fromCharCode(...m.memory.slice(0x10408, 0x10411)), 'Bottlify ');
 });
 
 test('the device families this build does not have say so', ()=>{
@@ -266,6 +266,75 @@ test('the device families this build does not have say so', ()=>{
     assert.equal(m.winmm.waveInOpen.handler([0, 0, 0, 0, 0, 0]), 2, 'BADDEVICEID');
     assert.equal(m.winmm.midiOutOpen.handler([0, 0, 0, 0, 0, 0]), 2);
     assert.equal(m.winmm.mciSendCommandA.handler([0, 0, 0, 0]), 257);
+});
+
+test('the capabilities of a device there is none of are BADDEVICEID, in both spellings', ()=>{
+    // winmm's midi, mixer and capture tests: GetDevCaps and Open agree.
+    const m = machine();
+    for (const name of ['midiOutGetDevCapsA', 'midiOutGetDevCapsW', 'mixerGetDevCapsA',
+        'mixerGetDevCapsW', 'waveInGetDevCapsW'])
+    {
+        assert.equal(m.winmm[name].handler([0xffffffff, 0x400, 0x40]), 2, name);
+        assert.equal(m.winmm[name].argBytes, 12, name);
+    }
+    assert.equal(m.winmm.midiStreamOpen.handler([0x400, 0x404, 1, 0, 0, 0]), 2);
+    assert.equal(m.winmm.midiStreamOpen.argBytes, 24);
+    assert.equal(m.winmm.midiStreamClose.handler([0x1234]), 5, 'INVALHANDLE');
+});
+
+test('waveOutGetDevCapsW names the device in UTF-16, the fields after it moved', ()=>{
+    const m = machine();
+    m.memory.fill(0xcc, 0x10400, 0x10400 + 84);
+    assert.equal(m.winmm.waveOutGetDevCapsW.handler([0, 0x10400, 84]), 0);
+    assert.equal(new TextDecoder('utf-16le').decode(m.memory.slice(0x10408, 0x10408 + 34)),
+        'Bottlify Wave Out');
+    assert.equal(m.memory[0x10400 + 76], 2, 'wChannels after the 32 WCHARs');
+    assert.equal(m.winmm.waveOutGetDevCapsW.handler([1, 0x10400, 84]), 2);
+});
+
+test('a capability structure in memory nothing maps is refused, not written', ()=>{
+    // winmm's wave tests pass NULL and 1 and expect MMSYSERR_INVALPARAM.
+    const m = machine();
+    for (const caps of [0, 1])
+    {
+        assert.equal(m.winmm.waveOutGetDevCapsA.handler([0, caps, 52]), 11);
+        assert.equal(m.winmm.waveOutGetDevCapsW.handler([0, caps, 84]), 11);
+    }
+});
+
+test('waveOutMessage answers the driver messages, and the mapper prefers the one device', ()=>{
+    // winmm's wave tests send these to a device id and to WAVE_MAPPER.
+    const m = machine();
+    const DRV_QUERYMAPPABLE = 0x805;
+    const DRV_QUERYDEVICEINTERFACE = 0x80c;
+    const DRV_QUERYDEVICEINTERFACESIZE = 0x80d;
+    const DRVM_MAPPER_PREFERRED_GET = 0x2015;
+
+    assert.equal(m.winmm.waveOutMessage.handler([0, DRV_QUERYMAPPABLE, 0, 0]), 0);
+    assert.equal(m.winmm.waveOutMessage.handler([0, DRV_QUERYDEVICEINTERFACESIZE, 0x400, 0]), 0);
+    const size = m.get32(0x400);
+    assert.equal(m.winmm.waveOutMessage.handler([0, DRV_QUERYDEVICEINTERFACE, 0x500, size]), 0);
+    const name = new TextDecoder('utf-16le').decode(m.memory.slice(0x500, 0x500 + size));
+    assert.equal(name.indexOf('\0'), size / 2 - 1, 'the size counts the name and its NUL');
+    assert.equal(m.winmm.waveOutMessage.handler([0, DRV_QUERYDEVICEINTERFACE, 0x500, 2]), 11,
+        'INVALPARAM for a buffer too short');
+
+    m.put32(0x600, 0xdeadbeef);
+    assert.equal(m.winmm.waveOutMessage.handler(
+        [0xffffffff, DRVM_MAPPER_PREFERRED_GET, 0x600, 0x604]), 0);
+    assert.equal(m.get32(0x600), 0, 'the one device');
+    assert.equal(m.winmm.waveOutMessage.handler(
+        [0xffffffff, DRVM_MAPPER_PREFERRED_GET, 0xffffffff, 0]), 11);
+    assert.equal(m.winmm.waveOutMessage.handler([0, 0x7fff, 0, 0]), 8, 'NOTSUPPORTED');
+    assert.equal(m.winmm.waveOutMessage.handler([7, DRV_QUERYMAPPABLE, 0, 0]), 2,
+        'BADDEVICEID for a device id there is none of');
+
+    m.put32(0x600, 0);
+    assert.equal(m.winmm.waveInMessage.handler(
+        [0xffffffff, DRVM_MAPPER_PREFERRED_GET, 0x600, 0x604]), 0);
+    assert.equal(m.get32(0x600), 0xffffffff, 'no capture device to prefer');
+    assert.equal(m.winmm.waveInMessage.handler(
+        [0xffffffff, DRVM_MAPPER_PREFERRED_GET, 0, 0x604]), 11);
 });
 
 test('a device with no byte rate in its format is refused, not stalled', ()=>{
@@ -340,7 +409,7 @@ test('a build with no notify behaves exactly as it did', ()=>{
     // The flags are the contract; the notification is on top of it. A host that
     // cannot reach guest code is not a broken one, and a program that polls
     // must not be able to tell the difference.
-    const memory = new Uint8Array(0x1000);
+    const memory = new Uint8Array(0x11000);
     let clock = 1000;
     const winmm = /** @type {any} */ (createWinmmFunctions({
         /** @param {number} address @param {number} length */
@@ -745,7 +814,7 @@ test('the timer reports the periods timeSetEvent accepts', ()=>{
 });
 
 test('the wave-out volume is one level for the device, heard through every track', ()=>{
-    const memory = new Uint8Array(0x1000);
+    const memory = new Uint8Array(0x11000);
     /** @type {{ gain: number }[]} */
     const tracks = [];
     const wave = /** @type {any} */ (createWinmmFunctions({
@@ -783,9 +852,9 @@ test('the wave-out volume is one level for the device, heard through every track
     assert.equal(tracks[0].gain, 0x8000 / 0xffff);
     assert.equal(winmm.waveOutGetVolume.handler([0, 0x300]), 0, 'the device by its id');
     assert.equal(view.getUint32(0x300, true), 0x8000_8000);
-    assert.equal(winmm.waveOutGetDevCapsA.handler([0, 0x400, 52]), 0);
-    assert.equal(view.getUint32(0x400 + 48, true) & 0x0008, 0, 'no WAVECAPS_LRVOLUME');
-    assert.equal(view.getUint32(0x400 + 48, true) & 0x0001, 1, 'but WAVECAPS_VOLUME');
+    assert.equal(winmm.waveOutGetDevCapsA.handler([0, 0x10400, 52]), 0);
+    assert.equal(view.getUint32(0x10400 + 48, true) & 0x0008, 0, 'no WAVECAPS_LRVOLUME');
+    assert.equal(view.getUint32(0x10400 + 48, true) & 0x0001, 1, 'but WAVECAPS_VOLUME');
 
     // A device opened later plays at the level already set.
     assert.equal(winmm.waveOutSetVolume.handler([0xffffffff, 0x4000]), 0, 'WAVE_MAPPER');
