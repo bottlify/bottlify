@@ -709,6 +709,36 @@ test('flat shading makes the two colour varyings flat on both sides, and nothing
         .wgsl.includes('interpolate'), 'Gouraud declares nothing');
 });
 
+test('a vertex shader carries fog to the pixel stage: its oFog, or all fog without one', ()=>{
+    // Direct3D fogs a shader-drawn surface below model 3 after the pixel
+    // shader, by the amount the vertex shader wrote to oFog -- and fogs it
+    // whole when the shader wrote none; a draw through a vertex shader of its
+    // own was not fogged at all (Wine's d3d8 fog_with_shader_test).
+    const position = [op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 0), src(REGISTER.INPUT, 0)];
+    const shader = (/** @type {number[]} */ extra)=>parseShader([VS_2_0, ...dclInput(0, 0),
+        ...position, ...extra, END_TOKEN]);
+    const writes = translateShader(shader([
+        op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 1, 0x1), src(REGISTER.CONST, 0),
+    ]), { fogSource: FOG_SOURCE.VERTEX });
+    assert.equal(writes.error, null);
+    assert.equal(writes.fogRegister, /** @type {number} */ (writes.viewportRegister) + 1);
+    assertLine(writes.wgsl, `out.oFog = vec4f(out.oFog.x, c[${writes.fogRegister}].rgb);`);
+
+    const silent = translateShader(shader([]), { fogSource: FOG_SOURCE.VERTEX });
+    assertLine(silent.wgsl, `out.oFog = vec4f(0.0, c[${silent.fogRegister}].rgb);`);
+
+    const table = translateShader(shader([]), { fogSource: FOG_SOURCE.TABLE });
+    const range = /** @type {number} */ (table.fogRegister) + 1;
+    assertLine(table.wgsl, `out.o${FOG_RANGE_LOCATION} = c[${range}];`);
+    assert.equal(table.constants, range + 1, 'the registers are uploaded');
+
+    // And the pixel shader fogs by any source, with no curve set as well.
+    const pixel = translateShader(parseShader([PS_2_0, ...dclInput(10, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(REGISTER.INPUT, 0), END_TOKEN]),
+    { fogSource: FOG_SOURCE.VERTEX, fog: D3DFOG.NONE });
+    assert.ok(pixel.wgsl.includes('mix(in.fog.yzw'), pixel.wgsl);
+});
+
 test('a vertex shader\'s position lands on the centre of the pixel it names', ()=>{
     // Direct3D 9 and before put a pixel's centre on its integer coordinate
     // and WebGPU half a pixel further on, so what the shader wrote to oPos is

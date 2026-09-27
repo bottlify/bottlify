@@ -49,7 +49,7 @@ import {
     constantBlocks, createProgramCache, samplerDimension, shapeKey, vertexLayoutOf,
 } from '../webgpu/internal/programmable.js';
 import {
-    HYBRID_CONSTANTS, fixedVertexStage, translateShader, varyingLocation,
+    FOG_RANGE_LOCATION, HYBRID_CONSTANTS, fixedVertexStage, translateShader, varyingLocation,
 } from '../d3d9/wgsl.js';
 import { D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
@@ -4667,14 +4667,13 @@ export function createRenderer(options){
         const pixelShader = /** @type {object} */ (program.pixelShader);
         // The fixed-function fog stage runs after a pixel shader below model 3,
         // so a shader-drawn surface is fogged exactly as a fixed-function one
-        // is -- and this device refuses a pixel shader above model 2. Only a
-        // draw whose vertex stage is the fixed one can promise the oFog
-        // varying the mix reads, so a draw through a vertex shader of the
-        // program's own keeps the fog Direct3D would take from that shader,
-        // which this translation does not compute.
-        const fog = program.vertex
-            ? { source: FOG_SOURCE.NONE, mode: D3DFOG.NONE }
-            : fogOf(model, fogApplied);
+        // is -- and this device refuses a pixel shader above model 2. Through
+        // a vertex shader of the program's own, vertex fog is the amount that
+        // shader writes to oFog, whatever mode is set, and table fog the
+        // pixel's as ever (the translation carries both to the pixel stage).
+        const fixedFog = fogOf(model, fogApplied);
+        const fog = program.vertex && fixedFog.source === FOG_SOURCE.SPECULAR
+            ? { ...fixedFog, source: FOG_SOURCE.VERTEX } : fixedFog;
         // Flat shading is declared on both sides of the two colour varyings,
         // so every translation of the pair is made for it.
         const flat = isFlatShaded(model);
@@ -4752,16 +4751,21 @@ export function createRenderer(options){
         // declaration carries under that number, since that is what the
         // fixed function hands a pixel shader.
         const generated = program.vertex ? [] : hybridGeneration(model);
+        // The fog varyings a vertex shader's translation writes itself, below.
+        const fogCarried = program.vertex && fog.source !== FOG_SOURCE.NONE
+            ? [varyingLocation(D3DDECLUSAGE.FOG, 0), FOG_RANGE_LOCATION] : [];
         const missing = pixel.reads.filter(
             (/** @type {number} */ location)=>!written.includes(location)
+                && !fogCarried.includes(location)
                 && !generated.some((mode, set)=>mode !== 0
                     && varyingLocation(D3DDECLUSAGE.TEXCOORD, set) === location));
         const vertex = program.vertex
             ? translationOf(/** @type {object} */ (program.vertexShader),
-                `vs:${shapes}|w${missing.join(',')}${flat ? '|flat' : ''}`,
+                `vs:${shapes}|w${missing.join(',')}${flat ? '|flat' : ''}|f${fog.source}`,
                 ()=>translateShader(
                     /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
-                    { inputs: layout.shapes, alsoWrite: missing, flatColours: flat }))
+                    { inputs: layout.shapes, alsoWrite: missing, flatColours: flat,
+                        fogSource: fog.source }))
             : hybridStageFor(
                 `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`
                     + `|f${fog.source}/${fog.mode}${flat ? '|flat' : ''}`
@@ -4990,6 +4994,21 @@ export function createRenderer(options){
         if (vertex.viewportRegister !== undefined)
         {
             blocks[0].set(model.viewport.scale, vertex.viewportRegister * 4);
+        }
+        if (vertex.fogRegister !== undefined)
+        {
+            // What the fixed vertex stage reads for the same: the colour,
+            // then the curve's range, as `hybridVertexBlocks` writes them.
+            const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
+            const fogColour = colorToFloats(rs('FOGCOLOR'));
+            blocks[0].set([fogColour.r, fogColour.g, fogColour.b, fogColour.a],
+                vertex.fogRegister * 4);
+            blocks[0].set([
+                dwordToFloat(rs('FOGSTART')),
+                dwordToFloat(rs('FOGEND')),
+                dwordToFloat(rs('FOGDENSITY')),
+                isAffine(transformOf(model, D3DTS.PROJECTION)) ? 1 : 0,
+            ], (vertex.fogRegister + 1) * 4);
         }
         return blocks;
     };

@@ -193,6 +193,8 @@ export function varyingLocation(usage, index){
  * @property {{ index: number, type: string }[]} samplers
  * @property {number} constants   How many float registers the shader reaches.
  * @property {number} [viewportRegister]
+ * @property {number} [fogRegister]  A vertex shader carrying fog: the fog colour's
+ *           register, with the table curve's range in the one after it.
  *     A vertex shader's: the float register past the ones it reads, where the
  *     viewport's scale is carried for the half-pixel move of its position.
  * @property {number} [bumpRegister]
@@ -1286,6 +1288,8 @@ export function translateShader(parsed, options = {}){
     const fogCurve = [];
     /** @type {number | undefined} */
     let viewportRegister;
+    /** @type {number | undefined} */
+    let fogRegister;
     let entry;
     if (vertex)
     {
@@ -1374,6 +1378,30 @@ export function translateShader(parsed, options = {}){
         viewportRegister = constants === Infinity ? 256 : constants;
         body.push(`    out.oPos = vec4f(out.oPos.xy + out.oPos.w * c[${viewportRegister}].xy`
             + ' * 0.5, out.oPos.zw);');
+        // The fog stage after a pixel shader below model 3 reads the oFog
+        // varying as the fixed vertex stage writes it: the amount, then the
+        // fog colour. Through a vertex shader the amount is what the shader
+        // put in oFog, and a shader that writes none is fogged whole; table fog
+        // is the pixel's own, and takes the curve's range beside it.
+        const carried = options.fogSource ?? FOG_SOURCE.NONE;
+        if (carried !== FOG_SOURCE.NONE)
+        {
+            fogRegister = viewportRegister + 1;
+            const wrote = vertexOutputs.has(1) && major < 3;
+            if (!wrote)
+            {
+                emits(varyingLocation(D3DDECLUSAGE.FOG, 0), 'oFog');
+            }
+            const amount = carried === FOG_SOURCE.VERTEX && wrote ? 'out.oFog.x' : '0.0';
+            body.push(`    out.oFog = vec4f(${amount}, c[${fogRegister}].rgb);`);
+            if (carried === FOG_SOURCE.TABLE)
+            {
+                outputFields.push(`    @location(${FOG_RANGE_LOCATION}) @interpolate(flat)`
+                    + ` o${FOG_RANGE_LOCATION}: vec4f,`);
+                outputs.push(FOG_RANGE_LOCATION);
+                body.push(`    out.o${FOG_RANGE_LOCATION} = c[${fogRegister + 1}];`);
+            }
+        }
         entry = 'vs_main';
     }
     else
@@ -1414,7 +1442,10 @@ export function translateShader(parsed, options = {}){
         // x and the fog colour in y,z,w. The mix goes in after the body and
         // before the outputs are written: fog on the shaded colour.
         const table = options.fogSource === FOG_SOURCE.TABLE;
-        if ((options.fog || options.fogSource === FOG_SOURCE.SPECULAR) && pixelOutputs.has(0))
+        // Any source fogs, a curve set or not: through a vertex shader the
+        // amount is the shader's own oFog with no mode at all.
+        const fogged = options.fog || (options.fogSource ?? FOG_SOURCE.NONE) !== FOG_SOURCE.NONE;
+        if (fogged && pixelOutputs.has(0))
         {
             inputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.FOG, 0)}) fog: vec4f,`);
             reads.push(varyingLocation(D3DDECLUSAGE.FOG, 0));
@@ -1446,7 +1477,8 @@ export function translateShader(parsed, options = {}){
     // two, named through a module constant so the body did not need to know
     // where they would start.
     const bumpRegister = bumps ? constants : undefined;
-    const reach = viewportRegister !== undefined ? viewportRegister + 1
+    const reach = fogRegister !== undefined ? fogRegister + 2
+        : viewportRegister !== undefined ? viewportRegister + 1
         : bumpRegister !== undefined ? bumpRegister + 16
             : constants === Infinity ? 224 : constants;
     const wgsl = [
@@ -1469,6 +1501,7 @@ export function translateShader(parsed, options = {}){
     return {
         wgsl, entry, inputs, outputs, reads, samplers, constants: reach,
         ...(viewportRegister === undefined ? {} : { viewportRegister }),
+        ...(fogRegister === undefined ? {} : { fogRegister }),
         ...(bumpRegister === undefined ? {} : { bumpRegister }),
         error,
     };
