@@ -687,14 +687,20 @@ dot over an array (`movups`, `mulps`, `add esi, 16`) 157 -> 110, CPU time, best 
 interleaved runs on a loaded machine; the no-test ceiling was about two thirds of the checked
 figure.
 
-A `rep movs` or `rep stos` with DF clear moves, per turn of its loop, every element that lies
-wholly on the current page of each pointer, as far as ecx and the budget go, at once: one test
-of those pages (inaccessible, and code for the destination), then one `memory.copy` or
-`memory.fill` -- or a word loop for a value that is not one byte repeated -- with ecx, the
-pointers, the count and the budget moved by the whole run. DF set, an element across a page,
-a flagged page, and a copy whose destination lies just ahead of its source (which the
-processor fills with the source's first elements, where a memmove does not) take the
-per-element path. `rep movsd` 5.2 -> 0.7 ns an element, `rep stosd` 2.9 -> 0.6. Both
+A `rep movs` or `rep stos` moves, per turn of its loop, every element that lies wholly on the
+current page of each pointer the way DF goes -- up to the page's end, down to its start -- as
+far as ecx and the budget go, at once: one test of those pages (inaccessible, and code for the
+destination), then one `memory.copy` or `memory.fill` over the bytes the run spans -- or a word
+loop for a value that is not one byte repeated -- with ecx, the pointers, the count and the
+budget moved by the whole run. An element across a page, a flagged page, and a copy whose
+destination lies just ahead of its source the way it goes (above it going up, below it going
+down, by less than the run: the processor reads there what it has just written, where a memmove
+does not) take the per-element path. `rep movsd` 5.2 -> 0.7 ns an element, `rep stosd` 2.9 ->
+0.6. Going down -- a copy whose destination lies above its source and inside it, as the guest
+msvcrt's `memmove`, `memcpy` and `strcpy` make one (`copyDown`, see `win32.md`) -- had taken the
+per-element path; under the engine, a loop of one `rep` a turn (as below) of `std; rep movsb`
+moving a run 32 bytes up, 4 KiB 20 500 -> 70 ns a turn, 64 KiB 357 000 -> 1 610, `std; rep
+movsd` of 64 KiB 75 300 -> 1 980, `std; rep stosb` of 64 KiB 332 000 -> 2 040. Both
 interpreter tiers move them the same way (`Memory.repeat` in `ir.js`, which `blockState` answers
 with a `copyWithin` or a `fill` of RAM; `repeatBulk` in `interp-wasm.c`, a `memory.copy` or
 `memory.fill`, the module built with `-mbulk-memory`), under the same tests, each element they
@@ -718,10 +724,26 @@ interpreter tier. The same loop, one thread: `rep stosb` of 4 KiB 262 -> 95 ns a
 256 KiB 41 500 -> 7 820. The interpreter tiers count a `rep` as one instruction, as the emulator
 does. A `rep cmps` or `rep scas` tests its stop condition before the budget: a slice that runs out on the iteration that stops it leaves the
 instruction done, where it had left on it and the instruction run again scanned on past the match
-(a `repne scasb` strlen of "abc" answered 9). The source of `lods`, `movs` and `cmps` takes an
-`fs:` override as any memory operand does, the thread block's base added to esi, where translated
-code had read linear esi; the destination is es:[edi] whatever the prefix, and a `rep movs` with an
-`fs:` source takes the per-element path.
+(a `repne scasb` strlen of "abc" answered 9). A `cmps` sets its record's first operand only once
+the destination's element is read: a fault there leaves the record of the compare before it
+whole, where its AF, CF and OF had been folded with the source's next element in place of its
+own. The source of `lods`, `movs` and `cmps` takes an `fs:` override as any memory operand does,
+the thread block's base added to esi, where translated code had read linear esi; the destination
+is es:[edi] whatever the prefix, and a `rep movs` with an `fs:` source takes the per-element
+path.
+
+A `repe` or `repne` `cmps` or `scas` passes over, per turn of its loop, the elements that do not
+stop it among those that lie wholly on the pointers' current pages the way DF goes, all but the
+last of them (`bulkScan`): a loop of a load, or two, and a compare alone, when those pages can
+be read, with ecx and the pointers moved past the elements and the budget charged by their bytes
+as a bulk move is. The element after them -- the one that stops the instruction, or the last on
+the pages or of the count -- takes the per-element path, which sets the flags, tests the stop
+and the budget and faults on its page, so however the instruction leaves -- done, out of budget,
+at a fault on the next page -- it leaves the flags of the last element it compared, as the
+processor does. Both interpreter tiers pass over the same elements (`Memory.pass`, `passBulk`).
+The same loop: `repne scasb` to a zero at the end of 64 bytes 86 -> 34 ns a turn, of 4 KiB
+6 130 -> 2 060, of 64 KiB 280 000 -> 37 000 (0.56 ns a byte); `repe cmpsb` of two equal runs of
+64 KiB 331 000 -> 51 600, `repe cmpsd` 63 700 -> 15 600.
 
 The null page is *not* marked, because the emulator lets a program read
 address 0 today and the two engines must agree; marking it, and projecting the memory

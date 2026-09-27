@@ -203,44 +203,92 @@ static inline u32 codeHit(u32 a)
 }
 
 /*
- * A `rep movs` (kind 0xa4) or `rep stos` (0xaa) going up, as translated code
- * runs one (bulkString in emit/integer.js): every element that lies wholly on
- * the pointers' current pages at once, when the destination's page is neither
- * inaccessible nor holding translated code, the source's can be read, and a
- * copy's destination does not lie just ahead of its source, where the
- * processor repeats the source's first elements and a memmove does not. The
- * registers move by the elements done, which is none when any of that fails:
- * the element is then the loop's own.
+ * The whole elements on the page of `a` from it the way a string instruction
+ * goes: going up to the page's end, going down to its start, and none when
+ * the element at `a` crosses the page's end.
  */
-static u32 repeatBulk(u32 kind, u32 size)
+static inline u32 pageRoom(u32 a, u32 size, u32 down)
 {
-    u32 shift = SIZE_INDEX(size), to = regs[7], from = regs[6], n = regs[1];
-    u32 room = (0x1000 - (to & 0xfff)) >> shift;
+    u32 offset = a & 0xfff, shift = SIZE_INDEX(size);
+    if (!down) return (0x1000 - offset) >> shift;
+    return offset > 0x1000 - size ? 0 : (offset >> shift) + 1;
+}
+
+/*
+ * A `rep movs` (kind 0xa4) or `rep stos` (0xaa), as translated code runs one
+ * (bulkString in emit/integer.js): every element that lies wholly on the
+ * pointers' current pages the way DF goes at once, when the destination's
+ * page is neither inaccessible nor holding translated code, the source's can
+ * be read, and a copy's destination does not lie just ahead of its source the
+ * way the copy goes, where the processor reads what it has just written and a
+ * memmove does not. The registers move by the elements done, which is none
+ * when any of that fails: the element is then the loop's own.
+ */
+static u32 repeatBulk(u32 kind, u32 size, u32 down)
+{
+    u32 to = regs[7], from = regs[6], n = regs[1];
+    u32 room = pageRoom(to, size, down);
     if (room < n) n = room;
     if (kind == 0xa4)
     {
-        room = (0x1000 - (from & 0xfff)) >> shift;
+        room = pageRoom(from, size, down);
         if (room < n) n = room;
     }
-    u32 bytes = n << shift;
+    u32 bytes = n << SIZE_INDEX(size);
     if (n == 0 || (pageFlags[to >> 12] & (INACCESSIBLE | HAS_CODE)) != 0) return 0;
+    /* The run's lowest bytes: going down, the pointers less the bytes before
+     * their own elements. */
+    u32 low = down ? to + size - bytes : to;
     if (kind == 0xa4)
     {
-        if ((pageFlags[from >> 12] & INACCESSIBLE) != 0 || to - from - 1 < bytes - 1) return 0;
-        __builtin_memmove(ram + to, ram + from, bytes);
-        regs[6] = from + bytes;
+        if ((pageFlags[from >> 12] & INACCESSIBLE) != 0
+            || (down ? from - to : to - from) - 1 < bytes - 1) return 0;
+        __builtin_memmove(ram + low, ram + (down ? from + size - bytes : from), bytes);
+        regs[6] = down ? from - bytes : from + bytes;
     }
     else
     {
         u32 v = regOf(0, size), b = v & 0xff;
         if (v == (size == 4 ? b * 0x01010101u : size == 2 ? b * 0x0101u : b))
-            __builtin_memset(ram + to, (int)b, bytes);
+            __builtin_memset(ram + low, (int)b, bytes);
         else
-            for (u32 a = to; a != to + bytes; a += size) store(a, size, v);
+            for (u32 a = low; a != low + bytes; a += size) store(a, size, v);
     }
-    regs[7] = to + bytes;
+    regs[7] = down ? to - bytes : to + bytes;
     regs[1] -= n;
     return n;
+}
+
+/*
+ * A `repe`/`repne` `cmps` (kind 0xa6) or `scas` (0xae), as translated code
+ * passes over one (bulkScan in emit/integer.js): the elements from the first
+ * that do not stop it, among those that lie wholly on the pointers' current
+ * pages the way DF goes, all but the last, when those pages can be read. The
+ * registers move past them; the element after them is the loop's own, which
+ * sets the flags.
+ */
+static void passBulk(u32 kind, u32 size, u32 down, u32 stopOnEqual)
+{
+    u32 to = regs[7], from = regs[6], n = regs[1];
+    u32 room = pageRoom(to, size, down);
+    if (room < n) n = room;
+    if (kind == 0xa6)
+    {
+        room = pageRoom(from, size, down);
+        if (room < n) n = room;
+    }
+    if (n < 2 || (pageFlags[to >> 12] & INACCESSIBLE) != 0
+        || (kind == 0xa6 && (pageFlags[from >> 12] & INACCESSIBLE) != 0)) return;
+    u32 step = down ? (u32)-(i32)size : size, apart = from - to, value = regOf(0, size);
+    u32 k = 0, a = to;
+    for (; k < n - 1; k++, a += step)
+    {
+        u32 other = kind == 0xa6 ? load(a + apart, size) : value;
+        if ((load(a, size) == other) == stopOnEqual) break;
+    }
+    regs[7] = to + k * step;
+    if (kind == 0xa6) regs[6] = from + k * step;
+    regs[1] -= k;
 }
 
 /* A condition code of the flags word. */
@@ -2411,13 +2459,15 @@ static u32 runInteger(u32 budget)
             u32 size = (op & 1) ? opsize : 1, s = SIZE_INDEX(size), kind = op & 0xfe;
             if (hasSeg || lock) LEAVE(W_UNSUPPORTED);
             FOLD();
-            u32 step = (fl & DF) ? (u32)-(i32)size : size;
+            u32 step = (fl & DF) ? (u32)-(i32)size : size, down = step != size;
             u32 repeat = rep != 0;
-            u32 bulk = repeat && step == size && (kind == 0xa4 || kind == 0xaa);
+            u32 bulk = repeat && (kind == 0xa4 || kind == 0xaa);
+            u32 passing = repeat && (kind == 0xa6 || kind == 0xae);
             for (;;)
             {
                 if (repeat && regs[1] == 0) break;
-                if (bulk && repeatBulk(kind, size) != 0) continue;
+                if (bulk && repeatBulk(kind, size, down) != 0) continue;
+                if (passing) passBulk(kind, size, down, rep == 2);
                 u32 done = 0;
                 if (kind == 0xa4)
                 {

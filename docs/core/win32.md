@@ -239,10 +239,10 @@ it uses from its first parameter: loads `u8`, `i8`, `u16`, `i16`, `u32`, `i32`, 
 stores `setU8`, `setU16`, `setU32`, `setF64`, `call(fn, ...args)` through a cdecl pointer, and
 `copyUp`/`copyDown`/`fill` (`rep movsd` or `rep stosd` for the whole dwords, down with the
 direction flag set for `copyDown`, the bytes left as the byte forms leave them -- a turn of a
-`rep` translated code moves one element at a time (a copy down, a page holding code) counts as an
-instruction of the thread's quantum, and a dword a turn is a quarter of the turns, where one it
-moves a page at a time counts by its bytes, whatever their width; a copy whose ends are one to
-three bytes apart goes a byte at a time).
+`rep` translated code moves one element at a time (a page holding code, an element across a
+page) counts as an instruction of the thread's quantum, and a dword a turn is a quarter of the
+turns, where one it moves a page at a time -- up or down -- counts by its bytes, whatever their
+width; a copy whose ends are one to three bytes apart goes a byte at a time).
 
 A function that leaves a rare case to the host's handler says `return host()` (`host` taken
 with the other helpers): the frame is taken down -- ESP at the return address, EBX, ESI, EDI and

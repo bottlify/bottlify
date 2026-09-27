@@ -318,6 +318,19 @@ export function interpret(state, maxInstructions = 1, options = {}){
  * per machine gave each machine's its own functions, and the interpreter's
  * call sites, shared by every machine in a process, saw one more with each.
  */
+/**
+ * The whole elements on an address's page from it the way a string
+ * instruction goes: going up to the page's end, going down to its start, and
+ * none when the element at the address crosses the page's end.
+ *
+ * @param {number} address @param {number} size @param {boolean} down
+ */
+function pageRoom(address, size, down){
+    const offset = address & 0xfff;
+    return !down ? (0x1000 - offset) / size | 0
+        : offset > 0x1000 - size ? 0 : (offset / size | 0) + 1;
+}
+
 class BlockMemory {
     /**
      * @param {WebAssembly.Memory} memory
@@ -430,21 +443,22 @@ class BlockMemory {
     /**
      * `Memory.repeat`, as translated code moves a `rep movs` or `rep stos` in
      * bulk (`bulkString` in `emit/integer.js`): every element that lies wholly
-     * on the pointers' current pages at once, when the destination's page is
-     * neither inaccessible nor holding translated code, the source's can be
-     * read, and a copy's destination does not lie just ahead of its source,
-     * where the processor repeats the source's first elements and a memmove
-     * does not.
+     * on the pointers' current pages the way DF goes at once, when the
+     * destination's page is neither inaccessible nor holding translated code,
+     * the source's can be read, and a copy's destination does not lie just
+     * ahead of its source the way the copy goes, where the processor reads
+     * what it has just written and a memmove does not.
      *
      * @param {boolean} copy @param {number} to @param {number} from
      * @param {number} size @param {number} count @param {number} value
+     * @param {boolean} down
      */
-    repeat(copy, to, from, size, count, value){
+    repeat(copy, to, from, size, count, value, down){
         const { pageFlags, ramBytes } = this;
-        let n = Math.min(count, (0x1000 - (to & 0xfff)) / size | 0);
+        let n = Math.min(count, pageRoom(to, size, down));
         if (copy)
         {
-            n = Math.min(n, (0x1000 - (from & 0xfff)) / size | 0);
+            n = Math.min(n, pageRoom(from, size, down));
         }
         const bytes = n * size;
         if (n === 0
@@ -452,14 +466,18 @@ class BlockMemory {
         {
             return 0;
         }
+        // The run's lowest bytes: going down, the pointers less the bytes
+        // before their own elements.
+        const low = down ? to + size - bytes : to;
         if (copy)
         {
             if ((pageFlags[from >>> 12] & PageFlag.INACCESSIBLE) !== 0
-                || ((to - from - 1) >>> 0) < bytes - 1)
+                || (((down ? from - to : to - from) - 1) >>> 0) < bytes - 1)
             {
                 return 0;
             }
-            ramBytes.copyWithin(to, from, from + bytes);
+            const source = down ? from + size - bytes : from;
+            ramBytes.copyWithin(low, source, source + bytes);
         }
         else
         {
@@ -467,11 +485,11 @@ class BlockMemory {
             const byte = word & 0xff;
             if (word === (size === 4 ? byte * 0x01010101 : size === 2 ? byte * 0x0101 : byte))
             {
-                ramBytes.fill(byte, to, to + bytes);
+                ramBytes.fill(byte, low, low + bytes);
             }
             else
             {
-                for (let address = to; address < to + bytes; address += size)
+                for (let address = low; address < low + bytes; address += size)
                 {
                     if (size === 2)
                     {
@@ -484,11 +502,56 @@ class BlockMemory {
                 }
             }
         }
-        if (to < this.watchEnd && to + bytes > this.watchStart)
+        if (low < this.watchEnd && low + bytes > this.watchStart)
         {
             this.hit = true;
         }
         return n;
+    }
+
+    /**
+     * `Memory.pass`, as translated code passes over a `repe`/`repne` `cmps`
+     * or `scas` (`bulkScan` in `emit/integer.js`): how many elements from the
+     * first do not stop it, among those that lie wholly on the pointers'
+     * current pages the way DF goes, all but the last, when those pages can be
+     * read. Each is compared as the instruction compares it: the source's
+     * element (a `scas`'s value) against the destination's.
+     *
+     * @param {boolean} compare @param {number} to @param {number} from
+     * @param {number} size @param {number} count @param {number} value
+     * @param {boolean} down @param {boolean} stopOnEqual
+     */
+    pass(compare, to, from, size, count, value, down, stopOnEqual){
+        const { pageFlags, ramBytes, view, ramBase } = this;
+        let n = Math.min(count, pageRoom(to, size, down));
+        if (compare)
+        {
+            n = Math.min(n, pageRoom(from, size, down));
+        }
+        if (n < 2 || (pageFlags[to >>> 12] & PageFlag.INACCESSIBLE) !== 0
+            || compare && (pageFlags[from >>> 12] & PageFlag.INACCESSIBLE) !== 0)
+        {
+            return 0;
+        }
+        const step = down ? -size : size;
+        const apart = from - to;
+        const wanted = size === 4 ? value >>> 0 : value & (size === 2 ? 0xffff : 0xff);
+        let k = 0;
+        for (let address = to; k < n - 1; k++, address += step)
+        {
+            const mine = size === 1 ? ramBytes[address]
+                : size === 2 ? view.getUint16(ramBase + address, true)
+                    : view.getUint32(ramBase + address, true);
+            const other = !compare ? wanted
+                : size === 1 ? ramBytes[address + apart]
+                    : size === 2 ? view.getUint16(ramBase + address + apart, true)
+                        : view.getUint32(ramBase + address + apart, true);
+            if ((mine === other) === stopOnEqual)
+            {
+                break;
+            }
+        }
+        return k;
     }
 
     /**
