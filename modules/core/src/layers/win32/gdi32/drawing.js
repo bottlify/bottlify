@@ -1254,6 +1254,24 @@ export function createDrawingFunctions(
                 (rect >>> 0) === 0 ? 0 : newRegion(readRect(host, rect)),
         },
 
+        /** int GetRgnBox(HRGN hrgn, LPRECT lprc): the bounds, and what kind of region */
+        GetRgnBox: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([region, out])=>{
+                const rect = regionOf(region);
+                if (!rect || (out >>> 0) === 0)
+                {
+                    return REGION_ERROR;
+                }
+                // An empty region has no position: Windows keeps it as zeros.
+                const empty = isEmpty(rect);
+                writeU32s(host, out >>> 0,
+                    empty ? [0, 0, 0, 0] : [rect.left, rect.top, rect.right, rect.bottom]);
+                return empty ? NULLREGION : SIMPLEREGION;
+            },
+        },
+
         /** int CombineRgn(HRGN hrgnDst, HRGN hrgnSrc1, HRGN hrgnSrc2, int iMode) */
         CombineRgn: {
             argBytes: 16,

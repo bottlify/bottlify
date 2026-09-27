@@ -69,12 +69,24 @@ const DEFAULT_PALETTE = 15;
 const SYSTEM_FIXED_FONT = 16;
 const DEFAULT_GUI_FONT = 17;
 
-/** GetCurrentObject's uObjectType. Only the selectable ones are answered. */
+/**
+ * The object types GetCurrentObject is asked for and GetObjectType answers.
+ * Only the selectable ones are answered by the first.
+ */
 const OBJ_PEN = 1;
 const OBJ_BRUSH = 2;
+const OBJ_DC = 3;
 const OBJ_PAL = 5;
 const OBJ_FONT = 6;
 const OBJ_BITMAP = 7;
+const OBJ_REGION = 8;
+const OBJ_MEMDC = 10;
+
+/** @type {Record<string, number>} */
+const OBJECT_TYPES = {
+    pen: OBJ_PEN, brush: OBJ_BRUSH, palette: OBJ_PAL, font: OBJ_FONT, bitmap: OBJ_BITMAP,
+    region: OBJ_REGION,
+};
 
 /** Brush styles. BS_PATTERN's hatch field is a bitmap handle instead of an index. */
 const BS_SOLID = 0;
@@ -202,6 +214,7 @@ const BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 /** The longest side CreateBitmap takes. */
 const MAX_BITMAP_SIDE = 0x7ffffff;
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INVALID_HANDLE = 6;
 
 /**
  * Depths a device context over somebody else's surface can be made at.
@@ -1606,6 +1619,31 @@ export function createGdiFunctions(host){
                     default:
                         return 0;
                 }
+            },
+        },
+
+        /**
+         * DWORD GetObjectType(HGDIOBJ h)
+         *
+         * A context is OBJ_MEMDC when it is a memory one and OBJ_DC otherwise;
+         * a handle that is no GDI object is 0 with ERROR_INVALID_HANDLE.
+         */
+        GetObjectType: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                if (dc)
+                {
+                    return dc.kind === 'memory' ? OBJ_MEMDC : OBJ_DC;
+                }
+                const type = OBJECT_TYPES[objects.get(handle)?.type ?? ''];
+                if (type === undefined)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                return type;
             },
         },
 

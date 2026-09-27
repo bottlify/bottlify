@@ -449,6 +449,19 @@ test('GetClipRgn copies the clip the program selected, and answers 0 for none', 
     assert.equal(fns.GetClipRgn.handler([0x9999, region]) | 0, -1, 'not a context');
 });
 
+test('GetRgnBox answers a region\'s bounds, an empty one as zeros', ()=>{
+    const { fns, memory } = setup();
+    const BOX = 0x3000;
+    const box = ()=>[0, 4, 8, 12].map(at=>
+        new DataView(memory.bytes.buffer).getInt32(BOX + at, true));
+    assert.equal(fns.GetRgnBox.handler([fns.CreateRectRgn.handler([2, 3, 40, 50]), BOX]),
+        SIMPLEREGION);
+    assert.deepEqual(box(), [2, 3, 40, 50]);
+    assert.equal(fns.GetRgnBox.handler([fns.CreateRectRgn.handler([5, 5, 5, 9]), BOX]), NULLREGION);
+    assert.deepEqual(box(), [0, 0, 0, 0]);
+    assert.equal(fns.GetRgnBox.handler([0x9999, BOX]), 0, 'not a region');
+});
+
 test('SetPixelV is SetPixel answered as a BOOL', ()=>{
     const bare = setup();
     assert.equal(bare.fns.SetPixelV.handler([bare.hdc, 1, 1, 0xff]), 0, 'nothing to draw with');

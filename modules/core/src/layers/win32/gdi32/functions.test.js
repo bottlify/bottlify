@@ -2186,3 +2186,17 @@ test('GetTextFace cuts the name to the count, and a null buffer asks for the siz
     assert.equal(fns.GetTextFaceW.handler([hdc, 0, 0]), 7);
     assert.equal(fns.GetTextFaceA.handler([0x9999, 32, NAME]), 0, 'not a context');
 });
+
+test('GetObjectType names each kind of GDI object, a context by whether it is in memory', ()=>{
+    const { fns, hdc } = withDC();
+    const memory = fns.CreateCompatibleDC.handler([hdc]);
+    assert.equal(fns.GetObjectType.handler([hdc]), 3, 'OBJ_DC');
+    assert.equal(fns.GetObjectType.handler([memory]), 10, 'OBJ_MEMDC');
+    assert.equal(fns.GetObjectType.handler([fns.GetStockObject.handler([7])]), 1, 'OBJ_PEN');
+    assert.equal(fns.GetObjectType.handler([fns.GetStockObject.handler([0])]), 2, 'OBJ_BRUSH');
+    assert.equal(fns.GetObjectType.handler([fns.GetStockObject.handler([15])]), 5, 'OBJ_PAL');
+    assert.equal(fns.GetObjectType.handler([fns.GetStockObject.handler([13])]), 6, 'OBJ_FONT');
+    assert.equal(fns.GetObjectType.handler([fns.CreateBitmap.handler([4, 4, 1, 1, 0])]), 7);
+    assert.equal(fns.GetObjectType.handler([fns.CreateRectRgn.handler([0, 0, 4, 4])]), 8);
+    assert.equal(fns.GetObjectType.handler([0x9999]), 0, 'no such object');
+});
