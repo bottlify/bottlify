@@ -2307,7 +2307,7 @@ class FunctionCompiler {
             case '-':
             {
                 const value = this.expr(node.argument);
-                if (value.type === 'f64')
+                if (isFloat(value.type))
                 {
                     this.toSt0(value, node.argument);
                     a.emit(0xd9, 0xe0);                                   // fchs

@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createD3dxFunctions } from './functions.js';
+import { COMPILED } from './inguest.x86.js';
 
 const E_NOTIMPL = 0x80004001;
 
@@ -43,7 +44,7 @@ test('the maths functions declare the stdcall bytes they pop -- the whole point 
         D3DXMatrixMultiply: 12, D3DXMatrixTranspose: 8, D3DXMatrixInverse: 12,
         D3DXMatrixTranslation: 16, D3DXMatrixOrthoLH: 20, D3DXMatrixPerspectiveLH: 20,
         D3DXVec4Transform: 12, D3DXVec3Transform: 12, D3DXVec3TransformNormal: 12,
-        D3DXVec3TransformCoordArray: 24, D3DXVec3Normalize: 8,
+        D3DXVec3TransformCoord: 12, D3DXVec3TransformCoordArray: 24, D3DXVec3Normalize: 8,
         D3DXCreateEffectPool: 4, D3DXCreateEffectFromResourceA: 36,
     };
     for (const [name, argBytes] of Object.entries(expected))
@@ -114,4 +115,30 @@ test('the effect facilities report E_NOTIMPL and leave a null pointer behind', (
     assert.equal(fns.D3DXCreateEffectFromResourceA.handler([0, 0, 0, 0, 0, 0, 0, OUT, 0]) >>> 0,
         E_NOTIMPL);
     assert.deepEqual(getFloats(OUT, 1), [0]);
+});
+
+test('the arithmetic is code in the guest, stdcall, its handler the same JavaScript', ()=>{
+    const { fns } = machine();
+    for (const name of Object.keys(COMPILED))
+    {
+        assert.equal(fns[name].convention, 'stdcall', name);
+        assert.deepEqual(fns[name].code(), COMPILED[/** @type {keyof typeof COMPILED} */ (name)]
+            .code, name);
+    }
+});
+
+test('a normal takes no part of the translation row, whatever it holds', ()=>{
+    const { fns, putFloats, getFloats } = machine();
+    putFloats(A, [2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4, 0, Infinity, NaN, -Infinity, 1]);
+    putFloats(B, [1, 1, 1]);
+    fns.D3DXVec3TransformNormal.handler([OUT, B, A]);
+    assert.deepEqual(getFloats(OUT, 3), [2, 3, 4]);
+});
+
+test('a point transformed to a w of zero is divided by one', ()=>{
+    const { fns, putFloats, getFloats } = machine();
+    putFloats(A, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 7, 0]);
+    putFloats(B, [1, 2, 3]);
+    fns.D3DXVec3TransformCoord.handler([OUT, B, A]);
+    assert.deepEqual(getFloats(OUT, 3), [6, 8, 10]);
 });

@@ -530,7 +530,7 @@ export function conversions(x, k){
 }
 
 /**
- * Floats: an f32 argument, loads, stores, variables and a float result.
+ * Floats: an f32 argument, loads, stores, variables, negated, and a float result.
  *
  * @guestCode stdcall
  * @param {any} guest @param {u32} p @param {f32} s
@@ -543,7 +543,7 @@ export function floats({ f32, setF32, setF64 }, p, s){
     setF32(p + 4, a + s * f32(p + 8));
     setF32(p + 12, b);
     b = Math.fround(b - 1);
-    setF64(p + 16, a / 3 + b);
+    setF64(p + 16, a / 3 + -b * f32(p + 8) - -f32(p + 4));
     setF32(p + 24, f32(p + 8) * f32(p) - f32(p + 4) / s);
     return a > b ? Math.fround(a + b) : b;
 }
