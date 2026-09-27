@@ -11,7 +11,7 @@ import { createMixer } from './mixer.js';
 import { createRing } from './ring.js';
 import {
     WRITTEN, DROP_TO, READ, STATE, STATE_FREE, SLOTS, MIXED_FRAMES, slotHeaderOffset, slotPcmOffset,
-    SLOT_HEADER_INT32, SLOT_BYTES, RATE, createSeam, resampleInto,
+    SLOT_HEADER_INT32, SLOT_BYTES, RATE, createSeam, resampleInto, FRESH, STREAMING,
 } from './mix.js';
 
 /** Sixteen-bit stereo at the output's own rate: no conversion in the way. */
@@ -656,4 +656,23 @@ test('with a shared table, a short write drops what does not fit rather than que
     const { header } = slotView(mixer, track.slot);
     assert.equal(Atomics.load(header, WRITTEN), almostFull.length + 8,
         'only the room available fit; the remainder was dropped, not queued for a later write');
+});
+
+test('a voice written in sequence while it plays is a stream, and a jump moves it on', ()=>{
+    const mixer = createMixer({ shared: true });
+    const voice = mixer.openVoice({ ...DIRECT, bytes: 4000 });
+    assert.ok(voice);
+    const header = new Int32Array(mixer.table, slotHeaderOffset(voice.slot), SLOT_HEADER_INT32);
+    voice.play(true);
+    voice.wrote(0, 4000);
+    assert.equal(Atomics.load(header, STREAMING), 0, 'a buffer rewritten once is not one');
+    voice.wrote(0, 400);
+    assert.equal(Atomics.load(header, STREAMING), 1);
+    assert.equal(Atomics.load(header, FRESH), 400);
+    voice.wrote(1000, 400);
+    assert.equal(Atomics.load(header, FRESH), 1400, 'a jump ahead moves it on');
+    voice.wrote(0, 100);
+    assert.equal(Atomics.load(header, FRESH), 1400, 'and it never moves back');
+    voice.play(true);
+    assert.equal(Atomics.load(header, STREAMING), 0, 'Play ends a stream');
 });

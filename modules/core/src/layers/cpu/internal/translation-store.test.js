@@ -17,7 +17,7 @@ import {
  * replaces what is there, and, when asked for, the synchronous access handle a
  * worker gets from the origin's file system.
  *
- * @param {{ probes: number, syncReads: number }} [counter]
+ * @param {{ probes: number, syncReads: number, writes?: number, writeMs?: number }} [counter]
  * @param {boolean} [sync]
  */
 function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
@@ -106,6 +106,13 @@ function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
                                 },
                                 /** @param {Uint8Array} from @param {{ at: number }} where */
                                 write(from, { at }){
+                                    counter.writes = (counter.writes ?? 0) + 1;
+                                    // A disk that takes its time, where a test asks.
+                                    const until = performance.now() + (counter.writeMs ?? 0);
+                                    while (performance.now() < until)
+                                    {
+                                        // the write is under way
+                                    }
                                     const grown = new Uint8Array(
                                         Math.max(file.bytes.length, at + from.length));
                                     grown.set(file.bytes);
@@ -550,4 +557,31 @@ test('while a seed is on its way a lookup is not answered at once', async()=>{
     arrive(seed);
     await taking;
     assert.deepEqual([...store.getNow(SEED_KEYS[0]) ?? []], [1, 2, 3]);
+});
+
+test('a large seed is written a few milliseconds at a time, the thread let go between', async()=>{
+    // A bundle's seed is thousands of records, taken in on the engine's own
+    // thread while the program loads. Written in one go it held that thread
+    // for hundreds of milliseconds -- a sound mixer in the guest missed its
+    // turns and the device replayed its last lap.
+    const source = await createDirectoryTranslationStore(createMemoryDirectory(), 'game');
+    for (let at = 0; at < 64; at++)
+    {
+        const key = `cork/41/a/${(0x401000 + at * 16).toString(16)}/x`;
+        await source.put(key, new Uint8Array(40).fill(at));
+    }
+    await source.flush();
+    const seed = await source.exportSeed();
+    const counter = { probes: 0, syncReads: 0, writes: 0, writeMs: 1 };
+    const store = await createDirectoryTranslationStore(fakeDirectory(counter, true), 'game');
+    /** @type {number | null} */
+    let writesAtTurn = null;
+    setTimeout(()=>{
+        writesAtTurn = counter.writes;
+    }, 0);
+    const taken = await store.seed(seed, 'id');
+    assert.equal(taken.added, 64);
+    assert.ok(writesAtTurn !== null && writesAtTurn < 64,
+        `the thread had a turn before the last record was written (${writesAtTurn})`);
+    assert.deepEqual([...await store.get('cork/41/a/401010/x') ?? []], new Array(40).fill(1));
 });

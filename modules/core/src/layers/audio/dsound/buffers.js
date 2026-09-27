@@ -225,6 +225,8 @@ export function createSoundBuffer({
     let streamEnd = null;
     let skippedBytes = 0;
     let skips = 0;
+    /** Frames voices this buffer has given back had held, for a report. */
+    let heldFrames = 0;
 
     /** @param {number} from @param {number} count */
     const markWritten = (from, count)=>written.fill(1, from, from + count);
@@ -351,9 +353,12 @@ export function createSoundBuffer({
      * to play, and handing it over would only push everything after it
      * further behind.
      *
+     * @param {number} [lead]  How far past the play cursor the read runs: the
+     *     write cursor's lead for a copy mixed ahead, none for the device, which
+     *     reads at the play cursor itself.
      * @returns {{ from: number, bytes: number }[]}
      */
-    const played = ()=>{
+    const played = (lead = span(WRITE_LEAD_MS))=>{
         const play = playCursor();
         if (reachedEnd)
         {
@@ -365,7 +370,7 @@ export function createSoundBuffer({
             fedByte = 0;
             return from < bytes ? [{ from, bytes: bytes - from }] : [];
         }
-        const ahead = playing ? span(WRITE_LEAD_MS) : 0;
+        const ahead = playing ? lead : 0;
         if (!looping)
         {
             // Start to end and never round: the read runs up to the write
@@ -654,7 +659,7 @@ export function createSoundBuffer({
                 // The device plays it; what it passed is still checked against
                 // what the program wrote, which is how a late refill -- heard as
                 // a repeat of the last lap -- is counted on this path too.
-                takeWritten(played());
+                takeWritten(played(0));
                 return [];
             }
             const ranges = played();
@@ -677,6 +682,11 @@ export function createSoundBuffer({
          * buffer being played: the bytes between were passed over and, unless
          * a later lock comes back for them, will play as they were a lap ago.
          */
+        /** Output frames the device waited, silent, for this stream to be written. */
+        get held(){
+            return heldFrames + (device ? device.voice.held : 0);
+        },
+
         get skipped(){
             return { bytes: skippedBytes, count: skips };
         },
@@ -744,6 +754,10 @@ export function createSoundBuffer({
                 {
                     device.copy(held.offset, held.first);
                     device.copy(0, held.second);
+                    if (playing)
+                    {
+                        device.voice.wrote(held.offset, held.first + held.second);
+                    }
                 }
                 if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
                 {
@@ -793,6 +807,7 @@ export function createSoundBuffer({
             }
             const { voice } = device;
             anchorByte = playCursor();
+            heldFrames += voice.held;
             device = null;
             return voice;
         },

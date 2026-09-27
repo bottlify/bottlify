@@ -151,6 +151,18 @@ passed there: a refill that came too late for the device is heard as the last la
 `staleBytes`/`staleDrains` (with `staleAt` and the last trail of unlocks) count it on this path
 too -- the measure of a program the machine cannot keep fed in real time.
 
+**A buffer written in sequence while it plays is a stream**, and the device plays it no further than
+what was written: an unlock of a playing voice that starts where the last one ended moves the
+voice's `FRESH` (laps times the length plus the offset, where that write ends, measured from the
+cursor) and sets `STREAMING`; the device stops a stream at `FRESH`, adds silence and counts the
+frames in `HELD`, and goes on once the writer catches up. Played on round the circle it would
+replay the lap before whenever the guest thread feeding it -- a Miles or FMOD mixer that writes a
+few tens of milliseconds past the cursor -- was held longer than that by the machine: a short
+gap is heard where the crackle was. Play and SetCurrentPosition end a stream; a buffer rewritten
+once while it loops is not one; and a stream waited for 250 ms is played on round the circle, as
+a writer that stopped leaves the hardware looping. `module.test.js` stalls a 65 ms-ahead writer
+for 120 ms: nothing stale is played.
+
 **With shared memory** (`createSharedMixer`): the engine writes each track's own guest PCM,
 unconverted, into a per-track byte ring inside one `SharedArrayBuffer` "track table" (`SLOTS = 64`
 slots of `SLOT_BYTES = 65536` bytes each, one 128-byte header per slot ahead of it, a 32-byte global

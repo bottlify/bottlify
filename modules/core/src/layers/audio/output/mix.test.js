@@ -12,7 +12,7 @@ import {
     SLOT_HEADER_INT32, SLOT_BYTES, GLOBAL_HEADER_INT32,
     STATE, GENERATION, RATE, CHANNELS, BITS, GAIN, PAUSED, WRITTEN, READ, DROP_TO,
     STATE_OPEN, GAIN_SCALE, TABLE_BYTES, KIND, KIND_DMA, BASE, LENGTH, POSITION, LOOPING, PLAYING,
-    LAPS, ENDS, ARENA_OFFSET, ARENA_BYTES,
+    LAPS, ENDS, FRESH, STREAMING, HELD, ARENA_OFFSET, ARENA_BYTES,
 } from './mix.js';
 import { convert, createMixer } from './mixer.js';
 
@@ -256,4 +256,27 @@ test('a DMA voice at half the output rate moves half a frame an output frame', (
     const out = mix(4);
     assert.deepEqual(out.left, [0, 500, 1000, 1500], 'interpolated between its frames');
     assert.equal(Atomics.load(header, POSITION), 2 * 2);
+});
+
+test('a stream is played up to what was written of it and waits there, silent', ()=>{
+    // Round the circle past that, the device would replay the lap before.
+    const { header, mix } = voice([100, 200, 300, 400, 500]);
+    Atomics.store(header, STREAMING, 1);
+    Atomics.store(header, FRESH, 3 * 2);
+    assert.deepEqual(mix(5).left, [100, 200, 300, 0, 0]);
+    assert.equal(Atomics.load(header, POSITION), 3 * 2, 'held where the writing ends');
+    assert.equal(Atomics.load(header, HELD), 2);
+    Atomics.store(header, FRESH, (5 + 2) * 2);
+    assert.deepEqual(mix(4).left, [400, 500, 100, 200], 'and on once it is written, round the end');
+    assert.equal(Atomics.load(header, LAPS), 1);
+});
+
+test('a stream nobody writes for a quarter of a second is played on round the circle', ()=>{
+    // Its writer has stopped, not fallen behind: the hardware loops the buffer.
+    const { header, mix } = voice([100, 200, 300, 400, 500]);
+    Atomics.store(header, STREAMING, 1);
+    Atomics.store(header, FRESH, 0);
+    assert.equal(mix(12001).produced, 0);
+    assert.equal(Atomics.load(header, STREAMING), 0);
+    assert.deepEqual(mix(2).left, [100, 200]);
 });
