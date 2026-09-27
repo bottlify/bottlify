@@ -26,7 +26,7 @@ import { createDialogFunctions } from './dialogs.js';
 import { createDesktopFunctions } from './desktops.js';
 import { createRawInput } from './rawinput.js';
 import {
-    WS_CHILD, WS_DISABLED, contains, createGeometry, intersect, isEmpty,
+    WS_CHILD, WS_DISABLED, contains, createGeometry, frameRings, intersect, isEmpty,
 } from './frame.js';
 import {
     COLOR_3DDKSHADOW, COLOR_3DFACE, COLOR_3DHILIGHT, COLOR_3DSHADOW, COLOR_BTNTEXT,
@@ -2446,14 +2446,15 @@ export function createWindowFunctions(host){
         const width = record.width;
         const height = record.height;
         const face = sysColor(COLOR_3DFACE);
-        // The border, one ring per pixel of edge: raised for the outer
-        // ring, face colour inside, as the classic frame is.
+        const isActive = topLevelOf(record).hwnd === activeWindow();
+        // The edge, one ring per pixel, each in the colours its part of the
+        // frame is drawn in: raised, banded, bordered or sunken.
+        const rings = frameRings(record.style, record.exStyle, isActive);
         for (let ring = 0; ring < frame.edge; ring++)
         {
-            const outer = ring === 0;
-            const topLeft = outer ? sysColor(COLOR_3DHILIGHT) : face;
-            const bottomRight = outer ? sysColor(COLOR_3DDKSHADOW)
-                : ring === 1 ? sysColor(COLOR_3DSHADOW) : face;
+            const colours = rings[ring] ?? { topLeft: COLOR_3DFACE, bottomRight: COLOR_3DFACE };
+            const topLeft = sysColor(colours.topLeft);
+            const bottomRight = sysColor(colours.bottomRight);
             draw.fill(hdc, { left: ring, top: ring, right: width - ring - 1, bottom: ring + 1 },
                 topLeft);
             draw.fill(hdc, { left: ring, top: ring, right: ring + 1, bottom: height - ring - 1 },
@@ -2465,7 +2466,6 @@ export function createWindowFunctions(host){
         }
         if (frame.caption > 0)
         {
-            const isActive = topLevelOf(record).hwnd === activeWindow();
             const bar = { left: frame.edge, top: frame.edge, right: width - frame.edge,
                 bottom: frame.edge + frame.caption };
             draw.fill(hdc, bar, sysColor(isActive ? COLOR_ACTIVECAPTION : COLOR_INACTIVECAPTION));

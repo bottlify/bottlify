@@ -118,6 +118,72 @@ export function frameOf(style, exStyle = 0, menu = false){
     };
 }
 
+/** The system colours a frame is drawn in, as GetSysColor numbers them. */
+const COLOR_WINDOWFRAME = 6;
+const COLOR_ACTIVEBORDER = 10;
+const COLOR_INACTIVEBORDER = 11;
+const COLOR_3DFACE = 15;
+const COLOR_3DSHADOW = 16;
+const COLOR_3DHILIGHT = 20;
+const COLOR_3DDKSHADOW = 21;
+const COLOR_3DLIGHT = 22;
+
+/**
+ * @typedef {{ topLeft: number, bottomRight: number }} FrameRing
+ *          One pixel of a frame's edge, all the way round: the system colour
+ *          its top and left sides are drawn in, and its bottom and right's.
+ */
+
+/** @param {number} topLeft @param {number} bottomRight @returns {FrameRing} */
+const ring = (topLeft, bottomRight)=>({ topLeft, bottomRight });
+
+/**
+ * The rings of a window's edge from the outside in, one per pixel of
+ * `frameOf`'s edge, in the order DefWindowProc paints them: a static edge's
+ * one sunken ring, or a dialog or sizing frame's two raised ones; the sizing
+ * frame's band in the border colour; the border's own ring -- the face
+ * colour beside a raised frame or a client edge, and the window-frame colour,
+ * black, round a plain WS_BORDER; and innermost the client edge, sunken, two
+ * rings deep. An edit or list box with WS_EX_CLIENTEDGE is sunken into its
+ * dialog, and a frame drawn raised all the way in stood out of it instead.
+ *
+ * @param {number} style @param {number} [exStyle]
+ * @param {boolean} [active]  Whether the window's top-level window is active,
+ *        which is the colour of a sizing frame's band.
+ * @returns {FrameRing[]}
+ */
+export function frameRings(style, exStyle = 0, active = true){
+    const modal = (exStyle & WS_EX_DLGMODALFRAME) !== 0;
+    const thick = (style & WS_THICKFRAME) !== 0;
+    /** @type {FrameRing[]} */
+    const rings = [];
+    if ((exStyle & WS_EX_STATICEDGE) !== 0 && !modal)
+    {
+        rings.push(ring(COLOR_3DSHADOW, COLOR_3DHILIGHT));
+    }
+    else if (modal || thick || (style & WS_DLGFRAME) !== 0)
+    {
+        rings.push(ring(COLOR_3DLIGHT, COLOR_3DDKSHADOW), ring(COLOR_3DHILIGHT, COLOR_3DSHADOW));
+    }
+    if (thick)
+    {
+        const band = active ? COLOR_ACTIVEBORDER : COLOR_INACTIVEBORDER;
+        rings.push(ring(band, band));
+    }
+    if ((style & (WS_BORDER | WS_DLGFRAME)) !== 0 || modal)
+    {
+        const colour = (exStyle & (WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE)) !== 0 ? COLOR_3DFACE
+            : (exStyle & WS_EX_STATICEDGE) !== 0 ? COLOR_WINDOWFRAME
+                : (style & (WS_DLGFRAME | WS_THICKFRAME)) !== 0 ? COLOR_3DFACE : COLOR_WINDOWFRAME;
+        rings.push(ring(colour, colour));
+    }
+    if ((exStyle & WS_EX_CLIENTEDGE) !== 0)
+    {
+        rings.push(ring(COLOR_3DSHADOW, COLOR_3DHILIGHT), ring(COLOR_3DDKSHADOW, COLOR_3DLIGHT));
+    }
+    return rings;
+}
+
 /** No frame at all: what a window covering the display is given. */
 const NO_FRAME = Object.freeze({
     left: 0, top: 0, right: 0, bottom: 0, edge: 0, caption: 0, menu: 0,
