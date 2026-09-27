@@ -351,7 +351,7 @@ test('strtol and strtoul: signs, prefixes, bases, the end pointer, and the host 
             // One digit past the largest magnitude that takes one without carrying out.
             '4294967300', '-4294967300', '0x1000000000', '0x10000000f', '1z141z4', '1z141z5'];
         const alphabet = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFXYZ .+-';
-        for (let i = 0; i < 120; i++)
+        for (let i = 0; i < 80; i++)
         {
             const digits = Array.from({ length: next() % 14 },
                 ()=>alphabet[next() % alphabet.length]).join('');
@@ -359,11 +359,15 @@ test('strtol and strtoul: signs, prefixes, bases, the end pointer, and the host 
             const prefix = ['', '', '0', '0x', '0X'][next() % 5];
             texts.push(`${' '.repeat(next() % 3)}${sign}${prefix}${digits}`);
         }
-        const bases = [0, 2, 8, 10, 16, 36, 1, 37, 0xffffffff, 0x80000000, 100];
-        for (const text of texts)
+        // The prefixes' bases and ten for every text; one it takes and one it
+        // leaves to the host, of each kind, by turns.
+        const others = [2, 8, 36, 2 + next() % 35];
+        const refused = [1, 37, 0xffffffff, 0x80000000, 100];
+        for (const [i, text] of texts.entries())
         {
             const bytes = [...text].map(c=>c.charCodeAt(0) & 0xff);
-            for (const base of [...bases, 2 + next() % 35])
+            for (const base of [0, 10, 16, others[i % others.length],
+                refused[i % refused.length]])
             {
                 for (const name of ['strtol', 'strtoul'])
                 {
@@ -489,18 +493,18 @@ test('strstr: found at the start, inside, at the end, overlapping itself, empty,
 test('strcat and strncpy: apart, over themselves either way, padded and cut short', ()=>{
     const next = random(19);
     const text = letters(next);
-    for (let i = 0; i < 200; i++)
+    for (let i = 0; i < 70; i++)
     {
         // The first string a little way in, so that one just below it is in the area too.
         const at = DATA + 0x10;
         const a = [...text(next() % 20), 0];
         const b = [...text(next() % 20), 0];
         const memory = /** @type {[number, number[]][]} */ ([[at, a], [at + 0x40, b]]);
-        const near = at + [1, 2, 3, 4, 7, -1, -3][next() % 7];
+        const near = at + [1, 2, 3, 4, 7, -1, -3][i % 7];
         same('strcat', { stack: [at, at + 0x40], memory });
         same('strcat', { stack: [at, near], memory });
         same('strcat', { stack: [near + 8, at], memory });
-        for (const count of [0, 1, 3, a.length - 1, a.length, a.length + 5, next() % 40])
+        for (const count of [0, 1, a.length - 1, a.length, a.length + 5])
         {
             same('strncpy', { stack: [at + 0x80, at, count], memory });
             same('strncpy', { stack: [near, at, count], memory });

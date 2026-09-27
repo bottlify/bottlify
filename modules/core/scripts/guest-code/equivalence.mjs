@@ -148,7 +148,7 @@ export function equivalence(compiled, sources){
         }
         view.setUint8(m.layout.x87Top, top);
         view.setUint8(m.layout.x87Empty, empty);
-        const before = m.read(DATA, DATA_END - DATA);
+        const before = fn.host === undefined ? null : m.read(DATA, DATA_END - DATA);
         const slots = fn.params.reduce((sum, type)=>sum + (type === 'f64' ? 2
             : type === 'x87' ? 0 : 1), 0);
         const exit = m.runProgram(CODE);
@@ -156,7 +156,8 @@ export function equivalence(compiled, sources){
         const handedOver = fn.host !== undefined && m.eip() === HOST + 1;
         if (handedOver)
         {
-            return handOver(name, m, input, double, before, slots, { top, empty });
+            return handOver(name, m, input, double, /** @type {Uint8Array} */ (before), slots,
+                { top, empty });
         }
         assert.equal(m.eip(), HALT + 1, `${name} returns to its caller's address`);
         const after = view.getUint8(m.layout.x87Top);
