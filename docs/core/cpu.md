@@ -959,8 +959,10 @@ otherwise.
 | `readPhysical` | `(address, length) => Uint8Array` | A **window** on guest RAM — a subarray of the emulator's memory, not a copy. |
 | `writePhysical` | `(address, bytes) => void` | Writes through the emulator, which invalidates any compiled code on the pages touched. |
 | `readU32` | `(address) => number` | One dword, with nothing allocated. |
+| `readU32sInto` | `(address, count, into, at) => void` | `count` dwords, signed, into `into` from `at`, in one call and with no region check -- the memory layer's `readU32sInto` checks the span and then hands it here, where it made a call down through this api to the host per word. |
 | `writeData` | `(address, bytes) => void` | Writes straight into RAM without the emulator's device checks. Meant for memory the guest does not execute; a page the compiler holds code for is still dirtied (see "Host writes and the compiler"). |
 | `readReg32` / `writeReg32` | `(name[, value])` | `eax ecx edx ebx esp ebp esi edi`, plus `eip` and `eflags` (the latter read through the emulator's accessor so lazy arithmetic flags are folded in). Unknown names throw. |
+| `registerFile` | `() => Int32Array \| null` | The eight general registers in place, `eax` to `edi` in the encoding's order, for a caller that reads and writes them on every crossing (the bridge: ESP read, EAX written); `null` when the engine keeps them nowhere a view reaches. Cork's view lives as long as the machine; the emulator's reads empty once it grows its memory, and the caller asks again. `hybrid` and `differential` lend the emulator's, which the translator runs over. |
 | `registerTrap` | `(name, popBytes, { preserveResult?, forwardTo?, saveRegisters?, pushEdx?, holdEip? }) => { id, address }` | Takes a stub slot; written into guest memory immediately if the table has already been laid down. Throws when the table is full. `saveRegisters` (`pushad`) or `pushEdx` (just EDX) run before the trap even without `forwardTo`; `holdEip` emits neither `ret` nor a jump, for a caller that decides EIP itself while handling the trap (the bridge's `hook`, EDX alone, or its `siteHook`, every register, together with `saveRegisters`). |
 | `thunkImage` | `() => Uint8Array` | The stub table so far, to be written at `layout.thunkBase`. Marks the table as written. |
 | `parkAddress` | `() => number` | Slot 0 of the table: `hlt; jmp` — where a terminating or blocking call returns to. |
@@ -1301,6 +1303,7 @@ Unit tests (no emulator; `npm test` runs `src/**/*.test.js`):
 | `internal/thunks.test.js` | Stub encoding per convention, forwarding stubs and their register save, a hook stub's single `push edx` and its held EIP (no `ret`, no `jmp`), refusal when the table is full, the default capacity. |
 | `internal/context.test.js` | Context round trips, lazy flags travelling together, x87 stack pointer/tag word, the TEB being part of the switch. |
 | `internal/fpu.test.js` | Double to extended conversion (sign of zero, explicit leading bit), push/pop, overflow refusal, control word. |
+| `internal/cork-host.test.js` | The translator's host over its own memory; among the rest, the register file lent to the bridge is the registers themselves in encoding order, one view for the machine's life, and a span of dwords reads signed into an array at an offset exactly as the words read one by one. |
 | `internal/samples.test.js` | A slice at a known EIP credits that bucket; two addresses inside one 64-byte span fold together, two spans apart stay separate; `topSamples` ranks by instructions and reports each bucket's own address; ten thousand distinct addresses leave the table's own size bounded at the cap, with the rest counted as overflow. |
 
 Integration tests (`npm run test:integration` runs `src/**/*.itest.js`; they need the prebuilt

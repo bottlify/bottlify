@@ -30,6 +30,9 @@
  * @property {(address: number) => number} [readF32]
  *     The same, reinterpreted as a float. Absent in a build whose memory has
  *     no such path.
+ * @property {(address: number, count: number, into: number[], at: number) => void}
+ *     [readU32sInto]  Several dwords at once, signed, into an array. Absent in
+ *     a build whose memory has no such path.
  * @property {(address: number, bytes: Uint8Array) => void} writePhysical
  */
 
@@ -280,6 +283,17 @@ export function createAccessors({ raw, regions, charge = null }){
             }
             if (region)
             {
+                // One call into the machine for the span, where there is one:
+                // the words of a crossing are read on every host call, and each
+                // word's own call down through the cpu layer's api to its host
+                // cost more than the read -- and several times more in a
+                // process's second machine, whose code finds no single machine's
+                // functions to count on (docs/core/bridge.md).
+                if (raw.readU32sInto)
+                {
+                    raw.readU32sInto(address, count, into, at);
+                    return;
+                }
                 for (let word = 0; word < count; word++)
                 {
                     into[at + word] = raw.readU32(address + word * 4) | 0;

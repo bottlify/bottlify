@@ -12,7 +12,7 @@
  * a read with an array index. The number is printed for whoever changes the
  * path; what is asserted is the shape that keeps it small -- the crossing
  * reuses what it hands out, times nothing it was not asked to time, and still
- * records the one call in eight that stands for the rest.
+ * records the one call in thirty-two that stands for the rest.
  */
 
 import { test } from 'node:test';
@@ -150,7 +150,7 @@ test('a stdcall of four dwords reuses its arguments and frame, and times only th
     assert.equal(m.sunk(), 5 * CALLS, 'the sink saw every call');
     assert.equal(m.errorReads(), 5 * CALLS, 'and the last error was read after each');
     const share = m.phases.length / (5 * CALLS);
-    assert.ok(share > 0.12 && share < 0.13, `one crossing in eight is timed (${share})`);
+    assert.ok(share > 0.029 && share < 0.034, `one crossing in thirty-two is timed (${share})`);
     assert.ok(m.phases.every(name=>name === 'trap'), 'and no handler phase without callPhases');
     assert.equal(m.dispatcher.detailed(1)[0].result, '0xa', 'the record still says the answer');
 });

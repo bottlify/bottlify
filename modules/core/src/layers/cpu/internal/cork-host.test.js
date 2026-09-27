@@ -50,6 +50,28 @@ test('the registers live in the block and read back', ()=>{
     assert.throws(()=>h.readReg32('nope'), /Unknown register/);
 });
 
+test('the register file lent to the bridge is the registers themselves, in encoding order', ()=>{
+    const h = host();
+    const file = h.registerFile();
+    h.writeReg32('esp', 0x80000);
+    h.writeReg32('ecx', 0x1234);
+    assert.equal(file[4], 0x80000, 'ESP as written by name');
+    assert.equal(file[1], 0x1234, 'ECX');
+    file[0] = -2;
+    assert.equal(h.readReg32('eax') >>> 0, 0xfffffffe, 'and EAX written in place reads back');
+    assert.equal(h.registerFile(), file, 'one view for the life of the machine');
+});
+
+test('a span of dwords reads signed into an array at an offset, as the words read one by one', ()=>{
+    const h = host();
+    h.writePhysical(0x2000, new Uint8Array([1, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff, 0, 0, 0, 0x80]));
+    /** @type {number[]} */
+    const into = [9, 0, 0, 0];
+    h.readU32sInto(0x2000, 3, into, 1);
+    assert.deepEqual(into, [9, 1, -2, -0x80000000]);
+    assert.deepEqual(into.slice(1), [0x2000, 0x2004, 0x2008].map(at=>h.readU32(at) | 0));
+});
+
 test('a captured context round-trips every block field', ()=>{
     const h = host();
     const layout = h.blockLayout();

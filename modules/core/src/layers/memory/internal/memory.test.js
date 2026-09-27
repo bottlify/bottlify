@@ -557,6 +557,45 @@ test('readU32sInto validates the whole span once and reads without an intermedia
     assert.equal(regions.scans, 1, 'one span check for the whole read, not one per word');
 });
 
+test('readU32sInto hands a checked span to the machine in one call when it takes one', ()=>{
+    const bytes = new Uint8Array(0x3000);
+    const view = new DataView(bytes.buffer);
+    /** @type {string[]} */
+    const calls = [];
+    const raw = {
+        readPhysical: (/** @type {number} */ address, /** @type {number} */ length)=>
+            bytes.slice(address, address + length),
+        writePhysical: (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>
+            bytes.set(data, address),
+        readU32: (/** @type {number} */ address)=>{
+            calls.push(`readU32 ${address.toString(16)}`);
+            return view.getUint32(address, true);
+        },
+        readU32sInto: (/** @type {number} */ address, /** @type {number} */ count,
+            /** @type {number[]} */ into, /** @type {number} */ at)=>
+        {
+            calls.push(`readU32sInto ${address.toString(16)} ${count} ${at}`);
+            for (let word = 0; word < count; word++)
+            {
+                into[at + word] = view.getInt32(address + word * 4, true);
+            }
+        },
+    };
+    const regions = mapWithCode();
+    const accessors = createAccessors({ raw, regions });
+    view.setUint32(0x2000, 10, true);
+    view.setUint32(0x2004, 0xfffffffe, true);
+
+    /** @type {number[]} */
+    const into = [0x401000, 0, 0];
+    accessors.readU32sInto(0x2000, 2, into, 1);
+
+    assert.deepEqual(into, [0x401000, 10, -2], 'signed, as the per-word path answers');
+    assert.deepEqual(calls, ['readU32sInto 2000 2 1'], 'one call for the span, none per word');
+    assert.throws(()=>accessors.readU32sInto(0x9000, 2, into), 'an unmapped span still fails');
+    assert.equal(calls.length, 1, 'and nothing of it reaches the machine');
+});
+
 test('readU32sInto writes into the array at the given offset, for a call\'s ecx already there',
     ()=>{
         const raw = fakeMemory();

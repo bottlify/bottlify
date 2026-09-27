@@ -678,6 +678,15 @@ export function createCpuModule(){
                 writePhysical: (address, bytes)=>started().writePhysical(address, bytes),
                 /** @param {number} address */
                 readU32: address=>started().readU32(address),
+                /**
+                 * Dwords, signed, into an array, with no region check: the
+                 * memory layer's span read, which checks the span first.
+                 *
+                 * @param {number} address @param {number} count
+                 * @param {number[]} into @param {number} at
+                 */
+                readU32sInto: (address, count, into, at)=>
+                    started().readU32sInto(address, count, into, at),
                 /** @param {number} address */
                 readF32: address=>started().readF32(address),
                 /** @param {number} address @param {Uint8Array} bytes */
@@ -686,6 +695,16 @@ export function createCpuModule(){
                 fillData: (address, value, length)=>started().fillData(address, value, length),
                 /** @param {string} name */
                 readReg32: name=>started().readReg32(name),
+                /**
+                 * EAX..EDI as a view in the encoding's order, for a caller
+                 * that reads and writes them on every crossing; null when the
+                 * engine keeps them nowhere a view can reach. A view that
+                 * reads empty is stale -- the emulator grew its memory -- and
+                 * is asked for again.
+                 *
+                 * @returns {Int32Array | null}
+                 */
+                registerFile: ()=>started().registerFile?.() ?? null,
                 /** @param {string} name @param {number} value */
                 writeReg32: (name, value)=>started().writeReg32(name, value),
 

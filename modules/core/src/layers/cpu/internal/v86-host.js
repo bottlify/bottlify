@@ -713,6 +713,19 @@ export async function createV86Host(config){
 
         /** A dword, read without a view or a copy being made. @param {number} address */
         readU32: address=>v().data.getUint32(v().ramOffset + address, true),
+        /**
+         * Dwords, signed, into an array: a host call's stack words in one call.
+         *
+         * @param {number} address @param {number} count @param {number[]} into @param {number} at
+         */
+        readU32sInto: (address, count, into, at)=>{
+            const { data, ramOffset } = v();
+            const from = ramOffset + address;
+            for (let word = 0; word < count; word++)
+            {
+                into[at + word] = data.getInt32(from + word * 4, true);
+            }
+        },
 
         /** The same dword, reinterpreted as a float. @param {number} address */
         readF32: address=>v().data.getFloat32(v().ramOffset + address, true),
@@ -814,6 +827,15 @@ export async function createV86Host(config){
             }
             v().reg32[index] = value | 0;
         },
+
+        /**
+         * The general registers in place, for the bridge's crossing. The view
+         * of the moment: it reads empty once the emulator grows its memory,
+         * and the caller asks again.
+         *
+         * @returns {Int32Array}
+         */
+        registerFile: ()=>v().reg32,
 
         /**
          * The emulator's CPU object, for code inside this layer that works with

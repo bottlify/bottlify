@@ -192,6 +192,7 @@ export function createBridgeModule(){
             // code a program later complains about actually came from.
             state.dispatcher = createDispatcher({
                 cpu, memory, parking: state.parking, suspend, lastError: config?.lastError,
+                lastErrorOffset: config?.lastErrorOffset,
                 traceStrings: config?.traceStrings ?? false,
                 callPhases: config?.callPhases ?? false,
                 onCall: config?.onCall,

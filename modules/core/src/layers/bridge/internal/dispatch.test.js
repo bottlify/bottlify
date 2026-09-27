@@ -463,7 +463,8 @@ test('the crossing is timed apart from the handler it carries', ()=>{
     assert.ok(opened.every((line, i)=>line === (i % 2 === 0 ? 'begin trap' : 'end trap')),
         'the crossing is timed; the call is not, unless a measurement asks');
     const timed = opened.length / 2;
-    assert.ok(timed > 850 && timed < 1150, `one crossing in eight is timed (${timed} of 8000)`);
+    assert.ok(timed > 200 && timed < 300,
+        `one crossing in thirty-two is timed (${timed} of 8000)`);
 
     opened.length = 0;
     const phased = machine({
@@ -487,7 +488,7 @@ test('the crossing is timed apart from the handler it carries', ()=>{
         'begin trap',
         'begin TEST.dll!Something',
         'end TEST.dll!Something',
-        'end trap x8',
+        'end trap x32',
     ], 'asked for, the handler runs inside the crossing, which keeps only its own time');
     assert.equal(opened.filter(line=>line === 'begin TEST.dll!Something').length,
         opened.length / 2 - 1, 'and every call is timed, the untimed crossings\' too');
@@ -955,8 +956,7 @@ test('a five-argument stdcall makes zero window calls, one readU32sInto call, ' 
     // The old path was five reads with a region check and a cache lookup
     // each, then a `memory.window` + `DataView` per call; the crossing now
     // makes one call into the memory layer and allocates nothing of its own.
-    // The frame's own read of the return address at ESP is not an argument
-    // word and is not counted.
+    // The return address at ESP is the first word of the same span.
     const esp = 0x3000;
     const m = machine({ esp, args: [10, 20, 30, 40, 50] });
     let windows = 0;
@@ -1009,7 +1009,8 @@ test('a five-argument stdcall makes zero window calls, one readU32sInto call, ' 
 
     assert.deepEqual(seen, [[10, 20, 30, 40, 50]], 'the arguments arrive in order');
     assert.equal(windows, 0, 'no window call for the stack words');
-    assert.equal(readU32sIntoCalls, 1, 'one readU32sInto call for the whole span');
+    assert.equal(readU32sIntoCalls, 1,
+        'one readU32sInto call for the return address and the arguments');
     assert.equal(dataViews, 0, 'no DataView constructed by the crossing');
 });
 
@@ -1255,4 +1256,133 @@ test('a read that fails inside no region at all still fails', ()=>{
     });
 
     assert.throws(()=>m.dispatcher.dispatch(1), /Unmapped read/);
+});
+
+test('two dispatchers\' records answer through one getter, so they share a hidden class', ()=>{
+    // A getter of each dispatcher's own made each machine's records a class of
+    // their own, and the crossing's code -- one compilation for every machine
+    // in a process -- met a second machine's records as strangers and wrote
+    // their fields through the generic path.
+    /** @param {ReturnType<typeof machine>} m */
+    const recordOf = m=>{
+        /** @type {any} */
+        let kept = null;
+        const dispatcher = createDispatcher({
+            cpu: m.cpu, memory: m.memory, parking: m.parking,
+            onCall: record=>{
+                kept = record;
+            },
+        });
+        dispatcher.register(1, { name: 'X.dll!Y', ...STDCALL, argBytes: 0, handler: ()=>5 });
+        dispatcher.dispatch(1);
+        return kept;
+    };
+    const first = recordOf(machine());
+    const second = recordOf(machine());
+
+    assert.notEqual(first, second);
+    assert.deepEqual(Object.keys(first), Object.keys(second));
+    assert.equal(Object.getOwnPropertyDescriptor(first, 'result')?.get,
+        Object.getOwnPropertyDescriptor(second, 'result')?.get, 'one getter for both');
+    assert.equal(second.result, '0x5');
+});
+
+test('a register file lent by the cpu carries ESP and EAX, and one that reads empty is asked '
+    + 'for again', ()=>{
+    const m = machine({ esp: 0x3000, args: [7, 5] });
+    /** @type {Int32Array} */
+    let file = new Int32Array(8);
+    file[4] = 0x3000;
+    let lent = 0;
+    /** @type {string[]} */
+    const byName = [];
+    const cpu = {
+        registerFile: ()=>{
+            lent++;
+            return file;
+        },
+        /** @param {string} name */
+        readReg32: name=>{
+            byName.push(`read ${name}`);
+            return m.cpu.readReg32(name);
+        },
+        /** @param {string} name @param {number} value */
+        writeReg32: (name, value)=>{
+            byName.push(`write ${name}`);
+            m.cpu.writeReg32(name, value);
+        },
+    };
+    const dispatcher = createDispatcher({ cpu, memory: m.memory, parking: m.parking });
+    dispatcher.register(1, {
+        name: 'X.dll!Sub', ...STDCALL, argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([a, b])=>a - b - 10,
+    });
+
+    dispatcher.dispatch(1);
+    assert.equal(file[0], -8, 'EAX written in place, as the guest reads it');
+    assert.deepEqual(byName, [], 'neither register asked for by name');
+    assert.equal(lent, 1);
+
+    // What an emulator growing its memory does to the view it lent.
+    const moved = new Int32Array(8);
+    moved[4] = 0x3000;
+    /** @type {any} */ (file.buffer).transfer();
+    file = moved;
+    dispatcher.dispatch(1);
+    assert.equal(lent, 2, 'a view that reads empty is asked for again');
+    assert.equal(moved[0], -8);
+
+    const none = machine({ esp: 0x3000, args: [7, 5] });
+    const refusing = createDispatcher({
+        cpu: { ...none.cpu, registerFile: ()=>null }, memory: none.memory, parking: none.parking,
+    });
+    refusing.register(1, {
+        name: 'X.dll!Sub', ...STDCALL, argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([a, b])=>a - b,
+    });
+    refusing.dispatch(1);
+    assert.equal(none.registers.eax, 2, 'a cpu that lends none is answered by name');
+});
+
+test('the last error is read from the calling thread\'s block at the offset handed down, and '
+    + 'through lastError for a thread without one', ()=>{
+    const m = machine({ esp: 0x3000 });
+    /** @type {string[]} */
+    const read = [];
+    m.memory.writeU32(0x7034, 0x57);
+    const cpu = {
+        ...m.cpu,
+        /** @param {number} address */
+        readU32: address=>{
+            read.push(`cpu ${address.toString(16)}`);
+            return m.memory.readU32(address);
+        },
+    };
+    /** @type {number[]} */
+    const errors = [];
+    const dispatcher = createDispatcher({
+        cpu, memory: m.memory, parking: m.parking, lastErrorOffset: 0x34,
+        lastError: ()=>{
+            read.push('lastError');
+            return 0x12;
+        },
+        onCall: record=>errors.push(record.error),
+    });
+    dispatcher.register(1, { name: 'X.dll!Y', ...STDCALL, argBytes: 0, handler: ()=>0 });
+    dispatcher.register(2, {
+        name: 'X.dll!Z', ...STDCALL, argBytes: 0, handler: ()=>0, lastError: false,
+    });
+
+    /** @type {any} */ (m.current).tebAddress = 0x7000;
+    dispatcher.dispatch(1);
+    dispatcher.dispatch(2);
+    /** @type {any} */ (m.current).tebAddress = 0;
+    dispatcher.dispatch(1);
+
+    assert.deepEqual(errors, [0x57, 0, 0x12]);
+    assert.deepEqual(read, ['cpu 7034', 'lastError'],
+        'the block read where there is one, the reader where there is none, neither for a '
+        + 'function that cannot set it');
 });

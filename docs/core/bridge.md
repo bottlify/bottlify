@@ -37,6 +37,7 @@ marshalling whatever bytes live at it.
 |--------|------|---------|---------|
 | `record` | number | `0` | How many seam events to keep for `recorded()`; 0 disables recording. |
 | `lastError` | `() => number` | `undefined` | Reads the running thread's last error after each call that can have set it, for the detailed trace. Handed down by the assembler because it belongs to `win32`, which is above this layer. |
+| `lastErrorOffset` | number | `undefined` | Where a thread's last error lives in its thread block (the kernel's `tebAddress`): the dword there is read through `cpu.readU32` after a call from a thread that has a block, and `lastError` answers only for one that has none. The assembler hands down `TEB.LAST_ERROR`. |
 | `traceStrings` | boolean | `false` | Read the text behind pointer arguments at call time (a scan of guest memory per pointer per call). |
 | `callPhases` | boolean | `false` | Time every handler as a phase of its own in the profiler; the crossing itself is always sampled. |
 | `onCall` | `(record) => void` | `undefined` | A sink handed every call record as it is made (and again when a waiting call answers). |
@@ -188,7 +189,7 @@ whichever kernel calls it and whatever it decided to compare. `ms` is also kept 
 the wall time between `performance.now()` readings taken immediately before and after the
 `handler(...)` call, added up call by call -- a fallthrough accrues it exactly as an answered
 call does, since the clock brackets the call itself and not which branch it took. Unlike the
-`trap` phase (sampled one call in eight and weighted back up, timing the whole crossing), `ms`
+`trap` phase (sampled one call in thirty-two and weighted back up, timing the whole crossing), `ms`
 times every call and only the handler's own work, which is what a kernel's per-call cost has to
 be read from. Whether that comparison is even
 attempted, and against what, is entirely the kernel's own code -- this layer never reads a guest
@@ -284,26 +285,54 @@ the handler with `parking.beginCall/endCall`, and then places the result:
 An unimplemented id or a second implementation of the same id throws. A handler that throws
 still ends its call (`finally`), so the bridge is never left inside one.
 
-The crossing is timed as a `trap` phase one call in eight (weighted by eight, which scales the
-profiler's sums and never its per-occurrence figures), so the host's share of a frame is known
-without two clock readings per call. Which call is timed is drawn from a xorshift, one in eight on
-average, rather than every eighth: a frame's draws repeat one sequence of calls, every eighth call of
-it was the same few calls every time, and the estimate was those calls' cost eightfold -- in a scene
-of eighteen calls a draw, more host time than the frames lasted and a guest phase below zero; `callPhases` adds a phase per handler. Both, and the clock
-around a hook's kernel, are diagnostics a production bundle leaves out. A prompt
-call allocates nothing: the argument array, the frame and the ring's records are made once and
-written over, the answer is kept as a number and rendered as text only when a reader asks, and
-the last error is read only after a function that can have set it. A call that answers late
+The crossing is timed as a `trap` phase one call in thirty-two on average (weighted by 32, which
+scales the profiler's sums and never its per-occurrence figures), so the host's share of a frame is
+known without two clock readings per call. The calls between two timed ones are drawn from a
+xorshift -- two draws of 0..31 and one -- rather than every Nth: a frame's draws repeat one
+sequence of calls, every eighth call of it was the same few calls every time, and the estimate was
+those calls' cost eightfold -- in a scene of eighteen calls a draw, more host time than the frames
+lasted and a guest phase below zero. One in thirty-two rather than the eight it was: the timed
+call's two clock readings and its phase were most of what the sampling cost every call, and a
+title's thirty thousand calls a second still time about a thousand. `callPhases` adds a phase per
+handler. Both, and the clock around a hook's kernel, are diagnostics a production bundle leaves
+out. A prompt call allocates nothing: the argument array, the frame and the ring's records are
+made once and written over, the answer is kept as a number and rendered as text only when a reader
+asks, and the last error is read only after a function that can have set it -- from the calling
+thread's block at `lastErrorOffset`, where the reader it replaced walked the kernel for the running
+thread and the memory layer for its block on every call. A call that answers late
 keeps the array and frame it was given, and the next call is given new ones. A ring record's
 argument array is kept while the call's arity matches it and replaced by one of the right
 length when it does not: setting `length` on it every call was a trip into the runtime and a
 fifth of the crossing. The engine's own sink (`app.js`, `journalCall`) keeps each call name's
 trace answer until the journal's `revision` moves -- asking `enabled` by area on every call was a
-tenth of the crossing -- and the last error's reader looks the win32 layer up once. Under cork, a
+tenth of the crossing. Under cork, a
 call of a function with no arguments (`GetCurrentThreadId` in a loop, alternating runs) went
 266 -> 217 ns, and `lstrlenA`, whose string read crosses the stack, the TEB and the image, 1219 ->
 834 with the memory layer's own share of it (`docs/core/memory.md`).
 `internal/crossing.test.js` times a million of each kind and prints the figure.
+
+What a call reads, it reads in as few calls down as there are pieces: ESP and EAX through the
+cpu's register file (`registerFile`, falling back to `readReg32`/`writeReg32` where the engine
+lends none), and the return address with the stack arguments above it as one span through the
+memory layer's `readU32sInto`, which checks the span once and hands it to the machine in one call.
+A variadic call whose slots run past the top of its stack falls back to reading the arguments on
+their own, zero past the region, and the return address alone.
+
+**A process's second machine.** The crossing's code is compiled once for every machine in a
+process -- V8 keeps one set of type feedback and one optimised body per function in the source,
+however many closures a `create()` makes of it -- and it is compiled first around the first
+machine's own objects and functions, which it may then treat as constants. A later machine's
+objects and closures are strangers to it, and each difference costs: an object whose hidden class
+differs between machines is written through V8's generic property path, and every call into
+another machine's closure is a check and a load where the first machine's was folded away. So the
+crossing keeps its objects in one shape for every machine -- the records' `result` getter is one
+function for the realm rather than one per dispatcher (a getter is part of the class), a frame is
+made with its `thread` slot rather than given it by parking, and the rings are made holding what
+they will hold -- and makes as few calls through another layer's closures as it can, which is the
+list above. A loop of `GetCurrentThreadId` under cork in node, one process, machines one after
+another: the first 295-363 ns a call and each later one 661-755 before, 259-275 and 419-470 after
+-- the later machines still pay for the calls they make into the other layers, and the handlers'
+own code is subject to the same thing.
 
 ### Parking (`internal/parking.js`)
 
@@ -470,7 +499,7 @@ Unit tests (`npm test`; filter with `node --test src/layers/bridge/internal/<fil
 | file | kind | covers |
 |------|------|--------|
 | `internal/conventions.test.js` | contract | Cleanup per convention including fastcall, unknown convention refused, stack and ECX argument reads, signed arguments. |
-| `internal/dispatch.test.js` | unit | Marshal/invoke/EAX, negative results, forwarding stubs, fastcall's registers read from the saved block, a hook that answers vs. one that falls through (EIP/ESP either way), a hook's counters and a reported mismatch, parked calls leaving EAX, the parked token's identity, unimplemented/duplicate traps, a throwing handler, the bounded rings, the sampled `trap` phase, record reuse, the sink; a site hook: all eight registers read off the pushad block into a plain object, an answer writing back every edited register with ESP by `stackAdjust` and EIP to `resume`, a fallthrough restoring every register to the pristine reading even after the handler edited the object, counters and diagnostics shared with a slot hook, and the `call.hook` trace unchanged. |
+| `internal/dispatch.test.js` | unit | Marshal/invoke/EAX, negative results, forwarding stubs, fastcall's registers read from the saved block, a hook that answers vs. one that falls through (EIP/ESP either way), a hook's counters and a reported mismatch, parked calls leaving EAX, the parked token's identity, unimplemented/duplicate traps, a throwing handler, the bounded rings, the sampled `trap` phase, record reuse, the sink; a site hook: all eight registers read off the pushad block into a plain object, an answer writing back every edited register with ESP by `stackAdjust` and EIP to `resume`, a fallthrough restoring every register to the pristine reading even after the handler edited the object, counters and diagnostics shared with a slot hook, and the `call.hook` trace unchanged; two dispatchers' records answering through one getter; a register file carrying ESP and EAX, asked for again once it reads empty, and a cpu lending none answered by name; the last error read from the calling thread's block at `lastErrorOffset`, through `lastError` for a thread without one, and not at all for a function that cannot set it. |
 | `internal/parking.test.js` | unit | `freeStackFor` per thread, nothing in flight, the token only inside a call. |
 | `internal/callback.test.js` | unit | Suspended-call naming, `answered()`, nested frames below the stack in use, no call in flight, the right thread, address zero refused, `recentlyStarted`; a callback entered with registers of its own; a transfer abandoning every call and frame below its line and keeping the window procedure's above it, and drawing the line at the new ESP when none is given. |
 | `internal/vtable.test.js` | unit | Refusal when stubs or arena run out, pointer identity, guest-code slots, shared tables finding their object, a pointer kept at zero while its object is reachable and forgotten once it is not, every pointer of an object that reports itself destroyed forgotten with it, one generation of a per-interface count ending alone, and the object told of each pointer as it is forgotten. |
