@@ -140,6 +140,46 @@ export function doubleWords(value){
 const sameDouble = (a, b)=>Object.is(a, b) || Number.isNaN(a) && Number.isNaN(b);
 
 /**
+ * The first byte two memories differ at, or -1; a float that is NaN in both,
+ * at the same aligned place and width, is the same float whatever its sign and
+ * payload -- the x87 stores its indefinite with the sign set, and the NaN the
+ * model's typed array stores has whichever sign the host processor gives.
+ *
+ * @param {Uint8Array} a @param {Uint8Array} b
+ */
+const firstDifference = (a, b)=>{
+    const view = (/** @type {Uint8Array} */ bytes)=>new DataView(bytes.buffer, bytes.byteOffset,
+        bytes.byteLength);
+    const left = view(a);
+    const right = view(b);
+    /** @param {number} at @param {number} width */
+    const bothNaN = (at, width)=>at + width <= a.length && (width === 4
+        ? Number.isNaN(left.getFloat32(at, true)) && Number.isNaN(right.getFloat32(at, true))
+        : Number.isNaN(left.getFloat64(at, true)) && Number.isNaN(right.getFloat64(at, true)));
+    for (let at = 0; at < a.length; at++)
+    {
+        if (a[at] === b[at])
+        {
+            continue;
+        }
+        const word = at & ~3;
+        const quad = at & ~7;
+        if (bothNaN(word, 4))
+        {
+            at = word + 3;
+            continue;
+        }
+        if (bothNaN(quad, 8))
+        {
+            at = quad + 7;
+            continue;
+        }
+        return at;
+    }
+    return a.length === b.length ? -1 : a.length;
+};
+
+/**
  * The data area a function is held to: all of it for one that takes a
  * helper of the guest's memory or calls the guest, none for one that takes
  * nothing but `host` -- it names no address, and a run of maths is spared
@@ -452,9 +492,9 @@ export function equivalence(compiled, sources, model){
             {
                 assert.equal(x86.edx, js.edx, `${what}: EDX`);
             }
-            if (!Buffer.from(x86.data).equals(Buffer.from(js.data)))
+            const at = firstDifference(x86.data, js.data);
+            if (at >= 0)
             {
-                const at = x86.data.findIndex((byte, i)=>byte !== js.data[i]);
                 assert.fail(`${what}: memory differs first at 0x${(DATA + at).toString(16)}: `
                     + `${x86.data[at]} against ${js.data[at]}`);
             }
