@@ -404,6 +404,13 @@ export function createVtables({ memory, register, heap }){
         {
             return E_POINTER;
         }
+        // No interface named at all: refused as DirectDraw refuses it (Wine's
+        // ddraw test_surface_qi), rather than a GUID read out of address zero.
+        if ((riid >>> 0) === 0)
+        {
+            memory.writeU32(ppv >>> 0, 0);
+            return 0x80070057; // E_INVALIDARG
+        }
 
         const wanted = readGuid(riid >>> 0);
         const record = object.interfaceFor(wanted);
