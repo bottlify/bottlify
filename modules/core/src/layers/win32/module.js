@@ -110,6 +110,12 @@ const CDECL_LIBRARIES = /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase)\.dll$/i
 /** The reason a DllMain is called with when its library is unloaded, or the process ends. */
 const DLL_PROCESS_DETACH = 0;
 
+/** RaiseException's flag for an exception execution cannot continue from. */
+const EXCEPTION_NONCONTINUABLE = 1;
+
+/** A path as GetModuleFileNameA writes one: MAX_PATH characters and the terminator. */
+const MAX_PATH_BYTES = 261;
+
 /**
  * The libraries Windows keeps under
  * `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs`.
@@ -726,6 +732,69 @@ export function createWin32Module(){
                 }
                 heap.free(at);
                 return answer >>> 0;
+            };
+
+            /**
+             * ole32's maker and reader of OBJREFs, which the NDR runtime's
+             * interface pointers cross as: offered by ole32 as it is built.
+             *
+             * @type {import('./rpcrt4/runtime.js').ObjrefMarshaler | null}
+             */
+            let objrefMarshaler = null;
+
+            /**
+             * RpcRaiseException: the status raised on the calling thread,
+             * noncontinuable, as the generated code's exception blocks expect.
+             *
+             * @param {number} code
+             */
+            const raiseRpc = code=>libraries['KERNEL32.dll'].RaiseException.handler(
+                [code >>> 0, EXCEPTION_NONCONTINUABLE, 0, 0]);
+            let rpcRaiseTrap = 0;
+            /**
+             * The same from a handler that has awaited something, and is no
+             * longer where its thread's registers are: the thread is sent from
+             * where the call would have returned into a routine that raises,
+             * as though the call had ended by calling RpcRaiseException -- so
+             * the exception carries that thread's own stack and frames.
+             *
+             * @param {number} code @param {any} thread
+             */
+            const raiseRpcLater = (code, thread)=>{
+                const call = thread?.hostCalls?.at(-1);
+                if (!call)
+                {
+                    return Promise.resolve(raiseRpc(code));
+                }
+                rpcRaiseTrap ||= bridge.register('<RpcRaiseException>', {
+                    argBytes: 4,
+                    /** @param {number[]} args */
+                    handler: ([status])=>raiseRpc(status),
+                });
+                const esp = (call.restingStack - 8) >>> 0;
+                memory.writeU32(esp, call.hostReturn >>> 0);
+                memory.writeU32(esp + 4, code >>> 0);
+                return Promise.resolve(bridge.continueAt({ eip: rpcRaiseTrap, esp },
+                    { below: call.restingStack >>> 0 }));
+            };
+
+            /**
+             * Where a module was loaded from, as GetModuleFileName answers.
+             *
+             * @param {number} module
+             * @returns {string | null}
+             */
+            const modulePath = module=>{
+                const buffer = heap.allocate(MAX_PATH_BYTES);
+                if (buffer === 0)
+                {
+                    return null;
+                }
+                const length = libraries['KERNEL32.dll'].GetModuleFileNameA.handler(
+                    [module >>> 0, buffer, MAX_PATH_BYTES]) >>> 0;
+                const path = length > 0 ? readCString(buffer, MAX_PATH_BYTES) : null;
+                heap.free(buffer);
+                return path;
             };
 
             /** Each apartment window's procedure, by window. */
@@ -1830,6 +1899,9 @@ export function createWin32Module(){
                         post: (window, message)=>
                             libraries['USER32.dll'].PostMessageA.handler([window, message, 0, 0]),
                     },
+                    offerMarshaler: marshaler=>{
+                        objrefMarshaler = marshaler;
+                    },
                     strings: {
                         allocate: bytes=>/** @type {number} */ (lent(bytes, at=>
                             libraries['OLEAUT32.dll'].SysAllocStringByteLen.handler(
@@ -1868,7 +1940,23 @@ export function createWin32Module(){
                     /** @param {number} bytes */
                     allocate: bytes=>heap.allocate(bytes),
                     /** @param {number} address */
-                    free: address=>heap.free(address),
+                    free: address=>{
+                        heap.free(address);
+                    },
+                    // A MIDL proxy/stub DLL's runtime: its generated code is
+                    // called and calls back, raises through the guest's own
+                    // exception chain, registers in the hive every library
+                    // writes, and sends interface pointers as ole32's OBJREFs.
+                    runtime: {
+                        call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                        callerThread: ()=>bridge.callerThread(),
+                        register: (name, fn)=>bridge.register(name, { ...fn, lastError: false }),
+                        raise: code=>raiseRpc(code),
+                        raiseLater: (code, thread)=>raiseRpcLater(code, thread),
+                        hive,
+                        modulePath,
+                        marshaler: ()=>objrefMarshaler,
+                    },
                 }),
 
                 'OLEAUT32.dll': createAutomationFunctions({

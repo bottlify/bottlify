@@ -27,16 +27,21 @@
  * the bridge.
  */
 
-import { GUID_NULL, GUID_SIZE, GUID_STRING_LENGTH, readGuid, writeGuid } from './guid.js';
+import {
+    GUID_NULL, GUID_SIZE, GUID_STRING_LENGTH, canonicalGuid, formatGuid, parseGuid, readGuid,
+    writeGuid,
+} from './guid.js';
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { createStorageFunctions } from './storage.js';
 import { createPropVariantFunctions } from './propvariant.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createClassTable, createRemoting } from './remote.js';
+import { OBJREF_BYTES, decodeObjref, encodeObjref } from './objref.js';
 
 /** HRESULTs this file produces. */
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
+const E_NOTIMPL = 0x80004001;
 const E_NOINTERFACE = 0x80004002;
 const E_POINTER = 0x80004003;
 const E_FAIL = 0x80004005;
@@ -46,6 +51,8 @@ const RPC_E_CHANGED_MODE = 0x80010106;
 const CLASS_E_NOAGGREGATION = 0x80040110;
 const CLASS_E_CLASSNOTAVAILABLE = 0x80040111;
 const REGDB_E_CLASSNOTREG = 0x80040154;
+const REGDB_E_IIDNOTREG = 0x80040155;
+const RPC_E_INVALID_OBJREF = 0x8001011d;
 /** The registry could not be written: CoTreatAsClass with no hive to write. */
 const REGDB_E_WRITEREGDB = 0x80040151;
 /** A registry string value's type. */
@@ -65,6 +72,24 @@ const CLSCTX_LOCAL_SERVER = 0x4;
 
 /** IID_IClassFactory: what a class object answers to. */
 const IID_ICLASSFACTORY = '{00000001-0000-0000-C000-000000000046}';
+
+/** What a proxy/stub DLL's class object is asked for. */
+const IID_IPSFACTORYBUFFER = '{D5F569D0-593B-101A-B569-08002B2DBF7A}';
+
+/**
+ * The proxy/stub classes of the universal marshaler, whose interfaces a type
+ * library describes rather than a proxy/stub DLL.
+ */
+const PSOAINTERFACE = '{00020424-0000-0000-C000-000000000046}';
+const PSDISPATCH = '{00020420-0000-0000-C000-000000000046}';
+
+/** How a marshaled packet may be used: once, the only way crossing here goes. */
+const MSHLFLAGS_TABLESTRONG = 1;
+const MSHLFLAGS_TABLEWEAK = 2;
+
+/** IStream's Read and Write. */
+const SLOT_STREAM_READ = 3;
+const SLOT_STREAM_WRITE = 4;
 
 /** A guest object's vtable slots this file calls: IUnknown's three, then IClassFactory's. */
 const SLOT_QUERY_INTERFACE = 0;
@@ -173,6 +198,10 @@ const MAX_PROGID = 255;
  *           A BSTR made from its content, for a string that crosses in.
  * @property {(vt: number, bounds: { elements: number, lower: number }[]) => number}
  *           [createSafeArray]
+ * @property {(marshaler: import('../rpcrt4/runtime.js').ObjrefMarshaler) => void}
+ *           [offerMarshaler]  Where the OBJREFs of this process are made and
+ *           read, handed to the NDR runtime, whose interface pointers cross as
+ *           them.
  */
 
 /**
@@ -468,9 +497,134 @@ export function createOleFunctions(host){
             },
             apartmentWindow: host.apartmentWindow,
             catalog: { hive: host.hive, readFile: wholeFile },
+            proxyStub: { factory: (iid, thread)=>proxyStubFactory(iid, thread) },
             divergence: host.divergence,
         });
         return remoting;
+    };
+
+    /**
+     * The IPSFactoryBuffers of the proxy/stub DLLs this process has loaded,
+     * by the class the registry names: loaded once and held, as COM holds
+     * the ones it loads.
+     *
+     * @type {Map<string, Promise<number>>}
+     */
+    const proxyFactories = new Map();
+
+    /**
+     * The class object of the proxy/stub DLL an interface's ProxyStubClsid32
+     * names, as an IPSFactoryBuffer; 0 when none is registered or it does not
+     * load. The universal marshaler's classes are not DLLs of this kind.
+     *
+     * @param {string} iid @param {unknown} thread
+     * @returns {Promise<number>}
+     */
+    const proxyStubFactory = (iid, thread)=>{
+        const clsid = canonicalGuid(interfaceKeyValue(iid, 'ProxyStubClsid32') ?? '');
+        if (clsid === null || clsid === PSOAINTERFACE || clsid === PSDISPATCH)
+        {
+            return Promise.resolve(0);
+        }
+        const known = proxyFactories.get(clsid);
+        if (known)
+        {
+            return known;
+        }
+        const loading = (async()=>{
+            const block = host.heap.allocate(GUID_SIZE * 2 + 4);
+            if (block === 0)
+            {
+                return 0;
+            }
+            writeGuid(host, block, clsid);
+            writeGuid(host, block + GUID_SIZE, IID_IPSFACTORYBUFFER);
+            writeU32(block + GUID_SIZE * 2, 0);
+            const hr = (await (fromServer(clsid, block, block + GUID_SIZE, block + GUID_SIZE * 2,
+                thread) ?? REGDB_E_CLASSNOTREG)) | 0;
+            const factory = readU32(block + GUID_SIZE * 2);
+            host.heap.free(block);
+            if (hr < 0 || factory === 0)
+            {
+                host.divergence?.('COM', `the proxy/stub class ${clsid} of ${iid} gave no`
+                    + ` IPSFactoryBuffer: 0x${(hr >>> 0).toString(16)}`);
+                proxyFactories.delete(clsid);
+                return 0;
+            }
+            return factory;
+        })();
+        proxyFactories.set(clsid, loading);
+        return loading;
+    };
+
+    /**
+     * Where the OBJREFs an interface pointer crosses as are made and read:
+     * the out-of-process channel's references, in DCOM's standard packet.
+     *
+     * @type {import('../rpcrt4/runtime.js').ObjrefMarshaler}
+     */
+    const marshaler = {
+        async marshal(pointer, iid, thread){
+            const channel = remote();
+            const bytes = parseGuid(iid);
+            if (!channel || !bytes || (pointer >>> 0) === 0)
+            {
+                return { hr: channel ? E_INVALIDARG : E_FAIL, objref: null };
+            }
+            const reference = await channel.exportReference(pointer >>> 0, iid, thread);
+            return { hr: S_OK, objref: encodeObjref(bytes, reference) };
+        },
+        async unmarshal(objref, iid, thread){
+            const decoded = decodeObjref(objref);
+            const channel = remote();
+            if (!decoded || !channel)
+            {
+                return { hr: RPC_E_INVALID_OBJREF | 0, pointer: 0 };
+            }
+            const pointer = await channel.importReference(decoded.reference, iid, thread);
+            return pointer === 0 ? { hr: E_NOINTERFACE | 0, pointer: 0 } : { hr: S_OK, pointer };
+        },
+    };
+    host.offerMarshaler?.(marshaler);
+
+    /**
+     * Reads a stream through its own IStream::Read: what a packet a program
+     * marshaled into it holds.
+     *
+     * @param {number} stream @param {number} bytes @param {unknown} thread
+     * @returns {Promise<Uint8Array | null>}
+     */
+    const readStream = async(stream, bytes, thread)=>{
+        const block = host.heap.allocate(bytes + 4);
+        if (block === 0)
+        {
+            return null;
+        }
+        writeU32(block + bytes, 0);
+        const hr = (await callMethod(stream, SLOT_STREAM_READ, [block, bytes, block + bytes],
+            thread)) | 0;
+        const read = Math.min(readU32(block + bytes), bytes);
+        const data = host.readMemory(block, read).slice();
+        host.heap.free(block);
+        return hr < 0 ? null : data;
+    };
+
+    /**
+     * A string value of a key under HKEY_CLASSES_ROOT\Interface\{iid}.
+     *
+     * @param {string} iid @param {string} subkey
+     */
+    const interfaceKeyValue = (iid, subkey)=>{
+        const root = host.hive?.root(HKEY_CLASSES_ROOT);
+        const key = root ? host.hive?.open(root, `Interface\\${iid}\\${subkey}`) : null;
+        const value = key ? host.hive?.getValue(key, '') : null;
+        if (!value)
+        {
+            return null;
+        }
+        const end = value.data.indexOf(0);
+        const text = decodeAnsi(end < 0 ? value.data : value.data.subarray(0, end));
+        return text.length > 0 ? text : null;
     };
 
     /**
@@ -1443,17 +1597,166 @@ export function createOleFunctions(host){
         },
 
         /**
+         * HRESULT CoMarshalInterface(IStream *pStm, REFIID riid, IUnknown *pUnk,
+         *     DWORD dwDestContext, void *pvDestContext, DWORD mshlflags)
+         *
+         * An OBJREF, written into the stream: the object is exported for other
+         * processes (`remote.js`), and the packet carries one reference for
+         * whoever unmarshals it. A packet unmarshals once; table marshaling,
+         * which lets it unmarshal again and again, is not built.
+         */
+        CoMarshalInterface: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([stream, riid, unknown, , , flags])=>{
+                const thread = host.callerThread?.();
+                const iid = guidAt(riid);
+                if ((stream >>> 0) === 0 || (unknown >>> 0) === 0 || iid === null)
+                {
+                    return E_INVALIDARG;
+                }
+                if ((flags & (MSHLFLAGS_TABLESTRONG | MSHLFLAGS_TABLEWEAK)) !== 0)
+                {
+                    host.divergence?.('CoMarshalInterface', 'table marshaling is not implemented');
+                    return E_NOTIMPL;
+                }
+                return marshaler.marshal(unknown >>> 0, iid, thread).then(async made=>{
+                    if (made.hr < 0 || !made.objref)
+                    {
+                        return made.hr;
+                    }
+                    const block = host.heap.allocate(made.objref.length);
+                    if (block === 0)
+                    {
+                        return E_OUTOFMEMORY;
+                    }
+                    host.writeMemory(block, made.objref);
+                    const hr = (await callMethod(stream >>> 0, SLOT_STREAM_WRITE,
+                        [block, made.objref.length, 0], thread)) | 0;
+                    host.heap.free(block);
+                    return hr < 0 ? hr : S_OK;
+                });
+            },
+        },
+
+        /**
+         * HRESULT CoUnmarshalInterface(IStream *pStm, REFIID riid, LPVOID *ppv)
+         *
+         * The pointer an OBJREF stands for, holding the reference the packet
+         * carried: the object itself if this process exported it, a proxy if
+         * another did. An IID other than the packet's is asked for of it.
+         */
+        CoUnmarshalInterface: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([stream, riid, ppv])=>{
+                const thread = host.callerThread?.();
+                const out = ppv >>> 0;
+                if (out === 0 || (stream >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out, 0);
+                const wanted = guidAt(riid);
+                return readStream(stream >>> 0, OBJREF_BYTES, thread).then(async bytes=>{
+                    const decoded = bytes ? decodeObjref(bytes) : null;
+                    if (!decoded)
+                    {
+                        return RPC_E_INVALID_OBJREF;
+                    }
+                    const carried = formatGuid(decoded.iid);
+                    const made = await marshaler.unmarshal(/** @type {Uint8Array} */ (bytes),
+                        carried, thread);
+                    if (made.hr < 0)
+                    {
+                        return made.hr;
+                    }
+                    if (wanted === null || wanted === GUID_NULL || wanted === carried)
+                    {
+                        writeU32(out, made.pointer);
+                        return S_OK;
+                    }
+                    const hr = (await callMethod(made.pointer, SLOT_QUERY_INTERFACE,
+                        [riid >>> 0, out], thread)) | 0;
+                    await callMethod(made.pointer, SLOT_RELEASE, [], thread);
+                    return hr;
+                });
+            },
+        },
+
+        /**
+         * HRESULT CoGetMarshalSizeMax(ULONG *pulSize, REFIID riid, IUnknown *pUnk,
+         *     DWORD dwDestContext, void *pvDestContext, DWORD mshlflags)
+         */
+        CoGetMarshalSizeMax: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([size])=>{
+                if ((size >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(size >>> 0, OBJREF_BYTES);
+                return S_OK;
+            },
+        },
+
+        /**
          * HRESULT CoReleaseMarshalData(IStream *pStm)
          *
-         * Frees what a marshaled packet holds. The packets this build
-         * writes hold a pointer and nothing owned, so there is nothing to
-         * let go of; the call is accepted so a program that cleans up
-         * after an unmarshal it never made does not lose eight bytes of
-         * stack to a missing import.
+         * The reference an OBJREF nobody unmarshaled carries, given back. A
+         * packet CoMarshalInterThreadInterfaceInStream wrote holds only the
+         * pointer, and nothing is owned by it.
          */
         CoReleaseMarshalData: {
             argBytes: 4,
-            handler: ()=>S_OK,
+            /** @param {number[]} args */
+            handler: ([stream])=>{
+                const thread = host.callerThread?.();
+                if ((stream >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                return readStream(stream >>> 0, OBJREF_BYTES, thread).then(async bytes=>{
+                    if (bytes?.length === 4)
+                    {
+                        return S_OK;
+                    }
+                    const decoded = bytes ? decodeObjref(bytes) : null;
+                    const channel = remote();
+                    if (!decoded || !channel)
+                    {
+                        return RPC_E_INVALID_OBJREF;
+                    }
+                    return channel.releaseReference(decoded.reference, thread);
+                });
+            },
+        },
+
+        /**
+         * HRESULT CoGetPSClsid(REFIID riid, CLSID *pClsid)
+         *
+         * The proxy/stub class the registry names for an interface.
+         */
+        CoGetPSClsid: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([riid, pclsid])=>{
+                const iid = guidAt(riid);
+                const clsid = iid === null ? null
+                    : canonicalGuid(interfaceKeyValue(iid, 'ProxyStubClsid32') ?? '');
+                if ((pclsid >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if (clsid === null)
+                {
+                    writeGuid(host, pclsid >>> 0, GUID_NULL);
+                    return REGDB_E_IIDNOTREG;
+                }
+                writeGuid(host, pclsid >>> 0, clsid);
+                return S_OK;
+            },
         },
 
         /**
