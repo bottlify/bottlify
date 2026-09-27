@@ -450,6 +450,61 @@ export function createOverlay({
             return store ? store.read(node.path, offset, length) : new Uint8Array(0);
         },
 
+        /**
+         * A file's whole contents, shared rather than copied where the store
+         * can: what one process wrote goes to the next as the same bytes.
+         *
+         * @param {string[]} components @returns {Uint8Array}
+         */
+        share(components){
+            const node = mustFind(components);
+            if (node.directory)
+            {
+                throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
+            }
+            if (node.inWritable && writable.share)
+            {
+                return writable.share(node.path);
+            }
+            return this.read(components, 0, sizeOf(node));
+        },
+
+        /**
+         * Replaces a file's contents with `bytes`, taken as they are where the
+         * store can keep them without copying (see `share`).
+         *
+         * @param {string[]} components @param {Uint8Array} bytes
+         */
+        replace(components, bytes){
+            mustBeWritable(components);
+            const node = mustFind(components);
+            if (node.directory)
+            {
+                throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
+            }
+            if (onSystemOnly(node))
+            {
+                throw fsError(ErrorCode.ACCESS_DENIED,
+                    `"${node.path}" is on the engine's read-only volume`);
+            }
+            if (!node.inWritable)
+            {
+                materialiseParents(node);
+                node.inWritable = true;
+            }
+            if (writable.adopt)
+            {
+                writable.adopt(node.path, bytes);
+            }
+            else
+            {
+                writable.truncate(node.path, 0);
+                writable.write(node.path, 0, bytes);
+            }
+            node.modified = now();
+            changed(node.path, 'written');
+        },
+
         /** @param {string[]} components @param {number} offset @param {Uint8Array} bytes */
         write(components, offset, bytes){
             mustBeWritable(components);

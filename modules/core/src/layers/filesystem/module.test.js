@@ -361,6 +361,43 @@ test('nothing on a disc can be written, made or removed', async()=>{
     await filesystemModule.dispose();
 });
 
+test('a file handed from one volume to another is the same bytes until either writes it',
+    async()=>{
+        // A copy per process made an installer that starts several processes
+        // hold its extracted archives once for every one of them.
+        const at = (/** @type {string[]} */ ...parts)=>['C:', ...parts].join(String.fromCharCode(92));
+        const ours = await volume();
+        const theirs = await volume();
+        const handle = ours.open(at('data1.cab'),
+            { write: true, disposition: ours.Disposition.CREATE_NEW });
+        ours.write(handle, bytes('archive'));
+        ours.close(handle);
+
+        const [exported] = ours.export('C');
+        theirs.apply([exported]);
+        const [again] = theirs.export('C');
+        assert.equal(again.bytes.buffer, exported.bytes.buffer, 'not copied on the way');
+
+        const writing = theirs.open(at('data1.cab'), { write: true });
+        theirs.write(writing, bytes('X'));
+        theirs.close(writing);
+        const read = (/** @type {any} */ side)=>{
+            const reading = side.open(at('data1.cab'), { read: true });
+            const got = text(side.read(reading, 64));
+            side.close(reading);
+            return got;
+        };
+        assert.equal(read(theirs), 'Xrchive');
+        assert.equal(read(ours), 'archive', 'a write copies first');
+
+        const mine = ours.open(at('data1.cab'), { write: true });
+        ours.write(mine, bytes('Y'));
+        ours.close(mine);
+        assert.equal(read(ours), 'Yrchive');
+        assert.equal(read(theirs), 'Xrchive', 'and so does the side that handed them over');
+        await filesystemModule.dispose();
+    });
+
 test('what changed after a generation is named, and what a quiet apply put in is not',
     async()=>{
         const fs = await volume();

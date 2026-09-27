@@ -58,6 +58,11 @@ import { ErrorCode, fsError } from './errors.js';
  * @property {(path: string, size: number) => void} truncate
  * @property {(path: string) => void} remove
  * @property {(path: string) => void} mkdir
+ * @property {(path: string) => Uint8Array} [share]  A file's whole contents, not
+ *           copied: the store copies them before it next changes them, so the
+ *           caller may hand them on as they are.
+ * @property {(path: string, bytes: Uint8Array) => void} [adopt]  Makes `bytes` a
+ *           file's contents without copying them, and never writes into them.
  */
 
 /** @typedef {SourceStore & WritableStoreMethods} WritableStore */
@@ -91,7 +96,12 @@ function toBytes(content){
  * @returns {WritableStore}
  */
 export function createMemoryStore(seed = {}){
-    /** @type {Map<string, { directory: boolean, data: Uint8Array }>} */
+    /**
+     * `shared` while the bytes are also another's -- a process beside this one
+     * holds the same file -- so the first change copies them.
+     *
+     * @type {Map<string, { directory: boolean, data: Uint8Array, shared?: boolean }>}
+     */
     const entries = new Map();
 
     /** @param {string} path */
@@ -113,7 +123,7 @@ export function createMemoryStore(seed = {}){
         }
     };
 
-    /** @param {string} path @returns {{ directory: boolean, data: Uint8Array }} */
+    /** @param {string} path @returns {{ directory: boolean, data: Uint8Array, shared?: boolean }} */
     const file = path=>{
         const entry = entries.get(path);
         if (entry && entry.directory)
@@ -180,6 +190,11 @@ export function createMemoryStore(seed = {}){
                 throw fsError(ErrorCode.INVALID_PARAMETER, `Negative offset writing "${path}"`);
             }
             const entry = file(path);
+            if (entry.shared)
+            {
+                entry.data = entry.data.slice();
+                entry.shared = false;
+            }
             const end = offset + bytes.length;
             if (end > entry.data.length)
             {
@@ -211,6 +226,25 @@ export function createMemoryStore(seed = {}){
             const resized = new Uint8Array(size);
             resized.set(entry.data.subarray(0, Math.min(size, entry.data.length)));
             entry.data = resized;
+            entry.shared = false;
+        },
+
+        /** @param {string} path */
+        share(path){
+            const entry = entries.get(path);
+            if (!entry || entry.directory)
+            {
+                throw fsError(ErrorCode.NOT_FOUND, `No file "${path}" to read`);
+            }
+            entry.shared = true;
+            return entry.data;
+        },
+
+        /** @param {string} path @param {Uint8Array} bytes */
+        adopt(path, bytes){
+            const entry = file(path);
+            entry.data = bytes;
+            entry.shared = true;
         },
 
         /** @param {string} path */

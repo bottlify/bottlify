@@ -5,22 +5,15 @@
  */
 
 /**
- * rpcrt4, as far as a proxy/stub DLL's self-registration reaches it.
- *
- * A COM server ships a DLL whose DllRegisterServer hands its proxy table to
- * NdrDllRegisterProxy, which writes the class and interface keys marshaling
- * would later read. There is one apartment here and nothing is marshaled, so
- * the keys are never read; the registration is answered as done and said to
- * diverge, and the class-object entry points refuse the documented way, since
- * no proxy class exists to hand out.
+ * rpcrt4: UUIDs, and the runtime a MIDL `-Os` proxy/stub DLL calls
+ * (`runtime.js`), which is how an interface that no type library describes
+ * crosses to another process.
  */
 
 import { GUID_SIZE, formatGuid, parseGuid } from '../ole32/guid.js';
+import { createRuntime } from './runtime.js';
 
-/** HRESULTs, and the RPC statuses that are not HRESULTs. */
-const S_OK = 0;
-const S_FALSE = 1;
-const CLASS_E_CLASSNOTAVAILABLE = 0x80040111 | 0;
+/** The RPC statuses. */
 const RPC_S_OK = 0;
 const RPC_S_OUT_OF_MEMORY = 14;
 const RPC_S_INVALID_STRING_UUID = 1705;
@@ -37,6 +30,11 @@ const UUID_STRING_LENGTH = 36;
  * @property {(bytes: number) => number} [allocate]
  *           Where a string the library hands out lives, freed by RpcStringFree.
  * @property {(address: number) => void} [free]
+ * @property {Omit<import('./runtime.js').RuntimeHost,
+ *     'readMemory' | 'writeMemory' | 'allocate' | 'free' | 'divergence'>} [runtime]
+ *           What the proxy/stub runtime needs besides memory: calls into the
+ *           guest, raising on the calling thread, the registry and ole32's
+ *           marshaler. Absent, a proxy/stub DLL's entry points are not bound.
  */
 
 /**
@@ -52,46 +50,20 @@ export function createRpcFunctions(host){
         host.writeMemory(address, bytes);
     };
 
-    return {
-        /**
-         * HRESULT NdrDllRegisterProxy(HMODULE hDll, const ProxyFileInfo **pProxyFileList,
-         *                             const CLSID *pclsid)
-         * HRESULT NdrDllUnregisterProxy(HMODULE, const ProxyFileInfo **, const CLSID *)
-         */
-        NdrDllRegisterProxy: {
-            argBytes: 12,
-            handler: ()=>{
-                report('NdrDllRegisterProxy',
-                    'proxy and stub classes are not registered: nothing is marshaled here');
-                return S_OK;
-            },
-        },
-        NdrDllUnregisterProxy: {
-            argBytes: 12,
-            handler: ()=>S_OK,
-        },
+    /** @type {Partial<ReturnType<typeof createRuntime>>} */
+    const runtime = host.runtime && host.readMemory && host.allocate && host.free
+        ? createRuntime({
+            ...host.runtime,
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            allocate: host.allocate,
+            free: host.free,
+            divergence: detail=>report('rpcrt4', detail),
+        })
+        : {};
 
-        /**
-         * HRESULT NdrDllGetClassObject(REFCLSID rclsid, REFIID riid, void **ppv,
-         *     const ProxyFileInfo **pProxyFileList, const CLSID *pclsid,
-         *     CStdPSFactoryBuffer *pPSFactoryBuffer)
-         * HRESULT NdrDllCanUnloadNow(CStdPSFactoryBuffer *pPSFactoryBuffer)
-         */
-        NdrDllGetClassObject: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([, , out])=>{
-                if ((out >>> 0) !== 0)
-                {
-                    writeU32(out >>> 0, 0);
-                }
-                return CLASS_E_CLASSNOTAVAILABLE;
-            },
-        },
-        NdrDllCanUnloadNow: {
-            argBytes: 4,
-            handler: ()=>S_FALSE,
-        },
+    return {
+        ...runtime,
 
         /**
          * RPC_STATUS UuidCreate(UUID *Uuid)
