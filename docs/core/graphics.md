@@ -704,6 +704,9 @@ renderer `Bottlify OpenGL`, 25 GL extensions and 4 WGL extensions (`extensions.j
 string is a promise that every function it defines is obtainable, and the test checks the list, the
 context and the marshalling agree). The context records state (`context*.js`, `state.js`) and reads
 it into one `Scene` per draw (`context-scene.js`); where that scene is drawn depends on the build.
+The vertices a draw assembles are that draw's own: the context keeps no record of what it drew
+unless it was made with `keepPrimitives` (a test's option, which `submittedPrimitives` then
+answers), because such a record grows by every draw's vertices for as long as the program runs.
 It takes every sized internal format GL 1.1 names, and texture 0 is one object per target shared by
 every texture unit. A handler is reachable without the trap through `entry(name)` -- the same
 function, the same dwords, the same current-context rule -- which is how a bundle's kernel issues GL
@@ -1051,6 +1054,11 @@ destination alone is mirrored places its pixels as a mirror would, where Wine's 
 placing one that no mirroring gives, though it answers as Windows does; and a 32-bit DIB's top byte,
 which Windows carries through `StretchDIBits`, is not kept. A Direct3D 10 effect's
 `Optimize` keeps what the runtime would drop, which only the effect's own reflection reads.
+Nothing bounds how far the device may fall behind the program: a present never waits for the
+device, where a Windows driver holds the presenting call once a few frames are queued, so a device
+slower than the program accumulates its frames for as long as it runs -- a software adapter is.
+Measured with SwiftShader and the engine on the same two cores, Doom 3's timed demo presented 16
+to 19 frames a second while the device finished 1.6 to 3.3, ending the demo 54 to 120 s behind.
 
 ## Tests
 

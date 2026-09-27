@@ -13,6 +13,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
 
@@ -46,7 +48,7 @@ function drawing(options = {}){
     const box = machine();
     /** @type {any} */
     const context = createGlContext({ memory: box.memory, divergence: options.divergence,
-        raster: options.raster });
+        raster: options.raster, keepPrimitives: true });
     context.attach({ width: 8, height: 8, doubleBuffered: false, depthBits: 24 });
     context.glMatrixMode(GL.PROJECTION);
     context.glLoadIdentity();
@@ -54,6 +56,15 @@ function drawing(options = {}){
     context.glMatrixMode(GL.MODELVIEW);
     context.glLoadIdentity();
     return { context, box };
+}
+
+/**
+ * A full collection, for a test of what is still reachable: `gc` is exposed
+ * only to a realm made after the flag is set.
+ */
+function collectGarbage(){
+    v8.setFlagsFromString('--expose-gc');
+    /** @type {() => void} */ (vm.runInNewContext('gc'))();
 }
 
 /** @param {any} frame @param {number} x @param {number} y @returns {number[]} */
@@ -412,6 +423,62 @@ test('with rasterisation off a draw does its state work and paints nothing', ()=
     // Row zero is the top: (1, 6) is inside the lower-left triangle.
     assert.deepEqual(pixelAt(painted.context.framebuffer, 1, 6), [255, 0, 0, 255],
         'the default rasterises');
+});
+
+test('a context keeps no draw\'s vertices unless asked to: they are garbage once drawn', async()=>{
+    // A renderer that takes no arrays, so an array draw is assembled on the
+    // processor as one of a shape the device cannot bind is, and that holds
+    // on to none of the vertices it is handed -- whatever still reaches them
+    // after a collection is the context.
+    /** @param {boolean} keepPrimitives */
+    const drawMany = keepPrimitives=>{
+        const box = machine();
+        /** @type {WeakRef<any[]>[]} */
+        const drawn = [];
+        /** @type {any} */
+        const gpu = {
+            attach(){},
+            clear(){},
+            copyToTexture: ()=>false,
+            drawArrays: ()=>false,
+            /** @param {any[]} args  the context, the scene, the mode, the vertices */
+            draw(...args){
+                drawn.push(new WeakRef(args[3]));
+            },
+        };
+        /** @type {any} */
+        const context = createGlContext({ memory: box.memory, gpu, keepPrimitives });
+        context.attach({ width: 8, height: 8, doubleBuffered: false, depthBits: 24 });
+        box.floats(0x100, [0, 0, 8, 0, 0, 8]);
+        context.glVertexPointer(2, GL.FLOAT, 0, 0x100);
+        context.glEnableClientState(GL.VERTEX_ARRAY);
+        for (let i = 0; i < 100; i++)
+        {
+            context.glDrawArrays(GL.TRIANGLES, 0, 3);
+            context.glBegin(GL.TRIANGLES);
+            context.glVertex2f(0, 0);
+            context.glVertex2f(8, 0);
+            context.glVertex2f(0, 8);
+            context.glEnd();
+        }
+        assert.equal(context.glGetError(), GL.NO_ERROR);
+        return { context, drawn };
+    };
+    const kept = drawMany(true);
+    const dropped = drawMany(false);
+    // A weak reference holds its target to the end of the job that made it.
+    await new Promise(resolve=>setImmediate(resolve));
+    collectGarbage();
+    /** @param {WeakRef<any[]>[]} refs */
+    const live = refs=>refs.filter(ref=>ref.deref() !== undefined).length;
+
+    assert.equal(kept.drawn.length, 200, 'every draw reached the renderer');
+    assert.equal(live(kept.drawn), 200, 'asked to, the context keeps each draw\'s vertices');
+    assert.equal(kept.context.submittedPrimitives.length, 200);
+    assert.equal(dropped.drawn.length, 200);
+    assert.equal(live(dropped.drawn), 0, 'otherwise none of them outlives its draw');
+    assert.equal(dropped.context.submittedPrimitives.length, 0);
+    assert.equal(dropped.context.destroyed, false, 'while the context itself is still in use');
 });
 
 test('arrays, indices and buffer contents are read through the window, not copied', ()=>{

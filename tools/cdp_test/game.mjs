@@ -36,6 +36,7 @@ import { CdpEndpoint } from './cdp.mjs';
 import { reportTimeout } from './timeout-report.mjs';
 import { serveStatic } from './server.mjs';
 import { describeProfile, profileWorkers, summarise } from './profile.mjs';
+import { describeDevice, watchDevice } from './device-lag.mjs';
 import { openBundle } from '../btl.mjs';
 import { windowsVersion } from '../../modules/core/src/layers/win32/kernel32/versions.js';
 
@@ -602,6 +603,13 @@ function describe(result, context, calls, symbols){
     say(`  adapter: ${JSON.stringify(result.adapter)}`);
     say(`  ran for ${result.elapsedMs}ms, ${result.instructions} guest instructions`);
     say(`stopped: ${result.stopped ?? result.error ?? 'no answer'}`);
+    if (result.answeredAfterMs !== undefined && result.elapsedMs !== undefined)
+    {
+        say(`  answered ${(result.answeredAfterMs / 1000).toFixed(1)} s after the start, the run`
+            + ` ${(result.elapsedMs / 1000).toFixed(1)} s of it: the rest is setting up and the`
+            + ' report, whose read-back of the last frame waits for the device to finish every'
+            + ' frame queued before it');
+    }
     if (result.stack && !result.ok)
     {
         // A failure before the program ran has only this to say where it came from.
@@ -1210,9 +1218,13 @@ export async function game(options){
             bundleId: options.id,
             exact: options.exact,
         });
+        // Made before the profiler asks for the page's workers, so the engine
+        // worker is seen whichever request attaches it.
+        const device = watchDevice(cdp, sessionId, { worker: options.worker });
         /** @type {Awaited<ReturnType<typeof profileWorkers>> | null} */
         const profiler = options.cpuProfile > 0 && options.worker
             ? await profileWorkers(cdp, sessionId) : null;
+        const deviceWatched = await device.install({ attach: profiler === null });
         let profilingFrom = Date.now();
         /** @type {{ url: string, profile: any, windowMs: number, from: number }[] | null} */
         let cpuProfiles = null;
@@ -1280,14 +1292,34 @@ export async function game(options){
             console.log(`call log: ${options.log}`);
         };
 
+        // The report reads the last frame back, so it answers only once the
+        // device has finished everything queued before that read: said as it
+        // happens, so a wait for the device does not read as a page that hangs.
+        const startedAt = Date.now();
+        /** @type {import('./device-lag.mjs').DeviceState | null} */
+        let lastDevice = null;
+        const deviceTimer = deviceWatched
+            ? setInterval(()=>{
+                device.read().then(state=>{
+                    lastDevice = state ?? lastDevice;
+                    if (state && state.oldestMs >= 5000)
+                    {
+                        console.log(`  waiting at ${Math.round((Date.now() - startedAt) / 1000)} s:`
+                            + ` ${describeDevice(state)}`);
+                    }
+                }, ()=>{});
+            }, 30000)
+            : null;
         let result;
         try
         {
             result = await poll(cdp, sessionId,
                 'window.__bottlify__.result ? JSON.stringify(window.__bottlify__.result) : null',
                 options.waitMs);
+            result.answeredAfterMs = Date.now() - startedAt;
         }
         catch (e){
+            const behind = deviceWatched ? await device.read() ?? lastDevice : null;
             if (profileTimer !== null)
             {
                 clearTimeout(profileTimer);
@@ -1297,6 +1329,7 @@ export async function game(options){
             const stampOut = new Date().toISOString().replace(/[:.]/g, '-');
             const reason = await reportTimeout({
                 reason: `${e instanceof Error ? e.message : String(e)}`
+                    + `${deviceWatched ? ` -- ${describeDevice(behind)}` : ''}`
                     + `${options.log ? ` -- call log drained to ${options.log}` : ''}`,
                 save(){
                     saveProfiles(stampOut);
@@ -1312,6 +1345,13 @@ export async function game(options){
                     Buffer.from(data, 'base64')),
             });
             return { ok: false, measured: false, pageUrl, events: thrown, reason };
+        }
+        finally
+        {
+            if (deviceTimer !== null)
+            {
+                clearInterval(deviceTimer);
+            }
         }
 
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');

@@ -202,6 +202,9 @@ const PIXEL_STORE_PARAMETERS = new Set([
 /** How many pushes the attribute stacks take. */
 const ATTRIB_STACK_LIMIT = 16;
 
+/** What `submittedPrimitives` answers for a context that keeps none. */
+const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[]} */ ([]));
+
 /**
  * @typedef {Object} Drawable
  * @property {number} width
@@ -230,6 +233,12 @@ const ATTRIB_STACK_LIMIT = 16;
  *           scene, but nothing reaches `framebuffer`. A diagnostic for a run
  *           without a device that measures something other than the
  *           rasteriser; a context with a `gpu` never rasterises either way.
+ * @property {boolean} [keepPrimitives]
+ *           Every primitive drawn is kept, with its vertices, for
+ *           `submittedPrimitives` to answer -- what a test reads back to see
+ *           what was assembled. Off unless asked for: nothing else reads it,
+ *           and kept, it grows by every draw's vertices for as long as the
+ *           program runs, where otherwise they are garbage once drawn.
  */
 
 /** @typedef {import('./kernel.js').ContextKernel} ContextKernel */
@@ -265,8 +274,8 @@ export function createGlContext(options = {}){
 
     /** @type {{ mode: number, vertices: any[] } | null} */
     let primitive = null;
-    /** @type {{ mode: number, vertices: any[] }[]} */
-    const submitted = [];
+    /** @type {{ mode: number, vertices: any[] }[] | null} */
+    const kept = options.keepPrimitives ? [] : null;
 
     /** @type {any[]} */
     const attribStack = [];
@@ -375,9 +384,12 @@ export function createGlContext(options = {}){
         get destroyed(){
             return destroyed;
         },
-        /** What glBegin/glEnd accumulated: the record of every primitive drawn. */
+        /**
+         * Every primitive drawn, in order, as glBegin/glEnd or an array draw
+         * assembled it -- under `keepPrimitives`; without it, nothing.
+         */
         get submittedPrimitives(){
-            return submitted;
+            return kept ?? NOTHING_KEPT;
         },
         get currentPrimitive(){
             return primitive;
@@ -1234,7 +1246,7 @@ export function createGlContext(options = {}){
             }
             const finished = primitive;
             primitive = null;
-            submitted.push(finished);
+            kept?.push(finished);
             draw(finished.mode, finished.vertices);
         },
 
@@ -1692,7 +1704,7 @@ export function createGlContext(options = {}){
     function drawVertices(mode, vertices){
         if (enter('drawVertices', [mode, vertices]))
         {
-            submitted.push({ mode, vertices });
+            kept?.push({ mode, vertices });
             draw(mode, vertices);
         }
     }

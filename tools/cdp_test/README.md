@@ -24,6 +24,7 @@ the guest, its files directly in that directory.
 | `browser.mjs` | finds and launches a Chromium with a CDP endpoint | library |
 | `cdp.mjs` | a minimal CDP client over WebSocket | library |
 | `server.mjs` | a static server for the sandbox pages, the sources and a bundle | library |
+| `device-lag.mjs` | counts the engine's GPU submits and those the device finished, for a run that waits on the device | library |
 
 Reports land in `tools/cdp_test/reports/` (gitignored).
 
@@ -42,7 +43,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 
 | flag | default | what it does |
 |---|---|---|
-| `--wait SECONDS` | 900 | how long the page runs before it is asked for its result. The page cannot be asked how it is doing while the engine holds its thread, so this is the run's length |
+| `--wait SECONDS` | 900 | how long to wait for the page's result, from the start: the run, then the report, whose read-back of the last frame waits for the device to finish every frame queued before it -- on a software adapter far longer than the run (see *A page that does not answer*). Bound the run itself with `--run-seconds` or a scene that ends |
 | `--turns N` | 200000 | scheduler turns before the run gives up |
 | `--calls N` | 40 | how many of the last host calls the report prints |
 | `--log-match REGEX` | off | keep only the host calls whose formatted line matches, so a question about one family of calls (`"EnumDisplay|CreateDevice"`) is answered across the whole run instead of the last N lines of the frame loop |
@@ -222,6 +223,33 @@ Reading it:
   finished without posting its completion.
 - An unresolved import is a real answer, not noise: a program that cannot bind
   one may take a different path silently.
+
+### A page that does not answer
+
+A present never waits for the device, so the engine runs as far ahead of it as
+the program goes; the page's report reads the last frame back, and that read
+waits until the device has finished every frame queued before it. On a
+software adapter (SwiftShader, which is what a machine without a GPU hands
+out) the device finishes frames several times slower than the engine submits
+them, so a run whose program has long stopped still has minutes of frames
+queued, and a `--wait` shorter than that ends in `the page did not answer`.
+Measured with the engine and the browser on the same two cores: Doom 3's
+timed demo presented 16 to 19 frames a second and the device finished 1.6 to
+3.3, so a run of 60 s answered 120 to 190 s after its start; a 45 s run in its
+menu answered 90 s after the run ended, and a 150 s one had not answered nine
+minutes after.
+
+So bound the run -- `--run-seconds`, or a scene that ends by itself, such as a
+title's own timed demo that quits when done -- and give `--wait` the run plus
+its drain. Doom 3's demo build reads a demo file only with `fs_restrict` off:
+`--file <bench.demo>=C:\App\demo\demos\bench.demo --command-line
+'"C:\App\Doom3.exe" +set fs_restrict 0 +set logFile 2 +timeDemoQuit bench'`
+plays every frame of it, writes `frames rendered in ... = ... fps` (on the
+guest's clock) to `qconsole.log` and exits. While it waits, the driver says how far behind the device is every
+30 s once the oldest unfinished submit is five seconds old, and a timeout's
+reason ends with the same count (`device-lag.mjs` wraps `GPUQueue.submit` in
+the realm the engine runs in, the page or its worker); a report that did
+answer says how long after the start it did.
 
 ## `../host-call-bench.mjs` -- what a call into an import costs
 
