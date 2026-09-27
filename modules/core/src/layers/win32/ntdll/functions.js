@@ -29,7 +29,7 @@
 import { createCountedStringFunctions } from './strings.js';
 import { createQueryFunctions } from './query.js';
 import { createIntegerFunctions } from './integer.js';
-import { toDosError } from './status.js';
+import { STATUS, toDosError } from './status.js';
 
 /**
  * The C runtime functions ntdll publishes under its own name.
@@ -175,6 +175,21 @@ export function createNtdllFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([status])=>toDosError(status),
+        },
+
+        /**
+         * NTSTATUS RtlWalkHeap(HANDLE HeapHandle, PVOID Entry)
+         *
+         * kernel32's HeapWalk is this walk on Windows, answered here as a
+         * status: its end is STATUS_NO_MORE_ENTRIES, which a caller's
+         * `while (!RtlWalkHeap(...))` stops on. HeapWalk hands out no entries
+         * here, so the two structures' different layouts never show.
+         */
+        RtlWalkHeap: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([heap, entry])=>
+                (kernel32.HeapWalk.handler([heap, entry]) !== 0 ? 0 : STATUS.NO_MORE_ENTRIES),
         },
 
         /**

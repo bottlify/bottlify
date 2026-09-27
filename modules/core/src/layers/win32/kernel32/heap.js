@@ -84,6 +84,9 @@ const ERROR_INVALID_ADDRESS = 487;
 const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 
+/** HEAP_SUMMARY: its own size, then what is allocated, committed, reserved and may be. */
+const HEAP_SUMMARY_SIZE = 20;
+
 /**
  * The one page protection this build offers.
  *
@@ -1622,6 +1625,42 @@ export function createHeapFunctions(host){
         },
 
         /**
+         * BOOL HeapSummary(HANDLE hHeap, DWORD dwFlags, LPHEAP_SUMMARY lpSummary)
+         *
+         * What the heap's live blocks add up to, as asked for, with the
+         * structure's own size in its first field or ERROR_INVALID_PARAMETER.
+         * The blocks sit in pages the arena already holds, so what is
+         * committed and what is reserved are both the allocated figure.
+         */
+        HeapSummary: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, , summary])=>{
+                const heap = handle >>> 0;
+                if (summary === 0 || readDword(summary >>> 0) !== HEAP_SUMMARY_SIZE)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if (!heaps.has(heap))
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                let allocated = 0;
+                for (const address of allocator.owned(heap))
+                {
+                    allocated += allocator.block(address)?.size ?? 0;
+                }
+                writeDword((summary >>> 0) + 4, allocated);
+                writeDword((summary >>> 0) + 8, allocated);
+                writeDword((summary >>> 0) + 12, allocated);
+                writeDword((summary >>> 0) + 16, 0);
+                return 1;
+            },
+        },
+
+        /**
          * BOOL VirtualProtect(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect,
          *                     PDWORD lpflOldProtect)
          *
@@ -1849,5 +1888,6 @@ export function createHeapFunctions(host){
         LocalUnlock: table.GlobalUnlock,
         LocalSize: table.GlobalSize,
         LocalHandle: table.GlobalHandle,
+        LocalFlags: table.GlobalFlags,
     };
 }

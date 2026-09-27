@@ -42,6 +42,7 @@ function fakeHost({ registers = true } = {}){
         HeapFree: { argBytes: 12, handler: ()=>1 },
         HeapReAlloc: { argBytes: 16, handler: ()=>0 },
         HeapSize: { argBytes: 12, handler: ()=>0 },
+        HeapWalk: { argBytes: 8, handler: ()=>0 },
         EnterCriticalSection: { argBytes: 4, handler: ()=>0 },
         RtlUnwind: { argBytes: 16, handler: ()=>0 },
         VerSetConditionMask: { argBytes: 16, handler: ()=>0 },
@@ -214,4 +215,18 @@ test('the 64-bit helpers appear only when there is a register to answer in', ()=
     // all and an import that needs one says so.
     assert.ok('_allmul' in createNtdllFunctions(fakeHost()));
     assert.ok(!('_allmul' in createNtdllFunctions(fakeHost({ registers: false }))));
+});
+
+test('RtlWalkHeap is HeapWalk answered as a status, its end STATUS_NO_MORE_ENTRIES', ()=>{
+    // kernel32's heap tests loop `while (!RtlWalkHeap(heap, &entry))`: the end
+    // of the walk has to be a status that is not zero.
+    const host = fakeHost();
+    const fns = createNtdllFunctions(host);
+
+    assert.equal(fns.RtlWalkHeap.handler([PROCESS_HEAP, 0x100]) >>> 0, 0x8000001a);
+    host.kernel32.HeapWalk.handler = ()=>1;
+    assert.equal(fns.RtlWalkHeap.handler([PROCESS_HEAP, 0x100]), 0, 'an entry is success');
+    assert.equal(fns.RtlWalkHeap.argBytes, 8);
+    assert.equal(fns.RtlNtStatusToDosError.handler([0x8000001a]), 259,
+        'and it reads as ERROR_NO_MORE_ITEMS');
 });
