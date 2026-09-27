@@ -196,6 +196,7 @@ export function createBridgeModule(){
                 traceStrings: config?.traceStrings ?? false,
                 callPhases: config?.callPhases ?? false,
                 onCall: config?.onCall,
+                wantsCall: config?.wantsCall,
                 // Where the time a host call takes is accounted. Nested inside the
                 // guest phase the driver opens, so what is left as the guest's own
                 // self time is the emulator executing and this is our code -- which

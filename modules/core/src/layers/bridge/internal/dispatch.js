@@ -91,6 +91,8 @@ import { isParkedCall } from './parking.js';
  * @property {number} writer
  *     Where the memory layer charges what this call writes into the guest,
  *     resolved here once so the crossing stores a number and looks nothing up.
+ * @property {number} sinkRevision  The journal revision `sinkOn` was asked at.
+ * @property {boolean} sinkOn       Whether the sink wants this function's calls.
  */
 
 /**
@@ -267,10 +269,16 @@ const NO_ERROR = ()=>0;
  *        of guest memory per pointer argument on every recorded call. On, it
  *        is the only way to see a string a program built on its own stack,
  *        which by the end of a run is somebody else's stack.
+ * @param {(name: string) => boolean} [deps.wantsCall]
+ *        Whether `onCall` wants the calls of a function, asked once for each
+ *        and again only when the journal's revision moves (`revisionCell`):
+ *        a sink that keeps nothing but what the journal traces is not called
+ *        for the rest. Absent, or with no journal to say when to ask again,
+ *        every call goes to the sink.
  * @param {{ enabled: (category: string, level: number) => boolean,
  *            write: (level: number, category: string, message: string,
  *                a?: any, b?: any, c?: any, d?: any) => void,
- *            Level: { TRACE: number } }} [deps.journal]
+ *            Level: { TRACE: number }, revisionCell?: () => Int32Array }} [deps.journal]
  *        Where a slot hook's crossings are written when `call.hook` is on:
  *        the frame as the guest's own call site left it, and where the
  *        call was sent afterwards. A hook stands in front of a call the
@@ -377,6 +385,15 @@ class Dispatcher {
         // archives made up its mind thousands of calls earlier. A sink keeps
         // all of it, for whoever is willing to pay for the file.
         this.onCall = deps.onCall ?? null;
+        /** @type {((name: string) => boolean) | null} */
+        this.wantsCall = null;
+        /** @type {Int32Array | null} */
+        this.revision = null;
+        if (deps.wantsCall && typeof deps.journal?.revisionCell === 'function')
+        {
+            this.wantsCall = deps.wantsCall;
+            this.revision = deps.journal.revisionCell();
+        }
         /**
          * Where a host call's time is accounted, when the caller wired one.
          *
@@ -860,7 +877,7 @@ class Dispatcher {
         // line of its own -- the first line is already written and in order,
         // and moving it would put the call somewhere it did not happen.
         const onCall = this.onCall;
-        if (onCall !== null)
+        if (onCall !== null && this.sinks(entry))
         {
             const asked = copyOf(record);
             result.then((/** @type {number} */ value)=>{
@@ -876,6 +893,27 @@ class Dispatcher {
             });
         }
         this.suspend(result, frame);
+    }
+
+    /**
+     * Whether this call goes to the sink: asked of `wantsCall` once for each
+     * function and again whenever the journal's revision has moved since.
+     *
+     * @param {Entry} entry
+     */
+    sinks(entry){
+        const revision = this.revision;
+        if (revision === null)
+        {
+            return true;
+        }
+        const now = revision[0];
+        if (entry.sinkRevision !== now)
+        {
+            entry.sinkOn = /** @type {(name: string) => boolean} */ (this.wantsCall)(entry.name);
+            entry.sinkRevision = now;
+        }
+        return entry.sinkOn;
     }
 
     /**
@@ -1078,7 +1116,7 @@ class Dispatcher {
                         ? reader.readU32(block + this.errorOffset)
                         : this.cpu.readU32(block + this.errorOffset);
             }
-            if (this.onCall !== null)
+            if (this.onCall !== null && this.sinks(entry))
             {
                 // As recorded, strings included only when tracing asked
                 // for them. Peeking every argument for a sink that does
@@ -1189,6 +1227,8 @@ class Dispatcher {
             readsError: this.errorReader && fn.lastError !== false,
             args: new Array(site ? 8 : stackWords + registerArgs),
             writer: typeof this.memory?.writer === 'function' ? this.memory.writer(fn.name) : -1,
+            sinkRevision: -1,
+            sinkOn: true,
         };
         if (hook)
         {

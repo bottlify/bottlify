@@ -455,6 +455,42 @@ test('an unpacker-shaped program runs under cork',
             `the patch was seen: ${JSON.stringify(cork.cork)}`);
     });
 
+test('with no sink of the caller\'s own, a traced area\'s calls reach the journal and an '
+    + 'untraced one\'s do not', async()=>{
+    // The bridge asks once a function whether the engine's own sink keeps its
+    // calls, and hands it those alone.
+    const exe = buildExe({
+        imports: {
+            'KERNEL32.dll': ['GetCurrentThreadId', 'ExitProcess'],
+            'USER32.dll': ['GetSystemMetrics'],
+        },
+        data: {},
+        codeSize: 0x40,
+        // mov esi, 3; L: call [GetCurrentThreadId]; push 0; call [GetSystemMetrics];
+        // dec esi; jnz L; push 0; call [ExitProcess]
+        code: ({ iat })=>[0xbe, ...u32(3),
+            0xff, 0x15, ...u32(iat('GetCurrentThreadId')),
+            0x6a, 0x00, 0xff, 0x15, ...u32(iat('GetSystemMetrics')), 0x4e, 0x75, 0xef,
+            0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+    });
+    const app = await createApp({ executable: exe, engine: 'cork' });
+    try
+    {
+        app.log.setLevel('call.cpu', 'trace');
+        await app.run({ timeoutMs: 30000 });
+        /** @type {string[]} */
+        const texts = app.log.recent(1000).map((/** @type {any} */ record)=>record.text);
+        assert.equal(texts.filter(text=>/GetCurrentThreadId/.test(text)).length, 3,
+            'every call of the traced area');
+        assert.equal(texts.filter(text=>/GetSystemMetrics/.test(text)).length, 0,
+            'none of the other');
+    }
+    finally
+    {
+        await app.dispose();
+    }
+});
+
 test('a call area switched on mid-run is traced from the next call on',
     async()=>{
     // The journal's answer for a call's area is kept per name until a level

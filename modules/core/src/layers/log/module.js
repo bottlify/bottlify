@@ -260,6 +260,13 @@ export function createLogModule(){
                 enabled: (category, level)=>live() && journal.enabled(category, level),
                 /** Moves with every level change: an `enabled` answer holds until it does. */
                 revision: ()=>(live() ? journal.revision() : -1),
+                /**
+                 * The revision as a one-element cell, for a caller that
+                 * checks it on every host call without a call in here.
+                 *
+                 * @returns {Int32Array}
+                 */
+                revisionCell: ()=>journal.revisionCell(),
                 /** @param {string} category @param {unknown} level */
                 setLevel: (category, level)=>{
                     if (live())

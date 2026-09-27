@@ -45,6 +45,10 @@ test('a category keeps what its level admits and nothing quieter', ()=>{
     journal.setDefaultLevel(Level.ERROR);
     assert.equal(journal.enabled('memory', Level.WARN), false);
     assert.equal(journal.revision(), revision + 2, 'and so does the default');
+    const cell = journal.revisionCell();
+    assert.equal(cell[0], journal.revision(), 'the cell holds the revision');
+    journal.setLevel('cpu', Level.OFF);
+    assert.equal(cell[0], revision + 3, 'and moves with it, the same cell');
 });
 
 test('the message stays a template until someone reads it', ()=>{

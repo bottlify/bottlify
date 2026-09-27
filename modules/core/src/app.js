@@ -2905,6 +2905,12 @@ async function buildApp(options){
                 journalCall(call);
                 options.onCall?.(call);
             },
+            // Which calls the sink above keeps: every one for a caller's own
+            // sink, the traced ones otherwise. The bridge asks once for each
+            // function and again when a level moves, and calls the sink for
+            // those alone.
+            wantsCall: (/** @type {string} */ name)=>options.onCall !== undefined
+                || journal.enabled(areaOfCall({ name }), journal.Level.TRACE),
         },
         media: {
             // The decoder, handed down the same way the emulator's binary is:

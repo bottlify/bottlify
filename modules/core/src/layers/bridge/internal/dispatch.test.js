@@ -1502,3 +1502,71 @@ test('the charge slot lent by the memory layer is swapped in around a call, nest
     assert.deepEqual(seen, [5, 6, 5, 7], 'each call charged while it runs, the outer again after');
     assert.equal(slot[0], 1, 'whoever was charged before the calls is charged after them');
 });
+
+test('a sink that says which calls it wants is handed those alone, and asked again when the '
+    + 'journal\'s revision moves', async()=>{
+    const m = machine({ esp: 0x3000 });
+    const revision = new Int32Array(1);
+    /** @type {string[]} */
+    const asked = [];
+    let traced = new Set(['X.dll!Y']);
+    /** @type {string[]} */
+    const sunk = [];
+    const journal = {
+        enabled: ()=>false, write: ()=>{}, Level: { TRACE: 0 }, revisionCell: ()=>revision,
+    };
+    const dispatcher = createDispatcher({
+        cpu: m.cpu, memory: m.memory, parking: m.parking, journal, suspend: ()=>{},
+        onCall: record=>sunk.push(`${record.name} ${record.result}`),
+        wantsCall: name=>{
+            asked.push(name);
+            return traced.has(name);
+        },
+    });
+    dispatcher.register(1, { name: 'X.dll!Y', ...STDCALL, argBytes: 0, handler: ()=>1 });
+    dispatcher.register(2, { name: 'X.dll!Z', ...STDCALL, argBytes: 0, handler: ()=>2 });
+    /** @type {(value: number) => void} */
+    let answer = ()=>{};
+    dispatcher.register(3, {
+        name: 'X.dll!Later', ...STDCALL, argBytes: 0,
+        handler: ()=>new Promise(settle=>{
+            answer = settle;
+        }),
+    });
+
+    for (const id of [1, 2, 1, 2, 3])
+    {
+        dispatcher.dispatch(id);
+    }
+    answer(9);
+    await Promise.resolve();
+    assert.deepEqual(sunk, ['X.dll!Y 0x1', 'X.dll!Y 0x1'],
+        'the wanted calls alone, and not the answer of a waiting one nobody wants');
+    assert.deepEqual(asked, ['X.dll!Y', 'X.dll!Z', 'X.dll!Later'], 'each function asked once');
+
+    traced = new Set(['X.dll!Z']);
+    revision[0]++;
+    dispatcher.dispatch(1);
+    dispatcher.dispatch(2);
+    assert.deepEqual(sunk.slice(2), ['X.dll!Z 0x2']);
+    assert.deepEqual(asked.slice(3), ['X.dll!Y', 'X.dll!Z'], 'and asked again once it moved');
+
+    // The ring keeps every call whoever the sink wants.
+    assert.deepEqual(dispatcher.calls(), ['X.dll!Y', 'X.dll!Z', 'X.dll!Y', 'X.dll!Z',
+        'X.dll!Later', 'X.dll!Y', 'X.dll!Z']);
+});
+
+test('a sink with no revision to ask again by is handed every call', ()=>{
+    const m = machine({ esp: 0x3000 });
+    /** @type {string[]} */
+    const sunk = [];
+    const dispatcher = createDispatcher({
+        cpu: m.cpu, memory: m.memory, parking: m.parking,
+        onCall: record=>sunk.push(record.name),
+        wantsCall: ()=>false,
+    });
+    dispatcher.register(1, { name: 'X.dll!Y', ...STDCALL, argBytes: 0, handler: ()=>1 });
+    dispatcher.dispatch(1);
+    dispatcher.dispatch(1);
+    assert.deepEqual(sunk, ['X.dll!Y', 'X.dll!Y']);
+});

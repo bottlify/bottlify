@@ -168,7 +168,9 @@ export function createJournal(options){
     /** @type {Map<string, number>} */
     const levels = new Map(Object.entries(options.categories ?? {}));
     let fallback = options.level ?? Level.INFO;
-    let revision = 0;
+    // A cell rather than a variable, so a caller that checks it on every host
+    // call reads an element instead of calling in here (`revisionCell`).
+    const revision = new Int32Array(1);
     /** @type {Map<string, number>} */
     const topics = new Map();
     /** @type {Map<string, { message: string, category: string, level: number, count: number }>} */
@@ -279,20 +281,22 @@ export function createJournal(options){
         /** @param {string} category @param {number} level */
         setLevel(category, level){
             levels.set(category, level);
-            revision++;
+            revision[0]++;
         },
 
         /** @param {number} level The level of every category nobody set explicitly. */
         setDefaultLevel(level){
             fallback = level;
-            revision++;
+            revision[0]++;
         },
 
         /**
          * Bumped by every level change, so a caller asking `enabled` for the
          * same category on every host call can keep the answer until it moves.
          */
-        revision: ()=>revision,
+        revision: ()=>revision[0],
+        /** The same number as a one-element cell that moves with it. */
+        revisionCell: ()=>revision,
 
         levelOf,
 
