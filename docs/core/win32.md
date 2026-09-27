@@ -629,7 +629,13 @@ Two clocks, both the kernel's ([`kernel.md`](./kernel.md)):
 | `GetTickCount`, `QueryPerformanceCounter` (1 MHz), `timeGetTime`, `clock`, `Sleep` deadlines, message timers | `kernel.clock.virtualTime()` — the guest's clock. A frame loop that times an interval with one call and reads it with another must not disagree with itself. |
 | `GetSystemTimeAsFileTime`, `GetSystemTime`, `GetLocalTime`, `time`, `timeGetSystemTime` | `kernel.clock.wallClock()` — the date. |
 
-`GetTickCount` wraps at 32 bits as Windows does.
+`GetTickCount` wraps at 32 bits as Windows does. `GetTickCount` and `QueryPerformanceCounter` are
+reads of a block the engine rewrites whenever the guest's clock moves, as guest code in the guest's
+own kernel32 (`kernel32/process.js`), and `WINMM.dll!timeGetTime` is bound to the same routine as
+`GetTickCount` (`win32/module.js`): it answers the same milliseconds off the same clock with the
+same wrap, `timeBeginPeriod` changing nothing here, so it is one `mov eax, [block+8]` and no
+crossing -- under cork in node, a loop of it went 395 -> 24 ns a call (`host-call-bench.mjs
+--baseline`, N 2M, five rounds pinned to one core). Its handler answers for a build with no block.
 
 ### The version a program is told
 
@@ -983,7 +989,11 @@ every slot refused, a freed slot zero; three threads through one critical sectio
 sleeping while they hold it, the count exact, every entry through the fast path and every waiter
 handed the section; and a thread that finds a section held refused by `TryEnterCriticalSection`,
 then waiting in the host, with the lock count showing it queued, while the owner's own try is a
-recursion, until the owner's last leave hands it over. `src/crt-inguest.itest.js` calls the runtime's in-guest functions through the import
+recursion, until the owner's last leave hands it over. `src/winmm-inguest.itest.js` calls
+`timeGetTime` and `GetTickCount` one after the other through the import, twice with a `Sleep`
+between, on cork and on the emulator: each pair in order on one clock, the sleep seen, the stack
+and the kept registers as they were, `timeBeginPeriod` granted, `GetProcAddress` handing out the
+address the import took, and neither clock crossing into the host. `src/crt-inguest.itest.js` calls the runtime's in-guest functions through the import
 of a small program, under cork and under the emulator: `_ftol`'s two halves, `qsort` through the
 program's comparator, and `floor`, `toupper` and `strncmp` against the handlers' answers with the
 program's ESI and EDI kept across each call. `src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe`, `cxxeh.exe`,
