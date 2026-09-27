@@ -360,3 +360,27 @@ test('nothing on a disc can be written, made or removed', async()=>{
     assert.deepEqual(fs.export('D'), []);
     await filesystemModule.dispose();
 });
+
+test('what changed after a generation is named, and what a quiet apply put in is not',
+    async()=>{
+        const fs = await volume();
+        const at = (/** @type {string[]} */ ...parts)=>['C:', ...parts].join(String.fromCharCode(92));
+        fs.createDirectory(at('Save'));
+        const start = fs.generation();
+        const handle = fs.open(at('Save', 'slot.dat'),
+            { write: true, disposition: fs.Disposition.CREATE_NEW });
+        fs.write(handle, bytes('slot'));
+        fs.close(handle);
+        const changed = fs.changesSince(start);
+        assert.deepEqual(changed.map((/** @type {any} */ file)=>[file.path, text(file.bytes ?? [])]),
+            [[at('Save', 'slot.dat'), 'slot']]);
+
+        const mark = fs.generation();
+        fs.apply([{ path: at('Save', 'other.dat'), bytes: bytes('theirs') }], { quiet: true });
+        assert.deepEqual(fs.changesSince(mark), [], 'another copy of the volume wrote that');
+        assert.equal(fs.stat(at('Save', 'other.dat'))?.size, 6);
+
+        fs.deleteFile(at('Save', 'slot.dat'));
+        assert.deepEqual(fs.changesSince(mark), [{ path: at('Save', 'slot.dat'), delete: true }]);
+        await filesystemModule.dispose();
+    });

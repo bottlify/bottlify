@@ -105,6 +105,15 @@ export function createFilesystemModule(){
             // and the useful answer is "this file is different now", once.
             /** @type {Map<string, { path: string, kind: string }>} */
             const changes = new Map();
+            // Every writable path that changed, with the generation of its last
+            // change: a copy of this volume kept elsewhere needs only what moved
+            // since it was last brought up to date, and reading the whole volume
+            // to find that out costs more than the program's own run. A change
+            // put in through a quiet `apply` is that copy's own, and not counted.
+            /** @type {Map<string, { key: string, path: string, generation: number }>} */
+            const touched = new Map();
+            let generation = 0;
+            let quiet = false;
             /** @type {((changes: any[]) => void) | null} */
             let listener = config?.onChanged ?? null;
             let notifying = false;
@@ -162,6 +171,11 @@ export function createFilesystemModule(){
                     readOnly,
                     now: config?.now,
                     onChanged: (/** @type {any} */ change)=>{
+                        if (!quiet)
+                        {
+                            touched.set(`${key}:${change.path}`,
+                                { key, path: change.path, generation: ++generation });
+                        }
                         changes.set(`${key}:${change.path}`, {
                             path: formatPath(key, splitComponents(change.path)),
                             kind: change.kind,
@@ -269,59 +283,103 @@ export function createFilesystemModule(){
                  * a header from the new one and a body from the old.
                  *
                  * @param {{ path: string, bytes?: Uint8Array, delete?: boolean }[]} batch
+                 * @param {{ quiet?: boolean }} [options]  `quiet`: what arrives is
+                 *        another copy's, and `changesSince` does not report it back.
                  * @returns {number} how many entries were applied
                  */
-                apply(batch){
+                apply(batch, options){
                     if (!live())
                     {
                         return 0;
                     }
-                    const open = new Set(state.files.list().map((/** @type {any} */ file)=>
-                        foldName(file.path)));
-                    for (const entry of batch)
+                    quiet = options?.quiet === true;
+                    try
                     {
-                        const { components, drive } = locate(entry.path);
-                        if (open.has(foldName(formatPath(drive, components))))
+                        const open = new Set(state.files.list().map((/** @type {any} */ file)=>
+                            foldName(file.path)));
+                        for (const entry of batch)
                         {
-                            throw fsError(ErrorCode.SHARING_VIOLATION,
-                                `"${entry.path}" is open; the batch was not applied`);
+                            const { components, drive } = locate(entry.path);
+                            if (open.has(foldName(formatPath(drive, components))))
+                            {
+                                throw fsError(ErrorCode.SHARING_VIOLATION,
+                                    `"${entry.path}" is open; the batch was not applied`);
+                            }
                         }
-                    }
 
-                    for (const entry of batch)
-                    {
-                        const { tree, components } = locate(entry.path);
-                        if (entry.delete)
+                        for (const entry of batch)
                         {
+                            const { tree, components } = locate(entry.path);
+                            if (entry.delete)
+                            {
+                                if (tree.stat(components))
+                                {
+                                    tree.removeFile(components);
+                                }
+                                continue;
+                            }
+
+                            // The parent may not exist yet: what arrives from outside
+                            // carries its own shape, and a save lives in a directory
+                            // the program has not created yet on a fresh install.
+                            for (let depth = 1; depth < components.length; depth++)
+                            {
+                                const parent = components.slice(0, depth);
+                                if (!tree.stat(parent))
+                                {
+                                    tree.createDirectory(parent);
+                                }
+                            }
                             if (tree.stat(components))
                             {
-                                tree.removeFile(components);
+                                tree.truncate(components, 0);
                             }
+                            else
+                            {
+                                tree.createFile(components);
+                            }
+                            tree.write(components, 0, entry.bytes ?? new Uint8Array(0));
+                        }
+                        return batch.length;
+                    }
+                    finally
+                    {
+                        quiet = false;
+                    }
+                },
+
+                /** Moves with every change to a writable file; `changesSince` takes it. */
+                generation: ()=>generation,
+
+                /**
+                 * The files changed after `mark`, as they stand now: the bytes of
+                 * one that exists, a deletion for one that does not.
+                 *
+                 * @param {number} mark  A `generation` read earlier.
+                 * @returns {{ path: string, bytes?: Uint8Array, delete?: boolean }[]}
+                 */
+                changesSince(mark){
+                    /** @type {{ path: string, bytes?: Uint8Array, delete?: boolean }[]} */
+                    const out = [];
+                    if (!live())
+                    {
+                        return out;
+                    }
+                    for (const entry of touched.values())
+                    {
+                        if (entry.generation <= mark)
+                        {
                             continue;
                         }
-
-                        // The parent may not exist yet: what arrives from outside
-                        // carries its own shape, and a save lives in a directory
-                        // the program has not created yet on a fresh install.
-                        for (let depth = 1; depth < components.length; depth++)
-                        {
-                            const parent = components.slice(0, depth);
-                            if (!tree.stat(parent))
-                            {
-                                tree.createDirectory(parent);
-                            }
-                        }
-                        if (tree.stat(components))
-                        {
-                            tree.truncate(components, 0);
-                        }
-                        else
-                        {
-                            tree.createFile(components);
-                        }
-                        tree.write(components, 0, entry.bytes ?? new Uint8Array(0));
+                        const tree = state.drives.get(entry.key);
+                        const components = splitComponents(entry.path);
+                        const path = formatPath(entry.key, components);
+                        const found = tree?.stat(components);
+                        out.push(!tree || !found || found.directory
+                            ? { path, delete: true }
+                            : { path, bytes: tree.read(components, 0, found.size) });
                     }
-                    return batch.length;
+                    return out;
                 },
 
                 /**
