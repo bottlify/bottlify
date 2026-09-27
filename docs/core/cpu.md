@@ -777,7 +777,14 @@ become a function of the state with their operands resolved, and an x87 instruct
 straight to the x87 model; the rest runs through `evaluate`. `blockState` keeps the fields a
 step touches on the state object itself and its accessors on a prototype -- one literal holding
 both put the object in V8's dictionary mode, and every `state.retired++` was a hash lookup (a
-load/add/store loop 250 -> 20 ns an instruction, x87 370 -> 56). An access within one page tests
+load/add/store loop 250 -> 20 ns an instruction, x87 370 -> 56). The state and its memory are
+instances of two classes (`BlockState`, `BlockMemory` in `interp.js`), one shape of each for every
+machine a process makes: made as an object over a prototype of accessors built per machine, each
+machine's state had a shape of its own, and the steps -- one set of functions for every machine --
+read it through as many shapes as there had been machines, polymorphic from the second and
+megamorphic from the fifth: a loop of five instructions on the JavaScript interpreter alone in
+six machines one after another in one process went 555, 514, 513, 547, 516, 537 -> 513, 452, 365,
+387, 386, 389 ns a turn (median of five processes). An access within one page tests
 that page's flag once, and a store to a page that is neither inaccessible nor translated code
 does nothing more; an access that crosses a page is judged by both. An `xadd` into memory writes
 its sum where the destination was before the source register changed (`xadd [ebx], bh` moves

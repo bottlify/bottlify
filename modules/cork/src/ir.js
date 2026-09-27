@@ -1277,9 +1277,8 @@ function stringInstruction(op, instruction, state, read, write, setFlags, addres
         }
         if (bulk)
         {
-            const moved = /** @type {NonNullable<Memory['repeat']>} */ (state.memory.repeat)(
-                op === 'movs', state.reg[7], state.reg[6], size, state.reg[1],
-                op === 'stos' ? read(operands[1]) : 0);
+            const moved = state.memory.repeat?.(op === 'movs', state.reg[7], state.reg[6], size,
+                state.reg[1], op === 'stos' ? read(operands[1]) : 0) ?? 0;
             if (moved > 0)
             {
                 advance(7, moved * size);
