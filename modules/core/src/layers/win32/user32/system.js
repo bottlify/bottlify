@@ -351,6 +351,7 @@ const GCL_HICONSM = -34;
 /** The style bit EnableWindow sets, and the only one it touches. */
 const WS_DISABLED = 0x08000000;
 const WS_MINIMIZE = 0x20000000;
+const WS_POPUP = 0x80000000;
 
 /** A class or window name is at most this long. */
 const MAX_NAME = 256;
@@ -795,6 +796,25 @@ export function createSystemFunctions({ host, live, windows, classes }){
 
     /** Windows in creation order, which is the only order this build has. */
     const ordered = ()=>[...windows.values()].filter(record=>!record.destroyed);
+
+    /**
+     * What GetParent answers for a window: its owner when it is a popup, its
+     * parent when it is a child -- the desktop for a child of the desktop --
+     * and nothing otherwise, by the style it has now.
+     *
+     * @param {any} record
+     */
+    const parentOf = record=>{
+        if ((record.style & WS_POPUP) !== 0)
+        {
+            return record.owner ?? 0;
+        }
+        if ((record.style & WS_CHILD) !== 0 && !host.isDesktop(record))
+        {
+            return record.parent !== 0 ? record.parent : host.desktop().hwnd;
+        }
+        return 0;
+    };
 
     /**
      * The bytes of a terminated string, terminator excluded, read a piece at
@@ -1894,20 +1914,35 @@ export function createSystemFunctions({ host, live, windows, classes }){
             },
         },
 
-        /** HWND GetParent(HWND hWnd) */
+        /**
+         * HWND GetParent(HWND hWnd)
+         *
+         * The owner of a popup, the parent of a child -- the desktop for a
+         * child of the desktop -- and nothing for any other window, by the
+         * style the window has now.
+         */
         GetParent: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>live(hwnd)?.parent ?? 0,
+            handler: ([hwnd])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                return parentOf(record);
+            },
         },
 
         /**
          * HWND GetAncestor(HWND hwnd, UINT gaFlags)
          *
-         * GA_PARENT is the parent alone -- the desktop for a window that is
-         * no child, where GetParent names the owner; GA_ROOT is where the
-         * chain of child windows ends; GA_ROOTOWNER goes on from there
-         * through each owner and its root. The desktop has no ancestor.
+         * GA_PARENT is the parent alone -- the desktop for a window on it,
+         * where GetParent may name the owner; GA_ROOT is the window whose
+         * parent is the desktop, whatever the styles on the way; GA_ROOTOWNER
+         * follows GetParent from the window until it answers nothing. The
+         * desktop has no ancestor.
          */
         GetAncestor: {
             argBytes: 8,
@@ -1921,7 +1956,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 /** @param {any} from */
                 const rootOf = from=>{
                     let at = from;
-                    for (let depth = 0; host.isChild(at) && live(at.parent) && depth < 256; depth++)
+                    for (let depth = 0; live(at.parent) && depth < 256; depth++)
                     {
                         at = live(at.parent);
                     }
@@ -1929,16 +1964,16 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 };
                 switch (flags >>> 0){
                     case GA_PARENT:
-                        return host.isChild(record) ? record.parent : host.desktop().hwnd;
+                        return live(record.parent)?.hwnd ?? host.desktop().hwnd;
                     case GA_ROOT:
                         return rootOf(record).hwnd;
                     case GA_ROOTOWNER: {
-                        let at = rootOf(record);
+                        let at = record;
                         const seen = new Set([at]);
-                        for (let owner = live(at.parent); owner && !seen.has(rootOf(owner));
-                            owner = live(at.parent))
+                        for (let next = live(parentOf(at)); next && !seen.has(next);
+                            next = live(parentOf(at)))
                         {
-                            at = rootOf(owner);
+                            at = next;
                             seen.add(at);
                         }
                         return at.hwnd;
@@ -1972,18 +2007,42 @@ export function createSystemFunctions({ host, live, windows, classes }){
             },
         },
 
-        /** HWND SetParent(HWND hWndChild, HWND hWndNewParent) */
+        /**
+         * HWND SetParent(HWND hWndChild, HWND hWndNewParent)
+         *
+         * Moves a window inside another, or onto the desktop for none, and
+         * answers the parent it had -- the desktop for a window on it. A
+         * window cannot go inside itself or anything inside it, which is
+         * refused with ERROR_INVALID_PARAMETER and changes nothing.
+         */
         SetParent: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([child, parent])=>{
                 const record = live(child);
-                if (!record)
+                const desktop = host.desktop();
+                if (!record || record === desktop)
                 {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                     return 0;
                 }
-                const previous = record.parent;
-                record.parent = parent >>> 0;
+                const target = (parent >>> 0) === desktop.hwnd ? 0 : parent >>> 0;
+                const inside = target === 0 ? null : live(target);
+                if (target !== 0 && !inside)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                for (let at = inside, depth = 0; at && depth < 256; at = live(at.parent), depth++)
+                {
+                    if (at === record)
+                    {
+                        host.setLastError?.(ERROR_INVALID_PARAMETER);
+                        return 0;
+                    }
+                }
+                const previous = record.parent !== 0 ? record.parent : desktop.hwnd;
+                record.parent = target;
                 return previous;
             },
         },
@@ -2028,8 +2087,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
                         return ordered().find(other=>other.parent === record.hwnd
                             && host.isChild(other))?.hwnd ?? 0;
                     case GW_OWNER:
-                        // A child has a parent, not an owner.
-                        return child ? 0 : record.parent;
+                        return record.owner ?? 0;
                     default:
                         return 0;
                 }

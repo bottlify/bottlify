@@ -461,6 +461,12 @@ test('GetAncestor walks parents and owners as GA_PARENT, GA_ROOT and GA_ROOTOWNE
     {
         assert.equal(fns.IsChild.handler([over, under]), answer, `IsChild(${over}, ${under})`);
     }
+    // A popup sits on the desktop whatever window it was made over; placed
+    // inside one, it is a child of it once its style says so.
+    fns.SetParent.handler([child4, child3]);
+    fns.SetParent.handler([child3, child2]);
+    fns.SetParent.handler([child2, child1]);
+    assert.equal(fns.IsChild.handler([child3, child4]), 0);
     fns.SetWindowLongA.handler([child4, GWL_STYLE, WS_CHILD]);
     assert.equal(fns.IsChild.handler([child3, child4]), 1);
     assert.equal(fns.IsChild.handler([child2, child4]), 1);
@@ -468,6 +474,53 @@ test('GetAncestor walks parents and owners as GA_PARENT, GA_ROOT and GA_ROOTOWNE
     fns.SetWindowLongA.handler([child2, GWL_STYLE, WS_CHILD]);
     assert.equal(fns.IsChild.handler([child1, child4]), 1);
     assert.equal(fns.IsChild.handler([parent, child4]), 1);
+});
+
+test('a window made over a child is owned by that child\'s top-level window, and SetParent '
+    + 'refuses a window inside itself', ()=>{
+    // check_parents in user32's window tests: the owner of a popup made with a
+    // child window as its hWndParent is the child's top-level window, which
+    // is what GWL_HWNDPARENT, GetParent and GW_OWNER all report; SetParent
+    // into the window itself or one of its descendants fails, and answers
+    // the desktop as the previous parent of a window that was no child.
+    const GWL_HWNDPARENT = -8;
+    const GW_OWNER = 4;
+    const WS_CHILD = 0x40000000;
+    const WS_POPUP = 0x80000000;
+    const ERROR_INVALID_PARAMETER = 87;
+    const ERROR_TLW_WITH_WSCHILD = 1406;
+    const { memory, fns, errors } = setup();
+    const desktop = fns.GetDesktopWindow.handler([]);
+    const parent = makeWindow(memory, fns);
+    /** @param {number} style @param {number} over */
+    const make = (style, over)=>fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, style,
+        0, 0, 50, 50, over, 0, HINSTANCE, 0]);
+    const child1 = make(WS_CHILD, parent);
+    const child2 = make(WS_POPUP, child1);
+    const child3 = make(WS_CHILD, child2);
+    /** @param {number} hwnd */
+    const parents = hwnd=>[fns.GetWindowLongA.handler([hwnd, GWL_HWNDPARENT]),
+        fns.GetParent.handler([hwnd]), fns.GetWindow.handler([hwnd, GW_OWNER])];
+    assert.deepEqual(parents(parent), [0, 0, 0]);
+    assert.deepEqual(parents(child1), [parent, parent, 0]);
+    assert.deepEqual(parents(child2), [parent, parent, parent], 'owned by child1\'s top level');
+    assert.deepEqual(parents(child3), [child2, child2, 0]);
+    assert.equal(make(WS_CHILD, 0), 0, 'a child needs a parent');
+    assert.equal(errors.at(-1), ERROR_TLW_WITH_WSCHILD);
+
+    assert.equal(fns.SetParent.handler([parent, child1]), 0, 'not into its own child');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(fns.SetParent.handler([child2, child3]), 0);
+    assert.equal(fns.SetParent.handler([child3, child3]), 0, 'nor into itself');
+    assert.deepEqual(parents(child3), [child2, child2, 0], 'and a refusal changes nothing');
+    assert.equal(fns.SetParent.handler([child1, parent]), parent);
+    assert.equal(fns.SetParent.handler([child3, 0]), child2);
+    const popup = make(WS_POPUP, 0);
+    assert.equal(fns.SetParent.handler([popup, child1]), desktop,
+        'a window that was no child had the desktop for its parent');
+    assert.deepEqual([1, 2, 3].map(flags=>fns.GetAncestor.handler([popup, flags])),
+        [child1, parent, popup], 'inside child1, rooted in its window, owned by nobody');
+    assert.equal(fns.DestroyWindow.handler([parent]), 1);
 });
 
 // --- painting ---

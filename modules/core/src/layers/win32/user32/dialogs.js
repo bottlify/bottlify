@@ -917,7 +917,7 @@ export function createDialogFunctions(options){
         // The owner is disabled for as long as the dialog is up, as Windows
         // disables it: a program asking IsWindowEnabled of its own frame
         // meanwhile is told no, and a click on the frame reaches nothing.
-        const owner = (record.style & WS_CHILD) === 0 ? live(record.parent) : null;
+        const owner = (record.style & WS_CHILD) === 0 ? live(record.owner ?? 0) : null;
         const ownerWasEnabled = owner !== null && (owner.style & WS_DISABLED) === 0;
         if (ownerWasEnabled)
         {

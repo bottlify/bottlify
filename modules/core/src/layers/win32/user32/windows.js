@@ -298,6 +298,9 @@ const INFINITE = 0xffffffff;
  */
 const POLLED_KINDS = new Set(['event', 'semaphore', 'timer']);
 
+/** The parent a message-only window is made with. */
+const HWND_MESSAGE = 0xfffffffd;
+
 /** PeekMessage takes this where a window goes to mean "thread messages only". */
 const HWND_THREAD_MESSAGES = 0xffffffff;
 
@@ -305,6 +308,7 @@ const HWND_THREAD_MESSAGES = 0xffffffff;
 const ERROR_INVALID_THREAD_ID = 1444;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_WINDOW_HANDLE = 1400;
+const ERROR_TLW_WITH_WSCHILD = 1406;
 
 /**
  * InSendMessageEx's answer: how the message being handled was sent from
@@ -852,7 +856,7 @@ export function createWindowFunctions(host){
      */
     const sendAcross = (hwnd, message, wParam, lParam, thread, unicode = false, how = {})=>{
         const record = live(hwnd);
-        const owner = record ? ownerOf(record) : null;
+        const owner = record ? creatorOf(record) : null;
         const self = threadIdOf(thread);
         if (!record || owner === null || self === null || owner === self)
         {
@@ -1031,7 +1035,7 @@ export function createWindowFunctions(host){
         {
             desktop = {
                 hwnd: 0, className: '#32769', title: '', style: DESKTOP_STYLE, exStyle: 0,
-                parent: 0, instance: 0, id: 0, wndProc: 0, menu: 0, x: 0, y: 0,
+                parent: 0, owner: 0, instance: 0, id: 0, wndProc: 0, menu: 0, x: 0, y: 0,
                 width: 0, height: 0, userData: 0, extra: new DataView(new ArrayBuffer(0)),
                 destroyed: false, updateRect: null, erase: false, ncDirty: false,
             };
@@ -1072,7 +1076,7 @@ export function createWindowFunctions(host){
      * @param {any} record
      * @returns {number | null}
      */
-    const ownerOf = record=>threadIdOf(record.thread);
+    const creatorOf = record=>threadIdOf(record.thread);
 
     /**
      * Takes down a window whose thread has ended, as Windows destroys a
@@ -1112,17 +1116,16 @@ export function createWindowFunctions(host){
 
     /**
      * The top-level window at the end of a window's owner chain: the one whose
-     * popups GetLastActivePopup answers about. An owner is kept where a
-     * child keeps its parent, and a chain a program looped with SetParent
-     * ends where it comes round.
+     * popups GetLastActivePopup answers about. A chain a program looped with
+     * SetWindowLong ends where it comes round.
      *
      * @param {any} record
      */
     const rootOwnerOf = record=>{
         let at = topLevelOf(record);
         const seen = new Set([at]);
-        for (let owner = live(at.parent); owner && !seen.has(topLevelOf(owner));
-            owner = live(at.parent))
+        for (let owner = live(at.owner ?? 0); owner && !seen.has(topLevelOf(owner));
+            owner = live(at.owner ?? 0))
         {
             at = topLevelOf(owner);
             seen.add(at);
@@ -1525,8 +1528,10 @@ export function createWindowFunctions(host){
             ? send(record.hwnd, message, 0, 0, on)
             : 0);
         return andThen(tell(WM_DESTROY), ()=>{
-            const children = [...windows.values()]
-                .filter(child=>child.parent === record.hwnd && !child.destroyed);
+            // Its children and the windows it owns go with it.
+            const children = [...windows.values()].filter(child=>child !== record
+                && !child.destroyed
+                && (child.parent === record.hwnd || child.owner === record.hwnd));
             /** @param {number} index @returns {number | Promise<number>} */
             const destroyChildren = index=>(index < children.length
                 ? andThen(destroyWindow(children[index].hwnd, on, told),
@@ -1594,7 +1599,8 @@ export function createWindowFunctions(host){
             case GWL_HINSTANCE:
                 return record.instance;
             case GWL_HWNDPARENT:
-                return record.parent;
+                // The parent, or for a window on the desktop its owner.
+                return record.parent !== 0 ? record.parent : record.owner ?? 0;
             case GWL_ID:
                 return record.id;
             case GWL_STYLE:
@@ -1624,7 +1630,16 @@ export function createWindowFunctions(host){
                 record.unicode = unicode;
                 return;
             case GWL_HWNDPARENT:
-                record.parent = value >>> 0;
+                // A window on the desktop is given an owner this way; any
+                // other is moved to another parent.
+                if (record.parent === 0)
+                {
+                    record.owner = value >>> 0;
+                }
+                else
+                {
+                    record.parent = value >>> 0;
+                }
                 return;
             case GWL_ID:
                 record.id = value >>> 0;
@@ -1818,6 +1833,21 @@ export function createWindowFunctions(host){
             thread: host.callerThread?.() ?? null,
             ...fields,
         };
+        // hWndParent names the parent of a child window and the owner of any
+        // other, which sits on the desktop: the top-level window of what it
+        // names, since only a top-level window owns another. A message-only
+        // window keeps the parent that makes it one.
+        if (record.owner === undefined)
+        {
+            record.owner = 0;
+            if ((record.style & (WS_CHILD | WS_POPUP)) !== WS_CHILD && record.parent !== 0
+                && record.parent !== HWND_MESSAGE)
+            {
+                const named = windows.get(record.parent);
+                record.owner = named && !named.destroyed ? topLevelOf(named).hwnd : 0;
+                record.parent = 0;
+            }
+        }
         // A system class supplies the procedure and the name a program reads
         // back: `#128` in a template is the Button class.
         const system = systemClasses.has(String(record.className).toLowerCase())
@@ -1870,6 +1900,12 @@ export function createWindowFunctions(host){
         const cls = classOf(className, unicode);
         if (!cls)
         {
+            return 0;
+        }
+        // A child needs something to be inside.
+        if ((style & (WS_CHILD | WS_POPUP)) === WS_CHILD && (parent >>> 0) === 0)
+        {
+            host.setLastError?.(ERROR_TLW_WITH_WSCHILD);
             return 0;
         }
         const record = makeWindow({
@@ -2109,7 +2145,7 @@ export function createWindowFunctions(host){
         {
             return;
         }
-        host.queue.dirtied?.(ownerOf(record));
+        host.queue.dirtied?.(creatorOf(record));
         const origin = geometry.clientRect(record);
         const dirty = {
             left: origin.left + record.updateRect.left,
@@ -3340,7 +3376,7 @@ export function createWindowFunctions(host){
 
     host.queue.ownersFrom?.(hwnd=>{
         const record = live(hwnd);
-        return record ? ownerOf(record) : null;
+        return record ? creatorOf(record) : null;
     });
 
     host.queue.paintsFrom?.(filter=>{
@@ -3349,7 +3385,7 @@ export function createWindowFunctions(host){
         {
             if (record.updateRect && shown(record)
                 && (filter.hwnd === ANY_WINDOW || filter.hwnd === record.hwnd)
-                && (asking === null || ownerOf(record) === null || ownerOf(record) === asking))
+                && (asking === null || creatorOf(record) === null || creatorOf(record) === asking))
             {
                 return record.hwnd;
             }
@@ -3424,7 +3460,8 @@ export function createWindowFunctions(host){
                 visible: (record.style & WS_VISIBLE) !== 0,
                 className: record.className,
                 title: record.title,
-                parent: record.parent ? `0x${record.parent.toString(16)}` : null,
+                parent: record.parent || record.owner
+                    ? `0x${(record.parent || record.owner).toString(16)}` : null,
                 // Inside its parent, as against owned by it: a top-level
                 // window with an owner is still over everything below it.
                 child: isChild(record),
@@ -3615,7 +3652,7 @@ export function createWindowFunctions(host){
             return 0;
         }
         const thread = host.callerThread?.();
-        const owner = ownerOf(record);
+        const owner = creatorOf(record);
         const self = threadIdOf(thread);
         if (owner !== null && self !== null && owner !== self)
         {
@@ -3753,7 +3790,7 @@ export function createWindowFunctions(host){
                  * @param {any} record
                  */
                 lastActivePopup: record=>{
-                    if (isChild(record) || live(record.parent))
+                    if (isChild(record) || live(record.owner ?? 0))
                     {
                         return record.hwnd;
                     }
