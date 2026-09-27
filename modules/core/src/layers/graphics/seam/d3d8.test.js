@@ -515,7 +515,8 @@ test('GetDirect3D answers the object the device was made through', ()=>{
     assert.equal(h.device(device, 'GetDirect3D', [out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), root,
         'the same object, so the same pointer -- a program compares these');
-    assert.equal(h.roots[0].refCount, 2, 'and the call took the reference it owes');
+    assert.equal(h.roots[0].refCount, 3,
+        'the device holds one on it, and the call took the reference it owes');
     assert.equal(h.device(device, 'GetDirect3D', [0]), D3DERR_INVALIDCALL);
 
     assert.equal(h.release(device), 0);

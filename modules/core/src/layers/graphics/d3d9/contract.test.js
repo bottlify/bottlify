@@ -114,7 +114,9 @@ test('a device remembers what it was made with and who made it', ()=>{
     const parent = {};
     assert.equal(device.GetDirect3D(parent), D3D_OK);
     assert.equal(parent.direct3D, d3d, 'the same object, with a reference taken');
-    assert.equal(d3d.refCount, 2);
+    // Its own, the one the device holds on it, and the one the call took
+    // (Wine's d3d9 test_refcount).
+    assert.equal(d3d.refCount, 3);
     d3d.release();
     assert.equal(device.GetNumberOfSwapChains(), 1);
     assert.ok(device.GetAvailableTextureMem() > 0);
@@ -123,6 +125,7 @@ test('a device remembers what it was made with and who made it', ()=>{
     assert.equal(device.SetSoftwareVertexProcessing(true), D3DERR_INVALIDCALL,
         'only a mixed device may switch');
     assert.equal(device.release(), 0);
+    assert.equal(d3d.refCount, 1, 'a device gone gives back the reference it held');
 });
 
 test('a mixed device switches vertex processing, and a pure software one is what it is', ()=>{

@@ -488,6 +488,11 @@ export function createDirect3D8(options = {}){
             {
                 return hr;
             }
+            // A device holds a reference on the object that made it, which it
+            // gives back when it goes: a program may release that object at
+            // once and still reach it through GetDirect3D (Wine's d3d8 and
+            // d3d9 test_refcount).
+            root.addRef();
             out.device = createDeviceObject(
                 normalisePresentParameters(parameters), resolved, behaviourFlags, services, {
                     direct3D: root,
@@ -1381,11 +1386,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
         addRef: ()=>count.addRef(),
         release: ()=>{
+            const before = count.value;
             const left = count.release();
-            if (left === 0)
+            if (left === 0 && before > 0)
             {
                 stopWatchingLoss?.();
                 showGamma(true);
+                // The reference CreateDevice took on the object that made it.
+                identity?.direct3D?.release?.();
             }
             return left;
         },
