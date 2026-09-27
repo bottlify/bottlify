@@ -757,6 +757,26 @@ test('nothing to patch is not a patch of nothing', ()=>{
     assert.deepEqual(placePatches([], 0x400000, 0x2000), { applied: [], refused: [] });
 });
 
+/**
+ * Runs `body` as a browser would see the globals: no `setImmediate`, which
+ * Node has and no browser does, so the yield takes the path a page and a
+ * worker take.
+ *
+ * @param {() => Promise<void>} body
+ */
+async function withoutImmediate(body){
+    const immediate = globalThis.setImmediate;
+    globalThis.setImmediate = /** @type {any} */ (undefined);
+    try
+    {
+        await body();
+    }
+    finally
+    {
+        globalThis.setImmediate = immediate;
+    }
+}
+
 test('the loop yields through a channel rather than a clamped timer', async()=>{
     // A browser clamps a zero timeout to four milliseconds, and to more once
     // they nest. Measured at eight milliseconds a yield and fifteen seconds in
@@ -772,11 +792,16 @@ test('the loop yields through a channel rather than a clamped timer', async()=>{
     });
     try
     {
-        const breathe = createMacrotask();
-        await breathe();
-        await breathe();
-        assert.deepEqual(timers, [], 'no timer was involved');
-        breathe.close();
+        for (const host of [(/** @type {() => Promise<void>} */ body)=>body(), withoutImmediate])
+        {
+            await host(async()=>{
+                const breathe = createMacrotask();
+                await breathe();
+                await breathe();
+                breathe.close();
+            });
+        }
+        assert.deepEqual(timers, [], 'no timer was involved, with an immediate or without');
     }
     finally
     {
@@ -784,7 +809,38 @@ test('the loop yields through a channel rather than a clamped timer', async()=>{
     }
 });
 
-test('a yield still works where there is no channel to use', async()=>{
+test('a host timer comes due between two yields, not a thousand turns later', async()=>{
+    // Node hands a port's messages over at least a thousand at a time, running
+    // the microtasks after each, so a loop yielding through a port runs a
+    // thousand turns before a timer, a file read, a worker's message or the
+    // engine's own compiled code gets a turn. Where the host has setImmediate
+    // the yield is one, and every one goes round the event loop.
+    const breathe = createMacrotask();
+    // Once before the timer is set: the first yield of a process pays for
+    // whatever the host loads to make it, tens of milliseconds, which would
+    // let the timer come due before the loop starts.
+    await breathe();
+    const timer = { fired: false };
+    setTimeout(()=>{
+        timer.fired = true;
+    }, 5);
+    let turns = 0;
+    while (!timer.fired && turns < 5000)
+    {
+        const turn = performance.now();
+        while (performance.now() - turn < 0.1)
+        {
+            // A turn of guest work.
+        }
+        await breathe();
+        turns++;
+    }
+    breathe.close();
+    assert.ok(timer.fired, 'the timer fired while the loop ran');
+    assert.ok(turns < 200, `a 5 ms timer waited ${turns} turns of 0.1 ms`);
+});
+
+test('a yield still works where there is neither an immediate nor a channel', async()=>{
     // The fallback is not decoration: this file runs in a worker, in a page and
     // under a test runner, and a yield that threw in one of them would stop the
     // machine rather than slow it.
@@ -792,9 +848,11 @@ test('a yield still works where there is no channel to use', async()=>{
     globalThis.MessageChannel = /** @type {any} */ (undefined);
     try
     {
-        const breathe = createMacrotask();
-        await breathe();
-        breathe.close();
+        await withoutImmediate(async()=>{
+            const breathe = createMacrotask();
+            await breathe();
+            breathe.close();
+        });
     }
     finally
     {
@@ -815,12 +873,14 @@ test('one channel serves every yield, not one channel per yield', async()=>{
     });
     try
     {
-        const breathe = createMacrotask();
-        await breathe();
-        await breathe();
-        await breathe();
-        assert.equal(opened, 1);
-        breathe.close();
+        await withoutImmediate(async()=>{
+            const breathe = createMacrotask();
+            await breathe();
+            await breathe();
+            await breathe();
+            assert.equal(opened, 1);
+            breathe.close();
+        });
     }
     finally
     {
@@ -831,10 +891,15 @@ test('one channel serves every yield, not one channel per yield', async()=>{
 test('closing a yield answers whoever was still waiting on it', async()=>{
     // A close that only drops the ports leaves the run loop awaiting a message
     // that can no longer arrive, which is a hang rather than a shutdown.
-    const breathe = createMacrotask();
-    const pending = breathe();
-    breathe.close();
-    await pending;
+    for (const host of [(/** @type {() => Promise<void>} */ body)=>body(), withoutImmediate])
+    {
+        await host(async()=>{
+            const breathe = createMacrotask();
+            const pending = breathe();
+            breathe.close();
+            await pending;
+        });
+    }
 });
 
 /** A machine with nothing outstanding at all. @param {any} [changed] */

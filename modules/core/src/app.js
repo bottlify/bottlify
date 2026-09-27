@@ -725,12 +725,28 @@ export function createMissingImports({ register, events, journal, classify, faul
 /**
  * A yield to the macrotask queue, so everything the host has queued gets a turn.
  *
- * Through a message channel rather than a timer, and the difference is not
- * small: a browser clamps a zero timeout to four milliseconds and more once
- * they nest, so a loop yielding that way pays the clamp every time -- measured
- * at eight milliseconds a yield and fifteen seconds in one run, larger than the
- * emulation it was interrupting. A channel message is delivered on the same
- * macrotask turn without the clamp.
+ * Everything means the host's timers too, which is why Node yields through
+ * `setImmediate` and not through a port. Node hands a port's messages over at
+ * least a thousand at a time in one pass of its event loop, running the
+ * microtasks after each, and a loop that posts its next yield from those
+ * microtasks stays inside the pass: a thousand turns go by before a timer
+ * fires, a file read or a fetch answers, another port -- a worker's --
+ * delivers a message, or a module the emulator compiled for a hot page is
+ * installed, so the emulator interprets. Measured: a loop of half-millisecond
+ * turns yielding through a port saw a 3 ms interval fire three times in two
+ * seconds, and through an immediate six hundred and sixty times. An immediate
+ * set from inside an immediate runs on the next pass, and every pass looks at
+ * the timers and polls for I/O.
+ *
+ * Elsewhere through a message channel rather than a timer, and the difference
+ * is not small: a browser clamps a zero timeout to four milliseconds and more
+ * once they nest, so a loop yielding that way pays the clamp every time --
+ * measured at eight milliseconds a yield and fifteen seconds in one run, larger
+ * than the emulation it was interrupting. A channel message is delivered on
+ * the same macrotask turn without the clamp, and a browser schedules it beside
+ * its timers rather than ahead of them: in Chromium, on a page and in a
+ * worker, a 3 ms timer came at most 9 ms late with 4 ms of work between two
+ * yields, and about 3 ms late with half a millisecond.
  *
  * A timer is still the fallback, because this file has to run in a worker, in a
  * page and under a test runner, and not all of them have a channel.
@@ -743,6 +759,16 @@ export function createMissingImports({ register, events, journal, classify, faul
  * @returns {(() => Promise<void>) & { close: () => void }}
  */
 export function createMacrotask(){
+    if (typeof setImmediate === 'function')
+    {
+        // Nothing to close: an immediate holds the process open only until it
+        // runs, and whoever is mid-yield is answered when it does.
+        return Object.assign(
+            ()=>new Promise(resolve=>{
+                setImmediate(resolve);
+            }),
+            { close: ()=>{} });
+    }
     if (typeof MessageChannel !== 'function')
     {
         return Object.assign(

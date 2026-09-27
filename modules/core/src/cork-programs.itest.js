@@ -61,6 +61,10 @@ function buildLoopExe(iterations = ITERATIONS){
             0x81, 0xe7, ...u32(0xff),
             0x57,
             0xff, 0x15, ...u32(iat('ExitProcess')),
+            // Never reached. Without it the emulator's compiler takes the
+            // data after the call for code and compiles it and the zeros
+            // after it with the loop (cpu.md, Limitations).
+            0xf4, // hlt
         ],
     });
 }
@@ -282,6 +286,7 @@ function buildComputeExe(count = 2_000_000){
                 0x75, rel & 0xff, // jnz loop
                 0x53, // push ebx
                 0xff, 0x15, ...u32(iat('ExitProcess')),
+                0xf4, // hlt, never reached: as buildLoopExe's
                 ...new Array(20).fill(0x90),
             ];
         },

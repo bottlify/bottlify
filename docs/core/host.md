@@ -281,10 +281,30 @@ The controller does not carry the engine's `debug`, `post`, `guestProfile`, `mai
 
 The engine's run loop hands out scheduler turns and, between them, has to give the thread away
 somehow. `src/app.js` takes that policy as `RunPacing` (`{ yield(pending), wait(until) }`) and
-defaults to `pagePacing`: a yield through a `MessageChannel` macrotask, and, when nothing can run,
-a look again on a 4 ms timer (`IDLE_LOOK_MS`), or on a macrotask when the page is hidden because a
-browser clamps a hidden page's timers to about a second and that stops the machine rather than
+defaults to `pagePacing`: a yield to the macrotask queue (`createMacrotask`), and, when nothing can
+run, a look again on a 4 ms timer (`IDLE_LOOK_MS`), or on a macrotask when the page is hidden because
+a browser clamps a hidden page's timers to about a second and that stops the machine rather than
 slowing it.
+
+The macrotask is a `setImmediate` where the host has one (Node) and a `MessageChannel` message
+elsewhere, never a zero timeout, which a browser clamps to 4 ms. The split is about the host's own
+timers and I/O, which the yield exists to let through. Node delivers a port's messages at least a
+thousand at a time in one pass of its event loop, running the microtasks after each, so a loop
+yielding through a port stays inside the pass for a thousand turns: no timer fires, no file read or
+fetch answers, no worker's message arrives and the emulator's compiled code is not installed until
+the pass ends. An immediate set from inside an immediate runs on the next pass, and every pass runs
+the due timers and polls for I/O. Measured under Node with a program that only counts, a port
+before and an immediate after: a 5 ms timer set again each time it fired fired once in a 2 s run,
+when the run ended, under each of the four engines, against 217-337 times and at most 19-47 ms
+late; the emulator retired 102-107 M instructions in 2 s against 1.35-1.38 G, having run no
+compiled code at all before; and on Doom 3 over 60 s under cork with its translation worker,
+72.6-73.3 % of instructions ran translated against 96.5-97.2 %, and the program presented 100-107
+frames against 152-170. In Chromium a channel message is a task scheduled beside the timers rather
+than ahead of them: on a page and in a worker, running the same program under cork and under the
+emulator, a 5 ms timer came 3.2 ms late at the median and 5-30 ms at worst, alike before and
+after, since no browser has `setImmediate`. `src/host-timers.itest.js` holds Node to it under cork and under the emulator:
+over a second and a half of a program that only counts, a 5 ms timer fires again and again and
+never 250 ms late, file reads answer, and the emulator runs compiled code.
 
 The yield is by need and by time, never by turn (`pacedYield`). The loop leaves the microtask
 queue at once when the host may have something to deliver — a host call is suspended, a range is
