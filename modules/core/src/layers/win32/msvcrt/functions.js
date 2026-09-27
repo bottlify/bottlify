@@ -40,6 +40,7 @@ import { createThreadFunctions } from './threads.js';
 import { createGlobals, EINVAL, ERANGE } from './globals.js';
 import { createDescriptors, createIoFunctions } from './io.js';
 import { createEnvironment } from './environ.js';
+import { createMultiBytePage } from './mbcs.js';
 import { bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
@@ -742,6 +743,10 @@ export function createMsvcrtFunctions(host){
         }
     };
 
+    // The multibyte code page `_setmbcp` selects, which `_splitpath` reads
+    // by as the `_mbs*` family does.
+    const multiBytePage = createMultiBytePage();
+
     const narrow = {
         ...table,
         ...createStringFunctions({
@@ -764,6 +769,7 @@ export function createMsvcrtFunctions(host){
             errno,
             addressOf: host.addressOf,
             divergence: host.divergence,
+            page: multiBytePage,
         }),
         ...createWideClassificationFunctions(),
         ...createWideFunctions({
@@ -851,6 +857,7 @@ export function createMsvcrtFunctions(host){
                 files: host.files,
                 errno,
                 getenv: name=>environment?.value(name) ?? null,
+                isLead: byte=>multiBytePage.isLead(byte),
             })
             : {}),
         ...(descriptors

@@ -415,6 +415,8 @@ export function createWideClassificationFunctions(){
  *     is: `_mbctype` is rewritten there when the page changes. Absent, the
  *     table a program reads stays the one it was placed with.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {import('./mbcs.js').MultiBytePage} [page]
+ *     The code page, where the rest of the runtime reads by it too.
  */
 
 /**
@@ -430,7 +432,7 @@ export function createWideClassificationFunctions(){
  * @param {MultiByteFunctionsHost} host
  */
 export function createMultiByteFunctions(narrow, host){
-    const page = createMultiBytePage();
+    const page = host.page ?? createMultiBytePage();
     const handlers = createMultiByteHandlers(host, page);
 
     /** @type {Record<string, any>} */
