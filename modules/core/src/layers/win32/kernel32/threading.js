@@ -440,7 +440,7 @@ export function createThreadingFunctions(host){
         return handle;
     });
 
-    return {
+    const table = {
         /** HANDLE CreateThread(LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD) */
         CreateThread: {
             argBytes: 24,
@@ -1036,6 +1036,48 @@ export function createThreadingFunctions(host){
                     return 0;
                 }
             },
+        },
+    };
+
+    /**
+     * HANDLE CreateRemoteThread(HANDLE hProcess, LPSECURITY_ATTRIBUTES, SIZE_T,
+     *                           LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD)
+     * HANDLE CreateRemoteThreadEx(..., LPPROC_THREAD_ATTRIBUTE_LIST, LPDWORD)
+     *
+     * A thread in this process is CreateThread's; one in a child cannot be
+     * made, since a child runs only once this process has nothing left to do,
+     * and is refused with ERROR_NOT_SUPPORTED rather than answered with a
+     * thread that would never run where it was asked to.
+     *
+     * @param {number} process @param {number[]} rest  CreateThread's six arguments.
+     */
+    const remoteThread = (process, rest)=>{
+        const target = object(process >>> 0, 'process');
+        if (!target)
+        {
+            host.setLastError(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        if (!target.current)
+        {
+            host.setLastError(ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+        return table.CreateThread.handler(rest);
+    };
+
+    return {
+        ...table,
+        CreateRemoteThread: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([process, ...rest])=>remoteThread(process, rest),
+        },
+        CreateRemoteThreadEx: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([process, attributes, stack, start, parameter, flags, , threadId])=>
+                remoteThread(process, [attributes, stack, start, parameter, flags, threadId]),
         },
     };
 }

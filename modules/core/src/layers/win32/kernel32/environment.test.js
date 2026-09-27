@@ -249,6 +249,22 @@ test('a changed environment produces a new block rather than an edited one', ()=
     assert.equal(host.readAnsi(before), 'PATH=C:\\WINDOWS', 'the old block still reads');
 });
 
+test('GetEnvironmentVariableW reads a variable by a wide name into a wide buffer', ()=>{
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    const name = 'TEMP';
+    for (let at = 0; at <= name.length; at++)
+    {
+        host.bytes[0x200 + at * 2] = at < name.length ? name.charCodeAt(at) : 0;
+        host.bytes[0x201 + at * 2] = 0;
+    }
+    assert.equal(fns.GetEnvironmentVariableW.handler([0x200, 0x300, 2]), 8,
+        'too short: the size wanted, terminator included');
+    assert.equal(fns.GetEnvironmentVariableW.handler([0x200, 0x300, 0x40]), 7);
+    assert.equal(host.readWideString(0x300, 0x40), 'C:\\TEMP');
+    assert.notEqual(fns.GetEnvironmentStringsA.handler(), 0, 'the block under its A name too');
+});
+
 test('the startup record names its own size and nothing else', ()=>{
     // dwFlags of zero is how a program is told not to read the rest, so every
     // other field being zero is the answer rather than a placeholder.
@@ -262,6 +278,8 @@ test('the startup record names its own size and nothing else', ()=>{
     assert.equal(view.getUint32(0x300 + 44, true), 0, 'dwFlags');
     assert.deepEqual([...host.bytes.slice(0x304, 0x300 + STARTUPINFOA_SIZE)],
         new Array(STARTUPINFOA_SIZE - 4).fill(0));
+    assert.equal(fns.GetStartupInfoW, fns.GetStartupInfoA,
+        'the wide record is the same size, with no strings to give either');
 });
 
 test('the system directory is inside the windows one, as a program assumes', ()=>{
