@@ -121,3 +121,15 @@ twenty-five years, and this entry records that debt.
 
 What is not taken: no code, no test structure, no helper, no assertion text, no ordering. Every
 test in this repository is written independently, against this project's own conventions.
+
+## The Windows CD-ROM file system's behaviour -- used as a specification
+
+What a disc mounted as a drive answers (`modules/core/src/layers/filesystem/internal/iso/`,
+`modules/core/src/layers/win32/kernel32/drives.js` and `filetime.js`) is taken from how
+Windows' CD-ROM file system (CDFS) behaves: the Joliet descriptor read in preference to the primary
+one, the volume serial number as four byte-wise sums over the descriptor it mounted, every name
+reported read-only and the existence bit reported as hidden, the file system named `CDFS`.
+Microsoft publishes that file system's source as a Windows Driver Kit sample (Microsoft Public
+License); it is used as knowledge of the observable behaviour only, and no code from it is carried
+into this repository. The disc format itself is read from its public standards, ECMA-119 and the
+Joliet specification.

@@ -12,11 +12,13 @@
  * still there — and the other is to decide whether it is running from a CD, in
  * which case a whole different set of paths and a copy-protection check follow.
  *
- * So every drive here reports as a fixed disk, and there is exactly one of
- * them. Claiming a CD-ROM would send a program down a path that ends at a disc
- * nobody can put in; claiming a removable drive invites it to ask the user to
- * insert something. A fixed disk is both true of where the files actually are
- * and the answer with no branch behind it.
+ * So a drive reports as a fixed disk unless it is a disc. Claiming a CD-ROM
+ * for the machine's own volume would send a program down a path that ends at a
+ * disc nobody can put in; claiming a removable drive invites it to ask the user
+ * to insert something. A disc image mounted as a drive is the other case, and
+ * the true one: it is a CD-ROM, with the label, the serial number and the
+ * size the disc itself records, full, and read-only, which is what an
+ * installer started from one expects to find about where it was started.
  *
  * The free-space figures are invented, and they have to be: the bytes live in a
  * bundle that is read-only and a session that is not, so there is no single
@@ -28,11 +30,17 @@
 
 import { encodeAnsi } from './locale.js';
 
-/** What GetDriveType answers. Only two of the six are ever used here. */
+/** @param {string} text @returns {Uint8Array} UTF-16, as a wide string is written. */
+const encodeWide = text=>new Uint8Array(Uint16Array.from(text,
+    character=>character.charCodeAt(0)).buffer);
+
+/** What GetDriveType answers. Only three of the six are ever used here. */
 const DRIVE_NO_ROOT_DIR = 1;
 const DRIVE_FIXED = 3;
+const DRIVE_CDROM = 5;
 
 /** Codes this surface reports. */
+const ERROR_WRITE_PROTECT = 19;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_BUFFER_OVERFLOW = 111;
 
@@ -80,6 +88,21 @@ const FS_CASE_IS_PRESERVED = 0x00000002;
 const FS_UNICODE_STORED_ON_DISK = 0x00000004;
 const FILE_SYSTEM_FLAGS = FS_CASE_IS_PRESERVED | FS_UNICODE_STORED_ON_DISK;
 
+/**
+ * A disc, as the CD-ROM file system describes one: 2048-byte sectors, one to
+ * a cluster, nothing free. Its names are compared without regard to case but
+ * the flag says case-sensitive search is supported, the Joliet ones are
+ * stored in Unicode, and the volume is read-only. The longest name is the
+ * longest identifier a directory record holds, in characters.
+ */
+const DISC_SECTOR = 2048;
+const DISC_FILE_SYSTEM = 'CDFS';
+const FILE_CASE_SENSITIVE_SEARCH = 0x00000001;
+const FILE_UNICODE_ON_DISK = 0x00000004;
+const FILE_READ_ONLY_VOLUME = 0x00080000;
+const DISC_COMPONENT_LENGTH = 221;
+const DISC_UNICODE_COMPONENT_LENGTH = 110;
+
 /** What GetComputerName answers. NetBIOS names are at most 15 characters. */
 const COMPUTER_NAME = 'BOTTLIFY';
 
@@ -91,6 +114,9 @@ const COMPUTER_NAME = 'BOTTLIFY';
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
  * @property {() => string[]} [drives]  Letters the filesystem has mounted.
+ * @property {(letter: string) => { kind?: string, label?: string, serial?: number,
+ *     size?: number, unicode?: boolean, readOnly?: boolean } | null} [volume]
+ *     What a drive says of itself: a disc names its kind, `'cdrom'`, and what it records.
  */
 
 /**
@@ -142,15 +168,28 @@ export function createDriveFunctions(host){
         return letter !== null && letters().includes(letter);
     };
 
+    /** @param {string} path */
+    const volumeOf = path=>{
+        const letter = letterOf(path);
+        return letter === null ? null : host.volume?.(letter) ?? null;
+    };
+
+    /** @param {string} path */
+    const discAt = path=>{
+        const volume = volumeOf(path);
+        return volume?.kind === 'cdrom' ? volume : null;
+    };
+
     /**
      * The label of each volume, by letter, as a program set it; a volume
-     * nobody has labelled carries the machine's own.
+     * nobody has labelled carries the machine's own, and a disc its own.
      *
      * @type {Map<string, string>}
      */
     const labels = new Map();
     /** @param {string} path */
-    const labelOf = path=>labels.get(letterOf(path) ?? '') ?? VOLUME_LABEL;
+    const labelOf = path=>discAt(path)?.label
+        ?? labels.get(letterOf(path) ?? '') ?? VOLUME_LABEL;
 
     /**
      * Both forms of GetVolumeInformation, and both forms of GetDriveType, differ
@@ -160,7 +199,68 @@ export function createDriveFunctions(host){
      *
      * @param {string} path
      */
-    const driveType = path=>known(path) ? DRIVE_FIXED : DRIVE_NO_ROOT_DIR;
+    const driveType = path=>{
+        if (!known(path))
+        {
+            return DRIVE_NO_ROOT_DIR;
+        }
+        return discAt(path) ? DRIVE_CDROM : DRIVE_FIXED;
+    };
+
+    /**
+     * GetVolumeInformation in either width; only the text differs.
+     *
+     * @param {(address: number, maxLength: number) => string} readPath
+     * @param {(text: string) => Uint8Array} encode
+     */
+    const volumeInformation = (readPath, encode)=>({
+        argBytes: 32,
+        /** @param {number[]} args */
+        handler: args=>{
+            const [path, volumeName, volumeSize, serial,
+                componentLength, flags, systemName, systemSize] = args;
+            const root = path === 0 ? '' : readPath(path >>> 0, MAX_PATH);
+            if (!known(root))
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const disc = discAt(root);
+            const system = disc ? DISC_FILE_SYSTEM : FILE_SYSTEM;
+            if (volumeName !== 0)
+            {
+                const label = labelOf(root);
+                if (label.length + 1 > (volumeSize >>> 0))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                host.writeMemory(volumeName >>> 0, encode(label + '\0'));
+            }
+            if (systemName !== 0)
+            {
+                if (system.length + 1 > (systemSize >>> 0))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                host.writeMemory(systemName >>> 0, encode(system + '\0'));
+            }
+            if (disc)
+            {
+                writeDwordIf(serial >>> 0, (disc.serial ?? 0) >>> 0);
+                writeDwordIf(componentLength >>> 0, disc.unicode
+                    ? DISC_UNICODE_COMPONENT_LENGTH : DISC_COMPONENT_LENGTH);
+                writeDwordIf(flags >>> 0, FILE_CASE_SENSITIVE_SEARCH | FILE_READ_ONLY_VOLUME
+                    | (disc.unicode ? FILE_UNICODE_ON_DISK : 0));
+                return 1;
+            }
+            writeDwordIf(serial >>> 0, VOLUME_SERIAL);
+            writeDwordIf(componentLength >>> 0, MAX_COMPONENT_LENGTH);
+            writeDwordIf(flags >>> 0, FILE_SYSTEM_FLAGS);
+            return 1;
+        },
+    });
 
     /**
      * GetComputerName in either width: the name is ASCII, so the sizes are
@@ -265,6 +365,15 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
+                const disc = discAt(root);
+                if (disc)
+                {
+                    writeDwordIf(sectorsPerCluster >>> 0, 1);
+                    writeDwordIf(bytesPerSector >>> 0, DISC_SECTOR);
+                    writeDwordIf(freeClusters >>> 0, 0);
+                    writeDwordIf(totalClusters >>> 0, Math.ceil((disc.size ?? 0) / DISC_SECTOR));
+                    return 1;
+                }
                 writeDwordIf(sectorsPerCluster >>> 0, SECTORS_PER_CLUSTER);
                 writeDwordIf(bytesPerSector >>> 0, BYTES_PER_SECTOR);
                 writeDwordIf(freeClusters >>> 0, FREE_CLUSTERS);
@@ -300,9 +409,10 @@ export function createDriveFunctions(host){
                         writeDword(address + 4, Math.floor(value / 0x1_0000_0000));
                     }
                 };
-                writeQwordIf(available >>> 0, FREE_BYTES);
-                writeQwordIf(total >>> 0, VOLUME_BYTES);
-                writeQwordIf(free >>> 0, FREE_BYTES);
+                const disc = discAt(root);
+                writeQwordIf(available >>> 0, disc ? 0 : FREE_BYTES);
+                writeQwordIf(total >>> 0, disc ? disc.size ?? 0 : VOLUME_BYTES);
+                writeQwordIf(free >>> 0, disc ? 0 : FREE_BYTES);
                 return 1;
             },
         },
@@ -318,43 +428,12 @@ export function createDriveFunctions(host){
          * than a truncated name -- this is the one place in the file surface
          * where a size mismatch fails instead of reporting a size.
          */
-        GetVolumeInformationA: {
-            argBytes: 32,
-            /** @param {number[]} args */
-            handler: args=>{
-                const [path, volumeName, volumeSize, serial,
-                    componentLength, flags, systemName, systemSize] = args;
-                const root = path === 0 ? '' : host.readCString(path >>> 0, MAX_PATH);
-                if (!known(root))
-                {
-                    host.setLastError(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-                if (volumeName !== 0)
-                {
-                    const label = labelOf(root);
-                    if (label.length + 1 > (volumeSize >>> 0))
-                    {
-                        host.setLastError(ERROR_INVALID_PARAMETER);
-                        return 0;
-                    }
-                    host.writeMemory(volumeName >>> 0, encodeAnsi(label + '\0'));
-                }
-                if (systemName !== 0)
-                {
-                    if (FILE_SYSTEM.length + 1 > (systemSize >>> 0))
-                    {
-                        host.setLastError(ERROR_INVALID_PARAMETER);
-                        return 0;
-                    }
-                    host.writeMemory(systemName >>> 0, encodeAnsi(FILE_SYSTEM + '\0'));
-                }
-                writeDwordIf(serial >>> 0, VOLUME_SERIAL);
-                writeDwordIf(componentLength >>> 0, MAX_COMPONENT_LENGTH);
-                writeDwordIf(flags >>> 0, FILE_SYSTEM_FLAGS);
-                return 1;
-            },
-        },
+        GetVolumeInformationA: volumeInformation(
+            (address, length)=>host.readCString(address, length), encodeAnsi),
+
+        /** GetVolumeInformationW: the same answers, the names in UTF-16 and sized in characters. */
+        GetVolumeInformationW: volumeInformation(
+            (address, length)=>host.readWideString(address, length), encodeWide),
 
         /**
          * BOOL SetVolumeLabelA(LPCSTR lpRootPathName, LPCSTR lpVolumeName)
@@ -371,6 +450,11 @@ export function createDriveFunctions(host){
                 if (letter === null || !known(root))
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if (discAt(root))
+                {
+                    host.setLastError(ERROR_WRITE_PROTECT);
                     return 0;
                 }
                 labels.set(letter, name === 0 ? '' : host.readCString(name >>> 0, MAX_PATH));
@@ -391,7 +475,6 @@ export function createDriveFunctions(host){
         GetComputerNameA: computerName(encodeAnsi),
 
         /** BOOL GetComputerNameW(LPWSTR lpBuffer, LPDWORD nSize): the size in characters. */
-        GetComputerNameW: computerName(text=>new Uint8Array(Uint16Array.from(text,
-            character=>character.charCodeAt(0)).buffer)),
+        GetComputerNameW: computerName(encodeWide),
     };
 }

@@ -27,10 +27,12 @@
  * predicate -- is named here by what it is built from, and the worker builds
  * it: a bundle by its URL, a device from the worker's own `navigator.gpu`, a
  * seeded volume by its files, a watch by the libraries and ordinals it covers.
+ * A disc crosses as the `Blob` the person chose, which is cloned by reference
+ * rather than copied, and the worker reads it a range at a time.
  *
  * @typedef {Omit<import('../app.js').AppOptions,
  *     'executable' | 'v86' | 'device' | 'bundle' | 'storage' | 'watchImport'
- *     | 'sample' | 'onCall' | 'pageHidden' | 'pacing'> & {
+ *     | 'sample' | 'onCall' | 'pageHidden' | 'pacing' | 'discs'> & {
  *     executable: Uint8Array,
  *     v86: { moduleUrl: string, wasmBytes: ArrayBuffer },
  *     bundle?: { url: string, store?: string | null, id?: string, prefix?: string,
@@ -46,6 +48,7 @@
  *     pacing?: 'page' | 'event',
  *     network?: { module: string, url: string, room: string, token?: string },
  *     files?: { path: string, bytes: Uint8Array }[],
+ *     discs?: { image: Blob | Uint8Array, letter?: string }[],
  * }} StartOptions
  */
 

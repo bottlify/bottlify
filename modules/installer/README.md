@@ -2,8 +2,8 @@
 
 Adding a title by running its installer, in the browser.
 
-Press Add, choose a distribution, and its own wizard runs — real windows, real
-dialogs, clicked through by a person. When the program exits, what is left on the
+Press Add, choose a distribution -- an installer, or a disc image -- and its own
+wizard runs — real windows, real dialogs, clicked through by a person. When the program exits, what is left on the
 volume is the game, and this package turns that into a bottle.
 
 ```
@@ -40,6 +40,32 @@ The registry comes out beside the files and travels as one of them,
 `.bottlify\registry.json`, so an unpacked prefix describes itself and the packed
 form has nothing the unpacked form lacks. **The engine does not read it back on
 mount yet**; writing it is this side of that contract.
+
+## From a disc image
+
+A disc image (`.iso`, ISO 9660 with Joliet names; told apart by its contents,
+never its name: `isDiscImage`) is not unpacked and not seeded. `discOptions(media)`
+reads only as much of it as finding its program takes -- the descriptors, the
+directories, `autorun.inf` and that program -- and hands `createApp` the image
+itself under `discs`: the engine mounts it as D:, a CD-ROM, read-only, with the
+disc's label and serial number, and reads it a range at a time from the file the
+person chose.
+
+The program is the disc's own answer, the one AutoPlay reads: `open=` in the
+`[autorun]` section of `autorun.inf` at the root, a command line relative to the
+root, taken apart the way CreateProcess takes apart an unquoted one (the shortest
+run of words that names a file on the disc, `.exe` added to a bare name); then
+`shellexecute=` when it names a program rather than a document; then `setup.exe`
+at the root. It starts as `D:\<program>` with the arguments the disc gives it, and
+`entry` names another program on the disc instead. Anything it starts in turn --
+an autorun menu starting the setup -- runs on the same machine, with the disc still
+in its drive.
+
+Nothing of the disc is ever in what the install produced, so `collectFrom` has
+nothing to subtract. `discOptions(media, { silent: true })` reads the unattended
+mode off the program and the files beside it, as `silentOptions` does for an
+installer: the command line starts the program from the disc, and the answers go
+in `C:\Install`.
 
 ## Running without the wizard
 
