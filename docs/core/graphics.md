@@ -919,7 +919,10 @@ divergence and draws nothing. That path is the formula the byte-exact tests hold
 
 `wgl.js` is the seam with GDI, every rule of it measured: a pixel format belongs to the drawable,
 can be set once, a DC without one cannot make a context, a context is current on one thread,
-`wglGetProcAddress` returns null for core names. `SwapBuffers` replays the recorded frame on a
+`wglGetProcAddress` returns null for core names. A context is current on the thread that calls
+`wglMakeCurrent` (the bridge's calling thread), and a thread with none current gets
+`GL_INVALID_OPERATION` from `glGetError`; `wglMakeCurrent` and `wglDeleteContext` given a handle that
+names no context fail with `ERROR_INVALID_HANDLE` as the last error. `SwapBuffers` replays the recorded frame on a
 device, and waits past the bound as a present does, and on the processor hands the frame to the
 presenter through guest scratch memory -- so this is the one API a headless build can run to a
 finished frame.

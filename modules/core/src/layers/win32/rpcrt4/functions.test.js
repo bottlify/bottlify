@@ -8,28 +8,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRpcFunctions } from './functions.js';
 
-test('a proxy DLL registers as done, says so, and hands out no class object', ()=>{
-    /** @type {[string, string][]} */
-    const said = [];
-    const memory = new Uint8Array(64);
-    const fns = createRpcFunctions({
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
-        divergence: (api, detail)=>{
-            said.push([api, detail]);
-        },
-    });
-    assert.equal(fns.NdrDllRegisterProxy.argBytes, 12);
-    assert.equal(fns.NdrDllRegisterProxy.handler(), 0, 'S_OK');
-    assert.equal(said.length, 1, 'and the divergence is reported');
-    assert.equal(fns.NdrDllUnregisterProxy.handler(), 0);
-
-    memory.set([0xef, 0xbe, 0xad, 0xde], 16);
-    const refused = fns.NdrDllGetClassObject.handler([0x1000, 0x2000, 16, 0, 0, 0]);
-    assert.equal(refused >>> 0, 0x80040111, 'CLASS_E_CLASSNOTAVAILABLE');
-    assert.deepEqual([...memory.subarray(16, 20)], [0, 0, 0, 0], 'the out pointer is cleared');
-    assert.equal(fns.NdrDllCanUnloadNow.handler(), 1, 'S_FALSE: never unloadable');
-});
-
 test('a UUID is made random and read back from its braceless spelling', ()=>{
     const memory = new Uint8Array(128);
     const text = '6B29FC40-CA47-1067-B31D-00DD010662DA';

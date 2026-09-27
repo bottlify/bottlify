@@ -91,6 +91,10 @@ const f32 = value=>{
  *        Routines the image exports, by name and in order; ordinals count from 1.
  *        Each offset is into the code.
  * @param {number} [options.codeSize]  Bytes reserved for the code.
+ * @param {number} [options.imageBase]  Where the image asks to be mapped. A
+ *        library needs a base of its own: it has no relocations, so one that
+ *        asks for the program's base cannot be loaded beside it.
+ * @param {boolean} [options.dll]  A library: its entry point is DllMain.
  * @param {(ctx: {
  *   iat: (name: string) => number,
  *   at: (name: string) => number,
@@ -98,10 +102,12 @@ const f32 = value=>{
  * }) => number[]} options.code
  * @returns {Uint8Array}
  */
-export function buildExe({ imports, data = {}, exports = [], codeSize = 0x40, code }){
+export function buildExe(options){
+    const { imports, data = {}, exports = [], codeSize = 0x40, code } = options;
+    const imageBase = options.imageBase ?? IMAGE_BASE;
     const text = new Buf();
     const rva = (/** @type {number} */ offset)=>SECTION_RVA + offset;
-    const va = (/** @type {number} */ offset)=>IMAGE_BASE + rva(offset);
+    const va = (/** @type {number} */ offset)=>imageBase + rva(offset);
 
     // One descriptor per DLL, each with its own lookup and address tables --
     // which is how a real program imports, and the only way to say that two
@@ -297,7 +303,7 @@ export function buildExe({ imports, data = {}, exports = [], codeSize = 0x40, co
     head.u32(0); // timestamp
     head.u32(0).u32(0); // no symbol table
     head.u16(0xe0); // size of optional header
-    head.u16(0x0102); // EXECUTABLE_IMAGE | 32BIT_MACHINE
+    head.u16(options.dll ? 0x2102 : 0x0102); // EXECUTABLE_IMAGE | 32BIT_MACHINE, and DLL
 
     // Optional header (PE32)
     head.u16(0x010b);
@@ -305,7 +311,7 @@ export function buildExe({ imports, data = {}, exports = [], codeSize = 0x40, co
     head.u32(rawSize).u32(0).u32(0); // sizes of code / initialized / uninitialized data
     head.u32(SECTION_RVA); // AddressOfEntryPoint
     head.u32(SECTION_RVA).u32(0); // BaseOfCode / BaseOfData
-    head.u32(IMAGE_BASE);
+    head.u32(imageBase);
     head.u32(SECTION_ALIGNMENT).u32(FILE_ALIGNMENT);
     head.u16(4).u16(0); // OS version
     head.u16(0).u16(0); // image version

@@ -410,6 +410,8 @@ const MAX_WINDOW_TEXT = 1 << 16;
 
 /**
  * @typedef {Object} WindowHost
+ * @property {number} [processId]  The running process's identifier, which
+ *           GetWindowThreadProcessId reports for this process's windows.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           The display every system metric is derived from.
  * @property {() => any} [dc]

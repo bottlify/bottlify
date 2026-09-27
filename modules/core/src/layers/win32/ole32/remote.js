@@ -16,6 +16,13 @@
  * it wrote. How a call's arguments travel is the typelib marshaler's
  * (`oleaut32/marshal.js`); this file is the channel under it.
  *
+ * An interface no type library describes crosses the way COM sends one whose
+ * ProxyStubClsid32 names a MIDL proxy/stub DLL: the DLL's IPSFactoryBuffer
+ * makes a proxy -- guest code, aggregated on the proxy manager here -- and a
+ * stub on the exporter's side, and what crosses between them is the bytes of
+ * the NDR buffer the generated code marshaled, through an IRpcChannelBuffer
+ * of this file's.
+ *
  * The model is COM's single-threaded apartment, which is what every program
  * of this era that serves a class out of process uses. An object belongs to
  * the thread that exported it, and a call for it runs there and nowhere
@@ -37,6 +44,7 @@
  */
 
 import { formatGuid, parseGuid } from './guid.js';
+import { IUNKNOWN_METHODS } from './objects.js';
 import {
     IID_ICLASSFACTORY, IID_IUNKNOWN, argumentBytes, createInterfaceCatalog,
     marshalReply, marshalRequest, unmarshalReply, unmarshalRequest,
@@ -51,6 +59,7 @@ const REGDB_E_CLASSNOTREG = 0x80040154 | 0;
 const CO_E_SERVER_EXEC_FAILURE = 0x80080005 | 0;
 const RPC_E_DISCONNECTED = 0x80010108 | 0;
 const RPC_E_SERVERFAULT = 0x80010105 | 0;
+const RPC_E_INVALID_OBJREF = 0x8001011d | 0;
 
 export const REGCLS_MULTIPLEUSE = 1;
 export const REGCLS_SUSPENDED = 4;
@@ -62,6 +71,26 @@ const SLOT_QUERY_INTERFACE = 0;
 const SLOT_ADD_REF = 1;
 const SLOT_RELEASE = 2;
 const SLOT_CREATE_INSTANCE = 3;
+
+/** IPSFactoryBuffer's methods, and IRpcProxyBuffer's and IRpcStubBuffer's. */
+const SLOT_CREATE_PROXY = 3;
+const SLOT_CREATE_STUB = 4;
+const SLOT_CONNECT = 3;
+const SLOT_DISCONNECT = 4;
+const SLOT_INVOKE = 5;
+
+const IID_IRPCCHANNELBUFFER = '{D5F56B60-593B-101A-B569-08002B2DBF7A}';
+
+/** RPCOLEMESSAGE, as a channel reads and writes it. */
+const MESSAGE = Object.freeze({
+    DATA_REPRESENTATION: 4, BUFFER: 8, BUFFER_LENGTH: 12, METHOD: 16, SIZE: 44,
+});
+
+/** Little-endian, ASCII, IEEE: what every buffer here is in. */
+const NDR_LOCAL_DATA_REPRESENTATION = 0x10;
+
+/** A channel's destination: another process on this machine. */
+const MSHCTX_LOCAL = 0;
 
 /**
  * @typedef {Object} Reference
@@ -246,6 +275,9 @@ export function createClassTable(hooks = {}){
  *     A hidden window on the calling thread, whose procedure is `handler`,
  *     and a way to post to it.
  * @property {import('../oleaut32/marshal.js').CatalogHost} catalog
+ * @property {{ factory: (iid: string, thread: unknown) => Promise<number> }} [proxyStub]
+ *     The IPSFactoryBuffer of the proxy/stub DLL the registry names for an
+ *     interface, loaded into this process as COM loads it; 0 when none is.
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -309,6 +341,7 @@ export function createRemoting(host){
      * @property {number} id
      * @property {number} unknown
      * @property {Map<string, number>} interfaces
+     * @property {Map<string, number>} stubs  The MIDL stubs its calls go through.
      * @property {number} refs
      * @property {unknown} thread
      */
@@ -512,7 +545,7 @@ export function createRemoting(host){
             await send(proxy.endpoint, { kind: 'addref', object: proxy.object });
             if (transfer)
             {
-                await releaseProxy(proxy);
+                await releaseProxy(proxy, thread);
             }
             return { endpoint: proxy.endpoint, object: proxy.object };
         }
@@ -522,7 +555,8 @@ export function createRemoting(host){
         let entry = exported.get(byIdentity.get(unknown) ?? 0);
         if (!entry)
         {
-            entry = { id: nextObject++, unknown, interfaces: new Map(), refs: 0, thread };
+            entry = { id: nextObject++, unknown, interfaces: new Map(), stubs: new Map(), refs: 0,
+                thread };
             exported.set(entry.id, entry);
             byIdentity.set(unknown, entry.id);
         }
@@ -564,6 +598,13 @@ export function createRemoting(host){
         }
         exported.delete(entry.id);
         byIdentity.delete(entry.unknown);
+        // A stub holds the object too, and is the DLL's to release.
+        for (const stub of entry.stubs.values())
+        {
+            await callSlot(stub, SLOT_DISCONNECT, [], thread);
+            await callSlot(stub, SLOT_RELEASE, [], thread);
+        }
+        entry.stubs.clear();
         for (const pointer of entry.interfaces.values())
         {
             await callSlot(pointer, SLOT_RELEASE, [], thread);
@@ -578,6 +619,9 @@ export function createRemoting(host){
      * @property {number} local     References the program holds.
      * @property {number} remote    Counts held on the exporter.
      * @property {Map<string, any>} records
+     * @property {Map<string, { pointer: number, buffer: number }>} midl
+     *           The interfaces a proxy/stub DLL's proxy stands for: its
+     *           interface pointer, and the IRpcProxyBuffer that owns it.
      * @property {boolean} destroyed
      */
 
@@ -612,7 +656,7 @@ export function createRemoting(host){
             { name: 'AddRef', argBytes: 4,
                 invoke: (/** @type {Proxy} */ proxy)=>++proxy.local },
             { name: 'Release', argBytes: 4,
-                invoke: (/** @type {Proxy} */ proxy)=>releaseProxy(proxy) },
+                invoke: (/** @type {Proxy} */ proxy)=>releaseProxy(proxy, host.callerThread()) },
         ];
         for (let slot = 3; slot < description.methods.length; slot++)
         {
@@ -631,25 +675,322 @@ export function createRemoting(host){
     };
 
     /**
-     * Gives a proxy the record for one interface, when anything describes it.
+     * Gives a proxy the interface: a record whose methods the type library
+     * describes, or else a proxy the interface's proxy/stub DLL makes.
      *
-     * @param {Proxy} proxy @param {string} iid
+     * @param {Proxy} proxy @param {string} iid @param {unknown} thread
      * @returns {Promise<boolean>}
      */
-    const describeFor = async(proxy, iid)=>{
-        if (proxy.records.has(iid))
+    const describeFor = async(proxy, iid, thread)=>{
+        if (proxy.records.has(iid) || proxy.midl.has(iid))
         {
             return true;
         }
         const description = await catalog.describe(iid);
-        if (!description)
+        if (description)
         {
-            report(`no proxy for interface ${iid}: nothing registers a type library for it`);
+            proxy.records.set(iid, Object.freeze({ object: proxy, id: iid,
+                methods: methodsFor(iid, description) }));
+            return true;
+        }
+        if (await midlProxy(proxy, iid, thread))
+        {
+            return true;
+        }
+        report(`no proxy for interface ${iid}: neither a type library nor a proxy/stub DLL`
+            + ' is registered for it');
+        return false;
+    };
+
+    /**
+     * A proxy the interface's proxy/stub DLL makes, aggregated on this proxy
+     * manager and connected to a channel to the exporter. Its methods are the
+     * DLL's code, which marshals into the channel's buffer.
+     *
+     * @param {Proxy} proxy @param {string} iid @param {unknown} thread
+     * @returns {Promise<boolean>}
+     */
+    const midlProxy = async(proxy, iid, thread)=>{
+        const factory = await host.proxyStub?.factory(iid, thread) ?? 0;
+        if (factory === 0 || !await describeFor(proxy, IID_IUNKNOWN, thread))
+        {
             return false;
         }
-        proxy.records.set(iid, Object.freeze({ object: proxy, id: iid,
-            methods: methodsFor(iid, description) }));
+        const outer = host.vtables.publish(proxy, IID_IUNKNOWN) >>> 0;
+        const block = outer === 0 ? 0 : host.heap.allocate(24);
+        if (block === 0)
+        {
+            return false;
+        }
+        proxyAt.set(outer, proxy);
+        writeU32(block, 0);
+        writeU32(block + 4, 0);
+        host.writeMemory(block + 8, /** @type {Uint8Array} */ (parseGuid(iid)));
+        const hr = (await callSlot(factory, SLOT_CREATE_PROXY, [outer, block + 8, block, block + 4],
+            thread)) | 0;
+        const buffer = readU32(block);
+        const pointer = readU32(block + 4);
+        host.heap.free(block);
+        if (hr < 0 || buffer === 0 || pointer === 0)
+        {
+            report(`the proxy/stub DLL of ${iid} made no proxy: 0x${(hr >>> 0).toString(16)}`);
+            return false;
+        }
+        // The interface came with a reference counted on this manager, which
+        // holds its own interfaces without one.
+        proxy.local--;
+        const channel = makeChannel({ proxy, iid });
+        const connected = channel.pointer === 0 ? E_OUTOFMEMORY
+            : (await callSlot(buffer, SLOT_CONNECT, [channel.pointer], thread)) | 0;
+        // The proxy holds the channel now, or nothing does.
+        channel.release();
+        if (connected < 0)
+        {
+            await callSlot(buffer, SLOT_RELEASE, [], thread);
+            report(`the proxy of ${iid} did not connect: 0x${(connected >>> 0).toString(16)}`);
+            return false;
+        }
+        proxy.midl.set(iid, { pointer, buffer });
+        proxyAt.set(pointer, proxy);
         return true;
+    };
+
+    /**
+     * The pointer a proxy is known by for one interface.
+     *
+     * @param {Proxy} proxy @param {string} iid
+     */
+    const pointerFor = (proxy, iid)=>
+        proxy.midl.get(iid)?.pointer ?? (host.vtables.publish(proxy, iid) >>> 0);
+
+    /**
+     * Where a channel's call goes: to a proxy's exporter, for the channel a
+     * proxy sends through; nowhere, for the one a stub answers through.
+     *
+     * @typedef {{ proxy: Proxy, iid: string } | null} ChannelSide
+     */
+
+    /**
+     * IRpcChannelBuffer's methods, shared by every channel of this process:
+     * each finds where it goes from the channel it was called through.
+     */
+    const channelMethods = Object.freeze([
+        ...IUNKNOWN_METHODS,
+        {
+            name: 'GetBuffer',
+            argBytes: 12,
+            /** HRESULT GetBuffer(RPCOLEMESSAGE *pMessage, REFIID riid) */
+            invoke: (/** @type {any} */ _channel, /** @type {number[]} */ [message])=>{
+                const buffer = host.heap.allocate(Math.max(readU32(message + MESSAGE.BUFFER_LENGTH),
+                    8));
+                if (buffer === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                writeU32(message + MESSAGE.BUFFER, buffer);
+                writeU32(message + MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
+                return S_OK;
+            },
+        },
+        {
+            name: 'SendReceive',
+            argBytes: 12,
+            /** HRESULT SendReceive(RPCOLEMESSAGE *pMessage, ULONG *pStatus) */
+            invoke: (/** @type {{ side: ChannelSide }} */ channel,
+                /** @type {number[]} */ [message, status])=>channel.side
+                ? sendReceive(channel.side, message >>> 0, status >>> 0)
+                : E_NOTIMPL,
+        },
+        {
+            name: 'FreeBuffer',
+            argBytes: 8,
+            /** HRESULT FreeBuffer(RPCOLEMESSAGE *pMessage) */
+            invoke: (/** @type {any} */ _channel, /** @type {number[]} */ [message])=>{
+                const buffer = readU32(message + MESSAGE.BUFFER);
+                if (buffer !== 0)
+                {
+                    host.heap.free(buffer);
+                    writeU32(message + MESSAGE.BUFFER, 0);
+                }
+                return S_OK;
+            },
+        },
+        {
+            name: 'GetDestCtx',
+            argBytes: 12,
+            /** HRESULT GetDestCtx(DWORD *pdwDestContext, void **ppvDestContext) */
+            invoke: (/** @type {any} */ _channel, /** @type {number[]} */ [context, pointer])=>{
+                if ((context >>> 0) !== 0)
+                {
+                    writeU32(context, MSHCTX_LOCAL);
+                }
+                if ((pointer >>> 0) !== 0)
+                {
+                    writeU32(pointer, 0);
+                }
+                return S_OK;
+            },
+        },
+        {
+            name: 'IsConnected',
+            argBytes: 4,
+            /** HRESULT IsConnected(void) */
+            invoke: (/** @type {{ side: ChannelSide }} */ channel)=>{
+                const side = channel.side;
+                return side && !side.proxy.destroyed
+                    && host.table.endpoint(side.proxy.endpoint)?.alive ? S_OK : 1;
+            },
+        },
+    ]);
+
+    /**
+     * An IRpcChannelBuffer in guest memory, made with one reference.
+     *
+     * @param {ChannelSide} side
+     */
+    const makeChannel = side=>{
+        let refs = 1;
+        const channel = {
+            side,
+            destroyed: false,
+            /** @param {string} id */
+            interfaceFor: id=>[IID_IUNKNOWN, IID_IRPCCHANNELBUFFER].includes(id) ? record : null,
+            addRef: ()=>++refs,
+            release: ()=>{
+                refs = Math.max(refs - 1, 0);
+                channel.destroyed = refs === 0;
+                return refs;
+            },
+            pointer: 0,
+        };
+        const record = Object.freeze({ object: channel, id: IID_IRPCCHANNELBUFFER,
+            methods: channelMethods });
+        channel.pointer = host.vtables.publish(channel, IID_IRPCCHANNELBUFFER) >>> 0;
+        return channel;
+    };
+
+    /**
+     * A proxy's call: the bytes its code marshaled go to the exporter, and
+     * the bytes the stub there marshaled come back in their place.
+     *
+     * @param {{ proxy: Proxy, iid: string }} side
+     * @param {number} message @param {number} status
+     */
+    const sendReceive = async({ proxy, iid }, message, status)=>{
+        const thread = host.callerThread();
+        if (proxy.destroyed)
+        {
+            return RPC_E_DISCONNECTED;
+        }
+        const request = readU32(message + MESSAGE.BUFFER);
+        const bytes = host.readMemory(request, readU32(message + MESSAGE.BUFFER_LENGTH)).slice();
+        const reply = await outgoing(thread, proxy.endpoint, { kind: 'ndr', object: proxy.object,
+            iid, method: readU32(message + MESSAGE.METHOD), bytes });
+        if (reply.disconnected)
+        {
+            return RPC_E_DISCONNECTED;
+        }
+        if ((reply.hr | 0) < 0)
+        {
+            return reply.hr | 0;
+        }
+        /** @type {Uint8Array} */
+        const answer = reply.bytes ?? new Uint8Array(0);
+        const buffer = host.heap.allocate(Math.max(answer.length, 8));
+        if (buffer === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        host.writeMemory(buffer, answer);
+        host.heap.free(request);
+        writeU32(message + MESSAGE.BUFFER, buffer);
+        writeU32(message + MESSAGE.BUFFER_LENGTH, answer.length);
+        writeU32(message + MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
+        if (status !== 0)
+        {
+            writeU32(status, 0);
+        }
+        return S_OK;
+    };
+
+    /** @type {ReturnType<typeof makeChannel> | null} */
+    let stubChannel = null;
+
+    /**
+     * The stub a proxy/stub DLL makes for an exported object's interface,
+     * made the first time a call for it arrives.
+     *
+     * @param {Exported} entry @param {string} iid @param {unknown} thread
+     */
+    const stubFor = async(entry, iid, thread)=>{
+        const known = entry.stubs.get(iid);
+        if (known !== undefined)
+        {
+            return known;
+        }
+        const factory = await host.proxyStub?.factory(iid, thread) ?? 0;
+        const block = factory === 0 ? 0 : host.heap.allocate(20);
+        if (block === 0)
+        {
+            return 0;
+        }
+        writeU32(block, 0);
+        host.writeMemory(block + 4, /** @type {Uint8Array} */ (parseGuid(iid)));
+        const hr = (await callSlot(factory, SLOT_CREATE_STUB, [block + 4, entry.unknown, block],
+            thread)) | 0;
+        const stub = readU32(block);
+        host.heap.free(block);
+        if (hr < 0 || stub === 0)
+        {
+            report(`the proxy/stub DLL of ${iid} made no stub: 0x${(hr >>> 0).toString(16)}`);
+            return 0;
+        }
+        entry.stubs.set(iid, stub);
+        return stub;
+    };
+
+    /**
+     * A call a proxy/stub DLL's proxy sent: its bytes put in an RPCOLEMESSAGE
+     * here, the DLL's stub invoked on them, and what the stub marshaled
+     * through the channel's GetBuffer sent back.
+     *
+     * @param {Exported} entry @param {any} message @param {unknown} thread
+     */
+    const invokeStub = async(entry, message, thread)=>{
+        const stub = await stubFor(entry, message.iid, thread);
+        if (stub === 0)
+        {
+            return { hr: E_NOINTERFACE };
+        }
+        stubChannel ??= makeChannel(null);
+        /** @type {Uint8Array} */
+        const bytes = message.bytes;
+        const rpc = host.heap.allocate(MESSAGE.SIZE);
+        const request = host.heap.allocate(Math.max(bytes.length, 8));
+        if (rpc === 0 || request === 0 || stubChannel.pointer === 0)
+        {
+            return { hr: E_OUTOFMEMORY };
+        }
+        host.writeMemory(rpc, new Uint8Array(MESSAGE.SIZE));
+        host.writeMemory(request, bytes);
+        writeU32(rpc + MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
+        writeU32(rpc + MESSAGE.BUFFER, request);
+        writeU32(rpc + MESSAGE.BUFFER_LENGTH, bytes.length);
+        writeU32(rpc + MESSAGE.METHOD, message.method);
+        const hr = (await callGuarded(stub, SLOT_INVOKE, [rpc, stubChannel.pointer], thread)) | 0;
+        // The request stays until the stub is done: what it unmarshaled in
+        // place is read from there while the method runs.
+        const replied = readU32(rpc + MESSAGE.BUFFER);
+        const reply = replied !== request && replied !== 0
+            ? host.readMemory(replied, readU32(rpc + MESSAGE.BUFFER_LENGTH)).slice()
+            : new Uint8Array(0);
+        if (replied !== request && replied !== 0)
+        {
+            host.heap.free(replied);
+        }
+        host.heap.free(request);
+        host.heap.free(rpc);
+        return hr < 0 ? { hr } : { hr: S_OK, bytes: reply };
     };
 
     /**
@@ -664,6 +1005,7 @@ export function createRemoting(host){
             local: 0,
             remote: 0,
             records: new Map(),
+            midl: new Map(),
             destroyed: false,
             interfaceFor: id=>proxy.records.get(formatGuid(
                 /** @type {Uint8Array} */ (parseGuid(id) ?? new Uint8Array(16)))) ?? null,
@@ -702,15 +1044,16 @@ export function createRemoting(host){
         const key = `${reference.endpoint}:${reference.object}`;
         const proxy = proxies.get(key) ?? makeProxy(reference.endpoint, reference.object);
         proxy.remote++;
-        if (!await describeFor(proxy, iid) || !await describeFor(proxy, IID_IUNKNOWN))
+        if (!await describeFor(proxy, IID_IUNKNOWN, thread)
+            || !await describeFor(proxy, iid, thread))
         {
             if (proxy.local === 0)
             {
-                await retire(proxy);
+                await retire(proxy, thread);
             }
             return 0;
         }
-        const pointer = host.vtables.publish(proxy, iid) >>> 0;
+        const pointer = pointerFor(proxy, iid);
         if (pointer === 0)
         {
             return 0;
@@ -727,26 +1070,27 @@ export function createRemoting(host){
      * @param {Proxy} proxy @param {number} riid @param {number} out
      */
     const queryProxy = async(proxy, riid, out)=>{
+        const thread = host.callerThread();
         if (out === 0)
         {
             return E_POINTER;
         }
         writeU32(out, 0);
         const iid = formatGuid(host.readMemory(riid, 16));
-        if (!proxy.records.has(iid))
+        if (!proxy.records.has(iid) && !proxy.midl.has(iid))
         {
-            const reply = await outgoing(host.callerThread(), proxy.endpoint,
+            const reply = await outgoing(thread, proxy.endpoint,
                 { kind: 'query', object: proxy.object, iid });
             if ((reply.hr | 0) < 0)
             {
                 return reply.hr | 0;
             }
-            if (!await describeFor(proxy, iid))
+            if (!await describeFor(proxy, iid, thread))
             {
                 return E_NOINTERFACE;
             }
         }
-        const pointer = host.vtables.publish(proxy, iid) >>> 0;
+        const pointer = pointerFor(proxy, iid);
         if (pointer === 0)
         {
             return E_OUTOFMEMORY;
@@ -757,8 +1101,8 @@ export function createRemoting(host){
         return S_OK;
     };
 
-    /** @param {Proxy} proxy */
-    const releaseProxy = async proxy=>{
+    /** @param {Proxy} proxy @param {unknown} thread */
+    const releaseProxy = async(proxy, thread)=>{
         if (proxy.local > 0)
         {
             proxy.local--;
@@ -767,17 +1111,19 @@ export function createRemoting(host){
         {
             return proxy.local;
         }
-        await retire(proxy);
+        await retire(proxy, thread);
         return 0;
     };
 
     /**
      * A proxy nobody holds: its pointers stop answering, and its counts go
-     * back to the exporter.
+     * back to the exporter. A proxy/stub DLL's proxies are disconnected and
+     * released on `thread`; a process that has ended has no thread to do it
+     * on and no memory it would matter to.
      *
-     * @param {Proxy} proxy
+     * @param {Proxy} proxy @param {unknown} thread
      */
-    const retire = async proxy=>{
+    const retire = async(proxy, thread)=>{
         if (proxy.destroyed)
         {
             return;
@@ -795,6 +1141,15 @@ export function createRemoting(host){
         {
             host.vtables.unpublish?.(proxy, iid);
         }
+        for (const { buffer } of proxy.midl.values())
+        {
+            if (thread !== null)
+            {
+                await callSlot(buffer, SLOT_DISCONNECT, [], thread);
+                await callSlot(buffer, SLOT_RELEASE, [], thread);
+            }
+        }
+        proxy.midl.clear();
         if (proxy.remote > 0)
         {
             const count = proxy.remote;
@@ -900,6 +1255,8 @@ export function createRemoting(host){
                 }
                 return { hr, reference: await exportInterface(made, message.iid, true, thread) };
             }
+            case 'ndr':
+                return invokeStub(entry, message, thread);
             case 'call': {
                 const pointer = entry.interfaces.get(message.iid)
                     ?? (message.iid === IID_IUNKNOWN ? entry.unknown : 0);
@@ -951,7 +1308,7 @@ export function createRemoting(host){
             }
             for (const proxy of [...proxies.values()])
             {
-                await retire(proxy);
+                await retire(proxy, null);
             }
         },
     };
@@ -1049,6 +1406,52 @@ export function createRemoting(host){
                 return E_NOINTERFACE;
             }
             writeU32(out, pointer);
+            return S_OK;
+        },
+
+        /**
+         * An interface pointer of this process as a reference another process
+         * can hold, which carries a reference of its own: what an OBJREF
+         * CoMarshalInterface writes stands for.
+         *
+         * @param {number} pointer @param {string} iid
+         * @param {unknown} [thread]  Whose call this is; the caller's by default.
+         * @returns {Promise<Reference>}
+         */
+        exportReference: (pointer, iid, thread = host.callerThread())=>
+            exportInterface(pointer >>> 0, iid, false, thread),
+
+        /**
+         * A reference as a pointer of this process, which takes the reference
+         * it carried: what CoUnmarshalInterface answers with. 0 when nothing
+         * here can stand for it.
+         *
+         * @param {Reference} reference @param {string} iid
+         * @param {unknown} [thread]
+         * @returns {Promise<number>}
+         */
+        importReference: (reference, iid, thread = host.callerThread())=>
+            importInterface(reference, iid, thread),
+
+        /**
+         * Gives back the reference a reference carries, unused: what
+         * CoReleaseMarshalData does with a packet nobody unmarshaled.
+         *
+         * @param {Reference} reference @param {unknown} [thread]
+         */
+        async releaseReference(reference, thread = host.callerThread()){
+            if (reference.endpoint !== endpointId)
+            {
+                await send(reference.endpoint,
+                    { kind: 'release', object: reference.object, count: 1 });
+                return S_OK;
+            }
+            const entry = exported.get(reference.object);
+            if (!entry)
+            {
+                return RPC_E_INVALID_OBJREF;
+            }
+            await dropExported(entry, 1, thread);
             return S_OK;
         },
 

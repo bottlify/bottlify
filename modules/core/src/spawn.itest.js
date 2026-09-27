@@ -295,3 +295,53 @@ test('a process started beside its parent writes into the run\'s one journal', {
         assert.ok(times.every((time, at)=>at === 0 || time >= times[at - 1]),
             'on the journal\'s one clock');
     });
+
+test('a child is the process its parent was told of: GetCurrentProcessId is PROCESS_INFORMATION\'s',
+    { timeout: 60000 }, async t=>{
+        // A test harness tells its children's output apart by the identifier
+        // each line carries, and OpenProcess finds a child by the one its
+        // parent was handed; a child answering its parent's would be neither.
+        const parent = buildExe({
+            imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject', 'ExitProcess'] },
+            data: {
+                command: ascii('C:\\App\\child.exe'),
+                startup: [...u32(68), ...new Array(64).fill(0)],
+                info: new Array(16).fill(0),
+            },
+            codeSize: 0x60,
+            code: ({ iat, at })=>[
+                // CreateProcessA(0, command, ..., &startup, &info)
+                0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at('command')), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateProcessA')),
+                // WaitForSingleObject(info.hProcess, INFINITE)
+                0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+                // ExitProcess(info.dwProcessId)
+                0xff, 0x35, ...u32(at('info') + 8),
+                0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        const child = buildExe({
+            imports: { 'KERNEL32.dll': ['GetCurrentProcessId', 'ExitProcess'] },
+            code: ({ iat })=>[
+                0xff, 0x15, ...u32(iat('GetCurrentProcessId')),
+                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),              // exit with it
+            ],
+        });
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\parent.exe',
+            engine: 'cork',
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {number[]} */
+        const childCodes = [];
+        app.on('process-resumed', (/** @type {any} */ event)=>childCodes.push(event.code >>> 0));
+        const told = (await app.run({ timeoutMs: 30000 })) >>> 0;
+        assert.notEqual(told, 0, 'the parent was handed an identifier');
+        assert.deepEqual(childCodes, [told], 'and the child answers that one as its own');
+        assert.notEqual(told, 0x1000, 'which is not the parent\'s');
+    });

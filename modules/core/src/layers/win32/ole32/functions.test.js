@@ -774,7 +774,7 @@ test('CLSIDFromProgID reads the ProgID key, and an unknown ProgID is not a class
     assert.equal(formatGuid(host.bytes.subarray(GUID_OUT, GUID_OUT + GUID_SIZE)), CLSID_TEST);
     assert.equal(withHive.CLSIDFromProgID.handler([0, GUID_OUT]), E_INVALIDARG);
 
-    assert.equal(withHive.CoReleaseMarshalData.handler(), S_OK);
+    assert.equal(withHive.CoReleaseMarshalData.handler([0]), E_INVALIDARG);
     host.fill(PPV, 1);
     assert.equal(withHive.GetRunningObjectTable.handler([0, PPV]), E_OUTOFMEMORY);
     assert.equal(host.u32(PPV), 0);
@@ -827,6 +827,10 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         OleSaveToStream: 8,
         CLSIDFromProgID: 8,
         CoReleaseMarshalData: 4,
+        CoMarshalInterface: 24,
+        CoUnmarshalInterface: 12,
+        CoGetMarshalSizeMax: 24,
+        CoGetPSClsid: 8,
         GetRunningObjectTable: 8,
         CreateItemMoniker: 12,
         StringFromCLSID: 8,
@@ -1155,4 +1159,25 @@ test('CoTreatAsClass writes the emulation into the registry, and GUID_NULL takes
     host.bytes.set(/** @type {Uint8Array} */ (parseGuid(GUID_NULL)), NEW_ARG);
     assert.equal(fns.CoTreatAsClass.handler([CLSID_ARG, NEW_ARG]), 0);
     assert.equal(hive.open(root, path), null, 'removed');
+});
+
+test('CoGetPSClsid reads the proxy/stub class the registry names for an interface', ()=>{
+    const { host } = setup();
+    const hive = createHive();
+    host.hive = hive;
+    const fns = createOleFunctions(host);
+    const OUT = 0x1040;
+    const proxyStub = '{0A0B0C0D-0000-0000-0000-000000000001}';
+    host.bytes.fill(0xcc, OUT, OUT + GUID_SIZE);
+    assert.equal(fns.CoGetPSClsid.handler([IID_ARG, OUT]) >>> 0, 0x80040155,
+        'REGDB_E_IIDNOTREG for an interface nothing registers');
+    assert.equal(formatGuid(host.bytes.subarray(OUT, OUT + GUID_SIZE)), GUID_NULL);
+
+    const root = /** @type {any} */ (hive.root(HKEY_CLASSES_ROOT));
+    const key = hive.create(root, `Interface\\${IID_TEST}\\ProxyStubClsid32`).key;
+    hive.setValue(key, '', 1, Uint8Array.from([...proxyStub, '\0'].map(c=>c.charCodeAt(0))));
+    assert.equal(fns.CoGetPSClsid.handler([IID_ARG, OUT]), S_OK);
+    assert.equal(formatGuid(host.bytes.subarray(OUT, OUT + GUID_SIZE)), proxyStub);
+    assert.equal(fns.CoGetMarshalSizeMax.handler([OUT, IID_ARG, 0, 0, 0, 0]), S_OK);
+    assert.equal(host.u32(OUT), 72, 'a standard OBJREF');
 });

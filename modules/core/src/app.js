@@ -189,6 +189,8 @@ import { createReplicas } from './replicas.js';
  *           What the program believes it was started with. argv[0] ends at the
  *           first space unless it is quoted, so a line composed by hand must
  *           quote it. Defaults to the image path, quoted.
+ * @property {number} [processId]    What GetCurrentProcessId answers: for a child, the
+ *           identifier its parent was handed when it started it.
  * @property {boolean} [refuseReplacement]
  *           Stop rather than replace this process with a child it asked for. A
  *           replacement erases every log and ring of the run that asked for it,
@@ -3328,6 +3330,7 @@ async function buildApp(options){
             // ring do, for the same reason -- a replacement rebuilds this
             // layer, and the name was never this process's to keep.
             namedObjects: options.namedObjects,
+            processId: options.processId,
             // The run's table of class objects served out of process, and this
             // process's name in it: shared for the same reason.
             com: options.com,
@@ -5045,7 +5048,7 @@ async function buildApp(options){
     const process = createProcessBlocks({
         allocate: allocateFromHeap,
         writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
-        processId: 0x1000,
+        processId: options.processId ?? 0x1000,
         version: windowsVersion(options.windows),
         imageBase: image.base,
         processHeap: allLibraries['KERNEL32.dll']?.GetProcessHeap?.handler([]) ?? 0,
@@ -6781,6 +6784,7 @@ export async function createApp(options){
             imagePath: request.imagePath,
             commandLine: request.commandLine,
             patches: request.patches,
+            processId: request.id,
             seed: parent.session.export(),
             hive: parent.registry().toJSON(),
         });
@@ -6903,6 +6907,7 @@ export async function createApp(options){
                 imagePath: request.imagePath,
                 commandLine: request.commandLine,
                 patches: request.patches,
+                processId: request.id,
                 seed: carried,
                 hive,
             });
