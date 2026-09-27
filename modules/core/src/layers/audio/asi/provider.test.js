@@ -428,6 +428,15 @@ test('a preference is kept and its previous value returned', async()=>{
     assert.equal(f.call('ASI_stream_set_preference', [handle, rate, 0x90000]), 22050);
 });
 
+test('a preference passed by value, as an older Miles passes it, is taken as the value', async()=>{
+    // 0x5622 is 22050 itself: an address in the low 64 KiB is never mapped.
+    const f = fixture();
+    const handle = await f.call('ASI_stream_open', [1, FETCH, f.file.length]);
+    const rate = ATTRIB.REQUESTED_SAMPLE_RATE;
+    assert.equal(f.call('ASI_stream_set_preference', [handle, rate, 0x5622]), 0);
+    assert.equal(f.call('ASI_stream_attribute', [handle, rate]), 22050);
+});
+
 test('a stream with no frames in it does not open, and says why', async()=>{
     const f = fixture({ file: new Uint8Array(1000).fill(7) });
     assert.equal(await f.call('ASI_stream_open', [1, FETCH, 1000]), 0);
