@@ -30,7 +30,7 @@
 import { IDIRECT3D9_SLOTS, describe } from './vtables.js';
 import {
     D3DBOX, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_BOX, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS9,
-    POINT, RECT, createFields, dwordsOf, floatsOf, intsOf, putLight, putMaterial,
+    POINT, RECT, createFields, createLightReader, dwordsOf, floatsOf, intsOf, putLight, putMaterial,
 } from './structs.js';
 import {
     IDIRECT3DBASETEXTURE9_SLOTS, IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS,
@@ -274,31 +274,7 @@ export function createDirect3D9Seam(
     };
 
     /** D3DLIGHT9 is D3DLIGHT7's layout under this version's names. */
-    const readLight = (/** @type {number} */ pointer)=>{
-        const colour = (/** @type {number} */ at)=>{
-            const f = readFloats(pointer + at, 4);
-            return { r: f[0], g: f[1], b: f[2], a: f[3] };
-        };
-        const vector = (/** @type {number} */ at)=>{
-            const f = readFloats(pointer + at, 3);
-            return { x: f[0], y: f[1], z: f[2] };
-        };
-        return {
-            Type: fields.readU32(pointer + D3DLIGHT7.dltType),
-            Diffuse: colour(D3DLIGHT7.dcvDiffuse),
-            Specular: colour(D3DLIGHT7.dcvSpecular),
-            Ambient: colour(D3DLIGHT7.dcvAmbient),
-            Position: vector(D3DLIGHT7.dvPosition),
-            Direction: vector(D3DLIGHT7.dvDirection),
-            Range: fields.readF32(pointer + D3DLIGHT7.dvRange),
-            Falloff: fields.readF32(pointer + D3DLIGHT7.dvFalloff),
-            Attenuation0: fields.readF32(pointer + D3DLIGHT7.dvAttenuation0),
-            Attenuation1: fields.readF32(pointer + D3DLIGHT7.dvAttenuation1),
-            Attenuation2: fields.readF32(pointer + D3DLIGHT7.dvAttenuation2),
-            Theta: fields.readF32(pointer + D3DLIGHT7.dvTheta),
-            Phi: fields.readF32(pointer + D3DLIGHT7.dvPhi),
-        };
-    };
+    const readLight = createLightReader(fields);
 
     /** @param {number} address @param {any} light */
     const writeLight = (address, light)=>{
@@ -1692,7 +1668,7 @@ export function createDirect3D9Seam(
         /** @param {any} device @param {number[]} args */
         SetLight: (device, [index, pointer])=>((pointer >>> 0) === 0
             ? D3DERR_INVALIDCALL
-            : device.SetLight(index >>> 0, readLight(pointer >>> 0))),
+            : device.SetLight(index >>> 0, readLight(device, index >>> 0, pointer >>> 0))),
 
         /** @param {any} device @param {number[]} args */
         GetLight: (device, [index, out])=>{

@@ -841,6 +841,33 @@ export function packLight(block, at, light){
 }
 
 /**
+ * Whether two lights hold the same values, field for field: a zero's sign and
+ * not-a-number compared as `Object.is` compares them, so a light set again
+ * with what it holds is told apart from one that reads back differently.
+ *
+ * @param {Light} a @param {Light} b
+ */
+export function sameLight(a, b){
+    return a.Type === b.Type && sameColour(a.Diffuse, b.Diffuse)
+        && sameColour(a.Specular, b.Specular) && sameColour(a.Ambient, b.Ambient)
+        && sameNumber(a.Position.x, b.Position.x) && sameNumber(a.Position.y, b.Position.y)
+        && sameNumber(a.Position.z, b.Position.z) && sameNumber(a.Direction.x, b.Direction.x)
+        && sameNumber(a.Direction.y, b.Direction.y) && sameNumber(a.Direction.z, b.Direction.z)
+        && sameNumber(a.Range, b.Range) && sameNumber(a.Falloff, b.Falloff)
+        && sameNumber(a.Attenuation0, b.Attenuation0) && sameNumber(a.Attenuation1, b.Attenuation1)
+        && sameNumber(a.Attenuation2, b.Attenuation2) && sameNumber(a.Theta, b.Theta)
+        && sameNumber(a.Phi, b.Phi);
+}
+
+/** @param {ColourValue} a @param {ColourValue} b */
+const sameColour = (a, b)=>sameNumber(a.r, b.r) && sameNumber(a.g, b.g) && sameNumber(a.b, b.b)
+    && sameNumber(a.a, b.a);
+
+/** `Object.is`, which would box each double handed to it. @param {number} a @param {number} b */
+const sameNumber = (a, b)=>(a === b ? a !== 0 || 1 / a === 1 / b
+    : Number.isNaN(a) && Number.isNaN(b));
+
+/**
  * Four floats into a block, without an array to carry them: a draw packs
  * dozens, and a frame has hundreds of draws.
  *
@@ -2491,9 +2518,8 @@ export function createRenderer(options){
         // translations is what tells that apart from a light that is simply
         // dim, and nothing else in a frame does.
         const world = transformOf(model, D3DTS.WORLD);
-        if (world !== lastSampled.world && tally.worlds.size < SAMPLE_LIMIT)
+        if (tally.worlds.size < SAMPLE_LIMIT && sampledWorldMoved(world))
         {
-            lastSampled.world = world;
             sample(tally.worlds, ()=>`origin=${round(world[12])},${round(world[13])}`
                 + `,${round(world[14])}`
                 + ` scale=${round(Math.hypot(world[0], world[1], world[2]))}`);
@@ -2542,13 +2568,25 @@ export function createRenderer(options){
     const LIGHT_SAMPLE_FLOATS = 18;
     let sampledLightValues = new Float64Array(8 * LIGHT_SAMPLE_FLOATS).fill(NaN);
 
+    /**
+     * Whether the world matrix differs from the one sampled last in what its
+     * sample reads: the translation and the length of the first row. The
+     * device writes a new world into the matrix it holds, so the object says
+     * nothing.
+     *
+     * @param {ArrayLike<number>} world
+     */
+    const sampledWorldMoved = world=>(keepValue(sampledWorld, 0, world[0])
+        | keepValue(sampledWorld, 1, world[1]) | keepValue(sampledWorld, 2, world[2])
+        | keepValue(sampledWorld, 3, world[12]) | keepValue(sampledWorld, 4, world[13])
+        | keepValue(sampledWorld, 5, world[14])) !== 0;
+    const sampledWorld = new Float64Array(6).fill(NaN);
+
     /** What `countLighting` sampled last, of each thing it samples. */
     const lastSampled = {
         ambient: -1,
         /** @type {unknown} */
         lights: null,
-        /** @type {unknown} */
-        world: null,
         /** @type {unknown} */
         material: null,
     };
@@ -4202,6 +4240,75 @@ export function createRenderer(options){
     };
 
     /**
+     * Numbers name states for as long as the renderer lives and are never
+     * reused, so a key made before a table was cleared cannot name a different
+     * state after it.
+     */
+    let nextStateNumber = 0;
+    const STATE_NUMBERS_LIMIT = 1024;
+
+    /** @param {Int32Array} stored @param {Int32Array} scratch @returns {boolean} */
+    const sameWords = (stored, scratch)=>{
+        for (let index = 0; index < stored.length; index++)
+        {
+            if (stored[index] !== scratch[index])
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    /**
+     * A table numbering states laid out as words: equal numbers are equal
+     * words. Looked up by an FNV-1a hash of them, with nothing built for a
+     * hit; a hit is compared in full, so a collision costs a comparison and
+     * never names two states alike.
+     */
+    const createNumbering = ()=>{
+        /** @type {Map<number, { values: Int32Array, number: number }[]>} */
+        const buckets = new Map();
+        let size = 0;
+        /** @param {Int32Array} words @param {number} count @returns {number} */
+        return (words, count)=>{
+            let hash = 0x811c9dc5;
+            for (let index = 0; index < count; index++)
+            {
+                hash = Math.imul(hash ^ words[index], 0x01000193);
+            }
+            const bucket = buckets.get(hash);
+            if (bucket !== undefined)
+            {
+                for (let index = 0; index < bucket.length; index++)
+                {
+                    const entry = bucket[index];
+                    if (entry.values.length === count && sameWords(entry.values, words))
+                    {
+                        return entry.number;
+                    }
+                }
+            }
+            if (size >= STATE_NUMBERS_LIMIT)
+            {
+                buckets.clear();
+                size = 0;
+            }
+            const entry = { values: words.slice(0, count), number: nextStateNumber++ };
+            const held = buckets.get(hash);
+            if (held !== undefined)
+            {
+                held.push(entry);
+            }
+            else
+            {
+                buckets.set(hash, [entry]);
+            }
+            size++;
+            return entry.number;
+        };
+    };
+
+    /**
      * The usages a hybrid's fixed vertex stage carries through: what a pixel
      * shader can read from a fixed-function vertex.
      */
@@ -4236,57 +4343,55 @@ export function createRenderer(options){
         // before every draw, which is how a shader-drawn frame goes, changes
         // none of it. A 1.x pixel shader's reads also take the dimension of
         // what is bound, which a binding changes without a version.
+        //
+        // When that state has changed, it may be one this frame has drawn with
+        // before -- a program flipping a render state between draws -- and the
+        // pieces are looked up by its values, as a fixed-function preparation
+        // is.
         const version = model.stateVersionBesideTextures;
         const legacy = legacyStages(model, program);
-        let pieces = version !== undefined && programPieces !== null
-            && programPieces.version === version
-            && programPieces.vertexShader === program.vertexShader
-            && programPieces.pixelShader === program.pixelShader
-            && programPieces.declarationId === program.declarationId
-            && programPieces.stride === stride && programPieces.topology === topology
-            && programPieces.legacy === legacy.key
-            ? programPieces.made
+        const last = programPieces;
+        let pieces = version !== undefined && last.made !== null
+            && last.version === version
+            && last.vertexShader === program.vertexShader
+            && last.pixelShader === program.pixelShader
+            && last.declarationId === program.declarationId
+            && last.stride === stride && last.topology === topology
+            && last.legacy === legacy.key
+            ? last.made
             : null;
         if (pieces === null)
         {
-            pieces = programPiecesOf(model, stride, topology, program, legacy);
+            const key = programKeyOf(model, stride, topology, program, legacy.key);
+            pieces = programPiecesKept.get(key) ?? null;
             if (pieces === null)
             {
-                return null;
+                pieces = programPiecesOf(model, stride, topology, program, legacy);
+                if (pieces === null)
+                {
+                    return null;
+                }
+                programPiecesKept.set(key, pieces);
+                if (programPiecesKept.size > PREPARED_CACHE_LIMIT)
+                {
+                    const oldest = programPiecesKept.keys().next().value;
+                    if (oldest !== undefined)
+                    {
+                        programPiecesKept.delete(oldest);
+                    }
+                }
             }
-            programPieces = version === undefined ? null : {
-                version, vertexShader: program.vertexShader, pixelShader: program.pixelShader,
-                declarationId: program.declarationId, stride, topology, legacy: legacy.key,
-                made: pieces,
-            };
+            last.version = version;
+            last.vertexShader = program.vertexShader;
+            last.pixelShader = program.pixelShader;
+            last.declarationId = program.declarationId;
+            last.stride = stride;
+            last.topology = topology;
+            last.legacy = legacy.key;
+            last.made = version === undefined ? null : pieces;
         }
         const { pixel, vertex, samplerPlan, state, source } = pieces;
-        const samplerBindings = samplerPlan.map((/** @type {any} */ planned)=>{
-            const bound = model.textures.get(planned.stage);
-            // A texture of another dimension than the shader declared cannot
-            // be bound to it: the sampler reads a blank one instead.
-            const texture = bound && textureDimensionOf(bound) === planned.dimension
-                ? bound
-                : null;
-            if (bound && !texture)
-            {
-                reportProgram(`dimension:${planned.stage}:${planned.dimension}`,
-                    `sampler s${planned.stage} is declared ${planned.dimension} and a`
-                    + ` ${textureDimensionOf(bound)} texture is bound there: it samples nothing`);
-            }
-            // A binding moves no state version, and a managed texture's own
-            // level of detail is part of how it is sampled.
-            const lod = lodOf(texture);
-            return {
-                stage: planned.stage,
-                texture,
-                view: texture ? uploadIfDirty(texture).view : placeholderView(planned.dimension),
-                sampler: lod === planned.lod
-                    ? planned.sampler
-                    : programSamplerFor(model.stageStates(planned.stage), lod),
-                placeholder: !texture,
-            };
-        });
+        const samplerBindings = samplerBindingsOf(model, pieces, samplerPlan);
         const take = ensureFrame().arena.take;
         const vertexBlocks = program.vertex
             ? shaderVertexBlocks(model, program, vertex, take)
@@ -4318,18 +4423,170 @@ export function createRenderer(options){
                 vertexBlocks,
                 pixelBlocks,
                 samplerBindings,
+                held: pieces,
             },
         };
     };
 
     /**
+     * The textures, views and samplers a shader draw binds, as the list its
+     * pieces handed out last when every one of them is the same -- a draw's
+     * command keeps the list, and the list is never written into -- or a new
+     * one.
+     *
+     * @param {RenderModel} model @param {any} pieces @param {any[]} samplerPlan
+     * @returns {any[]}
+     */
+    const samplerBindingsOf = (model, pieces, samplerPlan)=>{
+        const last = pieces.samplerBindings;
+        let same = last !== null && last.length === samplerPlan.length;
+        for (let index = 0; index < samplerPlan.length; index++)
+        {
+            const planned = samplerPlan[index];
+            const bound = model.textures.get(planned.stage);
+            // A texture of another dimension than the shader declared cannot
+            // be bound to it: the sampler reads a blank one instead.
+            const texture = bound && textureDimensionOf(bound) === planned.dimension
+                ? bound
+                : null;
+            if (bound && !texture)
+            {
+                reportProgram(`dimension:${planned.stage}:${planned.dimension}`,
+                    `sampler s${planned.stage} is declared ${planned.dimension} and a`
+                    + ` ${textureDimensionOf(bound)} texture is bound there: it samples nothing`);
+            }
+            // A binding moves no state version, and a managed texture's own
+            // level of detail is part of how it is sampled.
+            const lod = lodOf(texture);
+            const view = texture ? uploadIfDirty(texture).view : placeholderView(planned.dimension);
+            const sampler = lod === planned.lod
+                ? planned.sampler
+                : programSamplerFor(model.stageStates(planned.stage), lod);
+            boundTextures[index] = texture;
+            boundViews[index] = view;
+            boundSamplers[index] = sampler;
+            same = same && last[index].texture === texture && last[index].view === view
+                && last[index].sampler === sampler;
+        }
+        if (same)
+        {
+            return last;
+        }
+        const made = samplerPlan.map((/** @type {any} */ planned, /** @type {number} */ index)=>({
+            stage: planned.stage,
+            texture: boundTextures[index],
+            view: boundViews[index],
+            sampler: boundSamplers[index],
+            placeholder: !boundTextures[index],
+        }));
+        pieces.samplerBindings = made;
+        return made;
+    };
+    /** What `samplerBindingsOf` worked out for each planned sampler of the draw. */
+    /** @type {any[]} */
+    const boundTextures = [];
+    /** @type {any[]} */
+    const boundViews = [];
+    /** @type {any[]} */
+    const boundSamplers = [];
+
+    /**
      * The last shader draw's state-dependent pieces and the state they were
      * made for; see `prepareProgram`.
      *
-     * @type {{ version: number, vertexShader: any, pixelShader: any, declarationId: number,
-     *          stride: number, topology: string, legacy: string, made: any } | null}
+     * @type {{ version: number | undefined, vertexShader: any, pixelShader: any,
+     *          declarationId: number, stride: number, topology: string, legacy: string,
+     *          made: any }}
      */
-    let programPieces = null;
+    const programPieces = { version: undefined, vertexShader: null, pixelShader: null,
+        declarationId: 0, stride: 0, topology: '', legacy: '', made: null };
+
+    /**
+     * The pieces of the states this frame's shader draws were made with, by
+     * `programKeyOf`, bounded as `preparedCache` is.
+     *
+     * @type {Map<number, any>}
+     */
+    const programPiecesKept = new Map();
+
+    /**
+     * What a shader draw's pieces depend on, as a number: the device state
+     * beside the textures as `stateNumberOf` names it (kept while
+     * `stateVersionBesideTextures` holds still), the two shaders, the
+     * declaration, the stride and topology, a 1.x pixel shader's texture
+     * dimensions and projections, and every stream's stride and frequency,
+     * which the vertex layout is read through.
+     *
+     * @param {RenderModel} model @param {number} stride @param {string} topology
+     * @param {ProgramState} program @param {string} legacyKey
+     * @returns {number}
+     */
+    const programKeyOf = (model, stride, topology, program, legacyKey)=>{
+        const version = model.stateVersionBesideTextures;
+        if (version === undefined || version !== programStateVersion)
+        {
+            programStateNumber = stateNumberOf(model, PROGRAM_PROCESSING);
+            programStateVersion = version;
+        }
+        const words = programWords;
+        let at = 0;
+        words[at++] = programStateNumber;
+        words[at++] = objectSerialOf(program.vertexShader);
+        words[at++] = objectSerialOf(program.pixelShader);
+        words[at++] = program.declarationId;
+        words[at++] = stride;
+        words[at++] = topologyIdOf(topology);
+        words[at++] = legacyIdOf(legacyKey);
+        const frequencies = model.streamFrequencies;
+        for (let stream = 0; stream < PROGRAM_STREAMS; stream++)
+        {
+            words[at++] = strideOf(model, stream);
+            words[at++] = frequencies?.get(stream) ?? 1;
+        }
+        return programNumbering(words, at);
+    };
+
+    /** The streams a declaration may read, as Direct3D 9 has them. */
+    const PROGRAM_STREAMS = 16;
+    /** A shader draw's state is named apart from any vertex format. */
+    const PROGRAM_PROCESSING = Object.freeze({ fvf: 0, fixedFunctionLayout: null });
+    const programWords = new Int32Array(7 + PROGRAM_STREAMS * 2);
+    const programNumbering = createNumbering();
+    let programStateNumber = -1;
+    /** @type {number | undefined} */
+    let programStateVersion;
+    /** @type {Map<string, number>} */
+    const legacyIds = new Map();
+    /** @param {string} key */
+    const legacyIdOf = key=>{
+        let id = legacyIds.get(key);
+        if (id === undefined)
+        {
+            id = legacyIds.size;
+            legacyIds.set(key, id);
+        }
+        return id;
+    };
+    /** @type {WeakMap<object, number>} */
+    const objectSerials = new WeakMap();
+    let nextObjectSerial = 1;
+    /** @param {object | null} object  Zero for none. */
+    const objectSerialOf = object=>{
+        if (!object)
+        {
+            return 0;
+        }
+        let serial = objectSerials.get(object);
+        if (serial === undefined)
+        {
+            serial = nextObjectSerial++;
+            objectSerials.set(object, serial);
+        }
+        return serial;
+    };
+
+    /** What `legacyStages` answers for a shader of model 2 or later. */
+    const NO_LEGACY_STAGES = Object.freeze({ key: '' });
 
     /**
      * What a 1.x pixel shader's reads depend on beyond the shader: the
@@ -4344,7 +4601,7 @@ export function createRenderer(options){
         const version = program.pixel?.version;
         if (!version || version.major >= 2)
         {
-            return { key: '' };
+            return NO_LEGACY_STAGES;
         }
         /** @type {string[]} */
         const stageDimensions = [];
@@ -4534,6 +4791,12 @@ export function createRenderer(options){
             vertex,
             samplerPlan,
             state,
+            // The bindings handed out last, and the recording and index of the
+            // pipeline in it: kept with the pieces, where a draw's own
+            // preparation is made for it alone.
+            samplerBindings: null,
+            pipelineFrame: null,
+            pipelineIndex: 0,
             source: {
                 key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
                     + `/${shapes}/${stride}${streamsKey(layout)}`,
@@ -4983,14 +5246,18 @@ export function createRenderer(options){
         {
             regenerateSampled(frame, prepared);
         }
-        if (prepared.pipelineFrame !== frame)
+        // A shader draw's preparation is its own, and the pipeline is its
+        // pieces': asked for once per recording, as a fixed-function one is.
+        const holder = prepared.program?.held ?? prepared;
+        if (holder.pipelineFrame !== frame)
         {
-            prepared.pipelineIndex = frame.pipelines.length;
-            prepared.pipelineFrame = frame;
+            holder.pipelineIndex = frame.pipelines.length;
+            holder.pipelineFrame = frame;
             frame.pipelines.push(prepared.program
                 ? programs.get(prepared.state, prepared.program.source)
                 : backend.pipelineFor(prepared.state));
         }
+        prepared.pipelineIndex = holder.pipelineIndex;
         const command = {
             kind: 'draw',
             pipeline: prepared.pipelineIndex,
@@ -5095,6 +5362,53 @@ export function createRenderer(options){
     /** @type {WeakMap<object, { binding: number, resource: any }[]>} */
     const bindingEntries = new WeakMap();
 
+    /**
+     * A shader stage's constant blocks as the entries of its group, each
+     * given its slot in the uniform ring: one list per length, written for
+     * each draw, as the group is looked up and made from them at once.
+     *
+     * @param {any} pass @param {Float32Array[]} blocks
+     * @returns {{ binding: number, resource: any }[]}
+     */
+    const blockEntries = (pass, blocks)=>{
+        while (blockEntryLists.length <= blocks.length)
+        {
+            const length = blockEntryLists.length;
+            blockEntryLists.push(
+                Array.from({ length }, (_, binding)=>({ binding, resource: null })));
+        }
+        const entries = blockEntryLists[blocks.length];
+        for (let binding = 0; binding < blocks.length; binding++)
+        {
+            entries[binding].resource = pass.uniforms(blocks[binding]);
+        }
+        return entries;
+    };
+    /** @type {{ binding: number, resource: any }[][]} */
+    const blockEntryLists = [];
+
+    /**
+     * A shader draw's samplers as the entries of its group, made once for each
+     * list of bindings, which a draw that binds what the one before bound
+     * shares with it.
+     *
+     * @param {{ view: any, sampler: any }[]} samplerBindings
+     */
+    const samplerEntriesOf = samplerBindings=>{
+        let entries = samplerEntries.get(samplerBindings);
+        if (entries === undefined)
+        {
+            entries = samplerBindings.flatMap((bound, index)=>[
+                { binding: index * 2, resource: bound.view },
+                { binding: index * 2 + 1, resource: bound.sampler },
+            ]);
+            samplerEntries.set(samplerBindings, entries);
+        }
+        return entries;
+    };
+    /** @type {WeakMap<object, { binding: number, resource: any }[]>} */
+    const samplerEntries = new WeakMap();
+
     /** @type {WeakMap<object, number>} */
     const surfaceIds = new WeakMap();
     let nextSurfaceId = 0;
@@ -5107,75 +5421,6 @@ export function createRenderer(options){
             surfaceIds.set(surface, id);
         }
         return id;
-    };
-
-    /**
-     * Numbers name states for as long as the renderer lives and are never
-     * reused, so a key made before a table was cleared cannot name a different
-     * state after it.
-     */
-    let nextStateNumber = 0;
-    const STATE_NUMBERS_LIMIT = 1024;
-
-    /** @param {Int32Array} stored @param {Int32Array} scratch @returns {boolean} */
-    const sameWords = (stored, scratch)=>{
-        for (let index = 0; index < stored.length; index++)
-        {
-            if (stored[index] !== scratch[index])
-            {
-                return false;
-            }
-        }
-        return true;
-    };
-
-    /**
-     * A table numbering states laid out as words: equal numbers are equal
-     * words. Looked up by an FNV-1a hash of them, with nothing built for a
-     * hit; a hit is compared in full, so a collision costs a comparison and
-     * never names two states alike.
-     */
-    const createNumbering = ()=>{
-        /** @type {Map<number, { values: Int32Array, number: number }[]>} */
-        const buckets = new Map();
-        let size = 0;
-        /** @param {Int32Array} words @param {number} count @returns {number} */
-        return (words, count)=>{
-            let hash = 0x811c9dc5;
-            for (let index = 0; index < count; index++)
-            {
-                hash = Math.imul(hash ^ words[index], 0x01000193);
-            }
-            const bucket = buckets.get(hash);
-            if (bucket !== undefined)
-            {
-                for (let index = 0; index < bucket.length; index++)
-                {
-                    const entry = bucket[index];
-                    if (entry.values.length === count && sameWords(entry.values, words))
-                    {
-                        return entry.number;
-                    }
-                }
-            }
-            if (size >= STATE_NUMBERS_LIMIT)
-            {
-                buckets.clear();
-                size = 0;
-            }
-            const entry = { values: words.slice(0, count), number: nextStateNumber++ };
-            const held = buckets.get(hash);
-            if (held !== undefined)
-            {
-                held.push(entry);
-            }
-            else
-            {
-                buckets.set(hash, [entry]);
-            }
-            size++;
-            return entry.number;
-        };
     };
 
     /**
@@ -7071,19 +7316,12 @@ export function createRenderer(options){
     function replayProgram(pass, pipeline, command){
         const program = command.program;
         pass.setPipeline(pipeline.gpu);
-        pass.setBindings(0, pipeline.bindGroupLayouts[0], program.vertexBlocks.map(
-            (/** @type {Float32Array} */ block, /** @type {number} */ binding)=>(
-                { binding, resource: pass.uniforms(block) })));
-        pass.setBindings(1, pipeline.bindGroupLayouts[1], program.pixelBlocks.map(
-            (/** @type {Float32Array} */ block, /** @type {number} */ binding)=>(
-                { binding, resource: pass.uniforms(block) })));
-        /** @type {any[]} */
-        const sampled = [];
-        program.samplerBindings.forEach((/** @type {any} */ bound, /** @type {number} */ index)=>{
-            sampled.push({ binding: index * 2, resource: bound.view },
-                { binding: index * 2 + 1, resource: bound.sampler });
-        });
-        pass.setBindings(2, pipeline.bindGroupLayouts[2], sampled);
+        pass.setBindings(0, pipeline.bindGroupLayouts[0],
+            blockEntries(pass, program.vertexBlocks));
+        pass.setBindings(1, pipeline.bindGroupLayouts[1],
+            blockEntries(pass, program.pixelBlocks));
+        pass.setBindings(2, pipeline.bindGroupLayouts[2],
+            samplerEntriesOf(program.samplerBindings));
         pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
         bindStreams(pass, command);
         const slot = beginCounting(pass);

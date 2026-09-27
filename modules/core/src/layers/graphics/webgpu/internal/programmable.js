@@ -179,11 +179,17 @@ export function shapeKey(layout){
 export function constantBlocks(file, reach, take){
     const count = Math.max(1, reach);
     const floats = take(count * 4);
-    floats.set(file.floats.subarray(0, Math.min(count * 4, file.floats.length)));
+    // A draw sets two stages' blocks: the file whole where it fits, rather
+    // than a view of it made to say so.
+    floats.set(count * 4 >= file.floats.length
+        ? file.floats
+        : file.floats.subarray(0, count * 4));
     const ints = take(16 * 4);
-    new Int32Array(ints.buffer, ints.byteOffset, ints.length).set(file.ints.subarray(0, 64));
+    new Int32Array(ints.buffer, ints.byteOffset, ints.length)
+        .set(file.ints.length === 64 ? file.ints : file.ints.subarray(0, 64));
     const bools = take(16);
-    new Uint32Array(bools.buffer, bools.byteOffset, bools.length).set(file.bools.subarray(0, 16));
+    new Uint32Array(bools.buffer, bools.byteOffset, bools.length)
+        .set(file.bools.length === 16 ? file.bools : file.bools.subarray(0, 16));
     return [floats, ints, bools];
 }
 

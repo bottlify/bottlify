@@ -361,6 +361,82 @@ test('a written light reads back, and writing one does not enable it', ()=>{
     assertFullyReleased(device);
 });
 
+test('a light set again with what it holds keeps it, and a zero of the other sign changes it', ()=>{
+    // Setting what is there is nothing; but the values read back are the
+    // program's, bit for bit, so -0 where there was 0 is a different light.
+    const device = createDevice();
+    /** @type {{ light?: any, enabled?: any }} */
+    const out = {};
+    const light = {
+        Type: D3DLIGHTTYPE.SPOT,
+        Diffuse: { r: 1, g: 0.5, b: 0.25, a: 1 },
+        Specular: { r: 0, g: 0, b: 0, a: 0 },
+        Ambient: { r: 0.125, g: 0, b: 0, a: 1 },
+        Position: { x: 1, y: 2, z: 3 },
+        Direction: { x: 0, y: 0, z: 1 },
+        Range: 50,
+        Falloff: 1,
+        Attenuation0: 1,
+        Attenuation1: 0,
+        Attenuation2: 0,
+        Theta: 0.5,
+        Phi: 1,
+    };
+    assert.equal(device.SetLight(2, light), D3D_OK);
+    assert.equal(device.LightEnable(2, true), D3D_OK);
+    assert.equal(device.SetLight(2, { ...light }), D3D_OK);
+    assert.equal(device.LightEnable(2, true), D3D_OK);
+    assert.equal(device.GetLight(2, out), D3D_OK);
+    assert.deepEqual(out.light, light);
+    assert.equal(device.GetLightEnable(2, out), D3D_OK);
+    assert.equal(out.enabled, LIGHT_ENABLED, 'enabling it again leaves it enabled');
+
+    assert.equal(device.SetLight(2, { ...light, Attenuation1: -0,
+        Position: { x: 1, y: 2, z: 3 } }), D3D_OK);
+    assert.equal(device.GetLight(2, out), D3D_OK);
+    assert.ok(Object.is(out.light.Attenuation1, -0), 'the negative zero is what reads back');
+    assert.equal(device.GetLightEnable(2, out), D3D_OK);
+    assert.equal(out.enabled, LIGHT_ENABLED, 'setting a light does not disable it');
+
+    assert.equal(device.LightEnable(2, false), D3D_OK);
+    assert.equal(device.GetLightEnable(2, out), D3D_OK);
+    assert.equal(out.enabled, 0);
+
+    assertFullyReleased(device);
+});
+
+test('a world written over the one held reads back new, and a block captured before keeps its own',
+    ()=>{
+        // The device writes a new world into the matrix it holds; whoever
+        // took the old one took a copy.
+        const device = createDevice();
+        /** @type {{ matrix?: Float32Array, handle?: number }} */
+        const out = {};
+        const first = Float32Array.from({ length: 16 }, (_, at)=>at + 1);
+        const second = Float32Array.from({ length: 16 }, (_, at)=>-at);
+        assert.equal(device.SetTransform(D3DTS.WORLD, first), D3D_OK);
+        assert.equal(device.GetTransform(D3DTS.WORLD, out), D3D_OK);
+        const read = /** @type {Float32Array} */ (out.matrix);
+        assert.equal(device.CreateStateBlock(D3DSBT.ALL, out), D3D_OK);
+        const block = /** @type {number} */ (out.handle);
+
+        assert.equal(device.SetTransform(D3DTS.WORLD, second), D3D_OK);
+        assert.deepEqual([...read], [...first], 'what GetTransform answered is the caller\'s');
+        assert.equal(device.GetTransform(D3DTS.WORLD, out), D3D_OK);
+        assert.deepEqual([...(/** @type {Float32Array} */ (out.matrix))], [...second]);
+        second[0] = 99;
+        assert.equal(device.GetTransform(D3DTS.WORLD, out), D3D_OK);
+        assert.equal(/** @type {Float32Array} */ (out.matrix)[0], -0,
+            'the device copied the matrix it was handed');
+
+        assert.equal(device.ApplyStateBlock(block), D3D_OK);
+        assert.equal(device.GetTransform(D3DTS.WORLD, out), D3D_OK);
+        assert.deepEqual([...(/** @type {Float32Array} */ (out.matrix))], [...first]);
+
+        assert.equal(device.DeleteStateBlock(block), D3D_OK);
+        assertFullyReleased(device);
+    });
+
 // --- the viewport, which is one value with two halves ---
 
 test('a fresh device has the whole back buffer as its viewport', ()=>{

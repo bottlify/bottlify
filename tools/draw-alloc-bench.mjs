@@ -6,9 +6,9 @@
 
 /**
  * What a frame of draws allocates on the JavaScript heap, and what it costs,
- * in node: a scene drives a graphics device over the recording GPU double
- * frame after frame, and three things are measured over the frames after a
- * warm-up --
+ * in node: a scene drives a graphics device over the recording GPU double --
+ * its render passes recording nothing -- frame after frame, and three things
+ * are measured over the frames after a warm-up --
  *
  *   - the bytes allocated, by the V8 sampling heap profiler with the objects
  *     both collectors reclaimed counted in (an estimate: one sample per
@@ -29,6 +29,10 @@
  *                 light set again -- a program that sets its lights per model
  *   d3d8-moving   the same, with the light set before every draw in a new
  *                 place -- a light per model
+ *   d3d9-lit, d3d9-moving   the same two through Direct3D 9
+ *   d3d9-shader   Direct3D 9 through a vertex and a pixel shader, the matrix
+ *                 constants set before every draw with the texture and the
+ *                 cull mode
  *
  * `--top K` prints the K functions of the engine's own code that allocated
  * the most, with the file and line each starts at. `--root DIR` measures the
@@ -50,6 +54,10 @@ const {
     D3DCULL, D3D_OK,
 } = await import(`${GRAPHICS}/d3d8/constants.js`);
 const { createDirect3D8 } = await import(`${GRAPHICS}/d3d8/device.js`);
+const { createDirect3D9 } = await import(`${GRAPHICS}/d3d9/device.js`);
+const { D3DDECLTYPE, D3DDECLUSAGE } = await import(`${GRAPHICS}/d3d9/declaration.js`);
+const { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, versionToken } =
+    await import(`${GRAPHICS}/d3d9/shader.js`);
 const { createBackend } = await import(`${GRAPHICS}/webgpu/backend.js`);
 const { createFakeDevice } = await import(`${GRAPHICS}/webgpu/internal/fake-device.js`);
 const { FVF } = await import(`${GRAPHICS}/webgpu/internal/vertexformat.js`);
@@ -105,23 +113,109 @@ const light = (over = {})=>({
 });
 
 /**
- * A Direct3D 8 device over the recording double, and a frame of `draws`
- * draws on it.
+ * The recording double with what its render passes record left out: a pass
+ * of it resolves every binding and keeps every call, which is the double's
+ * work, and inlined into the backend's own calls the profiler would put it to
+ * the engine's account.
  *
- * @param {{ draws: number, moving: boolean }} scene
+ * @param {any} gpu
  */
-function d3d8Scene({ draws, moving }){
-    const gpu = createFakeDevice();
+function quietPasses(gpu){
+    const nothing = ()=>{};
+    const encoderFor = gpu.device.createCommandEncoder.bind(gpu.device);
+    gpu.device.createCommandEncoder = (/** @type {any[]} */ ...args)=>{
+        const encoder = encoderFor(...args);
+        const open = encoder.beginRenderPass.bind(encoder);
+        encoder.beginRenderPass = (/** @type {any} */ descriptor)=>{
+            const pass = open(descriptor);
+            for (const key of Object.keys(pass))
+            {
+                if (typeof pass[key] === 'function')
+                {
+                    pass[key] = nothing;
+                }
+            }
+            return pass;
+        };
+        return encoder;
+    };
+    return gpu;
+}
+
+/** @param {number} type @param {number} index */
+const dst = (type, index)=>(0x80000000 | ((type & 7) << 28) | ((type & 0x18) << 8) | (0xf << 16)
+    | index) >>> 0;
+/** @param {number} type @param {number} index */
+const src = (type, index)=>(0x80000000 | ((type & 7) << 28) | ((type & 0x18) << 8) | (0xe4 << 16)
+    | index) >>> 0;
+/** @param {number} opcode @param {number} length */
+const op = (opcode, length)=>((length << 24) | opcode) >>> 0;
+/** @param {number} usage @param {number} register */
+const dclInput = (usage, register)=>[
+    op(OPCODE.DCL, 2), (0x80000000 | usage) >>> 0, dst(REGISTER.INPUT, register),
+];
+
+/** vs_2_0: the position through c0..c3, the coordinate set carried. */
+const VERTEX_SHADER = [
+    versionToken(SHADER_KIND.VERTEX, 2, 0),
+    ...dclInput(D3DDECLUSAGE.POSITION, 0),
+    ...dclInput(D3DDECLUSAGE.TEXCOORD, 1),
+    op(OPCODE.M4x4, 3), dst(REGISTER.RASTOUT, 0), src(REGISTER.INPUT, 0), src(REGISTER.CONST, 0),
+    op(OPCODE.MOV, 2), dst(REGISTER.TEXCRDOUT, 0), src(REGISTER.INPUT, 1),
+    END_TOKEN,
+];
+
+/** ps_2_0: a texture sample offset by c2. */
+const PIXEL_SHADER = [
+    versionToken(SHADER_KIND.PIXEL, 2, 0),
+    op(OPCODE.DCL, 2), (2 << 27) >>> 0, dst(REGISTER.SAMPLER, 0),
+    op(OPCODE.DCL, 2), 0x80000000, dst(REGISTER.TEXTURE, 0),
+    op(OPCODE.TEX, 3), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 0), src(REGISTER.SAMPLER, 0),
+    op(OPCODE.ADD, 3), dst(REGISTER.COLOROUT, 0), src(REGISTER.TEMP, 0), src(REGISTER.CONST, 2),
+    END_TOKEN,
+];
+
+/** The cube's vertex as a declaration: position, normal, one coordinate set. */
+const CUBE_ELEMENTS = [
+    { Stream: 0, Offset: 0, Type: D3DDECLTYPE.FLOAT3, Method: 0, Usage: D3DDECLUSAGE.POSITION,
+        UsageIndex: 0 },
+    { Stream: 0, Offset: 12, Type: D3DDECLTYPE.FLOAT3, Method: 0, Usage: D3DDECLUSAGE.NORMAL,
+        UsageIndex: 0 },
+    { Stream: 0, Offset: 24, Type: D3DDECLTYPE.FLOAT2, Method: 0, Usage: D3DDECLUSAGE.TEXCOORD,
+        UsageIndex: 0 },
+];
+
+/**
+ * A Direct3D 8 or 9 device over the recording double, and a frame of
+ * `draws` draws on it: fixed-function and lit, or through a shader pair whose
+ * matrix constants are set before every draw.
+ *
+ * @param {{ version: 8 | 9, draws: number, moving?: boolean, shader?: boolean }} scene
+ */
+function directScene({ version, draws, moving = false, shader = false }){
+    const nine = version === 9;
+    const gpu = quietPasses(createFakeDevice());
     const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const ram = new Uint8Array(8 << 20);
-    const d3d = createDirect3D8({
+    let next = RAM_BASE + (4 << 20);
+    const services = {
         backend,
-        readMemory: (address, length)=>ram.slice(address - RAM_BASE, address - RAM_BASE + length),
-        windowMemory: (address, length)=>ram.subarray(address - RAM_BASE,
-            address - RAM_BASE + length),
-        createSampler: descriptor=>({ kind: 'sampler', descriptor }),
-    });
+        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+            ram.slice(address - RAM_BASE, address - RAM_BASE + length),
+        windowMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+            ram.subarray(address - RAM_BASE, address - RAM_BASE + length),
+        createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
+        allocate: (/** @type {number} */ bytes)=>{
+            const address = next;
+            next += bytes + 0x100;
+            return address;
+        },
+    };
+    const d3d = nine
+        ? createDirect3D9({ ...services, vertexShaderVersion: { major: 2, minor: 0 },
+            pixelShaderVersion: { major: 2, minor: 0 } })
+        : createDirect3D8(services);
     /** @type {{ device?: any }} */
     const out = {};
     check(d3d.CreateDevice({
@@ -181,14 +275,15 @@ function d3d8Scene({ draws, moving }){
         check(device.CreateTexture(16, 16, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, texture));
         /** @type {{ pBits?: number }} */
         const rect = {};
-        check(texture.texture.LockRect(0, rect, null, 0));
+        check(nine ? texture.texture.LockRect(0, rect)
+            : texture.texture.LockRect(0, rect, null, 0));
         ram.fill(0x40 + made * 0x40, /** @type {number} */ (rect.pBits) - RAM_BASE,
             /** @type {number} */ (rect.pBits) - RAM_BASE + 16 * 16 * 4);
         check(texture.texture.UnlockRect(0));
         textures.push(texture.texture);
     }
 
-    check(device.SetRenderState(D3DRS.LIGHTING, 1));
+    check(device.SetRenderState(D3DRS.LIGHTING, shader ? 0 : 1));
     check(device.SetRenderState(D3DRS.AMBIENT, 0xff202020));
     check(device.SetMaterial({
         Diffuse: { r: 1, g: 1, b: 1, a: 1 }, Ambient: { r: 1, g: 1, b: 1, a: 1 },
@@ -203,6 +298,18 @@ function d3d8Scene({ draws, moving }){
         check(device.SetLight(index, one));
         check(device.LightEnable(index, true));
     });
+    if (shader)
+    {
+        /** @type {{ shader?: any, declaration?: any }} */
+        const made = {};
+        check(device.CreateVertexDeclaration(CUBE_ELEMENTS, made));
+        check(device.SetVertexDeclaration(made.declaration));
+        check(device.CreateVertexShader(VERTEX_SHADER, made));
+        check(device.SetVertexShader(made.shader));
+        check(device.CreatePixelShader(PIXEL_SHADER, made));
+        check(device.SetPixelShader(made.shader));
+        check(device.SetPixelShaderConstantF(2, [0.1, 0.2, 0.3, 0.4], 1));
+    }
     // Made before the frames, so the scene's own arrays are not what is counted.
     const worlds = Array.from({ length: draws }, (_, index)=>{
         const matrix = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
@@ -226,18 +333,30 @@ function d3d8Scene({ draws, moving }){
             check(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, 0xff000000, 1, 0));
             check(device.SetTransform(D3DTS.VIEW, viewMatrix));
             check(device.SetTransform(D3DTS.PROJECTION, projection));
-            check(device.SetVertexShader(fvf));
-            check(device.SetStreamSource(0, vertices.buffer, stride));
-            check(device.SetIndices(indices.buffer, 0));
+            if (!shader)
+            {
+                check(nine ? device.SetFVF(fvf) : device.SetVertexShader(fvf));
+            }
+            check(nine ? device.SetStreamSource(0, vertices.buffer, 0, stride)
+                : device.SetStreamSource(0, vertices.buffer, stride));
+            check(nine ? device.SetIndices(indices.buffer) : device.SetIndices(indices.buffer, 0));
             for (let index = 0; index < draws; index++)
             {
-                check(device.SetTransform(D3DTS.WORLD, worlds[index]), index);
+                if (shader)
+                {
+                    check(device.SetVertexShaderConstantF(0, worlds[index], 4), index);
+                }
+                else
+                {
+                    check(device.SetTransform(D3DTS.WORLD, worlds[index]), index);
+                    check(device.SetLight(1, moving ? movingLights[index] : lights[1]), index);
+                    check(device.LightEnable(1, true), index);
+                }
                 check(device.SetTexture(0, textures[index & 1]), index);
                 check(device.SetRenderState(D3DRS.CULLMODE,
                     index & 2 ? D3DCULL.CW : D3DCULL.CCW), index);
-                check(device.SetLight(1, moving ? movingLights[index] : lights[1]), index);
-                check(device.LightEnable(1, true), index);
-                check(device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 24, 0, 12), index);
+                check(nine ? device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 0, 24, 0, 12)
+                    : device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 24, 0, 12), index);
             }
             check(device.EndScene());
             check(device.Present());
@@ -247,10 +366,13 @@ function d3d8Scene({ draws, moving }){
     };
 }
 
-/** @type {Record<string, (draws: number) => ReturnType<typeof d3d8Scene>>} */
+/** @type {Record<string, (draws: number) => ReturnType<typeof directScene>>} */
 const SCENES = {
-    'd3d8-lit': draws=>d3d8Scene({ draws, moving: false }),
-    'd3d8-moving': draws=>d3d8Scene({ draws, moving: true }),
+    'd3d8-lit': draws=>directScene({ version: 8, draws }),
+    'd3d8-moving': draws=>directScene({ version: 8, draws, moving: true }),
+    'd3d9-lit': draws=>directScene({ version: 9, draws }),
+    'd3d9-moving': draws=>directScene({ version: 9, draws, moving: true }),
+    'd3d9-shader': draws=>directScene({ version: 9, draws, shader: true }),
 };
 
 /**
@@ -285,7 +407,7 @@ function flatten(node, into = [], caller = null){
 const isDouble = url=>url.includes('fake-device.js') || url.includes('draw-alloc-bench');
 
 /**
- * @param {ReturnType<typeof d3d8Scene>} scene @param {number} frames
+ * @param {ReturnType<typeof directScene>} scene @param {number} frames
  * @param {number} interval
  */
 async function allocationsOf(scene, frames, interval){
@@ -327,7 +449,7 @@ async function allocationsOf(scene, frames, interval){
     return { engine, double, byFunction };
 }
 
-/** @param {ReturnType<typeof d3d8Scene>} scene @param {number} frames */
+/** @param {ReturnType<typeof directScene>} scene @param {number} frames */
 async function timeOf(scene, frames){
     /** @type {number[]} */
     const pauses = [];
