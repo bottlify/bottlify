@@ -3842,11 +3842,12 @@ async function buildApp(options){
         const exports = Object.entries(table).map(([exported, fn])=>({
             name: exported,
             ordinal: declared.get(exported),
-            // An export is a variable the program reads through its address,
-            // a trap into the host, or guest code that decides for itself
-            // when to trap: the builder hands such an entry the means to
-            // register the traps it falls back to.
-            ...fn.data ? { data: fn.data() } : {
+            // An export is a function that is code of its own, a variable the
+            // program reads through its address, a trap into the host, or
+            // guest code that decides for itself when to trap: the builder
+            // hands such an entry the means to register the traps it falls
+            // back to.
+            ...fn.code ? { code: fn.code() } : fn.data ? { data: fn.data() } : {
                 target: fn.guest
                     ? fn.guest({
                         /** @param {string} label @param {any} trap */

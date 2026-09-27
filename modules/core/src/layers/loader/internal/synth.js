@@ -6,7 +6,8 @@
 
 /**
  * Synthesis of an in-guest system module: a real PE32 image with a real export
- * directory, whose exported addresses are JMP trampolines into host trap stubs.
+ * directory, whose exported addresses are JMP trampolines into host trap stubs,
+ * variables, or functions that are code of their own.
  *
  * Patching an import table binds the calls a program makes through its own IAT.
  * It does nothing for a program that resolves a name at runtime, walks an export
@@ -67,6 +68,12 @@ const encoder = new TextEncoder();
  *   apart from the code: a program and the runtime both write them -- a
  *   stream's flags, the file mode -- where the code beside them stays
  *   read-only.
+ * @property {Uint8Array} [code]
+ *   A function whose body is these bytes, rather than a jump to a host stub:
+ *   placed in the code section after the export directory, read-only and on
+ *   pages no variable shares. A write to a variable -- the program's, or the
+ *   library's own from the host -- never lands on a page that holds code,
+ *   where a translator would have to throw its translations away.
  */
 
 /**
@@ -127,6 +134,24 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
     // The directory's size spans everything it owns, which is what tells a loader
     // whether an exported address is code or a forwarder.
     const exportDirectorySize = cursor - exportDirectoryRva;
+
+    // The functions that are code of their own, after the directory -- outside
+    // its range, so none is taken for a forwarder string -- each aligned like
+    // a slot.
+    /** @type {Map<number, number>} */
+    const codeRvas = new Map();
+    exports.forEach((entry, index)=>{
+        if (entry.code)
+        {
+            if (entry.data)
+            {
+                throw new Error(`export "${entry.name}" is both code and a variable`);
+            }
+            cursor = align(cursor, TRAMPOLINE_STRIDE);
+            codeRvas.set(index, cursor);
+            cursor += entry.code.length;
+        }
+    });
     const sectionSize = cursor - SECTION_RVA;
 
     // The variables, on the pages after the code -- outside the directory's
@@ -162,10 +187,14 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
     exports.forEach((entry, index)=>{
         const slot = trampolinesRva + index * TRAMPOLINE_STRIDE;
         bytes.fill(INT3, slot, slot + TRAMPOLINE_STRIDE);
-        const rva = dataRvas.get(index) ?? slot;
+        const rva = dataRvas.get(index) ?? codeRvas.get(index) ?? slot;
         if (entry.data)
         {
             bytes.set(entry.data, rva);
+        }
+        else if (entry.code)
+        {
+            bytes.set(entry.code, rva);
         }
         else
         {
@@ -201,7 +230,8 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
     strings.forEach((text, index)=>bytes.set(encoder.encode(text), stringRvas[index]));
 
     const table = new Map(exports.map((entry, index)=>[entry.name, {
-        address: base + (dataRvas.get(index) ?? trampolinesRva + index * TRAMPOLINE_STRIDE),
+        address: base + (dataRvas.get(index) ?? codeRvas.get(index)
+            ?? trampolinesRva + index * TRAMPOLINE_STRIDE),
         ordinal: ordinals[index],
     }]));
 

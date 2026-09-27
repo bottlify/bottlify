@@ -40,7 +40,8 @@
  * stores setU8, setU16, setU32 and setF64 (address, value); `call(fn, ...)`
  * calls a cdecl function pointer and answers its EAX as an i32; `copyUp`,
  * `copyDown` (dst, src, count) copy bytes ascending or descending, and
- * `fill` (dst, byte, count) sets them -- `rep movsb` and `rep stosb`.
+ * `fill` (dst, byte, count) sets them -- `rep movsd` and `rep stosd` for the
+ * whole dwords, leaving the bytes as the byte forms do.
  *
  * Integers are typed as asm.js types them: `|0`, `>>>0` and the bitwise
  * operators bring a value back to 32 bits; `+` and `-` leave a sum that may
@@ -1932,7 +1933,16 @@ class FunctionCompiler {
         a.emit(...STORES[name], ...memory(EAX, { base: ECX, disp: operand.disp ?? 0 }));
     }
 
-    /** copyUp, copyDown and fill: `rep movsb` and `rep stosb`. @param {any} node @param {string} name */
+    /**
+     * copyUp, copyDown and fill: `rep movsd` or `rep stosd` for the whole
+     * dwords and the byte forms for the rest. Each turn of a `rep` counts as
+     * an instruction, so a dword a turn is a quarter of the turns, and the
+     * bytes land as the byte form leaves them -- except where a copy's two
+     * ends are one to three bytes apart, and a dword read would take bytes
+     * the byte form had already overwritten: that copy is bytes throughout.
+     *
+     * @param {any} node @param {string} name
+     */
     bulk(node, name){
         const a = this.a;
         this.arity(node, 3);
@@ -1948,18 +1958,39 @@ class FunctionCompiler {
         a.emit(0x59);                                                      // pop ecx: the count
         if (name === 'fill')
         {
-            a.emit(0x58, 0x5f, 0xf3, 0xaa);                // pop eax; pop edi; rep stosb
+            a.emit(0x58, 0x5f);                                            // pop eax; pop edi
+            a.emit(0x0f, 0xb6, 0xc0, 0x69, 0xc0, ...le32(0x01010101));    // the byte, four times
+            a.emit(0x89, 0xca, 0xc1, 0xe9, 0x02, 0xf3, 0xab);          // edx = n; rep stosd
+            a.emit(0x89, 0xd1, 0x83, 0xe1, 0x03, 0xf3, 0xaa);          // n & 3; rep stosb
             return;
         }
         a.emit(0x5e, 0x5f);                                                // pop esi; pop edi
-        if (name === 'copyDown')
+        const bytes = a.fresh('bytes');
+        if (name === 'copyUp')
         {
-            // From the last byte of each, with the direction flag set and cleared again.
-            a.emit(0x8d, 0x74, 0x0e, 0xff, 0x8d, 0x7c, 0x0f, 0xff);   // lea esi/edi, [x+ecx-1]
-            a.emit(0xfd, 0xf3, 0xa4, 0xfc);                            // std; rep movsb; cld
+            // One to three bytes ahead of the source: bytes throughout.
+            a.emit(0x89, 0xf8, 0x29, 0xf0, 0x48, 0x83, 0xf8, 0x03);    // eax = edi - esi - 1
+            a.jump(CC.b, bytes);
+            a.emit(0x89, 0xca, 0xc1, 0xe9, 0x02, 0xf3, 0xa5);          // edx = n; rep movsd
+            a.emit(0x89, 0xd1, 0x83, 0xe1, 0x03);                      // ecx = n & 3
+            a.label(bytes);
+            a.emit(0xf3, 0xa4);                                            // rep movsb
             return;
         }
+        // From the last byte of each, with the direction flag set and cleared
+        // again: the top n & 3 bytes, then the dwords below them.
+        const done = a.fresh('done');
+        a.emit(0x89, 0xf0, 0x29, 0xf8, 0x48, 0x83, 0xf8, 0x03);        // eax = esi - edi - 1
+        a.emit(0x8d, 0x74, 0x0e, 0xff, 0x8d, 0x7c, 0x0f, 0xff, 0xfd);  // lea esi/edi, ...; std
+        a.jump(CC.b, bytes);
+        a.emit(0x89, 0xca, 0x83, 0xe1, 0x03, 0xf3, 0xa4);              // edx = n; rep movsb
+        a.emit(0x83, 0xee, 0x03, 0x83, 0xef, 0x03);                    // esi, edi at a dword
+        a.emit(0x89, 0xd1, 0xc1, 0xe9, 0x02, 0xf3, 0xa5);              // n >> 2; rep movsd
+        a.jump(-1, done);
+        a.label(bytes);
         a.emit(0xf3, 0xa4);                                                // rep movsb
+        a.label(done);
+        a.emit(0xfc);                                                      // cld
     }
 
     /** `push` a constant or a variable. @param {Value} value */

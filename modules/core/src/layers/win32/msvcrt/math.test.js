@@ -70,7 +70,7 @@ test('the _CI form of a binary function reads ST(1) as the left operand', ()=>{
 test('_ftol and its two other names are one body of guest code, into EDX:EAX', ()=>{
     // What it answers is held in inguest.test.js and crt-inguest.itest.js.
     const { table } = build();
-    assert.deepEqual(table._ftol.data(), COMPILED._ftol.code);
+    assert.deepEqual(table._ftol.code(), COMPILED._ftol.code);
     assert.equal(table._ftol2, table._ftol);
     assert.equal(table._ftol2_sse, table._ftol);
     assert.equal('handler' in table._ftol, false, 'no EDX to answer in: the x86 alone');

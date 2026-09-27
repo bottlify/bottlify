@@ -179,8 +179,11 @@ const COMPARATOR_CODE = [
  * @param {Spec} spec @param {number} n @param {boolean} withCall
  */
 export function program(spec, n, withCall){
+    // The arguments' bytes a page past the code: a store into a page that
+    // holds translated code takes the translator's slow path, and a store
+    // from the host drops the translations on it -- the loop's own.
     /** @type {Record<string, number[]>} */
-    const data = {};
+    const data = { apart: new Array(0x1000).fill(0) };
     spec.args.forEach((arg, i)=>{
         if (arg.kind === 's')
         {
