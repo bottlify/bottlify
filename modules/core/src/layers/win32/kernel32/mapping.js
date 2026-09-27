@@ -26,6 +26,7 @@ import { TAKEN } from './named-objects.js';
  */
 
 /** Codes this surface reports. */
+const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
@@ -221,9 +222,48 @@ export function createMappingFunctions(host){
         },
     });
 
+    /**
+     * HANDLE OpenFileMappingA/W(DWORD dwDesiredAccess, BOOL bInheritHandle,
+     *   LPCSTR/LPCWSTR lpName)
+     *
+     * A second handle onto a mapping made by name, as a second create would
+     * give but without making one: no name is a bad parameter, a name nothing
+     * holds is "no such thing", and a name another kind holds is a bad handle.
+     *
+     * @param {boolean} wide
+     */
+    const openFileMapping = wide=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([, , namePointer])=>{
+            const name = nameOf(namePointer, wide);
+            if (name === null)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const found = host.namedObjects.existing(name, 'mapping');
+            if (found === TAKEN)
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            if (!found)
+            {
+                return fail(ERROR_FILE_NOT_FOUND);
+            }
+            host.namedObjects.reference(found);
+            if (found.node)
+            {
+                host.files.retain(found.node);
+            }
+            return host.handles.open('mapping', found);
+        },
+    });
+
     return {
         CreateFileMappingA: createFileMapping(false),
         CreateFileMappingW: createFileMapping(true),
+        OpenFileMappingA: openFileMapping(false),
+        OpenFileMappingW: openFileMapping(true),
 
         /**
          * LPVOID MapViewOfFile(HANDLE hFileMappingObject, DWORD dwDesiredAccess,

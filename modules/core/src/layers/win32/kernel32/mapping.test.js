@@ -243,3 +243,25 @@ test('a view whose bytes never arrive fails on the caller, not on whoever runs t
     assert.deepEqual(errorsFor, [['the-caller', 1117]],
         'ERROR_IO_DEVICE, on the thread that asked');
 });
+
+test('OpenFileMapping finds a named mapping, and says why when it cannot', ()=>{
+    const NAME = 0x900;
+    const OTHER = 0x940;
+    const { fns, errors } = setup({ [NAME]: 'Local\\Foo', [OTHER]: 'Nothing' });
+    const made = fns.CreateFileMappingA.handler(
+        [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, 0x1000, NAME]);
+    assert.notEqual(made, 0);
+
+    const opened = fns.OpenFileMappingW.handler([FILE_MAP_WRITE, 0, NAME]);
+    assert.notEqual(opened, 0);
+    assert.notEqual(opened, made, 'a handle of its own onto the same mapping');
+    const view = fns.MapViewOfFile.handler([opened, FILE_MAP_WRITE, 0, 0, 0]);
+    assert.notEqual(view, 0);
+
+    errors.length = 0;
+    assert.equal(fns.OpenFileMappingA.handler([FILE_MAP_WRITE, 0, OTHER]), 0);
+    assert.equal(fns.OpenFileMappingA.handler([FILE_MAP_WRITE, 0, 0]), 0);
+    assert.deepEqual(errors, [2, 87], 'no such name, and no name at all');
+    assert.equal(fns.OpenFileMappingA.argBytes, 12);
+    assert.equal(fns.OpenFileMappingW.argBytes, 12);
+});
