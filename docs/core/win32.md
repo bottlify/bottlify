@@ -616,6 +616,15 @@ filter (`SetUnhandledExceptionFilter`) and then ends the process with the except
 exit code; a processor exception in a program with no filter stops the machine with the fault
 report instead, since that report is the only account of it.
 
+Each handler of the walk, and the last-chance filter, starts with TF, DF and AC clear, as Windows
+enters its dispatcher, whatever the exception left on the processor: compiled code assumes DF clear
+at every call, and a fault inside a copy going down (`std; rep movsd`, which is how the guest's own
+`memmove` copies an overlapping run) would otherwise have every `rep` in the handler run
+backwards. The context keeps the flags the exception had -- a raised exception's too, read at the
+call -- and a handler that answers `EXCEPTION_CONTINUE_EXECUTION` continues with the context's
+flags: the arithmetic ones, TF, DF, AC and ID as the handler left them, the rest (the reserved bit,
+IF, IOPL) the thread's own.
+
 The C runtime's half is what the compiler registers. `_except_handler3` (`msvcrt/seh.js`) reads
 the function's scope table and runs its blocks with EBP set to the frame plus `0x10`, as the
 compiler's code expects: a filter finds the exception pointers at `[EBP-0x14]`, `__finally`
@@ -1050,8 +1059,11 @@ while the host writes stdout's record in `_iob` at every turn has every instruct
 `src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe`, `cxxeh.exe`,
 `unhandled.exe`, built from `test/fixtures/src/` by `scripts/build-fixtures.mjs` with clang and
 lld against the MSVC ABI -- through every path above, processor faults and two threads throwing
-at once included. `src/apc.itest.js` runs `apc.exe`, built the same way: APCs to itself and to
-another thread's alertable sleep, one refused by a wait that is not alertable, a routine queued
+at once included; beside them a program built in the test takes an invalid opcode with DF set, on
+cork and on the emulator, and its handler runs with DF clear -- a `rep stosb` in it fills upwards
+-- while the context has DF, and the block the handler continues at gets DF back.
+`src/apc.itest.js` runs `apc.exe`, built the same way: APCs to itself and to another thread's
+alertable sleep, one refused by a wait that is not alertable, a routine queued
 by a routine, and a timer's completion routine. Others build their guest program in the test
 itself, most answering one property per bit of its exit code: `src/condition.itest.js` sleeps on a
 condition variable over an SRW lock and over a critical section; `src/suspend.itest.js` creates a

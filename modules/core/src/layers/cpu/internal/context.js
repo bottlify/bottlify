@@ -273,6 +273,31 @@ export function setThreadBase(context, tebAddress){
 }
 
 /**
+ * Sets a saved context's flags word, whole: the arithmetic state kept lazily
+ * beside it -- cork's record, the emulator's operands -- is dropped, since the
+ * word now says everything. For a thread sent into code with the flags it is
+ * to start with: an exception handler, or where a handler's context continues.
+ *
+ * @param {any} context  Either record: the emulator's fields or cork's block.
+ * @param {number} value
+ */
+export function setContextEflags(context, value){
+    if (context.block instanceof Uint8Array)
+    {
+        const { block, layout } = /** @type {BlockContext} */ (context);
+        const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+        view.setUint32(layout.eflags, value >>> 0, true);
+        if ((layout.flagRecord ?? -1) >= 0)
+        {
+            view.setUint32(/** @type {number} */ (layout.flagRecord), 0, true);
+        }
+        return;
+    }
+    context.flags = value | 0;
+    context.flagsChanged = 0;
+}
+
+/**
  * Reports which fields differ, for tests and for diagnosing a switch that lost
  * something. Empty means the two contexts are identical.
  *
