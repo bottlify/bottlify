@@ -732,6 +732,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         OleUninitialize: 0,
         CreateStreamOnHGlobal: 12,
         CoFreeUnusedLibraries: 0,
+        CoFreeAllLibraries: 0,
         CoLoadLibrary: 8,
         CoFreeLibrary: 4,
         CoCreateInstance: 20,

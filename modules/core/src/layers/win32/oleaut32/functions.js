@@ -31,6 +31,8 @@ import { readGuid } from '../ole32/guid.js';
 import { createAdapter, createTypeLibraryObjects } from './objects.js';
 import { createErrorInfoObjects } from './errorinfo.js';
 import { parseTypeLib } from './typelib.js';
+import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
+import { findResource } from '../../loader/internal/resources.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
@@ -662,6 +664,24 @@ export function createAutomationFunctions(host){
     };
 
     /**
+     * The TYPELIB resource of an image, as LoadTypeLib reads a library an
+     * executable or a DLL carries inside itself.
+     *
+     * @param {Uint8Array} file @param {number} index
+     * @returns {Uint8Array}
+     */
+    const typeLibResource = (file, index)=>{
+        const image = parsePe(file);
+        const found = findResource(file, image, 'TYPELIB', index);
+        if (!found)
+        {
+            throw new Error(`the image has no TYPELIB resource ${index}`);
+        }
+        const at = rvaToFileOffset(image, found.rva);
+        return file.subarray(at, at + found.size);
+    };
+
+    /**
      * Loads a library and puts its ITypeLib where the caller asked.
      *
      * @param {number} pathAddress  An OLESTR.
@@ -674,7 +694,12 @@ export function createAutomationFunctions(host){
             return E_INVALIDARG;
         }
         writeU32(out, 0);
-        const path = wideAt(pathAddress);
+        const named = wideAt(pathAddress);
+        // A library inside an image is named by the image's path, and one past
+        // the first by the image's path and \N, its TYPELIB resource number.
+        const indexed = /^(.*)\\(\d+)$/.exec(named);
+        const path = indexed && fileBytes(named) === null ? indexed[1] : named;
+        const index = indexed && path !== named ? Number(indexed[2]) : 1;
         const bytes = fileBytes(path);
         if (bytes === null || !typeLibraries)
         {
@@ -688,7 +713,8 @@ export function createAutomationFunctions(host){
             let library;
             try
             {
-                library = parseTypeLib(data);
+                library = parseTypeLib(data[0] === 0x4d && data[1] === 0x5a
+                    ? typeLibResource(data, index) : data);
             }
             catch (e){
                 report('LoadTypeLib', `"${path}": ${e instanceof Error ? e.message : String(e)}`);

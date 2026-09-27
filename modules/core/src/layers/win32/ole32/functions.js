@@ -733,6 +733,15 @@ export function createOleFunctions(host){
         },
 
         /**
+         * void CoFreeAllLibraries(void): a library COM loaded stays mapped for
+         * the process here, as CoFreeUnusedLibraries leaves it.
+         */
+        CoFreeAllLibraries: {
+            argBytes: 0,
+            handler: ()=>0,
+        },
+
+        /**
          * HINSTANCE CoLoadLibrary(LPOLESTR lpszLibName, BOOL bAutoFree)
          * void CoFreeLibrary(HINSTANCE hInst)
          *
