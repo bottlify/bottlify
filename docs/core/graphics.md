@@ -79,7 +79,7 @@ builds its renderer without them; the first four also reach the OpenGL device re
 | `screen()` | The current `{ width, height, bitsPerPixel }`. |
 | `create(name, options?)` | Makes one API object by name: `ddraw`, `d3d8`, `d3d9`, `opengl`, `d3d10`, `vulkan`. Direct3D 7 has no factory of its own; it is reached from a DirectDraw object. |
 | `apis()` | The six names above. |
-| `libraries()` | `{ 'OPENGL32.dll', 'D3D8.dll', 'D3D9.dll', 'D3D10.dll', 'DXGI.dll', 'vulkan-1.dll', 'DDRAW.dll' }`, each a `{ Name: { argBytes, handler } }` table shaped like a `win32` library's, for the loader. |
+| `libraries()` | `{ 'OPENGL32.dll', 'GLU32.dll', 'D3D8.dll', 'D3D9.dll', 'D3D10.dll', 'DXGI.dll', 'vulkan-1.dll', 'DDRAW.dll' }`, each a `{ Name: { argBytes, handler } }` table shaped like a `win32` library's, for the loader. |
 | `opengl()` | The pixel-format negotiation (`size`, `count`, `choose`, `describe`) and `swapBuffers(hdc)` whose entry points `gdi32` exports -- a swap answers a promise when it waits for the device (see *Frames in flight*); the assembling caller hands these down to `win32`; and `entry(name)`, one named `OPENGL32.dll` handler with its raw-dword convention, for a caller already on this side of the boundary -- every one but the two WGL swaps, which may wait. |
 | `gdiDrawing()` | GDI's own drawing for the device contexts `win32` keeps (`create`, `fontMetrics`, `textWidth`, `surfaceFor`, `desktop`, `presentDesktop`), and the display's gamma ramp for `gdi32`'s `SetDeviceGammaRamp`, `GetDeviceGammaRamp` and `GetDeviceCaps(COLORMGMTCAPS)`, which `app.js` hands down as `setGammaRamp`, `gammaRamp` and `appliesGamma`: `setDisplayGamma(ramp)` sets it (`{ red, green, blue }`, 256 sixteen-bit entries each; `null` takes it back), `displayGamma()` answers the ramp the display shows through, whoever set it, or `null` when none was (the identity), and `appliesGamma()` whether a ramp reaches the picture at all. A ramp a full-screen Direct3D 8 or 9 device or a DirectDraw primary sets afterwards is shown instead until that one is taken back; the display's own outlives the process, and a machine's devices take theirs with them when it is disposed. |
 
@@ -103,6 +103,7 @@ reading each table:
 | library | entry points | what they are |
 |---|---|---|
 | `OPENGL32.dll` | 507 | The whole of OpenGL 1.1, all of WGL, and every extension function this implementation answers. Every name is bound, implemented or not, because a stdcall stub that pops the wrong number of bytes loses the process far from the call. Unimplemented names answer zero and are counted. |
+| `GLU32.dll` | 60 | Windows' GLU32 and the GLU 1.3 additions: the projections, the camera and the pick region as guest code that calls OPENGL32, projection and unprojection and `gluCheckExtension` answered in the guest, the quadrics, images and tessellator on the host, NURBS accepted and drawing nothing (see *GLU32* below). |
 | `vulkan-1.dll` | 149 | Every command with its 32-bit argument size (`src/layers/graphics/vulkan/commands.js`). 65 are implemented (20 instance-level, 45 device-level); the rest answer `VK_ERROR_FEATURE_NOT_PRESENT` and are counted by name. |
 | `DDRAW.dll` | 7 | `DirectDrawCreate`, `DirectDrawCreateEx` and `DirectDrawCreateClipper`; `DirectDrawEnumerateA` and `DirectDrawEnumerateExA`, which call the program's callback once, for the primary display driver (a null GUID, `"Primary Display Driver"`, `"display"`, and a null monitor in the Ex form); and `DirectDrawEnumerateW` and `DirectDrawEnumerateExW`, which the runtime never implemented and which answer `DDERR_UNSUPPORTED` having called nothing. A null callback is `DDERR_INVALIDPARAMS` in every form but `DirectDrawEnumerateExW`. |
 | `D3D10.dll` | 27 | `D3D10CreateDevice` and `D3D10CreateDeviceAndSwapChain`; blobs and reflection (`D3D10CreateBlob`, the three signature-blob functions, `D3D10GetShaderDebugInfo`, `D3D10ReflectShader`); the three profile names; the state block (`D3D10CreateStateBlock` and the eight `D3D10StateBlockMask*` functions); the effect framework's `D3D10CreateEffectFromMemory`; and six that refuse by name, each reporting why: the two compilers answer `E_FAIL` with the reason in the error blob, the two disassemblers, `D3D10PreprocessShader` and `D3D10CreateEffectPoolFromMemory` `E_NOTIMPL`. |
@@ -902,6 +903,35 @@ device, and waits past the bound as a present does, and on the processor hands t
 presenter through guest scratch memory -- so this is the one API a headless build can run to a
 finished frame.
 
+**GLU32** (`src/layers/graphics/glu/`). Every export of Windows' `GLU32.dll` and the GLU 1.3
+additions a program may import beside them (`gluCheckExtension`, `gluUnProject4`,
+`gluBuild1D/2D/3DMipmapLevels`, `gluBuild3DMipmaps`) -- 60 names, each at its stdcall stack size.
+The arithmetic is code in GLU32's own module, compiled from `inguest.js` as msvcrt's is and computed
+on the x87 in doubles under the program's control word: `gluPerspective`, `gluLookAt`,
+`gluOrtho2D` and `gluPickMatrix` are routines (`code.js`) that compute on a frame of their own and
+then call OPENGL32's `glMultMatrixd`, `glTranslated`, `glScaled` or `glOrtho` through the addresses
+those exports are placed at -- GLU32 is placed after OPENGL32 for that -- so the current matrix is
+multiplied by GL, a display list being compiled records it, and nothing of GLU crosses into the host;
+`gluProject`, `gluUnProject`, `gluUnProject4` (the product inverted by its cofactors) and
+`gluCheckExtension` answer in the guest. The handlers beside them are the same JavaScript, the
+reference the x86 is held to, and what a build with no OPENGL32 placed answers with through a trap.
+The quadrics (`quadric.js`: fill, line, silhouette and point styles, smooth, flat or no normals,
+outside or inside, texture coordinates as GLU 1.3 lays them out) emit `glBegin`/`glNormal3f`/
+`glTexCoord2f`/`glVertex3f`/`glEnd` on the current context from the host, and an invalid enum or
+value goes to the quadric's `GLU_ERROR` callback in the guest. `gluScaleImage` and the mipmap
+builders (`images.js`) read the image under the context's unpack state into RGBA of 8 bits, resample
+it by coverage (a box filter at each halving), and hand GL each level down to one texel with a tight
+unpack state set for the call and the program's put back; a non-power-of-two size goes to the
+nearest power, a tie up, then halves until `GL_MAX_TEXTURE_SIZE` takes it. The tessellator
+(`tess.js`) projects the contours onto the plane of the given or Newell normal, nests them by
+containment, fills the regions the winding rule names, joins each region's holes to it by bridges
+and clips ears: triangles counter-clockwise about the normal through the program's `BEGIN`,
+`VERTEX`, `END` and `EDGE_FLAG` callbacks (their `_DATA` forms preferred, handed the polygon's
+pointer), or the boundary as line loops under `GLU_TESS_BOUNDARY_ONLY`; calls out of order are
+reported through `GLU_TESS_ERROR` and taken as GLU takes them. `gluErrorString`,
+`gluErrorUnicodeStringEXT` and `gluGetString` (`GLU_VERSION` "1.3", `GLU_EXTENSIONS`
+"GL_EXT_bgra") answer strings kept in guest memory.
+
 **Vulkan** (`src/layers/graphics/vulkan/`). One physical device, described from what WebGPU
 guarantees of every adapter (`physical.js`). Instances, devices, queues, surfaces and swapchains
 are made; command buffers record into a host list, `vkQueueSubmit` replays each into the open
@@ -1093,6 +1123,14 @@ Accepted and reported through `divergence`:
 - Vulkan: more than one subpass, more than one colour attachment, a render area smaller than the
   framebuffer (the whole attachment is cleared), a viewport or scissor other than the first, a
   present of more than one swapchain, and every unimplemented command on first call.
+- GLU32: contours that cross are not split -- with no combine callback such a polygon is
+  `GLU_TESS_NEED_COMBINE_CALLBACK`, as in GLU, and with one it is drawn as nothing and reported;
+  NURBS calls are accepted and draw nothing, reported once each; `gluBuild3DMipmaps` and
+  `gluBuild3DMipmapLevels` answer `GLU_INVALID_ENUM` (OPENGL32 has no 3D textures); the mipmap
+  builders and `gluScaleImage` resample in 8 bits a component, so a 16-bit or float image loses
+  precision; `gluLookAt` computes its rotation in doubles and hands `glMultMatrixd`, where GLU's
+  sample implementation rounds it to floats; `GLU_VERSION` is "1.3", where Windows' GLU32 says
+  "1.2.2.0 Microsoft Corporation".
 - OpenGL: selection and feedback modes record nothing; on the processor the stencil test is
   enabled with no stencil buffer; two-sided lighting lights back faces as front; an enabled,
   loaded program draws nothing; `glDrawPixels`,
@@ -1171,6 +1209,7 @@ after it was made and the report answering 53 to 118 s after the run.
 | Observed behaviour, pinned | `d3d9/observed.test.js` -- lock-flag traffic, matrix order, render-target alpha, viewport placement. |
 | Translators | `d3d9/shader.test.js`, `d3d9/wgsl.test.js`, `d3d10/dxbc.test.js`, `d3d10/sm4.test.js`, `d3d10/wgsl.test.js`, `vulkan/spirv.test.js`, `opengl/wgsl.test.js` (the GL formula as WGSL and the descriptor, and that every field the key must fold changes it), `opengl/arb-program.test.js` (the ARB program grammar, its error positions and limits), `opengl/arb-wgsl.test.js` (one stage at a time: every instruction, the parameters as one materialised block, the attribute aliasing, a real program's coordinate sets and image units), `opengl/gpu-layout.test.js` (array shapes to vertex formats and slots, mode expansion, index scanning), `opengl/buffer-reads.test.js` (the byte ranges unflushed draws read: overlap, forgotten once their frame flushed, a write past a frame's hull compared against none). |
 | Seam and ABI | `seam/*.test.js` drive the bridge's real vtable publisher over a flat buffer and read the same words a guest would (among them a `Flip` answering once the bound lets it, and not counted when refused); `seam/shadow.test.js` pins the guest-side code's bytes and layout, holds an entry to the words the routines marked, and holds entries after random runs of guest writes -- forty seeds of four hundred -- to the calls, their order and the refusals of a comparison of the whole block; `seam/shadow.itest.js` runs that code on the emulator's processor and on cork's, and reads the marks and counts it leaves; `seam/structs.test.js` holds `floatsOf`, `intsOf` and `dwordsOf` to what a copy through a fresh array's own buffer answered and each answer to an array of its own, a dword field to the same four bytes written in place or as bytes, and a structure to one write per run of the fields named; `seam/d3d8.test.js` and `seam/d3d9.test.js` hold each structure getter to one write of the bytes its setter took; `opengl/exports.test.js` holds the `OPENGL32.dll` argument words and every typed form of a family -- immediate and `*v`, each component count, each type -- to the specification's decoding, through the memory layer's float reader and through a window, with no `DataView` made on a call. |
+| GLU32 | `glu/inguest.test.js` holds each compiled function to its source (double precision, a rounding toward zero) and to the x87's model under single precision on cork's test machine; `glu/code.test.js` runs the routines there with OPENGL32's entry points stood in for by stubs that log what they are handed, and holds the calls and their doubles to the bit, and the stack and the kept registers; `glu/exports.test.js` binds every export at its size, the handlers against a recording context, the quadrics' surfaces, windings and errors, the tessellator (a concave polygon, a hole, nested contours under three winding rules, the boundary, edge flags, a crossing, calls out of order), the images and the strings; `src/glu.itest.js` (`npm run test:integration`) calls them through the import with a context current under cork and under the emulator, reads the matrices back with `glGetDoublev` against the arithmetic's source, and finds none of the arithmetic's exports crossing into the host. |
 | A whole program | `src/frame-latency.itest.js` (`npm run test:integration`) -- a program with a Direct3D 8 device and a second thread that only counts presents twelve frames through `createApp` over a device finishing one submit every few milliseconds of the host's timers, under cork and under the emulator: with the default bound presents wait, the device is never more than one frame past the bound behind and the counting thread runs while a present waits; with no bound none waits and the program runs ahead. `src/d3d8-shadow.itest.js` -- a Direct3D 8 program whose two threads set render states in three rows of the marks, stage states on two stages and two transforms through the guest routines, three thousand times each, and read every one back through the host after each round, under cork and under the emulator: every value reads back as set, every call is counted, and an entry that found something compared at most what one round of each thread set. |
 
 Real-GPU acceptance lives outside the unit suite in `tools/cdp_test/`: `triangle.mjs` (a

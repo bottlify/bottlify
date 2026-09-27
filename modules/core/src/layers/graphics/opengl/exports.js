@@ -1859,6 +1859,20 @@ export function createOpengl(services){
         implemented: [...Object.keys(implemented), ...Object.keys(swaps)],
 
         /**
+         * Runs `body` with the calling thread's current context, for GLU32,
+         * whose quadrics, images and matrices draw through it; null without
+         * one.
+         *
+         * @template T
+         * @param {(context: any) => T} body
+         * @returns {T | null}
+         */
+        withContext(body){
+            const context = current();
+            return context ? body(context) : null;
+        },
+
+        /**
          * A named entry point for a caller already on this side of the boundary
          * (a bundle's site kernel, through the assembling caller): the same handler
          * the trap table binds, taking the same raw dwords a guest call pushes --
