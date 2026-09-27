@@ -385,7 +385,8 @@ positive, x, its reciprocal, 1 -- and hands every other to the handler: 2^(y log
 missed powers that are exact (pow(10, 2) was 99.99999999999997). A case msvcrt
 answers with errno goes to the handler (`math.js`), which answers JavaScript's value and sets
 errno as msvcrt does -- `EDOM` for a NaN of arguments that were none, `ERANGE` for an infinity of
-finite ones -- and so does an argument past `fsin`'s reduction (2^63), a NaN or an infinity where
+finite ones, and `EDOM` for a NaN given to `atan`, `tanh` or `exp`, which answer it with that NaN
+-- and so does an argument past `fsin`'s reduction (2^63), a NaN or an infinity where
 the function checks for one, and a result past a double's range.
 `tools/math-bench.mjs` times each of these calls in a loop, d3dx9's arithmetic beside them and
 the x87's instructions inline, under both precisions, and sets cork's answers beside the
