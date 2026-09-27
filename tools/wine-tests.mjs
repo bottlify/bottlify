@@ -104,7 +104,9 @@ export const PRESETS = {
  * @property {string[]} names        the test names a `--list` printed
  */
 
-const SUMMARY = /^[0-9a-f]+:(\S+?):[0-9.]* (\d+) tests executed \((\d+) marked as todo, (?:(\d+) as flaky, )?(\d+) failures?\), (\d+) skipped\./;
+const SUMMARY = /^([0-9a-f]+):(\S+?):[0-9.]* (\d+) tests executed \((\d+) marked as todo, (?:(\d+) as flaky, )?(\d+) failures?\), (\d+) skipped\./;
+/** The identifier the engine gives the first process, the one a test runs in. */
+const MAIN_PROCESS = 0x1000;
 const CHECK = /^(.+?):(\d+):[0-9.]* (Test failed|Test succeeded inside todo block|Test succeeded inside flaky todo block): (.*)$/;
 const SKIPPED = /^(.+?):(\d+):[0-9.]* Tests skipped: /;
 const EXCEPTION = /^[0-9a-f]+:\S+?:[0-9.]* unhandled exception [0-9a-f]{8} at /;
@@ -119,9 +121,12 @@ const LAST_SEEN = /^(.+?):(\d+): this is the last test seen before the exception
  * @param {string} text
  * @param {string} [test]  whose closing count to take, when a child process of
  *     the test printed one of its own
+ * @param {number} [mainProcess]  the identifier of the process the test runs
+ *     in: a child runs the same test under the same name, and its closing
+ *     count is never the test's, even when the test itself never got to its own
  * @returns {ParsedOutput}
  */
-export function parseOutput(text, test){
+export function parseOutput(text, test, mainProcess){
     /** @type {ParsedOutput} */
     const parsed = { summary: null, failed: [], skips: 0, exceptions: [], lastSeen: null,
         missingTest: false, names: [] };
@@ -145,14 +150,18 @@ export function parseOutput(text, test){
             continue;
         }
         const summary = SUMMARY.exec(line);
-        if (summary && (test === undefined || summary[1] === test || parsed.summary === null))
+        if (summary && mainProcess !== undefined && parseInt(summary[1], 16) !== mainProcess)
+        {
+            continue;
+        }
+        if (summary && (test === undefined || summary[2] === test || parsed.summary === null))
         {
             parsed.summary = {
-                executed: Number(summary[2]),
-                todo: Number(summary[3]),
-                flaky: Number(summary[4] ?? 0),
-                failures: Number(summary[5]),
-                skipped: Number(summary[6]),
+                executed: Number(summary[3]),
+                todo: Number(summary[4]),
+                flaky: Number(summary[5] ?? 0),
+                failures: Number(summary[6]),
+                skipped: Number(summary[7]),
             };
             continue;
         }
@@ -298,7 +307,7 @@ export function classify(result, parsed){
  * @returns {TestReport}
  */
 export function summarise(module, test, result){
-    const parsed = parseOutput(result.output, test);
+    const parsed = parseOutput(result.output, test, MAIN_PROCESS);
     const status = classify(result, parsed);
     return {
         module,

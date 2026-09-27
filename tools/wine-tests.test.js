@@ -46,6 +46,16 @@ test('a child process\'s closing count does not stand in for the test\'s own', (
     assert.equal(parsed.summary?.executed, 900);
 });
 
+test('a child running the same test is told apart by its process, and never closes the test', ()=>{
+    const tail = '(0 marked as todo, 0 as flaky, 0 failures), 0 skipped.';
+    const child = `2000:msg: 19 tests executed ${tail}`;
+    const own = `1000:msg: 900 tests executed ${tail}`;
+    assert.equal(parseOutput([child, own].join('\n'), 'msg', 0x1000).summary?.executed, 900);
+    assert.equal(parseOutput([own, child].join('\n'), 'msg', 0x1000).summary?.executed, 900);
+    assert.equal(parseOutput(child, 'msg', 0x1000).summary, null,
+        'a test whose own process never closed has no count, whatever its child printed');
+});
+
 test('the names a --list prints are the program\'s tests', ()=>{
     const parsed = parseOutput('Valid test names:\r\n    one\r\n    two\r\n');
     assert.deepEqual(parsed.names, ['one', 'two']);
@@ -53,7 +63,7 @@ test('the names a --list prints are the program\'s tests', ()=>{
 
 test('a run is classed by how it ended before by what it printed', ()=>{
     const passed = parseOutput(
-        '0001:t: 3 tests executed (0 marked as todo, 0 failures), 0 skipped.');
+        '1000:t: 3 tests executed (0 marked as todo, 0 failures), 0 skipped.');
     assert.equal(classify(result(), passed), 'pass');
     assert.equal(classify(result({ killed: true }), passed), 'timeout');
     assert.equal(classify(result({ died: 'child exited SIGSEGV' }), passed), 'engine-crash');
@@ -74,9 +84,9 @@ test('a run is classed by how it ended before by what it printed', ()=>{
     assert.equal(classify(result(), parseOutput('Fatal: test \'x\' does not exist.')),
         'no-such-test');
     assert.equal(classify(result(), parseOutput(
-        '0001:t: unhandled exception c0000005 at 00401000')), 'guest-exception');
+        '1000:t: unhandled exception c0000005 at 00401000')), 'guest-exception');
     assert.equal(classify(result(), parseOutput(
-        '0001:t: 3 tests executed (0 marked as todo, 0 as flaky, 1 failure), 0 skipped.')), 'fail');
+        '1000:t: 3 tests executed (0 marked as todo, 0 as flaky, 1 failure), 0 skipped.')), 'fail');
 });
 
 test('a run that did not finish counts the failed checks it printed', ()=>{
@@ -92,7 +102,7 @@ test('a run that did not finish counts the failed checks it printed', ()=>{
 test('the markdown groups a failing line checked in a loop and compares with a baseline', ()=>{
     const now = summarise('lib', 't', result({ output: [
         'a.c:5: Test failed: n=1', 'a.c:5: Test failed: n=2', 'a.c:9: Test failed: other',
-        '0001:t: 10 tests executed (0 marked as todo, 0 as flaky, 3 failures), 0 skipped.',
+        '1000:t: 10 tests executed (0 marked as todo, 0 as flaky, 3 failures), 0 skipped.',
     ].join('\n') }));
     const before = { ...now, failures: 7, status: 'fail' };
     const text = markdown({ build: 'b', engine: 'cork', started: 's', tests: [now] },
@@ -104,11 +114,11 @@ test('the markdown groups a failing line checked in a loop and compares with a b
 test('a check that fails only on the tested engine is the translator\'s, set apart', ()=>{
     const tested = summarise('lib', 't', result({ output: [
         'a.c:5: Test failed: x87', 'a.c:7: Test failed: layer', 'a.c:7: Test failed: layer',
-        '0001:t: 10 tests executed (0 marked as todo, 0 as flaky, 3 failures), 0 skipped.',
+        '1000:t: 10 tests executed (0 marked as todo, 0 as flaky, 3 failures), 0 skipped.',
     ].join('\n') }));
     const reference = summarise('lib', 't', result({ output: [
         'a.c:7: Test failed: layer',
-        '0001:t: 10 tests executed (0 marked as todo, 0 as flaky, 1 failure), 0 skipped.',
+        '1000:t: 10 tests executed (0 marked as todo, 0 as flaky, 1 failure), 0 skipped.',
     ].join('\n') }));
     const against = againstReference(tested, reference, 'emulator');
     assert.deepEqual(against.onlyHere.map(check=>check.message), ['x87']);
@@ -127,7 +137,7 @@ test('a run that stops where the reference finished ended worse there', ()=>{
     const stopped = summarise('lib', 't',
         result({ error: { reason: 'guest-fault', message: 'x' } }));
     const finished = summarise('lib', 't', result({
-        output: '0001:t: 1 tests executed (0 marked as todo, 0 failures), 0 skipped.' }));
+        output: '1000:t: 1 tests executed (0 marked as todo, 0 failures), 0 skipped.' }));
     assert.equal(againstReference(stopped, finished, 'emulator').statusOnlyHere, true);
     assert.equal(againstReference(finished, stopped, 'emulator').statusOnlyHere, false);
 });
@@ -135,7 +145,7 @@ test('a run that stops where the reference finished ended worse there', ()=>{
 test('a hang where the reference stopped on an exception ended worse, a pass never did', ()=>{
     const hung = summarise('lib', 't', result({ killed: true }));
     const excepted = summarise('lib', 't', result({
-        output: '0001:t: unhandled exception c0000005 at 00000000' }));
+        output: '1000:t: unhandled exception c0000005 at 00000000' }));
     assert.equal(againstReference(hung, excepted, 'emulator').statusOnlyHere, true);
     assert.equal(againstReference(excepted, hung, 'emulator').statusOnlyHere, false);
 });
