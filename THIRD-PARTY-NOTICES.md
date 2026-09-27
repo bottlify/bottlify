@@ -103,6 +103,19 @@ FFmpeg's full license text is in that tree (`COPYING.LGPLv2.1`).
   Windows installation carries; it is included so that a signature Windows would accept is
   accepted here, and it grants nothing beyond that.
 
+## Thawte Timestamping CA certificate — a default Authenticode trust anchor
+
+- What it is: the root certificate "Thawte Timestamping CA" (issued 1997-01-01, expired
+  2020-12-31, SHA-1 thumbprint BE36A4562FB2EE05DBB3D32323ADF445084ED656), Thawte's (now
+  DigiCert's). VeriSign's "Time Stamping Services CA", which countersigned Authenticode
+  signatures in the 2000s, chains to it.
+- Source: the Windows trusted root store, where Microsoft's root program distributes it,
+  taken unmodified; its thumbprint was checked against the one above.
+- Location in this repository: `modules/core/src/layers/win32/wintrust/roots.js`, as base64
+  DER.
+- What is used: its names and public key, as data, the same way as the Microsoft root above:
+  default content of the root store, so that a timestamp Windows XP accepts is accepted here.
+
 ## Wine conformance expectations — used as a specification
 
 Wine and the Win32 specifications are used only as a source of knowledge about API behavior;

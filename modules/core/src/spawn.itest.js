@@ -269,3 +269,29 @@ test('a launcher waiting on its game or the event the game sets is woken by the 
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 30000 }), 1, 'WAIT_OBJECT_0 + 1: the event');
     });
+
+test('a process started beside its parent writes into the run\'s one journal', { timeout: 60000 },
+    async t=>{
+        // The page reads the journal through the facade, which stays with the
+        // parent while the child runs beside it: the child's calls must be in
+        // what it reads, after the parent's, on the same clock.
+        const { parent, game } = buildLauncher();
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\launcher.exe',
+            engine: 'cork',
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\game.exe', bytes: game }] }) },
+        });
+        t.after(()=>app.dispose());
+        app.log.setLevel('call.cpu', 'trace');
+        await app.run({ timeoutMs: 30000 });
+        const text = app.log.recent(4096).map((/** @type {any} */ record)=>record.text ?? '')
+            .join('\n');
+        assert.match(text, /CreateProcess/, 'the parent\'s own calls');
+        assert.match(text, /\[game\.exe:main\] KERNEL32\.dll!OpenEventA/,
+            'and the child\'s, in the same journal, named by its process');
+        /** @type {number[]} */
+        const times = app.log.recent(4096).map((/** @type {any} */ record)=>record.time);
+        assert.ok(times.every((time, at)=>at === 0 || time >= times[at - 1]),
+            'on the journal\'s one clock');
+    });

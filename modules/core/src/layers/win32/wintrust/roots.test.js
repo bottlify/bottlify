@@ -12,7 +12,7 @@ import { isSelfIssued, isSignedBy, parseCertificate } from '../crypto/x509.js';
 
 test('the default store is Microsoft\'s 1997 root, by thumbprint, name and validity', ()=>{
     const [der] = defaultTrustedRoots();
-    assert.equal(defaultTrustedRoots().length, 1);
+    assert.equal(defaultTrustedRoots().length, 2);
     assert.equal(createHash('sha1').update(der).digest('hex').toUpperCase(),
         'A43489159A520F0D93D032CCAF37E7FE20A8B419');
     const root = parseCertificate(der);
@@ -22,4 +22,12 @@ test('the default store is Microsoft\'s 1997 root, by thumbprint, name and valid
     assert.equal(root.publicKey?.size, 256);
     assert.ok(isSelfIssued(root));
     assert.ok(isSignedBy(root, root.publicKey), 'its MD5 with RSA self-signature verifies');
+
+    const thawte = defaultTrustedRoots()[1];
+    assert.equal(createHash('sha1').update(thawte).digest('hex').toUpperCase(),
+        'BE36A4562FB2EE05DBB3D32323ADF445084ED656');
+    const timestamping = parseCertificate(thawte);
+    assert.equal(timestamping.subjectName, 'Thawte Timestamping CA');
+    assert.ok(isSelfIssued(timestamping));
+    assert.ok(isSignedBy(timestamping, timestamping.publicKey));
 });
