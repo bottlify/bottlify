@@ -626,3 +626,27 @@ test('QueryInterface naming no interface is refused, reading nothing at address 
     assert.equal(f.call('QueryInterface', pointer, [0, 0x8000]), 0x80070057, 'E_INVALIDARG');
     assert.equal(f.call('QueryInterface', pointer, [0x9000, 0]), 0x80004003, 'E_POINTER');
 });
+
+test('an interface answered with another\'s pointer is that pointer, and counts as it', ()=>{
+    // COM identity: an object whose table for one interface holds another's
+    // and more may answer both with one pointer, and a program compares them.
+    const f = interfaces();
+    const methods = METHODS.slice(0, 3);
+    /** @type {string[]} */
+    const references = [];
+    const shared = {
+        /** @param {string} id */
+        interfaceFor: id=>(id === IID ? { id, methods }
+            : id === IID_B ? { id, methods, sharedWith: IID } : null),
+        /** @param {string} id */
+        addRef: id=>{
+            references.push(id);
+            return 2;
+        },
+        release: ()=>1,
+    };
+    const pointer = f.table.publish(shared, IID);
+    assert.equal(f.query(pointer, IID_B), pointer);
+    assert.deepEqual(references, [IID]);
+    assert.equal(f.table.publish(shared, IID_B), pointer, 'and published directly as well');
+});

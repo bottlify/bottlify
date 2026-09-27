@@ -13,7 +13,8 @@ import {
     createDirectInput, createPublisher, describe,
     DI_OK, DI_BUFFEROVERFLOW, DI_NOEFFECT, DIENUM_STOP,
     GUID_SysKeyboard, GUID_SysMouse,
-    IID_IDirectInputA, IID_IDirectInputW, IID_IDirectInput7A,
+    IID_IDirectInputA, IID_IDirectInputW, IID_IDirectInput7A, IID_IDirectInput2A,
+    IID_IDirectInput2W, IID_IDirectInput7W,
     IID_IDirectInput8A, IID_IDirectInput8W, IID_IDirectInputDeviceA, IID_IDirectInputDeviceW,
     IID_IDirectInputDevice2A, IID_IDirectInputDevice7A, IID_IDirectInputDevice8A,
     IID_IDirectInputDevice8W,
@@ -39,6 +40,9 @@ const DIK_A = 0x1e;
 const DIK_S = 0x1f;
 
 /** Where the fixture puts things in its flat guest memory. */
+/** The program's module handle, which every DirectInput after the first requires. */
+const INSTANCE = 0x00400000;
+
 const AT = Object.freeze({
     guid: 0x0400,
     iid: 0x0420,
@@ -196,7 +200,7 @@ function fixture({ windows } = {}){
     });
     const root = (()=>{
         const result = dinput.libraries['DINPUT.dll']
-            .DirectInputCreateA.handler([0, 0x0700, AT.out, 0]);
+            .DirectInputCreateA.handler([INSTANCE, 0x0700, AT.out, 0]);
         assert.equal(result, DI_OK);
         return memory.u32(AT.out);
     })();
@@ -806,7 +810,7 @@ test('Poll has nothing to do, and says so from DirectInput 7 on', ()=>{
     {
         const f = fixture();
         assert.equal(f.dinput.libraries['DINPUT.dll']
-            .DirectInputCreateA.handler([0, version, AT.out, 0]), DI_OK);
+            .DirectInputCreateA.handler([INSTANCE, version, AT.out, 0]), DI_OK);
         const root = f.memory.u32(AT.out);
         writeGuid(f.memory, AT.guid, GUID_SysMouse);
         assert.equal(f.bridge.call(root, 'CreateDevice', [AT.guid, AT.out, 0]), DI_OK);
@@ -862,7 +866,7 @@ test('SetCooperativeLevel checks its level and its window as Windows does', ()=>
         [0x0500, DIERR_INVALIDPARAM, DIERR_INVALIDPARAM], [0x0700, DI_OK, DIERR_UNSUPPORTED]])
     {
         assert.equal(f.dinput.libraries['DINPUT.dll']
-            .DirectInputCreateA.handler([0, version, AT.out, 0]), DI_OK);
+            .DirectInputCreateA.handler([INSTANCE, version, AT.out, 0]), DI_OK);
         const root = f.memory.u32(AT.out);
         writeGuid(f.memory, AT.guid, GUID_SysKeyboard);
         assert.equal(f.bridge.call(root, 'CreateDevice', [AT.guid, AT.out, 0]), DI_OK);
@@ -1188,7 +1192,7 @@ test('GetDeviceStatus knows the two devices and nothing else', ()=>{
 function directInput8(f, wide){
     writeGuid(f.memory, AT.iid, wide ? IID_IDirectInput8W : IID_IDirectInput8A);
     assert.equal(f.dinput.libraries['DINPUT8.dll']
-        .DirectInput8Create.handler([0, 0x0800, AT.iid, AT.out, 0]), DI_OK);
+        .DirectInput8Create.handler([INSTANCE, 0x0800, AT.iid, AT.out, 0]), DI_OK);
     return f.memory.u32(AT.out);
 }
 
@@ -1328,7 +1332,7 @@ test('DirectInput8Create hands back the interface the caller asked for', ()=>{
     const f = fixture();
     writeGuid(f.memory, AT.iid, IID_IDirectInput8A);
     assert.equal(f.dinput.libraries['DINPUT8.dll']
-        .DirectInput8Create.handler([0, 0x0800, AT.iid, AT.out, 0]), DI_OK);
+        .DirectInput8Create.handler([INSTANCE, 0x0800, AT.iid, AT.out, 0]), DI_OK);
     const pointer = f.memory.u32(AT.out);
     assert.equal(f.bridge.recordAt(pointer).id, IID_IDirectInput8A);
     assert.equal(f.bridge.methodsOf(pointer).length, 3 + IDIRECTINPUT8_SLOTS.length);
@@ -1338,14 +1342,14 @@ test('DirectInput8Create with an interface it has not answers E_NOINTERFACE', ()
     const f = fixture();
     writeGuid(f.memory, AT.iid, '{11111111-2222-3333-4444-555555555555}');
     assert.equal(f.dinput.libraries['DINPUT8.dll']
-        .DirectInput8Create.handler([0, 0x0800, AT.iid, AT.out, 0]), 0x80004002 | 0);
+        .DirectInput8Create.handler([INSTANCE, 0x0800, AT.iid, AT.out, 0]), 0x80004002 | 0);
     assert.equal(f.memory.u32(AT.out), 0);
 });
 
 test('the entry points refuse to write through a null', ()=>{
     const f = fixture();
     assert.equal(f.dinput.libraries['DINPUT.dll']
-        .DirectInputCreateA.handler([0, 0x0700, 0, 0]), DIERR_INVALIDPARAM);
+        .DirectInputCreateA.handler([INSTANCE, 0x0700, 0, 0]), E_POINTER);
 });
 
 test('the publisher keeps one adapter per object and can find it again', ()=>{
@@ -1435,7 +1439,7 @@ const slotOf = (slots, name)=>{
 test('a method reaches the arguments the guest pushed, at the offsets it pushed them', ()=>{
     const g = guestMachine();
     assert.equal(g.dinput.libraries['DINPUT.dll']
-        .DirectInputCreateA.handler([0, 0x0700, AT.out, 0]), DI_OK);
+        .DirectInputCreateA.handler([INSTANCE, 0x0700, AT.out, 0]), DI_OK);
     const root = g.memory.u32(AT.out);
     assert.notEqual(root, 0);
 
@@ -1463,7 +1467,7 @@ test('a device made by IDirectInput8 answers Poll from its own slot', ()=>{
     const g = guestMachine();
     writeGuid(g.memory, AT.iid, IID_IDirectInput8A);
     assert.equal(g.dinput.libraries['DINPUT8.dll']
-        .DirectInput8Create.handler([0, 0x0800, AT.iid, AT.out, 0]), DI_OK);
+        .DirectInput8Create.handler([INSTANCE, 0x0800, AT.iid, AT.out, 0]), DI_OK);
     const root = g.memory.u32(AT.out);
     writeGuid(g.memory, AT.guid, GUID_SysMouse);
     assert.equal(g.call(root, slotOf(IDIRECTINPUT8_SLOTS, 'CreateDevice'),
@@ -1481,7 +1485,7 @@ test('a device made by IDirectInput8 answers Poll from its own slot', ()=>{
 test('QueryInterface finds each device generation by the IID the header defines', ()=>{
     const g = guestMachine();
     assert.equal(g.dinput.libraries['DINPUT.dll']
-        .DirectInputCreateA.handler([0, 0x0500, AT.out, 0]), DI_OK);
+        .DirectInputCreateA.handler([INSTANCE, 0x0500, AT.out, 0]), DI_OK);
     const root = g.memory.u32(AT.out);
     writeGuid(g.memory, AT.guid, GUID_SysMouse);
     assert.equal(g.call(root, slotOf(IDIRECTINPUT_SLOTS, 'CreateDevice'),
@@ -1524,7 +1528,7 @@ test('a device whose last reference goes is gone through every generation asked 
     // neither may reach the released device.
     const g = guestMachine();
     assert.equal(g.dinput.libraries['DINPUT.dll']
-        .DirectInputCreateA.handler([0, 0x0500, AT.out, 0]), DI_OK);
+        .DirectInputCreateA.handler([INSTANCE, 0x0500, AT.out, 0]), DI_OK);
     const root = g.memory.u32(AT.out);
     writeGuid(g.memory, AT.guid, GUID_SysMouse);
     assert.equal(g.call(root, slotOf(IDIRECTINPUT_SLOTS, 'CreateDevice'),
@@ -1548,7 +1552,7 @@ test('the DirectInput object counts its references, one count for every interfac
     // zero; after it the object is gone through every pointer it had.
     const g = guestMachine();
     assert.equal(g.dinput.libraries['DINPUT.dll']
-        .DirectInputCreateA.handler([0, 0x0700, AT.out, 0]), DI_OK);
+        .DirectInputCreateA.handler([INSTANCE, 0x0700, AT.out, 0]), DI_OK);
     const root = g.memory.u32(AT.out);
     const [ADDREF, RELEASE] = [1, 2];
     writeGuid(g.memory, AT.iid, '{00000000-0000-0000-C000-000000000046}');
@@ -1575,7 +1579,7 @@ test('a device goes on working after the DirectInput object that made it is rele
     const g = guestMachine();
     writeGuid(g.memory, AT.iid, IID_IDirectInput8A);
     assert.equal(g.dinput.libraries['DINPUT8.dll']
-        .DirectInput8Create.handler([0, 0x0800, AT.iid, AT.out, 0]), DI_OK);
+        .DirectInput8Create.handler([INSTANCE, 0x0800, AT.iid, AT.out, 0]), DI_OK);
     const root = g.memory.u32(AT.out);
     writeGuid(g.memory, AT.guid, GUID_SysKeyboard);
     assert.equal(g.call(root, slotOf(IDIRECTINPUT8_SLOTS, 'CreateDevice'),
@@ -1594,7 +1598,7 @@ test('a pointer the bridge let go of names no device any more', ()=>{
     // or kept by a program past its Release must not find the released device.
     const g = guestMachine();
     assert.equal(g.dinput.libraries['DINPUT.dll']
-        .DirectInputCreateA.handler([0, 0x0500, AT.out, 0]), DI_OK);
+        .DirectInputCreateA.handler([INSTANCE, 0x0500, AT.out, 0]), DI_OK);
     const root = g.memory.u32(AT.out);
     writeGuid(g.memory, AT.guid, GUID_SysMouse);
     assert.equal(g.call(root, slotOf(IDIRECTINPUT_SLOTS, 'CreateDevice'),
@@ -1623,4 +1627,135 @@ test('diagnostics report what a run actually did', ()=>{
     assert.equal(report.devices.length, 1);
     assert.deepEqual(report.devices[0],
         { guid: GUID_SysKeyboard, kind: 'keyboard', acquired: true, buffered: 8, queued: 1 });
+});
+
+test('DirectInput refuses a creation as Windows does: pointer, interface, module, version', ()=>{
+    // Wine's dinput.c test_DirectInputCreate, test_DirectInputCreateEx and
+    // test_DirectInput8Create.
+    const f = fixture();
+    const legacy = f.dinput.libraries['DINPUT.dll'];
+    const eight = f.dinput.libraries['DINPUT8.dll'].DirectInput8Create;
+    const IID_IUnknown = '{00000000-0000-0000-C000-000000000046}';
+    /** @param {() => number} call @param {number} expected @param {number} [left] */
+    const refused = (call, expected, left = 0)=>{
+        f.memory.setU32(AT.out, 0xdeadbeef);
+        assert.equal(call(), expected);
+        assert.equal(f.memory.u32(AT.out), left >>> 0, 'what the pointer was left as');
+    };
+    const createA = (/** @type {number} */ instance, /** @type {number} */ version)=>
+        legacy.DirectInputCreateA.handler([instance, version, AT.out, 0]);
+    assert.equal(legacy.DirectInputCreateA.handler([0, 0, 0, 0]), E_POINTER);
+    refused(()=>createA(0, 0x700), DIERR_INVALIDPARAM);
+    refused(()=>createA(INSTANCE, 0), 0x80070015 | 0, 0);
+    refused(()=>createA(INSTANCE, 0x6ff), 0x80070481 | 0);
+    refused(()=>createA(INSTANCE, 0x701), 0x8007047e | 0);
+    assert.equal(createA(0, 0x300), DI_OK, 'the first DirectInput needed no module');
+    assert.equal(createA(INSTANCE, 0x61a), DI_OK);
+    refused(()=>legacy.DirectInputCreateA.handler([INSTANCE, 0x700, AT.out, 0x5000]), DI_OK);
+
+    writeGuid(f.memory, AT.iid, IID_IUnknown);
+    refused(()=>legacy.DirectInputCreateEx.handler([INSTANCE, 0x700, AT.iid, AT.out, 0]),
+        0x80004002 | 0, 0xdeadbeef);
+    assert.equal(legacy.DirectInputCreateEx.handler([INSTANCE, 0x700, AT.iid, 0, 0]),
+        0x80004002 | 0, 'the interface is looked at before the pointer');
+    writeGuid(f.memory, AT.iid, IID_IDirectInput7A);
+    refused(()=>legacy.DirectInputCreateEx.handler([INSTANCE, 0x800, AT.iid, AT.out, 0]),
+        0x8007047e | 0);
+
+    refused(()=>eight.handler([INSTANCE, 0x800, AT.iid, AT.out, 0]), 0x80004002 | 0);
+    writeGuid(f.memory, AT.iid, IID_IDirectInput8A);
+    refused(()=>eight.handler([INSTANCE, 0x7ff, AT.iid, AT.out, 0]), 0x80070481 | 0);
+    refused(()=>eight.handler([INSTANCE, 0x801, AT.iid, AT.out, 0]), 0x8007047e | 0);
+    refused(()=>eight.handler([0, 0x800, AT.iid, AT.out, 0]), DIERR_INVALIDPARAM);
+    assert.equal(eight.handler([INSTANCE, 0x800, AT.iid, AT.out, 0]), DI_OK);
+    assert.notEqual(f.memory.u32(AT.out), 0);
+});
+
+test('a DirectInput before 8 is one pointer per width, the wide one its IUnknown', ()=>{
+    // Wine's dinput.c test_QueryInterface: IDirectInput2A and 7A are the
+    // IDirectInputA pointer, the wide ones and IUnknown another; no
+    // generation of the other family is there to be asked for.
+    const g = guestMachine();
+    assert.equal(g.dinput.libraries['DINPUT.dll']
+        .DirectInputCreateA.handler([INSTANCE, 0x0700, AT.out, 0]), DI_OK);
+    const root = g.memory.u32(AT.out);
+    /** @param {number} pointer @param {string} iid */
+    const query = (pointer, iid)=>{
+        writeGuid(g.memory, AT.iid, iid);
+        g.memory.setU32(AT.state, 0xdeadbeef);
+        const result = g.call(pointer, 0, [AT.iid, AT.state]);
+        return { result, pointer: g.memory.u32(AT.state) };
+    };
+    for (const iid of [IID_IDirectInput2A, IID_IDirectInput7A])
+    {
+        assert.deepEqual(query(root, iid), { result: 0, pointer: root }, iid);
+    }
+    const unknown = query(root, '{00000000-0000-0000-C000-000000000046}').pointer;
+    assert.notEqual(unknown, root);
+    for (const iid of [IID_IDirectInputW, IID_IDirectInput2W, IID_IDirectInput7W])
+    {
+        assert.deepEqual(query(root, iid), { result: 0, pointer: unknown }, iid);
+    }
+    assert.deepEqual(query(root, IID_IDirectInput8A), { result: 0x80004002 | 0, pointer: 0 });
+    // The shared table is the longest generation's, so the last slot is there.
+    assert.equal(g.call(root, 3 + IDIRECTINPUT7_SLOTS.length - 1, [0, 0, 0, 0]),
+        DIERR_INVALIDPARAM, 'CreateDeviceEx is reached through the IDirectInputA pointer');
+
+    g.dinput.libraries['DINPUT8.dll'].DirectInput8Create.handler(
+        [INSTANCE, 0x800, (writeGuid(g.memory, AT.iid, IID_IDirectInput8A), AT.iid), AT.out, 0]);
+    assert.deepEqual(query(g.memory.u32(AT.out), IID_IDirectInput7A),
+        { result: 0x80004002 | 0, pointer: 0 }, 'nor an earlier generation from an 8');
+});
+
+test('the root checks what it is handed before it looks for a device', ()=>{
+    const f = fixture({ windows: { 0x100: 'top' } });
+    const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        f.bridge.call(f.root, name, args);
+    f.memory.setU32(AT.out, 0xdeadbeef);
+    assert.equal(call('CreateDevice', [0, AT.out, 0]), E_POINTER);
+    assert.equal(f.memory.u32(AT.out), 0);
+    assert.equal(call('CreateDevice', [AT.guid, 0, 0]), E_POINTER);
+    assert.equal(call('GetDeviceStatus', [0]), E_POINTER);
+    writeGuid(f.memory, AT.guid, '{11111111-2222-3333-4444-555555555555}');
+    assert.equal(call('GetDeviceStatus', [AT.guid]), 0x80040154 | 0, 'DIERR_DEVICENOTREG');
+    writeGuid(f.memory, AT.guid, GUID_SysMouse);
+    assert.equal(call('GetDeviceStatus', [AT.guid]), DI_OK);
+
+    assert.equal(call('RunControlPanel', [0, 0]), DI_OK);
+    assert.equal(call('RunControlPanel', [0, 0xffffffff]), DIERR_INVALIDPARAM);
+    assert.equal(call('RunControlPanel', [0xdeadbeef, 0]), 0x80070006 | 0, 'E_HANDLE');
+    assert.equal(call('RunControlPanel', [0x100, 0]), DI_OK);
+
+    assert.equal(call('Initialize', [0, 0]), DIERR_INVALIDPARAM);
+    assert.equal(call('Initialize', [INSTANCE, 0]), 0x80070015 | 0);
+    assert.equal(call('Initialize', [INSTANCE, 0x6ff]), 0x80070481 | 0);
+    assert.equal(call('Initialize', [INSTANCE, 0x701]), 0x8007047e | 0);
+    assert.equal(call('Initialize', [INSTANCE, 0x500]), DI_OK);
+
+    assert.equal(call('EnumDevices', [0xdeadbeef, 0x7000, 0, 0]), DIERR_INVALIDPARAM);
+    assert.equal(call('EnumDevices', [0, 0x7000, 0, 0xffffffff]), DIERR_INVALIDPARAM);
+});
+
+test('a device released to nothing is made anew by the next CreateDevice', async()=>{
+    // Wine's device8.c releases the device CreateDevice answered for one GUID
+    // and creates it again for another naming the same device.
+    const g = guestMachine();
+    assert.equal(g.dinput.libraries['DINPUT.dll']
+        .DirectInputCreateA.handler([INSTANCE, 0x0700, AT.out, 0]), DI_OK);
+    const root = g.memory.u32(AT.out);
+    writeGuid(g.memory, AT.guid, GUID_SysMouse);
+    const create = ()=>{
+        assert.equal(g.call(root, slotOf(IDIRECTINPUT_SLOTS, 'CreateDevice'),
+            [AT.guid, AT.out, 0]), DI_OK);
+        return g.memory.u32(AT.out);
+    };
+    const first = create();
+    assert.equal(g.call(first, 2), 0);
+    const second = create();
+    assert.equal(g.call(second, slotOf(IDIRECTINPUTDEVICE_SLOTS, 'SetDataFormat'),
+        [dataFormat(g.memory, 16)]), DI_OK, 'the new device answers');
+    const third = create();
+    assert.equal(third, second, 'one still held is handed out again');
+    assert.equal(g.call(third, 2), 1, 'with a reference of its own');
+    assert.equal(g.call(second, 2), 0);
 });

@@ -49,6 +49,54 @@ const DIERR_NOTFOUND = 0x80070002 | 0;
 const DIERR_NOTBUFFERED = 0x80040207 | 0;
 const E_POINTER = 0x80004003 | 0;
 const E_HANDLE = 0x80070006 | 0;
+const DIERR_NOINTERFACE = 0x80004002 | 0;
+/** ERROR_NOT_READY: an object no version was given to. */
+const DIERR_NOTINITIALIZED = 0x80070015 | 0;
+/** ERROR_RMODE_APP: a version no DirectInput was released as. */
+const DIERR_BETADIRECTINPUTVERSION = 0x80070481 | 0;
+/** ERROR_OLD_WIN_VERSION: a version later than this DirectInput. */
+const DIERR_OLDDIRECTINPUTVERSION = 0x8007047e | 0;
+
+/**
+ * The versions a DirectInput before 8 was released as, which DirectInputCreate
+ * and Initialize take: any other up to the last is a beta's, and one past it
+ * asks for a later DirectInput than this one. DirectInput 8 takes 0x800 alone.
+ */
+const LEGACY_VERSIONS = new Set([0x300, 0x500, 0x50a, 0x5b2, 0x602, 0x61a, 0x700]);
+const LAST_LEGACY_VERSION = 0x700;
+const VERSION_8 = 0x800;
+
+/**
+ * Whether a DirectInput object can be what `version` asks for, as creation and
+ * Initialize both decide: DI_OK or the refusal.
+ *
+ * @param {number} instance  The program's module handle.
+ * @param {number} version
+ * @param {boolean} eight   An IDirectInput8 object rather than an earlier one.
+ * @returns {number}
+ */
+export function versionRefusal(instance, version, eight){
+    const asked = version >>> 0;
+    // Only the first DirectInput let a program leave out its module handle.
+    if ((instance >>> 0) === 0 && (eight || asked !== 0x300))
+    {
+        return DIERR_INVALIDPARAM;
+    }
+    if (asked === 0)
+    {
+        return DIERR_NOTINITIALIZED;
+    }
+    if (eight)
+    {
+        return asked === VERSION_8 ? DI_OK
+            : (asked < VERSION_8 ? DIERR_BETADIRECTINPUTVERSION : DIERR_OLDDIRECTINPUTVERSION);
+    }
+    if (asked > LAST_LEGACY_VERSION)
+    {
+        return DIERR_OLDDIRECTINPUTVERSION;
+    }
+    return LEGACY_VERSIONS.has(asked) ? DI_OK : DIERR_BETADIRECTINPUTVERSION;
+}
 
 /** What a program's enumeration callback answers: another, or no more. */
 export const DIENUM_CONTINUE = 1;
@@ -79,6 +127,20 @@ const KEYBOARD_BUTTONS = 128;
 const DIDC_ATTACHED = 0x00000001;
 const DIDC_EMULATED = 0x00000004;
 const DIEDFL_FORCEFEEDBACK = 0x00000100;
+/** Every EnumDevices flag: attached only, force feedback, aliases, phantoms, hidden. */
+const DIEDFL_KNOWN = 0x00070101;
+
+/**
+ * Whether EnumDevices can be asked for this: a class, 0 to 4, or a device
+ * type in either generation's numbering -- DIDEVTYPE_* up to 5 with the HID
+ * bit, DI8DEVTYPE_* from 0x11 to 0x1c -- with a subtype in the second byte.
+ *
+ * @param {number} type
+ */
+const isDeviceKind = type=>{
+    const low = type & 0xff;
+    return (type & ~0x1ffff) === 0 && (low <= 5 || (low >= 0x11 && low <= 0x1c));
+};
 const DISCL_EXCLUSIVE = 0x00000001;
 const DISCL_NONEXCLUSIVE = 0x00000002;
 const DISCL_FOREGROUND = 0x00000004;
@@ -295,16 +357,21 @@ const FORMATS = Object.freeze({
  * @param {string} id
  * @param {[string, number][]} slots
  * @param {Record<string, (target: any, args: number[], descriptor: any) => any>} [implemented]
- * @param {{ wide?: boolean, legacy?: boolean }} [options]
+ * @param {{ wide?: boolean, legacy?: boolean, sharedWith?: string, unknown?: boolean }} [options]
  *     `wide` for a W interface, `legacy` for one of the pre-8 generations.
  *     Both are facts the method itself needs and the interface it arrived on
- *     is the only thing that carries them.
+ *     is the only thing that carries them. `sharedWith` names the interface
+ *     whose pointer answers this one too -- its table holding this one's and
+ *     more -- and `unknown` makes this interface's pointer the object's
+ *     IUnknown, as COM identity has one of them be.
  */
 export function describe(id, slots, implemented = {}, options = {}){
     return {
         id,
         wide: options.wide === true,
         legacy: options.legacy === true,
+        sharedWith: options.sharedWith,
+        unknown: options.unknown === true,
         methods: slots.map(([name, args])=>({
             name,
             argBytes: 4 + args * 4,
@@ -450,16 +517,20 @@ export function createPublisher({ publishInterface }){
                 api,
                 /** @param {string} id */
                 interfaceFor(id){
-                    if (id === IID_IUNKNOWN)
-                    {
-                        return { id, methods: IUNKNOWN_ONLY };
-                    }
-                    const descriptor = declared.get(id);
+                    const descriptor = id === IID_IUNKNOWN
+                        ? interfaces.find(entry=>entry.unknown === true)
+                        : declared.get(id);
                     if (!descriptor)
                     {
-                        return null;
+                        return id === IID_IUNKNOWN ? { id, methods: IUNKNOWN_ONLY } : null;
                     }
-                    return { id, methods: methodsFor(descriptor) };
+                    const sharedWith = descriptor.sharedWith
+                        ?? (id === IID_IUNKNOWN ? descriptor.id : undefined);
+                    return {
+                        id,
+                        methods: methodsFor(descriptor),
+                        ...sharedWith === undefined ? {} : { sharedWith },
+                    };
                 },
                 addRef: ()=>api.addRef?.() ?? 1,
                 release: ()=>api.release?.() ?? 0,
@@ -1014,21 +1085,29 @@ export function createDirectInput(
             { wide: true }),
     ];
 
+    /** @param {string} guid  Whether it names a device this machine has. */
+    const isDevice = guid=>guid === GUID_SysKeyboard || guid === GUID_SysMouse;
+
     /** @param {string} guid */
     const deviceFor = guid=>{
-        if (guid !== GUID_SysKeyboard && guid !== GUID_SysMouse)
+        if (!isDevice(guid))
         {
             return null;
         }
         let device = devices.get(guid);
-        if (!device)
+        // A device released to nothing is over, and a new CreateDevice makes
+        // a new one rather than handing back a pointer the bridge has let go.
+        // One still held is handed out again with a reference for this caller.
+        if (device && !device.destroyed)
         {
-            device = createInputDevice({
-                kind: guid === GUID_SysKeyboard ? KEYBOARD : MOUSE,
-                now,
-            });
-            devices.set(guid, device);
+            device.addRef();
+            return device;
         }
+        device = createInputDevice({
+            kind: guid === GUID_SysKeyboard ? KEYBOARD : MOUSE,
+            now,
+        });
+        devices.set(guid, device);
         return device;
     };
 
@@ -1066,7 +1145,7 @@ export function createDirectInput(
      * @returns {number | Promise<number>}
      */
     const enumerate = (type, callback, context, flags, wide, legacy)=>{
-        if ((callback >>> 0) === 0)
+        if ((callback >>> 0) === 0 || (flags & ~DIEDFL_KNOWN) !== 0 || !isDeviceKind(type))
         {
             return DIERR_INVALIDPARAM;
         }
@@ -1153,9 +1232,14 @@ export function createDirectInput(
          * @param {{ wide?: boolean, legacy?: boolean }} [descriptor]
          */
         CreateDevice(root, [guid, out], descriptor){
-            if ((out >>> 0) === 0 || (guid >>> 0) === 0)
+            if ((out >>> 0) === 0)
             {
-                return DIERR_INVALIDPARAM;
+                return E_POINTER;
+            }
+            if ((guid >>> 0) === 0)
+            {
+                writeU32(out, 0);
+                return E_POINTER;
             }
             const device = deviceFor(guidAt(guid));
             if (!device)
@@ -1224,17 +1308,37 @@ export function createDirectInput(
 
         /** HRESULT GetDeviceStatus(REFGUID) */
         GetDeviceStatus(root, [guid]){
-            const known = (guid >>> 0) !== 0
-                && deviceFor(guidAt(guid)) !== null;
-            return known ? DI_OK : DIERR_DEVICENOTREG;
+            if ((guid >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            return isDevice(guidAt(guid)) ? DI_OK : DIERR_DEVICENOTREG;
         },
 
-        /** HRESULT RunControlPanel(HWND, DWORD) */
-        RunControlPanel(){
-            return DI_OK;
+        /**
+         * HRESULT RunControlPanel(HWND, DWORD)
+         *
+         * There is no control panel to show; what can be refused is.
+         */
+        RunControlPanel(root, [owner, flags]){
+            if ((owner >>> 0) !== 0 && windowKind?.(owner >>> 0) === null)
+            {
+                return E_HANDLE;
+            }
+            return (flags >>> 0) !== 0 ? DIERR_INVALIDPARAM : DI_OK;
         },
-        /** HRESULT Initialize(HINSTANCE, DWORD version) */
-        Initialize(root, [, version]){
+        /**
+         * HRESULT Initialize(HINSTANCE, DWORD version)
+         *
+         * Refused as creation refuses, and checked again each time: a version
+         * already taken does not make a bad one good.
+         */
+        Initialize(root, [instance, version]){
+            const refused = versionRefusal(instance, version, root.eight);
+            if (refused !== DI_OK)
+            {
+                return refused;
+            }
             root.version = version >>> 0;
             return DI_OK;
         },
@@ -1244,19 +1348,25 @@ export function createDirectInput(
         },
     };
 
-    const rootInterfaces = [
-        describe(IID_IDirectInputA, IDIRECTINPUT_SLOTS, rootMethods, { legacy: true }),
-        describe(IID_IDirectInputW, IDIRECTINPUT_SLOTS, rootMethods,
-            { legacy: true, wide: true }),
-        describe(IID_IDirectInput2A, IDIRECTINPUT2_SLOTS, rootMethods, { legacy: true }),
-        describe(IID_IDirectInput2W, IDIRECTINPUT2_SLOTS, rootMethods,
-            { legacy: true, wide: true }),
-        describe(IID_IDirectInput7A, IDIRECTINPUT7_SLOTS, rootMethods, { legacy: true }),
-        describe(IID_IDirectInput7W, IDIRECTINPUT7_SLOTS, rootMethods,
-            { legacy: true, wide: true }),
+    // A root before 8 is one object with two tables, the ANSI and the wide
+    // IDirectInput7; each earlier generation's pointer is the same table, which
+    // holds its methods first, and the wide one is the object's IUnknown.
+    const legacyA = describe(IID_IDirectInput7A, IDIRECTINPUT7_SLOTS, rootMethods,
+        { legacy: true });
+    const legacyW = describe(IID_IDirectInput7W, IDIRECTINPUT7_SLOTS, rootMethods,
+        { legacy: true, wide: true, unknown: true });
+    /** @param {string} id @param {any} table */
+    const sameAs = (id, table)=>({ ...table, id, sharedWith: table.id, unknown: false });
+    const legacyRootInterfaces = [
+        sameAs(IID_IDirectInputA, legacyA), sameAs(IID_IDirectInput2A, legacyA), legacyA,
+        sameAs(IID_IDirectInputW, legacyW), sameAs(IID_IDirectInput2W, legacyW), legacyW,
+    ];
+    const rootInterfaces8 = [
         describe(IID_IDirectInput8A, IDIRECTINPUT8_SLOTS, rootMethods),
         describe(IID_IDirectInput8W, IDIRECTINPUT8_SLOTS, rootMethods, { wide: true }),
     ];
+    const isRootOf = (/** @type {string} */ id, /** @type {boolean} */ eight)=>
+        (eight ? rootInterfaces8 : legacyRootInterfaces).some(entry=>entry.id === id);
 
     /**
      * A new DirectInput object, as each creation call makes on Windows. It
@@ -1268,25 +1378,50 @@ export function createDirectInput(
      * dinput tests release it to zero while a device is still held, and the
      * device goes on answering, since it keeps what it needs of its own.
      *
-     * @param {number} out @param {string} id @param {number} version
+     * @param {Object} request
+     * @param {number} request.instance
+     * @param {number} request.version
+     * @param {string} request.id
+     * @param {number} request.out
+     * @param {number} request.outer
+     * @param {boolean} request.eight  DirectInput8Create's rather than an earlier call's.
      */
-    const createInto = (out, id, version)=>{
+    const create = ({ instance, version, id, out, outer, eight })=>{
         if ((out >>> 0) === 0)
         {
-            return DIERR_INVALIDPARAM;
+            return E_POINTER;
+        }
+        if (!isRootOf(id, eight))
+        {
+            writeU32(out, 0);
+            return DIERR_NOINTERFACE;
+        }
+        // Asked to be part of another object, Windows makes nothing and
+        // says so only through the pointer it leaves null.
+        if ((outer >>> 0) !== 0)
+        {
+            writeU32(out, 0);
+            return DI_OK;
+        }
+        const refused = versionRefusal(instance, version, eight);
+        if (refused !== DI_OK)
+        {
+            writeU32(out, 0);
+            return refused;
         }
         let references = 1;
         const root = {
             version: version >>> 0,
+            eight,
             addRef: ()=>++references,
             release: ()=>(references = Math.max(0, references - 1)),
             get destroyed(){
                 return references === 0;
             },
         };
-        const pointer = publisher.publish(root, rootInterfaces, id);
+        const pointer = publisher.publish(root, eight ? rootInterfaces8 : legacyRootInterfaces, id);
         writeU32(out, pointer);
-        return pointer === 0 ? 0x80004002 | 0 : DI_OK;
+        return pointer === 0 ? DIERR_NOINTERFACE : DI_OK;
     };
 
     return {
@@ -1343,12 +1478,14 @@ export function createDirectInput(
                 DirectInputCreateA: {
                     argBytes: 16,
                     /** @param {number[]} args */
-                    handler: ([, version, out])=>createInto(out, IID_IDirectInputA, version),
+                    handler: ([instance, version, out, outer])=>create(
+                        { instance, version, id: IID_IDirectInputA, out, outer, eight: false }),
                 },
                 DirectInputCreateW: {
                     argBytes: 16,
                     /** @param {number[]} args */
-                    handler: ([, version, out])=>createInto(out, IID_IDirectInputW, version),
+                    handler: ([instance, version, out, outer])=>create(
+                        { instance, version, id: IID_IDirectInputW, out, outer, eight: false }),
                 },
                 /**
                  * HRESULT DirectInputCreateEx(HINSTANCE, DWORD, REFIID,
@@ -1356,13 +1493,19 @@ export function createDirectInput(
                  *
                  * The interface the caller names is the one it gets, for the
                  * reason CreateDeviceEx honours its own: handing back a shorter
-                 * vtable than it expects is a jump off the end of one.
+                 * vtable than it expects is a jump off the end of one. One that
+                 * is no IDirectInput before 8 is refused before anything else
+                 * is looked at, the pointer left as it was.
                  */
                 DirectInputCreateEx: {
                     argBytes: 20,
                     /** @param {number[]} args */
-                    handler: ([, version, iid, out])=>createInto(
-                        out, guidAt(iid), version),
+                    handler: ([instance, version, iid, out, outer])=>{
+                        const id = (iid >>> 0) === 0 ? '' : guidAt(iid);
+                        return isRootOf(id, false)
+                            ? create({ instance, version, id, out, outer, eight: false })
+                            : DIERR_NOINTERFACE;
+                    },
                 },
                 DllCanUnloadNow: { argBytes: 0, handler: ()=>DI_OK },
             },
@@ -1374,8 +1517,10 @@ export function createDirectInput(
                 DirectInput8Create: {
                     argBytes: 20,
                     /** @param {number[]} args */
-                    handler: ([, version, iid, out])=>createInto(
-                        out, guidAt(iid), version),
+                    handler: ([instance, version, iid, out, outer])=>create({
+                        instance, version, id: (iid >>> 0) === 0 ? '' : guidAt(iid), out, outer,
+                        eight: true,
+                    }),
                 },
                 DllCanUnloadNow: { argBytes: 0, handler: ()=>DI_OK },
             },

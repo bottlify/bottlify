@@ -1774,3 +1774,40 @@ test('a BITMAPCOREHEADER DIB is read, drawn and handed back as Windows does', ()
     assert.deepEqual([0, 1].map(x=>fns.GetPixel.handler([other, x, 0])), [0x405060, 0x102030],
         'CBM_INIT through the three-byte table, as COLORREFs');
 });
+
+test('the nearest colour is what a SetPixel of it reads back as, and draws nothing', ()=>{
+    const objects = createGdiObjects(fakeHandles());
+    const drawing = createGdiDrawing({ objects, metrics: ()=>METRICS });
+    assert.equal(drawing.nearestColor(HDC, RED_COLOR), CLR_INVALID, 'no context');
+    const palette = [0x00000000, RED_PIXEL, 0x0000ff00, BLUE_PIXEL];
+    for (const options of [{ bitCount: 32 }, { bitCount: 16 }, { bitCount: 8, palette }])
+    {
+        const surface = createSurface({ width: 2, height: 1, ...options });
+        drawing.bind(HDC, surface);
+        for (const color of [0x00abcdef, 0x00123456, 0x000000f0])
+        {
+            const before = surface.read(1, 0);
+            const nearest = drawing.nearestColor(HDC, color);
+            assert.equal(surface.read(1, 0), before);
+            drawing.setPixel(HDC, 0, 0, color);
+            assert.equal(nearest, drawing.getPixel(HDC, 0, 0),
+                `${options.bitCount} bits, 0x${color.toString(16)}`);
+        }
+    }
+    assert.equal(drawing.nearestColor(HDC, 0x000000f0), RED_COLOR, 'the palette entry nearest');
+    drawing.bind(HDC, createSurface({ width: 1, height: 1, bitCount: 16 }));
+    assert.equal(drawing.nearestColor(HDC, 0x00abcdef), 0x00adceef, 'five bits a channel');
+});
+
+test('the text alignment is the context\'s own, and a new surface does not reset it', ()=>{
+    const state = { textAlign: 0, position: { x: 0, y: 0 } };
+    const objects = createGdiObjects(fakeHandles());
+    const drawing = createGdiDrawing({ objects, metrics: ()=>METRICS });
+    drawing.bind(HDC, createSurface({ width: 4, height: 4 }), state);
+    assert.equal(drawing.setTextAlign(HDC, TA_CENTER), 0);
+    assert.equal(state.textAlign, TA_CENTER, 'kept on the state the bookkeeping half owns');
+    drawing.bind(HDC, createSurface({ width: 8, height: 8 }), state);
+    assert.equal(drawing.getTextAlign(HDC), TA_CENTER);
+    state.textAlign = 0;
+    assert.equal(drawing.getTextAlign(HDC), 0, 'and a RestoreDC of the state is seen');
+});

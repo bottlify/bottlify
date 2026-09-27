@@ -266,22 +266,30 @@ export function _CIacos({ host }, x){
 }
 
 /**
- * double atan(double x) -- `fpatan` of x and 1.
+ * double atan(double x) -- `fpatan` of x and 1; a NaN the handler's (EDOM).
  *
  * @guestCode cdecl
- * @param {f64} x
+ * @param {Guest} guest @param {f64} x
  * @returns {f64}
  */
-export function atan(x){
+export function atan({ host }, x){
+    if (Number.isNaN(x))
+    {
+        return host();
+    }
     return Math.atan(x);
 }
 
 /**
  * @guestCode cdecl
- * @param {x87} x
+ * @param {Guest} guest @param {x87} x
  * @returns {f64}
  */
-export function _CIatan(x){
+export function _CIatan({ host }, x){
+    if (Number.isNaN(x))
+    {
+        return host();
+    }
     return Math.atan(x);
 }
 
@@ -577,16 +585,21 @@ export function _CIcosh({ host }, x){
 
 /**
  * double tanh(double x) -- (e^2|x| - 1) / (e^2|x| + 1), the sign put back;
- * 1 from 22 on, where the difference from 1 is below a double's reach.
+ * 1 from 22 on, where the difference from 1 is below a double's reach; a
+ * NaN the handler's (EDOM).
  *
  * @guestCode cdecl
- * @param {f64} x
+ * @param {Guest} guest @param {f64} x
  * @returns {f64}
  */
-export function tanh(x){
+export function tanh({ host }, x){
+    if (Number.isNaN(x))
+    {
+        return host();
+    }
     if (!(Math.abs(x) < 22))
     {
-        return Number.isNaN(x) ? x : x < 0 ? -1 : 1;
+        return x < 0 ? -1 : 1;
     }
     if (x === 0)
     {
@@ -598,13 +611,17 @@ export function tanh(x){
 
 /**
  * @guestCode cdecl
- * @param {x87} x
+ * @param {Guest} guest @param {x87} x
  * @returns {f64}
  */
-export function _CItanh(x){
+export function _CItanh({ host }, x){
+    if (Number.isNaN(x))
+    {
+        return host();
+    }
     if (!(Math.abs(x) < 22))
     {
-        return Number.isNaN(x) ? x : x < 0 ? -1 : 1;
+        return x < 0 ? -1 : 1;
     }
     if (x === 0)
     {

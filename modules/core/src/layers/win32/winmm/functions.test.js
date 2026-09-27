@@ -351,6 +351,26 @@ test('waveOutGetDevCapsW names the device in UTF-16, the fields after it moved',
     assert.equal(m.winmm.waveOutGetDevCapsW.handler([1, 0x10400, 84]), 2);
 });
 
+test('an open with no format is refused, and a mapped device knows it was the mapper\'s', ()=>{
+    // winmm's wave tests: waveOutOpen with a NULL format is
+    // MMSYSERR_INVALPARAM, and waveOutGetID of a device opened as WAVE_MAPPER
+    // answers WAVE_MAPPER.
+    const m = machine();
+    assert.equal(m.winmm.waveOutOpen.handler([0x200, 0xffffffff, 0, 0, 0, 0]), 11);
+    assert.equal(m.winmm.waveOutOpen.handler([0x200, 0xffffffff, 0, 0, 0, 1]), 11,
+        'WAVE_FORMAT_QUERY too');
+    m.put32(0x100, 1 | 2 << 16);
+    m.put32(0x104, 44100);
+    m.put32(0x108, BYTES_PER_SECOND);
+    m.put32(0x10c, 4 | 16 << 16);
+    assert.equal(m.winmm.waveOutOpen.handler([0x200, 0xffffffff, 0x100, 0, 0, 0]), 0);
+    assert.equal(m.winmm.waveOutGetID.handler([m.get32(0x200), 0x210]), 0);
+    assert.equal(m.get32(0x210), 0xffffffff);
+    assert.equal(m.winmm.waveOutOpen.handler([0x200, 0, 0x100, 0, 0, 0]), 0);
+    assert.equal(m.winmm.waveOutGetID.handler([m.get32(0x200), 0x210]), 0);
+    assert.equal(m.get32(0x210), 0, 'and one opened by its id, that id');
+});
+
 test('a capability structure in memory nothing maps is refused, not written', ()=>{
     // winmm's wave tests pass NULL and 1 and expect MMSYSERR_INVALPARAM.
     const m = machine();
@@ -857,6 +877,13 @@ test('PlaySound plays a WAVE image from memory, loops it, and null stops it', as
     assert.equal(diverged.length, 1, 'a file is refused out loud, not silently');
     assert.equal(winmm.PlaySoundA.argBytes, 12);
     assert.equal(winmm.sndPlaySoundA.argBytes, 8);
+
+    // The wide forms read no name, so they are the same calls.
+    assert.equal(winmm.PlaySoundW.handler([0x800, 0, 0x0001 | 0x0004]), 1);
+    assert.equal(mixer.diagnostics().tracks, 1);
+    assert.equal(winmm.sndPlaySoundW.handler([0, 0]), 1);
+    assert.equal(mixer.diagnostics().tracks, 0);
+    assert.deepEqual([winmm.PlaySoundW.argBytes, winmm.sndPlaySoundW.argBytes], [12, 8]);
 });
 
 test('the timer reports the periods timeSetEvent accepts', ()=>{
@@ -913,7 +940,8 @@ test('the wave-out volume is one level for the device, heard through every track
     assert.equal(view.getUint32(0x300, true), 0x8000_8000);
     assert.equal(winmm.waveOutGetDevCapsA.handler([0, 0x10400, 52]), 0);
     assert.equal(view.getUint32(0x10400 + 48, true) & 0x0008, 0, 'no WAVECAPS_LRVOLUME');
-    assert.equal(view.getUint32(0x10400 + 48, true) & 0x0001, 1, 'but WAVECAPS_VOLUME');
+    assert.equal(view.getUint32(0x10400 + 48, true), 0x0004 | 0x0020,
+        'but WAVECAPS_VOLUME, and WAVECAPS_SAMPLEACCURATE -- not PITCH or PLAYBACKRATE');
 
     // A device opened later plays at the level already set.
     assert.equal(winmm.waveOutSetVolume.handler([0xffffffff, 0x4000]), 0, 'WAVE_MAPPER');

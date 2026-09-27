@@ -422,7 +422,7 @@ export function createVtables({ memory, register, heap }){
             return E_NOINTERFACE;
         }
 
-        const pointer = publish(object, wanted, record.methods);
+        const pointer = publish(object, record.sharedWith ?? wanted, record.methods);
         if (pointer === 0)
         {
             // There is nowhere to put the interface, so there is no interface.
@@ -432,7 +432,7 @@ export function createVtables({ memory, register, heap }){
         }
         // The reference belongs to the interface the caller asked for, not to
         // the one it asked through.
-        object.addRef(wanted);
+        object.addRef(record.sharedWith ?? wanted);
         memory.writeU32(ppv >>> 0, pointer);
         return 0; // S_OK
     }
@@ -465,7 +465,12 @@ export function createVtables({ memory, register, heap }){
          */
         publish(object, interfaceId){
             const record = object.interfaceFor(interfaceId);
-            return record ? publish(object, interfaceId, record.methods) : 0;
+            // An interface answered with another's pointer -- a table that
+            // holds the other's and more, as IDirectInput7A holds
+            // IDirectInputA's -- is that pointer, so COM identity sees one.
+            return record
+                ? publish(object, record.sharedWith ?? interfaceId, record.methods)
+                : 0;
         },
 
         /**

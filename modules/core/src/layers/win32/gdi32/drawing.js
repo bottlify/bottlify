@@ -64,6 +64,13 @@ const DIB_PAL_INDICES = 2;
 /** The drawing layer's name for a sixteen-bit surface made in 5-6-5. */
 const RGB_565 = '565';
 
+/** A FLOAT crosses the ABI as its 32 bits, on the stack and through a pointer. */
+const FLOAT_BITS = new DataView(new ArrayBuffer(4));
+/** @param {number} bits @returns {number} */
+const floatOf = bits=>(FLOAT_BITS.setUint32(0, bits >>> 0, true), FLOAT_BITS.getFloat32(0, true));
+/** @param {number} value @returns {number} */
+const bitsOf = value=>(FLOAT_BITS.setFloat32(0, value, true), FLOAT_BITS.getUint32(0, true));
+
 /**
  * The default palette's twenty colours, the ones a palette device keeps for
  * itself: eight dark, four pale, eight bright. 0x00RRGGBB. They are the
@@ -586,6 +593,7 @@ export function createDrawingFunctions(
     /** @param {number} handle @param {any} dc @param {any} rect */
     const setClip = (handle, dc, rect)=>{
         dc.clip = { ...rect };
+        dc.clipSelected = true;
         bound(handle)?.setClipRect(handle >>> 0, rect);
     };
 
@@ -816,6 +824,17 @@ export function createDrawingFunctions(
             },
         },
 
+        /** BOOL SetPixelV(HDC hdc, int x, int y, COLORREF color): SetPixel, answered as a BOOL */
+        SetPixelV: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, x, y, color])=>{
+                const interfaces = bound(handle);
+                return interfaces && interfaces.setPixel(handle >>> 0, x | 0, y | 0, color >>> 0)
+                    !== 0xffffffff ? 1 : 0;
+            },
+        },
+
         /** COLORREF GetPixel(HDC hdc, int x, int y) */
         GetPixel: {
             argBytes: 12,
@@ -978,7 +997,7 @@ export function createDrawingFunctions(
                 {
                     return 0x80000000;
                 }
-                const previous = dc.characterExtra ?? 0;
+                const previous = dc.characterExtra;
                 dc.characterExtra = extra | 0;
                 return previous >>> 0;
             },
@@ -991,6 +1010,72 @@ export function createDrawingFunctions(
             handler: ([handle])=>{
                 const dc = dcOf(handle);
                 return dc ? (dc.characterExtra ?? 0) >>> 0 : 0x80000000;
+            },
+        },
+
+        /**
+         * BOOL SetMiterLimit(HDC hdc, FLOAT limit, PFLOAT old)
+         *
+         * A limit below one is refused with the old one left unwritten: a
+         * miter is never shorter than the line is wide. Nothing drawn here
+         * joins lines by it yet; the value is kept, saved and answered.
+         */
+        SetMiterLimit: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, limit, old])=>{
+                const dc = dcOf(handle);
+                const value = floatOf(limit);
+                if (!dc || !(value >= 1))
+                {
+                    return 0;
+                }
+                if ((old >>> 0) !== 0)
+                {
+                    writeU32s(host, old >>> 0, [bitsOf(dc.miterLimit)]);
+                }
+                dc.miterLimit = value;
+                return 1;
+            },
+        },
+
+        /** BOOL GetMiterLimit(HDC hdc, PFLOAT limit) */
+        GetMiterLimit: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                if ((out >>> 0) !== 0)
+                {
+                    writeU32s(host, out >>> 0, [bitsOf(dc.miterLimit)]);
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * COLORREF GetNearestColor(HDC hdc, COLORREF color)
+         *
+         * What the context's surface keeps of a colour -- the palette entry
+         * nearest it, the bits sixteen keep -- which is what a SetPixel of it
+         * reads back as. A build that cannot draw keeps every colour whole.
+         */
+        GetNearestColor: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, color])=>{
+                if (!dcOf(handle))
+                {
+                    return 0xffffffff;
+                }
+                const interfaces = bound(handle, false);
+                return interfaces
+                    ? interfaces.nearestColor(handle >>> 0, color >>> 0) >>> 0
+                    : (color & 0xffffff) >>> 0;
             },
         },
 
@@ -1169,6 +1254,24 @@ export function createDrawingFunctions(
                 (rect >>> 0) === 0 ? 0 : newRegion(readRect(host, rect)),
         },
 
+        /** int GetRgnBox(HRGN hrgn, LPRECT lprc): the bounds, and what kind of region */
+        GetRgnBox: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([region, out])=>{
+                const rect = regionOf(region);
+                if (!rect || (out >>> 0) === 0)
+                {
+                    return REGION_ERROR;
+                }
+                // An empty region has no position: Windows keeps it as zeros.
+                const empty = isEmpty(rect);
+                writeU32s(host, out >>> 0,
+                    empty ? [0, 0, 0, 0] : [rect.left, rect.top, rect.right, rect.bottom]);
+                return empty ? NULLREGION : SIMPLEREGION;
+            },
+        },
+
         /** int CombineRgn(HRGN hrgnDst, HRGN hrgnSrc1, HRGN hrgnSrc2, int iMode) */
         CombineRgn: {
             argBytes: 16,
@@ -1208,10 +1311,9 @@ export function createDrawingFunctions(
                 }
                 if ((region >>> 0) === 0)
                 {
-                    const surface = surfaceOf(dc);
-                    setClip(handle, dc, {
-                        left: 0, top: 0, right: surface.width, bottom: surface.height,
-                    });
+                    dc.clip = null;
+                    dc.clipSelected = false;
+                    bound(handle)?.setClipRect(handle >>> 0, clipOf(dc));
                     return SIMPLEREGION;
                 }
                 const rect = regionOf(region);
@@ -1221,6 +1323,54 @@ export function createDrawingFunctions(
                 }
                 setClip(handle, dc, rect);
                 return isEmpty(rect) ? NULLREGION : SIMPLEREGION;
+            },
+        },
+
+        /**
+         * int GetClipRgn(HDC hdc, HRGN hrgn)
+         *
+         * 1 with the clip the program selected copied into the region, 0 when
+         * it selected none -- a paint's update area is the system's clip, not
+         * the program's -- and -1 for a context or a region there is not.
+         */
+        GetClipRgn: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, region])=>{
+                const dc = dcOf(handle);
+                const target = objects.get(region);
+                if (!dc || !target || target.type !== 'region')
+                {
+                    return 0xffffffff;
+                }
+                if (!dc.clipSelected)
+                {
+                    return 0;
+                }
+                target.attributes = { ...clipOf(dc) };
+                return 1;
+            },
+        },
+
+        /**
+         * int IntersectClipRect(HDC hdc, int left, int top, int right, int bottom)
+         *
+         * The clip narrowed to the rectangle, which a rectangle always is.
+         */
+        IntersectClipRect: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, left, top, right, bottom])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return REGION_ERROR;
+                }
+                const clip = intersect(clipOf(dc), {
+                    left: left | 0, top: top | 0, right: right | 0, bottom: bottom | 0,
+                });
+                setClip(handle, dc, clip);
+                return isEmpty(clip) ? NULLREGION : SIMPLEREGION;
             },
         },
 

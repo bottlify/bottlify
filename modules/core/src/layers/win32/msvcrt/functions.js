@@ -18,8 +18,10 @@
  * undefined, the choice made here is written down at the function.
  */
 
-import { formatToString, varargsSlots } from './format.js';
+import { formatToString, guestAccess, varargsSlots } from './format.js';
 import { createStringFunctions } from './strings.js';
+import { createSecureFunctions } from './secure.js';
+import { createErrorFunctions } from './errors.js';
 import { createConversionFunctions } from './convert.js';
 import { createScanFunctions, VARIADIC_SLOTS } from './scan.js';
 import { createHeapFunctions } from './heap.js';
@@ -40,6 +42,8 @@ import { createStdioFunctions, standardRecords } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
 import { createGlobals, EINVAL, ERANGE } from './globals.js';
 import { createDescriptors, createIoFunctions } from './io.js';
+import { createEnvironment } from './environ.js';
+import { createMultiBytePage } from './mbcs.js';
 import { bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
@@ -102,6 +106,19 @@ const RAND_MAX = 0x7fff;
  *           unexported.
  * @property {() => string[]} [drives]      Letters the filesystem has mounted.
  * @property {() => number} [iob]           Where the runtime's `_iob` was placed, once it has been.
+ * @property {() => Record<string, string>} [environment]
+ *           The process's variables as it starts, as GetEnvironmentStrings
+ *           holds them: the runtime's own copy begins as these. Absent, the
+ *           runtime starts with none.
+ * @property {(name: string, value: string | null) => void} [setVariable]
+ *           Where `_putenv` changes the process's block, as
+ *           SetEnvironmentVariable does; null removes. Absent, the change is
+ *           the runtime's alone.
+ * @property {(name: string) => number} [addressOf]
+ *           Where the runtime's own export of that name was placed, zero
+ *           before it is: a table a program reads in place, `_mbctype`, is
+ *           rewritten there when the call that changes it comes. Absent, the
+ *           table stays as it was placed.
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           Registers a call answers in besides EAX: EDX, for the high half
  *           of an __int64. Absent, the calls answering one stay unexported.
@@ -143,6 +160,9 @@ export function createMsvcrtFunctions(host){
     /** @param {number} pointer */
     const readWide = pointer=>wideStringAt(host.readMemory, pointer);
 
+    /** Where %Z reads and %n writes. */
+    const memoryAccess = guestAccess(host.readMemory, host.writeMemory);
+
     /**
      * Text into bytes that may be longer than it, in the ANSI page the text
      * was read in: a string a program passed is copied as its own bytes.
@@ -168,7 +188,7 @@ export function createMsvcrtFunctions(host){
      * @param {number} format @param {number[]} values
      */
     const narrowText = (format, values)=>formatToString(readString(format), values, readString,
-        { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi });
+        { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi, ...memoryAccess });
 
     /** @param {number[]} args @param {number} fixed */
     const render = (args, fixed)=>narrowText(args[fixed - 1], args.slice(fixed));
@@ -199,8 +219,70 @@ export function createMsvcrtFunctions(host){
         return text.length > limit ? -1 : text.length;
     };
 
+    /**
+     * What a wide printer writes: %s is a wide string, %S a narrow one.
+     *
+     * @param {number} format @param {number[]} values
+     */
+    const wideText = (format, values)=>formatToString(readWide(format), values, readString,
+        { readWideString: readWide, wide: true, ...memoryAccess });
+
+    /**
+     * The _snwprintf family's answer: at most `count` characters, terminated
+     * only when there is room, and -1 when the text does not fit. With no
+     * buffer and a count of zero it answers how many the text needs (Wine's
+     * msvcrt test_vsnwprintf); no format, or no buffer for a count, is -1
+     * and EINVAL.
+     *
+     * @param {number} buffer @param {number} count @param {number} format
+     * @param {number[]} values
+     */
+    const countedWide = (buffer, count, format, values)=>{
+        const limit = count >>> 0;
+        if ((format >>> 0) === 0 || ((buffer >>> 0) === 0 && limit !== 0))
+        {
+            errno(EINVAL);
+            return -1;
+        }
+        const text = wideText(format, values);
+        if ((buffer >>> 0) === 0)
+        {
+            return text.length;
+        }
+        const units = unitsOfText(text.slice(0, limit));
+        host.writeMemory(buffer, bytesOfUnits(text.length < limit ? [...units, 0] : units));
+        return text.length > limit ? -1 : text.length;
+    };
+
+    /** int swprintf(wchar_t *buffer, const wchar_t *format, ...) */
+    const uncountedWide = {
+        convention: 'cdecl',
+        argBytes: 8 + VARIADIC_SLOTS * 4,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ args)=>{
+            const text = wideText(args[1], args.slice(2));
+            host.writeMemory(args[0], bytesOfUnits([...unitsOfText(text), 0]));
+            return text.length;
+        },
+    };
+
     /** int atoi(const char *str) -- in the guest */
     const atoi = guestEntry(inGuest.atoi, COMPILED.atoi, host);
+
+    /** @param {number} value  Unsigned. @param {number} radix */
+    const radixDigits = (value, radix)=>{
+        if (radix <= 36)
+        {
+            return value.toString(radix);
+        }
+        let text = '';
+        for (let rest = value; text === '' || rest > 0; rest = Math.floor(rest / radix))
+        {
+            const digit = rest % radix;
+            text = String.fromCharCode(digit < 10 ? 0x30 + digit : 0x57 + digit) + text;
+        }
+        return text;
+    };
 
     /** char *_itoa(int value, char *buffer, int radix) */
     const itoa = {
@@ -208,14 +290,18 @@ export function createMsvcrtFunctions(host){
         argBytes: 12,
         /** @param {number[]} args */
         handler: ([value, buffer, radix])=>{
-            if (radix < 2 || radix > 36)
+            if (radix < 2)
             {
-                // The secure variants reject this outright; the classic ones
-                // leave it undefined. Refusing beats writing arbitrary bytes.
+                // No radix below two ends a division loop; refusing beats
+                // writing arbitrary bytes.
                 return 0;
             }
             // Only base ten is signed: every other radix prints the bit pattern.
-            const text = radix === 10 ? (value | 0).toString(10) : (value >>> 0).toString(radix);
+            // Past thirty-six msvcrt goes on counting digits from 'a', which
+            // the secure form refuses and this one does not check:
+            // _itoa(100, buffer, 100) is "10" (Wine's msvcrt test__itoa_s).
+            const text = radix === 10 ? (value | 0).toString(10)
+                : radixDigits(value >>> 0, radix);
             writeString(buffer, text);
             return buffer;
         },
@@ -542,24 +628,27 @@ export function createMsvcrtFunctions(host){
             convention: 'cdecl',
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([buffer, count, format, list])=>{
-                const limit = count >>> 0;
-                if ((format >>> 0) === 0 || ((buffer >>> 0) === 0 && limit !== 0))
-                {
-                    errno(EINVAL);
-                    return -1;
-                }
-                const text = formatToString(readWide(format), varargsAt(list), readString,
-                    { readWideString: readWide, wide: true });
-                if ((buffer >>> 0) === 0)
-                {
-                    return text.length;
-                }
-                const units = unitsOfText(text.slice(0, limit));
-                host.writeMemory(buffer, bytesOfUnits(text.length < limit ? [...units, 0] : units));
-                return text.length > limit ? -1 : text.length;
-            },
+            handler: ([buffer, count, format, list])=>
+                countedWide(buffer, count, format, (format >>> 0) === 0 ? [] : varargsAt(list)),
         },
+
+        /** int _snwprintf(wchar_t *buffer, size_t count, const wchar_t *format, ...) */
+        _snwprintf: {
+            convention: 'cdecl',
+            argBytes: 12 + VARIADIC_SLOTS * 4,
+            /** @param {number[]} args */
+            handler: args=>countedWide(args[0], args[1], args[2], args.slice(3)),
+        },
+
+        /**
+         * int swprintf(wchar_t *buffer, const wchar_t *format, ...)
+         *
+         * msvcrt's own, which takes no count: the text and its terminator,
+         * however long, and the count of its characters. `_swprintf` is
+         * the same function.
+         */
+        swprintf: uncountedWide,
+        _swprintf: uncountedWide,
 
         /**
          * int sprintf_s(char *buffer, size_t size, const char *format, ...)
@@ -629,6 +718,22 @@ export function createMsvcrtFunctions(host){
     /** @param {number} code */
     const errno = code=>globals.set(errnoName(), code);
 
+    // The runtime's copy of the environment, taken from the process's as it
+    // starts: what getenv reads, _putenv changes and main is handed.
+    const environment = host.allocate
+        ? createEnvironment({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readCString: host.readCString,
+            allocate: host.allocate,
+            errno,
+            ...host.environment ? { environment: host.environment } : {},
+            ...host.setVariable ? { setVariable: host.setVariable } : {},
+            ...host.addressOf ? { addressOf: host.addressOf } : {},
+            cell: (name, initial)=>globals.address(name, initial),
+        })
+        : null;
+
     // The descriptor table the low-level calls hand out numbers from and the
     // streams stand on, so `_fileno(f)` is a number `_read` accepts.
     const descriptors = host.files
@@ -673,6 +778,10 @@ export function createMsvcrtFunctions(host){
         }
     };
 
+    // The multibyte code page `_setmbcp` selects, which `_splitpath` reads
+    // by as the `_mbs*` family does.
+    const multiBytePage = createMultiBytePage();
+
     const narrow = {
         ...table,
         ...createStringFunctions({
@@ -681,19 +790,55 @@ export function createMsvcrtFunctions(host){
             readCString: host.readCString,
             scanCString: host.scanCString,
             allocate,
+            errno,
         }),
     };
 
     return {
         ...narrow,
         // Bound to the byte functions above, so the two families cannot drift.
-        ...createMultiByteFunctions(narrow, host.divergence),
+        ...createMultiByteFunctions(narrow, {
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            fillMemory: host.fillMemory,
+            errno,
+            addressOf: host.addressOf,
+            divergence: host.divergence,
+            page: multiBytePage,
+        }),
         ...createWideClassificationFunctions(),
+        ...createSecureFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory,
+            errno }),
+        ...createErrorFunctions({
+            writeMemory: host.writeMemory,
+            allocate,
+            errno: ()=>globals.get(errnoName()),
+            setErrno: errno,
+            doserrno: ()=>globals.get('doserrno'),
+            setDoserrno: code=>globals.set('doserrno', code),
+        }),
+
+        /** errno_t rand_s(unsigned int *value) -- from the machine's random source */
+        rand_s: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                if ((pointer >>> 0) === 0)
+                {
+                    errno(EINVAL);
+                    return EINVAL;
+                }
+                host.writeMemory(pointer, crypto.getRandomValues(new Uint8Array(4)));
+                return 0;
+            },
+        },
         ...createWideFunctions({
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             readCString: host.readCString,
             errno,
+            ...host.allocate ? { allocate: host.allocate } : {},
         }),
         ...createConversionFunctions({
             readCString: host.readCString,
@@ -726,8 +871,10 @@ export function createMsvcrtFunctions(host){
                 errnoName,
                 closeStreams,
                 version: host.version,
+                ...environment ? { environment } : {},
             })
             : {}),
+        ...environment?.functions,
 
         // The rest of the runtime needs seams the assembling caller may not
         // have wired. A missing one leaves the functions unexported, and an
@@ -758,6 +905,11 @@ export function createMsvcrtFunctions(host){
                 systemTimeMs: host.systemTimeMs,
                 now: host.now,
                 fpu: host.fpu,
+                getenv: name=>environment?.value(name) ?? null,
+                ...host.addressOf ? { addressOf: host.addressOf } : {},
+                cell: (name, initial)=>globals.address(name, initial),
+                errno,
+                ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
             })
             : {}),
         ...(host.files
@@ -769,6 +921,8 @@ export function createMsvcrtFunctions(host){
                 drives: host.drives,
                 files: host.files,
                 errno,
+                getenv: name=>environment?.value(name) ?? null,
+                isLead: byte=>multiBytePage.isLead(byte),
             })
             : {}),
         ...(descriptors

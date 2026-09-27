@@ -167,3 +167,73 @@ test('upper-half bytes are stored as they were read, and a range of them is a ra
     assert.deepEqual([...memory.bytes.subarray(word, word + 3)], [0x80, 0x99, 0]);
     assert.deepEqual([...memory.bytes.subarray(run, run + 3)], [0x97, 0x8c, 0]);
 });
+
+test('width digits and length modifiers come in any order, the digits one width', ()=>{
+    // Wine's msvcrt test_sscanf: "%h02d", "%000h02d" and "%2h0d" of "12345678".
+    const fixture = build();
+    const out = fixture.memory.allocate(8);
+    for (const [format, expected] of /** @type {[string, number][]} */ ([
+        ['%02hd', 0xdead000c], ['%h02d', 0xdead000c], ['%000h02d', 0xdead000c],
+        ['%2h0d', 0xdead614e], ['%hhd', 0x00bc614e],
+    ]))
+    {
+        fixture.memory.setU32(out, 0xdeadbeef);
+        assert.equal(sscanf(fixture, '12345678', format, [out]), 1, format);
+        assert.equal(fixture.memory.u32(out), expected, format);
+    }
+});
+
+test('%p reads hexadecimal digits with no prefix, a sign allowed, and %P is the same', ()=>{
+    const fixture = build();
+    const out = fixture.memory.allocate(8);
+    for (const [input, format, expected] of /** @type {[string, string, number][]} */ ([
+        ['000000000046F170', '%p', 0x46f170], ['0x46F173', '%p', 0], ['-46F174', '%p', -0x46f174],
+        ['1234', '%P', 0x1234],
+    ]))
+    {
+        assert.equal(sscanf(fixture, input, format, [out]), 1, input);
+        assert.equal(fixture.memory.i32(out), expected, input);
+    }
+});
+
+test('a character that is no conversion is matched as it stands', ()=>{
+    const fixture = build();
+    const out = fixture.memory.allocate(8);
+    assert.equal(sscanf(fixture, '"%12@', '%"%%%d%@', [out]), 1);
+    assert.equal(fixture.memory.i32(out), 12);
+});
+
+test('a scanset range runs either way, and a dash after a range is itself', ()=>{
+    const fixture = build();
+    const out = fixture.memory.allocate(64);
+    assert.equal(sscanf(fixture, 'abcefgdh', '%*[a-cg-e]%c', [out]), 1);
+    assert.equal(String.fromCharCode(fixture.memory.bytes[out]), 'd');
+    assert.equal(sscanf(fixture, '-4123', '%[1-2-4]', [out]), 1);
+    assert.equal(fixture.memory.text(out), '-412');
+    assert.equal(sscanf(fixture, '-456123', '%[1-2-45-6]', [out]), 1);
+    assert.equal(fixture.memory.text(out), '-45612');
+});
+
+test('%jx stores eight bytes', ()=>{
+    const fixture = build();
+    const out = fixture.memory.allocate(8);
+    assert.equal(sscanf(fixture, '0xfefefefefefefefe', '%jx', [out]), 1);
+    assert.deepEqual([fixture.memory.u32(out), fixture.memory.u32(out + 4)],
+        [0xfefefefe, 0xfefefefe]);
+});
+
+test('swscanf stores wide text for %s and %c, and answers no input with zero', ()=>{
+    const fixture = build();
+    const { memory } = fixture;
+    const table = /** @type {Record<string, any>} */ (fixture.table);
+    const out = memory.allocate(64);
+    assert.equal(table.swscanf.handler([memory.putWide('ab c'), memory.putWide('%s%c%C'), out,
+        out + 32, out + 40]), 3);
+    assert.equal(memory.wide(out), 'ab');
+    assert.deepEqual([memory.bytes[out + 32], memory.bytes[out + 33], memory.bytes[out + 40]],
+        [0x20, 0, 0x63], '%c a unit, %C a byte');
+    assert.equal(table.swscanf.handler([memory.putWide(' \t\n'), memory.putWide('%s'), out]), 0);
+    assert.equal(table.swscanf.handler([memory.putWide('aሴሴb'),
+        memory.putWide('aሴ%ሴ%c'), out]), 1);
+    assert.equal(memory.bytes[out], 0x62);
+});
