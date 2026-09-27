@@ -30,10 +30,11 @@
  * files under a directory of the volume once the run is over -- what an
  * install left behind, which is what a bottle is made of. `--collect` takes
  * that prefix off the finished run as the installer's own wizard does
- * (`collectFrom`) and says which root, entry and files a bottle would get.
+ * (`collectFrom`) and says which root, entry and files a bottle would get;
+ * `--collect-to DIR` also writes it there, a directory make-btl packs.
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { createApp } from '../modules/core/src/app.js';
 import { collectFrom, prefixOptions } from '../modules/installer/src/index.js';
@@ -323,7 +324,8 @@ if (listAt)
         console.log('list failed:', e instanceof Error ? e.message : e);
     }
 }
-if (argv.includes('--collect'))
+const collectTo = argv.includes('--collect-to') ? argv[argv.indexOf('--collect-to') + 1] : null;
+if (argv.includes('--collect') || collectTo)
 {
     try
     {
@@ -334,6 +336,14 @@ if (argv.includes('--collect'))
         for (const one of collected.files.slice(0, 60))
         {
             console.log('COLLECT file', String(one.bytes.length).padStart(10), one.path);
+        }
+        // The prefix unpacked, as a directory make-btl packs into the bottle
+        // the wizard would have published.
+        for (const one of collectTo ? collected.files : [])
+        {
+            const to = join(collectTo, ...one.path.split('\\'));
+            mkdirSync(dirname(to), { recursive: true });
+            writeFileSync(to, one.bytes);
         }
     }
     catch (e){
