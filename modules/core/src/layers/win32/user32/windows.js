@@ -3388,10 +3388,14 @@ export function createWindowFunctions(host){
      */
     const getMessage = ([out, hwnd, filterMin, filterMax], unicode)=>{
         const filter = windowFilter(hwnd);
-        if (filter !== ANY_WINDOW && filter !== 0 && !windows.has(filter))
+        // A window already destroyed counts as none: its record is kept for
+        // a WM_DESTROY still queued, and waiting on a window that can never
+        // receive another message is waiting for ever.
+        if (filter !== ANY_WINDOW && filter !== 0 && !live(filter))
         {
             // The documented failure is -1, which is why a loop written
             // as `while (GetMessage(...))` spins forever on it.
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
             return -1;
         }
         const wanted = { hwnd: filter, first: filterMin >>> 0, last: filterMax >>> 0,

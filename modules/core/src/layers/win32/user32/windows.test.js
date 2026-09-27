@@ -2982,3 +2982,11 @@ test('GetClassInfoW reports the class by the wide name it was asked by', ()=>{
     assert.equal(memory.u32(0x10800 + WNDCLASSA.lpfnWndProc), WNDPROC);
     assert.equal(memory.u32(0x10800 + WNDCLASSA.lpszClassName), WIDE_CLASS);
 });
+
+test('GetMessage on a window already destroyed fails at once rather than waiting for ever', ()=>{
+    const { fns, hwnd, errors } = withWindow();
+    fns.DestroyWindow.handler([hwnd]);
+    assert.equal(fns.GetMessageA.handler([MSG_BUFFER, hwnd, 0, 0]), -1);
+    assert.equal(fns.GetMessageW.handler([MSG_BUFFER, hwnd, 0, 0]), -1);
+    assert.equal(errors.at(-1), 1400, 'ERROR_INVALID_WINDOW_HANDLE');
+});
