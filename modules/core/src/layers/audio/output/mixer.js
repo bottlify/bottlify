@@ -806,6 +806,17 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
                     // jumps ahead still moves it on: the gap is the program's.
                     const sequential = offset === nextWrite;
                     nextWrite = (offset + length) % size;
+                    if (length >= size)
+                    {
+                        // The whole buffer at once says nothing of where a
+                        // stream stands -- the program may have written any of
+                        // it -- and marked as written to the end of this lap it
+                        // held the device silent at every lap's turn: a program
+                        // that locks the whole buffer to mix into part of it
+                        // plays round the circle, as the hardware would.
+                        Atomics.store(header, STREAMING, 0);
+                        return;
+                    }
                     if (!sequential && Atomics.load(header, STREAMING) === 0)
                     {
                         return;

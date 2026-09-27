@@ -676,3 +676,24 @@ test('a voice written in sequence while it plays is a stream, and a jump moves i
     voice.play(true);
     assert.equal(Atomics.load(header, STREAMING), 0, 'Play ends a stream');
 });
+
+test('a voice written whole again and again while it plays is no stream', ()=>{
+    // Locked whole every few tens of milliseconds, to mix into part of it:
+    // counted as a stream written to the end of the lap, the device waited
+    // silent at every turn of the circle -- a tick a lap.
+    const mixer = createMixer({ shared: true });
+    const voice = mixer.openVoice({ ...DIRECT, bytes: 4000 });
+    assert.ok(voice);
+    const header = new Int32Array(mixer.table, slotHeaderOffset(voice.slot), SLOT_HEADER_INT32);
+    voice.play(true);
+    for (let write = 0; write < 5; write++)
+    {
+        voice.wrote(0, 4000);
+        assert.equal(Atomics.load(header, STREAMING), 0);
+    }
+    voice.wrote(0, 400);
+    voice.wrote(400, 400);
+    assert.equal(Atomics.load(header, STREAMING), 1, 'written in pieces after, it is one');
+    voice.wrote(0, 4000);
+    assert.equal(Atomics.load(header, STREAMING), 0, 'and a whole write ends it');
+});
