@@ -133,9 +133,19 @@ import from inside the region -- the cpu layer's, which runs the handler the por
 have reached (`raiseTrap` on the emulator's host, the same handler and the same count) and
 answers whether it moved EIP or stopped the machine -- takes the state back into the locals
 and goes on after the write, or leaves untranslated where the handler put EIP. A region
-holding x87 registers in its locals takes the older form instead, a `trap` exit past the
-instruction that the hybrid host and the cork host answer the same way (the cork host once
-ignored it, and a hook stub reached with the x87 stack live ran on into its `int3` padding); either way a call into the bridge
+holding x87 registers in its locals first puts them back in their own locals (undoing its
+exchanges) and writes them back with the rest, and after the handler leaves untranslated
+wherever EIP is, past the write or where the handler put it, through the entry hash: the
+handler may have popped the stack or pushed a result, and the code after the write is
+compiled for the top the tracker followed, so the region cannot go on in it. That exit
+finds the code for the top the machine has, where the region once left with a `trap` exit
+for the host's loop to run the handler, a turn of `runSlice` every call: a loop calling an x87
+function that jumps into a trap's stub, its handler popping two and pushing one, went 247-257
+-> 91 ns a call on the cork host, beside 80-88 for the same through `jmp eax` (the stub a
+region of its own, with no x87) and 73-76 for an integer function. A region where the x87
+and MMX views of the registers meet still takes that older form, which the hybrid host and
+the cork host answer the same way (the cork host once ignored it, and a hook stub reached
+with the x87 stack live ran on into its `int3` padding); either way a call into the bridge
 costs no emulator turn. `out` to any other port, `in`,
 `cli`, `sti`, `int n`, `int3` and `into` are the emulator's, before the instruction. Under engine cork the interpreter runs
 `in` and `out` to any other port against the ports Windows 9x left a program: the interval timer

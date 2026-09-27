@@ -1236,6 +1236,24 @@ export function x87BlockEnd(e){
 }
 
 /**
+ * After a call out of the region that wrote the state block back and took it
+ * again (the trap port's handler): the locals hold the machine's registers,
+ * each in its own local, and the words as the handler left them. Nothing the
+ * tracker knew of this place holds any more, so the exit that follows moves no
+ * register and writes no stale word over what was taken back.
+ *
+ * @param {E} e
+ */
+export function x87Reloaded(e){
+    const x = e.x87;
+    x.current = null;
+    x.known = unknown();
+    x.stack = NOTHING;
+    x.exact = 0;
+    x.exactNaN = 0;
+}
+
+/**
  * Before an instruction of another class writes the stack words (an MMX
  * instruction's hold, `emms`): the stale ones written first, so the flush
  * does not later overwrite what it wrote, and nothing known after it.

@@ -31,7 +31,7 @@ import { checkAccess, emitStaleExit, noteStore, stackAccess } from './memory.js'
 import { Tables } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
-import { emitX87, isX87 } from './x87.js';
+import { emitX87, isX87, x87Normalise, x87Reloaded } from './x87.js';
 
 /** i64 opcodes. */
 const I64 = Object.freeze({
@@ -723,12 +723,36 @@ export function emitInstruction(e, instruction, flagsLive){
                 e.openIf('port');
                 e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
                 e.close();
-                // Without the import, or with x87 registers held in the locals
-                // (a permutation the shared load and store do not know), the
-                // exit past the instruction, which the host answers the same.
-                if (e.context.trap === undefined || e.x87.active)
+                // Without the import, or in a region where the x87 and MMX
+                // views of the registers meet, the exit past the instruction,
+                // which the host answers the same.
+                if (e.context.trap === undefined || e.x87.hasMmx)
                 {
                     e.exitAt(next, Exit.TRAP);
+                    e.dead = true;
+                    return true;
+                }
+                if (e.x87.active)
+                {
+                    // The x87 registers back in their own locals and written
+                    // back with the rest, the handler run, everything taken
+                    // back -- and the region leaves for wherever EIP is, past
+                    // the write or where the handler moved it: the handler may
+                    // have popped or pushed (a double handed back in ST0), and
+                    // the code after the write is compiled for the top the
+                    // tracker followed. The transfer finds the code for the top
+                    // the machine has, where the exit to the host's loop cost
+                    // a round of it for every call.
+                    e.charge();
+                    b.i32const(next).localSet(Local.eip);
+                    x87Normalise(e);
+                    e.storeState();
+                    e.resetRun();
+                    b.localGet(Local.reg).call(e.context.trap).drop();
+                    e.loadState();
+                    x87Reloaded(e);
+                    b.i32const(0).load('i32', { offset: e.layout.eip }).localSet(Local.eip);
+                    e.exitDynamic(Exit.UNTRANSLATED);
                     e.dead = true;
                     return true;
                 }
