@@ -29,6 +29,7 @@ import { openBundle } from './btl.mjs';
 import { createApp } from '../modules/core/src/app.js';
 import { DEFAULT_ENGINE } from '../modules/core/src/layers/cpu/module.js';
 import { peekBytes } from '../modules/core/src/trace.js';
+import { placementOf } from '../modules/installer/src/prefix.js';
 
 const PREBUILT = new URL('../modules/core/vendor/prebuilt/', import.meta.url);
 const BUNDLES = new URL('../bundles/', import.meta.url);
@@ -436,15 +437,16 @@ async function main(){
     const sink = log ? createWriteStream(log) : null;
 
     const [wasm] = await Promise.all([readFile(new URL('v86.wasm', PREBUILT))]);
+    const placement = placementOf(manifest);
     const app = await createApp({
         executable: new Uint8Array(executable),
         v86: {
             moduleUrl: new URL('libv86.mjs', PREBUILT).href,
             wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
         },
-        // Where createApp mounts a bundle, so the program is told it was loaded
-        // from inside its own installation rather than from the volume's root.
-        imagePath: `C:\\App\\${manifest.entry}`,
+        // Where the bundle is mounted and the program started from: where its
+        // installation put it, when the manifest says, as the launcher does.
+        imagePath: placement.imagePath,
         engine,
         // No frames here to feed the translator between: it takes its
         // candidates inside the slice.
@@ -483,7 +485,7 @@ async function main(){
         watchImport: watch.length === 0 ? undefined : watching(watch),
         // Nothing durable: a probe should not leave a copy of a game behind, and
         // the file is already on this disk.
-        bundle: { fetch, store: null, prefetch: false },
+        bundle: { fetch, store: null, prefetch: false, prefix: placement.prefix },
         storage: null,
     });
 

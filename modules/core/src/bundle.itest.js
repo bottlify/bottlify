@@ -22,8 +22,9 @@ import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { createApp, READ_AHEAD_BYTES } from './app.js';
+import { BOTTLE_REGISTRY_PATH, createApp, READ_AHEAD_BYTES } from './app.js';
 import { writeBundle } from './bundle-node.js';
+import { createHive, HKEY_LOCAL_MACHINE, REG_SZ } from './layers/win32/advapi32/registry.js';
 
 /** The fixture's blocks, small so a read of a few bytes still misses one. */
 const BLOCK_SIZE = 64 * 1024;
@@ -300,3 +301,67 @@ test('what the program never read is fetched anyway, in the gaps', { timeout: 12
     assert.ok(filled.resident > 1, `only ${filled.resident} block(s) ever arrived`);
     assert.ok(filled.resident <= filled.blocks);
 });
+
+test('the registry a bottle carries is the machine\'s from the start, under what the session saved',
+    { timeout: 30000 }, async t=>{
+        // An installer's keys went into the bottle as a file and no further: a
+        // launcher that finds its game installed by the key its setup made
+        // offered to install it again.
+        const installed = createHive();
+        const key = installed.create(/** @type {any} */ (installed.root(HKEY_LOCAL_MACHINE)),
+            'SOFTWARE\\Vendor\\Game\\1.0').key;
+        const text = (/** @type {string} */ value)=>new TextEncoder().encode(`${value}\0`);
+        installed.setValue(key, 'InstallDir', REG_SZ, text('C:\\Games\\Game'));
+        installed.setValue(key, 'Language', REG_SZ, text('English'));
+
+        const root = await mkdtemp(join(tmpdir(), 'btl-src-'));
+        const out = await mkdtemp(join(tmpdir(), 'btl-out-'));
+        const [folder, file] = BOTTLE_REGISTRY_PATH.split('\\');
+        await mkdir(join(root, folder), { recursive: true });
+        await writeFile(join(root, folder, file), JSON.stringify(installed.toJSON()));
+        await writeFile(join(root, 'game.dat'), randomBytes(200 * 1024));
+        const path = join(out, 'bundle.btl');
+        await writeBundle({ root, output: path, blockSize: BLOCK_SIZE });
+        const handle = await open(path, 'r');
+        t.after(async()=>{
+            await handle.close();
+            await rm(root, { recursive: true, force: true });
+            await rm(out, { recursive: true, force: true });
+        });
+        /** @param {number} offset @param {number} length */
+        const fetch = async(offset, length)=>{
+            const buffer = Buffer.alloc(length);
+            await handle.read(buffer, 0, length, offset);
+            return new Uint8Array(buffer);
+        };
+
+        // The session this bottle saved last time: the language changed since.
+        const saved = createHive();
+        saved.setValue(saved.create(/** @type {any} */ (saved.root(HKEY_LOCAL_MACHINE)),
+            'SOFTWARE\\Vendor\\Game\\1.0').key, 'Language', REG_SZ, text('French'));
+
+        const [wasm, exe] = await Promise.all([
+            readFile(new URL('v86.wasm', PREBUILT)),
+            readFile(FIXTURE),
+        ]);
+        const app = await createApp({
+            executable: new Uint8Array(exe),
+            v86: {
+                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+            },
+            bundle: { fetch, store: null },
+            storage: { load: async()=>({ files: [], registry: saved.toJSON() }) },
+        });
+        t.after(()=>app.dispose());
+
+        const hive = app.registry();
+        const game = hive.open(hive.root(HKEY_LOCAL_MACHINE), 'SOFTWARE\\Vendor\\Game\\1.0');
+        assert.ok(game, 'the installation\'s key is there before the program runs');
+        const read = (/** @type {string} */ name)=>{
+            const value = hive.getValue(game, name);
+            return value ? new TextDecoder().decode(value.data).replace(/\0$/, '') : null;
+        };
+        assert.equal(read('InstallDir'), 'C:\\Games\\Game');
+        assert.equal(read('Language'), 'French', 'what the session saved since is kept');
+    });

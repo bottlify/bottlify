@@ -47,6 +47,7 @@ import { serveStatic } from './server.mjs';
 import { describeProfile, profileWorkers, summarise } from './profile.mjs';
 import { describeDevice, watchDevice } from './device-lag.mjs';
 import { openBundle } from '../btl.mjs';
+import { placementOf } from '../../modules/installer/src/prefix.js';
 import { windowsVersion } from '../../modules/core/src/layers/win32/kernel32/versions.js';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -1309,12 +1310,13 @@ export async function game(options){
             };
         }
 
-        // Where createApp mounts a bundle, so the program is told it was
-        // loaded from inside its own installation.
-        const imagePath = `C:\\App\\${entry}`;
+        // Where the bundle is mounted and the program started from: where its
+        // installation put it, when the manifest says, as the launcher does.
+        const { prefix: bundlePrefix, imagePath } = placementOf({ ...manifest, entry });
         const request = JSON.stringify({
             exeUrl: `http://127.0.0.1:${server.port}/entry/entry.exe`,
             bundleUrl: `http://127.0.0.1:${server.port}/bundle/bundle.btl`,
+            bundlePrefix,
             imagePath,
             // The bundle's own launch arguments, appended after the quoted
             // image path the same way createApp's own default is built,

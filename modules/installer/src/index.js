@@ -41,8 +41,9 @@ import { packBundle } from './pack.js';
 import { finish, partSink } from './upload.js';
 import { windowsChoice } from './windows.js';
 
-export { MEDIA_DIRECTORY, REGISTRY_PATH, chooseRoot, collect, guessEntry, prefixOptions }
-    from './prefix.js';
+export {
+    MEDIA_DIRECTORY, REGISTRY_PATH, chooseRoot, collect, guessEntry, placementOf, prefixOptions,
+} from './prefix.js';
 export { DEFAULT_BLOCK_SIZE, packBundle, packBlock, sha256 } from './pack.js';
 export {
     DISC_LETTER, autorunText, discEntry, discOptions, isDiscImage, isDiscMedia, readAutorun,
@@ -156,6 +157,9 @@ export async function publish({ prefix, endpoint, id, manifest = {}, report }){
     const answer = await finish(endpoint, id, packed, {
         title: id,
         entry: prefix.entry,
+        // Where the installation put it, which is where it is mounted again
+        // (`placementOf`): the registry it left names that place.
+        root: prefix.root,
         ...manifest,
     });
 

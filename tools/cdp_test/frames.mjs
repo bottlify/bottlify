@@ -31,6 +31,7 @@ import { CdpEndpoint } from './cdp.mjs';
 import { serveStatic } from './server.mjs';
 import { frameSpread } from './frame-window.mjs';
 import { openBundle } from '../btl.mjs';
+import { placementOf } from '../../modules/installer/src/prefix.js';
 import { windowsVersion } from '../../modules/core/src/layers/win32/kernel32/versions.js';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -483,10 +484,11 @@ try
         }
     }
 
-    const imagePath = `C:\\App\\${manifest.entry}`;
+    const { prefix: bundlePrefix, imagePath } = placementOf(manifest);
     await evaluate(`window.__bottlify__.start(${JSON.stringify({
         exe: Buffer.from(executable).toString('base64'),
         bundleUrl: `http://127.0.0.1:${server.port}/bundle/bundle.btl`,
+        bundlePrefix,
         imagePath,
         // The bundle's own launch arguments, appended after the quoted image
         // path the same way createApp's own default is built, unless

@@ -1624,6 +1624,13 @@ const SYSTEM_IMPORTS = Object.freeze({
 const BUNDLE_DIRECTORY = 'App';
 
 /**
+ * Where in a bottle the registry its installation left is kept: beside the
+ * files, as one of them, so an unpacked bottle describes itself. The installer
+ * writes it there (`@bottlify/installer`'s `REGISTRY_PATH`).
+ */
+export const BOTTLE_REGISTRY_PATH = '.bottlify\\registry.json';
+
+/**
  * The version resource of a file on the volume, or null: for a file that is
  * not there, is not an image, carries none, or whose bytes have not arrived --
  * the last because this is asked from inside a guest call and cannot wait,
@@ -2026,7 +2033,8 @@ export async function zstdWasmFor(options, here = import.meta.url){
  * @returns {Promise<{ fetch: (needed: any[]) => Promise<void>,
  *                     stop: () => void, ahead: () => number,
  *                     refetched: () => { blocks: number, bytes: number },
- *                     ranges: () => { requests: number, bytes: number } } | null>}
+ *                     ranges: () => { requests: number, bytes: number },
+ *                     registry: Promise<any> } | null>}
  */
 async function mountBundle({ options, cpu, filesystem, events, translationStore }){
     if (!options.bundle?.fetch)
@@ -2104,14 +2112,15 @@ async function mountBundle({ options, cpu, filesystem, events, translationStore 
     filesystem.mount('C', { source });
 
     /**
-     * The translation seed's bytes: one request for its run of blocks, each
-     * checked against the index and decoded as a guest read's block is. Not
-     * kept in the block cache, where nothing would read it again: the store
-     * keeps what it takes.
+     * A member's bytes, read before the program runs: one request for its run
+     * of blocks, each checked against the index and decoded as a guest read's
+     * block is. Not kept in the block cache, where nothing would read it
+     * again: whoever asked keeps what it takes.
      *
      * @param {import('./layers/filesystem/internal/bundle/format.js').BundleMember} of
+     * @param {string} what  named in a damaged block's report
      */
-    const readTranslations = async of=>{
+    const readMember = async(of, what)=>{
         const first = bundle.block(of.firstBlock);
         const last = bundle.block(of.firstBlock + of.blocks - 1);
         const whole = await fetchRange(first.offset, last.offset + last.packed - first.offset,
@@ -2123,7 +2132,7 @@ async function mountBundle({ options, cpu, filesystem, events, translationStore 
                     if (block.crc !== null
                         && crc32(bytes.subarray(from, from + block.packed)) !== block.crc)
                     {
-                        return `block ${at} of the translations arrived damaged`;
+                        return `block ${at} of ${what} arrived damaged`;
                     }
                 }
                 return null;
@@ -2154,12 +2163,22 @@ async function mountBundle({ options, cpu, filesystem, events, translationStore 
         && typeof translationStore?.seed === 'function')
     {
         const seeding = (async()=>(await translationStore.seededWith() === member.sha256
-            ? null : readTranslations(member))
+            ? null : readMember(member, 'the translations'))
         )();
         translationStore.seed(seeding, member.sha256).then((/** @type {any} */ result)=>{
             events.emit('bundle-translations', { size: member.size, ...result });
         });
     }
+
+    // The registry the installation left, which travels in the bottle beside
+    // its files: read now, while nothing else is, and parsed once.
+    const registryFile = bundle.find(BOTTLE_REGISTRY_PATH);
+    const registry = registryFile === null ? Promise.resolve(null)
+        : readMember(registryFile, 'the registry').then(bytes=>(bytes === null ? null
+            : JSON.parse(new TextDecoder().decode(bytes)))).catch((/** @type {any} */ e)=>{
+            events.emit('bundle-registry-unreadable', { reason: e?.message ?? String(e) });
+            return null;
+        });
 
     events.emit('bundle', {
         files: bundle.files.length,
@@ -2419,6 +2438,7 @@ async function mountBundle({ options, cpu, filesystem, events, translationStore 
     fill();
     return {
         fetch: demand,
+        registry,
         /** How many blocks were brought in ahead of a read, ever. */
         ahead: ()=>ahead,
         /** Blocks a request went out for that were already here: the number
@@ -2790,7 +2810,8 @@ async function buildApp(options){
     // is built before that and is handed the lookup rather than the answer.
     /** @type {{ fetch: (needed: any[]) => Promise<void>, stop: () => void, ahead: () => number,
      *          refetched: () => { blocks: number, bytes: number },
-     *          ranges: () => { requests: number, bytes: number } } | null} */
+     *          ranges: () => { requests: number, bytes: number },
+     *          registry: Promise<any> } | null} */
     let blocks = null;
     /**
      * Where a thread's environment block comes from, once the process has
@@ -3840,6 +3861,16 @@ async function buildApp(options){
     // Mounted after the machine is up. A zstd block is decoded by this
     // project's own decoder now, so the mount no longer needs the emulator.
     blocks = await mountBundle({ options, cpu, filesystem, events, translationStore });
+    // What the installation wrote to the registry is the machine's before the
+    // program's first instruction, as it was on the machine it was installed
+    // on: a launcher finds its game installed by the key its setup made. What
+    // the session saved since is kept over it. A process started by another
+    // has that one's registry, which holds it already.
+    const installedRegistry = await blocks?.registry;
+    if (installedRegistry && !options.hive)
+    {
+        core.api('win32').registry().fillFromJSON(installedRegistry);
+    }
     // A disc is a drive of its own, and takes D: or the first letter nothing
     // holds once the machine's own disk is mounted.
     await mountDiscs({ discs: options.discs, filesystem, events });

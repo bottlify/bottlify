@@ -954,5 +954,37 @@ export function createHive({ processorMhz = PROCESSOR.mhz, windows = windowsVers
                 mergeMissing(machine, tree);
             }
         },
+
+        /**
+         * Adds what a saved tree holds and this hive does not, leaving every
+         * key and value already here as it is: the registry an installation
+         * left, beneath what the programs run since have written over it.
+         *
+         * @param {any} stored
+         */
+        fillFromJSON(stored){
+            for (const entry of stored?.roots ?? [])
+            {
+                const id = entry?.id >>> 0;
+                const tree = keyFromJSON(entry.key);
+                if (id === HKEY_CLASSES_ROOT)
+                {
+                    mergeMissing(/** @type {RegistryNode} */ (
+                        walk(roots.get(HKEY_LOCAL_MACHINE), segments(MACHINE_CLASSES))), tree);
+                }
+                else if (ROOT_NAMES.has(id))
+                {
+                    const root = roots.get(id);
+                    if (root)
+                    {
+                        mergeMissing(root, tree);
+                    }
+                    else
+                    {
+                        roots.set(id, tree);
+                    }
+                }
+            }
+        },
     };
 }

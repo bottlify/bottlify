@@ -38,8 +38,17 @@ be somewhere the guest can open. `prefixOptions` seeds it at `C:\Install\` and
 
 The registry comes out beside the files and travels as one of them,
 `.bottlify\registry.json`, so an unpacked prefix describes itself and the packed
-form has nothing the unpacked form lacks. **The engine does not read it back on
-mount yet**; writing it is this side of that contract.
+form has nothing the unpacked form lacks. The engine reads it when it mounts the
+bottle, beneath whatever registry the bottle's session has saved since: a key the
+installer made is there before the program's first instruction, and a value the
+program changed afterwards stays changed.
+
+The manifest says where the installation put the tree, `root`
+(`C:\Program Files\Vendor\Game`), and `placementOf(manifest)` answers where to
+mount the bottle and start its program from: there again, so the install path the
+registry names, and the working directory a launcher changes to, are the bottle's
+own. A bottle without a root on C: -- made by hand, published before the root was
+recorded -- is mounted at `C:\App`, as any bundle is.
 
 ## From a disc image
 

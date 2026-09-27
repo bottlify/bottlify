@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { publish } from './index.js';
+import { placementOf, publish } from './index.js';
 
 /** A prefix with one installed file, which is the least a bottle is made of. */
 const PREFIX = {
@@ -43,4 +43,32 @@ test('a Windows that is not one of the four is refused before anything is sent',
     await assert.rejects(publish({ prefix: PREFIX, endpoint, id: 'a-title',
         manifest: { windows: 'win98' } }), /the choices are win2000, winxp, win7, win10/);
     assert.equal(sent.length, 0);
+});
+
+test('a bottle\'s manifest says where its installation put it', async()=>{
+    const { sent, endpoint } = server();
+    await publish({ prefix: PREFIX, endpoint, id: 'a-title' });
+
+    const finished = sent.find(request=>request.url.endsWith('/finish'));
+    assert.equal(JSON.parse(finished?.body).manifest.root, 'C:\\Game');
+});
+
+test('a bottle is mounted where its installation put it, and started from there', ()=>{
+    // The registry the installation left names that directory, and a launcher
+    // changes into it before it starts the game.
+    assert.deepEqual(placementOf({ entry: 'TRON.exe',
+        root: 'C:\\Program Files\\Buena Vista Interactive\\Tron 2.0 Demo' }), {
+        prefix: 'Program Files\\Buena Vista Interactive\\Tron 2.0 Demo',
+        imagePath: 'C:\\Program Files\\Buena Vista Interactive\\Tron 2.0 Demo\\TRON.exe',
+    });
+    assert.deepEqual(placementOf({ entry: 'game.exe', root: 'c:\\Games\\Game\\' }),
+        { prefix: 'Games\\Game', imagePath: 'C:\\Games\\Game\\game.exe' },
+        'a drive letter in either case, a trailing separator or none');
+    assert.deepEqual(placementOf({ entry: 'game.exe', root: 'C:\\' }),
+        { prefix: '', imagePath: 'C:\\game.exe' }, 'installed at the root');
+    assert.deepEqual(placementOf({ entry: 'game.exe' }),
+        { prefix: 'App', imagePath: 'C:\\App\\game.exe' }, 'a bottle that says nothing');
+    assert.deepEqual(placementOf({ entry: 'game.exe', root: 'D:\\Games\\Game' }),
+        { prefix: 'App', imagePath: 'C:\\App\\game.exe' },
+        'a bundle is mounted on C:, whatever drive it was installed on');
 });

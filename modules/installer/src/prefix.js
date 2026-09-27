@@ -37,9 +37,33 @@ export const MEDIA_DIRECTORY = 'C:\\Install';
  *
  * A file rather than a field of the container's index: an unpacked prefix is
  * then self-describing, and the packed form has nothing the unpacked form
- * lacks. The engine does not read it back on mount yet.
+ * lacks. The engine reads it when it mounts the bottle (core's
+ * `BOTTLE_REGISTRY_PATH`, the same path), beneath what a session saved since.
  */
 export const REGISTRY_PATH = '.bottlify\\registry.json';
+
+/** Where the engine mounts a bundle that says nothing of where it belongs. */
+const DEFAULT_PLACE = 'App';
+
+/**
+ * Where a bottle is mounted and its program started from: the directory its
+ * installation put it in, which the manifest records as `root`, so what the
+ * installation wrote about that place -- the install path in the registry, a
+ * launcher's working directory -- is true of the bottle. A bottle made by
+ * hand, or before the root was recorded, has none, and neither has one
+ * installed on a drive other than C: -- the drive a bundle is mounted on --
+ * and those go where the engine puts a bundle by default.
+ *
+ * @param {{ entry: string, root?: unknown }} manifest
+ * @returns {{ prefix: string, imagePath: string }}  `prefix` is the directory
+ *     on C: the bundle appears in, as createApp's `bundle.prefix` takes it.
+ */
+export function placementOf(manifest){
+    const root = typeof manifest.root === 'string' ? manifest.root : '';
+    const onC = /^c:\\(.*)$/i.exec(root);
+    const prefix = onC ? onC[1].replace(/\\+$/, '') : DEFAULT_PLACE;
+    return { prefix, imagePath: `C:\\${prefix ? `${prefix}\\` : ''}${manifest.entry}` };
+}
 
 /**
  * Directories a program is entitled to write to that are not part of what was
