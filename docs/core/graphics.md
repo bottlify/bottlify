@@ -1054,6 +1054,11 @@ destination alone is mirrored places its pixels as a mirror would, where Wine's 
 placing one that no mirroring gives, though it answers as Windows does; and a 32-bit DIB's top byte,
 which Windows carries through `StretchDIBits`, is not kept. A Direct3D 10 effect's
 `Optimize` keeps what the runtime would drop, which only the effect's own reflection reads.
+Nothing bounds how far the device may fall behind the program: a present never waits for the
+device, where a Windows driver holds the presenting call once a few frames are queued, so a device
+slower than the program accumulates its frames for as long as it runs -- a software adapter is.
+Measured with SwiftShader and the engine on the same two cores, Doom 3's timed demo presented 16
+to 19 frames a second while the device finished 1.6 to 3.3, ending the demo 54 to 120 s behind.
 
 ## Tests
 
