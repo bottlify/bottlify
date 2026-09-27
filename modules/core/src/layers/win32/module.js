@@ -61,6 +61,7 @@ import { createImageLists } from './comctl32/imagelist.js';
 import { createShellFunctions } from './shell32/functions.js';
 import { registerShellLinkClasses } from './shell32/shelllink.js';
 import { registerWbemClasses } from './ole32/wbem.js';
+import { registerDxDiagClasses } from './ole32/dxdiag.js';
 import { createRpcFunctions } from './rpcrt4/functions.js';
 import { createVersionFunctions } from './version/functions.js';
 import { createLzFunctions } from './lz32/functions.js';
@@ -915,6 +916,12 @@ export function createWin32Module(){
             registerWbemClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
                 divergence: config?.divergence,
+            });
+
+            // DxDiag's provider, which an installer asks which DirectX this is.
+            registerDxDiagClasses({
+                registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
+                windows, divergence: config?.divergence,
             });
 
             // One way of starting a program, behind three spellings of asking for

@@ -331,6 +331,13 @@ const versionValues = windows=>({
 export const DIRECTX_VERSION = '4.09.00.0904';
 
 /**
+ * The same DirectX by the name its release went by, 9.0c, in the three parts
+ * DxDiag reports: an installer that asks it compares the letter too, since
+ * 9.0, 9.0b and 9.0c share a major and a minor.
+ */
+export const DIRECTX_RELEASE = Object.freeze({ major: 9, minor: 0, letter: 'c' });
+
+/**
  * @param {Readonly<Record<string, string>>} table @param {string[]} names
  * @returns {Record<string, string>}
  */
