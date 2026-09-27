@@ -166,6 +166,28 @@ const OPERANDS_RGB = new Set([
 /** @type {Set<number>} */
 const OPERANDS_ALPHA = new Set([GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA]);
 
+/**
+ * The combiner's per-argument parameters glTexEnv sets: which array of the
+ * unit's combine state, the argument's place in it, and the values it takes.
+ *
+ * @type {Map<number, ['sourceRgb' | 'sourceAlpha' | 'operandRgb' | 'operandAlpha', number,
+ *     Set<number>]>}
+ */
+const COMBINE_SLOTS = new Map([
+    [GL.SOURCE0_RGB, ['sourceRgb', 0, COMBINE_SOURCES]],
+    [GL.SOURCE1_RGB, ['sourceRgb', 1, COMBINE_SOURCES]],
+    [GL.SOURCE2_RGB, ['sourceRgb', 2, COMBINE_SOURCES]],
+    [GL.SOURCE0_ALPHA, ['sourceAlpha', 0, COMBINE_SOURCES]],
+    [GL.SOURCE1_ALPHA, ['sourceAlpha', 1, COMBINE_SOURCES]],
+    [GL.SOURCE2_ALPHA, ['sourceAlpha', 2, COMBINE_SOURCES]],
+    [GL.OPERAND0_RGB, ['operandRgb', 0, OPERANDS_RGB]],
+    [GL.OPERAND1_RGB, ['operandRgb', 1, OPERANDS_RGB]],
+    [GL.OPERAND2_RGB, ['operandRgb', 2, OPERANDS_RGB]],
+    [GL.OPERAND0_ALPHA, ['operandAlpha', 0, OPERANDS_ALPHA]],
+    [GL.OPERAND1_ALPHA, ['operandAlpha', 1, OPERANDS_ALPHA]],
+    [GL.OPERAND2_ALPHA, ['operandAlpha', 2, OPERANDS_ALPHA]],
+]);
+
 /** @type {Set<number>} */
 const S3TC_FORMATS = new Set([
     GL.COMPRESSED_RGB_S3TC_DXT1_EXT, GL.COMPRESSED_RGBA_S3TC_DXT1_EXT,
@@ -800,21 +822,6 @@ export function installTextureCalls(context, kernel){
         const env = units[active].env;
         const value = values[0];
         const combine = env.combine;
-        /** @type {Record<number, [number[], number, Set<number>]>} */
-        const slots = {
-            [GL.SOURCE0_RGB]: [combine.sourceRgb, 0, COMBINE_SOURCES],
-            [GL.SOURCE1_RGB]: [combine.sourceRgb, 1, COMBINE_SOURCES],
-            [GL.SOURCE2_RGB]: [combine.sourceRgb, 2, COMBINE_SOURCES],
-            [GL.SOURCE0_ALPHA]: [combine.sourceAlpha, 0, COMBINE_SOURCES],
-            [GL.SOURCE1_ALPHA]: [combine.sourceAlpha, 1, COMBINE_SOURCES],
-            [GL.SOURCE2_ALPHA]: [combine.sourceAlpha, 2, COMBINE_SOURCES],
-            [GL.OPERAND0_RGB]: [combine.operandRgb, 0, OPERANDS_RGB],
-            [GL.OPERAND1_RGB]: [combine.operandRgb, 1, OPERANDS_RGB],
-            [GL.OPERAND2_RGB]: [combine.operandRgb, 2, OPERANDS_RGB],
-            [GL.OPERAND0_ALPHA]: [combine.operandAlpha, 0, OPERANDS_ALPHA],
-            [GL.OPERAND1_ALPHA]: [combine.operandAlpha, 1, OPERANDS_ALPHA],
-            [GL.OPERAND2_ALPHA]: [combine.operandAlpha, 2, OPERANDS_ALPHA],
-        };
         switch (parameter)
         {
             case GL.TEXTURE_ENV_MODE:
@@ -848,13 +855,13 @@ export function installTextureCalls(context, kernel){
                 return;
             default:
             {
-                const slot = slots[parameter];
+                const slot = COMBINE_SLOTS.get(parameter);
                 if (!slot || !slot[2].has(value))
                 {
                     setError(GL.INVALID_ENUM);
                     return;
                 }
-                slot[0][slot[1]] = value;
+                combine[slot[0]][slot[1]] = value;
             }
         }
     }
@@ -941,14 +948,14 @@ export function installTextureCalls(context, kernel){
         }
         if (parameter === GL.OBJECT_PLANE)
         {
-            unit.objectPlanes[k] = [0, 1, 2, 3].map(i=>values[i] ?? 0);
+            unit.objectPlanes[k] = [values[0] ?? 0, values[1] ?? 0, values[2] ?? 0, values[3] ?? 0];
             return;
         }
         if (parameter === GL.EYE_PLANE)
         {
             // Fixed in eye space by the modelview current now, like a light.
             const inverse = inverseTransposeOf(kernel.stacks.modelview.current);
-            const plane = [0, 1, 2, 3].map(i=>values[i] ?? 0);
+            const plane = [values[0] ?? 0, values[1] ?? 0, values[2] ?? 0, values[3] ?? 0];
             unit.eyePlanes[k] = [0, 1, 2, 3].map(row=>plane[0] * inverse[row]
                 + plane[1] * inverse[4 + row] + plane[2] * inverse[8 + row]
                 + plane[3] * inverse[12 + row]);

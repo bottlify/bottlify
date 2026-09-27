@@ -35,9 +35,59 @@ export const STACK_LIMITS = Object.freeze({
     texture: 2,
 });
 
+/** How many matrices one block holds. */
+const MATRICES_PER_BLOCK = 64;
+let block = new ArrayBuffer(0);
+let carved = 0;
+
+/**
+ * A new matrix of sixteen zeros.
+ *
+ * Sixteen doubles are past the size V8 keeps a typed array's elements on its
+ * own heap, so a `new Float64Array(16)` is a backing store allocated and later
+ * finalised of its own -- several times what the arithmetic filling it costs,
+ * on every push, load and multiply a program makes. A matrix is carved out of
+ * a shared block instead and costs only its view; the block lives while any
+ * of its matrices does. Nothing is carved twice, so every matrix is as much
+ * its own as one made alone, and a matrix still never changes once made.
+ *
+ * @returns {Float64Array}
+ */
+export function matrix(){
+    if (carved === block.byteLength)
+    {
+        block = new ArrayBuffer(MATRICES_PER_BLOCK * 16 * 8);
+        carved = 0;
+    }
+    const m = new Float64Array(block, carved, 16);
+    carved += 16 * 8;
+    return m;
+}
+
+/**
+ * A new matrix holding what `m` holds.
+ *
+ * @param {ArrayLike<number>} m  sixteen elements, column major
+ * @returns {Float64Array}
+ */
+export function copyOf(m){
+    if (m.length !== 16)
+    {
+        return Float64Array.from(m);
+    }
+    const out = matrix();
+    // A loop rather than `set`, which converts a Float32Array -- what a
+    // program's glLoadMatrixf arrives as -- at twice the cost.
+    for (let i = 0; i < 16; i++)
+    {
+        out[i] = m[i];
+    }
+    return out;
+}
+
 /** @returns {Float64Array} */
 export function identity(){
-    const m = new Float64Array(16);
+    const m = matrix();
     m[0] = 1;
     m[5] = 1;
     m[10] = 1;
@@ -54,7 +104,7 @@ export function identity(){
  * @returns {Float64Array}
  */
 export function multiply(a, b){
-    const out = new Float64Array(16);
+    const out = matrix();
     for (let column = 0; column < 4; column++)
     {
         for (let row = 0; row < 4; row++)
@@ -98,7 +148,7 @@ export function transform(m, v){
  * @returns {Float64Array}
  */
 export function transpose(m){
-    const out = new Float64Array(16);
+    const out = matrix();
     for (let column = 0; column < 4; column++)
     {
         for (let row = 0; row < 4; row++)
@@ -158,7 +208,7 @@ export function invert(m){
     }
     // The inverse is the cofactor matrix transposed over the determinant, and
     // the cofactors were built row-major in a column-major file.
-    const out = new Float64Array(16);
+    const out = matrix();
     for (let column = 0; column < 4; column++)
     {
         for (let row = 0; row < 4; row++)
@@ -272,7 +322,7 @@ export function frustum(left, right, bottom, top, near, far){
     {
         return null;
     }
-    const m = new Float64Array(16);
+    const m = matrix();
     m[0] = 2 * near / (right - left);
     m[5] = 2 * near / (top - bottom);
     m[8] = (right + left) / (right - left);

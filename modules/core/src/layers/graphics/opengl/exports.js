@@ -228,35 +228,26 @@ const TYPES = {
 };
 
 /**
- * The value an immediate argument of one type carries. A word argument is
- * reinterpreted as the type's width and signedness; a double is two words.
+ * The value an immediate argument of each type carries, read from the words
+ * at `at`. A word argument is reinterpreted as the type's width and
+ * signedness; a double is two words. An entry point picks its decoder when it
+ * is bound, so a call decodes without asking which type it is.
  *
- * @param {string} type
- * @param {number[]} words
- * @param {number} at
- * @returns {number}
+ * @type {Record<string, (words: number[], at: number) => number>}
  */
-function immediate(type, words, at){
-    switch (type)
-    {
-        case 'f':
-            return asFloat(words[at]);
-        case 'd':
-            return asDouble(words[at], words[at + 1]);
-        case 'b':
-            return (words[at] << 24) >> 24;
-        case 'ub':
-            return words[at] & 0xff;
-        case 's':
-            return (words[at] << 16) >> 16;
-        case 'us':
-            return words[at] & 0xffff;
-        case 'ui':
-            return words[at] >>> 0;
-        default:
-            return words[at] | 0;
-    }
-}
+const DECODE = {
+    f: (words, at)=>asFloat(words[at]),
+    d: (words, at)=>asDouble(words[at], words[at + 1]),
+    b: (words, at)=>(words[at] << 24) >> 24,
+    ub: (words, at)=>words[at] & 0xff,
+    s: (words, at)=>(words[at] << 16) >> 16,
+    us: (words, at)=>words[at] & 0xffff,
+    i: (words, at)=>words[at] | 0,
+    ui: (words, at)=>words[at] >>> 0,
+};
+
+/** @param {number} x @returns {number} */
+const unchanged = x=>x;
 
 /**
  * The pixel types glCallLists can index with, and their width.
@@ -276,13 +267,15 @@ const LIST_TYPES = new Map([
  *           guest runs again: for the `*v` arguments a draw reads and
  *           consumes before its handler returns. Falls back to `readMemory`
  *           where absent.
- * @property {(address: number, count: number, into: Float32Array) => void} [readF32sInto]
+ * @property {(address: number, count: number, into: Float32Array | number[]) => void}
+ *           [readF32sInto]
  *           `count` floats decoded straight into `into`, with nothing else
  *           allocated: for the fixed-count vector arguments (a program
  *           parameter, a matrix) a hot handler reads into its own reused
- *           scratch. Absent in a build with no such path -- a test that
- *           does not wire one -- and then that scratch is filled through
- *           `readMemory` and a `DataView` instead.
+ *           scratch, and any other float array is read into the array it
+ *           answers with. Absent in a build with no such path -- a test that
+ *           does not wire one -- and then these are read through a window and
+ *           a `DataView` instead.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {() => { width: number, height: number }} [screen]
  *           How big a drawable is, when nothing better can be asked.
@@ -444,8 +437,10 @@ export function createOpengl(services){
     /**
      * `count` values of one type, read from guest memory: a window rather
      * than a copy, because every one of these is consumed before the handler
-     * returns. The result is always a fresh array -- a caller that keeps it
-     * (`glDeleteBuffersARB(readU32s(...))`) still gets one nothing else writes.
+     * returns, and floats straight into the array through the memory layer's
+     * reader where there is one. The result is always a fresh array -- a
+     * caller that keeps it (`glDeleteBuffersARB(readU32s(...))`) still gets
+     * one nothing else writes.
      *
      * @param {string} type
      * @param {number} address
@@ -453,6 +448,13 @@ export function createOpengl(services){
      * @returns {number[]}
      */
     const readTyped = (type, address, count)=>{
+        if (type === 'f' && count > 0 && services.readF32sInto)
+        {
+            /** @type {number[]} */
+            const values = new Array(count);
+            services.readF32sInto(address >>> 0, count, values);
+            return values;
+        }
         const spec = TYPES[type];
         const bytes = windowMemory(address >>> 0, count * spec.bytes);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -464,12 +466,33 @@ export function createOpengl(services){
         return values;
     };
 
+    /**
+     * Where an answer's words are encoded before they are copied out. Asking
+     * a small typed array for its buffer, as a `DataView` over it does, moves
+     * its elements out of V8's heap into a store of their own -- several
+     * times what the encoding costs -- so the words are encoded once here and
+     * the copy the guest is handed is a plain slice.
+     */
+    let answerBytes = new Uint8Array(128);
+    let answerDataView = new DataView(answerBytes.buffer);
+    /** @param {number} length @returns {DataView} a view of at least `length` bytes */
+    const answerView = length=>{
+        if (length > answerBytes.length)
+        {
+            answerBytes = new Uint8Array(length);
+            answerDataView = new DataView(answerBytes.buffer);
+        }
+        return answerDataView;
+    };
+
     /** @param {number} address @param {readonly number[]} values */
     const writeU32s = (address, values)=>{
-        const bytes = new Uint8Array(values.length * 4);
-        const view = new DataView(bytes.buffer);
-        values.forEach((value, index)=>view.setUint32(index * 4, value >>> 0, true));
-        services.writeMemory(address >>> 0, bytes);
+        const view = answerView(values.length * 4);
+        for (let index = 0; index < values.length; index++)
+        {
+            view.setUint32(index * 4, values[index] >>> 0, true);
+        }
+        services.writeMemory(address >>> 0, answerBytes.slice(0, values.length * 4));
     };
 
     /** @param {number} address @param {number} count @returns {number[]} */
@@ -490,7 +513,7 @@ export function createOpengl(services){
      * -- decoded into the scratch it is always asked for, reused on every
      * call: no window, no copy, no per-call array, through the memory
      * layer's own span-checked reader. The context copies what it needs
-     * (`env.set`, `Float64Array.from`) before the next call overwrites it;
+     * (`env.set`, the matrix stack's `copyOf`) before the next call overwrites it;
      * `enter`'s display-list capture snapshots it too, for a call recorded
      * rather than run now. A build with no `readF32sInto` (a test that does
      * not wire one) falls back to `readTyped`, which is always a fresh copy.
@@ -509,6 +532,51 @@ export function createOpengl(services){
             scratch.set(readTyped('f', address, scratch.length));
         }
         return scratch;
+    };
+
+    /** Where the `*v` forms below decode their one to four components. */
+    const vectorFloats = new Float32Array(4);
+    const vectorValues = new Float64Array(4);
+    const vectorBytes = new Uint8Array(32);
+    const vectorView = new DataView(vectorBytes.buffer);
+
+    /**
+     * The reader of one type's `*v` form -- `glColor4ubv`, `glVertex3fv` --
+     * chosen when the entry point is bound: up to four components decoded
+     * into a scratch reused on every call, which the caller consumes before
+     * it returns, handing the context scalars rather than the scratch. A
+     * float vector goes through the memory layer's own reader where there is
+     * one; the rest are copied out of a window into scratch bytes, so no call
+     * makes a view or an array of its own.
+     *
+     * @param {string} type
+     * @returns {(address: number, count: number) => ArrayLike<number>}
+     */
+    const vectorReader = type=>{
+        const readF32sInto = services.readF32sInto;
+        if (type === 'f' && readF32sInto)
+        {
+            return (address, count)=>{
+                readF32sInto(address >>> 0, count, vectorFloats);
+                return vectorFloats;
+            };
+        }
+        const spec = TYPES[type];
+        return (address, count)=>{
+            const bytes = windowMemory(address >>> 0, count * spec.bytes);
+            if (bytes.length < count * spec.bytes)
+            {
+                // Short of what was asked -- a memory already given back --
+                // fails as the view over it always has.
+                return readTyped(type, address, count);
+            }
+            vectorBytes.set(bytes);
+            for (let index = 0; index < count; index++)
+            {
+                vectorValues[index] = spec.read(vectorView, index * spec.bytes);
+            }
+            return vectorValues;
+        };
     };
 
     /** @param {number} address @returns {string} */
@@ -533,28 +601,35 @@ export function createOpengl(services){
         {
             return;
         }
-        const width = as === 'byte' ? 1 : as === 'double' ? 8 : 4;
-        const bytes = new Uint8Array(values.length * width);
-        const view = new DataView(bytes.buffer);
-        values.forEach((value, index)=>{
-            if (as === 'byte')
+        const count = values.length;
+        if (as === 'byte')
+        {
+            const bytes = new Uint8Array(count);
+            for (let index = 0; index < count; index++)
             {
-                bytes[index] = value !== 0 ? 1 : 0;
+                bytes[index] = values[index] !== 0 ? 1 : 0;
             }
-            else if (as === 'word')
+            services.writeMemory(address >>> 0, bytes);
+            return;
+        }
+        const length = count * (as === 'double' ? 8 : 4);
+        const view = answerView(length);
+        for (let index = 0; index < count; index++)
+        {
+            if (as === 'word')
             {
-                view.setInt32(index * 4, value | 0, true);
+                view.setInt32(index * 4, values[index] | 0, true);
             }
             else if (as === 'float')
             {
-                view.setFloat32(index * 4, value, true);
+                view.setFloat32(index * 4, values[index], true);
             }
             else
             {
-                view.setFloat64(index * 8, value, true);
+                view.setFloat64(index * 8, values[index], true);
             }
-        });
-        services.writeMemory(address >>> 0, bytes);
+        }
+        services.writeMemory(address >>> 0, answerBytes.slice(0, length));
     };
 
     /**
@@ -691,25 +766,54 @@ export function createOpengl(services){
      * The typed families: `glVertex3f`, `glVertex3fv`, `glVertex3d`, ... all
      * decode into one call on the context.
      *
+     * Everything a form's name decides -- its decoder, its reader, whether it
+     * normalises, how many components it has -- is decided here, once, so a
+     * call decodes its components straight into the context's arguments and
+     * allocates nothing.
+     *
      * @param {string} stem  'glVertex'
      * @param {readonly number[]} counts  the component counts the family comes in
      * @param {readonly string[]} types
      * @param {boolean} normalised  whether the integer forms map onto 0..1
-     * @param {(values: number[], count: number) => (context: any) => void} apply
+     * @param {readonly number[]} defaults  what a form short of four
+     *        components passes for each one it lacks
+     * @param {(context: any, x: number, y: number, z: number, w: number) => void} apply
      * @param {string} [suffix]  an extension suffix, after the type letter
      */
-    function family(stem, counts, types, normalised, apply, suffix = ''){
+    function family(stem, counts, types, normalised, defaults, apply, suffix = ''){
+        const [, d1, d2, d3] = defaults;
         for (const count of counts)
         {
             for (const type of types)
             {
                 const spec = TYPES[type];
-                const convert = normalised ? spec.normalise : (/** @type {number} */ x)=>x;
-                implemented[`${stem}${count}${type}${suffix}`] = args=>call(apply(
-                    Array.from({ length: count }, (unused, i)=>
-                        convert(immediate(type, args, i * spec.words))), count));
-                implemented[`${stem}${count}${type}v${suffix}`] = ([address])=>call(apply(
-                    readTyped(type, address, count).map(convert), count));
+                const decode = DECODE[type];
+                const step = spec.words;
+                const convert = normalised ? spec.normalise : unchanged;
+                const read = vectorReader(type);
+                implemented[`${stem}${count}${type}${suffix}`] = args=>{
+                    const context = current();
+                    if (context)
+                    {
+                        apply(context, convert(decode(args, 0)),
+                            count > 1 ? convert(decode(args, step)) : d1,
+                            count > 2 ? convert(decode(args, 2 * step)) : d2,
+                            count > 3 ? convert(decode(args, 3 * step)) : d3);
+                    }
+                    return 0;
+                };
+                implemented[`${stem}${count}${type}v${suffix}`] = ([address])=>{
+                    const context = current();
+                    if (context)
+                    {
+                        const v = read(address, count);
+                        apply(context, convert(v[0]),
+                            count > 1 ? convert(v[1]) : d1,
+                            count > 2 ? convert(v[2]) : d2,
+                            count > 3 ? convert(v[3]) : d3);
+                    }
+                    return 0;
+                };
             }
         }
     }
@@ -717,50 +821,82 @@ export function createOpengl(services){
     const ALL = ['b', 'd', 'f', 'i', 's', 'ub', 'ui', 'us'];
     const SIGNED = ['d', 'f', 'i', 's'];
 
-    family('glVertex', [2, 3, 4], SIGNED, false,
-        v=>context=>context.glVertex4f(v[0], v[1], v[2] ?? 0, v[3] ?? 1));
-    family('glColor', [3, 4], ALL, true,
-        v=>context=>context.glColor4f(v[0], v[1], v[2], v[3] ?? 1));
-    family('glNormal', [3], ['b', 'd', 'f', 'i', 's'], true,
-        v=>context=>context.glNormal3f(v[0], v[1], v[2]));
-    family('glTexCoord', [1, 2, 3, 4], SIGNED, false,
-        v=>context=>context.glTexCoord4f(v[0], v[1] ?? 0, v[2] ?? 0, v[3] ?? 1));
-    family('glRasterPos', [2, 3, 4], SIGNED, false,
-        v=>context=>context.glRasterPos4f(v[0], v[1], v[2] ?? 0, v[3] ?? 1));
-    family('glSecondaryColor', [3], ALL, true,
-        v=>context=>context.glSecondaryColor3fEXT(v[0], v[1], v[2]), 'EXT');
+    family('glVertex', [2, 3, 4], SIGNED, false, [0, 0, 0, 1],
+        (context, x, y, z, w)=>context.glVertex4f(x, y, z, w));
+    family('glColor', [3, 4], ALL, true, [0, 0, 0, 1],
+        (context, r, g, b, a)=>context.glColor4f(r, g, b, a));
+    family('glNormal', [3], ['b', 'd', 'f', 'i', 's'], true, [0, 0, 0, 0],
+        (context, x, y, z)=>context.glNormal3f(x, y, z));
+    family('glTexCoord', [1, 2, 3, 4], SIGNED, false, [0, 0, 0, 1],
+        (context, s, t, r, q)=>context.glTexCoord4f(s, t, r, q));
+    family('glRasterPos', [2, 3, 4], SIGNED, false, [0, 0, 0, 1],
+        (context, x, y, z, w)=>context.glRasterPos4f(x, y, z, w));
+    family('glSecondaryColor', [3], ALL, true, [0, 0, 0, 0],
+        (context, r, g, b)=>context.glSecondaryColor3fEXT(r, g, b), 'EXT');
     // glIndex has no component count in its name, and glRect takes four
     // scalars or two pointers: neither is the family helper's pattern.
     for (const type of ['d', 'f', 'i', 's', 'ub'])
     {
-        implemented[`glIndex${type}`] = args=>call(context=>context.glIndexi(
-            immediate(type, args, 0)));
+        const decode = DECODE[type];
+        const read = vectorReader(type);
+        implemented[`glIndex${type}`] = args=>call(context=>context.glIndexi(decode(args, 0)));
         implemented[`glIndex${type}v`] = ([address])=>call(context=>context.glIndexi(
-            readTyped(type, address, 1)[0]));
+            read(address, 1)[0]));
     }
     for (const type of SIGNED)
     {
-        const spec = TYPES[type];
+        const decode = DECODE[type];
+        const step = TYPES[type].words;
         implemented[`glRect${type}`] = args=>call(context=>context.glRectf(
-            ...[0, 1, 2, 3].map(i=>immediate(type, args, i * spec.words))));
+            decode(args, 0), decode(args, step), decode(args, 2 * step), decode(args, 3 * step)));
         implemented[`glRect${type}v`] = ([a, b])=>call(context=>context.glRectf(
             ...readTyped(type, a, 2), ...readTyped(type, b, 2)));
     }
+    /**
+     * The forms whose first argument is an index the vector is not part of:
+     * a texture unit, a generic attribute. A form short of four components
+     * fills the rest with (0, 0, 1).
+     *
+     * @param {string} name  the entry point, up to its type letter
+     * @param {string} type
+     * @param {number} count
+     * @param {string} suffix
+     * @param {(context: any, index: number, x: number, y: number, z: number, w: number)
+     *     => void} apply
+     */
+    const indexedVector = (name, type, count, suffix, apply)=>{
+        const decode = DECODE[type];
+        const step = TYPES[type].words;
+        const read = vectorReader(type);
+        implemented[`${name}${type}${suffix}`] = args=>{
+            const context = current();
+            if (context)
+            {
+                apply(context, args[0] >>> 0, decode(args, 1),
+                    count > 1 ? decode(args, 1 + step) : 0,
+                    count > 2 ? decode(args, 1 + 2 * step) : 0,
+                    count > 3 ? decode(args, 1 + 3 * step) : 1);
+            }
+            return 0;
+        };
+        implemented[`${name}${type}v${suffix}`] = ([index, address])=>{
+            const context = current();
+            if (context)
+            {
+                const v = read(address, count);
+                apply(context, index >>> 0, v[0], count > 1 ? v[1] : 0, count > 2 ? v[2] : 0,
+                    count > 3 ? v[3] : 1);
+            }
+            return 0;
+        };
+    };
     // GL_ARB_multitexture: the unit comes first and is not part of the vector.
     for (const count of [1, 2, 3, 4])
     {
         for (const type of SIGNED)
         {
-            const spec = TYPES[type];
-            implemented[`glMultiTexCoord${count}${type}ARB`] = args=>call(context=>{
-                const v = Array.from({ length: count }, (unused, i)=>
-                    immediate(type, args, 1 + i * spec.words));
-                context.glMultiTexCoord4fARB(args[0] >>> 0, v[0], v[1] ?? 0, v[2] ?? 0, v[3] ?? 1);
-            });
-            implemented[`glMultiTexCoord${count}${type}vARB`] = ([unit, address])=>call(context=>{
-                const v = readTyped(type, address, count);
-                context.glMultiTexCoord4fARB(unit >>> 0, v[0], v[1] ?? 0, v[2] ?? 0, v[3] ?? 1);
-            });
+            indexedVector(`glMultiTexCoord${count}`, type, count, 'ARB',
+                (context, unit, s, t, r, q)=>context.glMultiTexCoord4fARB(unit, s, t, r, q));
         }
     }
 
@@ -772,16 +908,8 @@ export function createOpengl(services){
     {
         for (const type of ['s', 'f', 'd'])
         {
-            const spec = TYPES[type];
-            implemented[`glVertexAttrib${count}${type}ARB`] = args=>call(context=>{
-                const v = Array.from({ length: count }, (unused, i)=>
-                    immediate(type, args, 1 + i * spec.words));
-                context.glVertexAttrib4fARB(args[0] >>> 0, v[0], v[1] ?? 0, v[2] ?? 0, v[3] ?? 1);
-            });
-            implemented[`glVertexAttrib${count}${type}vARB`] = ([index, address])=>call(context=>{
-                const v = readTyped(type, address, count);
-                context.glVertexAttrib4fARB(index >>> 0, v[0], v[1] ?? 0, v[2] ?? 0, v[3] ?? 1);
-            });
+            indexedVector(`glVertexAttrib${count}`, type, count, 'ARB',
+                (context, index, x, y, z, w)=>context.glVertexAttrib4fARB(index, x, y, z, w));
         }
     }
     /** @type {[string, string, boolean][]} the four-component vector forms */
@@ -794,11 +922,12 @@ export function createOpengl(services){
     ];
     for (const [suffix, type, normalised] of attribVectors)
     {
-        const spec = TYPES[type];
-        const convert = normalised ? spec.normalise : (/** @type {number} */ x)=>x;
+        const convert = normalised ? TYPES[type].normalise : unchanged;
+        const read = vectorReader(type);
         implemented[`glVertexAttrib${suffix}ARB`] = ([index, address])=>call(context=>{
-            const v = readTyped(type, address, 4).map(convert);
-            context.glVertexAttrib4fARB(index >>> 0, v[0], v[1], v[2], v[3]);
+            const v = read(address, 4);
+            context.glVertexAttrib4fARB(index >>> 0, convert(v[0]), convert(v[1]),
+                convert(v[2]), convert(v[3]));
         });
     }
 
@@ -816,24 +945,41 @@ export function createOpengl(services){
      * @param {string} [suffix]
      */
     function parameterFamily(stem, leading, vectorSize, colours, apply, suffix = ''){
+        /** @param {number[]} args @returns {number[]} the enums before the value */
+        const headOf = args=>(leading === 1 ? [args[0] >>> 0] : [args[0] >>> 0, args[1] >>> 0]);
         for (const type of ['f', 'i'])
         {
-            /** @param {number} parameter @returns {(value: number) => number} */
-            const convert = parameter=>(type === 'i' && colours.has(parameter)
-                ? TYPES.i.normalise
-                : (/** @type {number} */ x)=>x);
-            implemented[`${stem}${type}${suffix}`] = args=>call(context=>{
-                const head = args.slice(0, leading).map(x=>x >>> 0);
-                const parameter = head[leading - 1];
-                apply(context, head, [convert(parameter)(immediate(type, args, leading))]);
-            });
-            implemented[`${stem}${type}v${suffix}`] = args=>call(context=>{
-                const head = args.slice(0, leading).map(x=>x >>> 0);
-                const parameter = head[leading - 1];
-                const values = readTyped(type, args[leading], vectorSize(parameter))
-                    .map(convert(parameter));
-                apply(context, head, values);
-            });
+            const decode = DECODE[type];
+            const integer = type === 'i';
+            implemented[`${stem}${type}${suffix}`] = args=>{
+                const context = current();
+                if (context)
+                {
+                    const head = headOf(args);
+                    const value = decode(args, leading);
+                    apply(context, head, [integer && colours.has(head[leading - 1])
+                        ? TYPES.i.normalise(value) : value]);
+                }
+                return 0;
+            };
+            implemented[`${stem}${type}v${suffix}`] = args=>{
+                const context = current();
+                if (context)
+                {
+                    const head = headOf(args);
+                    const parameter = head[leading - 1];
+                    const values = readTyped(type, args[leading], vectorSize(parameter));
+                    if (integer && colours.has(parameter))
+                    {
+                        for (let index = 0; index < values.length; index++)
+                        {
+                            values[index] = TYPES.i.normalise(values[index]);
+                        }
+                    }
+                    apply(context, head, values);
+                }
+                return 0;
+            };
         }
     }
 

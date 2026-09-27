@@ -733,6 +733,21 @@ every texture unit. A handler is reachable without the trap through `entry(name)
 function, the same dwords, the same current-context rule -- which is how a bundle's kernel issues GL
 work the guest's own function would have issued (`host.md`'s `frame.gl`).
 
+Everything a typed entry point's name decides -- the decoder of each argument type, the reader of
+its `*v` form, whether an integer form normalises, how many components it has and what the missing
+ones default to -- is decided when the table is built, so a call pays for its own work rather than
+for the marshalling around it, and with no context current answers zero before it reads anything.
+A typed call (`glColor4f`, `glVertex3fv`, `glMultiTexCoord2fARB`, `glVertexAttrib4NubvARB`)
+decodes its components straight into the context's arguments: a float vector through the memory
+layer's `readF32sInto`, any other into scratch bytes out of a window, never a view or an array of
+its own. A query's answer is encoded into a scratch buffer and handed to guest memory as a slice. On
+the context's side, a matrix is still a new `Float64Array` on every push, load and multiply -- the
+renderer's caches compare matrices by identity -- but carved out of a shared block (`matrix.js`
+`matrix()`): sixteen doubles alone are past the size V8 keeps a typed array's elements on its own
+heap, and each such array would be a backing store allocated and finalised of its own, several times
+the arithmetic that fills it. The texture environment's combiner slots and the client arrays' names
+and enables are tables of the module, not rebuilt per call.
+
 With a device, every draw goes to the GPU through the one backend (`gpu.js`): the frame is recorded
 as the program draws and replayed at `SwapBuffers`, once every pipeline it needs has compiled. Each
 recorded draw's fixed uniform block and, under a program, each stage's own block are handed back the
@@ -1093,7 +1108,7 @@ after it was made and the report answering 53 to 118 s after the run.
 
 ## Tests
 
-1,823 `test()` cases across the layer's `*.test.js` files, all run by `npm test` from
+1,825 `test()` cases across the layer's `*.test.js` files, all run by `npm test` from
 `modules/core` (`node --test "src/**/*.test.js"`); one integration file runs under
 `npm run test:integration`. By kind:
 
@@ -1105,7 +1120,7 @@ after it was made and the report answering 53 to 118 s after the run.
 | Contract, against documented behaviour and conformance expectations of the real runtime | `d3d7/load.test.js`, `d3d7/process.test.js`, `seam/raster.test.js`, `d3d9/contract.test.js`, `d3d9/ex.test.js`, `d3d9/validity.test.js`, `d3d8/validity.test.js`, `d3d8/declaration.test.js`, `d3d8/process.test.js`, `d3d10/validity.test.js`, `d3d10/device.test.js`, `d3d10/dxgi.test.js`, `d3d10/structs.test.js`, `d3d10/effect.test.js`, `d3d10/effect-object.test.js` (the effect framework, after Wine's d3d10 effect tests, over effects a fixture lays out), `ddraw/objects.test.js`, `ddraw/caps.test.js`, `ddraw/structs.test.js`, `opengl/wgl.test.js`, `opengl/pixelformat.test.js`, `opengl/context.test.js`, `opengl/context-calls.test.js`, `opengl/context-programs.test.js`, `vulkan/*.test.js`, `d3d7/caps.test.js`, `d3d9/caps.test.js`. |
 | Observed behaviour, pinned | `d3d9/observed.test.js` -- lock-flag traffic, matrix order, render-target alpha, viewport placement. |
 | Translators | `d3d9/shader.test.js`, `d3d9/wgsl.test.js`, `d3d10/dxbc.test.js`, `d3d10/sm4.test.js`, `d3d10/wgsl.test.js`, `vulkan/spirv.test.js`, `opengl/wgsl.test.js` (the GL formula as WGSL and the descriptor, and that every field the key must fold changes it), `opengl/arb-program.test.js` (the ARB program grammar, its error positions and limits), `opengl/arb-wgsl.test.js` (one stage at a time: every instruction, the parameters as one materialised block, the attribute aliasing, a real program's coordinate sets and image units), `opengl/gpu-layout.test.js` (array shapes to vertex formats and slots, mode expansion, index scanning), `opengl/buffer-reads.test.js` (the byte ranges unflushed draws read: overlap, forgotten once their frame flushed, a write past a frame's hull compared against none). |
-| Seam and ABI | `seam/*.test.js` drive the bridge's real vtable publisher over a flat buffer and read the same words a guest would (among them a `Flip` answering once the bound lets it, and not counted when refused); `seam/shadow.test.js` pins the guest-side code's bytes and layout; `seam/shadow.itest.js` runs that code on the real emulated processor. |
+| Seam and ABI | `seam/*.test.js` drive the bridge's real vtable publisher over a flat buffer and read the same words a guest would (among them a `Flip` answering once the bound lets it, and not counted when refused); `seam/shadow.test.js` pins the guest-side code's bytes and layout; `seam/shadow.itest.js` runs that code on the real emulated processor; `opengl/exports.test.js` holds the `OPENGL32.dll` argument words and every typed form of a family -- immediate and `*v`, each component count, each type -- to the specification's decoding, through the memory layer's float reader and through a window, with no `DataView` made on a call. |
 | A whole program | `src/frame-latency.itest.js` (`npm run test:integration`) -- a program with a Direct3D 8 device and a second thread that only counts presents twelve frames through `createApp` over a device finishing one submit every few milliseconds of the host's timers, under cork and under the emulator: with the default bound presents wait, the device is never more than one frame past the bound behind and the counting thread runs while a present waits; with no bound none waits and the program runs ahead. |
 
 Real-GPU acceptance lives outside the unit suite in `tools/cdp_test/`: `triangle.mjs` (a
