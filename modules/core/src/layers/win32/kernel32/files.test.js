@@ -1475,6 +1475,16 @@ test('the short form of a path is the path: this volume keeps no 8.3 aliases', (
     assert.equal(length, 'C:\\Program Files\\Title\\title.exe'.length);
     assert.equal(fns.GetShortPathNameA.handler([at(NAME, 'C:\\absent.exe'), OUT_PATH, 260]), 0);
     assert.equal(fns.GetShortPathNameA.argBytes, 12);
+
+    // The wide spelling counts characters: MFC hands it a MAX_PATH buffer.
+    const wide = fns.GetShortPathNameW.handler(
+        [putWide(memory, NAME, 'C:\\Program Files\\Title\\title.exe'), OUT_PATH, 260]);
+    assert.equal(wide, 'C:\\Program Files\\Title\\title.exe'.length);
+    const units = new Uint16Array(memory.bytes.slice(OUT_PATH, OUT_PATH + wide * 2 + 2).buffer);
+    assert.equal(String.fromCharCode(...units.subarray(0, wide)),
+        'C:\\Program Files\\Title\\title.exe');
+    assert.equal(units[wide], 0, 'and terminated');
+    assert.equal(fns.GetShortPathNameW.argBytes, 12);
 });
 
 test('the directories the machine promises exist before a program asks', ()=>{

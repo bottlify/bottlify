@@ -990,6 +990,27 @@ export function createSystemFunctions(host){
             }),
         },
 
+        /** LPWSTR lstrcatW(LPWSTR lpString1, LPCWSTR lpString2): lstrcatA's, in UTF-16. */
+        lstrcatW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: survivesFault(([first, second])=>{
+                if (first === 0 || second === 0)
+                {
+                    return 0;
+                }
+                const head = readWide(first >>> 0, MAX_STRING);
+                const tail = readWide(second >>> 0, MAX_STRING);
+                const units = new Uint16Array(tail.length + 1);
+                for (let at = 0; at < tail.length; at++)
+                {
+                    units[at] = tail.charCodeAt(at);
+                }
+                host.writeMemory((first >>> 0) + head.length * 2, new Uint8Array(units.buffer));
+                return first >>> 0;
+            }),
+        },
+
         /**
          * LPSTR lstrcpynA(LPSTR lpString1, LPCSTR lpString2, int iMaxLength)
          *
@@ -1009,6 +1030,32 @@ export function createSystemFunctions(host){
                 }
                 const text = readAnsi(source >>> 0, MAX_STRING).slice(0, room - 1);
                 writeAnsi(destination >>> 0, text);
+                return destination >>> 0;
+            }),
+        },
+
+        /**
+         * LPWSTR lstrcpynW(LPWSTR lpString1, LPCWSTR lpString2, int iMaxLength)
+         *
+         * lstrcpynA's, in UTF-16: iMaxLength counts characters, the
+         * terminator among them, and the copy always ends in one.
+         */
+        lstrcpynW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: survivesFault(([destination, source, max])=>{
+                const room = max | 0;
+                if (destination === 0 || source === 0 || room <= 0)
+                {
+                    return 0;
+                }
+                const text = readWide(source >>> 0, MAX_STRING).slice(0, room - 1);
+                const units = new Uint16Array(text.length + 1);
+                for (let at = 0; at < text.length; at++)
+                {
+                    units[at] = text.charCodeAt(at);
+                }
+                host.writeMemory(destination >>> 0, new Uint8Array(units.buffer));
                 return destination >>> 0;
             }),
         },

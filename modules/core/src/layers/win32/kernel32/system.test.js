@@ -129,6 +129,40 @@ test('the lstr family has no length of its own: a whole script is one string', (
     assert.equal(fns.lstrcmpA.handler([0x4000, 0x200]), 0);
 });
 
+test('lstrcpynW copies at most the count less one and always terminates', ()=>{
+    // The count is in characters, the terminator among them: MFC copies a
+    // path into a MAX_PATH buffer this way.
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    host.writeMemory(0x200, new Uint8Array(Uint16Array.from([...'abcdef', '\0']
+        .map(c=>c.charCodeAt(0))).buffer));
+    host.bytes.fill(0xee, 0x300, 0x320);
+
+    assert.equal(fns.lstrcpynW.handler([0x300, 0x200, 4]), 0x300);
+    assert.deepEqual([...new Uint16Array(host.bytes.slice(0x300, 0x308).buffer)],
+        [0x61, 0x62, 0x63, 0], 'three characters and the terminator');
+    assert.equal(host.bytes[0x308], 0xee, 'nothing past the count');
+
+    assert.equal(fns.lstrcpynW.handler([0x300, 0x200, 100]), 0x300);
+    assert.equal(host.view.getUint16(0x300 + 12, true), 0, 'a shorter source is copied whole');
+    assert.equal(fns.lstrcpynW.handler([0x300, 0xffffffff, 4]), 0, 'NULL for a faulting pointer');
+});
+
+test('lstrcatW appends in place, after the characters already there', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    /** @param {number} at @param {string} text */
+    const wide = (at, text)=>host.writeMemory(at, new Uint8Array(Uint16Array.from(
+        [...text, '\0'].map(c=>c.charCodeAt(0))).buffer));
+    wide(0x300, 'C:\\App');
+    wide(0x200, '\\Setup.exe');
+    assert.equal(fns.lstrcatW.handler([0x300, 0x200]), 0x300);
+    const joined = String.fromCharCode(...new Uint16Array(host.bytes.slice(0x300, 0x300 + 34)
+        .buffer)).split('\0')[0];
+    assert.equal(joined, 'C:\\App\\Setup.exe');
+    assert.equal(fns.lstrcatW.handler([0x300, 0xffffffff]), 0, 'NULL for a faulting pointer');
+});
+
 test('MulDiv keeps the product a caller could not have kept itself', ()=>{
     // The whole point of the call: the intermediate does not fit in 32 bits.
     const host = fakeHost();
