@@ -306,3 +306,28 @@ test('towupper and towlower fold the ASCII letters and pass the rest through', (
     assert.equal(fns.towlower.handler([0xc0]), 0xc0);
     assert.equal(fns.towlower.handler([0xffff]), 0);
 });
+
+test('a wide string near the end of its region is read to its terminator, not past it', ()=>{
+    // A path in a stack buffer a few hundred bytes below the stack's top: the
+    // memory layer refuses a read that runs past the region, and one wide
+    // window of the longest string would.
+    const memory = fakeMemory();
+    const end = memory.bytes.length;
+    const readMemory = (/** @type {number} */ address, /** @type {number} */ length)=>{
+        if (address + length > end)
+        {
+            throw new Error(`read of ${length} bytes at ${address} runs past the end of region`);
+        }
+        return memory.readMemory(address, length);
+    };
+    const table = /** @type {Record<string, any>} */ (createWideFunctions({ ...memory, readMemory }));
+    const text = 'C:/App/System';
+    const at = end - 0x40;
+    for (const [index, character] of [...`${text}\0`].entries())
+    {
+        memory.bytes[at + index * 2] = character.charCodeAt(0);
+        memory.bytes[at + index * 2 + 1] = 0;
+    }
+    assert.equal(table.wcschr.handler([at, 'S'.charCodeAt(0)]), at + text.indexOf('S') * 2);
+    assert.equal(table.wcslen.handler([at]), text.length);
+});

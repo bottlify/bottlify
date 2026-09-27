@@ -22,11 +22,9 @@
 
 import { EILSEQ } from './globals.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { wideStringAt } from './widetext.js';
 
 const MAX_STRING = 1 << 20;
-
-/** Sixty-four thousand UTF-16 units is as far as a wide string is scanned. */
-const MAX_WIDE = 1 << 16;
 
 /**
  * @typedef {Object} WideHost
@@ -97,22 +95,10 @@ export function createWideFunctions(host){
     const readNarrowUnits = pointer=>Array.from(encodeAnsi(host.readCString(pointer, MAX_STRING)),
         byte=>String.fromCharCode(byte)).join('');
 
-    /** @param {number} pointer @param {number} [limit] */
-    const readWide = (pointer, limit = MAX_WIDE)=>{
-        const bytes = host.readMemory(pointer, limit * 2);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        let text = '';
-        for (let at = 0; at * 2 + 1 < bytes.length && at < limit; at++)
-        {
-            const unit = view.getUint16(at * 2, true);
-            if (unit === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(unit);
-        }
-        return text;
-    };
+    // Up to the terminator a stretch at a time: a string near the top of its
+    // region (a path in a stack buffer) cannot be read as one wide window.
+    /** @param {number} pointer */
+    const readWide = pointer=>wideStringAt(host.readMemory, pointer);
 
     /** @param {number} pointer @param {string} text @param {boolean} terminate */
     const writeWide = (pointer, text, terminate = true)=>{
