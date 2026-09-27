@@ -23,6 +23,7 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
+import { assemble } from './layers/win32/msvcrt/guest-code.js';
 
 /**
  * A layer's report from the app's own graph: every graph has module objects of
@@ -259,6 +260,50 @@ test('a loop calling an import runs and translates under cork',
             + ` ${ITERATIONS * 2} (runs of ${warm.ms.toFixed(0)} and ${twice.ms.toFixed(0)} ms),`
             + ` regions ${twice.cork.regions},`
             + ` modules ${twice.cork.modules}`);
+    });
+
+/**
+ * Calls a function of its own a thousand times, rewrites the function's
+ * immediate through WriteProcessMemory -- a host write into a page of
+ * translated code -- calls it a thousand times more, and exits with the sum:
+ * 1000 * 1 + 1000 * 7.
+ */
+function buildRewriteExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['WriteProcessMemory', 'ExitProcess'] },
+        data: { seven: u32(7) },
+        codeSize: 0x120,
+        code: ({ iat, at, code })=>{
+            /** @type {(number[] | string | { jump: number[], to: string, short?: boolean })[]} */
+            const main = [
+                [0xbe, ...u32(1000), 0x31, 0xff],                        // esi = 1000; edi = 0
+                'first',
+                { jump: [0xe8], to: 'F' }, [0x01, 0xc7, 0x4e],           // call F; add edi, eax
+                { jump: [0x75], to: 'first', short: true },              // dec esi; jnz
+                [0x6a, 0x00, 0x6a, 0x04, 0x68, ...u32(at('seven'))],     // WriteProcessMemory(-1,
+                [0x68, ...u32(code(0x101)), 0x6a, 0xff],                 //   F + 1, &seven, 4, 0)
+                [0xff, 0x15, ...u32(iat('WriteProcessMemory'))],
+                [0xbe, ...u32(1000)],
+                'second',
+                { jump: [0xe8], to: 'F' }, [0x01, 0xc7, 0x4e],
+                { jump: [0x75], to: 'second', short: true },
+                [0x57, 0xff, 0x15, ...u32(iat('ExitProcess')), 0xf4],    // exit edi
+            ];
+            const length = assemble([...main, 'F']).length;
+            return [...assemble([...main, new Array(0x100 - length).fill(0x90), 'F',
+                [0xb8, ...u32(1), 0xc3]])];                              // F: mov eax, 1; ret
+        },
+    });
+}
+
+test('a program that rewrites its own translated code through the host runs what it wrote',
+    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
+        const exe = buildRewriteExe();
+        const reference = await run(exe, 'emulator');
+        assert.equal(reference.code, 8000);
+        const cork = await run(exe, 'cork');
+        assert.equal(cork.code, reference.code);
+        assert.ok(cork.cork.regions >= 1, `no region formed: ${JSON.stringify(cork.cork)}`);
     });
 
 /**

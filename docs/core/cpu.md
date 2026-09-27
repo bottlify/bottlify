@@ -582,7 +582,15 @@ translator's own flags (`layout.codePages`, the fork's `bottlify_page_has_code_p
 leaves `stale` with the address and width, and the runtime dirties the emulator's cache for
 that range (`dirtyCode`, the fork's `jit_dirty_cache`) as the emulator's own stores do. A
 host write into guest memory (`writePhysical`, `writeData`, `fillData`) invalidates the
-translator's regions on every page it touches, as it already dirties the emulator's.
+translator's regions on every page it touches, as it already dirties the emulator's. Nearly every
+such write is a call's answer into a stack or a buffer, where the translator has nothing: the
+runtime keeps a byte a page of the address space, set while a published region spans the page (its
+code, a switch table or a helper it was formed with) or a candidate or a barren address is filed
+under it, and `invalidatePage` passes over a page with the byte clear on that byte alone, where it
+looked in three maps and moved the page's generation (a host write of four bytes, in node, over a
+runtime that had been written 100 000 pages: 41 -> 20 ns into one of 64 pages written in turn, 159
+-> 67 ns into pages 20 000 apart). The generation is read only when a region formed over the page
+is published after the guest ran on, and such a region is hashed again then, as for a guest store.
 
 Translated code tests a page-flag table before every load and store (one byte per 4 KiB page
 of the address space, kept in the memory after the guest RAM): a page beyond RAM is
@@ -1388,7 +1396,7 @@ Unit tests (no emulator; `npm test` runs `src/**/*.test.js`):
 | `internal/thunks.test.js` | Stub encoding per convention, forwarding stubs and their register save, a hook stub's single `push edx` and its held EIP (no `ret`, no `jmp`), refusal when the table is full, the default capacity. |
 | `internal/context.test.js` | Context round trips, lazy flags travelling together, x87 stack pointer/tag word, the TEB being part of the switch. |
 | `internal/fpu.test.js` | Double to extended conversion (sign of zero, explicit leading bit), push/pop, overflow refusal, control word. |
-| `internal/cork-host.test.js` | The translator's host over its own memory; among the rest, the register file lent to the bridge is the registers themselves in encoding order, one view for the machine's life, and a span of dwords reads signed into an array at an offset exactly as the words read one by one. |
+| `internal/cork-host.test.js` | The translator's host over its own memory; among the rest, the register file lent to the bridge is the registers themselves in encoding order, one view for the machine's life, a span of dwords reads signed into an array at an offset exactly as the words read one by one, and code a trap handler rewrites between two calls of it runs as written, where the handler's writes into the stack's page leave it translated. |
 | `internal/samples.test.js` | A slice at a known EIP credits that bucket; two addresses inside one 64-byte span fold together, two spans apart stay separate; `topSamples` ranks by instructions and reports each bucket's own address; ten thousand distinct addresses leave the table's own size bounded at the cap, with the rest counted as overflow. |
 
 Integration tests (`npm run test:integration` runs `src/**/*.itest.js`; they need the prebuilt

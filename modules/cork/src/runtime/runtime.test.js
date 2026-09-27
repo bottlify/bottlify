@@ -934,6 +934,51 @@ test('a region whose code is written while its lookups are out is not published 
         assert.deepEqual([taken.published, taken.eax], [false, null], 'and not published');
     });
 
+test('a host write into a page no region spans and no candidate is filed under moves nothing:'
+    + ' a region whose lookups are out is read again for its bytes', async()=>{
+    const { memoryTranslationStore } = await import('./cache.js');
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const store = memoryTranslationStore();
+    // mov eax, imm32; hlt
+    const program = (/** @type {number} */ value)=>[0xb8, value, 0, 0, 0, 0xf4];
+    /** @param {number[]} before @param {number[]} after */
+    const formedThenWritten = async(before, after)=>{
+        const m = machine({ store, bundleId: 'test' });
+        m.write(CODE, before);
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        // As the host writes an answer: the bytes, then the page invalidated.
+        m.write(CODE, after);
+        m.runtime.invalidatePage(CODE >>> 12);
+        await settle();
+        const published = m.runtime.entryOf(CODE) >= 0;
+        const eax = published ? (m.runtime.run(m.runtime.entryOf(CODE), 100), m.reg(0)) : null;
+        return { published, eax };
+    };
+    assert.deepEqual(await formedThenWritten(program(1), program(2)),
+        { published: false, eax: null }, 'the code changed: not published');
+    assert.deepEqual(await formedThenWritten(program(5), program(5)),
+        { published: true, eax: 5 }, 'the same bytes: the write cost the region nothing');
+});
+
+test('a host write into the page of a region\'s switch table drops the region, though no code'
+    + ' is there', async()=>{
+    const m = machine();
+    // cmp eax, 2; ja D; jmp [0x3000 + eax*4]; C0..C4: ret; D: hlt
+    m.write(CODE, [0x83, 0xf8, 0x02, 0x77, 0x0a, 0xff, 0x24, 0x85, 0x00, 0x30, 0x00, 0x00,
+        0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xf4]);
+    m.write(0x3000, [0x0e, 0x10, 0, 0, 0x0f, 0x10, 0, 0, 0x10, 0x10, 0, 0]);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 1);
+    assert.equal(m.runtime.pages.get(3) & PageFlag.HAS_CODE, 0, 'no code on the table\'s page');
+    m.runtime.invalidatePage(5);
+    assert.ok(m.runtime.entryOf(CODE) >= 0, 'a page of nothing\'s: the region stays');
+    m.runtime.invalidatePage(3);
+    assert.equal(m.runtime.entryOf(CODE), -1, 'the table decides the region: it went');
+    assert.equal(m.runtime.diagnostics().invalidations, 1);
+});
+
 test('structure left unset is structure on, in the store\'s key as in the code', async()=>{
     const { memoryTranslationStore } = await import('./cache.js');
     const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));

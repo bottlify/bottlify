@@ -334,6 +334,22 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * per write (a loading run's writes are thousands a second) was the cost;
      * this clears a page's own keys instead. */
     const pageKeys = new Map();
+    /**
+     * Whether a write into a page is anything to the translator, a byte a page
+     * of the address space: `WATCH_REGIONS` while a published region spans it
+     * (`byPage`), `WATCH_KEYS` while a candidate or a barren address is filed
+     * under it (`pageKeys`). The host invalidates every page it writes, and
+     * nearly every such write is a call's answer into a stack or a buffer
+     * where neither is: `invalidatePage` passes those over on this byte alone,
+     * where it looked in three maps and moved the page's generation. That
+     * generation is only read at a publication, of a region formed over the
+     * page and published later, which the guest ran past meanwhile -- and such
+     * a region is hashed again then, as for a guest store the page's code did
+     * not watch.
+     */
+    const watched = new Uint8Array(1 << 20);
+    const WATCH_REGIONS = 1;
+    const WATCH_KEYS = 2;
     /** @param {number} key */
     // A key is eip * 16 + top, past 2^32 for an address above 256 MB, so its
     // page is a division rather than a shift, which would wrap there.
@@ -346,6 +362,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             keys = new Set();
             pageKeys.set(page, keys);
+            watched[page] |= WATCH_KEYS;
         }
         keys.add(key);
     };
@@ -359,6 +376,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             if (keys.size === 0)
             {
                 pageKeys.delete(page);
+                watched[page] &= ~WATCH_KEYS;
             }
         }
     };
@@ -683,6 +701,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             pages.clearCode(p);
             if (!left?.size)
             {
+                watched[p] &= ~WATCH_REGIONS;
                 pageExtents.delete(p);
                 imports.handoffPage?.(p, false);
                 continue;
@@ -713,6 +732,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
 
     /** @param {number} page */
     const invalidatePage = page=>{
+        if (watched[page] === 0)
+        {
+            return;
+        }
         const on = byPage.get(page);
         const cost = on ? on.size : 0;
         if (on)
@@ -730,6 +753,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 barren.delete(key);
             }
             pageKeys.delete(page);
+            watched[page] &= ~WATCH_KEYS;
         }
         generation.set(page, (generation.get(page) ?? 0) + 1);
         // Only a write that cost a region counts towards volatility: the
@@ -1338,6 +1362,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 byPage.set(page, set);
             }
             set.add(record);
+            watched[page] |= WATCH_REGIONS;
         }
         countExtents(record, 1);
         regions.add(record);
