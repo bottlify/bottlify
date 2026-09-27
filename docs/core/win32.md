@@ -380,6 +380,9 @@ answers with errno goes to the handler (`math.js`), which answers JavaScript's v
 errno as msvcrt does -- `EDOM` for a NaN of arguments that were none, `ERANGE` for an infinity of
 finite ones -- and so does an argument past `fsin`'s reduction (2^63), a NaN or an infinity where
 the function checks for one, and a result past a double's range.
+`tools/math-bench.mjs` times each of these calls in a loop, d3dx9's arithmetic beside them and
+the x87's instructions inline, under both precisions, and sets cork's answers beside the
+emulator's.
 
 ### The process model
 
@@ -958,7 +961,10 @@ Stated as the code states them.
   `f2xm1` is 2^x less one in doubles and its `fldlg2` and `fldl2t` a unit off the doubles cork
   loads: of the calls `crt-math.itest.js` makes, `exp(1)` and `log(10)` come a unit from cork's
   under it and `sinh(0.1)` five, and `log10` takes the double nearest log10(2) rather than
-  `fldlg2`, which made `log10(1000)` 2.999999999999999 there.
+  `fldlg2`, which made `log10(1000)` 2.999999999999999 there. The emulator's `fprem` is not the
+  exact remainder either: of `math-bench.mjs`'s 256 pairs, `fmod` under it missed cork's answer
+  -- JavaScript's `%`, the x87's exact remainder -- in 91, by up to 3.8 million units in the last
+  place of a remainder that cancelled.
 - **d3dx9's arithmetic is the x87's, under the program's control word, over floats.** A matrix
   product, a transform or a normalisation computes in doubles under a double-precision control
   word and to 24 bits under Direct3D's, and stores floats rounded to nearest; the library picks
