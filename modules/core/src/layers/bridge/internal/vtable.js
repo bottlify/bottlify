@@ -81,18 +81,41 @@ export function createVtables({ memory, register, heap }){
      * same texture again on every frame until the machine was out of memory
      * for real.
      *
-     * Keyed by the method list's identity: two object models describing the
-     * same interface id with different lists get two tables.
+     * Keyed by the method list's identity, and then by its shape: an object
+     * model that builds a fresh list for every object -- ole32 does, for
+     * every stream an installer writes its log through -- would otherwise
+     * take a table per object, and the stubs are never given back.
      *
      * @type {WeakMap<InterfaceMethod[], number>}
      */
     const tables = new WeakMap();
     /**
-     * Which object an interface pointer belongs to. A shared stub is called
-     * through many pointers, and the pointer is the first argument of every
-     * COM method, so this is where the call finds its object.
+     * The same tables by shape: the interface and, slot by slot, what its
+     * stub is built from -- the arguments it pops and which of IUnknown's
+     * three it is. Two lists of one shape can share stubs, because a stub
+     * runs the method of the object it was called through (`owners`), not
+     * the method of the list it was built for. A list with a method that
+     * runs in the guest carries code of its own and has no shape.
      *
-     * @type {Map<number, { object: any, interfaceId: string }>}
+     * @type {Map<string, number>}
+     */
+    const byShape = new Map();
+
+    /**
+     * @param {string} interfaceId @param {InterfaceMethod[]} table
+     * @returns {string | null}
+     */
+    const shapeOf = (interfaceId, table)=>(table.some(method=>method.guest)
+        ? null
+        : `${interfaceId}|${table.map(method=>`${method.argBytes}:${method.builtin ?? ''}`)
+            .join(',')}`);
+    /**
+     * Which object an interface pointer belongs to, and that object's own
+     * methods for it. A shared stub is called through many pointers, and the
+     * pointer is the first argument of every COM method, so this is where the
+     * call finds its object and what to run on it.
+     *
+     * @type {Map<number, { object: any, interfaceId: string, methods: InterfaceMethod[] }>}
      */
     const owners = new Map();
     /**
@@ -125,6 +148,13 @@ export function createVtables({ memory, register, heap }){
         if (already !== undefined)
         {
             return already;
+        }
+        const shape = shapeOf(interfaceId, table);
+        const shared = shape === null ? undefined : byShape.get(shape);
+        if (shared !== undefined)
+        {
+            tables.set(table, shared);
+            return shared;
         }
         /** @type {number[]} */
         let slots;
@@ -162,8 +192,8 @@ export function createVtables({ memory, register, heap }){
                         {
                             given[i - 1] = args[i];
                         }
-                        const answer = dispatch(
-                            owner.object, owner.interfaceId, index, method, given);
+                        const answer = dispatch(owner.object, owner.interfaceId, index,
+                            owner.methods[index] ?? method, given);
                         if (typeof answer?.then === 'function')
                         {
                             rest = new Array(given.length);
@@ -197,6 +227,10 @@ export function createVtables({ memory, register, heap }){
         slots.forEach((address, index)=>memory.writeU32(vtable + index * WORD, address));
         methods += slots.length;
         tables.set(table, vtable);
+        if (shape !== null)
+        {
+            byShape.set(shape, vtable);
+        }
         return vtable;
     }
 
@@ -243,7 +277,7 @@ export function createVtables({ memory, register, heap }){
         }
         memory.writeU32(block, vtable);
         memory.writeU32(block + WORD, (object.guestState?.() ?? 0) >>> 0);
-        owners.set(block, { object, interfaceId });
+        owners.set(block, { object, interfaceId, methods: table });
         byInterface.set(interfaceId, block);
         interfaces++;
         return block;
