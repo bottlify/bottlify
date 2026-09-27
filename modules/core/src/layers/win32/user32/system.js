@@ -161,6 +161,7 @@ export const SYS_COLORS = Object.freeze({
 
 /** MonitorFromRect and friends answer with this, there being one display. */
 const PRIMARY_MONITOR = 0x00010001;
+const MONITOR_DEFAULTTONULL = 0;
 const MONITORINFOF_PRIMARY = 1;
 
 /**
@@ -356,6 +357,9 @@ const GCL_HICONSM = -34;
 const WS_DISABLED = 0x08000000;
 const WS_MINIMIZE = 0x20000000;
 const WS_POPUP = 0x80000000;
+/** What the region calls answer: no region, or one rectangle. */
+const REGION_ERROR = 0;
+const SIMPLEREGION = 2;
 /** WINDOWINFO's dwWindowStatus for the active window. */
 const WS_ACTIVECAPTION = 0x0001;
 
@@ -1698,6 +1702,23 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ()=>host.desktop?.().hwnd ?? 0,
         },
 
+        /**
+         * HMONITOR MonitorFromPoint(POINT pt, DWORD dwFlags)
+         *
+         * The point comes by value. The one monitor holds every point on the
+         * screen; for one off it, MONITOR_DEFAULTTONULL asks for none and
+         * either other default for that monitor.
+         */
+        MonitorFromPoint: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([x, y, flags])=>{
+                const inside = (x | 0) >= 0 && (y | 0) >= 0 && (x | 0) < screen.width
+                    && (y | 0) < screen.height;
+                return inside || (flags >>> 0) !== MONITOR_DEFAULTTONULL ? PRIMARY_MONITOR : 0;
+            },
+        },
+
         /** HMONITOR MonitorFromRect(LPCRECT lprc, DWORD dwFlags) */
         MonitorFromRect: {
             argBytes: 8,
@@ -2591,16 +2612,56 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, hRgn])=>{
-                if (!live(hwnd))
+                const record = live(hwnd);
+                if (!record)
                 {
                     return 0;
                 }
+                // Its rectangle is kept, for what GetWindowRgn and
+                // GetWindowRgnBox answer.
+                record.regionBox = (hRgn >>> 0) === 0 ? null : host.regionBox?.(hRgn >>> 0) ?? null;
                 if ((hRgn >>> 0) !== 0)
                 {
                     host.divergence?.('SetWindowRgn',
                         'a window region is accepted and the window is not clipped to it');
                 }
                 return 1;
+            },
+        },
+
+        /**
+         * int GetWindowRgnBox(HWND hWnd, LPRECT lprc)
+         *
+         * The rectangle around the region SetWindowRgn gave the window, in
+         * window coordinates, and SIMPLEREGION; ERROR for a window with none.
+         * Only the rectangle of a region is kept, so every region is a simple one.
+         */
+        GetWindowRgnBox: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, rect])=>{
+                const box = live(hwnd)?.regionBox ?? null;
+                if (!box || (rect >>> 0) === 0)
+                {
+                    return REGION_ERROR;
+                }
+                writeRect(host, rect >>> 0, box);
+                return SIMPLEREGION;
+            },
+        },
+
+        /** int GetWindowRgn(HWND hWnd, HRGN hRgn): the window's region copied into hRgn. */
+        GetWindowRgn: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, region])=>{
+                const box = live(hwnd)?.regionBox ?? null;
+                if (!box || !host.setRegion || (region >>> 0) === 0)
+                {
+                    return REGION_ERROR;
+                }
+                host.setRegion(region >>> 0, box);
+                return SIMPLEREGION;
             },
         },
 

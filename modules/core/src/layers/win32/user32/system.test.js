@@ -816,6 +816,31 @@ test('SendMessageTimeoutA is a send whose answer goes out through the pointer', 
     assert.equal(fns.SendMessageTimeoutA.handler([0x9999, 0x0400, 0, 0, 0, 1000, OUT_BUFFER]), 0);
 });
 
+test('GetWindowRgnBox answers the rectangle of the region SetWindowRgn gave, and ERROR for none',
+    ()=>{
+        const SIMPLEREGION = 2;
+        const box = { left: 1, top: 2, right: 30, bottom: 40 };
+        const { memory, fns } = setup({ regionBox: region=>(region === 0x1234 ? box : null) });
+        const hwnd = makeWindow(memory, fns);
+        assert.equal(fns.GetWindowRgnBox.handler([hwnd, RECT_BUFFER]), 0, 'no region yet');
+        fns.SetWindowRgn.handler([hwnd, 0x1234, 1]);
+        assert.equal(fns.GetWindowRgnBox.handler([hwnd, RECT_BUFFER]), SIMPLEREGION);
+        assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)), [1, 2, 30, 40]);
+        fns.SetWindowRgn.handler([hwnd, 0, 1]);
+        assert.equal(fns.GetWindowRgnBox.handler([hwnd, RECT_BUFFER]), 0, 'and none again');
+    });
+
+test('MonitorFromPoint finds the monitor for a point on the screen, and none off it only when '
+    + 'asked for none', ()=>{
+    const { fns } = setup();
+    const monitor = fns.MonitorFromWindow.handler([0, 0]);
+    assert.equal(fns.MonitorFromPoint.argBytes, 12, 'the point by value');
+    assert.equal(fns.MonitorFromPoint.handler([10, 10, 0]), monitor);
+    assert.equal(fns.MonitorFromPoint.handler([-5, 10, 0]), 0, 'MONITOR_DEFAULTTONULL');
+    assert.equal(fns.MonitorFromPoint.handler([-5, 10, 1]), monitor, 'MONITOR_DEFAULTTOPRIMARY');
+    assert.equal(fns.MonitorFromPoint.handler([5000, 10, 2]), monitor, 'MONITOR_DEFAULTTONEAREST');
+});
+
 test('SetWindowRgn accepts a shape it does not clip to, and says so', ()=>{
     const { memory, fns, diverged } = setup();
     const hwnd = makeWindow(memory, fns);
