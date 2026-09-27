@@ -24,8 +24,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../testing/machine.js';
-import { blockState, interpret } from '../interp.js';
-import { PageFlag } from '../runtime/pages.js';
+import { Fault, blockState, interpret } from '../interp.js';
+import { WASM_INTERPRETER_AREA, WasmExit, createWasmInterpreter } from '../interp-wasm.js';
+import { PageFlag, createPageTable } from '../runtime/pages.js';
+import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
 import { Exit } from './region.js';
 
 const CODE = 0x1000;
@@ -131,7 +133,7 @@ test('a rep movsb faults into an inaccessible page with ecx, esi and edi as far 
     assert.equal(r.machine.reg('ecx'), 4, 'four of eight moved');
     assert.equal(r.machine.reg('edi'), 0x5000, 'the destination stands in the bad page');
     assert.equal(r.machine.reg('esi'), 0x2004);
-    assert.equal(r.exit.retired, 3 + 4, 'the completed iterations are counted');
+    assert.equal(r.exit.retired, 3 + 1, 'the completed iterations are counted, four bytes in bulk');
     agree(r);
     sameBytes(r, 0x4ffc, 4);
 });
@@ -282,7 +284,8 @@ test('a rep stosd of a word across a page, of zero, and of bytes into code', ()=
     assert.deepEqual([...code.machine.read(0x5ff0, 64)], Array(64).fill(0x90));
 });
 
-test('a bulk rep stops on the budget with the count and the pointers of the elements it ran', ()=>{
+test('a bulk rep is charged a unit of the budget for every sixteen bytes, and stops on it with '
+    + 'the count and the pointers of the elements it ran', ()=>{
     const m = createTestMachine();
     m.write(CODE, [
         0x31, 0xc0,                         // xor eax, eax
@@ -295,9 +298,25 @@ test('a bulk rep stops on the budget with the count and the pointers of the elem
     assert.equal(exit.kind, Exit.BUDGET);
     assert.equal(exit.eip, CODE + 12, 'on the rep');
     // The block's own instructions are charged at its end: the rep has the
-    // whole budget, as one element at a time had it.
-    assert.equal(m.reg('ecx'), 1000 - 100, 'a hundred elements');
-    assert.equal(m.reg('edi'), 0x2000 + 100 * 4);
+    // whole budget, a unit for every sixteen bytes.
+    assert.equal(exit.retired, 3 + 100, 'the block\'s three and the rep\'s hundred units');
+    assert.equal(m.reg('ecx'), 1000 - 400, 'four hundred elements');
+    assert.equal(m.reg('edi'), 0x2000 + 400 * 4);
+    // A byte's rep is charged by its bytes too, a begun unit whole: mov, mov,
+    // the rep itself and the hlt, and the units.
+    for (const [count, units] of [[3, 1], [16, 1], [17, 2], [0x1000, 256]])
+    {
+        const bytes = createTestMachine();
+        bytes.write(CODE, [
+            0xbf, 0x00, 0x40, 0, 0,         // mov edi, 0x4000
+            0xb9, ...le(count),             // mov ecx, count
+            0xf3, 0xaa, 0xf4,               // rep stosb; hlt
+        ]);
+        bytes.setReg('esp', STACK);
+        const done = bytes.runProgram(CODE);
+        assert.equal(done.kind, Exit.HALT);
+        assert.equal(done.retired, 4 + units, `${count} bytes`);
+    }
 });
 
 test('loops whose pointers move by fixed strides agree with the interpreter by pages clean, '
@@ -459,6 +478,177 @@ test('loops of string instructions with no repeat agree with the interpreter, DF
         assert.equal(Buffer.compare(Buffer.from(r.machine.read(low, span)), Buffer.from(theirs)), 0,
             `${what}: the bytes`);
     }
+});
+
+test('a rep movs or rep stos in bulk leaves what one element at a time leaves, on translated '
+    + 'code and on both interpreters: across pages, overlapping, DF set, faulting, into code', ()=>{
+    // Each round runs one `rep` four ways from the same start -- translated,
+    // the JavaScript interpreter and the one in wasm, all three moving whole
+    // pages at once where they may, and the JavaScript interpreter with its
+    // bulk path taken away, one element at a time, the reference -- over
+    // bytes that tell every element apart, a page along the pointers' way
+    // inaccessible or holding code or neither, and asserts the four agree:
+    // registers, the fault and its address, every byte, and the stores into
+    // code each reported (translated code, which reports the last, whether any).
+    let seed = Number(process.env.REP_SEED ?? 0xb01c);
+    const random = (/** @type {number} */ n)=>{
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        return (seed >>> 8) % n;
+    };
+    const forms = [[0xa4], [0x66, 0xa5], [0xa5], [0xaa], [0x66, 0xab], [0xab]];
+    const low = 0x10000;
+    const span = 0x40000;
+    const counts = [0, 1, 3, 17, 0x400, 0x1000, 0x1001, 0x2345];
+    let bulkRounds = 0;
+    let codeRounds = 0;
+    for (let round = 0; round < Number(process.env.REP_ROUNDS ?? 300); round++)
+    {
+        const form = forms[random(forms.length)];
+        const copy = (form[form.length - 1] & 0xfe) === 0xa4;
+        const set = random(4) === 0;
+        // Pointers on a page's edge as often as not, in the middle of the span.
+        const pointer = ()=>{
+            const page = low + 0x10000 + random(0x20) * 0x1000;
+            return random(2) === 0 ? page - random(8) : page + random(0x1000);
+        };
+        const edi = pointer();
+        // A copy's source near its destination, either side, a third of the time.
+        const esi = copy && random(3) === 0 ? edi + (random(2) === 0 ? -1 : 1) * random(24)
+            : pointer();
+        const count = random(3) === 0 ? random(0x3000) : counts[random(counts.length)];
+        const byte = random(256);
+        const eax = random(2) === 0 ? byte * 0x01010101 >>> 0
+            : (random(1 << 16) << 16 | byte) >>> 0;
+        const program = [0xbe, ...le(esi), 0xbf, ...le(edi), 0xb9, ...le(count), 0xb8, ...le(eax),
+            set ? 0xfd : 0xfc, random(8) === 0 ? 0xf2 : 0xf3, ...form, 0xfc, 0xf4];
+        const near = [esi, edi][random(2)] + (random(2) === 0 ? -1 : 1) * random(0x3000);
+        const page = near & ~0xfff;
+        const flag = [0, PageFlag.INACCESSIBLE, PageFlag.HAS_CODE][random(3)];
+        bulkRounds += !set && flag === 0 && count >= 0x400 ? 1 : 0;
+        const what = `round ${round}: ${form.map(b=>b.toString(16)).join(' ')}`
+            + ` esi ${esi.toString(16)} edi ${edi.toString(16)} ecx ${count}`
+            + ` eax ${eax.toString(16)} df ${set}`
+            + ` page ${page.toString(16)} flag ${flag}`;
+        /** @param {Uint8Array} ram @param {import('../runtime/pages.js').PageTable} pages */
+        const prepare = (ram, pages)=>{
+            for (let i = 0; i < span; i++)
+            {
+                ram[low + i] = (i * 7 + (i >>> 8) * 13 + round) & 255;
+            }
+            ram.set(program, CODE);
+            if (flag === PageFlag.HAS_CODE)
+            {
+                pages.markCode(page, 0x1000);
+            }
+            else if (flag !== 0)
+            {
+                pages.markRange(page, 0x1000, flag);
+            }
+        };
+
+        const machine = createTestMachine();
+        machine.setReg('esp', STACK);
+        prepare(new Uint8Array(machine.memory.buffer, machine.layout.ramBase, 1 << 20),
+            machine.pages);
+        // A store into code leaves past the rep, which goes on to its end first.
+        let exit = machine.runProgram(CODE);
+        const stale = exit.kind === Exit.STALE;
+        for (let again = 0; exit.kind === Exit.STALE && again < 4; again++)
+        {
+            exit = machine.runProgram(exit.eip);
+        }
+        const translated = {
+            ended: exit.kind === Exit.FAULT ? `fault ${exit.vector}`
+                : exit.kind === Exit.HALT ? 'halt' : `exit ${exit.kind}`,
+            eip: exit.eip,
+            regs: REGISTERS.map(name=>machine.reg(name)),
+            bytes: Buffer.from(machine.read(low, span)),
+        };
+
+        /** The JavaScript interpreter's run, with its bulk path or without. @param {boolean} bulk */
+        const js = bulk=>{
+            const model = createTestMachine();
+            model.setReg('esp', STACK);
+            prepare(new Uint8Array(model.memory.buffer, model.layout.ramBase, 1 << 20),
+                model.pages);
+            /** @type {string[]} */
+            const writes = [];
+            const state = blockState({ memory: model.memory, layout: model.layout,
+                onCodeWrite: (at, width)=>writes.push(`${at.toString(16)}/${width}`) });
+            if (!bulk)
+            {
+                /** @type {any} */ (state.memory).repeat = undefined;
+            }
+            state.eip = CODE;
+            state.syncIn();
+            let ended = 'halt';
+            try
+            {
+                interpret(state, 100_000);
+            }
+            catch (e){
+                assert.ok(e instanceof Fault, `${what}: ${e}`);
+                ended = `fault ${e.vector}`;
+                state.eip = e.eip;
+            }
+            return { ended, eip: state.eip >>> 0, regs: [...state.reg],
+                bytes: Buffer.from(model.read(low, span)), writes };
+        };
+
+        // The wasm tier over a memory of its own, in the same layout.
+        const layout = ownLayout({ ramSize: 1 << 20 });
+        const pages = pagesFor(layout, Tables.SIZE + WASM_INTERPRETER_AREA);
+        const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
+        const tier = createWasmInterpreter({ memory, layout, area: layout.tables + Tables.SIZE,
+            hotThreshold: 1 << 30, trapPort: 0xb077, parkBase: 0x100000 });
+        assert.ok(tier);
+        const view = new DataView(memory.buffer);
+        prepare(new Uint8Array(memory.buffer, layout.ramBase, 1 << 20),
+            createPageTable(memory, layout));
+        view.setUint32(layout.regs + 16, STACK, true);
+        view.setUint32(layout.eflags, 2, true);
+        view.setUint32(layout.eip, CODE, true);
+        let code = 0;
+        /** @type {string[]} */
+        const writes = [];
+        // A store into code leaves mid-`rep` for the host, which goes on with it.
+        for (let runs = 0; runs < 0x10000; runs++)
+        {
+            code = tier.run(100_000);
+            if (code !== WasmExit.CODE_WRITE)
+            {
+                break;
+            }
+            writes.push(`${tier.exitValue().toString(16)}/${tier.exitSize()}`);
+        }
+        const wasm = {
+            ended: code === WasmExit.FAULT ? `fault ${tier.exitValue()}`
+                : code === WasmExit.HALT ? 'halt' : `exit ${code}`,
+            eip: view.getUint32(layout.eip, true),
+            regs: REGISTERS.map((_, r)=>view.getUint32(layout.regs + r * 4, true)),
+            bytes: Buffer.from(new Uint8Array(memory.buffer, layout.ramBase + low, span)),
+            writes,
+        };
+
+        const reference = js(false);
+        const interpreted = js(true);
+        for (const [name, run] of [['translated', translated], ['interpreted', interpreted],
+            ['the wasm tier', wasm]])
+        {
+            const got = /** @type {typeof translated} */ (run);
+            assert.equal(got.ended, reference.ended, `${what}: how ${name} ended`);
+            assert.equal(got.eip, reference.eip, `${what}: ${name}'s eip`);
+            assert.deepEqual(got.regs, reference.regs, `${what}: ${name}'s registers`);
+            assert.equal(Buffer.compare(got.bytes, reference.bytes), 0, `${what}: ${name}'s bytes`);
+        }
+        assert.deepEqual(interpreted.writes, reference.writes, `${what}: the stores into code`);
+        assert.deepEqual(wasm.writes, reference.writes,
+            `${what}: the wasm tier's stores into code`);
+        assert.equal(stale, reference.writes.length > 0, `${what}: translated code's stale exit`);
+        codeRounds += reference.writes.length > 0 ? 1 : 0;
+    }
+    assert.ok(bulkRounds >= 20, `${bulkRounds} rounds of a clean run going up past a page`);
+    assert.ok(codeRounds >= 20, `${codeRounds} rounds of stores into code`);
 });
 
 /** @param {number} value */

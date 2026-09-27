@@ -13,6 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { Fault, interpret, blockState } from './interp.js';
 import { createState } from './ir.js';
 import { ownLayout, pagesFor, Tables } from './runtime/layout.js';
@@ -272,8 +273,15 @@ test('blockState keeps its fields fast and sees code rewritten in place', ()=>{
     const state = blockState({ memory, layout });
     // The step's fields are the object's own and the accessors its
     // prototype's: one literal holding both fell into V8's dictionary mode.
-    assert.deepEqual(Object.keys(state).sort(), ['eflags', 'eip', 'faultEip', 'halted',
-        'memory', 'rdtsc', 'reg', 'retired', 'trapped', 'x87Exact', 'x87Shadow']);
+    assert.deepEqual(Object.keys(state).sort(), ['eflags', 'eip', 'f80Values', 'f80Words',
+        'faultEip', 'halted', 'layout', 'memory', 'rdtsc', 'reg', 'retired', 'trapped', 'view',
+        'x87Exact', 'x87In', 'x87Shadow', 'xmmIn', 'xmmWords']);
+    for (const accessor of ['f80', 'f80bits', 'xmm', 'top', 'empty', 'status', 'control',
+        'mxcsr', 'fsBase'])
+    {
+        assert.ok(Object.getOwnPropertyDescriptor(Object.getPrototypeOf(state), accessor)?.get,
+            `${accessor} is the prototype's`);
+    }
     // mov eax, imm32 across a page boundary, then hlt; run, rewrite the
     // immediate's byte in the second page, run again.
     const at = 0x1ffe;
@@ -377,6 +385,62 @@ test('a run of instructions sees a store into its own bytes decoded before it', 
     interpret(state, 10, { onStep: at=>starts.push(at) });
     assert.equal(state.reg[1], 8, 'the immediate as the second store left it');
     assert.deepEqual(starts, [0x1000, 0x1006], 'the run ended after the store and resumed');
+});
+
+test('a rep stos moved in bulk over its own run\'s bytes ends the run as a store does', ()=>{
+    const layout = ownLayout({ ramSize: 1 << 20 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
+    // mov edi, 0x100f; mov ecx, 1; rep stosb; nop; add ecx, imm8; hlt -- the
+    // rep rewrites the add's immediate, as the store above does.
+    ram.set([0xbf, 0x0f, 0x10, 0, 0, 0xb9, 1, 0, 0, 0, 0xf3, 0xaa, 0x90, 0x83, 0xc1, 0, 0xf4],
+        0x1000);
+    const state = blockState({ memory, layout });
+    const bulk = /** @type {NonNullable<import('./ir.js').Memory['repeat']>} */ (
+        state.memory.repeat).bind(state.memory);
+    let moved = 0;
+    state.memory.repeat = (...args)=>{
+        const done = bulk(...args);
+        moved += done;
+        return done;
+    };
+    state.reg[0] = 3;
+    state.eip = 0x1000;
+    interpret(state, 10);
+    assert.equal(state.reg[1], 3);
+    /** @type {number[]} */
+    const starts = [];
+    state.reg[0] = 5;
+    state.eip = 0x1000;
+    state.halted = false;
+    interpret(state, 10, { onStep: at=>starts.push(at) });
+    assert.equal(moved, 2, 'both stores went in bulk');
+    assert.equal(state.reg[1], 5, 'the immediate as the second rep left it');
+    assert.deepEqual(starts, [0x1000, 0x100c], 'the run ended after the rep and resumed');
+});
+
+test('every machine\'s state and memory have one shape, whatever the machine', ()=>{
+    // The interpreter's steps are one set of functions for every machine in a
+    // process: states of two shapes make every access to them polymorphic, of
+    // five megamorphic. Two machines over memories and layouts of their own,
+    // one with the host's callbacks and one without, compared by V8 itself.
+    const interp = JSON.stringify(new URL('./interp.js', import.meta.url).href);
+    const layouts = JSON.stringify(new URL('./runtime/layout.js', import.meta.url).href);
+    const script = `
+        import { blockState } from ${interp};
+        import { ownLayout, pagesFor, Tables } from ${layouts};
+        const made = [[1 << 20, true], [1 << 21, false]].map(([ramSize, host])=>{
+            const layout = ownLayout({ ramSize });
+            const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+            return blockState(host ? { memory, layout, onCodeWrite: ()=>{}, rdtsc: ()=>0n }
+                : { memory, layout });
+        });
+        made[1].syncIn();
+        console.log(JSON.stringify([%HaveSameMap(made[0], made[1]),
+            %HaveSameMap(made[0].memory, made[1].memory)]));`;
+    const answer = execFileSync(process.execPath,
+        ['--allow-natives-syntax', '--input-type=module', '-e', script], { encoding: 'utf8' });
+    assert.deepEqual(JSON.parse(answer), [true, true], 'the states, then their memories');
 });
 
 test('a compiled lea step with an fs: override leaves the segment out', ()=>{

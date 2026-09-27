@@ -196,8 +196,9 @@ export function createDifferentialHost({ emulator, cork, engine, memory, layout 
             }
             // The emulator answers the same code, run to where the region left
             // -- not by the region's retired count: the two count a rep-prefixed
-            // instruction differently (the translator one per iteration, the
-            // emulator one per instruction). It stops at the exit because the
+            // instruction differently (the translator one per iteration, or per
+            // sixteen bytes of a bulk move or fill; the emulator one per
+            // instruction). It stops at the exit because the
             // exit is made a place it hands off at; it may also stop at any other
             // translated entry on the way, and goes on from there.
             const target = subjectState.eip;

@@ -1935,8 +1935,10 @@ class FunctionCompiler {
 
     /**
      * copyUp, copyDown and fill: `rep movsd` or `rep stosd` for the whole
-     * dwords and the byte forms for the rest. Each turn of a `rep` counts as
-     * an instruction, so a dword a turn is a quarter of the turns, and the
+     * dwords and the byte forms for the rest. Each turn of a `rep` translated
+     * code takes one element at a time (a copy down, a page holding code)
+     * counts as an instruction, so a dword a turn is a quarter of the turns
+     * (one it moves in bulk counts by its bytes either way), and the
      * bytes land as the byte form leaves them -- except where a copy's two
      * ends are one to three bytes apart, and a dword read would take bytes
      * the byte form had already overwritten: that copy is bytes throughout.

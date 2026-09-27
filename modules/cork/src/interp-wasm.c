@@ -202,6 +202,47 @@ static inline u32 codeHit(u32 a)
     return granule >= range[0] && granule < range[1];
 }
 
+/*
+ * A `rep movs` (kind 0xa4) or `rep stos` (0xaa) going up, as translated code
+ * runs one (bulkString in emit/integer.js): every element that lies wholly on
+ * the pointers' current pages at once, when the destination's page is neither
+ * inaccessible nor holding translated code, the source's can be read, and a
+ * copy's destination does not lie just ahead of its source, where the
+ * processor repeats the source's first elements and a memmove does not. The
+ * registers move by the elements done, which is none when any of that fails:
+ * the element is then the loop's own.
+ */
+static u32 repeatBulk(u32 kind, u32 size)
+{
+    u32 shift = SIZE_INDEX(size), to = regs[7], from = regs[6], n = regs[1];
+    u32 room = (0x1000 - (to & 0xfff)) >> shift;
+    if (room < n) n = room;
+    if (kind == 0xa4)
+    {
+        room = (0x1000 - (from & 0xfff)) >> shift;
+        if (room < n) n = room;
+    }
+    u32 bytes = n << shift;
+    if (n == 0 || (pageFlags[to >> 12] & (INACCESSIBLE | HAS_CODE)) != 0) return 0;
+    if (kind == 0xa4)
+    {
+        if ((pageFlags[from >> 12] & INACCESSIBLE) != 0 || to - from - 1 < bytes - 1) return 0;
+        __builtin_memmove(ram + to, ram + from, bytes);
+        regs[6] = from + bytes;
+    }
+    else
+    {
+        u32 v = regOf(0, size), b = v & 0xff;
+        if (v == (size == 4 ? b * 0x01010101u : size == 2 ? b * 0x0101u : b))
+            __builtin_memset(ram + to, (int)b, bytes);
+        else
+            for (u32 a = to; a != to + bytes; a += size) store(a, size, v);
+    }
+    regs[7] = to + bytes;
+    regs[1] -= n;
+    return n;
+}
+
 /* A condition code of the flags word. */
 static inline u32 holds(u32 cc, u32 f)
 {
@@ -2372,9 +2413,11 @@ static u32 runInteger(u32 budget)
             FOLD();
             u32 step = (fl & DF) ? (u32)-(i32)size : size;
             u32 repeat = rep != 0;
+            u32 bulk = repeat && step == size && (kind == 0xa4 || kind == 0xaa);
             for (;;)
             {
                 if (repeat && regs[1] == 0) break;
+                if (bulk && repeatBulk(kind, size) != 0) continue;
                 u32 done = 0;
                 if (kind == 0xa4)
                 {

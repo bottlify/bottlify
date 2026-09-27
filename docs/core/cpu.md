@@ -690,9 +690,29 @@ of those pages (inaccessible, and code for the destination), then one `memory.co
 pointers, the count and the budget moved by the whole run. DF set, an element across a page,
 a flagged page, and a copy whose destination lies just ahead of its source (which the
 processor fills with the source's first elements, where a memmove does not) take the
-per-element path. `rep movsd` 5.2 -> 0.7 ns an element, `rep stosd` 2.9 -> 0.6. Each
-iteration of a `rep` counts against the slice's budget, and a `rep cmps` or `rep scas` tests its
-stop condition before the budget: a slice that runs out on the iteration that stops it leaves the
+per-element path. `rep movsd` 5.2 -> 0.7 ns an element, `rep stosd` 2.9 -> 0.6. Both
+interpreter tiers move them the same way (`Memory.repeat` in `ir.js`, which `blockState` answers
+with a `copyWithin` or a `fill` of RAM; `repeatBulk` in `interp-wasm.c`, a `memory.copy` or
+`memory.fill`, the module built with `-mbulk-memory`), under the same tests, each element they
+leave going one at a time as before, and a bulk store into the JavaScript interpreter's own run
+ending the run as a store does. They have to: a `rep` a slice's budget stops in translated code
+leaves on the instruction, in the middle of its block, where no region has an entry, so the next
+slice runs the rest of it on an interpreter tier -- as one instruction, whatever the count -- and
+there it went an element at a time. Under the engine, a loop of one `rep` a turn timed between
+two points of one run (node, pinned to a core, median of three, a run each): `rep stosb` of 4 KiB
+1 100 -> 262 ns a turn, of 16 KiB 12 690 -> 914, of 256 KiB 985 000 -> 14 100; `rep movsb` of
+16 KiB 14 700 -> 1 100, of 256 KiB 1 437 000 -> 10 400; `rep stosd` and `rep movsd` of 256 KiB
+75 500 -> 7 190 and 101 000 -> 7 740, where cork's test machine runs the same loop's 16 KiB
+`rep stosb` in 0.15-0.4 us and its 256 KiB in about 5. An
+element of the per-element path counts against the slice's budget as an instruction does, and a
+turn of the bulk path a unit for every sixteen bytes it moves, a begun one whole, where it had
+counted each element too: a fill or a copy of sixteen bytes costs about what a translated
+instruction does, and counted by the element a `rep` of bytes ended its slice sixteen times as
+often as its time did -- each end a turn of the host's scheduler, and the rest of the `rep` on an
+interpreter tier. The same loop, one thread: `rep stosb` of 4 KiB 262 -> 95 ns a turn, of
+16 KiB 914 -> 399, of 256 KiB 14 100 -> 5 870; two threads each running it, 16 KiB 1 625 -> 230,
+256 KiB 41 500 -> 7 820. The interpreter tiers count a `rep` as one instruction, as the emulator
+does. A `rep cmps` or `rep scas` tests its stop condition before the budget: a slice that runs out on the iteration that stops it leaves the
 instruction done, where it had left on it and the instruction run again scanned on past the match
 (a `repne scasb` strlen of "abc" answered 9). The source of `lods`, `movs` and `cmps` takes an
 `fs:` override as any memory operand does, the thread block's base added to esi, where translated
@@ -757,7 +777,14 @@ become a function of the state with their operands resolved, and an x87 instruct
 straight to the x87 model; the rest runs through `evaluate`. `blockState` keeps the fields a
 step touches on the state object itself and its accessors on a prototype -- one literal holding
 both put the object in V8's dictionary mode, and every `state.retired++` was a hash lookup (a
-load/add/store loop 250 -> 20 ns an instruction, x87 370 -> 56). An access within one page tests
+load/add/store loop 250 -> 20 ns an instruction, x87 370 -> 56). The state and its memory are
+instances of two classes (`BlockState`, `BlockMemory` in `interp.js`), one shape of each for every
+machine a process makes: made as an object over a prototype of accessors built per machine, each
+machine's state had a shape of its own, and the steps -- one set of functions for every machine --
+read it through as many shapes as there had been machines, polymorphic from the second and
+megamorphic from the fifth: a loop of five instructions on the JavaScript interpreter alone in
+six machines one after another in one process went 555, 514, 513, 547, 516, 537 -> 513, 452, 365,
+387, 386, 389 ns a turn (median of five processes). An access within one page tests
 that page's flag once, and a store to a page that is neither inaccessible nor translated code
 does nothing more; an access that crosses a page is judged by both. An `xadd` into memory writes
 its sum where the destination was before the source register changed (`xadd [ebx], bh` moves
