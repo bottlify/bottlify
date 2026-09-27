@@ -1882,6 +1882,67 @@ function counted(h, block, counter, value){
     h.box.memory.writeU32(block + SHADOW.CALLS, h.box.memory.readU32(block + SHADOW.CALLS) + 1);
 }
 
+test('a value the host set through the trap is one the guest\'s next write is seen to change', ()=>{
+    // The routines leave a shader handle to the host, and MultiplyTransform
+    // is the host's alone: both set a value the block holds. Were the block
+    // left as it was, the guest setting the value before once more would
+    // write what the block already held and read as no change, and the
+    // device would keep the handle, or the product.
+    const h = seamed({ shadow: true });
+    const device = h.createDevice(h.create());
+    const block = h.box.memory.readU32(device + 4);
+    const out = 0xe000;
+    /** @param {number} at @param {number[]} words */
+    const write = (at, words)=>h.box.services.writeMemory(at,
+        new Uint8Array(Uint32Array.from(words).buffer));
+    write(0x7000, [0x20000000, 0x40020000, 0xffffffff]);
+    write(0x7100, [0xfffe0101, 0x00000009, 0xc0010000, 0x90e40000, 0xa0e40000, 0x0000ffff]);
+    assert.equal(h.device(device, 'CreateVertexShader', [0x7000, 0x7100, out, 0]), D3D_OK);
+    const handle = h.box.memory.readU32(out);
+    const fvf = 0x142;
+    /** What the guest routine does with a vertex format. */
+    const guestFormat = ()=>{
+        h.box.memory.writeU32(block + SHADOW.VERTEX_SHADER, fvf);
+        counted(h, block, SHADOW.BINDING_CALLS,
+            h.box.memory.readU32(block + SHADOW.BINDING_CALLS) + 1);
+    };
+    const bound = ()=>{
+        assert.equal(h.device(device, 'GetVertexShader', [out]), D3D_OK);
+        return h.box.memory.readU32(out);
+    };
+
+    guestFormat();
+    assert.equal(bound(), fvf);
+    assert.equal(h.box.trap(device, 'SetVertexShader', [handle]), D3D_OK);
+    assert.equal(bound(), handle);
+    guestFormat();
+    assert.equal(bound(), fvf, 'the format again, after the handle');
+    assert.equal(h.box.trap(device, 'SetVertexShader', [handle]), D3D_OK);
+    assert.equal(h.device(device, 'DeleteVertexShader', [handle]), D3D_OK);
+    assert.equal(bound(), 0, 'deleting the bound shader unbinds it');
+    guestFormat();
+    assert.equal(bound(), fvf);
+
+    // WORLD set in the guest, multiplied by the host, set in the guest again.
+    const matrix = Array.from({ length: 16 }, (_, i)=>floatToDword(i % 5 === 0 ? 2 : 0));
+    const world = block + SHADOW.TRANSFORMS + 24 * 64;
+    const guestWorld = ()=>{
+        write(world, matrix);
+        h.box.memory.writeU32(block + SHADOW.TRANSFORM_MARKS, 1 << 24);
+        counted(h, block, SHADOW.TRANSFORM_CALLS,
+            h.box.memory.readU32(block + SHADOW.TRANSFORM_CALLS) + 1);
+    };
+    write(0x8000, matrix);
+    guestWorld();
+    assert.equal(h.device(device, 'MultiplyTransform', [D3DTS.WORLD, 0x8000]), D3D_OK);
+    assert.equal(h.device(device, 'GetTransform', [D3DTS.WORLD, 0x8100]), D3D_OK);
+    assert.equal(h.fields.readF32(0x8100), 4, 'twice by twice');
+    guestWorld();
+    assert.equal(h.device(device, 'GetTransform', [D3DTS.WORLD, 0x8100]), D3D_OK);
+    assert.equal(h.fields.readF32(0x8100), 2, 'the matrix again, after the product');
+    assert.deepEqual(h.divergences, []);
+});
+
 test('a device is handed out with its block already in place, and reads what the guest wrote', ()=>{
     // The guest methods find the block one word past the interface pointer,
     // and that word is written when the interface is published. A device

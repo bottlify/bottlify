@@ -1680,9 +1680,17 @@ export function createDirect3D8Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        MultiplyTransform: (device, [type, matrix])=>((matrix >>> 0) === 0
-            ? D3DERR_INVALIDCALL
-            : device.MultiplyTransform(type >>> 0, readFloats(matrix, 16))),
+        MultiplyTransform: (device, [type, matrix])=>{
+            if ((matrix >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const hr = device.MultiplyTransform(type >>> 0, readFloats(matrix, 16));
+            // The product is the device's own, and the block holds the matrix
+            // before it.
+            shadowOf(device)?.refreshTransform(type >>> 0);
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         GetMaterial: (device, [out])=>{
@@ -2030,7 +2038,13 @@ export function createDirect3D8Seam(
         // as a handle, and that is how every fixed-function draw declares its
         // vertices.
         /** @param {any} device @param {number[]} args */
-        SetVertexShader: (device, [handle])=>device.SetVertexShader(handle >>> 0),
+        SetVertexShader: (device, [handle])=>{
+            const hr = device.SetVertexShader(handle >>> 0);
+            // The guest routine takes a vertex format and leaves a handle
+            // here: the block is told what the device holds now.
+            shadowOf(device)?.refreshShader();
+            return hr;
+        },
 
         GetVertexShaderDeclaration: tokensOf('GetVertexShaderDeclaration'),
         GetVertexShaderFunction: tokensOf('GetVertexShaderFunction'),
@@ -2075,7 +2089,12 @@ export function createDirect3D8Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        DeleteVertexShader: (device, [handle])=>device.DeleteVertexShader(handle >>> 0),
+        DeleteVertexShader: (device, [handle])=>{
+            const hr = device.DeleteVertexShader(handle >>> 0);
+            // Deleting the bound shader unbinds it.
+            shadowOf(device)?.refreshShader();
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         CreatePixelShader: (device, [code, out])=>{

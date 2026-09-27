@@ -1543,6 +1543,48 @@ export function createShadow(deps){
         },
 
         /**
+         * After a call through the trap set a value the block holds -- a
+         * shader handle, which the routine leaves to the host -- the block and
+         * the copy take the value the device now holds. Otherwise the guest's
+         * next write of the value before would read as no change, and the
+         * device would keep the handle.
+         */
+        refreshShader(){
+            if (address === 0)
+            {
+                return;
+            }
+            /** @type {{ handle?: number }} */
+            const shader = {};
+            seenShader = device.GetVertexShader(shader) === 0 ? (shader.handle ?? 0) >>> 0 : 0;
+            deps.writeMemory(address + SHADOW.VERTEX_SHADER, dwordBytes(seenShader));
+        },
+
+        /**
+         * The same for a transform the host changed itself -- one multiplied
+         * by MultiplyTransform, which works on what the device holds.
+         *
+         * @param {number} type
+         */
+        refreshTransform(type){
+            const slot = transformSlot(type);
+            if (address === 0 || slot < 0)
+            {
+                return;
+            }
+            /** @type {{ matrix?: ArrayLike<number> }} */
+            const out = {};
+            if (device.GetTransform(type, out) !== 0 || !out.matrix)
+            {
+                return;
+            }
+            const floats = new Float32Array(out.matrix);
+            seenTransforms.set(new Uint32Array(floats.buffer), slot * 16);
+            deps.writeMemory(address + SHADOW.TRANSFORMS + slot * 64,
+                new Uint8Array(floats.buffer));
+        },
+
+        /**
          * Adopts whatever the guest wrote since the last entry. Every
          * difference goes through the device's own setter, and a value the
          * setter refuses is reported once and left as the guest set it, so
