@@ -230,6 +230,8 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, maxLength: number) => string} readWideString
+ *           `maxLength` in bytes, as the memory layer counts it: a wide path of
+ *           MAX_PATH characters is twice that.
  * @property {FileSystem} files
  * @property {(code: number) => void} setLastError
  * @property {(handle: number, text: string) => void} writeConsole
@@ -713,9 +715,9 @@ export function createFileFunctions(host){
     /** @type {TextForm} */
     const WIDE = {
         path: pointer=>fullPath(
-            pointer === 0 ? '' : host.readWideString(pointer >>> 0, MAX_PATH)),
-        raw: pointer=>pointer === 0 ? '' : host.readWideString(pointer >>> 0, MAX_PATH),
-        list: pointer=>host.readWideString(pointer >>> 0, MAX_PATH_LIST),
+            pointer === 0 ? '' : host.readWideString(pointer >>> 0, MAX_WIDE_PATH * 2)),
+        raw: pointer=>pointer === 0 ? '' : host.readWideString(pointer >>> 0, MAX_WIDE_PATH * 2),
+        list: pointer=>host.readWideString(pointer >>> 0, MAX_PATH_LIST * 2),
         write: writeWideStringTo,
         findData: writeWideFindData,
         unit: 2,

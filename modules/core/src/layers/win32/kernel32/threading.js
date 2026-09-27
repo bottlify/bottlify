@@ -274,7 +274,7 @@ export function createThreadingFunctions(host){
         {
             return null;
         }
-        return (wide ? host.readWideString(pointer >>> 0, MAX_NAME)
+        return (wide ? host.readWideString(pointer >>> 0, MAX_NAME * 2)
             : host.readCString(pointer >>> 0, MAX_NAME)) || null;
     };
 

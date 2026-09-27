@@ -308,20 +308,21 @@ function setup(extra = {}){
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        // The memory layer's contract: the limit counts bytes, and a string
+        // with no terminator inside it throws.
         /** @param {number} address @param {number} maxLength */
         readWideString: (address, maxLength)=>{
             let text = '';
-            for (let at = 0; at < maxLength; at++)
+            for (let at = 0; at + 1 < maxLength; at += 2)
             {
-                const code = memory.bytes[address + at * 2]
-                    | memory.bytes[address + at * 2 + 1] << 8;
+                const code = memory.bytes[address + at] | memory.bytes[address + at + 1] << 8;
                 if (code === 0)
                 {
-                    break;
+                    return text;
                 }
                 text += String.fromCharCode(code);
             }
-            return text;
+            throw new Error(`No wide NUL within ${maxLength} bytes of 0x${address.toString(16)}`);
         },
         files,
         setLastError: code=>{
@@ -1347,6 +1348,21 @@ test('GetTempPathW zeroes what the path does not fill, and a short buffer whole'
 
     assert.equal(fns.GetTempPathW.handler([0, 0]), expected.length + 1);
     assert.equal(fns.GetTempPathW.argBytes, 8);
+});
+
+test('a wide path longer than half of MAX_PATH is read whole', ()=>{
+    // The memory layer's limit counts bytes: a wide name read with MAX_PATH as
+    // its limit stopped at 130 characters and threw. winmm's mmio tests delete
+    // and create a name of 169 characters.
+    const { files, memory, fns } = setup();
+    const name = `C:\\GAME\\very_long_filename_${'x'.repeat(150)}`;
+
+    const handle = fns.CreateFileW.handler(
+        [putWide(memory, NAME, name), GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE);
+    fns.CloseHandle.handler([handle]);
+    assert.ok(files.stat(name)?.exists);
+    assert.equal(fns.DeleteFileW.handler([putWide(memory, NAME, name)]), 1);
 });
 
 /**
