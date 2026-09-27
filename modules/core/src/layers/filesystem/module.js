@@ -330,15 +330,11 @@ export function createFilesystemModule(){
                                     tree.createDirectory(parent);
                                 }
                             }
-                            if (tree.stat(components))
-                            {
-                                tree.truncate(components, 0);
-                            }
-                            else
+                            if (!tree.stat(components))
                             {
                                 tree.createFile(components);
                             }
-                            tree.write(components, 0, entry.bytes ?? new Uint8Array(0));
+                            tree.replace(components, entry.bytes ?? new Uint8Array(0));
                         }
                         return batch.length;
                     }
@@ -377,7 +373,7 @@ export function createFilesystemModule(){
                         const found = tree?.stat(components);
                         out.push(!tree || !found || found.directory
                             ? { path, delete: true }
-                            : { path, bytes: tree.read(components, 0, found.size) });
+                            : { path, bytes: tree.share(components) });
                     }
                     return out;
                 },
@@ -410,7 +406,7 @@ export function createFilesystemModule(){
                             const components = splitComponents(entry.path);
                             out.push({
                                 path: formatPath(key, components),
-                                bytes: tree.read(components, 0, entry.size),
+                                bytes: tree.share(components),
                             });
                         }
                     }
