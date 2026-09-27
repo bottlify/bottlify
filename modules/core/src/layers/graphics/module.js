@@ -332,6 +332,18 @@ export function createGraphicsModule(){
                 readF32sInto: (address, count, into)=>memory.readF32sInto(address, count, into),
                 /** @param {number} address @param {Uint8Array} bytes */
                 writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                /**
+                 * Whether the guest may write `length` bytes at an address: an
+                 * out-parameter the system probes before it writes through it,
+                 * answering E_INVALIDARG where Windows could not write.
+                 *
+                 * @param {number} address @param {number} length
+                 */
+                writable: (address, length)=>{
+                    const region = memory.find?.(address >>> 0);
+                    return !!region && (address >>> 0) + length <= region.base + region.size
+                        && region.access.includes('w');
+                },
                 /** How many bytes a surface of this size needs. */
                 allocate: (/** @type {number} */ bytes)=>new Uint8Array(bytes),
                 screen: config?.screen ?? { width: 640, height: 480, bitsPerPixel: 32 },

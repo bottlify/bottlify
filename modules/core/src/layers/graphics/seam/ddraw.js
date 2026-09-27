@@ -99,6 +99,9 @@ const LEGACY_D3D_IIDS = Object.freeze(new Set([IID_IDirect3D, IID_IDirect3D2, II
 /** DDGAMMARAMP: red, green and blue, 256 words each. */
 const DDGAMMARAMP_BYTES = 3 * 256 * 2;
 
+/** A pointer argument the call could not use: the generic COM refusal. */
+const E_INVALIDARG = 0x80070057;
+
 /** What the caps report as video memory: a round number nothing here measures. */
 const VIDEO_MEMORY = 256 << 20;
 
@@ -1283,6 +1286,13 @@ export function createDirectDrawSeam(
             if ((out >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
+            }
+            // The pointer is probed before anything is made: one the program
+            // cannot write through is refused rather than written through
+            // (Wine's ddraw test_surface_qi, every version).
+            if (memory.writable && !memory.writable(out >>> 0, 4))
+            {
+                return E_INVALIDARG;
             }
             const request = (desc >>> 0) === 0
                 ? null
