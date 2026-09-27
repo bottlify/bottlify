@@ -49,6 +49,7 @@ import { foldName, matchName } from './paths.js';
  * @property {boolean} tombstone  Deleted here, still present in the source.
  * @property {Map<string, Node>} children  Keyed by folded name.
  * @property {number} modified    Milliseconds since the epoch; when it was last written.
+ * @property {boolean} hidden     The source records it as hidden.
  */
 
 /**
@@ -58,6 +59,8 @@ import { foldName, matchName } from './paths.js';
  * @property {boolean} directory
  * @property {number} size
  * @property {number} modified  Milliseconds since the epoch.
+ * @property {boolean} hidden
+ * @property {boolean} readOnly  On a volume nothing can be written to.
  */
 
 /**
@@ -86,6 +89,7 @@ function makeNode(parent, name){
         tombstone: false,
         children: new Map(),
         modified: SOURCE_MODIFIED_MS,
+        hidden: false,
     };
 }
 
@@ -98,9 +102,12 @@ function makeNode(parent, name){
  * @param {import('./memory-store.js').WritableStore} options.writable
  * @param {((change: { path: string, kind: string }) => void) | null} [options.onChanged]
  * @param {() => number} [options.now]  The clock a write is stamped with.
+ * @param {boolean} [options.readOnly]
+ *        The whole volume is read-only media, a disc: every write, create and
+ *        delete is `WRITE_PROTECTED`, whatever layer the name is in.
  */
 export function createOverlay({
-    source = null, system = null, writable, onChanged = null, now = Date.now,
+    source = null, system = null, writable, onChanged = null, now = Date.now, readOnly = false,
 })
 {
     /**
@@ -123,8 +130,12 @@ export function createOverlay({
      * @param {string} path
      * @param {boolean} directory
      * @param {'source' | 'system' | 'writable'} layer
+     * @param {import('./memory-store.js').StoredEntry} [entry]
+     *        What the store said of it: a disc records when each file was
+     *        written and which are hidden, and a program reading those reads
+     *        the disc's answer rather than the overlay's default.
      */
-    const index = (path, directory, layer)=>{
+    const index = (path, directory, layer, entry)=>{
         let node = root;
         const parts = path.split('\\').filter(part=>part.length > 0);
         parts.forEach((part, position)=>{
@@ -142,6 +153,14 @@ export function createOverlay({
             if (layer === 'source')
             {
                 child.inSource = true;
+                if (leaf && typeof entry?.modified === 'number')
+                {
+                    child.modified = entry.modified;
+                }
+                if (leaf && entry?.hidden)
+                {
+                    child.hidden = true;
+                }
             }
             else if (layer === 'system')
             {
@@ -160,7 +179,7 @@ export function createOverlay({
     // in every lookup below.
     for (const entry of source?.list() ?? [])
     {
-        index(entry.path, entry.directory, 'source');
+        index(entry.path, entry.directory, 'source', entry);
     }
     for (const entry of system?.list() ?? [])
     {
@@ -244,7 +263,22 @@ export function createOverlay({
      *
      * @param {Node} node
      */
-    const readOnly = node=>node.inSystem && !node.inSource && !node.inWritable;
+    const onSystemOnly = node=>node.inSystem && !node.inSource && !node.inWritable;
+
+    /**
+     * Refuses a change on read-only media before anything else is looked at:
+     * the device refuses it, not the file, so whether the name exists does
+     * not change the answer.
+     *
+     * @param {string[]} components
+     */
+    const mustBeWritable = components=>{
+        if (readOnly)
+        {
+            throw fsError(ErrorCode.WRITE_PROTECTED,
+                `"${components.join('\\')}" is on read-only media`);
+        }
+    };
 
     /**
      * Gives a node somewhere in the writable layer to live, parents first. A
@@ -332,6 +366,8 @@ export function createOverlay({
     };
 
     return {
+        readOnly,
+
         /** @param {string[]} components @returns {Entry | null} */
         stat(components){
             const node = find(components);
@@ -342,6 +378,8 @@ export function createOverlay({
                     directory: node.directory,
                     size: sizeOf(node),
                     modified: node.modified,
+                    hidden: node.hidden,
+                    readOnly,
                 }
                 : null;
         },
@@ -354,6 +392,7 @@ export function createOverlay({
          * @param {string[]} components @param {number} modified
          */
         setModified(components, modified){
+            mustBeWritable(components);
             mustFind(components).modified = modified;
         },
 
@@ -385,6 +424,8 @@ export function createOverlay({
                     directory: child.directory,
                     size: sizeOf(child),
                     modified: child.modified,
+                    hidden: child.hidden,
+                    readOnly,
                 });
             }
             return entries;
@@ -411,12 +452,13 @@ export function createOverlay({
 
         /** @param {string[]} components @param {number} offset @param {Uint8Array} bytes */
         write(components, offset, bytes){
+            mustBeWritable(components);
             const node = mustFind(components);
             if (node.directory)
             {
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
             }
-            if (readOnly(node))
+            if (onSystemOnly(node))
             {
                 throw fsError(ErrorCode.ACCESS_DENIED,
                     `"${node.path}" is on the engine's read-only volume`);
@@ -429,12 +471,13 @@ export function createOverlay({
 
         /** @param {string[]} components @param {number} size */
         truncate(components, size){
+            mustBeWritable(components);
             const node = mustFind(components);
             if (node.directory)
             {
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
             }
-            if (readOnly(node))
+            if (onSystemOnly(node))
             {
                 throw fsError(ErrorCode.ACCESS_DENIED,
                     `"${node.path}" is on the engine's read-only volume`);
@@ -461,8 +504,9 @@ export function createOverlay({
          * @returns {Entry}
          */
         createFile(components){
+            mustBeWritable(components);
             const parent = parentOf(components);
-            if (readOnly(parent))
+            if (onSystemOnly(parent))
             {
                 throw fsError(ErrorCode.ACCESS_DENIED,
                     `"${parent.path}" is on the engine's read-only volume`);
@@ -485,7 +529,7 @@ export function createOverlay({
             node.modified = now();
             changed(node.path, 'written');
             return { name: node.name, path: node.path, directory: false, size: 0,
-                modified: node.modified };
+                modified: node.modified, hidden: false, readOnly };
         },
 
         /**
@@ -496,8 +540,9 @@ export function createOverlay({
          * @returns {boolean} false when the directory was already there.
          */
         createDirectory(components){
+            mustBeWritable(components);
             const parent = parentOf(components);
-            if (readOnly(parent))
+            if (onSystemOnly(parent))
             {
                 throw fsError(ErrorCode.ACCESS_DENIED,
                     `"${parent.path}" is on the engine's read-only volume`);
@@ -533,12 +578,13 @@ export function createOverlay({
 
         /** @param {string[]} components */
         removeFile(components){
+            mustBeWritable(components);
             const node = mustFind(components);
             if (node.directory)
             {
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
             }
-            if (readOnly(node))
+            if (onSystemOnly(node))
             {
                 throw fsError(ErrorCode.ACCESS_DENIED,
                     `"${node.path}" is on the engine's read-only volume`);
@@ -554,6 +600,7 @@ export function createOverlay({
          * @param {string[]} components
          */
         removeDirectory(components){
+            mustBeWritable(components);
             const node = mustFind(components);
             if (!node.directory)
             {
@@ -563,7 +610,7 @@ export function createOverlay({
             {
                 throw fsError(ErrorCode.ACCESS_DENIED, 'A root cannot be removed');
             }
-            if (readOnly(node))
+            if (onSystemOnly(node))
             {
                 throw fsError(ErrorCode.ACCESS_DENIED,
                     `"${node.path}" is on the engine's read-only volume`);

@@ -98,17 +98,28 @@ export function createVolume(fs, fetchBlocks = null){
         return mode.truncate ? Disposition.TRUNCATE_EXISTING : Disposition.OPEN_EXISTING;
     };
 
+    /**
+     * What sets a name apart from an ordinary file: it is on read-only media,
+     * or the media records it as hidden. Said only when it is so.
+     *
+     * @param {any} entry
+     */
+    const marks = entry=>({
+        ...entry.readOnly ? { readOnly: true } : {},
+        ...entry.hidden ? { hidden: true } : {},
+    });
+
     return {
         /**
          * @param {string} path
          * @returns {{ exists: boolean, isDirectory: boolean, size: number,
-         *             modified: number } | null}
+         *             modified: number, readOnly?: boolean, hidden?: boolean } | null}
          */
         stat(path){
             const entry = attempt(()=>fs.stat(path), null);
             return entry
                 ? { exists: true, isDirectory: Boolean(entry.directory), size: entry.size,
-                    modified: entry.modified ?? 0 }
+                    modified: entry.modified ?? 0, ...marks(entry) }
                 : null;
         },
 
@@ -257,7 +268,19 @@ export function createVolume(fs, fetchBlocks = null){
                 isDirectory: Boolean(entry.directory),
                 size: entry.size,
                 modified: entry.modified ?? 0,
+                ...marks(entry),
             })), []),
+
+        /**
+         * Whether a path is on read-only media. Asked by the surface before a
+         * change, so it can answer with the code a disc answers with; a path
+         * on no drive at all is not, and fails however it fails.
+         *
+         * @param {string} path
+         * @returns {boolean}
+         */
+        writeProtected: path=>attempt(
+            ()=>fs.volume?.(fs.resolve(path).drive)?.readOnly === true, false),
 
         currentDirectory: ()=>fs.currentDirectory(),
         /** @param {string} path */

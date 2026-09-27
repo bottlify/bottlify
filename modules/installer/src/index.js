@@ -19,6 +19,10 @@
  *     const prefix = collectFrom(app, media);            // this is what it produced
  *     await publish({ prefix, manifest: { windows } });  // and this is the bottle
  *
+ * A disc image takes `discOptions` in place of the first two: the image is
+ * mounted as a CD-ROM drive of its own and the program it names runs from
+ * there (`disc.js`), so nothing of it is seeded and nothing is subtracted.
+ *
  * `silentOptions` is the engine's own unattended mode, asked for only by a run
  * with no screen (`{ silent: true }`, with createApp's `unattended` beside it),
  * when its family is recognised: a command line and the files it reads its
@@ -32,6 +36,7 @@
  */
 
 import { REGISTRY_PATH, collect, prefixOptions } from './prefix.js';
+import { isDiscMedia } from './disc.js';
 import { packBundle } from './pack.js';
 import { finish, partSink } from './upload.js';
 import { windowsChoice } from './windows.js';
@@ -39,6 +44,10 @@ import { windowsChoice } from './windows.js';
 export { MEDIA_DIRECTORY, REGISTRY_PATH, chooseRoot, collect, guessEntry, prefixOptions }
     from './prefix.js';
 export { DEFAULT_BLOCK_SIZE, packBundle, packBlock, sha256 } from './pack.js';
+export {
+    DISC_LETTER, autorunText, discEntry, discOptions, isDiscImage, isDiscMedia, readAutorun,
+    splitCommand,
+} from './disc.js';
 export {
     DESTINATION, detectFamily, dialogCalled, responseFile, responseFileV5, silentOptions,
 } from './silent.js';
@@ -88,7 +97,7 @@ export async function storageHeadroom(){
  * would mean copying the whole tree out of the volume twice.
  *
  * @param {InstalledApp} app
- * @param {import('./prefix.js').InstallMedia} media
+ * @param {import('./prefix.js').InstallMedia | import('./disc.js').DiscMedia} media
  * @param {string} [root]  Overrides the chosen installation root.
  * @returns {import('./prefix.js').Prefix}
  */
@@ -96,7 +105,8 @@ export function collectFrom(app, media, root){
     return collect({
         files: app.session.export(),
         registry: app.registry().toJSON(),
-        seeded: prefixOptions(media).seeded,
+        // A disc is a drive of its own and was never in the prefix.
+        seeded: isDiscMedia(media) ? [] : prefixOptions(media).seeded,
         root,
     });
 }

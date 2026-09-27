@@ -34,6 +34,7 @@
     ".": "./dist/core.js",
     "./bundle": "./src/bundle.js",
     "./bundle/node": "./src/bundle-node.js",
+    "./iso": "./src/iso.js",
     "./engine.worker.js": "./dist/engine.worker.js",
     "./worklet.js": "./dist/worklet.js",
     "./libv86.mjs": "./dist/vendor/libv86.mjs",
@@ -48,7 +49,11 @@
     "src/bundle.js",
     "src/bundle-node.js",
     "src/layers/filesystem/internal/bundle/format.js",
-    "src/layers/filesystem/internal/bundle/crc32.js"
+    "src/layers/filesystem/internal/bundle/crc32.js",
+    "src/iso.js",
+    "src/layers/filesystem/internal/iso/iso9660.js",
+    "src/layers/filesystem/internal/paths.js",
+    "src/layers/filesystem/internal/errors.js"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",

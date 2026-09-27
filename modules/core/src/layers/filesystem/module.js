@@ -82,10 +82,14 @@ export function createFilesystemModule(){
              * own drives and open files.
              *
              * @type {{ drives: Map<string, any>, writables: Map<string, any>,
-             *     directories: any, files: any, disposed: boolean }}
+             *     volumes: Map<string, any>, directories: any, files: any, disposed: boolean }}
              */
             const state = {
                 drives: new Map(),
+                // What each drive says of itself as a volume: a disc names its
+                // kind, its label and its serial; a drive that says nothing is
+                // the machine's own disk.
+                volumes: new Map(),
                 // Each drive's writable layer, kept across a remount: mounting a
                 // bundle on a drive puts its files under what is already written
                 // there -- the machine's own directories, made before the game
@@ -135,9 +139,18 @@ export function createFilesystemModule(){
                 {
                     throw fsError(ErrorCode.INVALID_PATH, `"${letter}" is not a drive letter`);
                 }
-                const writable = stores?.writable ?? state.writables.get(key)
-                    ?? createMemoryStore();
-                state.writables.set(key, writable);
+                const readOnly = stores?.readOnly === true;
+                // Read-only media has a writable layer only because the overlay
+                // is built around one; nothing ever lands in it, and it is not
+                // the one a later writable mount of the letter finds.
+                const writable = readOnly
+                    ? createMemoryStore()
+                    : stores?.writable ?? state.writables.get(key) ?? createMemoryStore();
+                if (!readOnly)
+                {
+                    state.writables.set(key, writable);
+                }
+                state.volumes.set(key, { ...stores?.volume, readOnly });
                 state.drives.set(key, createOverlay({
                     source: stores?.source ?? null,
                     // The engine's own volume, beneath every bundle: what a host
@@ -146,6 +159,7 @@ export function createFilesystemModule(){
                     // which is how a test drives it without a module around it.
                     system: stores?.system ?? config?.system ?? null,
                     writable,
+                    readOnly,
                     now: config?.now,
                     onChanged: (/** @type {any} */ change)=>{
                         changes.set(`${key}:${change.path}`, {
@@ -347,6 +361,23 @@ export function createFilesystemModule(){
 
                 /** @returns {string[]} */
                 drives: ()=>live() ? [...state.drives.keys()] : [],
+
+                /**
+                 * What a drive says of itself as a volume, as it was mounted:
+                 * `readOnly`, and for a disc its `kind` (`'cdrom'`), `label`,
+                 * `serial`, `size` in bytes and whether its names are `unicode`.
+                 * Null for a letter nothing is mounted under.
+                 *
+                 * @param {string} letter
+                 * @returns {Record<string, any> | null}
+                 */
+                volume(letter){
+                    if (!live())
+                    {
+                        return null;
+                    }
+                    return state.volumes.get(String(letter).slice(0, 1).toUpperCase()) ?? null;
+                },
 
                 /**
                  * Resolves a path without touching the volume. This is what a
@@ -620,7 +651,12 @@ export function createFilesystemModule(){
             const volumes = {};
             for (const [letter, tree] of instance.drives)
             {
-                volumes[`${letter}:`] = tree.diagnostics();
+                const described = instance.volumes.get(letter);
+                volumes[`${letter}:`] = {
+                    ...tree.diagnostics(),
+                    ...described?.readOnly ? { readOnly: true } : {},
+                    ...described?.kind ? { kind: described.kind, label: described.label } : {},
+                };
             }
             return {
                 name: 'filesystem',

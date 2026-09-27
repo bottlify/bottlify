@@ -993,6 +993,7 @@ export function createWin32Module(){
                         readCString, readWideString, readMemory, writeMemory,
                         setLastError: setError,
                         drives: ()=>filesystem.drives(),
+                        volume: (/** @type {string} */ letter)=>filesystem.volume?.(letter) ?? null,
                     }),
                     ...createMappingFunctions({
                         readMemory,

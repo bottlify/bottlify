@@ -160,6 +160,13 @@ export function createFileTable({ limit = 4096 } = {}){
             {
                 throw fsError(ErrorCode.ACCESS_DENIED, 'Too many files open');
             }
+            // Read-only media refuses the access itself, whether or not the
+            // file is there; creating or emptying one is refused by the tree.
+            if (access.write && tree.readOnly)
+            {
+                throw fsError(ErrorCode.WRITE_PROTECTED,
+                    `"${components.join('\\')}" is on read-only media`);
+            }
             const existing = tree.stat(components);
             if (existing?.directory)
             {

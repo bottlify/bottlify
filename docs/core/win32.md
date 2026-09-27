@@ -522,6 +522,28 @@ duplicated file handle does, so a program may close the file, the mapping and th
 order and the file closes with the last of them. The standard handles are never files: writing to
 them goes to `onOutput`.
 
+### Drives and discs
+
+`kernel32/drives.js` answers for the volumes. The machine's own disk is a fixed drive
+(`DRIVE_FIXED`), labelled `Bottlify`, on `NTFS`, with invented free space large enough to refuse no
+installation. A disc image mounted as a drive (`discs`, [`host.md`](./host.md)) is what it is: a
+CD-ROM (`DRIVE_CDROM`), and `GetVolumeInformationA`/`W` answer with the disc's own label and serial
+number ([`filesystem.md`](./filesystem.md), "Disc images"), the file system `CDFS`, a longest name
+of 110 characters on a Joliet disc and 221 on one without, and the flags `FILE_CASE_SENSITIVE_SEARCH`,
+`FILE_UNICODE_ON_DISK` (Joliet only) and `FILE_READ_ONLY_VOLUME`. `GetDiskFreeSpace` reports it
+full, 2048-byte sectors one to a cluster, as large as the disc; `SetVolumeLabel` on it fails with
+`ERROR_WRITE_PROTECT`.
+
+On the disc every name is read-only (`FILE_ATTRIBUTE_READONLY`, files and directories alike, and
+no archive bit), a name the disc records as hidden is hidden, and a file's time is the disc's
+recording time (`kernel32/filetime.js`'s `fileAttributes`, used by `GetFileAttributes`,
+`FindFirstFile` and `GetFileInformationByHandle`). Every change aimed at it -- `CreateFile` asking
+for write access or to create or empty a file, `CreateDirectory`, `DeleteFile`, `RemoveDirectory`,
+`MoveFile` off or onto it, `CopyFile` onto it, `SetFileAttributes`, `OpenFile`, `_lopen` and
+`_lcreat` for writing -- fails with `ERROR_WRITE_PROTECT` (19), the device's refusal, rather than
+`ERROR_ACCESS_DENIED`; `vfs.writeProtected(path)` is how the surface knows. Reading, and copying
+off the disc, are as on any drive.
+
 ### Time and its clock source
 
 Two clocks, both the kernel's ([`kernel.md`](./kernel.md)):
@@ -830,6 +852,14 @@ Stated as the code states them.
   `HKLM\SYSTEM\CurrentControlSet\Control\Setup\OsComponents\{GUID}`, a place of this build's
   choosing rather than a documented one, and one never registered is `ERROR_FILE_NOT_FOUND`,
   the code its callers test for. The wide (`W`) spellings do not exist.
+- **A disc refuses as the device, and some of its answers were not measured.** Every change on a
+  disc is `ERROR_WRITE_PROTECT` before its name is looked up, so `CreateFile` with `CREATE_NEW` on a
+  name the disc has is `ERROR_FILE_EXISTS` only because that is checked first here; which of the
+  two Windows gives there, and the longest-name and flag values `GetVolumeInformation` reports for
+  a disc, are how the CD-ROM file system is known to answer, not something measured here. `GetFileInformationByHandle`
+  gives a file on the disc the machine's own serial number, and the C runtime's `_access` and
+  `_stat` do not see that a file on it is read-only. There is no media change: one image per drive,
+  as long as the program runs.
 - **WINTRUST verifies Authenticode files and nothing else.** An action other than
   `WINTRUST_ACTION_GENERIC_VERIFY_V2` is `TRUST_E_PROVIDER_UNKNOWN`, and a subject other than a
   file (a catalog member, a blob, a signer, a certificate) `TRUST_E_SUBJECT_FORM_UNKNOWN`, each
@@ -856,7 +886,7 @@ Unit tests are colocated with each file, `node:test`, over `fakeMemory`
 
 | area | files (all `src/layers/win32/…`) |
 |------|----------------------------------|
-| kernel32 | `apc`, `atoms`, `code-arena`, `consoleio`, `critical`, `drives`, `environment`, `file-holds`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `modules`, `named-objects`, `process`, `processor`, `profile`, `resources`, `seh`, `slimsync`, `spawn`, `sync`, `system`, `teb`, `threading`, `versions`, `vfs` `.test.js` |
+| kernel32 | `apc`, `atoms`, `code-arena`, `consoleio`, `critical`, `disc`, `drives`, `environment`, `file-holds`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `modules`, `named-objects`, `process`, `processor`, `profile`, `resources`, `seh`, `slimsync`, `spawn`, `sync`, `system`, `teb`, `threading`, `versions`, `vfs` `.test.js` |
 | msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `globals`, `heap`, `io`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `stdio`, `strings`, `threads`, `time`, `widetext` `.test.js` |
 | user32 | `controls`, `cursors`, `dialogs`, `display`, `keys`, `messages`, `objects`, `paint`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |
