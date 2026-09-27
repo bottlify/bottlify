@@ -352,7 +352,127 @@ test('a NULL variant is rejected rather than written through', ()=>{
     assert.equal(call('VariantChangeType', [VARIANT_B, 0, 0, VT_I4]), E_INVALIDARG);
 });
 
-test('an interface a variant held is dropped, and the difference is reported', ()=>{
+/** Two objects in guest memory, `a` and `b`, and a vtable each. */
+const OBJECT_A = 0x6000;
+const OBJECT_B = 0x6010;
+
+/**
+ * Functions whose calls into the guest are written down: each object's
+ * AddRef and Release is an entry of its own, so the log says which object
+ * was counted which way, in the order it happened.
+ *
+ * @returns {string[]}
+ */
+const counting = ()=>{
+    setUp();
+    /** @type {Map<number, { name: string, object: number }>} */
+    const entries = new Map();
+    for (const [object, name] of /** @type {[number, string][]} */ ([[OBJECT_A, 'a'],
+        [OBJECT_B, 'b']]))
+    {
+        const vtable = object + 0x100;
+        host.putU32(object, vtable);
+        host.putU32(vtable + 4, 0xa0000 + object);
+        host.putU32(vtable + 8, 0xb0000 + object);
+        entries.set(0xa0000 + object, { name: `AddRef ${name}`, object });
+        entries.set(0xb0000 + object, { name: `Release ${name}`, object });
+    }
+    /** @type {string[]} */
+    const calls = [];
+    fx = createAutomationFunctions({
+        ...host,
+        /** @param {number} entry @param {number[]} args */
+        call: (entry, args)=>{
+            const called = entries.get(entry);
+            assert.ok(called, `0x${entry.toString(16)} is no AddRef or Release`);
+            assert.deepEqual(args, [called.object], 'this is the object called');
+            calls.push(called.name);
+            return Promise.resolve(0);
+        },
+    });
+    return calls;
+};
+
+/** @param {string} name @param {number[]} args */
+const settled = async(name, args)=>(await fx[name].handler(args)) >>> 0;
+
+test('VariantClear gives back the reference a variant held, through the object\'s Release',
+    async()=>{
+        const calls = counting();
+        host.putVariant(VARIANT_A, VT_UNKNOWN, OBJECT_A);
+        assert.equal(await settled('VariantClear', [VARIANT_A]), S_OK);
+        assert.equal(host.u16(VARIANT_A), VT_EMPTY);
+        assert.deepEqual(calls, ['Release a']);
+
+        host.putVariant(VARIANT_A, VT_UNKNOWN, 0);
+        assert.equal(await settled('VariantClear', [VARIANT_A]), S_OK);
+        host.putVariant(VARIANT_A, VT_UNKNOWN | VT_BYREF, SLOT);
+        assert.equal(await settled('VariantClear', [VARIANT_A]), S_OK);
+        assert.deepEqual(calls, ['Release a'], 'a null pointer or a reference owns nothing');
+    });
+
+test('a copy of a variant holds a reference of its own, and the one it replaced is given back',
+    async()=>{
+        const calls = counting();
+        host.putVariant(VARIANT_A, VT_UNKNOWN, OBJECT_A);
+        host.putVariant(VARIANT_B, VT_UNKNOWN, OBJECT_B);
+        assert.equal(await settled('VariantCopy', [VARIANT_B, VARIANT_A]), S_OK);
+        assert.equal(host.u32(VARIANT_B + 8), OBJECT_A);
+        assert.deepEqual(calls, ['AddRef a', 'Release b']);
+
+        calls.length = 0;
+        host.putVariant(VARIANT_B, VT_EMPTY, 0);
+        assert.equal(await settled('VariantChangeType', [VARIANT_B, VARIANT_A, 0, VT_UNKNOWN]),
+            S_OK);
+        assert.equal(await settled('VariantCopyInd', [VARIANT_B, VARIANT_A]), S_OK);
+        assert.deepEqual(calls, ['AddRef a', 'AddRef a', 'Release a'],
+            'a conversion and VariantCopyInd copy as VariantCopy does');
+    });
+
+test('a variant copied or converted onto itself keeps the count it had', async()=>{
+    const calls = counting();
+    host.putVariant(VARIANT_A, VT_UNKNOWN, OBJECT_A);
+    assert.equal(await settled('VariantCopy', [VARIANT_A, VARIANT_A]), S_OK);
+    assert.equal(await settled('VariantCopyInd', [VARIANT_A, VARIANT_A]), S_OK);
+    assert.deepEqual(calls, []);
+    assert.equal(await settled('VariantChangeType', [VARIANT_A, VARIANT_A, 0, VT_UNKNOWN]), S_OK);
+    assert.deepEqual(calls, ['AddRef a', 'Release a'], 'taken before it is given back');
+    assert.equal(host.u32(VARIANT_A + 8), OBJECT_A);
+});
+
+test('a SAFEARRAY holds a reference to every interface in it, as its elements or in its variants',
+    async()=>{
+        const calls = counting();
+        const BOUNDS = 0x3000;
+        const INDEX = 0x3040;
+        host.putU32(BOUNDS, 2);
+        host.putU32(BOUNDS + 4, 0);
+        const interfaces = call('SafeArrayCreate', [VT_UNKNOWN, 1, BOUNDS]);
+        host.putU32(INDEX, 0);
+        assert.equal(await settled('SafeArrayPutElement', [interfaces, INDEX, OBJECT_A]), S_OK);
+        assert.equal(await settled('SafeArrayPutElement', [interfaces, INDEX, OBJECT_B]), S_OK);
+        assert.deepEqual(calls, ['AddRef a', 'AddRef b', 'Release a'], 'put over another');
+        calls.length = 0;
+        assert.equal(await settled('SafeArrayGetElement', [interfaces, INDEX, SLOT]), S_OK);
+        assert.equal(host.u32(SLOT), OBJECT_B);
+        assert.equal(await settled('SafeArrayCopy', [interfaces, SLOT]), S_OK);
+        const copy = host.u32(SLOT);
+        assert.deepEqual(calls, ['AddRef b', 'AddRef b'], 'what is got and what is copied');
+        calls.length = 0;
+        assert.equal(await settled('SafeArrayDestroy', [interfaces]), S_OK);
+        assert.equal(await settled('SafeArrayDestroy', [copy]), S_OK);
+        assert.deepEqual(calls, ['Release b', 'Release b']);
+
+        calls.length = 0;
+        const variants = call('SafeArrayCreate', [12, 1, BOUNDS]);
+        host.putVariant(VARIANT_A, VT_UNKNOWN, OBJECT_A);
+        host.putU32(INDEX, 1);
+        assert.equal(await settled('SafeArrayPutElement', [variants, INDEX, VARIANT_A]), S_OK);
+        assert.equal(await settled('SafeArrayDestroy', [variants]), S_OK);
+        assert.deepEqual(calls, ['AddRef a', 'Release a']);
+    });
+
+test('without a way into guest code a reference is left as it was, and that is reported', ()=>{
     setUp();
     host.putVariant(VARIANT_A, VT_UNKNOWN, 0x4444);
 
@@ -360,7 +480,7 @@ test('an interface a variant held is dropped, and the difference is reported', (
     assert.equal(host.u16(VARIANT_A), VT_EMPTY);
     // Accepting a call and not doing all of it is the defect class that shows
     // up as behaviour rather than as an error, so it has to be said out loud.
-    assert.ok(host.said.some(line=>line.includes('Release')),
+    assert.ok(host.said.some(line=>line.includes('not counted')),
         `nothing reported the missing Release: ${JSON.stringify(host.said)}`);
 });
 
