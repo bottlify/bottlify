@@ -352,9 +352,16 @@ it. A loop of each call under cork in node, four machines one after another in a
 processes, the median of the first machines and of the later ones (N 2M, load 3.4-4.4), the tree
 before and this one: `GetCurrentThreadId` 262 and 427 ns a turn before, 264 and 346 after;
 `lstrlenA` 590/782 -> 554/674; `lstrcmpA` 730/1024 -> 732/872; `MulDiv` 366/497 -> 358/383.
-What a later machine still pays is its calls into the other layers' closures -- the engine's trap
-route, the memory layer's reads, the kernel's current thread -- and the handlers' own code, which
-is subject to the same thing.
+With the reads and the charge below made through classes and cells as well, and the sink
+asked once a function, the same loops against the tree before all three (load 2.1-4.6):
+`GetCurrentThreadId` 262/433 -> 237/236, `lstrlenA` 583/838 -> 560/622, `lstrcmpA` 736/1003 ->
+698/808, `MulDiv` 343/500 -> 318/297, `glColor4f` 965/1148 -> 793/840 (most of it its handler's
+own). What a later machine still pays is in the closures of the layers the crossing calls and is
+called from, each machine's own: the engine's trap route (cork's `raiseTrap` and the cpu layer's
+wrapper around the bridge's handler: under the profiler, 24 ns of self time a `lstrcmpA` in a
+first machine and 66 in a second), the kernel's current thread, and the handlers' own code -- a
+string handler's reads go through the memory layer's accessors and the host's `readPhysical`,
+which `--trace-opt` shows optimised afresh in every machine.
 
 ### Parking (`internal/parking.js`)
 
