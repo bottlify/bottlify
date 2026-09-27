@@ -242,6 +242,13 @@ export function interpret(state, maxInstructions = 1, options = {}){
             const run = runAt(state, cache);
             if (run.refused !== null)
             {
+                // An encoding that is no instruction is the program's #UD, which
+                // its own handler may answer; one this engine does not know is
+                // the engine's gap.
+                if (run.refused.invalid)
+                {
+                    throw new Fault(6, run.refused.eip);
+                }
                 throw new Unsupported(run.refused.opcode, run.refused.eip);
             }
             onStep?.(run.start, run.start !== fallthrough);

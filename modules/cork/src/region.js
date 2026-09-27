@@ -612,6 +612,7 @@ export function formRegion(read, entry,
                         kind: 'refused', targets: [], next: previous.eip, backEdge: false,
                         refusal: {
                             refused: true, eip: previous.eip, opcode: '00 00', reason: 'zero fill',
+                            invalid: false,
                         },
                     };
                     break;

@@ -168,6 +168,13 @@ test('asked runs the first run without the question and asks from the next on', 
     assert.deepEqual(asked, [0x1006]);
 });
 
+test('an encoding that is no instruction raises #UD at it, for the program to answer', ()=>{
+    const m = machine();
+    m.ram.set([0x90, 0xff, 0xff], 0x1000); // nop; ff /7
+    assert.throws(()=>interpret(m.state, 10),
+        (/** @type {any} */ e)=>e instanceof Fault && e.vector === 6 && e.eip === 0x1001);
+});
+
 test('an instruction with no model throws Unsupported', ()=>{
     // A form no user program runs and the evaluator has no case for: sldt.
     const m = machine();

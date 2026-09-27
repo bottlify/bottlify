@@ -346,7 +346,7 @@ test('bound decodes its register form too, as the emulator consumes it', ()=>{
 
 test('the refusals name the opcode and the reason', ()=>{
     assert.deepEqual(refused([0xff, 0xf8]),
-        { refused: true, eip: 0, opcode: 'ff /7', reason: 'not in table' });
+        { refused: true, eip: 0, opcode: 'ff /7', reason: 'not in table', invalid: true });
     assert.deepEqual(refused([0xea, 0, 0, 0, 0, 0, 0]).reason, 'not user mode');
     assert.equal(refused([0x0f, 0x01, 0x10]).reason, 'not user mode');
     assert.equal(refused([0x0f, 0x38, 0x00, 0xc1]).opcode, '0f 38');
@@ -355,6 +355,12 @@ test('the refusals name the opcode and the reason', ()=>{
     assert.equal(refused([0xf0, 0x01, 0xc0]).reason, 'lock on a register form');
     assert.equal(refused([0x8e, 0xf8]).reason, 'no such segment register');
     assert.equal(refused(new Array(16).fill(0x66)).reason, 'longer than fifteen bytes');
+    // Which of them a processor rejects with #UD, as against a form this
+    // decoder does not know: an SSE4 op is an instruction, ff /7 is none.
+    assert.equal(refused([0xff, 0xf8]).invalid, true);
+    assert.equal(refused([0x8d, 0xc0]).invalid, true, 'lea of a register');
+    assert.equal(refused([0x0f, 0x38, 0x00, 0xc1]).invalid, false);
+    assert.equal(refused([0xea, 0, 0, 0, 0, 0, 0]).invalid, false);
     const sixtyFour = decode(()=>0x90, 0, { bits: 64 });
     assert.ok('refused' in sixtyFour);
 });
