@@ -772,6 +772,21 @@ export function createWindowFunctions(host){
     /** @type {Map<number, SentMessage[]>} */
     const answered = new Map();
     /**
+     * The threads that have a message queue: made a window, or looked at
+     * their queue. A thread's queue is made the first time it needs one.
+     *
+     * @type {Set<number>}
+     */
+    const queueing = new Set();
+    /** @param {unknown} thread */
+    const hasQueue = thread=>{
+        const id = threadIdOf(thread);
+        if (id !== null)
+        {
+            queueing.add(id);
+        }
+    };
+    /**
      * The sent messages a thread's procedures are inside, innermost last:
      * what InSendMessage and ReplyMessage answer about.
      *
@@ -1969,6 +1984,7 @@ export function createWindowFunctions(host){
         }
         record.hwnd = host.handles.open('window', record);
         windows.set(record.hwnd, record);
+        hasQueue(record.thread);
         if ((record.style & WS_VISIBLE) !== 0)
         {
             appear(record);
@@ -3832,6 +3848,7 @@ export function createWindowFunctions(host){
     const peekMessage = ([out, hwnd, filterMin, filterMax, removeFlag], unicode)=>{
         const remove = (removeFlag & PM_REMOVE) !== 0;
         const thread = host.callerThread?.();
+        hasQueue(thread);
         const filter = { hwnd: windowFilter(hwnd), first: filterMin >>> 0,
             last: filterMax >>> 0, remove, thread: threadIdOf(thread) };
         // Only a message taken activates: a look leaves the press,
@@ -3868,6 +3885,7 @@ export function createWindowFunctions(host){
             return -1;
         }
         const thread = host.callerThread?.();
+        hasQueue(thread);
         const wanted = { hwnd: filter, first: filterMin >>> 0, last: filterMax >>> 0,
             remove: true, thread: threadIdOf(thread) };
         const next = ()=>andThen(receiveSent(thread), ()=>takeThrough(wanted, thread));
@@ -4565,6 +4583,34 @@ export function createWindowFunctions(host){
             },
         },
 
+        /**
+         * BOOL AttachThreadInput(DWORD idAttach, DWORD idAttachTo, BOOL fAttach)
+         *
+         * Joins two threads' input state, or parts them. The focus, the active
+         * window and the capture are one for the whole process here, which is
+         * every thread already attached to every other, so what is left is
+         * the refusal: a thread attached to itself, one that does not exist,
+         * or one that has no message queue yet -- no window made, no look at
+         * a queue -- is ERROR_INVALID_PARAMETER.
+         */
+        AttachThreadInput: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([from, to])=>{
+                const one = from >>> 0;
+                const other = to >>> 0;
+                const exists = (/** @type {number} */ id)=>(host.threadExists
+                    ? host.threadExists(id) : id !== 0);
+                if (one === other || !exists(one) || !exists(other)
+                    || !queueing.has(one) || !queueing.has(other))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
         /** BOOL PostMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) */
         PostMessageA: {
             argBytes: 16,
@@ -4729,6 +4775,7 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([flags])=>{
                 const mask = flags >>> 0;
+                hasQueue(host.callerThread?.());
                 const { inQueue, changed } = host.queue.status(
                     threadIdOf(host.callerThread?.()), mask);
                 return (((inQueue & mask) << 16) | (changed & mask)) >>> 0;
@@ -4811,6 +4858,7 @@ export function createWindowFunctions(host){
                 const wait = timeout >>> 0;
                 const mask = wakeMask >>> 0;
                 const waiter = threadIdOf(host.callerThread?.());
+                hasQueue(host.callerThread?.());
                 const input = ()=>((inputAvailable
                     ? host.queue.waiting(waiter) : host.queue.news(waiter)) & mask) !== 0;
                 /** @param {number} milliseconds */
@@ -4901,6 +4949,7 @@ export function createWindowFunctions(host){
             argBytes: 0,
             handler: ()=>{
                 const waiter = threadIdOf(host.callerThread?.());
+                hasQueue(host.callerThread?.());
                 const look = ()=>(waiter !== null && (inbox.get(waiter)?.length ?? 0) > 0)
                     || host.queue.peek({
                         hwnd: ANY_WINDOW, first: 0, last: 0, remove: false, thread: waiter,

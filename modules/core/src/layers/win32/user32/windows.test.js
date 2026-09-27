@@ -2724,6 +2724,28 @@ test('SendNotifyMessage leaves another thread\'s window a message and does not w
     assert.equal(fns.SendNotifyMessageA.handler([0x9999, WM_USER, 0, 0]), 0, 'no window');
 });
 
+test('AttachThreadInput joins two threads with queues, and refuses one without', ()=>{
+    // input.c's test_AttachThreadInput: a thread that has made no window and
+    // looked at no queue has none to attach, and neither has a thread that
+    // does not exist; a thread is not attached to itself.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (main) };
+    const { fns, memory, errors } = setup({ caller, threadExists: id=>id === 1 || id === 2 });
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    assert.equal(fns.AttachThreadInput.handler([1, 2, 1]), 0, 'the worker has no queue yet');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+
+    caller.current = worker;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    createWindow(fns, memory);
+    assert.equal(fns.AttachThreadInput.handler([1, 2, 1]), 1);
+    assert.equal(fns.AttachThreadInput.handler([2, 1, 0]), 1);
+    assert.equal(fns.AttachThreadInput.handler([2, 2, 1]), 0, 'not to itself');
+    assert.equal(fns.AttachThreadInput.handler([2, 7, 1]), 0, 'nor to nobody');
+});
+
 test('PostThreadMessageA refuses a thread that does not exist, and says why', ()=>{
     const { fns, queue, errors } = setup({ threadExists: id=>id === 0x88 });
     assert.equal(fns.PostThreadMessageA.handler([0x99, WM_USER, 0, 0]), 0);
