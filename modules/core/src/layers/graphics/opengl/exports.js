@@ -1342,7 +1342,10 @@ export function createOpengl(services){
 
         // --- the error flag and the strings ---
 
-        glGetError: ()=>current()?.glGetError() ?? GL.NO_ERROR,
+        // With no context current there is nothing to have no error: Windows
+        // answers GL_INVALID_OPERATION (Wine's opengl32 test, before its first
+        // context).
+        glGetError: ()=>current()?.glGetError() ?? GL.INVALID_OPERATION,
 
         glGetString: ([name])=>guestString(current()?.glGetString(name >>> 0)),
 

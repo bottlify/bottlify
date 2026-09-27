@@ -489,6 +489,9 @@ export function createGraphicsModule(){
                     // would be lost to the next.
                     /** @param {number} hdc */
                     describeDrawable: hdc=>win32.gdi().describeDrawable(hdc),
+                    // WGL's refusals are read with GetLastError.
+                    /** @param {number} code */
+                    setLastError: code=>win32.setLastError?.(code),
                     // On the configuration rather than the device handle: it
                     // concerns the build that has no device.
                     raster: config?.raster,

@@ -2121,6 +2121,14 @@ export function createWin32Module(){
                  * allocators hand out the same address.
                  */
                 heap: ()=>heap,
+                /**
+                 * Sets the calling thread's last error, as SetLastError does:
+                 * for a layer outside win32 whose calls a program checks with
+                 * GetLastError, as it does WGL's.
+                 *
+                 * @param {number} code
+                 */
+                setLastError: code=>setError(code),
                 /** Views of files: how many were mapped, waited for their bytes, or failed. */
                 mappings: ()=>mappings,
 
