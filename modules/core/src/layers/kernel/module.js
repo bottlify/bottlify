@@ -110,7 +110,8 @@ export function createKernelModule(){
              * own threads, sync objects and handles.
              *
              * @type {{ scheduler: any, sync: any, handles: any, clock: any, switcher: any,
-             *          processes: any, stacks: any, disposed: boolean, resumeLog: string[] }}
+             *          processes: any, stacks: any, disposed: boolean, resumeLog: string[],
+             *          refreshClock: (() => void) | undefined }}
              */
             const state = {
                 stacks,
@@ -121,6 +122,7 @@ export function createKernelModule(){
                 switcher: null,
                 processes: null,
                 disposed: false,
+                refreshClock: undefined,
                 // The last parks, holds and scheduled resumes, newest last: what a
                 // thread that sits in the park loop is read by.
                 resumeLog: [],
@@ -165,6 +167,18 @@ export function createKernelModule(){
             if (typeof log.metrics?.onFrame === 'function')
             {
                 log.metrics.onFrame(()=>state.scheduler.publish());
+            }
+            // With `preemption` on, a slice ends between chunks of translated
+            // code once a thread of higher priority comes due, as Windows
+            // preempts for one (`preemptionDue`). Off by default: measured on
+            // the Warcraft III demo it ended ~8 000 slices early for Miles'
+            // TIME_CRITICAL mixer and changed nothing heard in a browser, where
+            // the mixer's lateness is collection pauses outside any slice; and
+            // the chunked budget it needs has not been measured for speed.
+            if (config?.preemption === true)
+            {
+                cpu.setYieldCheck?.(()=>!state.disposed
+                    && state.scheduler.preemptionDue(state.refreshClock));
             }
             state.sync = createSyncObjects({ scheduler: state.scheduler });
             state.handles = createHandleTable();
@@ -335,6 +349,17 @@ export function createKernelModule(){
                     thread.resumeRegisters = registers ?? null;
                 },
                 currentThread: ()=>live() ? state.scheduler.current() : null,
+                /** Whether a thread of higher priority is due the processor now (see the scheduler). */
+                preemptionDue: ()=>live() && state.scheduler.preemptionDue(state.refreshClock),
+                /**
+                 * How the guest's clock is brought up to the host's between turns,
+                 * so a wait can come due inside a slice (see `preemptionDue`).
+                 *
+                 * @param {() => void} refresh
+                 */
+                refreshClockWith(refresh){
+                    state.refreshClock = refresh;
+                },
                 threads: ()=>live() ? state.scheduler.all() : [],
 
                 /** @param {number} address @param {number} id */

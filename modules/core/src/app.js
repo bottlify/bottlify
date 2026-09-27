@@ -174,6 +174,8 @@ import { createReplicas } from './replicas.js';
  *     measuring the emulator's own compiler rather than the guest's code.
  * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
  *           it is what makes `sample` a profile rather than a rumour.
+ * @property {boolean} [preemption]  End a slice early when a thread of higher
+ *           priority comes due, as Windows preempts (the kernel's option; off).
  * @property {(eip: number, instructions: number) => void} [sample]
  *           Called with the guest's instruction pointer at every turn boundary.
  *           This is the only view of what a program is doing between host calls,
@@ -2958,6 +2960,8 @@ async function buildApp(options){
             // gets a turn. Lowering it is how a sampled profile gets enough
             // points to say anything; raising it costs nothing but resolution.
             quantum: options.quantum,
+            // Off unless asked for: see the kernel's `preemption`.
+            preemption: options.preemption,
             // Every thread gets the stack the image was linked to expect, the
             // way Windows does -- not a fixed small one. A program that recurses
             // in a worker thread, or builds a large structure on its stack,
@@ -5293,6 +5297,7 @@ async function buildApp(options){
      */
     const CLOCK_CREDIT_CAP_MS = 250;
     const creditClock = clockCredit(clockSource, clock, CLOCK_CREDIT_CAP_MS);
+    kernel.refreshClockWith?.(()=>creditClock());
 
     const breathe = createMacrotask();
     const pacing = options.pacing ?? pagePacing({

@@ -133,6 +133,8 @@ export function createScheduler(options){
     const starvation = options.starvation ?? 4000;
     /** Turns given to a thread because it had been passed over too long. */
     let boosts = 0;
+    /** Slices ended early for a thread of higher priority that came due. */
+    let preemptions = 0;
     /** The last long gaps a short-period thread went without the processor. @type {string[]} */
     const lateGaps = [];
     /**
@@ -286,6 +288,15 @@ export function createScheduler(options){
      * @type {number | null}
      */
     let noDeadlineBefore = null;
+
+    /**
+     * The threads that were ready when the running slice began: a thread
+     * among them was passed over by the choice that started it, and does not
+     * take the processor back mid-slice (see `preemptionDue`).
+     *
+     * @type {Set<any>}
+     */
+    const readyAtSlice = new Set();
 
     /**
      * A due time the clock honours whether or not a thread is waiting for it.
@@ -461,6 +472,59 @@ export function createScheduler(options){
         /** @returns {any} the thread on the CPU, or null */
         current: ()=>current,
 
+        /**
+         * Whether the running thread should give the processor up at the host
+         * call it is in: a thread of higher priority became ready during this
+         * slice -- its timed wait came due, or the running thread set what it
+         * waited on. Windows preempts such a thread at once; a slice here is
+         * guest instructions, and one full of host calls ran 40-120 ms while a
+         * sound mixer woken every 10 ms waited for it to end. A thread that was
+         * already ready when the slice began does not count: it was passed over
+         * by the choice that started the slice.
+         *
+         * The guest's clock is moved on by the turn, so within a slice no wait
+         * comes due by itself: `refresh` brings it up to the host's first --
+         * only when a thread of higher priority is waiting at all, which keeps
+         * the look free for the many machines that have none.
+         *
+         * @param {() => void} [refresh]
+         * @returns {boolean}
+         */
+        preemptionDue(refresh){
+            if (current === null || current.state !== ThreadState.RUNNING)
+            {
+                return false;
+            }
+            const mine = absolutePriority(current.priority);
+            let waiting = false;
+            for (const thread of threads)
+            {
+                if (thread !== current && absolutePriority(thread.priority) > mine
+                    && !readyAtSlice.has(thread))
+                {
+                    waiting = true;
+                    break;
+                }
+            }
+            if (!waiting)
+            {
+                return false;
+            }
+            refresh?.();
+            expire();
+            for (const thread of threads)
+            {
+                if (thread !== current && thread.state === ThreadState.READY
+                    && !thread.awaitingHost && !(thread.suspendCount > 0)
+                    && absolutePriority(thread.priority) > mine && !readyAtSlice.has(thread))
+                {
+                    preemptions++;
+                    return true;
+                }
+            }
+            return false;
+        },
+
         /** @returns {any[]} */
         all: ()=>[...threads],
 
@@ -614,6 +678,14 @@ export function createScheduler(options){
             // How long it held the machine is a report's alone, and a
             // production bundle reads no clock for it.
             const began = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? wall() : 0;
+            readyAtSlice.clear();
+            for (const thread of threads)
+            {
+                if (thread !== next && thread.state === ThreadState.READY)
+                {
+                    readyAtSlice.add(thread);
+                }
+            }
             const instructions = cpu.runSlice(quantum);
             const held = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? wall() - began : 0;
             if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
@@ -958,6 +1030,7 @@ export function createScheduler(options){
                 // too long. A steady count is a high-priority thread that
                 // never yields, which a program does not mean to do.
                 boosts,
+                preemptions,
                 // The last gaps past LATE_GAP_MS a short-period thread went
                 // without the processor, and what held the machine meanwhile.
                 lateGaps: lateGaps.join(' | '),

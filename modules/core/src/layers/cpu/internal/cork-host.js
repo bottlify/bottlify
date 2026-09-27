@@ -57,6 +57,13 @@ const DEFAULT_MXCSR = 0x1f80;
  * same flags.
  */
 const DEFAULT_EFLAGS = 0x2;
+/**
+ * Instructions handed to the translated code at a time while a slice may end
+ * early: regions chain inside the wasm, and one call ran a whole slice without
+ * coming back to be asked. Not the quantum -- a slice nobody preempts is these
+ * run back to back to the same total.
+ */
+const YIELD_CHUNK = 10_000;
 /** The flat 32-bit code selector the segments are implicit at. */
 const FLAT_CS = 0x08;
 /**
@@ -211,6 +218,17 @@ export function createCorkHost(config){
     let wasmRetired = 0;
     let halted = false;
     let stopped = false;
+    /**
+     * Asked between regions whether to end the slice early: a thread of
+     * higher priority has come due (the scheduler's `preemptionDue`). A slice
+     * is guest instructions, and one of cold or heavy code ran 100 ms while a
+     * sound mixer woken every 5 ms waited behind it; ending at a region
+     * boundary is ending where the budget would have.
+     *
+     * @type {(() => boolean) | null}
+     */
+    let yieldCheck = null;
+
     // Set when the interpreter notes a hot start: the slice ends there so the
     // layer's feed forms the candidate before the next slice, instead of the
     // whole first pass running interpreted ahead of the translator.
@@ -848,6 +866,10 @@ export function createCorkHost(config){
         let jumpedIn = false;
         while (remaining > 0 && !isHalted() && !isStopped() && !isFeedDue())
         {
+            if (yieldCheck !== null && ran > 0 && yieldCheck())
+            {
+                break;
+            }
             if (translateDue)
             {
                 // Form what the interpreter noted and carry on with the rest
@@ -864,7 +886,8 @@ export function createCorkHost(config){
             const entry = runtime.entryOf(at, x87Top());
             if (entry >= 0)
             {
-                const exit = runtime.run(entry, remaining);
+                const exit = runtime.run(entry,
+                    yieldCheck === null ? remaining : Math.min(remaining, YIELD_CHUNK));
                 jumpedIn = exit.kind === 'untranslated';
                 remaining -= exit.retired;
                 ran += exit.retired;
@@ -1053,6 +1076,10 @@ export function createCorkHost(config){
         },
         stop(){
             stopped = true;
+        },
+        /** @param {(() => boolean) | null} check */
+        setYieldCheck(check){
+            yieldCheck = check;
         },
         runSlice,
 

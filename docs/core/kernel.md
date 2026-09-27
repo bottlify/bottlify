@@ -34,6 +34,7 @@ time,handles,processes,stacks}.js`.
 | option | type | default | meaning |
 |--------|------|---------|---------|
 | `quantum` | number | `100_000` | Retired guest instructions per scheduler turn. Below a page the emulator cannot honour a smaller one. |
+| `preemption` | boolean | `false` | End a slice between 10 000-instruction chunks of translated code once a thread of higher priority comes due (a timed wait expired, or the running thread set what it waited on), as Windows preempts. Off: on the Warcraft III demo it ended thousands of slices early for a TIME_CRITICAL sound mixer and changed nothing heard in a browser, and its cost in speed is unmeasured. |
 | `stacks.base` | number | `0x00300000` | Where the first pool stack is placed (`0x00400000 - 0x00100000`). |
 | `stacks.size` | number | `0x10000` | The default reserve: the stack a thread whose creator asks for no size gets. |
 | `stacks.limit` | number | `Infinity` | Address the pool may not grow past. A stack that fits nowhere below it makes `createThread` answer `null`. |

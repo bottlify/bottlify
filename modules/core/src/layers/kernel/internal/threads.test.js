@@ -312,6 +312,70 @@ test('a deadline set later but sooner is the first to expire, and none expires e
     assert.equal(sched.diagnostics().expiries, 2);
 });
 
+test('a higher-priority thread whose wait comes due mid-slice preempts at the next host call',
+    ()=>{
+        // A sound mixer at TIME_CRITICAL wakes every 10 ms; the thread on the
+        // processor ran a slice of 40-120 ms of host calls, and the mixer
+        // waited for the slice to end -- past the 65 ms it keeps written,
+        // heard as a crackle. Windows preempts at once.
+        let clock = 0;
+        /** @type {boolean[]} */
+        const asked = [];
+        const cpu = fakeCpu();
+        const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000,
+            now: ()=>clock });
+        let host = 0;
+        cpu.runSlice = max=>{
+            asked.push(sched.preemptionDue(()=>{
+                clock = host;
+            }));
+            host = 10;
+            asked.push(sched.preemptionDue(()=>{
+                clock = host;
+            }));
+            return max;
+        };
+        const main = sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
+        const mixer = sched.create({ entry: 0x3000, stackTop: 0x4000, tebAddress: 0,
+            name: 'mixer' });
+        mixer.priority = 15;
+        sched.block(mixer, 'its period', { deadline: 10 });
+
+        assert.equal(sched.runOnce().ran, main);
+        assert.deepEqual(asked, [false, true], 'due once its wait came due during the slice');
+        assert.equal(sched.runOnce().ran, mixer, 'and it has the next turn');
+
+        assert.equal(clock, 10, 'the guest clock was brought up to the host to see it');
+
+        asked.length = 0;
+        mixer.priority = -15;
+        sched.block(mixer, 'its period', { deadline: 20 });
+        host = 30;
+        sched.runOnce();
+        assert.deepEqual(asked, [false, false], 'a lower one waits for the slice to end');
+        assert.equal(clock, 10, 'and the clock is left to the turn');
+    });
+
+test('a higher-priority thread ready from the start of a slice does not preempt it', ()=>{
+    // Always ready and always higher, it would take the processor back at
+    // every host call; the slice it let run is the starvation rule's to end.
+    const cpu = fakeCpu();
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000 });
+    /** @type {boolean[]} */
+    const asked = [];
+    cpu.runSlice = max=>{
+        asked.push(sched.preemptionDue());
+        return max;
+    };
+    const busy = sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'busy' });
+    busy.priority = 2;
+    const other = sched.create({ entry: 0x3000, stackTop: 0x4000, tebAddress: 0, name: 'other' });
+    other.priority = 2;
+    sched.runOnce();
+    sched.runOnce();
+    assert.deepEqual(asked, [false, false]);
+});
+
 test('priority is composed as Windows composes it for a normal-class process', ()=>{
     assert.equal(absolutePriority(0), 8, 'THREAD_PRIORITY_NORMAL');
     assert.equal(absolutePriority(-2), 6, 'LOWEST');
