@@ -52,7 +52,7 @@ function harness({ client = true } = {}){
     const said = [];
     /** @type {{ pointer: number, iid: number[] }[]} */
     const exported = [];
-    /** @type {{ objref: number[], iid: number[] }[]} */
+    /** @type {{ objref: number[], iid: number[] | null }[]} */
     const imported = [];
     const ndr = createNdr({
         readMemory: (address, length)=>memory.subarray(address, address + length),
@@ -71,7 +71,7 @@ function harness({ client = true } = {}){
             return Uint8Array.of(0x4d, 0x45, 0x4f, 0x57, pointer & 0xff, 0, 0, 0);
         },
         unmarshalInterface: async(_call, objref, iid)=>{
-            imported.push({ objref: [...objref], iid: [...iid] });
+            imported.push({ objref: [...objref], iid: iid && [...iid] });
             return 0x7a00 + objref[4];
         },
         releaseInterface: (_call, pointer)=>{
@@ -509,7 +509,8 @@ test('an interface pointer is a unique pointer to the OBJREF ole32 made for it',
     h.w32(DATA, 0);
     await h.unmarshalled(wire, DATA, format);
     assert.equal(h.u32(DATA), 0x7a23);
-    assert.deepEqual(h.imported, [{ objref: wire.slice(12), iid: IID }]);
+    assert.deepEqual(h.imported, [{ objref: wire.slice(12), iid: null }],
+        'the interface is the one the OBJREF carries');
     await h.ndr.free(h.call, 0x7a23, format);
     assert.deepEqual(h.released, [0x7a23], 'freeing one is a Release');
 
@@ -525,6 +526,20 @@ test('iid_is names the interface through the IID a parameter points at', async()
     h.setField(STUB_MESSAGE.MAX_COUNT, iid);
     await h.marshalled(0x7123, format);
     assert.deepEqual(h.exported.at(-1)?.iid, IID);
+});
+
+test('an iid_is interface pointer unmarshals with no IID set, as the OBJREF names it', async()=>{
+    // Generated -Os code sets MaxCount to the IID only before sizing and
+    // marshalling; an unmarshal that required it refused every such pointer
+    // arriving with RPC_X_NULL_REF_POINTER.
+    const h = harness();
+    const format = h.place(FORMAT, [FC.IP, FC.PAD, 0x20 | FC.LONG, 0, 0, 0]);
+    h.setField(STUB_MESSAGE.MAX_COUNT, 0);
+    const wire = [...ID1, 8, 0, 0, 0, 8, 0, 0, 0, 0x4d, 0x45, 0x4f, 0x57, 0x31, 0, 0, 0];
+    h.w32(DATA, 0);
+    await h.unmarshalled(wire, DATA, format);
+    assert.equal(h.u32(DATA), 0x7a31);
+    assert.deepEqual(h.imported, [{ objref: wire.slice(12), iid: null }]);
 });
 
 test('an [out] interface pointer is a reference to a pointer that is dereferenced', async()=>{

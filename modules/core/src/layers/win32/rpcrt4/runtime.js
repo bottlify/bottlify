@@ -32,7 +32,7 @@
  */
 
 import { formatGuid } from '../ole32/guid.js';
-import { OBJREF_BYTES } from '../ole32/objref.js';
+import { OBJREF_BYTES, decodeObjref } from '../ole32/objref.js';
 import {
     NDR_LOCAL_DATA_REPRESENTATION, PROXY_PHASE, RPC_MESSAGE, RPC_STATUS, RpcException,
     STUB_DESC, STUB_MESSAGE, createNdr,
@@ -175,6 +175,8 @@ export function createRuntime(host){
     const raising = (thread, work)=>work().catch(e=>{
         if (e instanceof RpcException)
         {
+            // What was wrong is known only here; the guest sees a bare status.
+            report(`raised RPC status ${e.code}: ${e.message}`);
             return host.raiseLater(e.code, thread);
         }
         throw e;
@@ -216,7 +218,13 @@ export function createRuntime(host){
                 report('an interface pointer cannot cross: ole32 does not unmarshal here');
                 throw new RpcException(RPC_STATUS.S_CANNOT_SUPPORT);
             }
-            const made = await marshaler.unmarshal(objref, formatGuid(iid), call.thread);
+            const carried = iid ?? decodeObjref(objref)?.iid ?? null;
+            if (!carried)
+            {
+                throw new RpcException(RPC_STATUS.X_BAD_STUB_DATA,
+                    'an OBJREF that does not decode');
+            }
+            const made = await marshaler.unmarshal(objref, formatGuid(carried), call.thread);
             if (made.hr < 0)
             {
                 throw new RpcException(made.hr >>> 0);

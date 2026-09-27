@@ -234,8 +234,9 @@ export class RpcException extends Error {
  * @property {(call: NdrCall, pointer: number, iid: Uint8Array) => Promise<Uint8Array>}
  *           marshalInterface  An OBJREF for the pointer, holding a reference
  *           of its own for the receiver. Throws an RpcException on failure.
- * @property {(call: NdrCall, objref: Uint8Array, iid: Uint8Array) => Promise<number>}
- *           unmarshalInterface  A pointer of this process holding one reference.
+ * @property {(call: NdrCall, objref: Uint8Array, iid: Uint8Array | null) => Promise<number>}
+ *           unmarshalInterface  A pointer of this process holding one reference,
+ *           for the interface the OBJREF carries when `iid` is null.
  * @property {(call: NdrCall, pointer: number) => unknown} releaseInterface
  * @property {number} interfaceBytes  The most an OBJREF takes.
  * @property {(detail: string) => void} [divergence]
@@ -744,7 +745,8 @@ export function createNdr(host){
         {
             if (type === FC.RP)
             {
-                throw new RpcException(RPC_STATUS.X_NULL_REF_POINTER);
+                throw new RpcException(RPC_STATUS.X_NULL_REF_POINTER,
+                    `a null [ref] pointer sized at format 0x${format.toString(16)}`);
             }
             return;
         }
@@ -779,7 +781,8 @@ export function createNdr(host){
         {
             if (value === 0)
             {
-                throw new RpcException(RPC_STATUS.X_NULL_REF_POINTER);
+                throw new RpcException(RPC_STATUS.X_NULL_REF_POINTER,
+                    `a null [ref] pointer marshalled at format 0x${format.toString(16)}`);
             }
             if (slot !== null)
             {
@@ -1057,7 +1060,9 @@ export function createNdr(host){
         const at = conformance(call, format + 2, field(call, STUB_MESSAGE.MEMORY));
         if (at === 0)
         {
-            throw new RpcException(RPC_STATUS.X_NULL_REF_POINTER, 'iid_is names no IID');
+            throw new RpcException(RPC_STATUS.X_NULL_REF_POINTER,
+                `iid_is names no IID: format 0x${format.toString(16)}, correlation 0x${
+                    u32(format + 2).toString(16)}`);
         }
         return host.readMemory(at, 16).slice();
     };
@@ -1356,8 +1361,10 @@ export function createNdr(host){
                         'an interface pointer whose two counts differ');
                 }
                 const objref = host.readMemory(take(call, 1, bytes), bytes).slice();
-                const pointer = (await host.unmarshalInterface(call, objref,
-                    interfaceId(call, format))) >>> 0;
+                // No IID: the one the OBJREF carries, as NdrInterfacePointerUnmarshall
+                // passes IID_NULL. An iid_is correlation is set by the generated
+                // code only for sizing and marshalling, and reads nothing here.
+                const pointer = (await host.unmarshalInterface(call, objref, null)) >>> 0;
                 if (pointer !== 0)
                 {
                     state(call).imported.add(pointer);
