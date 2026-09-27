@@ -5007,6 +5007,7 @@ async function buildApp(options){
         processId: 0x1000,
         version: windowsVersion(options.windows),
         imageBase: image.base,
+        processHeap: allLibraries['KERNEL32.dll']?.GetProcessHeap?.handler([]) ?? 0,
         imagePath: options.imagePath ?? 'C:\\app.exe',
         // Quoted, and this is not cosmetic: a program is handed one string and
         // argv[0] ends at the first space, so an unquoted path with a space in
