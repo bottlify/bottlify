@@ -237,7 +237,9 @@ Measured with the engine and the browser on the same two cores: Doom 3's
 timed demo presented 16 to 19 frames a second and the device finished 1.6 to
 3.3, so a run of 60 s answered 120 to 190 s after its start; a 45 s run in its
 menu answered 90 s after the run ended, and a 150 s one had not answered nine
-minutes after.
+minutes after. The result is read a piece at a time, since a run's is larger
+than one answer carries -- Doom 3's is 6 MB, and a 4 MB answer closed the
+connection where 2 MB did not.
 
 So bound the run -- `--run-seconds`, or a scene that ends by itself, such as a
 title's own timed demo that quits when done -- and give `--wait` the run plus

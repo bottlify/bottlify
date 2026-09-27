@@ -425,6 +425,45 @@ async function poll(cdp, sessionId, expression, timeoutMs){
 }
 
 /**
+ * The most text one answer carries, before it is escaped twice on its way. An
+ * answer of 4 MB closed the connection where one of 2 MB did not, and a run's
+ * result is more than that once the files a title wrote are in it -- Doom 3's
+ * timed demo answered 6 MB, most of it its files and the last frame's pixels.
+ */
+const RESULT_CHUNK = 1 << 19;
+
+/**
+ * The page's result, once it has one: its length first, then its text a piece
+ * at a time, a piece never ending between the two halves of a character.
+ *
+ * @param {CdpEndpoint} cdp
+ * @param {string} sessionId
+ * @param {number} timeoutMs
+ * @returns {Promise<any>}
+ */
+async function readResult(cdp, sessionId, timeoutMs){
+    const length = await poll(cdp, sessionId, 'window.__bottlify__.result ? String(('
+        + 'self.__bottlifyResultText = JSON.stringify(window.__bottlify__.result)).length) : null',
+    timeoutMs);
+    const pieces = [];
+    for (let at = 0; at < length;)
+    {
+        const answer = await cdp.send('Runtime.evaluate', {
+            expression: `(()=>{ const text = self.__bottlifyResultText;
+                let end = Math.min(text.length, ${at + RESULT_CHUNK});
+                const last = text.charCodeAt(end - 1);
+                if (end < text.length && last >= 0xd800 && last <= 0xdbff) end--;
+                return JSON.stringify({ piece: text.slice(${at}, end), end }); })()`,
+            returnByValue: true,
+        }, sessionId);
+        const { piece, end } = JSON.parse(answer.result.value);
+        pieces.push(piece);
+        at = end;
+    }
+    return JSON.parse(pieces.join(''));
+}
+
+/**
  * One host call as a line: where it was called from, what it was given, what it
  * answered, and what error it left behind.
  *
@@ -1313,9 +1352,7 @@ export async function game(options){
         let result;
         try
         {
-            result = await poll(cdp, sessionId,
-                'window.__bottlify__.result ? JSON.stringify(window.__bottlify__.result) : null',
-                options.waitMs);
+            result = await readResult(cdp, sessionId, options.waitMs);
             result.answeredAfterMs = Date.now() - startedAt;
         }
         catch (e){
