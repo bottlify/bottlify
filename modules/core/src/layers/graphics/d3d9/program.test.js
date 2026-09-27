@@ -631,7 +631,7 @@ test('a vertex shader over the fixed-function pixel stage gets a fragment stage 
         assert.equal(h.device.release(), 0);
     });
 
-test('a vertex shader that writes no coordinate set ends the cascade before a sampling stage',
+test('a vertex shader that writes no coordinate set leaves a sampling stage reading zero',
     async()=>{
         const h = harness();
         /** @type {{ shader?: any }} */
@@ -644,8 +644,9 @@ test('a vertex shader that writes no coordinate set ends the cascade before a sa
         const fragment = h.gpu.of('createShaderModule').map(call=>call.descriptor)
             .find(module=>module.label.startsWith('ps:'));
         assert.ok(fragment);
-        assert.ok(!fragment.code.includes('sampleStage0'),
-            'stage zero wanted coordinate set zero, which the shader never wrote');
+        assert.ok(fragment.code.includes('sampleStage0'), 'the stage still samples');
+        assert.match(fragment.code, /input\.texCoord0 = vec2f\(0\.0\);/,
+            'at zero: coordinate set zero is one the shader never wrote');
         h.device.SetTexture(0, null);
         h.device.SetVertexShader(null);
         h.device.SetVertexDeclaration(null);

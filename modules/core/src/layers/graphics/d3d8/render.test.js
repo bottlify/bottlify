@@ -1785,17 +1785,24 @@ test('recorded: a bound pixel shader is drawn through its translation, not as fi
         assert.deepEqual(diagnostics.failures, []);
     });
 
-test('recorded: a stream whose stride is not the format\'s is counted, not misread', async()=>{
-    const h = harness();
-    const { device, gpu } = h;
-    assert.equal(device.BeginScene(), D3D_OK);
-    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
-    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(96), 32), D3D_OK);
-    assert.equal(device.EndScene(), D3D_OK);
-    await h.present();
-    assert.equal(gpu.count('draw'), 0);
-    assert.equal(h.device.diagnostics().skipped.stride, 1);
-});
+test('recorded: a stride past the format\'s steps over the rest, and one short of it is counted',
+    async()=>{
+        // Wine's d3d8 texop_test draws a format of no coordinate set at the
+        // stride of a vertex carrying one: each element is read at its offset.
+        const h = harness();
+        const { device, gpu } = h;
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(96), 32), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(36), 12), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        assert.equal(gpu.count('draw'), 1);
+        assert.equal(h.device.diagnostics().skipped.stride, 1);
+        const strides = gpu.calls.filter((/** @type {any} */ call)=>/RenderPipeline/.test(call.op))
+            .map((/** @type {any} */ call)=>call.descriptor?.vertex?.buffers?.[0]?.arrayStride);
+        assert.ok(strides.includes(32), `pipelines read at ${strides}`);
+    });
 
 test('recorded: a frame with nothing drawn still presents the back buffer', async()=>{
     const h = harness();

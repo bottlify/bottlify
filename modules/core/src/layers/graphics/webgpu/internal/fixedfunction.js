@@ -619,14 +619,21 @@ export function generateFixedFunction(state, layout){
     // A set a cube or volume stage reads carries all its components, zero
     // for one the vertex does not have; every other set carries two.
     const wide = wideSets(state);
-    for (let set = 0; set < layout.texCoordSets; set++)
+    // A set a stage reads and the vertex does not carry is zero, as Direct3D
+    // reads an absent one.
+    const sets = state.stages.reduce((most, stage)=>(generates(stage.texCoordIndex) ? most
+        : Math.max(most, (stage.texCoordIndex & COORD_SET_MASK) + 1)), layout.texCoordSets);
+    for (let set = 0; set < sets; set++)
     {
         const format = layout.attributes.find(attribute=>attribute.name === `texCoord${set}`)
             ?.format ?? 'float32x2';
+        const carried = set < layout.texCoordSets;
         varyings.push(
             `    @location(${location++}) texCoord${set}: ${wide.has(set) ? 'vec4f' : 'vec2f'},`);
-        assignments.push(`    out.texCoord${set} = ${wide.has(set)
-            ? widened(`vertex.texCoord${set}`, format) : `vertex.texCoord${set}.xy`};`);
+        assignments.push(`    out.texCoord${set} = ${!carried
+            ? wide.has(set) ? 'vec4f(0.0, 0.0, 0.0, 1.0)' : 'vec2f(0.0)'
+            : wide.has(set) ? widened(`vertex.texCoord${set}`, format)
+                : `vertex.texCoord${set}.xy`};`);
     }
 
     // A stage generating its coordinates from the vertex in camera space gets

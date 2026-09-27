@@ -1582,7 +1582,7 @@ const EMPTY_BLOCK = new Float32Array(0);
  *
  * @typedef {Object} CascadeTruncation
  * @property {number} stage  the stage that ended it
- * @property {'texture' | 'coordSet'} reason
+ * @property {'texture'} reason
  * @property {string} detail  the stage's state, for a report to name
  */
 
@@ -1590,11 +1590,11 @@ const EMPTY_BLOCK = new Float32Array(0);
  * The stage cascade a draw runs, and which texture each stage samples.
  *
  * The cascade ends at the first stage whose colour operation is off. It also
- * ends at a stage that reads the texture argument with nothing bound there, or
- * with no such coordinate set in the vertex: the generated shader would
- * otherwise sample a binding that does not exist, and a program that binds one
- * texture and leaves stage zero at its default expects that texture drawn, not
- * a refusal.
+ * ends at a stage that reads the texture argument with nothing bound there:
+ * the generated shader would otherwise sample a binding that does not exist.
+ * A coordinate set the vertex does not carry does not end it -- the stage
+ * samples at zero, as Direct3D reads an absent set (Wine's d3d8 texop_test
+ * draws through a format with none).
  *
  * Only the arguments the two operations actually read count. Stage state
  * persists across draws, so an unread slot holds whatever an earlier draw put
@@ -1604,11 +1604,10 @@ const EMPTY_BLOCK = new Float32Array(0);
  *
  * @param {RenderModel} model
  * @param {import('../webgpu/internal/vertexformat.js').VertexLayout} layout
- * @param {boolean} [sprite]  A point sprite, whose quad is every stage's coordinate.
  * @returns {{ stages: import('../webgpu/internal/pipeline.js').StageKey[],
  *             textures: (any | null)[], truncated: CascadeTruncation | null }}
  */
-export function stageCascade(model, layout, sprite = false){
+export function stageCascade(model, layout){
     /** @type {import('../webgpu/internal/pipeline.js').StageKey[]} */
     const stages = [];
     /** @type {(any | null)[]} */
@@ -1645,16 +1644,14 @@ export function stageCascade(model, layout, sprite = false){
         ];
         const samples = selectors.some(arg=>(arg & D3DTA_SELECTMASK) === D3DTA.TEXTURE);
         const texture = model.textures.get(stage) ?? null;
-        const coordSet = key.texCoordIndex & COORD_SET_MASK;
-        const carried = sprite || generates(key.texCoordIndex) || coordSet < layout.texCoordSets;
-        if (samples && (!texture || !carried))
+        if (samples && !texture)
         {
             return {
                 stages,
                 textures,
                 truncated: {
                     stage,
-                    reason: texture ? 'coordSet' : 'texture',
+                    reason: 'texture',
                     detail: `${key.colorOp}(${key.colorArg1},${key.colorArg2})`
                         + `/${key.alphaOp}(${key.alphaArg1},${key.alphaArg2})`
                         + ` tci=${key.texCoordIndex} sets=${layout.texCoordSets}`,
@@ -4961,7 +4958,7 @@ export function createRenderer(options){
         const spriteSets = points?.sprite
             ? [...new Set(stageCascade(model, {
                 texCoordSets: 0, attributes: [], stride, preTransformed: false, blendWeights: 0,
-            }, true).stages.map(stage=>varyingLocation(D3DDECLUSAGE.TEXCOORD,
+            }).stages.map(stage=>varyingLocation(D3DDECLUSAGE.TEXCOORD,
                 stage.texCoordIndex & COORD_SET_MASK)))]
             : [];
         /** @type {import('../d3d9/wgsl.js').TranslatedShader} */
@@ -4991,7 +4988,7 @@ export function createRenderer(options){
         }
         const cascade = stageCascade(model, {
             texCoordSets: sets, attributes: [], stride, preTransformed: false, blendWeights: 0,
-        }, points?.sprite === true);
+        });
         reportCascade(cascade);
         const state = {
             ...pipelineStateOf(model, {
@@ -6165,14 +6162,21 @@ export function createRenderer(options){
         else
         {
             layout = decodeFvf(processing.fvf);
-            if (stride !== layout.stride)
+            if (stride < layout.stride)
             {
                 skip('stride');
                 return null;
             }
+            // A stride past the format's own reads each element at its offset
+            // and steps over the rest, as Direct3D reads a vertex buffer bound
+            // at a wider stride than its format.
+            if (stride !== layout.stride)
+            {
+                layout = { ...layout, stride };
+                vertexLayoutKey = `f${processing.fvf.toString(16)}s${stride}`;
+            }
         }
-        const cascade = stageCascade(model, layout,
-            topology === POINT_QUADS && pointsOf(model).sprite);
+        const cascade = stageCascade(model, layout);
         keyStages(model, cascade);
         reportCascade(cascade);
         if (skipTextures.size > 0 && cascade.textures.some(
