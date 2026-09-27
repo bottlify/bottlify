@@ -900,6 +900,14 @@ test('the system palette has no entries to report', ()=>{
     assert.equal(fns.GetSystemPaletteEntries.handler([hdc, 0, 16, OUT]), 0);
 });
 
+test('the batch limit is kept and the previous one answered, and the palette use is static', ()=>{
+    const { fns, hdc } = setup();
+    assert.equal(fns.GdiSetBatchLimit.handler([1]), 20, 'the default until one is set');
+    assert.equal(fns.GdiSetBatchLimit.handler([0]), 1);
+    assert.equal(fns.GdiSetBatchLimit.handler([5]), 20, 'zero asked for the default back');
+    assert.equal(fns.GetSystemPaletteUse.handler([hdc]), 1, 'SYSPAL_STATIC');
+});
+
 test('text alignment is remembered even with nothing to draw on', ()=>{
     // A program that sets an alignment, draws, and restores must get back what
     // it set. Keeping it only on the drawing service would hand it a zero it

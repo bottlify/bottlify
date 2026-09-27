@@ -156,6 +156,11 @@ const ERROR_INVALID_PARAMETER = 87;
 const DIB_BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 
 /** CombineRgn's modes. */
+/** GdiSetBatchLimit's limit until a program sets one. */
+const DEFAULT_BATCH_LIMIT = 20;
+/** The static colours are the system's: GetSystemPaletteUse. */
+const SYSPAL_STATIC = 1;
+
 const RGN_AND = 1;
 const RGN_OR = 2;
 const RGN_XOR = 3;
@@ -596,6 +601,8 @@ export function createDrawingFunctions(
         right: rect.right | 0,
         bottom: rect.bottom | 0,
     });
+
+    let batchLimit = DEFAULT_BATCH_LIMIT;
 
     const functions = {
         /**
@@ -1494,6 +1501,34 @@ export function createDrawingFunctions(
         GdiFlush: {
             argBytes: 0,
             handler: ()=>1,
+        },
+
+        /**
+         * DWORD GdiSetBatchLimit(DWORD dw)
+         *
+         * Nothing is batched here, every call draws at once, but the limit is
+         * kept and the previous one answered: 20 until a program sets one, and
+         * zero asks for that default back.
+         */
+        GdiSetBatchLimit: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([limit])=>{
+                const previous = batchLimit;
+                batchLimit = (limit >>> 0) === 0 ? DEFAULT_BATCH_LIMIT : limit >>> 0;
+                return previous;
+            },
+        },
+
+        /**
+         * UINT GetSystemPaletteUse(HDC hdc)
+         *
+         * SYSPAL_STATIC: the twenty static colours are the system's, as on any
+         * display whose palette nobody has taken over.
+         */
+        GetSystemPaletteUse: {
+            argBytes: 4,
+            handler: ()=>SYSPAL_STATIC,
         },
 
         /**

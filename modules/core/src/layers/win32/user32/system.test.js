@@ -2409,6 +2409,8 @@ test('a message registered by name is the same number every time, whatever the c
     assert.notEqual(fns.RegisterWindowMessageA.handler([FORMAT_BUFFER]), first);
     assert.equal(fns.RegisterWindowMessageA.handler([0]), 0, 'and no name is no message');
     assert.equal(fns.RegisterWindowMessageA.argBytes, 4);
+    assert.equal(fns.RegisterClipboardFormatA.handler([FORMAT_BUFFER]),
+        fns.RegisterWindowMessageA.handler([FORMAT_BUFFER]), 'a clipboard format is the same atom');
 });
 
 test('a message box with neither text nor caption still reports', ()=>{
@@ -2637,6 +2639,20 @@ test('the rectangle helpers work over the caller\'s memory and refuse a null poi
     {
         assert.equal(fns[name].handler(args), 0, name);
     }
+    memory.putU32s(rect, [10, 20, 30, 40]);
+    memory.putU32s(other, [0, 0, 0, 0]);
+    assert.equal(fns.IsRectEmpty.handler([other]), 1);
+    assert.equal(fns.IsRectEmpty.handler([rect]), 0);
+    assert.equal(fns.IsRectEmpty.handler([0]), 1, 'no rectangle is an empty one');
+    const union = FORMAT_BUFFER + 0x40;
+    assert.equal(fns.UnionRect.handler([union, rect, other]), 1, 'an empty source adds nothing');
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(union + at) | 0), [10, 20, 30, 40]);
+    memory.putU32s(other, [0, 50, 5, 60]);
+    assert.equal(fns.UnionRect.handler([union, rect, other]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(union + at) | 0), [0, 20, 30, 60]);
+    memory.putU32s(other, [0, 0, 0, 0]);
+    assert.equal(fns.UnionRect.handler([union, other, other]), 0, 'two empty ones make nothing');
+
     assert.equal(fns.PtInRect.argBytes, 12, 'the POINT is two words on the stack');
     assert.equal(fns.OffsetRect.argBytes, 12);
     assert.equal(fns.CopyRect.argBytes, 8);
