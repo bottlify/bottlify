@@ -14,6 +14,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GuestCodeError, compileModule } from './compile.mjs';
 import { CALLBACK, DATA, doubleWords, equivalence, random } from './equivalence.mjs';
+import { loadModel } from './model.mjs';
+
+/** Where a source imports `X87` from, absolute: the samples are modules of no directory. */
+const X87_MODULE = new URL('../../src/layers/win32/msvcrt/x87.js', import.meta.url).href;
 
 /** @param {string} text */
 async function load(text){
@@ -25,8 +29,12 @@ async function load(text){
     {
         compiled[fn.name] = fn;
     }
-    return { values, compiled, ...equivalence(compiled, values) };
+    const model = await loadModel(text, { file: 'sample.js', url: X87_MODULE, values });
+    return { values, compiled, model, ...equivalence(compiled, values, model) };
 }
+
+/** The control words a double is computed under: double, extended, single, and two roundings. */
+const CONTROLS = [0x27f, 0x37f, 0x07f, 0x77f, 0xf7f];
 
 const SAMPLE = `
 export const T8 = Uint8Array.from({ length: 16 }, (_, i)=>i * 7 + 1);
@@ -438,6 +446,174 @@ export function bulk({ copyUp, copyDown, fill, call, u8 }, d, s, n, fn){
 }
 `;
 
+/** Doubles and floats, with X87 from where the samples cannot name it relatively. */
+const FLOATS = `import { X87 } from '${X87_MODULE}';
+
+/** A module-level function of a double, inlined with its argument read where it is. */
+const twice = v=>v + v * 1;
+
+/**
+ * A double's arithmetic in each of its forms: the memory operand on the
+ * right and, reversed, on the left; both on the stack; integers in the
+ * frame and in registers; constants special, a float's and not.
+ *
+ * @guestCode cdecl
+ * @param {f64} x @param {f64} y @param {i32} k @param {u32} u
+ * @returns {f64}
+ */
+export function arithmetic(x, y, k, u){
+    const a = x - y;
+    const b = 2.5 - x * y;
+    const c = (x + 1) / (y - 3);
+    const d = k / y - y / k;
+    const e = 0.1 * (a - b) / (c * c + 1e-3);
+    const f = -(x * 0.5) + (y - -0) * 3 - k + u / 7;
+    const g = ((k + 1) | 0) * x - x / (k | 1) - (u - x) / 1.25 + twice(y);
+    return (a * b - c) / (d + 2) + e * f + g * (1 - a) - (-1 - b) / (0.75 + c);
+}
+
+/**
+ * Remainders, which are exact under any control word, and division of
+ * integers, which is a double's.
+ *
+ * @guestCode stdcall
+ * @param {f64} x @param {f64} y @param {i32} a @param {i32} b
+ * @returns {f64}
+ */
+export function remainders(x, y, a, b){
+    return x % y + (x * 3) % (y + 1) - -x % 2.5 + a / b + ((a & 7) === 0 ? a / 3 : b / a) + b % y;
+}
+
+/**
+ * The transcendentals: an argument kept below 2^63 for the three that need it.
+ *
+ * @guestCode cdecl
+ * @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function transcendentals(x, y){
+    const s = Math.abs(x) < 2 ** 63 ? Math.sin(x) : 0;
+    const c = Math.abs(x) < 2 ** 63 ? Math.cos(x) : 0;
+    const t = Math.abs(x) < 2 ** 63 ? Math.tan(x) : 0;
+    return Math.sqrt(Math.abs(y)) + s * 3 - c + t / 2 + Math.atan(x) - Math.atan2(y, x)
+        + Math.atan2(x * y, -1) + Math.log2(Math.abs(y) + 1) + Math.sqrt(x * x + y * y);
+}
+
+/**
+ * The x87's own operations, through X87.
+ *
+ * @guestCode cdecl
+ * @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function intrinsics(x, y){
+    const t = x * X87.L2E;
+    const n = X87.rint(t);
+    const p = X87.scale(X87.f2xm1(t - n) + 1, n);
+    const l = X87.yl2x(X87.LN2, Math.abs(y) + 0.5) + X87.yl2x(y, X87.PI) * X87.LG2 - X87.L2T;
+    const e = Math.abs(y) <= 1e308 ? X87.exponent(y) - X87.significand(y) : 0;
+    return p + l + e - X87.significand(x) * X87.rint(y * 0.5) + X87.scale(y, x);
+}
+
+/**
+ * A double brought to an integer, in range and past it.
+ *
+ * @guestCode cdecl
+ * @param {f64} x @param {i32} k
+ * @returns {i32}
+ */
+export function conversions(x, k){
+    const whole = x | 0;
+    const wrapped = (x * 1e10) >>> 0;
+    const third = (x / 3 + k) | 0;
+    return (whole ^ wrapped ^ third ^ (k / 7 | 0) ^ (Math.floor(x) >>> 0)) | 0;
+}
+
+/**
+ * Floats: an f32 argument, loads, stores, variables and a float result.
+ *
+ * @guestCode stdcall
+ * @param {any} guest @param {u32} p @param {f32} s
+ * @returns {f32}
+ */
+export function floats({ f32, setF32, setF64 }, p, s){
+    const a = f32(p);
+    /** @type {f32} */
+    let b = Math.fround(a * s);
+    setF32(p + 4, a + s * f32(p + 8));
+    setF32(p + 12, b);
+    b = Math.fround(b - 1);
+    setF64(p + 16, a / 3 + b);
+    setF32(p + 24, f32(p + 8) * f32(p) - f32(p + 4) / s);
+    return a > b ? Math.fround(a + b) : b;
+}
+
+/**
+ * Deep: more doubles live at once than a left-deep sum keeps.
+ *
+ * @guestCode cdecl
+ * @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function deep(x, y){
+    return (x - (y - (x * (y + (x / (y - (x + (y * 0.5)))))))) / (1 + (x - (y + 2)));
+}
+
+/**
+ * Integers each read once, left in the frame: the x87's integer operands.
+ *
+ * @guestCode cdecl
+ * @param {f64} x @param {i32} a @param {i32} b @param {i32} c @param {u32} d
+ * @returns {f64}
+ */
+export function mixed(x, a, b, c, d){
+    return x * a + b / x - c + (d - x);
+}
+
+/**
+ * A negative zero's constant, where its sign decides the sum.
+ *
+ * @guestCode cdecl
+ * @param {f64} x
+ * @returns {f64}
+ */
+export function negativeZero(x){
+    return x === 0 ? -0 : twice(x - -0);
+}
+
+/**
+ * x87 arguments handed to the host as they came, one of them assigned first.
+ *
+ * @guestCode cdecl
+ * @param {any} guest @param {x87} v @param {x87} w
+ * @returns {f64}
+ */
+export function x87HandOver({ host }, v, w){
+    const product = v * w;
+    v = v + 1;
+    if (w === 0 || !(product < 1e300))
+    {
+        return host();
+    }
+    return product - v;
+}
+
+/**
+ * One x87 argument handed over from ST0's read: popped at entry after all.
+ *
+ * @guestCode cdecl
+ * @param {any} guest @param {x87} v
+ * @returns {f64}
+ */
+export function x87Root({ host }, v){
+    if (v < 0)
+    {
+        return host();
+    }
+    return Math.sqrt(v);
+}
+`;
+
 /** fn(p, k): the byte at p, times three, plus k -- and it writes k at p + 0x800. */
 const CALLBACK_X86 = [
     0x8b, 0x4c, 0x24, 0x04,             // mov ecx, [esp+4]
@@ -687,6 +863,152 @@ test('a parameter assigned before the call is handed over: the handler gets the 
         assert.ok(handed > 10 && handed < 40, `${handed} of 40 handed over: both ways taken`);
     });
 
+/**
+ * Doubles to compute with: the edges -- zeros, infinities, NaN, the largest,
+ * a denormal, 2^63 -- and random ones, of every exponent and of small ones.
+ *
+ * @param {number} seed @param {number} count
+ */
+function doubleInputs(seed, count){
+    const next = random(seed);
+    const values = [0, -0, 1, -1, 0.5, -2.5, 3, 1e-300, -1e300, 1e300, 2 ** 63, -(2 ** 64),
+        5e-324, Infinity, -Infinity, NaN, 0.1, 1 / 3, 123456.789, -7.75];
+    for (let i = 0; i < count; i++)
+    {
+        const view = new DataView(new ArrayBuffer(8));
+        view.setUint32(0, next(), true);
+        view.setUint32(4, next(), true);
+        values.push(i % 3 === 0 ? view.getFloat64(0, true)
+            : (next() - 2 ** 31) / 2 ** (next() % 48));
+    }
+    return values;
+}
+
+test('a double\'s arithmetic as JavaScript computes it, and as the x87 rounds it under single '
+    + 'precision', async()=>{
+    const { same } = await load(FLOATS);
+    const next = random(23);
+    const values = doubleInputs(24, 16);
+    for (const control of CONTROLS)
+    {
+        for (let i = 0; i < 120; i++)
+        {
+            const x = values[next() % values.length];
+            const y = values[next() % values.length];
+            const k = [0, 1, -1, 7, next() | 0][i % 5];
+            same('arithmetic', { stack: [...doubleWords(x), ...doubleWords(y), k >>> 0,
+                i % 4 === 0 ? 0x80000001 : next()], control });
+            same('remainders', { stack: [...doubleWords(x), ...doubleWords(y), k >>> 0,
+                i % 3 === 0 ? 0 : next() % 1000 - 500 >>> 0], control });
+            same('deep', { stack: [...doubleWords(x), ...doubleWords(y)], control });
+        }
+    }
+});
+
+test('integers in the frame as the x87\'s operands, and a negative zero\'s constant', async()=>{
+    const { same } = await load(FLOATS);
+    const next = random(31);
+    const values = doubleInputs(32, 10);
+    for (const control of CONTROLS)
+    {
+        for (const x of values)
+        {
+            same('mixed', { stack: [...doubleWords(x), next(), next() % 100, next(),
+                next() | 0x80000000], control });
+            same('negativeZero', { stack: doubleWords(x), control });
+        }
+        for (const x of [-0, 0])
+        {
+            same('negativeZero', { stack: doubleWords(x), control });
+        }
+    }
+});
+
+test('the transcendentals and X87\'s own operations, under each control word', async()=>{
+    const { same } = await load(FLOATS);
+    const next = random(25);
+    const values = doubleInputs(26, 16);
+    for (const control of CONTROLS)
+    {
+        for (let i = 0; i < 100; i++)
+        {
+            const x = values[next() % values.length];
+            const y = values[next() % values.length];
+            same('transcendentals', { stack: [...doubleWords(x), ...doubleWords(y)], control });
+            // f2xm1 takes [-1, 1]: t - rint(t) is within it for t below 2^52.
+            const small = (next() - 2 ** 31) / 2 ** (next() % 30 + 20);
+            same('intrinsics', { stack: [...doubleWords(small), ...doubleWords(y)], control });
+        }
+    }
+});
+
+test('a double to an integer as | 0 and >>> 0 bring one, past fisttp\'s range too', async()=>{
+    const { same } = await load(FLOATS);
+    const next = random(27);
+    const values = [...doubleInputs(28, 40), 2 ** 31, -(2 ** 31) - 0.5, 2 ** 32 + 5, 2 ** 63,
+        -(2 ** 63), 2 ** 63 + 2 ** 11, 2 ** 70 + 2 ** 40 * 3, 2 ** 84 + 2 ** 33,
+        -(2 ** 80) - 2 ** 30,
+        1.7976931348623157e308];
+    for (const control of CONTROLS)
+    {
+        for (const x of values)
+        {
+            same('conversions', { stack: [...doubleWords(x), next() % 200 - 100 >>> 0], control });
+        }
+    }
+});
+
+test('floats: an f32 argument, float loads and stores, float variables and result', async()=>{
+    const { same } = await load(FLOATS);
+    const next = random(29);
+    const view = new DataView(new ArrayBuffer(4));
+    /** A float's bits: edges, then random ones of every exponent but NaN's. */
+    const float = (/** @type {number} */ i)=>{
+        const edges = [0, 1, -2.5, 3.4028234663852886e38, 1.401298464324817e-45, -0.1, 16777217];
+        if (i < edges.length)
+        {
+            view.setFloat32(0, edges[i], true);
+            return view.getUint32(0, true);
+        }
+        const bits = next();
+        return (bits & 0x7f800000) === 0x7f800000 ? bits & 0xbfffffff : bits;
+    };
+    for (const control of CONTROLS)
+    {
+        for (let i = 0; i < 60; i++)
+        {
+            const memory = new Uint8Array(32);
+            const data = new DataView(memory.buffer);
+            data.setUint32(0, float(i % 7 === 0 ? i / 7 : 100), true);
+            data.setUint32(8, float(100), true);
+            same('floats', { stack: [DATA, float(i % 5 === 0 ? i / 5 : 100)],
+                memory: [[DATA, memory]], control });
+        }
+    }
+});
+
+test('x87 arguments handed to the host where the call left them, one assigned first',
+    async()=>{
+        const { same } = await load(FLOATS);
+        const values = doubleInputs(30, 12);
+        /** @type {(memory: Uint8Array, args: number[], x87: number[]) => { st0: number }} */
+        const host = (memory, args, x87)=>({ st0: x87.reduce((sum, v, i)=>sum + v * (i + 2), 0) });
+        let handed = 0;
+        for (const control of CONTROLS)
+        {
+            for (const v of values)
+            {
+                for (const w of [0, -1.5, 1e300, v])
+                {
+                    handed += same('x87HandOver', { x87: [v, w], control }, { host }).handedOver
+                        ? 1 : 0;
+                }
+                handed += same('x87Root', { x87: [v], control }, { host }).handedOver ? 1 : 0;
+            }
+        }
+        assert.ok(handed > 50 && handed < 400, `${handed} handed over: both ways taken`);
+    });
+
 const TAGS = '@param {i32} a @param {u32} c @param {f64} x\n * @returns {i32}';
 
 /**
@@ -717,13 +1039,18 @@ test('everything outside the subset is refused where it is written', ()=>{
     refused(one(p, 'return \'a\';'), /is not a number/);
     refused(one(p, 'const g = ()=>a;\n    return 0;'), /a closure is not in the subset/);
     refused(one(p, 'return await a;'), /await|reserved|Unexpected/);
-    refused(one(p, 'return a / 2 | 0;'), /no division/);
+    refused(one(p, 'return a % 2;'), /no integer division/);
     refused(one(p, 'return a + 1;'), /brought back to 32 bits/);
     refused(one(p, 'return a < c ? 1 : 0;'), /signed value compared with an unsigned/);
     refused(one(p, 'return Math.imul(a, c) * a;'), /Math\.imul/);
     refused(one(p, 'return other(a);'), /not a helper/);
     refused(one(p, 'return a == 1 ? 1 : 0;'), /is written ===/);
-    refused(one(p, 'return (x + 1) < 2 ? 1 : 0;'), /no double arithmetic/);
+    refused(one(p, 'return Math.exp(x) < 2 ? 1 : 0;'), /Math\.exp is no one x87 instruction/);
+    refused(one(p, 'return Math.pow(x, 2) < 2 ? 1 : 0;'), /Math\.pow is no one x87 instruction/);
+    refused(one(p, 'let y = x;\n    y += 1;\n    return 0;'), /on a double is written y = y \+/);
+    refused(one(p, '/** @type {f32} */\n    const y = x * 2;\n    return 0;'),
+        /y is f32, and this is f64: a float is Math\.fround's/);
+    refused(one(p, 'return x + a;'), /the function returns an i32, not an f64/);
     refused(one(p, 'return u8(a);'), /taken from the guest in the first parameter/);
     refused(one(p, 'return local[a];'), /not an exported module-level typed array/);
     refused(one(p, 'if (a) return 1;'), /can reach its end without a return/);
@@ -731,15 +1058,14 @@ test('everything outside the subset is refused where it is written', ()=>{
     refused(one(p, 'for (const k of [a]) { return k; }\n    return 0;'), /for\.\.\.of/);
     refused(one(p, 'let s = a;\n    s = c;\n    return s;'), /s is i32, and this is u32/);
     refused(one('{ u9 }, a, c, x', 'return 0;'), /the guest's helpers are/);
-    refused(one('a, c, x, y', 'return 0;'), /@param \{i32 \| u32 \| f64 \| x87\} y is wanted/);
+    refused(one('a, c, x, y', 'return 0;'),
+        /@param \{i32 \| u32 \| f64 \| f32 \| x87\} y is wanted/);
     refused(one(p, 'return 0;').replace('@guestCode cdecl', '@guestCode'),
         /names its convention/);
-    refused(one(p, 'return a;', '@param {i32} a @param {u32} c @param {f64} x\n * @returns {f32}'),
-        /is not i32, u32, f64, i64 or void/);
+    refused(one(p, 'return a;', '@param {i32} a @param {u32} c @param {f64} x\n * @returns {f16}'),
+        /is not i32, u32, f64, f32, i64 or void/);
     const q = '{ host }, a, c, x';
     refused(one(q, 'return host(a);'), /host\(\) takes no arguments/);
     refused(one(q, 'const v = host();\n    return v;'), /only returned: return host\(\)/);
     refused(one(q, 'host();\n    return 0;'), /only returned: return host\(\)/);
-    refused(one('{ host }, v', 'return host();', '@param {x87} v\n * @returns {i32}'),
-        /x87 parameter/);
 });

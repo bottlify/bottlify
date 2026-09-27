@@ -232,11 +232,13 @@ export function strncmp({ u8 }, left, right, count){ ... }
 ```
 
 The tag names the convention (`cdecl` or `stdcall`); `@param` and `@returns` give each value's
-machine type -- `i32`/`u32` a stack slot or EAX, `f64` two slots or ST0, `x87` a double the caller
-left on the x87 stack and the callee pops (`_ftol`), `i64` EDX:EAX (a double truncated as `fisttp`
-truncates, or an integer extended), `void`. A function that touches guest memory takes the helpers
-it uses from its first parameter: loads `u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `f32`, `f64`,
-stores `setU8`, `setU16`, `setU32`, `setF64`, `call(fn, ...args)` through a cdecl pointer, and
+machine type -- `i32`/`u32` a stack slot or EAX, `f64` two slots or ST0, `f32` one slot or ST0 (a
+value a float holds), `x87` a double the caller left on the x87 stack and the callee pops (`_ftol`,
+the `_CI` functions), `i64` EDX:EAX (a double truncated as `fisttp` truncates, or an integer
+extended), `void`. A function that touches guest memory takes the helpers it uses from its first
+parameter: loads `u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `f32`, `f64`, stores `setU8`, `setU16`,
+`setU32`, `setF32` (rounded to nearest, as `fstp dword` stores), `setF64`, `call(fn, ...args)`
+through a cdecl pointer, and
 `copyUp`/`copyDown`/`fill` (`rep movsd` or `rep stosd` for the whole dwords, down with the
 direction flag set for `copyDown`, the bytes left as the byte forms leave them -- a turn of a
 `rep` translated code moves one element at a time (a page holding code, an element across a
@@ -253,7 +255,7 @@ leaves empty and names (`host` in the compiled module): the binding registers th
 code, aims the jump at it ([`loader.md`](./loader.md)). A parameter such a function assigns is a
 variable of its own, copied from the argument at entry, so the arguments the handler reads are the
 call's. The function goes to the host before it writes anything, so there is nothing to undo; one
-with an x87 parameter, popped by then, cannot.
+with x87 parameters pushes them back first, the last in ST0, as the call left them.
 `strtol` and `strtoul` hand over a value out of range -- the handler clamps it and sets `errno`,
 which is the calling thread's own and reached only through the host -- and a base outside 2..36
 other than 0, and answer everything else themselves.
@@ -278,7 +280,11 @@ ECX with EAX standing. The one x87 parameter of a function that reads it once, b
 other double, jump or call, stays in ST0 until that read: `_ftol` is `sub esp, 8; fisttp qword
 [esp]; pop eax; pop edx; ret`. Each function is position-independent (the loader places a
 `code` export wherever the module's `.text` has room, and nothing tells the bytes their
-address), a table reached through the address a `call $+5` pushes.
+address), a table reached through the address a `call $+5` pushes -- or, in a function whose x87
+stack is deeper or shallower at its return than at its entry (one that answers a double), a call
+to a four-byte routine after the code that returns it: cork's translator follows `call $+5` as a
+call that returns to the pop, and with the x87 stack changed between them it stops at the pop and
+never gets past it.
 
 The subset is the part of JavaScript 32-bit integer and x87 code reproduces exactly, and everything
 outside it is a compile error naming its place in the source (the full rules are at the top of
@@ -286,20 +292,42 @@ outside it is a compile error naming its place in the source (the full rules are
 typed as asm.js types them (`|0`, `>>>0` and the bitwise operators bring a value back to 32 bits;
 a sum may feed an address, another sum, a bitwise operator, an index or a store, and is brought
 back before a comparison, a variable or a result); a comparison of two signed or two unsigned
-values, never one of each; `*` by a constant, `Math.imul` otherwise, no division; doubles loaded,
-stored, compared, rounded by `Math.floor`/`ceil`/`trunc` (the rounding control set around
-`frndint` and put back, the precision control never touched -- a program under Direct3D runs at
-single precision, and a function that changed it would move the translator's x87 regions to the
-slow mixed form), `Math.abs`, and returned; no double arithmetic, which under a single-precision
-control word would not compute what JavaScript does; a module-level constant folded in; an
-exported module-level typed array read by index, its contents placed after the code; a
-module-level function of one `return` inlined. Objects, arrays, strings, closures, `await` and
-calls to other handlers are refused, and the host is reached only by `return host()`.
+values, never one of each; `*` by a constant, `Math.imul` otherwise, no integer division (`/` of
+two integers is a double's); a module-level constant folded in; an exported module-level typed
+array read by index, its contents placed after the code; a module-level function of one `return`
+inlined. Objects, arrays, strings, closures, `await` and calls to other handlers are refused, and
+the host is reached only by `return host()`.
+
+Doubles are the x87's. `+`, `-`, `*`, `/` and unary `-` are its instructions -- an operand in the
+frame, read through registers alone, or in the table of constants after the code taken as the
+instruction's memory operand (`fsubr`/`fdivr` when it is the left one), an integer in the frame
+through the `fi` forms, exact -- `%` is `fprem` until the remainder is whole (JavaScript's exact
+remainder), `Math.sqrt` `fsqrt`, `Math.sin`, `Math.cos`, `Math.tan` `fsin`, `fcos`, `fptan` (for
+an argument the source keeps below 2^63 in magnitude, past which the instruction leaves it),
+`Math.atan2` and `Math.atan` `fpatan`, `Math.log2` `fyl2x` of 1, `Math.abs` `fabs`,
+`Math.floor`/`ceil`/`trunc` `frndint` under the rounding control they name (set around it and
+put back), and `Math.fround` a store to a float and back. An integer becomes a double exactly,
+and a double an integer by `| 0` or `>>> 0`, JavaScript's modulo 2^32 (`fisttp`, and `fprem` by
+2^32 where that answers the integer indefinite). `Math.exp`, `Math.log`, `Math.log10` and
+`Math.pow` are refused: no one instruction is any of them, and the x87's sequence for each is not
+JavaScript's to the last bit under an engine that keeps the x87 in doubles. A source writes them
+with the instructions they are made of, through `X87` (`msvcrt/x87.js`: `X87.f2xm1`, `X87.yl2x`,
+`X87.scale`, `X87.rint` -- `frndint` to nearest --, `X87.exponent` and `X87.significand` of
+`fxtract`, and the constants `fldl2e`, `fldln2`, `fldlg2`, `fldl2t`, `fldpi` load), whose
+JavaScript is the double the engines compute for each, held to cork's by `msvcrt/x87.test.js`.
+Under a double-precision control word every one of these answers what JavaScript does; under the
+one the program set, each rounds as the x87 rounds -- the arithmetic and the square root to its
+precision control -- which is how the runtime a program links computes. The compiled code never
+changes the precision control, and changes the rounding control only around the `frndint` that
+names one.
 
 The same function is the export's handler (`guestEntry`, `msvcrt/guest-code.js`): its arguments
 read off the stack as the x86 reads them, its result answered where the x86 leaves it. That is
 the reference `msvcrt/inguest.test.js` holds the x86 to on cork's test machine, input by input --
-boundary values and random ones from a fixed seed, under five control words for the doubles --
+boundary values and random ones from a fixed seed, under five control words for the doubles; under
+single precision against the x87's model of the source (`scripts/guest-code/model.mjs`: the
+module rewritten with each double's `+ - * /` and square root rounded to 24 bits, as the x87 and
+the translator round them) --
 the result registers, the x87 stack and memory byte for byte, and what a callee owes its caller:
 EBX, ESI, EDI and EBP kept, ESP past the return address, the direction flag clear, the control
 word as it was, the x87 stack empty but for a double result. It is also what answers wherever a
@@ -1018,7 +1046,7 @@ Unit tests are colocated with each file, `node:test`, over `fakeMemory`
 | area | files (all `src/layers/win32/…`) |
 |------|----------------------------------|
 | kernel32 | `apc`, `atoms`, `code-arena`, `consoleio`, `critical`, `drives`, `environment`, `file-holds`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `modules`, `named-objects`, `process`, `processor`, `profile`, `resources`, `seh`, `slimsync`, `spawn`, `sync`, `system`, `teb`, `threading`, `versions`, `vfs` `.test.js` |
-| msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `globals`, `heap`, `inguest`, `io`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `stdio`, `strings`, `threads`, `time`, `widetext` `.test.js` -- `inguest.test.js` holds each `@guestCode` function's x86 to its JavaScript on cork's test machine; the compiler's own tests (every form of the subset against JavaScript, every refusal with its place) are `scripts/guest-code/compile.test.js`, and `scripts/build-guest-code.test.js` fails on a stale `inguest.x86.js` |
+| msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `globals`, `heap`, `inguest`, `io`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `stdio`, `strings`, `threads`, `time`, `widetext`, `x87` `.test.js` -- `inguest.test.js` holds each `@guestCode` function's x86 to its JavaScript on cork's test machine, and `x87.test.js` `X87`'s JavaScript to the instructions on it; the compiler's own tests (every form of the subset against JavaScript, and against the x87's model under single precision, every refusal with its place) are `scripts/guest-code/compile.test.js`, and `scripts/build-guest-code.test.js` fails on a stale `inguest.x86.js` |
 | user32 | `controls`, `cursors`, `dialogs`, `display`, `keys`, `messages`, `objects`, `paint`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |
 | the rest | `advapi32/{crypto,functions,registry,services,tokens}`, `advpack/functions`, `cabinet/{cabinet,inflate,lzx}`, `crypto/{der,digest,pkcs7,pki,rc4,rsa,signature,x509}` (`pki.test.js` builds the keys, certificates and signed messages the others read), `comctl32/{functions,imagelist,progress,propsheet,tab,treeview}`, `comdlg32/functions`, `d3dx9/functions`, `imm32/functions`, `lz32/{expand,functions}`, `mpr/functions`, `msacm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{cfb,functions,guid,objects,propvariant,storage,wbem}`, `oleaut32/{errorinfo,functions,invoke,objects,typelib}`, `quartz/graph`, `rpcrt4/functions`, `setupapi/{functions,inf}`, `sfc/functions`, `shell32/{fileop,functions,namespace,shelllink}`, `shlwapi/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,mmio,thread,timers,wave}`, `winspool/functions`, `wintrust/{authenticode,fixtures,functions,roots}` (`fixtures.test.js` signs cabinets and images with a chain of its own), `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
