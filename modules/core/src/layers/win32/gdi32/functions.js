@@ -215,6 +215,27 @@ const BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 const MAX_BITMAP_SIDE = 0x7ffffff;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_HANDLE = 6;
+const STATUS_INVALID_PARAMETER = 0xc000000d;
+
+/** @param {any} memory @param {number} address @param {number} count @returns {number[]} */
+const readU32s = (memory, address, count)=>Array.from({ length: count },
+    (_, index)=>readU32(memory, (address >>> 0) + index * 4));
+
+/**
+ * The D3DDDIFORMATs a DC can be made over, with the depth each is and the
+ * masks a sixteen-bit one needs where it is not 5-5-5.
+ *
+ * @type {Map<number, { bitCount: number, masks?: number[] }>}
+ */
+const KMT_FORMATS = new Map([
+    [20, { bitCount: 24 }], // R8G8B8
+    [21, { bitCount: 32 }], // A8R8G8B8
+    [22, { bitCount: 32 }], // X8R8G8B8
+    [23, { bitCount: 16, masks: [0xf800, 0x07e0, 0x001f] }], // R5G6B5
+    [24, { bitCount: 16 }], // X1R5G5B5
+    [25, { bitCount: 16 }], // A1R5G5B5
+    [41, { bitCount: 8 }], // P8
+]);
 
 /**
  * Depths a device context over somebody else's surface can be made at.
@@ -1486,6 +1507,67 @@ export function createGdiFunctions(host){
             },
         },
 
+        /**
+         * NTSTATUS D3DKMTCreateDCFromMemory(D3DKMT_CREATEDCFROMMEMORY *desc)
+         *
+         * A memory DC with a DIB section over pixels the program already has,
+         * top-down at the pitch it names: pMemory, Format, Width, Height,
+         * Pitch, hDeviceDc and pColorTable in, hDc and hBitmap out. The pixels
+         * stay the program's: deleting the bitmap gives nothing back.
+         */
+        D3DKMTCreateDCFromMemory: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([desc])=>{
+                if ((desc >>> 0) === 0)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                const [memory, format, width, height, pitch, , colors] = readU32s(host, desc, 7);
+                const layout = KMT_FORMATS.get(format);
+                if (!layout || memory === 0 || width === 0 || height === 0
+                    || pitch < Math.ceil((width * layout.bitCount) / 8)
+                    || (layout.bitCount <= 8 && colors === 0))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                const palette = layout.bitCount <= 8
+                    ? [...readU32s(host, colors, 1 << layout.bitCount)].map(paletteEntryToPixel)
+                    : undefined;
+                const bitmap = objects.create('bitmap', {
+                    width, height, planes: 1, bitCount: layout.bitCount, topDown: true,
+                    usage: 0, bits: memory, section: memory, pitch, borrowed: true, palette,
+                    compression: layout.masks ? BI_BITFIELDS : BI_RGB,
+                    bitfields: layout.masks ?? [0, 0, 0],
+                    pelsPerMeter: [0, 0],
+                });
+                const dc = createContext(0, 'memory');
+                select(dc, bitmap);
+                writeU32s(host, desc + 28, [dc.hdc, bitmap]);
+                return 0;
+            },
+        },
+
+        /** NTSTATUS D3DKMTDestroyDCFromMemory(const D3DKMT_DESTROYDCFROMMEMORY *desc) */
+        D3DKMTDestroyDCFromMemory: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([desc])=>{
+                if ((desc >>> 0) === 0)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                const [hdc, bitmap] = readU32s(host, desc, 2);
+                const dc = dcOf(hdc);
+                if (dc)
+                {
+                    destroyContext(dc);
+                }
+                objects.remove(bitmap);
+                return 0;
+            },
+        },
+
         /** HDC CreateCompatibleDC(HDC hdc) */
         CreateCompatibleDC: {
             argBytes: 4,
@@ -1587,7 +1669,9 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([handle])=>{
                 const record = objects.get(handle);
-                const dib = record?.type === 'bitmap' ? record.attributes.section ?? 0 : 0;
+                // A section over the program's own memory leaves it to the program.
+                const dib = record?.type === 'bitmap' && record.attributes.borrowed !== true
+                    ? record.attributes.section ?? 0 : 0;
                 if (!objects.remove(handle))
                 {
                     return 0;
