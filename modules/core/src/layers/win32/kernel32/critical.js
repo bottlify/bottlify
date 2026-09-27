@@ -165,7 +165,12 @@ export function leaveCode(at, wakeTrap, counters){
 
 /**
  * BOOL TryEnterCriticalSection(LPCRITICAL_SECTION), as guest code. Never
- * traps: a try that would wait answers FALSE instead.
+ * traps: a try that would wait answers FALSE instead. A try that takes the
+ * section counts as an entry, so that entries and leaves still pair up for
+ * a program that takes its sections this way and leaves them as any other.
+ * Each way of taking it counts for itself rather than jumping back to a
+ * shared tail: under the translator a jump backwards in a routine this small
+ * cost the call more than all the rest of it.
  *
  *     mov ecx, [esp+4]
  *     mov edx, fs:[0x24]
@@ -177,6 +182,7 @@ export function leaveCode(at, wakeTrap, counters){
  *     jnz held
  *     mov [ecx+OwningThread], edx
  *     mov dword [ecx+RecursionCount], 1
+ *     lock inc dword [counters.entered]
  *     mov eax, 1
  *     ret 4
  *   held:
@@ -184,15 +190,17 @@ export function leaveCode(at, wakeTrap, counters){
  *     jne no
  *     lock inc dword [ecx+LockCount]
  *     inc dword [ecx+RecursionCount]
+ *     lock inc dword [counters.entered]
  *     mov eax, 1
  *     ret 4
  *   no:
  *     xor eax, eax
  *     ret 4
  *
+ * @param {number} counters  The counters block.
  * @returns {Uint8Array}
  */
-export function tryEnterCode(){
+export function tryEnterCode(counters){
     return new Uint8Array([
         0x8b, 0x4c, 0x24, 0x04,                                      // mov ecx, [esp+4]
         0x64, 0x8b, 0x15, ...dword(TEB_THREAD_ID),                   // mov edx, fs:[0x24]
@@ -201,16 +209,18 @@ export function tryEnterCode(){
         0xb8, ...dword(-1),                                          // mov eax, -1
         0xf0, 0x0f, 0xb1, 0x59, CS.LOCK_COUNT,                       // lock cmpxchg [ecx+4], ebx
         0x5b,                                                        // pop ebx (flags kept)
-        0x75, 0x12,                                                  // jnz held (+18)
+        0x75, 0x19,                                                  // jnz held (+25)
         0x89, 0x51, CS.OWNING_THREAD,                                // mov [ecx+12], edx
         0xc7, 0x41, CS.RECURSION_COUNT, ...dword(1),                 // mov [ecx+8], 1
+        0xf0, 0xff, 0x05, ...dword(counters + COUNTERS.ENTERED),     // lock inc [entered]
         0xb8, ...dword(1),                                           // mov eax, 1
         0xc2, 0x04, 0x00,                                            // ret 4
         // held:
         0x39, 0x51, CS.OWNING_THREAD,                                // cmp [ecx+12], edx
-        0x75, 0x0f,                                                  // jne no (+15)
+        0x75, 0x16,                                                  // jne no (+22)
         0xf0, 0xff, 0x41, CS.LOCK_COUNT,                             // lock inc [ecx+4]
         0xff, 0x41, CS.RECURSION_COUNT,                              // inc [ecx+8]
+        0xf0, 0xff, 0x05, ...dword(counters + COUNTERS.ENTERED),     // lock inc [entered]
         0xb8, ...dword(1),                                           // mov eax, 1
         0xc2, 0x04, 0x00,                                            // ret 4
         // no:

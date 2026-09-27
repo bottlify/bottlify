@@ -314,8 +314,8 @@ test('entering, leaving and trying a section are guest code, placed once', ()=>{
         [...enterCode(enter, 0x105010, counters)], 'the entry falls back to the wait trap');
     assert.deepEqual([...host.bytes.slice(leave, leave + leaveCode(leave, 0, 0).length)],
         [...leaveCode(leave, 0x105020, counters)], 'the release falls back to the wake trap');
-    assert.deepEqual([...host.bytes.slice(attempt, attempt + tryEnterCode().length)],
-        [...tryEnterCode()]);
+    assert.deepEqual([...host.bytes.slice(attempt, attempt + tryEnterCode(0).length)],
+        [...tryEnterCode(counters)], 'the try counts itself where the entry does');
 
     assert.equal(fns.EnterCriticalSection.guest(builder), enter, 'the same place again');
     assert.equal(builder.registered.length, 2, 'and no more traps');

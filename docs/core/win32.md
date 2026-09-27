@@ -102,7 +102,7 @@ the module graph is built. All are optional.
 | `ioCompletionWaits` | Every thread parked on a completion port: port, thread, `waitedMs`, packets queued. |
 | `waveDevices` | Per open device: cursor source, byte rate, queued/written/retired headers, notices owed. |
 | `waveThread` | The callback thread, if it exists, and what it is doing. |
-| `criticalSections` | `entered`/`left` in the guest without a crossing, `waits`, `wakes`, `handoffs`, `queued`, `owed`. |
+| `criticalSections` | `entered`/`left` in the guest without a crossing (a `TryEnterCriticalSection` that takes the section is an entry, one refused is not), `waits`, `wakes`, `handoffs`, `queued`, `owed`. |
 | `messages` | Queue depth, posted/retrieved totals, `quitPending`, the twelve most-pumped messages, armed timers and how late their ticks are. |
 | `windows` | Every live top-level window's rectangle and visibility. |
 | `windowProcedures` | Messages a window procedure is still inside, and for how long. |
@@ -888,8 +888,8 @@ thread, the last error each call leaves, a slot past the array through the host,
 every slot refused, a freed slot zero; three threads through one critical section with recursion,
 sleeping while they hold it, the count exact, every entry through the fast path and every waiter
 handed the section; and a thread that finds a section held refused by `TryEnterCriticalSection`,
-then waiting in the host, with the lock count showing it queued, until the owner's leave hands it
-over. `src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe`, `cxxeh.exe`,
+then waiting in the host, with the lock count showing it queued, while the owner's own try is a
+recursion, until the owner's last leave hands it over. `src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe`, `cxxeh.exe`,
 `unhandled.exe`, built from `test/fixtures/src/` by `scripts/build-fixtures.mjs` with clang and
 lld against the MSVC ABI -- through every path above, processor faults and two threads throwing
 at once included. `src/apc.itest.js` runs `apc.exe`, built the same way: APCs to itself and to

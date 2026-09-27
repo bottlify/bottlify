@@ -152,7 +152,7 @@ export function createSyncFunctions(host){
         fastPaths = {
             enter: place(at=>enterCode(at, waitTrap, counters)),
             leave: place(at=>leaveCode(at, wakeTrap, counters)),
-            tryEnter: place(()=>tryEnterCode()),
+            tryEnter: place(()=>tryEnterCode(counters)),
         };
         return fastPaths;
     };

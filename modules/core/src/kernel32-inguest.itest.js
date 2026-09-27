@@ -346,8 +346,9 @@ function buildSectionRaceExe(){
  * The main thread holds the section while a second thread tries it (and is
  * refused) and then enters it: the second waits in the host, the count says
  * one thread is queued, and nothing past its entry runs until the main
- * thread leaves -- which hands the section over, with the structure naming
- * the new owner before it runs.
+ * thread -- which meanwhile takes it once more by trying -- leaves it for the
+ * last time, which hands the section over, with the structure naming the new
+ * owner before it runs.
  */
 function buildSectionHandoffExe(){
     return buildExe({
@@ -371,14 +372,20 @@ function buildSectionHandoffExe(){
                 check(2), compare('reached', 1), { jump: JNE, to: 'fail' },
                 check(3), compare('inside', 0), { jump: JNE, to: 'fail' },
                 check(4), compare('section', 1, CS.LOCK_COUNT), { jump: JNE, to: 'fail' },
+                // The owner's own try is a recursion, counted as the entry would be.
+                check(5), push('section'), call('TryEnterCriticalSection'),
+                [0x3d, ...u32(1)], { jump: JNE, to: 'fail' },
+                check(6), compare('section', 2, CS.LOCK_COUNT), { jump: JNE, to: 'fail' },
+                compare('section', 2, CS.RECURSION_COUNT), { jump: JNE, to: 'fail' },
+                push('section'), call('LeaveCriticalSection'),
                 push('section'), call('LeaveCriticalSection'),
                 [0x6a, 0xff], pushFrom('handles'), call('WaitForSingleObject'),
-                check(5), compare('inside', 1), { jump: JNE, to: 'fail' },
-                check(6), [0xa1, ...u32(context.at('owner'))],           // mov eax, [owner]
+                check(7), compare('inside', 1), { jump: JNE, to: 'fail' },
+                check(8), [0xa1, ...u32(context.at('owner'))],           // mov eax, [owner]
                 [0x3b, 0x05, ...u32(context.at('id'))], { jump: JNE, to: 'fail' },
-                check(7), compare('recursion', 1), { jump: JNE, to: 'fail' },
-                check(8), compare('section', 0xffffffff, CS.LOCK_COUNT), { jump: JNE, to: 'fail' },
-                check(9), compare('section', 0, CS.OWNING_THREAD), { jump: JNE, to: 'fail' },
+                check(9), compare('recursion', 1), { jump: JNE, to: 'fail' },
+                check(10), compare('section', 0xffffffff, CS.LOCK_COUNT), { jump: JNE, to: 'fail' },
+                check(11), compare('section', 0, CS.OWNING_THREAD), { jump: JNE, to: 'fail' },
                 exit(),
                 ...fail(),
             ]);
@@ -483,5 +490,8 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
             assert.equal(sections.wakes, 1, 'the main thread\'s leave woke it');
             assert.equal(sections.handoffs, 1);
             assert.equal(sections.queued, 0);
+            assert.equal(sections.entered, 3,
+                'two entries and the owner\'s try, and not the refused one');
+            assert.equal(sections.left, 3);
         });
 }

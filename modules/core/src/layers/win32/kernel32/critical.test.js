@@ -38,15 +38,26 @@ test('the fast paths are the bytes they say they are, with the traps reached rel
     const nested = 11 + 3 + 2 + leave[15];
     assert.deepEqual([...leave.slice(nested, nested + 4)], [0xf0, 0xff, 0x49, CS.LOCK_COUNT]);
 
-    const attempt = tryEnterCode();
+    const attempt = tryEnterCode(0x30000);
     assert.deepEqual([...attempt.slice(0, 4)], [0x8b, 0x4c, 0x24, 0x04]);
     // EBX is callee-saved: it is pushed before it is used and popped before
     // the branch, and the pop does not touch the flags the branch reads.
     assert.equal(attempt[11], 0x53, 'push ebx');
     assert.equal(attempt[24], 0x5b, 'pop ebx');
     assert.equal(attempt[25], 0x75, 'then jnz');
-    assert.equal(attempt[attempt.length - 5], 0x31, 'the refused path answers zero');
-    assert.deepEqual([...attempt.slice(attempt.length - 3)], [0xc2, 0x04, 0x00]);
+    // Both ways of taking it -- free, and already its owner's -- count the
+    // entry, each for itself, with no jump back to a shared tail.
+    const counted = [0xf0, 0xff, 0x05, 0x00, 0x00, 0x03, 0x00];
+    const free = 27 + 3 + 7;
+    assert.deepEqual([...attempt.slice(free, free + 7)], counted, 'the free section');
+    const held = 27 + attempt[26];
+    assert.deepEqual([...attempt.slice(held, held + 3)], [0x39, 0x51, CS.OWNING_THREAD]);
+    const recursion = held + 3 + 2 + 4 + 3;
+    assert.deepEqual([...attempt.slice(recursion, recursion + 7)], counted, 'the owner\'s own');
+    assert.equal(attempt.includes(0xeb), false, 'no short jump anywhere');
+    const refused = held + 5 + attempt[held + 4];
+    assert.deepEqual([...attempt.slice(refused)], [0x31, 0xc0, 0xc2, 0x04, 0x00],
+        'the refused path answers zero');
 });
 
 test('the counters block is two dwords the fast paths increment', ()=>{
