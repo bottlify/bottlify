@@ -213,6 +213,7 @@ const KEYEVENTF_SCANCODE = 0x0008;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_WINDOW_HANDLE = 1400;
+const ERROR_NOACCESS = 998;
 const ERROR_TIMEOUT = 1460;
 
 /**
@@ -2998,18 +2999,24 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * `cbSize` is checked rather than trusted: it is sizeof(INPUT) or the
          * caller is not describing one, and Windows refuses the whole call
          * with ERROR_INVALID_PARAMETER rather than read past what it was
-         * given. `INPUT_HARDWARE` is a device model of its own -- a low-level
-         * message replay nothing here reproduces -- and is counted without
-         * being injected, exactly as this build's mouse and keyboard are
-         * counted when they are.
+         * given; so is a count of none, and no array at all is
+         * ERROR_NOACCESS. Every event of a known type is counted as inserted,
+         * one that moves nothing and presses nothing too. `INPUT_HARDWARE` is
+         * a device model of its own -- a low-level message replay nothing here
+         * reproduces -- and is counted without being injected.
          */
         SendInput: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([count, inputs, size])=>{
-                if ((size | 0) !== INPUT_SIZE)
+                if ((size | 0) !== INPUT_SIZE || (count >>> 0) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if ((inputs >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_NOACCESS);
                     return 0;
                 }
                 const events = count >>> 0;
@@ -3021,13 +3028,15 @@ export function createSystemFunctions({ host, live, windows, classes }){
                     const type = readU32(piece);
                     if (type === INPUT_MOUSE)
                     {
-                        inserted += injectMouse({ dx: readI32(piece + 4), dy: readI32(piece + 8),
-                            data: readU32(piece + 12), flags: readU32(piece + 16) }) ? 1 : 0;
+                        injectMouse({ dx: readI32(piece + 4), dy: readI32(piece + 8),
+                            data: readU32(piece + 12), flags: readU32(piece + 16) });
+                        inserted++;
                     }
                     else if (type === INPUT_KEYBOARD)
                     {
-                        inserted += injectKeyboard({ wVk: readU16(piece + 4),
-                            wScan: readU16(piece + 6), flags: readU32(piece + 8) }) ? 1 : 0;
+                        injectKeyboard({ wVk: readU16(piece + 4),
+                            wScan: readU16(piece + 6), flags: readU32(piece + 8) });
+                        inserted++;
                     }
                     else if (type === INPUT_HARDWARE)
                     {

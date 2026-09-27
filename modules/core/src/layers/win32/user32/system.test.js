@@ -2220,6 +2220,19 @@ test('a cbSize that is not an INPUT is refused whole, with the last error set', 
     assert.deepEqual(sent, [], 'and nothing was inserted');
 });
 
+test('SendInput refuses no events and no array, and counts an event that does nothing', ()=>{
+    // input.c's test_SendInput: a count of none is ERROR_INVALID_PARAMETER,
+    // no array ERROR_NOACCESS, and zeroed INPUTs -- a mouse event with no
+    // flags -- are each inserted.
+    const { memory, fns, errors } = setup();
+    assert.equal(fns.SendInput.handler([0, INPUT_BUFFER, 28]), 0);
+    assert.equal(errors.at(-1), 87);
+    assert.equal(fns.SendInput.handler([1, 0, 28]), 0);
+    assert.equal(errors.at(-1), 998);
+    memory.putU32s(INPUT_BUFFER, new Array(28 * 16 / 4).fill(0));
+    assert.equal(fns.SendInput.handler([16, INPUT_BUFFER, 28]), 16);
+});
+
 test('SendInput injects a keyboard event named by virtual key', ()=>{
     const INPUT_KEYBOARD = 1;
     const VK_A = 0x41;
