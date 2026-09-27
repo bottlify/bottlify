@@ -1000,3 +1000,20 @@ test('a WGL refusal reaches the program\'s GetLastError', ()=>{
     assert.equal(table.wglCreateContext.handler([0x1234]), 0);
     assert.deepEqual(errors, [2000], 'ERROR_INVALID_PIXEL_FORMAT');
 });
+
+test('a context handle deleted or never made is ERROR_INVALID_HANDLE to delete or bind', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const box = machine();
+    const opengl = createOpengl({
+        readMemory: box.readMemory,
+        writeMemory: box.writeMemory,
+        screen: ()=>({ width: 4, height: 4 }),
+        scratch: box.scratch,
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+    });
+    const table = /** @type {Table} */ (opengl.table);
+    assert.equal(table.wglDeleteContext.handler([0x4321]), 0);
+    assert.equal(table.wglMakeCurrent.handler([0, 0x4321]), 0);
+    assert.deepEqual(errors, [6, 6]);
+});
