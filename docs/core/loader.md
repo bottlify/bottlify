@@ -137,7 +137,9 @@ compiled `@guestCode` functions ([`win32.md`](./win32.md)) -- placed in `.text` 
 directory's strings, each aligned like a slot: read-only, and on no page a variable shares. A
 write from the host moves its page on for cork, and a translation formed from a page that moved
 is dropped when it lands, so a function on the page of a variable the host keeps writing (a
-standard stream's record in `_iob`) was never translated at all.
+standard stream's record in `_iob`) was never translated at all. Such a function's `jumps` name
+the displacements in it that are a `jmp rel32` to a guest address -- the host stub a function
+hands a call to -- filled in here, where the function's own address is known.
 
 Declared ordinals are honoured exactly and the rest are assigned above them, so an import by
 number binds to the function the program compiled against. The name table is sorted so a

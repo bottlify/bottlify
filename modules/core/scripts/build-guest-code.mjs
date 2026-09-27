@@ -106,6 +106,10 @@ export function render(from, functions){
         lines.push(`        params: ${quote(fn.params)},`);
         lines.push(`        returns: '${fn.returns}',`);
         lines.push(`        uses: ${quote(fn.uses)},`);
+        if (fn.host !== undefined)
+        {
+            lines.push(`        host: ${fn.host},`);
+        }
         lines.push('        code: Uint8Array.of(');
         for (let at = 0; at < fn.code.length; at += 12)
         {

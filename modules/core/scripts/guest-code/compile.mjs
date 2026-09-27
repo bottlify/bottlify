@@ -43,6 +43,16 @@
  * `fill` (dst, byte, count) sets them -- `rep movsd` and `rep stosd` for the
  * whole dwords, leaving the bytes as the byte forms do.
  *
+ * `return host()` hands the call to the host's handler of the same function
+ * with the arguments it came with, for a case the function leaves to it --
+ * errno to set, a base it does not take: the frame is taken down and the code
+ * jumps to the handler's trap -- a `jmp rel32` whose displacement, at the
+ * offset `host` names, the loader fills in where it places the code -- so the
+ * handler finds the stack, EBX, ESI, EDI and EBP as the caller left them.
+ * Nothing the function wrote before is undone: it goes to the host before it
+ * writes. A function with an x87 parameter, which it has popped by then, has
+ * no such return.
+ *
  * Integers are typed as asm.js types them: `|0`, `>>>0` and the bitwise
  * operators bring a value back to 32 bits; `+` and `-` leave a sum that may
  * have left them (an address may take one, as may another sum, a bitwise
@@ -94,6 +104,8 @@ import {
  * @property {ReturnType} returns
  * @property {string[]} uses        The helpers the first parameter takes, in order.
  * @property {Uint8Array} code
+ * @property {number} [host]        Where in the code the displacement of the jump
+ *                                  to the host's handler is, when it returns host().
  */
 
 /**
@@ -150,7 +162,7 @@ const STORES = /** @type {Record<string, number[]>} */ ({
 });
 
 const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES),
-    'call', 'copyUp', 'copyDown', 'fill']);
+    'call', 'copyUp', 'copyDown', 'fill', 'host']);
 
 const TABLE_KINDS = /** @type {const} */ ([
     ['Uint8Array', 1, false], ['Int8Array', 1, true], ['Uint16Array', 2, false],
@@ -357,6 +369,11 @@ class FunctionCompiler {
         /** @type {ReturnType} */
         this.returns = 'void';
         this.epilogue = this.a.fresh('epilogue');
+        /** Where `return host()` goes: the frame taken down, then the jump. */
+        this.toHost = this.a.fresh('host');
+        this.hostUsed = false;
+        /** @type {Variable[]} */
+        this.x87 = [];
         this.inlining = 0;
     }
 
@@ -430,6 +447,7 @@ class FunctionCompiler {
             {
                 const v = this.declare(param, param.name, 'f64', true);
                 x87.push(v);
+                this.x87.push(v);
                 continue;
             }
             this.bind(param, { name: param.name, type: /** @type {'i32' | 'u32' | 'f64'} */ (type),
@@ -475,17 +493,21 @@ class FunctionCompiler {
             out.emit(0xdd, ...frame(3, v.disp));
         }
         out.append(this.a);
-        out.label(this.epilogue);
-        if (saved.length > 0)
-        {
-            const below = -(this.locals + saved.length * 4);
-            out.emit(0x8d, ...frame(ESP, below));             // lea esp, [ebp - ...]
-            for (const reg of [...saved].reverse())
+        /** The frame taken down: ESP, EBP and the saved registers as the caller left them. */
+        const takeDown = ()=>{
+            if (saved.length > 0)
             {
-                out.emit(0x58 | reg);
+                const below = -(this.locals + saved.length * 4);
+                out.emit(0x8d, ...frame(ESP, below));         // lea esp, [ebp - ...]
+                for (const reg of [...saved].reverse())
+                {
+                    out.emit(0x58 | reg);
+                }
             }
-        }
-        out.emit(0xc9);                                       // leave
+            out.emit(0xc9);                                   // leave
+        };
+        out.label(this.epilogue);
+        takeDown();
         const argBytes = stack - 8;
         if (convention === 'stdcall' && argBytes > 0)
         {
@@ -495,12 +517,19 @@ class FunctionCompiler {
         {
             out.emit(0xc3);
         }
+        if (this.hostUsed)
+        {
+            out.label(this.toHost);
+            takeDown();
+            out.emit(0xe9).label('hostJump').emit(0, 0, 0, 0);   // jmp the handler's trap
+        }
         const tables = [...this.tables.values()].map(table=>({
             name: table.name, bytes: table.bytes, align: table.size,
         }));
+        const code = out.finish(tables);
         return {
-            name, convention, params: types, returns: this.returns, uses,
-            code: out.finish(tables),
+            name, convention, params: types, returns: this.returns, uses, code,
+            ...this.hostUsed ? { host: /** @type {number} */ (out.offsets.get('hostJump')) } : {},
         };
     }
 
@@ -745,7 +774,37 @@ class FunctionCompiler {
         {
             return this.epilogue;
         }
+        if (statement.type === 'ReturnStatement' && this.isHost(statement.argument)
+            && this.fpu === 0 && this.inlining === 0)
+        {
+            this.hostReturn(statement.argument);
+            return this.toHost;
+        }
         return null;
+    }
+
+    /** Whether an expression is `host()`. @param {any} node */
+    isHost(node){
+        return node?.type === 'CallExpression' && node.callee.type === 'Identifier'
+            && node.callee.name === 'host' && this.helpers.has('host');
+    }
+
+    /**
+     * Checks a `return host()` and marks the function as having one.
+     *
+     * @param {any} node  The call.
+     */
+    hostReturn(node){
+        if (node.arguments.length > 0)
+        {
+            this.fail(node, 'host() takes no arguments: the handler is handed the call\'s own');
+        }
+        if (this.x87.length > 0)
+        {
+            this.fail(node, 'a function with an x87 parameter has popped it, and cannot hand '
+                + 'the call to the host');
+        }
+        this.hostUsed = true;
     }
 
     /** @param {any} node */
@@ -974,6 +1033,10 @@ class FunctionCompiler {
                     this.guestCall(node);
                     return;
                 }
+                if (name === 'host' && this.helpers.has(name))
+                {
+                    this.fail(node, 'host() is only returned: return host()');
+                }
                 return this.fail(node, 'a call made for what it does is a store, a copy, a '
                     + 'fill or call()');
             }
@@ -1006,6 +1069,16 @@ class FunctionCompiler {
         if (this.inlining > 0)
         {
             this.fail(node, 'an inlined function returns only by its one return');
+        }
+        if (this.isHost(node.argument))
+        {
+            this.hostReturn(node.argument);
+            if (this.fpu !== 0)
+            {
+                this.fail(node, 'the x87 stack is not empty at a return');
+            }
+            this.a.jump(-1, this.toHost);
+            return;
         }
         if (returns === 'void')
         {
@@ -1719,6 +1792,10 @@ class FunctionCompiler {
             {
                 this.guestCall(node);
                 return { where: 'eax', type: 'i32' };
+            }
+            if (name === 'host')
+            {
+                this.fail(node, 'host() is only returned: return host()');
             }
             this.fail(node, `${name} is a statement: it answers nothing`);
         }

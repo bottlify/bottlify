@@ -11,10 +11,13 @@
  */
 
 import { test } from 'node:test';
+import assert from 'node:assert/strict';
 import { COMPILED } from './inguest.x86.js';
 import * as sources from './inguest.js';
+import { createConversionFunctions } from './convert.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 import {
-    CALLBACK, DATA, doubleWords, equivalence, random,
+    CALLBACK, DATA, DATA_END, doubleWords, equivalence, random,
 } from '../../../../scripts/guest-code/equivalence.mjs';
 
 const { same } = equivalence(COMPILED, sources);
@@ -297,4 +300,119 @@ test('strlen, strcpy and strcmp: empty strings, long ones, overlap, the upper ha
         const destination = DATA + [0x800, 1, 3, 0x400][next() % 4];
         same('strcpy', { stack: [destination, DATA], memory });
     }
+});
+
+/**
+ * The handlers strtol and strtoul hand calls to -- the conversions without
+ * the guest's memory, which are the handlers alone -- over a case's memory,
+ * reading a string as the engine's memory does.
+ */
+function conversionHandlers(){
+    /** @type {Uint8Array} */
+    let memory = new Uint8Array(0);
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
+        createConversionFunctions({
+            readCString: (address, limit)=>{
+                const end = memory.indexOf(0, address);
+                if (end === -1 || end - address >= limit)
+                {
+                    throw new Error(`No NUL within ${limit} bytes`);
+                }
+                return decodeAnsi(memory.subarray(address, end));
+            },
+            writeMemory: (address, bytes)=>memory.set(bytes, address),
+            allocate: ()=>{
+                throw new Error('nothing here allocates');
+            },
+            errno: code=>void errno.push(code),
+        }));
+    /** @param {string} name */
+    const host = name=>(/** @type {Uint8Array} */ at, /** @type {number[]} */ args)=>{
+        memory = at;
+        return table[name].handler(args);
+    };
+    return { host, errno };
+}
+
+test('strtol and strtoul: signs, prefixes, bases, the end pointer, and the host at the limits',
+    ()=>{
+        const next = random(14);
+        const { host } = conversionHandlers();
+        const texts = ['', ' ', '0', '-0', '+0', '42', '  -42', '\t\n\v\f\r 42', '+', '-', '- 5',
+            '+-5', '007', '08', '0x', '0X1f', '0x1F', '-0x', '0xg', '0x0x1', '12abc', 'zz', 'Zz',
+            '2147483647', '2147483648', '-2147483648', '-2147483649', '4294967295', '4294967296',
+            '-4294967295', '-4294967296', '99999999999999999999', '0000000000000000000000000001',
+            'ffffffff', '7fffffff', '80000000', '100000000', '0x7FFFFFFF', '0x80000000',
+            '0xFFFFFFFF', '0x100000000', 'zzzzzz', 'zzzzzzz', '-1', '1z', '\u0085 42',
+            '\u00a042', 'x42', '4\u00002', '11111111111111111111111111111111',
+            '100000000000000000000000000000000', '37777777777', '40000000000', '1y2p0ij32e8e7',
+            // One digit past the largest magnitude that takes one without carrying out.
+            '4294967300', '-4294967300', '0x1000000000', '0x10000000f', '1z141z4', '1z141z5'];
+        const alphabet = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFXYZ .+-';
+        for (let i = 0; i < 120; i++)
+        {
+            const digits = Array.from({ length: next() % 14 },
+                ()=>alphabet[next() % alphabet.length]).join('');
+            const sign = ['', '-', '+'][next() % 3];
+            const prefix = ['', '', '0', '0x', '0X'][next() % 5];
+            texts.push(`${' '.repeat(next() % 3)}${sign}${prefix}${digits}`);
+        }
+        const bases = [0, 2, 8, 10, 16, 36, 1, 37, 0xffffffff, 0x80000000, 100];
+        for (const text of texts)
+        {
+            const bytes = [...text].map(c=>c.charCodeAt(0) & 0xff);
+            for (const base of [...bases, 2 + next() % 35])
+            {
+                for (const name of ['strtol', 'strtoul'])
+                {
+                    const end = base === 10 ? 0 : DATA + 0x800;
+                    /** @type {import('../../../../scripts/guest-code/equivalence.mjs').Case} */
+                    const input = { stack: [DATA, end, base], memory: [[DATA, [...bytes, 0]]] };
+                    const js = same(name, input, { host: host(name) });
+                    // And the JavaScript answers as the handler it stands for,
+                    // result and end pointer, on the host's side of it too.
+                    const memory = new Uint8Array(1 << 20);
+                    memory.set([...bytes, 0], DATA);
+                    const eax = host(name)(memory, [DATA, end, base]) >>> 0;
+                    const what = `${name}(${JSON.stringify(text)}, ${base | 0})`;
+                    assert.equal(js.eax, eax, `${what}: the handler's answer`);
+                    assert.deepEqual(js.data, memory.slice(DATA, DATA_END),
+                        `${what}: the handler's end pointer`);
+                }
+            }
+        }
+    });
+
+test('strtol and strtoul hand the host a value out of range and a base they do not take, '
+    + 'and nothing else', ()=>{
+    const { host, errno } = conversionHandlers();
+    /** @type {[string, number, boolean, boolean][]} the text, the base, handed over by each */
+    const cases = [
+        ['2147483647', 10, false, false],
+        ['2147483648', 10, true, false],
+        ['-2147483648', 10, false, false],
+        ['-2147483649', 0, true, false],
+        ['4294967295', 10, true, false],
+        ['4294967296', 10, true, true],
+        ['0xffffffff', 0, true, false],
+        ['0x100000000', 16, true, true],
+        ['zzzzzzz', 36, true, true],
+        ['12', 1, true, true],
+        ['12', 37, true, true],
+        ['12', -1, true, true],
+        ['-1', 10, false, false],
+    ];
+    for (const [text, base, toHostSigned, toHostUnsigned] of cases)
+    {
+        const bytes = [...text].map(c=>c.charCodeAt(0));
+        /** @type {import('../../../../scripts/guest-code/equivalence.mjs').Case} */
+        const input = { stack: [DATA, DATA + 0x800, base >>> 0], memory: [[DATA, [...bytes, 0]]] };
+        assert.equal(same('strtol', input, { host: host('strtol') }).handedOver, toHostSigned,
+            `strtol("${text}", ${base})`);
+        assert.equal(same('strtoul', input, { host: host('strtoul') }).handedOver,
+            toHostUnsigned, `strtoul("${text}", ${base})`);
+    }
+    assert.ok(errno.length > 0, 'the host set errno for what it clamped');
 });

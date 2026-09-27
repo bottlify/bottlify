@@ -19,6 +19,7 @@ import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 import { assemble } from './layers/win32/msvcrt/guest-code.js';
+import { ERANGE } from './layers/win32/msvcrt/globals.js';
 
 const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
@@ -345,6 +346,105 @@ function buildMemoryExe(){
     });
 }
 
+/**
+ * Each conversion the program below makes: the function, the text, the base,
+ * the answer, how far into the text the end pointer points, errno after, and
+ * whether the guest's code hands the call to the host.
+ */
+const CONVERSIONS = /** @type {[string, string, number, number, number, number, boolean][]} */ ([
+    ['strtol', '  -123x', 10, -123, 6, 0, false],
+    ['strtol', '0x1fZ', 0, 31, 4, 0, false],
+    ['strtol', 'zz', 10, 0, 0, 0, false],
+    ['strtol', '2147483647', 0, 0x7fffffff, 10, 0, false],
+    ['strtol', '2147483648', 10, 0x7fffffff, 10, ERANGE, true],
+    ['strtol', '-99999999999', 10, -0x80000000, 12, ERANGE, true],
+    ['strtol', '12', 1, 0, 0, 0, true],
+    ['strtoul', '-1', 10, 0xffffffff, 2, 0, false],
+    ['strtoul', '4294967295', 0, 0xffffffff, 10, 0, false],
+    ['strtoul', '4294967296', 10, 0xffffffff, 10, ERANGE, true],
+    ['strtoul', '0777', 0, 511, 4, 0, false],
+]);
+
+/** What EBX, ESI, EDI and EBP hold across every conversion, to be found there after. */
+const KEPT = { ebx: 0x42424242, esi: 0x51515151, edi: 0x7e7e7e7e, ebp: 0x3c3c3c3c };
+
+/**
+ * strtol and strtoul through the import, errno cleared through `_errno()`
+ * before each and read through it after: the answer, the end pointer, errno,
+ * the stack and the kept registers checked; exits 0, or with the number of
+ * the first check that failed.
+ */
+function buildConversionExe(){
+    /** @type {Record<string, number[]>} */
+    const data = { end: u32(0), sp: u32(0) };
+    CONVERSIONS.forEach(([, text], i)=>{
+        data[`text${i}`] = cString(text);
+    });
+    return buildExe({
+        imports: {
+            'msvcrt.dll': ['strtol', 'strtoul', '_errno'],
+            'KERNEL32.dll': ['ExitProcess'],
+        },
+        data,
+        codeSize: 0x1000,
+        code: ({ iat, at })=>{
+            const call = (/** @type {string} */ name)=>[0xff, 0x15, ...u32(iat(name))];
+            /** @type {(number[] | { check: number })[]} */
+            const pieces = [];
+            let check = 0;
+            /** A `jne` to the exit that pushes the next check's number. */
+            const failIfNot = ()=>pieces.push({ check: ++check });
+            pieces.push([0xbb, ...u32(KEPT.ebx), 0xbe, ...u32(KEPT.esi),
+                0xbf, ...u32(KEPT.edi), 0xbd, ...u32(KEPT.ebp)]);
+            pieces.push([0x89, 0x25, ...u32(at('sp'))]);                  // mov [sp], esp
+            CONVERSIONS.forEach(([name, , base, answer, stop, errno], i)=>{
+                const text = at(`text${i}`);
+                pieces.push(call('_errno'), [0xc7, 0x00, ...u32(0)]);     // mov dword [eax], 0
+                pieces.push([0x68, ...u32(base >>> 0), 0x68, ...u32(at('end'))]);
+                pieces.push([0x68, ...u32(text)], call(name), [0x83, 0xc4, 0x0c]);
+                pieces.push([0x3d, ...u32(answer >>> 0)]);                // cmp eax, answer
+                failIfNot();
+                pieces.push([0xa1, ...u32(at('end')), 0x3d, ...u32(text + stop)]);
+                failIfNot();
+                pieces.push([0x3b, 0x25, ...u32(at('sp'))]);              // cmp esp, [sp]
+                failIfNot();
+                pieces.push([0x81, 0xfb, ...u32(KEPT.ebx)]);
+                failIfNot();
+                pieces.push([0x81, 0xfe, ...u32(KEPT.esi)]);
+                failIfNot();
+                pieces.push([0x81, 0xff, ...u32(KEPT.edi)]);
+                failIfNot();
+                pieces.push([0x81, 0xfd, ...u32(KEPT.ebp)]);
+                failIfNot();
+                pieces.push(call('_errno'), [0x81, 0x38, ...u32(errno)]); // cmp dword [eax], errno
+                failIfNot();
+            });
+            pieces.push([0x6a, 0x00], call('ExitProcess'));
+            /** @type {number[]} */
+            const body = [];
+            /** @type {{ from: number, check: number }[]} */
+            const fixups = [];
+            for (const piece of pieces)
+            {
+                if (Array.isArray(piece))
+                {
+                    body.push(...piece);
+                    continue;
+                }
+                body.push(0x0f, 0x85, 0, 0, 0, 0);                        // jne exit
+                fixups.push({ from: body.length - 4, check: piece.check });
+            }
+            for (const { from, check: number } of fixups)
+            {
+                const exit = body.length;
+                body.push(0x6a, number, ...call('ExitProcess'));
+                body.splice(from, 4, ...u32(exit - (from + 4)));
+            }
+            return body;
+        },
+    });
+}
+
 /** How many times the program below calls floor and writes stdout's record. */
 const TURNS = 100000;
 
@@ -374,6 +474,37 @@ function buildNeighbourExe(){
             [0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
         ])],
     });
+}
+
+/**
+ * Runs a program to its exit and reads, before the machine goes, the host's
+ * calls by name.
+ *
+ * @param {Uint8Array} executable @param {'emulator' | 'cork'} engine
+ */
+async function runCounting(executable, engine){
+    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+    const app = await createApp({
+        executable,
+        engine,
+        v86: {
+            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+        },
+    });
+    try
+    {
+        const code = await app.run({ timeoutMs: 30000 });
+        const bridge = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'bridge');
+        return {
+            code,
+            crossed: new Map(/** @type {[string, number][]} */ (bridge?.metrics?.hot ?? [])),
+        };
+    }
+    finally
+    {
+        await app.dispose();
+    }
 }
 
 /** @param {Uint8Array} executable @param {'emulator' | 'cork'} engine */
@@ -440,6 +571,18 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
             assert.equal(await exitCodeOf(buildMemoryExe(), engine), 0,
                 'the number of the first call that came back wrong');
         });
+
+    test(`strtol and strtoul answer in the guest, and hand the host what sets errno, under `
+        + `${engine}`, { timeout: 60000 }, async()=>{
+        const { code, crossed } = await runCounting(buildConversionExe(), engine);
+        assert.equal(code, 0, 'the number of the first check that failed');
+        for (const name of ['strtol', 'strtoul'])
+        {
+            const handed = CONVERSIONS.filter(([fn, , , , , , host])=>fn === name && host).length;
+            assert.equal(crossed.get(`msvcrt.dll!${name}`) ?? 0, handed,
+                `${name}: only the calls it hands over crossed into the host`);
+        }
+    });
 
     test(`qsort sorts through the program's comparator, in the guest, under ${engine}`,
         { timeout: 60000 }, async()=>{

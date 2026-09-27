@@ -173,6 +173,34 @@ export function widenUnsigned(b){
 }
 
 /**
+ * @guestCode stdcall
+ * @param {any} guest @param {u32} p @param {i32} k
+ * @returns {i32}
+ */
+export function handOver({ u8, setU8, host }, p, k){
+    if (k < 0)
+    {
+        return host();
+    }
+    let sum = 0;
+    for (let i = 0; i < k; i++)
+    {
+        const b = u8(p + i);
+        if (b === 0xff)
+        {
+            return host();
+        }
+        sum = (sum + T8[b & 15]) | 0;
+    }
+    if (sum > 400)
+    {
+        return host();
+    }
+    setU8(p + 0x100, sum);
+    return sum;
+}
+
+/**
  * @guestCode cdecl
  * @param {any} guest @param {u32} d @param {u32} s @param {u32} n @param {u32} fn
  * @returns {i32}
@@ -313,6 +341,28 @@ test('copies up and down, over themselves, a fill, and calls through a pointer',
     }
 });
 
+test('a call handed to the host: the frame down, the stack and the kept registers as they came',
+    async()=>{
+        const { same } = await load(SAMPLE);
+        const next = random(16);
+        /** @type {(memory: Uint8Array, args: number[]) => number} */
+        const host = (memory, [p, k])=>{
+            memory[p + 0x200] = 0x77;
+            return (k ^ 0x5eed) | 0;
+        };
+        let handed = 0;
+        for (let i = 0; i < 200; i++)
+        {
+            const bytes = Array.from({ length: 64 },
+                ()=>(next() % 40 === 0 ? 0xff : next() & 0xff));
+            const k = [-1, 0, 1, 64, next() % 65, (next() | 0x80000000) | 0][i % 6];
+            const js = same('handOver', { stack: [DATA, k >>> 0], memory: [[DATA, bytes]] },
+                { host });
+            handed += js.handedOver ? 1 : 0;
+        }
+        assert.ok(handed > 20 && handed < 180, `${handed} of 200 handed over: both ways taken`);
+    });
+
 const TAGS = '@param {i32} a @param {u32} c @param {f64} x\n * @returns {i32}';
 
 /**
@@ -362,4 +412,10 @@ test('everything outside the subset is refused where it is written', ()=>{
         /names its convention/);
     refused(one(p, 'return a;', '@param {i32} a @param {u32} c @param {f64} x\n * @returns {f32}'),
         /is not i32, u32, f64, i64 or void/);
+    const q = '{ host }, a, c, x';
+    refused(one(q, 'return host(a);'), /host\(\) takes no arguments/);
+    refused(one(q, 'const v = host();\n    return v;'), /only returned: return host\(\)/);
+    refused(one(q, 'host();\n    return 0;'), /only returned: return host\(\)/);
+    refused(one('{ host }, v', 'return host();', '@param {x87} v\n * @returns {i32}'),
+        /x87 parameter/);
 });

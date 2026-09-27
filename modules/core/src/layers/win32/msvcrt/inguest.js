@@ -775,3 +775,183 @@ export function strcmp({ u8 }, left, right){
         }
     }
 }
+
+/** Each byte's value as a digit: 0-9, then a letter of either case from ten; 255 for any other. */
+export const DIGITS = Uint8Array.from({ length: 256 }, (_, code)=>{
+    if (code >= 0x30 && code <= 0x39)
+    {
+        return code - 0x30;
+    }
+    if (code >= 0x61 && code <= 0x7a)
+    {
+        return code - 0x61 + 10;
+    }
+    return code >= 0x41 && code <= 0x5a ? code - 0x41 + 10 : 255;
+});
+
+/**
+ * The largest magnitude that takes another digit in each base from 2 to 36
+ * with no fear of passing 32 bits: 2^32 - 1 over the base. Past it, or when
+ * the digit carries out, the magnitude is more than 32 bits hold.
+ */
+export const BELOW_CARRY = Uint32Array.from({ length: 37 },
+    (_, base)=>(base < 2 ? 0 : Math.floor(0xffffffff / base)));
+
+/**
+ * long strtol(const char *text, char **end, int base)
+ *
+ * White space, a sign, `0x` or `0X` in base 16 or 0 (a leading 0 is octal in
+ * base 0), and the digits of the base, each letter of either case from ten;
+ * `*end` set to where the digits stopped, or to the text itself when none
+ * converted. A value out of range is the host's: it clamps and sets errno,
+ * which is the calling thread's own; so is a base outside 2..36 other than 0,
+ * which the handler reads as it reads any other. Neither case writes before
+ * it goes, so the host answers the call as it came.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
+ * @returns {i32}
+ */
+export function strtol({ u8, setU32, host }, text, end, base){
+    if (base !== 0 && (base < 2 || base > 36))
+    {
+        return host();
+    }
+    let at = text;
+    let c = u8(at);
+    while (c === 0x20 || c >= 0x09 && c <= 0x0d)
+    {
+        at++;
+        c = u8(at);
+    }
+    let negative = 0;
+    if (c === 0x2d || c === 0x2b)
+    {
+        negative = c === 0x2d ? 1 : 0;
+        at++;
+        c = u8(at);
+    }
+    let radix = base;
+    if ((radix === 0 || radix === 16) && c === 0x30 && (u8(at + 1) | 0x20) === 0x78)
+    {
+        radix = 16;
+        at += 2;
+        c = u8(at);
+    }
+    else if (radix === 0)
+    {
+        radix = c === 0x30 ? 8 : 10;
+    }
+    const start = at;
+    const most = BELOW_CARRY[radix];
+    /** @type {u32} */
+    let magnitude = 0;
+    let digit = DIGITS[c];
+    while (digit < radix)
+    {
+        if (magnitude > most)
+        {
+            return host();
+        }
+        const product = Math.imul(magnitude, radix) >>> 0;
+        magnitude = (product + digit) >>> 0;
+        if (magnitude < product)
+        {
+            return host();
+        }
+        at++;
+        digit = DIGITS[u8(at)];
+    }
+    if (at === start)
+    {
+        if (end !== 0)
+        {
+            setU32(end, text);
+        }
+        return 0;
+    }
+    if (magnitude > (negative !== 0 ? 0x80000000 : 0x7fffffff))
+    {
+        return host();
+    }
+    if (end !== 0)
+    {
+        setU32(end, at);
+    }
+    return negative !== 0 ? (0 - magnitude) | 0 : magnitude | 0;
+}
+
+/**
+ * unsigned long strtoul(const char *text, char **end, int base)
+ *
+ * As strtol reads, and a minus sign negates the magnitude within 32 bits:
+ * strtoul("-1") is ULONG_MAX. A magnitude past 32 bits is the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
+ * @returns {u32}
+ */
+export function strtoul({ u8, setU32, host }, text, end, base){
+    if (base !== 0 && (base < 2 || base > 36))
+    {
+        return host();
+    }
+    let at = text;
+    let c = u8(at);
+    while (c === 0x20 || c >= 0x09 && c <= 0x0d)
+    {
+        at++;
+        c = u8(at);
+    }
+    let negative = 0;
+    if (c === 0x2d || c === 0x2b)
+    {
+        negative = c === 0x2d ? 1 : 0;
+        at++;
+        c = u8(at);
+    }
+    let radix = base;
+    if ((radix === 0 || radix === 16) && c === 0x30 && (u8(at + 1) | 0x20) === 0x78)
+    {
+        radix = 16;
+        at += 2;
+        c = u8(at);
+    }
+    else if (radix === 0)
+    {
+        radix = c === 0x30 ? 8 : 10;
+    }
+    const start = at;
+    const most = BELOW_CARRY[radix];
+    /** @type {u32} */
+    let magnitude = 0;
+    let digit = DIGITS[c];
+    while (digit < radix)
+    {
+        if (magnitude > most)
+        {
+            return host();
+        }
+        const product = Math.imul(magnitude, radix) >>> 0;
+        magnitude = (product + digit) >>> 0;
+        if (magnitude < product)
+        {
+            return host();
+        }
+        at++;
+        digit = DIGITS[u8(at)];
+    }
+    if (at === start)
+    {
+        if (end !== 0)
+        {
+            setU32(end, text);
+        }
+        return 0;
+    }
+    if (end !== 0)
+    {
+        setU32(end, at);
+    }
+    return negative !== 0 ? (0 - magnitude) >>> 0 : magnitude;
+}

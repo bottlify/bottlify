@@ -721,6 +721,7 @@ export function createMsvcrtFunctions(host){
         }),
         ...createConversionFunctions({
             readCString: host.readCString,
+            readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             allocate,
             fpu: host.fpu,

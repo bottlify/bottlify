@@ -168,7 +168,9 @@ instead carry `guest`, a builder that emits guest code and registers the traps i
 do this, and such an export is bound to its code, crossing into the host only where the code
 jumps to a trap), `data`, a variable the program reads through the address it imported, or
 `code`, a function that is code in the guest's own library (below), placed in the module's
-read-only code section apart from every variable ([`loader.md`](./loader.md)).
+read-only code section apart from every variable ([`loader.md`](./loader.md)); such code that
+hands some calls to the host is given a builder too, and the trap it jumps to is registered under
+the export's own `DLL!Name`, so a trace and the bridge's `hot` counts show each call handed over.
 The assembler (`src/app.js`) merges `win32.libraries()` with the
 tables from `graphics`, `audio`, `input` and `media`, registers every handler with the bridge under
 `DLL!Name`, and asks the loader to synthesise one in-guest module per library, with the ordinals
@@ -211,7 +213,7 @@ A call into a host handler costs a crossing: out of translated code, the bridge'
 arguments read from guest memory, the way back -- 0.8-4 us a call under cork in node
 (`tools/host-call-bench.mjs`), where a function as small as `toupper` is a few instructions. The
 C runtime's pure functions -- no state, no call into the host -- are therefore code in the guest's
-own `msvcrt`: the export's `data` is x86, and the program's call reaches it as it reaches any
+own `msvcrt`: the export's `code` is x86, and the program's call reaches it as it reaches any
 function, translated with the program's own code. A function that calls back into the program
 (`qsort`'s comparator) makes an ordinary `call`, where a handler ran the guest from the host once
 a comparison.
@@ -242,6 +244,18 @@ instruction of the thread's quantum, and a dword a turn is a quarter of the turn
 moves a page at a time counts by its bytes, whatever their width; a copy whose ends are one to
 three bytes apart goes a byte at a time).
 
+A function that leaves a rare case to the host's handler says `return host()` (`host` taken
+with the other helpers): the frame is taken down -- ESP at the return address, EBX, ESI, EDI and
+EBP as the caller left them -- and the code jumps to a trap into the handler, which answers the
+call as it came, arguments and all. The jump is a `jmp rel32` whose displacement the compiler
+leaves empty and names (`host` in the compiled module): the binding registers the trap
+(`guestEntry`'s fallback, the handler the function stood for) and the loader, which places the
+code, aims the jump at it ([`loader.md`](./loader.md)). The function goes to the host before it
+writes anything, so there is nothing to undo; one with an x87 parameter, popped by then, cannot.
+`strtol` and `strtoul` hand over a value out of range -- the handler clamps it and sets `errno`,
+which is the calling thread's own and reached only through the host -- and a base outside 2..36
+other than 0, and answer everything else themselves.
+
 `npm run build` (and `npm run build:guest-code` alone) compiles every `@guestCode` function under
 `src/` with `scripts/guest-code/compile.mjs` -- parsed by `espree`, the parser ESLint already
 brings; nothing the running product loads -- into the module beside its source, `inguest.x86.js`,
@@ -267,7 +281,7 @@ slow mixed form), `Math.abs`, and returned; no double arithmetic, which under a 
 control word would not compute what JavaScript does; a module-level constant folded in; an
 exported module-level typed array read by index, its contents placed after the code; a
 module-level function of one `return` inlined. Objects, arrays, strings, closures, `await` and
-calls to other handlers or the host are refused.
+calls to other handlers are refused, and the host is reached only by `return host()`.
 
 The same function is the export's handler (`guestEntry`, `msvcrt/guest-code.js`): its arguments
 read off the stack as the x86 reads them, its result answered where the x86 leaves it. That is
@@ -288,10 +302,11 @@ their wide forms `iswalpha` ... `iswgraph`, `iswascii`, `towupper`, `towlower` (
 `CLASSES` and `WIDE_CLASSES`, which `_pctype`, `_isctype` and `iswctype` read too); `strlen`,
 `strcpy`, `strcmp`, `strncmp`, `_strnicmp`, `_stricmp`; `memcpy`/`memmove` (one function: as if
 the source were read whole first, copied up or down), `memset`, `memcmp` (four bytes at a
-time while they match); `atoi`/`atol`; `qsort` (Shell's sort) and `bsearch`, the program's
-comparator called with a `call`. Each keeps the answers of the handler it replaced (see the
-divergences below). `strtol`/`strtoul` stay handlers: they set `errno`, which is the calling
-thread's own and reached only through the host.
+time while they match); `atoi`/`atol`; `strtol`/`strtoul`, handing the host what they leave
+to it; `qsort` (Shell's sort) and `bsearch`, the program's comparator called with a `call`.
+Each keeps the answers of the handler it replaced (see the divergences below); `strtol` and
+`strtoul` are held to theirs input by input as well, the JavaScript against the handler, since
+the handler is part of them.
 
 ### The process model
 
@@ -848,8 +863,10 @@ Stated as the code states them.
   msvcrt compares unsigned bytes. The comparisons in the guest keep that order (`ORDER` in
   `msvcrt/inguest.js`) so the handler and the x86 answer alike. A string past 1 MiB, which the
   handlers read no further than (`strlen`'s stopped the run without a terminator by then), is
-  measured, copied and compared whole by the x86, as msvcrt's are. `strcpy` copies as `memmove`
-  does, as if the source were read whole first, where C leaves an overlap undefined.
+  measured, copied and compared whole by the x86, as msvcrt's are, and `strtol`/`strtoul` read
+  only as far as the number goes, where their handler read the whole string first. `strcpy`
+  copies as `memmove` does, as if the source were read whole first, where C leaves an overlap
+  undefined.
 - **Every listed display mode can be set.** `ChangeDisplaySettingsA`/`ExA` switch the screen to
   any mode `EnumDisplaySettingsA` lists -- the metrics, the desktop rectangle and the current
   settings follow, the refresh rate is accepted as asked, `CDS_TEST` answers without switching, and

@@ -21,6 +21,9 @@
 
 import { readDouble, returningDouble } from './float.js';
 import { ERANGE } from './globals.js';
+import { guestEntry } from './guest-code.js';
+import * as inGuest from './inguest.js';
+import { COMPILED } from './inguest.x86.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -145,6 +148,9 @@ export function scanFloat(text){
  * @typedef {Object} ConversionHost
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ *           With it, strtol and strtoul are code in the guest, handing the
+ *           host only what they leave to it; without it, handlers.
  * @property {(bytes: number) => number} allocate
  * @property {import('./float.js').FloatHost} [fpu]  Absent means the functions
  *           that return a double are not exported at all.
@@ -262,29 +268,41 @@ export function createConversionFunctions(host){
         },
     });
 
-    const table = {
-        /** long strtol(const char *str, char **end, int base) */
-        strtol: strtoInteger(12, (magnitude, negative)=>{
-            const value = negative ? -magnitude : magnitude;
-            return value > LONG_MAX || value < LONG_MIN ? null : value;
-        }, negative=>(negative ? LONG_MIN : LONG_MAX)),
+    /** long strtol(const char *str, char **end, int base) */
+    const strtol = strtoInteger(12, (magnitude, negative)=>{
+        const value = negative ? -magnitude : magnitude;
+        return value > LONG_MAX || value < LONG_MIN ? null : value;
+    }, negative=>(negative ? LONG_MIN : LONG_MAX));
 
-        /**
-         * unsigned long strtoul(const char *str, char **end, int base)
-         *
-         * A minus sign is accepted and the magnitude is negated within 32 bits,
-         * which C requires: strtoul("-1") is ULONG_MAX, not a failure. A
-         * magnitude out of range is clamped before the sign is applied, so a
-         * negative one comes back as ULONG_MAX negated, 1 (Wine's msvcrt
-         * test_strtol).
-         */
-        strtoul: strtoInteger(12, (magnitude, negative)=>{
-            if (magnitude > ULONG_MAX)
-            {
-                return null;
-            }
-            return negative ? BigInt.asUintN(32, -magnitude) : magnitude;
-        }, negative=>(negative ? BigInt.asUintN(32, -ULONG_MAX) : ULONG_MAX)),
+    /**
+     * unsigned long strtoul(const char *str, char **end, int base)
+     *
+     * A minus sign is accepted and the magnitude is negated within 32 bits,
+     * which C requires: strtoul("-1") is ULONG_MAX, not a failure. A
+     * magnitude out of range is clamped before the sign is applied, so a
+     * negative one comes back as ULONG_MAX negated, 1 (Wine's msvcrt
+     * test_strtol).
+     */
+    const strtoul = strtoInteger(12, (magnitude, negative)=>{
+        if (magnitude > ULONG_MAX)
+        {
+            return null;
+        }
+        return negative ? BigInt.asUintN(32, -magnitude) : magnitude;
+    }, negative=>(negative ? BigInt.asUintN(32, -ULONG_MAX) : ULONG_MAX));
+
+    const { readMemory, writeMemory } = host;
+    const table = {
+        // Code in the guest (`inguest.js`), which hands the host a value out
+        // of range -- errno is the calling thread's, and only the host
+        // reaches it -- and a base it does not take; the handlers above
+        // answer those, through a trap the code jumps to.
+        strtol: readMemory
+            ? guestEntry(inGuest.strtol, COMPILED.strtol, { readMemory, writeMemory }, strtol)
+            : strtol,
+        strtoul: readMemory
+            ? guestEntry(inGuest.strtoul, COMPILED.strtoul, { readMemory, writeMemory }, strtoul)
+            : strtoul,
 
         /** char *_ltoa(long value, char *buffer, int radix) */
         _ltoa: toText(1, true),
