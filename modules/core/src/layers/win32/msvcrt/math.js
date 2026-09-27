@@ -135,6 +135,12 @@ export function createMathFunctions(host){
         /** double floor(double x) -- in the guest; `_CIfloor` beside it stays a handler */
         floor: guestEntry(inGuest.floor, COMPILED.floor, host),
 
+        /** double ceil(double x) -- in the guest */
+        ceil: guestEntry(inGuest.ceil, COMPILED.ceil, host),
+
+        /** double fabs(double x) -- in the guest */
+        fabs: guestEntry(inGuest.fabs, COMPILED.fabs, host),
+
         _ftol: ftol,
         _ftol2: ftol,
         _ftol2_sse: ftol,

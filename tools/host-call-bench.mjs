@@ -20,6 +20,7 @@
  * A SPEC is `DLL!name(arg,...)[:ret][@convention]`:
  *
  *   s:text   a pointer to that string (s:"a,b" for one with a comma)
+ *   w:text   a pointer to that string in UTF-16, terminated (w:"a,b" as s: has it)
  *   b:N      a pointer to N zeroed bytes
  *   i:N      a 32-bit integer (0x.. or decimal, negative too)
  *   d:X      a double on the stack, two slots
@@ -62,7 +63,7 @@ const HERE = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const CDECL_LIBRARIES = /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase)\.dll$/i;
 
 /**
- * @typedef {{ kind: 's', text: string } | { kind: 'b', size: number }
+ * @typedef {{ kind: 's' | 'w', text: string } | { kind: 'b', size: number }
  *     | { kind: 'i', value: number } | { kind: 'd', value: number }
  *     | { kind: 'x', value: number } | { kind: 'c' }} Arg
  */
@@ -94,14 +95,14 @@ export function parseSpec(text){
     while (rest.length > 0)
     {
         const kind = rest[0];
-        if (rest[1] !== ':' || !'sbidxc'.includes(kind))
+        if (rest[1] !== ':' || !'swbidxc'.includes(kind))
         {
-            throw new Error(`an argument is s:, b:, i:, d:, x: or c:, at "${rest}" in ${text}`);
+            throw new Error(`an argument is s:, w:, b:, i:, d:, x: or c:, at "${rest}" in ${text}`);
         }
         rest = rest.slice(2);
         /** @type {string} */
         let value;
-        if (kind === 's' && rest.startsWith('"'))
+        if ((kind === 's' || kind === 'w') && rest.startsWith('"'))
         {
             const end = /^"(?:[^"\\]|\\.)*"/.exec(rest);
             if (!end)
@@ -118,7 +119,7 @@ export function parseSpec(text){
             rest = comma < 0 ? '' : rest.slice(comma);
         }
         rest = rest.replace(/^\s*,\s*/, '');
-        if (kind === 's')
+        if (kind === 's' || kind === 'w')
         {
             args.push({ kind, text: value });
         }
@@ -189,6 +190,11 @@ export function program(spec, n, withCall){
         {
             data[`a${i}`] = [...new TextEncoder().encode(arg.text), 0];
         }
+        else if (arg.kind === 'w')
+        {
+            data[`a${i}`] = [...arg.text, '\0'].flatMap(c=>[c.charCodeAt(0) & 255,
+                c.charCodeAt(0) >>> 8]);
+        }
         else if (arg.kind === 'b')
         {
             data[`a${i}`] = new Array(Math.max(arg.size, 1)).fill(0);
@@ -220,7 +226,7 @@ export function program(spec, n, withCall){
             }
             for (const [i, arg] of [...spec.args.entries()].reverse())
             {
-                if (arg.kind === 's' || arg.kind === 'b')
+                if (arg.kind === 's' || arg.kind === 'w' || arg.kind === 'b')
                 {
                     turn.push(0x68, ...u32(at(`a${i}`)));                    // push pointer
                     slots++;

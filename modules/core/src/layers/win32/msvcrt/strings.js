@@ -18,7 +18,7 @@
  * position between calls, because that is what the C library promises.
  */
 
-import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
@@ -61,10 +61,6 @@ const CT_HEX = 0x0080;
  */
 const CT_ALPHA_MARK = 0x0100;
 
-
-/** msvcrt's case folding under the C locale is ASCII and nothing else. */
-const foldCase = (/** @type {string} */ text)=>
-    text.replace(/[A-Z]/g, letter=>letter.toLowerCase());
 
 /**
  * Marks the bytes of a set string in a scan table, every other byte taking the
@@ -133,22 +129,8 @@ export function createStringFunctions(host){
 
     /** @type {Record<string, any>} */
     const table = {
-        /** char *strrchr(const char *str, int ch) */
-        strrchr: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([string, ch])=>{
-                const text = readString(string);
-                const byte = ch & 0xff;
-                if (byte === 0)
-                {
-                    return string + text.length;
-                }
-                const index = text.lastIndexOf(decodeAnsi(Uint8Array.of(byte)));
-                return index === -1 ? 0 : string + index;
-            },
-        },
+        /** char *strrchr(const char *str, int ch) -- in the guest */
+        strrchr: guestEntry(inGuest.strrchr, COMPILED.strrchr, host),
 
         /** char *strpbrk(const char *str, const char *accept) */
         strpbrk: {
@@ -208,11 +190,11 @@ export function createStringFunctions(host){
         /** int _strnicmp(const char *l, const char *r, size_t count) -- in the guest */
         _strnicmp: guestEntry(inGuest._strnicmp, COMPILED._strnicmp, host),
 
-        /** char *_strupr(char *str) */
-        _strupr: inPlace(text=>text.replace(/[a-z]/g, c=>c.toUpperCase())),
+        /** char *_strupr(char *str) -- in the guest */
+        _strupr: guestEntry(inGuest._strupr, COMPILED._strupr, host),
 
-        /** char *_strlwr(char *str) */
-        _strlwr: inPlace(foldCase),
+        /** char *_strlwr(char *str) -- in the guest */
+        _strlwr: guestEntry(inGuest._strlwr, COMPILED._strlwr, host),
 
         /** char *_strrev(char *str) */
         _strrev: inPlace(text=>[...text].reverse().join('')),

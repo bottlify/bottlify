@@ -416,3 +416,131 @@ test('strtol and strtoul hand the host a value out of range and a base they do n
     }
     assert.ok(errno.length > 0, 'the host set errno for what it clamped');
 });
+
+test('abs: both signs, zero, and INT_MIN, which stays itself', ()=>{
+    const next = random(15);
+    for (const value of [0, 1, 0xffffffff, 0x7fffffff, 0x80000000, 0x80000001, 12345,
+        ...Array.from({ length: 60 }, ()=>next())])
+    {
+        same('abs', { stack: [value] });
+    }
+});
+
+test('ceil and fabs: rounded up and made positive as JavaScript does, under any control word',
+    ()=>{
+        const next = random(16);
+        const values = [0, -0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.9999999999999999,
+            -0.9999999999999999, 2 ** 52 - 0.5, -(2 ** 52) + 0.5, 2 ** 53, 1e300, -1e300, 5e-324,
+            -5e-324, Infinity, -Infinity, NaN];
+        for (let i = 0; i < 40; i++)
+        {
+            values.push((next() - 2 ** 31) / 256);
+        }
+        for (const control of CONTROLS)
+        {
+            for (const value of values)
+            {
+                same('ceil', { stack: doubleWords(value), control });
+                same('fabs', { stack: doubleWords(value), control });
+            }
+        }
+    });
+
+/** Bytes from a small alphabet, so searches find what they look for. @param {() => number} next */
+const letters = next=>(/** @type {number} */ length)=>Array.from({ length },
+    ()=>[0x41, 0x42, 0x61, 0x62, 0x5a, 0x7a, 0x40, 0x5b, 0x80, 0x9f, 0xc0, 0xff][next() % 12]);
+
+test('strchr and strrchr: the first and last of a byte, the terminator, and none', ()=>{
+    const next = random(17);
+    const text = letters(next);
+    for (let i = 0; i < 150; i++)
+    {
+        const bytes = [...text(next() % 24), 0];
+        for (const c of [0, 0x41, 0x61, 0xff, 0x80, 0x1241, 0xffffff61,
+            bytes[next() % bytes.length]])
+        {
+            same('strchr', { stack: [DATA, c], memory: [[DATA, bytes]] });
+            same('strrchr', { stack: [DATA, c], memory: [[DATA, bytes]] });
+        }
+    }
+});
+
+test('strstr: found at the start, inside, at the end, overlapping itself, empty, and not', ()=>{
+    const next = random(18);
+    const text = letters(next);
+    for (let i = 0; i < 200; i++)
+    {
+        const haystack = text(next() % 30);
+        const from = next() % (haystack.length + 1);
+        const needle = next() % 3 === 0 ? text(next() % 4)
+            : haystack.slice(from, from + next() % 6);
+        same('strstr', { stack: [DATA, DATA + 0x100],
+            memory: [[DATA, [...haystack, 0]], [DATA + 0x100, [...needle, 0]]] });
+    }
+    for (const [haystack, needle] of [['aaab', 'aab'], ['abab', 'bab'], ['', ''], ['', 'a'],
+        ['a', ''], ['abc', 'abcd'], ['abcabd', 'abd']])
+    {
+        same('strstr', { stack: [DATA, DATA + 0x100], memory: [[DATA,
+            [...haystack].map(c=>c.charCodeAt(0)).concat(0)], [DATA + 0x100,
+            [...needle].map(c=>c.charCodeAt(0)).concat(0)]] });
+    }
+});
+
+test('strcat and strncpy: apart, over themselves either way, padded and cut short', ()=>{
+    const next = random(19);
+    const text = letters(next);
+    for (let i = 0; i < 200; i++)
+    {
+        // The first string a little way in, so that one just below it is in the area too.
+        const at = DATA + 0x10;
+        const a = [...text(next() % 20), 0];
+        const b = [...text(next() % 20), 0];
+        const memory = /** @type {[number, number[]][]} */ ([[at, a], [at + 0x40, b]]);
+        const near = at + [1, 2, 3, 4, 7, -1, -3][next() % 7];
+        same('strcat', { stack: [at, at + 0x40], memory });
+        same('strcat', { stack: [at, near], memory });
+        same('strcat', { stack: [near + 8, at], memory });
+        for (const count of [0, 1, 3, a.length - 1, a.length, a.length + 5, next() % 40])
+        {
+            same('strncpy', { stack: [at + 0x80, at, count], memory });
+            same('strncpy', { stack: [near, at, count], memory });
+            same('strncpy', { stack: [at, near, count], memory });
+        }
+    }
+});
+
+test('_strlwr and _strupr: the ASCII letters in place, and nothing else', ()=>{
+    const next = random(20);
+    for (let i = 0; i < 100; i++)
+    {
+        const bytes = [...Array.from({ length: next() % 40 }, ()=>1 + next() % 255), 0];
+        same('_strlwr', { stack: [DATA], memory: [[DATA, bytes]] });
+        same('_strupr', { stack: [DATA], memory: [[DATA, bytes]] });
+    }
+});
+
+test('wcslen, wcscmp and wcscpy: units past a byte and past 0x7fff, and copies over themselves',
+    ()=>{
+        const next = random(21);
+        const units = (/** @type {number} */ length)=>Array.from({ length },
+            ()=>[0x41, 0x61, 0xe9, 0x100, 0x3000, 0x7fff, 0x8000, 0xffff][next() % 8]);
+        const bytes = (/** @type {number[]} */ list)=>[...list, 0].flatMap(u=>[u & 0xff, u >>> 8]);
+        for (let i = 0; i < 150; i++)
+        {
+            const a = units(next() % 16);
+            const b = next() % 3 === 0 ? [...a] : units(next() % 16);
+            if (b.length > 0 && next() % 2 === 0)
+            {
+                b[next() % b.length] = units(1)[0];
+            }
+            const at = DATA + 0x10;
+            const memory = /** @type {[number, number[]][]} */ ([[at, bytes(a)],
+                [at + 0x80, bytes(b)]]);
+            same('wcslen', { stack: [at], memory });
+            same('wcscmp', { stack: [at, at + 0x80], memory });
+            for (const to of [at + 0x100, at + 2, at + 4, at - 2, at + 1])
+            {
+                same('wcscpy', { stack: [to, at], memory });
+            }
+        }
+    });

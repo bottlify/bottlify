@@ -319,21 +319,11 @@ export function createConversionFunctions(host){
         /** char *_i64toa(__int64 value, char *buffer, int radix) */
         _i64toa: toText(2, true),
 
-        /** int abs(int value) */
-        abs: {
-            convention: 'cdecl',
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([value])=>Math.abs(value | 0) | 0,
-        },
+        /** int abs(int value) -- in the guest */
+        abs: guestEntry(inGuest.abs, COMPILED.abs, {}),
 
         /** long labs(long value) -- the same function on a 32-bit target */
-        labs: {
-            convention: 'cdecl',
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([value])=>Math.abs(value | 0) | 0,
-        },
+        labs: guestEntry(inGuest.abs, COMPILED.abs, {}),
 
         /**
          * char *_ecvt(double value, int count, int *dec, int *sign)

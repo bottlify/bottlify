@@ -121,24 +121,11 @@ export function createWideFunctions(host){
     const foldCase = text=>text.replace(/[A-Z]/g, letter=>letter.toLowerCase());
 
     return {
-        /** size_t wcslen(const wchar_t *) */
-        wcslen: {
-            convention: 'cdecl',
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([string])=>readWide(string).length,
-        },
+        /** size_t wcslen(const wchar_t *) -- in the guest */
+        wcslen: guestEntry(inGuest.wcslen, COMPILED.wcslen, host),
 
-        /** wchar_t *wcscpy(wchar_t *dest, const wchar_t *src) */
-        wcscpy: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([destination, source])=>{
-                writeWide(destination, readWide(source));
-                return destination;
-            },
-        },
+        /** wchar_t *wcscpy(wchar_t *dest, const wchar_t *src) -- in the guest */
+        wcscpy: guestEntry(inGuest.wcscpy, COMPILED.wcscpy, host),
 
         /** wchar_t *wcsncpy(wchar_t *dest, const wchar_t *src, size_t count) */
         wcsncpy: {
@@ -167,13 +154,8 @@ export function createWideFunctions(host){
             },
         },
 
-        /** int wcscmp(const wchar_t *, const wchar_t *) */
-        wcscmp: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([left, right])=>compare(readWide(left), readWide(right)),
-        },
+        /** int wcscmp(const wchar_t *, const wchar_t *) -- in the guest */
+        wcscmp: guestEntry(inGuest.wcscmp, COMPILED.wcscmp, host),
 
         /** int wcsncmp(const wchar_t *, const wchar_t *, size_t) */
         wcsncmp: {

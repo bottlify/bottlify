@@ -306,15 +306,18 @@ guest has no handler in the engine -- a handler cannot run the guest and wait fo
 synchronously -- and is `guestExport`, the x86 alone; its tests run the JavaScript with a
 stand-in for the call.
 
-In the guest now: `floor`, `_ftol`/`_ftol2`/`_ftol2_sse` (ST0 popped, EDX:EAX; a handler only
-where the host can set EDX); `toupper`, `tolower`, the classifiers `isalpha`, `isdigit`,
-`isalnum`, `isspace`, `isupper`, `islower`, `ispunct`, `isxdigit`, `isprint`, `iscntrl` and
-their wide forms `iswalpha` ... `iswgraph`, `iswascii`, `towupper`, `towlower` (the classes in
-`CLASSES` and `WIDE_CLASSES`, which `_pctype`, `_isctype` and `iswctype` read too); `strlen`,
-`strcpy`, `strcmp`, `strncmp`, `_strnicmp`, `_stricmp`; `memcpy`/`memmove` (one function: as if
-the source were read whole first, copied up or down), `memset`, `memcmp` (four bytes at a
-time while they match); `atoi`/`atol`; `strtol`/`strtoul`, handing the host what they leave
-to it; `qsort` (Shell's sort) and `bsearch`, the program's comparator called with a `call`.
+In the guest now: `floor`, `ceil`, `fabs`, `_ftol`/`_ftol2`/`_ftol2_sse` (ST0 popped, EDX:EAX;
+a handler only where the host can set EDX); `abs`/`labs`; `toupper`, `tolower`, the classifiers
+`isalpha`, `isdigit`, `isalnum`, `isspace`, `isupper`, `islower`, `ispunct`, `isxdigit`,
+`isprint`, `iscntrl` and their wide forms `iswalpha` ... `iswgraph`, `iswascii`, `towupper`,
+`towlower` (the classes in `CLASSES` and `WIDE_CLASSES`, which `_pctype`, `_isctype` and
+`iswctype` read too); `strlen`, `strcpy`, `strcat`, `strncpy` (padded, and unterminated when cut
+short), `strcmp`, `strncmp`, `_strnicmp`, `_stricmp`, `strchr`, `strrchr`, `strstr`, `_strlwr`,
+`_strupr` (ASCII only, in place), and the `_mbs` names bound to them; `wcslen`, `wcscmp`,
+`wcscpy`; `memcpy`/`memmove` (one function: as if the source were read whole first, copied up
+or down), `memset`, `memcmp` (four bytes at a time while they match); `atoi`/`atol`;
+`strtol`/`strtoul`, handing the host what they leave to it; `qsort` (Shell's sort) and
+`bsearch`, the program's comparator called with a `call`.
 Each keeps the answers of the handler it replaced (see the divergences below); `strtol` and
 `strtoul` are held to theirs input by input as well, the JavaScript against the handler, since
 the handler is part of them.
@@ -875,7 +878,9 @@ Stated as the code states them.
   `msvcrt/inguest.js`) so the handler and the x86 answer alike. A string past 1 MiB, which the
   handlers read no further than (`strlen`'s stopped the run without a terminator by then), is
   measured, copied and compared whole by the x86, as msvcrt's are, and `strtol`/`strtoul` read
-  only as far as the number goes, where their handler read the whole string first. `strcpy`
+  only as far as the number goes, where their handler read the whole string first; so is a wide
+  string past 65536 units, where `wcslen`, `wcscmp` and `wcscpy`'s handlers stopped, having
+  read 128 KiB from the pointer whatever the string's length. `strcpy`
   copies as `memmove` does, as if the source were read whole first, where C leaves an overlap
   undefined.
 - **Every listed display mode can be set.** `ChangeDisplaySettingsA`/`ExA` switch the screen to

@@ -346,6 +346,64 @@ function buildMemoryExe(){
     });
 }
 
+/** A wide string's bytes, terminated. @param {string} text */
+const wString = text=>[...text].flatMap(c=>[c.charCodeAt(0) & 0xff, c.charCodeAt(0) >>> 8])
+    .concat(0, 0);
+
+/**
+ * abs, ceil, fabs, the searches, the concatenation and bounded copy, the case
+ * changes in place and the wide length, comparison and copy through the
+ * import, each change read back by a comparison.
+ */
+function buildMoreExe(){
+    /** @type {Call[]} */
+    const calls = [];
+    /**
+     * @param {string} name @param {(at: (name: string) => number) => number[]} args
+     * @param {number | ((at: (name: string) => number) => number)} answer
+     */
+    const call = (name, args, answer)=>calls.push({ name, args, returns: 'eax',
+        expected: at=>[(typeof answer === 'function' ? answer(at) : answer) >>> 0] });
+    call('abs', ()=>[-5 >>> 0], 5);
+    call('abs', ()=>[0x80000000], 0x80000000);
+    call('labs', ()=>[7], 7);
+    for (const [name, value, answer] of /** @type {[string, number, number][]} */ ([
+        ['ceil', 2.5, 3], ['ceil', -2.5, -2], ['fabs', -3.75, 3.75], ['fabs', 0, 0]]))
+    {
+        calls.push({ name, args: ()=>halves(value), returns: 'st0', expected: halves(answer) });
+    }
+    call('strchr', at=>[at('hello'), 0x6c], at=>at('hello') + 2);
+    call('strchr', at=>[at('hello'), 0x7a], 0);
+    call('strchr', at=>[at('hello'), 0], at=>at('hello') + 5);
+    call('strrchr', at=>[at('hello'), 0x6c], at=>at('hello') + 3);
+    call('strstr', at=>[at('hello'), at('ll')], at=>at('hello') + 2);
+    call('strstr', at=>[at('hello'), at('lx')], 0);
+    call('strcpy', at=>[at('buffer'), at('ab')], at=>at('buffer'));
+    call('strcat', at=>[at('buffer'), at('cd')], at=>at('buffer'));
+    call('strcmp', at=>[at('buffer'), at('abcd')], 0);
+    call('strncpy', at=>[at('buffer'), at('hello'), 3], at=>at('buffer'));
+    call('strcmp', at=>[at('buffer'), at('held')], 0);
+    call('strncpy', at=>[at('buffer'), at('ab'), 6], at=>at('buffer'));
+    call('memcmp', at=>[at('buffer'), at('padded'), 7], 0);
+    call('_strupr', at=>[at('buffer')], at=>at('buffer'));
+    call('strcmp', at=>[at('buffer'), at('AB')], 0);
+    call('_strlwr', at=>[at('buffer')], at=>at('buffer'));
+    call('strcmp', at=>[at('buffer'), at('ab')], 0);
+    call('wcslen', at=>[at('wide')], 3);
+    call('wcscmp', at=>[at('wide'), at('wider')], -1);
+    call('wcscmp', at=>[at('wider'), at('wide')], 1);
+    call('wcscpy', at=>[at('wbuffer'), at('wide')], at=>at('wbuffer'));
+    call('wcscmp', at=>[at('wbuffer'), at('wide')], 0);
+    return buildCallsExe(calls, {
+        hello: cString('hello'), ll: cString('ll'), lx: cString('lx'), ab: cString('ab'),
+        cd: cString('cd'), abcd: cString('abcd'), held: cString('held'), AB: cString('AB'),
+        // strncpy's padding, and the byte after it the copy leaves alone.
+        padded: [0x61, 0x62, 0, 0, 0, 0, 0x78], buffer: [...new Array(6).fill(0), 0x78, 0],
+        wide: wString('h\u00e9\u8000'), wider: wString('h\u00e9\u8001'),
+        wbuffer: new Array(12).fill(0),
+    });
+}
+
 /**
  * Each conversion the program below makes: the function, the text, the base,
  * the answer, how far into the text the end pointer points, errno after, and
@@ -571,6 +629,16 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
             assert.equal(await exitCodeOf(buildMemoryExe(), engine), 0,
                 'the number of the first call that came back wrong');
         });
+
+    test(`abs, ceil, fabs, the searches, strcat, strncpy, the case changes and the wide `
+        + `functions answer in the guest, under ${engine}`, { timeout: 60000 }, async()=>{
+        const { code, crossed } = await runCounting(buildMoreExe(), engine);
+        assert.equal(code, 0, 'the number of the first call that came back wrong');
+        const inGuest = new Set(['abs', 'labs', 'ceil', 'fabs', 'strchr', 'strrchr', 'strstr',
+            'strcat', 'strncpy', '_strupr', '_strlwr', 'wcslen', 'wcscmp', 'wcscpy']);
+        assert.deepEqual([...crossed.keys()].filter(name=>inGuest.has(name.split('!')[1])), [],
+            'none of them crossed into the host');
+    });
 
     test(`strtol and strtoul answer in the guest, and hand the host what sets errno, under `
         + `${engine}`, { timeout: 60000 }, async()=>{
