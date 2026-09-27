@@ -159,6 +159,27 @@ test('a repe cmpsb whose destination page faults leaves the flags of the compare
     agree(r);
 });
 
+test('a repne cmpsb whose destination faults after a compare leaves that compare\'s flags, '
+    + 'whatever the source\'s next element', ()=>{
+    // The first pair, 0x10 against 0x01, leaves CF clear and AF set; the
+    // second's source byte, 0x00, is read before its destination faults, and
+    // folded with the first's record it would leave CF set and AF clear.
+    const r = both([
+        0xbe, 0x00, 0x20, 0, 0,             // mov esi, 0x2000
+        0xbf, 0xff, 0x4f, 0, 0,             // mov edi, 0x4fff
+        0xb9, 0x04, 0, 0, 0,                // mov ecx, 4
+        0xf2, 0xa6,                         // repne cmpsb
+        0xf4,
+    ], { memory: [[0x2000, [0x10, 0x00]], [0x4fff, [0x01]]],
+        mark: [[0x5000, 0x1000, PageFlag.INACCESSIBLE]] });
+    assert.equal(r.exit.kind, Exit.FAULT);
+    assert.equal(r.exit.eip, CODE + 15);
+    assert.equal(r.machine.reg('ecx'), 3, 'one compare completed');
+    assert.equal(r.machine.reg('edi'), 0x5000);
+    assert.equal(r.machine.eflags() & 0x51, 0x10, 'CF and ZF clear, AF set: 0x10 - 0x01');
+    agree(r);
+});
+
 test('a cmpsd element straddling a page faults before the compare, source read first', ()=>{
     // The source starts a word before the inaccessible page 3: its last two
     // bytes land in it. The destination is clean, so the source is what

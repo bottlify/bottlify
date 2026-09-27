@@ -714,10 +714,13 @@ interpreter tier. The same loop, one thread: `rep stosb` of 4 KiB 262 -> 95 ns a
 256 KiB 41 500 -> 7 820. The interpreter tiers count a `rep` as one instruction, as the emulator
 does. A `rep cmps` or `rep scas` tests its stop condition before the budget: a slice that runs out on the iteration that stops it leaves the
 instruction done, where it had left on it and the instruction run again scanned on past the match
-(a `repne scasb` strlen of "abc" answered 9). The source of `lods`, `movs` and `cmps` takes an
-`fs:` override as any memory operand does, the thread block's base added to esi, where translated
-code had read linear esi; the destination is es:[edi] whatever the prefix, and a `rep movs` with an
-`fs:` source takes the per-element path.
+(a `repne scasb` strlen of "abc" answered 9). A `cmps` sets its record's first operand only once
+the destination's element is read: a fault there leaves the record of the compare before it
+whole, where its AF, CF and OF had been folded with the source's next element in place of its
+own. The source of `lods`, `movs` and `cmps` takes an `fs:` override as any memory operand does,
+the thread block's base added to esi, where translated code had read linear esi; the destination
+is es:[edi] whatever the prefix, and a `rep movs` with an `fs:` source takes the per-element
+path.
 
 The null page is *not* marked, because the emulator lets a program read
 address 0 today and the two engines must agree; marking it, and projecting the memory

@@ -2220,11 +2220,14 @@ function stringInstruction(e, instruction){
             advance(esi);
             break;
         case 'cmps':
+            // The source's element waits in t1 until the destination's is
+            // read: a fault there leaves the record of the compare before,
+            // whose first operand the flags are folded from.
             checkedLoad(esi);
-            b.localSet(Local.op1);
+            b.localSet(Local.t1);
             checkedLoad(edi);
             b.localSet(Local.op2);
-            b.localGet(Local.op1).localGet(Local.op2).op(I32.sub);
+            b.localGet(Local.t1).localTee(Local.op1).localGet(Local.op2).op(I32.sub);
             mask(e, size);
             e.record(Kind.SUB, size);
             b.drop();
