@@ -75,6 +75,7 @@ import { createD3dxFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
 import { createNetworkFunctions } from './mpr/functions.js';
 import { createAcmFunctions } from './msacm32/functions.js';
+import { createThemeFunctions } from './uxtheme/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
 import { createOleFunctions, createTaskAllocator } from './ole32/functions.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS } from './oleaut32/functions.js';
@@ -1615,6 +1616,8 @@ export function createWin32Module(){
                 'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError }),
 
                 'MPR.dll': createNetworkFunctions({ setLastError: setError }),
+
+                'UXTHEME.dll': createThemeFunctions({ setLastError: setError }),
 
                 // Audio middleware links against the codec manager statically;
                 // with no drivers installed it answers "not possible" and the
