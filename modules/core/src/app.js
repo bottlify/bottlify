@@ -3712,11 +3712,8 @@ async function buildApp(options){
     // project's own decoder now, so the mount no longer needs the emulator.
     blocks = await mountBundle({ options, cpu, filesystem, events, translationStore });
 
-    // The session's files go onto the volume once it is the one the program
-    // will run on: the mount above puts a fresh writable layer over the
-    // bundle, and files laid down before it went with the layer it replaced
-    // -- which is how a saved profile was written faithfully and never seen
-    // again.
+    // The session's files go onto the volume once the bundle is under it, so
+    // that a saved file the bundle also carries is the one the program sees.
     if (seeded.files.length > 0)
     {
         filesystem.apply(seeded.files);
