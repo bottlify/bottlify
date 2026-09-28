@@ -725,6 +725,8 @@ test('a child among other objects still hands over, waiting for all or any', ()=
             `bWaitAll=${all}`);
         assert.deepEqual(child.waiters?.map((/** @type {any} */ one)=>one.result),
             all ? undefined : [1], `bWaitAll=${all}`);
+        assert.equal(child.handsOver, all ? true : undefined,
+            'the child alone cannot answer a wait for all of them: the parent hands over');
     }
 });
 
@@ -740,7 +742,7 @@ test('polling a set with a child says it is still running rather than blocking',
 
     assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 0]), WAIT_TIMEOUT);
     assert.equal(host.kernel.state.blocked.length, 0, 'and did not join the queue');
-    assert.equal(child.polled, true, 'and the parent watches it, so it runs beside');
+    assert.equal(child.handsOver, undefined, 'a question hands nothing over');
 });
 
 test('polling for all of a set with a child can never be satisfied', ()=>{

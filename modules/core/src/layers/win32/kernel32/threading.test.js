@@ -486,7 +486,6 @@ test('polling a child process says it is still running', ()=>{
     assert.equal(fns.WaitForSingleObject.handler([handle, 0]), 0x102);
     assert.deepEqual(parked, []);
     assert.deepEqual(kernel.state.blocked, []);
-    assert.equal(child.polled, true, 'and the parent watches it, so it runs beside');
 });
 
 test('a wait that succeeds returns immediately', ()=>{

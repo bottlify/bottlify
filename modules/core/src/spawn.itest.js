@@ -394,6 +394,70 @@ test('a parent that polls its child\'s exit code goes on after it, as one waitin
         assert.deepEqual(lifecycle, ['child C:\\App\\helper.exe', 'resumed 7']);
     });
 
+/**
+ * A setup that starts a helper and waits for it to say it is done rather than
+ * for its process: it names an event, starts the helper, waits on the event
+ * alone and exits with 3. The helper opens the event by name, signals it and
+ * exits with 0.
+ */
+function buildSignalled(){
+    const parent = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateEventA', 'CreateProcessA', 'WaitForSingleObject',
+            'ExitProcess'] },
+        data: {
+            name: ascii('LAUNCHED_OK'),
+            command: ascii('C:\\App\\game.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+            event: new Array(4).fill(0),
+        },
+        codeSize: 0x60,
+        code: ({ iat, at })=>[
+            // CreateEventA(0, 0, 0, name)
+            0x68, ...u32(at('name')), 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateEventA')),
+            0xa3, ...u32(at('event')),
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            // WaitForSingleObject(event, INFINITE)
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('event')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            0x6a, 3, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    return { parent, game: buildLauncher().game };
+}
+
+test('a parent waiting on something its child sets, not on the child, outlives the child',
+    { timeout: 60000 }, async t=>{
+        // A process lives until it exits itself, however it waits. One blocked
+        // on anything but its child's handle -- an event, a sleep between polls,
+        // its message loop -- was replaced by the child, so the child's exit
+        // ended the whole run: an installer vanished when a helper it started
+        // did, and a launcher collecting the installation at the end never did.
+        const { parent, game } = buildSignalled();
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\setup.exe',
+            engine: 'cork',
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\game.exe', bytes: game }] }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {string[]} */
+        const lifecycle = [];
+        app.on('process-child', (/** @type {any} */ event)=>
+            lifecycle.push(`child ${event.image}`));
+        app.on('process-replace', (/** @type {any} */ event)=>
+            lifecycle.push(`replaced by ${event.image}`));
+        app.on('process-resumed', (/** @type {any} */ event)=>
+            lifecycle.push(`resumed ${event.code}`));
+        assert.equal(await app.run({ timeoutMs: 30000 }), 3, 'the parent\'s own exit');
+        assert.deepEqual(lifecycle, ['child C:\\App\\game.exe', 'resumed 0'],
+            'the child ran beside it, and the parent went on to its end');
+    });
+
 test('a process started beside its parent writes into the run\'s one journal', { timeout: 60000 },
     async t=>{
         // The page reads the journal through the facade, which stays with the

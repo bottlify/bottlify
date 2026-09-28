@@ -351,24 +351,6 @@ test('IsWow64Process answers FALSE for this process and a child, and fails a str
     assert.equal(fns.IsWow64Process.argBytes, 8);
 });
 
-test('asking a child still to run for its exit code is STILL_ACTIVE, and watches it', ()=>{
-    // A setup that polls between sleeps is waiting for its helper: the child
-    // is marked, and the engine runs it beside the parent rather than in its
-    // place. One already finished is only read.
-    const host = fakeHost();
-    const running = { imagePath: 'C:\\helper.exe', exitCode: 259, completed: false };
-    const finished = { imagePath: 'C:\\done.exe', exitCode: 0, completed: true };
-    host.handles.set(0x40, running);
-    host.handles.set(0x44, finished);
-    const fns = createSystemFunctions(host);
-
-    assert.equal(fns.GetExitCodeProcess.handler([0x40, 0x200]), 1);
-    assert.equal(host.view.getUint32(0x200, true), 259);
-    assert.equal(/** @type {any} */ (running).polled, true);
-    assert.equal(fns.GetExitCodeProcess.handler([0x44, 0x200]), 1);
-    assert.equal(/** @type {any} */ (finished).polled, undefined);
-});
-
 test('a child process reports its own exit code, not this process\'s', ()=>{
     // The engine only ever answers STILL_ACTIVE for a child -- a child takes
     // this process's place rather than running beside it -- but the value has

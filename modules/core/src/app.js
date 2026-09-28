@@ -5788,12 +5788,13 @@ async function buildApp(options){
                     if (!step.ran)
                     {
                         // Nobody is ready. When a child is waiting to be started
-                        // that is not a deadlock but the handover: the parent's
-                        // last thread has ended, or it is blocked on the child's
-                        // own handle, which nothing in this process can signal.
-                        // A parent blocked on its child is not finished: the
-                        // child runs beside it and it goes on afterwards, which
-                        // the caller above arranges. Anything else is replaced.
+                        // that is not a deadlock but its turn: the parent has not
+                        // exited, so it is not finished -- blocked on the child's
+                        // handle, sleeping between polls of its exit code, or idle
+                        // in its message loop -- and the child runs beside it,
+                        // the parent going on afterwards, which the caller above
+                        // arranges. Only a wait for all of a set the child cannot
+                        // answer alone still hands the parent over.
                         if (replacing)
                         {
                             if (win32.childWaitedOn(replacing))
@@ -6310,8 +6311,8 @@ async function buildApp(options){
         replacement: ()=>kernel.processes.pending(),
 
         /**
-         * Whether this process is waiting on that child rather than done
-         * with it: then the child runs beside it, and it goes on afterwards.
+         * Whether that child runs beside this process rather than in its
+         * place: whenever this process has not exited. It goes on afterwards.
          *
          * @param {any} request
          */

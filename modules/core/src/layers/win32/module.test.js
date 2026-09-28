@@ -139,12 +139,13 @@ test('dsetup is a library here, so an autorun that loads it by name finds Direct
     await win32Module.dispose();
 });
 
-test('a child its parent waits on or polls runs beside it; one it ignores takes its place',
+test('a child runs beside a parent that has not exited, however the parent waits for it',
     async()=>{
         const api = await win32Module.create({ screen: SCREEN }, stubHost());
         assert.equal(api.childWaitedOn({ waiters: [{}] }), true, 'blocked on its handle');
-        assert.equal(api.childWaitedOn({ polled: true }), true, 'asked whether it has ended');
-        assert.equal(api.childWaitedOn({}), false, 'started and left');
+        assert.equal(api.childWaitedOn({}), true, 'polling it, or idle in its message loop');
+        assert.equal(api.childWaitedOn({ handsOver: true }), false,
+            'blocked on a wait for all of a set the child cannot answer alone');
         await win32Module.dispose();
     });
 

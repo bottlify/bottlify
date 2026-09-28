@@ -2470,17 +2470,19 @@ export function createWin32Module(){
                 rawInput: report=>windowService.rawInput(report),
 
                 /**
-                 * Whether one of this process's threads is blocked waiting on a
-                 * child it started, or has asked whether it is still running --
-                 * GetExitCodeProcess, or a wait of no time -- as a setup polling
-                 * for a helper between sleeps does: the parent that goes on once
-                 * the child is done, which the engine then runs the child beside
-                 * rather than replacing it.
+                 * Whether a child this process started runs beside it, the
+                 * parent going on once the child is done: whenever the parent
+                 * has not exited, as a process on Windows lives until it ends
+                 * itself however it waits for its child -- blocked on the
+                 * handle, polling its exit code between sleeps, or idle in its
+                 * message loop. Only a parent that has exited is replaced, and
+                 * one blocked on a wait for all of a set the child's exit alone
+                 * cannot answer, which the child is marked for.
                  *
                  * @param {any} child  The child's process record.
                  */
-                childWaitedOn: (/** @type {any} */ child)=>(child?.waiters?.length ?? 0) > 0
-                    || child?.polled === true,
+                childWaitedOn: (/** @type {any} */ child)=>exitCode === null
+                    && child?.handsOver !== true,
 
                 /**
                  * A child run beside this process has exited: its record takes the

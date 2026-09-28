@@ -454,18 +454,17 @@ export function createSyncFunctions(host){
                         (child.waiters ??= []).push(
                             { thread, result: WAIT_OBJECT_0 + childAt, settle });
                     }
+                    else
+                    {
+                        child.handsOver = true;
+                    }
                     kernel.block(thread, `child process ${child.imagePath}`);
                     return host.park(thread);
                 }
                 // A poll is a question, not a wait, and the honest answer about
                 // a child is that it is still running. So a poll for all of a
                 // set containing one can never be satisfied, and neither can a
-                // poll for any of a set that holds nothing else. Either way the
-                // parent is watching it, and the child runs beside it.
-                if (child !== null)
-                {
-                    child.polled = true;
-                }
+                // poll for any of a set that holds nothing else.
                 if (child !== null && (waitAll !== 0 || objects.length === 0))
                 {
                     return WAIT_TIMEOUT;

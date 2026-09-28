@@ -726,9 +726,7 @@ export function createSystemFunctions(host){
          * can look. A child the engine itself answered for -- a redistributable
          * installer, already run and exited 0 -- reports its own code, because
          * saying it is still running would make a caller that waits on it wait
-         * for ever. A parent that asks about a child still to run is watching
-         * for its end, as one polling between sleeps does: the child is marked
-         * polled, and runs beside this process rather than in its place.
+         * for ever.
          */
         GetExitCodeProcess: {
             argBytes: 8,
@@ -741,10 +739,6 @@ export function createSystemFunctions(host){
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
-                }
-                if (child && !child.completed && child.exitCode === STILL_ACTIVE)
-                {
-                    child.polled = true;
                 }
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setUint32(
