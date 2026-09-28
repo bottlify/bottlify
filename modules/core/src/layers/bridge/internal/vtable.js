@@ -526,6 +526,23 @@ export function createVtables({ memory, register, heap }){
             return true;
         },
 
+        /**
+         * The object behind an interface pointer this engine published.
+         *
+         * A layer that has to act on a pointer a program passes back -- a
+         * performance asked to play the segment whose pointer a class factory
+         * handed out -- has no other way to find it, because the words at the
+         * pointer are only the vtable and the owner is the bridge's own
+         * bookkeeping.
+         *
+         * @param {number} pointer
+         * @returns {any} the object, or null for a pointer not published here
+         */
+        objectAt(pointer){
+            const owner = owners.get(pointer >>> 0);
+            return owner ? owner.object : null;
+        },
+
         diagnostics: ()=>({
             comInterfaces: interfaces,
             comMethods: methods,

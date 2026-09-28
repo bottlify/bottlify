@@ -646,6 +646,16 @@ export function createBridgeModule(){
                 },
 
                 /**
+                 * The object behind an interface pointer this engine published.
+                 *
+                 * @param {number} pointer
+                 * @returns {any}
+                 */
+                interfaceObject(pointer){
+                    return live() && state.vtables ? state.vtables.objectAt(pointer) : null;
+                },
+
+                /**
                  * How many host calls are suspended, waiting on something. A driver
                  * loop that sees this above zero has to let the host run, not merely
                  * flush microtasks.
