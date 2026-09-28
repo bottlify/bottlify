@@ -1976,7 +1976,9 @@ export function createDirect3D9Seam(
                 readArray(indices,
                     vertexCountOf(type >>> 0, count >>> 0) * indexWidth(format)),
                 format >>> 0,
-                readArray(vertices, (numVertices >>> 0) * (stride >>> 0)),
+                // An index counts from the start of the vertices, so the
+                // range reaches past its lowest by the count.
+                readArray(vertices, ((minIndex >>> 0) + (numVertices >>> 0)) * (stride >>> 0)),
                 stride >>> 0),
 
         /** @param {any} device @param {number[]} args */

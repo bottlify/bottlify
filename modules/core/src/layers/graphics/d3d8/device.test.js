@@ -1888,6 +1888,12 @@ test('a draw outside a scene, of nothing, or without a stream is refused', ()=>{
         'but it needs enough bytes');
     assert.equal(device.DrawIndexedPrimitiveUP(D3DPT.TRIANGLELIST, 0, 3, 1, new Uint8Array(6),
         D3DFMT_INDEX.INDEX16, bytes, 16), D3D_OK);
+    // The indices count from the first vertex: a range of three from the
+    // second reaches the fourth, and needs its bytes.
+    assert.equal(device.DrawIndexedPrimitiveUP(D3DPT.TRIANGLELIST, 1, 3, 1, new Uint8Array(6),
+        D3DFMT_INDEX.INDEX16, bytes, 16), D3DERR_INVALIDCALL, 'three vertices are not four');
+    assert.equal(device.DrawIndexedPrimitiveUP(D3DPT.TRIANGLELIST, 1, 3, 1, new Uint8Array(6),
+        D3DFMT_INDEX.INDEX16, new Uint8Array(64), 16), D3D_OK);
     assert.equal(device.SetVertexShader(0), D3D_OK);
     assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, bytes, 16), D3DERR_INVALIDCALL,
         'no vertex format and no shader');

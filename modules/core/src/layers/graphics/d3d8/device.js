@@ -2061,7 +2061,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
         /**
          * @param {number} type
-         * @param {number} _minIndex
+         * @param {number} minIndex
          * @param {number} numVertices  How many vertices `vertexData` holds.
          * @param {number} primitiveCount
          * @param {Uint8Array} indexData
@@ -2070,19 +2070,23 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {number} stride
          */
         DrawIndexedPrimitiveUP(
-            type, _minIndex, numVertices, primitiveCount, indexData, indexFormat, vertexData,
+            type, minIndex, numVertices, primitiveCount, indexData, indexFormat, vertexData,
             stride,
         )
         {
+            // The indices count from the first vertex, not from minIndex, which
+            // only says where the range they use begins (Wine's d3d8
+            // test_drawindexedprimitiveup).
+            const reach = minIndex + numVertices;
             const hr = drawPreconditions(type, primitiveCount);
             if (hr !== D3D_OK || !vertexData || !indexData || !(stride > 0)
-                || vertexData.byteLength < numVertices * stride)
+                || vertexData.byteLength < reach * stride)
             {
                 return D3DERR_INVALIDCALL;
             }
             if (renderer)
             {
-                renderer.drawIndexedPrimitiveUp(model, type, numVertices, primitiveCount,
+                renderer.drawIndexedPrimitiveUp(model, type, reach, primitiveCount,
                     indexData, indexFormat, vertexData, stride);
             }
             unbindStreamZero();

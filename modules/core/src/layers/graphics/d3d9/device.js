@@ -2985,7 +2985,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         /**
          * @param {number} type
-         * @param {number} _minIndex
+         * @param {number} minIndex
          * @param {number} numVertices  How many vertices `vertexData` holds.
          * @param {number} primitiveCount
          * @param {Uint8Array} indexData
@@ -2994,17 +2994,20 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {number} stride
          */
         DrawIndexedPrimitiveUP(
-            type, _minIndex, numVertices, primitiveCount, indexData, indexFormat, vertexData,
+            type, minIndex, numVertices, primitiveCount, indexData, indexFormat, vertexData,
             stride,
         )
         {
+            // The indices count from the first vertex; minIndex only says where
+            // the range they use begins.
+            const reach = minIndex + numVertices;
             if (drawPreconditions(type, primitiveCount) !== D3D_OK || !vertexData || !indexData
-                || !(stride > 0) || vertexData.byteLength < numVertices * stride)
+                || !(stride > 0) || vertexData.byteLength < reach * stride)
             {
                 return D3DERR_INVALIDCALL;
             }
             noteUndrawable();
-            renderer?.drawIndexedPrimitiveUp(model, type, numVertices, primitiveCount, indexData,
+            renderer?.drawIndexedPrimitiveUp(model, type, reach, primitiveCount, indexData,
                 indexFormat, vertexData, stride);
             unbindStreamZero();
             return D3D_OK;
