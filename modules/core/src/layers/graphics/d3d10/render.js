@@ -2233,15 +2233,16 @@ export function createRenderer(services){
 
         /** @returns {any} */
         diagnostics(){
-            return {
+            // lastFrame is not enumerable: its commands hold live resources,
+            // and a table posted to the page must not walk the device.
+            return Object.defineProperty({
                 frames: counters.frames,
                 draws: counters.draws,
                 clears: counters.clears,
                 skipped: { ...counters.skipped },
                 failures: [...counters.failures],
                 pipelines: pipelines.size,
-                lastFrame,
-            };
+            }, 'lastFrame', { value: lastFrame });
         },
     };
 

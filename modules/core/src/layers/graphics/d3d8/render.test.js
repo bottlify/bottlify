@@ -575,6 +575,8 @@ test('byte-exact: known matrices in, known transformed positions out', async()=>
 
     const draw = h.device.diagnostics().lastFrame.find((/** @type {any} */ c)=>c.kind === 'draw');
     assert.deepEqual([...draw.uniforms.subarray(0, 16)], [...combined]);
+    assert.ok(!Object.keys(h.device.diagnostics()).includes('lastFrame'),
+        'the last frame, which holds live resources, is not walked when the table is posted');
     assert.deepEqual([...draw.uniforms.subarray(UNIFORM_AT.world, UNIFORM_AT.world + 16)],
         [...world], 'and the world matrix on its own, which is what lighting needs');
     assert.deepEqual(

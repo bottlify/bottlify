@@ -7434,7 +7434,7 @@ export function createRenderer(options){
         },
 
         diagnostics(){
-            return {
+            return Object.defineProperty({
                 frames: counters.frames,
                 draws: counters.draws,
                 clears: counters.clears,
@@ -7469,9 +7469,6 @@ export function createRenderer(options){
                 // cascade cut short, a texture uploaded, how many textures
                 // the frame drew with.
                 recentFrames: frameHistory.slice(),
-                // What the last frame was made of, for a test that wants to
-                // evaluate the same draws on the processor.
-                lastFrame,
                 // Empty unless the build asked for it; see `dumpDraws`.
                 lastDump,
                 // What the program made, and where its pixels live. Addresses
@@ -7495,7 +7492,13 @@ export function createRenderer(options){
                     tails: entry.tails ?? {},
                 })),
                 textures: [...uploaded.values()],
-            };
+            }, 'lastFrame', {
+                // What the last frame was made of, for a test that wants to
+                // evaluate the same draws on the processor. Not enumerable:
+                // its commands hold the live resources they drew with, and a
+                // table posted to the page must not walk the device through them.
+                value: lastFrame,
+            });
         },
     };
 

@@ -1695,7 +1695,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             // Reported whether or not this build draws: a program setting the
             // same matrix over and over is doing it for its own reasons, and
             // that is worth knowing before anyone builds a stub to spare it.
-            return { ...drawn, redundantTransforms };
+            return Object.defineProperty({ ...drawn, redundantTransforms }, 'lastFrame',
+                { value: drawn?.lastFrame });
         },
 
         BeginScene(){
