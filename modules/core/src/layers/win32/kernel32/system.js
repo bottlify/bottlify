@@ -133,8 +133,10 @@ export function mulDiv(number, numerator, denominator){
 /** GetCurrentThread hands out this, and it is -2 on every Windows. */
 const CURRENT_THREAD = 0xfffffffe;
 
-/** FormatMessage's two flags that change what it does. */
+/** The FormatMessage flags that change what it does. */
 const FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x00000100;
+const FORMAT_MESSAGE_IGNORE_INSERTS = 0x00000200;
+const FORMAT_MESSAGE_FROM_STRING = 0x00000400;
 const FORMAT_MESSAGE_FROM_SYSTEM = 0x00001000;
 
 /**
@@ -352,6 +354,51 @@ export function createSystemFunctions(host){
         host.writeMemory(address, new Uint8Array([
             value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
         ]));
+    };
+
+    /** @param {number} address */
+    const readDword = address=>{
+        const bytes = host.readMemory(address, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+
+    /**
+     * FormatMessage's insert pass over a caller's own format string: `%1`
+     * through `%9` take the n-th argument, `%%` is a literal percent, and
+     * everything else is copied through. An argument is always a string
+     * pointer, so a va_list and an ARGUMENT_ARRAY read the same way -- both
+     * lay the pointers out consecutively from the pointer the caller passed.
+     *
+     * @param {string} text @param {number} argumentsPtr
+     * @returns {string}
+     */
+    const insertArguments = (text, argumentsPtr)=>{
+        let out = '';
+        for (let at = 0; at < text.length; at++)
+        {
+            const ch = text[at];
+            const next = text[at + 1];
+            if (ch !== '%' || next === undefined)
+            {
+                out += ch;
+                continue;
+            }
+            if (next === '%')
+            {
+                out += '%';
+                at++;
+                continue;
+            }
+            if (next >= '1' && next <= '9')
+            {
+                const pointer = readDword(argumentsPtr + (next.charCodeAt(0) - 0x31) * 4);
+                out += pointer === 0 ? '' : readAnsi(pointer, MAX_STRING);
+                at++;
+                continue;
+            }
+            out += ch;
+        }
+        return out;
     };
 
     /** @param {number} address @param {number} length */
@@ -918,11 +965,17 @@ export function createSystemFunctions(host){
          * DWORD FormatMessageA(DWORD dwFlags, LPCVOID lpSource, DWORD dwMessageId,
          *   DWORD dwLanguageId, LPSTR lpBuffer, DWORD nSize, va_list *Arguments)
          *
-         * Only the system half. A program calls this to turn the code it just
-         * got from GetLastError into something to show or log, so the table
-         * below covers the codes this build actually produces; anything else
-         * gets a line naming the number, which is more use than an empty string
-         * and cannot be mistaken for a real message.
+         * Both sources a program uses in practice. FROM_SYSTEM turns a code
+         * from GetLastError into something to show or log, so the table below
+         * covers the codes this build actually produces; anything else gets a
+         * line naming the number, which is more use than an empty string and
+         * cannot be mistaken for a real message.
+         *
+         * FROM_STRING takes the caller's own text, with `%1`..`%9` expanded
+         * from the arguments when it is given any. It is as real a source as
+         * the system table, and it is how a caller expands inserts in a format
+         * string it already holds; refusing it hands back the empty buffer the
+         * caller cleared first, which reads as a string that was never there.
          *
          * FORMAT_MESSAGE_ALLOCATE_BUFFER changes what lpBuffer means: it is no
          * longer the buffer but a pointer to where the address of one goes, and
@@ -931,20 +984,35 @@ export function createSystemFunctions(host){
         FormatMessageA: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([flags, , messageId, , buffer, size])=>{
-                if ((flags >>> 0 & FORMAT_MESSAGE_FROM_SYSTEM) === 0)
+            handler: survivesFault(([flags, source, messageId, , buffer, size,
+                argumentsPtr])=>{
+                const asked = flags >>> 0;
+                /** @type {string} */
+                let text;
+                if ((asked & FORMAT_MESSAGE_FROM_STRING) !== 0)
                 {
-                    // FROM_STRING and FROM_HMODULE both need a source this can
-                    // not read: one is a format the caller supplies with inserts
-                    // to expand, the other a message table in a module.
+                    text = readAnsi(source >>> 0, MAX_STRING);
+                    if ((asked & FORMAT_MESSAGE_IGNORE_INSERTS) === 0
+                        && (argumentsPtr >>> 0) !== 0)
+                    {
+                        text = insertArguments(text, argumentsPtr >>> 0);
+                    }
+                }
+                else if ((asked & FORMAT_MESSAGE_FROM_SYSTEM) !== 0)
+                {
+                    const code = messageId >>> 0;
+                    text = /** @type {Record<number, string>} */ (SYSTEM_MESSAGES)[code]
+                        ?? `Error ${code}.`;
+                }
+                else
+                {
+                    // FROM_HMODULE needs a message table in a module, which no
+                    // caller in this build asks this surface for.
                     host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
                     return 0;
                 }
-                const code = messageId >>> 0;
-                const text = /** @type {Record<number, string>} */ (SYSTEM_MESSAGES)[code]
-                    ?? `Error ${code}.`;
 
-                if ((flags >>> 0 & FORMAT_MESSAGE_ALLOCATE_BUFFER) !== 0)
+                if ((asked & FORMAT_MESSAGE_ALLOCATE_BUFFER) !== 0)
                 {
                     if (!host.allocate || buffer === 0)
                     {
@@ -962,7 +1030,7 @@ export function createSystemFunctions(host){
                     return text.length;
                 }
                 return writeAnsiTo(buffer >>> 0, size >>> 0, text);
-            },
+            }),
         },
 
         /**

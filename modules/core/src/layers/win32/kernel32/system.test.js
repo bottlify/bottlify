@@ -565,3 +565,40 @@ test('a child that has ended already is not ended twice', ()=>{
     assert.equal(child.exitCode, 0);
     assert.deepEqual(host.errors, [5], 'ERROR_ACCESS_DENIED, as Windows answers');
 });
+
+test('FormatMessageA formats a caller\'s own string, not only the system table', ()=>{
+    // A caller loads a resource string, clears its output buffer, and puts the
+    // string through this call to have inserts expanded. Answering NULL for
+    // FROM_STRING leaves the buffer it cleared, so every name reads as absent.
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    host.writeMemory(0x200, Uint8Array.from([...'Forward', '\0'].map(c=>c.charCodeAt(0))));
+
+    assert.equal(fns.FormatMessageA.handler([0x400, 0x200, 0, 0, 0x300, 0x40, 0]), 7);
+    assert.equal(host.bytes[0x300 + 7], 0, 'terminated');
+    assert.equal(String.fromCharCode(...host.bytes.slice(0x300, 0x307)), 'Forward');
+});
+
+test('FormatMessageA expands inserts from the arguments it is handed', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    host.writeMemory(0x200, Uint8Array.from([...'%1 = %2', '\0'].map(c=>c.charCodeAt(0))));
+    host.writeMemory(0x220, Uint8Array.from([...'Forward', '\0'].map(c=>c.charCodeAt(0))));
+    host.writeMemory(0x240, Uint8Array.from([...'W', '\0'].map(c=>c.charCodeAt(0))));
+    host.writeMemory(0x260, new Uint8Array(Uint32Array.from([0x220, 0x240]).buffer));
+
+    assert.equal(fns.FormatMessageA.handler([0x400, 0x200, 0, 0, 0x300, 0x40, 0x260]), 11);
+    assert.equal(String.fromCharCode(...host.bytes.slice(0x300, 0x30b)), 'Forward = W');
+});
+
+test('FormatMessageA allocates the buffer when asked, for a caller\'s string too', ()=>{
+    const host = { ...fakeHost(), allocate: ()=>0x400 };
+    const fns = createSystemFunctions(host);
+    host.writeMemory(0x200, Uint8Array.from([...'unassigned', '\0'].map(c=>c.charCodeAt(0))));
+
+    // FROM_STRING with ALLOCATE_BUFFER: lpBuffer is where the address goes and
+    // nSize is ignored.
+    assert.equal(fns.FormatMessageA.handler([0x500, 0x200, 0, 0, 0x300, 1, 0]), 10);
+    assert.equal(host.view.getUint32(0x300, true), 0x400);
+    assert.equal(host.bytes[0x400 + 10], 0, 'terminated');
+});
