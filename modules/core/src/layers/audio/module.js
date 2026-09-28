@@ -248,6 +248,11 @@ export function createAudioModule(){
                         bridge?.interfaceObject?.(pointer) ?? null,
                     allocate: config?.allocate,
                     free: config?.free,
+                    // DirectMusic's notification message is the event the
+                    // performance sets when a segment reaches a point a
+                    // program asked about; it is signalled from the audio
+                    // tick, the same place the sound notifier's is.
+                    signal: config?.signal,
                     // A segment's bytes may arrive through an IStream, which is
                     // guest code: reading it is a callback the bridge makes on
                     // the thread whose call is running.

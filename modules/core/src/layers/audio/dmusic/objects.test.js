@@ -88,6 +88,15 @@ function rig(configure){
     const time = { at: 1000 };
     /** @type {Map<string, Uint8Array>} */
     const files = new Map();
+    /** Events the performance set, in order. @type {number[]} */
+    const signals = [];
+    /** @type {{ api: string, detail: string }[]} */
+    const divergences = [];
+    // One pointer per object and interface, as the bridge's publisher gives:
+    // the same interface asked for twice is the same pointer, which is how a
+    // program and this engine agree on identity.
+    /** @type {Map<any, Map<string, number>>} */
+    const published = new Map();
     let pointer = 0x20000000;
     const host = /** @type {any} */ ({
         registry: {},
@@ -97,16 +106,33 @@ function rig(configure){
             writeBytes: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>
                 space.writeBytes(a, b),
         },
-        publishInterface: ()=>pointer++,
+        publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>{
+            let byInterface = published.get(object);
+            if (!byInterface)
+            {
+                byInterface = new Map();
+                published.set(object, byInterface);
+            }
+            if (!byInterface.has(iid))
+            {
+                byInterface.set(iid, pointer++);
+            }
+            return byInterface.get(iid);
+        },
         output: ()=>out,
         now: ()=>time.at,
+        signal: (/** @type {number} */ handle)=>signals.push(handle),
+        allocate: (/** @type {number} */ bytes)=>space.alloc(bytes),
+        free: ()=>{},
         readFile: async(/** @type {string} */ path)=>
             files.get(path) ?? files.get(path.toLowerCase()) ?? null,
-        divergence: ()=>{},
+        divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>{
+            divergences.push({ api, detail });
+        },
     });
     configure?.(host, space);
     const dm = createDirectMusic(host);
-    return { space, out, time, files, dm };
+    return { space, out, time, files, signals, divergences, host, dm };
 }
 
 /**
@@ -393,4 +419,128 @@ test('a segment\'s wave is read through the loader its stream names', async()=>{
     const program = await (/** @type {any} */ (object).dmusic).resolve({});
     assert.equal(program.items.length, 1, 'the wave came through the loader');
     assert.equal(program.items[0].samples.length, samples.length * 2);
+});
+
+/**
+ * Loads the one-wave segment into a published pointer through the loader.
+ *
+ * @param {any} space @param {Map<string, Uint8Array>} files @param {any} dm
+ */
+async function loadedSegment(space, files, dm){
+    const { segment, wave } = segmentWithWave();
+    files.set('a.wav', wave);
+    const loader = createComObject(ids.CLSID_DIRECTMUSIC_LOADER, dm.loader());
+    const block = space.alloc(segment.length);
+    space.writeBytes(block, segment);
+    const desc = space.alloc(ids.DMUS_OBJECTDESC.SIZE);
+    space.writeU32(desc + ids.DMUS_OBJECTDESC.dwSize, ids.DMUS_OBJECTDESC.SIZE);
+    space.writeU32(desc + ids.DMUS_OBJECTDESC.dwValidData,
+        ids.DMUS_OBJ.CLASS | ids.DMUS_OBJ.MEMORY);
+    space.writeGuid(desc + ids.DMUS_OBJECTDESC.guidClass, ids.CLSID_DIRECTMUSIC_SEGMENT);
+    space.writeU32(desc + ids.DMUS_OBJECTDESC.llMemLength, segment.length);
+    space.writeU32(desc + ids.DMUS_OBJECTDESC.pbMemData, block);
+    const segmentOut = space.alloc(4);
+    assert.equal(await call(loader, ids.IID_DIRECTMUSIC_LOADER8, 'GetObject',
+        [desc, 0, segmentOut]), S_OK);
+    return space.readU32(segmentOut);
+}
+
+test('a segment reports start, almost-end and end, and each sets the event', async()=>{
+    const { space, files, signals, dm, time } = rig();
+    const segmentPointer = await loadedSegment(space, files, dm);
+    const performance = createComObject(ids.CLSID_DIRECTMUSIC_PERFORMANCE, dm.performance());
+
+    const handle = 0x1234;
+    assert.equal(await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8,
+        'SetNotificationHandle', [handle, 0, 0]), S_OK);
+    const type = space.alloc(16);
+    space.writeGuid(type, ids.GUID_NOTIFICATION_SEGMENT);
+    assert.equal(await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8,
+        'AddNotificationType', [type]), S_OK);
+    assert.equal(await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8,
+        'SetPrepareTime', [100]), S_OK);
+
+    const stateOut = space.alloc(4);
+    assert.equal(await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8, 'PlaySegmentEx',
+        [segmentPointer, 0, 0, 0, 0, 0, stateOut, 0, 0]), S_OK);
+    assert.deepEqual(signals, [handle], 'the segment starting set the event');
+
+    const pmsgOut = space.alloc(4);
+    /** @returns {Promise<number>} the option of the next message */
+    const nextOption = async()=>{
+        assert.equal(await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8,
+            'GetNotificationPMsg', [pmsgOut]), S_OK);
+        const message = space.readU32(pmsgOut);
+        assert.notEqual(message, 0);
+        assert.equal(space.readU32(message + ids.DMUS_NOTIFICATION_PMSG.dwType),
+            ids.DMUS_PMSGT_NOTIFICATION);
+        assert.equal(space.readU32(message + ids.DMUS_NOTIFICATION_PMSG.punkUser),
+            space.readU32(stateOut), 'the message names the segment state');
+        const option = space.readU32(message + ids.DMUS_NOTIFICATION_PMSG.dwNotificationOption);
+        assert.equal(await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8,
+            'FreePMsg', [message]), S_OK);
+        return option;
+    };
+    assert.equal(await nextOption(), ids.DMUS_NOTIFICATION_SEGSTART);
+
+    time.at += 450;
+    dm.tick();
+    assert.equal(await nextOption(), ids.DMUS_NOTIFICATION_SEGALMOSTEND);
+    time.at += 200;
+    dm.tick();
+    assert.equal(await nextOption(), ids.DMUS_NOTIFICATION_SEGEND);
+    assert.equal(await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8,
+        'GetNotificationPMsg', [pmsgOut]), S_FALSE, 'nothing is left');
+});
+
+test('PlaySegment refuses a source that is not a segment, without throwing', async()=>{
+    const { space, dm, divergences } = rig();
+    const performance = createComObject(ids.CLSID_DIRECTMUSIC_PERFORMANCE, dm.performance());
+    const stateOut = space.alloc(4);
+    const hr = await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8, 'PlaySegmentEx',
+        [0x11112222, 0, 0, 0, 0, 0, stateOut, 0, 0]);
+    assert.equal(hr, 0x80070057 | 0, 'an unknown source is E_INVALIDARG');
+    assert.equal(space.readU32(stateOut), 0, 'no state came back');
+    assert.equal(dm.diagnostics().playing, 0, 'nothing was started');
+    assert.ok(divergences.some(entry=>entry.api.includes('PlaySegment')),
+        'the refusal is reported');
+});
+
+test('PlaySegmentEx plays an IDirectSoundWave a program loaded itself', async()=>{
+    const samples = new Int16Array(1000);
+    const bytes = wavFile(samples, { sampleRate: 1000, channels: 1 });
+    /** @type {any} */
+    let waveObject = null;
+    const { space, out, dm } = rig(host=>{
+        host.objectAt = ()=>waveObject;
+    });
+    waveObject = createComObject(ids.CLSID_DIRECTSOUND_WAVE, dm.wave());
+    waveObject.state.bytes = bytes;
+    const performance = createComObject(ids.CLSID_DIRECTMUSIC_PERFORMANCE, dm.performance());
+    const stateOut = space.alloc(4);
+    assert.equal(await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8, 'PlaySegmentEx',
+        [0x70000000, 0, 0, 0, 0, 0, stateOut, 0, 0]), S_OK);
+    assert.equal(out.tracks.length, 1);
+    assert.equal(out.tracks[0].format.sampleRate, 1000);
+    assert.equal(out.tracks[0].bytes, samples.length * 2, 'the wave samples reached the mixer');
+});
+
+test('a segment that repeats for ever keeps playing past its length', async()=>{
+    const { space, files, out, time, host, dm } = rig();
+    files.set('a.wav', wavFile(new Int16Array(2000), { sampleRate: 1000, channels: 1 }));
+    const bytes = dmsgSegment([{ file: 'a.wav', time: 0 }],
+        { length: 768, tempo: { time: 0, tempo: 120 } });
+    const segment = dm.createSegment(bytes, '');
+    await call(segment.object, ids.IID_DIRECTMUSIC_SEGMENT8, 'SetRepeats', [0xffffffff]);
+    assert.equal(segment.plays(), Infinity);
+    host.objectAt = ()=>segment.object;
+
+    const performance = createComObject(ids.CLSID_DIRECTMUSIC_PERFORMANCE, dm.performance());
+    const stateOut = space.alloc(4);
+    assert.equal(await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8, 'PlaySegmentEx',
+        [0x50000000, 0, 0, 0, 0, 0, stateOut, 0, 0]), S_OK);
+    time.at += 5000;
+    dm.tick();
+    assert.equal(dm.diagnostics().playing, 1, 'still playing after ten passes');
+    assert.ok(out.tracks.length >= 2, 'each pass opens its own track');
 });

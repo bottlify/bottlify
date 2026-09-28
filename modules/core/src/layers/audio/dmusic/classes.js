@@ -34,6 +34,7 @@ export * from './ids.js';
  * @property {(pointer: number) => any} [objectAt]
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [free]
+ * @property {(handle: number) => void} [signal]
  * @property {(entry: number, args: number[], thread?: any) => Promise<number>} [callGuest]
  * @property {() => any} [callerThread]
  * @property {() => any} [output]

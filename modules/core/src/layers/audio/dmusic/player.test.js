@@ -106,3 +106,43 @@ test('volume in hundredths of a decibel becomes a linear gain', ()=>{
     assert.ok(volumeToGain(-600) > 0.49 && volumeToGain(-600) < 0.51);
     assert.equal(volumeToGain(-10000), 0);
 });
+
+test('a wave longer than a track holds is streamed over several turns', ()=>{
+    const time = clock();
+    const samples = new Uint8Array(4000);
+    const capacityFrames = 100;
+    let queued = 0;
+    let written = 0;
+    /** A mixer of bounded depth: it drops whatever does not fit. */
+    const out = {
+        open(/** @type {any} */ format){
+            return {
+                format,
+                capacityFrames,
+                pending: ()=>queued,
+                /** @param {Uint8Array} data */
+                write(data){
+                    const room = capacityFrames * 2 - queued * 2;
+                    const take = Math.min(data.length, Math.max(0, room));
+                    written += take;
+                    queued += take / 2;
+                    return take / 2;
+                },
+                close(){},
+            };
+        },
+    };
+    const player = createPlayer({ now: ()=>time.now(), output: ()=>out });
+    player.start({
+        items: [{ timeMs: 0, samples, sampleRate: 1000, channels: 1, gain: 1 }],
+        lengthMs: 100000,
+    }, { plays: 1 });
+    assert.ok(written < samples.length, 'only what the track holds went at first');
+    for (let turn = 0; turn < 40 && written < samples.length; turn++)
+    {
+        queued = 0;
+        time.at += 10;
+        player.tick();
+    }
+    assert.equal(written, samples.length, 'the whole wave reached the track');
+});

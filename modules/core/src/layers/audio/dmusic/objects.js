@@ -73,6 +73,7 @@ const STREAM_SEEK_END = 2;
  * @property {(bytes: Uint8Array, shape: { formatTag: number, sampleRate: number,
  *     channels: number }) => Promise<{ samples: Int16Array, sampleRate: number,
  *     channels: number } | null>} [decodeWave]
+ * @property {(handle: number) => void} [signal]  Sets a guest event.
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -192,6 +193,16 @@ export function createDirectMusic(host){
         return objects.get(pointer >>> 0) ?? host.objectAt?.(pointer) ?? null;
     };
     /**
+     * Whether a published object is a segment, rather than a wave or one of
+     * the other DirectMusic objects. A segment's parsed state carries the
+     * wave items a wave file does not, and that is what tells them apart
+     * without either class having to name the other.
+     *
+     * @param {any} object
+     */
+    const isSegmentObject = object=>Array.isArray(object?.state?.parsed?.waves);
+
+    /**
      * The implementation behind an interface pointer. A published COM object
      * carries the piece that knows how to play it as `dmusic`, so a method
      * handed a pointer resolves it to what it can actually ask.
@@ -208,7 +219,17 @@ export function createDirectMusic(host){
         {
             return object.dmusic;
         }
-        return object.state?.parsed ? segmentApiFor(object) : object;
+        if (isSegmentObject(object))
+        {
+            return segmentApiFor(object);
+        }
+        // A DirectSoundWave a program loaded itself is playable through
+        // PlaySegmentEx, so it answers the same calls a segment does.
+        if (object.state && 'bytes' in object.state)
+        {
+            return waveApiFor(object);
+        }
+        return object;
     };
 
     /** The directory a program named with SetSearchDirectory. */
@@ -254,12 +275,53 @@ export function createDirectMusic(host){
     };
 
     /**
-     * A segment's waves decoded into what the mixer plays.
+     * A wave file's samples as 16-bit PCM, or null when nothing here can
+     * decode it.
      *
      * A wave that is already PCM is handed over as it stands. Anything else
-     * is the file's own compressed stream, decoded once here rather than on
-     * every pass; a build with no decoder leaves the item out and says so,
-     * which is silence for that one sound and not a failed segment.
+     * is the file's own compressed stream -- very often MPEG-in-WAV -- run
+     * through the same decoder the program's sound library would have used;
+     * a build with no decoder answers null, which is silence for that one
+     * sound and not a failed segment.
+     *
+     * @param {Uint8Array} bytes
+     * @returns {Promise<{ samples: Uint8Array | null, sampleRate: number,
+     *     channels: number, formatTag: number } | null>}
+     */
+    const waveSamples = async bytes=>{
+        const wav = parseWave(bytes);
+        if (!wav)
+        {
+            return null;
+        }
+        if (wav.format === 'pcm' && wav.bitsPerSample === 16)
+        {
+            return { samples: wav.data, sampleRate: wav.sampleRate, channels: wav.channels,
+                formatTag: wav.formatTag };
+        }
+        if ((wav.formatTag === WAVE_FORMAT_MPEG || wav.formatTag === WAVE_FORMAT_MPEGLAYER3)
+            && host.decodeWave)
+        {
+            const decoded = await host.decodeWave(wav.data, {
+                formatTag: wav.formatTag, sampleRate: wav.sampleRate, channels: wav.channels,
+            });
+            if (decoded)
+            {
+                return {
+                    samples: new Uint8Array(decoded.samples.buffer, decoded.samples.byteOffset,
+                        decoded.samples.byteLength),
+                    sampleRate: decoded.sampleRate,
+                    channels: decoded.channels,
+                    formatTag: wav.formatTag,
+                };
+            }
+        }
+        return { samples: null, sampleRate: wav.sampleRate, channels: wav.channels,
+            formatTag: wav.formatTag };
+    };
+
+    /**
+     * A segment's waves decoded into what the mixer plays.
      *
      * @param {import('./riff.js').Segment} parsed @param {string} beside
      * @param {any} state @param {any} [thread]
@@ -276,44 +338,19 @@ export function createDirectMusic(host){
             {
                 continue;
             }
-            const wav = parseWave(bytes);
-            if (!wav)
-            {
-                continue;
-            }
-            /** @type {Uint8Array | null} */
-            let samples = null;
-            let sampleRate = wav.sampleRate;
-            let channels = wav.channels;
-            if (wav.format === 'pcm' && wav.bitsPerSample === 16)
-            {
-                samples = wav.data;
-            }
-            else if ((wav.formatTag === WAVE_FORMAT_MPEG
-                    || wav.formatTag === WAVE_FORMAT_MPEGLAYER3) && host.decodeWave)
-            {
-                const decoded = await host.decodeWave(wav.data, {
-                    formatTag: wav.formatTag, sampleRate: wav.sampleRate, channels: wav.channels,
-                });
-                if (decoded)
-                {
-                    samples = new Uint8Array(decoded.samples.buffer, decoded.samples.byteOffset,
-                        decoded.samples.byteLength);
-                    sampleRate = decoded.sampleRate;
-                    channels = decoded.channels;
-                }
-            }
-            if (!samples)
+            const decoded = await waveSamples(bytes);
+            if (!decoded || !decoded.samples || decoded.samples.length === 0)
             {
                 host.divergence?.('IDirectMusicSegment::Download',
-                    `no decoder for wave tag 0x${wav.formatTag.toString(16)} (${wave.file})`);
+                    `no decoder for wave tag 0x${(decoded?.formatTag ?? 0).toString(16)}`
+                    + ` (${wave.file})`);
                 continue;
             }
             items.push({
                 timeMs: Math.max(0, musicToMs(parsed.tempo, wave.start)),
-                samples: samples.slice(),
-                sampleRate,
-                channels,
+                samples: decoded.samples.slice(),
+                sampleRate: decoded.sampleRate,
+                channels: decoded.channels,
                 gain: volumeToGain(wave.volume),
             });
         }
@@ -506,6 +543,73 @@ export function createDirectMusic(host){
             resolution: ()=>state.resolution,
         };
         segmentApis.set(object, api);
+        (/** @type {any} */ (object)).dmusic = api;
+        return api;
+    };
+
+    /** @type {WeakMap<any, any>} */
+    const waveApis = new WeakMap();
+
+    /**
+     * A wave a program plays directly, as a one-item program.
+     *
+     * DX8 lets a program hand `PlaySegmentEx` an `IDirectSoundWave` -- a wave
+     * it loaded itself -- and the engine plays its samples as though they were
+     * a segment holding one wave at time zero. The bytes are what the loader's
+     * `CLSID_DirectSoundWave` object holds, and nothing else about it is
+     * observable, so a wave with no bytes is refused and a wave with them
+     * plays.
+     *
+     * @param {any} object
+     * @returns {Promise<import('./player.js').WaveProgram | null>}
+     */
+    const resolveWaveObject = async object=>{
+        const bytes = object.state?.bytes;
+        if (!bytes)
+        {
+            return null;
+        }
+        const decoded = await waveSamples(bytes);
+        if (!decoded || !decoded.samples || decoded.samples.length === 0)
+        {
+            return null;
+        }
+        const seconds = decoded.samples.length / (decoded.channels * 2) / decoded.sampleRate;
+        return {
+            items: [{
+                timeMs: 0,
+                samples: decoded.samples.slice(),
+                sampleRate: decoded.sampleRate,
+                channels: decoded.channels,
+                gain: 1,
+            }],
+            lengthMs: seconds * 1000,
+        };
+    };
+
+    /**
+     * The playable face of a wave object, shaped like a segment's API so
+     * `PlaySegment` treats the two the same.
+     *
+     * @param {any} object @returns {any}
+     */
+    const waveApiFor = object=>{
+        let api = waveApis.get(object);
+        if (api)
+        {
+            return api;
+        }
+        api = {
+            object,
+            load(){},
+            resolve: ()=>resolveWaveObject(object),
+            plays: ()=>1,
+            repeats: ()=>0,
+            startPoint: ()=>0,
+            loop: ()=>({ start: 0, end: 0 }),
+            resolution: ()=>PPQ,
+        };
+        waveApis.set(object, api);
         (/** @type {any} */ (object)).dmusic = api;
         return api;
     };
@@ -825,7 +929,8 @@ export function createDirectMusic(host){
                 {
                     return E_POINTER;
                 }
-                const state = createSegmentState(object, ()=>object.state.startPoint, null);
+                const state = createSegmentState(object, ()=>object.state.startPoint,
+                    { voice: null });
                 writeU32(out, publish(state.object, ids.IID_DIRECTMUSIC_SEGMENTSTATE8));
                 return S_OK;
             }],
@@ -875,27 +980,28 @@ export function createDirectMusic(host){
     }
 
     /**
-     * @param {any} segmentObject @param {() => number} startPoint @param {any} voice
+     * @param {any} segmentObject @param {() => number} startPoint
+     * @param {{ voice: any }} voiceRef
      */
-    const createSegmentState = (segmentObject, startPoint, voice)=>{
+    const createSegmentState = (segmentObject, startPoint, voiceRef)=>{
         const object = createComObject(ids.CLSID_DIRECTMUSIC_SEGMENTSTATE, {
             interfaces: [
                 describe(ids.IID_DIRECTMUSIC_SEGMENTSTATE8,
-                    stateMethods(segmentObject, startPoint, voice, true)),
+                    stateMethods(segmentObject, startPoint, voiceRef, true)),
                 describe(ids.IID_DIRECTMUSIC_SEGMENTSTATE,
-                    stateMethods(segmentObject, startPoint, voice, false)),
+                    stateMethods(segmentObject, startPoint, voiceRef, false)),
             ],
         });
-        const state = { object, voice, segment: segmentObject };
+        const state = { object, voice: voiceRef?.voice ?? null, segment: segmentObject };
         (/** @type {any} */ (object)).dmusic = state;
         return state;
     };
 
     /**
      * @param {any} segmentObject @param {() => number} startPoint
-     * @param {any} voice @param {boolean} eight
+     * @param {{ voice: any }} voiceRef @param {boolean} eight
      */
-    function stateMethods(segmentObject, startPoint, voice, eight){
+    function stateMethods(segmentObject, startPoint, voiceRef, eight){
         const getSegment = /** @type {ComMethodEntry} */ (['GetSegment', 8, (_, [out])=>{
             if ((out >>> 0) === 0)
             {
@@ -906,7 +1012,7 @@ export function createDirectMusic(host){
         }]);
         const methods = /** @type {ComMethodEntry[]} */ ([
             ['GetRepeats', 8, (_, [out])=>{
-                writeU32(out, voice ? 1 : 0);
+                writeU32(out, voiceRef.voice ? 1 : 0);
                 return S_OK;
             }],
             getSegment,
@@ -1140,29 +1246,194 @@ export function createDirectMusic(host){
         const join64 = (lo, hi)=>(lo >>> 0) + (hi >>> 0) * 0x100000000;
 
         /**
+         * DMUS_SEGF_*: whether a segment joins what plays or replaces it, and
+         * whether the replacement waits for the current one to end.
+         *
+         * A program of this era changes its music by naming the segment that
+         * should play and when; the flags are how it says whether the new
+         * piece is secondary (plays alongside), the next default boundary, or
+         * queued behind the piece already playing.
+         */
+        const SEG_SECONDARY = 0x80;
+        const SEG_QUEUE = 0x100;
+        const SEG_DEFAULT = 0x4000;
+        const SEG_MEASURE = 0x2000;
+        const SEG_BEAT = 0x1000;
+        const SEG_GRID = 0x800;
+        const SEG_SEGMENTEND = 0x800000;
+
+        /**
+         * The performance's notification state.
+         *
+         * DirectMusic tells a program that a segment started, looped, is
+         * nearly over or has ended by queueing a DMUS_NOTIFICATION_PMSG and
+         * setting the event the program gave `SetNotificationHandle`; the
+         * program wakes, reads the messages with `GetNotificationPMsg`, and
+         * frees each with `FreePMsg`. A music manager of this era chains its
+         * pieces exactly this way, so none of these is a stub.
+         */
+        const notifications = {
+            /** The guest event to set when a message is queued. */
+            handle: 0,
+            /** @type {Set<string>} */
+            types: new Set(),
+            /** @type {{ guid: string, option: number, voice: any }[]} */
+            queue: [],
+            /** @type {Set<number>} */
+            allocated: new Set(),
+        };
+
+        /** How long before a segment's end it is reported as nearly over. */
+        let prepareTime = 1000;
+
+        /** The primary voice, replaced rather than added to by name. */
+        /** @type {any} */
+        let primary = null;
+
+        /**
+         * A segment reached a point worth reporting. Queued and the program's
+         * event set on the audio tick; a program waiting on the handle cannot
+         * be the one to poll for it.
+         *
+         * @param {string} kind @param {any} voice
+         */
+        const onEvent = (kind, voice)=>{
+            if (!notifications.handle
+                || !notifications.types.has(ids.GUID_NOTIFICATION_SEGMENT))
+            {
+                return;
+            }
+            const option = kind === 'start' ? ids.DMUS_NOTIFICATION_SEGSTART
+                : kind === 'end' ? ids.DMUS_NOTIFICATION_SEGEND
+                    : kind === 'almostEnd' ? ids.DMUS_NOTIFICATION_SEGALMOSTEND
+                        : ids.DMUS_NOTIFICATION_SEGLOOP;
+            notifications.queue.push({ guid: ids.GUID_NOTIFICATION_SEGMENT, option, voice });
+            host.signal?.(notifications.handle);
+        };
+
+        /**
+         * How much of a voice is left to play, for a segment queued behind it.
+         *
+         * @param {any} voice
+         */
+        const remainingMs = voice=>{
+            const length = voice?.program?.lengthMs ?? 0;
+            if (!(length > 0))
+            {
+                return 0;
+            }
+            const elapsed = now() - voice.startedAt - voice.delayMs;
+            const total = voice.plays === Infinity ? length : length * voice.plays;
+            return Math.max(0, total - elapsed);
+        };
+
+        /**
+         * Plays a segment, or a wave a program loaded itself, now or behind
+         * the primary one.
+         *
+         * Never throws: a source that is not a segment or a wave is answered
+         * with the error DirectMusic answers, because the program's next line
+         * must run rather than the call ending the session.
+         *
          * @param {any} segment @param {number} flags @param {number} start
          * @param {number} out @param {any} [thread]
          */
         const playSegment = async(segment, flags, start, out, thread)=>{
-            if (!segment)
+            if (!segment || typeof segment.resolve !== 'function')
             {
+                host.divergence?.('IDirectMusicPerformance::PlaySegment',
+                    'the source is neither a segment nor a wave that can be played');
                 return E_INVALIDARG;
             }
-            const program = await segment.resolve(thread);
+            /** @type {import('./player.js').WaveProgram | null} */
+            let program;
+            try
+            {
+                program = await segment.resolve(thread);
+            }
+            catch (e){
+                host.divergence?.('IDirectMusicPerformance::PlaySegment',
+                    `the source could not be resolved: ${e instanceof Error ? e.message : e}`);
+                return E_FAIL;
+            }
+            if (!program)
+            {
+                host.divergence?.('IDirectMusicPerformance::PlaySegment',
+                    'the source has no samples to play');
+                return E_INVALIDARG;
+            }
+            const secondary = (flags & SEG_SECONDARY) !== 0;
+            const queued = (flags & (SEG_SEGMENTEND | SEG_QUEUE)) !== 0;
+            let delayMs = start > 0 ? start : 0;
+            // A piece queued behind the primary one begins where the primary
+            // ends. Without measures to align to, its end is the boundary a
+            // program of this era queues against.
+            if (!secondary && queued && primary)
+            {
+                delayMs = Math.max(delayMs, remainingMs(primary));
+            }
+            if (!secondary && !queued && primary)
+            {
+                player.stop(primary);
+            }
+            const frame = { voice: null };
+            const state = createSegmentState(segment.object, ()=>segment.startPoint(), frame);
             const voice = player.start(program, {
-                delayMs: start > 0 ? start : 0,
+                delayMs,
                 plays: segment.plays(),
                 volume: masterGain() * (defaultPath?.gain ?? 1),
                 segment,
+                state,
+                prepareMs: prepareTime,
+                onEvent,
             });
-            const state = createSegmentState(segment.object, ()=>segment.startPoint(), voice);
+            frame.voice = voice;
+            state.voice = voice;
             voice.state = state;
+            if (!secondary)
+            {
+                primary = voice;
+            }
+            void (flags & (SEG_DEFAULT | SEG_MEASURE | SEG_BEAT | SEG_GRID));
             if ((out >>> 0) !== 0)
             {
                 writeU32(out, publish(state.object, ids.IID_DIRECTMUSIC_SEGMENTSTATE8));
             }
-            void flags;
             return S_OK;
+        };
+
+        /**
+         * Allocates one guest DMUS_NOTIFICATION_PMSG for the next queued
+         * event, or 0 when nothing is waiting.
+         */
+        const nextNotification = ()=>{
+            const event = notifications.queue.shift();
+            if (!event)
+            {
+                return 0;
+            }
+            const size = ids.DMUS_NOTIFICATION_PMSG.SIZE;
+            const address = (host.allocate?.(size) ?? 0) >>> 0;
+            if (address === 0)
+            {
+                return 0;
+            }
+            notifications.allocated.add(address);
+            memory.writeBytes(address, new Uint8Array(size));
+            writeU32(address + ids.DMUS_NOTIFICATION_PMSG.dwSize, size);
+            const ms = now();
+            writeU64(address + ids.DMUS_NOTIFICATION_PMSG.rtTime, Math.round(ms * 10000));
+            writeU32(address + ids.DMUS_NOTIFICATION_PMSG.mtTime, Math.round(ms * PPQ * 2 / 1000));
+            writeU32(address + ids.DMUS_NOTIFICATION_PMSG.dwFlags,
+                ids.DMUS_PMSGF_REFTIME | ids.DMUS_PMSGF_MUSICTIME);
+            writeU32(address + ids.DMUS_NOTIFICATION_PMSG.dwType, ids.DMUS_PMSGT_NOTIFICATION);
+            const state = event.voice?.state;
+            writeU32(address + ids.DMUS_NOTIFICATION_PMSG.punkUser,
+                state ? publish(state.object, ids.IID_DIRECTMUSIC_SEGMENTSTATE8) : 0);
+            writeGuid(guidMemory, address + ids.DMUS_NOTIFICATION_PMSG.guidNotificationType,
+                event.guid);
+            writeU32(address + ids.DMUS_NOTIFICATION_PMSG.dwNotificationOption, event.option);
+            return address;
         };
 
         const methods = /** @type {ComMethodEntry[]} */ ([
@@ -1171,7 +1442,21 @@ export function createDirectMusic(host){
             }],
             ['PlaySegment', 24, (_, [source, flags, lo, hi, out])=>playSegment(
                 apiOf(source), flags >>> 0, join64(lo, hi), out, host.callerThread?.())],
-            ['Stop', 20, (_, [source, state])=>stopVoice(apiOf(state) ?? apiOf(source))],
+            ['Stop', 20, (_, [source, state])=>{
+                if ((state >>> 0) !== 0)
+                {
+                    return stopVoice(apiOf(state));
+                }
+                if ((source >>> 0) !== 0)
+                {
+                    return stopVoice(apiOf(source));
+                }
+                // Neither named: the primary segment is the one meant.
+                const stopped = player.playing((/** @type {any} */ v)=>v === primary);
+                player.stopWhere((/** @type {any} */ v)=>v === primary);
+                primary = null;
+                return stopped ? S_OK : S_FALSE;
+            }],
             ['GetSegmentState', 12, (_, [out])=>{
                 const voice = player.voices()[0];
                 if (!voice || (out >>> 0) === 0)
@@ -1181,9 +1466,12 @@ export function createDirectMusic(host){
                 writeU32(out, publish(voice.state.object, ids.IID_DIRECTMUSIC_SEGMENTSTATE8));
                 return S_OK;
             }],
-            ['SetPrepareTime', 8, ()=>S_OK],
+            ['SetPrepareTime', 8, (_, [value])=>{
+                prepareTime = value >>> 0;
+                return S_OK;
+            }],
             ['GetPrepareTime', 8, (_, [out])=>{
-                writeU32(out, 0);
+                writeU32(out, prepareTime);
                 return S_OK;
             }],
             ['SetBumperLength', 8, ()=>S_OK],
@@ -1209,19 +1497,15 @@ export function createDirectMusic(host){
                 return S_OK;
             }],
             ['IsPlaying', 12, (_, [segment, state])=>{
-                const stateObject = apiOf(state);
-                if (stateObject)
+                const a = (state >>> 0) !== 0 ? apiOf(state) : null;
+                const b = (segment >>> 0) !== 0 ? apiOf(segment) : null;
+                if (!a && !b)
                 {
-                    return player.playing((/** @type {any} */ v)=>v.state === stateObject)
-                        ? S_OK : S_FALSE;
+                    return player.voices().length > 0 ? S_OK : S_FALSE;
                 }
-                const wanted = apiOf(segment);
-                if (wanted)
-                {
-                    return player.playing((/** @type {any} */ v)=>v.segment === wanted)
-                        ? S_OK : S_FALSE;
-                }
-                return player.voices().length > 0 ? S_OK : S_FALSE;
+                const hit = player.playing((/** @type {any} */ v)=>
+                    v.state === a || v.segment === a || v.state === b || v.segment === b);
+                return hit ? S_OK : S_FALSE;
             }],
             ['GetTime', 12, (_, [reference, music])=>{
                 const ms = now();
@@ -1235,14 +1519,65 @@ export function createDirectMusic(host){
                 }
                 return S_OK;
             }],
-            ['AllocPMsg', 12, ()=>E_NOTIMPL],
-            ['FreePMsg', 8, ()=>E_NOTIMPL],
+            ['AllocPMsg', 12, (_, [size, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                const bytes = (size >>> 0) || ids.DMUS_NOTIFICATION_PMSG.SIZE;
+                const address = (host.allocate?.(bytes) ?? 0) >>> 0;
+                if (address === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                memory.writeBytes(address, new Uint8Array(bytes));
+                writeU32(address + ids.DMUS_NOTIFICATION_PMSG.dwSize, bytes);
+                notifications.allocated.add(address);
+                writeU32(out, address);
+                return S_OK;
+            }],
+            ['FreePMsg', 8, (_, [message])=>{
+                if ((message >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                if (notifications.allocated.delete(message >>> 0))
+                {
+                    host.free?.(message >>> 0);
+                }
+                return S_OK;
+            }],
             ['GetGraph', 8, ()=>E_FAIL],
             ['SetGraph', 8, ()=>E_NOTIMPL],
-            ['SetNotificationHandle', 16, ()=>S_OK],
-            ['GetNotificationPMsg', 8, ()=>S_FALSE],
-            ['AddNotificationType', 8, ()=>S_OK],
-            ['RemoveNotificationType', 8, ()=>S_OK],
+            ['SetNotificationHandle', 16, (_, [handle])=>{
+                notifications.handle = handle >>> 0;
+                return S_OK;
+            }],
+            ['GetNotificationPMsg', 8, (_, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                const address = nextNotification();
+                writeU32(out, address);
+                return address !== 0 ? S_OK : S_FALSE;
+            }],
+            ['AddNotificationType', 8, (_, [guid])=>{
+                const type = guidAt(guid);
+                if (type)
+                {
+                    notifications.types.add(type);
+                }
+                return S_OK;
+            }],
+            ['RemoveNotificationType', 8, (_, [guid])=>{
+                const type = guidAt(guid);
+                if (type)
+                {
+                    notifications.types.delete(type);
+                }
+                return S_OK;
+            }],
             ['AddPort', 8, ()=>S_OK],
             ['RemovePort', 8, ()=>S_OK],
             ['AssignPChannelBlock', 16, ()=>S_OK],
@@ -1280,6 +1615,7 @@ export function createDirectMusic(host){
             }],
             ['CloseDown', 4, ()=>{
                 player.stopAll();
+                primary = null;
                 return S_OK;
             }],
             ['GetResolvedTime', 20, (_, [lo, hi, out])=>{
@@ -1320,6 +1656,7 @@ export function createDirectMusic(host){
                 if ((item >>> 0) === 0)
                 {
                     player.stopAll();
+                    primary = null;
                     return S_OK;
                 }
                 return stopVoice(apiOf(item));
@@ -1366,11 +1703,17 @@ export function createDirectMusic(host){
                 return S_FALSE;
             }
             let stopped = false;
+            let stoppedPrimary = false;
             player.stopWhere((/** @type {any} */ voice)=>{
                 const hit = voice.segment === target || voice.state === target;
                 stopped ||= hit;
+                stoppedPrimary ||= hit && voice === primary;
                 return hit;
             });
+            if (stoppedPrimary)
+            {
+                primary = null;
+            }
             return stopped ? S_OK : S_FALSE;
         };
 

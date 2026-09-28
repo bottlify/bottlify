@@ -50,6 +50,54 @@ export const CLSID_DIRECTSOUND_WAVE = '{8A667154-F9CB-11D2-AD8A-0060B0575ABC}';
 /** The one master-volume parameter a program sets through SetGlobalParam. */
 export const GUID_PERF_MASTER_VOLUME = '{D2AC28B1-B39B-11D1-8704-00600893B1BD}';
 
+/**
+ * GUID_NOTIFICATION_SEGMENT, the type a performance sends when a segment
+ * starts, loops, is about to end or has ended. A program that queues its
+ * music adds this type and reads the performance's notification messages.
+ */
+export const GUID_NOTIFICATION_SEGMENT = '{D2AC2899-B39B-11D1-8704-00600893B1BD}';
+
+/**
+ * DMUS_NOTIFICATION_*, the option on a segment notification. The low three
+ * are the whole life of a segment, which is what a music manager of this era
+ * chains its pieces on.
+ */
+export const DMUS_NOTIFICATION_SEGSTART = 0;
+export const DMUS_NOTIFICATION_SEGEND = 1;
+export const DMUS_NOTIFICATION_SEGALMOSTEND = 2;
+export const DMUS_NOTIFICATION_SEGLOOP = 3;
+export const DMUS_NOTIFICATION_SEGABORT = 4;
+
+/** DMUS_PMSGT_NOTIFICATION, the PMSG type a notification is. */
+export const DMUS_PMSGT_NOTIFICATION = 3;
+
+/**
+ * DMUS_NOTIFICATION_PMSG, the message GetNotificationPMsg hands out.
+ *
+ * The offsets are the packed-8 layout of the SDK header, which is not a sum
+ * of the declared fields: `rtTime` is eight-byte aligned, so `dwSize` is
+ * followed by four bytes of padding, and everything after shifts by that.
+ * The engine reads back the same offsets the program writes at.
+ */
+export const DMUS_NOTIFICATION_PMSG = Object.freeze({
+    dwSize: 0x00,
+    rtTime: 0x08,
+    mtTime: 0x10,
+    dwFlags: 0x14,
+    pChannel: 0x18,
+    dwType: 0x28,
+    punkUser: 0x34,
+    guidNotificationType: 0x38,
+    dwNotificationOption: 0x48,
+    dwField1: 0x4c,
+    dwField2: 0x50,
+    SIZE: 0x54,
+});
+
+/** DMUS_PMSG's own flags: the time fields that are set. */
+export const DMUS_PMSGF_REFTIME = 0x1;
+export const DMUS_PMSGF_MUSICTIME = 0x2;
+
 /** GUID_DirectMusicAllTypes, the class wildcard SetSearchDirectory takes. */
 export const GUID_DIRECTMUSIC_ALL_TYPES = '{D2AC2893-B39B-11D1-8704-00600893B1BD}';
 
