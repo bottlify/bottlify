@@ -321,6 +321,43 @@ export function createTokenFunctions(host){
     };
 
     /**
+     * An access ACE appended after the last one; an ACL with no room for it
+     * refuses it rather than writing past its end.
+     *
+     * @param {number} acl
+     * @param {number} type
+     * @param {number} mask
+     * @param {number} sid
+     */
+    const addAce = (acl, type, mask, sid)=>{
+        const aces = (acl >>> 0) === 0 ? null : acesOf(acl);
+        if (aces === null)
+        {
+            return fail(ERROR_INVALID_ACL);
+        }
+        const bytes = sidAt(sid);
+        if (bytes === null)
+        {
+            return fail(ERROR_INVALID_SID);
+        }
+        const at = aces.length === 0 ? ACL.HEADER : aces[aces.length - 1].next;
+        const aceSize = 8 + bytes.length;
+        if (at + aceSize > readWord((acl >>> 0) + ACL.SIZE))
+        {
+            return fail(ERROR_ALLOTTED_SPACE_EXCEEDED);
+        }
+        const ace = new Uint8Array(aceSize);
+        ace[0] = type;
+        ace[2] = aceSize & 0xff;
+        ace[3] = aceSize >>> 8;
+        new DataView(ace.buffer).setUint32(4, mask >>> 0, true);
+        ace.set(bytes, 8);
+        host.writeMemory((acl >>> 0) + at, ace);
+        writeWord((acl >>> 0) + ACL.COUNT, aces.length + 1);
+        return 1;
+    };
+
+    /**
      * The generic rights of a mask turned into the specific ones a
      * GENERIC_MAPPING names, the generic bits themselves taken out.
      *
@@ -441,33 +478,38 @@ export function createTokenFunctions(host){
         AddAccessAllowedAce: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([acl, , mask, sid])=>{
-                const aces = (acl >>> 0) === 0 ? null : acesOf(acl);
-                if (aces === null)
-                {
-                    return fail(ERROR_INVALID_ACL);
-                }
-                const bytes = sidAt(sid);
-                if (bytes === null)
-                {
-                    return fail(ERROR_INVALID_SID);
-                }
-                const at = aces.length === 0 ? ACL.HEADER : aces[aces.length - 1].next;
-                const aceSize = 8 + bytes.length;
-                if (at + aceSize > readWord((acl >>> 0) + ACL.SIZE))
-                {
-                    return fail(ERROR_ALLOTTED_SPACE_EXCEEDED);
-                }
-                const ace = new Uint8Array(aceSize);
-                ace[0] = ACCESS_ALLOWED_ACE_TYPE;
-                ace[2] = aceSize & 0xff;
-                ace[3] = aceSize >>> 8;
-                new DataView(ace.buffer).setUint32(4, mask >>> 0, true);
-                ace.set(bytes, 8);
-                host.writeMemory((acl >>> 0) + at, ace);
-                writeWord((acl >>> 0) + ACL.COUNT, aces.length + 1);
-                return 1;
-            },
+            handler: ([acl, , mask, sid])=>addAce(acl, ACCESS_ALLOWED_ACE_TYPE, mask, sid),
+        },
+
+        /**
+         * BOOL AddAccessDeniedAce(PACL pAcl, DWORD dwAceRevision, DWORD AccessMask, PSID pSid)
+         */
+        AddAccessDeniedAce: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([acl, , mask, sid])=>addAce(acl, ACCESS_DENIED_ACE_TYPE, mask, sid),
+        },
+
+        /**
+         * DWORD SetSecurityInfo(HANDLE, SE_OBJECT_TYPE, SECURITY_INFORMATION, PSID owner,
+         *   PSID group, PACL dacl, PACL sacl)
+         *
+         * Taken and kept nowhere: the one account is the only one there is, so
+         * a DACL on an object has nobody else to let in or keep out.
+         */
+        SetSecurityInfo: {
+            argBytes: 28,
+            handler: ()=>0,
+        },
+
+        /**
+         * BOOL SetKernelObjectSecurity(HANDLE, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR)
+         *
+         * As SetSecurityInfo: accepted, with nobody else for it to matter to.
+         */
+        SetKernelObjectSecurity: {
+            argBytes: 12,
+            handler: ()=>1,
         },
 
         /**

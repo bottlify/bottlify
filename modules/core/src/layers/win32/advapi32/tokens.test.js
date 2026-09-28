@@ -225,3 +225,41 @@ test('a DACL allowing only the administrators lets the one account in', ()=>{
     assert.equal(fns.InitializeSecurityDescriptor.handler([DESCRIPTOR, 2]), 0);
     assert.equal(errors.at(-1), 1305, 'ERROR_UNKNOWN_REVISION');
 });
+
+test('a denied ACE ahead of an allowed one keeps its rights from the account', ()=>{
+    // A program closing its own process to others: a DACL denying a SID some
+    // rights, then allowing the rest, set on the process with SetSecurityInfo.
+    const { bytes, errors, fns, dword } = setup();
+    assert.equal(fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 1);
+    const token = dword(OUT);
+    const DESCRIPTOR = 0x300, ACL_AT = 0x340, MAPPING = 0x400;
+    const PRIVILEGES = 0x420, PRIVILEGES_LENGTH = 0x444, GRANTED = 0x448, STATUS = 0x44c;
+    bytes.set(ADMINISTRATORS_SID, SID);
+    const aclSize = 8 + 2 * (8 + ADMINISTRATORS_SID.length);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(MAPPING, 1, true);
+    view.setUint32(PRIVILEGES_LENGTH, 20, true);
+
+    assert.equal(fns.InitializeSecurityDescriptor.handler([DESCRIPTOR, 1]), 1);
+    assert.equal(fns.InitializeAcl.handler([ACL_AT, aclSize, 2]), 1);
+    assert.equal(fns.AddAccessDeniedAce.handler([ACL_AT, 2, 0xfa, SID]), 1);
+    assert.equal(fns.AddAccessAllowedAce.handler([ACL_AT, 2, 0x100701, SID]), 1);
+    assert.equal(bytes[ACL_AT + 8], 1, 'ACCESS_DENIED_ACE_TYPE first');
+    assert.equal(fns.SetSecurityDescriptorDacl.handler([DESCRIPTOR, 1, ACL_AT, 0]), 1);
+    assert.equal(fns.SetSecurityDescriptorGroup.handler([DESCRIPTOR, SID, 0]), 1);
+    assert.equal(fns.SetSecurityDescriptorOwner.handler([DESCRIPTOR, SID, 0]), 1);
+
+    const check = (/** @type {number} */ desired)=>fns.AccessCheck.handler([DESCRIPTOR, token, desired, MAPPING,
+        PRIVILEGES, PRIVILEGES_LENGTH, GRANTED, STATUS]);
+    assert.equal(check(0x10), 1);
+    assert.equal(dword(STATUS), 0, 'a denied right is refused');
+    assert.equal(errors.at(-1), 5);
+    assert.equal(check(0x1), 1);
+    assert.equal(dword(STATUS), 1, 'an allowed one the denial does not name is granted');
+
+    assert.equal(fns.AddAccessDeniedAce.handler([ACL_AT, 2, 1, SID]), 0);
+    assert.equal(errors.at(-1), 1344, 'ERROR_ALLOTTED_SPACE_EXCEEDED');
+    assert.equal(fns.SetSecurityInfo.handler(), 0);
+    assert.equal(fns.SetSecurityInfo.argBytes, 28);
+    assert.equal(fns.SetKernelObjectSecurity.handler(), 1);
+});
