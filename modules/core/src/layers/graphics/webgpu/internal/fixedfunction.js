@@ -189,9 +189,10 @@ const LIGHT_STRUCT = `struct Light {
  *
  * @param {number} mode  D3DFOG; NONE is 0, which declares nothing.
  * @param {string} [factors]  WGSL expression for the (start, end, density) row.
+ * @param {boolean} [perVertex]  Evaluated at the vertices and interpolated.
  * @returns {string}
  */
-export function fogFunctionDeclaration(mode, factors = 'uniforms.fogFactors'){
+export function fogFunctionDeclaration(mode, factors = 'uniforms.fogFactors', perVertex = false){
     switch (mode)
     {
         case D3DFOG.LINEAR:
@@ -199,10 +200,12 @@ export function fogFunctionDeclaration(mode, factors = 'uniforms.fogFactors'){
     let start = ${factors}.x;
     let end = ${factors}.y;
     // A range of nothing is a program asking for a step at that distance, not
-    // a division by zero that erases the frame.
+    // a division by zero that erases the frame -- per pixel. At the vertices
+    // Windows fogs it whole (Wine's d3d8 fog_special_test): a step there would
+    // interpolate into a gradient across every primitive that spans it.
     if (end <= start)
     {
-        return select(1.0, 0.0, dist >= end);
+        return ${perVertex ? '0.0' : 'select(1.0, 0.0, dist >= end)'};
     }
     return clamp((end - dist) / (end - start), 0.0, 1.0);
 }
@@ -767,7 +770,7 @@ export function generateFixedFunction(state, layout){
     const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}${uniformStruct(lightCount)}
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(lighting, vertexFog || fogSource === FOG_SOURCE.TABLE
-        ? state.fogMode : D3DFOG.NONE)}${samplerDeclarations(dimensionsOf(state), 0, 1)}
+        ? state.fogMode : D3DFOG.NONE, vertexFog)}${samplerDeclarations(dimensionsOf(state), 0, 1)}
 ${keys.some(key=>key !== null) ? 'var<private> colourKeyed: bool = false;\n' : ''}${
     sampleFunctions(state.stages.length, state.stages.map((stage, index)=>(generated[index]
         ? { projected: stage.projected ?? 0 } : null)), keys, dimensionsOf(state))}
@@ -1004,7 +1007,8 @@ export function fixedFragmentStage(state, written){
     }
     // Below table fog, a shader-drawn vertex is fogged by what the shader
     // wrote: its oFog when it wrote one, else its specular alpha -- neither
-    // the vertex mode's curve nor its range applies.
+    // the vertex mode's curve nor its range applies -- and with neither it is
+    // fogged whole (Wine's d3d8 fog_special_test).
     const fogSource = fogSourceOf(state);
     const carriedFog = fogSource === FOG_SOURCE.SPECULAR || fogSource === FOG_SOURCE.VERTEX;
     if (carriedFog)
@@ -1013,7 +1017,7 @@ export function fixedFragmentStage(state, written){
         {
             fields.push('    @location(10) fog: vec4f,');
         }
-        carried.push(`    input.fogAmount = ${has(10) ? 'in.fog.x' : has(1) ? 'in.v1.a' : '1.0'};`);
+        carried.push(`    input.fogAmount = ${has(10) ? 'in.fog.x' : has(1) ? 'in.v1.a' : '0.0'};`);
     }
     const members = ['    diffuse: vec4f,', '    specular: vec4f,',
         ...Array.from({ length: sets },
@@ -1057,10 +1061,10 @@ ${fragmentBody(state, state.specularEnable === true, [], 'in.position')}
  * @param {number} fogMode  D3DFOG; NONE is 0.
  * @returns {string}
  */
-function functionDeclarations(lighting, fogMode){
+function functionDeclarations(lighting, fogMode, perVertex = false){
     // Only for geometry that has a distance to fog by: a pre-transformed vertex
     // carries its factor already and would leave this declared and uncalled.
-    const fog = fogFunctionDeclaration(fogMode);
+    const fog = fogFunctionDeclaration(fogMode, undefined, perVertex);
     if (lighting === null)
     {
         return fog;

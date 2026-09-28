@@ -1824,7 +1824,7 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             outputFields,
         }),
         // The fog curve over the fixed function's own range row.
-        fogFunctionDeclaration(vertexFog ? fog : 0, `c[${HYBRID_CONSTANTS.FOG}]`).trimEnd(),
+        fogFunctionDeclaration(vertexFog ? fog : 0, `c[${HYBRID_CONSTANTS.FOG}]`, true).trimEnd(),
         // The viewport's inverse offset and scale, as the fixed-function stage
         // applies them to a vertex given in target pixels, and its RHW back as
         // the clip w the rasteriser interpolates by (one for none to give).

@@ -20,7 +20,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
-    D3DFOG, D3DLIGHT, D3DMCS, D3DTA, D3DTOP, TCI, fixedFragmentStage, generateFixedFunction,
+    D3DFOG, D3DLIGHT, D3DMCS, D3DTA, D3DTOP, TCI, fixedFragmentStage, fogFunctionDeclaration,
+    generateFixedFunction,
 } from './fixedfunction.js';
 import { FOG_SOURCE } from './pipeline.js';
 import { FVF, decodeFvf } from './vertexformat.js';
@@ -915,4 +916,11 @@ test('a pre-transformed vertex with no depth test is held in the depth range, no
     const transformed = generate(baseState({ fvf: FVF.XYZ | FVF.DIFFUSE, depthTest: false }));
     assert.doesNotMatch(transformed.code, held,
         'a transformed vertex is clipped by the near and far planes');
+});
+
+test('linear fog of no range is a step per pixel and whole fog at a vertex', ()=>{
+    // Wine's d3d8 fog_special_test: FOGSTART equal to FOGEND fogs a vertex
+    // entirely, where the table curve steps at that depth.
+    assert.match(fogFunctionDeclaration(D3DFOG.LINEAR), /return select\(1\.0, 0\.0, dist >= end\);/);
+    assert.match(fogFunctionDeclaration(D3DFOG.LINEAR, undefined, true), /return 0\.0;/);
 });
