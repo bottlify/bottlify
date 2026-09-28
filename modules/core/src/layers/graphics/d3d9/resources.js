@@ -797,11 +797,30 @@ export function createTexture(options){
     const faces = cube ? 6 : 1;
     /** @type {Map<string, Surface>} */
     const surfaces = new Map();
-    const count = sharedCount(options.count, ()=>{
-        for (const surface of surfaces.values())
+    // Each face's levels lie one after another in one block, as Windows lays
+    // a texture's chain out: a program that locks the top level and writes
+    // on past its end writes the next levels (Wine's d3d8 test_mipmap_upload).
+    /** @type {number[]} */
+    const chains = new Array(faces).fill(0);
+    /** @param {number} level @returns {number} bytes before it in its face's block */
+    const offsetOf = level=>{
+        let bytes = 0;
+        for (let before = 0; before < level; before++)
         {
-            options.free?.(surface.base);
+            bytes += surfaceBytes(options.format, levelExtent(options.width, before),
+                levelExtent(options.height, before));
         }
+        return bytes;
+    };
+    const count = sharedCount(options.count, ()=>{
+        for (const base of chains)
+        {
+            if (base)
+            {
+                options.free?.(base);
+            }
+        }
+        chains.fill(0);
         surfaces.clear();
     });
     /** @type {SurfaceFamily} */
@@ -858,7 +877,8 @@ export function createTexture(options){
             format: options.format,
             pool: options.pool,
             usage: options.usage,
-            base: options.allocate(surfaceBytes(options.format, width, height)),
+            base: (chains[face] ||= options.allocate(offsetOf(options.levels)))
+                + offsetOf(level),
             count,
             // Only a surface reached through a 2D texture forgives an unlock it
             // does not owe; a cube face does not, and that difference is

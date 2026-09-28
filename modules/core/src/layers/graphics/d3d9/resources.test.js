@@ -478,7 +478,8 @@ test('a texture gives its storage back when the last reference goes', ()=>{
     const level1 = {};
     texture.GetSurfaceLevel(0, level0);
     texture.GetSurfaceLevel(1, level1);
-    const taken = [level0.surface.base, level1.surface.base];
+    assert.equal(level1.surface.base, level0.surface.base + 8 * 8 * 4,
+        'the chain is one block, each level after the one before it');
     assert.equal(freed.length, 0, 'nothing is given back while it is referenced');
 
     // A level handed out takes a reference of its own; the storage goes back
@@ -487,8 +488,7 @@ test('a texture gives its storage back when the last reference goes', ()=>{
     {
         texture.release();
     }
-    assert.deepEqual(freed.sort(), taken.sort(),
-        'every level a program ever locked is handed back, not only the first');
+    assert.deepEqual(freed, [level0.surface.base], 'the chain goes back whole, once');
 });
 
 test('a texture\'s storage goes back when its last reference goes through a level', ()=>{
