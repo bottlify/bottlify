@@ -175,7 +175,7 @@ export function createDirectMusic(host){
     /** @param {any} object @param {string} iid @returns {number} */
     const publish = (object, iid)=>{
         const pointer = (host.publishInterface?.(object, iid) ?? 0) >>> 0;
-        if (pointer !== 0)
+        if (pointer !== 0 && !host.objectAt)
         {
             objects.set(pointer, object);
         }
@@ -187,10 +187,15 @@ export function createDirectMusic(host){
         {
             return null;
         }
-        // Objects this module published are remembered here; objects the
-        // class registry published -- a segment a program made itself -- are
-        // the bridge's to find, because it is what built their vtables.
-        return objects.get(pointer >>> 0) ?? host.objectAt?.(pointer) ?? null;
+        // The bridge's map is the live one: a pointer released to zero is
+        // handed out again for another object, and this module's own map
+        // would go on naming the first. It is only the answer where there is
+        // no bridge to ask.
+        if (host.objectAt)
+        {
+            return host.objectAt(pointer) ?? null;
+        }
+        return objects.get(pointer >>> 0) ?? null;
     };
     /**
      * Whether a published object is a segment, rather than a wave or one of

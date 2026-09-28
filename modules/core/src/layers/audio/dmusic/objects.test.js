@@ -585,3 +585,37 @@ test('a segment that repeats for ever keeps playing past its length', async()=>{
     assert.equal(dm.diagnostics().playing, 1, 'still playing after ten passes');
     assert.ok(out.tracks.length >= 2, 'each pass opens its own track');
 });
+
+test('a pointer the bridge hands out again names its new object', async()=>{
+    const { segment, wave } = segmentWithWave();
+    const reused = 0x30000000;
+    /** @type {any} */
+    let published = null;
+    /** @type {any} */
+    let live = null;
+    const { space, files, out, dm } = rig(host=>{
+        host.publishInterface = (/** @type {any} */ object)=>{
+            published = object;
+            return reused;
+        };
+        host.objectAt = ()=>live;
+    });
+    files.set('a.wav', wave);
+    const performance = createComObject(ids.CLSID_DIRECTMUSIC_PERFORMANCE, dm.performance());
+    const pathOut = space.alloc(4);
+    await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8,
+        'CreateStandardAudioPath', [5, 128, 1, pathOut]);
+
+    // The program takes the path's buffer and releases it; the bridge frees the
+    // pointer and gives the same words to the segment it is about to play.
+    const guid = space.alloc(16);
+    space.writeGuid(guid, '{6825A449-7524-4D82-920F-50E36AB3AB1E}');
+    const path = published;
+    assert.equal(await call(path, ids.IID_DIRECTMUSIC_AUDIOPATH, 'GetObjectInPath',
+        [0, 0, 0, 0, 0, guid, space.alloc(4)]), S_OK);
+    live = dm.createSegment(segment, '').object;
+
+    assert.equal(await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8, 'PlaySegmentEx',
+        [reused, 0, 0, 0, 0, 0, space.alloc(4), 0, 0]), S_OK);
+    assert.equal(out.tracks.length, 1, 'the segment now behind the pointer played');
+});
