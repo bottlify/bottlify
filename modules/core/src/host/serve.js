@@ -241,40 +241,59 @@ function buffersUnder(files){
  * text and reads it back, which for a graphics table with the last frame's
  * commands in it cost tens of milliseconds of the engine's thread per call.
  *
+ * A live object a layer left in its table -- a texture holding its surfaces,
+ * each holding the texture -- would walk for ever; what refers back to an
+ * object still being copied is left out.
+ *
  * @param {unknown} value
+ * @param {Set<object>} [within]  the objects being copied around this one
  * @returns {unknown}
  */
-export function plain(value){
+export function plain(value, within = new Set()){
     if (value === null || typeof value !== 'object')
     {
         return typeof value === 'function' ? undefined : value;
-    }
-    if (Array.isArray(value))
-    {
-        return value.map(plain);
     }
     if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer || value instanceof Date)
     {
         return value;
     }
-    if (value instanceof Map)
+    if (within.has(value))
     {
-        return new Map([...value].map(([key, held])=>[key, plain(held)]));
+        return undefined;
     }
-    if (value instanceof Set)
+    within.add(value);
+    /** @param {unknown} held */
+    const inner = held=>plain(held, within);
+    /** @type {unknown} */
+    let copy;
+    if (Array.isArray(value))
     {
-        return new Set([...value].map(plain));
+        copy = value.map(inner);
     }
-    /** @type {Record<string, unknown>} */
-    const copy = {};
-    for (const [key, held] of Object.entries(value))
+    else if (value instanceof Map)
     {
-        const kept = plain(held);
-        if (kept !== undefined)
+        copy = new Map([...value].map(([key, held])=>[key, inner(held)]));
+    }
+    else if (value instanceof Set)
+    {
+        copy = new Set([...value].map(inner));
+    }
+    else
+    {
+        /** @type {Record<string, unknown>} */
+        const fields = {};
+        for (const [key, held] of Object.entries(value))
         {
-            copy[key] = kept;
+            const kept = inner(held);
+            if (kept !== undefined)
+            {
+                fields[key] = kept;
+            }
         }
+        copy = fields;
     }
+    within.delete(value);
     return copy;
 }
 
