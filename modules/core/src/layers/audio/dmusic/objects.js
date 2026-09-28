@@ -325,11 +325,15 @@ export function createDirectMusic(host){
     const readStream = async(stream, thread)=>{
         if ((stream >>> 0) === 0 || !host.callGuest)
         {
+            host.divergence?.('IPersistStream::Load',
+                `stream=0x${(stream >>> 0).toString(16)} no callGuest=${!host.callGuest}`);
             return null;
         }
         const vtable = readU32(stream);
         if (vtable === 0)
         {
+            host.divergence?.('IPersistStream::Load', `stream 0x${(stream >>> 0).toString(16)}`
+                + ' has no vtable');
             return null;
         }
         // IStream's Read is the fourth slot: IUnknown's three, then Read.
@@ -338,6 +342,7 @@ export function createDirectMusic(host){
         const scratch = (host.allocate?.(chunk + 4) ?? 0) >>> 0;
         if (scratch === 0)
         {
+            host.divergence?.('IPersistStream::Load', 'no room for a read buffer');
             return null;
         }
         /** @type {Uint8Array[]} */
@@ -356,6 +361,8 @@ export function createDirectMusic(host){
                 }
                 if (hr < 0 || got < chunk)
                 {
+                    host.divergence?.('IPersistStream::Load',
+                        `read hr=0x${(hr >>> 0).toString(16)} bytes=${got}`);
                     break;
                 }
             }
