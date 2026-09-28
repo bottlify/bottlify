@@ -277,6 +277,9 @@ export const D3DFMT = Object.freeze({
     DXT3: 0x33545844,
     DXT4: 0x34545844,
     DXT5: 0x35545844,
+    // Packed 4:2:2 video, two pixels to four bytes.
+    YUY2: 0x32595559,
+    UYVY: 0x59565955,
 });
 
 /**
@@ -294,7 +297,7 @@ export const D3DFMT = Object.freeze({
  *
  * @type {Readonly<Record<number,
  *     { bytesPerPixel: number, depth: boolean, alpha: boolean,
- *       blockBytes?: number, blockSize?: number }>>}
+ *       blockBytes?: number, blockSize?: number, video?: boolean }>>}
  */
 export const FORMAT_INFO = Object.freeze({
     [D3DFMT.A8R8G8B8]: Object.freeze({ bytesPerPixel: 4, depth: false, alpha: true }),
@@ -322,6 +325,11 @@ export const FORMAT_INFO = Object.freeze({
     [D3DFMT.D24S8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24X8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D16]: Object.freeze({ bytesPerPixel: 2, depth: true, alpha: false }),
+    // Video the runtime holds and no device samples or draws into: made in the
+    // scratch pool, and as a plain surface in system memory, and nowhere else
+    // (Wine's test_surface_blocks and test_volume_blocks, in any size).
+    [D3DFMT.YUY2]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false, video: true }),
+    [D3DFMT.UYVY]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false, video: true }),
     // A compressed format has no bytes per pixel at all: its unit is a 4x4
     // block, and a size in pixels only becomes a size in bytes after rounding
     // up to whole blocks. `bytesPerPixel` is left at zero deliberately -- any
@@ -376,6 +384,24 @@ export function offsetOfRect(format, pitch, rect){
 export function isCompressed(format){
     const info = FORMAT_INFO[format];
     return !!info && info.blockBytes !== undefined;
+}
+
+/**
+ * @param {number} format  D3DFMT
+ * @returns {boolean} whether it is packed video the runtime only holds
+ */
+export function isVideo(format){
+    return FORMAT_INFO[format]?.video === true;
+}
+
+/**
+ * Where a video format may be made: any resource of the scratch pool, and a
+ * plain surface of system memory.
+ *
+ * @param {number} pool @param {boolean} plain
+ */
+export function videoPoolAllowed(pool, plain){
+    return pool === D3DPOOL.SCRATCH || (plain && pool === D3DPOOL.SYSTEMMEM);
 }
 
 /**

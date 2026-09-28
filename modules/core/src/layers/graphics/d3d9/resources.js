@@ -1142,8 +1142,17 @@ export function boxAtLevel(box, level, width, height, depth){
  */
 export function createVolume(options){
     const rowPitch = surfacePitch(options.format, options.width);
-    const slicePitch = rowPitch * options.height;
+    const slicePitch = surfaceBytes(options.format, options.width, options.height);
     const texelBytes = FORMAT_INFO[options.format]?.bytesPerPixel ?? 4;
+    // A compressed volume is rows of blocks: a box is whole blocks across, or
+    // reaches the edge, and is found by blocks.
+    const block = FORMAT_INFO[options.format]?.blockSize ?? 1;
+    const blockBytes = FORMAT_INFO[options.format]?.blockBytes ?? texelBytes;
+    /** @param {LockBox} box */
+    const blockAlignedBox = box=>block === 1
+        || (box.left % block === 0 && box.top % block === 0
+            && (box.right % block === 0 || box.right === options.width)
+            && (box.bottom % block === 0 || box.bottom === options.height));
     // Wine's d3d8 and d3d9 test_volume_locking: a default-pool volume locks
     // only when it was made dynamic; every other pool's always does.
     const lockable = options.pool !== D3DPOOL.DEFAULT
@@ -1196,7 +1205,8 @@ export function createVolume(options){
          */
         LockBox(out, box = null, flags = 0){
             if (locked || !lockable
-                || (box && !boxWithin(box, options.width, options.height, options.depth)))
+                || (box && (!boxWithin(box, options.width, options.height, options.depth)
+                    || !blockAlignedBox(box))))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -1206,7 +1216,8 @@ export function createVolume(options){
             out.RowPitch = rowPitch;
             out.SlicePitch = slicePitch;
             out.pBits = options.base + (box
-                ? box.front * slicePitch + box.top * rowPitch + box.left * texelBytes
+                ? box.front * slicePitch + box.top / block * rowPitch
+                    + box.left / block * blockBytes
                 : 0);
             return D3D_OK;
         },
@@ -1307,7 +1318,7 @@ export function createVolumeTexture(options){
             format: options.format,
             pool: options.pool,
             usage: options.usage,
-            base: options.allocate(surfacePitch(options.format, width) * height * depth),
+            base: options.allocate(surfaceBytes(options.format, width, height) * depth),
             count,
             // A level's box is a box of the top level scaled up.
             dirtied: box=>addDirty(box

@@ -22,7 +22,7 @@
 
 import {
     D3DERR_INVALIDCALL, D3DPOOL, D3DSWAPEFFECT, D3DTEXF, D3DTSS, D3DUSAGE, D3D_OK, FORMAT_INFO,
-    isCompressed,
+    isCompressed, isVideo, videoPoolAllowed,
 } from './constants.js';
 import {
     FORMAT_KIND, RESOURCE_VALIDITY, SURFACE_TYPE, surfaceCreateResult,
@@ -84,6 +84,11 @@ export function createResult(surfaceType, format, pool, usage, support){
     if ((usage & D3DUSAGE.WRITEONLY) !== 0)
     {
         return D3DERR_INVALIDCALL;
+    }
+    if (isVideo(format))
+    {
+        return usage === 0 && videoPoolAllowed(pool, surfaceType === SURFACE_TYPE.PLAIN)
+            ? D3D_OK : D3DERR_INVALIDCALL;
     }
     if (isCompressed(format))
     {

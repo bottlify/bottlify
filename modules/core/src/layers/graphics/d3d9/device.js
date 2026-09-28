@@ -53,7 +53,7 @@ import {
     D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_DEVICEREMOVED, D3DERR_INVALIDCALL,
     D3DERR_NOTAVAILABLE,
     D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DOK_NOAUTOGEN, D3DPOOL, D3DRS, D3DRTYPE, D3DUSAGE,
-    D3D_OK, FORMAT_INFO, blockAligned, isCompressed, surfaceBytes, surfacePitch,
+    D3D_OK, FORMAT_INFO, blockAligned, isCompressed, surfaceBytes, surfacePitch, videoPoolAllowed,
 } from './constants.js';
 import { D3DCLEAR, D3DTS } from '../d3d8/constants.js';
 import {
@@ -493,7 +493,7 @@ export function createDirect3D9(options = {}){
          */
         CheckDeviceFormat(usage, resourceType, format){
             const info = FORMAT_INFO[format];
-            if (!info)
+            if (!info || info.video)
             {
                 return D3DERR_NOTAVAILABLE;
             }
@@ -3524,6 +3524,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         CreateOffscreenPlainSurface(width, height, format, pool, out, usage = 0){
             const info = FORMAT_INFO[format];
             if (!info || pool === D3DPOOL.MANAGED || (info.depth && !caps.depthPlain)
+                || (info.video && !videoPoolAllowed(pool, true))
                 || !(width > 0) || !(height > 0) || !blockAligned(format, width, height))
             {
                 return D3DERR_INVALIDCALL;
@@ -4336,6 +4337,10 @@ function checkTextureArguments(usage, format, pool, caps, cube){
     if (!info)
     {
         return D3DERR_INVALIDCALL;
+    }
+    if (info.video)
+    {
+        return usage === 0 && videoPoolAllowed(pool, false) ? D3D_OK : D3DERR_INVALIDCALL;
     }
     // A write-only texture is a contradiction the API rejects outright.
     if ((usage & D3DUSAGE.WRITEONLY) !== 0)

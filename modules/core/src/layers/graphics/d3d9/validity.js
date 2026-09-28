@@ -212,7 +212,13 @@ export function volumeLevelCount(width, height, depth){
  */
 export function volumeCreateResult(request){
     const info = FORMAT_INFO[request.format];
-    if (!info || info.depth || info.blockBytes !== undefined)
+    // A compressed volume is the runtime's own, made only in the scratch pool
+    // no device draws from, and only in whole blocks across (Wine's d3d8 and
+    // d3d9 test_volume_blocks); its depth is not blocked.
+    const blocks = info?.blockSize;
+    if (!info || info.depth || (info.video && request.pool !== D3DPOOL.SCRATCH)
+        || (blocks !== undefined && (request.pool !== D3DPOOL.SCRATCH
+        || request.width % blocks !== 0 || request.height % blocks !== 0)))
     {
         return D3DERR_INVALIDCALL;
     }

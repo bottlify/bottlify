@@ -753,11 +753,33 @@ test('a volume texture is made and locks by the pool and usage it was made with'
     /** @type {{ texture?: any }} */
     const out = {};
     for (const [usage, format] of [[0x1, D3DFMT.A8R8G8B8], [0x2, D3DFMT.D24S8],
-        [0x8, D3DFMT.A8R8G8B8], [0, D3DFMT.D24S8], [0, D3DFMT.DXT1]])
+        [0x8, D3DFMT.A8R8G8B8], [0, D3DFMT.D24S8]])
     {
         assert.equal(device.CreateVolumeTexture(4, 4, 4, 1, usage, format, D3DPOOL.SCRATCH, out),
             D3DERR_INVALIDCALL, `usage ${usage} format ${format}`);
     }
+    // A compressed volume: the scratch pool's, whole blocks across, locked by blocks.
+    assert.equal(device.CreateVolumeTexture(4, 4, 4, 1, 0, D3DFMT.DXT1, D3DPOOL.MANAGED, out),
+        D3DERR_INVALIDCALL);
+    assert.equal(device.CreateVolumeTexture(6, 4, 4, 1, 0, D3DFMT.DXT1, D3DPOOL.SCRATCH, out),
+        D3DERR_INVALIDCALL);
+    assert.equal(device.CreateVolumeTexture(8, 8, 3, 1, 0, D3DFMT.DXT1, D3DPOOL.SCRATCH, out),
+        D3D_OK);
+    /** @type {any} */
+    const whole = {};
+    assert.equal(out.texture.LockBox(0, whole, null, 0), D3D_OK);
+    assert.deepEqual([whole.RowPitch, whole.SlicePitch], [16, 32], 'two blocks a row, two rows');
+    assert.equal(out.texture.UnlockBox(0), D3D_OK);
+    /** @type {any} */
+    const inner = {};
+    assert.equal(out.texture.LockBox(0, inner,
+        { left: 4, top: 4, front: 2, right: 8, bottom: 8, back: 3 }, 0), D3D_OK);
+    assert.equal(inner.pBits - whole.pBits, 2 * 32 + 16 + 8);
+    assert.equal(out.texture.UnlockBox(0), D3D_OK);
+    assert.equal(out.texture.LockBox(0, inner,
+        { left: 2, top: 0, front: 0, right: 8, bottom: 8, back: 1 }, 0), D3DERR_INVALIDCALL,
+    'a box that starts inside a block');
+    assert.equal(out.texture.release(), 0);
     assert.equal(device.CreateVolumeTexture(4, 4, 0, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out),
         D3DERR_INVALIDCALL, 'no depth');
     assert.equal(device.CreateVolumeTexture(512, 4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED,

@@ -2541,3 +2541,20 @@ test('a buffer released to nothing while bound lives until it is unbound, and is
     assert.equal(made.buffer.destroyed, true, 'and gone once unbound');
     assertFullyReleased(device);
 });
+
+test('packed video is made where the runtime holds it and nowhere a device draws from', ()=>{
+    // Wine's d3d8 test_surface_blocks and test_volume_blocks, in any size.
+    const device = createDevice();
+    for (const format of [D3DFMT.YUY2, D3DFMT.UYVY])
+    {
+        assert.equal(device.CreateTexture(7, 5, 1, 0, format, D3DPOOL.SCRATCH, {}), D3D_OK);
+        assert.equal(device.CreateCubeTexture(3, 1, 0, format, D3DPOOL.SCRATCH, {}), D3D_OK);
+        assert.equal(device.CreateVolumeTexture(3, 5, 2, 1, 0, format, D3DPOOL.SCRATCH, {}),
+            D3D_OK);
+        assert.equal(device.CreateImageSurface(5, 3, format, {}), D3D_OK);
+        assert.equal(device.CreateTexture(8, 8, 1, 0, format, D3DPOOL.MANAGED, {}),
+            D3DERR_INVALIDCALL);
+        assert.equal(device.CreateTexture(8, 8, 1, 0, format, D3DPOOL.DEFAULT, {}),
+            D3DERR_INVALIDCALL);
+    }
+});
