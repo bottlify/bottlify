@@ -409,9 +409,14 @@ export function createBackend(options){
             /** @param {import('./contract.js').ViewportRect} rect */
             setViewport(rect){
                 viewport = viewportState(rect);
+                // WebGPU refuses a depth range outside 0..1, and the refusal
+                // takes the frame's whole command buffer with it. Direct3D
+                // takes a MaxZ past one and the depth buffer clamps what it
+                // writes, which the range held to 0..1 writes too.
+                const depth = (/** @type {number} */ value)=>Math.min(1, Math.max(0, value));
                 raw.setViewport(viewport.rect.x, viewport.rect.y,
                     viewport.rect.width, viewport.rect.height,
-                    viewport.rect.minDepth, viewport.rect.maxDepth);
+                    depth(viewport.rect.minDepth), depth(viewport.rect.maxDepth));
                 scissor(viewport.rect);
                 return viewport;
             },

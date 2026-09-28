@@ -116,6 +116,18 @@ test('the two halves of the viewport travel together', ()=>{
     assert.deepEqual(pass.viewport.scale, [2 / 64, -2 / 32]);
 });
 
+test('a depth range past 0..1 reaches the GPU held to it, and the pass keeps what was asked', ()=>{
+    // Wine's d3d8 depth_clamp_test sets MaxZ 7.5; WebGPU refuses that range and
+    // with it the frame's whole command buffer.
+    const { gpu, backend } = harness();
+    const frame = backend.beginFrame();
+    const pass = frame.beginPass({ target: target(backend, 256) });
+    pass.setViewport({ x: 0, y: 0, width: 64, height: 32, minDepth: -1, maxDepth: 7.5 });
+    frame.end();
+    assert.deepEqual(gpu.of('setViewport').pop().rect, [0, 0, 64, 32, 0, 1]);
+    assert.equal(pass.viewport.rect.maxDepth, 7.5);
+});
+
 test('a viewport past the target keeps its mapping, and its scissor stays on the target', ()=>{
     // A viewport may reach past the attachment -- WebGPU allows it, and so do
     // the APIs above -- but a scissor may not: one past the attachment
