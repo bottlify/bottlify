@@ -1968,10 +1968,9 @@ export function createWin32Module(){
                             register(definition);
                         }
                     },
-                    // A program's own explanation of why it is stopping, handed up
-                    // whole rather than as a line of log, so whoever is embedding
-                    // this engine can show it the way a person would have seen it.
-                    // Unattended, nobody is at the page to answer it.
+                    // A message box is a dialog on the program's own desktop;
+                    // unattended, nobody is at it, and the box is put to
+                    // whoever answers for the run instead.
                     /** @param {any} notice */
                     messageBox: notice=>(config?.unattended === true
                         ? answerUnattended({
@@ -1979,7 +1978,7 @@ export function createWin32Module(){
                             buttons: notice.buttons.map((/** @type {any} */ button)=>
                                 ({ ...button, default: button.id === notice.defaultButton })),
                         })
-                        : config?.onMessageBox?.(notice)),
+                        : null),
                     unattended: config?.unattended === true,
                     answer: answerUnattended,
                     /** @param {string} text */

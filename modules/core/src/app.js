@@ -2692,13 +2692,6 @@ async function buildApp(options){
     // process they were made against: the program has changed, the machine it
     // is running in has not.
     const events = options.events ?? createEvents();
-    // The message boxes standing right now, by the id the page was shown. A
-    // box is a call the guest is parked inside, so the promise below is what
-    // holds that thread: nothing else can answer it, and a page that never
-    // does leaves it parked, which is what a program waiting on a person
-    // should do. A replacement starts empty and abandons the old boxes.
-    /** @type {Map<number, (button: number) => void>} */
-    const messageBoxes = new Map();
     // The presenter the run made. A machine is a process; the canvas, the
     // texture the primary is copied into and the pacer are not. This machine
     // hands the run's presenter to the graphics layer and draws through it, so
@@ -3515,32 +3508,6 @@ async function buildApp(options){
             // accepts a flag it does not act on owes the reader the same
             // warning as a Direct3D state that is stored and unused.
             divergence: reportDivergence,
-            /**
-             * A message box the program put up.
-             *
-             * Carried with the guest's own backtrace, because the sentence and
-             * the place it was said from answer different halves of the same
-             * question -- and the backtrace is only capturable at the moment of
-             * the call, since by the time anyone reads a report the stack that
-             * explains it is gone. Captured only when somebody is listening:
-             * walking the stack costs real work, and a build with no consumer
-             * would pay it for nothing.
-             *
-             * The answer is a promise the caller is left parked on until
-             * `answerMessageBox` is given the id: MessageBox is modal, and a
-             * page that never answers is a program waiting for a person.
-             *
-             * @param {{ id: number, text: string, caption: string, type: number }} notice
-             */
-            onMessageBox: notice=>new Promise(resolve=>{
-                messageBoxes.set(notice.id, resolve);
-                events.emit('message-box', {
-                    ...notice,
-                    trace: events.listening('message-box')
-                        ? formatTrace(captureTrace({ cpu, memory, kernel, bridge }))
-                        : null,
-                });
-            }),
             // Text a program copied, for the page to put on the browser's
             // clipboard: the copy button of an error console is useless if
             // what it copied cannot leave the engine.
@@ -5911,24 +5878,19 @@ async function buildApp(options){
         stop: ()=>cpu.stop(),
 
         /**
-         * Answers a message box the program put up, with the identifier of the
-         * button pressed. The thread parked inside MessageBox resumes with it,
-         * and a box nobody answers leaves that thread parked for ever, which is
-         * what a program waiting on a person does.
+         * Answers a message box the page was shown. A program's own boxes are
+         * dialogs on its desktop, answered there as a person answers them, and
+         * the engine's own notice waits on nothing -- so no box is ever
+         * standing here to be answered.
          *
          * @param {number} id   The id the `message-box` event carried.
-         * @param {number} button  One of the ids the box's own buttons carry.
-         * @returns {boolean} Whether a box was standing under that id.
+         * @param {number} button
+         * @returns {boolean} Whether a box was standing under that id: never.
          */
         answerMessageBox(id, button){
-            const resolve = messageBoxes.get(id >>> 0);
-            if (!resolve)
-            {
-                return false;
-            }
-            messageBoxes.delete(id >>> 0);
-            resolve(button >>> 0);
-            return true;
+            void id;
+            void button;
+            return false;
         },
 
         /**

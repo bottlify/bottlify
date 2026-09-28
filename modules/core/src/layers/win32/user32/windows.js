@@ -19,7 +19,8 @@
 import { ANY_WINDOW, WM_PAINT, WM_QUIT, WM_TIMER, threadIdOf } from './messages.js';
 import { characterOf } from './keys.js';
 import { encodeAnsi } from '../kernel32/locale.js';
-import { createPaintFunctions } from './paint.js';
+import { createPaintFunctions, layoutText } from './paint.js';
+import { createMessageBoxFunctions } from './msgbox.js';
 import { HOVER_SIZE, HOVER_TIME, SYS_COLORS, createSystemFunctions } from './system.js';
 import { createObjectFunctions } from './objects.js';
 import { createDialogFunctions } from './dialogs.js';
@@ -163,6 +164,9 @@ const WM_SETCURSOR = 0x0020;
  * running somebody's code.
  */
 const HOST_PROCEDURE_BASE = 0x7ff00000;
+/** DrawText's flags a message box's text is measured with. */
+const DT_WORDBREAK = 0x0010;
+const DT_NOPREFIX = 0x0800;
 
 /** The one hook type this build calls, and the one event it calls it for. */
 const WH_CBT = 5;
@@ -582,16 +586,12 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           methods use. Absent in a build with nothing showing a cursor, and
  *           then the derived picture is kept to ourselves.
  * @property {(notice: { id: number, text: string, caption: string, type: number,
- *           buttons: { id: number, label: string }[], defaultButton: number,
- *           icon: string | null }) => number | Promise<number> | void} [messageBox]
- *           A message box the program put up, handed up whole with the buttons
- *           uType asks for. The answer is the id of the button pressed: a
- *           promise when a page will answer it, which the bridge parks the
- *           calling thread on, or a number when it is already known. Returning
- *           nothing means nobody is listening and the box's default is used.
- *           It is a program explaining in its own words why it is about to
- *           stop, which is the most useful sentence it will ever say, and a
- *           line in a log is where such a sentence goes to be missed.
+ *           buttons: { id: number, label: string }[], defaultButton: number })
+ *           => number | Promise<number> | null | undefined} [messageBox]
+ *           Who answers a message box when nobody is at the screen
+ *           (`unattended`): the id of the button chosen, or nothing for the
+ *           box's own default. With somebody there the box is a dialog on the
+ *           program's desktop and this is not asked.
  * @property {(text: string) => void} [clipboard]
  *           The text a program copied, handed up when it closes the clipboard.
  *           A copy that stays inside the guest is one the person cannot paste
@@ -5146,5 +5146,55 @@ export function createWindowFunctions(host){
                 [ansi.hwnd, ansi.message, ansi.wParam, ansi.lParam])),
         },
     };
+    // A message box is a dialog user32 makes out of its own calls, so it is
+    // built over the finished table.
+    let messageBoxProcedures = 0;
+    Object.assign(table, createMessageBoxFunctions({
+        host,
+        call: (name, args)=>/** @type {any} */ (table)[name].handler(args),
+        procedure: (name, handler)=>{
+            messageBoxProcedures++;
+            /** @type {number} */
+            const address = host.registerProcedure
+                ? host.registerProcedure(`<${name}>`,
+                    message=>callProcedure(address, message, host.callerThread?.()))
+                : HOST_PROCEDURE_BASE - messageBoxProcedures * 16;
+            procedures.set(address, handler);
+            return address;
+        },
+        measure: (hwnd, text, width)=>{
+            const record = live(hwnd);
+            if (!record)
+            {
+                return { width: 0, height: 0 };
+            }
+            const hdc = paint.contextOn(record);
+            inFont(record, hdc);
+            const cell = paint.cellOf(hdc);
+            const widthOf = cell.width
+                ?? ((/** @type {string} */ piece)=>piece.length * cell.cellWidth);
+            const lines = layoutText(text, { left: 0, top: 0, right: width, bottom: 0x7fff },
+                DT_WORDBREAK | DT_NOPREFIX, cell);
+            if (hdc !== 0)
+            {
+                paint.table.ReleaseDC.handler([hwnd, hdc]);
+            }
+            return {
+                width: lines.reduce((most, line)=>Math.max(most, widthOf(line.text)), 0),
+                height: Math.max(lines.length, 1) * cell.cellHeight,
+            };
+        },
+        frame: hwnd=>{
+            const record = live(hwnd);
+            if (!record)
+            {
+                return { width: 0, height: 0 };
+            }
+            const outer = geometry.windowRect(record);
+            const inner = geometry.clientSize(record);
+            return { width: outer.right - outer.left - inner.width,
+                height: outer.bottom - outer.top - inner.height };
+        },
+    }));
     return table;
 }

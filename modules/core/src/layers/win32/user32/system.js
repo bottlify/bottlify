@@ -399,75 +399,6 @@ const ERROR_HOTKEY_NOT_REGISTERED = 1410;
 /** The one deferred-placement batch there ever is, as the handle a caller holds. */
 const DEFER_TOKEN = 0x4d50;
 
-/** The button identifiers a message box answers with, as Windows numbers them. */
-const IDOK = 1, IDCANCEL = 2, IDABORT = 3, IDRETRY = 4, IDIGNORE = 5;
-const IDYES = 6, IDNO = 7, IDTRYAGAIN = 10, IDCONTINUE = 11;
-
-/**
- * The buttons each message-box type asks for, by `uType & 0xf`, in the order
- * Windows lays them out -- which is also the order MB_DEFBUTTON counts in.
- * The seventh entry is MB_CANCELTRYCONTINUE, whose identifiers sit at 2, 10
- * and 11 rather than in a run.
- */
-const MESSAGE_BOX_SETS = [
-    [{ id: IDOK, label: 'OK' }],
-    [{ id: IDOK, label: 'OK' }, { id: IDCANCEL, label: 'Cancel' }],
-    [{ id: IDABORT, label: 'Abort' }, { id: IDRETRY, label: 'Retry' },
-        { id: IDIGNORE, label: 'Ignore' }],
-    [{ id: IDYES, label: 'Yes' }, { id: IDNO, label: 'No' },
-        { id: IDCANCEL, label: 'Cancel' }],
-    [{ id: IDYES, label: 'Yes' }, { id: IDNO, label: 'No' }],
-    [{ id: IDRETRY, label: 'Retry' }, { id: IDCANCEL, label: 'Cancel' }],
-    [{ id: IDCANCEL, label: 'Cancel' }, { id: IDTRYAGAIN, label: 'Try Again' },
-        { id: IDCONTINUE, label: 'Continue' }],
-];
-
-/**
- * The icon a message-box type asks for, as a name the page can draw. The
- * four documented kinds share their low nibble with aliases -- 0x10 is an
- * error, a hand or a stop -- so the nibble is what identifies them.
- *
- * @param {number} type
- * @returns {string | null}
- */
-const messageBoxIcon = type=>{
-    switch (type & 0xf0)
-    {
-        case 0x10: return 'error';
-        case 0x20: return 'question';
-        case 0x30: return 'warning';
-        case 0x40: return 'information';
-        case 0x80: return 'user';
-        default: return null;
-    }
-};
-
-/**
- * The buttons a message box shows, as a fresh list the caller may keep: the
- * page is handed the same shape it would render, and the engine's own table
- * must not be a page's to write into.
- *
- * @param {number} type
- */
-const messageBoxButtons = type=>(MESSAGE_BOX_SETS[type & 0xf] ?? MESSAGE_BOX_SETS[0])
-    .map(button=>({ id: button.id, label: button.label }));
-
-/**
- * The button a message box answers with when nobody is there to press one:
- * the default of the set its type asks for, which is the first button of the
- * set unless MB_DEFBUTTON2, 3 or 4 moves it along.
- *
- * The answer has to be a button the box shows. A value outside the set is one
- * the caller's own switch has no arm for, and a program that falls through
- * every case then waits for a click the answer said had already happened.
- *
- * @param {number} type  The uType of MessageBoxA.
- */
-const messageBoxDefault = type=>{
-    const buttons = MESSAGE_BOX_SETS[type & 0xf] ?? MESSAGE_BOX_SETS[0];
-    return buttons[Math.min((type & 0x300) >> 8, buttons.length - 1)].id;
-};
-
 /**
  * Builds the system-query half of user32, over the window records the
  * bookkeeping half keeps.
@@ -518,7 +449,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
     let nextTimerId = 0x1000;
     // Names a message box for as long as it is up, so the page can answer the
     // one it was shown rather than whichever box is standing now.
-    let nextMessageBoxId = 1;
     /** The cursor SetCursor last set, which GetCursor reads back. */
     let currentCursor = 0;
     /**
@@ -1060,39 +990,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
         const clipped = limit > 0 ? text.slice(0, limit - 1) : '';
         host.writeMemory(address, encodeAnsi(`${clipped}\0`));
         return clipped.length;
-    };
-
-    /**
-     * Puts a message box up and answers with the button pressed.
-     *
-     * Windows keeps the calling thread inside MessageBox until a button is
-     * pressed. Here the page is the only thing that can press one, so the
-     * sentence goes up as an event carrying the buttons, the default and an
-     * id, and what comes back is either the id of the button the page answered
-     * with or -- when nothing is listening -- the box's own default. A promise
-     * is what the engine hands back when a page is listening, and the bridge
-     * parks the caller on it: the rest of the program keeps pumping while the
-     * box is up, which is what a program that shows one and waits expects.
-     *
-     * The text is written to the log as well, because a message box is a
-     * program explaining in its own words why it is about to stop -- the most
-     * useful sentence it will ever say -- and a line in a log is where such a
-     * sentence goes to be missed.
-     *
-     * @param {string} body @param {string} title @param {number} type @param {number} id
-     */
-    const showMessageBox = (body, title, type, id)=>{
-        const answer = host.messageBox?.({
-            id,
-            text: body,
-            caption: title,
-            type,
-            buttons: messageBoxButtons(type),
-            defaultButton: messageBoxDefault(type),
-            icon: messageBoxIcon(type),
-        });
-        host.say?.(title.length > 0 ? `${title}: ${body}` : body);
-        return answer === undefined || answer === null ? messageBoxDefault(type) : answer;
     };
 
     /** @param {number} address */
@@ -2793,41 +2690,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
         MessageBeep: {
             argBytes: 4,
             handler: ()=>1,
-        },
-
-        /**
-         * int MessageBoxA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType)
-         *
-         * The box is modal and synchronous: this returns the identifier of the
-         * button pressed and not before. The buttons, the default and the icon
-         * come from uType; with nothing listening the box's own default is the
-         * answer, which is what an unattended run keeps doing.
-         */
-        MessageBoxA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([, text, caption, type])=>{
-                const body = (text >>> 0) === 0 ? '' : host.readCString(text, 0x10000);
-                const title = (caption >>> 0) === 0 ? '' : host.readCString(caption, 0x1000);
-                return showMessageBox(body, title, type >>> 0, nextMessageBoxId++);
-            },
-        },
-
-        /**
-         * int MessageBoxW(HWND hWnd, LPCWSTR lpText, LPCWSTR lpCaption, UINT uType)
-         *
-         * The same box with the text left as UTF-16, which is how a program
-         * that compiled against the wide entry point hands it over. The two
-         * differ only in how the strings are read.
-         */
-        MessageBoxW: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([, text, caption, type])=>
-                showMessageBox(
-                    (text >>> 0) === 0 ? '' : readWideString(text >>> 0),
-                    (caption >>> 0) === 0 ? '' : readWideString(caption >>> 0),
-                    type >>> 0, nextMessageBoxId++),
         },
 
         /**

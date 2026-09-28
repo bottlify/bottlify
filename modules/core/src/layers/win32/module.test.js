@@ -169,14 +169,13 @@ test('a DC taken through user32 is one GDI answers for', async()=>{
     await win32Module.dispose();
 });
 
-test('unattended, a message box answers its default button without asking the page', async()=>{
+test('unattended, a message box answers its default button', async()=>{
     /** @type {string[]} */
     const said = [];
     const api = await win32Module.create({
         unattended: true,
         divergence: (/** @type {string} */ name, /** @type {string} */ detail)=>
             said.push(`${name}: ${detail}`),
-        onMessageBox: ()=>assert.fail('nobody is at the screen to be asked'),
     }, stubHost());
     const user32 = api.libraries()['USER32.dll'];
     // MB_YESNO | MB_DEFBUTTON2: the second button, No.

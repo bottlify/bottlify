@@ -182,7 +182,7 @@ JSON cost the engine's thread tens of milliseconds per call.
 |---|---|---|
 | `run(runOptions?)` | `Promise<number>` | Exit code, once the page's own last look at the journal is done, so a tail read right after is the tail. `runOptions.maxTurns` bounds the turns the guest worked; `runOptions.timeoutMs` bounds the wall clock, which is the only bound a program that just waits ever reaches. |
 | `pause()`, `resume()`, `stop()` | `Promise` | |
-| `answerMessageBox(id, button)` | `Promise<boolean>` | Answers the `message-box` the page was shown, with the id of the button pressed. The guest thread parked inside `MessageBox` resumes with it; a box nobody answers stays up. `false` when no box is standing under that id. |
+| `answerMessageBox(id, button)` | `Promise<boolean>` | Always `false`: a program's `MessageBox` is a dialog on its own desktop, answered there, and the engine's own `message-box` notice waits on nothing. |
 | `dispose()` | `Promise` | Ends the program and its device. With a canvas the worker stays alive for the next program in the same canvas; without one it is terminated. |
 | `diagnostics(layer?)` | `Promise<ModuleDiagnostics[]>` | Every layer's table, or one layer's. The **cold** description: a request to the engine's thread, and the only way to see a layer that publishes no table of its own. Not for a poll — what a poll wants is under `log` below. |
 | `trace()` | `Promise<string>` | Where the guest was: registers, a stack scan, the host calls in flight. |
@@ -230,7 +230,7 @@ later call is counted for diagnostics and written to the journal but never annou
 program calling a missing import in a loop cannot flood the page's queue; both events carry
 `origin`, `'system'` or `'program'` — and a call to an undecorated name of a system library, or to
 a C++ name that does not carry its argument bytes, ends the run as a `guest-fault` naming it),
-`divergence`, `message-box` (the program's `MessageBox`, drawn by the page, not inside the program's desktop; or, with `id: 0` and `exit`, the engine's own box when the game has finished -- see `exitNotice`), `clipboard` (`{ text }`, what a program copied, for the page to put on the browser clipboard), `library-loaded`, `library-unloaded` (`{ name, base }`, a library the program freed for the last time), `library-missing`,
+`divergence`, `message-box` (with `id: 0` and `exit`, the engine's own notice that the game has finished -- see `exitNotice`; a program's `MessageBox` is a dialog on its own desktop, drawn in the canvas like its other windows, and is not emitted), `clipboard` (`{ text }`, what a program copied, for the page to put on the browser clipboard), `library-loaded`, `library-unloaded` (`{ name, base }`, a library the program freed for the last time), `library-missing`,
 `libraries`, `bundle`, `bundle-retry`, `bundle-prefetch`, `bundle-unavailable`, `session`,
 `process-create`, `process-replace`, `process-child` (`{ image, commandLine }`, a parent waiting on a child it started: the child is about to run beside it), `process-started`, `process-resumed` (`{ image, code }`, that child exited with `code` and its parent goes on), `process-patched`, `hooks-bound`
 (`{ image, bound, refused, pending }`, once per image the sidecar is bound against -- the

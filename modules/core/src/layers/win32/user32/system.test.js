@@ -189,10 +189,6 @@ function fakeContexts(){
  * @param {{ width: number, height: number, bitsPerPixel: number,
  *           displayWidth?: number, displayHeight?: number }} [options.screen]
  *        The screen, its own object per test because a mode switch moves it.
- * @param {(notice: any) => any} [options.messageBox]
- *        What answers a message box: a promise leaves the caller parked, and
- *        nothing at all leaves the box its own default. Defaults to recording
- *        the notice and answering nothing.
  * @param {(region: number) => any} [options.regionBox]
  *        The rectangle a GDI region holds, for the calls that name one.
  * @param {(instance: number) => number} [options.moduleBase]
@@ -205,7 +201,7 @@ function fakeContexts(){
  */
 function setup(
     { cursor, keyState, asyncKeyState, keyboardState, setKeyboardState,
-        findResource, loadString, dispatch = ()=>0, screen, messageBox, regionBox,
+        findResource, loadString, dispatch = ()=>0, screen, regionBox,
         moduleBase, bitmapFromDib, files, allocate, release } = {})
 {
     screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
@@ -215,8 +211,6 @@ function setup(
     // a hot key fires on a combination, and the queue is what reads it.
     const queue = createMessageQueue({ now: ()=>clock.at, keyState });
     const contexts = fakeContexts();
-    /** @type {any[]} */
-    const notices = [];
     /** @type {string[]} */
     const said = [];
     /** @type {string[]} */
@@ -258,10 +252,6 @@ function setup(
         release,
         loadString,
         regionBox,
-        /** @param {any} notice */
-        messageBox: messageBox ?? (notice=>{
-            notices.push(notice);
-        }),
         /** @param {string} text */
         say: text=>said.push(text),
         /** @param {string} api @param {string} detail */
@@ -279,7 +269,7 @@ function setup(
     // a guest call always arrives with the whole argument array.
     const table = /** @type {Record<string, { argBytes: number, convention?: string,
         handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
-    return { memory, queue, fns: table, contexts, clock, notices, said, diverged, errors,
+    return { memory, queue, fns: table, contexts, clock, said, diverged, errors,
         screen, cursors, placed, sent };
 }
 
@@ -2506,157 +2496,6 @@ test('the keyboard-state calls refuse a null pointer', ()=>{
     assert.equal(fns.SetKeyboardState.handler([0]), 0);
 });
 
-test('a message box is handed up whole, with the buttons its type asks for', ()=>{
-    // A message box is a program explaining, in its own words, why it is about
-    // to stop -- the most useful sentence it will ever say. A line in a log is
-    // where such a sentence goes to be missed, so whoever is embedding the
-    // engine gets it as its own thing, buttons and all, and can put it in front
-    // of a person. With nobody listening it answers with its own default.
-    const { memory, fns, notices, said } = setup();
-    memory.putString(TEXT_BUFFER, 'Unable to initialize DirectX.');
-    memory.putString(FORMAT_BUFFER, 'Warcraft III');
-
-    const MB_YESNO = 0x4, MB_ICONERROR = 0x10;
-    assert.equal(
-        fns.MessageBoxA.handler([0, TEXT_BUFFER, FORMAT_BUFFER, MB_YESNO | MB_ICONERROR]),
-        6, 'IDYES: the default button, there being nobody to press one');
-
-    assert.deepEqual(notices, [{
-        id: 1,
-        text: 'Unable to initialize DirectX.',
-        caption: 'Warcraft III',
-        type: MB_YESNO | MB_ICONERROR,
-        buttons: [{ id: 6, label: 'Yes' }, { id: 7, label: 'No' }],
-        defaultButton: 6,
-        icon: 'error',
-    }]);
-    assert.deepEqual(said, ['Warcraft III: Unable to initialize DirectX.'],
-        'and it still reaches the log, for a reader who only has that');
-});
-
-test('all seven message-box types show the buttons Windows gives them', ()=>{
-    const { fns, notices } = setup();
-    /** @type {[number, number[]][]} */
-    const sets = [
-        [0x0, [1]], [0x1, [1, 2]], [0x2, [3, 4, 5]], [0x3, [6, 7, 2]],
-        [0x4, [6, 7]], [0x5, [4, 2]], [0x6, [2, 10, 11]],
-    ];
-    for (const [type, ids] of sets)
-    {
-        fns.MessageBoxA.handler([0, 0, 0, type]);
-        assert.deepEqual(notices.at(-1).buttons.map((/** @type {any} */ button)=>button.id),
-            ids, `uType 0x${type.toString(16)}`);
-    }
-    // A type past the seventh is no set at all, and Windows shows a single OK.
-    fns.MessageBoxA.handler([0, 0, 0, 0x7]);
-    assert.deepEqual(notices.at(-1).buttons.map((/** @type {any} */ button)=>button.id), [1]);
-});
-
-test('MB_DEFBUTTON1..4 chooses which button is the default, and the answer', ()=>{
-    const { fns, notices } = setup();
-    const MB_YESNOCANCEL = 0x3, MB_DEFBUTTON2 = 0x100, MB_DEFBUTTON3 = 0x200;
-    const MB_DEFBUTTON4 = 0x300;
-
-    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_YESNOCANCEL]), 6);
-    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_YESNOCANCEL | MB_DEFBUTTON2]), 7);
-    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_YESNOCANCEL | MB_DEFBUTTON3]), 2);
-    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_YESNOCANCEL | MB_DEFBUTTON4]), 2,
-        'a rank past the last button is the last button');
-    assert.deepEqual(notices.map(notice=>notice.defaultButton), [6, 7, 2, 2]);
-});
-
-test('the icon in uType is named for the page', ()=>{
-    const { fns, notices } = setup();
-    /** @type {[number, string | null][]} */
-    const icons = [
-        [0x10, 'error'], [0x20, 'question'], [0x30, 'warning'],
-        [0x40, 'information'], [0x80, 'user'], [0x00, null],
-    ];
-    for (const [bit, name] of icons)
-    {
-        fns.MessageBoxA.handler([0, 0, 0, bit]);
-        assert.equal(notices.at(-1).icon, name, `icon bit 0x${bit.toString(16)}`);
-    }
-});
-
-test('a message box parks the caller until the page answers it', async()=>{
-    // MessageBox is modal and synchronous: it returns the id of the button
-    // pressed and not before. The page answers through the id the notice
-    // carries, and until it does the call is a promise nothing has settled.
-    /** @type {any[]} */
-    const notices = [];
-    /** @type {((button: number) => void)[]} */
-    const waiting = [];
-    const { fns } = setup({
-        messageBox: notice=>{
-            notices.push(notice);
-            return new Promise(resolve=>waiting.push(resolve));
-        },
-    });
-
-    const parked = /** @type {any} */ (fns.MessageBoxA.handler([0, 0, 0, 0x4])); // MB_YESNO
-    assert.equal(typeof parked.then, 'function',
-        'the call is parked, not answered');
-    assert.equal(notices[0].id, 1);
-    assert.equal(notices[0].defaultButton, 6);
-
-    waiting[0](7);
-    assert.equal(await parked, 7, 'IDNO: the button the page answered');
-});
-
-test('a second box is raised while the first is still parked', async()=>{
-    // The parked thread is inside its own call and the machine keeps running,
-    // so a second box is put up and answered under its own id while the first
-    // still waits -- and answering one does not unpark the other.
-    /** @type {Map<number, (button: number) => void>} */
-    const waiting = new Map();
-    const { fns } = setup({
-        messageBox: notice=>new Promise(resolve=>waiting.set(notice.id, resolve)),
-    });
-
-    const first = /** @type {Promise<number>} */ (
-        /** @type {unknown} */ (fns.MessageBoxA.handler([0, 0, 0, 0x4]))); // MB_YESNO
-    const second = /** @type {Promise<number>} */ (
-        /** @type {unknown} */ (fns.MessageBoxA.handler([0, 0, 0, 0x1]))); // MB_OKCANCEL
-    assert.equal(waiting.size, 2, 'two boxes are up at once, under two ids');
-
-    waiting.get(2)?.(2);
-    assert.equal(await second, 2, 'IDCANCEL on the second');
-    assert.equal(await Promise.race([first.then(()=>'settled'), Promise.resolve('parked')]),
-        'parked', 'the first is still waiting on its own answer');
-
-    waiting.get(1)?.(6);
-    assert.equal(await first, 6);
-});
-
-test('an MB_OK box with nobody listening answers IDOK', ()=>{
-    const { fns } = setup();
-    assert.equal(fns.MessageBoxA.handler([0, 0, 0, 0]), 1);
-});
-
-test('MessageBoxW reads the same box from UTF-16 text', ()=>{
-    const { memory, fns, notices, said } = setup();
-    /** @param {number} address @param {string} text */
-    const putWide = (address, text)=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            const code = text.charCodeAt(at);
-            bytes[at * 2] = code & 0xff;
-            bytes[at * 2 + 1] = code >>> 8;
-        }
-        memory.writeMemory(address, bytes);
-    };
-    putWide(TEXT_BUFFER, 'Wide text');
-    putWide(FORMAT_BUFFER, 'Wide caption');
-
-    assert.equal(fns.MessageBoxW.handler([0, TEXT_BUFFER, FORMAT_BUFFER, 0x4]), 6);
-    assert.equal(notices[0].text, 'Wide text');
-    assert.equal(notices[0].caption, 'Wide caption');
-    assert.deepEqual(notices[0].buttons.map((/** @type {any} */ button)=>button.id), [6, 7]);
-    assert.deepEqual(said, ['Wide caption: Wide text']);
-});
-
 test('a message registered by name is the same number every time, whatever the case', ()=>{
     const { memory, fns } = setup();
     memory.putString(TEXT_BUFFER, 'commdlg_FindReplace');
@@ -2691,15 +2530,6 @@ test('a message registered by a UTF-16 name is the number its narrow name has', 
     assert.equal(fns.RegisterWindowMessageW.handler([FORMAT_BUFFER]), narrow);
     assert.equal(fns.RegisterClipboardFormatW.handler([FORMAT_BUFFER]), narrow);
     assert.equal(fns.RegisterWindowMessageW.argBytes, 4);
-});
-
-test('a message box with neither text nor caption still reports', ()=>{
-    const { fns, notices } = setup();
-    assert.equal(fns.MessageBoxA.handler([0, 0, 0, 0]), 1);
-    assert.deepEqual(notices, [{
-        id: 1, text: '', caption: '', type: 0,
-        buttons: [{ id: 1, label: 'OK' }], defaultButton: 1, icon: null,
-    }]);
 });
 
 // --- hot keys ---
@@ -2864,25 +2694,6 @@ test('a hot key is waiting news, in the class GetQueueStatus asks about', ()=>{
     assert.equal(status.inQueue & QS_HOTKEY, QS_HOTKEY);
     assert.equal(status.changed & QS_HOTKEY, QS_HOTKEY, 'and it is news until looked at');
     assert.equal(queue.status().changed & QS_HOTKEY, 0, 'one look spends the news');
-});
-
-test('a message box answers a button it actually shows', ()=>{
-    // A box answered outside its own set hands the caller a value its switch
-    // has no arm for: a yes-or-no question answered "OK" is a program waiting
-    // for a click the answer said had already happened.
-    const { fns } = setup();
-    const MB_OKCANCEL = 0x1, MB_ABORTRETRYIGNORE = 0x2, MB_YESNOCANCEL = 0x3;
-    const MB_YESNO = 0x4, MB_RETRYCANCEL = 0x5;
-    const MB_DEFBUTTON2 = 0x100, MB_DEFBUTTON3 = 0x200;
-
-    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_YESNO]), 6, 'IDYES: the first button');
-    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_YESNO | MB_DEFBUTTON2]), 7, 'IDNO');
-    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_YESNOCANCEL | MB_DEFBUTTON3]), 2,
-        'IDCANCEL: the default rank walks the set');
-    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_RETRYCANCEL]), 4, 'IDRETRY');
-    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_ABORTRETRYIGNORE]), 3, 'IDABORT');
-    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_OKCANCEL | MB_DEFBUTTON3]), 2,
-        'a rank past the last button is the last button');
 });
 
 // --- rectangles and the small string helpers ---

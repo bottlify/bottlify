@@ -59,7 +59,6 @@ the module graph is built. All are optional.
 | `compatibility` | `{ supportedOS?: string[], imageVersion?: { major, minor } }` | nothing declared | What the running program says it knows: its manifest's `supportedOS` GUIDs and its PE header's operating system version (`createApp` reads both from the image, `compatibilityOf`). Only `win10` consults it, for what the version calls tell the program (§3, "The version a program is told"). |
 | `commandLine`, `environment` | string, record | the quoted image path; `SystemRoot`, `TEMP`, `TMP`, `windir` under `C:\WINDOWS`, and the profile folders of the Windows's layout (`defaultEnvironment`): `ALLUSERSPROFILE`, `APPDATA`, `USERPROFILE`, and for 7 and 10 `LOCALAPPDATA`, `ProgramData`, `PUBLIC` | What the program is told it was started with. |
 | `onOutput(handle, text)`, `onTrace(text)`, `created(hwnd)`, `spawned(request)` | callbacks | no-ops | Console output, `OutputDebugString`, window creation, `CreateProcess`. |
-| `onMessageBox(notice)` | callback | the box's own default | A message box the program put up. `notice` is `{ id, text, caption, type, buttons, defaultButton, icon }`; the answer is the id of the button pressed, and a promise parks the calling thread until `answerMessageBox(id, button)` supplies it. |
 | `onClipboard(text)` | callback | no-op | The text a program copied. Called from `CloseClipboard` when the clipboard was written under that open and holds `CF_UNICODETEXT` (preferred), `CF_TEXT` or `CF_OEMTEXT`; a close after a read alone, or with only non-text formats, calls nothing. A null handle (delayed rendering) is not rendered. |
 | `trustedRoots` | `(Uint8Array \| string)[]` | Microsoft's "Microsoft Root Authority" | The root store `WinVerifyTrust` judges Authenticode chains against, each root DER bytes or base64; an empty array trusts nothing. |
 | `divergence(api, detail)` | callback | none | See §3, "The divergence rule". |
@@ -1138,6 +1137,14 @@ nothing implements).
   procedure runs after every control exists and has set itself up, and before a template's
   `WS_VISIBLE` shows the window — so a program that fills in a control from that handler finds it
   already filled when the window first appears (`user32/dialogs.js`).
+- **`MessageBox` is a dialog on the program's own desktop**, made as Windows makes it: a template
+  of a static for the text and a push button per answer, run by `DialogBoxIndirectParam` with a
+  dialog procedure of user32's own that sizes the box to its text on `WM_INITDIALOG` and ends it
+  on a button. It is drawn in the canvas with the program's other windows, disables its owner,
+  answers Enter with its default button and Escape as Windows does (`IDCANCEL` with a Cancel
+  button, `IDOK` for a lone OK, nothing for a question), and its text also goes to the journal.
+  The standard icons have no pixels in this build, so no icon is shown, and `MB_HELP`'s button is
+  not; unattended, the box is put to `answer` with no window made (`user32/msgbox.js`).
 - **A redistributable installer is a child that has already finished.** `CreateProcess` on a
   `vcredist*`/`vc_redist*`, a `dotnetfx*`/`ndp*`/`netfx*` or `oalinst.exe` answers a process record
   created `completed`: exit code 0 from the start, and never the process this one hands over to.
@@ -1340,7 +1347,7 @@ Stated as the code states them.
   gives for those three was not measured.
 
 Reported at runtime: `divergence` (each once), `unimplemented` (each import once, plus a count per
-name in the application's diagnostics as `unimplementedCalls`), `message-box`, `clipboard` (the
+name in the application's diagnostics as `unimplementedCalls`), `clipboard` (the
 text a program copied, once its clipboard closes), `output`, `debug`,
 and the metrics in §2.
 
