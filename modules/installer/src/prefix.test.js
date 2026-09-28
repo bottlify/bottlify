@@ -89,6 +89,19 @@ test('the system\'s own tree is never mistaken for the installation', ()=>{
     ])), 'C:\\Games\\Title');
 });
 
+test('what an installer unpacks beside itself is the distribution, not the installation', ()=>{
+    // A self-extractor unpacks its setup next to itself, a level shallower
+    // than any Program Files directory the setup then installs into.
+    assert.equal(chooseRoot(tree([
+        `${MEDIA_DIRECTORY}\\Title_Install\\setup.exe`,
+        `${MEDIA_DIRECTORY}\\Title_Install\\autorun.exe`,
+        'C:\\Program Files\\Publisher\\Title\\title.exe',
+    ])), 'C:\\Program Files\\Publisher\\Title');
+    // An archive that unpacks the game itself put it nowhere else.
+    assert.equal(chooseRoot(tree([`${MEDIA_DIRECTORY}\\Title\\title.exe`])),
+        `${MEDIA_DIRECTORY}\\Title`);
+});
+
 test('among equally shallow candidates the one with more executables wins', ()=>{
     assert.equal(chooseRoot(tree([
         'C:\\Games\\Shortcut\\link.exe',

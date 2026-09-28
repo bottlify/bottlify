@@ -184,8 +184,16 @@ export function chooseRoot(entries){
         return entries.length > 0 ? `${entries[0].path.slice(0, 2)}\\` : 'C:\\';
     }
 
+    // The media's own directory holds the distribution, and what an installer
+    // unpacks beside itself there -- a self-extractor's payload, the setup it
+    // then starts -- is the distribution too, however shallow. Only when
+    // nothing went anywhere else is it the installation, as for an archive
+    // that unpacks the game itself.
+    const media = fold(`${MEDIA_DIRECTORY}\\`);
+    const elsewhere = [...weight.entries()]
+        .filter(([directory])=>!fold(`${directory}\\`).startsWith(media));
     const depth = (/** @type {string} */ path)=>path.split('\\').length;
-    return [...weight.entries()].sort((a, b)=>
+    return (elsewhere.length > 0 ? elsewhere : [...weight.entries()]).sort((a, b)=>
         depth(a[0]) - depth(b[0]) || b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0][0];
 }
 
