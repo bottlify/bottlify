@@ -129,6 +129,19 @@ export const HYBRID_CONSTANTS = Object.freeze({
     COUNT: 49,
 });
 
+/** vs_1_x expp: 2^floor(x), the fraction of x, 2^x, and one. */
+const EXP_PARTS = `fn expParts(x: f32) -> vec4f {
+    let whole = floor(x);
+    return vec4f(exp2(whole), x - whole, exp2(x), 1.0);
+}`;
+
+/** vs_1_x logp: the exponent of |x|, its mantissa in [1, 2), log2 |x|, and one. */
+const LOG_PARTS = `fn logParts(x: f32) -> vec4f {
+    let magnitude = abs(x);
+    let exponent = floor(log2(magnitude));
+    return vec4f(exponent, magnitude / exp2(exponent), log2(magnitude), 1.0);
+}`;
+
 /** Whether a varying location carries a coordinate set. @param {number} location */
 const isCoordinate = location=>location >= varyingLocation(D3DDECLUSAGE.TEXCOORD, 0)
     && location <= varyingLocation(D3DDECLUSAGE.TEXCOORD, 7);
@@ -411,6 +424,8 @@ export function translateShader(parsed, options = {}){
     // rest; 1.0 to 1.3 fill each texture register from its own stage.
     const phased = legacy && minor >= 4;
     const supplied = options.inputs ?? null;
+    /** The old four-part expp and logp the body calls. @type {Set<'exp' | 'log'>} */
+    const usesParts = new Set();
     /** @type {ShaderInput[]} */
     const inputs = [];
     /** @type {{ index: number, type: string }[]} */
@@ -921,19 +936,35 @@ export function translateShader(parsed, options = {}){
             case OPCODE.MAX:
                 write(instruction, `max(${src(instruction, 0)}, ${src(instruction, 1)})`);
                 break;
+            // A scalar instruction reads the last component its source swizzle
+            // names -- w for a plain register, the one component of a
+            // replicate (Wine's d3d8 test_scalar_instructions).
             case OPCODE.RCP:
-                write(instruction, `vec4f(1.0 / ${src(instruction, 0)}.x)`);
+                write(instruction, `vec4f(1.0 / ${src(instruction, 0)}.w)`);
                 break;
             case OPCODE.RSQ:
-                write(instruction, `vec4f(inverseSqrt(abs(${src(instruction, 0)}.x)))`);
+                write(instruction, `vec4f(inverseSqrt(abs(${src(instruction, 0)}.w)))`);
                 break;
             case OPCODE.EXP:
+                write(instruction, `vec4f(exp2(${src(instruction, 0)}.w))`);
+                break;
             case OPCODE.EXPP:
-                write(instruction, `vec4f(exp2(${src(instruction, 0)}.x))`);
+                // Below model 2 a vertex shader's expp is the old four-part
+                // result: 2^floor, the fraction, the power, and one.
+                write(instruction, vertex && major < 2
+                    ? `expParts(${src(instruction, 0)}.w)`
+                    : `vec4f(exp2(${src(instruction, 0)}.w))`);
+                usesParts.add('exp');
                 break;
             case OPCODE.LOG:
+                write(instruction, `vec4f(log2(abs(${src(instruction, 0)}.w)))`);
+                break;
             case OPCODE.LOGP:
-                write(instruction, `vec4f(log2(abs(${src(instruction, 0)}.x)))`);
+                // And its logp: the exponent, the mantissa, the logarithm, one.
+                write(instruction, vertex && major < 2
+                    ? `logParts(${src(instruction, 0)}.w)`
+                    : `vec4f(log2(abs(${src(instruction, 0)}.w)))`);
+                usesParts.add('log');
                 break;
             case OPCODE.FRC:
                 write(instruction, `fract(${src(instruction, 0)})`);
@@ -1583,6 +1614,8 @@ export function translateShader(parsed, options = {}){
             vertex, constants: reach, samplers, inputFields, outputFields,
         }),
         ...fogCurve,
+        ...(usesParts.has('exp') && vertex && major < 2 ? [EXP_PARTS] : []),
+        ...(usesParts.has('log') && vertex && major < 2 ? [LOG_PARTS] : []),
         ...(bumpRegister === undefined ? [] : [`const _bump = ${bumpRegister};`]),
         ...(alphaRegister === undefined ? [] : [`const _alphaRef = ${alphaRegister};`]),
         vertex ? '@vertex' : '@fragment',

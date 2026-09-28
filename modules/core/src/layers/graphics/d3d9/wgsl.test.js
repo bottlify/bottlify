@@ -83,11 +83,11 @@ test('the arithmetic instructions become the statements they mean', ()=>{
             'r0 = (c[1] * c[2] + c[3]);'],
         ['min', [op(OPCODE.MIN, 3), dst(r, 0), src(c, 1), src(c, 2)], 'r0 = min(c[1], c[2]);'],
         ['max', [op(OPCODE.MAX, 3), dst(r, 0), src(c, 1), src(c, 2)], 'r0 = max(c[1], c[2]);'],
-        ['rcp', [op(OPCODE.RCP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(1.0 / c[1].x);'],
+        ['rcp', [op(OPCODE.RCP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(1.0 / c[1].w);'],
         ['rsq', [op(OPCODE.RSQ, 2), dst(r, 0), src(c, 1)],
-            'r0 = vec4f(inverseSqrt(abs(c[1].x)));'],
-        ['exp', [op(OPCODE.EXP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(exp2(c[1].x));'],
-        ['log', [op(OPCODE.LOG, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(log2(abs(c[1].x)));'],
+            'r0 = vec4f(inverseSqrt(abs(c[1].w)));'],
+        ['exp', [op(OPCODE.EXP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(exp2(c[1].w));'],
+        ['log', [op(OPCODE.LOG, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(log2(abs(c[1].w)));'],
         ['frc', [op(OPCODE.FRC, 2), dst(r, 0), src(c, 1)], 'r0 = fract(c[1]);'],
         ['dp3', [op(OPCODE.DP3, 3), dst(r, 0), src(c, 1), src(c, 2)],
             'r0 = vec4f(dot(c[1].xyz, c[2].xyz));'],
@@ -130,8 +130,8 @@ test('the arithmetic instructions become the statements they mean', ()=>{
         ['sincos', [op(OPCODE.SINCOS, 4), dst(r, 0), src(c, 1), src(c, 2), src(c, 3)],
             'r0 = vec4f(cos(c[1].x), sin(c[1].x), 0.0, 0.0);'],
         ['mova', [op(OPCODE.MOVA, 2), dst(REGISTER.ADDR, 0), src(c, 1)], 'a0 = round(c[1]);'],
-        ['expp', [op(OPCODE.EXPP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(exp2(c[1].x));'],
-        ['logp', [op(OPCODE.LOGP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(log2(abs(c[1].x)));'],
+        ['expp', [op(OPCODE.EXPP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(exp2(c[1].w));'],
+        ['logp', [op(OPCODE.LOGP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(log2(abs(c[1].w)));'],
     ]);
     for (const [name, tokens, line] of cases)
     {
@@ -983,4 +983,18 @@ test('a pixel shader under the alpha test discards what fails it, by a register 
     const untested = translateShader(shader);
     assert.equal(untested.alphaRegister, undefined);
     assert.ok(!untested.wgsl.includes('discard'));
+});
+
+test('a vs_1_1 expp and logp are the old four-part results, read from the source\'s w', ()=>{
+    // Wine's d3d8 test_scalar_instructions: rcp of expp's x is 1/2^floor(w),
+    // and logp writes the exponent, the mantissa, the logarithm and one.
+    const translated = (/** @type {number} */ opcode)=>translateShader(parseShader([
+        versionToken(SHADER_KIND.VERTEX, 1, 1),
+        op(opcode, 2), dst(REGISTER.TEMP, 0), src(REGISTER.CONST, 0), END_TOKEN]));
+    const expp = translated(OPCODE.EXPP);
+    assertLine(expp.wgsl, 'r0 = expParts(c[0].w);');
+    assert.ok(expp.wgsl.includes('fn expParts(x: f32) -> vec4f {'));
+    const logp = translated(OPCODE.LOGP);
+    assertLine(logp.wgsl, 'r0 = logParts(c[0].w);');
+    assert.ok(logp.wgsl.includes('fn logParts(x: f32) -> vec4f {'));
 });
