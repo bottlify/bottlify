@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
-import { SHADOW } from './shadow.js';
+import { SHADOW, STALE_POINTER } from './shadow.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { IDIRECT3D9_SLOTS } from './vtables.js';
 import {
@@ -1635,7 +1635,7 @@ test('with guest memory, the setters and GetRenderState of a device run in the g
     const guest = (/** @type {string} */ name)=>h.box.isGuest(device,
         slot(IDIRECT3DDEVICE9_SLOTS, name));
     for (const name of ['SetRenderState', 'GetRenderState', 'SetTransform',
-        'SetTextureStageState', 'SetMaterial', 'SetSamplerState'])
+        'SetTextureStageState', 'SetMaterial', 'SetSamplerState', 'SetTexture'])
     {
         assert.ok(guest(name), `${name} runs in the guest`);
     }
@@ -1666,6 +1666,25 @@ test('with guest memory, the setters and GetRenderState of a device run in the g
     h.box.memory.writeU32(at(SHADOW.CALLS), 2);
     assert.equal(h.device(device, 'GetSamplerState', [1, 5, value]), D3D_OK);
     assert.equal(h.fields.readU32(value), 1, 'the sampler state adopted');
+
+    // A texture bound in the guest is the one GetTexture hands back; one let
+    // go of before the host looked is adopted first, and its stage made stale.
+    assert.equal(h.device(device, 'CreateTexture',
+        [4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, value, 0]), D3D_OK);
+    const texture = h.fields.readU32(value);
+    const bind = (/** @type {number} */ stage, /** @type {number} */ calls)=>{
+        h.box.memory.writeU32(at(SHADOW.TEXTURES + stage * 4), texture);
+        h.box.memory.writeU32(at(SHADOW.TEXTURE_CALLS), calls);
+        h.box.memory.writeU32(at(SHADOW.CALLS), 2 + calls);
+    };
+    bind(1, 1);
+    assert.equal(h.device(device, 'GetTexture', [1, value]), D3D_OK);
+    assert.equal(h.fields.readU32(value), texture);
+    h.release(texture);
+    bind(2, 2);
+    assert.equal(h.release(texture), 0);
+    assert.equal(h.box.memory.readU32(at(SHADOW.TEXTURES + 8)), STALE_POINTER);
+    assert.equal(h.box.memory.readU32(at(SHADOW.TEXTURES + 4)), STALE_POINTER);
 
     const { parameters } = h.createDevice(root);
     assert.equal(h.device(device, 'Reset', [parameters]), D3D_OK);

@@ -810,7 +810,9 @@ const invalidTail = popped=>[
 /**
  * HRESULT SetTexture(this, DWORD stage, IDirect3DBaseTexture8*), as guest
  * code. The pointer is stored as it is; the host turns it into the object it
- * names when it next looks, and refuses one that names nothing.
+ * names when it next looks, and refuses one that names nothing. A stage past
+ * the block's eight is invalid to Direct3D 8; Direct3D 9, whose samplers go
+ * further, sends it to the host (`beyond` 'slow').
  *
  *     mov eax, [esp+8]            ; stage
  *     cmp eax, 8
@@ -822,15 +824,15 @@ const invalidTail = popped=>[
  *     xor eax, eax
  *     ret 12
  *
- * @param {number} at @param {number} trap
+ * @param {number} at @param {number} trap @param {'invalid' | 'slow'} [beyond]
  * @returns {Uint8Array}
  */
-export function setTextureCode(at, trap){
+export function setTextureCode(at, trap, beyond = 'invalid'){
     return routine(at, trap, [
         ...prologue(),
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
         [0x3d, ...dword(SHADOW.STAGE_COUNT)],                    // cmp eax, 8
-        { jcc: 0x73, to: 'invalid' },                            // jae invalid
+        { jcc: 0x73, to: beyond },                               // jae beyond
         [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
         [0x89, 0x94, 0x81, ...dword(SHADOW.TEXTURES)],           // mov [ecx+eax*4+disp], edx
         [0xff, 0x81, ...dword(SHADOW.TEXTURE_CALLS)],            // inc dword [ecx+disp]
@@ -1154,6 +1156,7 @@ export function materialFloats(material){
  *     states (Direct3D 9), the stage state slot each D3DSAMP type is kept in,
  *     by type: the guest writes one there, and the host sets it back through
  *     SetSamplerState.
+ * @property {string} [name]  The device interface a refusal names.
  * @property {boolean} [bindings]  Whether the device's stream, index and
  *     vertex shader bindings are Direct3D 8's and mirrored; a Direct3D 9
  *     device's are not, and no routine of this block sets them.
@@ -1166,6 +1169,7 @@ export function materialFloats(material){
  */
 export function createShadow(deps){
     const { device } = deps;
+    const name = deps.name ?? 'IDirect3DDevice8';
     /** The D3DSAMP type kept in each stage state slot, or 0 for a stage state. */
     const samplerTypes = new Uint8Array(SHADOW.STAGE_STATE_STRIDE);
     (deps.samplerStates ?? []).forEach((key, type)=>{
@@ -1477,7 +1481,7 @@ export function createShadow(deps){
         seenStates[state] = value;
         if (device.SetRenderState(state, value) !== 0)
         {
-            refuse('IDirect3DDevice8::SetRenderState',
+            refuse(`${name}::SetRenderState`,
                 `state ${state} set to ${value} in the guest was accepted;`
                 + ' the device refuses it');
         }
@@ -1506,7 +1510,7 @@ export function createShadow(deps){
         }
         if (device.SetTextureStageState(stage, type, value) !== 0)
         {
-            refuse('IDirect3DDevice8::SetTextureStageState',
+            refuse(`${name}::SetTextureStageState`,
                 `stage ${stage} state ${type} set to ${value} in the guest was accepted;`
                 + ' the device refuses it');
         }
@@ -1548,7 +1552,7 @@ export function createShadow(deps){
             const matrix = new Float32Array(words.buffer, words.byteOffset, 16);
             if (device.SetTransform(transformType(slot), matrix) !== 0)
             {
-                refuse('IDirect3DDevice8::SetTransform',
+                refuse(`${name}::SetTransform`,
                     `type ${transformType(slot)} set in the guest was accepted;`
                     + ' the device refuses it');
             }
@@ -1575,13 +1579,13 @@ export function createShadow(deps){
             const buffer = pointer === 0 ? null : deps.objectAt(pointer);
             if (pointer !== 0 && !buffer)
             {
-                refuse('IDirect3DDevice8::SetStreamSource',
+                refuse(`${name}::SetStreamSource`,
                     `stream ${index} bound in the guest to 0x${pointer.toString(16)},`
                     + ' which is not an interface this device published');
             }
             else if (device.SetStreamSource(index, buffer, stride) !== 0)
             {
-                refuse('IDirect3DDevice8::SetStreamSource',
+                refuse(`${name}::SetStreamSource`,
                     `stream ${index} bound in the guest was accepted; the device refuses it`);
             }
         }
@@ -1594,13 +1598,13 @@ export function createShadow(deps){
             const buffer = seenIndices === 0 ? null : deps.objectAt(seenIndices);
             if (seenIndices !== 0 && !buffer)
             {
-                refuse('IDirect3DDevice8::SetIndices',
+                refuse(`${name}::SetIndices`,
                     `indices bound in the guest to 0x${seenIndices.toString(16)},`
                     + ' which is not an interface this device published');
             }
             else if (device.SetIndices(buffer, seenBaseVertex) !== 0)
             {
-                refuse('IDirect3DDevice8::SetIndices',
+                refuse(`${name}::SetIndices`,
                     'indices bound in the guest were accepted; the device refuses them');
             }
         }
@@ -1610,7 +1614,7 @@ export function createShadow(deps){
             seenShader = shader;
             if (device.SetVertexShader(seenShader) !== 0)
             {
-                refuse('IDirect3DDevice8::SetVertexShader',
+                refuse(`${name}::SetVertexShader`,
                     `vertex format 0x${seenShader.toString(16)} set in the guest was`
                     + ' accepted; the device refuses it');
             }
@@ -1632,13 +1636,13 @@ export function createShadow(deps){
             const texture = pointer === 0 ? null : deps.objectAt(pointer);
             if (pointer !== 0 && !texture)
             {
-                refuse('IDirect3DDevice8::SetTexture',
+                refuse(`${name}::SetTexture`,
                     `stage ${stage} bound in the guest to 0x${pointer.toString(16)},`
                     + ' which is not an interface this device published');
             }
             else if (device.SetTexture(stage, texture) !== 0)
             {
-                refuse('IDirect3DDevice8::SetTexture',
+                refuse(`${name}::SetTexture`,
                     `stage ${stage} bound in the guest was accepted; the device refuses it`);
             }
         }
@@ -1666,7 +1670,7 @@ export function createShadow(deps){
         const floats = new Float32Array(words.buffer, words.byteOffset, SHADOW.MATERIAL_WORDS);
         if (device.SetMaterial(materialOf(floats)) !== 0)
         {
-            refuse('IDirect3DDevice8::SetMaterial',
+            refuse(`${name}::SetMaterial`,
                 'a material set in the guest was accepted; the device refuses it');
         }
     };

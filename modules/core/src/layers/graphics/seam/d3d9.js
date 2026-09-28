@@ -72,7 +72,7 @@ import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
     createShadow, getRenderStateCode, setMaterialCode, setRenderStateCode, setSamplerStateCode,
-    setTextureStageStateCode, setTransformCode,
+    setTextureCode, setTextureStageStateCode, setTransformCode,
 } from './shadow.js';
 import { D3DTSS9, SAMPLER_STATE_KEY } from '../d3d9/samplerstates.js';
 
@@ -189,16 +189,34 @@ export function createDirect3D9Seam(
 
     /**
      * Each device's block of the state its setters write in the guest
-     * (`shadow.js`). Direct3D 9's render states, transforms, stage states and
-     * material are laid out as Direct3D 8's and take the same routines; its
-     * stream, index and shader bindings and its sampler states are its own and
-     * stay with the host.
+     * (`shadow.js`). Direct3D 9's render states, transforms, stage states,
+     * material and first eight textures are laid out as Direct3D 8's and take
+     * the same routines, and its sampler states share the stage state slots;
+     * its stream, index and shader bindings are its own and stay with the
+     * host.
      *
      * @type {WeakMap<any, ReturnType<typeof createShadow>>}
      */
     const shadows = new WeakMap();
     /** @param {any} device */
     const shadowOf = device=>shadows.get(device) ?? null;
+    /**
+     * The program let go of a texture. A stage the guest bound it to and the
+     * host has not read yet still names it, so it is adopted now, while the
+     * pointer resolves; after that the pointer is nobody's, and the stage is
+     * made stale so the device keeps what it bound.
+     *
+     * @param {any} resource @param {Iterable<number>} pointers
+     */
+    const retire = (resource, pointers)=>{
+        privateData.released(resource);
+        const shadow = shadowOf(owners.get(resource));
+        shadow?.sync();
+        for (const pointer of pointers)
+        {
+            shadow?.forgetPointer(pointer);
+        }
+    };
     /** @param {(at: number) => Uint8Array} code */
     const placeCode = code=>{
         // Sized by a throwaway rendering: the bytes depend on where they
@@ -660,7 +678,7 @@ export function createDirect3D9Seam(
      * @param {string} id @param {[string, number][]} slots @param {any} methods
      */
     const textureFamily = (id, slots, methods)=>[
-        describe(id, slots, methods, {}, privateData.released),
+        describe(id, slots, methods, {}, retire),
         describe(IID_IDirect3DBaseTexture9, IDIRECT3DBASETEXTURE9_SLOTS, methods),
         describe(IID_IDirect3DResource9, IDIRECT3DRESOURCE9_SLOTS, methods),
     ];
@@ -2335,6 +2353,7 @@ export function createDirect3D9Seam(
                 STAGE_STATE_TYPES_9)),
             SetMaterial: ({ trap })=>placeCode(at=>setMaterialCode(at, trap)),
             SetSamplerState: ({ trap })=>placeCode(at=>setSamplerStateCode(at, trap)),
+            SetTexture: ({ trap })=>placeCode(at=>setTextureCode(at, trap, 'slow')),
         }
         : {};
     const deviceInterfaces = [
@@ -2776,6 +2795,7 @@ export function createDirect3D9Seam(
                 objectAt: publisher.objectAt,
                 pointerOf: ()=>0,
                 divergence,
+                name: 'IDirect3DDevice9',
                 bindings: false,
                 samplerStates: SAMPLER_STATE_KEY,
             });
