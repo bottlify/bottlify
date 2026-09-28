@@ -75,16 +75,22 @@ function mixer(){
     };
 }
 
-/** A test rig with a guest memory, a mixer and the files the loader reads. */
-function rig(){
+/**
+ * A test rig with a guest memory, a mixer and the files the loader reads.
+ *
+ * @param {(host: any, space: ReturnType<typeof arena>) => void} [configure]
+ *     Edits the host the module is made with -- the stream reader, the
+ *     allocator -- before it exists.
+ */
+function rig(configure){
     const space = arena();
     const out = mixer();
     const time = { at: 1000 };
     /** @type {Map<string, Uint8Array>} */
     const files = new Map();
     let pointer = 0x20000000;
-    const dm = createDirectMusic({
-        registry: /** @type {any} */ ({}),
+    const host = /** @type {any} */ ({
+        registry: {},
         memory: {
             readBytes: (/** @type {number} */ a, /** @type {number} */ l)=>
                 space.ram.subarray(a, a + l),
@@ -94,9 +100,12 @@ function rig(){
         publishInterface: ()=>pointer++,
         output: ()=>out,
         now: ()=>time.at,
-        readFile: async path=>files.get(path) ?? files.get(path.toLowerCase()) ?? null,
+        readFile: async(/** @type {string} */ path)=>
+            files.get(path) ?? files.get(path.toLowerCase()) ?? null,
         divergence: ()=>{},
     });
+    configure?.(host, space);
+    const dm = createDirectMusic(host);
     return { space, out, time, files, dm };
 }
 
@@ -226,4 +235,162 @@ test('a segment that is not a DMSG is refused and nothing is played', async()=>{
     assert.equal(await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8, 'PlaySegmentEx',
         [segmentPointer, 0, 0, 0, 0, 0, stateOut, 0, 0]), S_OK);
     assert.equal(dm.diagnostics().playing, 1);
+});
+
+test('Load asks a stream for exactly what is left, not a chunk past its end', async()=>{
+    const { segment } = segmentWithWave();
+    const SEEK_ENTRY = 0x00600000;
+    const READ_ENTRY = 0x00600004;
+    const E_FAIL = 0x80004005 | 0;
+    /** @type {{ reads: number, overLong: number }} */
+    const counted = { reads: 0, overLong: 0 };
+    /** @type {number} */
+    let stream = 0;
+    const { dm } = rig((host, space)=>{
+        const vtable = space.alloc(16 * 4);
+        stream = space.alloc(8);
+        space.writeU32(vtable + 3 * 4, READ_ENTRY);
+        space.writeU32(vtable + 5 * 4, SEEK_ENTRY);
+        space.writeU32(stream, vtable);
+        host.allocate = (/** @type {number} */ bytes)=>space.alloc(bytes);
+        host.free = ()=>{};
+        host.callerThread = ()=>({});
+        let position = 0;
+        /**
+         * @param {number} entry
+         * @param {number[]} args
+         */
+        const guest = async(entry, args)=>{
+            if (entry === SEEK_ENTRY)
+            {
+                // STREAM_SEEK_END is 2: the answer a file stream gives is its
+                // size, and the reader starts from the front again.
+                position = (args[3] >>> 0) === 2 ? segment.length : 0;
+                space.writeU32(args[4], position);
+                space.writeU32(args[4] + 4, 0);
+                return S_OK;
+            }
+            if (entry === READ_ENTRY)
+            {
+                const want = args[2] >>> 0;
+                const left = segment.length - position;
+                counted.reads++;
+                if (want > left)
+                {
+                    // What the game's own file stream does with an over-long
+                    // read: E_FAIL and not a byte, where IStream promises a
+                    // short count.
+                    counted.overLong++;
+                    space.writeU32(args[3], 0);
+                    return E_FAIL;
+                }
+                space.writeBytes(args[1], segment.subarray(position, position + want));
+                space.writeU32(args[3], want);
+                position += want;
+                return S_OK;
+            }
+            return 0x80004001 | 0;
+        };
+        host.callGuest = guest;
+    });
+    const object = createComObject(ids.CLSID_DIRECTMUSIC_SEGMENT, dm.segment());
+    assert.equal(await call(object, ids.IID_IPERSIST_STREAM, 'Load', [stream]), S_OK);
+    assert.equal(counted.overLong, 0, 'nothing was asked for past the end');
+    assert.equal(object.state.parsed.waves.length, 1, 'the segment arrived whole');
+});
+
+test('a segment\'s wave is read through the loader its stream names', async()=>{
+    const samples = new Int16Array(2000);
+    const wave = wavFile(samples, { sampleRate: 1000, channels: 1 });
+    const { segment } = segmentWithWave();
+    const SOK = 0;
+    const E_NOINTERFACE = 0x80004002 | 0;
+    const SEEK_ENTRY = 0x00700000;
+    const READ_ENTRY = 0x00700004;
+    const QI_ENTRY = 0x00700008;
+    const GETLOADER_ENTRY = 0x0070000c;
+    const RELEASE_ENTRY = 0x00700010;
+    const GETOBJECT_ENTRY = 0x00700014;
+    const GETLOADER_IID = /** @type {Uint8Array} */ (parseGuid(ids.IID_DIRECTMUSIC_GETLOADER));
+    const wavePointer = 0x70000000;
+    /** @type {any} */
+    let waveObject = null;
+    /** @type {number} */
+    let stream = 0;
+    const { dm } = rig((host, space)=>{
+        const streamVtable = space.alloc(16 * 4);
+        const glVtable = space.alloc(8 * 4);
+        const loaderVtable = space.alloc(8 * 4);
+        stream = space.alloc(8);
+        const getLoader = space.alloc(8);
+        const loader = space.alloc(8);
+        space.writeU32(streamVtable + 0 * 4, QI_ENTRY);
+        space.writeU32(streamVtable + 3 * 4, READ_ENTRY);
+        space.writeU32(streamVtable + 5 * 4, SEEK_ENTRY);
+        space.writeU32(stream, streamVtable);
+        space.writeU32(glVtable + 2 * 4, RELEASE_ENTRY);
+        space.writeU32(glVtable + 3 * 4, GETLOADER_ENTRY);
+        space.writeU32(getLoader, glVtable);
+        space.writeU32(loaderVtable + 3 * 4, GETOBJECT_ENTRY);
+        space.writeU32(loader, loaderVtable);
+        host.allocate = (/** @type {number} */ bytes)=>space.alloc(bytes);
+        host.free = ()=>{};
+        host.callerThread = ()=>({});
+        host.objectAt = ()=>waveObject;
+        let position = 0;
+        /**
+         * @param {number} entry
+         * @param {number[]} args
+         */
+        const guest = async(entry, args)=>{
+            if (entry === SEEK_ENTRY)
+            {
+                position = (args[3] >>> 0) === 2 ? segment.length : 0;
+                space.writeU32(args[4], position);
+                space.writeU32(args[4] + 4, 0);
+                return SOK;
+            }
+            if (entry === READ_ENTRY)
+            {
+                const want = args[2] >>> 0;
+                const got = Math.min(want, segment.length - position);
+                space.writeBytes(args[1], segment.subarray(position, position + got));
+                space.writeU32(args[3], got);
+                position += got;
+                return SOK;
+            }
+            if (entry === QI_ENTRY)
+            {
+                const matches = args[1] !== 0 && GETLOADER_IID
+                    .every((byte, at)=>space.ram[args[1] + at] === byte);
+                space.writeU32(args[2], matches ? getLoader : 0);
+                return matches ? SOK : E_NOINTERFACE;
+            }
+            if (entry === GETLOADER_ENTRY)
+            {
+                space.writeU32(args[1], loader);
+                return SOK;
+            }
+            if (entry === RELEASE_ENTRY)
+            {
+                return 0;
+            }
+            if (entry === GETOBJECT_ENTRY)
+            {
+                space.writeU32(args[3], wavePointer);
+                return SOK;
+            }
+            return 0x80004001 | 0;
+        };
+        host.callGuest = guest;
+    });
+    waveObject = createComObject(ids.CLSID_DIRECTSOUND_WAVE, dm.wave());
+    waveObject.state.bytes = wave;
+    const object = createComObject(ids.CLSID_DIRECTMUSIC_SEGMENT, dm.segment());
+    assert.equal(await call(object, ids.IID_IPERSIST_STREAM, 'Load', [stream]), S_OK);
+    assert.notEqual(object.state.loader, 0, 'the loader was captured from the stream');
+    assert.equal(await call(object, ids.IID_DIRECTMUSIC_SEGMENT8, 'Download', []), S_OK);
+    const program = await (/** @type {any} */ (object).dmusic).resolve({});
+    assert.equal(program.items.length, 1, 'the wave came through the loader');
+    assert.equal(program.items[0].samples.length, samples.length * 2);
 });

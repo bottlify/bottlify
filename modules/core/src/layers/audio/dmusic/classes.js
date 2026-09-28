@@ -57,6 +57,11 @@ export function registerDirectMusic(host){
     // hands it the bytes it loaded itself, so the class has to exist even
     // though the loader is the other way one arrives.
     host.registry.registerClass(ids.CLSID_DIRECTMUSIC_SEGMENT, ()=>music.segment());
+    // A segment's wave references are resolved by the program's own loader,
+    // which creates each wave by this class and loads the file into the
+    // object this engine owns -- so the samples reach the wave track through
+    // here and nowhere else.
+    host.registry.registerClass(ids.CLSID_DIRECTSOUND_WAVE, ()=>music.wave());
     return {
         tick: music.tick,
         diagnostics: music.diagnostics,

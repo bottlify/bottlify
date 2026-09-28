@@ -43,6 +43,12 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
 const WAVE_FORMAT_MPEG = 0x50;
 const WAVE_FORMAT_MPEGLAYER3 = 0x55;
 
+/** IStream's Read and Seek, and the two origins this uses. */
+const SLOT_STREAM_READ = 3;
+const SLOT_STREAM_SEEK = 5;
+const STREAM_SEEK_SET = 0;
+const STREAM_SEEK_END = 2;
+
 /**
  * One vtable slot as a table declares it: its name, the bytes it pops
  * including the interface pointer, and the handler that answers it.
@@ -135,6 +141,20 @@ export function createDirectMusic(host){
             text += String.fromCharCode(value);
         }
         return text;
+    };
+    /** @param {number} address @param {string} text */
+    const writeWide = (address, text)=>{
+        if ((address >>> 0) === 0)
+        {
+            return;
+        }
+        const bytes = new Uint8Array(text.length * 2 + 2);
+        const view = new DataView(bytes.buffer);
+        for (let at = 0; at < text.length; at++)
+        {
+            view.setUint16(at * 2, text.charCodeAt(at), true);
+        }
+        memory.writeBytes(address >>> 0, bytes);
     };
     /** @param {number} address @returns {string | null} */
     const guidAt = address=>(address >>> 0) === 0 ? null : readGuid(guidMemory, address >>> 0);
@@ -242,14 +262,16 @@ export function createDirectMusic(host){
      * which is silence for that one sound and not a failed segment.
      *
      * @param {import('./riff.js').Segment} parsed @param {string} beside
+     * @param {any} state @param {any} [thread]
      * @returns {Promise<import('./player.js').WaveProgram>}
      */
-    const resolveProgram = async(parsed, beside)=>{
+    const resolveProgram = async(parsed, beside, state, thread)=>{
         /** @type {import('./player.js').WaveProgramItem[]} */
         const items = [];
         for (const wave of parsed.waves)
         {
-            const bytes = await loadFile(wave.file, beside);
+            const bytes = (state.loader ? await waveFromLoader(state, wave.file, thread) : null)
+                ?? await loadFile(wave.file, beside);
             if (!bytes)
             {
                 continue;
@@ -311,13 +333,19 @@ export function createDirectMusic(host){
 
     /**
      * Every byte a guest IStream has to give, read through the stream's own
-     * `Read`.
+     * `Read` and `Seek`.
      *
      * A program that loaded a segment's file itself hands the segment an
      * IStream and expects it parsed; the bytes are only reachable by calling
      * the stream, which is guest code, so the bridge runs it and this reads
-     * what it wrote. Read in chunks because the length is not known until the
-     * stream says so, and a short read is the end.
+     * what it wrote.
+     *
+     * The stream's size is asked for first, and every read asks for exactly
+     * what is left. A DirectMusic file stream refuses a read longer than the
+     * bytes remaining -- its `Read` answers E_FAIL rather than a short count --
+     * so a reader that assumes a stream tolerates an over-long request gets an
+     * empty segment and no music. A stream that will not seek is read in chunks
+     * and expected to answer a short read at the end, as IStream promises.
      *
      * @param {number} stream @param {any} thread
      * @returns {Promise<Uint8Array | null>}
@@ -336,33 +364,64 @@ export function createDirectMusic(host){
                 + ' has no vtable');
             return null;
         }
-        // IStream's Read is the fourth slot: IUnknown's three, then Read.
-        const readFn = readU32(vtable + 12);
+        const readFn = readU32(vtable + SLOT_STREAM_READ * 4);
+        const seekFn = readU32(vtable + SLOT_STREAM_SEEK * 4);
         const chunk = 1 << 16;
-        const scratch = (host.allocate?.(chunk + 4) ?? 0) >>> 0;
+        // The count Read writes and the 64-bit position Seek writes, past the
+        // sample buffer.
+        const countAt = chunk;
+        const positionAt = chunk + 4;
+        const scratch = (host.allocate?.(chunk + 16) ?? 0) >>> 0;
         if (scratch === 0)
         {
             host.divergence?.('IPersistStream::Load', 'no room for a read buffer');
             return null;
         }
+        // What the stream holds, from where it stands now; -1 when it will not
+        // seek and the length has to be found by reading.
+        let remaining = -1;
+        if (seekFn !== 0)
+        {
+            const hr = (await host.callGuest(seekFn,
+                [stream, 0, 0, STREAM_SEEK_END, scratch + positionAt], thread)) | 0;
+            if (hr >= 0)
+            {
+                const size = readU32(scratch + positionAt)
+                    + readU32(scratch + positionAt + 4) * 0x100000000;
+                // A nonsense size is no size: read until the stream says stop.
+                if (size >= 0 && size < 0x40000000)
+                {
+                    remaining = size;
+                    await host.callGuest(seekFn,
+                        [stream, 0, 0, STREAM_SEEK_SET, scratch + positionAt], thread);
+                }
+            }
+        }
         /** @type {Uint8Array[]} */
         const parts = [];
+        let total = 0;
         try
         {
             for (;;)
             {
-                writeU32(scratch + chunk, 0);
+                const want = remaining < 0 ? chunk : Math.min(chunk, remaining - total);
+                if (want <= 0)
+                {
+                    break;
+                }
+                writeU32(scratch + countAt, 0);
                 const hr = (await host.callGuest(readFn,
-                    [stream, scratch, chunk, scratch + chunk], thread)) | 0;
-                const got = Math.min(readU32(scratch + chunk), chunk);
+                    [stream, scratch, want, scratch + countAt], thread)) | 0;
+                const got = Math.min(readU32(scratch + countAt), want);
                 if (got > 0)
                 {
                     parts.push(memory.readBytes(scratch, got).slice());
+                    total += got;
                 }
-                if (hr < 0 || got < chunk)
+                if (hr < 0 || got < want)
                 {
                     host.divergence?.('IPersistStream::Load',
-                        `read hr=0x${(hr >>> 0).toString(16)} bytes=${got}`);
+                        `read hr=0x${(hr >>> 0).toString(16)} bytes=${got} of ${want}`);
                     break;
                 }
             }
@@ -371,7 +430,10 @@ export function createDirectMusic(host){
         {
             host.free?.(scratch);
         }
-        const total = parts.reduce((sum, part)=>sum + part.length, 0);
+        if (total === 0)
+        {
+            return null;
+        }
         const bytes = new Uint8Array(total);
         let at = 0;
         for (const part of parts)
@@ -379,7 +441,7 @@ export function createDirectMusic(host){
             bytes.set(part, at);
             at += part.length;
         }
-        return total > 0 ? bytes : null;
+        return bytes;
     };
 
     /**
@@ -428,8 +490,13 @@ export function createDirectMusic(host){
                 state.resolution = state.parsed.header.resolution || PPQ;
                 state.program = null;
             },
-            resolve(){
-                state.program ??= resolveProgram(state.parsed, state.dir);
+            /** @param {number} loader */
+            attachLoader(loader){
+                state.loader = loader >>> 0;
+            },
+            /** @param {any} [thread] @returns {Promise<import('./player.js').WaveProgram>} */
+            resolve(thread){
+                state.program ??= resolveProgram(state.parsed, state.dir, state, thread);
                 return state.program;
             },
             plays: ()=>state.repeats === 0xffffffff ? Infinity : (state.repeats | 0) + 1,
@@ -442,6 +509,183 @@ export function createDirectMusic(host){
         (/** @type {any} */ (object)).dmusic = api;
         return api;
     };
+
+    /**
+     * The loader a segment's stream names through `IDirectMusicGetLoader`.
+     *
+     * A program that loads a segment from its own stream answers that stream
+     * for the loader that reads the files the segment references, so the wave
+     * track can reach a wave by name without knowing where the program keeps
+     * its archives. Zero when the stream does not answer it.
+     *
+     * @param {number} stream @param {any} thread
+     * @returns {Promise<number>}
+     */
+    const streamLoader = async(stream, thread)=>{
+        if (!host.callGuest || (stream >>> 0) === 0)
+        {
+            return 0;
+        }
+        const vtable = readU32(stream);
+        const block = (host.allocate?.(32) ?? 0) >>> 0;
+        if (block === 0)
+        {
+            return 0;
+        }
+        try
+        {
+            writeGuid(guidMemory, block, ids.IID_DIRECTMUSIC_GETLOADER);
+            writeU32(block + 16, 0);
+            const hr = (await host.callGuest(readU32(vtable),
+                [stream, block, block + 16], thread)) | 0;
+            const getLoader = readU32(block + 16);
+            if (hr < 0 || getLoader === 0)
+            {
+                return 0;
+            }
+            const glVtable = readU32(getLoader);
+            writeU32(block + 20, 0);
+            const loaded = (await host.callGuest(readU32(glVtable + 12),
+                [getLoader, block + 20], thread)) | 0;
+            // The interface was taken for this one call and goes back now.
+            await host.callGuest(readU32(glVtable + 8), [getLoader], thread);
+            return loaded >= 0 ? readU32(block + 20) : 0;
+        }
+        finally
+        {
+            host.free?.(block);
+        }
+    };
+
+    /**
+     * A wave's bytes, asked of the loader the segment's stream named.
+     *
+     * The loader is a program's own object: it resolves the file name against
+     * whatever the program mounted -- a game's archive -- and hands back a
+     * `CLSID_DirectSoundWave` object, which is this module's, so the bytes it
+     * was fed with are read straight out of its state. Null when there is no
+     * loader, or it cannot find the wave.
+     *
+     * @param {any} state @param {string} file @param {any} thread
+     * @returns {Promise<Uint8Array | null>}
+     */
+    const waveFromLoader = async(state, file, thread)=>{
+        if (!state.loader || !host.callGuest || !file)
+        {
+            return null;
+        }
+        const block = (host.allocate?.(ids.DMUS_OBJECTDESC.SIZE + 20) ?? 0) >>> 0;
+        if (block === 0)
+        {
+            return null;
+        }
+        try
+        {
+            memory.writeBytes(block, new Uint8Array(ids.DMUS_OBJECTDESC.SIZE));
+            writeU32(block + ids.DMUS_OBJECTDESC.dwSize, ids.DMUS_OBJECTDESC.SIZE);
+            writeU32(block + ids.DMUS_OBJECTDESC.dwValidData,
+                ids.DMUS_OBJ.CLASS | ids.DMUS_OBJ.NAME | ids.DMUS_OBJ.FILENAME);
+            writeGuid(guidMemory, block + ids.DMUS_OBJECTDESC.guidClass,
+                ids.CLSID_DIRECTSOUND_WAVE);
+            writeWide(block + ids.DMUS_OBJECTDESC.wszFileName, file);
+            writeWide(block + ids.DMUS_OBJECTDESC.wszName, file.replace(/\.[^.]*$/, ''));
+            const riidAt = block + ids.DMUS_OBJECTDESC.SIZE;
+            const outAt = riidAt + 16;
+            writeGuid(guidMemory, riidAt, ids.IID_DIRECTMUSIC_OBJECT);
+            writeU32(outAt, 0);
+            const vtable = readU32(state.loader);
+            const hr = (await host.callGuest(readU32(vtable + 3 * 4),
+                [state.loader, block, riidAt, outAt], thread)) | 0;
+            const object = readU32(outAt);
+            if (hr < 0 || object === 0)
+            {
+                return null;
+            }
+            return objectAt(object)?.state?.bytes ?? null;
+        }
+        finally
+        {
+            host.free?.(block);
+        }
+    };
+
+    /**
+     * A DirectMusic wave: the bytes a program's loader fed it.
+     *
+     * A segment names its waves; the loader the segment's stream names makes
+     * one of these for each and loads the file into it, so this is where a
+     * wave's bytes arrive and where the wave track reads them from. Nothing
+     * else about the object is observable to a program -- it is made by class
+     * id and never asked anything but to hold its samples.
+     *
+     * @returns {import('../../win32/ole32/objects.js').ComClassDefinition}
+     */
+    const waveDefinition = ()=>({
+        interfaces: [
+            describe(ids.IID_DIRECTMUSIC_OBJECT, [
+                ['GetDescriptor', 8, (object, [out])=>{
+                    if ((out >>> 0) === 0)
+                    {
+                        return E_POINTER;
+                    }
+                    const state = object.state;
+                    writeU32(out + ids.DMUS_OBJECTDESC.dwSize, ids.DMUS_OBJECTDESC.SIZE);
+                    writeU32(out + ids.DMUS_OBJECTDESC.dwValidData,
+                        ids.DMUS_OBJ.CLASS | (state.file ? ids.DMUS_OBJ.FILENAME : 0)
+                        | (state.name ? ids.DMUS_OBJ.NAME : 0));
+                    writeGuid(guidMemory, out + ids.DMUS_OBJECTDESC.guidClass,
+                        ids.CLSID_DIRECTSOUND_WAVE);
+                    writeWide(out + ids.DMUS_OBJECTDESC.wszFileName, state.file);
+                    writeWide(out + ids.DMUS_OBJECTDESC.wszName, state.name);
+                    return S_OK;
+                }],
+                ['SetDescriptor', 8, (object, [desc])=>{
+                    if ((desc >>> 0) === 0)
+                    {
+                        return E_POINTER;
+                    }
+                    const valid = readU32(desc + ids.DMUS_OBJECTDESC.dwValidData);
+                    if ((valid & ids.DMUS_OBJ.FILENAME) !== 0)
+                    {
+                        object.state.file = readWide(desc + ids.DMUS_OBJECTDESC.wszFileName, 260);
+                    }
+                    if ((valid & ids.DMUS_OBJ.NAME) !== 0)
+                    {
+                        object.state.name = readWide(desc + ids.DMUS_OBJECTDESC.wszName, 260);
+                    }
+                    return S_OK;
+                }],
+                ['ParseDescriptor', 12, ()=>E_NOTIMPL],
+            ]),
+            describe(ids.IID_IPERSIST_STREAM, [
+                ['GetClassID', 8, (_, [out])=>{
+                    if ((out >>> 0) === 0)
+                    {
+                        return E_POINTER;
+                    }
+                    writeGuid(guidMemory, out, ids.CLSID_DIRECTSOUND_WAVE);
+                    return S_OK;
+                }],
+                ['IsDirty', 4, ()=>S_FALSE],
+                ['Load', 8, (object, [stream])=>{
+                    const thread = host.callerThread?.();
+                    return readStream(stream, thread).then(bytes=>{
+                        const wav = bytes ? parseWave(bytes) : null;
+                        if (!wav)
+                        {
+                            return E_FAIL;
+                        }
+                        object.state.bytes = bytes;
+                        object.state.parsed = wav;
+                        return S_OK;
+                    });
+                }],
+                ['Save', 12, ()=>E_NOTIMPL],
+                ['GetSizeMax', 8, ()=>E_NOTIMPL],
+            ]),
+        ],
+        state: { bytes: null, parsed: null, name: '', file: '' },
+    });
 
     /**
      * @param {Uint8Array | null} data @param {string} dir
@@ -503,7 +747,13 @@ export function createDirectMusic(host){
                 ['IsDirty', 4, ()=>S_FALSE],
                 ['Load', 8, (object, [stream])=>{
                     const thread = host.callerThread?.();
-                    return readStream(stream, thread).then(bytes=>{
+                    return streamLoader(stream, thread).then(loader=>{
+                        if (loader !== 0)
+                        {
+                            segmentApiFor(object).attachLoader(loader);
+                        }
+                        return readStream(stream, thread);
+                    }).then(bytes=>{
                         if (!bytes)
                         {
                             return E_FAIL;
@@ -616,7 +866,8 @@ export function createDirectMusic(host){
                 ['SetTrackConfig', 24, ()=>E_NOTIMPL],
                 ['GetAudioPathConfig', 8, ()=>E_NOTIMPL],
                 ['Compose', 20, ()=>E_NOTIMPL],
-                ['Download', 8, object=>segmentApiFor(object).resolve().then(()=>S_OK)],
+                ['Download', 8, object=>segmentApiFor(object)
+                    .resolve(host.callerThread?.()).then(()=>S_OK)],
                 ['Unload', 8, ()=>S_OK],
             );
         }
@@ -890,14 +1141,14 @@ export function createDirectMusic(host){
 
         /**
          * @param {any} segment @param {number} flags @param {number} start
-         * @param {number} out
+         * @param {number} out @param {any} [thread]
          */
-        const playSegment = async(segment, flags, start, out)=>{
+        const playSegment = async(segment, flags, start, out, thread)=>{
             if (!segment)
             {
                 return E_INVALIDARG;
             }
-            const program = await segment.resolve();
+            const program = await segment.resolve(thread);
             const voice = player.start(program, {
                 delayMs: start > 0 ? start : 0,
                 plays: segment.plays(),
@@ -919,7 +1170,7 @@ export function createDirectMusic(host){
                 return S_OK;
             }],
             ['PlaySegment', 24, (_, [source, flags, lo, hi, out])=>playSegment(
-                apiOf(source), flags >>> 0, join64(lo, hi), out)],
+                apiOf(source), flags >>> 0, join64(lo, hi), out, host.callerThread?.())],
             ['Stop', 20, (_, [source, state])=>stopVoice(apiOf(state) ?? apiOf(source))],
             ['GetSegmentState', 12, (_, [out])=>{
                 const voice = player.voices()[0];
@@ -1064,7 +1315,7 @@ export function createDirectMusic(host){
                 return S_OK;
             }],
             ['PlaySegmentEx', 40, (_, [source, , , flags, lo, hi, out])=>playSegment(
-                apiOf(source), flags >>> 0, join64(lo, hi), out)],
+                apiOf(source), flags >>> 0, join64(lo, hi), out, host.callerThread?.())],
             ['StopEx', 20, (_, [item])=>{
                 if ((item >>> 0) === 0)
                 {
@@ -1258,6 +1509,8 @@ export function createDirectMusic(host){
         performance: performanceDefinition,
         loader: loaderDefinition,
         directMusic: directMusicDefinition,
+        /** A wave the loader makes for a segment's reference. */
+        wave: waveDefinition,
         /** An empty segment, for a program that makes one by class id. */
         segment: ()=>segmentDefinition(null, ''),
         /** One turn of the clock for every performance's voices. */
