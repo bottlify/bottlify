@@ -71,10 +71,10 @@ import { createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
-    createShadow, getRenderStateCode, setMaterialCode, setRenderStateCode,
+    createShadow, getRenderStateCode, setMaterialCode, setRenderStateCode, setSamplerStateCode,
     setTextureStageStateCode, setTransformCode,
 } from './shadow.js';
-import { D3DTSS9 } from '../d3d9/samplerstates.js';
+import { D3DTSS9, SAMPLER_STATE_KEY } from '../d3d9/samplerstates.js';
 
 /** Direct3D 9's stage state types below 32, a bit each: what the guest routine takes. */
 const STAGE_STATE_TYPES_9 = Object.values(D3DTSS9)
@@ -2334,6 +2334,7 @@ export function createDirect3D9Seam(
             SetTextureStageState: ({ trap })=>placeCode(at=>setTextureStageStateCode(at, trap,
                 STAGE_STATE_TYPES_9)),
             SetMaterial: ({ trap })=>placeCode(at=>setMaterialCode(at, trap)),
+            SetSamplerState: ({ trap })=>placeCode(at=>setSamplerStateCode(at, trap)),
         }
         : {};
     const deviceInterfaces = [
@@ -2776,6 +2777,7 @@ export function createDirect3D9Seam(
                 pointerOf: ()=>0,
                 divergence,
                 bindings: false,
+                samplerStates: SAMPLER_STATE_KEY,
             });
             shadows.set(held.device, shadow);
             held.device.guestState = ()=>shadow.address();

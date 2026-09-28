@@ -147,7 +147,15 @@ export const SHADOW = {
      * which the device refuses, to the host.
      */
     RENDER_STATE_VALID: 4448,
-    SIZE: 4480,
+    /**
+     * A byte per D3DSAMP type below 16: the stage state slot a sampler state
+     * of that type is kept in, zero for one the block does not hold. Written
+     * by the host for a device that has sampler states; zero throughout for
+     * one that does not, which sends every call to the host.
+     */
+    SAMPLER_KEYS: 4480,
+    SAMPLER_KEY_COUNT: 16,
+    SIZE: 4496,
 };
 
 /**
@@ -888,6 +896,63 @@ export function setTextureStageStateCode(at, trap, types = STAGE_STATE_TYPES){
 }
 
 /**
+ * HRESULT SetSamplerState(this, DWORD sampler, D3DSAMPLERSTATETYPE type,
+ * DWORD value), as guest code: the state is kept in its sampler's stage
+ * state slot for its type, which the block's table names, and marked there
+ * as a stage state is. A sampler past the block's stages -- the higher pixel
+ * samplers, the displacement and vertex ones -- and a type the table has no
+ * slot for go to the host.
+ *
+ *     (prologue)
+ *     mov eax, [esp+12]           ; type
+ *     cmp eax, 16
+ *     jae slow
+ *     movzx eax, byte [ecx + eax + SAMPLER_KEYS]
+ *     test eax, eax
+ *     jz slow
+ *     mov edx, [esp+8]            ; sampler
+ *     cmp edx, 8
+ *     jae slow
+ *     shl edx, 5
+ *     add eax, edx                ; sampler * 32 + slot
+ *     mov edx, [esp+16]           ; value
+ *     mov [ecx + eax*4 + STAGE_STATES], edx
+ *     bts [ecx + STAGE_STATE_MARKS], eax
+ *     inc dword [ecx + STAGE_STATE_CALLS]
+ *     inc dword [ecx + CALLS]
+ *     xor eax, eax
+ *     ret 16
+ *   slow:
+ *     jmp trap
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function setSamplerStateCode(at, trap){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
+        [0x3d, ...dword(SHADOW.SAMPLER_KEY_COUNT)],              // cmp eax, 16
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0x0f, 0xb6, 0x84, 0x01, ...dword(SHADOW.SAMPLER_KEYS)], // movzx eax, byte [ecx+eax+disp]
+        [0x85, 0xc0],                                            // test eax, eax
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
+        [0x81, 0xfa, ...dword(SHADOW.STAGE_COUNT)],              // cmp edx, 8
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0xc1, 0xe2, 0x05],                                      // shl edx, 5
+        [0x01, 0xd0],                                            // add eax, edx
+        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
+        [0x89, 0x94, 0x81, ...dword(SHADOW.STAGE_STATES)],       // mov [ecx+eax*4+disp], edx
+        mark(SHADOW.STAGE_STATE_MARKS),                          // bts [ecx+disp], eax
+        [0xff, 0x81, ...dword(SHADOW.STAGE_STATE_CALLS)],        // inc dword [ecx+disp]
+        counted(1),                                              // inc dword [ecx+12]
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x10, 0x00],                                      // ret 16
+    ]);
+}
+
+/**
  * HRESULT SetMaterial(this, const D3DMATERIAL8*), as guest code. Copies the
  * seventeen floats into the block; a null pointer is the host's to refuse.
  * The call is counted once the copy is done, so that an entry another
@@ -1062,6 +1127,8 @@ export function materialFloats(material){
  * @property {(handle: number) => number} SetVertexShader
  * @property {(out: { handle?: number }) => number} GetVertexShader
  * @property {(stage: number, texture: any) => number} SetTexture
+ * @property {(sampler: number, type: number, value: number) => number} [SetSamplerState]
+ * @property {(sampler: number, type: number, out: { value?: number }) => number} [GetSamplerState]
  * @property {(stage: number, type: number, value: number) => number} SetTextureStageState
  * @property {(stage: number, type: number, out: { value?: number }) => number
  *     } GetTextureStageState
@@ -1083,6 +1150,10 @@ export function materialFloats(material){
  * @property {(pointer: number) => any} objectAt    The object a pointer the guest wrote names.
  * @property {(buffer: ShadowBuffer) => number} pointerOf   The pointer a buffer is published as.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {readonly number[]} [samplerStates]  For a device with sampler
+ *     states (Direct3D 9), the stage state slot each D3DSAMP type is kept in,
+ *     by type: the guest writes one there, and the host sets it back through
+ *     SetSamplerState.
  * @property {boolean} [bindings]  Whether the device's stream, index and
  *     vertex shader bindings are Direct3D 8's and mirrored; a Direct3D 9
  *     device's are not, and no routine of this block sets them.
@@ -1095,6 +1166,14 @@ export function materialFloats(material){
  */
 export function createShadow(deps){
     const { device } = deps;
+    /** The D3DSAMP type kept in each stage state slot, or 0 for a stage state. */
+    const samplerTypes = new Uint8Array(SHADOW.STAGE_STATE_STRIDE);
+    (deps.samplerStates ?? []).forEach((key, type)=>{
+        if (type !== 0 && key < SHADOW.STAGE_STATE_STRIDE && type < SHADOW.SAMPLER_KEY_COUNT)
+        {
+            samplerTypes[key] = type;
+        }
+    });
     let address = 0;
     /** What the host last saw in the block, and so what the device holds. */
     const seenStates = new Uint32Array(SHADOW.RENDER_STATE_COUNT);
@@ -1275,6 +1354,24 @@ export function createShadow(deps){
                 seenStageStates[stage * SHADOW.STAGE_STATE_STRIDE + type] = value;
             }
         }
+        // A sampler state is kept in the slot of its stage state key, read as
+        // the device answers it for that sampler.
+        const keys = new Uint8Array(SHADOW.SAMPLER_KEY_COUNT);
+        (deps.samplerStates ?? []).forEach((key, type)=>{
+            if (type === 0 || key >= SHADOW.STAGE_STATE_STRIDE || type >= SHADOW.SAMPLER_KEY_COUNT)
+            {
+                return;
+            }
+            keys[type] = key;
+            for (let stage = 0; stage < SHADOW.STAGE_COUNT; stage++)
+            {
+                /** @type {{ value?: number }} */
+                const out = {};
+                seenStageStates[stage * SHADOW.STAGE_STATE_STRIDE + key] =
+                    device.GetSamplerState?.(stage, type, out) === 0 ? (out.value ?? 0) >>> 0 : 0;
+            }
+        });
+        deps.writeMemory(address + SHADOW.SAMPLER_KEYS, keys);
         deps.writeMemory(address + SHADOW.STAGE_STATES, dwordsBytes([...seenStageStates]));
 
         /** @type {{ material?: ShadowMaterial }} */
@@ -1396,6 +1493,17 @@ export function createShadow(deps){
         seenStageStates[at] = value;
         const stage = at >>> 5;
         const type = at & (SHADOW.STAGE_STATE_STRIDE - 1);
+        const sampler = samplerTypes[type];
+        if (sampler)
+        {
+            if (device.SetSamplerState?.(stage, sampler, value) !== 0)
+            {
+                refuse('IDirect3DDevice9::SetSamplerState',
+                    `sampler ${stage} state ${sampler} set to ${value} in the guest was accepted;`
+                    + ' the device refuses it');
+            }
+            return;
+        }
         if (device.SetTextureStageState(stage, type, value) !== 0)
         {
             refuse('IDirect3DDevice8::SetTextureStageState',

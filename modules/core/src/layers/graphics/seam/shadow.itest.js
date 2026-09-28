@@ -24,7 +24,7 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
     BUFFER, FLAG_SLOW_PATH, SHADOW, TEXTURE, getRenderStateCode, getSurfaceLevelCode, lockCode,
-    setIndicesCode,
+    setIndicesCode, setSamplerStateCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
     setTextureStageStateCode, setTransformCode, setVertexShaderCode, unlockCode,
 } from './shadow.js';
@@ -37,7 +37,7 @@ const PROGRAM = 0x8000;
 const ROUTINES = {
     renderState: 0x8800, transform: 0x8880, lock: 0x8900, unlock: 0x89a0,
     stream: 0x8a00, indices: 0x8a80, shader: 0x8b00, texture: 0x8b80, stageState: 0x8c00,
-    material: 0x8c80, surfaceLevel: 0x8d80, getState: 0x8e00,
+    material: 0x8c80, surfaceLevel: 0x8d80, getState: 0x8e00, sampler: 0x8e80,
 };
 /** Where the routines jump when they leave the case to the host: a halt here. */
 const TRAP = 0x8d00;
@@ -114,6 +114,10 @@ const STEPS = [
     step(ROUTINES.getState, OBJECT, [9, OUT]),           // 36: one it refuses: the trap
     step(ROUTINES.getState, OBJECT, [300, OUT]),         // 37: past the block: the trap
     step(ROUTINES.getState, OBJECT, [8, 0]),             // 38: nowhere to put it: the trap
+    step(ROUTINES.sampler, OBJECT, [1, 5, 2]),           // 39: sampler 1, MAGFILTER
+    step(ROUTINES.sampler, OBJECT, [1, 11, 1]),          // 40: a type with no slot: the trap
+    step(ROUTINES.sampler, OBJECT, [8, 5, 2]),           // 41: a sampler past the block: the trap
+    step(ROUTINES.sampler, OBJECT, [1, 16, 2]),          // 42: past the table: the trap
 ];
 
 /** @param {typeof STEPS[number]} entry @param {number} at */
@@ -227,6 +231,7 @@ async function routines(engine){
     host.writePhysical(ROUTINES.surfaceLevel,
         getSurfaceLevelCode(ROUTINES.surfaceLevel, TRAP));
     host.writePhysical(ROUTINES.getState, getRenderStateCode(ROUTINES.getState, TRAP));
+    host.writePhysical(ROUTINES.sampler, setSamplerStateCode(ROUTINES.sampler, TRAP));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
     host.writePhysical(TEX + 4, new Uint8Array(u32(TBLOCK)));
     host.writePhysical(TBLOCK, new Uint8Array(TEXTURE.SIZE));
@@ -450,6 +455,19 @@ async function routines(engine){
     assert.equal(run(38), 'trap', 'a null out-pointer');
     assert.equal(read(OUT), 0xdead, 'nothing written by the three the host answers');
     assert.equal(calls(), 17, 'a read is no call the host has to adopt');
+
+    // A sampler state goes to the stage state slot the block's table names
+    // for its type -- MAGFILTER's is 16 -- marked as a stage state is.
+    host.writePhysical(BLOCK + SHADOW.SAMPLER_KEYS + 5, new Uint8Array([16]));
+    const sampled = marks().stages;
+    assert.equal(run(39), 'ok');
+    assert.equal(read(BLOCK + SHADOW.STAGE_STATES + (1 * 32 + 16) * 4), 2);
+    assert.equal(marks().stages[1], (sampled[1] | 1 << 16) >>> 0);
+    assert.equal(calls(), 18);
+    assert.equal(run(40), 'trap', 'a type the table has no slot for');
+    assert.equal(run(41), 'trap', 'a sampler past the stages the block holds');
+    assert.equal(run(42), 'trap', 'a type past the table');
+    assert.equal(calls(), 18);
 
     machine.stop();
 }

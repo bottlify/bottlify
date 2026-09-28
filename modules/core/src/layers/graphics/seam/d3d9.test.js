@@ -44,6 +44,7 @@ import {
 import { guidBytes } from './d3d7.js';
 import { D3DCREATE, D3DDEVTYPE, D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
 import { D3DFMT, D3DPOOL, D3DRS } from '../d3d9/constants.js';
+import { SAMPLER_STATE_KEY } from '../d3d9/samplerstates.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { END_TOKEN, SHADER_KIND, versionToken } from '../d3d9/shader.js';
 import { displayModes } from '../../win32/user32/display.js';
@@ -1623,7 +1624,8 @@ test('the adapter a Direct3D 9 program is told about is the one every generation
 
 test('with guest memory, the setters and GetRenderState of a device run in the guest', ()=>{
     // Direct3D 9's render states, transforms, stage states and material take
-    // Direct3D 8's routines; its sampler states and bindings stay traps. What
+    // Direct3D 8's routines, and its sampler states share the stage state
+    // slots through the block's table; its bindings stay traps. What
     // the guest wrote reaches the device on the way into any host method, a
     // reset puts the block back to the defaults, and a state block applied
     // is mirrored into it.
@@ -1633,11 +1635,11 @@ test('with guest memory, the setters and GetRenderState of a device run in the g
     const guest = (/** @type {string} */ name)=>h.box.isGuest(device,
         slot(IDIRECT3DDEVICE9_SLOTS, name));
     for (const name of ['SetRenderState', 'GetRenderState', 'SetTransform',
-        'SetTextureStageState', 'SetMaterial'])
+        'SetTextureStageState', 'SetMaterial', 'SetSamplerState'])
     {
         assert.ok(guest(name), `${name} runs in the guest`);
     }
-    assert.ok(!guest('SetSamplerState') && !guest('SetStreamSource') && !guest('DrawPrimitive'));
+    assert.ok(!guest('SetStreamSource') && !guest('DrawPrimitive'));
 
     const block = h.box.memory.readU32(device + 4);
     assert.notEqual(block, 0, 'the block is one word past the interface pointer');
@@ -1653,6 +1655,17 @@ test('with guest memory, the setters and GetRenderState of a device run in the g
     const value = 0x3100;
     assert.equal(h.device(device, 'GetRenderState', [D3DRS.CULLMODE, value]), D3D_OK);
     assert.equal(h.fields.readU32(value), 1, 'adopted on the way into the host');
+
+    // A sampler state as the routine leaves it: MAGFILTER (5) of sampler 1.
+    const key = SAMPLER_STATE_KEY[5];
+    assert.equal(h.box.memory.readU32(at(SHADOW.SAMPLER_KEYS + 4)) >>> 8 & 0xff, key,
+        'the table names its slot');
+    h.box.memory.writeU32(at(SHADOW.STAGE_STATES + (32 + key) * 4), 1);
+    h.box.memory.writeU32(at(SHADOW.STAGE_STATE_MARKS + 4), 1 << key);
+    h.box.memory.writeU32(at(SHADOW.STAGE_STATE_CALLS), 1);
+    h.box.memory.writeU32(at(SHADOW.CALLS), 2);
+    assert.equal(h.device(device, 'GetSamplerState', [1, 5, value]), D3D_OK);
+    assert.equal(h.fields.readU32(value), 1, 'the sampler state adopted');
 
     const { parameters } = h.createDevice(root);
     assert.equal(h.device(device, 'Reset', [parameters]), D3D_OK);
