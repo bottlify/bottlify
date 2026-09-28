@@ -984,7 +984,8 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     // its own would cost sixteen bytes to carry four.
     const eye = values.eye ?? [0, 0, 0];
     put4(block, at.eye, eye[0], eye[1], eye[2], material.Power);
-    block[at.alphaRef] = values.alphaRef / 255;
+    // Only the reference's low byte is compared, whatever else was set.
+    block[at.alphaRef] = (values.alphaRef & 0xff) / 255;
     // Raw bit patterns, not colours: the shader reads these fields as u32.
     const stages = values.stages ?? [];
     const words = new Uint32Array(block.buffer, block.byteOffset, block.length);
@@ -4496,6 +4497,11 @@ export function createRenderer(options){
         {
             bumpMatrices(model, pixelBlocks[0], pixel.bumpRegister);
         }
+        if (pixel.alphaRegister !== undefined)
+        {
+            pixelBlocks[0][pixel.alphaRegister * 4] =
+                ((model.renderStates.get(D3DRS.ALPHAREF) ?? 0) & 0xff) / 255;
+        }
         return {
             version: undefined,
             contentVersion: 0,
@@ -4769,8 +4775,11 @@ export function createRenderer(options){
         const normalizeNormals = (model.renderStates.get(D3DRS.NORMALIZENORMALS) ?? 0) !== 0;
         const rangeFog = fog.source === FOG_SOURCE.VERTEX
             && (model.renderStates.get(D3DRS.RANGEFOGENABLE) ?? 0) !== 0;
+        const alphaFunc = (model.renderStates.get(D3DRS.ALPHATESTENABLE) ?? 0) !== 0
+            ? model.renderStates.get(D3DRS.ALPHAFUNC) ?? 0 : undefined;
         const pixel = translationOf(pixelShader,
-            `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}|${legacy.key}`,
+            `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}|${legacy.key}`
+                + (alphaFunc === undefined ? '' : `|a${alphaFunc}`),
             ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel), {
                     ...(fog.source === FOG_SOURCE.NONE
@@ -4778,6 +4787,7 @@ export function createRenderer(options){
                     flatColours: flat,
                     stageDimensions: legacy.stageDimensions,
                     projectedBy: legacy.projectedBy,
+                    ...(alphaFunc === undefined ? {} : { alphaTest: alphaFunc }),
                 }));
         if (pixel.error)
         {

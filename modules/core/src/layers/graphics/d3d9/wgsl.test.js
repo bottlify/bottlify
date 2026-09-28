@@ -968,3 +968,19 @@ test('the fog stage after a pixel shader mixes the shaded colour by the varying'
     assertLine(table.wgsl, 'oC0 = vec4f(mix(in.fog.yzw, oC0.rgb, clamp(fogFactorOf('
         + 'select(1.0 / in.vPos.w, in.vPos.z, fogRange.w != 0.0)), 0.0, 1.0)), oC0.a);');
 });
+
+test('a pixel shader under the alpha test discards what fails it, by a register of its own', ()=>{
+    // Wine's d3d8 test_alphatest runs the test after a ps_1_1 as after the
+    // fixed stages.
+    const shader = parseShader([PS_1_1,
+        op(OPCODE.MOV, 0), dst(REGISTER.TEMP, 0), src(REGISTER.INPUT, 0), END_TOKEN]);
+    const tested = translateShader(shader, { alphaTest: 2 });
+    assert.equal(tested.error, null);
+    assert.equal(tested.alphaRegister, tested.constants - 1, 'the register past the shader\'s');
+    assertLine(tested.wgsl, `const _alphaRef = ${tested.alphaRegister};`);
+    assertLine(tested.wgsl, 'if (!(clamp(oC0.a, 0.0, 1.0) < c[_alphaRef].x)) {');
+    assertLine(tested.wgsl, 'discard;');
+    const untested = translateShader(shader);
+    assert.equal(untested.alphaRegister, undefined);
+    assert.ok(!untested.wgsl.includes('discard'));
+});

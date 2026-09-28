@@ -2745,6 +2745,16 @@ test('the block lays a texture transform out as two rows per sampled stage', ()=
         textureTransforms: [columns, IDENTITY, IDENTITY, columns],
     });
     assert.equal(block.length, UNIFORM_FLOATS);
+    // The alpha reference is compared by its low byte alone (Wine's d3d8
+    // test_alphatest sets 0xff70 and reads 0x70).
+    const referenced = uniformBlock({
+        worldViewProjection: IDENTITY,
+        viewport: viewportState({ x: 0, y: 0, width: 1, height: 1 }),
+        textureFactor: 0,
+        fogColor: 0,
+        alphaRef: 0xff70,
+    });
+    assert.equal(referenced[UNIFORM_AT.alphaRef], Math.fround(0x70 / 255));
     assert.deepEqual([...block.subarray(76, 92)], columns);
     assert.deepEqual([...block.subarray(92, 124)], [...IDENTITY, ...IDENTITY]);
     assert.deepEqual([...block.subarray(124, 140)], columns, 'a fourth stage has rows of its own');

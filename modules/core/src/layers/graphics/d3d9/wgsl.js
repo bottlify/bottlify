@@ -59,7 +59,7 @@
 
 import { OPCODE, REGISTER, SHADER_KIND } from './shader.js';
 import { D3DDECLUSAGE } from './declaration.js';
-import { fogFunctionDeclaration } from '../webgpu/internal/fixedfunction.js';
+import { compareExpression, fogFunctionDeclaration } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 
 /** D3DSPSM, the source modifiers. */
@@ -230,6 +230,8 @@ export function varyingLocation(usage, index){
  *           register, with the table curve's range in the one after it.
  *     A vertex shader's: the float register past the ones it reads, where the
  *     viewport's scale is carried for the half-pixel move of its position.
+ * @property {number} [alphaRegister]  A pixel shader under the alpha test:
+ *           the register holding the reference, as a fraction of 255, in x.
  * @property {number} [pointRegister]  A vertex shader drawing points: the
  *           register holding the state's size, minimum and maximum.
  * @property {number} [bumpRegister]
@@ -371,7 +373,7 @@ function moduleHeader(options){
  * @param {{ inputs?: Map<number, InputShape>, alsoWrite?: readonly number[],
  *     fog?: number, fogSource?: number, flatColours?: boolean,
  *     stageDimensions?: readonly string[], projectedBy?: readonly string[],
- *     points?: { sprite: boolean } }} [options]
+ *     points?: { sprite: boolean }, alphaTest?: number }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
  *        by register. Absent means every declared input arrives as four
  *        floats; present, a declared register it does not name reads as the
@@ -1331,6 +1333,8 @@ export function translateShader(parsed, options = {}){
     let fogRegister;
     /** @type {number | undefined} */
     let pointRegister;
+    /** A pixel shader under the alpha test: the reference's register. @type {number | undefined} */
+    let alphaRegister;
     /** The name each varying location is written under. @type {Map<number, string>} */
     const emitted = new Map();
     let entry;
@@ -1526,6 +1530,19 @@ export function translateShader(parsed, options = {}){
             const at = body.indexOf('    out.oC0 = oC0;');
             body.splice(at < 0 ? body.length : at, 0, ...fogLines);
         }
+        // D3DRS_ALPHATESTENABLE runs after the pixel shader as after the
+        // fixed stages: the colour's alpha, as written, against the
+        // reference the register past the shader's own carries.
+        if (options.alphaTest !== undefined && pixelOutputs.has(0))
+        {
+            alphaRegister = -1;
+            const at = body.indexOf('    out.oC0 = oC0;');
+            body.splice(at < 0 ? body.length : at, 0,
+                `    if (!(${compareExpression(options.alphaTest, 'clamp(oC0.a, 0.0, 1.0)',
+                    'c[_alphaRef].x')})) {`,
+                '        discard;',
+                '    }');
+        }
         entry = 'ps_main';
     }
 
@@ -1533,17 +1550,41 @@ export function translateShader(parsed, options = {}){
     // two, named through a module constant so the body did not need to know
     // where they would start.
     const bumpRegister = bumps ? constants : undefined;
-    const reach = pointRegister !== undefined ? pointRegister + 1
-        : fogRegister !== undefined ? fogRegister + 2
-            : viewportRegister !== undefined ? viewportRegister + 1
-                : bumpRegister !== undefined ? bumpRegister + 16
-                    : constants === Infinity ? 224 : constants;
+    if (alphaRegister !== undefined)
+    {
+        alphaRegister = bumpRegister !== undefined ? bumpRegister + 16
+            : constants === Infinity ? 224 : constants;
+    }
+    const reach = (()=>{
+        if (alphaRegister !== undefined)
+        {
+            return alphaRegister + 1;
+        }
+        if (pointRegister !== undefined)
+        {
+            return pointRegister + 1;
+        }
+        if (fogRegister !== undefined)
+        {
+            return fogRegister + 2;
+        }
+        if (viewportRegister !== undefined)
+        {
+            return viewportRegister + 1;
+        }
+        if (bumpRegister !== undefined)
+        {
+            return bumpRegister + 16;
+        }
+        return constants === Infinity ? 224 : constants;
+    })();
     const wgsl = [
         ...moduleHeader({
             vertex, constants: reach, samplers, inputFields, outputFields,
         }),
         ...fogCurve,
         ...(bumpRegister === undefined ? [] : [`const _bump = ${bumpRegister};`]),
+        ...(alphaRegister === undefined ? [] : [`const _alphaRef = ${alphaRegister};`]),
         vertex ? '@vertex' : '@fragment',
         `fn ${entry}(in: ${vertex ? 'VsIn' : 'PsIn'}) -> ${vertex ? 'VsOut' : 'PsOut'} {`,
         `    var out: ${vertex ? 'VsOut' : 'PsOut'};`,
@@ -1560,6 +1601,7 @@ export function translateShader(parsed, options = {}){
         ...(viewportRegister === undefined ? {} : { viewportRegister }),
         ...(fogRegister === undefined ? {} : { fogRegister }),
         ...(pointRegister === undefined ? {} : { pointRegister }),
+        ...(alphaRegister === undefined ? {} : { alphaRegister }),
         ...(bumpRegister === undefined ? {} : { bumpRegister }),
         error,
     };
