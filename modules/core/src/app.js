@@ -3158,6 +3158,7 @@ async function buildApp(options){
         input: {
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
                 core.api('bridge').publishInterface(object, iid),
+            divergence: reportDivergence,
             now: ()=>core.api('kernel').clock.virtualTime(),
             // Where a keystroke goes: the window win32 reports as foreground --
             // the active one, not merely the last made, which may be hidden or

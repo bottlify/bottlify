@@ -20,19 +20,15 @@
  * properly means walking an array of DIOBJECTDATAFORMAT and matching each entry
  * against a device object by GUID and flags.
  *
- * We do not do that. We take the caller's `dwDataSize` and recognise the four
- * layouts every program actually uses -- c_dfDIKeyboard, c_dfDIMouse,
- * c_dfDIMouse2, and a joystick's -- because they are distinguishable by size
- * and because writing a general walker before anything needs one is work with
- * no test to hold it up. What matters is that this is a *decision*, recorded
- * here: a program with a hand-rolled format of an unfamiliar size is told its
- * format is unsupported rather than quietly written into at the wrong offsets.
+ * That is what `readFormat` does, so a program's own format -- not only
+ * c_dfDIKeyboard and c_dfDIMouse -- is filled in where it asked, and the
+ * offsets its buffered events carry are the ones its format gave.
  */
 
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 import { readGuid, parseGuid } from '../../win32/ole32/guid.js';
 import {
-    createInputDevice, objectsOf, KEYBOARD, MOUSE, KEYBOARD_KEYS, DIMOUSE_OFS, MOUSE_BUTTONS,
+    createInputDevice, objectsOf, KEYBOARD, MOUSE, DIMOUSE_OFS, MOUSE_BUTTONS,
 } from './devices.js';
 
 export const DI_OK = 0;
@@ -339,19 +335,80 @@ function objectInstanceBytes(object, wide){
     return bytes;
 }
 
-/**
- * The data formats we recognise, by the size of the structure the caller says
- * it wants filled in.
- *
- * `DIMOUSESTATE` is three longs and four buttons; `DIMOUSESTATE2` is the same
- * with eight. The keyboard's is a flat array of 256 bytes, which is why it
- * needs no offsets at all.
- */
-const FORMATS = Object.freeze({
-    256: 'keyboard',
-    16: 'mouse',
-    20: 'mouse2',
+/** DIDATAFORMAT and DIOBJECTDATAFORMAT, as SetDataFormat reads them. */
+const DIDATAFORMAT = Object.freeze({
+    dwSize: 0x00, dwObjSize: 0x04, dwDataSize: 0x0c, dwNumObjs: 0x10, rgodf: 0x14, SIZE: 24,
 });
+const DIOBJECTDATAFORMAT = Object.freeze({ pguid: 0x0, dwOfs: 0x4, dwType: 0x8, SIZE: 16 });
+const DIDFT_AXIS = 0x03;
+const DIDFT_ANYINSTANCE = 0xffff;
+const DIDFT_OPTIONAL = 0x80000000;
+
+/**
+ * A program's data format read against a device's objects: where in the
+ * program's structure each object it asked for goes, by the object's own
+ * offset. Entries are matched in order, each to the first object not taken
+ * yet whose GUID (when the entry names one), type and instance (unless any)
+ * agree; an entry no object answers refuses the format unless it is
+ * optional, as Windows refuses it (Wine's dinput tests). Null for a format
+ * that cannot be read.
+ *
+ * @param {(address: number) => number} readU32
+ * @param {(address: number) => string} guidAt
+ * @param {number} format
+ * @param {readonly import('./devices.js').DeviceObject[]} objects
+ * @param {(why: string) => void} [refused]  Told what refused the format.
+ * @returns {{ dataSize: number, places: Map<number, number> } | null}
+ */
+export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
+    const dataSize = readU32(format + DIDATAFORMAT.dwDataSize);
+    if (readU32(format + DIDATAFORMAT.dwSize) !== DIDATAFORMAT.SIZE
+        || readU32(format + DIDATAFORMAT.dwObjSize) !== DIOBJECTDATAFORMAT.SIZE
+        || dataSize % 4 !== 0)
+    {
+        refused(`a header of ${readU32(format + DIDATAFORMAT.dwSize)} bytes, objects of`
+            + ` ${readU32(format + DIDATAFORMAT.dwObjSize)} and data of ${dataSize}`);
+        return null;
+    }
+    const count = readU32(format + DIDATAFORMAT.dwNumObjs);
+    const array = readU32(format + DIDATAFORMAT.rgodf);
+    /** @type {Map<number, number>} */
+    const places = new Map();
+    const taken = new Set();
+    for (let index = 0; index < count; index++)
+    {
+        const at = array + index * DIOBJECTDATAFORMAT.SIZE;
+        const guid = readU32(at + DIOBJECTDATAFORMAT.pguid);
+        const offset = readU32(at + DIOBJECTDATAFORMAT.dwOfs);
+        const type = readU32(at + DIOBJECTDATAFORMAT.dwType);
+        const instance = (type >>> 8) & 0xffff;
+        const named = guid === 0 ? null : guidAt(guid);
+        const object = objects.find(candidate=>!taken.has(candidate)
+            && (named === null || candidate.guidType === named)
+            && ((type & 0xff) === 0 || (candidate.type & type & 0xff) !== 0)
+            && (instance === DIDFT_ANYINSTANCE || ((candidate.type >>> 8) & 0xffff) === instance));
+        if (!object)
+        {
+            if ((type & DIDFT_OPTIONAL) === 0)
+            {
+                refused(`object ${index} of ${count} (${named ?? 'any'}, type`
+                    + ` 0x${(type >>> 0).toString(16)}, at ${offset})`
+                    + ' matches none of the device's');
+                return null;
+            }
+            continue;
+        }
+        const width = (object.type & DIDFT_AXIS) !== 0 ? 4 : 1;
+        if (offset + width > dataSize || offset % width !== 0)
+        {
+            refused(`object ${index} is placed at ${offset} of ${dataSize} bytes`);
+            return null;
+        }
+        taken.add(object);
+        places.set(object.offset, offset);
+    }
+    return { dataSize, places };
+}
 
 /**
  * @param {string} id
@@ -593,13 +650,16 @@ export function createPublisher({ publishInterface }){
  *        by when the thread the processor is on may no longer be this one --
  *        so the loop names it once, before that first await, rather than
  *        asking the bridge to guess a second time.
+ * @param {(api: string, detail: string) => void} [deps.divergence]
+ *        Where a refusal the program may not expect is said.
  * @param {(hwnd: number) => 'top' | 'child' | null | undefined} [deps.windowKind]
  *        What a handle names: a top-level window, a child one, nothing -- or
  *        undefined when there are no windows to ask about, in which case any
  *        handle is taken as a window. SetCooperativeLevel wants a top-level one.
  */
 export function createDirectInput(
-    { memory, now, publishInterface, signal, allocate, callGuest, callerThread, windowKind },
+    { memory, now, publishInterface, signal, allocate, callGuest, callerThread, windowKind,
+        divergence },
 )
 {
     const publisher = createPublisher({ publishInterface });
@@ -610,6 +670,9 @@ export function createDirectInput(
 
     /** @param {number} address */
     const guidAt = address=>readGuid(memory, address >>> 0);
+
+    /** What each device's SetDataFormat settled on. @type {WeakMap<object, { dataSize: number, places: Map<number, number> }>} */
+    const formats = new WeakMap();
 
     /** @param {number} address */
     const readU32 = address=>{
@@ -711,27 +774,27 @@ export function createDirectInput(
         /**
          * HRESULT SetDataFormat(LPCDIDATAFORMAT)
          *
-         * The size the caller states is what decides the layout -- see the
-         * note at the top of this file for why the description itself is not
-         * walked, and for what a program with an unfamiliar one is told.
+         * The description is read object by object (`readFormat`), and a
+         * held device cannot change it.
          */
         SetDataFormat(device, [format]){
             if ((format >>> 0) === 0)
             {
                 return DIERR_INVALIDPARAM;
             }
-            // DIDATAFORMAT: dwSize, dwObjSize, dwFlags, dwDataSize, ...
-            const dataSize = readU32((format >>> 0) + 0x0c);
-            const known = /** @type {Record<number, string>} */ (FORMATS)[dataSize];
-            if (!known)
+            if (device.acquired)
             {
-                return DIERR_UNSUPPORTED;
+                return DIERR_ACQUIRED;
             }
-            if ((known === 'keyboard') !== (device.kind === KEYBOARD))
+            const read = readFormat(readU32, guidAt, format >>> 0, objectsOf(device.kind),
+                why=>divergence?.('DirectInput', `SetDataFormat on the ${device.kind} was`
+                    + ` refused: ${why}`));
+            if (!read)
             {
                 return DIERR_INVALIDPARAM;
             }
-            device.setDataSize(dataSize);
+            formats.set(device, read);
+            device.setDataSize(read.dataSize);
             return DI_OK;
         },
 
@@ -849,29 +912,38 @@ export function createDirectInput(
                 return DIERR_INVALIDPARAM;
             }
 
-            if (device.kind === KEYBOARD)
-            {
-                if (wanted !== KEYBOARD_KEYS)
-                {
-                    return DIERR_INVALIDPARAM;
-                }
-                memory.writeMemory(data >>> 0, device.keyboardState());
-                return DI_OK;
-            }
-
-            if (wanted !== 16 && wanted !== 20)
+            const format = formats.get(device);
+            if (!format)
             {
                 return DIERR_INVALIDPARAM;
             }
-            const state = device.mouseState();
+            // Each object the format asked for, where it asked: an axis a
+            // long, a key or a button a byte. What it did not ask for is zero.
             const bytes = new Uint8Array(wanted);
             const view = new DataView(bytes.buffer);
-            view.setInt32(DIMOUSE_OFS.X, state.x, true);
-            view.setInt32(DIMOUSE_OFS.Y, state.y, true);
-            view.setInt32(DIMOUSE_OFS.Z, state.wheel, true);
-            for (let button = 0; button < wanted - DIMOUSE_OFS.BUTTON0; button++)
+            if (device.kind === KEYBOARD)
             {
-                bytes[DIMOUSE_OFS.BUTTON0 + button] = state.buttons[button];
+                const keys = device.keyboardState();
+                for (const [own, place] of format.places)
+                {
+                    bytes[place] = keys[own];
+                }
+            }
+            else
+            {
+                const state = device.mouseState();
+                const axes = [state.x, state.y, state.wheel];
+                for (const [own, place] of format.places)
+                {
+                    if (own < DIMOUSE_OFS.BUTTON0)
+                    {
+                        view.setInt32(place, axes[own / 4], true);
+                    }
+                    else
+                    {
+                        bytes[place] = state.buttons[own - DIMOUSE_OFS.BUTTON0];
+                    }
+                }
             }
             memory.writeMemory(data >>> 0, bytes);
             return DI_OK;
@@ -913,7 +985,15 @@ export function createDirectInput(
 
             const asked = readU32(count);
             const peek = (flags & DIGDD_PEEK) !== 0 || (array >>> 0) === 0;
-            const { events, overflow } = device.drain(asked, peek);
+            const drained = device.drain(asked, peek);
+            const overflow = drained.overflow;
+            // An event carries its object's offset in the program's format,
+            // and an object the format left out is not reported.
+            const places = formats.get(device)?.places;
+            const events = places
+                ? drained.events.filter((/** @type {any} */ event)=>places.has(event.offset))
+                    .map((/** @type {any} */ event)=>({ ...event, offset: places.get(event.offset) }))
+                : drained.events;
 
             if ((array >>> 0) !== 0)
             {

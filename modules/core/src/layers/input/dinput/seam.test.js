@@ -219,16 +219,53 @@ function createDevice(f, guid){
     return f.memory.u32(AT.out);
 }
 
+const DIDFT_OPTIONAL = 0x80000000;
+const ANY_AXIS = 0x00ffff03;
+const ANY_BUTTON = 0x00ffff0c;
+
 /**
- * A DIDATAFORMAT whose only field that matters here is dwDataSize.
+ * A DIDATAFORMAT and its objects, as dinput.lib's c_dfDIKeyboard (256
+ * bytes), c_dfDIMouse (16) and c_dfDIMouse2 (20) lay them out; any other
+ * size is `objects`, or none.
  *
  * @param {any} memory @param {number} dataSize
+ * @param {{ guid: string | null, offset: number, type: number }[]} [objects]
  */
-function dataFormat(memory, dataSize){
+function dataFormat(memory, dataSize, objects){
+    const list = objects ?? (dataSize === 256
+        ? Array.from({ length: 256 }, (_, key)=>({
+            guid: GUID_Key, offset: key, type: (DIDFT_OPTIONAL | 0x0c | key << 8) >>> 0,
+        }))
+        : dataSize === 16 || dataSize === 20
+            ? [
+                { guid: GUID_XAxis, offset: 0, type: ANY_AXIS },
+                { guid: GUID_YAxis, offset: 4, type: ANY_AXIS },
+                { guid: GUID_ZAxis, offset: 8, type: (DIDFT_OPTIONAL | ANY_AXIS) >>> 0 },
+                ...Array.from({ length: dataSize - 12 }, (_, button)=>({
+                    guid: null, offset: 12 + button, type: (DIDFT_OPTIONAL | ANY_BUTTON) >>> 0,
+                })),
+            ]
+            : []);
+    const guids = [...new Set(list.map(one=>one.guid).filter(guid=>guid !== null))];
+    const guidAt = (/** @type {string} */ guid)=>0xd0000 + guids.indexOf(guid) * 16;
+    for (const guid of guids)
+    {
+        writeGuid(memory, guidAt(guid), guid);
+    }
+    const array = 0xc0000;
+    list.forEach((one, index)=>{
+        const at = array + index * 16;
+        memory.setU32(at, one.guid === null ? 0 : guidAt(one.guid));
+        memory.setU32(at + 4, one.offset);
+        memory.setU32(at + 8, one.type);
+        memory.setU32(at + 12, 0);
+    });
     memory.setU32(AT.format + 0x00, 0x18); // dwSize
     memory.setU32(AT.format + 0x04, 0x10); // dwObjSize
     memory.setU32(AT.format + 0x08, 0x02); // DIDF_RELAXIS
     memory.setU32(AT.format + 0x0c, dataSize);
+    memory.setU32(AT.format + 0x10, list.length);
+    memory.setU32(AT.format + 0x14, array);
     return AT.format;
 }
 
@@ -433,27 +470,40 @@ test('an unacquired device reports so rather than handing back zeroes', ()=>{
         [DIDEVICEOBJECTDATA.SIZE, AT.data, AT.count, 0]), DIERR_NOTACQUIRED);
 });
 
-test('SetDataFormat picks the layout from the size the caller states', ()=>{
+test('SetDataFormat reads the layout the program describes, object by object', ()=>{
     const f = fixture();
     const device = createDevice(f, GUID_SysMouse);
     assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 16)]), DI_OK);
     assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 20)]), DI_OK);
-});
-
-test('a format of an unfamiliar size is refused, not guessed at', ()=>{
-    const f = fixture();
-    const device = createDevice(f, GUID_SysMouse);
-    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 40)]),
-        DIERR_UNSUPPORTED,
-        'writing at guessed offsets would smash the caller\'s structure');
+    // A program's own structure: the Y axis first, then X, then the first
+    // button, in twelve bytes of its choosing.
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 12, [
+        { guid: GUID_YAxis, offset: 0, type: ANY_AXIS },
+        { guid: GUID_XAxis, offset: 4, type: ANY_AXIS },
+        { guid: null, offset: 8, type: ANY_BUTTON },
+    ])]), DI_OK);
+    assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+    f.dinput.post({ kind: 'mouseMove', x: 3, y: -2 });
+    f.dinput.post({ kind: 'mouseButton', code: 0, down: true });
+    assert.equal(f.bridge.call(device, 'GetDeviceState', [12, AT.state]), DI_OK);
+    const view = new DataView(f.memory.bytes.buffer);
+    assert.equal(view.getInt32(AT.state, true), -2, 'Y where the program put it');
+    assert.equal(view.getInt32(AT.state + 4, true), 3);
+    assert.equal(f.memory.bytes[AT.state + 8], 0x80);
     assert.equal(f.bridge.call(device, 'SetDataFormat', [0]), DIERR_INVALIDPARAM);
 });
 
-test('a keyboard format on a mouse is refused', ()=>{
+test('a format asking for an object the device lacks is refused unless it is optional', ()=>{
     const f = fixture();
-    const device = createDevice(f, GUID_SysMouse);
-    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 256)]),
-        DIERR_INVALIDPARAM);
+    const device = createDevice(f, GUID_SysKeyboard);
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 16)]),
+        DIERR_INVALIDPARAM, 'a keyboard has no X axis');
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 4, [
+        { guid: GUID_XAxis, offset: 0, type: (DIDFT_OPTIONAL | ANY_AXIS) >>> 0 },
+    ])]), DI_OK);
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 4, [
+        { guid: GUID_Key, offset: 4, type: ANY_BUTTON },
+    ])]), DIERR_INVALIDPARAM, 'an object past the structure');
 });
 
 test('GetDeviceState writes the whole keyboard array', ()=>{
@@ -493,11 +543,11 @@ test('GetDeviceState writes DIMOUSESTATE as three longs and four buttons', ()=>{
     assert.equal(f.memory.bytes[AT.state + DIMOUSE_OFS.BUTTON0 + 1], KEY_DOWN);
 });
 
-test('DIMOUSESTATE2 is the same with four more buttons', ()=>{
+test('DIMOUSESTATE2 carries the fifth button DIMOUSESTATE has no room for', ()=>{
     const f = mouse(fixture(), 20);
-    f.dinput.post({ kind: 'mouseButton', code: 6, down: true });
+    f.dinput.post({ kind: 'mouseButton', code: 4, down: true });
     assert.equal(f.bridge.call(f.device, 'GetDeviceState', [20, AT.state]), DI_OK);
-    assert.equal(f.memory.bytes[AT.state + DIMOUSE_OFS.BUTTON0 + 6], KEY_DOWN);
+    assert.equal(f.memory.bytes[AT.state + DIMOUSE_OFS.BUTTON0 + 4], KEY_DOWN);
     // Twenty bytes, not one more: the byte after is the caller's.
     assert.equal(f.memory.bytes[AT.state + 20], 0);
 });

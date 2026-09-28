@@ -65,6 +65,7 @@ export function createInputModule(){
                 // order wrongly against everything else it knows the time of.
                 now: config?.now ?? (()=>Date.now()),
                 publishInterface: config?.publishInterface ?? (()=>0),
+                divergence: config?.divergence,
                 signal: config?.signal,
                 // Where a DIDEVICEINSTANCE is written for a program's enumeration
                 // callback, and the route into that callback itself. The callback
