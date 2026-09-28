@@ -141,7 +141,13 @@ export const SHADOW = {
     TRANSFORM_MARKS: 4412,
     STAGE_STATE_MARKS: 4416,
     MARK_WORDS: 17,
-    SIZE: 4448,
+    /**
+     * A bit per render state the device answers for, set by the host when it
+     * mirrors: the getter answers those from the block and leaves the rest,
+     * which the device refuses, to the host.
+     */
+    RENDER_STATE_VALID: 4448,
+    SIZE: 4480,
 };
 
 /**
@@ -404,6 +410,50 @@ export function setRenderStateCode(at, trap){
         counted(1),                                              // inc dword [ecx+12]
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x0c, 0x00],                                      // ret 12
+    ]);
+}
+
+/**
+ * HRESULT GetRenderState(this, D3DRENDERSTATETYPE state, DWORD *value), as
+ * guest code: the block holds what the device holds for every state the
+ * device answers for, the guest's own writes included, so the answer is read
+ * there. A state the device refuses, a null pointer and the host's flag go
+ * to the host.
+ *
+ *     (prologue)
+ *     mov eax, [esp+8]            ; state
+ *     cmp eax, 256
+ *     jae slow
+ *     bt [ecx + RENDER_STATE_VALID], eax
+ *     jnc slow                    ; a state the device refuses
+ *     mov edx, [esp+12]           ; value
+ *     test edx, edx
+ *     jz slow
+ *     mov eax, [ecx + eax*4 + RENDER_STATES]
+ *     mov [edx], eax
+ *     xor eax, eax                ; D3D_OK
+ *     ret 12
+ *   slow:
+ *     jmp trap
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function getRenderStateCode(at, trap){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x3d, ...dword(SHADOW.RENDER_STATE_COUNT)],             // cmp eax, 256
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0x0f, 0xa3, 0x81, ...dword(SHADOW.RENDER_STATE_VALID)], // bt [ecx+disp], eax
+        { jcc: 0x73, to: 'slow' },                               // jnc slow
+        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x8b, 0x84, 0x81, ...dword(SHADOW.RENDER_STATES)],      // mov eax, [ecx+eax*4+disp]
+        [0x89, 0x02],                                            // mov [edx], eax
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 12, 0x00],                                        // ret 12
     ]);
 }
 
@@ -808,15 +858,17 @@ export function setTextureCode(at, trap){
  *     ret 16
  *
  * @param {number} at @param {number} trap
+ * @param {number} [types]  The stage state types the routine takes, a bit
+ *     each below 32; Direct3D 8's by default. The rest go to the host.
  * @returns {Uint8Array}
  */
-export function setTextureStageStateCode(at, trap){
+export function setTextureStageStateCode(at, trap, types = STAGE_STATE_TYPES){
     return routine(at, trap, [
         ...prologue(),
         [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
         [0x3d, ...dword(SHADOW.STAGE_STATE_STRIDE)],             // cmp eax, 32
         { jcc: 0x73, to: 'slow' },                               // jae slow
-        [0xba, ...dword(STAGE_STATE_TYPES)],                     // mov edx, imm32
+        [0xba, ...dword(types)],                                 // mov edx, imm32
         [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
         { jcc: 0x73, to: 'slow' },                               // jnc slow
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
@@ -1031,6 +1083,9 @@ export function materialFloats(material){
  * @property {(pointer: number) => any} objectAt    The object a pointer the guest wrote names.
  * @property {(buffer: ShadowBuffer) => number} pointerOf   The pointer a buffer is published as.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {boolean} [bindings]  Whether the device's stream, index and
+ *     vertex shader bindings are Direct3D 8's and mirrored; a Direct3D 9
+ *     device's are not, and no routine of this block sets them.
  */
 
 /**
@@ -1146,15 +1201,22 @@ export function createShadow(deps){
     const mirror = ()=>{
         const states = new Uint8Array(SHADOW.RENDER_STATE_COUNT * 4);
         const view = new DataView(states.buffer);
+        const valid = new Uint8Array(SHADOW.RENDER_STATE_COUNT / 8);
         for (let state = 0; state < SHADOW.RENDER_STATE_COUNT; state++)
         {
             /** @type {{ value?: number }} */
             const out = {};
-            const value = device.GetRenderState(state, out) === 0 ? (out.value ?? 0) >>> 0 : 0;
+            const answered = device.GetRenderState(state, out) === 0;
+            const value = answered ? (out.value ?? 0) >>> 0 : 0;
             seenStates[state] = value;
             view.setUint32(state * 4, value, true);
+            if (answered)
+            {
+                valid[state >>> 3] |= 1 << (state & 7);
+            }
         }
         deps.writeMemory(address + SHADOW.RENDER_STATES, states);
+        deps.writeMemory(address + SHADOW.RENDER_STATE_VALID, valid);
 
         const matrices = new Uint8Array(SHADOW.TRANSFORM_SLOTS * 64);
         const floats = new Float32Array(matrices.buffer);
@@ -1172,7 +1234,7 @@ export function createShadow(deps){
 
         // The bindings, as the pointers the program knows the buffers by. A
         // Get* adds a reference the caller owes back.
-        for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
+        for (let index = 0; index < (deps.bindings === false ? 0 : SHADOW.STREAM_COUNT); index++)
         {
             /** @type {{ buffer?: ShadowBuffer, stride?: number }} */
             const out = {};
@@ -1183,13 +1245,14 @@ export function createShadow(deps){
         }
         /** @type {{ buffer?: ShadowBuffer, baseVertexIndex?: number }} */
         const indices = {};
-        const hasIndices = device.GetIndices(indices) === 0;
+        const hasIndices = deps.bindings !== false && device.GetIndices(indices) === 0;
         seenIndices = hasIndices && indices.buffer ? deps.pointerOf(indices.buffer) : 0;
         seenBaseVertex = hasIndices ? (indices.baseVertexIndex ?? 0) >>> 0 : 0;
         indices.buffer?.release();
         /** @type {{ handle?: number }} */
         const shader = {};
-        seenShader = device.GetVertexShader(shader) === 0 ? (shader.handle ?? 0) >>> 0 : 0;
+        seenShader = deps.bindings !== false && device.GetVertexShader(shader) === 0
+            ? (shader.handle ?? 0) >>> 0 : 0;
         deps.writeMemory(address + SHADOW.STREAMS,
             dwordsBytes([...seenStreams, seenIndices, seenBaseVertex, seenShader]));
 

@@ -178,6 +178,15 @@ function machine(){
             return entry.fn.handler([pointer, ...args]) >>> 0;
         },
 
+        /**
+         * Whether a slot holds guest code rather than a trap: its address is
+         * none the bridge registered.
+         *
+         * @param {number} pointer @param {number} index
+         */
+        isGuest: (pointer, index)=>!registered.has(memory.readU32(memory.readU32(pointer)
+            + index * 4)),
+
         /** @param {number} pointer @param {number} index */
         argBytesOf(pointer, index){
             const table = memory.readU32(pointer);
@@ -290,9 +299,15 @@ function seamed({ shadow = false, windowClientSize, allocateCode, caps } = {}){
             assert.equal(hr, D3D_OK);
             return box.memory.readU32(0x2100);
         },
-        /** @param {number} device @param {string} name @param {number[]} args */
-        device: (device, name, args = [])=>
-            box.call(device, slot(IDIRECT3DDEVICE8_SLOTS, name), args),
+        /**
+         * A slot holding guest code is reached through the trap it falls
+         * back to, which is the host's path of the method.
+         *
+         * @param {number} device @param {string} name @param {number[]} args
+         */
+        device: (device, name, args = [])=>(box.isGuest(device, slot(IDIRECT3DDEVICE8_SLOTS, name))
+            ? box.trap(device, name, args)
+            : box.call(device, slot(IDIRECT3DDEVICE8_SLOTS, name), args)),
         /** @param {number} surface @param {string} name @param {number[]} args */
         surface: (surface, name, args = [])=>
             box.call(surface, slot(IDIRECT3DSURFACE8_SLOTS, name), args),

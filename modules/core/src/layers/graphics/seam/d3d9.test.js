@@ -22,6 +22,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
+import { SHADOW } from './shadow.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { IDIRECT3D9_SLOTS } from './vtables.js';
 import {
@@ -160,13 +161,34 @@ function machine(){
             const table = memory.readU32(pointer);
             return registered.get(memory.readU32(table + index * 4)).fn.argBytes;
         },
+
+        /**
+         * Whether a slot holds guest code rather than a trap.
+         *
+         * @param {number} pointer @param {number} index
+         */
+        isGuest: (pointer, index)=>!registered.has(memory.readU32(memory.readU32(pointer)
+            + index * 4)),
+
+        /**
+         * The host's path of a method whose slot holds guest code: the trap
+         * the guest routine falls back to, found by its name.
+         *
+         * @param {number} pointer @param {string} name @param {number[]} args
+         */
+        trap(pointer, name, args = []){
+            const entry = [...registered.values()].find(one=>one.name.endsWith(`}::${name}`));
+            assert.ok(entry, `${name} has a trap`);
+            return entry.fn.handler([pointer, ...args]) >>> 0;
+        },
+        allocate,
     };
 }
 
 /**
  * The seam over a root, as the entry point would publish it.
  *
- * @param {{ caps?: object,
+ * @param {{ caps?: object, shadow?: boolean,
  *           windowClientSize?: ((window: number) => { width: number,
  *               height: number } | null) | null }} [options]
  */
@@ -214,6 +236,7 @@ function seamed(options = {}){
             ? [w, h, where?.window, where?.fullscreen, 'announced']
             : [w, h, where?.window, where?.fullscreen]),
         identity: ()=>({ vendor: 'nvidia', architecture: 'ampere', description: '' }),
+        allocate: options.shadow ? box.allocate : undefined,
     });
     // The device reports its own divergences: the assembling caller hands
     // the same sink to both, and so does this.
@@ -258,9 +281,15 @@ function seamed(options = {}){
                 [0, D3DDEVTYPE.HAL, HWND, behaviour, at, 0x2100]);
             return { hr, device: box.memory.readU32(0x2100), parameters: at };
         },
-        /** @param {number} device @param {string} name @param {number[]} args */
-        device: (device, name, args = [])=>
-            box.call(device, slot(IDIRECT3DDEVICE9_SLOTS, name), args),
+        /**
+         * A slot holding guest code is reached through the trap it falls
+         * back to, the host's path of the method.
+         *
+         * @param {number} device @param {string} name @param {number[]} args
+         */
+        device: (device, name, args = [])=>(box.isGuest(device, slot(IDIRECT3DDEVICE9_SLOTS, name))
+            ? box.trap(device, name, args)
+            : box.call(device, slot(IDIRECT3DDEVICE9_SLOTS, name), args)),
         /** @param {number} pointer */
         release: pointer=>box.call(pointer, 2, []),
         /** @param {number} pointer */
@@ -1590,4 +1619,43 @@ test('the adapter a Direct3D 9 program is told about is the one every generation
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER9.FIELDS), 0xcdcdcdcd,
         'the padding after the fields is not written');
     h.box.call(root, 2, []);
+});
+
+test('with guest memory, the setters and GetRenderState of a device run in the guest', ()=>{
+    // Direct3D 9's render states, transforms, stage states and material take
+    // Direct3D 8's routines; its sampler states and bindings stay traps. What
+    // the guest wrote reaches the device on the way into any host method, a
+    // reset puts the block back to the defaults, and a state block applied
+    // is mirrored into it.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const guest = (/** @type {string} */ name)=>h.box.isGuest(device,
+        slot(IDIRECT3DDEVICE9_SLOTS, name));
+    for (const name of ['SetRenderState', 'GetRenderState', 'SetTransform',
+        'SetTextureStageState', 'SetMaterial'])
+    {
+        assert.ok(guest(name), `${name} runs in the guest`);
+    }
+    assert.ok(!guest('SetSamplerState') && !guest('SetStreamSource') && !guest('DrawPrimitive'));
+
+    const block = h.box.memory.readU32(device + 4);
+    assert.notEqual(block, 0, 'the block is one word past the interface pointer');
+    const at = (/** @type {number} */ offset)=>block + offset;
+    assert.equal(h.box.memory.readU32(at(SHADOW.RENDER_STATES + D3DRS.CULLMODE * 4)), 3);
+
+    // As the routine leaves it: the value, its mark, the two counters.
+    h.box.memory.writeU32(at(SHADOW.RENDER_STATES + D3DRS.CULLMODE * 4), 1);
+    h.box.memory.writeU32(at(SHADOW.RENDER_STATE_MARKS + (D3DRS.CULLMODE >>> 5) * 4),
+        1 << (D3DRS.CULLMODE & 31));
+    h.box.memory.writeU32(at(SHADOW.RENDER_STATE_CALLS), 1);
+    h.box.memory.writeU32(at(SHADOW.CALLS), 1);
+    const value = 0x3100;
+    assert.equal(h.device(device, 'GetRenderState', [D3DRS.CULLMODE, value]), D3D_OK);
+    assert.equal(h.fields.readU32(value), 1, 'adopted on the way into the host');
+
+    const { parameters } = h.createDevice(root);
+    assert.equal(h.device(device, 'Reset', [parameters]), D3D_OK);
+    assert.equal(h.box.memory.readU32(at(SHADOW.RENDER_STATES + D3DRS.CULLMODE * 4)), 3,
+        'a reset is mirrored into the block');
 });

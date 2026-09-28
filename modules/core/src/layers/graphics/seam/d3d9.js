@@ -70,6 +70,15 @@ import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
+import {
+    createShadow, getRenderStateCode, setMaterialCode, setRenderStateCode,
+    setTextureStageStateCode, setTransformCode,
+} from './shadow.js';
+import { D3DTSS9 } from '../d3d9/samplerstates.js';
+
+/** Direct3D 9's stage state types below 32, a bit each: what the guest routine takes. */
+const STAGE_STATE_TYPES_9 = Object.values(D3DTSS9)
+    .reduce((mask, type)=>(type < 32 ? mask | (1 << type) : mask), 0) >>> 0;
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c | 0;
@@ -119,10 +128,14 @@ const MAX_SHADER_DWORDS = 1 << 16;
  * @param {import('../d3d9/resources.js').SurfaceGdi} [deps.gdi]
  *     Device contexts over a surface's pixels, for GetDC; absent, none is handed out.
  * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
+ * @param {(bytes: number) => number} [deps.allocate]  Guest memory, for a device's
+ *     block of the state its setters write without leaving the guest.
+ * @param {(bytes: number) => number} [deps.allocateCode]  Pages of their own for
+ *     those setters' code.
  */
 export function createDirect3D9Seam(
     { publisher, memory, screen, divergence, cursor, resolution, identity,
-        windowClientSize, gdi, now = ()=>performance.now() },
+        windowClientSize, gdi, now = ()=>performance.now(), allocate, allocateCode },
 )
 {
     const fields = createFields(memory);
@@ -173,6 +186,28 @@ export function createDirect3D9Seam(
     /** @param {any} chain @param {number} override  The window a present named, or 0. */
     const shownIn = (chain, override)=>
         ((override >>> 0) || chainWindows.get(chain) || deviceWindow) === deviceWindow;
+
+    /**
+     * Each device's block of the state its setters write in the guest
+     * (`shadow.js`). Direct3D 9's render states, transforms, stage states and
+     * material are laid out as Direct3D 8's and take the same routines; its
+     * stream, index and shader bindings and its sampler states are its own and
+     * stay with the host.
+     *
+     * @type {WeakMap<any, ReturnType<typeof createShadow>>}
+     */
+    const shadows = new WeakMap();
+    /** @param {any} device */
+    const shadowOf = device=>shadows.get(device) ?? null;
+    /** @param {(at: number) => Uint8Array} code */
+    const placeCode = code=>{
+        // Sized by a throwaway rendering: the bytes depend on where they
+        // land only through relative jumps, never in length.
+        const at = (allocateCode ?? /** @type {(bytes: number) => number} */ (allocate))(
+            code(0).length);
+        memory.writeMemory(at, code(at));
+        return at;
+    };
 
     /**
      * The method that hands a resource its device: the same pointer the
@@ -872,10 +907,21 @@ export function createDirect3D9Seam(
     const stateBlockInterfaces = [
         describe(IID_IDirect3DStateBlock9, IDIRECT3DSTATEBLOCK9_SLOTS, {
             GetDevice: getDevice,
+            // A block reads and writes the device's state, which the guest
+            // may have set since the device last looked.
             /** @param {any} block */
-            Capture: block=>block.Capture(),
+            Capture: block=>{
+                shadowOf(owners.get(block))?.sync();
+                return block.Capture();
+            },
             /** @param {any} block */
-            Apply: block=>block.Apply(),
+            Apply: block=>{
+                const shadow = shadowOf(owners.get(block));
+                shadow?.sync();
+                const hr = block.Apply();
+                shadow?.remirror();
+                return hr;
+            },
         }),
     ];
 
@@ -1271,6 +1317,9 @@ export function createDirect3D9Seam(
                     fullscreen: !next.windowed,
                 });
             }
+            // A reset puts the state back to its defaults, which the block
+            // has to say before the guest reads or writes it again.
+            shadowOf(device)?.remirror();
             return hr;
         },
 
@@ -1618,9 +1667,15 @@ export function createDirect3D9Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        MultiplyTransform: (device, [type, matrix])=>((matrix >>> 0) === 0
-            ? D3DERR_INVALIDCALL
-            : device.MultiplyTransform(type >>> 0, readFloats(matrix, 16))),
+        MultiplyTransform: (device, [type, matrix])=>{
+            if ((matrix >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const hr = device.MultiplyTransform(type >>> 0, readFloats(matrix, 16));
+            shadowOf(device)?.refreshTransform(type >>> 0);
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         SetViewport: (device, [pointer])=>((pointer >>> 0) === 0
@@ -1756,7 +1811,16 @@ export function createDirect3D9Seam(
             return hr;
         },
         /** @param {any} device */
-        BeginStateBlock: (/** @type {any} */ device)=>device.BeginStateBlock(),
+        BeginStateBlock: (/** @type {any} */ device)=>{
+            const hr = device.BeginStateBlock();
+            if (hr === D3D_OK)
+            {
+                // Recording captures what is set, not what changed: the
+                // guest's setters give way to the host until it ends.
+                shadowOf(device)?.slowPath(true);
+            }
+            return hr;
+        },
         /** @param {any} device @param {number[]} args */
         EndStateBlock: (device, [out])=>{
             if ((out >>> 0) === 0)
@@ -1766,6 +1830,7 @@ export function createDirect3D9Seam(
             /** @type {{ block?: any }} */
             const held = {};
             const hr = device.EndStateBlock(held);
+            shadowOf(device)?.slowPath(false);
             if (hr === D3D_OK && held.block)
             {
                 return handBack(held.block, stateBlockInterfaces, IID_IDirect3DStateBlock9,
@@ -2247,8 +2312,32 @@ export function createDirect3D9Seam(
         return texture.volume ? volumeTextureInterfaces : textureInterfaces;
     };
 
+    /**
+     * Every method adopts what the guest set on its way in, so a read, a draw
+     * or a present sees the state the program set last -- through the same
+     * setters a trap would have called.
+     *
+     * @param {Record<string, any>} methods
+     * @returns {Record<string, any>}
+     */
+    const synced = methods=>Object.fromEntries(Object.entries(methods)
+        .map(([name, method])=>[name, (/** @type {any} */ device, /** @type {number[]} */ args)=>{
+            shadowOf(device)?.sync();
+            return method(device, args);
+        }]));
+    /** @type {Record<string, (builder: { trap: number }) => number>} */
+    const deviceGuests = allocate
+        ? {
+            SetRenderState: ({ trap })=>placeCode(at=>setRenderStateCode(at, trap)),
+            GetRenderState: ({ trap })=>placeCode(at=>getRenderStateCode(at, trap)),
+            SetTransform: ({ trap })=>placeCode(at=>setTransformCode(at, trap)),
+            SetTextureStageState: ({ trap })=>placeCode(at=>setTextureStageStateCode(at, trap,
+                STAGE_STATE_TYPES_9)),
+            SetMaterial: ({ trap })=>placeCode(at=>setMaterialCode(at, trap)),
+        }
+        : {};
     const deviceInterfaces = [
-        describe(IID_IDirect3DDevice9, IDIRECT3DDEVICE9_SLOTS, deviceMethods),
+        describe(IID_IDirect3DDevice9, IDIRECT3DDEVICE9_SLOTS, synced(deviceMethods), deviceGuests),
     ];
 
     /**
@@ -2362,7 +2451,7 @@ export function createDirect3D9Seam(
      */
     const exDeviceInterfaces = [
         describe(IID_IDirect3DDevice9Ex, [...IDIRECT3DDEVICE9_SLOTS, ...IDIRECT3DDEVICE9EX_SLOTS],
-            { ...deviceMethods, ...exDeviceMethods }),
+            synced({ ...deviceMethods, ...exDeviceMethods }), deviceGuests),
         ...deviceInterfaces,
     ];
 
@@ -2673,6 +2762,24 @@ export function createDirect3D9Seam(
         }
         writePresentParameters(parameters >>> 0, wanted);
         lastParameters = wanted;
+        if (allocate)
+        {
+            // Made before the interface is published, because publishing is
+            // when the block's address is written one word past `this`.
+            const shadow = createShadow({
+                allocate,
+                readMemory: memory.windowMemory ?? memory.readMemory,
+                readU32: memory.readU32,
+                writeMemory: memory.writeMemory,
+                device: held.device,
+                objectAt: publisher.objectAt,
+                pointerOf: ()=>0,
+                divergence,
+                bindings: false,
+            });
+            shadows.set(held.device, shadow);
+            held.device.guestState = ()=>shadow.address();
+        }
         // The window is now this resolution; the reported screen is too.
         // Fullscreen, the device's window follows the mode, as the real
         // device moves it; windowed, the window is the program's own. The

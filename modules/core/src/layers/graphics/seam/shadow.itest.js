@@ -23,7 +23,8 @@ import { createV86Host } from '../../cpu/internal/v86-host.js';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
-    BUFFER, FLAG_SLOW_PATH, SHADOW, TEXTURE, getSurfaceLevelCode, lockCode, setIndicesCode,
+    BUFFER, FLAG_SLOW_PATH, SHADOW, TEXTURE, getRenderStateCode, getSurfaceLevelCode, lockCode,
+    setIndicesCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
     setTextureStageStateCode, setTransformCode, setVertexShaderCode, unlockCode,
 } from './shadow.js';
@@ -36,7 +37,7 @@ const PROGRAM = 0x8000;
 const ROUTINES = {
     renderState: 0x8800, transform: 0x8880, lock: 0x8900, unlock: 0x89a0,
     stream: 0x8a00, indices: 0x8a80, shader: 0x8b00, texture: 0x8b80, stageState: 0x8c00,
-    material: 0x8c80, surfaceLevel: 0x8d80,
+    material: 0x8c80, surfaceLevel: 0x8d80, getState: 0x8e00,
 };
 /** Where the routines jump when they leave the case to the host: a halt here. */
 const TRAP = 0x8d00;
@@ -109,6 +110,10 @@ const STEPS = [
     step(ROUTINES.transform, OBJECT, [23, MATRIX]),      // 32: TEXTURE7, slot 23
     step(ROUTINES.transform, OBJECT, [259, MATRIX]),     // 33: WORLD3, slot 27
     step(ROUTINES.stageState, OBJECT, [7, D3DTSS.TEXTURETRANSFORMFLAGS, 2]),  // 34: the last stage
+    step(ROUTINES.getState, OBJECT, [8, OUT]),           // 35: a state the device answers for
+    step(ROUTINES.getState, OBJECT, [9, OUT]),           // 36: one it refuses: the trap
+    step(ROUTINES.getState, OBJECT, [300, OUT]),         // 37: past the block: the trap
+    step(ROUTINES.getState, OBJECT, [8, 0]),             // 38: nowhere to put it: the trap
 ];
 
 /** @param {typeof STEPS[number]} entry @param {number} at */
@@ -221,6 +226,7 @@ async function routines(engine){
     host.writePhysical(ROUTINES.material, setMaterialCode(ROUTINES.material, TRAP));
     host.writePhysical(ROUTINES.surfaceLevel,
         getSurfaceLevelCode(ROUTINES.surfaceLevel, TRAP));
+    host.writePhysical(ROUTINES.getState, getRenderStateCode(ROUTINES.getState, TRAP));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
     host.writePhysical(TEX + 4, new Uint8Array(u32(TBLOCK)));
     host.writePhysical(TBLOCK, new Uint8Array(TEXTURE.SIZE));
@@ -431,6 +437,19 @@ async function routines(engine){
     // 1, 5, 7, 10, 11, 12, 14, 15, 18, 20, 24 and 30 to 34. A refusal made
     // in the guest is not one, and a level handed out is the texture's.
     assert.equal(calls(), 17);
+
+    // The getter answers from the block for a state the host marked as one
+    // the device answers for, and changes nothing the host counts.
+    write(BLOCK + SHADOW.RENDER_STATE_VALID, 1 << 8);
+    write(OUT, 0xdead);
+    assert.equal(run(35), 'ok');
+    assert.equal(read(OUT), 7, 'state 8 as the guest set it');
+    write(OUT, 0xdead);
+    assert.equal(run(36), 'trap', 'a state the device refuses');
+    assert.equal(run(37), 'trap', 'a state past the block');
+    assert.equal(run(38), 'trap', 'a null out-pointer');
+    assert.equal(read(OUT), 0xdead, 'nothing written by the three the host answers');
+    assert.equal(calls(), 17, 'a read is no call the host has to adopt');
 
     machine.stop();
 }

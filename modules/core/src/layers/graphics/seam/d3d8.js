@@ -60,7 +60,7 @@ import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { declarationLength } from '../d3d8/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import {
-    createShadow, getSurfaceLevelCode, lockCode, materialOf, setIndicesCode,
+    createShadow, getRenderStateCode, getSurfaceLevelCode, lockCode, materialOf, setIndicesCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
     setTextureStageStateCode, setTransformCode, setVertexShaderCode, unlockCode,
 } from './shadow.js';
@@ -2151,6 +2151,7 @@ export function createDirect3D8Seam(
     const deviceGuests = allocate
         ? {
             SetRenderState: ({ trap })=>placeCode(at=>setRenderStateCode(at, trap)),
+            GetRenderState: ({ trap })=>placeCode(at=>getRenderStateCode(at, trap)),
             SetTransform: ({ trap })=>placeCode(at=>setTransformCode(at, trap)),
             SetStreamSource: ({ trap })=>placeCode(at=>setStreamSourceCode(at, trap)),
             SetIndices: ({ trap })=>placeCode(at=>setIndicesCode(at, trap)),

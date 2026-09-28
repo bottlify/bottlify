@@ -13,6 +13,9 @@ import {
     setVertexShaderCode, transformSlot, transformType, unlockCode,
 } from './shadow.js';
 import { D3DTSS } from '../d3d8/constants.js';
+import { createDirect3D9 } from '../d3d9/device.js';
+import { D3DFMT as D3DFMT9, D3DRS as D3DRS9, D3DSWAPEFFECT as D3DSWAPEFFECT9 } from '../d3d9/constants.js';
+import { D3DTSS9 } from '../d3d9/samplerstates.js';
 
 /**
  * A buffer that remembers its locks and refuses a second one, as the device's does.
@@ -367,7 +370,8 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.TRANSFORM_MARKS + 4, SHADOW.STAGE_STATE_MARKS);
     assert.equal(SHADOW.STAGE_STATE_MARKS + SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE / 8,
         SHADOW.MARKS + SHADOW.MARK_WORDS * 4);
-    assert.equal(SHADOW.MARKS + SHADOW.MARK_WORDS * 4, SHADOW.SIZE);
+    assert.equal(SHADOW.MARKS + SHADOW.MARK_WORDS * 4, SHADOW.RENDER_STATE_VALID);
+    assert.equal(SHADOW.RENDER_STATE_VALID + SHADOW.RENDER_STATE_COUNT / 8, SHADOW.SIZE);
     assert.ok(SHADOW.CALLS > SHADOW.TRANSFORM_CALLS && SHADOW.CALLS < SHADOW.RENDER_STATES,
         'the count of every call in the header, where a disp8 reaches it');
     assert.equal(BUFFER.SIZE, 32);
@@ -1314,4 +1318,72 @@ test('an entry sets what a scan of the whole block set, in the order it set it',
         set += m.device.calls.length;
     }
     assert.ok(entries > 1000 && set > 3000, `${entries} entries setting ${set} values`);
+});
+
+test('a Direct3D 9 device takes the render states, stage states and transforms its guest set', ()=>{
+    // The same block and routines as Direct3D 8's, over a device whose
+    // stream, index and shader bindings are its own: the mirror leaves them
+    // alone, and what the guest wrote reaches the device through its setters.
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(createDirect3D9({}).CreateDevice({
+        swapEffect: D3DSWAPEFFECT9.DISCARD, backBufferCount: 1, backBufferWidth: 64,
+        backBufferHeight: 64, backBufferFormat: D3DFMT9.X8R8G8B8,
+    }, out), 0);
+    const device = out.device;
+    const memory = new Uint8Array(0x20000);
+    const view = new DataView(memory.buffer);
+    let free = 0x1008;
+    const shadow = createShadow({
+        allocate: bytes=>{
+            const at = free;
+            free += bytes;
+            return at;
+        },
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        device,
+        objectAt: ()=>null,
+        pointerOf: ()=>0,
+        bindings: false,
+    });
+    const at = shadow.address();
+    assert.equal(view.getUint32(at + SHADOW.RENDER_STATES + D3DRS9.CULLMODE * 4, true), 3,
+        'the render states of the device are mirrored');
+    /** @param {number} counter */
+    const count = counter=>{
+        for (const word of [counter, SHADOW.CALLS])
+        {
+            view.setUint32(at + word, view.getUint32(at + word, true) + 1, true);
+        }
+    };
+    /** @param {number} marks @param {number} index */
+    const mark = (marks, index)=>{
+        const word = at + marks + (index >>> 5) * 4;
+        view.setUint32(word, (view.getUint32(word, true) | 1 << (index & 31)) >>> 0, true);
+    };
+
+    // As the routines leave them: the value, its mark, the counters.
+    view.setUint32(at + SHADOW.RENDER_STATES + D3DRS9.CULLMODE * 4, 1, true);
+    mark(SHADOW.RENDER_STATE_MARKS, D3DRS9.CULLMODE);
+    count(SHADOW.RENDER_STATE_CALLS);
+    const stageState = SHADOW.STAGE_STATES + (1 * SHADOW.STAGE_STATE_STRIDE + D3DTSS9.COLOROP) * 4;
+    view.setUint32(at + stageState, 2, true);
+    mark(SHADOW.STAGE_STATE_MARKS + 4, D3DTSS9.COLOROP);
+    count(SHADOW.STAGE_STATE_CALLS);
+    view.setFloat32(at + SHADOW.TRANSFORMS + transformSlot(256) * 64 + 12 * 4, 7, true);
+    mark(SHADOW.TRANSFORM_MARKS, transformSlot(256));
+    count(SHADOW.TRANSFORM_CALLS);
+    shadow.sync();
+
+    /** @type {{ value?: number }} */
+    const state = {};
+    assert.equal(device.GetRenderState(D3DRS9.CULLMODE, state), 0);
+    assert.equal(state.value, 1);
+    assert.equal(device.GetTextureStageState(1, D3DTSS9.COLOROP, state), 0);
+    assert.equal(state.value, 2);
+    /** @type {{ matrix?: ArrayLike<number> }} */
+    const world = {};
+    assert.equal(device.GetTransform(256, world), 0);
+    assert.equal(world.matrix?.[12], 7);
 });
