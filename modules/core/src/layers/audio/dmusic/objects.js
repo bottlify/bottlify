@@ -232,6 +232,41 @@ export function createDirectMusic(host){
         return object;
     };
 
+    /**
+     * What a pointer handed to `PlaySegment` actually names, for a divergence
+     * a program's refusal has to be understood from: a performance is given
+     * the wrong interface often enough (a segment state, an audio path, a
+     * pointer whose object this engine never published) that "not a segment"
+     * alone does not say which.
+     *
+     * @param {number} pointer
+     */
+    const describeSource = pointer=>{
+        const object = objectAt(pointer);
+        if (!object)
+        {
+            return 'no object is behind the pointer';
+        }
+        if (isSegmentObject(object))
+        {
+            return 'a segment';
+        }
+        if (object.state && 'bytes' in object.state)
+        {
+            return 'a wave';
+        }
+        const api = object.dmusic;
+        if (api && 'segment' in api && 'voice' in api)
+        {
+            return 'a segment state';
+        }
+        if (api && 'gain' in api)
+        {
+            return 'an audio path';
+        }
+        return 'an object with no playable face';
+    };
+
     /** The directory a program named with SetSearchDirectory. */
     let searchDirectory = '';
 
@@ -924,7 +959,7 @@ export function createDirectMusic(host){
             ['GetTrackGroup', 12, ()=>E_NOTIMPL],
             ['InsertTrack', 12, ()=>E_NOTIMPL],
             ['RemoveTrack', 8, ()=>S_OK],
-            ['InitPlay', 16, (object, [, , , out])=>{
+            ['InitPlay', 16, (object, [out])=>{
                 if ((out >>> 0) === 0)
                 {
                     return E_POINTER;
@@ -940,7 +975,32 @@ export function createDirectMusic(host){
             ['RemoveNotificationType', 8, ()=>S_OK],
             ['GetParam', 28, ()=>E_NOTIMPL],
             ['SetParam', 24, ()=>E_NOTIMPL],
-            ['Clone', 16, ()=>E_NOTIMPL],
+            // A program clones a segment to keep one playing while it changes
+            // the other -- a level that swaps a wave track, a manager that
+            // holds a spare. DirectMusic answers with a real segment, so a
+            // source this engine has no other way to make would otherwise be
+            // played as the pointer a refusing call left behind.
+            ['Clone', 16, (object, [, , out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                const copy = createSegmentObject(null, object.state.dir);
+                const state = copy.object.state;
+                state.parsed = object.state.parsed;
+                state.repeats = object.state.repeats;
+                state.startPoint = object.state.startPoint;
+                state.loopStart = object.state.loopStart;
+                state.loopEnd = object.state.loopEnd;
+                state.resolution = object.state.resolution;
+                state.lengthOverride = object.state.lengthOverride;
+                if (object.state.loader)
+                {
+                    copy.attachLoader(object.state.loader);
+                }
+                writeU32(out, publish(copy.object, ids.IID_DIRECTMUSIC_SEGMENT8));
+                return S_OK;
+            }],
             ['SetStartPoint', 8, (object, [value])=>{
                 object.state.startPoint = value | 0;
                 return S_OK;
@@ -1335,14 +1395,24 @@ export function createDirectMusic(host){
          * with the error DirectMusic answers, because the program's next line
          * must run rather than the call ending the session.
          *
-         * @param {any} segment @param {number} flags @param {number} start
-         * @param {number} out @param {any} [thread]
+         * @param {number} source @param {any} segment @param {number} flags
+         * @param {number} start @param {number} out @param {any} [thread]
          */
-        const playSegment = async(segment, flags, start, out, thread)=>{
+        const playSegment = async(source, segment, flags, start, out, thread)=>{
+            // The state a program asks for is written before anything can
+            // fail, so a play that is refused leaves null rather than whatever
+            // the program's local held. DirectMusic's own manager reads this
+            // output whatever the result, and a stale pointer there is followed
+            // as though it named a segment state.
+            if ((out >>> 0) !== 0)
+            {
+                writeU32(out, 0);
+            }
             if (!segment || typeof segment.resolve !== 'function')
             {
                 host.divergence?.('IDirectMusicPerformance::PlaySegment',
-                    'the source is neither a segment nor a wave that can be played');
+                    `the source is neither a segment nor a wave that can be played`
+                    + ` (0x${(source >>> 0).toString(16)} is ${describeSource(source)})`);
                 return E_INVALIDARG;
             }
             /** @type {import('./player.js').WaveProgram | null} */
@@ -1441,7 +1511,8 @@ export function createDirectMusic(host){
                 return S_OK;
             }],
             ['PlaySegment', 24, (_, [source, flags, lo, hi, out])=>playSegment(
-                apiOf(source), flags >>> 0, join64(lo, hi), out, host.callerThread?.())],
+                source, apiOf(source), flags >>> 0, join64(lo, hi), out,
+                host.callerThread?.())],
             ['Stop', 20, (_, [source, state])=>{
                 if ((state >>> 0) !== 0)
                 {
@@ -1651,7 +1722,8 @@ export function createDirectMusic(host){
                 return S_OK;
             }],
             ['PlaySegmentEx', 40, (_, [source, , , flags, lo, hi, out])=>playSegment(
-                apiOf(source), flags >>> 0, join64(lo, hi), out, host.callerThread?.())],
+                source, apiOf(source), flags >>> 0, join64(lo, hi), out,
+                host.callerThread?.())],
             ['StopEx', 20, (_, [item])=>{
                 if ((item >>> 0) === 0)
                 {

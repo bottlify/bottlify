@@ -296,6 +296,17 @@ export function createPlayer({ now, output, onVoice }){
                 voice.notifiedStart = true;
                 emit(voice, 'start');
             }
+            // A segment with no waves has no length: it starts and ends on the
+            // same clock read, which is the only thing a program waiting for a
+            // notification can act on. Left playing it would never say it had
+            // ended, and a manager that queues the next piece on that word
+            // would wait for ever.
+            if (length <= 0)
+            {
+                emit(voice, 'end');
+                stop(voice);
+                return;
+            }
             const into = length > 0 ? elapsed - voice.cycle * length : elapsed;
             // The last pass through a segment says it is nearly over once the
             // guest's clock is within the prepare time of its end, which is

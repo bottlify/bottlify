@@ -82,6 +82,20 @@ test('a segment that repeats for ever opens a fresh track each pass', ()=>{
     assert.equal(player.voices().length, 1);
 });
 
+test('a segment with no waves starts and ends on the same clock read', ()=>{
+    const time = clock();
+    const out = mixer();
+    /** @type {string[]} */
+    const events = [];
+    const player = createPlayer({ now: ()=>time.now(), output: ()=>out });
+    player.start({ items: [], lengthMs: 0 }, {
+        plays: 1,
+        onEvent: (/** @type {string} */ kind)=>events.push(kind),
+    });
+    assert.deepEqual(events, ['start', 'end'], 'a zero-length play is not left running');
+    assert.equal(player.voices().length, 0);
+});
+
 test('stopping a voice closes what it opened', ()=>{
     const out = mixer();
     const player = createPlayer({ now: ()=>0, output: ()=>out });

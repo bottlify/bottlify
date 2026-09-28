@@ -253,14 +253,52 @@ test('a segment that is not a DMSG is refused and nothing is played', async()=>{
     const out = space.alloc(4);
     assert.equal(await call(loader, ids.IID_DIRECTMUSIC_LOADER8, 'LoadObjectFromFile',
         [0, 0, path, out]), S_OK);
-    // An unparseable file still produces an object; what it plays is nothing,
-    // which is the same answer an empty segment gives, not a crash.
+    // An unparseable file still produces an object; it has no waves, so it
+    // starts and ends at once rather than sitting open for ever.
     const performance = createComObject(ids.CLSID_DIRECTMUSIC_PERFORMANCE, dm.performance());
     const stateOut = space.alloc(4);
     const segmentPointer = space.readU32(out);
     assert.equal(await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8, 'PlaySegmentEx',
         [segmentPointer, 0, 0, 0, 0, 0, stateOut, 0, 0]), S_OK);
-    assert.equal(dm.diagnostics().playing, 1);
+    assert.equal(dm.diagnostics().playing, 0, 'an empty segment does not stay playing');
+});
+
+test('InitPlay hands back a segment state for the segment it was called on', async()=>{
+    const { space, dm, host } = rig();
+    const { segment, wave } = segmentWithWave();
+    const object = dm.createSegment(segment, '').object;
+    host.objectAt = ()=>object;
+    const stateOut = space.alloc(4);
+    assert.equal(await call(object, ids.IID_DIRECTMUSIC_SEGMENT8, 'InitPlay',
+        [stateOut, 0x22223333, 0]), S_OK);
+    assert.notEqual(space.readU32(stateOut), 0, 'a state pointer was written');
+    void wave;
+});
+
+test('a cloned segment is a real segment that plays the same music', async()=>{
+    const { space, files, out, dm } = rig();
+    const { segment, wave } = segmentWithWave();
+    files.set('a.wav', wave);
+    const source = dm.createSegment(segment, '');
+    const cloneOut = space.alloc(4);
+    assert.equal(await call(source.object, ids.IID_DIRECTMUSIC_SEGMENT8, 'Clone',
+        [0, 0, cloneOut]), S_OK);
+    const clonePointer = space.readU32(cloneOut);
+    assert.notEqual(clonePointer, 0, 'Clone hands back a segment, not a refusal');
+
+    // A second clone is a second object: the pointer is not the same one
+    // handed out twice, which a program comparing them would notice.
+    const secondOut = space.alloc(4);
+    assert.equal(await call(source.object, ids.IID_DIRECTMUSIC_SEGMENT8, 'Clone',
+        [0, 0, secondOut]), S_OK);
+    assert.notEqual(space.readU32(secondOut), clonePointer);
+
+    const performance = createComObject(ids.CLSID_DIRECTMUSIC_PERFORMANCE, dm.performance());
+    const stateOut = space.alloc(4);
+    assert.equal(await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8, 'PlaySegmentEx',
+        [clonePointer, 0, 0, 0, 0, 0, stateOut, 0, 0]), S_OK);
+    assert.equal(out.tracks.length, 1, 'the clone plays the segment wave');
+    assert.equal(out.tracks[0].bytes, 4000);
 });
 
 test('Load asks a stream for exactly what is left, not a chunk past its end', async()=>{
@@ -497,10 +535,13 @@ test('PlaySegment refuses a source that is not a segment, without throwing', asy
     const { space, dm, divergences } = rig();
     const performance = createComObject(ids.CLSID_DIRECTMUSIC_PERFORMANCE, dm.performance());
     const stateOut = space.alloc(4);
+    // A program's local, not a fresh slot: a refusing play must overwrite it,
+    // because DirectMusic's own manager follows this word whatever came back.
+    space.writeU32(stateOut, 0xdeadbeef);
     const hr = await call(performance, ids.IID_DIRECTMUSIC_PERFORMANCE8, 'PlaySegmentEx',
         [0x11112222, 0, 0, 0, 0, 0, stateOut, 0, 0]);
     assert.equal(hr, 0x80070057 | 0, 'an unknown source is E_INVALIDARG');
-    assert.equal(space.readU32(stateOut), 0, 'no state came back');
+    assert.equal(space.readU32(stateOut), 0, 'a refused play leaves no stale state');
     assert.equal(dm.diagnostics().playing, 0, 'nothing was started');
     assert.ok(divergences.some(entry=>entry.api.includes('PlaySegment')),
         'the refusal is reported');
