@@ -14,7 +14,7 @@
  *   node tools/install-watch.mjs <setup.exe> [--every 30] [--minutes 20]
  *       [--journal SECONDS] [--memory MB] [--key Code@S]... [--click X,Y@S]...
  *       [--shots DIR] [--list 'C:\Program Files'] [--collect]
- *       [--screen 1024x768]
+ *       [--screen 1024x768] [--cat 'C:\WINDOWS\DirectX.log']...
  *
  * `--journal S` prints, S seconds in, the last cross-process COM calls and
  * message waits from the call journal (every call area on); `--trace S` prints
@@ -32,9 +32,11 @@
  * desktop the facade's process paints into as a PNG at every status, which is
  * what a person would have seen, pixel for pixel. `--list DIR` prints the
  * files under a directory of the volume once the run is over -- what an
- * install left behind, which is what a bottle is made of. `--collect` takes
- * that prefix off the finished run as the installer's own wizard does
- * (`collectFrom`) and says which root, entry and files a bottle would get;
+ * install left behind, which is what a bottle is made of. `--cat FILE` prints
+ * a text file of the volume once the run is over -- the log a setup keeps of
+ * what it decided. `--collect` takes that prefix off the finished run as the
+ * installer's own wizard does (`collectFrom`) and says which root, entry and
+ * files a bottle would get;
  * `--collect-to DIR` also writes it there, a directory make-btl packs.
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -343,6 +345,16 @@ if (listAt)
     }
     catch (e){
         console.log('list failed:', e instanceof Error ? e.message : e);
+    }
+}
+for (const path of all('--cat'))
+{
+    try
+    {
+        console.log(`CAT ${path}\n${new TextDecoder('latin1').decode(app.files.read(path))}`);
+    }
+    catch (e){
+        console.log('cat failed:', path, e instanceof Error ? e.message : e);
     }
 }
 const collectTo = argv.includes('--collect-to') ? argv[argv.indexOf('--collect-to') + 1] : null;
