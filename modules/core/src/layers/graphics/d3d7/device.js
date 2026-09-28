@@ -122,10 +122,10 @@ export function d3dFormatOf(format){
         {
             return D3DFMT.D16;
         }
-        // The stencil depth sits in the slot the red mask uses for colour.
-        return format.redMask === 8 ? D3DFMT.D24S8 : (format.bitCount === 32
-            ? D3DFMT.D24X8
-            : null);
+        // The stencil depth sits in the slot the red mask uses for colour. A
+        // z-buffer of another depth is held in the nearest a driver has.
+        return format.redMask === 8 ? D3DFMT.D24S8
+            : format.bitCount > 16 ? D3DFMT.D24X8 : D3DFMT.D16;
     }
     if ((format.flags & DDPF_PALETTEINDEXED_ANY) !== 0)
     {
@@ -457,7 +457,9 @@ export function createDirect3D7(ddraw, services = {}){
             {
                 return existing;
             }
-            const format = d3dFormatOf(surface.pixelFormat);
+            // A z-buffer is one whatever its descriptor said of its format.
+            const format = d3dFormatOf(surface.pixelFormat)
+                ?? ((surface.caps & DDSCAPS_ZBUFFER) !== 0 ? D3DFMT.D16 : null);
             const adapter = {
                 buffer,
                 // Where a read-back is written and a write taken up from.

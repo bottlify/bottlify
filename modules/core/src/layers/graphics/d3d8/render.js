@@ -3630,7 +3630,13 @@ export function createRenderer(options){
         if (!made)
         {
             const desc = describe(surface);
-            const depth = FORMAT_INFO[desc.Format].depth;
+            const info = FORMAT_INFO[desc.Format];
+            if (!info)
+            {
+                throw new Error(`a ${desc.Width}x${desc.Height} surface of format ${desc.Format}`
+                    + ' has no GPU format');
+            }
+            const depth = info.depth;
             made = backend.createSurface({
                 width: desc.Width,
                 height: desc.Height,

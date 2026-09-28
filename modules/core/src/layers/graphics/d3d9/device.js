@@ -3805,7 +3805,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             const chain = createAdditionalChain({
                 parameters: wanted,
                 count: explicitCount(D3DPOOL.DEFAULT),
-                makeBackBuffer: chainCount=>createSurface({
+                // A back buffer's count is its own, as Direct3D 8's is: one
+                // released to nothing is the chain's to hand out again (Wine's
+                // d3d9 test_refcount).
+                makeBackBuffer: ()=>createSurface({
                     type: SURFACE_TYPE.RENDER_TARGET,
                     width,
                     height,
@@ -3814,7 +3817,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     usage: D3DUSAGE.RENDERTARGET,
                     lockable: wanted.lockableBackBuffer,
                     base: allocate(surfaceBytes(format, width, height)),
-                    count: chainCount,
+                    count: implicitCount(),
                     rejectsMalformedRects: true,
                     divergence: services.divergence ?? null,
                     pixels: targetPixels(),

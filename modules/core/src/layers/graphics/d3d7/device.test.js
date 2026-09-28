@@ -211,6 +211,12 @@ test('a fresh device answers every D3D7 render state and nothing newer', ()=>{
     releaseAll(f);
 });
 
+test('a 24-bit z-buffer is one the renderer takes, held in 32 bits', ()=>{
+    const root = ddrawObject();
+    const depth = surface(root, { caps: DDSCAPS_ZBUFFER, zBufferBitDepth: 24 });
+    assert.equal(d3dFormatOf(depth.pixelFormat), D3DFMT.D24X8);
+});
+
 test('a depth buffer attached at creation turns the depth test on', ()=>{
     const root = ddrawObject();
     const d3d = createDirect3D7(root);

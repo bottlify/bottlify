@@ -23,10 +23,8 @@ import { D3DERR_INVALIDCALL, D3D_OK } from './constants.js';
  * @property {any} parameters
  *           The present parameters as normalised, with the window the chain
  *           presents into as `hDeviceWindow`. A back buffer count of zero is one.
- * @property {import('./resources.js').ReferenceCount} count
- *           The chain's own, which its back buffers share: a program releasing
- *           a back buffer it took from the chain releases the chain.
- * @property {(count: import('./resources.js').ReferenceCount) => any} makeBackBuffer
+ * @property {import('./resources.js').ReferenceCount} count  The chain's own.
+ * @property {() => any} makeBackBuffer
  * @property {(backBuffer: any, shown: boolean) => number | Promise<number>} present
  *           The device's: whether it can present at all, and what showing or
  *           keeping the picture takes. A promise is a present made and held
@@ -40,7 +38,7 @@ import { D3DERR_INVALIDCALL, D3D_OK } from './constants.js';
  */
 export function createAdditionalChain(options){
     const buffers = Array.from({ length: options.parameters.backBufferCount || 1 },
-        ()=>options.makeBackBuffer(options.count));
+        ()=>options.makeBackBuffer());
     /** @type {any} the back buffer the last present handed over, or null before one */
     let presented = null;
     let presents = 0;

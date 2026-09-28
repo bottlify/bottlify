@@ -1654,8 +1654,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 // A back buffer's count is its own and not the chain's, as the
                 // device's own back buffer's is: a reference on it is one on
                 // the device, and one released to nothing leaves it the
-                // chain's to take again (Wine's d3d8 test_refcount). Direct3D 9
-                // shares the chain's.
+                // chain's to take again (Wine's d3d8 test_refcount).
                 makeBackBuffer: ()=>createSurface({
                     type: SURFACE_TYPE.RENDER_TARGET,
                     width,
