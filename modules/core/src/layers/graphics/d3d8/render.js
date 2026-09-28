@@ -1577,10 +1577,11 @@ function generatesFromNormal(model){
 const EMPTY_BLOCK = new Float32Array(0);
 
 /**
- * Why a cascade stopped before the program's stages ran out.
+ * The first stage of a cascade whose operation read a texture where none is
+ * bound, and so passed the current colour on instead.
  *
  * @typedef {Object} CascadeTruncation
- * @property {number} stage  the stage that ended it
+ * @property {number} stage  the stage
  * @property {'texture'} reason
  * @property {string} detail  the stage's state, for a report to name
  */
@@ -1588,12 +1589,14 @@ const EMPTY_BLOCK = new Float32Array(0);
 /**
  * The stage cascade a draw runs, and which texture each stage samples.
  *
- * The cascade ends at the first stage whose colour operation is off. It also
- * ends at a stage that reads the texture argument with nothing bound there:
- * the generated shader would otherwise sample a binding that does not exist.
- * A coordinate set the vertex does not carry does not end it -- the stage
- * samples at zero, as Direct3D reads an absent set (Wine's d3d8 texop_test
- * draws through a format with none).
+ * The cascade ends at the first stage whose colour operation is off, and
+ * nowhere else. An operation that reads the texture argument with nothing
+ * bound there passes the current colour or alpha on unchanged, the colour
+ * and the alpha each on its own -- untextured geometry drawn with stage zero
+ * at its default is its vertex colour and alpha, and a colour taken from the
+ * texture factor beside it is still that colour (Wine's d3d8
+ * test_fog_interpolation). A coordinate set the vertex does not carry is
+ * sampled at zero (texop_test).
  *
  * Only the arguments the two operations actually read count. Stage state
  * persists across draws, so an unread slot holds whatever an earlier draw put
@@ -1611,6 +1614,8 @@ export function stageCascade(model, layout){
     const stages = [];
     /** @type {(any | null)[]} */
     const textures = [];
+    /** @type {CascadeTruncation | null} */
+    let unbound = null;
     for (let stage = 0; stage < STAGE_COUNT; stage++)
     {
         const states = model.stageStates(stage);
@@ -1637,31 +1642,62 @@ export function stageCascade(model, layout){
                 ? Math.min(transformFlags & TTFF_COUNT_MASK, 4)
                 : 0,
         };
-        const selectors = [
-            ...argumentsRead(key.colorOp, key.colorArg1, key.colorArg2),
-            ...argumentsRead(key.alphaOp, key.alphaArg1, key.alphaArg2),
-        ];
-        const samples = selectors.some(arg=>(arg & D3DTA_SELECTMASK) === D3DTA.TEXTURE);
         const texture = model.textures.get(stage) ?? null;
-        if (samples && !texture)
+        if (!texture)
         {
-            return {
-                stages,
-                textures,
-                truncated: {
+            const colour = readsTexture(key.colorOp, key.colorArg1, key.colorArg2);
+            const alpha = readsTexture(key.alphaOp, key.alphaArg1, key.alphaArg2);
+            if ((colour || alpha) && !unbound)
+            {
+                unbound = {
                     stage,
                     reason: 'texture',
                     detail: `${key.colorOp}(${key.colorArg1},${key.colorArg2})`
                         + `/${key.alphaOp}(${key.alphaArg1},${key.alphaArg2})`
                         + ` tci=${key.texCoordIndex} sets=${layout.texCoordSets}`,
-                },
-            };
+                };
+            }
+            if (colour)
+            {
+                key.colorOp = D3DTOP.SELECTARG1;
+                key.colorArg1 = D3DTA.CURRENT;
+            }
+            if (alpha)
+            {
+                key.alphaOp = D3DTOP.SELECTARG1;
+                key.alphaArg1 = D3DTA.CURRENT;
+            }
         }
+        const samples = readsTexture(key.colorOp, key.colorArg1, key.colorArg2)
+            || readsTexture(key.alphaOp, key.alphaArg1, key.alphaArg2);
         const dimension = samples ? textureDimensionOf(texture) : '2d';
         stages.push(dimension === '2d' ? key : { ...key, dimension });
         textures.push(samples ? texture : null);
     }
-    return { stages, textures, truncated: null };
+    // A stage at the end that only passes the current colour and alpha on
+    // changes nothing, and draws as no stage at all.
+    const passes = (/** @type {import('../webgpu/internal/pipeline.js').StageKey} */ key)=>
+        key.colorOp === D3DTOP.SELECTARG1 && (key.colorArg1 & ~D3DTA_SELECTMASK) === 0
+        && (key.colorArg1 & D3DTA_SELECTMASK) === D3DTA.CURRENT
+        && key.alphaOp === D3DTOP.SELECTARG1 && (key.alphaArg1 & ~D3DTA_SELECTMASK) === 0
+        && (key.alphaArg1 & D3DTA_SELECTMASK) === D3DTA.CURRENT;
+    while (stages.length > 0 && passes(stages[stages.length - 1]))
+    {
+        stages.pop();
+        textures.pop();
+    }
+    return { stages, textures, truncated: unbound };
+}
+
+/**
+ * Whether an operation reads its stage's texture: through an argument it
+ * reads, or by blending by the texture's alpha.
+ *
+ * @param {number} op @param {number} arg1 @param {number} arg2
+ */
+function readsTexture(op, arg1, arg2){
+    return op === D3DTOP.BLENDTEXTUREALPHA || op === D3DTOP.BLENDTEXTUREALPHAPM
+        || argumentsRead(op, arg1, arg2).some(arg=>(arg & D3DTA_SELECTMASK) === D3DTA.TEXTURE);
 }
 
 /**
@@ -3261,12 +3297,9 @@ export function createRenderer(options){
     };
 
     /**
-     * Counts and reports a cascade that stopped short of the program's stages.
-     *
-     * The draw still happens -- refusing it would change what the program does
-     * -- so nothing else says the picture lost a texture layer. The counter
-     * carries the distinct stage states so that a run names which ones, and the
-     * divergence says it once.
+     * Counts a cascade with a stage whose operation read an absent texture,
+     * naming the distinct stage states, so a run can tell a layer passed over
+     * from one the program meant to texture.
      *
      * @param {{ truncated: CascadeTruncation | null }} cascade
      */
@@ -3283,12 +3316,6 @@ export function createRenderer(options){
             && counters.cascade.truncations.length < TRUNCATION_SAMPLES)
         {
             counters.cascade.truncations.push(line);
-        }
-        if (divergence)
-        {
-            divergence('Direct3D 8',
-                'a texture stage cascade was cut short and the draw ran untextured'
-                + ` from that stage on: ${line}`);
         }
     };
 

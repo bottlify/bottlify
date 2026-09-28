@@ -1074,10 +1074,9 @@ test('recorded: a stale texture argument the operation never reads keeps the cas
         assert.doesNotMatch(diagnostics.lastDump[0], / cut=/);
     });
 
-test('recorded: a cascade the program really did cut short is counted and reported', async()=>{
-    // The other half of the rule: an operation that does read the texture with
-    // none bound still ends the cascade, and nothing else in a frame says the
-    // draw lost a layer.
+test('recorded: an operation reading a texture nobody bound is counted, not reported', async()=>{
+    // It passes the current colour on, as Windows does, which is no
+    // divergence; the count is what tells a layer passed over from one drawn.
     /** @type {string[]} */
     const said = [];
     const h = harness({
@@ -1098,8 +1097,7 @@ test('recorded: a cascade the program really did cut short is counted and report
     assert.equal(diagnostics.cascade.noTexture, 1);
     assert.equal(diagnostics.cascade.truncations.length, 1);
     assert.match(diagnostics.cascade.truncations[0], /^stage 0 texture: /);
-    assert.equal(said.length, 1);
-    assert.match(said[0], /cut short and the draw ran untextured/);
+    assert.deepEqual(said, []);
     assert.match(diagnostics.lastDump[0], / cut=0\/texture\//);
 });
 
