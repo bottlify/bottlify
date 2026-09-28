@@ -7,7 +7,9 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRemoteApp } from './remote.js';
-import { serveEngine, watchFrom, workerPacing, WORKER_YIELD_MS } from './serve.js';
+import {
+    postAsItIs, serveEngine, watchFrom, workerPacing, WORKER_YIELD_MS,
+} from './serve.js';
 import { serveKeeper } from './keeper.js';
 import { PAGE_YIELD_MS } from '../app.js';
 import { createEvents } from '../events.js';
@@ -541,6 +543,49 @@ test('run answers with the exit code and what the exit left behind', async()=>{
     assert.deepEqual(remote.registry().toJSON(), { HKLM: {} });
     await remote.dispose();
 });
+
+test('an exit\'s volume is moved to the page rather than copied', async()=>{
+    // An installer's volume is a gigabyte and more, and a copy of it on each
+    // side of the port is more than a page need have room for.
+    const { remote, app } = await connect({ collectOnExit: true });
+    // Two files over one buffer, as a copy between them leaves them: moved once.
+    const one = Uint8Array.of(1, 2, 3);
+    const written = [{ path: 'C:\\a.txt', bytes: one.subarray(0, 2) },
+        { path: 'C:\\b.txt', bytes: one.subarray(2) }];
+    app.session.export = ()=>written;
+    assert.equal(await remote.run(), 7);
+    assert.deepEqual(remote.session.export().map((/** @type {any} */ file)=>[...file.bytes]),
+        [[1, 2], [3]]);
+    assert.equal(one.buffer.byteLength, 0, 'the worker holds none of it');
+    await assert.rejects(remote.files.read('C:\\a.txt'), /went to the page with the exit/);
+    await remote.dispose();
+});
+
+test('a message crosses as it is: a buffer that cannot move is copied, a refusal goes as JSON',
+    async()=>{
+        const { port1, port2 } = new MessageChannel();
+        opened.push(()=>{
+            port1.close();
+            port2.close();
+        });
+        /** @type {any[]} */
+        const seen = [];
+        port2.onmessage = ({ data })=>seen.push(data);
+        const bytes = Uint8Array.of(1, 2, 3);
+        assert.equal(postAsItIs(port1, { bytes }, [bytes.buffer]), true);
+        assert.equal(bytes.byteLength, 0, 'moved');
+        // A wasm memory's buffer is not detachable.
+        const memory = new WebAssembly.Memory({ initial: 1 });
+        new Uint8Array(memory.buffer).set([4, 5]);
+        assert.equal(postAsItIs(port1, { view: new Uint8Array(memory.buffer, 0, 2) },
+            [memory.buffer]), false);
+        assert.equal(memory.buffer.byteLength, 65536, 'still the memory\'s');
+        assert.equal(postAsItIs(port1, { kept: 1, dropped: ()=>1 }), false);
+        await settled();
+        assert.deepEqual(seen[0].bytes, Uint8Array.of(1, 2, 3));
+        assert.deepEqual([...seen[1].view], [4, 5]);
+        assert.deepEqual(seen[2], { kept: 1 });
+    });
 
 test('a failed run rejects with the reason and trace the page shows', async()=>{
     const { remote, app } = await connect();

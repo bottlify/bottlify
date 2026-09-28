@@ -175,20 +175,60 @@ function describe(e){
 }
 
 /**
- * A payload as it can be posted: as it is when a clone takes it, and through
- * JSON when it holds something that cannot cross -- a function, a GPU object.
+ * Posts a message as it is, and through JSON only when a clone refuses it --
+ * a function, a GPU object.
  *
- * @param {unknown} value
+ * Tried rather than tested first. A clone taken beforehand to find out copies
+ * every message twice, and the answer to an installer's run carries the whole
+ * volume it wrote: a gigabyte and more, copied to be thrown away. Nor can JSON
+ * stand in for a clone that ran out of room, because it names a byte array's
+ * elements as keys, and a list of keys that long is refused (`Invalid array
+ * length`).
+ *
+ * `transfer` is moved where it can be and copied where it cannot -- a buffer
+ * that is not detachable, a wasm memory's. A message whose clone fails is not
+ * sent and detaches nothing, so each attempt starts from the same message.
+ *
+ * @param {any} port  The worker's global scope, or a MessagePort.
+ * @param {unknown} message
+ * @param {ArrayBuffer[]} [transfer]
+ * @returns {boolean} whether `transfer` was moved
  */
-function cloneable(value){
-    try
+export function postAsItIs(port, message, transfer = []){
+    for (const moving of transfer.length > 0 ? [transfer, []] : [[]])
     {
-        structuredClone(value);
-        return value;
+        try
+        {
+            port.postMessage(message, moving);
+            return moving.length > 0;
+        }
+        catch {
+            // Refused as it stands: moved, then copied, then as JSON.
+        }
     }
-    catch {
-        return JSON.parse(JSON.stringify(value));
+    port.postMessage(JSON.parse(JSON.stringify(message)));
+    return false;
+}
+
+/**
+ * The buffers under an exit's files, each once, to be moved to the page with
+ * the answer: the machine they were written on is done, and the page
+ * disposes of it next.
+ *
+ * @param {{ bytes: Uint8Array }[]} files
+ * @returns {ArrayBuffer[]}
+ */
+function buffersUnder(files){
+    /** @type {Set<ArrayBuffer>} */
+    const buffers = new Set();
+    for (const { bytes } of files)
+    {
+        if (bytes?.buffer instanceof ArrayBuffer)
+        {
+            buffers.add(bytes.buffer);
+        }
     }
+    return [...buffers];
 }
 
 /**
@@ -331,7 +371,20 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     /** @param {import('./messages.js').FromEngine} message */
     const post = message=>port.postMessage(message);
     /** @param {string} name @param {unknown} payload */
-    const emit = (name, payload)=>post({ type: 'event', name, payload: cloneable(payload) });
+    const emit = (name, payload)=>postAsItIs(port, { type: 'event', name, payload });
+    /**
+     * Whether the volume went to the page with the exit's answer: its bytes
+     * are the page's now, and a read here would find them detached.
+     */
+    let volumeMoved = false;
+    const volume = ()=>{
+        if (volumeMoved)
+        {
+            throw new Error('the volume went to the page with the exit: '
+                + 'the page\'s session.export() holds it');
+        }
+        return app.files;
+    };
 
     /**
      * The device, or a refusal that says which part was missing.
@@ -534,6 +587,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                     : undefined,
             });
             started = options;
+            volumeMoved = false;
             // A machine rebuilt on a child's image publishes a fresh block.
             // The page's keeper is reading the parent's, so it is handed the
             // next one the moment it exists -- the journal's sequence is
@@ -645,8 +699,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 : tables.filter((/** @type {{ name: string }} */ table)=>table.name === layer));
         },
         trace: ()=>app.trace(),
-        'files.list': (/** @type {string} */ path)=>app.files.list(path),
-        'files.read': (/** @type {string} */ path)=>app.files.read(path),
+        'files.list': (/** @type {string} */ path)=>volume().list(path),
+        'files.read': (/** @type {string} */ path)=>volume().read(path),
         presented: ()=>({ count: frames, history: presented.slice() }),
         /*
          * The emulator's account of where the guest ran, by address. Only the
@@ -723,8 +777,10 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                         throw new Error(`${message.method}: nothing has been started`);
                     }
                     const result = await method(...message.args);
-                    post({ type: 'answer', id: message.id,
-                        result: message.method === 'diagnostics' ? result : cloneable(result) });
+                    const moving = message.method === 'run'
+                        ? buffersUnder(/** @type {any} */ (result).files) : [];
+                    volumeMoved = postAsItIs(port, { type: 'answer', id: message.id, result },
+                        moving) || volumeMoved;
                 }
                 catch (e){
                     post({ type: 'answer', id: message.id, error: describe(e) });
