@@ -136,7 +136,7 @@ async function copyVendor(){
 
     // The emulator is an optional layer since 5.5: a build without it ships
     // and runs the demos under `cork`, and a launch that selects `emulator`
-    // or `hybrid` is refused with the layer's message. Each artifact present
+    // is refused with the layer's message. Each artifact present
     // is still recorded and copied; each absent is named so a build log says
     // what the package does not carry.
     for (const artifact of missing)

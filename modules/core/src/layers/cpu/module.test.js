@@ -86,7 +86,7 @@ test('a disposed cpu answers harmlessly rather than throwing', async()=>{
 test('an engine a launch may select is named, and one that is not is refused', async()=>{
     await assert.rejects(cpuModule.create({ engine: 'x' }, /** @type {any} */ ({
         requireApi: ()=>({}), provide: ()=>{},
-    })), { message: 'cpu: unknown engine "x" (emulator, hybrid, cork, differential)' });
+    })), { message: 'cpu: unknown engine "x" (emulator, cork)' });
 
     await cpuModule.create({ engine: 'cork' }, /** @type {any} */ ({
         requireApi: ()=>({}), provide: ()=>{},
@@ -95,19 +95,9 @@ test('an engine a launch may select is named, and one that is not is refused', a
         'cork is built and reports before boot');
     await cpuModule.dispose();
 
-    await cpuModule.create({ engine: 'differential' }, /** @type {any} */ ({
+    await assert.rejects(cpuModule.create({ engine: 'hybrid' }, /** @type {any} */ ({
         requireApi: ()=>({}), provide: ()=>{},
-    }));
-    assert.equal(cpuModule.diagnostics().metrics?.engine, 'differential',
-        'differential is built and reports before boot');
-    await cpuModule.dispose();
-
-    await cpuModule.create({ engine: 'hybrid' }, /** @type {any} */ ({
-        requireApi: ()=>({}), provide: ()=>{},
-    }));
-    assert.equal(cpuModule.diagnostics().metrics?.engine, 'hybrid',
-        'the selected engine is reported before boot');
-    await cpuModule.dispose();
+    })), { message: 'cpu: unknown engine "hybrid" (emulator, cork)' }, 'hybrid is gone');
 
     await open();
     assert.equal(cpuModule.diagnostics().metrics?.engine, 'cork', 'the default');
@@ -118,7 +108,7 @@ test('an engine that needs the emulator says so when the launch passes none', as
     // Since 5.5 the emulator is an optional layer: a build may carry none of
     // it, and a launch that selects it is told the layer is missing rather
     // than failing deeper on an absent file.
-    for (const engine of ['emulator', 'hybrid', 'differential'])
+    for (const engine of ['emulator'])
     {
         const api = await cpuModule.create({ engine }, /** @type {any} */ ({
             requireApi: ()=>({}), provide: ()=>{},

@@ -90,7 +90,7 @@ replaced by what it is built from. The worker rebuilds the object it needs.
 | `memorySize`, `heapSize`, `stackSize` | `number` | Guest RAM (a power of two), the heap's ceiling, the main thread's stack. |
 | `quantum` | `number` | Guest instructions per scheduler turn. |
 | `jit` | `Record<string, number>` | The emulator's compiler budgets, for measurement. The `jit.*` counters report `-1` under `cork`, which has no emulator compiler. |
-| `engine` | `'emulator' \| 'hybrid' \| 'cork' \| 'differential'` | Which execution engine runs the program (`docs/core/cpu.md`'s "Engines"). Default `cork`, which loads nothing of the emulator. Chosen per launch: the launcher passes the person's choice for the bundle, or the manifest's suggestion. The emulator is an optional layer since 5.5: a build without its artifacts still runs under `cork`, and a launch that selects `emulator` or `hybrid` without them is refused with `cpu: the emulator is not available in this build (engine "…" needs it)`. |
+| `engine` | `'emulator' \| 'cork'` | Which execution engine runs the program (`docs/core/cpu.md`'s "Engines"). Default `cork`, which loads nothing of the emulator. Chosen per launch: the launcher passes the person's choice for the bundle, or the manifest's suggestion. The emulator is an optional layer since 5.5: a build without its artifacts still runs under `cork`, and a launch that selects `emulator` without them is refused with `cpu: the emulator is not available in this build (engine "…" needs it)`. |
 | `sampling` | `boolean` | The `cpu` layer's always-on guest sampler (`docs/core/cpu.md`'s "Sampling"). `false` turns it off, for a caller measuring the emulator's own compiler rather than the guest's code. Always on otherwise. |
 | `record` | `number` | How many bridge events to keep for a replayable session; `0` keeps none. |
 | `traceStrings`, `profileCalls` | `boolean` | Keep the text an argument pointed at; time every host call as a phase. Both cost, both off by default. |
@@ -348,7 +348,7 @@ translator (`@bottlify/cork`), which the cpu layer loads by URL too. The outputs
 | `dist/engine.worker.js` | `src/host/engine.worker.js` | `@bottlify/core/engine.worker.js` |
 | `dist/log.worker.js` | `src/host/log.worker.js` | loaded by URL from `createApp` |
 | `dist/worklet.js` | copied from `src/layers/audio/output/worklet.js` | `@bottlify/core/worklet.js` |
-| `dist/cork/index.js`, `dist/cork/translator.worker.js` | `modules/cork/src/index.js` and its translation worker | loaded by URL for `engine: 'cork'` or `'hybrid'` |
+| `dist/cork/index.js`, `dist/cork/translator.worker.js` | `modules/cork/src/index.js` and its translation worker | loaded by URL for `engine: 'cork'` |
 | `dist/vendor/libv86.mjs`, `v86.wasm` | copied from `vendor/prebuilt/` | `@bottlify/core/libv86.mjs`, `@bottlify/core/v86.wasm` |
 | `dist/vendor/video-decoder.wasm` | copied from `vendor/prebuilt/` | `@bottlify/core/video-decoder.wasm` |
 | `dist/vendor/manifest.json` | written | checksums and source release of each vendor artifact |

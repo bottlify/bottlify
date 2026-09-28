@@ -43,7 +43,7 @@ import assert from 'node:assert/strict';
 import { skipWithout } from './fetched.js';
 import { readFile } from 'node:fs/promises';
 import { createV86Host } from '../../../core/src/layers/cpu/internal/v86-host.js';
-import { createHybridHost } from '../../../core/src/layers/cpu/internal/hybrid-host.js';
+import { createHybridHost } from './hybrid-host.js';
 import { TABLES_RESERVE } from '../../../core/src/layers/cpu/engine.js';
 import { createCorkRuntime } from '../runtime/runtime.js';
 import { PageFlag } from '../runtime/pages.js';

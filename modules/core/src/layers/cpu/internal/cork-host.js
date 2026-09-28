@@ -28,8 +28,7 @@
  *
  * Nothing here imports the cork package statically -- the layer never imports an
  * engine package, so the engine module (`createEngine`, `ownLayout`, the table
- * and page arithmetic) is handed in by `module.js`, which loaded it by URL the
- * way it does for `hybrid`.
+ * and page arithmetic) is handed in by `module.js`, which loaded it by URL.
  */
 
 import { exceptionName, hostFault } from './faults.js';
@@ -137,8 +136,7 @@ export function createCorkHost(config){
         eflagsOf, setEflags, WasmExit } = engine;
 
     // The guest RAM is the whole memorySize; the tables and the state block are
-    // memory of cork's own beside it, not carved out of the guest's the way the
-    // hybrid carves the tables from the top of the emulator's RAM.
+    // memory of cork's own beside it, not carved out of the guest's.
     const layout = ownLayout({ ramSize: memorySize });
     // A profiling run (`blockProfile`) has the block profile past the tables,
     // and the interpreter tier in wasm its hot counts past that.
@@ -371,8 +369,8 @@ export function createCorkHost(config){
     }
 
     /**
-     * Every page a host write touches is invalidated, as the hybrid host does:
-     * a write into a page holding translated code drops its regions.
+     * Every page a host write touches is invalidated: a write into a page
+     * holding translated code drops its regions.
      *
      * @param {number} address
      * @param {number} length

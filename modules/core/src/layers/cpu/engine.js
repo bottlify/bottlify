@@ -364,8 +364,10 @@
 
 /**
  * How much of the top of the guest's RAM an engine may take for its own
- * tables in hybrid mode, where the memory is the emulator's and cannot be
- * grown behind its views. The layer reports the RAM below it as the memory's
- * size to every other layer, so nothing of the guest is ever placed there.
+ * tables when it runs over the emulator's memory, as the translator's
+ * sequence corpus runs it (`cork/src/testing/hybrid-host.js`), where
+ * the memory cannot be grown behind the emulator's views. The RAM below it
+ * is the memory's size to everything else, so nothing of the guest is
+ * placed there.
  */
 export const TABLES_RESERVE = 8 * 1024 * 1024;

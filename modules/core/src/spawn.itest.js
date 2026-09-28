@@ -533,3 +533,111 @@ test('a child is the process its parent was told of: GetCurrentProcessId is PROC
         assert.deepEqual(childCodes, [told], 'and the child answers that one as its own');
         assert.notEqual(told, 0x1000, 'which is not the parent\'s');
     });
+
+/** @param {number} value */
+const le32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
+/** @param {string} text */
+const cstring = text=>[...text].map(c=>c.charCodeAt(0)).concat(0);
+
+/**
+ * A parent that hands its child a file as the child's output: it creates
+ * C:\App\out.txt, starts child.exe with STARTF_USESTDHANDLES and the file as
+ * hStdOutput and hStdError, waits for it, writes "P" through its own handle
+ * and reads the file back from the start. The exit code is the bytes read,
+ * plus 0x100 when the last is the parent's "P" and 0x200 when the first is
+ * the child's "c": 0x306 when the child's "child" came first and the parent's
+ * write went on from where the child left the shared position.
+ */
+function buildOutputParent(){
+    const startupSize = 68;
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['CreateFileA', 'CreateProcessA', 'WaitForSingleObject',
+            'WriteFile', 'SetFilePointer', 'ReadFile', 'ExitProcess'] },
+        data: {
+            path: cstring('C:\\App\\out.txt'), child: cstring('C:\\App\\child.exe'),
+            startup: [...le32(startupSize), ...new Array(startupSize - 4).fill(0)],
+            info: new Array(16).fill(0), mark: cstring('P'), count: [0, 0, 0, 0],
+            buffer: new Array(16).fill(0),
+        },
+        codeSize: 0x200,
+        code: ({ iat, at })=>{
+            const call = (/** @type {string} */ name)=>[0xff, 0x15, ...le32(iat(name))];
+            const push = (/** @type {number} */ value)=>[0x68, ...le32(value)];
+            const bytes = [
+                // STARTF_USESTDHANDLES
+                0xc7, 0x05, ...le32(at('startup') + 44), ...le32(0x100),
+                ...push(0), ...push(0x80), ...push(2), ...push(0), ...push(3),
+                ...push(0xc0000000), ...push(at('path')), ...call('CreateFileA'),
+                0x89, 0xc3,                                                   // mov ebx, eax
+                0xa3, ...le32(at('startup') + 60),                           // hStdOutput
+                0xa3, ...le32(at('startup') + 64),                           // hStdError
+                ...push(at('info')), ...push(at('startup')), ...push(0), ...push(0), ...push(0),
+                ...push(1), ...push(0), ...push(0), ...push(at('child')), ...push(0),
+                ...call('CreateProcessA'),
+                ...push(0xffffffff), 0xff, 0x35, ...le32(at('info')),
+                ...call('WaitForSingleObject'),
+                ...push(0), ...push(at('count')), ...push(1), ...push(at('mark')), 0x53,
+                ...call('WriteFile'),
+                ...push(0), ...push(0), ...push(0), 0x53, ...call('SetFilePointer'),
+                ...push(0), ...push(at('count')), ...push(16), ...push(at('buffer')), 0x53,
+                ...call('ReadFile'),
+                0x8b, 0x0d, ...le32(at('count')),                            // mov ecx, [count]
+                // movzx eax, byte [buffer]; cmp al, 'c'; jne +6; add ecx, 0x200
+                0x0f, 0xb6, 0x05, ...le32(at('buffer')),
+                0x3c, 0x63, 0x75, 0x06, 0x81, 0xc1, ...le32(0x200),
+                // movzx eax, byte [buffer + 5]; cmp al, 'P'; jne +6; add ecx, 0x100
+                0x0f, 0xb6, 0x05, ...le32(at('buffer') + 5),
+                0x3c, 0x50, 0x75, 0x06, 0x81, 0xc1, ...le32(0x100),
+                0x51, ...call('ExitProcess'),
+            ];
+            return bytes.concat(new Array(0x200 - bytes.length).fill(0xcc));
+        },
+    });
+}
+
+/** A child that writes "child" to its standard output and exits 0. */
+function buildOutputChild(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['GetStdHandle', 'WriteFile', 'ExitProcess'] },
+        data: { text: cstring('child'), count: [0, 0, 0, 0] },
+        codeSize: 0x40,
+        code: ({ iat, at })=>{
+            const bytes = [
+                0x6a, 0xf5, 0xff, 0x15, ...le32(iat('GetStdHandle')),       // STD_OUTPUT_HANDLE
+                0x6a, 0x00, 0x68, ...le32(at('count')), 0x6a, 0x05, 0x68, ...le32(at('text')),
+                0x50, 0xff, 0x15, ...le32(iat('WriteFile')),
+                0x6a, 0x00, 0xff, 0x15, ...le32(iat('ExitProcess')),
+            ];
+            return bytes.concat(new Array(0x40 - bytes.length).fill(0xcc));
+        },
+    });
+}
+
+// Under cork alone: the handing over is the process layer's, whichever engine
+// runs, and two emulators beside the file's others exhaust a node process.
+for (const engine of /** @type {const} */ (['cork']))
+{
+    test('a child writes into the file its parent handed it as its output',
+        { timeout: 120000 }, async t=>{
+            const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+            const app = await createApp({
+                executable: buildOutputParent(),
+                imagePath: 'C:\\App\\parent.exe',
+                engine,
+                files: [{ path: 'C:\\App\\child.exe', bytes: buildOutputChild() }],
+                v86: {
+                    moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+                    wasmBytes: wasm.buffer.slice(wasm.byteOffset,
+                        wasm.byteOffset + wasm.byteLength),
+                },
+            });
+            t.after(()=>app.dispose());
+            /** @type {string[]} */
+            const console = [];
+            app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
+                console.push(text));
+            const code = await app.run({ timeoutMs: 60000 });
+            assert.equal(code, 0x306, 'the file reads "childP": the child first, the parent after');
+            assert.equal(console.join('').includes('child'), false, 'nothing went to the console');
+        });
+}

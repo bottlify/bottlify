@@ -579,3 +579,24 @@ test('the RAM lent to the memory layer is the machine\'s own, byte 0 at address 
     assert.equal(h.readU32(0x3000) & 0xff, 0xab, 'and a byte written in place reads back');
     assert.equal(h.ramView(), ram, 'one view for the life of the machine');
 });
+
+test('addresses below closedBelow fault on a fetch and a store; none are closed by default',
+    ()=>{
+        // call [0x20100], whose word is zero: a call through a null pointer.
+        const call = [0xff, 0x15, 0x00, 0x01, 0x02, 0x00, 0xf4];
+        const closed = host({ closedBelow: 0x10000 });
+        load(closed, 0x20000, call);
+        closed.runSlice(100);
+        assert.equal(closed.fault()?.eip, 0, 'the fetch at address zero faults');
+
+        // mov [0x10], eax; hlt
+        const store = host({ closedBelow: 0x10000 });
+        load(store, 0x20000, [0xa3, 0x10, 0, 0, 0, 0xf4]);
+        store.runSlice(100);
+        assert.equal(store.fault()?.eip, 0x20000, 'the store faults at its instruction');
+
+        const open = host();
+        load(open, 0x20000, [0xa3, 0x10, 0, 0, 0, 0xf4]);
+        assert.equal(open.runSlice(100), 2);
+        assert.equal(open.fault(), null);
+    });

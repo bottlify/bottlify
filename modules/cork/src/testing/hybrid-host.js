@@ -5,7 +5,10 @@
  */
 
 /**
- * The hybrid host: one register file, one memory, two executors.
+ * The hybrid host: one register file, one memory, two executors -- no longer
+ * an engine a launch selects, but the oracle the sequence corpus
+ * (`sequences-judge.js`) judges translated code against, the emulator running
+ * beside the translator on the same state.
  *
  * The emulator runs everything a translator has not translated; the
  * translator runs the regions it has. Both work on the emulator's own
@@ -34,7 +37,7 @@
 /**
  * @param {Object} parts
  * @param {any} parts.emulator   The emulator's host (`createV86Host`).
- * @param {import('../engine.js').Runtime | null} parts.cork
+ * @param {import('../../../core/src/layers/cpu/engine.js').Runtime | null} parts.cork
  *     The translator's runtime, or null while there is none.
  */
 export function createHybridHost({ emulator, cork }){

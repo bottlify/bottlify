@@ -233,7 +233,7 @@ function parse(argv){
         corkConfig: argv.includes('--cork-config')
             ? JSON.parse(argv[argv.indexOf('--cork-config') + 1]) : undefined,
         // Which execution engine runs the program (`cork`, the default, or
-        // `emulator` / `hybrid`), so two runs differ by that alone.
+        // `emulator`), so two runs differ by that alone.
         engine: argv.includes('--engine') ? argv[argv.indexOf('--engine') + 1] : undefined,
         // The display the program is told it has, as `WxH`. The launcher
         // names the person's own screen, which is rarely a size a program of
@@ -793,31 +793,6 @@ function describe(result, context, calls, symbols){
     {
         describeCork({ ...result.cork, staleAt: result.staleAt, staleTrail: result.staleTrail },
             say);
-        say('');
-    }
-
-    if (result.differential)
-    {
-        say(`  differential: ${result.differential.replayed} regions replayed,`
-            + ` ${result.differential.divergences} diverged`
-            + (result.differential.skipped
-                ? ` (not replayed: ${result.differential.skipped.hostCalls} called the host,`
-                    + ` ${result.differential.skipped.overran} overran the undo ring,`
-                    + ` ${result.differential.skipped.budget ?? 0} left on their budget)`
-                : ''));
-        for (const [field, kind] of Object.entries(result.differential.byField ?? {}))
-        {
-            say(`    ${field}: ${kind.count} (${kind.at.join(', ')})`);
-        }
-        if (result.differential.first)
-        {
-            say(`    first divergence at ${result.differential.first.at}:`);
-            for (const field of result.differential.first.diff)
-            {
-                say(`      ${field.name}: emulator=${field.expected} cork=${field.actual}`
-                    + (field.trail ? ` (emulator steps: ${field.trail})` : ''));
-            }
-        }
         say('');
     }
 

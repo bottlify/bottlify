@@ -169,7 +169,7 @@ import { createReplicas } from './replicas.js';
  *           write it somewhere.
  * @property {Record<string, number>} [jit]
  *     The emulator's compiler budgets, by config index. For measurement.
- * @property {'emulator' | 'hybrid' | 'cork' | 'differential'} [engine]
+ * @property {'emulator' | 'cork'} [engine]
  *     Which execution engine runs the program (`docs/core/cpu.md`'s "Engines").
  *     Default `cork`. Chosen per launch: a launcher passes the person's
  *     choice for the bundle, or the bundle manifest's suggestion.
@@ -360,9 +360,6 @@ export function retryingFetch({ fetch, events, retry }){
             + `attempts: ${reason}`);
     };
 }
-
-/** The range at the start of the address space Windows never maps. */
-const NULL_REGION = 0x10000;
 
 /**
  * How much one range request may ask for.
@@ -1233,7 +1230,7 @@ const CORK = /** @type {{ env?: { BOTTLIFY_CORK?: string } }} */ (import.meta).e
     ?? '../../cork/src/index.js';
 
 /**
- * The translator to load for `hybrid` or `cork`: what the caller named, else
+ * The translator to load for `cork`: what the caller named, else
  * the one built beside this module (see `CORK`).
  *
  * @param {{ moduleUrl?: string } | undefined} asked
@@ -1977,7 +1974,7 @@ function expectIndex(expected){
  * The zstd decoder a bundle read uses, by engine. While the emulator is loaded
  * its wasm decoder is several times faster than this project's own
  * (`modules/core/src/zstd.js`), and a first bundle load decodes the whole
- * bundle, so `emulator` and `hybrid` use it; `cork` has no emulator and uses
+ * bundle, so `emulator` uses it; `cork` has no emulator and uses
  * the project's. Both answer synchronously, as a guest read needs. The choice
  * is made once, when the bundle is mounted; when `zstd.js` is measured at the
  * wasm decoder's speed it becomes the decoder for every engine.
@@ -2066,7 +2063,7 @@ async function mountBundle({ options, cpu, filesystem, events, translationStore 
      * A block, turned back into bytes, without awaiting anything.
      *
      * zstd is decoded by the engine's decoder (`chooseZstdDecoder` above): the
-     * emulator's wasm one under `emulator`/`hybrid`, this project's own
+     * emulator's wasm one under `emulator`, this project's own
      * (`zstd.js`) under `cork`. Both answer synchronously. Deflate has
      * no synchronous decoder in a browser at all, so a deflate block is
      * inflated when it is *fetched* -- which is already an asynchronous step --
@@ -3005,9 +3002,11 @@ async function buildApp(options){
         },
         cpu: {
             jit: options.jit, sampling: options.sampling, memorySize,
-            // The 64 KiB Windows never maps: a call or a store through a null
-            // pointer is an access violation a program's handler can catch.
-            closedBelow: NULL_REGION,
+            // Open, where Windows never maps the first 64 KiB: TRON 2.0 reads
+            // through a null pointer somewhere our libraries hand it one that
+            // Windows would not, and reads zero there; closed, it faults.
+            // Closed again once that is found (roadmap/00-cork-defects.md).
+            closedBelow: 0,
             engine: options.engine ?? DEFAULT_ENGINE,
             engineUrl: (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
                 ? corkArtifacts(options.cork).moduleUrl : null,

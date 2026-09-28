@@ -8,10 +8,9 @@
  * Whole programs under `cork` with the emulator's machine absent (plan step
  * 5.3): the interpreter runs the cold code, the hotness the interpreter counts
  * forms regions at the threshold, and the program ends as it ends on the
- * emulator alone. The same fixtures `hybrid-programs.itest.js` runs -- `hello`,
- * a calling loop (`imports`), `qsort` (callbacks) and the threaded fixture --
- * prove the scheduler, the loader and the trap channel still agree when the
- * only executor is cork's own.
+ * emulator alone. The fixtures -- `hello`, a calling loop (`imports`), `qsort`
+ * (callbacks) and the threaded fixture -- prove the scheduler, the loader and
+ * the trap channel still agree when the only executor is cork's own.
  *
  * The emulator is read only to produce the reference each program is judged
  * against; the cork run itself loads nothing of it.

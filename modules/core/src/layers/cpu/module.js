@@ -5,10 +5,7 @@
  */
 
 import { createV86Host } from './internal/v86-host.js';
-import { createHybridHost } from './internal/hybrid-host.js';
 import { createCorkHost } from './internal/cork-host.js';
-import { createDifferentialHost } from './internal/differential-host.js';
-import { TABLES_RESERVE } from './engine.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
 import {
@@ -31,24 +28,18 @@ import { fileNameOf } from './internal/translation-store.js';
 export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
 
 /**
- * The execution engines a launch may select (`engine.js` for the contract).
- *
- * `emulator` is the vendored emulator alone; `hybrid` runs the emulator with
- * a translator taking the regions it has translated, on one register file;
- * `cork` is the translator alone; `differential` is `hybrid` with every
- * region replayed on the emulator and compared, for test builds. The last is
- * named here so a configuration is refused for the right reason -- not built
- * yet, rather than unknown -- until its step lands.
+ * The execution engines a launch may select (`engine.js` for the contract):
+ * `emulator`, the vendored emulator alone, and `cork`, the translator alone.
  */
-export const ENGINES = Object.freeze(['emulator', 'hybrid', 'cork', 'differential']);
+export const ENGINES = Object.freeze(['emulator', 'cork']);
 
 /** The engines a launch can run today. */
-const BUILT_ENGINES = new Set(['emulator', 'hybrid', 'cork', 'differential']);
+const BUILT_ENGINES = new Set(ENGINES);
 
 /**
  * The engine a launch that names none runs: the translator. The emulator stays
- * an engine a launch may select, and the reference the differential suites
- * judge the translator against.
+ * an engine a launch may select, and the reference the translator's suites
+ * judge it against.
  */
 export const DEFAULT_ENGINE = 'cork';
 
@@ -308,8 +299,7 @@ export function createCpuModule(){
                 // hundreds of megabytes of it. Must stay a power of two -- the
                 // emulator requires it.
                 memorySize: config?.memorySize ?? DEFAULT_MEMORY_SIZE,
-                // The translator's module, imported at boot for `hybrid`; absent,
-                // hybrid runs with no translator attached.
+                // The translator's module, imported at boot for `cork`.
                 engineUrl: config?.engineUrl ?? null,
                 /** @type {import('./engine.js').EngineConfig} */
                 cork: config?.cork ?? {},
@@ -393,12 +383,9 @@ export function createCpuModule(){
                     // What anything placing an image has to fit inside. A base
                     // chosen without it is a guess about how much memory the
                     // machine was given, and a wrong guess writes past the end.
-                    // Under hybrid the top of the emulator's RAM is the tables';
-                    // cork allocates its state block and tables beside the guest's
+                    // Cork allocates its state block and tables beside the guest's
                     // full RAM, so nothing is carved out of it.
-                    memorySize: engine === 'cork'
-                        ? settings.memorySize
-                        : settings.memorySize - (engine === 'emulator' ? 0 : TABLES_RESERVE),
+                    memorySize: settings.memorySize,
                     // Where our own boot ROM sits. Worth registering as a region
                     // by whoever lays out memory: a fault leaves the processor
                     // standing in the stub behind its vector, and a report that
@@ -470,57 +457,7 @@ export function createCpuModule(){
                                 + ` build (engine "${engine}" needs it)`);
                         }
                         const emulator = await createV86Host({ ...settings, moduleUrl, wasmBytes });
-                        // Under `hybrid` the emulator's host is composed with the
-                        // translator's runtime, built over the emulator's own memory
-                        // and register file by the module the configuration names.
-                        // Without one the composition is the emulator's host under
-                        // another name, which runs a program exactly as the emulator
-                        // alone does. `differential` is the same composition plus a
-                        // replay of every region on the emulator, so it loads the
-                        // module's snapshot machinery too.
-                        let engineModule = null;
-                        const corkLayout = emulator.stateLayout(TABLES_RESERVE);
-                        if ((engine === 'hybrid' || engine === 'differential')
-                            && settings.engineUrl)
-                        {
-                            engineModule = await import(settings.engineUrl);
-                            const { createEngine } = engineModule;
-                            state.cork = createEngine({
-                                memory: emulator.wasmMemory(),
-                                layout: corkLayout,
-                                // A differential build logs every store's old bytes, so the
-                                // replay can rewind the translator's writes first.
-                                config: { trapPort: settings.trapPort, ...settings.cork,
-                                    ...(engine === 'differential' ? { undoLog: true } : {}) },
-                                read: emulator.readByte,
-                                imports: {
-                                    // The call channel from inside translated code:
-                                    // the handler the port write reaches, on the
-                                    // register file the region wrote back; 1 when it
-                                    // moved EIP or stopped the machine, so the region
-                                    // leaves rather than going on.
-                                    trap: (/** @type {number} */ value)=>{
-                                        const at = emulator.eip();
-                                        emulator.raiseTrap(value);
-                                        return emulator.eip() !== at || emulator.halted() ? 1 : 0;
-                                    },
-                                    getEflags: emulator.getEflags,
-                                    x87Read: ()=>0,
-                                    rdtsc: ()=>emulator.readTsc(),
-                                    handoffPage: emulator.handoffPage,
-                                    handoffHash: emulator.handoffHash,
-                                    dirtyCode: emulator.dirtyCode,
-                                },
-                            });
-                        }
-                        state.host = engine === 'hybrid'
-                            ? createHybridHost({ emulator, cork: state.cork })
-                            : engine === 'differential'
-                                ? createDifferentialHost({
-                                    emulator, cork: state.cork, engine: engineModule,
-                                    memory: emulator.wasmMemory(), layout: corkLayout,
-                                })
-                                : emulator;
+                        state.host = emulator;
                     }
                     state.thunks = createThunkTable({
                         base: settings.thunkBase,
@@ -1110,11 +1047,6 @@ export function createCpuModule(){
                     },
                     // The translator's own report, or null when none is attached.
                     cork: instance.cork ? instance.cork.diagnostics() : null,
-                    // The differential's own account, or null when the engine is
-                    // not one with a replay.
-                    differential: typeof instance.host?.differentialDiagnostics === 'function'
-                        ? instance.host.differentialDiagnostics()
-                        : null,
                 },
             };
         },

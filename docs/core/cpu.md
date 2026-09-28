@@ -33,45 +33,11 @@ call, and answers a `Runtime` (`entryOf`, `run`, `noteHot`, `translatePending`,
 refuses it — so a launch that selects the emulator runs with no translator installed, and a
 launch that selects the translator loads nothing of the emulator. The `engine` configuration
 field selects one per launch, and a launch that names none runs the translator (`engine: 'cork'`,
-`DEFAULT_ENGINE`); the emulator is selected by name, and stays the reference the differential
-suites judge the translator against. `internal/hybrid-host.js` composes the emulator's host with a
-translator's runtime on one register file. `diagnostics()` reports the selected engine as
+`DEFAULT_ENGINE`); the emulator is selected by name, and stays the reference the translator's
+suites judge it against. There is no third engine: the hybrid that ran the translator over the
+emulator's memory, and the differential that replayed it there, are gone. `diagnostics()` reports the selected engine as
 `metrics.engine` and the translator's own report as `metrics.cork` (null when none is
 attached).
-
-Under `hybrid` with a translator (`engineUrl` names its module; without one, hybrid is the
-emulator under another name, proven by identical instruction counts) the slice is shared:
-while the guest stands at an address the translator has an entry for, the translator runs it
-with what remains of the slice's budget, and when it leaves for an untranslated address, a
-fault (the emulator then re-executes the instruction and raises it the ordinary way) or a
-trap, the emulator takes a turn with the rest -- and gives it back: the runtime sets the
-emulator's per-page handoff bit for every page a published region spans (`handoffPage`,
-cleared when the page holds none), and the emulator's slice returns as soon as it reaches
-such a page having retired something, so the two go round within one slice until the budget
-is spent. An emulator build without the export runs its turn to a boundary of its own and
-ends the slice; `cork.handoffMisses` counts the slices that so ended inside a page the
-translator holds (`Runtime.holdsPage`), zero with the export.
-
-Under `differential` the same slice loop replays every region on the emulator before its run
-stands. Its modules are built with the undo log (`undoLog: true`; the translation store is not
-used, since its modules carry no log), each store appending its old bytes to the ring in the
-tables. The state is snapshotted, the translator runs the region, the state is snapshotted
-again with the spans the ring names, the registers are restored and the stores rewound newest
-first, the emulator runs to the region's exit, and the two records are compared -- the
-emulator is the oracle -- over registers, flags, eip, the x87 block, XMM and the written
-bytes. The guest then carries on from the translator's registers and bytes. A region that
-called the host through the trap port is not replayed (the handler would run twice), nor one
-whose stores overran the ring (it cannot be rewound), nor one that left on its budget (it leaves
-at a loop head of its own, which the emulator reaches on its first pass); `metrics.differential`
-counts all three under
-`skipped`, beside how many regions were replayed, how many diverged, and the first region that
-did with the fields that differed; `byField` counts the divergences by the first field that
-differed, with the first regions of each. The emulator is run to the region's exit by making
-the exit a place it hands off at (the address in a free slot of the entry hash, its page
-flagged while the replay lasts), since its slice of one instruction is not one instruction in
-compiled code; a `control` divergence carries the trail of the emulator's slices. Where the
-emulator's compiled code transfers within a page without the handoff check, it still runs past
-the exit -- a limit of the oracle, named by the trail, not a divergence of the translator.
 
 Between regions, translated
 code needs no slice loop at all where the engine has tail calls: every region function is
@@ -771,12 +737,11 @@ The same loop: `repne scasb` to a zero at the end of 64 bytes 86 -> 34 ns a turn
 6 130 -> 2 060, of 64 KiB 280 000 -> 37 000 (0.56 ns a byte); `repe cmpsb` of two equal runs of
 64 KiB 331 000 -> 51 600, `repe cmpsd` 63 700 -> 15 600.
 
-Under cork alone the addresses below `closedBelow` are marked no-access, and a process sets it
-to 64 KiB, the range Windows never maps: a call through a null pointer faults at its fetch and a
-store through one at the store, as access violations a program's handler can catch. A translated
-read outside `precise` is not tested (it wraps into RAM, above), so it still reads there. The
-emulator and hybrid read the null page, and the two engines agree only where a program does not
-touch it; projecting the memory layer's read-only regions into the table is still to do.
+Under cork alone the addresses below `closedBelow` are marked no-access -- a fetch or a store
+there faults, as an access violation a program's handler can catch; a translated read outside
+`precise` is not tested (it wraps into RAM, above). A process passes 0 for now, leaving the null
+page readable as the emulator's is: a title that runs reads through a null pointer our libraries
+hand it where Windows would not, and it faults once the range is closed.
 
 Under `engine: 'cork'` (milestone 5) nothing of the emulator is loaded. The engine module the
 configuration names (`engineUrl`) is loaded by URL at `boot()` like the emulator is, and
@@ -1008,7 +973,7 @@ enter the type check or the bundle.
 | option          | type                       | default             | meaning |
 |-----------------|----------------------------|---------------------|---------|
 | `memorySize`    | number (power of two)      | `1 GiB`             | Guest RAM. Reserved, not committed: the host pays for pages the guest touches. Must be a power of two; the emulator requires it. With an engine other than `emulator` the top `TABLES_RESERVE` (4 MiB) is the translator's tables, and `layout.memorySize` reports the rest. |
-| `engineUrl`     | string                     | none                | The translator's entry module, imported at `boot()` under `hybrid`; `createApp` resolves it from `cork.moduleUrl` or the package beside core. Absent, `hybrid` runs with no translator. |
+| `engineUrl`     | string                     | none                | The translator's entry module, imported at `boot()` under `cork`; `createApp` resolves it from `cork.moduleUrl` or the package beside core. |
 | `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold` (the interpreter's own count under `cork`; default 2, where the sampler's default is 2000; the queue is drained hottest first), `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`, `maxQueued` (the candidates kept waiting, the coldest evicted past it; default 8192), `maxBatchRegions` (a deep queue takes a quarter of itself per batch, up to this, and a batch its regions' direct callees; default 256), `relinkAfter` and `relinkRegions` (see the relink above; 0 turns it off), `dispatch` (default false: true places each module in a range of the table so a transfer into its own module is a direct tail call, see the transfers after the relink; off by default because games run from their start to a menu on real hardware held 57 % of the canvas's frame rate with it alone on against neither, where the benchmarks gain at most a few per cent) and `mergeAfter` (default 2^16: the crossings between two modules, for each region a merge would build, before the worker gathers them into one; 0 never), `leafCalls` (default true: a small leaf callee is formed into its caller, see above), `runtimeHelpers` (default true: a direct call to a compiler runtime helper recognised by its bytes, MSVC's `_ftol2`, is formed as the instructions it computes, see above), `callTargets` (default false: true samples indirect calls and forms a region whose indirect call keeps going to a few small leaf callees again with them in it, see above -- the benchmarks' virtual and indirect calls run four to five times faster with it, but games run from their start to a menu on real hardware lost more than half the canvas's frame rate with it and `dispatch` on, froze frames past 250 ms and repeated their audio, and the cause is not found yet, so it is off until it is), `structure` (default true: a region's loops, those of its control flow, are wasm loops -- a jump forward is a branch out of its target's wasm block, a jump back to the head of a loop around it a branch to that loop, only other backward jumps take the dispatch, and a block inside a loop is entered through the region's copies, see the loops above; false: every backward jump goes through the dispatch, and the store keys lack the `S` a run with it on or left unset has; a flag no block after reads is not computed either way, see the lazy flags above; the first structured form, loops by address, doubled the guest's time a frame in Doom 3's menu, and this one has not been measured in a game yet), `wideFirst` (default true: x87 regions compiled for the precision control the program runs under -- the wide ones until single is seen, single until another is seen -- see the x87 section; false tests precision at every rounding operation from the start), `precise` (default false: what the translator and the interpreter tier in wasm relax for speed, listed under the limitations below -- the x87 exception bookkeeping, and the flags an instruction leaves undefined, which hold what the cheapest code leaves there -- is not kept; true keeps it as the processor does and the undefined flags as the emulator leaves them -- the corpora, the sequences and the emulator-judged tests run so, and its translations are stored under their own key, `P` among the emitting settings), `countTransfers` (a diagnostic: each transfer between regions through the hash counts into `transfers`), `blockProfile` (a diagnostic, cork's own layout only: every block counts its executions in a table past the tables -- a slot per hashed block start of its address, count and a shared-slot mark, in a memory the host sizes for it -- the diagnostics carry `blockCounts` and the forty `topBlocks` with their regions, the harness writes them beside its report for `tools/cork-mix.mjs`, and the run keeps no store), `blockProfileFrom` (with `blockProfile`: seconds after the runtime is made at which the counts start over, so the profile holds a steady state rather than the load), `timings` (a diagnostic, default false: the host clock read around the translator's phases and the host's slices, for the diagnostics' milliseconds and `stalls`, the record of long holds; off, those read 0 and nothing is recorded -- the harness turns it on), `traceStore` (a diagnostic: every store key put and missed, `entry:hash:top` with the blocks' spans, in the diagnostics' `storeTrace`; the harness writes it beside the report as `-store.json`, and `missNoRecord`/`missNoModule` split the misses always, as `lookedUpNow`/`lookedUpLater` count the batches the store answered in the call that formed them and a turn later), `feed`, `missThreshold`, `wasmInterpreter` (default true: under `cork` alone the interpreter tier's integer, x87 and SSE instructions run in wasm, see the interpreter above; false runs the JavaScript interpreter alone), `wasmInterpreterAfter` (default 8192: how far the JavaScript interpreter carries a process's hosts, between them, before the wasm tier takes over, a jump target new to a host counting as 128 instructions; 0 runs the tier from the first instruction), and `leaveOut`, the instruction classes (`x87`, `mmx`, `sse`) a run leaves to the emulator so a defect can be localised by class; such a run keeps no translation store. The diagnostics among them -- `timings`, `blockProfile`, `traceStore`, `countTransfers` -- are left out of a production bundle whatever is asked (`import.meta.BOTTLIFY_DIAGNOSTICS`, see `host.md`), the translator among it: `npm run build` bundles `@bottlify/cork` into `dist/cork/` under the same define, and the built package loads it from there. |
 | `trapPort`      | number                     | `0xb077`            | The I/O port a stub writes its trap id to. |
 | `entryVector`   | number                     | `0x7000`            | Linear address of the dword the ROM jumps through to enter guest code. |
@@ -1017,7 +982,7 @@ enter the type check or the bundle.
 | `thunkCapacity` | number (bytes)             | `16384 * 16`        | Room reserved for the stub table: 16 384 slots of 16 bytes. Every import and every COM method takes one; none is ever given back. |
 | `jit`           | `Record<number, number>`   | `undefined`         | The emulator's compiler budgets by config index (1 = pages one module may span, 3 = extra basic blocks discovery may follow, 6 = chaining). For measurement, not production. |
 | `sampling`      | `boolean`                  | `true`              | Whether `runSlice` credits an address bucket per slice (see "Sampling" below). Always on; `false` is the only way to turn it off, for a caller measuring the emulator itself. |
-| `engine`        | `'emulator' \| 'hybrid' \| 'cork' \| 'differential'` | `'cork'` | Which execution engine runs the program (see "Engines" above). An unknown name is refused by `create()` with `cpu: unknown engine "x" (…)`. `cork` runs with nothing of the emulator loaded (see "Engines" above); `boot()` under it needs no emulator artifacts and throws `cpu: engine "cork" needs an engineUrl` without one. `hybrid` without `engineUrl` composes the emulator's host with no translator attached and runs a program exactly as `emulator` does, to the instruction. `differential` is `hybrid` with every region replayed on the emulator and compared; it needs the emulator artifacts and an `engineUrl`. |
+| `engine`        | `'emulator' \| 'cork'` | `'cork'` | Which execution engine runs the program (see "Engines" above). An unknown name is refused by `create()` with `cpu: unknown engine "x" (…)`. `cork` runs with nothing of the emulator loaded; `boot()` under it needs no emulator artifacts and throws `cpu: engine "cork" needs an engineUrl` without one. |
 
 Chaining (index 6) is switched on automatically when the running engine validates a wasm tail
 call and the caller has not set the knob (`tailCallsSupported()` in `internal/v86-host.js`).
@@ -1044,8 +1009,8 @@ otherwise.
 | `readU32sInto` | `(address, count, into, at) => void` | `count` dwords, signed, into `into` from `at`, in one call and with no region check -- the memory layer's `readU32sInto` checks the span and then hands it here, where it made a call down through this api to the host per word. |
 | `writeData` | `(address, bytes) => void` | Writes straight into RAM without the emulator's device checks. Meant for memory the guest does not execute; a page the compiler holds code for is still dirtied (see "Host writes and the compiler"). |
 | `readReg32` / `writeReg32` | `(name[, value])` | `eax ecx edx ebx esp ebp esi edi`, plus `eip` and `eflags` (the latter read through the emulator's accessor so lazy arithmetic flags are folded in). Unknown names throw. |
-| `registerFile` | `() => Int32Array \| null` | The eight general registers in place, `eax` to `edi` in the encoding's order, for a caller that reads and writes them on every crossing (the bridge: ESP read, EAX written); `null` when the engine keeps them nowhere a view reaches. Cork's view lives as long as the machine; the emulator's reads empty once it grows its memory, and the caller asks again. `hybrid` and `differential` lend the emulator's, which the translator runs over. |
-| `ramView` | `() => Uint8Array \| null` | The guest's RAM in place, byte 0 at guest address 0, for a caller that reads it on every crossing and checks its own spans (the memory layer's reader: a host call's stack words and its thread's last error); `null` when the engine keeps it nowhere a view reaches. Cork's view lives as long as the machine; the emulator's is detached once it grows its memory, and the caller asks again. `hybrid` and `differential` lend none, and are read through `readU32`/`readU32sInto`. |
+| `registerFile` | `() => Int32Array \| null` | The eight general registers in place, `eax` to `edi` in the encoding's order, for a caller that reads and writes them on every crossing (the bridge: ESP read, EAX written); `null` when the engine keeps them nowhere a view reaches. Cork's view lives as long as the machine; the emulator's reads empty once it grows its memory, and the caller asks again. |
+| `ramView` | `() => Uint8Array \| null` | The guest's RAM in place, byte 0 at guest address 0, for a caller that reads it on every crossing and checks its own spans (the memory layer's reader: a host call's stack words and its thread's last error); `null` when the engine keeps it nowhere a view reaches. Cork's view lives as long as the machine; the emulator's is detached once it grows its memory, and the caller asks again. |
 | `registerTrap` | `(name, popBytes, { preserveResult?, forwardTo?, saveRegisters?, pushEdx?, holdEip? }) => { id, address }` | Takes a stub slot; written into guest memory immediately if the table has already been laid down. Throws when the table is full. `saveRegisters` (`pushad`) or `pushEdx` (just EDX) run before the trap even without `forwardTo`; `holdEip` emits neither `ret` nor a jump, for a caller that decides EIP itself while handling the trap (the bridge's `hook`, EDX alone, or its `siteHook`, every register, together with `saveRegisters`). |
 | `thunkImage` | `() => Uint8Array` | The stub table so far, to be written at `layout.thunkBase`. Marks the table as written. |
 | `parkAddress` | `() => number` | Slot 0 of the table: `hlt; jmp` — where a terminating or blocking call returns to. |
@@ -1272,7 +1237,7 @@ with a clang that targets wasm32 (`--native`). `src/zstd-wasm.js` instantiates i
 answers `decompress(packed, expectedLength)` synchronously with `zstd.js`'s errors.
 `mountBundle` chooses once, by `chooseZstdDecoder` (unit-tested in `app.test.js`): the wasm
 build for every engine when the package carries it (`AppOptions.zstd`, or `vendor/zstd.wasm`
-beside the module); without it, the emulator's decoder under `emulator` and `hybrid` and
+beside the module); without it, the emulator's decoder under `emulator` and
 `zstd.js` under `cork`. The artifact is optional (`check-package`), fetched by
 `npm run fetch:zstd` from the release the vendor workflow publishes and pinned in
 `zstd-lock.json`. The three decoders are judged byte for byte against each other and against
@@ -1314,9 +1279,9 @@ to its end: tens of microseconds each, which ran a title's scene at 240 ns an in
   layer offers the fault through `onFault` and otherwise stops. What `fault()` reports is for
   whoever drives the machine to act on.
 - **Without paging, a stray pointer does not fault.** Every address in RAM is readable and
-  writable -- under the emulator and hybrid the null page included, so a program that probes a
-  pointer or writes through null and expects an access violation carries on instead. Cork alone
-  closes the range below `closedBelow` (above).
+  writable, the null page included, so a program that probes a pointer or writes through null
+  and expects an access violation carries on instead. Cork can close the range below
+  `closedBelow` (above); a process does not yet.
 - **Only the first 32 vectors** have gates. Hardware interrupts are not delivered; the guest
   runs with `IF` clear from the ROM's `cli`.
 - **Ring 0, flat segments, no paging.** The guest runs at CPL 0 with two flat 4 GiB
@@ -1347,7 +1312,7 @@ to its end: tens of microseconds each, which ran a title's scene at 240 ns an in
   wait on -- an asynchronous compile with nothing else pending, the process's exit -- so there
   the next machine's `createApp` and the exit waited half a minute each. An `int3` after the call
   does not end the decoding; a `hlt` or a `jmp` does, and the looping test programs in
-  `src/cork-programs.itest.js` and `src/hybrid-programs.itest.js` put a `hlt` after their last
+  `src/cork-programs.itest.js` puts a `hlt` after its last
   call for that reason.
 - **Under `cork`, translated code relaxes what games do not observe** unless the engine's
   `precise` is set (`cork: { precise: true }`), which restores each of these exactly:
