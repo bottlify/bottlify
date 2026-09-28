@@ -188,11 +188,11 @@ export function createAudioModule(){
              * stream is cut at its own frame boundaries and run through the
              * same decoder the program's sound library would have used.
              *
-             * @param {Uint8Array} bytes @param {{ sampleRate: number, channels: number }} shape
+             * @param {Uint8Array} bytes
              * @returns {Promise<{ samples: Int16Array, sampleRate: number,
              *     channels: number } | null>}
              */
-            const decodeWave = async(bytes, shape)=>{
+            const decodeWave = async bytes=>{
                 const frames = splitFrames(bytes);
                 if (frames.length === 0)
                 {
@@ -225,7 +225,6 @@ export function createAudioModule(){
                         resolve({ samples, sampleRate: frames[0].header.sampleRate,
                             channels: frames[0].header.channels });
                     }, reject);
-                    void shape;
                 });
             };
 
