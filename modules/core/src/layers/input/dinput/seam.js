@@ -393,7 +393,7 @@ export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
             {
                 refused(`object ${index} of ${count} (${named ?? 'any'}, type`
                     + ` 0x${(type >>> 0).toString(16)}, at ${offset})`
-                    + ' matches none of the device's');
+                    + ' matches none of the device objects');
                 return null;
             }
             continue;
