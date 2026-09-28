@@ -263,9 +263,14 @@ export function layoutText(text, rect, format, metrics){
  * @param {(record: any) => any[]} [options.descendants]
  *        A window's descendants, parents before their children: the order
  *        RDW_ALLCHILDREN paints them in.
+ * @param {(record: any) => boolean} [options.shown]
+ *        Whether a window is on the screen: it and every parent WS_VISIBLE.
  */
 export function createPaintFunctions(options){
     const { host, live, WM_PAINT, geometry, send, invalidated, painted, descendants } = options;
+    const shown = options.shown ?? (()=>true);
+    /** Where a window that is not on the screen draws: nowhere. */
+    const NOWHERE = { left: 0, top: 0, right: 0, bottom: 0 };
     let iconDivergenceSaid = false;
 
     /** @param {any} record @returns {Rect} */
@@ -371,12 +376,15 @@ export function createPaintFunctions(options){
         const hdc = contexts()?.get(record.hwnd, area) ?? 0;
         if (hdc !== 0)
         {
+            // A window that is hidden, or inside one that is, has no part on
+            // the screen, and what it draws reaches none: its visible region
+            // is empty, not the rectangle it would have if it were shown.
             const visible = whole
                 ? geometry.visibleWindowRect(record) : geometry.visibleClientRect(record);
-            host.draw?.clip?.(hdc, {
+            host.draw?.clip?.(hdc, shown(record) ? {
                 left: visible.left - area.left, top: visible.top - area.top,
                 right: visible.right - area.left, bottom: visible.bottom - area.top,
-            });
+            } : NOWHERE);
         }
         return hdc;
     };
@@ -415,12 +423,12 @@ export function createPaintFunctions(options){
         {
             const visible = geometry.visibleClientRect(record);
             const origin = geometry.clientRect(record);
-            host.draw?.clip?.(hdc, {
+            host.draw?.clip?.(hdc, shown(record) ? {
                 left: Math.max(dirty.left, visible.left - origin.left),
                 top: Math.max(dirty.top, visible.top - origin.top),
                 right: Math.min(dirty.right, visible.right - origin.left),
                 bottom: Math.min(dirty.bottom, visible.bottom - origin.top),
-            });
+            } : NOWHERE);
         }
         const result = { hdc, rect: dirty };
         if (hdc === 0)

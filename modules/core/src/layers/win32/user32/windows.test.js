@@ -184,8 +184,9 @@ const PARKED = Object.freeze({ parked: true });
  *
  * @param {{ rect: any, color: number, quiet: boolean }[]} fills
  * @param {number[]} presents
+ * @param {any[]} clips  The area each context was cut down to, last one last.
  */
-function paintedHost(fills, presents){
+function paintedHost(fills, presents, clips){
     return {
         screen: { width: 640, height: 480, bitsPerPixel: 32 },
         dc: ()=>({ get: ()=>1, release: ()=>{} }),
@@ -195,6 +196,7 @@ function paintedHost(fills, presents){
             // The manager's own screen background: painted, not shown.
             fillBackground: (/** @type {any} */ hdc, /** @type {any} */ rect,
                 /** @type {number} */ color)=>fills.push({ rect, color, quiet: true }),
+            clip: (/** @type {any} */ hdc, /** @type {any} */ rect)=>clips.push(rect),
         },
         present: ()=>presents.push(1),
     };
@@ -254,6 +256,8 @@ function setup({
     const fills = [];
     /** @type {number[]} */
     const presents = [];
+    /** @type {any[]} */
+    const clips = [];
     /** What GetKeyState answers for a key, as a test holds it. @type {Map<number, number>} */
     const keys = new Map();
 
@@ -298,7 +302,7 @@ function setup({
             return at;
         } : undefined,
         release: heap ? (/** @type {number} */ at)=>released.push(at) : undefined,
-        ...(paint ? paintedHost(fills, presents) : {}),
+        ...(paint ? paintedHost(fills, presents, clips) : {}),
     });
 
     /** Lets every waiting call look at the queue once more. */
@@ -312,7 +316,7 @@ function setup({
     };
 
     return { memory, handles, queue, keys, fns, dispatched, parked, tick, idlers, released,
-        called, divergences, errors, fills, presents,
+        called, divergences, errors, fills, presents, clips,
         service: /** @type {import('./windows.js').WindowService} */ (
             /** @type {unknown} */ (service)) };
 }
@@ -1564,6 +1568,26 @@ test('a window appearing paints the desktop but does not present it as a frame',
     assert.equal(fills[0].color, 0x808080, 'in the desktop colour');
     assert.equal(fills[0].quiet, true, 'through the paint that does not present');
     assert.deepEqual(presents, [], 'and was not presented as a frame');
+});
+
+test('a window that is not on the screen draws nowhere, and a child of one neither', ()=>{
+    // Its visible region is empty: what it paints before it is shown -- a
+    // dialog's control painting during WM_INITDIALOG, before the dialog is
+    // moved into place and shown -- must not be left on the desktop where
+    // the window stood, to show beside it once it has moved.
+    const { fns, hwnd, clips } = withWindow({ paint: true });
+    const EMPTY = { left: 0, top: 0, right: 0, bottom: 0 };
+    fns.ReleaseDC.handler([hwnd, fns.GetDC.handler([hwnd])]);
+    assert.deepEqual(clips.at(-1), EMPTY, 'hidden, its context covers nothing');
+    const child = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, WS_CHILD | WS_VISIBLE,
+        0, 0, 20, 10, hwnd, 1, HINSTANCE, 0]);
+    fns.ReleaseDC.handler([child, fns.GetDC.handler([child])]);
+    assert.deepEqual(clips.at(-1), EMPTY, 'nor does a visible child\'s inside it');
+
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    fns.ReleaseDC.handler([child, fns.GetDC.handler([child])]);
+    assert.deepEqual(clips.at(-1), { left: 0, top: 0, right: 20, bottom: 10 },
+        'shown, the child draws in its own area');
 });
 
 test('uncovering the desktop presents it, because a window no longer covers it', ()=>{

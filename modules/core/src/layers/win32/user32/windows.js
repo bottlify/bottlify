@@ -3371,7 +3371,7 @@ export function createWindowFunctions(host){
         // The drawing with the system colours on it, which FillRect needs
         // for a brush named as a colour index.
         host: Object.assign(Object.create(host), { draw }),
-        live, WM_PAINT, geometry, send, invalidated, painted,
+        live, WM_PAINT, geometry, send, invalidated, painted, shown,
         descendants: (/** @type {any} */ record)=>paintedDescendantsOf(record),
     });
 
