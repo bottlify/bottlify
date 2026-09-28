@@ -2789,6 +2789,37 @@ test('SendMessage to another thread\'s window waits for that thread to take it',
     assert.equal(fns.ReplyMessage.handler([0]), 0);
 });
 
+test('a thread inside a modal loop answers what another thread sends its windows', async()=>{
+    // The dialog manager's loop is GetMessage, and GetMessage runs what other
+    // threads sent before it looks for anything posted. A worker that tells
+    // the progress bar of a thread sitting in its wizard waits on that thread
+    // to take the send; a loop that never took it held both threads for ever.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (main) };
+    // TRUE to WM_NCCREATE, or the window is refused.
+    const { fns, memory, tick } = setup({ caller, heap: true,
+        reply: message=>(message.message === WM_USER ? 0x55 : message.message === WM_NCCREATE) });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    const box = fns.MessageBoxA.handler([hwnd, 0, 0, 0]);
+    assert.ok(box instanceof Promise, 'the main thread is in the box\'s loop');
+
+    caller.current = worker;
+    const answer = fns.SendMessageA.handler([hwnd, WM_USER, 0, 0]);
+    assert.ok(answer instanceof Promise, 'and the worker waits on it');
+    const answered = { value: /** @type {unknown} */ (null) };
+    answer.then((/** @type {unknown} */ value)=>{
+        answered.value = value;
+    });
+    for (let turn = 0; turn < 20; turn++)
+    {
+        await tick();
+    }
+    assert.equal(answered.value, 0x55, 'answered from inside the modal loop');
+});
+
 test('what the window manager sends another thread\'s window runs on the sender, and says so',
     ()=>{
         const main = { id: 1, name: 'main', state: 'running' };

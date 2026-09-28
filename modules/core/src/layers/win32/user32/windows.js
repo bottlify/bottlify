@@ -4041,8 +4041,14 @@ export function createWindowFunctions(host){
                     return record ? showWindow(record, SW_SHOW) : 0;
                 },
                 translate,
-                take: (/** @type {unknown} */ thread)=>takeThrough(
-                    { hwnd: ANY_WINDOW, first: 0, last: 0, remove: true }, thread),
+                // GetMessage, as the dialog manager's loop is: what other
+                // threads sent is handled first, or a thread waiting on its
+                // modal dialog never answers another thread's SendMessage --
+                // a worker telling its progress bar, a box's button telling
+                // the box -- and both threads wait for ever.
+                take: (/** @type {unknown} */ thread)=>andThen(receiveSent(thread),
+                    ()=>takeThrough({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true },
+                        thread)),
             }),
             live, windows, makeWindow, destroyWindow, deliver, announce,
             // A class the program registered, by the name a template spells it.
@@ -5149,7 +5155,7 @@ export function createWindowFunctions(host){
     // A message box is a dialog user32 makes out of its own calls, so it is
     // built over the finished table.
     let messageBoxProcedures = 0;
-    Object.assign(table, createMessageBoxFunctions({
+    return Object.assign(table, createMessageBoxFunctions({
         host,
         call: (name, args)=>/** @type {any} */ (table)[name].handler(args),
         procedure: (name, handler)=>{
@@ -5196,5 +5202,4 @@ export function createWindowFunctions(host){
                 height: outer.bottom - outer.top - inner.height };
         },
     }));
-    return table;
 }
