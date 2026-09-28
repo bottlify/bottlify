@@ -3103,12 +3103,45 @@ async function buildApp(options){
         audio: {
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
                 core.api('bridge').publishInterface(object, iid),
+            divergence: reportDivergence,
             // The guest's clock, never the host's. A program that fills a sound
             // buffer reads how far playback has got and compares it with a time
             // it took from somewhere else; two clocks make it disagree with
             // itself about whether it is behind.
             now: ()=>core.api('kernel').clock.virtualTime(),
             allocate: (/** @type {number} */ bytes)=>core.api('win32').heap().allocate(bytes),
+            // A guest buffer a handler fills on the program's behalf -- a
+            // segment's bytes read out of its stream -- goes back to the same
+            // heap it came from.
+            free: (/** @type {number} */ address)=>core.api('win32').heap().free(address),
+            // How DirectMusic's loader reads a wave a segment names. The
+            // loader knows the file's name and not where the volume keeps it,
+            // and the layer that answers for the volume is below audio, so
+            // the reader is handed down as a thunk the same way the mixer is
+            // handed to win32.
+            readFile: async(/** @type {string} */ path)=>{
+                /** @type {any} */
+                let handle;
+                try
+                {
+                    handle = core.api('filesystem').open(path, { create: false });
+                }
+                catch {
+                    return null;
+                }
+                if (!handle)
+                {
+                    return null;
+                }
+                try
+                {
+                    return core.api('filesystem').read(handle, core.api('filesystem').size(handle));
+                }
+                finally
+                {
+                    core.api('filesystem').close(handle);
+                }
+            },
             // Whether anything is reading the other end of the ring. Told from
             // outside because only the assembling caller knows whether it
             // opened a device, and it decides whether a program's play cursor

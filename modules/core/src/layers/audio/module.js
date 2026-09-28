@@ -5,10 +5,11 @@
  */
 
 import { createDirectSound } from './dsound/seam.js';
+import { registerDirectMusic } from './dmusic/classes.js';
 import { DSBSTATUS_PLAYING } from './dsound/buffers.js';
 import { createMixer } from './output/mixer.js';
 import { createMp3Provider } from './asi/provider.js';
-import { createSynchronousDecoder, createWebCodecsDecoder } from './asi/mp3.js';
+import { createSynchronousDecoder, createWebCodecsDecoder, splitFrames } from './asi/mp3.js';
 
 /**
  * audio — the sound APIs a program was written against.
@@ -75,6 +76,28 @@ export function createAudioModule(){
             // calls truthfully. Optional, because a caller assembling this module
             // for a test has no bridge and no guest to call.
             const bridge = host.requireApi('bridge');
+
+            // DirectMusic's classes, which a program asks for by CLSID rather
+            // than through an export. Held until the mixer and the decoder
+            // exist, because what plays a segment's waves is the one and what
+            // decodes them is the other.
+            const win32 = host.requireApi('win32');
+            // A build with win32 stubbed -- one where nothing asked for win32
+            // and it was switched off -- has no class registry to put
+            // DirectMusic's classes in. Asking for it would throw the stub's
+            // refusal, which is the right answer to a *call* and the wrong
+            // one to a graph being assembled: DirectMusic is simply absent.
+            /** @type {any} */
+            let com;
+            try
+            {
+                com = win32?.com?.() ?? null;
+            }
+            catch {
+                com = null;
+            }
+            /** @type {any} */
+            let dmusic = null;
 
             // Whether the other end of the ring is being read. Told from outside,
             // because only the assembling caller knows whether it opened a device.
@@ -156,6 +179,89 @@ export function createAudioModule(){
                     ? createSynchronousDecoder(config.openAudio, createWebCodecsDecoder())
                     : createWebCodecsDecoder());
 
+            /**
+             * Decodes a compressed wave's frames into interleaved 16-bit PCM.
+             *
+             * A segment's wave track names a `.wav`, and a `.wav` in a
+             * DirectMusic library is very often an MPEG Layer 3 stream inside
+             * a RIFF header. The mixer behind this layer plays PCM, so the
+             * stream is cut at its own frame boundaries and run through the
+             * same decoder the program's sound library would have used.
+             *
+             * @param {Uint8Array} bytes @param {{ sampleRate: number, channels: number }} shape
+             * @returns {Promise<{ samples: Int16Array, sampleRate: number,
+             *     channels: number } | null>}
+             */
+            const decodeWave = async(bytes, shape)=>{
+                const frames = splitFrames(bytes);
+                if (frames.length === 0)
+                {
+                    return null;
+                }
+                return await new Promise((resolve, reject)=>{
+                    /** @type {Int16Array[]} */
+                    const parts = [];
+                    let total = 0;
+                    const stream = decoder.open(frames[0].header,
+                        (/** @type {Int16Array} */ pcm)=>{
+                            parts.push(pcm);
+                            total += pcm.length;
+                        },
+                        (/** @type {Error} */ error)=>reject(error));
+                    for (const frame of frames)
+                    {
+                        const end = frame.offset + frame.header.length;
+                        stream.feed(bytes.subarray(frame.offset, end), frame.header);
+                    }
+                    Promise.resolve(stream.flush()).then(()=>{
+                        stream.close();
+                        const samples = new Int16Array(total);
+                        let at = 0;
+                        for (const part of parts)
+                        {
+                            samples.set(part, at);
+                            at += part.length;
+                        }
+                        resolve({ samples, sampleRate: frames[0].header.sampleRate,
+                            channels: frames[0].header.channels });
+                    }, reject);
+                    void shape;
+                });
+            };
+
+            if (com)
+            {
+                dmusic = registerDirectMusic({
+                    registry: com,
+                    divergence: config?.divergence ?? (()=>{}),
+                    memory: {
+                        readBytes: (/** @type {number} */ address, /** @type {number} */ length)=>
+                            memory.readBytes(address, length),
+                        writeBytes: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+                            memory.writeBytes(address, bytes),
+                    },
+                    publishInterface: config?.publishInterface ?? (()=>0),
+                    // The bridge owns the map from a published pointer back to
+                    // its object; a segment a program made by class id is
+                    // published there and not by this module, so a
+                    // performance asked to play it has to look there.
+                    objectAt: (/** @type {number} */ pointer)=>
+                        bridge?.interfaceObject?.(pointer) ?? null,
+                    allocate: config?.allocate,
+                    free: config?.free,
+                    // A segment's bytes may arrive through an IStream, which is
+                    // guest code: reading it is a callback the bridge makes on
+                    // the thread whose call is running.
+                    callGuest: (/** @type {number} */ entry, /** @type {number[]} */ args,
+                        /** @type {any} */ thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
+                    output: ()=>output,
+                    now: config?.now ?? (()=>Date.now()),
+                    readFile: config?.readFile,
+                    decodeWave,
+                });
+            }
+
             // The MPEG decoder a sound library of this era loads beside a program
             // as a provider of its own. Hosted, because decoding it in the guest
             // costs a fifth of the machine; reached through the same library
@@ -209,6 +315,12 @@ export function createAudioModule(){
              */
             const feedBuffers = ()=>{
                 fills++;
+                // DirectMusic first: a segment's waves are due at a moment on
+                // the guest's clock, and this is the one place a turn of that
+                // clock reaches the mixer. Opening a track just before the mix
+                // that will play it is what keeps a wave's first frame from
+                // being a turn late.
+                dmusic?.tick?.();
                 // Told first, and told whatever else happens here.
                 //
                 // A program that streams into a sound buffer does not poll it: it
@@ -447,6 +559,9 @@ export function createAudioModule(){
 
                 dsound: ()=>dsound,
 
+                /** DirectMusic, for whoever is measuring its playback. */
+                dmusic: ()=>dmusic,
+
                 /** Turns a buffer was left unread because its track was full. */
                 behind: ()=>behind,
             };
@@ -467,6 +582,9 @@ export function createAudioModule(){
                     ...(current ? current.output().diagnostics() : {}),
                     behindTurns: current ? current.behind() : 0,
                     ...(current ? current.feeding() : {}),
+                    // What DirectMusic played: mixer tracks opened, bytes
+                    // handed over, and how many segments are still running.
+                    dmusic: current?.dmusic?.()?.diagnostics?.() ?? null,
                     // Every sound buffer's own state. A count of buffers says a
                     // program made some; this says whether any of them is playing,
                     // where its cursor stands and how much of it was ever filled --

@@ -143,6 +143,10 @@ async function playing({ silent = false, drained = true, shared = false, memory 
                 // module asks for it the way the registry always binds it.
                 return { callGuest: async()=>0 };
             }
+            if (name === 'win32')
+            {
+                return {};
+            }
             assert.equal(name, 'memory');
             return f.memory;
         },

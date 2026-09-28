@@ -1,0 +1,1273 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * DirectMusic's objects: the loader, a segment, a play state, an audio path
+ * and the performance that drives them.
+ *
+ * The engine answers the part of DirectMusic a game of this era actually
+ * uses: loading a segment and playing its wave tracks. A segment whose music
+ * is written as notes -- a MIDI port, a DLS instrument -- is a different
+ * machine and is not built here; the methods that would reach it refuse with
+ * E_NOTIMPL, which is an answer a program handles by taking another path.
+ *
+ * The pieces talk to each other through the context below, and to the outside
+ * world through what the assembling caller hands in: guest memory, the mixer
+ * the music plays through, a way to read a file, and a way to decode it. That
+ * division is what makes a segment's parsing, its schedule and the loader's
+ * search testable with no guest at all.
+ */
+
+import { createComObject } from '../../win32/ole32/objects.js';
+import { readGuid, writeGuid, GUID_NULL } from '../../win32/ole32/guid.js';
+import { parseSegment, parseWave, musicToMs, PPQ } from './riff.js';
+import { createPlayer, volumeToGain } from './player.js';
+import {
+    WAVEFORMATEX, IID_IDirectSoundBuffer, IID_IDirectSoundBuffer8, IID_IKsPropertySet,
+} from '../dsound/seam.js';
+import * as ids from './ids.js';
+
+const S_OK = 0;
+const S_FALSE = 1;
+const E_NOTIMPL = 0x80004001 | 0;
+const E_POINTER = 0x80004003 | 0;
+const E_NOINTERFACE = 0x80004002 | 0;
+const E_INVALIDARG = 0x80070057 | 0;
+const E_FAIL = 0x80004005 | 0;
+const E_OUTOFMEMORY = 0x8007000e | 0;
+
+/** WAVE_FORMAT_MPEG and WAVE_FORMAT_MPEGLAYER3, the compressed wave tags. */
+const WAVE_FORMAT_MPEG = 0x50;
+const WAVE_FORMAT_MPEGLAYER3 = 0x55;
+
+/**
+ * One vtable slot as a table declares it: its name, the bytes it pops
+ * including the interface pointer, and the handler that answers it.
+ *
+ * @typedef {[string, number, ((object: any, args: number[]) => any)?]} ComMethodEntry
+ */
+
+/**
+ * @typedef {Object} DmusicHost
+ * @property {import('../../win32/ole32/objects.js').ComRegistry} registry
+ * @property {{ readBytes: (address: number, length: number) => Uint8Array,
+ *              writeBytes: (address: number, bytes: Uint8Array) => void }} memory
+ * @property {(object: any, iid: string) => number} [publishInterface]
+ * @property {(pointer: number) => any} [objectAt]  The bridge's pointer lookup.
+ * @property {() => any} [output]        The mixer the music plays through.
+ * @property {() => number} [now]        The guest's clock, in milliseconds.
+ * @property {(bytes: number) => number} [allocate]  Guest memory.
+ * @property {(address: number) => void} [free]      Gives it back.
+ * @property {(entry: number, args: number[], thread?: any) => Promise<number>} [callGuest]
+ * @property {() => any} [callerThread]
+ * @property {(path: string) => Promise<Uint8Array | null>} [readFile]
+ * @property {(bytes: Uint8Array, shape: { formatTag: number, sampleRate: number,
+ *     channels: number }) => Promise<{ samples: Int16Array, sampleRate: number,
+ *     channels: number } | null>} [decodeWave]
+ * @property {(api: string, detail: string) => void} [divergence]
+ */
+
+/** @param {number} value */
+function u32(value){
+    return new Uint8Array([value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff,
+        value >>> 24 & 0xff]);
+}
+
+/**
+ * @param {string} id
+ * @param {ComMethodEntry[]} methods
+ * @returns {import('../../win32/ole32/objects.js').ComInterfaceDescriptor}
+ */
+function describe(id, methods){
+    return {
+        id,
+        methods: methods.map(([name, argBytes, invoke])=>({ name, argBytes, invoke })),
+    };
+}
+
+/** @param {DmusicHost} host */
+export function createDirectMusic(host){
+    const memory = host.memory;
+    /** @type {{ readMemory: (a: number, l: number) => Uint8Array,
+     *           writeMemory: (a: number, b: Uint8Array) => void }} */
+    const guidMemory = {
+        readMemory: (a, l)=>memory.readBytes(a >>> 0, l),
+        writeMemory: (a, b)=>memory.writeBytes(a >>> 0, b),
+    };
+    /** @param {number} address */
+    const readU32 = address=>{
+        const bytes = memory.readBytes(address >>> 0, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+    /** @param {number} address @param {number} value */
+    const writeU32 = (address, value)=>{
+        if ((address >>> 0) !== 0)
+        {
+            memory.writeBytes(address >>> 0, u32(value));
+        }
+    };
+    /** @param {number} address @param {number} value  A REFERENCE_TIME. */
+    const writeU64 = (address, value)=>{
+        if ((address >>> 0) !== 0)
+        {
+            memory.writeBytes(address >>> 0, u32(value % 0x100000000));
+            memory.writeBytes((address >>> 0) + 4, u32(Math.floor(value / 0x100000000)));
+        }
+    };
+    /** @param {number} address @param {number} maxChars */
+    const readWide = (address, maxChars)=>{
+        if ((address >>> 0) === 0)
+        {
+            return '';
+        }
+        let text = '';
+        for (let at = 0; at < maxChars; at++)
+        {
+            const unit = memory.readBytes((address >>> 0) + at * 2, 2);
+            const value = unit[0] | unit[1] << 8;
+            if (value === 0)
+            {
+                break;
+            }
+            text += String.fromCharCode(value);
+        }
+        return text;
+    };
+    /** @param {number} address @returns {string | null} */
+    const guidAt = address=>(address >>> 0) === 0 ? null : readGuid(guidMemory, address >>> 0);
+
+    const now = host.now ?? (()=>Date.now());
+    const player = createPlayer({ now, output: ()=>host.output?.() ?? null });
+
+    /**
+     * Interface pointers this engine handed out, back to the object each one
+     * names. A performance is handed a segment as a pointer and has to find
+     * the object behind it; the bridge keeps the guest's map, this one is
+     * ours.
+     *
+     * @type {Map<number, any>}
+     */
+    const objects = new Map();
+    /** @param {any} object @param {string} iid @returns {number} */
+    const publish = (object, iid)=>{
+        const pointer = (host.publishInterface?.(object, iid) ?? 0) >>> 0;
+        if (pointer !== 0)
+        {
+            objects.set(pointer, object);
+        }
+        return pointer;
+    };
+    /** @param {number} pointer @returns {any} */
+    const objectAt = pointer=>{
+        if ((pointer >>> 0) === 0)
+        {
+            return null;
+        }
+        // Objects this module published are remembered here; objects the
+        // class registry published -- a segment a program made itself -- are
+        // the bridge's to find, because it is what built their vtables.
+        return objects.get(pointer >>> 0) ?? host.objectAt?.(pointer) ?? null;
+    };
+    /**
+     * The implementation behind an interface pointer. A published COM object
+     * carries the piece that knows how to play it as `dmusic`, so a method
+     * handed a pointer resolves it to what it can actually ask.
+     *
+     * @param {number} pointer @returns {any}
+     */
+    const apiOf = pointer=>{
+        const object = objectAt(pointer);
+        if (!object)
+        {
+            return null;
+        }
+        if (object.dmusic)
+        {
+            return object.dmusic;
+        }
+        return object.state?.parsed ? segmentApiFor(object) : object;
+    };
+
+    /** The directory a program named with SetSearchDirectory. */
+    let searchDirectory = '';
+
+    /** @param {string} directory @param {string} file */
+    const joinPath = (directory, file)=>{
+        if (directory === '')
+        {
+            return file;
+        }
+        const trimmed = /[\\/]$/.test(directory) ? directory.slice(0, -1) : directory;
+        return `${trimmed}\\${file}`;
+    };
+
+    /**
+     * The bytes behind a wave reference: the file beside the segment, then in
+     * the search directory, then wherever the name alone points. Async,
+     * because a file read is, and the bridge parks the calling thread until
+     * it settles rather than the read happening behind the program's back.
+     *
+     * @param {string} file @param {string} beside
+     * @returns {Promise<Uint8Array | null>}
+     */
+    const loadFile = async(file, beside)=>{
+        if (!file)
+        {
+            return null;
+        }
+        const candidates = /^[a-zA-Z]:[\\/]|^\\\\/.test(file)
+            ? [file]
+            : [...(beside ? [joinPath(beside, file)] : []),
+                ...(searchDirectory ? [joinPath(searchDirectory, file)] : []), file];
+        for (const candidate of candidates)
+        {
+            const bytes = await host.readFile?.(candidate);
+            if (bytes)
+            {
+                return bytes;
+            }
+        }
+        return null;
+    };
+
+    /**
+     * A segment's waves decoded into what the mixer plays.
+     *
+     * A wave that is already PCM is handed over as it stands. Anything else
+     * is the file's own compressed stream, decoded once here rather than on
+     * every pass; a build with no decoder leaves the item out and says so,
+     * which is silence for that one sound and not a failed segment.
+     *
+     * @param {import('./riff.js').Segment} parsed @param {string} beside
+     * @returns {Promise<import('./player.js').WaveProgram>}
+     */
+    const resolveProgram = async(parsed, beside)=>{
+        /** @type {import('./player.js').WaveProgramItem[]} */
+        const items = [];
+        for (const wave of parsed.waves)
+        {
+            const bytes = await loadFile(wave.file, beside);
+            if (!bytes)
+            {
+                continue;
+            }
+            const wav = parseWave(bytes);
+            if (!wav)
+            {
+                continue;
+            }
+            /** @type {Uint8Array | null} */
+            let samples = null;
+            let sampleRate = wav.sampleRate;
+            let channels = wav.channels;
+            if (wav.format === 'pcm' && wav.bitsPerSample === 16)
+            {
+                samples = wav.data;
+            }
+            else if ((wav.formatTag === WAVE_FORMAT_MPEG
+                    || wav.formatTag === WAVE_FORMAT_MPEGLAYER3) && host.decodeWave)
+            {
+                const decoded = await host.decodeWave(wav.data, {
+                    formatTag: wav.formatTag, sampleRate: wav.sampleRate, channels: wav.channels,
+                });
+                if (decoded)
+                {
+                    samples = new Uint8Array(decoded.samples.buffer, decoded.samples.byteOffset,
+                        decoded.samples.byteLength);
+                    sampleRate = decoded.sampleRate;
+                    channels = decoded.channels;
+                }
+            }
+            if (!samples)
+            {
+                host.divergence?.('IDirectMusicSegment::Download',
+                    `no decoder for wave tag 0x${wav.formatTag.toString(16)} (${wave.file})`);
+                continue;
+            }
+            items.push({
+                timeMs: Math.max(0, musicToMs(parsed.tempo, wave.start)),
+                samples: samples.slice(),
+                sampleRate,
+                channels,
+                gain: volumeToGain(wave.volume),
+            });
+        }
+        let lengthMs = parsed.header.length > 0
+            ? musicToMs(parsed.tempo, parsed.header.length)
+            : 0;
+        if (!lengthMs)
+        {
+            for (const item of items)
+            {
+                const seconds = item.samples.length / (item.channels * 2) / item.sampleRate;
+                lengthMs = Math.max(lengthMs, item.timeMs + seconds * 1000);
+            }
+        }
+        return { items, lengthMs };
+    };
+
+    /**
+     * Every byte a guest IStream has to give, read through the stream's own
+     * `Read`.
+     *
+     * A program that loaded a segment's file itself hands the segment an
+     * IStream and expects it parsed; the bytes are only reachable by calling
+     * the stream, which is guest code, so the bridge runs it and this reads
+     * what it wrote. Read in chunks because the length is not known until the
+     * stream says so, and a short read is the end.
+     *
+     * @param {number} stream @param {any} thread
+     * @returns {Promise<Uint8Array | null>}
+     */
+    const readStream = async(stream, thread)=>{
+        if ((stream >>> 0) === 0 || !host.callGuest)
+        {
+            return null;
+        }
+        const vtable = readU32(stream);
+        if (vtable === 0)
+        {
+            return null;
+        }
+        // IStream's Read is the fourth slot: IUnknown's three, then Read.
+        const readFn = readU32(vtable + 12);
+        const chunk = 1 << 16;
+        const scratch = (host.allocate?.(chunk + 4) ?? 0) >>> 0;
+        if (scratch === 0)
+        {
+            return null;
+        }
+        /** @type {Uint8Array[]} */
+        const parts = [];
+        try
+        {
+            for (;;)
+            {
+                writeU32(scratch + chunk, 0);
+                const hr = (await host.callGuest(readFn,
+                    [stream, scratch, chunk, scratch + chunk], thread)) | 0;
+                const got = Math.min(readU32(scratch + chunk), chunk);
+                if (got > 0)
+                {
+                    parts.push(memory.readBytes(scratch, got).slice());
+                }
+                if (hr < 0 || got < chunk)
+                {
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            host.free?.(scratch);
+        }
+        const total = parts.reduce((sum, part)=>sum + part.length, 0);
+        const bytes = new Uint8Array(total);
+        let at = 0;
+        for (const part of parts)
+        {
+            bytes.set(part, at);
+            at += part.length;
+        }
+        return total > 0 ? bytes : null;
+    };
+
+    /**
+     * A segment's per-object state, shared by every interface it answers to.
+     * A segment made by the loader has bytes; one a program makes by class id
+     * has none but the same state, and can still be fed through its stream.
+     *
+     * @param {Uint8Array | null} data @param {string} dir
+     */
+    const segmentState = (data, dir)=>{
+        const parsed = data ? parseSegment(data) : emptySegment();
+        return {
+            parsed,
+            dir,
+            repeats: parsed.header.repeats,
+            startPoint: 0,
+            loopStart: parsed.header.loopStart | 0,
+            loopEnd: parsed.header.loopEnd | 0,
+            resolution: parsed.header.resolution || PPQ,
+            lengthOverride: 0,
+            /** @type {Promise<import('./player.js').WaveProgram> | null} */
+            program: null,
+        };
+    };
+
+    /** @type {WeakMap<any, any>} */
+    const segmentApis = new WeakMap();
+    /** @param {any} object @returns {any} */
+    const segmentApiFor = object=>{
+        let api = segmentApis.get(object);
+        if (api)
+        {
+            return api;
+        }
+        const state = object.state;
+        api = {
+            object,
+            /** @param {Uint8Array | null} data @param {string} dir */
+            load(data, dir){
+                state.parsed = data ? parseSegment(data) : emptySegment();
+                state.dir = dir;
+                state.repeats = state.parsed.header.repeats;
+                state.startPoint = 0;
+                state.loopStart = state.parsed.header.loopStart | 0;
+                state.loopEnd = state.parsed.header.loopEnd | 0;
+                state.resolution = state.parsed.header.resolution || PPQ;
+                state.program = null;
+            },
+            resolve(){
+                state.program ??= resolveProgram(state.parsed, state.dir);
+                return state.program;
+            },
+            plays: ()=>state.repeats === 0xffffffff ? Infinity : (state.repeats | 0) + 1,
+            repeats: ()=>state.repeats,
+            startPoint: ()=>state.startPoint,
+            loop: ()=>({ start: state.loopStart, end: state.loopEnd }),
+            resolution: ()=>state.resolution,
+        };
+        segmentApis.set(object, api);
+        (/** @type {any} */ (object)).dmusic = api;
+        return api;
+    };
+
+    /**
+     * @param {Uint8Array | null} data @param {string} dir
+     * @returns {import('../../win32/ole32/objects.js').ComClassDefinition}
+     */
+    const segmentDefinition = (data, dir = '')=>({
+        interfaces: [
+            describe(ids.IID_DIRECTMUSIC_SEGMENT8, segmentMethods(true)),
+            describe(ids.IID_DIRECTMUSIC_SEGMENT, segmentMethods(false)),
+            describe(ids.IID_DIRECTMUSIC_OBJECT, [
+                ['GetDescriptor', 8, (_, [out])=>{
+                    if ((out >>> 0) === 0)
+                    {
+                        return E_POINTER;
+                    }
+                    writeU32(out + ids.DMUS_OBJECTDESC.dwSize, ids.DMUS_OBJECTDESC.SIZE);
+                    writeU32(out + ids.DMUS_OBJECTDESC.dwValidData, ids.DMUS_OBJ.CLASS);
+                    writeGuid(guidMemory, out + ids.DMUS_OBJECTDESC.guidClass,
+                        ids.CLSID_DIRECTMUSIC_SEGMENT);
+                    return S_OK;
+                }],
+                // A descriptor is how a program hands a segment the bytes it
+                // loaded itself: a stream is not read here, but the in-memory
+                // form is, because that is the bytes already in guest memory.
+                ['SetDescriptor', 8, (object, [desc])=>{
+                    if ((desc >>> 0) === 0)
+                    {
+                        return E_POINTER;
+                    }
+                    const valid = readU32(desc + ids.DMUS_OBJECTDESC.dwValidData);
+                    if ((valid & ids.DMUS_OBJ.MEMORY) !== 0)
+                    {
+                        const length = readU32(desc + ids.DMUS_OBJECTDESC.llMemLength)
+                            + readU32(desc + ids.DMUS_OBJECTDESC.llMemLength + 4) * 0x100000000;
+                        const dataAt = readU32(desc + ids.DMUS_OBJECTDESC.pbMemData);
+                        if (dataAt !== 0 && length > 0)
+                        {
+                            segmentApiFor(object).load(
+                                memory.readBytes(dataAt, length).slice(), '');
+                            return S_OK;
+                        }
+                    }
+                    host.divergence?.('IDirectMusicObject::SetDescriptor',
+                        'only an in-memory descriptor is read');
+                    return E_NOTIMPL;
+                }],
+                ['ParseDescriptor', 12, (_, [stream, out])=>
+                    (stream >>> 0) === 0 || (out >>> 0) === 0 ? E_POINTER : S_OK],
+            ]),
+            describe(ids.IID_IPERSIST_STREAM, [
+                ['GetClassID', 8, (_, [out])=>{
+                    if ((out >>> 0) === 0)
+                    {
+                        return E_POINTER;
+                    }
+                    writeGuid(guidMemory, out, ids.CLSID_DIRECTMUSIC_SEGMENT);
+                    return S_OK;
+                }],
+                ['IsDirty', 4, ()=>S_FALSE],
+                ['Load', 8, (object, [stream])=>{
+                    const thread = host.callerThread?.();
+                    return readStream(stream, thread).then(bytes=>{
+                        if (!bytes)
+                        {
+                            return E_FAIL;
+                        }
+                        segmentApiFor(object).load(bytes, '');
+                        return S_OK;
+                    });
+                }],
+                ['Save', 12, ()=>E_NOTIMPL],
+                ['GetSizeMax', 8, ()=>E_NOTIMPL],
+            ]),
+        ],
+        state: segmentState(data, dir),
+    });
+
+    /**
+     * @param {Uint8Array | null} data @param {string} [dir]
+     * @returns {any}
+     */
+    const createSegmentObject = (data, dir = '')=>{
+        const object = createComObject(ids.CLSID_DIRECTMUSIC_SEGMENT,
+            segmentDefinition(data, dir));
+        return segmentApiFor(object);
+    };
+
+    /** @param {boolean} eight */
+    function segmentMethods(eight){
+        const methods = /** @type {ComMethodEntry[]} */ ([
+            ['GetLength', 8, (object, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                const state = object.state;
+                writeU32(out, state.lengthOverride || state.parsed.header.length | 0);
+                return S_OK;
+            }],
+            ['SetLength', 8, (object, [value])=>{
+                object.state.lengthOverride = value | 0;
+                return S_OK;
+            }],
+            ['GetRepeats', 8, (object, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeU32(out, object.state.repeats);
+                return S_OK;
+            }],
+            ['SetRepeats', 8, (object, [value])=>{
+                object.state.repeats = value >>> 0;
+                return S_OK;
+            }],
+            ['GetDefaultResolution', 8, (object, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeU32(out, object.state.resolution);
+                return S_OK;
+            }],
+            ['SetDefaultResolution', 8, ()=>S_OK],
+            ['GetTrack', 20, ()=>E_NOTIMPL],
+            ['GetTrackGroup', 12, ()=>E_NOTIMPL],
+            ['InsertTrack', 12, ()=>E_NOTIMPL],
+            ['RemoveTrack', 8, ()=>S_OK],
+            ['InitPlay', 16, (object, [, , , out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                const state = createSegmentState(object, ()=>object.state.startPoint, null);
+                writeU32(out, publish(state.object, ids.IID_DIRECTMUSIC_SEGMENTSTATE8));
+                return S_OK;
+            }],
+            ['GetGraph', 8, ()=>E_NOTIMPL],
+            ['SetGraph', 8, ()=>E_NOTIMPL],
+            ['AddNotificationType', 8, ()=>S_OK],
+            ['RemoveNotificationType', 8, ()=>S_OK],
+            ['GetParam', 28, ()=>E_NOTIMPL],
+            ['SetParam', 24, ()=>E_NOTIMPL],
+            ['Clone', 16, ()=>E_NOTIMPL],
+            ['SetStartPoint', 8, (object, [value])=>{
+                object.state.startPoint = value | 0;
+                return S_OK;
+            }],
+            ['GetStartPoint', 8, (object, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeU32(out, object.state.startPoint);
+                return S_OK;
+            }],
+            ['SetLoopPoints', 12, (object, [start, end])=>{
+                object.state.loopStart = start | 0;
+                object.state.loopEnd = end | 0;
+                return S_OK;
+            }],
+            ['GetLoopPoints', 12, (object, [start, end])=>{
+                writeU32(start, object.state.loopStart);
+                writeU32(end, object.state.loopEnd);
+                return S_OK;
+            }],
+            ['SetPChannelsUsed', 12, ()=>S_OK],
+        ]);
+        if (eight)
+        {
+            methods.push(
+                ['SetTrackConfig', 24, ()=>E_NOTIMPL],
+                ['GetAudioPathConfig', 8, ()=>E_NOTIMPL],
+                ['Compose', 20, ()=>E_NOTIMPL],
+                ['Download', 8, object=>segmentApiFor(object).resolve().then(()=>S_OK)],
+                ['Unload', 8, ()=>S_OK],
+            );
+        }
+        return methods;
+    }
+
+    /**
+     * @param {any} segmentObject @param {() => number} startPoint @param {any} voice
+     */
+    const createSegmentState = (segmentObject, startPoint, voice)=>{
+        const object = createComObject(ids.CLSID_DIRECTMUSIC_SEGMENTSTATE, {
+            interfaces: [
+                describe(ids.IID_DIRECTMUSIC_SEGMENTSTATE8,
+                    stateMethods(segmentObject, startPoint, voice, true)),
+                describe(ids.IID_DIRECTMUSIC_SEGMENTSTATE,
+                    stateMethods(segmentObject, startPoint, voice, false)),
+            ],
+        });
+        const state = { object, voice, segment: segmentObject };
+        (/** @type {any} */ (object)).dmusic = state;
+        return state;
+    };
+
+    /**
+     * @param {any} segmentObject @param {() => number} startPoint
+     * @param {any} voice @param {boolean} eight
+     */
+    function stateMethods(segmentObject, startPoint, voice, eight){
+        const getSegment = /** @type {ComMethodEntry} */ (['GetSegment', 8, (_, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            writeU32(out, publish(segmentObject, ids.IID_DIRECTMUSIC_SEGMENT8));
+            return S_OK;
+        }]);
+        const methods = /** @type {ComMethodEntry[]} */ ([
+            ['GetRepeats', 8, (_, [out])=>{
+                writeU32(out, voice ? 1 : 0);
+                return S_OK;
+            }],
+            getSegment,
+            ['GetStartTime', 8, (_, [out])=>{
+                writeU32(out, 0);
+                return S_OK;
+            }],
+            ['GetSeek', 8, (_, [out])=>{
+                writeU32(out, 0);
+                return S_OK;
+            }],
+            ['GetStartPoint', 8, (_, [out])=>{
+                writeU32(out, startPoint());
+                return S_OK;
+            }],
+        ]);
+        if (eight)
+        {
+            methods.push(
+                ['SetTrackConfig', 24, ()=>E_NOTIMPL],
+                ['GetObjectInPath', 32, ()=>E_NOTIMPL],
+            );
+        }
+        return methods;
+    }
+
+    /**
+     * The buffer a program reaches the audio path's own output through.
+     *
+     * A program of this era asks the path for an IDirectSoundBuffer8 and sets
+     * its volume, which is how it makes the music quieter or louder from the
+     * same code that would control any buffer. The path has no DirectSound
+     * buffer of its own -- the mixer's tracks are where its sound leaves --
+     * so what is handed back is a buffer-shaped object: the volume it is told
+     * becomes the gain of every wave the path plays, and the calls that move
+     * samples around answer the way a buffer that is playing does.
+     *
+     * @param {any} path
+     */
+    const createPathBuffer = path=>{
+        const writeWaveFormat = (/** @type {number} */ address)=>{
+            if ((address >>> 0) === 0)
+            {
+                return;
+            }
+            const bytes = new Uint8Array(WAVEFORMATEX.SIZE);
+            const view = new DataView(bytes.buffer);
+            view.setUint16(WAVEFORMATEX.wFormatTag, 1, true);
+            view.setUint16(WAVEFORMATEX.nChannels, 2, true);
+            view.setUint32(WAVEFORMATEX.nSamplesPerSec, 44100, true);
+            view.setUint32(WAVEFORMATEX.nAvgBytesPerSec, 44100 * 4, true);
+            view.setUint16(WAVEFORMATEX.nBlockAlign, 4, true);
+            view.setUint16(WAVEFORMATEX.wBitsPerSample, 16, true);
+            memory.writeBytes(address >>> 0, bytes);
+        };
+        const methods = /** @type {ComMethodEntry[]} */ ([
+            ['GetCaps', 8, ()=>S_OK],
+            ['GetCurrentPosition', 12, (_, [play, write])=>{
+                writeU32(play, 0);
+                writeU32(write, 0);
+                return S_OK;
+            }],
+            ['GetFormat', 16, (_, [format, size, written])=>{
+                if ((format >>> 0) !== 0 && (size >>> 0) >= WAVEFORMATEX.SIZE)
+                {
+                    writeWaveFormat(format);
+                }
+                writeU32(written, WAVEFORMATEX.SIZE);
+                return S_OK;
+            }],
+            ['GetVolume', 8, (_, [out])=>{
+                writeU32(out, path.volume);
+                return S_OK;
+            }],
+            ['GetPan', 8, (_, [out])=>{
+                writeU32(out, path.pan);
+                return S_OK;
+            }],
+            ['GetFrequency', 8, (_, [out])=>{
+                writeU32(out, path.frequency);
+                return S_OK;
+            }],
+            ['GetStatus', 8, (_, [out])=>{
+                writeU32(out, 1); // DSBSTATUS_PLAYING
+                return S_OK;
+            }],
+            ['Initialize', 12, ()=>S_OK],
+            // Nothing locks the path's buffer: its samples are mixed, not
+            // written by the program, and a lock is answered as the call a
+            // program must not make rather than by handing it memory.
+            ['Lock', 32, ()=>E_NOTIMPL],
+            ['Play', 16, ()=>S_OK],
+            ['SetCurrentPosition', 8, ()=>S_OK],
+            ['SetFormat', 8, ()=>S_OK],
+            ['SetVolume', 8, (_, [value])=>{
+                path.volume = value | 0;
+                path.gain = volumeToGain(path.volume);
+                return S_OK;
+            }],
+            ['SetPan', 8, (_, [value])=>{
+                path.pan = value | 0;
+                return S_OK;
+            }],
+            ['SetFrequency', 8, (_, [value])=>{
+                path.frequency = value >>> 0;
+                return S_OK;
+            }],
+            ['Stop', 4, ()=>S_OK],
+            ['Unlock', 20, ()=>S_OK],
+            ['Restore', 4, ()=>S_OK],
+        ]);
+        const eightMethods = /** @type {ComMethodEntry[]} */ ([
+            ['SetFX', 16, ()=>E_NOTIMPL],
+            ['AcquireResources', 16, ()=>S_OK],
+            ['GetObjectInPath', 20, ()=>E_NOINTERFACE],
+        ]);
+        return createComObject(IID_IDirectSoundBuffer, {
+            interfaces: [
+                describe(IID_IDirectSoundBuffer8, [...methods, ...eightMethods]),
+                describe(IID_IDirectSoundBuffer, methods),
+                describe(IID_IKsPropertySet, [
+                    ['Get', 32, ()=>0x80070490], // E_PROP_ID_UNSUPPORTED
+                    ['Set', 28, ()=>S_OK],
+                    ['QuerySupport', 16, (_, [, , out])=>{
+                        writeU32(out, 0);
+                        return S_OK;
+                    }],
+                ]),
+            ],
+        });
+    };
+
+    /**
+     * The path a performance's music plays through. It names the mixer's
+     * default output, which is where a segment's tracks already go, so this is
+     * an object a program can hold and ask questions of.
+     *
+     * @param {number} type @param {number} channels
+     */
+    const createAudioPath = (type, channels)=>{
+        const path = {
+            /** @type {any} */
+            object: null,
+            /** @type {any} */
+            buffer: null,
+            /** Master volume in hundredths of a decibel, 0 = full. */
+            volume: 0,
+            pan: 0,
+            frequency: 44100,
+            gain: 1,
+        };
+        path.object = createComObject(ids.IID_DIRECTMUSIC_AUDIOPATH, {
+            interfaces: [describe(ids.IID_DIRECTMUSIC_AUDIOPATH, [
+                // The buffer a stage names is where a program sets the music's
+                // volume; anything else is a part of the graph this engine
+                // does not build, and is refused by name so the program can
+                // tell the two apart.
+                ['GetObjectInPath', 32, (_, [, stage, , , , iid, out])=>{
+                    const wanted = guidAt(iid);
+                    if (wanted === IID_IDirectSoundBuffer8 || wanted === IID_IDirectSoundBuffer)
+                    {
+                        path.buffer ??= createPathBuffer(path);
+                        writeU32(out, publish(path.buffer, wanted));
+                        return S_OK;
+                    }
+                    if (wanted === ids.IID_DIRECTMUSIC_AUDIOPATH || wanted === GUID_NULL)
+                    {
+                        writeU32(out, publish(path.object, ids.IID_DIRECTMUSIC_AUDIOPATH));
+                        return S_OK;
+                    }
+                    if ((out >>> 0) !== 0)
+                    {
+                        writeU32(out, 0);
+                    }
+                    host.divergence?.('IDirectMusicAudioPath::GetObjectInPath',
+                        `stage=0x${(stage >>> 0).toString(16)} iid=${wanted ?? '-'}`);
+                    return E_NOINTERFACE;
+                }],
+                ['Activate', 8, ()=>S_OK],
+                ['SetVolume', 8, (_, [value])=>{
+                    path.volume = value | 0;
+                    path.gain = volumeToGain(path.volume);
+                    return S_OK;
+                }],
+                ['ConvertPChannel', 12, (_, [, out])=>{
+                    writeU32(out, 0);
+                    return S_OK;
+                }],
+            ])],
+            state: { type, channels },
+        });
+        (/** @type {any} */ (path.object)).dmusic = path;
+        return path;
+    };
+
+    /** The DirectMusic object itself, for a program that asks for one. */
+    const directMusicDefinition = ()=>{
+        const methods = /** @type {ComMethodEntry[]} */ ([
+            ['EnumPort', 12, ()=>S_FALSE],
+            ['CreateMusicBuffer', 16, ()=>E_NOTIMPL],
+            ['CreatePort', 20, ()=>E_NOTIMPL],
+            ['EnumMasterClock', 12, ()=>S_FALSE],
+            ['GetMasterClock', 12, ()=>E_NOTIMPL],
+            ['SetMasterClock', 8, ()=>E_NOTIMPL],
+            ['Activate', 8, ()=>S_OK],
+            ['GetDefaultPort', 8, ()=>E_NOTIMPL],
+            ['SetDirectSound', 12, ()=>S_OK],
+        ]);
+        const eight = [...methods, /** @type {ComMethodEntry} */ (
+            ['SetExternalMasterClock', 8, ()=>E_NOTIMPL])];
+        return {
+            interfaces: [
+                describe(ids.IID_DIRECTMUSIC8, eight),
+                describe(ids.IID_DIRECTMUSIC, methods),
+            ],
+        };
+    };
+
+    /**
+     * The performance: what a program plays segments through. One definition
+     * per create, so each holds its own default path and volume.
+     */
+    const performanceDefinition = ()=>{
+        /** @type {any} */
+        let defaultPath = null;
+        /** Master volume in hundredths of a decibel, 0 = full. */
+        let masterVolume = 0;
+        const masterGain = ()=>volumeToGain(masterVolume);
+
+        /** @param {number} lo @param {number} hi */
+        const join64 = (lo, hi)=>(lo >>> 0) + (hi >>> 0) * 0x100000000;
+
+        /**
+         * @param {any} segment @param {number} flags @param {number} start
+         * @param {number} out
+         */
+        const playSegment = async(segment, flags, start, out)=>{
+            if (!segment)
+            {
+                return E_INVALIDARG;
+            }
+            const program = await segment.resolve();
+            const voice = player.start(program, {
+                delayMs: start > 0 ? start : 0,
+                plays: segment.plays(),
+                volume: masterGain() * (defaultPath?.gain ?? 1),
+                segment,
+            });
+            const state = createSegmentState(segment.object, ()=>segment.startPoint(), voice);
+            voice.state = state;
+            if ((out >>> 0) !== 0)
+            {
+                writeU32(out, publish(state.object, ids.IID_DIRECTMUSIC_SEGMENTSTATE8));
+            }
+            void flags;
+            return S_OK;
+        };
+
+        const methods = /** @type {ComMethodEntry[]} */ ([
+            ['Init', 16, ()=>{
+                return S_OK;
+            }],
+            ['PlaySegment', 24, (_, [source, flags, lo, hi, out])=>playSegment(
+                apiOf(source), flags >>> 0, join64(lo, hi), out)],
+            ['Stop', 20, (_, [source, state])=>stopVoice(apiOf(state) ?? apiOf(source))],
+            ['GetSegmentState', 12, (_, [out])=>{
+                const voice = player.voices()[0];
+                if (!voice || (out >>> 0) === 0)
+                {
+                    return E_FAIL;
+                }
+                writeU32(out, publish(voice.state.object, ids.IID_DIRECTMUSIC_SEGMENTSTATE8));
+                return S_OK;
+            }],
+            ['SetPrepareTime', 8, ()=>S_OK],
+            ['GetPrepareTime', 8, (_, [out])=>{
+                writeU32(out, 0);
+                return S_OK;
+            }],
+            ['SetBumperLength', 8, ()=>S_OK],
+            ['GetBumperLength', 8, (_, [out])=>{
+                writeU32(out, 0);
+                return S_OK;
+            }],
+            ['SendPMsg', 8, ()=>S_OK],
+            ['MusicToReferenceTime', 12, (_, [mt, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeU64(out, mt * 10000);
+                return S_OK;
+            }],
+            ['ReferenceToMusicTime', 16, (_, [lo, hi, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeU32(out, Math.floor(join64(lo, hi) / 10000));
+                return S_OK;
+            }],
+            ['IsPlaying', 12, (_, [segment, state])=>{
+                const stateObject = apiOf(state);
+                if (stateObject)
+                {
+                    return player.playing((/** @type {any} */ v)=>v.state === stateObject)
+                        ? S_OK : S_FALSE;
+                }
+                const wanted = apiOf(segment);
+                if (wanted)
+                {
+                    return player.playing((/** @type {any} */ v)=>v.segment === wanted)
+                        ? S_OK : S_FALSE;
+                }
+                return player.voices().length > 0 ? S_OK : S_FALSE;
+            }],
+            ['GetTime', 12, (_, [reference, music])=>{
+                const ms = now();
+                if ((reference >>> 0) !== 0)
+                {
+                    writeU64(reference, Math.round(ms * 10000));
+                }
+                if ((music >>> 0) !== 0)
+                {
+                    writeU32(music, Math.round(ms * PPQ * 2 / 1000));
+                }
+                return S_OK;
+            }],
+            ['AllocPMsg', 12, ()=>E_NOTIMPL],
+            ['FreePMsg', 8, ()=>E_NOTIMPL],
+            ['GetGraph', 8, ()=>E_FAIL],
+            ['SetGraph', 8, ()=>E_NOTIMPL],
+            ['SetNotificationHandle', 16, ()=>S_OK],
+            ['GetNotificationPMsg', 8, ()=>S_FALSE],
+            ['AddNotificationType', 8, ()=>S_OK],
+            ['RemoveNotificationType', 8, ()=>S_OK],
+            ['AddPort', 8, ()=>S_OK],
+            ['RemovePort', 8, ()=>S_OK],
+            ['AssignPChannelBlock', 16, ()=>S_OK],
+            ['AssignPChannel', 20, ()=>S_OK],
+            ['PChannelInfo', 20, ()=>E_INVALIDARG],
+            ['DownloadInstrument', 36, ()=>E_NOTIMPL],
+            ['Invalidate', 12, ()=>S_OK],
+            ['GetParam', 28, ()=>E_NOTIMPL],
+            ['SetParam', 24, ()=>E_NOTIMPL],
+            ['GetGlobalParam', 16, (_, [guid, out])=>{
+                if (guidAt(guid) === ids.GUID_PERF_MASTER_VOLUME && (out >>> 0) !== 0)
+                {
+                    writeU32(out, masterVolume);
+                }
+                return S_OK;
+            }],
+            ['SetGlobalParam', 16, (_, [guid, param])=>{
+                if (guidAt(guid) === ids.GUID_PERF_MASTER_VOLUME && (param >>> 0) !== 0)
+                {
+                    masterVolume = readU32(param) | 0;
+                }
+                return S_OK;
+            }],
+            ['GetLatencyTime', 8, (_, [out])=>{
+                writeU64(out, 0);
+                return S_OK;
+            }],
+            ['GetQueueTime', 8, (_, [out])=>{
+                writeU64(out, 0);
+                return S_OK;
+            }],
+            ['AdjustTime', 12, (_, [lo, hi, out])=>{
+                writeU64(out, join64(lo, hi));
+                return S_OK;
+            }],
+            ['CloseDown', 4, ()=>{
+                player.stopAll();
+                return S_OK;
+            }],
+            ['GetResolvedTime', 20, (_, [lo, hi, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeU64(out, join64(lo, hi));
+                return S_OK;
+            }],
+            ['MIDIToMusic', 24, ()=>E_NOTIMPL],
+            ['MusicToMIDI', 24, ()=>E_NOTIMPL],
+            ['TimeToRhythm', 28, ()=>E_NOTIMPL],
+            ['RhythmToTime', 28, ()=>E_NOTIMPL],
+        ]);
+
+        const eightMethods = /** @type {ComMethodEntry[]} */ ([
+            ['InitAudio', 32, (_, [music, sound, , type, channels])=>{
+                defaultPath = createAudioPath(type >>> 0, channels >>> 0);
+                // The objects the caller asked for are the ones DirectMusic
+                // would have made. The DirectSound half is not this layer's
+                // to make -- the layer that answers for DirectSound is a
+                // different one -- so it is left null.
+                if ((music >>> 0) !== 0)
+                {
+                    const made = createComObject(ids.CLSID_DIRECTMUSIC, directMusicDefinition());
+                    writeU32(music, publish(made, ids.IID_DIRECTMUSIC8));
+                }
+                if ((sound >>> 0) !== 0)
+                {
+                    writeU32(sound, 0);
+                }
+                return S_OK;
+            }],
+            ['PlaySegmentEx', 40, (_, [source, , , flags, lo, hi, out])=>playSegment(
+                apiOf(source), flags >>> 0, join64(lo, hi), out)],
+            ['StopEx', 20, (_, [item])=>{
+                if ((item >>> 0) === 0)
+                {
+                    player.stopAll();
+                    return S_OK;
+                }
+                return stopVoice(apiOf(item));
+            }],
+            ['ClonePMsg', 12, ()=>E_NOTIMPL],
+            ['CreateAudioPath', 16, (_, [, , out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                const path = createAudioPath(0, 0);
+                writeU32(out, publish(path.object, ids.IID_DIRECTMUSIC_AUDIOPATH));
+                return S_OK;
+            }],
+            ['CreateStandardAudioPath', 20, (_, [type, channels, , out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                const path = createAudioPath(type >>> 0, channels >>> 0);
+                writeU32(out, publish(path.object, ids.IID_DIRECTMUSIC_AUDIOPATH));
+                return S_OK;
+            }],
+            ['SetDefaultAudioPath', 8, (_, [path])=>{
+                defaultPath = apiOf(path);
+                return S_OK;
+            }],
+            ['GetDefaultAudioPath', 8, (_, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeU32(out, defaultPath
+                    ? publish(defaultPath.object, ids.IID_DIRECTMUSIC_AUDIOPATH) : 0);
+                return S_OK;
+            }],
+            ['GetParamEx', 32, ()=>E_NOTIMPL],
+        ]);
+
+        /** @param {any} target */
+        const stopVoice = target=>{
+            if (!target)
+            {
+                return S_FALSE;
+            }
+            let stopped = false;
+            player.stopWhere((/** @type {any} */ voice)=>{
+                const hit = voice.segment === target || voice.state === target;
+                stopped ||= hit;
+                return hit;
+            });
+            return stopped ? S_OK : S_FALSE;
+        };
+
+        return {
+            interfaces: [
+                describe(ids.IID_DIRECTMUSIC_PERFORMANCE8, [...methods, ...eightMethods]),
+                describe(ids.IID_DIRECTMUSIC_PERFORMANCE, methods),
+            ],
+        };
+    };
+
+    /** The loader a program asks for objects by name or descriptor. */
+    const loaderDefinition = ()=>{
+        /** @type {Map<string, any>} */
+        const cache = new Map();
+        /** @param {string} path */
+        const dirOf = path=>{
+            const at = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
+            return at <= 0 ? '' : path.slice(0, at);
+        };
+        /** @param {number} address */
+        const readDescriptor = address=>({
+            name: readWide(address + ids.DMUS_OBJECTDESC.wszName, 64),
+            filename: readWide(address + ids.DMUS_OBJECTDESC.wszFileName, 260),
+            memLength: readU32(address + ids.DMUS_OBJECTDESC.llMemLength)
+                + readU32(address + ids.DMUS_OBJECTDESC.llMemLength + 4) * 0x100000000,
+            memData: readU32(address + ids.DMUS_OBJECTDESC.pbMemData),
+            stream: readU32(address + ids.DMUS_OBJECTDESC.pStream),
+        });
+
+        /**
+         * @param {number} iid @param {Uint8Array} bytes @param {string} dir
+         * @param {number} out
+         */
+        const finishLoad = (iid, bytes, dir, out)=>{
+            const wanted = (iid >>> 0) === 0 ? ids.IID_DIRECTMUSIC_SEGMENT8 : guidAt(iid);
+            const allowed = [ids.IID_DIRECTMUSIC_SEGMENT, ids.IID_DIRECTMUSIC_SEGMENT8,
+                ids.IID_DIRECTMUSIC_OBJECT, ids.IID_IPERSIST_STREAM, GUID_NULL];
+            if (!allowed.includes(/** @type {string} */ (wanted)))
+            {
+                return E_NOINTERFACE;
+            }
+            const segment = createSegmentObject(bytes, dir);
+            const chosen = wanted === GUID_NULL ? ids.IID_DIRECTMUSIC_SEGMENT8
+                : /** @type {string} */ (wanted);
+            const pointer = publish(segment.object, chosen);
+            if (pointer === 0)
+            {
+                return E_OUTOFMEMORY;
+            }
+            writeU32(out, pointer);
+            return S_OK;
+        };
+
+        const methods = /** @type {ComMethodEntry[]} */ ([
+            ['GetObject', 16, (_, [descriptor, iid, out])=>{
+                if ((descriptor >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeU32(out, 0);
+                const desc = readDescriptor(descriptor >>> 0);
+                if (desc.memData !== 0 && desc.memLength > 0)
+                {
+                    return finishLoad(iid, memory.readBytes(desc.memData, desc.memLength).slice(),
+                        '', out);
+                }
+                if (desc.filename !== '')
+                {
+                    return loadFile(desc.filename, '')
+                        .then(bytes=>bytes ? finishLoad(iid, bytes, dirOf(desc.filename), out)
+                            : E_FAIL);
+                }
+                if (desc.name !== '')
+                {
+                    return loadFile(desc.name, '')
+                        .then(bytes=>bytes ? finishLoad(iid, bytes, '', out) : E_FAIL);
+                }
+                if (desc.stream !== 0)
+                {
+                    host.divergence?.('IDirectMusicLoader::GetObject',
+                        'loading from an IStream is not implemented');
+                    return E_NOTIMPL;
+                }
+                return E_INVALIDARG;
+            }],
+            ['SetObject', 8, ()=>S_OK],
+            ['SetSearchDirectory', 16, (_, [guid, path])=>{
+                void guid;
+                if ((path >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                const wanted = readWide(path, 260);
+                const changed = wanted !== searchDirectory;
+                searchDirectory = wanted;
+                return changed ? S_OK : S_FALSE;
+            }],
+            ['ScanDirectory', 16, ()=>S_FALSE],
+            ['CacheObject', 8, ()=>S_OK],
+            ['ReleaseObject', 8, ()=>S_OK],
+            ['ClearCache', 8, ()=>{
+                cache.clear();
+                return S_OK;
+            }],
+            ['EnableCache', 12, ()=>S_FALSE],
+            ['EnumObject', 20, ()=>S_FALSE],
+        ]);
+        const eightMethods = /** @type {ComMethodEntry[]} */ ([
+            ['CollectGarbage', 4, ()=>S_OK],
+            ['ReleaseObjectByUnknown', 8, ()=>S_OK],
+            ['LoadObjectFromFile', 20, (_, [, iid, path, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeU32(out, 0);
+                if ((path >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const name = readWide(path, 260);
+                return loadFile(name, '')
+                    .then(bytes=>bytes ? finishLoad(iid, bytes, dirOf(name), out) : E_FAIL);
+            }],
+        ]);
+        return {
+            interfaces: [
+                describe(ids.IID_DIRECTMUSIC_LOADER8, [...methods, ...eightMethods]),
+                describe(ids.IID_DIRECTMUSIC_LOADER, methods),
+            ],
+        };
+    };
+
+    return {
+        performance: performanceDefinition,
+        loader: loaderDefinition,
+        directMusic: directMusicDefinition,
+        /** An empty segment, for a program that makes one by class id. */
+        segment: ()=>segmentDefinition(null, ''),
+        /** One turn of the clock for every performance's voices. */
+        tick: ()=>player.tick(),
+        diagnostics: ()=>({ ...player.diagnostics() }),
+        /** A segment made by the loader, kept for tests and for the report. */
+        createSegment: createSegmentObject,
+    };
+}
+
+/** A segment with nothing in it, for a segment made by class id alone. */
+function emptySegment(){
+    return {
+        header: { repeats: 0, length: 0, playStart: 0, loopStart: 0, loopEnd: 0,
+            resolution: PPQ, refLength: 0 },
+        waves: [],
+        tempo: [],
+        trackCount: 0,
+    };
+}
