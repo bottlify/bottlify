@@ -2097,7 +2097,7 @@ const CLEAR_STRIDE = 20;
  * @property {boolean} [compressedTextures]
  *     Whether a DXT surface uploads as BC blocks (true, when its base is also
  *     block-aligned) or decodes to `bgra8unorm` (false, the default). Never
- *     whether a DXT surface may be created -- that is always legal.
+ *     whether a DXT surface may be created -- that is the device's to say.
  */
 
 /**

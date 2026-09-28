@@ -45,6 +45,14 @@ const E_FAIL = 0x80004005 | 0;
 /** The shader versions Direct3D 8 validates: vs_1_0-1_1 and ps_1_0-1_4. */
 const VERTEX_SHADER_VERSIONS = [0xfffe0100, 0xfffe0101];
 const PIXEL_SHADER_VERSIONS = [0xffff0100, 0xffff0101, 0xffff0102, 0xffff0103, 0xffff0104];
+/** A shader's end token and comment opcode, a declaration's end, and a read of past them. */
+const SHADER_END = 0x0000ffff;
+const SHADER_COMMENT = 0xfffe;
+const DECLARATION_END = 0xffffffff;
+const SHADER_TOKEN_CAP = 0x10000;
+/** D3DSPR_INPUT and D3DSPR_CONST, a parameter's register types. */
+const REGISTER_INPUT = 1;
+const REGISTER_CONSTANT = 2;
 /** E_OUTOFMEMORY, which is what a create that cannot make an object reports. */
 const E_OUTOFMEMORY = 0x8007000e | 0;
 
@@ -84,6 +92,8 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *        Guest memory for the state a program sets without crossing into the host.
  * @param {(address: number) => void} [deps.free]
  *        And the way to give it back, for a map a program has finished with.
+ * @param {(bytes: number) => number} [deps.processHeapAllocate]
+ *        A block of the process heap, for what a program frees with HeapFree.
  * @param {(name: string) => number} [deps.exportAddress]
  *        The guest address of one of OPENGL32's own exports, which is what
  *        wglGetProcAddress answers for a core name.
@@ -127,7 +137,7 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
 export function createGraphicsLibraries(
     { graphics, memory, publishInterface, unpublishInterface, screen, gdi, present, flipQueued,
         publisher: shared, callGuest,
-        free, exportAddress,
+        free, exportAddress, processHeapAllocate,
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
         gamma, deactivated, deactivations, now = ()=>performance.now(),
@@ -140,27 +150,111 @@ export function createGraphicsLibraries(
     const fields = createFields(memory);
 
     /**
-     * @param {number} code @param {number} caps @param {number} errors
-     * @param {number[]} versions @param {number} capsVersion  Where the caps keep
-     *        the highest version the device runs.
+     * What a Direct3D 8 shader is judged on: a version Direct3D 8 knows and
+     * the caps, when given, run; for a vertex shader, constants within the
+     * caps' count and inputs its declaration, when given, maps. The answer's
+     * reason, or null when it is valid.
+     *
+     * @param {number} code @param {number} caps @param {number} declaration
+     * @param {{ versions: number[], capsVersion: number, capsConstants?: number }} kind
+     * @returns {string | null}
      */
-    const validateShader = (code, caps, errors, versions, capsVersion)=>{
-        if ((errors >>> 0) !== 0)
-        {
-            fields.writeU32(errors >>> 0, 0);
-        }
+    const shaderFault = (code, caps, declaration, kind)=>{
         if ((code >>> 0) === 0)
         {
-            return E_FAIL;
+            return 'No shader was given.';
         }
         const version = fields.readU32(code >>> 0) >>> 0;
-        if (!versions.includes(version))
+        if (!kind.versions.includes(version))
         {
-            return E_FAIL;
+            return `Shader version ${version.toString(16)} is not valid.`;
         }
-        return (caps >>> 0) !== 0
-            && (version & 0xffff) > (fields.readU32((caps >>> 0) + capsVersion) & 0xffff)
-            ? E_FAIL : S_OK;
+        if ((caps >>> 0) !== 0
+            && (version & 0xffff) > (fields.readU32((caps >>> 0) + kind.capsVersion) & 0xffff))
+        {
+            return 'The shader version is higher than the device supports.';
+        }
+        // Every parameter token has its top bit set, an instruction token and
+        // the end token do not; a comment is skipped by its length.
+        let highestConstant = -1;
+        /** @type {Set<number>} */
+        const inputs = new Set();
+        for (let at = (code >>> 0) + 4, count = 0; count < SHADER_TOKEN_CAP; at += 4, count++)
+        {
+            const token = fields.readU32(at) >>> 0;
+            if (token === SHADER_END)
+            {
+                break;
+            }
+            if ((token & 0xffff) === SHADER_COMMENT && (token & 0x80000000) === 0)
+            {
+                at += (token >>> 16 & 0x7fff) * 4;
+                continue;
+            }
+            if ((token & 0x80000000) === 0)
+            {
+                continue;
+            }
+            const type = (token >>> 28 & 7) | (token >>> 8 & 0x18);
+            if (type === REGISTER_INPUT)
+            {
+                inputs.add(token & 0x7ff);
+            }
+            else if (type === REGISTER_CONSTANT)
+            {
+                highestConstant = Math.max(highestConstant, token & 0x7ff);
+            }
+        }
+        if ((caps >>> 0) !== 0 && kind.capsConstants !== undefined
+            && highestConstant >= fields.readU32((caps >>> 0) + kind.capsConstants))
+        {
+            return 'The shader uses more constants than the device has.';
+        }
+        if ((declaration >>> 0) !== 0)
+        {
+            /** @type {Set<number>} */
+            const declared = new Set();
+            for (let at = declaration >>> 0, count = 0; count < SHADER_TOKEN_CAP; at += 4, count++)
+            {
+                const token = fields.readU32(at) >>> 0;
+                if (token === DECLARATION_END)
+                {
+                    break;
+                }
+                // D3DVSD_REG: a stream datum that is not a skip.
+                if ((token >>> 29) === 2 && (token & 0x10000000) === 0)
+                {
+                    declared.add(token & 0x1f);
+                }
+            }
+            if ([...inputs].some(register=>!declared.has(register)))
+            {
+                return 'The shader reads an input its declaration does not map.';
+            }
+        }
+        return null;
+    };
+
+    /**
+     * The answer of either Validate call. The messages are a string of the
+     * process heap, which the program frees: empty unless the shader is
+     * invalid and they were asked for.
+     *
+     * @param {string | null} fault @param {number} errorReturn @param {number} errors
+     */
+    const validated = (fault, errorReturn, errors)=>{
+        if ((errors >>> 0) !== 0)
+        {
+            const text = fault !== null && errorReturn !== 0 ? fault : '';
+            const block = processHeapAllocate?.(text.length + 1) ?? 0;
+            if (block !== 0)
+            {
+                memory.writeMemory(block,
+                    Uint8Array.from([...text].map(c=>c.charCodeAt(0)).concat(0)));
+            }
+            fields.writeU32(errors >>> 0, block);
+        }
+        return fault === null ? S_OK : E_FAIL;
     };
     const d3d8 = createDirect3D8Seam({
         publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution,
@@ -310,15 +404,18 @@ export function createGraphicsLibraries(
              *                              const D3DCAPS8 *caps, BOOL errorReturn,
              *                              char **errors)
              *
-             * The version token is what is judged: one Direct3D 8 knows, and
-             * no newer than the caps say the device runs. There are never
-             * messages, so an errors pointer is answered with none.
+             * Judged as `shaderFault` says; an errors pointer is handed a
+             * string of the process heap for the program to free.
              */
             ValidateVertexShader: {
                 argBytes: 20,
                 /** @param {number[]} args */
-                handler: ([code, , caps, , errors])=>validateShader(code, caps, errors,
-                    VERTEX_SHADER_VERSIONS, D3DCAPS8.VertexShaderVersion),
+                handler: ([code, declaration, caps, errorReturn, errors])=>validated(
+                    shaderFault(code, caps, declaration, {
+                        versions: VERTEX_SHADER_VERSIONS,
+                        capsVersion: D3DCAPS8.VertexShaderVersion,
+                        capsConstants: D3DCAPS8.MaxVertexShaderConst,
+                    }), errorReturn, errors),
             },
 
             /**
@@ -328,8 +425,11 @@ export function createGraphicsLibraries(
             ValidatePixelShader: {
                 argBytes: 16,
                 /** @param {number[]} args */
-                handler: ([code, caps, , errors])=>validateShader(code, caps, errors,
-                    PIXEL_SHADER_VERSIONS, D3DCAPS8.PixelShaderVersion),
+                handler: ([code, caps, errorReturn, errors])=>validated(
+                    shaderFault(code, caps, 0, {
+                        versions: PIXEL_SHADER_VERSIONS,
+                        capsVersion: D3DCAPS8.PixelShaderVersion,
+                    }), errorReturn, errors),
             },
         },
 

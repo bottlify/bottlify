@@ -735,6 +735,23 @@ test('Direct3D 8 validates a shader by its version token, and never has messages
     box.memory.writeU32(code, 0xfffe0102);
     assert.equal(d3d8.ValidateVertexShader.handler([code, 0, 0, 0, 0]), E_FAIL);
 
+    // dp4 oPos.x, v0, c3, then the end: constants to c3 and an input v0.
+    [0xfffe0101, 9, 0xc0010000, 0x90e40000, 0xa0e40003, 0xffff]
+        .forEach((word, at)=>box.memory.writeU32(code + at * 4, word));
+    box.memory.writeU32(caps + 0xc4, 0xfffe0101);
+    box.memory.writeU32(caps + 0xc8, 4);
+    assert.equal(d3d8.ValidateVertexShader.handler([code, 0, caps, 0, 0]), 0);
+    box.memory.writeU32(caps + 0xc8, 3);
+    assert.equal(d3d8.ValidateVertexShader.handler([code, 0, caps, 0, 0]), E_FAIL,
+        'c3 is past the three constants the caps give');
+    const declaration = 0x9300;
+    [0x20000000, 0x40030000, 0xffffffff]
+        .forEach((word, at)=>box.memory.writeU32(declaration + at * 4, word));
+    assert.equal(d3d8.ValidateVertexShader.handler([code, declaration, 0, 0, 0]), 0);
+    box.memory.writeU32(declaration + 4, 0x40030003);
+    assert.equal(d3d8.ValidateVertexShader.handler([code, declaration, 0, 0, 0]), E_FAIL,
+        'v0 read, only v3 declared');
+
     box.memory.writeU32(code, 0xffff0104);
     assert.equal(d3d8.ValidatePixelShader.handler([code, 0, 0, 0]), 0);
     box.memory.writeU32(code, 0xffff0200);

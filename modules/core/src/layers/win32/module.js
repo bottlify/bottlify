@@ -2385,6 +2385,18 @@ export function createWin32Module(){
                  */
                 heap: ()=>heap,
                 /**
+                 * A block of the process heap, as HeapAlloc(GetProcessHeap())
+                 * gives one: what a system library hands a program to free with
+                 * HeapFree. Zero when there is no room.
+                 *
+                 * @param {number} bytes
+                 */
+                processHeapAllocate: bytes=>{
+                    const kernel32 = libraries['KERNEL32.dll'];
+                    return kernel32.HeapAlloc.handler(
+                        [kernel32.GetProcessHeap.handler([]), 0, bytes >>> 0]) >>> 0;
+                },
+                /**
                  * Sets the calling thread's last error, as SetLastError does:
                  * for a layer outside win32 whose calls a program checks with
                  * GetLastError, as it does WGL's.

@@ -379,6 +379,17 @@ export function isCompressed(format){
 }
 
 /**
+ * Whether a resource's top level is whole blocks of its format: Direct3D 8
+ * and 9 refuse a compressed texture or surface that is not, in every pool
+ * (Wine's test_surface_blocks), where the levels below it may be any size.
+ *
+ * @param {number} format @param {number} width @param {number} height
+ */
+export function blockAligned(format, width, height){
+    return !isCompressed(format) || ((width | height) & 3) === 0;
+}
+
+/**
  * The distance in bytes between one row of a surface and the next.
  *
  * For a compressed format that is a row of blocks, not a row of pixels, and it

@@ -53,7 +53,7 @@ import {
     D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_DEVICEREMOVED, D3DERR_INVALIDCALL,
     D3DERR_NOTAVAILABLE,
     D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DOK_NOAUTOGEN, D3DPOOL, D3DRS, D3DRTYPE, D3DUSAGE,
-    D3D_OK, FORMAT_INFO, isCompressed, surfaceBytes, surfacePitch,
+    D3D_OK, FORMAT_INFO, blockAligned, isCompressed, surfaceBytes, surfacePitch,
 } from './constants.js';
 import { D3DCLEAR, D3DTS } from '../d3d8/constants.js';
 import {
@@ -3358,7 +3358,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ texture?: any }} out
          */
         CreateTexture(width, height, levels, usage, format, pool, out){
-            if (unmanaged(pool))
+            if (unmanaged(pool) || !blockAligned(format, width, height))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -3388,7 +3388,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ texture?: any }} out
          */
         CreateCubeTexture(edgeLength, levels, usage, format, pool, out){
-            if (unmanaged(pool))
+            if (unmanaged(pool) || !blockAligned(format, edgeLength, edgeLength))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -3524,7 +3524,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         CreateOffscreenPlainSurface(width, height, format, pool, out, usage = 0){
             const info = FORMAT_INFO[format];
             if (!info || pool === D3DPOOL.MANAGED || (info.depth && !caps.depthPlain)
-                || !(width > 0) || !(height > 0))
+                || !(width > 0) || !(height > 0) || !blockAligned(format, width, height))
             {
                 return D3DERR_INVALIDCALL;
             }

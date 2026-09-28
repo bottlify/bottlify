@@ -153,6 +153,20 @@ export function createDirect3D9Seam(
     const owners = new WeakMap();
 
     /**
+     * A create that failed leaves a null where its interface would have gone,
+     * as Direct3D does.
+     *
+     * @param {number} out @param {number} hr
+     */
+    const clearAndRefuse = (out, hr)=>{
+        if ((out >>> 0) !== 0)
+        {
+            fields.writeU32(out >>> 0, 0);
+        }
+        return hr;
+    };
+
+    /**
      * A resource, published as whichever interface it is, with the reference
      * the out-parameter owes taken. Publishing can fail -- guest memory for a
      * vtable is finite -- and the failure is the whole call's: the pointer
@@ -1436,7 +1450,7 @@ export function createDirect3D9Seam(
                 return handBack(held.texture, textureInterfaces, IID_IDirect3DTexture9,
                     out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
-            return hr;
+            return clearAndRefuse(out, hr);
         },
 
         /** @param {any} device @param {number[]} args */
@@ -1455,8 +1469,7 @@ export function createDirect3D9Seam(
                 return handBack(held.texture, volumeTextureInterfaces,
                     IID_IDirect3DVolumeTexture9, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
-            fields.writeU32(out >>> 0, 0);
-            return hr;
+            return clearAndRefuse(out, hr);
         },
         /** @param {any} device @param {number[]} args */
         CreateCubeTexture: (device, [edgeLength, levels, usage, format, pool, out, shared])=>{
@@ -1473,7 +1486,7 @@ export function createDirect3D9Seam(
                 return handBack(held.texture, cubeTextureInterfaces, IID_IDirect3DCubeTexture9,
                     out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
-            return hr;
+            return clearAndRefuse(out, hr);
         },
 
         /** @param {any} device @param {number[]} args */
@@ -1491,7 +1504,7 @@ export function createDirect3D9Seam(
                 return handBack(held.buffer, vertexBufferInterfaces,
                     IID_IDirect3DVertexBuffer9, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
-            return hr;
+            return clearAndRefuse(out, hr);
         },
 
         /** @param {any} device @param {number[]} args */
@@ -1509,7 +1522,7 @@ export function createDirect3D9Seam(
                 return handBack(held.buffer, indexBufferInterfaces,
                     IID_IDirect3DIndexBuffer9, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
-            return hr;
+            return clearAndRefuse(out, hr);
         },
 
         // The multisample type and quality are dropped: this device renders
@@ -1529,7 +1542,7 @@ export function createDirect3D9Seam(
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface9,
                     out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
-            return hr;
+            return clearAndRefuse(out, hr);
         },
 
         /** @param {any} device @param {number[]} args */
@@ -1547,7 +1560,7 @@ export function createDirect3D9Seam(
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface9,
                     out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
-            return hr;
+            return clearAndRefuse(out, hr);
         },
 
         /** @param {any} device @param {number[]} args */
@@ -1565,7 +1578,7 @@ export function createDirect3D9Seam(
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface9,
                     out >>> 0, E_OUTOFMEMORY, device);
             }
-            return hr;
+            return clearAndRefuse(out, hr);
         },
 
         // --- copies between surfaces: the device describes the moves and,

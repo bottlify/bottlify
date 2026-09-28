@@ -1196,7 +1196,7 @@ export function createDirect3D8Seam(
                 return handBack(held.texture, textureInterfaces, IID_IDirect3DTexture8,
                     out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
-            return hr;
+            return clearAndRefuse(out, hr);
         },
 
         /** @param {any} device @param {number[]} args */
@@ -1209,7 +1209,7 @@ export function createDirect3D8Seam(
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
                     out >>> 0, E_OUTOFMEMORY, device);
             }
-            return hr;
+            return clearAndRefuse(out, hr);
         },
 
         /** @param {any} device @param {number[]} args */
@@ -1224,7 +1224,7 @@ export function createDirect3D8Seam(
                 return handBack(held.buffer, vertexBufferInterfaces,
                     IID_IDirect3DVertexBuffer8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
-            return hr;
+            return clearAndRefuse(out, hr);
         },
 
         /** @param {any} device @param {number[]} args */
@@ -1239,7 +1239,7 @@ export function createDirect3D8Seam(
                 return handBack(held.buffer, indexBufferInterfaces,
                     IID_IDirect3DIndexBuffer8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
-            return hr;
+            return clearAndRefuse(out, hr);
         },
 
         /** @param {any} device @param {number[]} args */
@@ -1549,7 +1549,7 @@ export function createDirect3D8Seam(
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
                     out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
-            return hr;
+            return clearAndRefuse(out, hr);
         },
 
         /** @param {any} device @param {number[]} args */
@@ -1563,7 +1563,7 @@ export function createDirect3D8Seam(
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
                     out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
-            return hr;
+            return clearAndRefuse(out, hr);
         },
 
         /** @param {any} device @param {number[]} args */

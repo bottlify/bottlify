@@ -44,7 +44,7 @@ import {
     D3DCLEAR, D3DCREATE, D3DDEVTYPE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET,
     D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE, D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DPOOL,
     D3DFMT_VERTEXDATA, D3DPRESENTFLAG, D3DRTYPE, D3DSBT, D3DTS, D3DUSAGE, D3D_OK, FORMAT_INFO,
-    isCompressed, isShaderHandle,
+    blockAligned, isCompressed, isShaderHandle,
     surfaceBytes, surfacePitch,
 } from './constants.js';
 import { GAMMA_RAMP_ENTRIES } from './structs.js';
@@ -2620,6 +2620,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ texture?: any }} out
          */
         CreateTexture(width, height, levels, usage, format, pool, out){
+            if (!blockAligned(format, width, height))
+            {
+                return D3DERR_INVALIDCALL;
+            }
             const hr = createResult(SURFACE_TYPE.TEXTURE_2D, format, pool, usage, caps);
             if (hr !== D3D_OK)
             {
@@ -2689,6 +2693,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ texture?: any }} out
          */
         CreateCubeTexture(edgeLength, levels, usage, format, pool, out){
+            if (!blockAligned(format, edgeLength, edgeLength))
+            {
+                return D3DERR_INVALIDCALL;
+            }
             const hr = createResult(SURFACE_TYPE.CUBE, format, pool, usage, caps);
             if (hr !== D3D_OK)
             {
@@ -2783,6 +2791,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ surface?: any }} out
          */
         CreateImageSurface(width, height, format, out){
+            if (!blockAligned(format, width, height))
+            {
+                return D3DERR_INVALIDCALL;
+            }
             const hr = imageSurfaceCreateResult(format, caps);
             if (hr !== D3D_OK)
             {

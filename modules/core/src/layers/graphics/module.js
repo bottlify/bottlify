@@ -823,6 +823,9 @@ export function createGraphicsModule(){
                 allocate: config?.allocate,
                 allocateCode: config?.allocateCode,
                 free: config?.free,
+                // What a program is handed to free with HeapFree itself.
+                processHeapAllocate: (/** @type {number} */ bytes)=>
+                    win32.processHeapAllocate?.(bytes) ?? 0,
                 divergence: config?.divergence,
                 // The address of one of OPENGL32's own exports, which only the
                 // assembling caller knows once the module is placed.

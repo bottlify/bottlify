@@ -29,7 +29,7 @@ import assert from 'node:assert/strict';
 import {
     D3DBLEND, D3DCLEAR, D3DCMP, D3DFMT, D3DFMT_INDEX, D3DFOG, D3DLIGHTTYPE, D3DLOCK, D3DMCS,
     D3DPOOL, D3DPT, D3DRS, D3DSWAPEFFECT, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS, D3DTSS,
-    D3D_OK, floatToDword,
+    D3D_OK, D3DERR_INVALIDCALL, floatToDword,
 } from './constants.js';
 import { createDirect3D8 } from './device.js';
 import {
@@ -1861,15 +1861,19 @@ test('recorded: a textured draw without a sampler factory fails loudly, not whit
     assert.throws(()=>createDirect3D8({ backend }), /readMemory/);
 });
 
-test('recorded: a DXT1 base narrower than one block decodes, a whole-block one takes the BC path',
+test('a DXT1 base narrower than one block is refused; a decoded one lies in B, G, R, A',
     async()=>{
-        const h = harness({ compressedTextures: true });
+        // Direct3D 8 and 9 make a compressed texture only in whole blocks
+        // (Wine's test_surface_blocks).
+        const refusing = harness({ compressedTextures: true });
+        assert.equal(refusing.device.CreateTexture(2, 64, 1, 0, D3DFMT.DXT1, D3DPOOL.MANAGED, {}),
+            D3DERR_INVALIDCALL);
+
+        const h = harness({ compressedTextures: false });
         const { device, gpu } = h;
-        // Both a 2-wide and a 4-wide base round up to one column of blocks,
-        // so both need the same 16 rows-of-blocks worth of compressed bytes.
         const block = new Uint8Array(128).fill(7);
-        const narrow = textureFrom(h, 2, 64, D3DFMT.DXT1, block);
-        assert.equal(device.SetTexture(0, narrow), D3D_OK);
+        const texture = textureFrom(h, 4, 64, D3DFMT.DXT1, block);
+        assert.equal(device.SetTexture(0, texture), D3D_OK);
         selectTexture(device);
         assert.equal(device.BeginScene(), D3D_OK);
         assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
@@ -1878,13 +1882,10 @@ test('recorded: a DXT1 base narrower than one block decodes, a whole-block one t
         assert.equal(device.EndScene(), D3D_OK);
         await h.present();
 
-        const narrowSurface = gpu.of('createTexture').find(c=>c.descriptor.label === 'texture');
-        assert.equal(narrowSurface.descriptor.format, 'bgra8unorm',
-            'a 2-wide base is narrower than one block, so WebGPU refuses it as compressed');
-        assert.equal(gpu.of('copyBufferToTexture').length, 0, 'no staged, undecoded copy happened');
-        const written = gpu.of('writeTexture')
-            .find(w=>w.destination.texture === narrowSurface.texture);
-        assert.ok(written, 'the level travelled decoded instead');
+        const surface = gpu.of('createTexture').find(c=>c.descriptor.label === 'texture');
+        assert.equal(surface.descriptor.format, 'bgra8unorm');
+        const written = gpu.of('writeTexture').find(w=>w.destination.texture === surface.texture);
+        assert.ok(written, 'the level travelled decoded');
         // A block of 0x07 bytes: both endpoints 0x0707 (r 0, g 227, b 57 widened
         // from 5-6-5), index bits 0b00000111 -- the first texel index 3, which
         // the punch-through mode makes transparent black, the second index 1,
@@ -1892,23 +1893,6 @@ test('recorded: a DXT1 base narrower than one block decodes, a whole-block one t
         // stored in, or red and blue trade places on every DXT texture.
         assert.deepEqual([...written.bytes.subarray(4, 8)], [57, 227, 0, 0xff],
             'blue byte first');
-
-        const wide = textureFrom(h, 4, 64, D3DFMT.DXT1, block);
-        assert.equal(device.SetTexture(0, wide), D3D_OK);
-        assert.equal(device.BeginScene(), D3D_OK);
-        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
-        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
-            quad([0, 0, 2, 2], argb(255, 255, 255), true), 28), D3D_OK);
-        assert.equal(device.EndScene(), D3D_OK);
-        await h.present();
-
-        const wideSurface = gpu.of('createTexture').find(c=>c.descriptor.label === 'texture'
-            && c.texture !== narrowSurface.texture);
-        assert.equal(wideSurface.descriptor.format, 'bc1-rgba-unorm',
-            'a 4-wide base is a whole block: it still takes the BC path');
-        assert.ok(
-            gpu.of('copyBufferToTexture').some(c=>c.destination.texture === wideSurface.texture),
-            'the level travelled through staging, undecoded');
     });
 
 test('recorded: a block-aligned DXT5 surface decodes with compressedTextures off and takes'
