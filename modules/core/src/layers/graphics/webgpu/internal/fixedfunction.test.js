@@ -905,3 +905,14 @@ test('an unsupported operation is refused rather than silently dropped', ()=>{
     });
     assert.throws(()=>generate(state), /Unsupported texture operation 99/);
 });
+
+test('a pre-transformed vertex with no depth test is held in the depth range, not clipped', ()=>{
+    const rhw = FVF.XYZRHW | FVF.DIFFUSE;
+    const held = /out\.position\.z = clamp\(out\.position\.z, 0\.0, out\.position\.w\);/;
+    assert.match(generate(baseState({ fvf: rhw, depthTest: false })).code, held);
+    assert.doesNotMatch(generate(baseState({ fvf: rhw, depthTest: true })).code, held,
+        'a depth test reads the depth as it is');
+    const transformed = generate(baseState({ fvf: FVF.XYZ | FVF.DIFFUSE, depthTest: false }));
+    assert.doesNotMatch(transformed.code, held,
+        'a transformed vertex is clipped by the near and far planes');
+});

@@ -751,6 +751,12 @@ export function generateFixedFunction(state, layout){
             : [`    out.fogAmount = ${has('specular') ? 'vertex.specular.a' : '1.0'};`];
 
     const lightCount = lighting === null ? 0 : lighting.lights.length;
+    // A pre-transformed vertex is not clipped by its depth, and with no depth
+    // test its depth is read by nothing else: held inside the range, it is
+    // drawn wherever its z lies, as Direct3D draws it (Wine's d3d8
+    // zenable_test), where the rasteriser would cut it at the near and far.
+    const unclipped = layout.preTransformed && !state.depthTest
+        ? '\n    out.position.z = clamp(out.position.z, 0.0, out.position.w);' : '';
     const cornerInput = points ? ', @builtin(vertex_index) corner: u32' : '';
     const keys = state.stages.map(stage=>stage.colorKey ?? null);
     // The position is @invariant: a second pass over the same geometry with
@@ -778,7 +784,7 @@ ${varyings.join('\n')}
 fn vertexMain(vertex: VertexIn${cornerInput}) -> VertexOut {
     var out: VertexOut;
 ${position}
-${pixelCentre}
+${pixelCentre}${unclipped}
 ${pointLines.join('\n')}
 ${[...assignments, ...fogAmount].join('\n')}
     return out;
