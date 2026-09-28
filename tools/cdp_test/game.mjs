@@ -342,6 +342,20 @@ function parse(argv){
             const [code, after, frames] = argv[index + 1].split(',');
             return [{ code, ...afterOf(after), frames: frames ? Number(frames) : 1 }];
         }),
+        // A watch in front of a routine inside one of the program's own
+        // modules, `module:offset:label:argBytes:len,len[:strings]` as the
+        // launcher's `?hook=` takes it: its calls and answers join the log.
+        watches: argv.flatMap((flag, index)=>{
+            if (flag !== '--hook')
+            {
+                return [];
+            }
+            const [module, offset, label, argBytes, lengths, strings] = argv[index + 1].split(':');
+            return [{ module: module.toLowerCase(), offset: Number(offset), label,
+                argBytes: Number(argBytes), lengths: lengths.split(',').map(Number),
+                strings: (strings ?? '').split('+').filter(Boolean)
+                    .map(s=>(/^\d+$/.test(s) ? Number(s) : s)) }];
+        }),
         // Mouse motion without a button, `dx,dy,after,frames`: that much each
         // presented frame for that many frames -- how a view is turned.
         looks: argv.flatMap((flag, index)=>{
@@ -1300,6 +1314,7 @@ export async function game(options){
                 ?? (manifest.commandLine ? `"${imagePath}" ${manifest.commandLine}` : undefined),
             windows,
             sidecarHooks,
+            hooks: options.watches,
             maxTurns: options.turns,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
             engine: options.engine,

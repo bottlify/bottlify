@@ -1569,6 +1569,32 @@ export function createHarness(canvas, how = {}){
             // something reads the other end of the ring at the rate a device would.
             audio: { drained: true, ...request.audio ?? {} },
         });
+        // Watches in front of routines inside a program's own modules, as
+        // `--hook` named them, put in place as each module is loaded -- the
+        // launcher's `?hook=` for a scenario run.
+        // What a watched routine was handed and what it answered, in the log
+        // beside the calls around it.
+        if ((request.hooks ?? []).length > 0 && request.log)
+        {
+            app.on('guest-return', (/** @type {any} */ back)=>{
+                const line = `${back.name} -> ${JSON.stringify(back.result)} `
+                    + (back.strings ?? []).join(' ');
+                if (callLog.length < (request.logLines || LIMITS.log)
+                    && (!logMatch || logMatch.test(line)))
+                {
+                    callLog.push(line);
+                }
+            });
+        }
+        for (const spec of request.hooks ?? [])
+        {
+            app.on('library-loaded', (/** @type {{ name: string, base: number }} */ { name, base })=>{
+                if (String(name).toLowerCase().endsWith(spec.module))
+                {
+                    app.debug.hook(base + spec.offset, spec);
+                }
+            });
+        }
 
         // What the device mixed, between two moments of the run, when asked.
         const capture = request.captureAudio
