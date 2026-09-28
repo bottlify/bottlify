@@ -2187,7 +2187,7 @@ test('recorded: a lit draw carries its lights, its material and the scene ambien
     assert.deepEqual([...draw.uniforms.subarray(second + 12, second + 16)], [1, 2, 3, 50]);
 });
 
-test('recorded: lighting off, or no normal to light, leaves the vertex colour alone', async()=>{
+test('recorded: lighting off leaves the colour alone, and no normal still lights', async()=>{
     /** @param {number} fvf @param {number} lighting */
     const drawWith = async(fvf, lighting)=>{
         const h = harness();
@@ -2215,11 +2215,10 @@ test('recorded: lighting off, or no normal to light, leaves the vertex colour al
     assert.equal(off.uniforms.length, UNIFORM_FLOATS,
         'and no light is carried for a shader that declares none');
 
-    // Direct3D leaves a lit vertex with no normal undefined. Carrying its
-    // colour through is the reading that keeps such a draw looking as it did
-    // rather than turning it black.
+    // A vertex with no normal is still lit, with a zero one: its ambient and
+    // emissive colours are what Windows draws (Wine's d3d8 test_color_vertex).
     const noNormal = await drawWith(FVF.XYZ | FVF.DIFFUSE, 1);
-    assert.equal(noNormal.state.lighting, null);
+    assert.equal(noNormal.state.lighting.lights.length, 1);
 
     // A pre-transformed vertex is past the point where lighting happens.
     const preTransformed = await drawWith(FVF.XYZRHW | FVF.DIFFUSE, 1);
@@ -2359,7 +2358,7 @@ test('the run counts what lighting it was actually asked for', async()=>{
     // A picture that is uniformly too dark or too flat cannot be diagnosed from
     // the frame. The question is always whether the program enabled lighting,
     // how many lights it had on, what ambient it set, and how many draws were
-    // refused lighting for want of a normal -- and none of that was countable.
+    // lit without a normal -- and none of that was countable.
     const h = harness();
     const { device } = h;
     /** @param {number} fvf @param {number} lighting */
@@ -2384,9 +2383,9 @@ test('the run counts what lighting it was actually asked for', async()=>{
     await h.present();
 
     const counted = device.diagnostics().lighting;
-    assert.equal(counted.lit, 1);
-    assert.equal(counted.unlit, 3);
-    assert.equal(counted.noNormal, 1, 'lighting was on and the format carried no normal');
+    assert.equal(counted.lit, 2);
+    assert.equal(counted.unlit, 2);
+    assert.equal(counted.noNormal, 1, 'lit, and the format carried no normal');
     assert.equal(counted.preTransformed, 1, 'lighting was on and the vertices were past it');
     assert.equal(counted.mostLights, 1);
     assert.deepEqual(counted.types, [light8().Type]);

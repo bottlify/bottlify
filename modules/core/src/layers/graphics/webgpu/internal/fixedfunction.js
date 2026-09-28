@@ -504,8 +504,11 @@ function lightingBody(lighting, has, specular, normalizeNormals){
     /** @type {string[]} */
     const lines = [
         '    let worldPosition = (uniforms.world * vec4f(vertex.position, 1.0)).xyz;',
-        `    let worldNormal = ${normalized(
-            '(uniforms.normalMatrix * vec4f(vertex.normal, 0.0)).xyz', normalizeNormals)};`,
+        // A vertex with no normal is lit with a zero one, as Direct3D lights
+        // it: its lights add nothing, and ambient and emissive light it whole.
+        `    let worldNormal = ${has('normal') ? normalized(
+            '(uniforms.normalMatrix * vec4f(vertex.normal, 0.0)).xyz', normalizeNormals)
+            : 'vec3f(0.0)'};`,
     ];
     if (highlights)
     {
@@ -570,11 +573,6 @@ export function generateFixedFunction(state, layout){
     const lighting = state.lighting ?? null;
     const specularEnable = state.specularEnable === true;
     const normalizeNormals = state.normalizeNormals === true;
-    if (lighting && !has('normal'))
-    {
-        throw new Error('A lit vertex format must carry a normal');
-    }
-
     /** @type {string[]} */
     const varyings = [];
     /** @type {string[]} */

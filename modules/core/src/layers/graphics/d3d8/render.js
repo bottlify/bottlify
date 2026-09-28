@@ -1359,9 +1359,7 @@ const enabledLightsKept = new WeakMap();
  */
 export function lightingOf(model, layout){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
-    const lit = rs('LIGHTING') !== 0
-        && !layout.preTransformed
-        && layout.attributes.some(attribute=>attribute.name === 'normal');
+    const lit = rs('LIGHTING') !== 0 && !layout.preTransformed;
     if (!lit)
     {
         return null;
@@ -2553,20 +2551,18 @@ export function createRenderer(options){
             tally.unlit++;
             if ((model.renderStates.get(D3DRS.LIGHTING) ?? 0) !== 0)
             {
-                // Lighting was on and we declined it, which is the case worth
-                // separating: the program believes it is lighting this draw.
-                if (layout.preTransformed)
-                {
-                    tally.preTransformed++;
-                }
-                else
-                {
-                    tally.noNormal++;
-                }
+                // Lighting was on and the vertices are past it: the program
+                // believes it is lighting this draw.
+                tally.preTransformed++;
             }
             return;
         }
         tally.lit++;
+        // Lit with a zero normal, which only its ambient and emissive light.
+        if (!layout.attributes.some(attribute=>attribute.name === 'normal'))
+        {
+            tally.noNormal++;
+        }
         tally.mostLights = Math.max(tally.mostLights, lighting.lights.length);
         for (let index = 0; index < lighting.lights.length; index++)
         {

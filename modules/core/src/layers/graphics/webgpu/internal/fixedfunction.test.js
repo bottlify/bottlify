@@ -880,17 +880,19 @@ test('the specular colour is added even when nothing was lit', ()=>{
     assert.match(code, /current = vec4f\(current\.rgb \+ input\.specular\.rgb, current\.a\);/);
 });
 
-test('a lit format without a normal, and an unknown light type, are refused', ()=>{
-    // Both would compile into something: the first into a shader reading an
-    // attribute that is not there, the second into a light that contributes
-    // nothing. A refusal is what the shader cache is for.
-    assert.throws(
-        ()=>generate(baseState({ fvf: FVF.XYZ | FVF.DIFFUSE, lighting: lighting() })),
-        /must carry a normal/);
-    assert.throws(
-        ()=>generate(baseState({ fvf: LIT_FVF, lighting: lighting({ lights: [7] }) })),
-        /Unsupported light type 7/);
-});
+test('a lit format without a normal is lit with a zero one, and an unknown light type is refused',
+    ()=>{
+        // Windows lights such a vertex by its ambient and emissive colours
+        // alone (Wine's d3d8 test_color_vertex); a light of an unknown type
+        // would compile into one that contributes nothing.
+        const code = generate(baseState({ fvf: FVF.XYZ | FVF.DIFFUSE, lighting: lighting() }))
+            .code;
+        assert.match(code, /let worldNormal = vec3f\(0\.0\);/);
+        assert.doesNotMatch(code, /vertex\.normal/);
+        assert.throws(
+            ()=>generate(baseState({ fvf: LIT_FVF, lighting: lighting({ lights: [7] }) })),
+            /Unsupported light type 7/);
+    });
 
 test('an unsupported operation is refused rather than silently dropped', ()=>{
     const state = baseState({
