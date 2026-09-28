@@ -1736,6 +1736,30 @@ export function createShadow(deps){
         },
 
         /**
+         * The same after a user-pointer draw, which empties stream zero and the
+         * index binding on the device: without it a program binding the
+         * buffer it had bound before would read as no change.
+         */
+        refreshStreamZero(){
+            if (address === 0 || deps.bindings === false
+                || (seenStreams[0] === 0 && seenStreams[1] === 0 && seenIndices === 0
+                    && seenBaseVertex === 0))
+            {
+                return;
+            }
+            /** @type {{ stride?: number }} */
+            const out = {};
+            device.GetStreamSource(0, out);
+            /** @type {any} */ (out).buffer?.release();
+            seenStreams[0] = 0;
+            seenStreams[1] = (out.stride ?? 0) >>> 0;
+            seenIndices = 0;
+            seenBaseVertex = 0;
+            deps.writeMemory(address + SHADOW.STREAMS, dwordsBytes([0, seenStreams[1]]));
+            deps.writeMemory(address + SHADOW.INDICES, dwordsBytes([0, 0]));
+        },
+
+        /**
          * The same for a transform the host changed itself -- one multiplied
          * by MultiplyTransform, which works on what the device holds.
          *

@@ -373,6 +373,20 @@ export function createDirect3D8Seam(
     };
 
     /**
+     * A user-pointer draw's answer, once the shadow block has taken the empty
+     * stream zero and index binding the draw left on the device.
+     *
+     * @param {any} device @param {number} hr
+     */
+    const refreshedStreamZero = (device, hr)=>{
+        if (hr === D3D_OK)
+        {
+            shadowOf(device)?.refreshStreamZero();
+        }
+        return hr;
+    };
+
+    /**
      * A create this build cannot do.
      *
      * The caller's pointer is cleared as well as the result reported, because a
@@ -1311,23 +1325,24 @@ export function createDirect3D8Seam(
         // times the stride the caller declared.
         /** @param {any} device @param {number[]} args */
         DrawPrimitiveUP: (device, [type, primitiveCount, vertices, stride])=>
-            device.DrawPrimitiveUP(type >>> 0, primitiveCount >>> 0,
+            refreshedStreamZero(device, device.DrawPrimitiveUP(
+                type >>> 0, primitiveCount >>> 0,
                 readArray(vertices,
                     vertexCountOf(type >>> 0, primitiveCount >>> 0) * (stride >>> 0)),
-                stride >>> 0),
+                stride >>> 0)),
 
         /** @param {any} device @param {number[]} args */
         DrawIndexedPrimitiveUP: (device,
             [type, minIndex, numVertices, count, indices, format, vertices, stride])=>
-            device.DrawIndexedPrimitiveUP(type >>> 0, minIndex >>> 0, numVertices >>> 0,
-                count >>> 0,
+            refreshedStreamZero(device, device.DrawIndexedPrimitiveUP(
+                type >>> 0, minIndex >>> 0, numVertices >>> 0, count >>> 0,
                 readArray(indices,
                     vertexCountOf(type >>> 0, count >>> 0) * indexWidth(format)),
                 format >>> 0,
                 // An index counts from the start of the vertices, so the
                 // range reaches past its lowest by the count.
                 readArray(vertices, ((minIndex >>> 0) + (numVertices >>> 0)) * (stride >>> 0)),
-                stride >>> 0),
+                stride >>> 0)),
 
         /** @param {any} device @param {number[]} args */
         SetRenderTarget: (device, [target, depth])=>

@@ -1751,7 +1751,7 @@ test('recorded: a fan drawn from user memory is expanded, and unbinds stream zer
     const stream = {};
     assert.equal(device.GetStreamSource(0, stream), D3D_OK);
     assert.equal(stream.buffer, null, 'a user-pointer draw leaves stream zero empty');
-    assert.equal(stream.stride, 20, 'but the stride is not forgotten');
+    assert.equal(stream.stride, 0, 'and its stride');
     out.buffer.release();
 });
 

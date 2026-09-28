@@ -1402,13 +1402,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     };
 
     /**
-     * The user-pointer draws leave stream zero and the index binding empty:
-     * the data they drew came from neither, and a program that draws from a
-     * buffer afterwards has to bind it again.
+     * The user-pointer draws leave stream zero and the index binding empty,
+     * the stride with them: the data they drew came from neither, and a
+     * program that draws from a buffer afterwards has to bind it again.
      */
     const unbindStreamZero = ()=>{
         stream(0).buffer?.letGo?.();
         stream(0).buffer = null;
+        stream(0).stride = 0;
         indices?.letGo?.();
         indices = null;
         baseVertexIndex = 0;
@@ -2023,11 +2024,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          */
         DrawIndexedPrimitive(type, _minIndex, _numVertices, startIndex, primitiveCount){
             const hr = drawPreconditions(type, primitiveCount);
-            if (hr !== D3D_OK || !stream(0).buffer || !indices)
+            if (hr !== D3D_OK)
             {
                 return D3DERR_INVALIDCALL;
             }
-            if (renderer)
+            // Nothing to draw from is nothing drawn, not a failure (Wine's d3d8
+            // test_draw_primitive).
+            if (renderer && stream(0).buffer && indices)
             {
                 renderer.drawIndexedPrimitive(model, type, startIndex, primitiveCount);
             }
@@ -2044,6 +2047,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {number} stride
          */
         DrawPrimitiveUP(type, primitiveCount, vertexData, stride){
+            // No primitives is nothing to draw, and still a user-pointer draw.
+            if (primitiveCount === 0 && inScene && vertexData && stride > 0)
+            {
+                unbindStreamZero();
+                return D3D_OK;
+            }
             const hr = drawPreconditions(type, primitiveCount);
             if (hr !== D3D_OK || !vertexData || !(stride > 0)
                 || vertexData.byteLength < vertexCountOf(type, primitiveCount) * stride)

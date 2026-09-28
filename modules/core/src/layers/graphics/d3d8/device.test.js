@@ -1878,8 +1878,8 @@ test('a draw outside a scene, of nothing, or without a stream is refused', ()=>{
     assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 0), D3DERR_INVALIDCALL, 'nothing');
     assert.equal(device.DrawPrimitive(9, 0, 1), D3DERR_INVALIDCALL, 'not a primitive type');
     assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
-    assert.equal(device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 3, 0, 1), D3DERR_INVALIDCALL,
-        'no indices are bound');
+    assert.equal(device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 3, 0, 1), D3D_OK,
+        'no indices bound draws nothing, and is not refused (Wine test_draw_primitive)');
     assert.equal(device.SetStreamSource(0, null, 0), D3D_OK);
     assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3DERR_INVALIDCALL, 'no stream');
     assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, bytes, 16), D3D_OK,
@@ -1924,7 +1924,7 @@ test('a user-pointer draw unbinds stream zero and the indices', ()=>{
     const out = {};
     assert.equal(device.GetStreamSource(0, out), D3D_OK);
     assert.equal(out.buffer, null);
-    assert.equal(out.stride, 16, 'the stride survives, as it does for any unbinding');
+    assert.equal(out.stride, 0, 'the stride goes with it (Wine d3d8 test_draw_primitive)');
     assert.equal(device.GetIndices(out), D3D_OK);
     assert.equal(out.buffer, null);
     assert.equal(out.baseVertexIndex, 0);
