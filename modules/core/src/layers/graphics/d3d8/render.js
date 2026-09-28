@@ -4120,10 +4120,12 @@ export function createRenderer(options){
     const ensureFrame = ()=>{
         if (!recording)
         {
-            const arena = arenas.pop() ?? createUniformArena();
+            const arena = arenas.pop() ?? Object.assign(createUniformArena(),
+                { draws: /** @type {any[]} */ ([]) });
             arena.reset();
             recording = {
                 commands: [], pipelines: [], pass: null, viewport: null, scissor: '', arena,
+                drawsTaken: 0,
             };
         }
         return recording;
@@ -5436,27 +5438,46 @@ export function createRenderer(options){
                 : backend.pipelineFor(prepared.state));
         }
         prepared.pipelineIndex = holder.pipelineIndex;
-        const command = {
-            kind: 'draw',
-            // Six corners an instance, one instance a point.
-            ...(prepared.state.points ? { points: true } : {}),
-            pipeline: prepared.pipelineIndex,
-            state: prepared.state,
-            uniforms: prepared.uniforms,
-            stageBindings: prepared.stageBindings,
-            program: prepared.program,
-            ...geometry,
-        };
-        if (streams.length !== 0)
+        // The draw commands of a frame are kept with its arena and written
+        // over by the next frame that takes the arena, which is after this
+        // one has replayed: a draw that made an object of its own made the
+        // collector run under the frame, and a collection there is a gap in
+        // the sound as much as in the picture.
+        const pool = frame.arena.draws;
+        let command = pool[frame.drawsTaken];
+        if (!command)
         {
-            command.streams = streams;
+            command = blankDraw();
+            pool.push(command);
         }
-        if (instances !== 1)
-        {
-            command.instances = instances;
-        }
+        frame.drawsTaken++;
+        // Six corners an instance, one instance a point.
+        command.points = prepared.state.points !== undefined;
+        command.pipeline = prepared.pipelineIndex;
+        command.state = prepared.state;
+        command.uniforms = prepared.uniforms;
+        command.stageBindings = prepared.stageBindings;
+        command.program = prepared.program;
+        command.vertices = geometry.vertices;
+        command.indices = geometry.indices;
+        command.count = geometry.count;
+        command.first = geometry.first;
+        command.baseVertex = geometry.baseVertex ?? 0;
+        command.streams = streams.length !== 0 ? streams : undefined;
+        command.instances = instances !== 1 ? instances : undefined;
+        command.check = undefined;
         frame.commands.push(command);
     };
+
+    /** A draw command of the one shape every draw is recorded in. */
+    const blankDraw = ()=>({
+        kind: 'draw', points: false, pipeline: 0, state: /** @type {any} */ (null),
+        uniforms: /** @type {any} */ (null), stageBindings: /** @type {any} */ (null),
+        program: /** @type {any} */ (null), vertices: /** @type {any} */ (null),
+        indices: /** @type {any} */ (null), count: 0, first: 0, baseVertex: 0,
+        streams: /** @type {any} */ (undefined), instances: /** @type {number | undefined} */ (undefined),
+        check: /** @type {any} */ (undefined),
+    });
 
     /**
      * What one state of the device prepares to, kept until the state changes.
@@ -6320,6 +6341,58 @@ export function createRenderer(options){
     };
 
     /**
+     * The geometry a draw hands `record`, which copies it at once: one object
+     * for every draw that has no other, where a literal each was garbage.
+     *
+     * @type {{ vertices: any, indices: any, count: number, first: number, baseVertex: number }}
+     */
+    const scratchGeometry = { vertices: null, indices: null, count: 0, first: 0, baseVertex: 0 };
+
+    /** @type {WeakMap<object, { gpu: any, offset: number }>} */
+    const wholeBindings = new WeakMap();
+    /**
+     * A GPU buffer bound from its start, one object per buffer: commands hold
+     * it until they replay and never change it, so every draw of a buffer
+     * shares one.
+     *
+     * @param {any} gpu
+     */
+    const wholeBinding = gpu=>{
+        let bound = wholeBindings.get(gpu);
+        if (!bound)
+        {
+            bound = { gpu, offset: 0 };
+            wholeBindings.set(gpu, bound);
+        }
+        return bound;
+    };
+
+    /** @type {WeakMap<object, Map<number, { gpu: any, offset: number, format: string }>>} */
+    const indexBindings = new WeakMap();
+    /**
+     * An index buffer bound at an offset in a format, one object per buffer,
+     * offset and format, shared as `wholeBinding` shares its own.
+     *
+     * @param {any} gpu @param {number} offset @param {string} format
+     */
+    const indexBinding = (gpu, offset, format)=>{
+        let byOffset = indexBindings.get(gpu);
+        if (!byOffset)
+        {
+            byOffset = new Map();
+            indexBindings.set(gpu, byOffset);
+        }
+        const key = offset * 2 + (format === 'uint32' ? 1 : 0);
+        let bound = byOffset.get(key);
+        if (!bound)
+        {
+            bound = { gpu, offset, format };
+            byOffset.set(key, bound);
+        }
+        return bound;
+    };
+
+    /**
      * An indexed point list's vertices in index order: a point is drawn as an
      * instance, and an instance is read in order, never through an index.
      *
@@ -7065,20 +7138,16 @@ export function createRenderer(options){
             const indexBuffer = bufferFor(model.indices).gpu;
             streamBuffer.markRead();
             indexBuffer.markRead();
-            const vertices = { gpu: streamBuffer.gpu, offset: 0 };
+            const vertices = wholeBinding(streamBuffer.gpu);
             if (list === undefined)
             {
-                record(model, prepared, {
-                    vertices,
-                    indices: {
-                        gpu: indexBuffer.gpu,
-                        offset: byteOffset,
-                        format: format.gpu,
-                    },
-                    count,
-                    first: 0,
-                    baseVertex: model.baseVertexIndex,
-                }, true, streamZeroBias(model));
+                const geometry = scratchGeometry;
+                geometry.vertices = vertices;
+                geometry.indices = indexBinding(indexBuffer.gpu, byteOffset, format.gpu);
+                geometry.count = count;
+                geometry.first = 0;
+                geometry.baseVertex = model.baseVertexIndex;
+                record(model, prepared, geometry, true, streamZeroBias(model));
                 if (dumpDraws && prepared.program)
                 {
                     dumpProgram(model, prepared, count);

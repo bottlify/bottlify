@@ -44,13 +44,14 @@
 
 import { Session } from 'node:inspector/promises';
 import { PerformanceObserver } from 'node:perf_hooks';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolve, relative } from 'node:path';
 
 const HERE = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const rootAt = process.argv.indexOf('--root');
 const ROOT = rootAt > 0 ? resolve(process.argv[rootAt + 1]) : HERE;
-const GRAPHICS = `${ROOT}/modules/core/src/layers/graphics`;
+// A URL, not a path: an absolute Windows path is no module specifier.
+const GRAPHICS = pathToFileURL(`${ROOT}/modules/core/src/layers/graphics`).href;
 
 const {
     D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DPOOL, D3DPT, D3DRS, D3DSWAPEFFECT, D3DTS, D3DCLEAR,
