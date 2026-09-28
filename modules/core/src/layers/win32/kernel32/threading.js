@@ -651,9 +651,11 @@ export function createThreadingFunctions(host){
                     // wait's answer, and the parent goes on after its child as
                     // on Windows. A timeout is not armed -- nothing of the
                     // parent's runs while the child does, so no time of its
-                    // passes to run out.
+                    // passes to run out. A poll marks the child as one its
+                    // parent watches, which runs beside it as a waited one does.
                     if (wait === 0)
                     {
+                        target.polled = true;
                         return WAIT_TIMEOUT;
                     }
                     (target.waiters ??= []).push({ thread, result: WAIT_OBJECT_0 });

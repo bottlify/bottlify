@@ -321,6 +321,79 @@ test('a launcher waiting on its game or the event the game sets is woken by the 
         assert.equal(await app.run({ timeoutMs: 30000 }), 1, 'WAIT_OBJECT_0 + 1: the event');
     });
 
+/**
+ * A setup that runs a helper and polls for it rather than waiting: it starts
+ * the helper, asks GetExitCodeProcess until the answer is no longer
+ * STILL_ACTIVE, sleeping a millisecond between, and exits with the helper's
+ * code plus one. The helper exits with 7.
+ */
+function buildPoller(){
+    const parent = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'GetExitCodeProcess', 'Sleep',
+            'ExitProcess'] },
+        data: {
+            command: ascii('C:\\App\\helper.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+            code: new Array(4).fill(0),
+        },
+        codeSize: 0x60,
+        code: ({ iat, at })=>[
+            // CreateProcessA(0, command, ..., &startup, &info)
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            // poll: GetExitCodeProcess(info.hProcess, &code)
+            0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+            0x81, 0x3d, ...u32(at('code')), ...u32(259),               // cmp code, STILL_ACTIVE
+            0x75, 0x0a,                                                // jne done
+            0x6a, 1, 0xff, 0x15, ...u32(iat('Sleep')),                 // Sleep(1)
+            0xeb, 0xd9,                                                // jmp poll
+            // done: ExitProcess(code + 1)
+            0xa1, ...u32(at('code')), 0x40, 0x50,
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const helper = buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        code: ({ iat })=>[0x6a, 7, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+    });
+    return { parent, helper };
+}
+
+test('a parent that polls its child\'s exit code goes on after it, as one waiting on it does',
+    { timeout: 60000 }, async t=>{
+        // GetExitCodeProcess answers STILL_ACTIVE while the child runs, and a
+        // setup asking it between one-millisecond sleeps is waiting for its
+        // helper as surely as one blocked on the handle. It was taken for a
+        // parent with nothing left to do and replaced by the helper, so the
+        // run ended with the helper's exit: an installer vanished once a
+        // shortcut helper it started had finished.
+        const { parent, helper } = buildPoller();
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\setup.exe',
+            engine: 'cork',
+            storage: { load: async()=>({
+                files: [{ path: 'C:\\App\\helper.exe', bytes: helper }],
+            }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {string[]} */
+        const lifecycle = [];
+        app.on('process-child', (/** @type {any} */ event)=>
+            lifecycle.push(`child ${event.image}`));
+        app.on('process-replace', (/** @type {any} */ event)=>
+            lifecycle.push(`replaced by ${event.image}`));
+        app.on('process-resumed', (/** @type {any} */ event)=>
+            lifecycle.push(`resumed ${event.code}`));
+        assert.equal(await app.run({ timeoutMs: 30000 }), 8,
+            'the helper\'s 7, plus the parent\'s one');
+        assert.deepEqual(lifecycle, ['child C:\\App\\helper.exe', 'resumed 7']);
+    });
+
 test('a process started beside its parent writes into the run\'s one journal', { timeout: 60000 },
     async t=>{
         // The page reads the journal through the facade, which stays with the

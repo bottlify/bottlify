@@ -199,11 +199,14 @@ function fakeContexts(){
  *        Where a module is mapped, for a resource read in place.
  * @param {(info: number, bits: number) => number} [options.bitmapFromDib]
  *        The bitmap a packed DIB in guest memory is made into.
+ * @param {any} [options.files]  The volume, for an image loaded from a file.
+ * @param {(bytes: number) => number} [options.allocate]
+ * @param {(address: number) => void} [options.release]
  */
 function setup(
     { cursor, keyState, asyncKeyState, keyboardState, setKeyboardState,
         findResource, loadString, dispatch = ()=>0, screen, messageBox, regionBox,
-        moduleBase, bitmapFromDib } = {})
+        moduleBase, bitmapFromDib, files, allocate, release } = {})
 {
     screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
     const memory = fakeMemory();
@@ -250,6 +253,9 @@ function setup(
         findResource,
         moduleBase,
         bitmapFromDib,
+        files,
+        allocate,
+        release,
         loadString,
         regionBox,
         /** @param {any} notice */
@@ -1264,6 +1270,81 @@ test('a bitmap resource is made from its packed DIB, past the header and its col
         'IMAGE_BITMAP, by name');
     assert.deepEqual(made[1], [base + 0x800, base + 0x800 + 40]);
     assert.equal(fns.LoadBitmapA.handler([HINSTANCE, 999]), 0, 'and one it does not carry is null');
+});
+
+test('LR_LOADFROMFILE makes a bitmap of a .bmp file, its pixels where bfOffBits says', async()=>{
+    // A setup's banner is a file beside it: LoadImage(hinst, "AutoRun\\AutoRun.bmp",
+    // IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE | LR_CREATEDIBSECTION). The module
+    // handle plays no part; the file is a BITMAPFILEHEADER and a DIB, and a
+    // zero bfOffBits means the pixels are packed behind the colours.
+    const IMAGE_BITMAP = 0;
+    const LR_LOADFROMFILE = 0x10;
+    const LR_CREATEDIBSECTION = 0x2000;
+    const SCRATCH = 0x9000;
+    /** @param {number} offBits @param {number} gap */
+    const bmp = (offBits, gap)=>{
+        const bytes = new Uint8Array(14 + 40 + gap + 16);
+        const view = new DataView(bytes.buffer);
+        bytes.set([0x42, 0x4d]);
+        view.setUint32(2, bytes.length, true);
+        view.setUint32(10, offBits, true);
+        view.setUint32(14, 40, true);
+        view.setInt32(18, 2, true);
+        view.setInt32(22, 2, true);
+        view.setUint16(26, 1, true);
+        view.setUint16(28, 24, true);
+        return bytes;
+    };
+    /** @type {Map<string, Uint8Array>} */
+    const disk = new Map([
+        ['C:\\SETUP\\AUTORUN\\AUTORUN.BMP', bmp(14 + 40 + 2, 2)],
+        ['C:\\SETUP\\PACKED.BMP', bmp(0, 0)],
+        ['C:\\SETUP\\NOTES.TXT', new TextEncoder().encode('not a bitmap at all, only words')],
+    ]);
+    /** @param {string} path */
+    const find = path=>disk.get(path.toUpperCase());
+    const files = {
+        stat: (/** @type {string} */ path)=>(find(path)
+            ? { exists: true, isDirectory: false, size: find(path)?.length ?? 0 } : null),
+        open: (/** @type {string} */ path)=>find(path) ?? null,
+        // Read as a bundle's file is, later.
+        read: (/** @type {Uint8Array} */ node, /** @type {number} */ at,
+            /** @type {number} */ length)=>Promise.resolve(node.slice(at, at + length)),
+        close: ()=>{},
+    };
+    /** @type {{ info: number, bits: number, header: number }[]} */
+    const made = [];
+    /** @type {number[]} */
+    const released = [];
+    const { memory, fns } = setup({
+        files,
+        allocate: ()=>SCRATCH,
+        release: address=>released.push(address),
+        bitmapFromDib: (info, bits)=>{
+            made.push({ info, bits, header: memory.u32(info) });
+            return 0x7100 + made.length;
+        },
+    });
+
+    memory.putString(TEXT_BUFFER, 'C:\\Setup\\AutoRun\\AutoRun.bmp');
+    assert.equal(await fns.LoadImageA.handler([HINSTANCE, TEXT_BUFFER, IMAGE_BITMAP, 0, 0,
+        LR_LOADFROMFILE | LR_CREATEDIBSECTION]), 0x7101);
+    assert.deepEqual(made[0], { info: SCRATCH, bits: SCRATCH + 40 + 2, header: 40 },
+        'the DIB behind the file header, its pixels where the header says');
+    assert.deepEqual(released, [SCRATCH], 'and the copy goes once the bitmap is made');
+
+    memory.putString(TEXT_BUFFER, 'C:\\Setup\\Packed.bmp');
+    assert.equal(await fns.LoadImageA.handler([0, TEXT_BUFFER, IMAGE_BITMAP, 0, 0,
+        LR_LOADFROMFILE]), 0x7102, 'no module needed');
+    assert.equal(made[1].bits, SCRATCH + 40, 'packed: no colours for 24 bits');
+
+    memory.putString(TEXT_BUFFER, 'C:\\Setup\\Notes.txt');
+    assert.equal(await fns.LoadImageA.handler([0, TEXT_BUFFER, IMAGE_BITMAP, 0, 0,
+        LR_LOADFROMFILE]), 0, 'not a bitmap file');
+    memory.putString(TEXT_BUFFER, 'C:\\Setup\\Missing.bmp');
+    assert.equal(fns.LoadImageA.handler([0, TEXT_BUFFER, IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE]),
+        0, 'no file');
+    assert.equal(made.length, 2);
 });
 
 test('a bitmap the module does not carry, and a program-manager conversation, are refused', ()=>{

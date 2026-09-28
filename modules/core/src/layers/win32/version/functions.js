@@ -107,7 +107,7 @@ const FIXED_FILE_VERSION_LS = 12;
  * system's.
  */
 const DIRECTX_LIBRARY =
-    /^(ddraw|d3d\w*|dsound|dinput8?|dplay\w*|dpn\w*|dm\w+|dswave|dxdiag\w*|xinput\w*)\.dll$/i;
+    /^(ddraw|d3d\w*|dsound|dinput8?|dplay\w*|dpn\w*|dm\w+|dswave|dxdiag\w*|xinput\w*|dsetup)\.dll$/i;
 
 /**
  * The 16-bit subsystem's modules, in the system directory of every 32-bit

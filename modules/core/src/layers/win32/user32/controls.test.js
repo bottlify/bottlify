@@ -197,7 +197,7 @@ function fakeHandles(){
  * @param {{ style: number, title: string, x?: number, y?: number, cx: number, cy: number,
  *     font?: { pointSize: number, face: string },
  *     controls: { id: number, className: string, title: string, style: number,
- *         x: number, y: number, cx: number, cy: number }[] }} dialog
+ *         x: number, y: number, cx: number, cy: number, exStyle?: number }[] }} dialog
  */
 function putTemplate(memory, dialog){
     let at = TEMPLATE;
@@ -239,7 +239,7 @@ function putTemplate(memory, dialog){
     {
         at = (at + 3) & ~3;
         u32(control.style);
-        u32(0);
+        u32(control.exStyle ?? 0);
         u16(control.x);
         u16(control.y);
         u16(control.cx);
@@ -1558,7 +1558,9 @@ test('a program\'s own class is told to erase with its background brush and to p
         assert.ok(seen.includes(WM_CREATE) && seen.includes(WM_PAINT), 'created and painted');
         assert.equal(context.desktop.read(60, 53), 0x00ffffff, 'COLOR_WINDOW inside the client');
         assert.equal(context.desktop.read(60, 38), 0x00000080, 'the active caption above it');
-        assert.equal(context.desktop.read(20, 30), 0x00ffffff, 'the frame\'s highlight corner');
+        // EDGE_RAISED: COLOR_3DLIGHT outermost, the highlight a ring inside it.
+        assert.equal(context.desktop.read(20, 30), 0x00c0c0c0, 'the frame\'s light outer corner');
+        assert.equal(context.desktop.read(21, 31), 0x00ffffff, 'and its highlight inside');
         assert.equal(context.desktop.read(10, 10), 0x00808080, 'the desktop around it');
 
         // A WM_CTLCOLORSTATIC the program leaves to the default answers a brush.
@@ -1604,4 +1606,102 @@ test('an unread message for a hidden window paints nothing and the desktop stays
     assert.equal(context.desktop.read(181, 130), 0x00c0c0c0, 'the dialog face where it is now');
     assert.deepEqual(context.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0);
     void MSG;
+});
+
+test('a MoveWindow that leaves a control where it was repaints nothing', async()=>{
+    // MoveWindow is SetWindowPos with the z-order left alone, and a placement
+    // that changes neither the position nor the size uncovers nothing: the
+    // parent has nothing to repaint. A dialog that lays its controls out from
+    // its own WM_PAINT, to where they already are, repainted without end.
+    const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
+    const dialog = await openDialog(context);
+    const button = context.fns.GetDlgItem.handler([dialog, 3]);
+    context.fns.GetWindowRect.handler([button, OUT]);
+    context.fns.MapWindowPoints.handler([0, dialog, OUT, 2]);
+    const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at) | 0);
+    const face = context.desktop.read(0, 0);
+    context.fns.GetWindowRect.handler([button, OUT]);
+    const onScreen = { x: context.memory.u32(OUT) + 1, y: context.memory.u32(OUT + 4) + 1 };
+    const pixel = context.desktop.read(onScreen.x, onScreen.y);
+    assert.notEqual(pixel, face, 'the button is on the screen, not the desktop');
+
+    const before = context.dispatched.length;
+    assert.equal(context.fns.MoveWindow.handler([button, left, top, right - left, bottom - top, 1]),
+        1);
+    assert.equal(context.fns.GetUpdateRect.handler([dialog, 0, 0]), 0, 'the dialog is still valid');
+    assert.equal(context.desktop.read(onScreen.x, onScreen.y), pixel,
+        'and nothing was drawn where the button is');
+    await context.pump(dialog);
+    assert.deepEqual(context.dispatched.slice(before)
+        .filter(one=>one.message === WM_PAINT && one.wndProc === DIALOGPROC), []);
+});
+
+test('an edit with a client edge is sunken into its dialog', async()=>{
+    // WS_EX_CLIENTEDGE is EDGE_SUNKEN: shadow then dark shadow along the top
+    // and left, highlight then light along the bottom and right.
+    const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
+    const dialog = await openDialog(context, {
+        ...WIZARD_PAGE,
+        controls: [{ id: 10, className: 'Edit', title: 'C:\\Games', x: 4, y: 4, cx: 60, cy: 12,
+            style: WS_CHILD | WS_VISIBLE | WS_TABSTOP, exStyle: WS_EX_CLIENTEDGE }],
+    });
+    const edit = context.fns.GetDlgItem.handler([dialog, 10]);
+    context.fns.GetWindowRect.handler([edit, OUT]);
+    const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at));
+    const read = (/** @type {number} */ x, /** @type {number} */ y)=>context.desktop.read(x, y);
+    assert.deepEqual([read(left + 4, top), read(left, top + 4)], [0x00808080, 0x00808080],
+        'the shadow outermost along the top and the left');
+    assert.deepEqual([read(left + 4, top + 1), read(left + 1, top + 4)], [0, 0],
+        'the dark shadow inside it');
+    assert.deepEqual([read(left + 4, bottom - 1), read(right - 1, top + 4)],
+        [0x00ffffff, 0x00ffffff], 'the highlight outermost along the bottom and the right');
+    assert.deepEqual([read(left + 4, bottom - 2), read(right - 2, top + 4)],
+        [0x00c0c0c0, 0x00c0c0c0], 'the light inside it');
+});
+
+test('a multi-line radio\'s label is centred down it, as its ring is, unless BS_TOP', async()=>{
+    // DrawText centres a single line only; a BS_MULTILINE button measures its
+    // label and puts the block in its middle, level with the ring.
+    const BS_MULTILINE = 0x2000;
+    const BS_TOP = 0x0400;
+    const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
+    const radio = { className: 'Button', title: 'Typical User\nDefault directory', x: 4, cx: 90,
+        cy: 40 };
+    const dialog = await openDialog(context, {
+        ...WIZARD_PAGE, cy: 100,
+        controls: [
+            { ...radio, id: 20, y: 4, style: WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON
+                | BS_MULTILINE },
+            { ...radio, id: 21, y: 50, style: WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON
+                | BS_MULTILINE | BS_TOP },
+        ],
+    });
+    /** The rows of a button's label that have ink, top and bottom, in its own pixels. */
+    const inked = (/** @type {number} */ id)=>{
+        const button = context.fns.GetDlgItem.handler([dialog, id]);
+        context.fns.GetWindowRect.handler([button, OUT]);
+        const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at));
+        /** @type {number[]} */
+        const rows = [];
+        for (let y = top; y < bottom; y++)
+        {
+            for (let x = left + 20; x < right; x++)
+            {
+                if (context.desktop.read(x, y) === 0)
+                {
+                    rows.push(y - top);
+                    break;
+                }
+            }
+        }
+        return { first: rows[0], last: rows[rows.length - 1], height: bottom - top };
+    };
+    const centred = inked(20);
+    const topped = inked(21);
+    // The ink sits inside its cells, so the block's middle is compared, and
+    // within a few pixels.
+    assert.ok(Math.abs((centred.first + centred.last) / 2 - (centred.height - 1) / 2) <= 4,
+        `the block's middle is the button's: ${JSON.stringify(centred)}`);
+    assert.equal(topped.last - topped.first, centred.last - centred.first, 'the same block');
+    assert.ok(topped.first < centred.first - 10, `BS_TOP at the top: ${JSON.stringify(topped)}`);
 });

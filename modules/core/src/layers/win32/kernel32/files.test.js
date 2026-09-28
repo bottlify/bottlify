@@ -685,6 +685,56 @@ test('a copy overwrites unless the caller says not to', ()=>{
         'and the whole file, not part of it');
 });
 
+test('a copy from a bundle\'s file waits for its blocks and copies the whole of it', async()=>{
+    // A file a bundle has not fetched yet answers a read with a promise. The
+    // copy parks until the bytes come and goes on from there; it was refused
+    // with ERROR_ACCESS_DENIED -- a setup copying its own files to a temporary
+    // directory said it could not transfer them from the media -- and the
+    // source was closed under the read still fetching it.
+    /** @type {{ thread: any, code: number }[]} */
+    const answered = [];
+    const thread = { name: 'main' };
+    const { error, files, fns, at } = setup({
+        currentThread: ()=>thread,
+        setLastErrorFor: (/** @type {any} */ who, /** @type {number} */ code)=>
+            answered.push({ thread: who, code }),
+    });
+    files.put('C:\\SETUP\\AUTORUN.BMP', 'BM a banner from the media');
+    /** @type {string[]} */
+    const closed = [];
+    const read = files.read;
+    let pending = 0;
+    files.read = (node, offset, length)=>{
+        const bytes = read(node, offset, length);
+        if (node.path !== 'C:\\SETUP\\AUTORUN.BMP')
+        {
+            return bytes;
+        }
+        pending++;
+        return Promise.resolve().then(()=>{
+            assert.equal(closed.includes(node.path), false, 'the source is open while it is read');
+            pending--;
+            return bytes;
+        });
+    };
+    const close = files.close;
+    files.close = node=>{
+        closed.push(node.path);
+        close(node);
+    };
+    error.code = 0xdead;
+
+    const copied = fns.CopyFileA.handler(
+        [at(NAME, 'C:\\SETUP\\AUTORUN.BMP'), at(NAME2, 'C:\\WINDOWS\\AUTORUN.BMP'), 0]);
+    assert.equal(typeof (/** @type {any} */ (copied))?.then, 'function', 'the caller is parked');
+    assert.equal(await copied, 1);
+    assert.equal(pending, 0);
+    assert.equal(files.text('C:\\WINDOWS\\AUTORUN.BMP'), 'BM a banner from the media');
+    assert.deepEqual(closed.sort(), ['C:\\SETUP\\AUTORUN.BMP', 'C:\\WINDOWS\\AUTORUN.BMP']);
+    assert.deepEqual(answered, [{ thread, code: ERROR_SUCCESS }],
+        'the success is the parked thread\'s own');
+});
+
 test('directories are made one level at a time and removed only when empty', ()=>{
     const { error, files, fns, at } = setup();
 

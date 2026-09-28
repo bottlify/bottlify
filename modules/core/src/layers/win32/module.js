@@ -61,6 +61,7 @@ import { createImageLists } from './comctl32/imagelist.js';
 import { createShellFunctions } from './shell32/functions.js';
 import { registerShellLinkClasses } from './shell32/shelllink.js';
 import { registerWbemClasses } from './ole32/wbem.js';
+import { registerDxDiagClasses } from './ole32/dxdiag.js';
 import { createRpcFunctions } from './rpcrt4/functions.js';
 import { createVersionFunctions } from './version/functions.js';
 import { createLzFunctions } from './lz32/functions.js';
@@ -71,6 +72,7 @@ import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
 import { createIostreamFunctions } from './msvcirt/functions.js';
 import { formatToString } from './msvcrt/format.js';
+import { createDsetupFunctions } from './dsetup/functions.js';
 import { createSetupapiFunctions } from './setupapi/functions.js';
 import { createWintrustFunctions } from './wintrust/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
@@ -920,6 +922,12 @@ export function createWin32Module(){
                 divergence: config?.divergence,
             });
 
+            // DxDiag's provider, which an installer asks which DirectX this is.
+            registerDxDiagClasses({
+                registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
+                windows, divergence: config?.divergence,
+            });
+
             // One way of starting a program, behind three spellings of asking for
             // one: kernel32's CreateProcess and WinExec, and the shell's launch. A
             // program a self-extractor starts through ShellExecute has to be the one
@@ -1680,6 +1688,10 @@ export function createWin32Module(){
                     format: (format, words)=>formatToString(format, words, ()=>''),
                 }),
 
+                // The DirectX setup library a game's autorun asks for the
+                // installed runtime's version before it decides to install one.
+                'DSETUP.dll': createDsetupFunctions({ writeMemory }),
+
                 // An installer's INF files, cabinets and file queues, over the
                 // volume every file call uses; a queue's notifications go to the
                 // program's own callback on the thread that asked.
@@ -1813,6 +1825,8 @@ export function createWin32Module(){
                         modules.findResource?.(instance, type, name) ?? null,
                     /** @param {number} instance */
                     moduleBase: instance=>modules.moduleBase?.(instance) ?? 0,
+                    // Where LoadImage reads a bitmap a program names by its file.
+                    files: volume,
                     // A bitmap resource made a bitmap for the display: CreateDIBitmap
                     // on a screen context, as LoadBitmap and LoadImage make one.
                     /** @param {number} info @param {number} bits */
@@ -2402,13 +2416,16 @@ export function createWin32Module(){
 
                 /**
                  * Whether one of this process's threads is blocked waiting on a
-                 * child it started: the parent that goes on once the child is
-                 * done, which the engine then runs the child beside rather than
-                 * replacing it.
+                 * child it started, or has asked whether it is still running --
+                 * GetExitCodeProcess, or a wait of no time -- as a setup polling
+                 * for a helper between sleeps does: the parent that goes on once
+                 * the child is done, which the engine then runs the child beside
+                 * rather than replacing it.
                  *
                  * @param {any} child  The child's process record.
                  */
-                childWaitedOn: (/** @type {any} */ child)=>(child?.waiters?.length ?? 0) > 0,
+                childWaitedOn: (/** @type {any} */ child)=>(child?.waiters?.length ?? 0) > 0
+                    || child?.polled === true,
 
                 /**
                  * A child run beside this process has exited: its record takes the

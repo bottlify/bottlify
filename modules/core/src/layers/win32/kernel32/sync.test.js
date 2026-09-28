@@ -733,11 +733,14 @@ test('polling a set with a child says it is still running rather than blocking',
     // program that was only checking whether its child had finished.
     const host = fakeHost();
     const fns = createSyncFunctions(host);
-    host.register(0x20, 'process', { imagePath: 'C:\\App\\war3.exe' });
+    /** @type {any} */
+    const child = { imagePath: 'C:\\App\\war3.exe' };
+    host.register(0x20, 'process', child);
     new DataView(host.bytes.buffer).setUint32(0x400, 0x20, true);
 
     assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 0]), WAIT_TIMEOUT);
     assert.equal(host.kernel.state.blocked.length, 0, 'and did not join the queue');
+    assert.equal(child.polled, true, 'and the parent watches it, so it runs beside');
 });
 
 test('polling for all of a set with a child can never be satisfied', ()=>{

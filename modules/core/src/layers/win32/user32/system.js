@@ -55,6 +55,12 @@ import { threadIdOf } from './messages.js';
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
 
+/** The longest path a file name argument is read to. */
+const MAX_PATH = 260;
+
+const SWP_NOZORDER = 0x0004;
+const SWP_NOACTIVATE = 0x0010;
+
 const SM_CXSCREEN = 0;
 const SM_CYSCREEN = 1;
 const SM_CXVSCROLL = 2;
@@ -771,7 +777,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
     const setWindowPos = ([hwnd, after, x, y, cx, cy, flags])=>{
         const SWP_NOSIZE = 0x0001;
         const SWP_NOMOVE = 0x0002;
-        const SWP_NOZORDER = 0x0004;
         const SWP_SHOWWINDOW = 0x0040;
         const SWP_HIDEWINDOW = 0x0080;
         const HWND_BOTTOM = 1;
@@ -1112,22 +1117,95 @@ export function createSystemFunctions({ host, live, windows, classes }){
      * draw the same.
      *
      * @param {number} instance @param {number} name @param {number} type
-     * @param {boolean} wide
+     * @param {boolean} wide @param {number} [flags]  fuLoad.
      */
-    const loadImage = (instance, name, type, wide)=>{
+    const loadImage = (instance, name, type, wide, flags = 0)=>{
         const IMAGE_BITMAP = 0;
         const IMAGE_ICON = 1;
         const IMAGE_CURSOR = 2;
+        const LR_LOADFROMFILE = 0x10;
         switch (type >>> 0){
             case IMAGE_ICON:
                 return loadResourceObject(host, 'icon', RT_GROUP_ICON, instance, name, wide);
             case IMAGE_CURSOR:
                 return loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name, wide);
             case IMAGE_BITMAP:
-                return loadBitmap(instance, name, wide);
+                return (flags & LR_LOADFROMFILE) !== 0
+                    ? loadBitmapFile(readText(host, name >>> 0, wide, MAX_PATH))
+                    : loadBitmap(instance, name, wide);
             default:
                 return 0;
         }
+    };
+
+    /**
+     * A bitmap out of a .bmp file, as LoadImage loads one with LR_LOADFROMFILE:
+     * the module handle plays no part, the file is a BITMAPFILEHEADER -- 'BM'
+     * -- and a DIB behind it, and its pixels are where the header's
+     * bfOffBits says, or packed behind the colours when it says nothing. The
+     * file is only read: what comes back is a bitmap of its own, and the DIB
+     * is copied into guest memory just long enough to make it.
+     *
+     * @param {string} path
+     * @returns {number | Promise<number>}
+     */
+    const loadBitmapFile = path=>{
+        const FILE_HEADER = 14;
+        const files = host.files;
+        const stat = path === '' ? null : files?.stat(path);
+        const node = files && stat?.exists && !stat.isDirectory
+            ? files.open(path, { read: true }) : null;
+        if (!files || !stat || !node)
+        {
+            return 0;
+        }
+        /** @param {Uint8Array} bytes */
+        const make = bytes=>{
+            files.close(node);
+            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+            if (bytes.length <= FILE_HEADER + 12 || view.getUint16(0, true) !== 0x4d42
+                || !host.allocate || !host.bitmapFromDib)
+            {
+                return 0;
+            }
+            const dib = bytes.subarray(FILE_HEADER);
+            const at = host.allocate(dib.length);
+            if (at === 0)
+            {
+                return 0;
+            }
+            try
+            {
+                host.writeMemory(at, dib);
+                const offBits = view.getUint32(10, true);
+                return host.bitmapFromDib(at, offBits > FILE_HEADER
+                    ? at + offBits - FILE_HEADER : packedBits(at));
+            }
+            finally
+            {
+                host.release?.(at);
+            }
+        };
+        const read = files.read(node, 0, stat.size);
+        return read instanceof Uint8Array ? make(read) : read.then(make);
+    };
+
+    /**
+     * Where a packed DIB's pixels start: behind its header, the three masks
+     * of a 40-byte BI_BITFIELDS header, and its colours -- three bytes each
+     * after a BITMAPCOREHEADER, four after every later one.
+     *
+     * @param {number} info
+     */
+    const packedBits = info=>{
+        const BI_BITFIELDS = 3;
+        const headerSize = readU32(info);
+        const core = headerSize === 12;
+        const bitCount = readU16(info + (core ? 10 : 14));
+        const used = core ? 0 : readU32(info + 32);
+        const colours = used !== 0 ? used : bitCount <= 8 ? 1 << bitCount : 0;
+        const masks = !core && headerSize === 40 && readU32(info + 16) === BI_BITFIELDS ? 12 : 0;
+        return info + headerSize + masks + colours * (core ? 3 : 4);
     };
 
     /**
@@ -1141,7 +1219,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
      */
     const loadBitmap = (instance, name, wide)=>{
         const RT_BITMAP = 2;
-        const BI_BITFIELDS = 3;
         const module = instance >>> 0;
         const raw = name >>> 0;
         if (module === 0)
@@ -1157,16 +1234,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
             return 0;
         }
         const info = base + found.rva;
-        const headerSize = readU32(info);
-        // A BITMAPCOREHEADER's colours are three bytes each; every later
-        // header's are four, after three masks when the header is the
-        // 40-byte one and the pixels are BI_BITFIELDS.
-        const core = headerSize === 12;
-        const bitCount = readU16(info + (core ? 10 : 14));
-        const used = core ? 0 : readU32(info + 32);
-        const colours = used !== 0 ? used : bitCount <= 8 ? 1 << bitCount : 0;
-        const masks = !core && headerSize === 40 && readU32(info + 16) === BI_BITFIELDS ? 12 : 0;
-        return host.bitmapFromDib(info, info + headerSize + masks + colours * (core ? 3 : 4));
+        return host.bitmapFromDib(info, packedBits(info));
     };
 
     /**
@@ -2239,6 +2307,20 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: args=>setWindowPos(args),
         },
 
+        /**
+         * BOOL MoveWindow(HWND, int X, int Y, int nWidth, int nHeight, BOOL bRepaint)
+         *
+         * SetWindowPos with the z-order and the activation left alone, so a
+         * window put back where it already is uncovers nothing and repaints
+         * nothing.
+         */
+        MoveWindow: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([hwnd, x, y, width, height])=>setWindowPos([hwnd, 0, x, y, width, height,
+                SWP_NOZORDER | SWP_NOACTIVATE]),
+        },
+
         /** HWND BringWindowToTop(HWND hWnd) */
         BringWindowToTop: {
             argBytes: 4,
@@ -2951,19 +3033,22 @@ export function createSystemFunctions({ host, live, windows, classes }){
          *                  int cy, UINT fuLoad)
          *
          * A cursor or an icon out of a module's resources, as LoadCursor and
-         * LoadIcon load them, or a bitmap as LoadBitmap loads one.
+         * LoadIcon load them, or a bitmap as LoadBitmap loads one -- or, with
+         * LR_LOADFROMFILE, out of the .bmp file the name is the path of.
          */
         LoadImageA: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([instance, name, type])=>loadImage(instance, name, type, false),
+            handler: ([instance, name, type, , , flags])=>
+                loadImage(instance, name, type, false, flags),
         },
 
         /** HANDLE LoadImageW(HINSTANCE hInst, LPCWSTR name, UINT type, int cx, int cy, UINT) */
         LoadImageW: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([instance, name, type])=>loadImage(instance, name, type, true),
+            handler: ([instance, name, type, , , flags])=>
+                loadImage(instance, name, type, true, flags),
         },
 
         /** HCURSOR LoadCursorA(HINSTANCE hInstance, LPCSTR lpCursorName) */

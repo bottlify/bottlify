@@ -26,7 +26,7 @@ import { createDialogFunctions } from './dialogs.js';
 import { createDesktopFunctions } from './desktops.js';
 import { createRawInput } from './rawinput.js';
 import {
-    WS_CHILD, WS_DISABLED, contains, createGeometry, intersect, isEmpty,
+    WS_CHILD, WS_DISABLED, contains, createGeometry, frameRings, intersect, isEmpty,
 } from './frame.js';
 import {
     COLOR_3DDKSHADOW, COLOR_3DFACE, COLOR_3DHILIGHT, COLOR_3DSHADOW, COLOR_BTNTEXT,
@@ -503,6 +503,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           A bitmap for the display made from a packed DIB in guest memory
  *           (its header and colours at `info`, its pixels at `bits`), as
  *           CreateDIBitmap on a screen context makes one; zero when it cannot.
+ * @property {import('../kernel32/files.js').FileSystem} [files]
+ *           The volume every file call uses, which an image loaded from a
+ *           file is read from. Absent, no file is there to load.
  * @property {{ text: string | null, version: number }} [pasteboard]
  *           What the host last pasted, with a version that rises on every
  *           paste: the clipboard's contents until a program empties it.
@@ -2443,14 +2446,15 @@ export function createWindowFunctions(host){
         const width = record.width;
         const height = record.height;
         const face = sysColor(COLOR_3DFACE);
-        // The border, one ring per pixel of edge: raised for the outer
-        // ring, face colour inside, as the classic frame is.
+        const isActive = topLevelOf(record).hwnd === activeWindow();
+        // The edge, one ring per pixel, each in the colours its part of the
+        // frame is drawn in: raised, banded, bordered or sunken.
+        const rings = frameRings(record.style, record.exStyle, isActive);
         for (let ring = 0; ring < frame.edge; ring++)
         {
-            const outer = ring === 0;
-            const topLeft = outer ? sysColor(COLOR_3DHILIGHT) : face;
-            const bottomRight = outer ? sysColor(COLOR_3DDKSHADOW)
-                : ring === 1 ? sysColor(COLOR_3DSHADOW) : face;
+            const colours = rings[ring] ?? { topLeft: COLOR_3DFACE, bottomRight: COLOR_3DFACE };
+            const topLeft = sysColor(colours.topLeft);
+            const bottomRight = sysColor(colours.bottomRight);
             draw.fill(hdc, { left: ring, top: ring, right: width - ring - 1, bottom: ring + 1 },
                 topLeft);
             draw.fill(hdc, { left: ring, top: ring, right: ring + 1, bottom: height - ring - 1 },
@@ -2462,7 +2466,6 @@ export function createWindowFunctions(host){
         }
         if (frame.caption > 0)
         {
-            const isActive = topLevelOf(record).hwnd === activeWindow();
             const bar = { left: frame.edge, top: frame.edge, right: width - frame.edge,
                 bottom: frame.edge + frame.caption };
             draw.fill(hdc, bar, sysColor(isActive ? COLOR_ACTIVECAPTION : COLOR_INACTIVECAPTION));
@@ -4365,30 +4368,6 @@ export function createWindowFunctions(host){
                     return 0;
                 }
                 writeRect(host, out, geometry.windowRect(record));
-                return 1;
-            },
-        },
-
-        /** BOOL MoveWindow(HWND, int X, int Y, int nWidth, int nHeight, BOOL bRepaint) */
-        MoveWindow: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([hwnd, x, y, width, height])=>{
-                const record = live(hwnd);
-                if (!record)
-                {
-                    return 0;
-                }
-                const covered = shown(record) ? geometry.windowRect(record) : null;
-                record.x = x | 0;
-                record.y = y | 0;
-                record.width = width | 0;
-                record.height = height | 0;
-                if (covered)
-                {
-                    uncover(covered);
-                    appear(record);
-                }
                 return 1;
             },
         },

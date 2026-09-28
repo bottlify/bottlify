@@ -460,7 +460,12 @@ export function createSyncFunctions(host){
                 // A poll is a question, not a wait, and the honest answer about
                 // a child is that it is still running. So a poll for all of a
                 // set containing one can never be satisfied, and neither can a
-                // poll for any of a set that holds nothing else.
+                // poll for any of a set that holds nothing else. Either way the
+                // parent is watching it, and the child runs beside it.
+                if (child !== null)
+                {
+                    child.polled = true;
+                }
                 if (child !== null && (waitAll !== 0 || objects.length === 0))
                 {
                     return WAIT_TIMEOUT;
