@@ -45,6 +45,9 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  */
 const TSC_DRIFT_MS = 16;
 
+/** The translator's page flag that closes a page (`PageFlag.INACCESSIBLE`). */
+const PAGE_INACCESSIBLE = 1;
+
 /** The default x87 control word: double-extended precision, round to nearest. */
 const DEFAULT_CONTROL_WORD = 0x037f;
 /** The default MXCSR: every SIMD exception masked. */
@@ -102,6 +105,8 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * @property {number} [thunkBase]  Where the thunk table and its park loop begin.
  * @property {number} initialStack Initial guest ESP.
  * @property {import('../engine.js').EngineConfig} [cork]  The translator's config.
+ * @property {number} [closedBelow]  Addresses below this are no-access: a fetch, a
+ *           store or an interpreted read there faults. Zero, the default, closes none.
  */
 
 /**
@@ -119,7 +124,8 @@ export const CORK_TSC_MHZ = 3000;
  * @param {CorkHostConfig} config
  */
 export function createCorkHost(config){
-    const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig } = config;
+    const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
+        closedBelow = 0 } = config;
     for (const name of ENGINE_EXPORTS)
     {
         if (engine?.[name] === undefined)
@@ -355,6 +361,14 @@ export function createCorkHost(config){
             rdtsc: readTsc,
         },
     });
+
+    // The emulator reads every address below RAM's end, so only cork alone,
+    // which no longer answers to it, closes a range: a translated read outside
+    // `precise` still wraps into RAM rather than testing it.
+    if (closedBelow > 0)
+    {
+        runtime.pages?.markRange(0, closedBelow, PAGE_INACCESSIBLE);
+    }
 
     /**
      * Every page a host write touches is invalidated, as the hybrid host does:

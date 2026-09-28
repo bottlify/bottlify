@@ -717,3 +717,27 @@ test('an indexed draw from user memory sizes its two arrays separately', ()=>{
     invoke('DrawIndexedPrimitiveUP', [4, 0, 4, 2, 0x9c00, 102, 0x9e00, 20]);
     assert.equal(calls[1].args[4].length, 6 * 4, 'and four bytes each when the format is 32-bit');
 });
+
+test('Direct3D 8 validates a shader by its version token, and never has messages', ()=>{
+    const { box, libraries } = seamed();
+    const d3d8 = libraries.libraries['D3D8.dll'];
+    const E_FAIL = 0x80004005 | 0;
+    const code = 0x9000, caps = 0x9100, errors = 0x9200;
+    box.memory.writeU32(errors, 0xcafeface);
+
+    assert.equal(d3d8.ValidateVertexShader.handler([0, 0, 0, 1, errors]), E_FAIL);
+    assert.equal(box.memory.readU32(errors), 0, 'no messages, even on failure');
+    box.memory.writeU32(code, 0xfffe0101);
+    assert.equal(d3d8.ValidateVertexShader.handler([code, 0, 0, 0, 0]), 0);
+    box.memory.writeU32(caps + 0xc4, 0xfffe0100);
+    assert.equal(d3d8.ValidateVertexShader.handler([code, 0, caps, 0, 0]), E_FAIL,
+        'newer than the caps say the device runs');
+    box.memory.writeU32(code, 0xfffe0102);
+    assert.equal(d3d8.ValidateVertexShader.handler([code, 0, 0, 0, 0]), E_FAIL);
+
+    box.memory.writeU32(code, 0xffff0104);
+    assert.equal(d3d8.ValidatePixelShader.handler([code, 0, 0, 0]), 0);
+    box.memory.writeU32(code, 0xffff0200);
+    assert.equal(d3d8.ValidatePixelShader.handler([code, 0, 0, 0]), E_FAIL);
+    assert.equal(d3d8.ValidatePixelShader.argBytes, 16);
+});

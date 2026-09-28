@@ -498,3 +498,27 @@ test('ReadProcessMemory reads this process, and of a child only what was written
     assert.equal(host.errors.at(-1), ERROR_INVALID_HANDLE);
     assert.equal(fns.ReadProcessMemory.argBytes, 20);
 });
+
+test('a STARTUPINFO\'s output and error files are handed to the child, the parent\'s own', ()=>{
+    // winetest hands each test its log this way and reads what the test wrote.
+    const host = fakeHost({ files: ['C:\\App\\test.exe'] });
+    const fns = createSpawnFunctions(host);
+    const log = { path: 'C:\\App\\log.txt', node: {}, read: true, write: true, position: 12 };
+    const file = host.kernel.handles.open('file', log);
+    const startup = 0x400;
+    host.view.setUint32(startup + 44, 0x100, true); // STARTF_USESTDHANDLES
+    host.view.setUint32(startup + 60, file, true);
+    host.view.setUint32(startup + 64, file, true);
+
+    assert.equal(fns.CreateProcessA.handler(
+        [0, putAnsi(host, 0x100, 'test.exe --list'), 0, 0, 1, 0, 0, 0, startup, 0]), 1);
+    const { standardFiles } = pending(host);
+    assert.equal(standardFiles.output, log, 'the same open file, so its position is shared');
+    assert.equal(standardFiles.error, log);
+
+    host.view.setUint32(startup + 44, 0, true);
+    assert.equal(fns.CreateProcessA.handler(
+        [0, putAnsi(host, 0x100, 'test.exe'), 0, 0, 0, 0, 0, 0, startup, 0]), 1);
+    assert.equal(host.requests.at(-1).standardFiles, undefined,
+        'without the flag the child keeps the console');
+});

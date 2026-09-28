@@ -208,3 +208,63 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
                 + ' handler\'s fill went down; 8: the block continued without it');
         });
 }
+
+/**
+ * A call through a null pointer, with a frame whose handler sends the thread to
+ * a block that exits 7: the first 64 KiB are never mapped, so the fetch at
+ * address 0 is an access violation the handler catches.
+ */
+function buildNullCallExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        data: { pointer: [0, 0, 0, 0], savedEsp: [0, 0, 0, 0] },
+        codeSize: 0x180,
+        code: ({ iat, at, code })=>{
+            const handler = code(0x100);
+            const recover = code(0x80);
+            const main = [
+                0x68, ...u32(handler),                           // push handler
+                0x64, 0xff, 0x35, 0, 0, 0, 0,                    // push dword fs:[0]
+                0x64, 0x89, 0x25, 0, 0, 0, 0,                    // mov fs:[0], esp
+                0x89, 0x25, ...u32(at('savedEsp')),              // mov [savedEsp], esp
+                0xff, 0x15, ...u32(at('pointer')),               // call [pointer]: null
+                0x6a, 0x01, 0xff, 0x15, ...u32(iat('ExitProcess')), // exit 1: not reached
+            ];
+            const block = [0x6a, 0x07, 0xff, 0x15, ...u32(iat('ExitProcess'))];
+            const handle = [
+                0x8b, 0x4c, 0x24, 0x0c,                          // mov ecx, [esp+12]: CONTEXT
+                0xc7, 0x81, ...u32(0xb8), ...u32(recover),       // context.Eip = block
+                0xa1, ...u32(at('savedEsp')),                    // mov eax, [savedEsp]
+                0x89, 0x81, ...u32(0xc4),                        // context.Esp = eax
+                0x31, 0xc0,                                      // xor eax, eax: continue
+                0xc3,                                            // ret
+            ];
+            const bytes = new Array(0x180).fill(0xcc);
+            bytes.splice(0, main.length, ...main);
+            bytes.splice(0x80, block.length, ...block);
+            bytes.splice(0x100, handle.length, ...handle);
+            return bytes;
+        },
+    });
+}
+
+test('a call through a null pointer is an access violation a handler catches, under cork',
+    { timeout: 60000 }, async t=>{
+        const { code } = await runExecutable(t, buildNullCallExe(), 'cork');
+        assert.equal(code, 7);
+    });
+
+for (const engine of /** @type {const} */ (['cork', 'emulator']))
+{
+    test(`an entry point that returns ends the process with its answer, under ${engine}`,
+        { timeout: 60000 }, async t=>{
+            const exe = buildExe({
+                imports: { 'KERNEL32.dll': ['ExitProcess'] },
+                data: {},
+                codeSize: 0x10,
+                code: ()=>[0xb8, ...u32(5), 0xc3, ...new Array(10).fill(0xcc)], // mov eax, 5; ret
+            });
+            const { code } = await runExecutable(t, exe, engine);
+            assert.equal(code, 5);
+        });
+}

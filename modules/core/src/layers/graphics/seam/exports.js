@@ -34,12 +34,17 @@ import { createDirectDrawSeam, readGuid } from './ddraw.js';
 import { createDirect3D7Seam } from './d3d7.js';
 import { createLegacyDirect3DSeam } from './d3dlegacy.js';
 import { IID_IDirectDraw7, IID_IDirectDrawClipper } from './iids.js';
-import { createFields } from './structs.js';
+import { createFields, D3DCAPS8 } from './structs.js';
 
 const DD_OK = 0;
 /** DDERR_INVALIDPARAMS. */
 const DDERR_INVALIDPARAMS = 0x80070057 | 0;
 const CLASS_E_NOAGGREGATION = 0x80040110 | 0;
+const S_OK = 0;
+const E_FAIL = 0x80004005 | 0;
+/** The shader versions Direct3D 8 validates: vs_1_0-1_1 and ps_1_0-1_4. */
+const VERTEX_SHADER_VERSIONS = [0xfffe0100, 0xfffe0101];
+const PIXEL_SHADER_VERSIONS = [0xffff0100, 0xffff0101, 0xffff0102, 0xffff0103, 0xffff0104];
 /** E_OUTOFMEMORY, which is what a create that cannot make an object reports. */
 const E_OUTOFMEMORY = 0x8007000e | 0;
 
@@ -133,6 +138,30 @@ export function createGraphicsLibraries(
 {
     const publisher = shared ?? createPublisher({ publishInterface, unpublishInterface });
     const fields = createFields(memory);
+
+    /**
+     * @param {number} code @param {number} caps @param {number} errors
+     * @param {number[]} versions @param {number} capsVersion  Where the caps keep
+     *        the highest version the device runs.
+     */
+    const validateShader = (code, caps, errors, versions, capsVersion)=>{
+        if ((errors >>> 0) !== 0)
+        {
+            fields.writeU32(errors >>> 0, 0);
+        }
+        if ((code >>> 0) === 0)
+        {
+            return E_FAIL;
+        }
+        const version = fields.readU32(code >>> 0) >>> 0;
+        if (!versions.includes(version))
+        {
+            return E_FAIL;
+        }
+        return (caps >>> 0) !== 0
+            && (version & 0xffff) > (fields.readU32((caps >>> 0) + capsVersion) & 0xffff)
+            ? E_FAIL : S_OK;
+    };
     const d3d8 = createDirect3D8Seam({
         publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution,
         windowClientSize, now,
@@ -274,6 +303,33 @@ export function createGraphicsLibraries(
                     created.push('d3d8');
                     return d3d8.publishRoot(root);
                 },
+            },
+
+            /**
+             * HRESULT ValidateVertexShader(const DWORD *code, const DWORD *declaration,
+             *                              const D3DCAPS8 *caps, BOOL errorReturn,
+             *                              char **errors)
+             *
+             * The version token is what is judged: one Direct3D 8 knows, and
+             * no newer than the caps say the device runs. There are never
+             * messages, so an errors pointer is answered with none.
+             */
+            ValidateVertexShader: {
+                argBytes: 20,
+                /** @param {number[]} args */
+                handler: ([code, , caps, , errors])=>validateShader(code, caps, errors,
+                    VERTEX_SHADER_VERSIONS, D3DCAPS8.VertexShaderVersion),
+            },
+
+            /**
+             * HRESULT ValidatePixelShader(const DWORD *code, const D3DCAPS8 *caps,
+             *                             BOOL errorReturn, char **errors)
+             */
+            ValidatePixelShader: {
+                argBytes: 16,
+                /** @param {number[]} args */
+                handler: ([code, caps, , errors])=>validateShader(code, caps, errors,
+                    PIXEL_SHADER_VERSIONS, D3DCAPS8.PixelShaderVersion),
             },
         },
 

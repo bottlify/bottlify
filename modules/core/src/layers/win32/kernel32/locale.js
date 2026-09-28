@@ -23,6 +23,10 @@ import { UI_LANGUAGE } from '../../loader/internal/resources.js';
  * the kind of fault that lands somewhere else entirely.
  */
 
+/** GetUserGeoID's class of a country, and the United States' number among them. */
+const GEOCLASS_NATION = 16;
+const GEOID_UNITED_STATES = 244;
+
 /** The pages this build understands. CP_ACP and CP_OEMCP are selectors, not pages. */
 const CP_ACP = 0;
 const CP_OEMCP = 1;
@@ -852,6 +856,19 @@ export function createLocaleFunctions(host){
          * one way and format it another.
          */
         GetUserDefaultLCID: { argBytes: 0, handler: ()=>LCID_EN_US },
+
+        /**
+         * GEOID GetUserGeoID(GEOCLASS GeoClass)
+         *
+         * The nation of the one locale installed, the United States; any other
+         * class is GEOID_NOT_AVAILABLE.
+         */
+        GetUserGeoID: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([geoClass])=>
+                ((geoClass >>> 0) === GEOCLASS_NATION ? GEOID_UNITED_STATES : -1),
+        },
         GetSystemDefaultLCID: { argBytes: 0, handler: ()=>LCID_EN_US },
         GetThreadLocale: { argBytes: 0, handler: ()=>LCID_EN_US },
 

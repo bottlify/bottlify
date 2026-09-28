@@ -48,6 +48,10 @@ import { createReplicas } from './replicas.js';
  */
 
 /**
+ * @typedef {{ path: string, position: number }} StandardFile
+ */
+
+/**
  * @typedef {Object} AppOptions
  * @property {Uint8Array} executable      The program to run.
  * @property {Object} [v86]               Emulator artifacts, when the package's
@@ -193,6 +197,10 @@ import { createReplicas } from './replicas.js';
  *           quote it. Defaults to the image path, quoted.
  * @property {number} [processId]    What GetCurrentProcessId answers: for a child, the
  *           identifier its parent was handed when it started it.
+ * @property {{ output?: StandardFile, error?: StandardFile }} [standardFiles]
+ *           The files a child's parent handed it as its output and error,
+ *           each the parent's own open file, whose position the child's
+ *           writes move.
  * @property {boolean} [refuseReplacement]
  *           Stop rather than replace this process with a child it asked for. A
  *           replacement erases every log and ring of the run that asked for it,
@@ -352,6 +360,9 @@ export function retryingFetch({ fetch, events, retry }){
             + `attempts: ${reason}`);
     };
 }
+
+/** The range at the start of the address space Windows never maps. */
+const NULL_REGION = 0x10000;
 
 /**
  * How much one range request may ask for.
@@ -3001,6 +3012,9 @@ async function buildApp(options){
         },
         cpu: {
             jit: options.jit, sampling: options.sampling, memorySize,
+            // The 64 KiB Windows never maps: a call or a store through a null
+            // pointer is an access violation a program's handler can catch.
+            closedBelow: NULL_REGION,
             engine: options.engine ?? DEFAULT_ENGINE,
             engineUrl: (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
                 ? corkArtifacts(options.cork).moduleUrl : null,
@@ -3361,6 +3375,7 @@ async function buildApp(options){
             // layer, and the name was never this process's to keep.
             namedObjects: options.namedObjects,
             processId: options.processId,
+            standardFiles: options.standardFiles,
             // The run's table of class objects served out of process, and this
             // process's name in it: shared for the same reason.
             com: options.com,
@@ -5126,6 +5141,9 @@ async function buildApp(options){
         stackLimit: initialStack - stackSize,
         tebAddress: mainBlock.teb,
         name: 'main',
+        // A program whose entry point returns ends as one that called
+        // ExitThread with its answer, as Windows' process start routine sees to.
+        returnTo: win32.threadReturn(),
     });
 
     /** The mixer, when this build has one. Read once; it does not change. */
@@ -6835,6 +6853,7 @@ export async function createApp(options){
             commandLine: request.commandLine,
             patches: request.patches,
             processId: request.id,
+            standardFiles: request.standardFiles,
             seed: parent.session.export(),
             hive: parent.registry().toJSON(),
         });

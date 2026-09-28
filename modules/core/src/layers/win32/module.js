@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { createConsoleFunctions } from './kernel32/console.js';
+import { createConsoleFunctions, HANDLE_STDOUT, HANDLE_STDERR } from './kernel32/console.js';
 import { createThreadingFunctions } from './kernel32/threading.js';
 import { createNamedObjects } from './kernel32/named-objects.js';
 import { createDebugFunctions } from './kernel32/debug.js';
@@ -247,7 +247,7 @@ export function createWin32Module(){
             };
 
             /** @type {(handle: number, text: string) => void} */
-            const sink = config?.onOutput ?? (()=>{});
+            const toConsole = config?.onOutput ?? (()=>{});
             /** @type {(text: string) => void} */
             const trace = config?.onTrace ?? (()=>{});
 
@@ -343,6 +343,25 @@ export function createWin32Module(){
             // Absent unless a bundle is mounted, in which case a read of a block
             // that is not here yet becomes a wait rather than a fault.
             const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
+            // A child whose parent handed it files for its output and error
+            // writes there, at the position it shares with the parent's handle,
+            // rather than to the console.
+            /** @type {{ output?: { path: string, position: number },
+             *           error?: { path: string, position: number } } | undefined} */
+            const standardFiles = config?.standardFiles;
+            /** @param {number} handle @param {string} text */
+            const sink = (handle, text)=>{
+                const file = handle === HANDLE_STDOUT ? standardFiles?.output
+                    : handle === HANDLE_STDERR ? standardFiles?.error : undefined;
+                const node = file && volume.open(file.path, { write: true });
+                if (!file || !node)
+                {
+                    toConsole(handle, text);
+                    return;
+                }
+                file.position += volume.write(node, file.position, encodeAnsi(text));
+                volume.close(node);
+            };
             const hive = createHive({ processorMhz: config?.processorMhz, windows });
             // The guest's clock, because a timer is due against the clock the
             // program itself reads, and the input layer's key state, because a
@@ -372,6 +391,21 @@ export function createWin32Module(){
              * @type {number | null}
              */
             let threadReturnStub = null;
+            /**
+             * A thread ending itself, by ExitThread or by returning. The last
+             * one ends the process with its code, as it does on Windows.
+             *
+             * @param {any} thread @param {number} code
+             */
+            const endThread = (thread, code)=>{
+                kernel.exitThread(thread, code);
+                if (exitCode === null && kernel.threads().every(
+                    (/** @type {any} */ other)=>other.state === 'terminated'))
+                {
+                    exitCode = code;
+                    processEnded();
+                }
+            };
             const threadReturnAddress = ()=>{
                 threadReturnStub ??= bridge.register('<thread-returned>', {
                     argBytes: 0,
@@ -380,7 +414,7 @@ export function createWin32Module(){
                     preserveResult: true,
                     handler: ()=>{
                         const thread = kernel.currentThread();
-                        kernel.exitThread(thread, cpuRegisters.read('ecx') >>> 0);
+                        endThread(thread, cpuRegisters.read('ecx') >>> 0);
                         return bridge.park(thread);
                     },
                 });
@@ -1106,6 +1140,7 @@ export function createWin32Module(){
                         // first time a thread is made, because registering it costs
                         // a stub and a build that never makes a thread needs none.
                         threadReturn: ()=>threadReturnAddress(),
+                        endThread,
                         processId,
                         imagePath: ()=>modules.imagePath(),
                         divergence: config?.divergence,
@@ -1224,6 +1259,11 @@ export function createWin32Module(){
                          */
                         call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                         callerThread: ()=>bridge.callerThread(),
+                        writeMemory,
+                        /** @param {number} bytes */
+                        allocate: bytes=>heap.allocate(bytes),
+                        /** @param {number} address */
+                        free: address=>heap.free(address),
                     }),
                     ...createProfileFunctions({
                         readMemory,
@@ -1985,6 +2025,21 @@ export function createWin32Module(){
                         setLastError: setError,
                         divergence: config?.divergence,
                     }),
+                    // There is one user, so a child started as whichever user a
+                    // token names is started as that one: CreateProcess, the token
+                    // dropped from the front of the arguments.
+                    CreateProcessAsUserA: {
+                        argBytes: 44,
+                        /** @param {number[]} args */
+                        handler: ([, ...args])=>
+                            libraries['KERNEL32.dll'].CreateProcessA.handler(args),
+                    },
+                    CreateProcessAsUserW: {
+                        argBytes: 44,
+                        /** @param {number[]} args */
+                        handler: ([, ...args])=>
+                            libraries['KERNEL32.dll'].CreateProcessW.handler(args),
+                    },
                 },
 
                 'GDI32.dll': gdi.table,
@@ -2512,6 +2567,12 @@ export function createWin32Module(){
                         ? bridge.continueAt(/** @type {Record<string, number>} */ (result.registers))
                         : null));
                 },
+
+                /**
+                 * Where a thread's start routine returns to, the main thread's
+                 * included: its answer ends the thread as ExitThread would.
+                 */
+                threadReturn: ()=>threadReturnAddress(),
 
                 /** Set once the guest has asked to terminate. */
                 exitCode: ()=>exitCode,

@@ -26,6 +26,10 @@ function setup({ reply, wide = true } = {}){
     const errors = [];
     /** @type {{ entry: number, args: number[], thread: unknown }[]} */
     const called = [];
+    /** @type {{ bytes: number, text?: string }[]} */
+    const placed = [];
+    /** @type {number[]} */
+    const freed = [];
     const fns = createResourceFunctions({
         readCString: address=>address === 0x19000 ? 'MYNAME'
             : address === 0x19100 ? '#101' : 'OTHER',
@@ -58,8 +62,18 @@ function setup({ reply, wide = true } = {}){
             return reply ? reply(args[3]) : 1;
         },
         callerThread: ()=>'main',
+        allocate: bytes=>{
+            placed.push({ bytes });
+            return 0x50000;
+        },
+        writeMemory: (address, bytes)=>{
+            placed[placed.length - 1].text = String.fromCharCode(...bytes);
+        },
+        free: address=>{
+            freed.push(address);
+        },
     });
-    return { fns, asked, errors, called };
+    return { fns, asked, errors, called, placed, freed };
 }
 
 test('the name comes before the type, which is the opposite of the tree', ()=>{
@@ -229,4 +243,29 @@ test('EnumResourceLanguagesW reads the names wide and passes them on as given', 
         { entry: 0x401000, args: [0, 0x1b000, 0x2a000, 1033, 5], thread: 'main' },
     ]);
     assert.equal(fns.EnumResourceLanguagesW.argBytes, 20);
+});
+
+test('the names of a type are enumerated once each, a string name placed for its callback', ()=>{
+    const { fns, called, placed, freed } = setup();
+    assert.equal(fns.EnumResourceNamesA.handler([0, RT_STRING, 0x401000, 0x77]), 1);
+    assert.deepEqual(called.map(({ args })=>args),
+        [[0, RT_STRING, 1, 0x77], [0, RT_STRING, 2, 0x77]],
+        'a name in two languages is one name');
+
+    const named = setup();
+    assert.equal(named.fns.EnumResourceNamesA.handler([0, RT_BITMAP, 0x401000, 0]), 1);
+    assert.deepEqual(named.called.map(({ args })=>args[2]), [0x50000, 101]);
+    assert.deepEqual(named.placed, [{ bytes: 7, text: 'myname ' }]);
+    assert.deepEqual(named.freed, [0x50000], 'the string lives for its callback only');
+    assert.equal(placed.length + freed.length, 0);
+    assert.equal(fns.EnumResourceNamesA.argBytes, 16);
+});
+
+test('a callback that says stop ends the name enumeration with FALSE', ()=>{
+    const { fns, called } = setup({ reply: ()=>0 });
+    assert.equal(fns.EnumResourceNamesA.handler([0, RT_STRING, 0x401000, 0]), 0);
+    assert.equal(called.length, 1);
+    const missing = setup();
+    assert.equal(missing.fns.EnumResourceNamesW.handler([0, 99, 0x401000, 0]), 0);
+    assert.deepEqual(missing.errors, [1813]);
 });

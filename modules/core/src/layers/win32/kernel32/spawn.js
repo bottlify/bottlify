@@ -42,6 +42,13 @@ const ERROR_PARTIAL_COPY = 299;
 /** dwCreationFlags, the one bit that changes what a create does here. */
 const CREATE_SUSPENDED = 0x00000004;
 
+/** STARTUPINFO's dwFlags bit that says its three handles are the child's own. */
+const STARTF_USESTDHANDLES = 0x00000100;
+/** Where dwFlags, hStdOutput and hStdError sit in STARTUPINFOA and W alike. */
+const SI_FLAGS = 44;
+const SI_STD_OUTPUT = 60;
+const SI_STD_ERROR = 64;
+
 /** The pseudo-handle for the running process; -1 on every Windows. */
 const CURRENT_PROCESS = 0xffffffff;
 
@@ -341,17 +348,57 @@ export function createSpawnFunctions(host){
         }
     };
 
+    /** @param {number} address */
+    const readDword = address=>{
+        const b = host.readMemory(address, 4);
+        return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
+    };
+
+    /**
+     * The files a STARTUPINFO hands the child as its output and error, when
+     * it hands any: a handle the parent inherits shares one file position
+     * with the child's, so each names the parent's own open file, whose
+     * position the child's writes move. A handle that is not a file -- the
+     * console, a pipe -- leaves that stream where it was.
+     *
+     * @param {number} startup
+     * @returns {{ output?: any, error?: any } | undefined}
+     */
+    const standardFiles = startup=>{
+        if (startup === 0 || (readDword(startup + SI_FLAGS) & STARTF_USESTDHANDLES) === 0)
+        {
+            return undefined;
+        }
+        /** @param {number} handle */
+        const fileOf = handle=>{
+            try
+            {
+                const file = kernel.handles.resolve(handle, 'file');
+                return file?.path && file.write ? file : undefined;
+            }
+            catch (e){
+                void e;
+                return undefined;
+            }
+        };
+        return {
+            output: fileOf(readDword(startup + SI_STD_OUTPUT)),
+            error: fileOf(readDword(startup + SI_STD_ERROR)),
+        };
+    };
+
     /**
      * @param {string} named @param {string} line
-     * @param {number} flags @param {number} information
+     * @param {number} flags @param {number} information @param {number} [startup]
      */
-    const create = (named, line, flags, information)=>{
+    const create = (named, line, flags, information, startup = 0)=>{
         const made = record(named, line, flags);
         if (!made)
         {
             host.setLastError(ERROR_FILE_NOT_FOUND);
             return 0;
         }
+        made.standardFiles = standardFiles(startup >>> 0);
         if ((information >>> 0) !== 0)
         {
             const bytes = new Uint8Array(PROCESS_INFORMATION_SIZE);
@@ -373,7 +420,8 @@ export function createSpawnFunctions(host){
          *   LPSTARTUPINFOA lpStartupInfo, LPPROCESS_INFORMATION lpProcessInformation)
          *
          * The handles are real and the ids are the child's; what does not exist
-         * yet is the child itself. Inherited handles, a chosen environment and a
+         * yet is the child itself. A STARTUPINFO's output and error files are the
+         * child's own; other inherited handles, a chosen environment and a
          * chosen current directory are accepted and not acted on -- the child
          * runs in this machine's own volume and environment, which is the same
          * one the parent had.
@@ -381,25 +429,25 @@ export function createSpawnFunctions(host){
         CreateProcessA: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([application, commandLine, , , , flags, , , , information])=>create(
+            handler: ([application, commandLine, , , , flags, , , startup, information])=>create(
                 (application >>> 0) === 0 ? '' : host.readCString(application >>> 0, MAX_PATH),
                 (commandLine >>> 0) === 0
                     ? ''
                     : host.readCString(commandLine >>> 0, MAX_COMMAND_LINE),
-                flags >>> 0, information),
+                flags >>> 0, information, startup),
         },
 
         /** BOOL CreateProcessW(...) — the same call, read as wide strings. */
         CreateProcessW: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([application, commandLine, , , , flags, , , , information])=>create(
+            handler: ([application, commandLine, , , , flags, , , startup, information])=>create(
                 (application >>> 0) === 0 ? ''
                     : host.readWideString(application >>> 0, MAX_PATH * 2),
                 (commandLine >>> 0) === 0
                     ? ''
                     : host.readWideString(commandLine >>> 0, MAX_COMMAND_LINE * 2),
-                flags >>> 0, information),
+                flags >>> 0, information, startup),
         },
 
         /**

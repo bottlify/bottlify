@@ -68,6 +68,11 @@ const MAX_NAME = 260;
  * @property {() => unknown} [callerThread]
  *           The thread whose call is being answered, named on every callback
  *           after the first because the bridge has let the call go by then.
+ * @property {(bytes: number) => number} [allocate]
+ * @property {(address: number) => void} [free]
+ * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
+ *           Where a string name is put for EnumResourceNames' callback, which
+ *           takes it as a pointer. Absent, only integer names are handed over.
  */
 
 /**
@@ -214,6 +219,88 @@ export function createResourceFunctions(host){
     };
 
     /**
+     * A string name as the guest reads it, NUL-terminated in its width.
+     *
+     * @param {string} text @param {boolean} wide
+     */
+    const encodeName = (text, wide)=>{
+        if (!wide)
+        {
+            return Uint8Array.from([...text].map(c=>c.charCodeAt(0) & 0xff).concat(0));
+        }
+        const bytes = new Uint8Array((text.length + 1) * 2);
+        for (let i = 0; i < text.length; i++)
+        {
+            bytes[i * 2] = text.charCodeAt(i) & 0xff;
+            bytes[i * 2 + 1] = text.charCodeAt(i) >>> 8;
+        }
+        return bytes;
+    };
+
+    /**
+     * EnumResourceNames, either width: each name of the type once, whatever
+     * languages it comes in, in the order the image lists them. A string name
+     * lives in guest memory for the length of its callback and no longer, as
+     * Windows' does.
+     *
+     * @param {number[]} args @param {boolean} wide
+     * @returns {number | Promise<number>}
+     */
+    const enumNames = ([instance, type, callback, lParam], wide)=>{
+        if (!host.call || (callback >>> 0) === 0)
+        {
+            return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
+        }
+        const wantedType = identifier(type, wide);
+        /** @type {(number | string)[]} */
+        const names = [];
+        for (const entry of host.listResources?.(instance >>> 0) ?? [])
+        {
+            if (sameKey(entry.type, wantedType) && !names.some(name=>sameKey(name, entry.name)))
+            {
+                names.push(entry.name);
+            }
+        }
+        if (names.length === 0)
+        {
+            return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
+        }
+        const thread = host.callerThread?.();
+        const call = /** @type {NonNullable<typeof host.call>} */ (host.call);
+        /** @param {number} at @returns {number | Promise<number>} */
+        const next = at=>{
+            if (at === names.length)
+            {
+                return 1;
+            }
+            const name = names[at];
+            let pointer = 0;
+            if (typeof name === 'string')
+            {
+                if (!host.allocate || !host.writeMemory)
+                {
+                    return next(at + 1);
+                }
+                const bytes = encodeName(name, wide);
+                pointer = host.allocate(bytes.length);
+                host.writeMemory(pointer, bytes);
+            }
+            const answer = call(callback >>> 0,
+                [instance >>> 0, type >>> 0, pointer || Number(name), lParam >>> 0], thread);
+            /** @param {number} went */
+            const then = went=>{
+                if (pointer !== 0)
+                {
+                    host.free?.(pointer);
+                }
+                return (went | 0) === 0 ? 0 : next(at + 1);
+            };
+            return typeof answer === 'number' ? then(answer) : answer.then(then);
+        };
+        return next(0);
+    };
+
+    /**
      * A language of zero, MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL), is none.
      *
      * @param {number} value
@@ -273,6 +360,28 @@ export function createResourceFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: args=>enumLanguages(args, true),
+        },
+
+        /**
+         * BOOL EnumResourceNamesA(HMODULE hModule, LPCSTR lpType,
+         *                         ENUMRESNAMEPROCA lpEnumFunc, LONG_PTR lParam)
+         *
+         * FALSE when the callback stopped it early, as Windows answers.
+         */
+        EnumResourceNamesA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>enumNames(args, false),
+        },
+
+        /**
+         * BOOL EnumResourceNamesW(HMODULE hModule, LPCWSTR lpType,
+         *                         ENUMRESNAMEPROCW lpEnumFunc, LONG_PTR lParam)
+         */
+        EnumResourceNamesW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>enumNames(args, true),
         },
 
         /**

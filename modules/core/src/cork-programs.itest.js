@@ -76,29 +76,31 @@ function buildLoopExe(iterations = ITERATIONS){
 
 /**
  * Calls an import nothing claims -- which returns zero through the stubs so a
- * callback or an unresolved import's return is the shape -- and then returns
- * into the entry vector, where `BOUND` sits in its register form (`62 d0`, the
- * low byte of an entry point followed by a register ModRM, exactly what the
- * real route's vector held). The emulator's decoder consumes that instruction
- * and carries on, so cork must too: the program exits 42 on both. This is the
- * path the real-route run stopped on at 0x7000.
+ * callback or an unresolved import's return is the shape -- and then jumps to
+ * `BOUND` in its register form (`62 d0`, the low byte of an entry point
+ * followed by a register ModRM, exactly what a real run once found where it
+ * returned into the entry vector). The emulator's decoder consumes that
+ * instruction and carries on, so cork must too: the program exits 42 on both.
+ * The bytes sit in the image's data, since the entry vector is in the 64 KiB
+ * a process never maps.
  */
 function buildVectorReturnExe(){
     return buildExe({
         imports: { 'msvcrt.dll': ['no_such_import'], 'KERNEL32.dll': ['ExitProcess'] },
-        data: {},
+        data: { vector: [0, 0, 0, 0, 0, 0, 0, 0] },
         codeSize: 0x80,
-        code: ({ iat, code })=>{
+        code: ({ iat, at, code })=>{
+            const vector = at('vector');
             const atExit = code(0x40);
-            const rel = atExit - 0x7007; // the jmp after `62 d0`, from 0x7002
+            const rel = atExit - (vector + 7); // the jmp after `62 d0`
             const first = ((rel & 0xff) << 24 | 0x00e9d062) >>> 0; // 62 d0 e9 rel0
             const second = rel >>> 8;
             const atJmp = code(26);
             return [
-                0xc7, 0x05, ...u32(0x7000), ...u32(first), // mov dword [0x7000], ...
-                0xc7, 0x05, ...u32(0x7004), ...u32(second),
+                0xc7, 0x05, ...u32(vector), ...u32(first), // mov dword [vector], ...
+                0xc7, 0x05, ...u32(vector + 4), ...u32(second),
                 0xff, 0x15, ...u32(iat('no_such_import')), // call the unresolved import
-                0xe9, ...u32(0x7000 - (atJmp + 5)), // jmp 0x7000
+                0xe9, ...u32(vector - (atJmp + 5)), // jmp vector
                 ...new Array(0x40 - 31).fill(0x90),
                 0x6a, 0x2a, 0xff, 0x15, ...u32(iat('ExitProcess')), // exit 42
                 ...new Array(20).fill(0x90),
@@ -207,7 +209,7 @@ for (const name of ['qsort.exe', 'threads.exe', 'session.exe'])
         });
 }
 
-test('a return into the entry vector runs BOUND under cork as on the emulator',
+test('BOUND in its register form runs under cork as on the emulator',
     { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
         const exe = buildVectorReturnExe();
         const reference = await run(exe, 'emulator');

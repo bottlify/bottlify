@@ -85,6 +85,9 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park       Stops a thread; returns the parked token.
+ * @property {(thread: any, code: number) => void} [endThread]
+ *           Ends a thread that ended itself, and the process with it when it
+ *           was the last. Absent, the kernel's exitThread alone.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
  * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} namedObjects
@@ -971,7 +974,7 @@ export function createThreadingFunctions(host){
                 // kernel's notion of a current thread, and the parking that
                 // follows still has to happen to the thread that called.
                 const thread = host.currentThread();
-                kernel.exitThread(thread, code >>> 0);
+                (host.endThread ?? kernel.exitThread)(thread, code >>> 0);
                 return host.park(thread);
             },
         },

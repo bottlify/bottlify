@@ -771,10 +771,12 @@ The same loop: `repne scasb` to a zero at the end of 64 bytes 86 -> 34 ns a turn
 6 130 -> 2 060, of 64 KiB 280 000 -> 37 000 (0.56 ns a byte); `repe cmpsb` of two equal runs of
 64 KiB 331 000 -> 51 600, `repe cmpsd` 63 700 -> 15 600.
 
-The null page is *not* marked, because the emulator lets a program read
-address 0 today and the two engines must agree; marking it, and projecting the memory
-layer's read-only regions into the table, is a policy switch this layer's owner throws when
-the emulator is no longer the reference for it.
+Under cork alone the addresses below `closedBelow` are marked no-access, and a process sets it
+to 64 KiB, the range Windows never maps: a call through a null pointer faults at its fetch and a
+store through one at the store, as access violations a program's handler can catch. A translated
+read outside `precise` is not tested (it wraps into RAM, above), so it still reads there. The
+emulator and hybrid read the null page, and the two engines agree only where a program does not
+touch it; projecting the memory layer's read-only regions into the table is still to do.
 
 Under `engine: 'cork'` (milestone 5) nothing of the emulator is loaded. The engine module the
 configuration names (`engineUrl`) is loaded by URL at `boot()` like the emulator is, and
@@ -1312,8 +1314,9 @@ to its end: tens of microseconds each, which ran a title's scene at 240 ns an in
   layer offers the fault through `onFault` and otherwise stops. What `fault()` reports is for
   whoever drives the machine to act on.
 - **Without paging, a stray pointer does not fault.** Every address in RAM is readable and
-  writable, the null page included, so a program that probes a pointer or writes through null
-  and expects an access violation carries on instead.
+  writable -- under the emulator and hybrid the null page included, so a program that probes a
+  pointer or writes through null and expects an access violation carries on instead. Cork alone
+  closes the range below `closedBelow` (above).
 - **Only the first 32 vectors** have gates. Hardware interrupts are not delivered; the guest
   runs with `IF` clear from the ROM's `cli`.
 - **Ring 0, flat segments, no paging.** The guest runs at CPL 0 with two flat 4 GiB

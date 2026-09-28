@@ -755,6 +755,23 @@ export function createCxxExceptions(host){
                 },
             },
 
+            /**
+             * void _assert(const char *message, const char *file, unsigned line)
+             *
+             * A failed assert() in a release-linked program: the runtime's
+             * message, then the process ends as abort ends it.
+             */
+            _assert: {
+                convention: 'cdecl',
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([message, file, line])=>{
+                    host.abort(`Assertion failed: ${host.readCString(message >>> 0, 1024)}, file ${
+                        host.readCString(file >>> 0, 260)}, line ${line >>> 0}`);
+                    return host.park();
+                },
+            },
+
             /** void terminate(void) */
             '?terminate@@YAXXZ': {
                 convention: 'cdecl',
