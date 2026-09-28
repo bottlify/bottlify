@@ -585,10 +585,43 @@ test('FormatMessageA expands inserts from the arguments it is handed', ()=>{
     host.writeMemory(0x200, Uint8Array.from([...'%1 = %2', '\0'].map(c=>c.charCodeAt(0))));
     host.writeMemory(0x220, Uint8Array.from([...'Forward', '\0'].map(c=>c.charCodeAt(0))));
     host.writeMemory(0x240, Uint8Array.from([...'W', '\0'].map(c=>c.charCodeAt(0))));
-    host.writeMemory(0x260, new Uint8Array(Uint32Array.from([0x220, 0x240]).buffer));
+    // A va_list: lpArguments points at the pointer to the first value, not at
+    // the values themselves.
+    host.writeMemory(0x280, new Uint8Array(Uint32Array.from([0x220, 0x240]).buffer));
+    host.writeMemory(0x260, new Uint8Array(Uint32Array.from([0x280]).buffer));
 
     assert.equal(fns.FormatMessageA.handler([0x400, 0x200, 0, 0, 0x300, 0x40, 0x260]), 11);
     assert.equal(String.fromCharCode(...host.bytes.slice(0x300, 0x30b)), 'Forward = W');
+});
+
+test('FormatMessageA formats the numeric inserts a resolution is named with', ()=>{
+    // "%1!d!x%2!d!x%3!d!" is the format cshell paints a display mode with; a
+    // handler that reads every insert as a string pointer finds a stack
+    // address where an integer should be, faults, and answers NULL, leaving
+    // the mode list blank.
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    const format = '%1!d!x%2!d!x%3!d!';
+    host.writeMemory(0x200, Uint8Array.from([...format, '\0'].map(c=>c.charCodeAt(0))));
+    host.writeMemory(0x280, new Uint8Array(Uint32Array.from([1024, 768, 32]).buffer));
+    host.writeMemory(0x260, new Uint8Array(Uint32Array.from([0x280]).buffer));
+
+    assert.equal(fns.FormatMessageA.handler([0x400, 0x200, 0, 0, 0x300, 0x40, 0x260]), 11);
+    assert.equal(String.fromCharCode(...host.bytes.slice(0x300, 0x30b)), '1024x768x32');
+});
+
+test('FormatMessageA reads an ARGUMENT_ARRAY directly, and a typed insert by its specifier', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    const format = '%1!s! %2!u! %3!X!';
+    host.writeMemory(0x200, Uint8Array.from([...format, '\0'].map(c=>c.charCodeAt(0))));
+    host.writeMemory(0x240, Uint8Array.from([...'W', '\0'].map(c=>c.charCodeAt(0))));
+    // With FORMAT_MESSAGE_ARGUMENT_ARRAY the pointer is the array of values;
+    // 0x240 is a string pointer, 300 an unsigned decimal, 48879 a hex one.
+    host.writeMemory(0x280, new Uint8Array(Uint32Array.from([0x240, 300, 48879]).buffer));
+
+    assert.equal(fns.FormatMessageA.handler([0x400 | 0x2000, 0x200, 0, 0, 0x300, 0x40, 0x280]), 10);
+    assert.equal(String.fromCharCode(...host.bytes.slice(0x300, 0x30a)), 'W 300 BEEF');
 });
 
 test('FormatMessageA allocates the buffer when asked, for a caller\'s string too', ()=>{

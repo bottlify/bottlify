@@ -138,6 +138,7 @@ const FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x00000100;
 const FORMAT_MESSAGE_IGNORE_INSERTS = 0x00000200;
 const FORMAT_MESSAGE_FROM_STRING = 0x00000400;
 const FORMAT_MESSAGE_FROM_SYSTEM = 0x00001000;
+const FORMAT_MESSAGE_ARGUMENT_ARRAY = 0x00002000;
 
 /**
  * How far a string argument is read before it is taken for a pointer that is
@@ -363,40 +364,107 @@ export function createSystemFunctions(host){
     };
 
     /**
-     * FormatMessage's insert pass over a caller's own format string: `%1`
-     * through `%9` take the n-th argument, `%%` is a literal percent, and
-     * everything else is copied through. An argument is always a string
-     * pointer, so a va_list and an ARGUMENT_ARRAY read the same way -- both
-     * lay the pointers out consecutively from the pointer the caller passed.
+     * One insert's text. The conversion is the printf spelling a message
+     * carries between the exclamation marks, and it decides how the
+     * argument's slot reads: `s` a string pointer, `d`/`i` a signed decimal,
+     * `u` an unsigned one, `x`/`X` hexadecimal, `o` octal, `c` a character.
+     * There is no insert without a conversion in a message table, but a
+     * caller's own format string may write a bare `%1`; a string is the
+     * default, which is the reading that makes `%1 = %2` expand two text
+     * arguments.
      *
-     * @param {string} text @param {number} argumentsPtr
+     * `w` asks for a wide argument and `h` for a narrow one, and a capital
+     * `S` or `C` is the other width to the family, as it is in printf. A
+     * conversion this surface does not format produces nothing rather than a
+     * reading of the slot that would be a different type's.
+     *
+     * @param {number} value @param {string} conversion
      * @returns {string}
      */
-    const insertArguments = (text, argumentsPtr)=>{
+    const insertValue = (value, conversion)=>{
+        const shape = conversion.toLowerCase();
+        const last = conversion === '' ? 's' : conversion[conversion.length - 1];
+        const wide = shape.includes('w') || (!shape.includes('h')
+            && (last === 'S' || last === 'C'));
+        switch (last.toLowerCase())
+        {
+            case 's':
+                return (value >>> 0) === 0 ? ''
+                    : (wide ? readWide(value >>> 0, MAX_STRING)
+                        : readAnsi(value >>> 0, MAX_STRING));
+            case 'c':
+                return wide ? String.fromCharCode(value & 0xffff)
+                    : String.fromCharCode(value & 0xff);
+            case 'd':
+            case 'i':
+                return String(value | 0);
+            case 'u':
+                return String(value >>> 0);
+            case 'x': {
+                const hex = (value >>> 0).toString(16);
+                return last === 'X' ? hex.toUpperCase() : hex;
+            }
+            case 'o':
+                return (value >>> 0).toString(8);
+            default:
+                return '';
+        }
+    };
+
+    /**
+     * FormatMessage's insert pass over a caller's own format string: `%1`
+     * through `%9` take the n-th argument, `%%` is a literal percent, and
+     * everything else is copied through.
+     *
+     * The arguments are a va_list, not an array: `argumentsPtr` points at the
+     * pointer to the first value, so it is dereferenced once before indexing.
+     * Reading the pointer as the array itself is what makes the first value a
+     * stack address, and answering ERROR_INVALID_PARAMETER when that address
+     * is then read as a string -- which is the error Windows answers for a
+     * malformed call. With FORMAT_MESSAGE_ARGUMENT_ARRAY the caller says the
+     * pointer *is* the array, and then it is indexed directly.
+     *
+     * @param {string} text @param {number} argumentsPtr @param {boolean} array
+     * @returns {string}
+     */
+    const insertArguments = (text, argumentsPtr, array)=>{
+        const base = array ? argumentsPtr : readDword(argumentsPtr);
+        /** @param {number} index */
+        const valueAt = index=>readDword(base + index * 4);
         let out = '';
         for (let at = 0; at < text.length; at++)
         {
             const ch = text[at];
-            const next = text[at + 1];
-            if (ch !== '%' || next === undefined)
+            if (ch !== '%')
             {
                 out += ch;
                 continue;
             }
+            const next = text[at + 1];
             if (next === '%')
             {
                 out += '%';
                 at++;
                 continue;
             }
-            if (next >= '1' && next <= '9')
+            if (next === undefined || next < '1' || next > '9')
             {
-                const pointer = readDword(argumentsPtr + (next.charCodeAt(0) - 0x31) * 4);
-                out += pointer === 0 ? '' : readAnsi(pointer, MAX_STRING);
-                at++;
+                out += ch;
                 continue;
             }
-            out += ch;
+            const index = next.charCodeAt(0) - 0x31;
+            at++;
+            let conversion = 's';
+            if (text[at + 1] === '!')
+            {
+                const close = text.indexOf('!', at + 2);
+                if (close > at)
+                {
+                    conversion = text.slice(at + 2, close);
+                    at = close;
+                }
+            }
+            out += insertValue(valueAt(index), conversion);
         }
         return out;
     };
@@ -972,10 +1040,12 @@ export function createSystemFunctions(host){
          * cannot be mistaken for a real message.
          *
          * FROM_STRING takes the caller's own text, with `%1`..`%9` expanded
-         * from the arguments when it is given any. It is as real a source as
-         * the system table, and it is how a caller expands inserts in a format
-         * string it already holds; refusing it hands back the empty buffer the
-         * caller cleared first, which reads as a string that was never there.
+         * from the arguments when it is given any, through the `!s!`, `!d!`,
+         * `!x!` and other conversions a message's inserts carry. It is as real
+         * a source as the system table, and it is how a caller expands inserts
+         * in a format string it already holds; refusing it hands back the empty
+         * buffer the caller cleared first, which reads as a string that was
+         * never there.
          *
          * FORMAT_MESSAGE_ALLOCATE_BUFFER changes what lpBuffer means: it is no
          * longer the buffer but a pointer to where the address of one goes, and
@@ -995,7 +1065,8 @@ export function createSystemFunctions(host){
                     if ((asked & FORMAT_MESSAGE_IGNORE_INSERTS) === 0
                         && (argumentsPtr >>> 0) !== 0)
                     {
-                        text = insertArguments(text, argumentsPtr >>> 0);
+                        text = insertArguments(text, argumentsPtr >>> 0,
+                            (asked & FORMAT_MESSAGE_ARGUMENT_ARRAY) !== 0);
                     }
                 }
                 else if ((asked & FORMAT_MESSAGE_FROM_SYSTEM) !== 0)
