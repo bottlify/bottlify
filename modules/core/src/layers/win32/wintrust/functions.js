@@ -29,6 +29,7 @@ const WINTRUST_ACTION_GENERIC_VERIFY_V2 = Uint8Array.of(0x6b, 0xc5, 0xaa, 0x00, 
 const TRUST_E_PROVIDER_UNKNOWN = 0x800b0001;
 const CRYPT_E_FILE_ERROR = 0x80092003;
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_FILE_NOT_FOUND = 2;
 
 /** WINTRUST_DATA's fields that matter here, by offset. */
 const WTD = Object.freeze({
@@ -242,5 +243,49 @@ export function createWintrustFunctions(host){
          * The same verification, the answer read as an HRESULT.
          */
         WinVerifyTrustEx: { argBytes: 12, handler: verifyTrust },
+
+        /**
+         * HANDLE CryptCATOpen(LPCWSTR pwszFileName, DWORD fdwOpenFlags,
+         *                     HCRYPTPROV hProv, DWORD dwPublicVersion,
+         *                     DWORD dwEncodingType)
+         *
+         * Opens a catalog file, handing back a handle over it. The catalog is
+         * opened as a file: a name that is not there fails with
+         * ERROR_FILE_NOT_FOUND, and the handle is what CryptCATClose closes.
+         * CRYPTCAT_OPEN_EXISTING's distinction -- a missing file is not created
+         * -- is the one thing honoured, since nothing here enumerates the
+         * members an opened catalog names.
+         */
+        CryptCATOpen: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([name, flags])=>{
+                const path = host.fullPath(host.readWideString(name >>> 0, 260));
+                const stat = host.files.stat(path);
+                if (!stat || stat.isDirectory)
+                {
+                    host.setLastErrorFor(host.callerThread(), ERROR_FILE_NOT_FOUND);
+                    return 0;
+                }
+                return host.handles.open('wintrust-catalog', { path, flags: flags >>> 0 });
+            },
+        },
+
+        /** BOOL CryptCATClose(HANDLE hCatalog) */
+        CryptCATClose: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                try
+                {
+                    host.handles.close(handle >>> 0);
+                    return 1;
+                }
+                catch (e){
+                    void e;
+                    return 0;
+                }
+            },
+        },
     };
 }

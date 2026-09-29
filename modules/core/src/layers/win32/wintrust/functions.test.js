@@ -181,6 +181,24 @@ test('WTD_HASH_ONLY_FLAG trusts an intact file without asking who signed it', ()
     assert.equal(m.verify('C:\\signed.cab'), CERT_E_CHAINING);
 });
 
+test('CryptCATOpen opens a catalog file and CryptCATClose closes it', ()=>{
+    const m = machine();
+    m.file('C:\\catalog.cat', new Uint8Array([1, 2, 3]));
+    const name = 0x500;
+    [...'C:\\catalog.cat', '\0'].forEach((ch, i)=>
+        m.view.setUint16(name + i * 2, ch.charCodeAt(0), true));
+    const handle = m.fns.CryptCATOpen.handler([name, 0, 0, 0, 0]);
+    assert.notEqual(handle, 0);
+    assert.equal(m.handleType(handle), 'wintrust-catalog');
+    assert.equal(m.fns.CryptCATClose.handler([handle]), 1);
+    assert.equal(m.handleType(handle), null, 'the handle is gone');
+
+    [...'C:\\missing.cat', '\0'].forEach((ch, i)=>
+        m.view.setUint16(name + i * 2, ch.charCodeAt(0), true));
+    assert.equal(m.fns.CryptCATOpen.handler([name, 0, 0, 0, 0]), 0);
+    assert.equal(m.lastError(), 2, 'ERROR_FILE_NOT_FOUND');
+});
+
 test('an unknown action, another subject form and missing arguments are refused', ()=>{
     const m = machine({ roots: [chain.root] });
     m.file('C:\\signed.cab', signedCabinet());
