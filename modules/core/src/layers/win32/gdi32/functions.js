@@ -217,6 +217,12 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_HANDLE = 6;
 const STATUS_INVALID_PARAMETER = 0xc000000d;
 
+/** GetBoundsRect's flags: reset clears, set records, the rest query. */
+const DCB_RESET = 0x0001;
+const DCB_SET = 0x0008;
+const DCB_ENABLE = 0x0010;
+const DCB_DISABLE = 0x0020;
+
 /** @param {any} memory @param {number} address @param {number} count @returns {number[]} */
 const readU32s = (memory, address, count)=>Array.from({ length: count },
     (_, index)=>readU32(memory, (address >>> 0) + index * 4));
@@ -631,6 +637,10 @@ export function createGdiFunctions(host){
             viewportExt: { cx: 1, cy: 1 },
             windowExt: { cx: 1, cy: 1 },
             position: { x: 0, y: 0 },
+            /** GetBoundsRect's accumulated bounding rectangle, or null. */
+            boundingRect: null,
+            /** GetBoundsRect's accumulation state: DCB_ENABLE, DCB_DISABLE, or none. */
+            boundsState: 0,
             /** @type {any[]} */
             saved: [],
         };
@@ -2875,6 +2885,107 @@ export function createGdiFunctions(host){
                 const dc = dcOf(handle);
                 return dc ? deviceCaps(dc, index) : 0;
             },
+        },
+
+        /**
+         * UINT GetBoundsRect(HDC hdc, LPRECT lprect, UINT flags)
+         *
+         * The accumulated bounding rectangle, which this layer does not
+         * accumulate: a DC's bounds are what the program set with DCB_SET and
+         * cleared with DCB_RESET. DCB_SET records the rectangle and answers
+         * DCB_SET; DCB_RESET clears it and answers what was there; any other
+         * flags answer the current state -- DCB_SET when a rectangle is held,
+         * zero otherwise -- and copy the rectangle out.
+         */
+        GetBoundsRect: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, rect, flags])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                const held = dc.boundsState;
+                if ((flags & DCB_RESET) !== 0)
+                {
+                    dc.boundingRect = null;
+                    return held;
+                }
+                if ((flags & DCB_SET) !== 0)
+                {
+                    const [left, top, right, bottom] = readU32s(host, rect >>> 0, 4);
+                    dc.boundingRect = { left, top, right, bottom };
+                    return DCB_SET;
+                }
+                if ((rect >>> 0) !== 0 && dc.boundingRect)
+                {
+                    const { left, top, right, bottom } = dc.boundingRect;
+                    writeU32s(host, rect >>> 0, [left, top, right, bottom]);
+                }
+                return held;
+            },
+        },
+
+        /**
+         * UINT SetBoundsRect(HDC hdc, const RECT *lprect, UINT flags)
+         *
+         * The setter half of GetBoundsRect: DCB_SET records the rectangle,
+         * DCB_ENABLE and DCB_DISABLE turn accumulation on and off, and
+         * DCB_RESET clears it. Every one answers the state that came before.
+         * Drawing does not accumulate here, so an enabled DC still holds only
+         * what a DCB_SET put there.
+         */
+        SetBoundsRect: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, rect, flags])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                const held = dc.boundsState;
+                if ((flags & DCB_RESET) !== 0)
+                {
+                    dc.boundingRect = null;
+                    return held;
+                }
+                if ((flags & DCB_SET) !== 0)
+                {
+                    const [left, top, right, bottom] = readU32s(host, rect >>> 0, 4);
+                    dc.boundingRect = { left, top, right, bottom };
+                    return held;
+                }
+                if ((flags & DCB_ENABLE) !== 0)
+                {
+                    dc.boundsState = DCB_ENABLE;
+                }
+                else if ((flags & DCB_DISABLE) !== 0)
+                {
+                    dc.boundsState = DCB_DISABLE;
+                }
+                return held;
+            },
+        },
+
+        /**
+         * HDC ResetDCA/W(HDC hdc, const DEVMODEA/W *lpInitData)
+         *
+         * A DC put back to the device mode given. There is one display mode
+         * here and a DC's own settings are the program's to change, so nothing
+         * is reset; the call answers the DC's own handle, which is what Windows
+         * answers with on success.
+         */
+        ResetDCA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>dcOf(handle) ? handle >>> 0 : 0,
+        },
+        ResetDCW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>dcOf(handle) ? handle >>> 0 : 0,
         },
 
         /** BOOL GetTextMetricsW(HDC hdc, LPTEXTMETRICW lptm) */
