@@ -84,6 +84,9 @@ const ERROR_SIGNAL_REFUSED = 156;
 /** A thread that has ended cannot be suspended. */
 const ERROR_ACCESS_DENIED = 5;
 
+/** Milliseconds from the FILETIME epoch (1601) to the Unix one, for thread times. */
+const FILETIME_EPOCH_MS = 11644473600000;
+
 /**
  * @typedef {Object} SyncHost
  * @property {any} kernel                        The kernel layer's API.
@@ -525,6 +528,46 @@ export function createSyncFunctions(host){
             argBytes: 0,
             handler: ()=>CURRENT_THREAD,
             code: ()=>Uint8Array.from([0xb8, 0xfe, 0xff, 0xff, 0xff, 0xc3]), // mov eax, -2; ret
+        },
+
+        /**
+         * BOOL GetThreadTimes(HANDLE hThread, LPFILETIME lpCreationTime,
+         *     LPFILETIME lpExitTime, LPFILETIME lpKernelTime, LPFILETIME lpUserTime)
+         *
+         * The thread's creation time, its exit time (zero while it runs), and
+         * its CPU time in each mode. The clock this build keeps is one wall
+         * clock, so the creation time is now and the times are zero -- a
+         * caller that asks for them gets a plausible FILETIME, not a pointer
+         * left unwritten.
+         */
+        GetThreadTimes: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, creation, exit, kernelTime, userTime])=>{
+                const thread = threadOf(handle);
+                if (!thread)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const now = BigInt(Math.floor(
+                    kernel.clock.wallClock() + FILETIME_EPOCH_MS)) * 10000n;
+                /** @param {number} address @param {bigint} value */
+                const write = (address, value)=>{
+                    if ((address >>> 0) !== 0)
+                    {
+                        const bytes = new Uint8Array(8);
+                        new DataView(bytes.buffer).setBigInt64(0, value, true);
+                        host.writeMemory(address >>> 0, bytes);
+                    }
+                };
+                const ended = (thread.exitCode ?? null) !== null;
+                write(creation, now);
+                write(exit, ended ? now : 0n);
+                write(kernelTime, 0n);
+                write(userTime, 0n);
+                return 1;
+            },
         },
 
         /** DWORD SuspendThread(HANDLE hThread) */

@@ -108,7 +108,7 @@ function fakeKernel(){
             state.blocked.push(thread);
             return null;
         },
-        clock: { virtualTime: ()=>state.now },
+        clock: { virtualTime: ()=>state.now, wallClock: ()=>state.now },
         /** @param {any[]} objects @param {any} thread @param {any} [timed] */
         waitAll(objects, thread, timed){
             state.timed.push(timed);
@@ -610,6 +610,26 @@ test('a suspension past MAXIMUM_SUSPEND_COUNT fails and leaves the count alone',
     assert.equal(fns.SuspendThread.handler([0x20]), 0xffffffff, '(DWORD)-1');
     assert.equal(other.suspendCount, 127);
     assert.deepEqual(host.errors, [ERROR_SIGNAL_REFUSED]);
+});
+
+test('GetThreadTimes fills a FILETIME per slot, zero exit for a running thread', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.register(0x20, 'thread', host.threads.second);
+
+    const read64 = (/** @type {number} */ at)=>new DataView(host.bytes.buffer).getBigInt64(at, true);
+    assert.equal(fns.GetThreadTimes.handler([0x20, 0x300, 0x308, 0x310, 0x318]), 1);
+    assert.notEqual(read64(0x300), 0n, 'a creation time');
+    assert.equal(read64(0x308), 0n, 'a running thread has no exit time');
+    assert.equal(read64(0x310), 0n);
+    assert.equal(read64(0x318), 0n);
+
+    host.threads.second.exitCode = 0;
+    assert.equal(fns.GetThreadTimes.handler([0x20, 0x300, 0x308, 0x310, 0x318]), 1);
+    assert.notEqual(read64(0x308), 0n, 'an ended thread has an exit time');
+
+    assert.equal(fns.GetThreadTimes.handler([0x1234, 0x300, 0x308, 0x310, 0x318]), 0);
+    assert.deepEqual(host.errors, [6], 'ERROR_INVALID_HANDLE');
 });
 
 test('a thread resumed while queued behind a released section takes it', ()=>{
