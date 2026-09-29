@@ -254,6 +254,13 @@ const initialize = (fns, mode)=>fns.CoInitializeEx.handler([0, mode]);
 const createInstance = (fns, { clsid = CLSID_ARG, outer = 0, iid = IID_ARG, ppv = PPV } = {})=>
     fns.CoCreateInstance.handler([clsid, outer, 1, iid, ppv]);
 
+test('CoGetCurrentLogicalThreadId answers the calling thread\'s id', ()=>{
+    const { host, fns } = setup();
+    assert.equal(fns.CoGetCurrentLogicalThreadId.handler(), 0x100);
+    host.run(host.threads.second);
+    assert.equal(fns.CoGetCurrentLogicalThreadId.handler(), 0x104);
+});
+
 test('CoInitialize nests and only the matching CoUninitialize leaves', ()=>{
     const { host, fns } = setup();
     assert.equal(fns.CoInitialize.handler(), S_OK);
@@ -788,6 +795,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoInitialize: 4,
         CoInitializeEx: 8,
         CoGetApartmentType: 8,
+        CoGetCurrentLogicalThreadId: 0,
         CoInitializeSecurity: 36,
         CoUninitialize: 0,
         OleInitialize: 4,

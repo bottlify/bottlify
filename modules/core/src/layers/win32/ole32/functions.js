@@ -1080,6 +1080,19 @@ export function createOleFunctions(host){
             },
         },
 
+        /**
+         * DWORD CoGetCurrentLogicalThreadId(void)
+         *
+         * The identifier of the calling thread's apartment, which for a thread
+         * in an apartment of its own is its own thread id: the same number
+         * GetCurrentThreadId answers, and the one a program uses to tell its
+         * own logical thread from another's.
+         */
+        CoGetCurrentLogicalThreadId: {
+            argBytes: 0,
+            handler: ()=>(host.currentThread()?.id ?? 0) >>> 0,
+        },
+
         /** void CoUninitialize(void) */
         /**
          * void CoFreeUnusedLibraries(void)
