@@ -62,6 +62,22 @@ function setup(){
     return { bytes, errors, table, fns, dword };
 }
 
+test('DuplicateToken hands a second token handle with the level it was given', ()=>{
+    const { errors, fns, dword, table } = setup();
+    assert.equal(fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 1);
+    const token = dword(OUT);
+
+    assert.equal(fns.DuplicateToken.handler([token, 2, NEEDED]), 1);
+    const duplicate = dword(NEEDED);
+    assert.equal(table.get(duplicate)?.type, 'token');
+    assert.notEqual(duplicate, token, 'a second handle, not the same one');
+    assert.equal(table.get(duplicate)?.object.impersonationLevel, 2);
+    assert.equal(table.get(duplicate)?.object.process, CURRENT_PROCESS);
+
+    assert.equal(fns.DuplicateToken.handler([0x1234, 2, NEEDED]), 0, 'not a token');
+    assert.deepEqual(errors, [ERROR_INVALID_HANDLE]);
+});
+
 test('the sequence an installer asks whether it is an administrator with', ()=>{
     // OpenThreadToken has to fail with ERROR_NO_TOKEN and nothing else: that
     // is the code the program tests before it falls back to the process's
