@@ -1990,6 +1990,15 @@ test('DefWindowProcA does nothing at all with a message it has no opinion on', (
     assert.equal(queue.quitPending(), false);
 });
 
+test('DefFrameProcA is the default procedure with an MDI client it ignores', ()=>{
+    const { fns, hwnd } = withWindow();
+    assert.equal(fns.DefFrameProcA.handler([hwnd, 0x1234, WM_USER, 5, 6]),
+        fns.DefWindowProcA.handler([hwnd, WM_USER, 5, 6]));
+    assert.equal(fns.DefFrameProcW.handler([hwnd, 0x1234, WM_USER, 5, 6]),
+        fns.DefWindowProcW.handler([hwnd, WM_USER, 5, 6]));
+    assert.deepEqual([fns.DefFrameProcA.argBytes, fns.DefFrameProcW.argBytes], [20, 20]);
+});
+
 // --- the stack every one of them pops ---
 
 test('every function declares the stack its arguments occupy', ()=>{

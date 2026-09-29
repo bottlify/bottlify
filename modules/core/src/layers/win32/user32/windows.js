@@ -5206,6 +5206,29 @@ export function createWindowFunctions(host){
             }, false, ansi=>table.DefWindowProcA.handler(
                 [ansi.hwnd, ansi.message, ansi.wParam, ansi.lParam])),
         },
+
+        /**
+         * LRESULT DefFrameProcA/W(HWND hWnd, HWND hWndMDIClient, UINT uMsg,
+         *     WPARAM wParam, LPARAM lParam)
+         *
+         * The default procedure of an MDI frame. There is no MDI child here,
+         * so the frame behaves as its ordinary default procedure does: the
+         * client window argument is taken and the message goes to
+         * DefWindowProc.
+         */
+        DefFrameProcA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([hwnd, , message, wParam, lParam])=>
+                table.DefWindowProcA.handler([hwnd, message, wParam, lParam]),
+        },
+
+        DefFrameProcW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([hwnd, , message, wParam, lParam])=>
+                table.DefWindowProcW.handler([hwnd, message, wParam, lParam]),
+        },
     };
     // A message box is a dialog user32 makes out of its own calls, so it is
     // built over the finished table.
