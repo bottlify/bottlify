@@ -570,6 +570,53 @@ export function createSyncFunctions(host){
             },
         },
 
+        /**
+         * DWORD_PTR SetThreadAffinityMask(HANDLE hThread, DWORD_PTR dwThreadAffinityMask)
+         *
+         * The processor a thread is allowed on. This build has one processor,
+         * so the mask is recorded and the previous one handed back -- a caller
+         * that sets and restores it gets the value it saved. A handle that is
+         * not a thread fails with ERROR_INVALID_HANDLE.
+         */
+        SetThreadAffinityMask: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, mask])=>{
+                const thread = threadOf(handle);
+                if (!thread)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const previous = thread.affinityMask ?? 1;
+                thread.affinityMask = mask >>> 0;
+                return previous;
+            },
+        },
+
+        /**
+         * DWORD SetThreadIdealProcessor(HANDLE hThread, DWORD dwIdealProcessor)
+         *
+         * The processor a thread would prefer to run on. There is one, so the
+         * choice is recorded and the previous one handed back, as
+         * SetThreadAffinityMask does.
+         */
+        SetThreadIdealProcessor: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, ideal])=>{
+                const thread = threadOf(handle);
+                if (!thread)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const previous = thread.idealProcessor ?? 0;
+                thread.idealProcessor = ideal >>> 0;
+                return previous;
+            },
+        },
+
         /** DWORD SuspendThread(HANDLE hThread) */
         SuspendThread: {
             argBytes: 4,

@@ -632,6 +632,29 @@ test('GetThreadTimes fills a FILETIME per slot, zero exit for a running thread',
     assert.deepEqual(host.errors, [6], 'ERROR_INVALID_HANDLE');
 });
 
+test('SetThreadAffinityMask records the mask and answers the one before', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.register(0x20, 'thread', host.threads.second);
+
+    assert.equal(fns.SetThreadAffinityMask.handler([0x20, 2]), 1, 'the one processor');
+    assert.equal(fns.SetThreadAffinityMask.handler([0x20, 4]), 2, 'what was set before');
+    assert.equal(host.threads.second.affinityMask, 4);
+
+    assert.equal(fns.SetThreadAffinityMask.handler([0x1234, 1]), 0, 'not a thread');
+    assert.deepEqual(host.errors, [6], 'ERROR_INVALID_HANDLE');
+});
+
+test('SetThreadIdealProcessor records the ideal and answers the one before', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.register(0x20, 'thread', host.threads.second);
+
+    assert.equal(fns.SetThreadIdealProcessor.handler([0x20, 1]), 0, 'processor 0 before');
+    assert.equal(fns.SetThreadIdealProcessor.handler([0x20, 3]), 1);
+    assert.equal(host.threads.second.idealProcessor, 3);
+});
+
 test('a thread resumed while queued behind a released section takes it', ()=>{
     // Suspended behind a section, a thread is passed over by the release that
     // nobody else could take; resuming it hands it the section then.
