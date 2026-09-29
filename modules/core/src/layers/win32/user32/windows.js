@@ -4510,6 +4510,61 @@ export function createWindowFunctions(host){
         },
 
         /**
+         * BOOL SetLayeredWindowAttributes(HWND hwnd, COLORREF crKey, BYTE bAlpha,
+         *     DWORD dwFlags)
+         * BOOL GetLayeredWindowAttributes(HWND hwnd, COLORREF *pcrKey, BYTE *pbAlpha,
+         *     DWORD *pdwFlags)
+         *
+         * The attributes are recorded on the window and handed back whole:
+         * nothing renders a layered window any differently here, so the value
+         * only has to round-trip. LWA_COLORKEY and LWA_ALPHA name which of the
+         * two the caller set, and the getter answers what the setter stored.
+         */
+        SetLayeredWindowAttributes: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, key, alpha, flags])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                record.layered = { key: key >>> 0, alpha: alpha & 0xff, flags: flags >>> 0 };
+                return 1;
+            },
+        },
+
+        GetLayeredWindowAttributes: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, key, alpha, flags])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                const layered = record.layered;
+                if ((key >>> 0) !== 0)
+                {
+                    const bytes = new Uint8Array(4);
+                    new DataView(bytes.buffer).setUint32(0, layered?.key ?? 0, true);
+                    host.writeMemory(key >>> 0, bytes);
+                }
+                if ((alpha >>> 0) !== 0)
+                {
+                    host.writeMemory(alpha >>> 0, new Uint8Array([(layered?.alpha ?? 0) & 0xff]));
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    const bytes = new Uint8Array(4);
+                    new DataView(bytes.buffer).setUint32(0, layered?.flags ?? 0, true);
+                    host.writeMemory(flags >>> 0, bytes);
+                }
+                return 1;
+            },
+        },
+
+        /**
          * WORD GetWindowWord(HWND hWnd, int nIndex)
          * WORD SetWindowWord(HWND hWnd, int nIndex, WORD wNewWord)
          *

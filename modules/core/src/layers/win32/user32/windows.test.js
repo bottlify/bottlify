@@ -861,6 +861,23 @@ test('SetWindowLongA answers with the value it replaced', ()=>{
         'code that restores what it changed needs the old value back');
 });
 
+test('SetLayeredWindowAttributes records what GetLayeredWindowAttributes reads back', ()=>{
+    const { fns, memory, hwnd } = withWindow();
+    assert.equal(fns.SetLayeredWindowAttributes.handler([hwnd, 0x00ff00, 0x80, 0x2]), 1);
+
+    const KEY = 0x5000;
+    const ALPHA = 0x5004;
+    const FLAGS = 0x5008;
+    assert.equal(fns.GetLayeredWindowAttributes.handler([hwnd, KEY, ALPHA, FLAGS]), 1);
+    assert.equal(memory.u32(KEY), 0x00ff00);
+    assert.equal(memory.u32(ALPHA) & 0xff, 0x80);
+    assert.equal(memory.u32(FLAGS), 0x2);
+
+    assert.equal(fns.SetLayeredWindowAttributes.handler([0x1234, 0, 0, 0]), 0, 'not a window');
+    assert.deepEqual([fns.SetLayeredWindowAttributes.argBytes,
+        fns.GetLayeredWindowAttributes.argBytes], [16, 16]);
+});
+
 test('the extra bytes a class asked for are the window\'s own storage', ()=>{
     const { fns, memory } = withWindow({ windowExtra: 8 });
     const first = createWindow(fns, memory);
