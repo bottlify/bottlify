@@ -2532,6 +2532,27 @@ test('a message registered by a UTF-16 name is the number its narrow name has', 
     assert.equal(fns.RegisterWindowMessageW.argBytes, 4);
 });
 
+test('GetClipboardFormatName reads back a fixed and a registered name', ()=>{
+    const { memory, fns } = setup();
+    const OUT = 0x12000;
+
+    assert.equal(fns.GetClipboardFormatNameW.handler([13, OUT, 20]), 12,
+        'CF_UNICODETEXT is "Unicode Text", 12 characters');
+    assert.equal(memory.bytes[OUT], 'U'.charCodeAt(0));
+    assert.equal(memory.bytes[OUT + 1], 0, 'and it is wide');
+
+    memory.putString(FORMAT_BUFFER, 'MyFormat');
+    const id = fns.RegisterClipboardFormatA.handler([FORMAT_BUFFER]);
+    assert.equal(fns.GetClipboardFormatNameA.handler([id, OUT, 20]), 8,
+        '"MyFormat" is 8 characters');
+    assert.equal(memory.bytes[OUT], 'M'.charCodeAt(0));
+    assert.equal(memory.bytes[OUT + 8], 0, 'and it is terminated');
+
+    assert.equal(fns.GetClipboardFormatNameW.handler([0xffff, OUT, 20]), 0, 'no such format');
+    assert.deepEqual([fns.GetClipboardFormatNameA.argBytes, fns.GetClipboardFormatNameW.argBytes],
+        [12, 12]);
+});
+
 // --- hot keys ---
 
 const WM_KEYDOWN = 0x0100;

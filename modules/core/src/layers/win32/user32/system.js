@@ -392,6 +392,14 @@ const DMLERR_NO_ERROR = 0;
 /** Where RegisterWindowMessage numbers start: 0xc000 to 0xffff is theirs. */
 const REGISTERED_MESSAGE_FIRST = 0xc000;
 
+/** The names of the fixed clipboard formats, the ones GetClipboardFormatName reads back. */
+const CLIPBOARD_FORMAT_NAMES = new Map([
+    [1, 'Text'], [2, 'Bitmap'], [3, 'MetaFilePict'], [4, 'SYLK'], [5, 'DIF'],
+    [6, 'TIFF'], [7, 'OEM Text'], [8, 'DIB'], [9, 'Palette'], [10, 'Pen Data'],
+    [11, 'RIFF'], [12, 'Wave'], [13, 'Unicode Text'], [14, 'Enhanced Metafile'],
+    [15, 'Drop'], [16, 'Locale'], [17, 'DIB V5'],
+]);
+
 /** RegisterHotKey's failure codes, which a caller reads with GetLastError. */
 const ERROR_HOTKEY_ALREADY_REGISTERED = 1409;
 const ERROR_HOTKEY_NOT_REGISTERED = 1410;
@@ -694,6 +702,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
      * @type {Map<string, number>}
      */
     const registeredMessages = new Map();
+    /** A registered number's name in the case it was first registered. */
+    const registeredMessageNames = new Map();
 
     /**
      * SetWindowPos, shared with the deferred form. The two flags that say
@@ -1587,8 +1597,9 @@ export function createSystemFunctions({ host, live, windows, classes }){
         {
             return 0;
         }
-        const key = (wide ? readWideString(name >>> 0).slice(0, MAX_NAME)
-            : host.readCString(name >>> 0, MAX_NAME)).toLowerCase();
+        const original = wide ? readWideString(name >>> 0).slice(0, MAX_NAME)
+            : host.readCString(name >>> 0, MAX_NAME);
+        const key = original.toLowerCase();
         if (key.length === 0)
         {
             return 0;
@@ -1598,8 +1609,28 @@ export function createSystemFunctions({ host, live, windows, classes }){
         {
             id = REGISTERED_MESSAGE_FIRST + registeredMessages.size;
             registeredMessages.set(key, id);
+            // The name as the program wrote it, so GetClipboardFormatName
+            // reads back the case it registered rather than a folded one.
+            registeredMessageNames.set(id, original);
         }
         return id;
+    };
+
+    /**
+     * The name a clipboard format's number was registered under, or its fixed
+     * name for the formats Windows numbers itself; null when the number names
+     * nothing this table knows.
+     *
+     * @param {number} format
+     * @returns {string | null}
+     */
+    const clipboardFormatName = format=>{
+        const fixed = CLIPBOARD_FORMAT_NAMES.get(format);
+        if (fixed !== undefined)
+        {
+            return fixed;
+        }
+        return registeredMessageNames.get(format) ?? null;
     };
     return {
         /** int GetSystemMetrics(int nIndex) */
@@ -2684,6 +2715,40 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: args=>registerName(args, true),
+        },
+
+        /**
+         * int GetClipboardFormatNameA/W(UINT format, LPSTR/LPWSTR lpszFormatName,
+         *     int cchMaxCount)
+         *
+         * The name behind a format's number: a fixed format's own, or the name a
+         * program registered. The count written excludes the terminator, and a
+         * format no table here knows is answered with zero, which is the
+         * "not registered" answer.
+         */
+        GetClipboardFormatNameA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([format, name, count])=>{
+                const text = clipboardFormatName(format >>> 0);
+                if (text === null)
+                {
+                    return 0;
+                }
+                return writeString(name >>> 0, text, count | 0);
+            },
+        },
+        GetClipboardFormatNameW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([format, name, count])=>{
+                const text = clipboardFormatName(format >>> 0);
+                if (text === null)
+                {
+                    return 0;
+                }
+                return writeWideString(name >>> 0, text, count | 0);
+            },
         },
 
         /** BOOL MessageBeep(UINT uType) */
