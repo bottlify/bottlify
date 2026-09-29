@@ -82,6 +82,47 @@ test('the code pages reported are the ones a Western build was linked against', 
     assert.equal(fns.GetOEMCP.handler(), CP_OEM_437);
 });
 
+test('EnumTimeFormatsA hands each format to the callback until it stops', async()=>{
+    const host = fakeHost();
+    /** @type {string[]} */
+    const seen = [];
+    let next = 0x800;
+    const fns = createLocaleFunctions({
+        ...host,
+        callerThread: ()=>({ id: 1 }),
+        /** @param {number} bytes */
+        allocate: bytes=>{
+            const at = next;
+            next += bytes + 8;
+            return at;
+        },
+        free: ()=>{},
+        /** @param {number} entry @param {number[]} args */
+        call: async(entry, [buffer])=>{
+            void entry;
+            let text = '';
+            for (let at = 0; host.bytes[buffer + at] !== 0; at++)
+            {
+                text += String.fromCharCode(host.bytes[buffer + at]);
+            }
+            seen.push(text);
+            return seen.length === 3 ? 0 : 1;
+        },
+    });
+
+    assert.equal(await fns.EnumTimeFormatsA.handler([0x1234, 0x0409, 0, 0]), 0,
+        'the callback stopped the run');
+    assert.deepEqual(seen, ['h:mm:ss tt', 'hh:mm:ss tt', 'H:mm:ss'],
+        'the locale formats, first three then stopped');
+    assert.equal(fns.EnumTimeFormatsA.argBytes, 16);
+});
+
+test('EnumTimeFormatsA fails without a callback or a bridge to call through', ()=>{
+    const fns = createLocaleFunctions(fakeHost());
+    assert.equal(fns.EnumTimeFormatsA.handler([0, 0x0409, 0, 0]), 0);
+});
+
+
 test('a single-byte page reports one byte per character and no lead-byte ranges', ()=>{
     // A lead-byte range that is not empty tells a caller to look for two-byte
     // sequences, and it will then read one character where there are two.

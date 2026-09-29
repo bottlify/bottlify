@@ -145,6 +145,10 @@ const LONG_DATE = 'dddd, MMMM dd, yyyy';
 const LONG_TIME = 'h:mm:ss tt';
 const SHORT_TIME = 'h:mm tt';
 
+/** The time formats EnumTimeFormats enumerates, the locale's own first. */
+const TIME_FORMATS = ['h:mm:ss tt', 'hh:mm:ss tt', 'H:mm:ss', 'HH:mm:ss',
+    'h:mm tt', 'hh:mm tt', 'H:mm', 'HH:mm'];
+
 /** sizeof(SYSTEMTIME), which the date and time formats are given one of. */
 const SYSTEMTIME_SIZE = 16;
 
@@ -485,6 +489,13 @@ const characterType = code=>{
  * @property {() => number} [systemTimeMs]
  *           The guest wall clock, for a date or time format given no
  *           SYSTEMTIME of its own. Without it that one case fails.
+ * @property {(entry: number, args: number[], thread?: unknown) => Promise<number>} [call]
+ *           A stdcall into guest code, for an enumeration's callback. Absent,
+ *           the enumerations report not implemented rather than calling.
+ * @property {() => unknown} [callerThread]  Whose call a callback answers.
+ * @property {(bytes: number) => number} [allocate]  Guest memory for a format
+ *           string the callback reads; absent, enumerations do not call.
+ * @property {(address: number) => void} [free]
  */
 
 /**
@@ -621,6 +632,55 @@ export function createLocaleFunctions(host){
 
     /** @param {string} text @param {number} buffer @param {number} count */
     const writeFormatted = (text, buffer, count)=>writeAnswer(text, buffer, count, false);
+
+    /**
+     * EnumTimeFormats' body: each format as a NUL-terminated string in guest
+     * memory, the callback called with it, and the whole run stopped the moment
+     * the callback answers zero. The answer is the callback's last answer, or
+     * zero when it never ran -- a null callback, no allocation, no bridge.
+     *
+     * @param {number} proc @param {number} lParam @param {boolean} wide
+     * @returns {number | Promise<number>}
+     */
+    const enumerateTimeFormats = (proc, lParam, wide)=>{
+        const call = host.call;
+        const allocate = host.allocate;
+        if (!call || !allocate || (proc >>> 0) === 0)
+        {
+            return 0;
+        }
+        const thread = host.callerThread?.();
+        const longest = TIME_FORMATS.reduce((max, format)=>Math.max(max, format.length), 0);
+        const block = allocate((longest + 1) * (wide ? 2 : 1));
+        if (block === 0)
+        {
+            return 0;
+        }
+        const run = async()=>{
+            let answer = 1;
+            for (const format of TIME_FORMATS)
+            {
+                const text = format + String.fromCharCode(0);
+                if (wide)
+                {
+                    writeWide(block, text);
+                }
+                else
+                {
+                    const { bytes } = encodeSingleByte(text, ANSI_CODE_PAGE);
+                    host.writeMemory(block, bytes);
+                }
+                answer = (await call(proc >>> 0, [block, lParam >>> 0], thread)) | 0;
+                if (answer === 0)
+                {
+                    break;
+                }
+            }
+            host.free?.(block);
+            return answer;
+        };
+        return run();
+    };
 
     /**
      * A NUMBERFMTA read out of the guest, or the locale's own picture when the
@@ -1014,6 +1074,27 @@ export function createLocaleFunctions(host){
                 host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
                 return 0;
             },
+        },
+
+        /**
+         * BOOL EnumTimeFormatsA/W(TIMEFMT_ENUMPROCA/W lpTimeFmtProc,
+         *     LCID Locale, DWORD dwFlags, LPARAM lParam)
+         *
+         * The locale's time formats, handed to the program's callback one at a
+         * time until it answers zero, then the answer (nonzero) returned. The
+         * format travels as an ANSI or wide string in guest memory allocated
+         * for it, freed after the call. A null callback, or a build without
+         * the bridge to call into, is a failure rather than a silent no-op.
+         */
+        EnumTimeFormatsA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([proc, , , lParam])=>enumerateTimeFormats(proc, lParam, false),
+        },
+        EnumTimeFormatsW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([proc, , , lParam])=>enumerateTimeFormats(proc, lParam, true),
         },
 
         /**

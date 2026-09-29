@@ -1242,6 +1242,13 @@ export function createWin32Module(){
                         readMemory, writeMemory,
                         setLastError: setError,
                         systemTimeMs: ()=>kernel.clock.wallClock(),
+                        /** @param {number} entry @param {number[]} args @param {unknown} [thread] */
+                        call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                        callerThread: ()=>bridge.callerThread(),
+                        /** @param {number} bytes */
+                        allocate: bytes=>heap.allocate(bytes),
+                        /** @param {number} address */
+                        free: address=>heap.free(address),
                     }),
                     ...createResourceFunctions({
                         readCString,
