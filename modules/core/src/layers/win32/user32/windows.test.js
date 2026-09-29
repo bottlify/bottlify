@@ -1999,6 +1999,15 @@ test('DefFrameProcA is the default procedure with an MDI client it ignores', ()=
     assert.deepEqual([fns.DefFrameProcA.argBytes, fns.DefFrameProcW.argBytes], [20, 20]);
 });
 
+test('DefMDIChildProc is the child\'s default procedure, which is DefWindowProc', ()=>{
+    const { fns, hwnd } = withWindow();
+    assert.equal(fns.DefMDIChildProcA.handler([hwnd, WM_USER, 5, 6]),
+        fns.DefWindowProcA.handler([hwnd, WM_USER, 5, 6]));
+    assert.equal(fns.DefMDIChildProcW.handler([hwnd, WM_USER, 5, 6]),
+        fns.DefWindowProcW.handler([hwnd, WM_USER, 5, 6]));
+    assert.deepEqual([fns.DefMDIChildProcA.argBytes, fns.DefMDIChildProcW.argBytes], [16, 16]);
+});
+
 // --- the stack every one of them pops ---
 
 test('every function declares the stack its arguments occupy', ()=>{

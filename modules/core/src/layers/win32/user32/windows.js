@@ -5229,6 +5229,28 @@ export function createWindowFunctions(host){
             handler: ([hwnd, , message, wParam, lParam])=>
                 table.DefWindowProcW.handler([hwnd, message, wParam, lParam]),
         },
+
+        /**
+         * LRESULT DefMDIChildProcA/W(HWND hWnd, UINT uMsg, WPARAM wParam,
+         *     LPARAM lParam)
+         *
+         * The default procedure of an MDI child. There is no MDI here, so a
+         * child behaves as its ordinary default procedure does: the message
+         * goes to DefWindowProc.
+         */
+        DefMDIChildProcA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, message, wParam, lParam])=>
+                table.DefWindowProcA.handler([hwnd, message, wParam, lParam]),
+        },
+
+        DefMDIChildProcW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, message, wParam, lParam])=>
+                table.DefWindowProcW.handler([hwnd, message, wParam, lParam]),
+        },
     };
     // A message box is a dialog user32 makes out of its own calls, so it is
     // built over the finished table.
