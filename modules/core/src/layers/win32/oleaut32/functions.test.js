@@ -221,6 +221,24 @@ test('SysReAllocString replaces the string in the slot and frees the old one', (
     assert.equal(host.live.has(first - 4), false, 'the old string is gone');
 });
 
+test('VarBstrFromBool spells the two booleans, and wants an out pointer', ()=>{
+    setUp();
+    host.putU32(SLOT, 0xdeadbeef);
+    assert.equal(call('VarBstrFromBool', [0xffff, 0, 0, SLOT]) >>> 0, S_OK);
+    const yes = host.u32(SLOT);
+    assert.equal(host.u16(yes), 'T'.charCodeAt(0));
+    assert.equal(host.u16(yes + 2), 'r'.charCodeAt(0));
+    assert.equal(host.u16(yes + 8), 0, 'True is four characters, terminated');
+
+    host.putU32(SLOT, 0xdeadbeef);
+    assert.equal(call('VarBstrFromBool', [0, 0, 0, SLOT]) >>> 0, S_OK);
+    const no = host.u32(SLOT);
+    assert.equal(host.u16(no), 'F'.charCodeAt(0));
+    assert.equal(host.u16(no + 10), 0, 'False is five characters, terminated');
+
+    assert.equal(call('VarBstrFromBool', [0, 0, 0, 0]) >>> 0, 0x80004003, 'E_POINTER');
+});
+
 test('VariantInit empties the whole variant, not only its type', ()=>{
     setUp();
     host.bytes.fill(0xa5, VARIANT_A, VARIANT_A + 16);

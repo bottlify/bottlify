@@ -117,6 +117,7 @@ const TYPE_E_CANTLOADLIBRARY = 0x80029c4a | 0;
 const TYPE_E_LIBNOTREGISTERED = 0x8002801d | 0;
 const TYPE_E_REGISTRYACCESS = 0x8002801c | 0;
 const E_INVALIDARG = 0x80070057;
+const E_POINTER = 0x80004003;
 const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
 const DISP_E_TYPEMISMATCH = 0x80020005;
@@ -1239,6 +1240,29 @@ export function createAutomationFunctions(host){
                 const owed = nothingOwed();
                 return settle(owed, thread, changeType(pvargDest >>> 0, pvarSrc >>> 0,
                     wFlags & 0xffff, vt & 0xffff, owed));
+            },
+        },
+
+        /**
+         * HRESULT VarBstrFromBool(VARIANT_BOOL boolIn, LCID lcid, ULONG dwFlags,
+         *                         BSTR *pbstrOut)
+         *
+         * The one spelling the English locale uses: "True" for VARIANT_TRUE and
+         * "False" for VARIANT_FALSE, which is every nonzero against zero. The
+         * locale and flags are accepted and ignored, since this build speaks
+         * one language; the out pointer is required, E_POINTER without it.
+         */
+        VarBstrFromBool: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([boolIn, , , out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                const bstr = allocateBstr(encode(boolIn ? 'True' : 'False'));
+                writeU32(out >>> 0, bstr);
+                return bstr === 0 ? E_OUTOFMEMORY : S_OK;
             },
         },
 
