@@ -776,6 +776,8 @@ export function planStack(region, states, cut, speculate){
  * @property {(StackState | null)[]} ends   the state at each block's end, for a loop onto itself
  * @property {Set<number>} cut
  * @property {StackState | null} current   the state at the current point of emission
+ * @property {StackState | null} landed   where the registers are after the last `x87Edge`
+ *     moved them: `current` describes them only until then
  * @property {boolean} controlWritten
  * @property {number} checkedPrecision  the block whose precision control a `wide` region
  *     has checked since the last write of the control word, or -1
@@ -897,8 +899,9 @@ export function prepareX87(e, entryTop, checked = false,
     {
         return {
             active: false, hasMmx: false, base: 0, form: -1, temp: 0, temp2: 0, temp3: 0,
-            states: [], ends: [], cut: new Set(), current: null, controlWritten: false,
-            checkedPrecision: -1, known: unknown(), shapes: [], needs: [], stack: NOTHING,
+            states: [], ends: [], cut: new Set(), current: null, landed: null,
+            controlWritten: false, checkedPrecision: -1, known: unknown(), shapes: [], needs: [],
+            stack: NOTHING,
             guards: 0, relaxedReads: 0, tracksExact: false, exact: 0, exactNaN: 0, shadow: [],
         };
     }
@@ -917,7 +920,7 @@ export function prepareX87(e, entryTop, checked = false,
     }
     return {
         active: true, hasMmx, base, form, temp: base + 8, temp2: base + 9, temp3: base + 10,
-        states, ends, cut, current: null, controlWritten: false, checkedPrecision: -1,
+        states, ends, cut, current: null, landed: null, controlWritten: false, checkedPrecision: -1,
         known: unknown(), shapes, needs, stack: NOTHING, guards: 0, relaxedReads: 0,
         tracksExact, exact: 0, exactNaN: 0, shadow: new Array(8).fill(-1),
     };
@@ -1164,9 +1167,11 @@ export function x87Edge(e, targetIndex){
         // (an fxch) is read there as the wrong registers. A call into a
         // formed-in leaf that two call sites reach with different tops is
         // such an edge.
-        if (x.current !== null)
+        x.landed = x.current === null
+            ? null : { top: x.current.top, slot: [0, 1, 2, 3, 4, 5, 6, 7] };
+        if (x.landed !== null)
         {
-            x87MoveTo(e, { top: x.current.top, slot: [0, 1, 2, 3, 4, 5, 6, 7] });
+            x87MoveTo(e, x.landed);
         }
         return true;
     }
@@ -1174,22 +1179,27 @@ export function x87Edge(e, targetIndex){
     {
         return false;
     }
+    x.landed = x.current === null ? null : to;
     x87MoveTo(e, to);
     return true;
 }
 
 /**
  * Before an exit: the registers back in their own locals, so the epilogue
- * stores local k into register k.
+ * stores local k into register k. `from` is where they are when the exit
+ * runs: the current state's, or the one an edge just moved them to.
  *
- * @param {E} e
+ * @param {E} e @param {StackState | null} [from]
  */
-export function x87Normalise(e){
+export function x87Normalise(e, from = e.x87.current){
     const x = e.x87;
     x87Flush(e, false);
-    if (x.current !== null)
+    if (from !== null)
     {
-        x87MoveTo(e, { top: x.current.top, slot: [0, 1, 2, 3, 4, 5, 6, 7] });
+        const held = x.current;
+        x.current = from;
+        x87MoveTo(e, { top: from.top, slot: [0, 1, 2, 3, 4, 5, 6, 7] });
+        x.current = held;
     }
 }
 
