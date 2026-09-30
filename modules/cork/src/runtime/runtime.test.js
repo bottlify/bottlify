@@ -1324,6 +1324,44 @@ test('a batch whose answer waits behind a hold of the engine thread past the lim
         }
     });
 
+test('what queues while a batch is with the worker goes out when its answer comes, unasked',
+    async()=>{
+        const m = machine({ worker: true });
+        const A = 0x2000;
+        const B = 0x3000;
+        m.write(CODE, COUNTDOWN);
+        m.write(A, COUNTDOWN);
+        m.write(B, COUNTDOWN);
+        m.setReg(4, 0x80000);
+        try
+        {
+            // The worker is open once a first batch has come back from it.
+            m.runtime.noteHot(CODE, 0, 2);
+            for (let i = 0; i < 200 && m.runtime.entryOf(CODE) < 0; i++)
+            {
+                await m.runtime.translatePending();
+                await new Promise(resolve=>setTimeout(resolve, 10));
+            }
+            assert.ok(m.runtime.entryOf(CODE) >= 0, 'the worker answers');
+            m.runtime.noteHot(A, 0, 2);
+            await m.runtime.translatePending();
+            // B is noted while A's batch is out: the host's ask finds a batch away.
+            m.runtime.noteHot(B, 0, 2);
+            assert.equal(await m.runtime.translatePending(), 0, 'one batch out at a time');
+            // Nobody asks again: A's answer sends B.
+            for (let i = 0; i < 200 && m.runtime.entryOf(B) < 0; i++)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 10));
+            }
+            assert.ok(m.runtime.entryOf(A) >= 0, 'A published');
+            assert.ok(m.runtime.entryOf(B) >= 0, 'B sent and published with no further ask');
+        }
+        finally
+        {
+            await m.runtime.flush();
+        }
+    });
+
 test('a worker that cannot load is dropped and the batches are emitted inline', async()=>{
     // A worker file that throws as it loads: the worker is made, and fails after.
     const m = machine({ workerUrl: 'data:text/javascript,throw new Error("cannot load")' });

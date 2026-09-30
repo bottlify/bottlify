@@ -934,6 +934,22 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     // order and the waiting is never the slice's.
     let storePending = false;
     let workerRequest = 0;
+    /** The runtime itself, once made: what a batch's answer calls to send the next. */
+    /** @type {{ translatePending: () => Promise<number> } | null} */
+    let runtimeApi = null;
+    /**
+     * Sends the next batch when candidates wait and none is out. The host asks
+     * for a batch when the interpreter notes a new start, and a start already
+     * queued is not noted again: what queued while a batch was with the worker
+     * or the store waited for some other start to be noted, and ran
+     * interpreted meanwhile.
+     */
+    const sendNext = ()=>{
+        if (queue.size > 0 && outstanding === null && !storePending)
+        {
+            runtimeApi?.translatePending().catch(()=>{});
+        }
+    };
     /** What emitting inline keeps for a relink to take again, as the worker keeps its own. */
     const emitCache = createEmitCache();
 
@@ -2025,6 +2041,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             publishBatch(pending.metas ?? [], data.batch, data.compiled ?? null, pending.store);
         }
         noteStall(pending.relink ? 'relink' : 'publish', publishedAt);
+        sendNext();
     };
 
     if (workerUrl !== null)
@@ -2266,7 +2283,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         return top;
     };
 
-    return {
+    /** @type {Runtime & { pages: import('./pages.js').PageTable }} */
+    const api = {
         pages,
         entryOf(eip, top = 0){
             const entry = entries.entryOf(eip, top);
@@ -2688,6 +2706,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     one.waited = true;
                 }
                 finishBatch(formed, store);
+                sendNext();
             };
             Promise.all(formed.map(async one=>{
                 try
@@ -2822,4 +2841,6 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             };
         },
     };
+    runtimeApi = api;
+    return api;
 }
