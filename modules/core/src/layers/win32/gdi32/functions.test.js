@@ -2386,3 +2386,18 @@ test('a world transform needs GM_ADVANCED, composes, and maps LPtoDP and DPtoLP'
     assert.equal(fns.SetGraphicsMode.handler([hdc, 1]), 2);
     assert.equal(fns.GetGraphicsMode.handler([hdc]), 1);
 });
+
+test('GetGlyphOutline answers a glyph\'s metrics and refuses its shape', ()=>{
+    const { fns, hdc, memory } = withDC();
+    const GM = STRUCT + 0xa00;
+    const MAT = STRUCT + 0xa40;
+    memory.putU32s(MAT, [0x10000, 0, 0, 0x10000]);
+    assert.equal(fns.GetGlyphOutlineA.handler([hdc, 65, 0, GM, 0, 0, MAT]), 1);
+    assert.ok(memory.u32(GM) > 0, 'a black box');
+    assert.equal(memory.i32(GM + 12) > 0, true, 'the origin at the ascent');
+    assert.ok((memory.u32(GM + 16) & 0xffff) > 0, 'the advance');
+    assert.equal(fns.GetGlyphOutlineW.handler([hdc, 65, 1, GM, 0, 0, MAT]), 0xffffffff,
+        'GGO_BITMAP is not made');
+    assert.equal(fns.GetGlyphOutlineA.handler([hdc, 65, 0, GM, 0, 0, 0]), 0xffffffff,
+        'the matrix is required');
+});

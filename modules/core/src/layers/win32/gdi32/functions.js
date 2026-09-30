@@ -140,6 +140,11 @@ const SCALABLE_MAP_MODES = new Set([MM_ISOTROPIC, MM_ANISOTROPIC]);
  */
 const LAYOUT_RTL = 0x01;
 const GDI_ERROR = 0xffffffff;
+/** GetGlyphOutline's formats this layer answers, and the flags it reads past. */
+const GGO_METRICS = 0;
+const GGO_GLYPH_INDEX = 0x80;
+const GGO_UNHINTED = 0x100;
+const GLYPHMETRICS_SIZE = 20;
 
 /**
  * The fixed modes, by how many logical units make an inch: MM_LOMETRIC's
@@ -1104,6 +1109,32 @@ export function createGdiFunctions(host){
 
     /** @param {any} dc @returns {import('./structs.js').TextMetricFields} */
     const currentMetrics = dc=>metricsOf(currentFont(dc));
+
+    /** GetGlyphOutline in either width. @param {number[]} args @param {string} api */
+    const glyphOutline = ([handle, char, format, metrics, , , matrix], api)=>{
+        const dc = dcOf(handle);
+        if (!dc || (matrix >>> 0) === 0 || (metrics >>> 0) === 0)
+        {
+            return GDI_ERROR;
+        }
+        if (((format >>> 0) & ~(GGO_GLYPH_INDEX | GGO_UNHINTED)) !== GGO_METRICS)
+        {
+            host.divergence?.(api, 'the outline and bitmap of a glyph are not made; only metrics');
+            return GDI_ERROR;
+        }
+        const width = widthOf(dc, String.fromCharCode(char & 0xffff));
+        const { ascent } = currentMetrics(dc);
+        const bytes = new Uint8Array(GLYPHMETRICS_SIZE);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, Math.max(1, width), true);
+        view.setUint32(4, Math.max(1, ascent), true);
+        view.setInt32(8, 0, true);
+        view.setInt32(12, ascent, true);
+        view.setInt16(16, width, true);
+        view.setInt16(18, 0, true);
+        host.writeMemory(metrics >>> 0, bytes);
+        return 1;
+    };
 
     /**
      * The face a context's font is drawn in, as GetTextFace names it: the one
@@ -3383,6 +3414,25 @@ export function createGdiFunctions(host){
             handler: ([handle, first, last, out])=>
                 writeWidths(handle, first >>> 0, last >>> 0, out, ABC_SIZE,
                     width=>[0, width, 0], 0xffff),
+        },
+
+        /**
+         * DWORD GetGlyphOutlineA/W(HDC hdc, UINT uChar, UINT fuFormat, LPGLYPHMETRICS lpgm,
+         *   DWORD cjBuffer, LPVOID pvBuffer, const MAT2 *lpmat2)
+         *
+         * A glyph's metrics, from the same measurements text is laid out
+         * with. Its outline or bitmap is the font engine's, which is not
+         * reached from here: those formats are refused, and that reported.
+         */
+        GetGlyphOutlineA: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: args=>glyphOutline(args, 'GetGlyphOutlineA'),
+        },
+        GetGlyphOutlineW: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: args=>glyphOutline(args, 'GetGlyphOutlineW'),
         },
 
         /** BOOL GetTextMetricsA(HDC hdc, LPTEXTMETRICA lptm) */
