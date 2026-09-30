@@ -40,7 +40,7 @@ function mp3Stream(count){
  * samples carrying the frame's index -- when the test lets it.
  *
  * @param {{ file?: Uint8Array, chunk?: number, open?: import('./mp3.js').Decoder['open'],
- *     held?: boolean }} [options]
+ *     held?: boolean, slowFetch?: boolean }} [options]
  */
 function fixture(options = {}){
     const bytes = new Uint8Array(0x100000);
@@ -123,7 +123,10 @@ function fixture(options = {}){
                 const part = file.subarray(fileAt, fileAt + Math.min(ask, chunk));
                 bytes.set(part, dest);
                 fileAt += part.length;
-                return Promise.resolve(part.length);
+                // The guest copies at once, and the call answers later.
+                return options.slowFetch
+                    ? new Promise(resolve=>setImmediate(()=>resolve(part.length)))
+                    : Promise.resolve(part.length);
             }
             return Promise.resolve(0);
         },
@@ -256,10 +259,10 @@ test('opening a stream reads until its first frame and describes it', async()=>{
     // for a stream of megabytes, so it must not cap the reads.
     const handle = await f.call('ASI_stream_open', [0x55, FETCH, 4096]);
     assert.equal(handle, 1);
-    assert.deepEqual(f.fetches(), [[0x10000, -1]],
-        'one read, continuing from wherever the library stands; it answered its own chunk');
+    assert.deepEqual(f.fetches(), [[10, -1], [417 + 4 - 10, -1]],
+        'the size of a tag header, then the first frame and the header that confirms it');
     assert.equal(f.calls.find(call=>call.entry === FETCH)?.args[0], 0x55, 'the user word');
-    assert.equal(f.fed(), 3, 'the last frame waits to be confirmed by what follows it');
+    assert.equal(f.fed(), 1, 'nothing past the first frame is read');
 
     const attribute = (/** @type {number} */ which)=>f.call('ASI_stream_attribute', [handle, which]);
     assert.equal(attribute(ATTRIB.INPUT_BIT_RATE), 128000);
@@ -311,7 +314,7 @@ test('the rest of a stream is read as samples are asked for, continuing each tim
     assert.equal(f.call('ASI_stream_process', [handle, buffer, perFrame]), 0);
     assert.equal(f.call('ASI_stream_attribute', [handle, ATTRIB.PERCENT_DONE]), 97,
         'against what was read, since the size word was not the stream');
-    assert.deepEqual(f.fetches().at(-1), [0x10000, -1], 'the read that answered nothing');
+    assert.equal(f.fetches().at(-1)?.[1], -1, 'the read that answered nothing');
     assert.equal(f.provider.diagnostics().samplesOut, 40 * 1152 * 2);
 });
 
@@ -321,11 +324,12 @@ test('a lead is decoded before a stream is handed over, and requests come out of
     const buffer = 0x80000;
     const perFrame = 1152 * 2 * 2;
 
-    // Nine frames were fed out of the first chunk and none has come back: the
-    // open waits for eight of them, once, rather than every request waiting.
+    // The first frame has not come back, so the decoder answers later: the
+    // open reads a lead of eight and waits for it, once, rather than every
+    // request waiting.
     const opening = f.call('ASI_stream_open', [1, FETCH, 4096]);
     await new Promise(resolve=>setImmediate(resolve));
-    assert.equal(f.fed(), 9);
+    assert.equal(f.fed(), 8);
     let opened = false;
     opening.then(()=>{
         opened = true;
@@ -350,23 +354,27 @@ test('a lead is decoded before a stream is handed over, and requests come out of
     assert.ok(pending instanceof Promise);
     await new Promise(resolve=>setImmediate(resolve));
     assert.ok(f.fed() >= 8 + 2 + 8, `fed ${f.fed()}: the request and a lead past it`);
-    assert.equal(f.fetches().length, 2, 'the second chunk was read for it');
     f.release(Infinity);
     assert.equal(await pending, perFrame * 2);
     assert.equal(f.view.getInt16(buffer, true), 9);
     assert.equal(f.provider.diagnostics().waits, 1);
 });
 
-test('a request the decoder can already answer is answered at once', async()=>{
+test('a request the decoder has already answered is answered at once', async()=>{
     const f = fixture();
     const handle = await f.call('ASI_stream_open', [1, FETCH, f.file.length]);
     const buffer = 0x80000;
     const perFrame = 1152 * 2 * 2;
-    assert.equal(f.call('ASI_stream_process', [handle, buffer, perFrame * 2]), perFrame * 2);
+    // Half a frame past the first: the second frame is read and decoded whole.
+    assert.equal(await f.call('ASI_stream_process', [handle, buffer, perFrame * 1.5]),
+        perFrame * 1.5);
     assert.equal(f.view.getInt16(buffer, true), 1);
     assert.equal(f.view.getInt16(buffer + perFrame, true), 2);
-    assert.equal(f.call('ASI_stream_attribute', [handle, ATTRIB.POSITION]), 2 * 417);
-    assert.equal(f.call('ASI_stream_attribute', [handle, ATTRIB.PERCENT_DONE]), 50);
+    // Its other half is here already: answered in the call.
+    assert.equal(f.call('ASI_stream_attribute', [handle, ATTRIB.POSITION]), 417);
+    assert.equal(f.call('ASI_stream_process', [handle, buffer, perFrame / 2]), perFrame / 2);
+    assert.equal(f.view.getInt16(buffer, true), 2);
+    assert.equal(f.call('ASI_stream_attribute', [handle, ATTRIB.PERCENT_DONE]), 25);
     assert.equal(f.provider.diagnostics().waits, 0);
 });
 
@@ -375,9 +383,9 @@ test('seeking names a byte of the input, and lands on the frame that holds it', 
     const handle = await f.call('ASI_stream_open', [1, FETCH, f.file.length]);
     const buffer = 0x80000;
     const perFrame = 1152 * 2 * 2;
+    assert.equal(await f.call('ASI_stream_process', [handle, buffer, perFrame * 4]), perFrame * 4);
     assert.equal(await f.call('ASI_stream_seek', [handle, 417 * 2 + 5]), 0);
-    // The frame named was the unconfirmed last one: reading on confirms it.
-    assert.equal(await f.call('ASI_stream_process', [handle, buffer, perFrame]), perFrame);
+    assert.equal(f.call('ASI_stream_process', [handle, buffer, perFrame]), perFrame);
     assert.equal(f.view.getInt16(buffer, true), 4, 'the frame after the byte named');
     assert.equal(await f.call('ASI_stream_seek', [handle, -1]), 0, 'a reset with nothing to reset');
     assert.equal(await f.call('ASI_stream_seek', [handle, 0]), 0);
@@ -400,9 +408,9 @@ test('a seek past what is held continues from the byte named; back to the start 
     const buffer = 0x80000;
     const pending = f.call('ASI_stream_process', [handle, buffer, 1152 * 4]);
     assert.equal(await pending, 1152 * 4);
-    // The tenth frame fed, and it is the one at the byte named.
-    assert.equal(f.view.getInt16(buffer, true), 10);
-    assert.equal(f.provider.streams().get(1)?.frames[9]?.offset, 417 * 30);
+    // The second frame fed, and it is the one at the byte named.
+    assert.equal(f.view.getInt16(buffer, true), 2);
+    assert.equal(f.provider.streams().get(1)?.frames[1]?.offset, 417 * 30);
     assert.ok(f.fetches().every(([, offset])=>offset === -1), 'every read continued');
     // To the end, then back to the start: what is held replays, and the bytes
     // the library serves again are dropped rather than appended.
@@ -485,10 +493,8 @@ test('a decoder that answers in the call never parks a request', async()=>{
     const buffer = 0x80000;
     const perFrame = 1152 * 2 * 2;
 
-    // Within what the first read fed: answered without a promise at all.
-    const direct = f.call('ASI_stream_process', [handle, buffer, perFrame * 9]);
-    assert.ok(!(direct instanceof Promise), 'answered in the call');
-    assert.equal(direct, perFrame * 9);
+    // Read for as the request needs it; the decoder answers inside the read.
+    assert.equal(await f.call('ASI_stream_process', [handle, buffer, perFrame * 9]), perFrame * 9);
     assert.equal(f.view.getInt16(buffer + perFrame * 8, true), 9);
 
     // Past it: the read through the library's callback is the only thing the
@@ -502,4 +508,61 @@ test('a decoder that answers in the call never parks a request', async()=>{
     assert.equal(f.call('ASI_stream_process', [handle, buffer, perFrame]), 0, 'the end');
     assert.equal(f.provider.diagnostics().waits, 0, 'no request was ever parked on the decoder');
     assert.equal(f.provider.diagnostics().samplesOut, 40 * 1152 * 2);
+});
+
+test('requests that overlap on one stream read its input once each, in order', async()=>{
+    const file = mp3Stream(60);
+    const f = fixture({ file, slowFetch: true, open: (_header, onPcm)=>({
+        feed: (bytes, frame)=>onPcm(new Int16Array(frame.samples * frame.channels).fill(bytes[8])),
+        flush: ()=>Promise.resolve(),
+        close: ()=>{},
+    }) });
+    const handle = await f.call('ASI_stream_open', [1, FETCH, 4096]);
+    const perFrame = 1152 * 2 * 2;
+    const a = 0x80000;
+    const b = 0x90000;
+    // The service thread and the main thread both ask, past what is decoded.
+    const [first, second] = await Promise.all([
+        f.call('ASI_stream_process', [handle, a, perFrame * 14]),
+        f.call('ASI_stream_process', [handle, b, perFrame * 14]),
+    ]);
+    assert.equal(first, perFrame * 14);
+    assert.equal(second, perFrame * 14);
+    const frames = [];
+    for (const at of [a, b])
+    {
+        for (let index = 0; index < 14; index++)
+        {
+            frames.push(f.view.getInt16(at + index * perFrame, true));
+        }
+    }
+    assert.deepEqual(frames, Array.from({ length: 28 }, (_, index)=>index + 1));
+});
+
+test('a stream is read no further ahead of the program than the frame it is taking', async()=>{
+    // The library keeps a sample's place by what has been fetched, and a read
+    // far ahead of playback was measured coming back with the first bytes again.
+    const file = mp3Stream(40);
+    const f = fixture({ file });
+    const handle = await f.call('ASI_stream_open', [1, FETCH, file.length]);
+    const buffer = 0x80000;
+    const perFrame = 1152 * 2;
+    const request = 356 * 2 * 2;
+    // What was asked for; past the end the library answers the asks for the
+    // next header with nothing.
+    const read = ()=>f.fetches().reduce((sum, [ask])=>sum + ask, 0);
+    let taken = 0;
+    for (;;)
+    {
+        const count = await f.call('ASI_stream_process', [handle, buffer, request]);
+        taken += count / 2;
+        const frames = Math.ceil(taken / perFrame);
+        assert.ok(read() <= Math.min(file.length + 4, (frames + 1) * 417) + 4,
+            `${read()} bytes read with ${frames} frames begun`);
+        if (count < request)
+        {
+            break;
+        }
+    }
+    assert.equal(taken, 40 * perFrame);
 });
