@@ -49,6 +49,8 @@ const ERROR_NO_MORE_FILES = 18;
 const ERROR_WRITE_PROTECT = 19;
 const ERROR_FILE_EXISTS = 80;
 const ERROR_INVALID_PARAMETER = 87;
+/** The unit a FILE_SEGMENT_ELEMENT names: one page of the caller's memory. */
+const PAGE_SIZE = 4096;
 const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_DIR_NOT_EMPTY = 145;
@@ -2017,6 +2019,75 @@ export function createFileFunctions(host){
                     host.ports?.completed(handle >>> 0, stored, pointer);
                 }
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL WriteFileGather(HANDLE, FILE_SEGMENT_ELEMENT aSegmentArray[],
+         *   DWORD nNumberOfBytesToWrite, LPDWORD lpReserved, LPOVERLAPPED)
+         *
+         * One transfer at the OVERLAPPED's offset from a page per segment,
+         * completed at once and reported once, as an overlapped WriteFile is.
+         */
+        WriteFileGather: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, segments, length, , overlapped])=>{
+                const file = object(handle, 'file');
+                if (!file || (overlapped >>> 0) === 0 || !host.ports)
+                {
+                    return fail(file ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
+                }
+                if (!file.write)
+                {
+                    return fail(ERROR_ACCESS_DENIED);
+                }
+                const bytes = new Uint8Array(length >>> 0);
+                for (let at = 0; at < bytes.length; at += PAGE_SIZE)
+                {
+                    const page = readDword((segments >>> 0) + at / PAGE_SIZE * 8);
+                    bytes.set(host.readMemory(page, Math.min(PAGE_SIZE, bytes.length - at)), at);
+                }
+                const stored = files.write(file.node, host.ports.offsetOf(overlapped >>> 0), bytes);
+                host.ports.completed(handle >>> 0, stored, overlapped >>> 0);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL ReadFileScatter(HANDLE, FILE_SEGMENT_ELEMENT aSegmentArray[],
+         *   DWORD nNumberOfBytesToRead, LPDWORD lpReserved, LPOVERLAPPED)
+         *
+         * The read WriteFileGather's write is the mirror of: a page per segment.
+         */
+        ReadFileScatter: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, segments, length, , overlapped])=>{
+                const file = object(handle, 'file');
+                const ports = host.ports;
+                if (!file || (overlapped >>> 0) === 0 || !ports)
+                {
+                    return fail(file ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
+                }
+                if (!file.read)
+                {
+                    return fail(ERROR_ACCESS_DENIED);
+                }
+                /** @param {Uint8Array} bytes */
+                const deliver = bytes=>{
+                    for (let at = 0; at < bytes.length; at += PAGE_SIZE)
+                    {
+                        const page = readDword((segments >>> 0) + at / PAGE_SIZE * 8);
+                        host.writeMemory(page, bytes.subarray(at, at + PAGE_SIZE));
+                    }
+                    ports.completed(handle >>> 0, bytes.length, overlapped >>> 0);
+                    return 1;
+                };
+                const bytes = files.read(file.node, ports.offsetOf(overlapped >>> 0), length >>> 0);
+                return typeof (/** @type {any} */ (bytes))?.then === 'function'
+                    ? /** @type {Promise<Uint8Array>} */ (bytes).then(deliver)
+                    : deliver(/** @type {Uint8Array} */ (bytes));
             },
         },
 

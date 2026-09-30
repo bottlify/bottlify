@@ -1931,3 +1931,27 @@ test('ReplaceFile moves the replacement onto the replaced name, keeping a backup
         assert.equal(error.code, ERROR_ACCESS_DENIED, 'a read-only file is not replaced');
         assert.equal(files.text(`${dir}NEW.TXT`), 'x', 'and nothing moved');
     });
+
+test('WriteFileGather and ReadFileScatter move a page per segment and complete once', ()=>{
+    /** @type {number[][]} */
+    const done = [];
+    const { memory, files, fns, open } = setup({ ports: {
+        offsetOf: ()=>2,
+        /** @param {number} handle @param {number} count @param {number} pointer */
+        completed: (handle, count, pointer)=>done.push([count, pointer]),
+    } });
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdefghij');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    memory.putString(0x400, 'XYZ');
+    memory.putDword(0x300, 0x400);
+    memory.putDword(0x304, 0);
+    assert.equal(fns.WriteFileGather.handler([handle, 0x300, 3, 0, 0x500]), 1);
+    assert.equal(files.text('C:\\GAME\\SAVE.DAT'), 'abXYZfghij', 'at the OVERLAPPED\'s offset');
+    assert.deepEqual(done, [[3, 0x500]]);
+
+    memory.putDword(0x300, 0x600);
+    assert.equal(fns.ReadFileScatter.handler([handle, 0x300, 4, 0, 0x500]), 1);
+    assert.equal(memory.readCString(0x600, 4), 'XYZf');
+    assert.deepEqual(done.at(-1), [4, 0x500]);
+    assert.equal(fns.ReadFileScatter.handler([handle, 0x300, 4, 0, 0]), 0, 'overlapped only');
+});
