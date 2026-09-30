@@ -128,6 +128,43 @@ const DISP_E_BADVARTYPE = 0x80020008;
 const DISP_E_OVERFLOW = 0x8002000a;
 
 /**
+ * NUMPARSE's fields (six 32-bit words) and the NUMPRS_* flags this build
+ * recognises. dwInFlags says which forms the caller allows; dwOutFlags which
+ * the string actually used.
+ */
+const NUMPARSE_C_DIG = 0;
+const NUMPARSE_IN_FLAGS = 4;
+const NUMPARSE_OUT_FLAGS = 8;
+const NUMPARSE_CCH_USED = 12;
+const NUMPARSE_BASE_SHIFT = 16;
+const NUMPARSE_PWR10 = 20;
+const NUMPRS_LEADING_WHITE = 0x0001;
+const NUMPRS_TRAILING_WHITE = 0x0002;
+const NUMPRS_LEADING_PLUS = 0x0004;
+const NUMPRS_TRAILING_PLUS = 0x0008;
+const NUMPRS_LEADING_MINUS = 0x0010;
+const NUMPRS_TRAILING_MINUS = 0x0020;
+const NUMPRS_HEX_OCT = 0x0040;
+const NUMPRS_PARENS = 0x0080;
+const NUMPRS_DECIMAL = 0x0100;
+const NUMPRS_THOUSANDS = 0x0200;
+const NUMPRS_CURRENCY = 0x0400;
+const NUMPRS_EXPONENT = 0x0800;
+const NUMPRS_USE_ALL = 0x1000;
+const NUMPRS_NEG = 0x10000;
+const NUMPRS_INEXACT = 0x20000;
+
+/** The forms a string can take that this parser does not pull apart. */
+const NUMPRS_UNPARSED = NUMPRS_TRAILING_PLUS | NUMPRS_TRAILING_MINUS | NUMPRS_HEX_OCT
+    | NUMPRS_PARENS | NUMPRS_CURRENCY;
+
+/** The variant types VarNumFromParseNum can choose between, beyond this file's own. */
+const VT_CY = 6;
+const VT_DECIMAL = 14;
+const VT_I8 = 20;
+const VT_UI8 = 21;
+
+/**
  * @typedef {Object} AutomationHeap
  * @property {(bytes: number) => number} allocate  The address, or 0 if nothing fits.
  * @property {(address: number) => boolean} free
@@ -1265,6 +1302,95 @@ export function createAutomationFunctions(host){
                 return bstr === 0 ? E_OUTOFMEMORY : S_OK;
             },
         },
+        /**
+         * HRESULT VarParseNumFromStr(LPCOLESTR strIn, LCID lcid, ULONG dwFlags,
+         *                            NUMPARSE *pnumprs, BYTE *rgbDig)
+         *
+         * cDig comes in as the digit buffer's size and goes out as the count
+         * written; dwInFlags is only read. Nothing is written when the string
+         * holds no number, or when NUMPRS_USE_ALL is set and some is left over.
+         */
+        VarParseNumFromStr: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([strIn, lcid, , pnumprs, rgbDig])=>{
+                const numprs = pnumprs >>> 0;
+                if ((strIn >>> 0) === 0 || numprs === 0 || (rgbDig >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const language = lcid & 0x3ff;
+                if (language !== 0 && language !== 0x09 && language !== 0x7f)
+                {
+                    report('VarParseNumFromStr',
+                        `locale ${lcid >>> 0} is read with the invariant '.' and ','`);
+                }
+                const fields = peek(numprs, 24);
+                const capacity = fields.getInt32(NUMPARSE_C_DIG, true);
+                const allowed = fields.getUint32(NUMPARSE_IN_FLAGS, true);
+                const text = wideAt(strIn >>> 0);
+                const parsed = parseNumberText(text, allowed, capacity);
+                const rest = parsed === null ? text : text.slice(parsed.used);
+                if ((allowed & NUMPRS_UNPARSED) !== 0 && /^\s*[&()$+-]/.test(rest))
+                {
+                    report('VarParseNumFromStr',
+                        'hex/octal, currency, parenthesised and trailing-sign forms are not read');
+                }
+                if (parsed === null
+                    || ((allowed & NUMPRS_USE_ALL) !== 0 && parsed.used < text.length))
+                {
+                    return DISP_E_TYPEMISMATCH;
+                }
+                const out = new DataView(new ArrayBuffer(24));
+                out.setInt32(NUMPARSE_C_DIG, parsed.digits.length, true);
+                out.setUint32(NUMPARSE_IN_FLAGS, allowed, true);
+                out.setUint32(NUMPARSE_OUT_FLAGS, parsed.flags, true);
+                out.setInt32(NUMPARSE_CCH_USED, parsed.used, true);
+                out.setInt32(NUMPARSE_BASE_SHIFT, 0, true);
+                out.setInt32(NUMPARSE_PWR10, parsed.pwr10, true);
+                host.writeMemory(numprs, new Uint8Array(out.buffer));
+                host.writeMemory(rgbDig >>> 0, Uint8Array.from(parsed.digits));
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT VarNumFromParseNum(NUMPARSE *pnumprs, BYTE *rgbDig,
+         *                            ULONG dwVtBits, VARIANT *pvar)
+         *
+         * The parsed number as the smallest type the caller allows; an
+         * overflow when none holds it.
+         */
+        VarNumFromParseNum: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([pnumprs, rgbDig, vtBits, pvar])=>{
+                const numprs = pnumprs >>> 0;
+                if (numprs === 0 || (rgbDig >>> 0) === 0 || (pvar >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const fields = peek(numprs, 24);
+                const count = Math.max(fields.getInt32(NUMPARSE_C_DIG, true), 0);
+                const digits = [...host.readMemory(rgbDig >>> 0, count)];
+                const negative = (fields.getUint32(NUMPARSE_OUT_FLAGS, true) & NUMPRS_NEG) !== 0;
+                const made = numberVariant(digits, fields.getInt32(NUMPARSE_PWR10, true),
+                    fields.getInt32(NUMPARSE_BASE_SHIFT, true), negative, vtBits >>> 0);
+                if (made === null)
+                {
+                    if ((vtBits & (1 << VT_DECIMAL)) !== 0)
+                    {
+                        report('VarNumFromParseNum', 'VT_DECIMAL is never produced');
+                    }
+                    return DISP_E_OVERFLOW;
+                }
+                const variant = new Uint8Array(VARIANT_BYTES);
+                variant[0] = made.type;
+                variant.set(made.bytes, VARIANT_VALUE);
+                host.writeMemory(pvar >>> 0, variant);
+                return S_OK;
+            },
+        },
 
         /**
          * HRESULT SetErrorInfo(ULONG dwReserved, IErrorInfo *perrinfo)
@@ -1984,6 +2110,204 @@ export function createAutomationFunctions(host){
             },
         },
     };
+}
+
+/** @param {string} char */
+const isWhite = char=>char === ' ' || char === '\t' || char === '\n' || char === '\r'
+    || char === '\v' || char === '\f';
+
+/**
+ * A number string pulled apart the way VarParseNumFromStr does, in the
+ * invariant spelling: sign, digits, thousands commas, a '.' and an exponent,
+ * each only where `allowed` lets it in. The digits come back without leading
+ * or trailing zeros (those move into the power of ten), at most `capacity` of
+ * them, INEXACT set when a dropped one was not zero.
+ *
+ * @param {string} text @param {number} allowed @param {number} capacity
+ * @returns {{ digits: number[], flags: number, used: number, pwr10: number } | null}
+ *   null when the string holds no number at all.
+ */
+export function parseNumberText(text, allowed, capacity){
+    let at = 0;
+    let flags = 0;
+    if ((allowed & NUMPRS_LEADING_WHITE) !== 0)
+    {
+        while (at < text.length && isWhite(text[at]))
+        {
+            at++;
+            flags |= NUMPRS_LEADING_WHITE;
+        }
+    }
+    if (text[at] === '+' && (allowed & NUMPRS_LEADING_PLUS) !== 0)
+    {
+        at++;
+        flags |= NUMPRS_LEADING_PLUS;
+    }
+    else if (text[at] === '-' && (allowed & NUMPRS_LEADING_MINUS) !== 0)
+    {
+        at++;
+        flags |= NUMPRS_LEADING_MINUS | NUMPRS_NEG;
+    }
+    let whole = '';
+    let fraction = '';
+    let inFraction = false;
+    for (; at < text.length; at++)
+    {
+        const char = text[at];
+        if (char >= '0' && char <= '9')
+        {
+            if (inFraction)
+            {
+                fraction += char;
+            }
+            else
+            {
+                whole += char;
+            }
+        }
+        else if (char === '.' && !inFraction && (allowed & NUMPRS_DECIMAL) !== 0)
+        {
+            inFraction = true;
+            flags |= NUMPRS_DECIMAL;
+        }
+        else if (char === ',' && !inFraction && (allowed & NUMPRS_THOUSANDS) !== 0)
+        {
+            flags |= NUMPRS_THOUSANDS;
+        }
+        else
+        {
+            break;
+        }
+    }
+    if (whole === '' && fraction === '')
+    {
+        return null;
+    }
+    let exponent = 0;
+    if ((text[at] === 'e' || text[at] === 'E') && (allowed & NUMPRS_EXPONENT) !== 0)
+    {
+        // An 'e' with no digits after it is not an exponent, and is left unread.
+        const match = /^[eE]([+-]?)(\d+)/.exec(text.slice(at));
+        if (match)
+        {
+            exponent = Number(match[2]) * (match[1] === '-' ? -1 : 1);
+            at += match[0].length;
+            flags |= NUMPRS_EXPONENT;
+        }
+    }
+    if ((allowed & NUMPRS_TRAILING_WHITE) !== 0)
+    {
+        while (at < text.length && isWhite(text[at]))
+        {
+            at++;
+            flags |= NUMPRS_TRAILING_WHITE;
+        }
+    }
+
+    let all = (whole + fraction).replace(/^0+/, '');
+    let pwr10 = exponent - fraction.length;
+    const significant = all.replace(/0+$/, '');
+    pwr10 += all.length - significant.length;
+    all = significant;
+    if (all === '')
+    {
+        return { digits: [0], flags, used: at, pwr10: 0 };
+    }
+    const kept = Math.max(capacity, 0);
+    if (all.length > kept)
+    {
+        if (/[1-9]/.test(all.slice(kept)))
+        {
+            flags |= NUMPRS_INEXACT;
+        }
+        pwr10 += all.length - kept;
+        all = all.slice(0, kept);
+    }
+    return { digits: [...all].map(Number), flags, used: at, pwr10 };
+}
+
+/**
+ * The VARIANT VarNumFromParseNum makes of parsed digits: the first type in
+ * `vtBits` (a mask of 1 << VT_*) that holds the value, integers smallest
+ * first, then R4 for at most seven significant digits, R8, CY. A fraction
+ * given only integer types is rounded to one. null when nothing holds it;
+ * VT_DECIMAL is never chosen, since this build does not carry it.
+ *
+ * @param {number[]} digits @param {number} pwr10 @param {number} baseShift
+ * @param {boolean} negative @param {number} vtBits
+ * @returns {{ type: number, bytes: Uint8Array } | null} the eight value bytes
+ */
+export function numberVariant(digits, pwr10, baseShift, negative, vtBits){
+    let magnitude;
+    if (baseShift !== 0)
+    {
+        magnitude = digits.reduce((sum, digit)=>sum * (1 << baseShift) + digit, 0);
+    }
+    else
+    {
+        magnitude = Number(`${digits.join('') || '0'}e${pwr10}`);
+    }
+    const value = negative ? -magnitude : magnitude;
+    const bytes = new Uint8Array(8);
+    const data = new DataView(bytes.buffer);
+    const allows = (/** @type {number} */ type)=>(vtBits & (1 << type)) !== 0;
+    const integral = Number.isInteger(value);
+    const floats = allows(VT_R4) || allows(VT_R8) || allows(VT_CY);
+    // Rounding to an integer happens only when no type could keep the fraction.
+    const whole = integral || floats ? value : Math.sign(value) * Math.round(Math.abs(value));
+    if (Number.isInteger(whole))
+    {
+        /** @type {[number, number, number, (n: number) => void][]} */
+        const integers = [
+            [VT_I1, -128, 127, n=>data.setInt8(0, n)],
+            [VT_UI1, 0, 255, n=>data.setUint8(0, n)],
+            [VT_I2, -32768, 32767, n=>data.setInt16(0, n, true)],
+            [VT_UI2, 0, 65535, n=>data.setUint16(0, n, true)],
+            [VT_I4, -2147483648, 2147483647, n=>data.setInt32(0, n, true)],
+            [VT_UI4, 0, 4294967295, n=>data.setUint32(0, n, true)],
+        ];
+        for (const [type, low, high, write] of integers)
+        {
+            if (allows(type) && whole >= low && whole <= high)
+            {
+                write(whole);
+                return { type, bytes };
+            }
+        }
+        const big = Number.isSafeInteger(whole)
+            ? BigInt(whole)
+            : (baseShift === 0 && pwr10 >= 0
+                ? BigInt(digits.join('')) * 10n ** BigInt(pwr10) * (negative ? -1n : 1n)
+                : null);
+        if (big !== null && allows(VT_I8) && big >= -(2n ** 63n) && big < 2n ** 63n)
+        {
+            data.setBigInt64(0, big, true);
+            return { type: VT_I8, bytes };
+        }
+        if (big !== null && allows(VT_UI8) && big >= 0n && big < 2n ** 64n)
+        {
+            data.setBigUint64(0, big, true);
+            return { type: VT_UI8, bytes };
+        }
+    }
+    const significant = digits.length;
+    if (allows(VT_R4) && significant <= 7 && Math.abs(value) <= 3.4028234663852886e38)
+    {
+        data.setFloat32(0, value, true);
+        return { type: VT_R4, bytes };
+    }
+    if (allows(VT_R8) && Number.isFinite(value))
+    {
+        data.setFloat64(0, value, true);
+        return { type: VT_R8, bytes };
+    }
+    const units = Math.round(value * 10000);
+    if (allows(VT_CY) && Number.isSafeInteger(units))
+    {
+        data.setBigInt64(0, BigInt(units), true);
+        return { type: VT_CY, bytes };
+    }
+    return null;
 }
 
 /**

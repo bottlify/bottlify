@@ -239,6 +239,99 @@ test('VarBstrFromBool spells the two booleans, and wants an out pointer', ()=>{
     assert.equal(call('VarBstrFromBool', [0, 0, 0, 0]) >>> 0, 0x80004003, 'E_POINTER');
 });
 
+test('VarParseNumFromStr pulls a decimal string into NUMPARSE and its digits', ()=>{
+    setUp();
+    const NUMPARSE = 0x3000;
+    const DIGITS = 0x3100;
+    // LEADING_WHITE | TRAILING_WHITE | LEADING_MINUS | DECIMAL | EXPONENT
+    const allowed = 0x0001 | 0x0002 | 0x0010 | 0x0100 | 0x0800;
+    const parse = (/** @type {string} */ text, /** @type {number} */ flags = allowed, cDig = 30)=>{
+        host.putWide(TEXT, text);
+        host.putU32(NUMPARSE, cDig);
+        host.putU32(NUMPARSE + 4, flags);
+        const result = call('VarParseNumFromStr', [TEXT, 0x409, 0, NUMPARSE, DIGITS]);
+        const count = host.u32(NUMPARSE);
+        return {
+            result,
+            count,
+            outFlags: host.u32(NUMPARSE + 8),
+            used: host.u32(NUMPARSE + 12),
+            pwr10: host.u32(NUMPARSE + 20) | 0,
+            digits: [...host.bytes.subarray(DIGITS, DIGITS + count)],
+        };
+    };
+
+    const plain = parse(' -12.50e2 ');
+    assert.equal(plain.result, S_OK);
+    assert.deepEqual(plain.digits, [1, 2, 5], 'the trailing zero moves into the power of ten');
+    assert.equal(plain.pwr10, 1, '-12.50e2 is -125 x 10^1');
+    assert.equal(plain.outFlags, 0x0001 | 0x0002 | 0x0010 | 0x0100 | 0x0800 | 0x10000);
+    assert.equal(plain.used, 10);
+    assert.equal(host.u32(NUMPARSE + 4), allowed, 'dwInFlags is only read');
+
+    assert.deepEqual(parse('100').digits, [1]);
+    assert.equal(parse('100').pwr10, 2);
+    assert.deepEqual(parse('0').digits, [0], 'a zero is one digit');
+    assert.equal(parse('0.05').pwr10, -2);
+
+    const cut = parse('12345', allowed, 3);
+    assert.deepEqual(cut.digits, [1, 2, 3]);
+    assert.equal(cut.pwr10, 2);
+    assert.equal(cut.outFlags & 0x20000, 0x20000, 'dropping non-zero digits is INEXACT');
+
+    // A form the caller does not allow ends the number rather than joining it.
+    const noWhite = parse(' 1', 0);
+    assert.equal(noWhite.result, DISP_E_TYPEMISMATCH >>> 0);
+    const stops = parse('1.5', 0);
+    assert.equal(stops.result, S_OK);
+    assert.equal(stops.used, 1);
+    assert.equal(parse('1.5', 0x1000).result, DISP_E_TYPEMISMATCH >>> 0, 'USE_ALL wants it all');
+    assert.equal(parse('abc').result, DISP_E_TYPEMISMATCH >>> 0);
+    assert.equal(call('VarParseNumFromStr', [TEXT, 0x409, 0, 0, DIGITS]), E_INVALIDARG);
+
+    host.said.length = 0;
+    parse('&H10', 0x0040);
+    assert.ok(host.said.some(line=>line.includes('hex')), 'an unparsed form is reported');
+});
+
+test('VarNumFromParseNum picks the smallest type the caller allows', ()=>{
+    setUp();
+    const NUMPARSE = 0x3000;
+    const DIGITS = 0x3100;
+    const VTBIT = (/** @type {number} */ vt)=>2 ** vt;
+    /** @param {number[]} digits @param {number} pwr10 @param {boolean} negative @param {number} bits */
+    const make = (digits, pwr10, negative, bits)=>{
+        host.bytes.fill(0, NUMPARSE, NUMPARSE + 24);
+        host.putU32(NUMPARSE, digits.length);
+        host.putU32(NUMPARSE + 8, negative ? 0x10000 : 0);
+        host.putU32(NUMPARSE + 20, pwr10 >>> 0);
+        host.bytes.set(digits, DIGITS);
+        host.bytes.fill(0xa5, VARIANT_A, VARIANT_A + 16);
+        return call('VarNumFromParseNum', [NUMPARSE, DIGITS, bits, VARIANT_A]);
+    };
+    const view = ()=>new DataView(host.bytes.buffer, VARIANT_A, 16);
+
+    const ints = VTBIT(VT_UI1) | VTBIT(VT_I2) | VTBIT(VT_I4);
+    assert.equal(make([2, 5], 0, false, ints), S_OK);
+    assert.equal(host.u16(VARIANT_A), VT_UI1);
+    assert.equal(host.bytes[VARIANT_A + 8], 25);
+
+    assert.equal(make([3], 3, true, ints), S_OK);
+    assert.equal(host.u16(VARIANT_A), VT_I2);
+    assert.equal(view().getInt16(8, true), -3000);
+
+    assert.equal(make([1, 5], -1, false, VTBIT(VT_I4)), S_OK, 'a fraction rounds to an integer');
+    assert.equal(view().getInt32(8, true), 2);
+
+    assert.equal(make([1, 5], -1, false, ints | VTBIT(VT_R8)), S_OK);
+    assert.equal(host.u16(VARIANT_A), VT_R8);
+    assert.equal(view().getFloat64(8, true), 1.5);
+
+    assert.equal(make([1], 12, false, ints), DISP_E_OVERFLOW >>> 0);
+    assert.equal(make([1], 0, false, 0), DISP_E_OVERFLOW >>> 0);
+    assert.equal(call('VarNumFromParseNum', [0, DIGITS, ints, VARIANT_A]), E_INVALIDARG);
+});
+
 test('VariantInit empties the whole variant, not only its type', ()=>{
     setUp();
     host.bytes.fill(0xa5, VARIANT_A, VARIANT_A + 16);
