@@ -350,6 +350,8 @@ const PROCESSOR_KEY = 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0';
 const IN_PROCESS_CLASSES = Object.freeze([
     { clsid: '{47D4D946-62E8-11CF-93BC-444553540000}', library: 'dsound.dll' }, // DirectSound
     { clsid: '{3901CC3F-84B5-4FA4-BA35-AA8172B8A09B}', library: 'dsound.dll' }, // DirectSound8
+    { clsid: '{D7B70EE0-4340-11CF-B063-0020AFC2CD35}', library: 'ddraw.dll' }, // DirectDraw
+    { clsid: '{3C305196-50DB-11D3-9CFE-00C04FD930C5}', library: 'ddraw.dll' }, // DirectDraw7
 ]);
 
 /**

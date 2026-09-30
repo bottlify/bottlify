@@ -80,6 +80,22 @@ import {
 } from '../ddraw/constants.js';
 import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { blt, bltFast } from '../ddraw/blit.js';
+
+/** The classes DDRAW.dll's DllGetClassObject makes. */
+const CLSID_DirectDraw = '{D7B70EE0-4340-11CF-B063-0020AFC2CD35}';
+const CLSID_DirectDraw7 = '{3C305196-50DB-11D3-9CFE-00C04FD930C5}';
+const IID_IUnknown = '{00000000-0000-0000-C000-000000000046}';
+const IID_IClassFactory = '{00000001-0000-0000-C000-000000000046}';
+/** IClassFactory, after IUnknown's three. */
+const ICLASSFACTORY_SLOTS = /** @type {[string, number][]} */ ([
+    ['CreateInstance', 3],
+    ['LockServer', 1],
+]);
+const E_POINTER = 0x80004003 | 0;
+const E_NOINTERFACE = 0x80004002 | 0;
+const E_OUTOFMEMORY = 0x8007000e | 0;
+const CLASS_E_NOAGGREGATION = 0x80040110 | 0;
+const CLASS_E_CLASSNOTAVAILABLE = 0x80040111 | 0;
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { createRaster } from './raster.js';
 import { DDRAW_PRIVATE_DATA, createPrivateData } from './privatedata.js';
@@ -278,6 +294,13 @@ export function createDirectDrawSeam(
     const exclusiveHolders = new Set();
 
     const privateData = createPrivateData({ memory, publisher, rules: DDRAW_PRIVATE_DATA });
+
+    /**
+     * Objects CoCreateInstance made, which wait for Initialize as COM leaves them.
+     *
+     * @type {WeakSet<any>}
+     */
+    const uninitialized = new WeakSet();
 
     /** The raster of a DirectDraw object's display mode. @param {any} root */
     const rasterOf = root=>createRaster({
@@ -1515,7 +1538,9 @@ export function createDirectDrawSeam(
             return DD_OK;
         },
 
-        Initialize: ()=>DDERR_ALREADYINITIALIZED,
+        /** One a class factory made waits for this call; every other is born ready. */
+        Initialize: (/** @type {any} */ root)=>(uninitialized.delete(root)
+            ? DD_OK : DDERR_ALREADYINITIALIZED),
 
         /** @param {any} root */
         RestoreDisplayMode: (/** @type {any} */ root)=>root.restoreDisplayMode(),
@@ -1672,7 +1697,87 @@ export function createDirectDrawSeam(
         ...extraInterfaces,
     ];
 
+    /**
+     * The class object DllGetClassObject hands out for DirectDraw and
+     * DirectDraw7: its CreateInstance makes an object that waits for
+     * Initialize, answering any of the object's own interfaces.
+     *
+     * @param {(version: 1 | 7) => any} create
+     * @param {1 | 7} version
+     */
+    const factoryFor = (create, version)=>{
+        let references = 1;
+        return {
+            create,
+            version,
+            addRef: ()=>++references,
+            release: ()=>(references = Math.max(0, references - 1)),
+            get destroyed(){
+                return references === 0;
+            },
+        };
+    };
+    const factoryInterfaces = [describe(IID_IClassFactory, ICLASSFACTORY_SLOTS, {
+        /** @param {any} factory @param {number[]} args */
+        CreateInstance: (factory, [outer, riid, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            fields.writeU32(out >>> 0, 0);
+            if ((outer >>> 0) !== 0)
+            {
+                return CLASS_E_NOAGGREGATION;
+            }
+            const wanted = (riid >>> 0) === 0 ? '' : readGuid(memory, riid >>> 0);
+            if (!ddrawInterfaces.some(entry=>entry.id === wanted))
+            {
+                return E_NOINTERFACE;
+            }
+            const root = factory.create(factory.version);
+            if (!root)
+            {
+                return E_OUTOFMEMORY;
+            }
+            const facade = facadeOf(root);
+            uninitialized.add(facade);
+            fields.writeU32(out >>> 0, publisher.publish(facade, ddrawInterfaces, wanted));
+            return DD_OK;
+        },
+        LockServer: ()=>DD_OK,
+    })];
+
     return {
+        /**
+         * HRESULT DllGetClassObject(REFCLSID, REFIID, LPVOID *ppv): the class
+         * object for DirectDraw or DirectDraw7, which CoCreateInstance reaches
+         * through the class's InprocServer32 key.
+         *
+         * @param {number} clsid @param {number} riid @param {number} out
+         * @param {(version: 1 | 7) => any} create
+         */
+        classObject(clsid, riid, out, create){
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            fields.writeU32(out >>> 0, 0);
+            const asked = (clsid >>> 0) === 0 ? '' : readGuid(memory, clsid >>> 0);
+            const version = asked === CLSID_DirectDraw ? 1 : asked === CLSID_DirectDraw7 ? 7 : 0;
+            if (version === 0)
+            {
+                return CLASS_E_CLASSNOTAVAILABLE;
+            }
+            const wanted = (riid >>> 0) === 0 ? '' : readGuid(memory, riid >>> 0);
+            if (wanted !== IID_IClassFactory && wanted !== IID_IUnknown)
+            {
+                return E_NOINTERFACE;
+            }
+            fields.writeU32(out >>> 0,
+                publisher.publish(factoryFor(create, version), factoryInterfaces, wanted));
+            return DD_OK;
+        },
+
         /**
          * The options a ddraw object is created with so that its device
          * contexts are GDI's and its screen changes are seen.

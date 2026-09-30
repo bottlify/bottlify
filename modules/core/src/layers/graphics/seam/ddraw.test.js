@@ -43,6 +43,7 @@ import {
     DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT,
     DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK, DDERR_UNSUPPORTED,
     DDERR_EXCLUSIVEMODEALREADYSET, DDERR_NOEXCLUSIVEMODE, DDERR_SURFACELOST, DDERR_WRONGMODE,
+    DDERR_ALREADYINITIALIZED,
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
@@ -2230,3 +2231,29 @@ test('exclusive full screen places its window over the mode; a windowed one keep
     assert.deepEqual(placed.at(-1), [800, 600, { window: HWND, fullscreen: true }]);
     assert.equal(h.release(ddraw), 0);
 });
+
+test('CoCreateInstance reaches DirectDraw through its class object, and it waits for Initialize',
+    ()=>{
+        const h = seamed();
+        const clsid = h.box.putGuid(0x4000, '{D7B70EE0-4340-11CF-B063-0020AFC2CD35}');
+        const factoryId = h.box.putGuid(0x4010, '{00000001-0000-0000-C000-000000000046}');
+        const wanted = h.box.putGuid(0x4020, IID_IDirectDraw7);
+        assert.equal(h.ddrawDll.DllGetClassObject.handler([clsid, factoryId, 0x4100]), DD_OK);
+        const factory = h.box.memory.readU32(0x4100);
+        assert.equal(h.box.call(factory, 3, [0x1234, wanted, 0x4200]) >>> 0, 0x80040110,
+            'aggregation is refused');
+        assert.equal(h.box.call(factory, 3, [0, wanted, 0x4200]), DD_OK);
+        const made = h.box.memory.readU32(0x4200);
+        const initialize = slot(IDIRECTDRAW7_SLOTS, 'Initialize');
+        assert.equal(h.box.call(made, initialize, [0]), DD_OK, 'the first Initialize takes');
+        assert.equal(h.box.call(made, initialize, [0]) >>> 0, DDERR_ALREADYINITIALIZED);
+
+        // One DirectDrawCreate made was initialized when it was made.
+        assert.equal(h.ddrawDll.DirectDrawCreate.handler([0, 0x4300, 0]), DD_OK);
+        assert.equal(h.box.call(h.box.memory.readU32(0x4300), slot(IDIRECTDRAW_SLOTS, 'Initialize'),
+            [0]) >>> 0, DDERR_ALREADYINITIALIZED);
+
+        const other = h.box.putGuid(0x4030, '{47D4D946-62E8-11CF-93BC-444553540000}');
+        assert.equal(h.ddrawDll.DllGetClassObject.handler([other, factoryId, 0x4100]) >>> 0,
+            0x80040111, 'CLASS_E_CLASSNOTAVAILABLE for a class it does not serve');
+    });

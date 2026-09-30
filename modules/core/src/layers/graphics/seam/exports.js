@@ -530,6 +530,23 @@ export function createGraphicsLibraries(
             },
             DirectDrawEnumerateExW: { argBytes: 12, handler: ()=>ddraw.enumerate.wideEx() },
 
+            /** HRESULT DllGetClassObject(REFCLSID, REFIID, LPVOID *ppv) */
+            DllGetClassObject: {
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([clsid, riid, out])=>ddraw.classObject(clsid, riid, out,
+                    version=>{
+                        const root = graphics.create('ddraw', ddraw.rootOptions(version));
+                        if (root)
+                        {
+                            created.push('ddraw');
+                        }
+                        return root;
+                    }),
+            },
+            /** HRESULT DllCanUnloadNow(void), which COM asks for. */
+            DllCanUnloadNow: { argBytes: 0, handler: ()=>S_OK },
+
             /**
              * HRESULT DirectDrawCreateClipper(DWORD, LPDIRECTDRAWCLIPPER*, IUnknown*)
              *
