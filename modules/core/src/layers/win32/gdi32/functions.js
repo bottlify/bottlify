@@ -917,6 +917,13 @@ export function createGdiFunctions(host){
         return 1;
     };
 
+    /** A float's bits as the dword they are written as. @param {number} value */
+    const floatBits = value=>{
+        const view = new DataView(new ArrayBuffer(4));
+        view.setFloat32(0, value, true);
+        return view.getUint32(0, true);
+    };
+
     /**
      * The glyph-index form of the width calls.
      *
@@ -3470,6 +3477,37 @@ export function createGdiFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: args=>glyphWidths(args, 4, width=>[width]),
+        },
+
+        /**
+         * BOOL GetCharABCWidthsFloatA/W(HDC, UINT iFirst, UINT iLast, LPABCFLOAT)
+         * BOOL GetCharWidthFloatA/W(HDC, UINT iFirst, UINT iLast, PFLOAT)
+         *
+         * The same widths as floats; a null DC or buffer is refused.
+         */
+        GetCharABCWidthsFloatA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, first, last, out])=>writeWidths(handle, first >>> 0, last >>> 0,
+                out, ABC_SIZE, width=>[0, floatBits(width), 0], 0xff),
+        },
+        GetCharABCWidthsFloatW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, first, last, out])=>writeWidths(handle, first >>> 0, last >>> 0,
+                out, ABC_SIZE, width=>[0, floatBits(width), 0], 0xffff),
+        },
+        GetCharWidthFloatA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, first, last, out])=>writeWidths(handle, first >>> 0, last >>> 0,
+                out, 4, width=>[floatBits(width)], 0xff),
+        },
+        GetCharWidthFloatW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, first, last, out])=>writeWidths(handle, first >>> 0, last >>> 0,
+                out, 4, width=>[floatBits(width)], 0xffff),
         },
 
         /** BOOL GetCharABCWidthsW(HDC hdc, UINT wFirst, UINT wLast, LPABC lpABC) */

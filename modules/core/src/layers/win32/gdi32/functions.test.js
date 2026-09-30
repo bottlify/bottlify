@@ -2427,4 +2427,11 @@ test('the glyph-index width calls read a glyph as the character GetGlyphIndices 
     assert.equal(fns.GetCharABCWidthsI.handler([hdc, 0, 2, GLYPHS, WIDTHS]), 1, 'or the list');
     assert.deepEqual([memory.u32(WIDTHS + 4), memory.u32(WIDTHS + 16)], [b, a]);
     assert.equal(fns.GetCharWidthI.handler([0x7777, 65, 1, 0, WIDTHS]), 0);
+
+    const view = new DataView(memory.bytes.buffer);
+    assert.equal(fns.GetCharWidthFloatA.handler([hdc, 65, 65, WIDTHS]), 1);
+    assert.equal(view.getFloat32(WIDTHS, true), a, 'the same width, as a float');
+    assert.equal(fns.GetCharABCWidthsFloatW.handler([hdc, 66, 66, WIDTHS]), 1);
+    assert.equal(view.getFloat32(WIDTHS + 4, true), b);
+    assert.equal(fns.GetCharABCWidthsFloatW.handler([0, 66, 66, WIDTHS]), 0);
 });
