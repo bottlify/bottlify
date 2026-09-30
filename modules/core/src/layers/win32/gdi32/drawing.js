@@ -361,6 +361,37 @@ function masksFor(shape, bitCount){
 }
 
 /**
+ * The points of an arc along the ellipse a rectangle bounds, counterclockwise
+ * on the screen from the start radial to the end radial, a segment for about
+ * every two pixels of the way.
+ *
+ * @param {number} left @param {number} top @param {number} right @param {number} bottom
+ * @param {number} xStart @param {number} yStart @param {number} xEnd @param {number} yEnd
+ * @returns {{ x: number, y: number }[]}
+ */
+export function arcPoints(left, top, right, bottom, xStart, yStart, xEnd, yEnd){
+    const cx = (left + right) / 2;
+    const cy = (top + bottom) / 2;
+    const rx = Math.abs(right - left) / 2;
+    const ry = Math.abs(bottom - top) / 2;
+    // Screen y grows downward, so counterclockwise is the angle of -y.
+    const from = Math.atan2(cy - yStart, xStart - cx);
+    let to = Math.atan2(cy - yEnd, xEnd - cx);
+    if (to <= from)
+    {
+        to += 2 * Math.PI;
+    }
+    const steps = Math.max(8, Math.ceil((to - from) * Math.max(rx, ry) / 2));
+    return Array.from({ length: steps + 1 }, (_, index)=>{
+        const angle = from + (to - from) * index / steps;
+        return {
+            x: Math.round(cx + rx * Math.cos(angle)),
+            y: Math.round(cy - ry * Math.sin(angle)),
+        };
+    });
+}
+
+/**
  * @param {Object} options
  * @param {any} options.host
  * @param {any} options.objects   The GDI object table.
@@ -937,6 +968,39 @@ export function createDrawingFunctions(
                     text += String.fromCharCode(bytes[at * 2] | (bytes[at * 2 + 1] << 8));
                 }
                 interfaces.textOutA(handle >>> 0, x | 0, y | 0, text);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL Arc(HDC hdc, int left, int top, int right, int bottom,
+         *          int xStart, int yStart, int xEnd, int yEnd)
+         *
+         * The outline of the ellipse the rectangle bounds, counterclockwise
+         * from where the start radial meets it to where the end radial does,
+         * drawn with the pen and leaving the current position where it was.
+         * The same radial twice is the whole ellipse.
+         */
+        Arc: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([handle, left, top, right, bottom, xStart, yStart, xEnd, yEnd])=>{
+                const interfaces = bound(handle);
+                if (!interfaces)
+                {
+                    return 0;
+                }
+                const points = arcPoints(left | 0, top | 0, right | 0, bottom | 0,
+                    xStart | 0, yStart | 0, xEnd | 0, yEnd | 0);
+                const back = interfaces.moveToEx(handle >>> 0, points[0].x, points[0].y);
+                for (const point of points.slice(1))
+                {
+                    interfaces.lineTo(handle >>> 0, point.x, point.y);
+                }
+                if (back)
+                {
+                    interfaces.moveToEx(handle >>> 0, back.x, back.y);
+                }
                 return 1;
             },
         },
