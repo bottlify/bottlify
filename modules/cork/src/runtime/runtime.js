@@ -938,14 +938,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** @type {{ translatePending: () => Promise<number> } | null} */
     let runtimeApi = null;
     /**
-     * Sends the next batch when candidates wait and none is out. The host asks
-     * for a batch when the interpreter notes a new start, and a start already
-     * queued is not noted again: what queued while a batch was with the worker
-     * or the store waited for some other start to be noted, and ran
-     * interpreted meanwhile.
+     * The host's asks for a batch that found one out. The host asks when the
+     * interpreter notes a new start, and a start already queued is not noted
+     * again: an ask that found a batch with the worker or the store was spent,
+     * and what queued meanwhile waited for some other start to be noted,
+     * running interpreted. Each is kept and answered as a batch comes back --
+     * a batch an ask, as inline, not the whole queue, whose cold starts stay
+     * cold.
      */
+    let owed = 0;
     const sendNext = ()=>{
-        if (queue.size > 0 && outstanding === null && !storePending)
+        if (owed > 0 && queue.size > 0 && outstanding === null && !storePending)
         {
             runtimeApi?.translatePending().catch(()=>{});
         }
@@ -2527,8 +2530,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             if (outstanding !== null || storePending)
             {
+                owed++;
                 return 0;
             }
+            owed = Math.max(0, owed - 1);
             if (!settings.translate)
             {
                 return 0;
