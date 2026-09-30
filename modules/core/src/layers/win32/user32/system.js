@@ -1716,6 +1716,47 @@ export function createSystemFunctions({ host, live, windows, classes }){
             },
         },
 
+        /**
+         * BOOL EnumDisplayMonitors(HDC hdc, LPCRECT lprcClip, MONITORENUMPROC, LPARAM)
+         *
+         * The one monitor, handed to the callback with the part of it the
+         * clip leaves, when the clip leaves any; the callback's answer is
+         * not the call's, which succeeds once it has asked.
+         */
+        EnumDisplayMonitors: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hdc, clipRect, callback, data])=>{
+                if ((callback >>> 0) === 0 || !host.call || !host.allocate)
+                {
+                    return 0;
+                }
+                const box = { left: 0, top: 0, right: screen.width, bottom: screen.height };
+                if ((clipRect >>> 0) !== 0)
+                {
+                    const limit = readRect(host, clipRect >>> 0);
+                    box.left = Math.max(box.left, limit.left);
+                    box.top = Math.max(box.top, limit.top);
+                    box.right = Math.min(box.right, limit.right);
+                    box.bottom = Math.min(box.bottom, limit.bottom);
+                    if (box.left >= box.right || box.top >= box.bottom)
+                    {
+                        return 1;
+                    }
+                }
+                const at = host.allocate(16);
+                if (at === 0)
+                {
+                    return 0;
+                }
+                writeRect(host, at, box);
+                return Promise.resolve(host.call(callback >>> 0,
+                    [PRIMARY_MONITOR, hdc >>> 0, at, data >>> 0], host.callerThread?.()))
+                    .then(()=>1, ()=>0)
+                    .finally(()=>host.release?.(at));
+            },
+        },
+
         /** HMONITOR MonitorFromRect(LPCRECT lprc, DWORD dwFlags) */
         MonitorFromRect: {
             argBytes: 8,

@@ -198,11 +198,12 @@ function fakeContexts(){
  * @param {any} [options.files]  The volume, for an image loaded from a file.
  * @param {(bytes: number) => number} [options.allocate]
  * @param {(address: number) => void} [options.release]
+ * @param {(entry: number, args: number[]) => number} [options.call]
  */
 function setup(
     { cursor, keyState, asyncKeyState, keyboardState, setKeyboardState,
         findResource, loadString, dispatch = ()=>0, screen, regionBox,
-        moduleBase, bitmapFromDib, files, allocate, release } = {})
+        moduleBase, bitmapFromDib, files, allocate, release, call } = {})
 {
     screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
     const memory = fakeMemory();
@@ -250,6 +251,7 @@ function setup(
         files,
         allocate,
         release,
+        call,
         loadString,
         regionBox,
         /** @param {string} text */
@@ -835,6 +837,40 @@ test('MonitorFromPoint finds the monitor for a point on the screen, and none off
     assert.equal(fns.MonitorFromPoint.handler([-5, 10, 0]), 0, 'MONITOR_DEFAULTTONULL');
     assert.equal(fns.MonitorFromPoint.handler([-5, 10, 1]), monitor, 'MONITOR_DEFAULTTOPRIMARY');
     assert.equal(fns.MonitorFromPoint.handler([5000, 10, 2]), monitor, 'MONITOR_DEFAULTTONEAREST');
+});
+
+test('EnumDisplayMonitors hands the one monitor to the callback, cut by the clip', async()=>{
+    /** @type {number[][]} */
+    const seen = [];
+    /** @type {any} */
+    let box = null;
+    const { memory, fns, screen } = setup({
+        allocate: ()=>0x7000,
+        release: ()=>{},
+        call: (entry, args)=>{
+            seen.push([entry, ...args]);
+            box = Array.from({ length: 4 }, (_, i)=>{
+                const b = memory.readMemory(args[2] + i * 4, 4);
+                return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) | 0;
+            });
+            return 0;
+        },
+    });
+    const monitor = fns.MonitorFromWindow.handler([0, 0]);
+    assert.equal(fns.EnumDisplayMonitors.argBytes, 16);
+    assert.equal(await fns.EnumDisplayMonitors.handler([0, 0, 0x9000, 0x55]), 1,
+        'the callback answering FALSE is not the call failing');
+    assert.deepEqual(seen, [[0x9000, monitor, 0, 0x7000, 0x55]]);
+    assert.deepEqual(box, [0, 0, screen.width, screen.height]);
+
+    memory.writeMemory(RECT_BUFFER, new Uint8Array(new Int32Array([10, 20, 30, 40]).buffer));
+    assert.equal(await fns.EnumDisplayMonitors.handler([0, RECT_BUFFER, 0x9000, 0]), 1);
+    assert.deepEqual(box, [10, 20, 30, 40]);
+
+    memory.writeMemory(RECT_BUFFER, new Uint8Array(new Int32Array([-50, -50, -10, -10]).buffer));
+    assert.equal(await fns.EnumDisplayMonitors.handler([0, RECT_BUFFER, 0x9000, 0]), 1);
+    assert.equal(seen.length, 2, 'a clip off the screen leaves no monitor to call about');
+    assert.equal(fns.EnumDisplayMonitors.handler([0, 0, 0, 0]), 0, 'no callback');
 });
 
 test('SetWindowRgn accepts a shape it does not clip to, and says so', ()=>{
