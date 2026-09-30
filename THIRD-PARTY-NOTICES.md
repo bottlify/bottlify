@@ -82,6 +82,17 @@ rebuilding it needs only Docker.
 
 FFmpeg's full license text is in that tree (`COPYING.LGPLv2.1`).
 
+## minimp3 — MPEG Layer 3 audio decoding
+
+- Source: minimp3 by lieff, https://github.com/lieff/minimp3, compiled to WebAssembly by the
+  npm package `minimp3-wasm` 0.1.0 (https://github.com/bashi/minimp3-wasm)
+- Distributed artifact: that package's `dist/decoder.opt.wasm`, unmodified (SHA-256
+  `3fea18c86778b24306c9f184cba41df3c7dd0ab8e49e70416ba21ae6e696e55c`), embedded as base64 in
+  `modules/core/src/layers/audio/asi/minimp3.wasm.js`; the code that drives it,
+  `minimp3.js` beside it, is original work under the MPL
+- License: minimp3 is CC0-1.0 (public domain dedication); the WebAssembly build is Apache-2.0,
+  whose full text is `modules/core/src/layers/audio/asi/minimp3.LICENSE`
+
 ## Microsoft Root Authority certificate — the default Authenticode trust anchor
 
 - What it is: the root certificate "Microsoft Root Authority" (issued 1997-01-10, expired

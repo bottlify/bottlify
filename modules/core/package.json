@@ -46,6 +46,7 @@
     "dist",
     "LICENSE",
     "THIRD-PARTY-NOTICES.md",
+    "src/layers/audio/asi/minimp3.LICENSE",
     "src/bundle.js",
     "src/bundle-node.js",
     "src/layers/filesystem/internal/bundle/format.js",
