@@ -36,6 +36,8 @@ import { decodeAnsi, encodeAnsi } from './locale.js';
 const ERROR_SUCCESS = 0;
 const ERROR_INVALID_FUNCTION = 1;
 const ERROR_FILE_NOT_FOUND = 2;
+/** What CreateSymbolicLink answers a user who may not make links. */
+const ERROR_PRIVILEGE_NOT_HELD = 1314;
 const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_ACCESS_DENIED = 5;
 /** CreateFile's dwShareMode bit that lets another handle write the file too. */
@@ -119,6 +121,7 @@ const FILE_DELETE_ON_CLOSE = 0x1000;
 const STATUS_SUCCESS = 0;
 const STATUS_BUFFER_OVERFLOW = 0x80000005;
 const STATUS_INVALID_INFO_CLASS = 0xc0000003;
+const STATUS_INVALID_DEVICE_REQUEST = 0xc0000010;
 const STATUS_INFO_LENGTH_MISMATCH = 0xc0000004;
 /** The FILE_INFORMATION_CLASS values NtQueryInformationFile answers. */
 const FILE_STANDARD_INFORMATION = 5;
@@ -999,6 +1002,15 @@ export function createFileFunctions(host){
     });
 
     /**
+     * The volume has no reparse points to make a link of; the caller is
+     * answered as a user without the privilege to create one is.
+     */
+    const createSymbolicLink = bothForms(12, ([name], text)=>{
+        host.divergence?.('CreateSymbolicLink', `no symbolic links; ${text.path(name)} not made`);
+        return fail(ERROR_PRIVILEGE_NOT_HELD);
+    });
+
+    /**
      * ReplaceFile: the replacement takes the replaced file's name, and the
      * replaced file goes to the backup name when one is given. Either file
      * read-only refuses the whole replacement before anything moves.
@@ -1835,8 +1847,11 @@ export function createFileFunctions(host){
      * @param {number} block @param {number} status @param {number} information
      */
     const report = (block, status, information)=>{
-        writeDword(block, status);
-        writeDword(block + 4, information);
+        if (block !== 0)
+        {
+            writeDword(block, status);
+            writeDword(block + 4, information);
+        }
         return status;
     };
 
@@ -1895,6 +1910,27 @@ export function createFileFunctions(host){
         },
 
         NtCreateFile: { argBytes: 44, handler: ntCreateFile },
+
+        /**
+         * NTSTATUS NtFsControlFile(HANDLE, HANDLE Event, PIO_APC_ROUTINE, PVOID,
+         *   PIO_STATUS_BLOCK, ULONG FsControlCode, PVOID, ULONG, PVOID, ULONG)
+         *
+         * The volume answers no file-system control: reparse points,
+         * compression and the rest are the requests of a volume it is not.
+         */
+        NtFsControlFile: {
+            argBytes: 40,
+            /** @param {number[]} args */
+            handler: ([handle, , , , block, code])=>{
+                if (!object(handle, 'file'))
+                {
+                    return report(block >>> 0, STATUS_INVALID_HANDLE, 0);
+                }
+                host.divergence?.('NtFsControlFile',
+                    `control code 0x${(code >>> 0).toString(16)} is not one this volume answers`);
+                return report(block >>> 0, STATUS_INVALID_DEVICE_REQUEST, 0);
+            },
+        },
 
         /**
          * NTSTATUS NtQueryInformationFile(HANDLE, PIO_STATUS_BLOCK, PVOID,
@@ -2602,6 +2638,8 @@ export function createFileFunctions(host){
          * BOOL MoveFileEx(LPCSTR lpExistingFileName, LPCSTR lpNewFileName,
          *                 DWORD dwFlags) -- one body, both spellings.
          */
+        CreateSymbolicLinkA: createSymbolicLink.ansi,
+        CreateSymbolicLinkW: createSymbolicLink.wide,
         CreateHardLinkA: createHardLink.ansi,
         CreateHardLinkW: createHardLink.wide,
         ReplaceFileA: replaceFile.ansi,

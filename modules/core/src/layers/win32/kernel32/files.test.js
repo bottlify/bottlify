@@ -1994,6 +1994,14 @@ test('NtQueryInformationFile answers the name, the size and the position of an o
     assert.equal(query.handler([handle, block, out, 0x100, 34]) >>> 0, 0xc0000003,
         'a class nothing keeps');
     assert.equal(query.handler([0x999, block, out, 0x100, 9]) >>> 0, 0xc0000008);
+
+    const control = /** @type {any} */ (fns.CreateFileW).natives.NtFsControlFile;
+    assert.equal(control.argBytes, 40);
+    assert.equal(control.handler([handle, 0, 0, 0, block, 0x900a8]) >>> 0, 0xc0000010,
+        'STATUS_INVALID_DEVICE_REQUEST');
+    assert.equal(memory.dword(block) >>> 0, 0xc0000010);
+    assert.equal(control.handler([0xffffffff, 0, 0, 0, 0, 0]) >>> 0, 0xc0000008,
+        'no block to write is not a fault');
 });
 
 test('CreateHardLink answers as a volume without links does, and says so', ()=>{
@@ -2010,6 +2018,11 @@ test('CreateHardLink answers as a volume without links does, and says so', ()=>{
     assert.equal(fns.CreateHardLinkA.handler(
         [NAME2, at(NAME, 'C:\\GAME\\NONE.DAT'), 0]), 0);
     assert.equal(error.code, 2, 'a missing file is missing first');
+
+    assert.equal(fns.CreateSymbolicLinkW.argBytes, 12);
+    assert.equal(fns.CreateSymbolicLinkA.handler([NAME2, NAME, 0]), 0);
+    assert.equal(error.code, 1314, 'ERROR_PRIVILEGE_NOT_HELD');
+    assert.equal(said.at(-1), 'CreateSymbolicLink');
 });
 
 test('GetFileAttributesEx fills the head a find would, and nothing past it', ()=>{
