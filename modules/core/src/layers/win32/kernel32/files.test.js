@@ -380,6 +380,16 @@ function setup(extra = {}){
     return { memory, files, handles, error, console, fns, open, at };
 }
 
+test('a name past MAX_PATH is read whole, not cut at 260 characters', ()=>{
+    const { files, fns, at } = setup();
+    const long = 'C:\\GAME\\' + 'x'.repeat(300) + '.DAT';
+    const cut = long.slice(0, 260);
+    files.put(cut, 'the wrong file');
+    assert.equal(fns.CreateFileA.handler(
+        [at(NAME, long), GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0]), INVALID_HANDLE_VALUE,
+    'the first 260 characters name another file');
+});
+
 test('CREATE_NEW refuses a file that is already there', ()=>{
     const { files, error, fns, at } = setup();
     files.put('C:\\GAME\\SAVE.DAT', 'old');

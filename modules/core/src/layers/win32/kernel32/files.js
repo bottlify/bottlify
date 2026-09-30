@@ -456,9 +456,14 @@ export function createFileFunctions(host){
         return text.length;
     };
 
-    /** @param {number} pointer */
+    /**
+     * A name longer than MAX_PATH is still a name: it is read to its end,
+     * and then found or not as any other is.
+     *
+     * @param {number} pointer
+     */
     const pathArgument = pointer=>fullPath(
-        pointer === 0 ? '' : host.readCString(pointer >>> 0, MAX_PATH));
+        pointer === 0 ? '' : host.readCString(pointer >>> 0, MAX_PATH_LIST));
 
     /**
      * Turns what the guest wrote into the absolute path the filesystem takes.
