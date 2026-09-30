@@ -1578,9 +1578,11 @@ export function createGdiFunctions(host){
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                const [memory, format, width, height, pitch, , colors] = readU32s(host, desc, 7);
+                const [memory, format, width, height, pitch, device, colors] =
+                    readU32s(host, desc, 7);
                 const layout = KMT_FORMATS.get(format);
-                if (!layout || memory === 0 || width === 0 || height === 0
+                // The device DC the memory is to be compatible with is required.
+                if (!layout || !dcOf(device) || memory === 0 || width === 0 || height === 0
                     || pitch < Math.ceil((width * layout.bitCount) / 8)
                     || (layout.bitCount <= 8 && colors === 0))
                 {

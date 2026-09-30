@@ -2287,6 +2287,8 @@ test('D3DKMTCreateDCFromMemory makes a memory DC over the program\'s own pixels'
     const view = new DataView(memory.bytes.buffer);
     // pMemory, Format (A8R8G8B8), Width, Height, Pitch, hDeviceDc, pColorTable
     [PIXELS, 21, 4, 4, 16, 0, 0].forEach((value, at)=>view.setUint32(DESC + at * 4, value, true));
+    assert.equal(fns.D3DKMTCreateDCFromMemory.handler([DESC]), 0xc000000d, 'no device DC');
+    view.setUint32(DESC + 20, fns.CreateCompatibleDC.handler([0]), true);
     assert.equal(fns.D3DKMTCreateDCFromMemory.handler([DESC]), 0);
     const hdc = view.getUint32(DESC + 28, true);
     const bitmap = view.getUint32(DESC + 32, true);
