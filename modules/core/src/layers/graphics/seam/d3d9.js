@@ -951,7 +951,17 @@ export function createDirect3D9Seam(
                 const shadow = shadowOf(owners.get(block));
                 shadow?.sync();
                 const hr = block.Apply();
-                shadow?.remirror();
+                // What the block holds is all it changed.
+                const record = block.record;
+                shadow?.remirror({
+                    renderStates: record.renderStates.keys(),
+                    transforms: record.transforms.keys(),
+                    textures: record.textures.size > 0,
+                    stageStates: record.stageStates.size > 0 || record.samplerStates.size > 0,
+                    material: record.material !== undefined,
+                    bindings: record.streams.size > 0 || record.indices !== undefined
+                        || record.vertexShader !== undefined,
+                });
                 return hr;
             },
         }),

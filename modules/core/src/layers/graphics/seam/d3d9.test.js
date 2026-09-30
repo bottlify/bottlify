@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
-import { SHADOW, STALE_POINTER } from './shadow.js';
+import { SHADOW, STALE_POINTER, transformSlot } from './shadow.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { IDIRECT3D9_SLOTS } from './vtables.js';
 import {
@@ -1690,4 +1690,69 @@ test('with guest memory, the setters and GetRenderState of a device run in the g
     assert.equal(h.device(device, 'Reset', [parameters]), D3D_OK);
     assert.equal(h.box.memory.readU32(at(SHADOW.RENDER_STATES + D3DRS.CULLMODE * 4)), 3,
         'a reset is mirrored into the block');
+});
+
+test('a state block applied mirrors into the block only the states it holds', ()=>{
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const block = h.box.memory.readU32(device + 4);
+    const out = 0x3200;
+    /** @param {[string, number[]][]} setters */
+    const record = setters=>{
+        assert.equal(h.device(device, 'BeginStateBlock'), D3D_OK);
+        for (const [name, args] of setters)
+        {
+            assert.equal(h.device(device, name, args), D3D_OK, name);
+        }
+        assert.equal(h.device(device, 'EndStateBlock', [out]), D3D_OK);
+        return h.box.memory.readU32(out);
+    };
+    const object = h.object(device);
+    let reads = 0;
+    for (const name of ['GetRenderState', 'GetTextureStageState', 'GetSamplerState',
+        'GetTransform', 'GetMaterial'])
+    {
+        const original = object[name];
+        object[name] = (/** @type {any[]} */ ...args)=>{
+            reads++;
+            return original.apply(object, args);
+        };
+    }
+    const apply = (/** @type {number} */ stateBlock)=>h.box.call(stateBlock, 5, []);
+
+    // Shaders and a declaration are not in the block: nothing is read back.
+    const shaders = record([['SetVertexShader', [0]], ['SetPixelShader', [0]]]);
+    reads = 0;
+    assert.equal(apply(shaders), D3D_OK);
+    assert.equal(reads, 0, 'a block of bindings reads no state back');
+
+    // A render state is read back alone, and lands in the block.
+    const cull = record([['SetRenderState', [D3DRS.CULLMODE, 1]]]);
+    assert.equal(h.device(device, 'SetRenderState', [D3DRS.CULLMODE, 3]), D3D_OK);
+    reads = 0;
+    assert.equal(apply(cull), D3D_OK);
+    assert.ok(reads <= 1, `${reads} reads for one render state`);
+    assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + D3DRS.CULLMODE * 4), 1);
+    const value = 0x3300;
+    assert.equal(h.device(device, 'GetRenderState', [D3DRS.CULLMODE, value]), D3D_OK);
+    assert.equal(h.fields.readU32(value), 1);
+
+    // A matrix and a stage state the block holds land in the block too.
+    const matrix = 0x3400;
+    for (let index = 0; index < 16; index++)
+    {
+        h.fields.writeU32(matrix + index * 4, new Uint32Array(Float32Array.of(index + 1).buffer)[0]);
+    }
+    const world = record([['SetTransform', [256, matrix]], ['SetTextureStageState', [1, 1, 2]]]);
+    for (let index = 0; index < 16; index++)
+    {
+        h.fields.writeU32(matrix + index * 4, 0);
+    }
+    assert.equal(h.device(device, 'SetTransform', [256, matrix]), D3D_OK);
+    assert.equal(apply(world), D3D_OK);
+    assert.equal(new Float32Array(Uint32Array.of(h.box.memory.readU32(
+        block + SHADOW.TRANSFORMS + transformSlot(256) * 64 + 4)).buffer)[0], 2);
+    assert.equal(h.box.memory.readU32(block + SHADOW.STAGE_STATES
+        + (SHADOW.STAGE_STATE_STRIDE + 1) * 4), 2);
 });

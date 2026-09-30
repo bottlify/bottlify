@@ -1281,26 +1281,33 @@ export function createShadow(deps){
      * Writes the device's current values into the block, so that the block
      * and the copy agree with the device before the guest touches either.
      */
-    const mirror = ()=>{
+    /** @param {number} state @returns {number | null} what the device holds, if it answers */
+    const renderStateOf = state=>{
+        /** @type {{ value?: number }} */
+        const out = {};
+        return device.GetRenderState(state, out) === 0 ? (out.value ?? 0) >>> 0 : null;
+    };
+
+    const mirrorRenderStates = ()=>{
         const states = new Uint8Array(SHADOW.RENDER_STATE_COUNT * 4);
         const view = new DataView(states.buffer);
         const valid = new Uint8Array(SHADOW.RENDER_STATE_COUNT / 8);
         for (let state = 0; state < SHADOW.RENDER_STATE_COUNT; state++)
         {
-            /** @type {{ value?: number }} */
-            const out = {};
-            const answered = device.GetRenderState(state, out) === 0;
-            const value = answered ? (out.value ?? 0) >>> 0 : 0;
+            const answered = renderStateOf(state);
+            const value = answered ?? 0;
             seenStates[state] = value;
             view.setUint32(state * 4, value, true);
-            if (answered)
+            if (answered !== null)
             {
                 valid[state >>> 3] |= 1 << (state & 7);
             }
         }
         deps.writeMemory(address + SHADOW.RENDER_STATES, states);
         deps.writeMemory(address + SHADOW.RENDER_STATE_VALID, valid);
+    };
 
+    const mirrorTransforms = ()=>{
         const matrices = new Uint8Array(SHADOW.TRANSFORM_SLOTS * 64);
         const floats = new Float32Array(matrices.buffer);
         for (let slot = 0; slot < SHADOW.TRANSFORM_SLOTS; slot++)
@@ -1314,7 +1321,9 @@ export function createShadow(deps){
         }
         seenTransforms.set(new Uint32Array(matrices.buffer));
         deps.writeMemory(address + SHADOW.TRANSFORMS, matrices);
+    };
 
+    const mirrorBindings = ()=>{
         // The bindings, as the pointers the program knows the buffers by. A
         // Get* adds a reference the caller owes back.
         for (let index = 0; index < (deps.bindings === false ? 0 : SHADOW.STREAM_COUNT); index++)
@@ -1338,14 +1347,18 @@ export function createShadow(deps){
             ? (shader.handle ?? 0) >>> 0 : 0;
         deps.writeMemory(address + SHADOW.STREAMS,
             dwordsBytes([...seenStreams, seenIndices, seenBaseVertex, seenShader]));
+    };
 
+    const mirrorTextures = ()=>{
         // The textures are mirrored as stale rather than as pointers: a
         // program that never writes a stage leaves the device with what it
         // holds, and reading a bound texture back would take a reference on
         // one the program may already have let go of.
         seenTextures.fill(STALE_POINTER);
         deps.writeMemory(address + SHADOW.TEXTURES, dwordsBytes([...seenTextures]));
+    };
 
+    const mirrorStageStates = ()=>{
         for (let stage = 0; stage < SHADOW.STAGE_COUNT; stage++)
         {
             for (let type = 0; type < SHADOW.STAGE_STATE_STRIDE; type++)
@@ -1377,7 +1390,9 @@ export function createShadow(deps){
         });
         deps.writeMemory(address + SHADOW.SAMPLER_KEYS, keys);
         deps.writeMemory(address + SHADOW.STAGE_STATES, dwordsBytes([...seenStageStates]));
+    };
 
+    const mirrorMaterial = ()=>{
         /** @type {{ material?: ShadowMaterial }} */
         const held = {};
         const material = device.GetMaterial(held) === 0 && held.material
@@ -1385,6 +1400,34 @@ export function createShadow(deps){
             : new Float32Array(SHADOW.MATERIAL_WORDS);
         seenMaterial.set(new Uint32Array(material.buffer));
         deps.writeMemory(address + SHADOW.MATERIAL, new Uint8Array(material.buffer));
+    };
+
+    /** @param {number} type */
+    const refreshTransform = type=>{
+        const slot = transformSlot(type);
+        if (address === 0 || slot < 0)
+        {
+            return;
+        }
+        /** @type {{ matrix?: ArrayLike<number> }} */
+        const out = {};
+        if (device.GetTransform(type, out) !== 0 || !out.matrix)
+        {
+            return;
+        }
+        const floats = new Float32Array(out.matrix);
+        seenTransforms.set(new Uint32Array(floats.buffer), slot * 16);
+        deps.writeMemory(address + SHADOW.TRANSFORMS + slot * 64,
+            new Uint8Array(floats.buffer));
+    };
+
+    const mirror = ()=>{
+        mirrorRenderStates();
+        mirrorTransforms();
+        mirrorBindings();
+        mirrorTextures();
+        mirrorStageStates();
+        mirrorMaterial();
     };
 
     /**
@@ -1708,12 +1751,53 @@ export function createShadow(deps){
 
         /**
          * After the host changed state on its own -- a state block applied, a
-         * reset -- the block is brought to what the device now holds.
+         * reset -- the block is brought to what the device now holds: the
+         * groups named, or all of it. A small state block applied between
+         * draws is common, and reading back every state the block holds cost
+         * each Apply hundreds of calls into the device.
+         *
+         * @param {{ renderStates?: Iterable<number>, transforms?: Iterable<number>,
+         *     bindings?: boolean, textures?: boolean, stageStates?: boolean,
+         *     material?: boolean }} [touched]
          */
-        remirror(){
-            if (address !== 0)
+        remirror(touched){
+            if (address === 0)
+            {
+                return;
+            }
+            if (!touched)
             {
                 mirror();
+                return;
+            }
+            for (const state of touched.renderStates ?? [])
+            {
+                if (state >= 0 && state < SHADOW.RENDER_STATE_COUNT)
+                {
+                    seenStates[state] = renderStateOf(state) ?? 0;
+                    deps.writeMemory(address + SHADOW.RENDER_STATES + state * 4,
+                        dwordBytes(seenStates[state]));
+                }
+            }
+            for (const type of touched.transforms ?? [])
+            {
+                refreshTransform(type);
+            }
+            if (touched.bindings)
+            {
+                mirrorBindings();
+            }
+            if (touched.textures)
+            {
+                mirrorTextures();
+            }
+            if (touched.stageStates)
+            {
+                mirrorStageStates();
+            }
+            if (touched.material)
+            {
+                mirrorMaterial();
             }
         },
 
@@ -1765,23 +1849,7 @@ export function createShadow(deps){
          *
          * @param {number} type
          */
-        refreshTransform(type){
-            const slot = transformSlot(type);
-            if (address === 0 || slot < 0)
-            {
-                return;
-            }
-            /** @type {{ matrix?: ArrayLike<number> }} */
-            const out = {};
-            if (device.GetTransform(type, out) !== 0 || !out.matrix)
-            {
-                return;
-            }
-            const floats = new Float32Array(out.matrix);
-            seenTransforms.set(new Uint32Array(floats.buffer), slot * 16);
-            deps.writeMemory(address + SHADOW.TRANSFORMS + slot * 64,
-                new Uint8Array(floats.buffer));
-        },
+        refreshTransform,
 
         /**
          * Adopts whatever the guest wrote since the last entry. Every
