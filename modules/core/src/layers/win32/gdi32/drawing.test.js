@@ -17,7 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { arcPoints, combine } from './drawing.js';
+import { arcPoints, combine, roundRectPoints } from './drawing.js';
 import { createGdiFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 
@@ -158,6 +158,16 @@ function fakeDrawing(){
         /** @param {number} hdc @param {number} x @param {number} y */
         lineTo(hdc, x, y){
             calls.push(['lineTo', hdc, x, y]);
+        },
+        /** @param {number} hdc @param {any[]} points */
+        polygon(hdc, points){
+            calls.push(['polygon', hdc, points]);
+            return true;
+        },
+        /** @param {number} hdc @param {number[]} box */
+        ellipse(hdc, ...box){
+            calls.push(['ellipse', hdc, ...box]);
+            return true;
         },
         /** @param {number} hdc @param {number} x @param {number} y */
         moveToEx(hdc, x, y){
@@ -1288,4 +1298,16 @@ test('Arc draws with the pen and puts the current position back', ()=>{
         ['moveToEx', hdc, 1, 2]);
     assert.ok(graphics.calls.filter(call=>call[0] === 'lineTo').length >= 8);
     assert.equal(fns.Arc.handler([0x7777, 0, 0, 1, 1, 0, 0, 0, 0]), 0, 'not a DC');
+});
+
+test('a rounded rectangle is a polygon inside its box, square where the corners are flat', ()=>{
+    const points = roundRectPoints({ left: 10, top: 10, right: 40, bottom: 25 }, 3, 4.5);
+    assert.ok(points.every(({ x, y })=>x >= 10 && x <= 39 && y >= 10 && y <= 24));
+    assert.ok(!points.some(({ x, y })=>x === 10 && y === 10), 'the corner itself is cut');
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+    assert.equal(fns.RoundRect.handler([hdc, 10, 10, 40, 25, -6, -9]), 1, 'the sign is dropped');
+    assert.equal(graphics.calls.at(-1)[0], 'polygon');
+    assert.equal(fns.Ellipse.handler([hdc, 0, 0, 5, 5]), 1);
+    assert.deepEqual(graphics.calls.at(-1), ['ellipse', hdc, 0, 0, 5, 5]);
 });

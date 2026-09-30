@@ -392,6 +392,33 @@ export function arcPoints(left, top, right, bottom, xStart, yStart, xEnd, yEnd){
 }
 
 /**
+ * The outline of a rounded rectangle, clockwise from the top edge: each
+ * corner a quarter of an ellipse of the radii given, inside the box.
+ *
+ * @param {{ left: number, top: number, right: number, bottom: number }} box
+ * @param {number} rx @param {number} ry
+ * @returns {{ x: number, y: number }[]}
+ */
+export function roundRectPoints(box, rx, ry){
+    const right = box.right - 1;
+    const bottom = box.bottom - 1;
+    const corners = [
+        { cx: right - rx, cy: box.top + ry, from: Math.PI / 2 },
+        { cx: right - rx, cy: bottom - ry, from: 0 },
+        { cx: box.left + rx, cy: bottom - ry, from: -Math.PI / 2 },
+        { cx: box.left + rx, cy: box.top + ry, from: -Math.PI },
+    ];
+    const steps = Math.max(2, Math.ceil(Math.max(rx, ry) / 2));
+    return corners.flatMap(({ cx, cy, from })=>Array.from({ length: steps + 1 }, (_, index)=>{
+        const angle = from - (Math.PI / 2) * index / steps;
+        return {
+            x: Math.round(cx + rx * Math.cos(angle)),
+            y: Math.round(cy - ry * Math.sin(angle)),
+        };
+    }));
+}
+
+/**
  * @param {Object} options
  * @param {any} options.host
  * @param {any} options.objects   The GDI object table.
@@ -1002,6 +1029,51 @@ export function createDrawingFunctions(
                     interfaces.moveToEx(handle >>> 0, back.x, back.y);
                 }
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL RoundRect(HDC hdc, int left, int top, int right, int bottom,
+         *                int width, int height)
+         *
+         * A rectangle whose corners are quarters of the ellipse width by
+         * height, outlined with the pen and filled with the brush; the
+         * ellipse's size is taken without its sign and no larger than the
+         * rectangle, and a flat one is the plain rectangle.
+         */
+        RoundRect: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([handle, left, top, right, bottom, width, height])=>{
+                const interfaces = bound(handle);
+                if (!interfaces)
+                {
+                    return 0;
+                }
+                const box = {
+                    left: Math.min(left | 0, right | 0), top: Math.min(top | 0, bottom | 0),
+                    right: Math.max(left | 0, right | 0), bottom: Math.max(top | 0, bottom | 0),
+                };
+                const cornerX = Math.min(Math.abs(width | 0), box.right - box.left) / 2;
+                const cornerY = Math.min(Math.abs(height | 0), box.bottom - box.top) / 2;
+                if (cornerX < 1 || cornerY < 1)
+                {
+                    return interfaces.rectangle(handle >>> 0, box.left, box.top, box.right,
+                        box.bottom) ? 1 : 0;
+                }
+                return interfaces.polygon(handle >>> 0, roundRectPoints(box, cornerX, cornerY))
+                    ? 1 : 0;
+            },
+        },
+
+        /** BOOL Ellipse(HDC hdc, int left, int top, int right, int bottom) */
+        Ellipse: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, left, top, right, bottom])=>{
+                const interfaces = bound(handle);
+                return interfaces && interfaces.ellipse(handle >>> 0,
+                    left | 0, top | 0, right | 0, bottom | 0) ? 1 : 0;
             },
         },
 
