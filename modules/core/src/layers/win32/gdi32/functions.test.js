@@ -366,37 +366,40 @@ test('CreateCompatibleDC starts with the one-pixel bitmap, and answers for the d
         fns.GetDeviceCaps.handler([hdc, HORZRES]));
 });
 
-test('GetBoundsRect records what DCB_SET put there and DCB_RESET clears it', ()=>{
-    const { fns, hdc, memory } = withDC();
-    const RECT = STRUCT + 0x800;
-    assert.equal(fns.GetBoundsRect.handler([hdc, RECT, 0]), 0, 'nothing accumulated yet');
+test('the bounds accumulate what SetBoundsRect adds, and each call answers the state before',
+    ()=>{
+        // Wine's dc.c test_boundsrect, in the order it asks.
+        const DCB_RESET = 1;
+        const DCB_SET = 3;
+        const DCB_ENABLE = 4;
+        const DCB_DISABLE = 8;
+        const { fns, hdc, memory } = withDC();
+        const RECT = STRUCT + 0x800;
+        const read = ()=>[0, 4, 8, 12].map(at=>memory.i32(RECT + at));
+        assert.equal(fns.GetBoundsRect.handler([hdc, 0, 0]), 0);
+        assert.equal(fns.GetBoundsRect.handler([hdc, 0, ~0]), 0);
 
-    memory.putU32s(RECT, [10, 20, 30, 40]);
-    assert.equal(fns.GetBoundsRect.handler([hdc, RECT, 0x8]), 0x8, 'DCB_SET answers DCB_SET');
-    memory.putU32s(RECT, [0, 0, 0, 0]);
-    assert.equal(fns.GetBoundsRect.handler([hdc, RECT, 0]), 0);
-    assert.deepEqual([memory.u32(RECT), memory.u32(RECT + 4), memory.u32(RECT + 8),
-        memory.u32(RECT + 12)], [10, 20, 30, 40]);
+        memory.putU32s(RECT, [10, 20, 40, 50]);
+        assert.equal(fns.SetBoundsRect.handler([hdc, RECT, DCB_SET]), DCB_RESET | DCB_DISABLE);
+        assert.equal(fns.GetBoundsRect.handler([hdc, RECT, 0]), DCB_SET);
+        assert.deepEqual(read(), [10, 20, 40, 50]);
 
-    assert.equal(fns.GetBoundsRect.handler([hdc, RECT, 0x1]), 0);
-    assert.equal(fns.GetBoundsRect.handler([hdc, RECT, 0]), 0, 'and the bounds are gone');
-});
+        memory.putU32s(RECT, [8, 8, 23, 23]);
+        assert.equal(fns.SetBoundsRect.handler([hdc, RECT, 2]), DCB_SET | DCB_DISABLE,
+            'DCB_ACCUMULATE adds to them');
+        fns.GetBoundsRect.handler([hdc, RECT, 0]);
+        assert.deepEqual(read(), [8, 8, 40, 50]);
 
-test('SetBoundsRect turns accumulation on and off, answering the state before', ()=>{
-    const { fns, hdc, memory } = withDC();
-    const RECT = STRUCT + 0x800;
-    assert.equal(fns.SetBoundsRect.handler([hdc, 0, 0x10]), 0, 'was not accumulating');
-    assert.equal(fns.SetBoundsRect.handler([hdc, 0, 0x10]), 0x10, 'already enabled');
-    assert.equal(fns.SetBoundsRect.handler([hdc, 0, 0x20]), 0x10, 'disable answers enable');
-    assert.equal(fns.SetBoundsRect.handler([hdc, 0, 0x20]), 0x20, 'now disabled');
+        memory.putU32s(RECT, [20, 20, 10, 10]);
+        fns.SetBoundsRect.handler([hdc, RECT, DCB_SET]);
+        assert.equal(fns.GetBoundsRect.handler([hdc, RECT, 0]), DCB_RESET, 'an empty one resets');
+        assert.deepEqual(read(), [0, 0, 0, 0]);
 
-    memory.putU32s(RECT, [1, 2, 3, 4]);
-    assert.equal(fns.SetBoundsRect.handler([hdc, RECT, 0x8]), 0x20, 'DCB_SET answers the state');
-    memory.putU32s(RECT, [0, 0, 0, 0]);
-    fns.GetBoundsRect.handler([hdc, RECT, 0]);
-    assert.deepEqual([memory.u32(RECT), memory.u32(RECT + 4), memory.u32(RECT + 8),
-        memory.u32(RECT + 12)], [1, 2, 3, 4], 'the rectangle SetBoundsRect put there');
-});
+        assert.equal(fns.SetBoundsRect.handler([hdc, 0, DCB_ENABLE]), DCB_RESET | DCB_DISABLE);
+        assert.equal(fns.SetBoundsRect.handler([hdc, 0, DCB_DISABLE]), DCB_RESET | DCB_ENABLE);
+        assert.equal(fns.SetBoundsRect.handler([hdc, 0, ~0]), 0, 'flags it does not know');
+        assert.equal(fns.SetBoundsRect.handler([0, 0, 0]), 0, 'no DC');
+    });
 
 test('ResetDC answers the DC it was given', ()=>{
     const { fns, hdc } = withDC();

@@ -222,11 +222,12 @@ const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_SUPPORTED = 50;
 const STATUS_INVALID_PARAMETER = 0xc000000d;
 
-/** GetBoundsRect's flags: reset clears, set records, the rest query. */
+/** GetBoundsRect's and SetBoundsRect's flags; DCB_SET is reset and accumulate together. */
 const DCB_RESET = 0x0001;
-const DCB_SET = 0x0008;
-const DCB_ENABLE = 0x0010;
-const DCB_DISABLE = 0x0020;
+const DCB_ACCUMULATE = 0x0002;
+const DCB_SET = DCB_RESET | DCB_ACCUMULATE;
+const DCB_ENABLE = 0x0004;
+const DCB_DISABLE = 0x0008;
 
 /** @param {any} memory @param {number} address @param {number} count @returns {number[]} */
 const readU32s = (memory, address, count)=>Array.from({ length: count },
@@ -3013,72 +3014,81 @@ export function createGdiFunctions(host){
         /**
          * UINT GetBoundsRect(HDC hdc, LPRECT lprect, UINT flags)
          *
-         * The accumulated bounding rectangle, which this layer does not
-         * accumulate: a DC's bounds are what the program set with DCB_SET and
-         * cleared with DCB_RESET. DCB_SET records the rectangle and answers
-         * DCB_SET; DCB_RESET clears it and answers what was there; any other
-         * flags answer the current state -- DCB_SET when a rectangle is held,
-         * zero otherwise -- and copy the rectangle out.
+         * The bounds in logical units, DCB_SET when there are any and
+         * DCB_RESET with an empty rectangle when not; DCB_RESET empties them
+         * after they are read. Without a rectangle to write, it answers zero.
          */
         GetBoundsRect: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, rect, flags])=>{
                 const dc = dcOf(handle);
-                if (!dc)
+                if (!dc || (flags & ~DCB_RESET) !== 0)
                 {
                     return 0;
                 }
-                const held = dc.boundsState;
+                const held = dc.boundingRect;
                 if ((flags & DCB_RESET) !== 0)
                 {
                     dc.boundingRect = null;
-                    return held;
                 }
-                if ((flags & DCB_SET) !== 0)
+                if ((rect >>> 0) === 0)
                 {
-                    const [left, top, right, bottom] = readU32s(host, rect >>> 0, 4);
-                    dc.boundingRect = { left, top, right, bottom };
-                    return DCB_SET;
+                    return 0;
                 }
-                if ((rect >>> 0) !== 0 && dc.boundingRect)
-                {
-                    const { left, top, right, bottom } = dc.boundingRect;
-                    writeU32s(host, rect >>> 0, [left, top, right, bottom]);
-                }
-                return held;
+                const corners = held
+                    ? [transform(dc, { x: held.left, y: held.top }, false),
+                        transform(dc, { x: held.right, y: held.bottom }, false)]
+                    : [{ x: 0, y: 0 }, { x: 0, y: 0 }];
+                writeU32s(host, rect >>> 0,
+                    [corners[0].x, corners[0].y, corners[1].x, corners[1].y]);
+                return held ? DCB_SET : DCB_RESET;
             },
         },
 
         /**
          * UINT SetBoundsRect(HDC hdc, const RECT *lprect, UINT flags)
          *
-         * The setter half of GetBoundsRect: DCB_SET records the rectangle,
-         * DCB_ENABLE and DCB_DISABLE turn accumulation on and off, and
-         * DCB_RESET clears it. Every one answers the state that came before.
-         * Drawing does not accumulate here, so an enabled DC still holds only
-         * what a DCB_SET put there.
+         * The bounds are kept in device units: DCB_RESET empties them,
+         * DCB_ACCUMULATE adds the rectangle given in logical units, an empty
+         * one adding nothing, and DCB_ENABLE and DCB_DISABLE turn the
+         * accumulation on and off. It answers the state before: whether there
+         * were bounds, and whether they were accumulating. Drawing does not
+         * accumulate here, so an enabled DC holds only what was set.
          */
         SetBoundsRect: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, rect, flags])=>{
                 const dc = dcOf(handle);
-                if (!dc)
+                if (!dc || (flags & ~(DCB_SET | DCB_ENABLE | DCB_DISABLE)) !== 0)
                 {
                     return 0;
                 }
-                const held = dc.boundsState;
+                const before = (dc.boundingRect ? DCB_SET : DCB_RESET)
+                    | (dc.boundsState === DCB_ENABLE ? DCB_ENABLE : DCB_DISABLE);
                 if ((flags & DCB_RESET) !== 0)
                 {
                     dc.boundingRect = null;
-                    return held;
                 }
-                if ((flags & DCB_SET) !== 0)
+                if ((flags & DCB_ACCUMULATE) !== 0 && (rect >>> 0) !== 0)
                 {
-                    const [left, top, right, bottom] = readU32s(host, rect >>> 0, 4);
-                    dc.boundingRect = { left, top, right, bottom };
-                    return held;
+                    const [left, top, right, bottom] = readU32s(host, rect >>> 0, 4)
+                        .map(value=>value | 0);
+                    const a = transform(dc, { x: left, y: top }, true);
+                    const b = transform(dc, { x: right, y: bottom }, true);
+                    const added = { left: Math.min(a.x, b.x), top: Math.min(a.y, b.y),
+                        right: Math.max(a.x, b.x), bottom: Math.max(a.y, b.y) };
+                    if (left < right && top < bottom)
+                    {
+                        const was = dc.boundingRect;
+                        dc.boundingRect = was ? {
+                            left: Math.min(was.left, added.left),
+                            top: Math.min(was.top, added.top),
+                            right: Math.max(was.right, added.right),
+                            bottom: Math.max(was.bottom, added.bottom),
+                        } : added;
+                    }
                 }
                 if ((flags & DCB_ENABLE) !== 0)
                 {
@@ -3088,7 +3098,7 @@ export function createGdiFunctions(host){
                 {
                     dc.boundsState = DCB_DISABLE;
                 }
-                return held;
+                return before;
             },
         },
 
