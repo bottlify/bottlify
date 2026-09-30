@@ -2435,3 +2435,19 @@ test('the glyph-index width calls read a glyph as the character GetGlyphIndices 
     assert.equal(view.getFloat32(WIDTHS + 4, true), b);
     assert.equal(fns.GetCharABCWidthsFloatW.handler([0, 66, 66, WIDTHS]), 0);
 });
+
+test('GetTextExtentExPoint answers the extent of each prefix and how many fit', ()=>{
+    const { fns, hdc, memory } = withDC();
+    const TEXT = STRUCT + 0xd00;
+    const FIT = STRUCT + 0xd40;
+    const DX = STRUCT + 0xd50;
+    const SIZE_AT = STRUCT + 0xd80;
+    memory.putString(TEXT, 'AAA');
+    assert.equal(fns.GetTextExtentPoint32A.handler([hdc, TEXT, 1, SIZE_AT]), 1);
+    const one = memory.u32(SIZE_AT);
+    assert.equal(fns.GetTextExtentExPointA.handler([hdc, TEXT, 3, one * 2, FIT, DX, SIZE_AT]), 1);
+    assert.equal(memory.u32(FIT), 2);
+    assert.deepEqual([memory.u32(DX), memory.u32(DX + 8)], [one, one * 3]);
+    assert.equal(memory.u32(SIZE_AT), one * 3);
+    assert.equal(fns.GetTextExtentExPointW.handler([hdc, 0, 3, 0, 0, 0, SIZE_AT]), 0);
+});

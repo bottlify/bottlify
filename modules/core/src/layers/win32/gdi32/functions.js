@@ -917,6 +917,36 @@ export function createGdiFunctions(host){
         return 1;
     };
 
+    /**
+     * GetTextExtentExPoint in its three forms.
+     *
+     * @param {number[]} args @param {(string: number, count: number) => string} read
+     */
+    const textExtentEx = ([handle, string, count, maxExtent, fit, dx, size], read)=>{
+        const dc = dcOf(handle);
+        if (!dc || (count | 0) < 0 || ((string >>> 0) === 0 && (count | 0) !== 0))
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const text = (count | 0) === 0 ? '' : read(string >>> 0, count | 0);
+        const extents = Array.from(text, (_, index)=>widthOf(dc, text.slice(0, index + 1)));
+        if ((fit >>> 0) !== 0)
+        {
+            const limit = maxExtent | 0;
+            writeU32s(host, fit >>> 0, [extents.filter(extent=>extent <= limit).length]);
+        }
+        if ((dx >>> 0) !== 0 && extents.length > 0)
+        {
+            writeU32s(host, dx >>> 0, extents);
+        }
+        if ((size >>> 0) !== 0)
+        {
+            writeSize(host, size, { cx: extents.at(-1) ?? 0, cy: currentMetrics(dc).height });
+        }
+        return 1;
+    };
+
     /** A float's bits as the dword they are written as. @param {number} value */
     const floatBits = value=>{
         const view = new DataView(new ArrayBuffer(4));
@@ -3435,6 +3465,31 @@ export function createGdiFunctions(host){
                 writeSize(host, out, { cx: widthOf(dc, text), cy: currentMetrics(dc).height });
                 return 1;
             },
+        },
+
+        /**
+         * BOOL GetTextExtentExPointA/W/I(HDC hdc, LPCSTR/LPCWSTR/LPWORD text, int count,
+         *   int nMaxExtent, LPINT lpnFit, LPINT lpnDx, LPSIZE lpSize)
+         *
+         * The whole string's extent, each prefix's extent in lpnDx, and in
+         * lpnFit how many characters fit within nMaxExtent; the I form takes
+         * glyph indices, which are characters here.
+         */
+        GetTextExtentExPointA: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: args=>textExtentEx(args, (string, count)=>decodeAnsi(
+                host.readMemory(string, count))),
+        },
+        GetTextExtentExPointW: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: args=>textExtentEx(args, (string, count)=>wideText(string, count, true)),
+        },
+        GetTextExtentExPointI: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: args=>textExtentEx(args, (string, count)=>wideText(string, count, true)),
         },
 
         /** BOOL GetCharWidth32W(HDC hdc, UINT iFirst, UINT iLast, LPINT lpBuffer) */
