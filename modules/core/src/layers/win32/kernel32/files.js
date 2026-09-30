@@ -309,7 +309,8 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {{ open: (type: string, object: any) => number,
  *              resolve: (handle: number, type?: string) => any,
  *              close: (handle: number) => any,
- *              typeOf?: (handle: number) => string | undefined }} handles
+ *              typeOf?: (handle: number) => string | undefined,
+ *              holds?: (object: any) => boolean }} handles
  *           The one handle table, shared with every other kind of object.
  * @property {() => any} [currentThread]
  *           Whose call this is, for an answer that arrives after the thread has
@@ -1754,7 +1755,8 @@ export function createFileFunctions(host){
                     locks.set(key, kept);
                 }
             }
-            if (closed?.deleteOnClose)
+            // With the last handle to the file, not with a duplicate of it.
+            if (closed?.deleteOnClose && !host.handles.holds?.(closed))
             {
                 files.remove(closed.path);
             }

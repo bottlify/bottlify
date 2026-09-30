@@ -335,6 +335,8 @@ export function createWin32Module(){
                 close: handle=>kernel.handles.close(handle),
                 /** @param {number} handle */
                 typeOf: handle=>kernel.handles.typeOf(handle),
+                /** @param {any} object */
+                holds: object=>kernel.handles.holds(object),
             };
 
             const { setError, lastErrorOf, setErrorOn: setErrorOnBlock } = createThreadState(

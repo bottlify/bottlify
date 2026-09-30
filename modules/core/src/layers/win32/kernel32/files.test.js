@@ -316,6 +316,8 @@ function fakeHandles(){
         },
         /** @param {number} handle */
         has: handle=>entries.has(handle),
+        /** @param {any} object */
+        holds: object=>[...entries.values()].some(entry=>entry.object === object),
     };
 }
 
@@ -1694,6 +1696,18 @@ test('FILE_FLAG_DELETE_ON_CLOSE takes the file away with its handle', ()=>{
         GENERIC_READ | GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE, 0]);
     assert.notEqual(handle, INVALID_HANDLE_VALUE);
     assert.equal(files.stat('C:\\GAME\\SCRATCH.TMP')?.exists, true, 'there while it is open');
+    fns.CloseHandle.handler([handle]);
+    assert.equal(files.stat('C:\\GAME\\SCRATCH.TMP'), null);
+});
+
+test('FILE_FLAG_DELETE_ON_CLOSE waits for the last handle, not a duplicate', ()=>{
+    const { files, fns, at, handles } = setup();
+    const handle = fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\SCRATCH.TMP'),
+        GENERIC_READ | GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE, 0]);
+    // What DuplicateHandle files: a second handle onto the same open file.
+    const duplicate = handles.open('file', handles.resolve(handle));
+    fns.CloseHandle.handler([duplicate]);
+    assert.equal(files.stat('C:\\GAME\\SCRATCH.TMP')?.exists, true, 'the first still holds it');
     fns.CloseHandle.handler([handle]);
     assert.equal(files.stat('C:\\GAME\\SCRATCH.TMP'), null);
 });
