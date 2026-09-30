@@ -30,6 +30,8 @@ const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** What CreateNamedPipe answers where there are no named pipes, as on Windows 9x. */
+const ERROR_CALL_NOT_IMPLEMENTED = 120;
 /** What a mapping of an empty file is refused with, as documented. */
 const ERROR_FILE_INVALID = 1006;
 /** What a read that failed after the caller was parked answers. */
@@ -64,6 +66,7 @@ const FILE_MAP_ALL_ACCESS = 0xf001f;
  *           The error of a thread that is not the one running: a map that
  *           waited for its bytes answers on somebody else's turn.
  * @property {() => any} [currentThread]
+ * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ views: number, waited: number, failed: number }} [metrics]
  *           Counted in place: views mapped, views that waited for their
  *           bytes, views whose bytes never came.
@@ -118,6 +121,12 @@ export function createMappingFunctions(host){
     const fail = (code, result = 0)=>{
         host.setLastError(code);
         return result;
+    };
+
+    /** @param {string} api */
+    const refuseNamedPipe = api=>{
+        host.divergence?.(api, 'there are no named pipes; refused as Windows 9x refuses it');
+        return fail(ERROR_CALL_NOT_IMPLEMENTED, INVALID_HANDLE_VALUE);
     };
 
     /** @param {number} address @param {number} value */
@@ -417,6 +426,26 @@ export function createMappingFunctions(host){
                 writeDword(writeHandle >>> 0, host.handles.open('pipe-write', pipe));
                 return 1;
             },
+        },
+
+        /**
+         * HANDLE CreateNamedPipeA(LPCSTR lpName, DWORD dwOpenMode, DWORD dwPipeMode,
+         *   DWORD nMaxInstances, DWORD nOutBufferSize, DWORD nInBufferSize,
+         *   DWORD nDefaultTimeOut, LPSECURITY_ATTRIBUTES lpSecurityAttributes)
+         * HANDLE CreateNamedPipeW(LPCWSTR, ...): the same in wide text
+         *
+         * There is no pipe namespace a client could open the other end in, so
+         * the server end is refused the way Windows 9x refuses it, which a
+         * caller of the era already handles; NT would create it, so the
+         * refusal is reported.
+         */
+        CreateNamedPipeA: {
+            argBytes: 32,
+            handler: ()=>refuseNamedPipe('CreateNamedPipeA'),
+        },
+        CreateNamedPipeW: {
+            argBytes: 32,
+            handler: ()=>refuseNamedPipe('CreateNamedPipeW'),
         },
 
         /**

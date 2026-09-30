@@ -1287,6 +1287,7 @@ export function createWin32Module(){
                     }),
                     ...createMappingFunctions({
                         readMemory,
+                        divergence: config?.divergence,
                         writeMemory,
                         readCString,
                         readWideString,
