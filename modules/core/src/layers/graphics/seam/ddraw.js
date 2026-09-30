@@ -322,6 +322,13 @@ export function createDirectDrawSeam(
     /** One facade per model, so one object is one identity. */
     /** @type {WeakMap<object, any>} */
     const facades = new WeakMap();
+    /**
+     * Every DirectDraw object made, for the export that finds a surface by
+     * its DC without naming one.
+     *
+     * @type {Set<WeakRef<any>>}
+     */
+    const roots = new Set();
 
     /**
      * The model, with its counts addressed by interface identifier.
@@ -369,6 +376,7 @@ export function createDirectDrawSeam(
             release: { value: (/** @type {string} */ id)=>root.release(generationOf(id)) },
         });
         facades.set(root, facade);
+        roots.add(new WeakRef(root));
         return facade;
     };
 
@@ -1780,6 +1788,45 @@ export function createDirectDrawSeam(
             fields.writeU32(out >>> 0,
                 publisher.publish(factoryFor(create, version), factoryInterfaces, wanted));
             return DD_OK;
+        },
+
+        /**
+         * HRESULT GetSurfaceFromDC(HDC hdc, IDirectDrawSurface **surface, HDC *device_dc)
+         *
+         * DDRAW.dll's own export: the surface a GetDC handed this DC out
+         * of, whichever DirectDraw object made it, as its first generation.
+         *
+         * @param {number} hdc @param {number} out @param {number} deviceOut
+         */
+        surfaceFromDc(hdc, out, deviceOut){
+            if ((out >>> 0) === 0 || (deviceOut >>> 0) === 0)
+            {
+                if ((out >>> 0) !== 0)
+                {
+                    fields.writeU32(out >>> 0, 0);
+                }
+                return E_INVALIDARG;
+            }
+            for (const reference of roots)
+            {
+                const root = reference.deref();
+                if (!root)
+                {
+                    roots.delete(reference);
+                    continue;
+                }
+                const surface = root.surfaceWithDc?.(hdc >>> 0);
+                if (surface)
+                {
+                    surface.addRef();
+                    handBack(surface, surfaceInterfaces, IID_IDirectDrawSurface, out >>> 0);
+                    fields.writeU32(deviceOut >>> 0, hdc >>> 0);
+                    return DD_OK;
+                }
+            }
+            fields.writeU32(out >>> 0, 0);
+            fields.writeU32(deviceOut >>> 0, 0);
+            return DDERR_NOTFOUND;
         },
 
         /**

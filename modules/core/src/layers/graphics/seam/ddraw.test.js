@@ -474,6 +474,14 @@ test('GetDC is a real device context over the surface, and not a mutex with Lock
     assert.equal(h.surface7(surface, 'GetDC', [out]), DD_OK);
     const hdc = h.box.memory.readU32(out);
     assert.notEqual(hdc, 0xdeadbeef);
+    // DDRAW.dll's export finds the surface by the DC alone, as the first generation.
+    assert.equal(h.ddrawDll.GetSurfaceFromDC.handler([hdc, 0x5500, 0x5504]), DD_OK);
+    assert.equal(h.publisher.objectAt(h.box.memory.readU32(0x5500)), model);
+    h.release(h.box.memory.readU32(0x5500));
+    assert.equal(h.ddrawDll.GetSurfaceFromDC.handler([hdc, 0, 0x5504]) >>> 0, 0x80070057);
+    assert.equal(h.ddrawDll.GetSurfaceFromDC.handler([0x1234, 0x5500, 0x5504]) >>> 0,
+        DDERR_NOTFOUND);
+    assert.deepEqual([h.box.memory.readU32(0x5500), h.box.memory.readU32(0x5504)], [0, 0]);
     assert.deepEqual(h.dcs[0], { event: 'create', handle: hdc, attributes: {
         width: 8, height: 8, pitch: 32, bitCount: 32, bits: model.buffer, palette: null,
         format: '555',

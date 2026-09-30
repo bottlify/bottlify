@@ -544,6 +544,12 @@ export function createGraphicsLibraries(
                         return root;
                     }),
             },
+            /** HRESULT GetSurfaceFromDC(HDC, IDirectDrawSurface **, HDC *) */
+            GetSurfaceFromDC: {
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([hdc, out, deviceOut])=>ddraw.surfaceFromDc(hdc, out, deviceOut),
+            },
             /** HRESULT DllCanUnloadNow(void), which COM asks for. */
             DllCanUnloadNow: { argBytes: 0, handler: ()=>S_OK },
 
