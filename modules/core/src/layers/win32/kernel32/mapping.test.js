@@ -282,3 +282,14 @@ test('CreateNamedPipe is refused as Windows 9x refuses it, and says so', ()=>{
     assert.equal(said.length, 2);
     assert.match(said[1], /^CreateNamedPipeW: /);
 });
+
+test('CreateMailslot is refused, and says so', ()=>{
+    const { fns, errors, said } = setup();
+    for (const entry of [fns.CreateMailslotA, fns.CreateMailslotW])
+    {
+        assert.equal(entry.argBytes, 16);
+        assert.equal(entry.handler() >>> 0, 0xffffffff);
+        assert.equal(errors.at(-1), 120, 'ERROR_CALL_NOT_IMPLEMENTED');
+    }
+    assert.match(said[1], /^CreateMailslotW: /);
+});
