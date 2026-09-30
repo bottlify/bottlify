@@ -146,6 +146,8 @@ const GGO_GLYPH_INDEX = 0x80;
 const GGO_UNHINTED = 0x100;
 const GLYPHMETRICS_SIZE = 20;
 const GGI_MARK_NONEXISTING_GLYPHS = 1;
+/** GetCharacterPlacement's flag that stops the fit at nMaxExtent. */
+const GCP_MAXEXTENT = 0x100000;
 
 /**
  * The fixed modes, by how many logical units make an inch: MM_LOMETRIC's
@@ -915,6 +917,66 @@ export function createGdiFunctions(host){
                 record(widthOf(dc, character)));
         }
         return 1;
+    };
+
+    /** GetCharacterPlacement in either width. @param {number[]} args @param {boolean} wide */
+    const characterPlacement = ([handle, string, count, maxExtent, results, flags], wide)=>{
+        const dc = dcOf(handle);
+        if (!dc || (count | 0) <= 0 || (string >>> 0) === 0)
+        {
+            return 0;
+        }
+        const text = wide ? wideText(string >>> 0, count | 0, true)
+            : decodeAnsi(host.readMemory(string >>> 0, count | 0));
+        const advances = Array.from(text, character=>widthOf(dc, character));
+        const width = advances.reduce((sum, advance)=>sum + advance, 0);
+        if ((results >>> 0) !== 0)
+        {
+            const [, outString, order, dx, caret, kind, glyphs, room] =
+                readU32s(host, results >>> 0, 8);
+            const placed = Math.min(text.length, room >>> 0 || text.length);
+            /** @param {number} at @param {number[]} values @param {number} size */
+            const put = (at, values, size)=>{
+                if (at === 0)
+                {
+                    return;
+                }
+                const bytes = new Uint8Array(values.length * size);
+                const view = new DataView(bytes.buffer);
+                values.forEach((value, index)=>{
+                    if (size === 4)
+                    {
+                        view.setInt32(index * 4, value, true);
+                    }
+                    else if (size === 2)
+                    {
+                        view.setUint16(index * 2, value, true);
+                    }
+                    else
+                    {
+                        view.setUint8(index, value);
+                    }
+                });
+                host.writeMemory(at, bytes);
+            };
+            const codes = Array.from(text, character=>character.charCodeAt(0)).slice(0, placed);
+            put(outString, codes, wide ? 2 : 1);
+            put(order, codes.map((_, index)=>index), 4);
+            put(dx, advances.slice(0, placed), 4);
+            put(caret, advances.slice(0, placed)
+                .map((_, index)=>advances.slice(0, index).reduce((sum, a)=>sum + a, 0)), 4);
+            put(kind, codes.map(()=>0), 1);
+            put(glyphs, codes, 2);
+            let fit = placed;
+            if ((flags & GCP_MAXEXTENT) !== 0)
+            {
+                let sum = 0;
+                fit = advances.findIndex(advance=>(sum += advance) > (maxExtent | 0));
+                fit = fit < 0 ? placed : fit;
+            }
+            writeU32s(host, (results >>> 0) + 28, [placed, fit]);
+        }
+        return (width & 0xffff | currentMetrics(dc).height << 16) >>> 0;
     };
 
     /** @param {number} handle @param {string} api */
@@ -3592,6 +3654,25 @@ export function createGdiFunctions(host){
                 }
                 return 1;
             },
+        },
+
+        /**
+         * DWORD GetCharacterPlacementA/W(HDC hdc, LPCSTR/LPCWSTR lpString, int nCount,
+         *   int nMexExtent, LPGCP_RESULTS lpResults, DWORD dwFlags)
+         *
+         * Left to right, one glyph per character, placed by its advance:
+         * the arrays the results name are filled as far as they reach, and
+         * the answer is the string's extent, width low and height high.
+         */
+        GetCharacterPlacementA: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>characterPlacement(args, false),
+        },
+        GetCharacterPlacementW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>characterPlacement(args, true),
         },
 
         /** BOOL GetCharWidth32W(HDC hdc, UINT iFirst, UINT iLast, LPINT lpBuffer) */

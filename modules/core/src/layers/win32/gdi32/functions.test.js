@@ -2459,3 +2459,20 @@ test('GetTextExtentExPoint answers the extent of each prefix and how many fit', 
     assert.deepEqual([memory.u32(FIT + 8), memory.u32(FIT + 12), memory.u32(FIT + 16) & 0xffff],
         [0xe0, 1, 0x20], 'the printable range and past it');
 });
+
+test('GetCharacterPlacement places one glyph per character by its advance', ()=>{
+    const { fns, hdc, memory } = withDC();
+    const TEXT = STRUCT + 0xe00;
+    const RESULTS = STRUCT + 0xe40;
+    const CARET = STRUCT + 0xe80;
+    const GLYPHS = STRUCT + 0xec0;
+    memory.putString(TEXT, 'Wine Test');
+    memory.putU32s(RESULTS, [36, 0, 0, 0, CARET, 0, GLYPHS, 20, 0]);
+    const size = fns.GetCharacterPlacementA.handler([hdc, TEXT, 9, 0, RESULTS, 0]);
+    assert.ok(size > 0);
+    assert.equal(memory.u32(RESULTS + 28), 9, 'nGlyphs');
+    assert.equal(memory.u32(GLYPHS) & 0xffff, 'W'.charCodeAt(0));
+    assert.equal(memory.u32(CARET), 0);
+    assert.equal(fns.GetCharacterPlacementA.handler([hdc, TEXT, 9, 0, 0, 0]), size, 'no results');
+    assert.equal(fns.GetCharacterPlacementA.handler([hdc, TEXT, 0, 0, RESULTS, 0]), 0);
+});
