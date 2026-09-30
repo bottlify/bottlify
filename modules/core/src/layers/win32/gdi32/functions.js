@@ -83,11 +83,13 @@ const OBJ_REGION = 8;
 const OBJ_MEMDC = 10;
 const OBJ_ENHMETADC = 12;
 const OBJ_ENHMETAFILE = 13;
+const OBJ_METADC = 4;
+const OBJ_METAFILE = 9;
 
 /** @type {Record<string, number>} */
 const OBJECT_TYPES = {
     pen: OBJ_PEN, brush: OBJ_BRUSH, palette: OBJ_PAL, font: OBJ_FONT, bitmap: OBJ_BITMAP,
-    region: OBJ_REGION, enhmetafile: OBJ_ENHMETAFILE,
+    region: OBJ_REGION, enhmetafile: OBJ_ENHMETAFILE, metafile: OBJ_METAFILE,
 };
 
 /** Brush styles. BS_PATTERN's hatch field is a bitmap handle instead of an index. */
@@ -646,7 +648,12 @@ export function createGdiFunctions(host){
             boundsState: 0,
             /** @type {any[]} */
             saved: [],
-            /** Whether CreateEnhMetaFile made it, which only CloseEnhMetaFile ends. */
+            /**
+             * Which kind of metafile a Create made it for, whose Close alone
+             * ends it; false for any other DC.
+             *
+             * @type {false | 'enhmetafile' | 'metafile'}
+             */
             metafile: false,
         };
         dc.hdc = host.handles.open('dc', dc);
@@ -681,8 +688,9 @@ export function createGdiFunctions(host){
      * does not write.
      *
      * @param {number} reference @param {number} filename @param {string} api
+     * @param {'enhmetafile' | 'metafile'} [kind]  which Close ends it
      */
-    const createEnhMetaFile = (reference, filename, api)=>{
+    const createEnhMetaFile = (reference, filename, api, kind = 'enhmetafile')=>{
         if ((reference >>> 0) !== 0 && !dcOf(reference))
         {
             return 0;
@@ -696,7 +704,7 @@ export function createGdiFunctions(host){
         host.divergence?.(api, 'drawing on the metafile DC is not recorded; it closes empty');
         const dc = createContext(0, 'memory');
         select(dc, defaultBitmap());
-        dc.metafile = true;
+        dc.metafile = kind;
         return dc.hdc;
     };
 
@@ -1673,7 +1681,7 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([handle])=>{
                 const dc = dcOf(handle);
-                if (!dc?.metafile)
+                if (dc?.metafile !== 'enhmetafile')
                 {
                     host.setLastError?.(ERROR_INVALID_HANDLE);
                     return 0;
@@ -1681,6 +1689,47 @@ export function createGdiFunctions(host){
                 destroyContext(dc);
                 return objects.create('enhmetafile', {});
             },
+        },
+
+        /**
+         * HDC CreateMetaFileA(LPCSTR pszFile) / CreateMetaFileW(LPCWSTR)
+         *
+         * The Windows 3 metafile, made as the enhanced one is: in memory only,
+         * closing empty.
+         */
+        CreateMetaFileA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([file])=>createEnhMetaFile(0, file, 'CreateMetaFileA', 'metafile'),
+        },
+        CreateMetaFileW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([file])=>createEnhMetaFile(0, file, 'CreateMetaFileW', 'metafile'),
+        },
+
+        /** HMETAFILE CloseMetaFile(HDC hdc) */
+        CloseMetaFile: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                if (dc?.metafile !== 'metafile')
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                destroyContext(dc);
+                return objects.create('metafile', {});
+            },
+        },
+
+        /** BOOL DeleteMetaFile(HMETAFILE hmf) */
+        DeleteMetaFile: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>(objects.get(handle)?.type === 'metafile'
+                && objects.remove(handle) ? 1 : 0),
         },
 
         /** BOOL DeleteEnhMetaFile(HENHMETAFILE hmf) */
@@ -1822,7 +1871,7 @@ export function createGdiFunctions(host){
                 {
                     if (dc.metafile)
                     {
-                        return OBJ_ENHMETADC;
+                        return dc.metafile === 'metafile' ? OBJ_METADC : OBJ_ENHMETADC;
                     }
                     return dc.kind === 'memory' ? OBJ_MEMDC : OBJ_DC;
                 }
@@ -2714,7 +2763,6 @@ export function createGdiFunctions(host){
          *
          * HMETAFILE SetMetaFileBitsEx(UINT cbBuffer, const BYTE *lpData)
          * BOOL PlayMetaFile(HDC hdc, HMETAFILE hmf)
-         * BOOL DeleteMetaFile(HMETAFILE hmf)
          */
         SetMetaFileBitsEx: {
             argBytes: 8,
@@ -2723,11 +2771,6 @@ export function createGdiFunctions(host){
 
         PlayMetaFile: {
             argBytes: 8,
-            handler: ()=>0,
-        },
-
-        DeleteMetaFile: {
-            argBytes: 4,
             handler: ()=>0,
         },
 

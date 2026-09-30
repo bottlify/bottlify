@@ -1513,7 +1513,7 @@ test('the extents a DC has are read back, and a metafile is refused', ()=>{
 
     assert.equal(fns.SetMetaFileBitsEx.handler(), 0);
     assert.equal(fns.PlayMetaFile.handler(), 0);
-    assert.equal(fns.DeleteMetaFile.handler(), 0);
+    assert.equal(fns.DeleteMetaFile.handler([0x7777]), 0, 'not a metafile');
     assert.deepEqual([fns.GetViewportExtEx, fns.GetWindowExtEx, fns.SetMetaFileBitsEx,
         fns.PlayMetaFile, fns.DeleteMetaFile].map(fn=>fn.argBytes), [8, 8, 8, 8, 4]);
 });
@@ -2326,4 +2326,13 @@ test('an enhanced metafile DC closes into a metafile handle, and says it recorde
     memory.putString(STRUCT, 'out.emf');
     assert.equal(fns.CreateEnhMetaFileA.handler([0, STRUCT, 0, 0]), 0);
     assert.ok(said.some(line=>line.includes('on disk')), 'a file is refused, and reported');
+
+    // The Windows 3 metafile the same way, each Close ending only its own kind.
+    const old = fns.CreateMetaFileA.handler([0]);
+    assert.equal(fns.GetObjectType.handler([old]), 4, 'OBJ_METADC');
+    assert.equal(fns.CloseEnhMetaFile.handler([old]), 0);
+    const closed = fns.CloseMetaFile.handler([old]);
+    assert.equal(fns.GetObjectType.handler([closed]), 9, 'OBJ_METAFILE');
+    assert.equal(fns.DeleteEnhMetaFile.handler([closed]), 0);
+    assert.equal(fns.DeleteMetaFile.handler([closed]), 1);
 });
