@@ -63,6 +63,10 @@ const MAX_NAME = 259;
 const A_SUBDIR = 0x10;
 const A_ARCH = 0x20;
 
+/** The fixed part of a tmpnam name, as the runtime spells it from its process. */
+const TMPNAM_STEM = '1c';
+const TMPNAM_BUFFER = 260;
+
 /**
  * Splits a path into drive, directory, filename and extension.
  *
@@ -356,6 +360,10 @@ export function createPathFunctions(host){
 
     /** Where a name comes from next: each one given differs from the last. */
     let nextTemporary = 1;
+
+    /** How many names tmpnam has handed out, and its own buffer once made. */
+    let tmpnamCount = 0;
+    let tmpnamBuffer = 0;
 
     /**
      * _tempnam's name: the first directory of TMP's, `dir` and the current
@@ -740,6 +748,42 @@ export function createPathFunctions(host){
                 const address = host.allocate(encodeAnsi(text).length + 1);
                 writeString(address, text);
                 return address;
+            },
+        },
+
+        /**
+         * char *tmpnam(char *str)
+         *
+         * A name in the root of the current drive no file has: a backslash,
+         * 's', the stem, a dot and a count -- nothing after the dot the first
+         * time. Into the caller's buffer, or one of the runtime's own that
+         * the next call writes over.
+         */
+        tmpnam: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([buffer])=>{
+                const next = ()=>`\\s${TMPNAM_STEM}.${tmpnamCount === 0 ? ''
+                    : tmpnamCount.toString(32)}`;
+                let name = next();
+                while (exists(name))
+                {
+                    tmpnamCount++;
+                    name = next();
+                }
+                tmpnamCount++;
+                let at = buffer >>> 0;
+                if (at === 0)
+                {
+                    tmpnamBuffer ||= host.allocate(TMPNAM_BUFFER);
+                    at = tmpnamBuffer;
+                }
+                if (at !== 0)
+                {
+                    writeString(at, name);
+                }
+                return at;
             },
         },
 
