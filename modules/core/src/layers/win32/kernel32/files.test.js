@@ -1969,3 +1969,18 @@ test('WriteFileGather and ReadFileScatter move a page per segment and complete o
     assert.deepEqual(done.at(-1), [4, 0x500]);
     assert.equal(fns.ReadFileScatter.handler([handle, 0x300, 4, 0, 0]), 0, 'overlapped only');
 });
+
+test('GetFileAttributesEx fills the head a find would, and nothing past it', ()=>{
+    const { memory, files, error, fns, at } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdefghij');
+    memory.bytes.fill(0xa5, 0x400, 0x440);
+    assert.equal(fns.GetFileAttributesExA.argBytes, 12);
+    assert.equal(fns.GetFileAttributesExA.handler([at(NAME, 'C:\\GAME\\SAVE.DAT'), 0, 0x400]), 1);
+    assert.equal(memory.dword(0x400), fns.GetFileAttributesA.handler([NAME]));
+    assert.equal(memory.dword(0x400 + 32), 10, 'nFileSizeLow');
+    assert.equal(memory.bytes[0x400 + 36], 0xa5, 'thirty-six bytes');
+    assert.equal(fns.GetFileAttributesExA.handler([NAME, 1, 0x400]), 0, 'one level');
+    assert.equal(error.code, 87);
+    assert.equal(fns.GetFileAttributesExA.handler([at(NAME, 'C:\\GAME\\NONE.DAT'), 0, 0x400]), 0);
+    assert.equal(error.code, 2);
+});

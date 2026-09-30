@@ -51,6 +51,9 @@ const ERROR_FILE_EXISTS = 80;
 const ERROR_INVALID_PARAMETER = 87;
 /** The unit a FILE_SEGMENT_ELEMENT names: one page of the caller's memory. */
 const PAGE_SIZE = 4096;
+/** GetFileAttributesEx's one information level. */
+const GET_FILE_EX_INFO_STANDARD = 0;
+const WIN32_FILE_ATTRIBUTE_DATA_SIZE = 36;
 const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_DIR_NOT_EMPTY = 145;
@@ -657,14 +660,12 @@ export function createFileFunctions(host){
     };
 
     /**
-     * Fills in a whole WIN32_FIND_DATAA. Written in one piece so that no field
-     * can be left holding whatever the caller's buffer had in it -- the times
-     * and the alternate 8.3 name we have nothing to say about are zeros the
-     * guest can read, not gaps.
+     * A WIN32_FIND_DATAA with its head filled -- attributes, the three times,
+     * the size -- which is also the whole of a WIN32_FILE_ATTRIBUTE_DATA.
      *
-     * @param {number} address @param {DirectoryEntry} entry
+     * @param {DirectoryEntry | FileStat} entry
      */
-    const writeFindData = (address, entry)=>{
+    const findDataHead = entry=>{
         const data = new Uint8Array(WIN32_FIND_DATAA.SIZE);
         const view = new DataView(data.buffer);
         view.setUint32(WIN32_FIND_DATAA.dwFileAttributes, attributesOf(entry), true);
@@ -678,6 +679,19 @@ export function createFileFunctions(host){
         const size = entry.size ?? 0;
         view.setUint32(WIN32_FIND_DATAA.nFileSizeHigh, high(size), true);
         view.setUint32(WIN32_FIND_DATAA.nFileSizeLow, low(size), true);
+        return data;
+    };
+
+    /**
+     * Fills in a whole WIN32_FIND_DATAA. Written in one piece so that no field
+     * can be left holding whatever the caller's buffer had in it -- the times
+     * and the alternate 8.3 name we have nothing to say about are zeros the
+     * guest can read, not gaps.
+     *
+     * @param {number} address @param {DirectoryEntry} entry
+     */
+    const writeFindData = (address, entry)=>{
+        const data = findDataHead(entry);
         data.set(encodeAnsi(entry.name.slice(0, MAX_PATH - 1)), WIN32_FIND_DATAA.cFileName);
         host.writeMemory(address, data);
     };
@@ -1195,6 +1209,23 @@ export function createFileFunctions(host){
             return fail(missing(path), INVALID_FILE_ATTRIBUTES);
         }
         return attributesOf(entry);
+    });
+
+    /** WIN32_FILE_ATTRIBUTE_DATA is the head of a WIN32_FIND_DATA. */
+    const getFileAttributesEx = bothForms(12, ([name, level, out], text)=>{
+        if ((level >>> 0) !== GET_FILE_EX_INFO_STANDARD)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const path = text.path(name);
+        const entry = files.stat(path);
+        if (!entry || !entry.exists)
+        {
+            return fail(missing(path));
+        }
+        host.writeMemory(out >>> 0,
+            findDataHead(entry).subarray(0, WIN32_FILE_ATTRIBUTE_DATA_SIZE));
+        return 1;
     });
 
     const setFileAttributes = bothForms(8, ([name, attributes], text)=>{
@@ -2391,6 +2422,8 @@ export function createFileFunctions(host){
         /** DWORD GetFileAttributes(LPCSTR) -- one body, both spellings. */
         GetFileAttributesA: getFileAttributes.ansi,
         GetFileAttributesW: getFileAttributes.wide,
+        GetFileAttributesExA: getFileAttributesEx.ansi,
+        GetFileAttributesExW: getFileAttributesEx.wide,
 
         /** BOOL SetFileAttributes(LPCSTR, DWORD dwFileAttributes) -- one body, both spellings. */
         SetFileAttributesA: setFileAttributes.ansi,
