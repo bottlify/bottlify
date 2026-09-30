@@ -166,6 +166,9 @@ const DIB_BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 
 /** CombineRgn's modes. */
 /** GdiSetBatchLimit's limit until a program sets one. */
+/** The two ways an arc can run. */
+const AD_COUNTERCLOCKWISE = 1;
+const AD_CLOCKWISE = 2;
 /** The raster operation that copies the source as it is. */
 const SRCCOPY = 0x00cc0020;
 const DEFAULT_BATCH_LIMIT = 20;
@@ -1017,8 +1020,13 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                const points = arcPoints(left | 0, top | 0, right | 0, bottom | 0,
-                    xStart | 0, yStart | 0, xEnd | 0, yEnd | 0);
+                // Clockwise is the counterclockwise arc from the end radial back.
+                const clockwise = dcOf(handle)?.arcDirection === AD_CLOCKWISE;
+                const points = clockwise
+                    ? arcPoints(left | 0, top | 0, right | 0, bottom | 0,
+                        xEnd | 0, yEnd | 0, xStart | 0, yStart | 0).reverse()
+                    : arcPoints(left | 0, top | 0, right | 0, bottom | 0,
+                        xStart | 0, yStart | 0, xEnd | 0, yEnd | 0);
                 const back = interfaces.moveToEx(handle >>> 0, points[0].x, points[0].y);
                 for (const point of points.slice(1))
                 {
@@ -1029,6 +1037,37 @@ export function createDrawingFunctions(
                     interfaces.moveToEx(handle >>> 0, back.x, back.y);
                 }
                 return 1;
+            },
+        },
+
+        /**
+         * int SetArcDirection(HDC hdc, int dir) / int GetArcDirection(HDC hdc)
+         *
+         * Which way Arc runs, counterclockwise until a program says otherwise;
+         * anything but the two directions is ERROR_INVALID_PARAMETER.
+         */
+        SetArcDirection: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, direction])=>{
+                const dc = dcOf(handle);
+                if (!dc || ((direction | 0) !== AD_COUNTERCLOCKWISE
+                    && (direction | 0) !== AD_CLOCKWISE))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const previous = dc.arcDirection ?? AD_COUNTERCLOCKWISE;
+                dc.arcDirection = direction | 0;
+                return previous;
+            },
+        },
+        GetArcDirection: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                return dc ? dc.arcDirection ?? AD_COUNTERCLOCKWISE : 0;
             },
         },
 

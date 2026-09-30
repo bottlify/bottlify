@@ -1311,3 +1311,15 @@ test('a rounded rectangle is a polygon inside its box, square where the corners 
     assert.equal(fns.Ellipse.handler([hdc, 0, 0, 5, 5]), 1);
     assert.deepEqual(graphics.calls.at(-1), ['ellipse', hdc, 0, 0, 5, 5]);
 });
+
+test('the arc direction is the DC\'s, and a clockwise Arc runs the other way round', ()=>{
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+    assert.equal(fns.GetArcDirection.handler([hdc]), 1, 'counterclockwise to begin with');
+    assert.equal(fns.SetArcDirection.handler([hdc, 2]), 1);
+    assert.equal(fns.SetArcDirection.handler([hdc, 3]), 0, 'no such direction');
+    assert.equal(fns.GetArcDirection.handler([hdc]), 2);
+    fns.Arc.handler([hdc, 0, 0, 20, 20, 20, 10, 10, 0]);
+    const drawn = graphics.calls.filter(call=>call[0] === 'lineTo').map(([, , x, y])=>({ x, y }));
+    assert.ok(drawn.some(({ x })=>x === 0), 'the long way round, past the left side');
+});
