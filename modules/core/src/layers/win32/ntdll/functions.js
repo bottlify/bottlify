@@ -132,6 +132,9 @@ const alias = (table, names)=>Object.fromEntries(
         .filter(([, from])=>table[from] !== undefined)
         .map(([to, from])=>[to, table[from]]));
 
+/** Where a thread block keeps its process's block. */
+const TEB_PEB = 0x30;
+
 /**
  * Builds the function table: name -> { argBytes, handler }.
  *
@@ -235,6 +238,20 @@ export function createNtdllFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([status])=>toDosError(status),
+        },
+
+        /** PPEB RtlGetCurrentPeb(void): where the running thread's block says it is. */
+        RtlGetCurrentPeb: {
+            argBytes: 0,
+            handler: ()=>{
+                const teb = host.teb();
+                if (teb === 0)
+                {
+                    return 0;
+                }
+                const bytes = host.readMemory(teb + TEB_PEB, 4);
+                return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+            },
         },
 
         /**

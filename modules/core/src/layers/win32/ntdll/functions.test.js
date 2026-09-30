@@ -243,3 +243,12 @@ test('RtlWalkHeap is HeapWalk answered as a status, its end STATUS_NO_MORE_ENTRI
     assert.equal(fns.RtlNtStatusToDosError.handler([0x8000001a]), 259,
         'and it reads as ERROR_NO_MORE_ITEMS');
 });
+
+test('RtlGetCurrentPeb reads the process block out of the running thread\'s', ()=>{
+    const host = /** @type {any} */ (fakeHost());
+    host.teb = ()=>0x200;
+    host.bytes.set([0x00, 0x30, 0x40, 0x7f], 0x230);
+    assert.equal(createNtdllFunctions(host).RtlGetCurrentPeb.handler([]), 0x7f403000);
+    host.teb = ()=>0;
+    assert.equal(createNtdllFunctions(host).RtlGetCurrentPeb.handler([]), 0);
+});
