@@ -35,6 +35,7 @@ import { parseTypeLibrary } from './sltg.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { dateOf, fieldsOf, rollYear } from './dates.js';
 
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
 const PREFIX_BYTES = 4;
@@ -271,6 +272,43 @@ export function createAutomationFunctions(host){
 
     /** The IErrorInfo a program last set and nothing has yet collected. */
     let heldErrorInfo = 0;
+
+    /** @param {number} low @param {number} high */
+    const doubleOf = (low, high)=>{
+        const view = new DataView(new ArrayBuffer(8));
+        view.setUint32(0, low >>> 0, true);
+        view.setUint32(4, high >>> 0, true);
+        return view.getFloat64(0, true);
+    };
+
+    /** @param {number} address @param {number} value */
+    const writeDouble = (address, value)=>{
+        const bytes = new Uint8Array(8);
+        new DataView(bytes.buffer).setFloat64(0, value, true);
+        host.writeMemory(address, bytes);
+    };
+
+    /** Signed words, as SYSTEMTIME's fields are read. @param {number} address @param {number} count */
+    const readWords = (address, count)=>{
+        const view = peek(address, count * 2);
+        return Array.from({ length: count }, (_, index)=>view.getInt16(index * 2, true));
+    };
+
+    /** @param {number} address @param {number[]} words */
+    const writeWords = (address, words)=>{
+        const bytes = new Uint8Array(words.length * 2);
+        const view = new DataView(bytes.buffer);
+        words.forEach((word, index)=>view.setUint16(index * 2, word & 0xffff, true));
+        host.writeMemory(address, bytes);
+    };
+
+    /**
+     * A UDATE: SYSTEMTIME's eight words, then the day of the year.
+     *
+     * @param {import('./dates.js').Fields} fields
+     */
+    const udateWords = fields=>[fields.year, fields.month, fields.dayOfWeek, fields.day,
+        fields.hour, fields.minute, fields.second, fields.milliseconds, fields.dayOfYear];
 
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
@@ -1302,6 +1340,120 @@ export function createAutomationFunctions(host){
                 return bstr === 0 ? E_OUTOFMEMORY : S_OK;
             },
         },
+        /** HRESULT VarUdateFromDate(DATE dateIn, ULONG dwFlags, UDATE *pudateOut) */
+        VarUdateFromDate: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([low, high, , out])=>{
+                const fields = fieldsOf(doubleOf(low, high));
+                if (!fields)
+                {
+                    return E_INVALIDARG;
+                }
+                writeWords(out >>> 0, udateWords(fields));
+                return S_OK;
+            },
+        },
+
+        /** HRESULT VarDateFromUdate(UDATE *pudateIn, ULONG dwFlags, DATE *pdateOut) */
+        VarDateFromUdate: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([udate, flags, out])=>{
+                const words = readWords(udate >>> 0, 8);
+                if (words[0] > 9999 || words[0] < -9999)
+                {
+                    return E_INVALIDARG;
+                }
+                const { year, month } = rollYear(words[0], words[1]);
+                writeDouble(out >>> 0, dateOf({ year, month, day: words[3], hour: words[4],
+                    minute: words[5], second: words[6] }, flags >>> 0));
+                return S_OK;
+            },
+        },
+
+        /**
+         * INT SystemTimeToVariantTime(LPSYSTEMTIME, double *pvtime)
+         *
+         * Stricter than VarDateFromUdate: every field in its range, save a
+         * day of zero, which is the last of the month before. A two-digit
+         * year below 50 is this century.
+         */
+        SystemTimeToVariantTime: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([time, out])=>{
+                const [year, month, , day, hour, minute, second] = readWords(time >>> 0, 8);
+                if (year < 0 || year > 9999 || month < 1 || month > 12 || day > 31
+                    || hour > 23 || minute > 59 || second > 59)
+                {
+                    return 0;
+                }
+                writeDouble(out >>> 0, dateOf({
+                    year: year < 50 ? 2000 + year : year < 100 ? 1900 + year : year,
+                    month, day, hour, minute, second }));
+                return 1;
+            },
+        },
+
+        /** INT VariantTimeToSystemTime(double vtime, LPSYSTEMTIME lpSystemTime) */
+        VariantTimeToSystemTime: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([low, high, out])=>{
+                const fields = fieldsOf(doubleOf(low, high));
+                if (!fields)
+                {
+                    return 0;
+                }
+                writeWords(out >>> 0, udateWords(fields).slice(0, 8));
+                return 1;
+            },
+        },
+
+        /**
+         * INT DosDateTimeToVariantTime(USHORT wDosDate, USHORT wDosTime, double *pvtime)
+         *
+         * The packed fields as they are, a day or month of zero rolling back
+         * and a day past the month's end rolling on, up to the last DOS year.
+         */
+        DosDateTimeToVariantTime: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([date, time, out])=>{
+                const year = 1980 + ((date >>> 9) & 0x7f);
+                const month = (date >>> 5) & 0xf;
+                const hour = (time >>> 11) & 0x1f;
+                const minute = (time >>> 5) & 0x3f;
+                const second = (time & 0x1f) * 2;
+                if (year > 2099 || month > 12 || hour > 23 || minute > 59 || second > 59)
+                {
+                    return 0;
+                }
+                writeDouble(out >>> 0,
+                    dateOf({ year, month, day: date & 0x1f, hour, minute, second }));
+                return 1;
+            },
+        },
+
+        /** INT VariantTimeToDosDateTime(double vtime, USHORT *pwDosDate, USHORT *pwDosTime) */
+        VariantTimeToDosDateTime: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([low, high, dateOut, timeOut])=>{
+                const fields = fieldsOf(doubleOf(low, high));
+                if (!fields || fields.year < 1980 || fields.year > 2099)
+                {
+                    return 0;
+                }
+                writeWords(dateOut >>> 0, [fields.day | fields.month << 5
+                    | (fields.year - 1980) << 9]);
+                writeWords(timeOut >>> 0, [fields.second >>> 1 | fields.minute << 5
+                    | fields.hour << 11]);
+                return 1;
+            },
+        },
+
         /**
          * HRESULT VarParseNumFromStr(LPCOLESTR strIn, LCID lcid, ULONG dwFlags,
          *                            NUMPARSE *pnumprs, BYTE *rgbDig)
