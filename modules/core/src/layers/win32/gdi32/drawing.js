@@ -166,6 +166,8 @@ const DIB_BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 
 /** CombineRgn's modes. */
 /** GdiSetBatchLimit's limit until a program sets one. */
+/** The raster operation that copies the source as it is. */
+const SRCCOPY = 0x00cc0020;
 const DEFAULT_BATCH_LIMIT = 20;
 /** The static colours are the system's: GetSystemPaletteUse. */
 const SYSPAL_STATIC = 1;
@@ -679,6 +681,30 @@ export function createDrawingFunctions(
                 }
                 return interfaces.stretchBlt(dest >>> 0, x | 0, y | 0, cx | 0, cy | 0,
                     source >>> 0, x1 | 0, y1 | 0, cx1 | 0, cy1 | 0, rop >>> 0) ? 1 : 0;
+            },
+        },
+
+        /**
+         * BOOL GdiTransparentBlt(HDC hdcDest, int xDest, int yDest, int wDest, int hDest,
+         *   HDC hdcSrc, int xSrc, int ySrc, int wSrc, int hSrc, UINT crTransparent)
+         *
+         * A stretch that leaves the key colour's pixels out. The drawing
+         * layer copies every pixel, the key's too, so the copy is made whole
+         * and that is reported; a negative size is refused, as it is there.
+         */
+        GdiTransparentBlt: {
+            argBytes: 44,
+            /** @param {number[]} args */
+            handler: ([dest, x, y, cx, cy, source, x1, y1, cx1, cy1])=>{
+                const interfaces = bound(dest);
+                if (!interfaces || !bound(source) || (cx | 0) < 0 || (cy | 0) < 0
+                    || (cx1 | 0) < 0 || (cy1 | 0) < 0)
+                {
+                    return 0;
+                }
+                host.divergence?.('GdiTransparentBlt', 'the key colour is copied too');
+                return interfaces.stretchBlt(dest >>> 0, x | 0, y | 0, cx | 0, cy | 0,
+                    source >>> 0, x1 | 0, y1 | 0, cx1 | 0, cy1 | 0, SRCCOPY) ? 1 : 0;
             },
         },
 

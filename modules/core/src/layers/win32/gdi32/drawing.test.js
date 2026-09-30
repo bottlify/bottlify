@@ -336,6 +336,10 @@ test('the blits that need no source, and the ones that scale, reach the service'
 
     assert.equal(fns.PatBlt.handler([hdc, 1, 2, 30, 40, PATCOPY]), 1);
     assert.equal(fns.StretchBlt.handler([hdc, 0, 0, 10, 10, hdc, 0, 0, 5, 5, SRCCOPY]), 1);
+    assert.equal(fns.GdiTransparentBlt.handler([hdc, 0, 0, 10, 10, hdc, 0, 0, 5, 5, 0xff]), 1,
+        'a transparent blit is a stretch, the key copied too');
+    assert.equal(graphics.calls.filter(call=>call[0] === 'stretchBlt').at(-1)?.at(-1), SRCCOPY);
+    assert.equal(fns.GdiTransparentBlt.handler([hdc, 0, 0, -1, 10, hdc, 0, 0, 5, 5, 0]), 0);
     assert.equal(fns.SetStretchBltMode.handler([hdc, 3]), 1, 'the previous mode comes back');
     assert.equal(fns.GetStretchBltMode.handler([hdc]), 3);
 
