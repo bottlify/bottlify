@@ -152,6 +152,8 @@ const MAX_STRING = 0x7fffffff;
 /** Codes this surface can also report. */
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** What DeactivateActCtx answers for a cookie that is not the innermost. */
+const ERROR_SXS_INVALID_DEACTIVATION = 14065;
 /** What CreateActCtx sets when it cannot build a context from a manifest. */
 const ERROR_SXS_CANT_GEN_ACTCTX = 14001;
 const INVALID_HANDLE_VALUE = 0xffffffff;
@@ -366,6 +368,9 @@ export function createSystemFunctions(host){
         const bytes = host.readMemory(address, 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
+
+    /** @type {number[]} What ActivateActCtx put on the stack, innermost last. */
+    const activations = [];
 
     /**
      * CreateActCtxA and CreateActCtxW, which differ only in the strings
@@ -978,6 +983,60 @@ export function createSystemFunctions(host){
          */
         CreateActCtxA: { argBytes: 4, handler: createActCtx('CreateActCtxA') },
         CreateActCtxW: { argBytes: 4, handler: createActCtx('CreateActCtxW') },
+
+        /**
+         * BOOL ActivateActCtx(HANDLE hActCtx, ULONG_PTR *lpCookie)
+         * BOOL DeactivateActCtx(DWORD dwFlags, ULONG_PTR ulCookie)
+         * BOOL GetCurrentActCtx(HANDLE *lphActCtx)
+         *
+         * A stack of what was activated, the cookie naming its place. No
+         * context can have been built, so the stack only ever holds what a
+         * caller handed back from a refused CreateActCtx, and the current
+         * context is always none.
+         */
+        ActivateActCtx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, cookie])=>{
+                if ((cookie >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                activations.push(handle >>> 0);
+                writeDword(cookie >>> 0, activations.length);
+                return 1;
+            },
+        },
+        DeactivateActCtx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, cookie])=>{
+                if ((cookie >>> 0) !== activations.length || activations.length === 0)
+                {
+                    host.setLastError(ERROR_SXS_INVALID_DEACTIVATION);
+                    return 0;
+                }
+                activations.pop();
+                return 1;
+            },
+        },
+        GetCurrentActCtx: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                writeDword(out >>> 0, 0);
+                return 1;
+            },
+        },
+        /** void AddRefActCtx(HANDLE) and ReleaseActCtx(HANDLE): there is nothing to count. */
+        AddRefActCtx: { argBytes: 4, handler: ()=>0 },
+        ReleaseActCtx: { argBytes: 4, handler: ()=>0 },
 
         /**
          * UINT SetErrorMode(UINT uMode)

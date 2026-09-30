@@ -664,3 +664,20 @@ test('CreateActCtx fails as for an unusable manifest, and says it diverged', ()=
     assert.equal(host.errors.at(-1), 87, 'nor is one too short to name its source');
     assert.equal(said.length, 2, 'a bad parameter is the real answer, not a divergence');
 });
+
+test('activations stack by cookie, and the current context is always none', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    host.view.setUint32(0x300, 0xdeadbeef, true);
+    assert.equal(fns.GetCurrentActCtx.handler([0x300]), 1);
+    assert.equal(host.view.getUint32(0x300, true), 0);
+    assert.equal(fns.ActivateActCtx.handler([0xffffffff, 0x304]), 1);
+    assert.equal(fns.ActivateActCtx.handler([0xffffffff, 0x308]), 1);
+    const inner = host.view.getUint32(0x308, true);
+    assert.equal(fns.DeactivateActCtx.handler([0, host.view.getUint32(0x304, true)]), 0,
+        'only the innermost comes off');
+    assert.equal(host.errors.at(-1), 14065);
+    assert.equal(fns.DeactivateActCtx.handler([0, inner]), 1);
+    assert.equal(fns.DeactivateActCtx.handler([0, host.view.getUint32(0x304, true)]), 1);
+    assert.equal(fns.ActivateActCtx.handler([0, 0]), 0, 'no cookie to hand back');
+});
