@@ -2358,3 +2358,31 @@ test('an enhanced metafile DC closes into a metafile handle, and says it recorde
     assert.equal(fns.DeleteEnhMetaFile.handler([closed]), 0);
     assert.equal(fns.DeleteMetaFile.handler([closed]), 1);
 });
+
+test('a world transform needs GM_ADVANCED, composes, and maps LPtoDP and DPtoLP', ()=>{
+    const { fns, hdc, memory } = withDC();
+    const XF = STRUCT + 0x900;
+    const PT = STRUCT + 0x940;
+    const view = new DataView(memory.bytes.buffer);
+    const putXform = (/** @type {number[]} */ values)=>values
+        .forEach((value, index)=>view.setFloat32(XF + index * 4, value, true));
+    putXform([1, 0, 0, -1, 0, 35]);
+    assert.equal(fns.SetWorldTransform.handler([hdc, XF]), 0, 'not in GM_COMPATIBLE');
+    assert.equal(fns.SetGraphicsMode.handler([hdc, 2]), 1);
+    assert.equal(fns.SetWorldTransform.handler([hdc, XF]), 1);
+    memory.putU32s(PT, [10, 10]);
+    assert.equal(fns.LPtoDP.handler([hdc, PT, 1]), 1);
+    assert.deepEqual([memory.i32(PT), memory.i32(PT + 4)], [10, 25], 'flipped about 17.5');
+    assert.equal(fns.DPtoLP.handler([hdc, PT, 1]), 1);
+    assert.deepEqual([memory.i32(PT), memory.i32(PT + 4)], [10, 10], 'and back');
+    assert.equal(fns.SetGraphicsMode.handler([hdc, 1]), 0, 'not back while transformed');
+
+    putXform([2, 0, 0, 2, 0, 0]);
+    assert.equal(fns.ModifyWorldTransform.handler([hdc, XF, 3]), 1, 'right: after the flip');
+    assert.equal(fns.GetWorldTransform.handler([hdc, XF]), 1);
+    assert.deepEqual([0, 1, 2, 3, 4, 5].map(index=>view.getFloat32(XF + index * 4, true)),
+        [2, 0, 0, -2, 0, 70]);
+    assert.equal(fns.ModifyWorldTransform.handler([hdc, 0, 1]), 1, 'MWT_IDENTITY');
+    assert.equal(fns.SetGraphicsMode.handler([hdc, 1]), 2);
+    assert.equal(fns.GetGraphicsMode.handler([hdc]), 1);
+});

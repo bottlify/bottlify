@@ -230,6 +230,14 @@ const PS_ALTERNATE = 8;
 const PS_TYPE_MASK = 0x000f0000;
 const PS_GEOMETRIC = 0x00010000;
 
+/** The graphics modes, and ModifyWorldTransform's three ways. */
+const GM_COMPATIBLE = 1;
+const GM_ADVANCED = 2;
+const MWT_IDENTITY = 1;
+const MWT_LEFTMULTIPLY = 2;
+const MWT_RIGHTMULTIPLY = 3;
+const IDENTITY_XFORM = Object.freeze([1, 0, 0, 1, 0, 0]);
+
 const DCB_RESET = 0x0001;
 const DCB_ACCUMULATE = 0x0002;
 const DCB_SET = DCB_RESET | DCB_ACCUMULATE;
@@ -938,10 +946,17 @@ export function createGdiFunctions(host){
      * A logical point as the device sees it, or a device point as the
      * program's logical space names it: what LPtoDP and DPtoLP answer.
      *
-     * @param {any} dc @param {{ x: number, y: number }} point
+     * @param {any} dc @param {{ x: number, y: number }} given
      * @param {boolean} toDevice
      */
-    const transform = (dc, point, toDevice)=>{
+    const transform = (dc, given, toDevice)=>{
+        const world = dc.world ?? null;
+        // The world transform comes before the page's on the way to the
+        // device, and is undone after it on the way back.
+        const point = world && toDevice ? {
+            x: Math.round(world[0] * given.x + world[2] * given.y + world[4]),
+            y: Math.round(world[1] * given.x + world[3] * given.y + world[5]),
+        } : given;
         const [from, to, fromExt, toExt] = toDevice
             ? [dc.windowOrg, dc.viewportOrg, dc.windowExt, dc.viewportExt]
             : [dc.viewportOrg, dc.windowOrg, dc.viewportExt, dc.windowExt];
@@ -955,7 +970,58 @@ export function createGdiFunctions(host){
         {
             result.x = edge - result.x;
         }
+        if (world && !toDevice)
+        {
+            const [m11, m12, m21, m22, dx, dy] = world;
+            const det = m11 * m22 - m12 * m21;
+            const x0 = result.x - dx;
+            const y0 = result.y - dy;
+            return { x: Math.round((m22 * x0 - m21 * y0) / det),
+                y: Math.round((m11 * y0 - m12 * x0) / det) };
+        }
         return result;
+    };
+
+    /** @param {number} address @returns {number[]} an XFORM's six floats */
+    const readXform = address=>{
+        const bytes = host.readMemory(address, 24);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, 24);
+        return Array.from({ length: 6 }, (_, index)=>view.getFloat32(index * 4, true));
+    };
+
+    /** @param {number} address @param {readonly number[]} xform */
+    const writeXform = (address, xform)=>{
+        const bytes = new Uint8Array(24);
+        const view = new DataView(bytes.buffer);
+        xform.forEach((value, index)=>view.setFloat32(index * 4, value, true));
+        host.writeMemory(address, bytes);
+    };
+
+    /**
+     * a then b, as XFORMs compose: a point goes through a first.
+     *
+     * @param {readonly number[]} a @param {readonly number[]} b
+     */
+    const compose = (a, b)=>[
+        a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3],
+        a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3],
+        a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5],
+    ];
+
+    /**
+     * Keeps a DC's world transform, none for the identity; one the drawing
+     * layer does not apply is reported.
+     *
+     * @param {any} dc @param {readonly number[]} xform
+     */
+    const setWorld = (dc, xform)=>{
+        const identity = xform.every((value, index)=>value === IDENTITY_XFORM[index]);
+        dc.world = identity ? null : xform;
+        if (!identity)
+        {
+            host.divergence?.('SetWorldTransform',
+                'the transform maps coordinates but drawing does not apply it');
+        }
     };
 
     /**
@@ -2647,6 +2713,103 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>dcOf(handle)?.layout ?? GDI_ERROR,
+        },
+
+        /** int SetGraphicsMode(HDC hdc, int iMode) / int GetGraphicsMode(HDC hdc) */
+        SetGraphicsMode: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, mode])=>{
+                const dc = dcOf(handle);
+                if (!dc || ((mode | 0) !== GM_COMPATIBLE && (mode | 0) !== GM_ADVANCED))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                // Back to compatible only once the world transform is the identity.
+                if ((mode | 0) === GM_COMPATIBLE && dc.world)
+                {
+                    return 0;
+                }
+                const previous = dc.graphicsMode ?? GM_COMPATIBLE;
+                dc.graphicsMode = mode | 0;
+                return previous;
+            },
+        },
+        GetGraphicsMode: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                return dc ? dc.graphicsMode ?? GM_COMPATIBLE : 0;
+            },
+        },
+
+        /**
+         * BOOL SetWorldTransform(HDC hdc, const XFORM *lpxf)
+         * BOOL GetWorldTransform(HDC hdc, LPXFORM lpxf)
+         * BOOL ModifyWorldTransform(HDC hdc, const XFORM *lpxf, DWORD mode)
+         *
+         * A DC's world transform, which only GM_ADVANCED may change. It maps
+         * coordinates through LPtoDP and DPtoLP; the drawing layer does not
+         * apply it, and that is reported when one is set.
+         */
+        SetWorldTransform: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, xform])=>{
+                const dc = dcOf(handle);
+                if (!dc || (xform >>> 0) === 0 || dc.graphicsMode !== GM_ADVANCED)
+                {
+                    return 0;
+                }
+                const values = readXform(xform >>> 0);
+                if (values[0] * values[3] - values[1] * values[2] === 0)
+                {
+                    return 0;
+                }
+                setWorld(dc, values);
+                return 1;
+            },
+        },
+        GetWorldTransform: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, xform])=>{
+                const dc = dcOf(handle);
+                if (!dc || (xform >>> 0) === 0)
+                {
+                    return 0;
+                }
+                writeXform(xform >>> 0, dc.world ?? IDENTITY_XFORM);
+                return 1;
+            },
+        },
+        ModifyWorldTransform: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, xform, mode])=>{
+                const dc = dcOf(handle);
+                if (!dc || dc.graphicsMode !== GM_ADVANCED)
+                {
+                    return 0;
+                }
+                if ((mode >>> 0) === MWT_IDENTITY)
+                {
+                    setWorld(dc, IDENTITY_XFORM);
+                    return 1;
+                }
+                if ((xform >>> 0) === 0 || ((mode >>> 0) !== MWT_LEFTMULTIPLY
+                    && (mode >>> 0) !== MWT_RIGHTMULTIPLY))
+                {
+                    return 0;
+                }
+                const given = readXform(xform >>> 0);
+                const current = dc.world ?? IDENTITY_XFORM;
+                setWorld(dc, (mode >>> 0) === MWT_LEFTMULTIPLY
+                    ? compose(given, current) : compose(current, given));
+                return 1;
+            },
         },
 
         /** int GetMapMode(HDC hdc) */
