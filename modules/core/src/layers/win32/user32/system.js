@@ -166,6 +166,8 @@ export const SYS_COLORS = Object.freeze({
 });
 
 /** MonitorFromRect and friends answer with this, there being one display. */
+/** What SetClassWord answers for the atom, or a word past the extra bytes. */
+const ERROR_INVALID_INDEX = 1413;
 const PRIMARY_MONITOR = 0x00010001;
 const MONITOR_DEFAULTTONULL = 0;
 const MONITORINFOF_PRIMARY = 1;
@@ -916,6 +918,16 @@ export function createSystemFunctions({ host, live, windows, classes }){
         // them would be reading whatever happens to follow in our own record.
         cls.extra ??= new DataView(new ArrayBuffer(Math.max(cls.classExtra, 0)));
         return at >= 0 && at + 4 <= cls.extra.byteLength ? cls.extra.getUint32(at, true) : 0;
+    };
+
+    /**
+     * Where a word of the class's extra bytes is, or null outside them.
+     *
+     * @param {any} cls @param {number} index
+     */
+    const classWordAt = (cls, index)=>{
+        cls.extra ??= new DataView(new ArrayBuffer(Math.max(cls.classExtra, 0)));
+        return (index | 0) >= 0 && (index | 0) + 2 <= cls.extra.byteLength ? index | 0 : null;
     };
 
     /** @param {any} cls @param {number} index @param {number} value */
@@ -3870,6 +3882,51 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 }
                 const previous = readClassLong(cls, index);
                 writeClassLong(cls, index, value);
+                return previous;
+            },
+        },
+
+        /**
+         * WORD GetClassWord(HWND hWnd, int nIndex) / WORD SetClassWord(HWND, int, WORD)
+         *
+         * A word of the class's extra bytes, or its atom to read; the atom is
+         * the class's name and is not set, ERROR_INVALID_INDEX, and nor is a
+         * word past the extra bytes.
+         */
+        GetClassWord: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, index])=>{
+                const cls = classOfWindow(hwnd);
+                if (!cls)
+                {
+                    return 0;
+                }
+                if ((index | 0) === GCW_ATOM)
+                {
+                    return cls.atom & 0xffff;
+                }
+                return classWordAt(cls, index) === null ? 0
+                    : /** @type {DataView} */ (cls.extra).getUint16(index | 0, true);
+            },
+        },
+        SetClassWord: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, index, value])=>{
+                const cls = classOfWindow(hwnd);
+                if (!cls)
+                {
+                    return 0;
+                }
+                if (classWordAt(cls, index) === null)
+                {
+                    host.setLastError?.(ERROR_INVALID_INDEX);
+                    return 0;
+                }
+                const extra = /** @type {DataView} */ (cls.extra);
+                const previous = extra.getUint16(index | 0, true);
+                extra.setUint16(index | 0, value & 0xffff, true);
                 return previous;
             },
         },

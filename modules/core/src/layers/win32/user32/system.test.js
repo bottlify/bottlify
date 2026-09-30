@@ -2120,6 +2120,18 @@ test('a class long is class data: every window of a class reads the same value',
     assert.equal(memory.readCString(OUT_BUFFER, 32), 'MainWnd');
 });
 
+test('a class word is read from the atom or the extra bytes, and the atom is not set', ()=>{
+    const { memory, fns, errors } = setup();
+    const hwnd = makeWindow(memory, fns);
+    const GCW_ATOM = -32;
+    assert.equal(fns.GetClassWord.handler([hwnd, GCW_ATOM]),
+        fns.GetClassLongA.handler([hwnd, GCW_ATOM]) & 0xffff);
+    assert.equal(fns.SetClassWord.handler([hwnd, GCW_ATOM, 2]), 0);
+    assert.equal(errors.at(-1), 1413, 'ERROR_INVALID_INDEX');
+    assert.equal(fns.SetClassWord.handler([hwnd, 0, 2]), 0, 'the class asked for no extra bytes');
+    assert.equal(errors.at(-1), 1413);
+});
+
 // --- display mode ---
 
 /** @param {any} memory @param {number} width @param {number} height */
