@@ -1,0 +1,22 @@
+{
+    "x87": {
+        "vm": "17895e4c",
+        "entities": "a80a4804",
+        "math": "106f1815",
+        "path": "c005ba63",
+        "lz": "d236cfd9",
+        "containers": "924e9b1c",
+        "spread": "dd6ed920",
+        "api": "93c7fc9d"
+    },
+    "sse": {
+        "vm": "17895e4c",
+        "entities": "e4b23fd5",
+        "math": "152ef1ef",
+        "path": "c005ba63",
+        "lz": "d236cfd9",
+        "containers": "924e9b1c",
+        "spread": "dd6ed920",
+        "api": "93c7fc9d"
+    }
+}
