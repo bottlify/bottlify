@@ -978,7 +978,7 @@ export function createGraphicsModule(){
                  *     draw in, in screen coordinates; absent, the whole screen.
                  * @param {{ width: number, height: number, bitCount: number, bits?: number,
                  *     topDown?: boolean, palette?: number[], format?: string,
-                 *     pixels?: Uint8Array }} bitmap
+                 *     pixels?: Uint8Array, pitch?: number }} bitmap
                  *     A device-dependent bitmap carries its own `pixels`; a DIB
                  *     section's `bits` are a guest address.
                  */
@@ -1006,8 +1006,9 @@ export function createGraphicsModule(){
                     // The bitmap's own bytes, not a copy: a program draws into
                     // a DIB section and reads the pixels back through the
                     // pointer it was given, so the drawing has to land there.
+                    // A section over memory the program laid out says its own stride.
                     const bytes = services.windowMemory(bits,
-                        dibPitch(bitmap.width, bitmap.bitCount) * bitmap.height);
+                        (bitmap.pitch ?? dibPitch(bitmap.width, bitmap.bitCount)) * bitmap.height);
                     return surfaceForDibSection({ ...bitmap, bits }, bytes, bits);
                 },
                 /** The desktop's pixels, or null in a build with no heap for them. */
