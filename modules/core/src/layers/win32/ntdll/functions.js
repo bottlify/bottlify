@@ -28,6 +28,7 @@
 
 import { createCountedStringFunctions } from './strings.js';
 import { createQueryFunctions } from './query.js';
+import { createImageFunctions } from './image.js';
 import { createIntegerFunctions } from './integer.js';
 import { createWaitFunctions } from './waits.js';
 import { createPathFunctions } from './paths.js';
@@ -173,6 +174,8 @@ export function createNtdllFunctions(host){
             allocate,
             free,
         }),
+
+        ...createImageFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
 
         ...createQueryFunctions({
             readMemory: host.readMemory,
