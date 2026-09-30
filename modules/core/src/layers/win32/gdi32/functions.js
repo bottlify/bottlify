@@ -223,6 +223,13 @@ const ERROR_NOT_SUPPORTED = 50;
 const STATUS_INVALID_PARAMETER = 0xc000000d;
 
 /** GetBoundsRect's and SetBoundsRect's flags; DCB_SET is reset and accumulate together. */
+/** ExtCreatePen's style word: the line style, and whether the pen is geometric. */
+const PS_STYLE_MASK = 0x0000000f;
+const PS_USERSTYLE = 7;
+const PS_ALTERNATE = 8;
+const PS_TYPE_MASK = 0x000f0000;
+const PS_GEOMETRIC = 0x00010000;
+
 const DCB_RESET = 0x0001;
 const DCB_ACCUMULATE = 0x0002;
 const DCB_SET = DCB_RESET | DCB_ACCUMULATE;
@@ -1912,6 +1919,34 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 return objects.create('pen', fields);
+            },
+        },
+
+        /**
+         * HPEN ExtCreatePen(DWORD dwPenStyle, DWORD dwWidth, const LOGBRUSH *plbrush,
+         *                   DWORD dwStyleCount, const DWORD *lpStyle)
+         *
+         * A pen of a style and a brush's colour. A cosmetic pen is one pixel
+         * wide; only PS_USERSTYLE takes a dash table, and it must have one.
+         */
+        ExtCreatePen: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([style, width, brush, count, dashes])=>{
+                const kind = (style >>> 0) & PS_STYLE_MASK;
+                const geometric = ((style >>> 0) & PS_TYPE_MASK) === PS_GEOMETRIC;
+                const user = kind === PS_USERSTYLE;
+                if ((brush >>> 0) === 0 || kind > PS_ALTERNATE
+                    || (!geometric && (width >>> 0) !== 1)
+                    || (user ? (count >>> 0) === 0 || (dashes >>> 0) === 0 : (count >>> 0) !== 0))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const [, color] = readU32s(host, brush >>> 0, 2);
+                return objects.create('pen', {
+                    style: kind, width: width | 0, color: color >>> 0, extended: style >>> 0,
+                });
             },
         },
 

@@ -500,6 +500,23 @@ test('CreatePenIndirect reads LOGPEN at the documented offsets', ()=>{
     assert.ok(fns.CreatePenIndirect.handler([STRUCT]) > 0);
 });
 
+test('ExtCreatePen takes its colour from a brush and checks its width and dashes', ()=>{
+    const { fns, memory, hdc } = withDC();
+    const PS_GEOMETRIC = 0x10000;
+    memory.putU32s(STRUCT, [0, 0x00123456, 0]);
+    const pen = fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 5, STRUCT, 0, 0]);
+    assert.ok(pen > 0);
+    fns.SelectObject.handler([hdc, pen]);
+    assert.equal(fns.GetCurrentObject.handler([hdc, OBJ_PEN]), pen);
+    assert.ok(fns.ExtCreatePen.handler([PS_SOLID, 1, STRUCT, 0, 0]) > 0, 'cosmetic, one wide');
+    assert.equal(fns.ExtCreatePen.handler([PS_SOLID, 3, STRUCT, 0, 0]), 0, 'a wide cosmetic pen');
+    assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | 7, 5, STRUCT, 0, 0]), 0,
+        'PS_USERSTYLE without its dashes');
+    assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 5, STRUCT, 2, STRUCT]), 0,
+        'dashes on a style that takes none');
+    assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 5, 0, 0, 0]), 0, 'no brush');
+});
+
 test('CreateBrushIndirect reads LOGBRUSH at the documented offsets', ()=>{
     const { fns, memory } = setup();
     memory.putU32s(STRUCT + LOGBRUSH.lbStyle, [BS_HATCHED]);
