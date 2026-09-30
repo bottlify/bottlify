@@ -2634,16 +2634,16 @@ export function createFileFunctions(host){
         GetTempFileNameA: getTempFileName.ansi,
         GetTempFileNameW: getTempFileName.wide,
 
-        /**
-         * BOOL MoveFileEx(LPCSTR lpExistingFileName, LPCSTR lpNewFileName,
-         *                 DWORD dwFlags) -- one body, both spellings.
-         */
         CreateSymbolicLinkA: createSymbolicLink.ansi,
         CreateSymbolicLinkW: createSymbolicLink.wide,
         CreateHardLinkA: createHardLink.ansi,
         CreateHardLinkW: createHardLink.wide,
         ReplaceFileA: replaceFile.ansi,
         ReplaceFileW: replaceFile.wide,
+        /**
+         * BOOL MoveFileEx(LPCSTR lpExistingFileName, LPCSTR lpNewFileName,
+         *                 DWORD dwFlags) -- one body, both spellings.
+         */
         MoveFileExA: moveFileEx.ansi,
         MoveFileExW: moveFileEx.wide,
 

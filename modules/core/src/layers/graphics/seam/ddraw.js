@@ -80,6 +80,10 @@ import {
 } from '../ddraw/constants.js';
 import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { blt, bltFast } from '../ddraw/blit.js';
+import { ADAPTER_GUID, describeAdapter } from './adapter.js';
+import { createRaster } from './raster.js';
+import { DDRAW_PRIVATE_DATA, createPrivateData } from './privatedata.js';
+import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 
 /** The classes DDRAW.dll's DllGetClassObject makes. */
 const CLSID_DirectDraw = '{D7B70EE0-4340-11CF-B063-0020AFC2CD35}';
@@ -96,10 +100,6 @@ const E_NOINTERFACE = 0x80004002 | 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
 const CLASS_E_NOAGGREGATION = 0x80040110 | 0;
 const CLASS_E_CLASSNOTAVAILABLE = 0x80040111 | 0;
-import { ADAPTER_GUID, describeAdapter } from './adapter.js';
-import { createRaster } from './raster.js';
-import { DDRAW_PRIVATE_DATA, createPrivateData } from './privatedata.js';
-import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 
 /** WaitForVerticalBlank: which edge of the blank to return at. */
 const DDWAITVB_BLOCKBEGIN = 0x00000001;
