@@ -305,9 +305,11 @@ export function acceptsMalformedLockRect(caps, caps2){
  * before anything is built on top of it.
  *
  * @param {{ caps: number, pixelFormatFlags: number, hasPalette: boolean }} surface
+ * @param {boolean} hardware  A software rasteriser draws into system memory,
+ *     so only a hardware device refuses a target there.
  * @returns {number}
  */
-export function validateDeviceTarget(surface){
+export function validateDeviceTarget(surface, hardware){
     if (!(surface.caps & DDSCAPS_3DDEVICE) || (surface.caps & DDSCAPS_ZBUFFER))
     {
         return DDERR_INVALIDCAPS;
@@ -316,7 +318,7 @@ export function validateDeviceTarget(surface){
     {
         return DDERR_NOPALETTEATTACHED;
     }
-    if (surface.caps & DDSCAPS_SYSTEMMEMORY)
+    if (hardware && (surface.caps & DDSCAPS_SYSTEMMEMORY))
     {
         return D3DERR_SURFACENOTINVIDMEM;
     }
