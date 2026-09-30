@@ -85,6 +85,9 @@ const ERROR_SIGNAL_REFUSED = 156;
 const ERROR_ACCESS_DENIED = 5;
 /** What GetThreadContext answers for a thread that has ended. */
 const ERROR_GEN_FAILURE = 31;
+/** What GetThreadSelectorEntry answers for a selector it holds nothing for. */
+const ERROR_NOACCESS = 998;
+const ERROR_INVALID_THREAD_ID = 1444;
 /** The CONTEXT groups GetThreadContext fills, and the size of the record. */
 const CONTEXT_CONTROL = 0x10001;
 const CONTEXT_INTEGER = 0x10002;
@@ -745,6 +748,57 @@ export function createSyncFunctions(host){
                 host.divergence?.('SetThreadContext', 'the registers of a thread are not replaced');
                 host.setLastError?.(ERROR_ACCESS_DENIED);
                 return 0;
+            },
+        },
+
+        /**
+         * BOOL GetThreadSelectorEntry(HANDLE hThread, DWORD dwSelector, LPLDT_ENTRY)
+         *
+         * The flat descriptors a 32-bit thread runs under -- code, data, and
+         * the thread's own block behind FS -- and nothing for the null one.
+         */
+        GetThreadSelectorEntry: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, selector, out])=>{
+                const thread = threadOf(handle);
+                if (!thread)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                if ((selector >>> 0) > 0xffff)
+                {
+                    host.setLastError?.(ERROR_INVALID_THREAD_ID);
+                    return 0;
+                }
+                const index = (selector >>> 0) & ~3;
+                /** @type {[number, number, number, number, boolean] | null} */
+                const descriptor = index === 0 ? [0, 0, 0, 0, false]
+                    : index === (SELECTOR_CODE & ~3) ? [0, 0xfffff, 0x1b, 3, true]
+                        : index === (SELECTOR_DATA & ~3) ? [0, 0xfffff, 0x13, 3, true]
+                            : index === (SELECTOR_FS & ~3)
+                                ? [thread.tebAddress >>> 0, 0xfff, 0x13, 3, false] : null;
+                if (!descriptor)
+                {
+                    host.setLastError?.(ERROR_NOACCESS);
+                    return 0;
+                }
+                const [base, limit, type, dpl, pages] = descriptor;
+                const bytes = new Uint8Array(8);
+                const view = new DataView(bytes.buffer);
+                if (index !== 0)
+                {
+                    view.setUint16(0, limit & 0xffff, true);
+                    view.setUint16(2, base & 0xffff, true);
+                    bytes[4] = base >>> 16 & 0xff;
+                    bytes[5] = type | dpl << 5 | 0x80;
+                    // The high limit, 32-bit operands, and page granularity when flat.
+                    bytes[6] = (limit >>> 16 & 0xf) | 0x40 | (pages ? 0x80 : 0);
+                    bytes[7] = base >>> 24;
+                }
+                host.writeMemory(out >>> 0, bytes);
+                return 1;
             },
         },
 

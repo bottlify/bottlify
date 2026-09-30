@@ -917,3 +917,22 @@ test('GetThreadContext fills the groups asked for, and SetThreadContext is refus
     assert.deepEqual(said, ['SetThreadContext']);
     assert.equal(fns.GetThreadContext.handler([0x99, at]), 0, 'no such thread');
 });
+
+test('GetThreadSelectorEntry describes the flat selectors and the thread block behind FS', ()=>{
+    const host = /** @type {any} */ (fakeHost());
+    const fns = createSyncFunctions(host);
+    const self = host.currentThread();
+    self.tebAddress = 0x7ffd0000;
+    const at = 0x400;
+    assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 0x3b, at]), 1);
+    const bytes = host.bytes.subarray(at, at + 8);
+    const base = (bytes[7] << 24 | bytes[4] << 16 | bytes[2] | bytes[3] << 8) >>> 0;
+    assert.equal(base, 0x7ffd0000, 'FS is the thread block');
+    assert.equal(bytes[0] | bytes[1] << 8, 0xfff);
+    assert.equal(bytes[5] & 0x1f, 0x13);
+    assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 0x1b, at]), 1);
+    assert.equal(bytes[6] & 0xc0, 0xc0, 'flat code: 32-bit and page granular');
+    assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 3, at]), 1, 'the null one');
+    assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 0x123, at]), 0);
+    assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 0xdeadbeef, at]), 0);
+});
