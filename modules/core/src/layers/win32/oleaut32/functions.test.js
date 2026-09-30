@@ -1090,3 +1090,70 @@ test('the argument list of each entry is the one the guest pushed', ()=>{
         assert.equal(fx[name].argBytes, argBytes, name);
     }
 });
+
+test('VarRound keeps an integer type, rounds a real one and takes a string as a double', ()=>{
+    setUp();
+    const IN = 0x3000;
+    const OUT = 0x3020;
+    const view = new DataView(host.bytes.buffer);
+    host.putVariant(IN, 11, 0xffff);
+    assert.equal(call('VarRound', [IN, 0, OUT]), S_OK);
+    assert.deepEqual([host.u16(OUT), view.getInt16(OUT + 8, true)], [2, -1], 'BOOL to I2');
+    host.putVariant(IN, 5, 0);
+    view.setFloat64(IN + 8, -1.23456, true);
+    assert.equal(call('VarRound', [IN, 3, OUT]), S_OK);
+    assert.deepEqual([host.u16(OUT), view.getFloat64(OUT + 8, true)], [5, -1.235]);
+    host.putVariant(IN, 1, 0);
+    assert.equal(call('VarRound', [IN, 0, OUT]), S_OK);
+    assert.equal(host.u16(OUT), 1, 'NULL stays NULL');
+    assert.equal(call('VarRound', [IN, -1, OUT]), 0x80070057);
+    host.putVariant(IN, 9, 0);
+    assert.equal(call('VarRound', [IN, 0, OUT]), 0x80020008, 'an interface is no number');
+});
+
+test('VarCmp orders numbers, text and null; VarCat joins what it can spell', ()=>{
+    setUp();
+    const L = 0x3000;
+    const R = 0x3020;
+    const OUT = 0x3040;
+    host.putVariant(L, 3, 2);
+    host.putVariant(R, 2, 3);
+    assert.equal(call('VarCmp', [L, R, 0, 0]), 0, 'LT');
+    host.putVariant(R, 1, 0);
+    assert.equal(call('VarCmp', [L, R, 0, 0]), 3, 'NULL');
+    host.putVariant(R, 6, 20000);
+    assert.equal(call('VarCmp', [L, R, 0, 0]), 1, 'two and two currency units are equal');
+
+    host.putVariant(L, 11, 0xffff);
+    host.putVariant(R, 3, 7);
+    assert.equal(call('VarCat', [L, R, OUT]), S_OK);
+    const bstr = host.u32(OUT + 8);
+    assert.equal(host.u16(OUT), 8);
+    assert.deepEqual([0, 1, 2, 3, 4].map(i=>String.fromCharCode(host.u16(bstr + i * 2))),
+        ['T', 'r', 'u', 'e', '7']);
+    host.putVariant(L, 1, 0);
+    host.putVariant(R, 1, 0);
+    assert.equal(call('VarCat', [L, R, OUT]), S_OK);
+    assert.equal(host.u16(OUT), 1, 'null only when both are');
+});
+
+test('the currency and decimal conversions carry exact values', ()=>{
+    setUp();
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(call('VarCyFromI4', [-3, 0x3000]), S_OK);
+    assert.equal(view.getBigInt64(0x3000, true), -30000n);
+    assert.equal(call('VarR8FromCy', [view.getUint32(0x3000, true),
+        view.getUint32(0x3004, true), 0x3010]), S_OK);
+    assert.equal(view.getFloat64(0x3010, true), -3);
+    view.setFloat64(0x3020, 1.5, true);
+    assert.equal(call('VarDecFromR8', [view.getUint32(0x3020, true),
+        view.getUint32(0x3024, true), 0x3030]), S_OK);
+    assert.deepEqual([host.bytes[0x3032], view.getUint32(0x3038, true)], [1, 15]);
+    assert.equal(call('VarR8FromDec', [0x3030, 0x3040]), S_OK);
+    assert.equal(view.getFloat64(0x3040, true), 1.5);
+    host.putWide(0x3050, ' -2.5 ');
+    assert.equal(call('VarR8FromStr', [0x3050, 0, 0, 0x3060]), S_OK);
+    assert.equal(view.getFloat64(0x3060, true), -2.5);
+    host.putWide(0x3050, 'x');
+    assert.equal(call('VarR8FromStr', [0x3050, 0, 0, 0x3060]), 0x80020005);
+});
