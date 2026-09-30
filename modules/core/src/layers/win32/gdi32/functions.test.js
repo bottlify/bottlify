@@ -2289,3 +2289,41 @@ test('D3DKMTCreateDCFromMemory makes a memory DC over the program\'s own pixels'
     assert.equal(fns.GetObjectType.handler([bitmap]), 0, 'and the bitmap');
     assert.ok(!context.surfaces.freed.includes(PIXELS), 'the pixels stay the program\'s');
 });
+
+test('an enhanced metafile DC closes into a metafile handle, and says it recorded nothing', ()=>{
+    const memory = fakeMemory();
+    /** @type {string[]} */
+    const said = [];
+    const { table: fns } = createGdiFunctions({
+        readMemory: (address, length)=>memory.readMemory(address, length),
+        writeMemory: (address, data)=>memory.writeMemory(address, data),
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        handles: fakeHandles(),
+        surfaces: fakeSurfaces(),
+        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+    });
+    const OBJ_ENHMETADC = 12;
+    const OBJ_ENHMETAFILE = 13;
+
+    const hdc = fns.CreateEnhMetaFileA.handler([0, 0, 0, 0]);
+    assert.notEqual(hdc, 0);
+    assert.equal(fns.GetObjectType.handler([hdc]), OBJ_ENHMETADC);
+    assert.ok(said.some(line=>line.startsWith('CreateEnhMetaFileA: drawing')));
+    assert.equal(fns.GetDeviceCaps.handler([hdc, TECHNOLOGY]), 1,
+        'the reference device is the display');
+
+    const metafile = fns.CloseEnhMetaFile.handler([hdc]);
+    assert.notEqual(metafile, 0);
+    assert.equal(fns.GetObjectType.handler([metafile]), OBJ_ENHMETAFILE);
+    assert.equal(fns.GetObjectType.handler([hdc]), 0, 'closing ends the DC');
+    assert.equal(fns.CloseEnhMetaFile.handler([hdc]), 0, 'and it cannot be closed twice');
+    assert.equal(fns.DeleteEnhMetaFile.handler([metafile]), 1);
+    assert.equal(fns.DeleteEnhMetaFile.handler([metafile]), 0);
+
+    const display = fns.CreateCompatibleDC.handler([0]);
+    assert.equal(fns.CloseEnhMetaFile.handler([display]), 0, 'a DC that is no metafile');
+    assert.equal(fns.CreateEnhMetaFileW.handler([0x7777, 0, 0, 0]), 0, 'a reference that is no DC');
+    memory.putString(STRUCT, 'out.emf');
+    assert.equal(fns.CreateEnhMetaFileA.handler([0, STRUCT, 0, 0]), 0);
+    assert.ok(said.some(line=>line.includes('on disk')), 'a file is refused, and reported');
+});

@@ -21,7 +21,8 @@
  */
 
 /**
- * @typedef {'pen' | 'brush' | 'font' | 'bitmap' | 'region' | 'palette'} GdiObjectType
+ * @typedef {'pen' | 'brush' | 'font' | 'bitmap' | 'region' | 'palette' | 'enhmetafile'}
+ *     GdiObjectType
  */
 
 /**

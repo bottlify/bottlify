@@ -81,11 +81,13 @@ const OBJ_FONT = 6;
 const OBJ_BITMAP = 7;
 const OBJ_REGION = 8;
 const OBJ_MEMDC = 10;
+const OBJ_ENHMETADC = 12;
+const OBJ_ENHMETAFILE = 13;
 
 /** @type {Record<string, number>} */
 const OBJECT_TYPES = {
     pen: OBJ_PEN, brush: OBJ_BRUSH, palette: OBJ_PAL, font: OBJ_FONT, bitmap: OBJ_BITMAP,
-    region: OBJ_REGION,
+    region: OBJ_REGION, enhmetafile: OBJ_ENHMETAFILE,
 };
 
 /** Brush styles. BS_PATTERN's hatch field is a bitmap handle instead of an index. */
@@ -215,6 +217,7 @@ const BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 const MAX_BITMAP_SIDE = 0x7ffffff;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_NOT_SUPPORTED = 50;
 const STATUS_INVALID_PARAMETER = 0xc000000d;
 
 /** GetBoundsRect's flags: reset clears, set records, the rest query. */
@@ -643,6 +646,8 @@ export function createGdiFunctions(host){
             boundsState: 0,
             /** @type {any[]} */
             saved: [],
+            /** Whether CreateEnhMetaFile made it, which only CloseEnhMetaFile ends. */
+            metafile: false,
         };
         dc.hdc = host.handles.open('dc', dc);
         forEachSelection(dc, handle=>objects.retain(handle));
@@ -669,6 +674,30 @@ export function createGdiFunctions(host){
         objects.remove(dc.defaultBitmap);
         contexts.delete(dc.hdc);
         host.handles.close(dc.hdc);
+    };
+
+    /**
+     * CreateEnhMetaFileA and W, which differ only in the file name this build
+     * does not write.
+     *
+     * @param {number} reference @param {number} filename @param {string} api
+     */
+    const createEnhMetaFile = (reference, filename, api)=>{
+        if ((reference >>> 0) !== 0 && !dcOf(reference))
+        {
+            return 0;
+        }
+        if ((filename >>> 0) !== 0)
+        {
+            host.divergence?.(api, 'a metafile on disk is not written; refused');
+            host.setLastError?.(ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+        host.divergence?.(api, 'drawing on the metafile DC is not recorded; it closes empty');
+        const dc = createContext(0, 'memory');
+        select(dc, defaultBitmap());
+        dc.metafile = true;
+        return dc.hdc;
     };
 
     /** @param {any} dc @returns {any} a copy of everything SaveDC remembers */
@@ -1615,6 +1644,53 @@ export function createGdiFunctions(host){
             },
         },
 
+        /**
+         * HDC CreateEnhMetaFileA(HDC hdcRef, LPCSTR lpFilename, const RECT *lprc,
+         *                        LPCSTR lpDesc)
+         * HDC CreateEnhMetaFileW(HDC hdcRef, LPCWSTR lpFilename, const RECT *lprc,
+         *                        LPCWSTR lpDesc)
+         *
+         * A metafile in memory: a DC that accepts drawing over a memory DC's
+         * surface, which CloseEnhMetaFile turns into a metafile handle. Nothing
+         * drawn is recorded, so the metafile closes empty, and that is reported.
+         * One on disk is refused, reported likewise, rather than closed into a
+         * file that never gets written.
+         */
+        CreateEnhMetaFileA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([reference, file])=>createEnhMetaFile(reference, file, 'CreateEnhMetaFileA'),
+        },
+        CreateEnhMetaFileW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([reference, file])=>createEnhMetaFile(reference, file, 'CreateEnhMetaFileW'),
+        },
+
+        /** HENHMETAFILE CloseEnhMetaFile(HDC hdc) */
+        CloseEnhMetaFile: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                if (!dc?.metafile)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                destroyContext(dc);
+                return objects.create('enhmetafile', {});
+            },
+        },
+
+        /** BOOL DeleteEnhMetaFile(HENHMETAFILE hmf) */
+        DeleteEnhMetaFile: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>(objects.get(handle)?.type === 'enhmetafile'
+                && objects.remove(handle) ? 1 : 0),
+        },
+
         /** int SaveDC(HDC hdc) */
         SaveDC: {
             argBytes: 4,
@@ -1744,6 +1820,10 @@ export function createGdiFunctions(host){
                 const dc = dcOf(handle);
                 if (dc)
                 {
+                    if (dc.metafile)
+                    {
+                        return OBJ_ENHMETADC;
+                    }
                     return dc.kind === 'memory' ? OBJ_MEMDC : OBJ_DC;
                 }
                 const type = OBJECT_TYPES[objects.get(handle)?.type ?? ''];
