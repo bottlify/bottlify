@@ -1970,6 +1970,32 @@ test('WriteFileGather and ReadFileScatter move a page per segment and complete o
     assert.equal(fns.ReadFileScatter.handler([handle, 0x300, 4, 0, 0]), 0, 'overlapped only');
 });
 
+test('NtQueryInformationFile answers the name, the size and the position of an open file', ()=>{
+    const { memory, files, fns, open } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdefghij');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    fns.SetFilePointer.handler([handle, 3, 0, FILE_BEGIN]);
+    const query = /** @type {any} */ (fns.CreateFileW).natives.NtQueryInformationFile;
+    const block = 0x300;
+    const out = 0x400;
+
+    assert.equal(query.handler([handle, block, out, 0x100, 9]), 0, 'FileNameInformation');
+    const name = '\\GAME\\SAVE.DAT';
+    assert.equal(memory.dword(out), name.length * 2);
+    assert.equal(memory.bytes[out + 4], name.charCodeAt(0));
+    assert.equal(memory.dword(block + 4), 4 + name.length * 2);
+
+    assert.equal(query.handler([handle, block, out, 0x100, 5]), 0, 'FileStandardInformation');
+    assert.equal(memory.dword(out + 8), 10, 'EndOfFile');
+    assert.equal(query.handler([handle, block, out, 8, 14]), 0, 'FilePositionInformation');
+    assert.equal(memory.dword(out), 3);
+
+    assert.equal(query.handler([handle, block, out, 4, 5]) >>> 0, 0xc0000004, 'too short');
+    assert.equal(query.handler([handle, block, out, 0x100, 34]) >>> 0, 0xc0000003,
+        'a class nothing keeps');
+    assert.equal(query.handler([0x999, block, out, 0x100, 9]) >>> 0, 0xc0000008);
+});
+
 test('CreateHardLink answers as a volume without links does, and says so', ()=>{
     /** @type {string[]} */
     const said = [];

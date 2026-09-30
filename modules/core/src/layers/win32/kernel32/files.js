@@ -117,6 +117,13 @@ const FILE_DELETE_ON_CLOSE = 0x1000;
 
 /** The statuses the native opens answer with. */
 const STATUS_SUCCESS = 0;
+const STATUS_BUFFER_OVERFLOW = 0x80000005;
+const STATUS_INVALID_INFO_CLASS = 0xc0000003;
+const STATUS_INFO_LENGTH_MISMATCH = 0xc0000004;
+/** The FILE_INFORMATION_CLASS values NtQueryInformationFile answers. */
+const FILE_STANDARD_INFORMATION = 5;
+const FILE_NAME_INFORMATION = 9;
+const FILE_POSITION_INFORMATION = 14;
 const STATUS_UNSUCCESSFUL = 0xc0000001;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
 const STATUS_INVALID_HANDLE = 0xc0000008;
@@ -1888,6 +1895,73 @@ export function createFileFunctions(host){
         },
 
         NtCreateFile: { argBytes: 44, handler: ntCreateFile },
+
+        /**
+         * NTSTATUS NtQueryInformationFile(HANDLE, PIO_STATUS_BLOCK, PVOID,
+         *                                 ULONG Length, FILE_INFORMATION_CLASS)
+         *
+         * The name, the size and the position of an open file; a class
+         * this surface keeps nothing for is refused, and the refusal said.
+         */
+        NtQueryInformationFile: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, block, out, length, kind])=>{
+                const file = object(handle, 'file');
+                if (!file)
+                {
+                    return report(block >>> 0, STATUS_INVALID_HANDLE, 0);
+                }
+                /** @type {Uint8Array} */
+                let data;
+                switch (kind >>> 0)
+                {
+                    case FILE_STANDARD_INFORMATION: {
+                        const size = BigInt(files.stat(file.path)?.size ?? 0);
+                        data = new Uint8Array(24);
+                        const view = new DataView(data.buffer);
+                        // AllocationSize, EndOfFile, NumberOfLinks, DeletePending, Directory.
+                        view.setBigUint64(0, size, true);
+                        view.setBigUint64(8, size, true);
+                        view.setUint32(16, 1, true);
+                        data[20] = file.deleteOnClose ? 1 : 0;
+                        break;
+                    }
+                    case FILE_NAME_INFORMATION: {
+                        // The path from the volume's root, without its drive.
+                        const name = String(file.path).replace(/^[A-Za-z]:/, '');
+                        data = new Uint8Array(4 + name.length * 2);
+                        new DataView(data.buffer).setUint32(0, name.length * 2, true);
+                        for (let at = 0; at < name.length; at++)
+                        {
+                            data[4 + at * 2] = name.charCodeAt(at) & 0xff;
+                            data[5 + at * 2] = name.charCodeAt(at) >>> 8;
+                        }
+                        break;
+                    }
+                    case FILE_POSITION_INFORMATION:
+                        data = new Uint8Array(8);
+                        new DataView(data.buffer).setBigUint64(0, BigInt(file.position), true);
+                        break;
+                    default:
+                        host.divergence?.('NtQueryInformationFile',
+                            `information class ${kind >>> 0} is not kept`);
+                        return report(block >>> 0, STATUS_INVALID_INFO_CLASS, 0);
+                }
+                if ((length >>> 0) < data.length)
+                {
+                    const fits = kind >>> 0 === FILE_NAME_INFORMATION && (length >>> 0) >= 4;
+                    if (fits)
+                    {
+                        host.writeMemory(out >>> 0, data.subarray(0, length >>> 0));
+                    }
+                    return report(block >>> 0, fits ? STATUS_BUFFER_OVERFLOW
+                        : STATUS_INFO_LENGTH_MISMATCH, fits ? length >>> 0 : 0);
+                }
+                host.writeMemory(out >>> 0, data);
+                return report(block >>> 0, STATUS_SUCCESS, data.length);
+            },
+        },
 
         /**
          * NTSTATUS NtOpenFile(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
