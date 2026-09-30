@@ -946,6 +946,10 @@ export function createDirectDrawSeam(
                 {
                     handBack(got.palette, paletteInterfaces, IID_IDirectDrawPalette, out >>> 0);
                 }
+                else if ((out >>> 0) !== 0)
+                {
+                    fields.writeU32(out >>> 0, 0);
+                }
                 return got.hr;
             },
 

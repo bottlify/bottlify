@@ -873,8 +873,10 @@ export function createDirectDraw(options = {}){
      * @param {{ caps: number, caps2: number, width: number, height: number,
      *   backBufferCount: number, pixelFormat: import("./structs.js").PixelFormatFields,
      *   owner: string | null, implicit: boolean, mipMapCount?: number,
-     *   mode?: { width: number, height: number, bitCount: number } }} spec
-     *   `mode` is the display mode a primary and its buffers are the screen in.
+     *   mode?: { width: number, height: number, bitCount: number },
+     *   version?: 1 | 2 | 4 | 7 }} spec
+     *   `mode` is the display mode a primary and its buffers are the screen in;
+     *   `version` the generation a mipmap level was created through.
      * @returns {Surface}
      */
     function makeSurface(spec){
@@ -1189,9 +1191,14 @@ export function createDirectDraw(options = {}){
                 return DD_OK;
             },
 
-            /** @param {Palette | null} next */
+            /**
+             * Before DirectDraw 7 a level below the top holds a palette of its
+             * own; from 7 on it takes the top level's and refuses one.
+             *
+             * @param {Palette | null} next
+             */
             setPalette(next){
-                if (sublevel)
+                if (sublevel && spec.version === 7)
                 {
                     return DDERR_NOTONMIPMAPSUBLEVEL;
                 }
@@ -1829,6 +1836,7 @@ export function createDirectDraw(options = {}){
                 owner: null,
                 implicit: true,
                 mipMapCount: levels - index,
+                version,
             });
             above.setMipNext(level);
             above = level;

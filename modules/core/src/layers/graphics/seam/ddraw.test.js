@@ -43,7 +43,7 @@ import {
     DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT,
     DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK, DDERR_UNSUPPORTED,
     DDERR_EXCLUSIVEMODEALREADYSET, DDERR_NOEXCLUSIVEMODE, DDERR_SURFACELOST, DDERR_WRONGMODE,
-    DDERR_ALREADYINITIALIZED,
+    DDERR_ALREADYINITIALIZED, DDERR_NOPALETTEATTACHED,
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
@@ -637,6 +637,11 @@ test('a mip chain reports its levels through the descriptor and is walked level 
     assert.equal(h.surface7(levels[1], 'SetColorKey', [DDCKEY_SRCBLT, 0x5700]),
         DDERR_NOTONMIPMAPSUBLEVEL);
     assert.equal(h.surface7(top, 'SetColorKey', [DDCKEY_SRCBLT, 0x5700]), DD_OK);
+
+    // No palette attached: the refusal clears the caller's pointer.
+    h.box.memory.writeU32(0x5710, 0xdeadbeef);
+    assert.equal(h.surface7(top, 'GetPalette', [0x5710]) >>> 0, DDERR_NOPALETTEATTACHED);
+    assert.equal(h.box.memory.readU32(0x5710), 0);
 
     assert.equal(h.release(levels[2]), 1);
     assert.equal(h.release(levels[1]), 1);
