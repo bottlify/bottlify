@@ -1358,6 +1358,7 @@ export function createWin32Module(){
                         readMemory,
                         writeMemory,
                         setLastError: setError,
+                        divergence: config?.divergence,
                         ramTop: arena.size > 0 ? arena.base + arena.size : 0,
                         systemTimeMs: ()=>kernel.clock.wallClock(),
                         /** @param {number} bytes */

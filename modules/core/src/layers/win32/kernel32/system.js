@@ -152,6 +152,9 @@ const MAX_STRING = 0x7fffffff;
 /** Codes this surface can also report. */
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** What CreateActCtx sets when it cannot build a context from a manifest. */
+const ERROR_SXS_CANT_GEN_ACTCTX = 14001;
+const INVALID_HANDLE_VALUE = 0xffffffff;
 /** No activation context has this section: what a process without a manifest is told. */
 
 
@@ -210,6 +213,7 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  * @property {number} [ramTop]  Where guest RAM ends. With it lstrlen and lstrcpy in
  *           both widths are guest code (`lstr.js`), for the pointers it can read
  *           without a fault.
+ * @property {(api: string, detail: string) => void} [divergence]
  * @property {(thread: any, result: number) => void} [wake]
  *           Ends a thread's wait with its answer: how a thread waiting on a
  *           child another one terminates goes on. Without it that thread
@@ -361,6 +365,25 @@ export function createSystemFunctions(host){
     const readDword = address=>{
         const bytes = host.readMemory(address, 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+
+    /**
+     * CreateActCtxA and CreateActCtxW, which differ only in the strings
+     * this build never reads.
+     *
+     * @param {string} name
+     * @returns {(args: number[]) => number}
+     */
+    const createActCtx = name=>([actCtx])=>{
+        // cbSize, dwFlags and lpSource are the least any version carries.
+        if ((actCtx >>> 0) === 0 || readDword(actCtx >>> 0) < 12)
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return INVALID_HANDLE_VALUE;
+        }
+        host.divergence?.(name, 'manifests are not read; no activation context is built');
+        host.setLastError(ERROR_SXS_CANT_GEN_ACTCTX);
+        return INVALID_HANDLE_VALUE;
     };
 
     /**
@@ -941,6 +964,20 @@ export function createSystemFunctions(host){
             argBytes: 8,
             handler: ()=>1,
         },
+
+        /**
+         * HANDLE CreateActCtxA(PCACTCTXA pActCtx)
+         * HANDLE CreateActCtxW(PCACTCTXW pActCtx)
+         *
+         * Manifests are not read in this build, so no context can be built:
+         * the call fails as it does for a manifest Windows cannot use, and a
+         * caller takes its no-context path rather than activating a handle
+         * that resolves to nothing. Real Windows would answer a handle, so the
+         * refusal is reported. A missing or truncated ACTCTX is an invalid
+         * parameter, as it is there.
+         */
+        CreateActCtxA: { argBytes: 4, handler: createActCtx('CreateActCtxA') },
+        CreateActCtxW: { argBytes: 4, handler: createActCtx('CreateActCtxW') },
 
         /**
          * UINT SetErrorMode(UINT uMode)

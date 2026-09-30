@@ -635,3 +635,32 @@ test('FormatMessageA allocates the buffer when asked, for a caller\'s string too
     assert.equal(host.view.getUint32(0x300, true), 0x400);
     assert.equal(host.bytes[0x400 + 10], 0, 'terminated');
 });
+
+test('CreateActCtx fails as for an unusable manifest, and says it diverged', ()=>{
+    // A caller that meets INVALID_HANDLE_VALUE takes its no-context path; a
+    // handle that resolved to nothing would be activated and then misbehave.
+    const host = fakeHost();
+    /** @type {string[]} */
+    const said = [];
+    const fns = createSystemFunctions({
+        ...host,
+        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+    });
+    host.view.setUint32(0x200, 32, true);
+
+    for (const entry of [fns.CreateActCtxA, fns.CreateActCtxW])
+    {
+        assert.equal(entry.argBytes, 4);
+        assert.equal(entry.handler([0x200]) >>> 0, 0xffffffff);
+        assert.equal(host.errors.at(-1), 14001, 'ERROR_SXS_CANT_GEN_ACTCTX');
+    }
+    assert.equal(said.length, 2);
+    assert.match(said[0], /^CreateActCtxA: /);
+
+    assert.equal(fns.CreateActCtxW.handler([0]) >>> 0, 0xffffffff);
+    assert.equal(host.errors.at(-1), 87, 'no ACTCTX is ERROR_INVALID_PARAMETER');
+    host.view.setUint32(0x200, 4, true);
+    assert.equal(fns.CreateActCtxW.handler([0x200]) >>> 0, 0xffffffff);
+    assert.equal(host.errors.at(-1), 87, 'nor is one too short to name its source');
+    assert.equal(said.length, 2, 'a bad parameter is the real answer, not a divergence');
+});
