@@ -674,19 +674,14 @@ test('the decoder behind the provider follows the configuration', async()=>{
             name === 'bridge' ? { callGuest: async()=>0 } : f.memory,
         provide: ()=>{},
     };
-    // Nothing offered: the platform's decoder, which answers later.
+    // Nothing offered: the hosted minimp3, which answers inside the call.
     let api = await audioModule.create({ ...f.config }, host);
-    assert.deepEqual(api.decoder(), { name: 'webcodecs' });
-    assert.deepEqual(audioModule.diagnostics().metrics?.decoder, { name: 'webcodecs' });
+    assert.deepEqual(api.decoder(), { name: 'minimp3', opens: 0, paddedFrames: 0 });
+    assert.deepEqual(audioModule.diagnostics().metrics?.decoder,
+        { name: 'minimp3', opens: 0, paddedFrames: 0 });
 
-    // The media layer's hosted decoder offered: preferred, with the platform's
-    // as the fallback for a stream it answers null to.
-    api = await audioModule.create({ ...f.config, openAudio: ()=>null }, host);
-    assert.deepEqual(api.decoder(),
-        { name: 'synchronous', opens: 0, fallbackOpens: 0, paddedFrames: 0 });
-
-    // A test's own decoder wins over both.
-    api = await audioModule.create({ ...f.config, openAudio: ()=>null, decoder: {
+    // A test's own decoder wins.
+    api = await audioModule.create({ ...f.config, decoder: {
         open: ()=>({ feed: ()=>{}, flush: ()=>Promise.resolve(), close: ()=>{} }),
     } }, host);
     assert.deepEqual(api.decoder(), { name: 'custom' });

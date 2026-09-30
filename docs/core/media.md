@@ -50,7 +50,6 @@ through the GitHub API; without one the script tries the plain release URL and t
 | `available()` | Whether a binary was configured. |
 | `prepare()` | Instantiates the decoder without opening anything, so the cost lands where the caller chooses rather than on the frame a cinematic starts. |
 | `open(bytes)` | A clip from the whole file in memory; a promise, because the first call instantiates the module. |
-| `openAudio({ formatTag, sampleRate, channels })` | An elementary audio stream with no container, decoded a packet at a time inside the call: `feed(bytes)` answers with the interleaved 16-bit PCM that frame produced, `flush()` with what was still held, `close()`; `sampleRate` and `channels` say what comes out. Synchronous. Null when there is no binary, when the binary was built without the path (an issue in diagnostics says so), or when it is not instantiated yet -- asking starts it, so the next stream finds it. A tag the build cannot serve throws by name. |
 | `closeAll()` | Drops every clip this machine opened, for a teardown between games, and leaves the decoder instance itself alive: the process that replaces this one opens over the same compiled module and linear memory. |
 | `instance()` | The decoder instance this machine uses, or null before one exists; `src/app.js` reads it before a replacement and hands it to the machine that follows as `config.instance`. |
 | `libraries()` | `{ 'ijl15.dll' }` when the guest-memory thunks are configured, else `{}`. |
@@ -62,8 +61,8 @@ binary, the given `instance`, the machine's session over it and the hosted JPEG 
 instance the api closes over, and a second `create()` cannot take the first one's clips;
 `diagnostics()` answers for its own graph's instance. After `dispose()`, a call that was
 in flight is answered as a build with no decoder binary is: `available()` is false, `open()` and
-`prepare()` reject with `media: this build has no decoder binary`, `openAudio()` and `instance()`
-answer null, `closeAll()` does nothing, and `libraries()`/`ordinals()` answer empty.
+`prepare()` reject with `media: this build has no decoder binary`, `instance()`
+answers null, `closeAll()` does nothing, and `libraries()`/`ordinals()` answer empty.
 
 A clip carries `width`, `height`, `fps`, `frameCount` (zero when the container does not say),
 `codec` (the decoder's own short name), `fourcc`, `pixelFormat` (the source format before
@@ -112,7 +111,8 @@ count, fps numerator and denominator, sample rate, channels, has-video, has-audi
 `media_codec_name`, `media_decode` (status 0 frame, 1 end, 2 audio), `media_frame`,
 `media_audio_pending`, `media_audio_read(id, out, max)`, `media_close`, and the packet-fed path
 `media_open_audio(formatTag, sampleRate, channels)`, `media_feed_audio(id, data, size)`,
-`media_flush_audio(id)`, which share the FIFO and the close. `open` copies the file into
+`media_flush_audio(id)`, which share the FIFO and the close. The engine no longer calls the
+packet-fed path: MP3 streams are decoded by minimp3 in the audio layer. `open` copies the file into
 a block the decoder then owns and names the refusal by code: invalid clip, out of memory, too
 many clips open, container not recognised, neither video nor audio, no decoder for this stream.
 Which containers and codecs the binary understands is decided in

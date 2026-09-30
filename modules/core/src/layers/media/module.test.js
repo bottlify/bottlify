@@ -58,20 +58,9 @@ test('closing everything is safe before anything was opened', async()=>{
     await mediaModule.dispose();
 });
 
-test('a packet-fed stream is null until there is a decoder to answer with', async()=>{
-    const shape = { formatTag: 0x55, sampleRate: 44100, channels: 2 };
-    let api = await mediaModule.create({});
-    assert.equal(api.openAudio(shape), null, 'no binary: nothing to decode with');
-    await mediaModule.dispose();
-
-    // A binary that is not up yet answers null and starts coming up, so the
-    // next stream finds it; one that cannot come up says so in the issues.
-    api = await mediaModule.create({ wasmBytes: new Uint8Array([0, 1, 2]) });
-    assert.equal(api.openAudio(shape), null);
-    for (let guard = 0; guard < 50 && mediaModule.diagnostics().issues?.length === 0; guard++)
-    {
-        await new Promise(resolve=>setImmediate(resolve));
-    }
+test('a binary that cannot come up says so in the issues', async()=>{
+    const api = await mediaModule.create({ wasmBytes: new Uint8Array([0, 1, 2]) });
+    await api.prepare().catch(()=>undefined);
     assert.match(mediaModule.diagnostics().issues?.[0] ?? '', /could not be instantiated/);
     await mediaModule.dispose();
 });
@@ -81,10 +70,8 @@ test('a machine attaches to a decoder an earlier one made', async()=>{
     const clip = { close(){ closed++; } };
     const instance = {
         open: ()=>clip,
-        openAudio: ()=>null,
-        audioCapable: ()=>true,
         closeAll(){ closed++; },
-        diagnostics: ()=>({ opened: 1, clips: 1, audioCapable: true, heapBytes: 0 }),
+        diagnostics: ()=>({ opened: 1, clips: 1, heapBytes: 0 }),
     };
 
     // No binary, and none needed: the instance is the decoder.
@@ -111,10 +98,8 @@ test('a second instance in one realm does not take the first one\'s decoder', as
     // create() cannot take the first one's clips or its given decoder.
     const instance = {
         open: (/** @type {Uint8Array} */ bytes)=>({ bytes }),
-        openAudio: ()=>null,
-        audioCapable: ()=>true,
         closeAll(){},
-        diagnostics: ()=>({ opened: 1, clips: 1, audioCapable: true, heapBytes: 0 }),
+        diagnostics: ()=>({ opened: 1, clips: 1, heapBytes: 0 }),
     };
     const first = await mediaModule.create({ instance });
     const second = await mediaModule.create({});
@@ -135,8 +120,6 @@ test('a disposed media refuses to open rather than throwing', async()=>{
     // disposal took away.
     const instance = {
         open: ()=>({}),
-        openAudio: ()=>null,
-        audioCapable: ()=>true,
         closeAll(){},
         diagnostics: ()=>({}),
     };
@@ -145,7 +128,6 @@ test('a disposed media refuses to open rather than throwing', async()=>{
     await mediaModule.dispose();
 
     assert.equal(api.available(), false);
-    assert.equal(api.openAudio({ formatTag: 0x55, sampleRate: 44100, channels: 2 }), null);
     assert.equal(api.instance(), null);
     assert.deepEqual(api.libraries(), {});
     assert.deepEqual(api.runtimes(), []);

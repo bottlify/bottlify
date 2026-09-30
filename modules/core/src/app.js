@@ -3186,13 +3186,6 @@ async function buildApp(options){
             // program runs the decoder it ships, which is the comparison a
             // measurement of the hosted one is made against.
             mp3: options.audio?.mp3 ?? true,
-            // What decodes behind that provider: the media layer's hosted
-            // decoder, which answers in the call. Handed down as a thunk for
-            // the reason the mixer is handed to win32 -- audio may not import
-            // media -- and asked only when a stream opens; null from a build
-            // that cannot, and the provider falls back to the platform's.
-            /** @param {import('./layers/media/internal/decoder.js').AudioStreamShape} shape */
-            openAudio: shape=>core.api('media').openAudio(shape),
         },
         input: {
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>

@@ -25,7 +25,7 @@
  * thread and whatever lock the library took before asking.
  */
 
-import { id3Length, scanFrames } from './mp3.js';
+import { id3Length, parseFrameHeader, scanFrames } from './mp3.js';
 
 /** The provider's file name, which is how the library finds it. */
 export const PROVIDER_LIBRARY = 'Mp3dec.asi';
@@ -321,11 +321,47 @@ export function createMp3Provider(host){
         registered = up;
     };
 
+    /** Reads go one at a time: they share one buffer the guest writes into. */
+    let reading = Promise.resolve();
+
     /** @param {Stream} stream */
     const wake = stream=>{
         const waiting = stream.waiting;
         stream.waiting = [];
         waiting.forEach(resolve=>resolve());
+    };
+
+    /**
+     * Bytes up to the end of the frame being scanned plus the next header:
+     * an ID3 tag's header first, then the tag, then frame by frame. Where the
+     * bytes are not a frame the scan has to search, and a frame's worth is
+     * asked for.
+     *
+     * @param {Stream} stream
+     */
+    const askFor = stream=>{
+        const at = stream.scannedAt;
+        const held = stream.inputAt;
+        /** @type {number} */
+        let end;
+        if (at === 0 && held < 10)
+        {
+            end = 10;
+        }
+        else if (at === 0 && id3Length(stream.input.subarray(0, held)) > 0)
+        {
+            end = id3Length(stream.input.subarray(0, held)) + 4;
+        }
+        else if (held < at + 4)
+        {
+            end = at + 4;
+        }
+        else
+        {
+            const header = parseFrameHeader(stream.input.subarray(0, held), at);
+            end = header ? at + header.length + 4 : held + MAXIMUM_FRAME_SIZE;
+        }
+        return Math.min(FETCH_CHUNK, Math.max(1, end - held + stream.discard));
     };
 
     /**
@@ -341,15 +377,25 @@ export function createMp3Provider(host){
      * copying a negative count -- hundreds of megabytes over the end of the
      * guest's memory.
      *
+     * Each read asks for no more than completes the next frame, and the header
+     * after it that confirms it, the way the program's own decoder reads: the
+     * library keeps a sample's place in its bytes by what has been fetched,
+     * and a read far ahead of playback was measured coming back with the
+     * sample's first bytes again.
+     *
      * @param {Stream} stream @param {any} thread
      */
-    const readMore = async(stream, thread)=>{
+    const readOnce = async(stream, thread)=>{
+        if (stream.inputDone)
+        {
+            return;
+        }
         if (scratch === 0)
         {
             scratch = allocate(FETCH_CHUNK);
         }
         const read = (await callGuest(stream.fetch,
-            [stream.user, scratch, FETCH_CHUNK, -1], thread)) | 0;
+            [stream.user, scratch, askFor(stream), -1], thread)) | 0;
         if (read <= 0)
         {
             stream.inputDone = true;
@@ -386,6 +432,13 @@ export function createMp3Provider(host){
         }
     };
 
+    /** @param {Stream} stream @param {any} thread */
+    const readMore = (stream, thread)=>{
+        const run = reading.then(()=>readOnce(stream, thread));
+        reading = run.catch(()=>{});
+        return run;
+    };
+
     /**
      * Opens the decoder for a stream whose first frame is known.
      *
@@ -416,8 +469,14 @@ export function createMp3Provider(host){
         }
     };
 
-    /** @param {Stream} stream */
-    const leadSamples = stream=>LEAD_FRAMES * stream.first.samples * stream.first.channels;
+    /**
+     * Frames decoded ahead of the position, for a decoder that has fallen
+     * behind what it was fed; one that answers as it is fed needs none.
+     *
+     * @param {Stream} stream
+     */
+    const leadSamples = stream=>(stream.decoded < stream.fed
+        ? LEAD_FRAMES * stream.first.samples * stream.first.channels : 0);
 
     /**
      * Parks the caller until the decoder has produced more, or the stream is
@@ -658,6 +717,13 @@ export function createMp3Provider(host){
                             return 0;
                         }
                         streams.set(stream.handle, stream);
+                        // A decoder that has not answered what it was given
+                        // is one that answers later: it is fed a lead now.
+                        while (leadSamples(stream) > 0 && stream.fed < leadSamples(stream)
+                            && !stream.inputDone)
+                        {
+                            await readMore(stream, thread);
+                        }
                         // The lead, out of what the first read fed: the wait
                         // for it is paid here, once, and not by every request
                         // the library makes while the decoder is warming up.

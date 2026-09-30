@@ -44,10 +44,9 @@ Source: `src/layers/audio/module.js`. The DirectSound seam imports `IUNKNOWN_MET
 | `callGuest` | `(entry, args, thread?) => Promise<number>` | `bridge.callGuest` | Runs a guest routine, for device enumeration and the provider's registration. |
 | `currentThread` | `() => thread` | `() => undefined` | Whose call the provider is answering, read before it awaits. |
 | `resolveImport` | `(library, name) => address \| null` | `() => null` | The guest address of an export, of the sound middleware or of the provider itself. |
-| `openAudio` | `(shape) => AudioStream | null` | absent | The media layer's packet-fed decoder, handed down by the assembling caller. Present, the provider decodes each frame inside the call that fed it (`createSynchronousDecoder`) and falls back to WebCodecs per stream when it answers null. |
-| `decoder` | `Decoder` | from `openAudio`, else `createWebCodecsDecoder()` | The MPEG decoder behind the provider; a test substitutes one. |
+| `decoder` | `Decoder` | `createMinimp3Decoder()` | The MPEG decoder behind the provider; a test substitutes one. |
 | `mp3` | boolean | `true` | Whether `Mp3dec.asi` is published at all. `false` leaves a program to run the decoder it ships. |
-| `warn` | `(text) => void` | absent | Where the provider reports a failure. |
+| `divergence` | `(api, detail) => void` | absent | Where a call that differs from the real API is reported; the MP3 provider reports its failures there as `Mp3dec.asi`. |
 
 ### Provided API
 
@@ -309,28 +308,28 @@ entry points (`_RIB_provider_library_handle@0`, `RIB_register_interface`, resolv
 tables are written into guest memory once, with the entry types, attribute tokens and data
 subtypes the redistributable decoder registers, because the middleware compares the numbers.
 
-Decoding is hosted. `ASI_stream_open` reads the compressed stream through the middleware's fetch
-callback in `FETCH_CHUNK` (65,536-byte) pieces from a guest scratch block, each read continuing
-from where the last stopped (offset -1) because the callback was measured miscounting a named
-offset outside its window; the size stated at open is advisory. `src/layers/audio/asi/mp3.js`
+Decoding is hosted. The provider reads the compressed stream through the middleware's fetch
+callback into a guest scratch block, frame by frame as the program's own decoder does: each read
+asks for no more than completes the next frame and the header after it that confirms it, and
+reads only when a request needs the frame. The middleware keeps a sample's place in its bytes by
+what has been fetched, and a read far ahead of playback was measured coming back with the
+sample's first bytes again, which a listener hears as a line replaying. Each read continues from
+where the last stopped (offset -1), because the callback was measured miscounting a named offset
+outside its window; the size stated at open is advisory. Reads from different guest threads share
+the scratch block, so they are queued one behind another. `src/layers/audio/asi/mp3.js`
 scans frame headers (MPEG 1, 2 and 2.5, skipping an ID3v2 tag, probing the first 262,144 bytes
 for a frame) and cuts the stream at frame boundaries. Each frame goes to the decoder as it is
-read: with `openAudio` configured that is the media layer's hosted decoder, which answers inside
-`feed` (`createSynchronousDecoder`), so every fed frame's samples are in hand before the request
-that read it returns and a frame the decoder rejects is made up with silence (`paddedFrames`);
-without it, or per stream when the media layer answers null, the platform's `AudioDecoder`
-(WebCodecs, codec `'mp3'`) decodes them and `interleave16` turns each `AudioData` into
-interleaved 16-bit samples. Before the stream is handed over, `LEAD_FRAMES` (8) frames are read
-ahead and kept in front of the position; an `ASI_stream_process` that has fed enough and finds
-it not yet decoded -- only the platform decoder, which was measured answering up to a second
-late while a program starts -- waits (counted in `waits`) rather than answering short, which holds
-the guest thread and whatever lock it took. With the hosted decoder `waits` stays at zero. `seek` finds
+read: minimp3 (`src/layers/audio/asi/minimp3.js`, a WebAssembly build noticed in
+`THIRD-PARTY-NOTICES.md`) answers inside `feed`, one instance per stream, so every fed frame's
+samples are in hand before the request that read it returns, and a frame it answers short is made
+up with silence (`paddedFrames`). A substitute decoder that answers later than it is fed is given
+a lead of `LEAD_FRAMES` (8) frames, and a request that finds its samples not yet decoded waits
+(counted in `waits`) rather than answering short; with minimp3 `waits` stays at zero. `seek` finds
 the frame at or after the byte offset, `attribute` answers rates, widths, channels, position and
 percent done, `set_preference` records requested rate, width and channels.
 
 The provider is off when `config.mp3 === false`; then the program runs the decoder it ships as
-guest code. It is also inert on a platform with no `AudioDecoder`: `createWebCodecsDecoder().open`
-throws, and the open fails with a message `ASI_error` returns.
+guest code.
 
 ## Limitations and divergences
 
@@ -388,8 +387,9 @@ All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`).
 | `src/layers/audio/output/ring.test.js` | Unit | Fill and room, short writes, silence on a short read, starvation counters, `clear`. |
 | `src/layers/audio/dsound/buffers.test.js` | Contract | Cursor motion against the clock, write lead and stopped margin, wrapped locks, volume/pan bounds and the pan law, notifications (the start position passed first, a one-shot's last frame as it ends, `DSBPN_OFFSETSTOP` on a stop and never on a lap), duplicates, `drainPlayed` ranges. |
 | `src/layers/audio/dsound/seam.test.js` | Contract, over a flat guest memory | Every slot's argument count, `IDirectSound8`'s twelfth slot, structure layouts (`WAVEFORMATEX`, `DSBUFFERDESC` in both sizes and no other, `DSCAPS` at 96 bytes), device and buffer caps flags, a size rounded to whole frames, controls refused without their flags, `SetFX`, which interfaces each object answers, one object per create with its own count and one primary that outlives its last release while its device lives and is pruned after, a primary described with a format refused, DirectSound 8's rules for 3D buffers, `Stop` setting `DSBPN_OFFSETSTOP`, refusals, enumeration through a guest callback, `GetDeviceID` resolving the playback defaults and the enumerated device to one GUID and refusing the capture defaults, identity through the publisher, the ordinals through the real synthesiser. |
-| `src/layers/audio/asi/provider.test.js` | Contract, with a substitute decoder | Table registration through `RIB`, chunked continuing fetch, lead decoding, immediate answers, seek forward and back, preferences, a frameless stream, a failing decoder, a platform with none. |
-| `src/layers/audio/asi/mp3.test.js` | Unit | Frame-header parsing for each MPEG version, ID3 skipping, frame scanning, `interleave16` over planar and interleaved `AudioData`. |
+| `src/layers/audio/asi/provider.test.js` | Contract, with a substitute decoder | Table registration through `RIB`, frame-by-frame continuing fetch never further ahead than the frame being taken, overlapping requests reading once each in order, a lead for a decoder that answers late, immediate answers, seek forward and back, preferences, a frameless stream, a failing decoder, a platform with none. |
+| `src/layers/audio/asi/minimp3.test.js` | Unit | Each frame answered inside `feed` as a whole frame of samples; a frame that decodes short padded to its length. |
+| `src/layers/audio/asi/mp3.test.js` | Unit | Frame-header parsing for each MPEG version, ID3 skipping, frame scanning. |
 
 Whether sound is audible on a real page is not covered by the unit suite; the starvation counters
 either backend reports are what a browser run reports.

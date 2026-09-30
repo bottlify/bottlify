@@ -2609,11 +2609,11 @@ export class RegionEmitter {
         const around = !this.copying && this.ranges.some(range=>range.loop && range.lo === label);
         b.localGet(Local.budget).i32const(0).op(I32.leS);
         this.openGuard('spent');
-        this.exitAt(target, Exit.BUDGET);
+        this.exitAfterEdge(target, Exit.BUDGET);
         this.close();
         if (this.copyFunction ? !this.copyIndex.has(label) : this.interior.has(label))
         {
-            this.exitAt(target, Exit.UNTRANSLATED);
+            this.exitAfterEdge(target, Exit.UNTRANSLATED);
             return;
         }
         if (!around || this.entered.has(label))
@@ -2668,6 +2668,20 @@ export class RegionEmitter {
         this.charge();
         this.b.i32const(eip).localSet(Local.eip);
         this.exitWithKind(kind, vector);
+    }
+
+    /**
+     * `exitAt` from a jump whose x87 edge has already moved the registers
+     * where the target reads them: the exit writes them back from there.
+     *
+     * @param {number} eip @param {number} kind
+     */
+    exitAfterEdge(eip, kind){
+        const x = this.x87;
+        const held = x.current;
+        x.current = x.active ? x.landed : held;
+        this.exitAt(eip, kind);
+        x.current = held;
     }
 
     /**

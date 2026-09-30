@@ -9,7 +9,8 @@ import { registerDirectMusic } from './dmusic/classes.js';
 import { DSBSTATUS_PLAYING } from './dsound/buffers.js';
 import { createMixer } from './output/mixer.js';
 import { createMp3Provider } from './asi/provider.js';
-import { createSynchronousDecoder, createWebCodecsDecoder, splitFrames } from './asi/mp3.js';
+import { createMinimp3Decoder } from './asi/minimp3.js';
+import { splitFrames } from './asi/mp3.js';
 
 /**
  * audio — the sound APIs a program was written against.
@@ -171,13 +172,8 @@ export function createAudioModule(){
             // What decodes behind the provider. The library asks for its samples
             // in a call and holds a lock while it asks, so a decoder that answers
             // later parks the guest thread and everything waiting on that lock
-            // with it; the assembling caller's `openAudio` -- the media layer's
-            // hosted decoder -- answers in the call, and the platform's decoder
-            // is only the fallback for a build whose binary cannot.
-            const decoder = config?.decoder
-                ?? (config?.openAudio
-                    ? createSynchronousDecoder(config.openAudio, createWebCodecsDecoder())
-                    : createWebCodecsDecoder());
+            // with it; minimp3 answers in the call.
+            const decoder = config?.decoder ?? createMinimp3Decoder();
 
             /**
              * Decodes a compressed wave's frames into interleaved 16-bit PCM.
@@ -284,7 +280,7 @@ export function createAudioModule(){
                 resolveImport: config?.resolveImport ?? (()=>null),
                 decoder,
                 /** @param {string} text */
-                warn: text=>config?.warn?.(text),
+                warn: text=>config?.divergence?.('Mp3dec.asi', text),
             });
 
             /**
