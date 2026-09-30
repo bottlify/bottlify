@@ -40,6 +40,10 @@ const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_ACCESS_DENIED = 5;
 /** CreateFile's dwShareMode bit that lets another handle write the file too. */
 const FILE_SHARE_WRITE = 0x2;
+/** A buffer the call cannot read from, as NT answers a null one. */
+const ERROR_INVALID_USER_BUFFER = 1784;
+/** What NT answers a read into a null buffer. */
+const ERROR_NOACCESS = 998;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NO_MORE_FILES = 18;
 const ERROR_WRITE_PROTECT = 19;
@@ -1871,6 +1875,11 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
+                if ((buffer >>> 0) === 0 && (length >>> 0) !== 0)
+                {
+                    writeDwordIf(read >>> 0, 0);
+                    return fail(ERROR_NOACCESS);
+                }
                 const pointer = overlapped >>> 0;
                 const at = pointer !== 0 && host.ports
                     ? host.ports.offsetOf(pointer)
@@ -1942,6 +1951,11 @@ export function createFileFunctions(host){
                 if (!file.write)
                 {
                     return fail(ERROR_ACCESS_DENIED);
+                }
+                if ((buffer >>> 0) === 0 && count !== 0)
+                {
+                    writeDwordIf(written >>> 0, 0);
+                    return fail(ERROR_INVALID_USER_BUFFER);
                 }
                 // Copied, not passed on: the memory layer may hand back a view
                 // onto guest memory, and what the filesystem stores outlives

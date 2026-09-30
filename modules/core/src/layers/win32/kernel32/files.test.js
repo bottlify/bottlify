@@ -516,6 +516,24 @@ test('a zero-length write still reports a count', ()=>{
     assert.equal(memory.dword(OUT_COUNT), 0);
 });
 
+test('a write from a null buffer is refused, a zero-length one is not', ()=>{
+    const { memory, files, error, fns, open } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'abcd');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    memory.putDword(OUT_COUNT, 0xdeadbeef);
+    assert.equal(fns.WriteFile.handler([handle, 0, 10, OUT_COUNT, 0]), 0);
+    assert.equal(error.code, 1784, 'ERROR_INVALID_USER_BUFFER');
+    assert.equal(memory.dword(OUT_COUNT), 0);
+    assert.equal(files.text('C:\\GAME\\SAVE.DAT'), 'abcd');
+    assert.equal(fns.WriteFile.handler([handle, 0, 0, OUT_COUNT, 0]), 1);
+
+    memory.putDword(OUT_COUNT, 0xdeadbeef);
+    assert.equal(fns.ReadFile.handler([handle, 0, 10, OUT_COUNT, 0]), 0);
+    assert.equal(error.code, 998, 'ERROR_NOACCESS');
+    assert.equal(memory.dword(OUT_COUNT), 0);
+    assert.equal(fns.SetFilePointer.handler([handle, 0, 0, FILE_CURRENT]), 0, 'nothing consumed');
+});
+
 test('a file opened for reading refuses a write, and the other way round', ()=>{
     const { files, error, fns, open } = setup();
     files.put('C:\\GAME\\SAVE.DAT', 'abcd');
