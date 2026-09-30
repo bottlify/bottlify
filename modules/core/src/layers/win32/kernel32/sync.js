@@ -83,6 +83,18 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_SIGNAL_REFUSED = 156;
 /** A thread that has ended cannot be suspended. */
 const ERROR_ACCESS_DENIED = 5;
+/** What GetThreadContext answers for a thread that has ended. */
+const ERROR_GEN_FAILURE = 31;
+/** The CONTEXT groups GetThreadContext fills, and the size of the record. */
+const CONTEXT_CONTROL = 0x10001;
+const CONTEXT_INTEGER = 0x10002;
+const CONTEXT_SEGMENTS = 0x10004;
+const CONTEXT_DEBUG_REGISTERS = 0x10010;
+const CONTEXT_BYTES = 0x2cc;
+/** The flat selectors a 32-bit thread runs under. */
+const SELECTOR_CODE = 0x1b;
+const SELECTOR_DATA = 0x23;
+const SELECTOR_FS = 0x3b;
 
 /** Milliseconds from the FILETIME epoch (1601) to the Unix one, for thread times. */
 const FILETIME_EPOCH_MS = 11644473600000;
@@ -105,6 +117,8 @@ const FILETIME_EPOCH_MS = 11644473600000;
  *   Credits the guest clock for time a wait was supposed to spend. See the
  *   timeout note on WaitForMultipleObjects.
  * @property {(code: number) => void} [setLastError]
+ * @property {() => Record<string, number>} [registers]  the running thread's
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /**
@@ -230,6 +244,70 @@ export function createSyncFunctions(host){
         standing ??= kernel.createEvent({ manualReset: true, signalled: true,
             name: 'standard stream' });
         return standing;
+    };
+
+    /**
+     * The registers a switched-away thread's saved state holds, in either
+     * engine's shape: both keep the eight general registers and eip.
+     *
+     * @param {any} context
+     * @returns {Record<string, number>}
+     */
+    const savedRegisters = context=>{
+        if (!context)
+        {
+            return {};
+        }
+        const [eax, ecx, edx, ebx, esp, ebp, esi, edi] = Array.from(context.reg32 ?? [],
+            value=>Number(value) >>> 0);
+        let eflags = context.flags;
+        if (context.block instanceof Uint8Array && context.layout)
+        {
+            eflags = new DataView(context.block.buffer, context.block.byteOffset)
+                .getUint32(context.layout.eflags, true);
+        }
+        return { eax, ecx, edx, ebx, esp, ebp, esi, edi, eip: context.eip >>> 0,
+            eflags: (eflags ?? 0x202) >>> 0 };
+    };
+
+    /**
+     * Writes the groups of a CONTEXT its ContextFlags name, and nothing else.
+     *
+     * @param {number} at @param {Record<string, number>} registers
+     */
+    const writeThreadContext = (at, registers)=>{
+        const bytes = host.readMemory(at, CONTEXT_BYTES).slice();
+        const view = new DataView(bytes.buffer);
+        const flags = view.getUint32(0, true);
+        /** @param {number} offset @param {number | undefined} value */
+        const put = (offset, value)=>view.setUint32(offset, (value ?? 0) >>> 0, true);
+        if ((flags & CONTEXT_DEBUG_REGISTERS) === CONTEXT_DEBUG_REGISTERS)
+        {
+            bytes.fill(0, 4, 0x1c);
+        }
+        if ((flags & CONTEXT_SEGMENTS) === CONTEXT_SEGMENTS)
+        {
+            put(0x8c, 0);
+            put(0x90, SELECTOR_FS);
+            put(0x94, SELECTOR_DATA);
+            put(0x98, SELECTOR_DATA);
+        }
+        if ((flags & CONTEXT_INTEGER) === CONTEXT_INTEGER)
+        {
+            [['edi', 0x9c], ['esi', 0xa0], ['ebx', 0xa4], ['edx', 0xa8], ['ecx', 0xac],
+                ['eax', 0xb0]].forEach(([name, offset])=>
+                put(Number(offset), registers[String(name)]));
+        }
+        if ((flags & CONTEXT_CONTROL) === CONTEXT_CONTROL)
+        {
+            put(0xb4, registers.ebp);
+            put(0xb8, registers.eip);
+            put(0xbc, SELECTOR_CODE);
+            put(0xc0, registers.eflags ?? 0x202);
+            put(0xc4, registers.esp);
+            put(0xc8, SELECTOR_DATA);
+        }
+        host.writeMemory(at, bytes);
     };
 
     /** @param {number} handle */
@@ -614,6 +692,59 @@ export function createSyncFunctions(host){
                 const previous = thread.idealProcessor ?? 0;
                 thread.idealProcessor = ideal >>> 0;
                 return previous;
+            },
+        },
+
+        /**
+         * BOOL GetThreadContext(HANDLE hThread, LPCONTEXT lpContext)
+         *
+         * The groups ContextFlags asks for, from the running registers for
+         * the calling thread and from the state saved when another was last
+         * switched away. A thread that has ended has no context to read.
+         */
+        GetThreadContext: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const thread = threadOf(handle);
+                if (!thread)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                if (kernel.ThreadState && thread.state === kernel.ThreadState.TERMINATED)
+                {
+                    host.setLastError?.(ERROR_GEN_FAILURE);
+                    return 0;
+                }
+                const registers = thread === host.currentThread()
+                    ? host.registers?.() ?? {} : savedRegisters(thread.context);
+                writeThreadContext(out >>> 0, registers);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SetThreadContext(HANDLE hThread, const CONTEXT *lpContext)
+         *
+         * Refused: a thread stopped here is usually stopped inside a call
+         * into the system, whose return would overwrite whatever registers
+         * were put in its place, and a context that took effect only
+         * sometimes would be worse than one refused.
+         */
+        SetThreadContext: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const thread = threadOf(handle);
+                if (!thread)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                host.divergence?.('SetThreadContext', 'the registers of a thread are not replaced');
+                host.setLastError?.(ERROR_ACCESS_DENIED);
+                return 0;
             },
         },
 

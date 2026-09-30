@@ -1239,6 +1239,9 @@ export function createWin32Module(){
                         allocateCode: bytes=>heap.allocateCode(bytes),
                         advanceClock: (/** @type {number} */ ms)=>kernel.clock.advance(ms),
                         setLastError: setError,
+                        registers: ()=>Object.fromEntries([...registerNames, 'eflags']
+                            .map(name=>[name, cpuRegisters.read(name)])),
+                        divergence: config?.divergence,
                     }),
                     ...createLocaleFunctions({
                         readMemory, writeMemory,

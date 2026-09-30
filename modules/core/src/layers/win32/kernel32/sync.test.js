@@ -884,3 +884,36 @@ test('a count of nothing or of too much is ERROR_INVALID_PARAMETER', ()=>{
     fns.WaitForMultipleObjects.handler([65, 0x400, 0, INFINITE]);
     assert.deepEqual(host.errors, [87, 87]);
 });
+
+test('GetThreadContext fills the groups asked for, and SetThreadContext is refused', ()=>{
+    const host = /** @type {any} */ (fakeHost());
+    const said = /** @type {string[]} */ ([]);
+    host.divergence = (/** @type {string} */ api)=>said.push(api);
+    host.registers = ()=>({ eax: 1, ecx: 2, edx: 3, ebx: 4, esp: 0x5000, ebp: 6, esi: 7, edi: 8,
+        eip: 0x401000, eflags: 0x246 });
+    const fns = createSyncFunctions(host);
+    const other = host.threads.second;
+    other.context = { reg32: Int32Array.of(10, 11, 12, 13, 0x6000, 15, 16, 17), eip: 0x402000,
+        flags: 0x202 };
+    host.register(0x20, 'thread', other);
+    const at = 0x400;
+    const view = new DataView(host.bytes.buffer);
+    const CONTEXT_FULL = 0x10007;
+
+    view.setUint32(at, CONTEXT_FULL, true);
+    assert.equal(fns.GetThreadContext.handler([0xfffffffe, at]), 1, 'the calling thread');
+    assert.deepEqual([view.getUint32(at + 0xb0, true), view.getUint32(at + 0xc4, true),
+        view.getUint32(at + 0xb8, true)], [1, 0x5000, 0x401000]);
+    assert.equal(view.getUint32(at, true), CONTEXT_FULL, 'the flags stay as given');
+
+    view.setUint32(at, 0x10001, true);
+    view.setUint32(at + 0xb0, 0xcccccccc, true);
+    assert.equal(fns.GetThreadContext.handler([0x20, at]), 1, 'a switched-away thread');
+    assert.equal(view.getUint32(at + 0xb8, true), 0x402000);
+    assert.equal(view.getUint32(at + 0xc4, true), 0x6000);
+    assert.equal(view.getUint32(at + 0xb0, true), 0xcccccccc, 'integer registers not asked for');
+
+    assert.equal(fns.SetThreadContext.handler([0x20, at]), 0);
+    assert.deepEqual(said, ['SetThreadContext']);
+    assert.equal(fns.GetThreadContext.handler([0x99, at]), 0, 'no such thread');
+});
