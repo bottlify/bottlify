@@ -2077,3 +2077,88 @@ test('a transfer that finds no entry leaves with the carried state written back'
     const flags = eflagsOf(new DataView(m.memory.buffer), m.layout);
     assert.equal(flags & 0x41, 0x41, 'CF and ZF of the add');
 });
+
+/**
+ * Runs from EIP until the machine halts, translating each address the run
+ * leaves at: the regions a program's calls and returns need, whichever way
+ * the runtime found them.
+ *
+ * @param {ReturnType<typeof machine>} m
+ */
+async function runToHalt(m){
+    let retired = 0;
+    for (let turn = 0; turn < 64; turn++)
+    {
+        if (m.runtime.entryOf(m.eip()) < 0)
+        {
+            m.runtime.noteHot(m.eip());
+            await m.runtime.translatePending();
+        }
+        const exit = m.runtime.run(m.runtime.entryOf(m.eip()), 10_000_000);
+        retired += exit.retired;
+        if (exit.kind === 'halt')
+        {
+            return retired;
+        }
+    }
+    throw new Error('no halt');
+}
+
+test('with callReturn a call out of a region returns into it as a wasm call: the same run, half '
+    + 'the transfers', async()=>{
+    // mov ecx, 1000; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret
+    const program = [
+        0xb9, 0xe8, 0x03, 0, 0, 0xe8, 0x04, 0, 0, 0, 0x49, 0x75, 0xf8, 0xf4, 0x42, 0xc3,
+    ];
+    /** @type {{ retired: number, transfers: number, edx: number, esp: number }[]} */
+    const runs = [];
+    for (const callReturn of [false, true])
+    {
+        const m = machine({ leafCalls: false, callReturn, countTransfers: true });
+        m.write(CODE, program);
+        m.setReg(4, 0x80000);
+        new DataView(m.memory.buffer).setUint32(m.layout.eip, CODE, true);
+        const retired = await runToHalt(m);
+        const d = m.runtime.diagnostics();
+        runs.push({ retired, transfers: d.transfers ?? 0, edx: m.reg(2), esp: m.reg(4) });
+        assert.equal(new DataView(m.memory.buffer).getUint32(
+            m.layout.tables + Tables.UNDO_RING, true), 0, 'no call left waiting');
+    }
+    const [plain, called] = runs;
+    assert.equal(called.retired, plain.retired);
+    assert.equal(called.edx, 1000);
+    assert.equal(called.esp, 0x80000);
+    if (plain.transfers > 0)
+    {
+        assert.ok(called.transfers <= plain.transfers / 2 + 2,
+            `returns do not go through the hash: ${called.transfers} of ${plain.transfers}`);
+    }
+});
+
+test('with callReturn calls deeper than the stack of waiting calls go on as plain transfers',
+    async()=>{
+        // Mutual recursion 600 deep, past CallStack.LIMIT:
+        //   mov ecx, 600; call A; hlt
+        //   A: dec ecx; jz 1f; inc edx; call B; 1: ret
+        //   B: dec ecx; jz 1f; inc ebx; call A; 1: ret
+        const program = [
+            0xb9, 0x58, 0x02, 0, 0, 0xe8, 0x01, 0, 0, 0, 0xf4,
+            0x49, 0x74, 0x06, 0x42, 0xe8, 0x01, 0, 0, 0, 0xc3,
+            0x49, 0x74, 0x06, 0x43, 0xe8, 0xed, 0xff, 0xff, 0xff, 0xc3,
+        ];
+        /** @type {number[][]} */
+        const results = [];
+        for (const callReturn of [false, true])
+        {
+            const m = machine({ leafCalls: false, callReturn });
+            m.write(CODE, program);
+            m.setReg(4, 0x80000);
+            new DataView(m.memory.buffer).setUint32(m.layout.eip, CODE, true);
+            const retired = await runToHalt(m);
+            results.push([retired, m.reg(1), m.reg(2), m.reg(3), m.reg(4), m.eip()]);
+            assert.equal(new DataView(m.memory.buffer).getUint32(
+                m.layout.tables + Tables.UNDO_RING, true), 0, 'no call left waiting');
+        }
+        assert.deepEqual(results[1], results[0]);
+        assert.deepEqual(results[1].slice(1, 5), [0, 300, 299, 0x80000]);
+    });

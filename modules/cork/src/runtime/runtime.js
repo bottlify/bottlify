@@ -53,7 +53,10 @@ const usesX87 = region=>region.blocks.some(block=>block.instructions.some(isX87)
 
 /** Exit codes by number, as the region functions answer them. */
 const KINDS = /** @type {ExitKind[]} */ (
-    ['untranslated', 'budget', 'trap', 'halt', 'fault', 'stale', 'interpreted']);
+    ['untranslated', 'budget', 'trap', 'halt', 'fault', 'stale', 'interpreted',
+        // `RETURNED` goes to a region's own wasm call, never to the host; were it
+        // to arrive, the state block is whole and the run goes on at its EIP.
+        'untranslated']);
 
 /** @type {Function | null} */
 let noTier = null;
@@ -141,6 +144,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // cent from it, and in the games `callTargets` names one still ran at
         // 57 % of the frame rate it had with neither when this one alone was on.
         dispatch: false,
+        // A call out of a region a wasm call, and the region going on after the
+        // `ret` that comes back to it, rather than a transfer through the entry
+        // hash each way (`callAndReturn` in emit/integer.js). Off unless asked.
+        callReturn: false,
         // x87 regions compiled for the precision control the program runs
         // under -- the wide ones (double, extended) until it is seen with
         // single set, single from then on until it is seen with another --
@@ -952,6 +959,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         hash: table !== null,
         place: table !== null && settings.dispatch === true,
         profileCalls: table !== null && settings.callTargets === true,
+        callReturn: table !== null && settings.callReturn === true && !settings.undoLog,
         resume: resumable,
         wide: precision === 'wide',
         narrow: precision === 'narrow',
@@ -1392,6 +1400,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const variant = (settings.structure !== false ? 'S' : '')
         + (settings.precise === true ? 'P' : '') + (settings.countTransfers ? 'T' : '')
         + (settings.dispatch === true ? 'D' : '') + (settings.callTargets === true ? 'C' : '')
+        + (settings.callReturn === true ? 'R' : '')
         + `p${(settings.trapPort ?? 0).toString(16)}`;
     /** The store key of one formed region: an x87 region compiled for the wide
      * precision controls or for single, or checked, is another translation of the same

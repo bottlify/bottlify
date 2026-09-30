@@ -111,7 +111,7 @@ function contextKey(layout, features, options, leaveOut){
         options.trapPort ?? null, options.countTransfers === true, options.blockProfile === true,
         options.wide === true, options.narrow === true, options.structure !== false,
         options.precise === true, options.place === true, options.profileCalls === true,
-        options.resume === true, [...leaveOut].sort()]);
+        options.resume === true, options.callReturn === true, [...leaveOut].sort()]);
 }
 
 /** @type {Map<string, number>} */
@@ -236,7 +236,8 @@ function keep(cache, key, shape, { typeIndex, locals, body, hints }, built){
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
  *     blockProfile?: boolean, timings?: boolean, place?: boolean,
  *     leaveOut?: Set<string> | string[], wide?: boolean, narrow?: boolean,
- *     structure?: boolean, precise?: boolean, profileCalls?: boolean, resume?: boolean }}
+ *     structure?: boolean, precise?: boolean, profileCalls?: boolean, resume?: boolean,
+ *     callReturn?: boolean }}
  *     [options]
  *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0;
  *     precise: nothing relaxed (the runtime's `precise`); place: job i's function goes at
@@ -265,6 +266,7 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
         place: options.place === true ? jobs.length : 0,
         profileCalls: options.profileCalls === true,
         resume: options.resume === true,
+        callReturn: options.callReturn === true,
         leaveOut,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
     });

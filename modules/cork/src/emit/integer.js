@@ -26,7 +26,7 @@ import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
 import { CPUID_LEAVES } from '../cpuid.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
-import { Exit, Local } from './region.js';
+import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
 import { checkAccess, emitStaleExit, noteStore, stackAccess } from './memory.js';
 import { Tables } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
@@ -101,6 +101,92 @@ function profileCall(e, site){
     b.localGet(Local.t1).i32const(15).op(I32.and).i32const(3).op(I32.shl).localTee(Local.t1)
         .i32const(site | 0).store('i32', { offset: at + 8 });
     b.localGet(Local.t1).localGet(Local.count).store('i32', { offset: at + 12 });
+    e.close();
+}
+
+/**
+ * A call out of the region as a wasm call (`callReturn`): the return address
+ * on the call stack, the state written back, the module's transfer called --
+ * not tail-called -- with the target, and the region going on after the call
+ * when the `ret` that pops that address answers `RETURNED`. The transfer then
+ * ran every region in between inside the call, and the host's return stack
+ * predicts the way back where the entry hash and its indirect jump did not.
+ * Any other answer is an exit the state block already holds: it goes up as it
+ * came, this call's entry taken off the stack. Past the stack's limit, or with
+ * the budget spent, the call leaves as any call does.
+ *
+ * @param {import('./region.js').RegionEmitter} e
+ * @param {number} next  the return address, a block of the region
+ * @param {() => void} pushTarget  pushes the callee's address
+ */
+function callAndReturn(e, next, pushTarget){
+    const { b, layout } = e;
+    const depth = layout.tables + CallStack.DEPTH;
+    e.charge();
+    pushTarget();
+    b.localSet(Local.eip);
+    if (e.staleCheck)
+    {
+        // The push stored into a page holding code: leave at the callee, as a
+        // call that leaves by itself does.
+        e.staleCheck = false;
+        b.localGet(Local.stale);
+        e.openIf('stale');
+        e.exitDynamic(Exit.STALE);
+        e.close();
+    }
+    b.i32const(0).load('i32', { offset: depth }).localTee(Local.t1)
+        .i32const(CallStack.LIMIT).op(I32.geU)
+        .localGet(Local.budget).i32const(0).op(I32.leS).op(I32.or);
+    e.openIf('plain');
+    e.exitDynamic(Exit.UNTRANSLATED);
+    e.close();
+    b.localGet(Local.t1).i32const(2).op(I32.shl).i32const(next)
+        .store('i32', { offset: layout.tables + CallStack.STACK });
+    b.i32const(0).localGet(Local.t1).i32const(1).op(I32.add).store('i32', { offset: depth });
+    e.storeState();
+    e.resetRun();
+    // What the calls in between retire is added to the counter; the budget
+    // goes down by the same.
+    b.i32const(0).load('i32', { offset: layout.counter }).localSet(Local.t2);
+    b.localGet(Local.eip);
+    for (let local = Local.budget; local < STATE_PARAMS; local++)
+    {
+        b.localGet(local);
+    }
+    b.call(/** @type {number} */ (e.context.transfer)).localTee(Local.t0)
+        .i32const(Exit.RETURNED).op(I32.ne);
+    e.openIf('elsewhere');
+    b.i32const(0).localGet(Local.t1).store('i32', { offset: depth });
+    b.localGet(Local.t0).return();
+    e.close();
+    e.loadState();
+    b.localGet(Local.budget)
+        .i32const(0).load('i32', { offset: layout.counter }).localGet(Local.t2).op(I32.sub)
+        .op(I32.sub).localTee(Local.budget).localSet(Local.origin);
+    b.i32const(next).localSet(Local.eip);
+    e.returned = true;
+}
+
+/**
+ * A `ret` whose address is the one the innermost call made as a wasm call
+ * waits at: that entry off the stack, and the region answers `RETURNED` with
+ * the state written back, for the caller to go on.
+ *
+ * @param {import('./region.js').RegionEmitter} e
+ */
+function returnToCall(e){
+    const { b, layout } = e;
+    const depth = layout.tables + CallStack.DEPTH;
+    b.i32const(0).load('i32', { offset: depth }).localTee(Local.t1);
+    e.openIf('called');
+    b.localGet(Local.t1).i32const(2).op(I32.shl)
+        .load('i32', { offset: layout.tables + CallStack.STACK - 4 })
+        .localGet(Local.eip).op(I32.eq);
+    e.openIf('returns');
+    b.i32const(0).localGet(Local.t1).i32const(1).op(I32.sub).store('i32', { offset: depth });
+    e.exitDynamic(Exit.RETURNED);
+    e.close();
     e.close();
 }
 
@@ -580,6 +666,14 @@ export function emitInstruction(e, instruction, flagsLive){
                 }
                 return true;
             }
+            if (e.callReturn && e.labels.has(next)
+                && !(dst.kind !== 'rel' && e.region.blocks[e.blockIndex].exit.predicted))
+            {
+                callAndReturn(e, next, dst.kind === 'rel'
+                    ? ()=>b.i32const(/** @type {number} */ (dst.target))
+                    : ()=>b.localGet(Local.count));
+                return true;
+            }
             if (dst.kind === 'rel')
             {
                 e.exitAt(/** @type {number} */ (dst.target), Exit.UNTRANSLATED);
@@ -610,6 +704,10 @@ export function emitInstruction(e, instruction, flagsLive){
                 e.openIf('return');
                 e.jumpTo(at);
                 e.close();
+            }
+            if (e.context.callReturn)
+            {
+                returnToCall(e);
             }
             e.exitDynamic(Exit.UNTRANSLATED);
             e.dead = true;

@@ -62,7 +62,7 @@ import { inlineReturns } from '../region.js';
 import {
     analyseX87, floatCondition, isX87, prepareX87, sameState, x87BlockEnd, x87BlockStart,
     x87Edge, x87EntryCheck, x87Epilogue, x87LoadRegisters, x87Normalise,
-    x87Prologue, x87StoreRegisters,
+    x87Prologue, x87StoreRegisters, regionHasMmx,
 } from './x87.js';
 
 /**
@@ -117,6 +117,22 @@ export function mathImports(){
 /** How a run of translated code came back, as the low byte of the result. */
 export const Exit = Object.freeze({
     UNTRANSLATED: 0, BUDGET: 1, TRAP: 2, HALT: 3, FAULT: 4, STALE: 5, INTERPRETED: 6,
+    // A `ret` to the address a call made as a wasm call (`callReturn`) is waiting at:
+    // the state block complete, the caller goes on there. The host never sees it.
+    RETURNED: 7,
+});
+
+/**
+ * Where a module with `callReturn` keeps the return addresses its wasm calls
+ * wait at, from `layout.tables`: a depth, then a stack of addresses. The undo
+ * ring's area, which only a differential build fills and which then has no
+ * calls of this kind.
+ */
+export const CallStack = Object.freeze({
+    DEPTH: Tables.UNDO_RING,
+    STACK: Tables.UNDO_RING + 16,
+    // Deeper calls leave as any call does, so the wasm stack stays bounded.
+    LIMIT: 256,
 });
 
 /**
@@ -185,6 +201,8 @@ const LOCAL_TYPES = [
  * @property {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @property {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @property {number} [undo]           the undo helper's function index, in a differential build
+ * @property {boolean} [callReturn] a call out of a region is a wasm call the matching `ret`
+ *     returns from (`CallStack`), where the region goes on after it
  * @property {boolean} [countTransfers] each transfer through the hash adds one to the
  *     tables' transfer count (a diagnostic run)
  * @property {boolean} [blockProfile] each block counts its executions in the block
@@ -244,7 +262,7 @@ const LOCAL_TYPES = [
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
  *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
- *     resume?: boolean }}
+ *     resume?: boolean, callReturn?: boolean }}
  *     [options]  undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
@@ -261,7 +279,7 @@ const LOCAL_TYPES = [
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
-        place = 0, profileCalls = false, resume = false } = {})
+        place = 0, profileCalls = false, resume = false, callReturn = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -326,6 +344,10 @@ export function prepareModule(m, layout, features, memory = {},
         context.undo = addUndoHelper(m, layout);
     }
     // A production bundle emits no diagnostic count, whatever it is asked.
+    if (callReturn && hashed && !undoLog && (layout.flagRecord ?? -1) >= 0)
+    {
+        context.callReturn = true;
+    }
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && countTransfers)
     {
         context.countTransfers = true;
@@ -698,9 +720,17 @@ export class RegionEmitter {
         this.planned = planned;
         /** By ret block: the return addresses it jumps to rather than leaves by. */
         this.returns = planned?.returns ?? inlineReturns(region);
+        /** A call out of this region is a wasm call it goes on after: no x87 or MMX
+         * state to carry across one. */
+        this.callReturn = context.callReturn === true
+            && !region.blocks.some(block=>block.instructions.some(isX87))
+            && !regionHasMmx(region, context.leaveOut ?? new Set());
+        /** Whether the block's call returned here and went on. */
+        this.returned = false;
         /** The emitting order and its loops, in a structured region (`planStructure`). */
         this.structure = planned !== null ? planned.structure
-            : context.flat === true ? null : planStructure(region, this.returns);
+            : context.flat === true ? null
+                : planStructure(region, this.returns, this.callReturn);
         // A structured region's blocks in the order they are emitted, which
         // is their labels' order too.
         this.region = planned?.region ?? (this.structure === null
@@ -2492,6 +2522,14 @@ export class RegionEmitter {
                 }
                 return;
             case 'call':
+                if (this.returned)
+                {
+                    // Called as a wasm call and returned to: the block after it.
+                    this.returned = false;
+                    this.charge();
+                    this.jumpTo(exit.next);
+                    return;
+                }
                 // A direct call to a block of the region: the push is done
                 // and the jump is the block's. Any other left by itself.
                 if (!this.dead)
@@ -2501,6 +2539,13 @@ export class RegionEmitter {
                 }
                 return;
             default:
+                if (this.returned)
+                {
+                    this.returned = false;
+                    this.charge();
+                    this.jumpTo(exit.next);
+                    return;
+                }
                 // ret, indirect, call, hlt, fault: the instruction's own
                 // emission already left the function.
                 if (!this.dead)
@@ -2856,7 +2901,7 @@ export function liveFlagsOut(blocks, labels, precise = true){
  *     inside a loop: the return addresses of the predicted indirect calls, which a call to
  *     another target comes back to from outside
  */
-export function planStructure(region, returns){
+export function planStructure(region, returns, callReturn = false){
     const { blocks } = region;
     const count = blocks.length;
     const index = new Map(blocks.map((block, i)=>[block.start, i]));
@@ -2868,7 +2913,7 @@ export function planStructure(region, returns){
     const successors = blocks.map(block=>{
         /** @type {number[]} */
         const out = [];
-        for (const target of jumpsOf(block, returns))
+        for (const target of jumpsOf(block, returns, callReturn))
         {
             const at = index.get(target);
             if (at !== undefined && !out.includes(at))
@@ -3235,8 +3280,14 @@ function naturalLoops(successors, roots){
  * @param {import('../region.js').Block} block @param {Map<number, number[]>} returns
  * @returns {number[]} addresses, some perhaps outside the region
  */
-function jumpsOf(block, returns){
+function jumpsOf(block, returns, callReturn = false){
     const { kind, targets, next, table, predicted } = block.exit;
+    const last = block.instructions[block.instructions.length - 1];
+    if (callReturn && (kind === 'call'
+        || kind === 'indirect' && last?.op === 'call' && table === undefined && !predicted))
+    {
+        return [...targets, next];
+    }
     if (kind === 'fallthrough' || kind === 'jump' || kind === 'call'
         || kind === 'indirect' && (table !== undefined || predicted))
     {
