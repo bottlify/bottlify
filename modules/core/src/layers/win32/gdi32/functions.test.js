@@ -2401,3 +2401,30 @@ test('GetGlyphOutline answers a glyph\'s metrics and refuses its shape', ()=>{
     assert.equal(fns.GetGlyphOutlineA.handler([hdc, 65, 0, GM, 0, 0, 0]), 0xffffffff,
         'the matrix is required');
 });
+
+test('GetGlyphIndices maps each character, marking the ones outside the font', ()=>{
+    const { fns, hdc, memory } = withDC();
+    const TEXT = STRUCT + 0xb00;
+    const INDICES = STRUCT + 0xb40;
+    memory.putString(TEXT, 'A\x01');
+    assert.equal(fns.GetGlyphIndicesA.handler([hdc, TEXT, 2, INDICES, 1]), 2);
+    assert.deepEqual([memory.u32(INDICES) & 0xffff, memory.u32(INDICES + 2) & 0xffff],
+        [65, 0xffff]);
+    assert.equal(fns.GetGlyphIndicesA.handler([hdc, TEXT, 2, INDICES, 0]), 2);
+    assert.equal(memory.u32(INDICES + 2) & 0xffff, 0x1f, 'the default character');
+    assert.equal(fns.GetGlyphIndicesW.handler([0x7777, TEXT, 1, INDICES, 0]), 0xffffffff);
+});
+
+test('the glyph-index width calls read a glyph as the character GetGlyphIndices named', ()=>{
+    const { fns, hdc, memory } = withDC();
+    const GLYPHS = STRUCT + 0xc00;
+    const WIDTHS = STRUCT + 0xc40;
+    assert.equal(fns.GetCharWidth32A.handler([hdc, 65, 66, WIDTHS]), 1);
+    const [a, b] = [memory.u32(WIDTHS), memory.u32(WIDTHS + 4)];
+    assert.equal(fns.GetCharWidthI.handler([hdc, 65, 2, 0, WIDTHS]), 1, 'a run from the first');
+    assert.deepEqual([memory.u32(WIDTHS), memory.u32(WIDTHS + 4)], [a, b]);
+    memory.bytes.set([66, 0, 65, 0], GLYPHS);
+    assert.equal(fns.GetCharABCWidthsI.handler([hdc, 0, 2, GLYPHS, WIDTHS]), 1, 'or the list');
+    assert.deepEqual([memory.u32(WIDTHS + 4), memory.u32(WIDTHS + 16)], [b, a]);
+    assert.equal(fns.GetCharWidthI.handler([0x7777, 65, 1, 0, WIDTHS]), 0);
+});

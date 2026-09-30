@@ -145,6 +145,7 @@ const GGO_METRICS = 0;
 const GGO_GLYPH_INDEX = 0x80;
 const GGO_UNHINTED = 0x100;
 const GLYPHMETRICS_SIZE = 20;
+const GGI_MARK_NONEXISTING_GLYPHS = 1;
 
 /**
  * The fixed modes, by how many logical units make an inch: MM_LOMETRIC's
@@ -917,6 +918,28 @@ export function createGdiFunctions(host){
     };
 
     /**
+     * The glyph-index form of the width calls.
+     *
+     * @param {number[]} args @param {number} stride
+     * @param {(width: number) => number[]} record
+     */
+    const glyphWidths = ([handle, first, count, glyphs, out], stride, record)=>{
+        const dc = dcOf(handle);
+        if (!dc || (out >>> 0) === 0)
+        {
+            return 0;
+        }
+        const list = (glyphs >>> 0) === 0 ? null : host.readMemory(glyphs >>> 0, (count >>> 0) * 2);
+        for (let index = 0; index < (count >>> 0); index++)
+        {
+            const glyph = list ? list[index * 2] | list[index * 2 + 1] << 8 : (first >>> 0) + index;
+            writeU32s(host, (out >>> 0) + index * stride,
+                record(widthOf(dc, String.fromCharCode(glyph))));
+        }
+        return 1;
+    };
+
+    /**
      * The extents a mapping mode fixes, or null for MM_ANISOTROPIC, which
      * keeps whatever the DC had.
      *
@@ -1109,6 +1132,30 @@ export function createGdiFunctions(host){
 
     /** @param {any} dc @returns {import('./structs.js').TextMetricFields} */
     const currentMetrics = dc=>metricsOf(currentFont(dc));
+
+    /** GetGlyphIndices in either width. @param {number[]} args @param {boolean} wide */
+    const glyphIndices = ([handle, text, count, out, flags], wide)=>{
+        const dc = dcOf(handle);
+        if (!dc || (count | 0) < 0 || (text >>> 0) === 0 || (out >>> 0) === 0)
+        {
+            return GDI_ERROR;
+        }
+        host.divergence?.(wide ? 'GetGlyphIndicesW' : 'GetGlyphIndicesA',
+            'a glyph index is the character code, not the index in the font');
+        const { firstChar, lastChar, defaultChar } = currentMetrics(dc);
+        const bytes = host.readMemory(text >>> 0, (count | 0) * (wide ? 2 : 1));
+        const indices = new Uint8Array((count | 0) * 2);
+        const view = new DataView(indices.buffer);
+        for (let index = 0; index < (count | 0); index++)
+        {
+            const code = wide ? bytes[index * 2] | bytes[index * 2 + 1] << 8 : bytes[index];
+            const inside = code >= firstChar && code <= lastChar;
+            view.setUint16(index * 2, inside ? code
+                : (flags & GGI_MARK_NONEXISTING_GLYPHS) !== 0 ? 0xffff : defaultChar, true);
+        }
+        host.writeMemory(out >>> 0, indices);
+        return count | 0;
+    };
 
     /** GetGlyphOutline in either width. @param {number[]} args @param {string} api */
     const glyphOutline = ([handle, char, format, metrics, , , matrix], api)=>{
@@ -3407,6 +3454,24 @@ export function createGdiFunctions(host){
                     width=>[0, width, 0], 0xff),
         },
 
+        /**
+         * BOOL GetCharABCWidthsI(HDC hdc, UINT giFirst, UINT cgi, LPWORD pgi, LPABC pabc)
+         * BOOL GetCharWidthI(HDC hdc, UINT giFirst, UINT cgi, LPWORD pgi, LPINT piWidths)
+         *
+         * The widths by glyph index -- the list given, or the run from the
+         * first -- where an index is the character GetGlyphIndices named.
+         */
+        GetCharABCWidthsI: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>glyphWidths(args, ABC_SIZE, width=>[0, width, 0]),
+        },
+        GetCharWidthI: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>glyphWidths(args, 4, width=>[width]),
+        },
+
         /** BOOL GetCharABCWidthsW(HDC hdc, UINT wFirst, UINT wLast, LPABC lpABC) */
         GetCharABCWidthsW: {
             argBytes: 16,
@@ -3433,6 +3498,25 @@ export function createGdiFunctions(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: args=>glyphOutline(args, 'GetGlyphOutlineW'),
+        },
+
+        /**
+         * DWORD GetGlyphIndicesA/W(HDC hdc, LPCSTR/LPCWSTR lpstr, int c, LPWORD pgi, DWORD fl)
+         *
+         * A character's glyph is its own code within the font's range: the
+         * font engine's table of glyphs is not reached from here, which is
+         * reported. One outside the range is the default character, or
+         * 0xffff under GGI_MARK_NONEXISTING_GLYPHS.
+         */
+        GetGlyphIndicesA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>glyphIndices(args, false),
+        },
+        GetGlyphIndicesW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>glyphIndices(args, true),
         },
 
         /** BOOL GetTextMetricsA(HDC hdc, LPTEXTMETRICA lptm) */
