@@ -858,3 +858,13 @@ test('CopyImage makes a new handle on the same picture, and can let the original
     assert.equal(fns.CopyImage.handler([0x7777, 1, 0, 0, 0]), 0, 'nothing to copy');
     assert.equal(fns.CopyImage.handler([moved, 0, 0, 0, 0]), 0, 'a bitmap is not copied here');
 });
+
+test('GetIconInfo answers the kind and hot spot, and fails on a destroyed handle', ()=>{
+    const { fns, memory } = setup();
+    const cursor = fns.CreateCursor.handler([0, 3, 4, 32, 32]);
+    assert.equal(fns.GetIconInfo.handler([cursor, 0x100]), 1);
+    const view = new DataView(memory.bytes.buffer);
+    assert.deepEqual([0, 4, 8, 12, 16].map(at=>view.getUint32(0x100 + at, true)), [0, 3, 4, 0, 0]);
+    fns.DestroyCursor.handler([cursor]);
+    assert.equal(fns.GetIconInfo.handler([cursor, 0x100]), 0);
+});

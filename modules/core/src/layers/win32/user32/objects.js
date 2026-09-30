@@ -386,6 +386,8 @@ const parseMenuTemplate = bytes=>{
 const IMAGE_ICON = 1;
 const IMAGE_CURSOR = 2;
 const LR_COPYDELETEORG = 0x8;
+/** What GetIconInfo answers for a handle that is no icon or cursor. */
+const ERROR_INVALID_CURSOR_HANDLE = 1402;
 
 /**
  * @param {Object} options
@@ -1706,6 +1708,48 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                     destroyObjectHandle(host, handle >>> 0);
                 }
                 return copy;
+            },
+        },
+
+        /**
+         * BOOL GetIconInfo(HICON hIcon, PICONINFO piconinfo)
+         *
+         * Whether it is an icon and where its hot spot is. The mask and
+         * colour bitmaps a caller would own are not made: the picture is
+         * kept as pixels, not as GDI bitmaps, so both come back empty.
+         */
+        GetIconInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                /** @param {string} which */
+                const held = which=>{
+                    try
+                    {
+                        return host.handles.resolve?.(handle >>> 0, which) ?? null;
+                    }
+                    catch {
+                        return null;
+                    }
+                };
+                const icon = held('icon');
+                const object = icon ?? held('cursor');
+                if (!object || (out >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_CURSOR_HANDLE);
+                    return 0;
+                }
+                host.divergence?.('GetIconInfo', 'the mask and colour bitmaps are not made');
+                const hotSpot = object.hotSpot ?? (icon
+                    ? { x: (object.width ?? 32) >> 1, y: (object.height ?? 32) >> 1 }
+                    : { x: 0, y: 0 });
+                const bytes = new Uint8Array(20);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(0, icon ? 1 : 0, true);
+                view.setUint32(4, hotSpot.x >>> 0, true);
+                view.setUint32(8, hotSpot.y >>> 0, true);
+                host.writeMemory(out >>> 0, bytes);
+                return 1;
             },
         },
 
