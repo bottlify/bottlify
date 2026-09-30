@@ -1644,6 +1644,18 @@ export function createSystemFunctions({ host, live, windows, classes }){
         }
         return registeredMessageNames.get(format) ?? null;
     };
+
+    /** GetClassName in either width. @param {number[]} args @param {boolean} wide */
+    const writeClassName = ([hwnd, out, maxCount], wide)=>{
+        const record = live(hwnd);
+        const room = maxCount | 0;
+        if (!record || (out >>> 0) === 0 || room <= 0)
+        {
+            return 0;
+        }
+        return (wide ? writeWideString : writeString)(out >>> 0, record.className, room);
+    };
+
     return {
         /** int GetSystemMetrics(int nIndex) */
         GetSystemMetrics: {
@@ -3961,30 +3973,32 @@ export function createSystemFunctions({ host, live, windows, classes }){
         GetClassNameW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([hwnd, out, maxCount])=>{
-                const record = live(hwnd);
-                const room = maxCount | 0;
-                if (!record || (out >>> 0) === 0 || room <= 0)
-                {
-                    return 0;
-                }
-                return writeWideString(out >>> 0, record.className, room);
-            },
+            handler: args=>writeClassName(args, true),
         },
 
         /** int GetClassNameA(HWND hWnd, LPSTR lpClassName, int nMaxCount) */
         GetClassNameA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([hwnd, out, maxCount])=>{
-                const record = live(hwnd);
-                const room = maxCount | 0;
-                if (!record || (out >>> 0) === 0 || room <= 0)
-                {
-                    return 0;
-                }
-                return writeString(out >>> 0, record.className, room);
-            },
+            handler: args=>writeClassName(args, false),
+        },
+
+        /**
+         * UINT RealGetWindowClassA/W(HWND, LPSTR/LPWSTR, UINT)
+         *
+         * The class a window was made with: a superclass of a system class
+         * would answer the system class it is built on, and no window here is
+         * made on one, so it is the class name.
+         */
+        RealGetWindowClassA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>writeClassName(args, false),
+        },
+        RealGetWindowClassW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>writeClassName(args, true),
         },
 
         /**

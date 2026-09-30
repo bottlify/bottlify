@@ -2978,3 +2978,12 @@ test('keybd_event and mouse_event are one INPUT each, handed over as arguments',
         { kind: 'wheel', delta: -120 },
     ]);
 });
+
+test('RealGetWindowClass answers the class name, as no window is made on a system superclass',
+    ()=>{
+        const { memory, fns } = setup();
+        const hwnd = makeWindow(memory, fns);
+        assert.equal(fns.RealGetWindowClassA.handler([hwnd, OUT_BUFFER, 32]), 7);
+        assert.equal(memory.readCString(OUT_BUFFER, 32), 'MainWnd');
+        assert.equal(fns.RealGetWindowClassA.handler([0x9999, OUT_BUFFER, 32]), 0);
+    });
