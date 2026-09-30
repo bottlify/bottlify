@@ -95,7 +95,8 @@ const FIRST_REPORT = 0x00010000;
  * @param {{ readMemory: (address: number, length: number) => Uint8Array,
  *     writeMemory: (address: number, bytes: Uint8Array) => void,
  *     queue: { post: (message: { hwnd: number, message: number, wParam: number,
- *         lParam: number }) => void },
+ *         lParam: number }) => void,
+ *         peek?: (filter: import('./messages.js').MessageFilter) => { lParam: number } | null },
  *     setLastError?: (code: number) => void,
  *     divergence?: (api: string, detail: string) => void }} options.host
  * @param {(hwnd: number) => boolean} options.isWindow
@@ -331,6 +332,61 @@ export function createRawInput({ host, isWindow, focus, foreground }){
                     (array >>> 0) + index * RAWINPUTDEVICE_SIZE,
                     [(device.usage << 16 | device.page) >>> 0, device.flags, device.hwnd]));
                 return devices.length;
+            },
+        },
+
+        /**
+         * UINT GetRawInputBuffer(PRAWINPUT pData, PUINT pcbSize, UINT cbSizeHeader)
+         *
+         * The reports whose WM_INPUT are still queued, taken off the queue
+         * in the order they came and laid end to end as many as fit; a null
+         * buffer is told the size of the first. One that does not fit even
+         * alone is ERROR_INSUFFICIENT_BUFFER, with the size it needs.
+         */
+        GetRawInputBuffer: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([data, sizeAt, headerSize])=>{
+                if ((sizeAt >>> 0) === 0 || (headerSize >>> 0) !== RAWINPUTHEADER_SIZE)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                /** @param {boolean} remove */
+                const next = remove=>host.queue.peek?.({ hwnd: null, first: WM_INPUT,
+                    last: WM_INPUT, remove }) ?? null;
+                const waiting = next(false);
+                const first = waiting ? reports.get(waiting.lParam >>> 0) : undefined;
+                if ((data >>> 0) === 0)
+                {
+                    writeU32s(host, sizeAt >>> 0, [first ? first.length : 0]);
+                    return 0;
+                }
+                const room = readU32(host, sizeAt >>> 0);
+                if (!first)
+                {
+                    writeU32s(host, sizeAt >>> 0, [0]);
+                    return 0;
+                }
+                if (first.length > room)
+                {
+                    writeU32s(host, sizeAt >>> 0, [first.length]);
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                let used = 0;
+                let count = 0;
+                for (let entry = waiting; entry; entry = next(false))
+                {
+                    const bytes = reports.get(entry.lParam >>> 0);
+                    if (!bytes || used + bytes.length > room)
+                    {
+                        break;
+                    }
+                    next(true);
+                    host.writeMemory((data >>> 0) + used, bytes);
+                    used += bytes.length;
+                    count++;
+                }
+                return count;
             },
         },
 

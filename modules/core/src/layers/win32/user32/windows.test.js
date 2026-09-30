@@ -3012,6 +3012,34 @@ test('RegisterRawInputDevices checks its devices, and the registered list is ord
     assert.equal(memory.u32(COUNT), 0, 'both removed');
 });
 
+test('GetRawInputBuffer takes the queued reports end to end, as many as fit', ()=>{
+    const RAWINPUT_MOUSE_SIZE = 40;
+    const { fns, memory, hwnd, queue, service, errors } = withWindow({ style: WS_VISIBLE });
+    fns.SetFocus.handler([hwnd]);
+    putDevices(memory, [[1, 2, 0, hwnd]]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, 1, RAWINPUTDEVICE_SIZE]), 1);
+
+    memory.putU32s(COUNT, [0x100]);
+    assert.equal(fns.GetRawInputBuffer.handler([RAW, COUNT, RAWINPUTHEADER_SIZE]), 0);
+    assert.equal(memory.u32(COUNT), 0, 'nothing queued');
+    assert.equal(fns.GetRawInputBuffer.handler([RAW, COUNT, 0]), 0xffffffff);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+
+    for (const dx of [1, 2, 3])
+    {
+        service.rawInput({ device: 'mouse', dx, dy: 0 });
+    }
+    assert.equal(fns.GetRawInputBuffer.handler([0, COUNT, RAWINPUTHEADER_SIZE]), 0);
+    assert.equal(memory.u32(COUNT), RAWINPUT_MOUSE_SIZE, 'a null buffer asks the size');
+    memory.putU32s(COUNT, [RAWINPUT_MOUSE_SIZE * 2 + 8]);
+    assert.equal(fns.GetRawInputBuffer.handler([RAW, COUNT, RAWINPUTHEADER_SIZE]), 2);
+    assert.deepEqual([RAW + 28, RAW + 40 + 28].map(at=>memory.u32(at)), [1, 2]);
+    assert.equal(queue.depth(), 1, 'the two taken are off the queue');
+    memory.putU32s(COUNT, [8]);
+    assert.equal(fns.GetRawInputBuffer.handler([RAW, COUNT, RAWINPUTHEADER_SIZE]), 0xffffffff);
+    assert.equal(memory.u32(COUNT), RAWINPUT_MOUSE_SIZE, 'too small even for one');
+});
+
 test('GetRawInputData refuses a handle that names no input', ()=>{
     const { fns, memory, errors } = setup();
     memory.putU32s(COUNT, [0]);
