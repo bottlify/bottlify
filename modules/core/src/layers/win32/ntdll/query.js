@@ -76,6 +76,25 @@ const PROCESS_BASIC = Object.freeze({
 const SYSTEM_BASIC_INFORMATION = 0;
 const PROCESS_BASIC_INFORMATION = 0;
 const PROCESS_DEBUG_PORT = 7;
+const OBJECT_BASIC_INFORMATION = 0;
+
+/**
+ * OBJECT_BASIC_INFORMATION: attributes, granted access, the two counts, pool
+ * usage, three reserved words, three lengths and the creation time.
+ */
+const OBJECT_BASIC = Object.freeze({
+    GRANTED_ACCESS: 0x04,
+    HANDLE_COUNT: 0x08,
+    POINTER_COUNT: 0x0c,
+    SIZE: 0x38,
+});
+
+/** STANDARD_RIGHTS_ALL | SPECIFIC_RIGHTS_ALL: every right any object has. */
+const ALL_ACCESS = 0x001fffff;
+
+/** NtCurrentProcess() and NtCurrentThread(), which name without a table entry. */
+const CURRENT_PROCESS = 0xffffffff;
+const CURRENT_THREAD = 0xfffffffe;
 
 /** Facts about the machine this engine presents, not preferences. */
 const PAGE_SIZE = 0x1000;
@@ -109,6 +128,10 @@ const NORMAL_BASE_PRIORITY = 8;
  *           The machine's Windows, for the two fields the process block does
  *           not hold: the suite and the product type, which Windows keeps in
  *           the page the kernel shares with every process. Absent, the default.
+ * @property {(handle: number) => string | null} [handleType]  What a handle
+ *           names, or null when it names nothing. Without it NtQueryObject
+ *           answers every handle as invalid.
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /**
@@ -365,6 +388,47 @@ export function createQueryFunctions(host){
                     return STATUS.SUCCESS;
                 }
                 return STATUS.INVALID_INFO_CLASS;
+            },
+        },
+
+        /**
+         * NTSTATUS NtQueryObject(HANDLE Handle, OBJECT_INFORMATION_CLASS Class,
+         *                        PVOID Information, ULONG Length, PULONG ReturnLength)
+         *
+         * Only the basic class. The handle table keeps neither the access a
+         * handle was opened with nor how many handles share an object, so a
+         * handle is answered with every right and counts of one, and says so.
+         */
+        NtQueryObject: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, infoClass, buffer, length, returnLength])=>{
+                const named = handle >>> 0;
+                if (named !== CURRENT_PROCESS && named !== CURRENT_THREAD
+                    && (host.handleType?.(named) ?? null) === null)
+                {
+                    return STATUS.INVALID_HANDLE;
+                }
+                if ((infoClass >>> 0) !== OBJECT_BASIC_INFORMATION)
+                {
+                    host.divergence?.('NtQueryObject',
+                        `information class ${infoClass >>> 0} is refused`);
+                    return STATUS.INVALID_INFO_CLASS;
+                }
+                writeU32If(returnLength >>> 0, OBJECT_BASIC.SIZE);
+                if ((length >>> 0) < OBJECT_BASIC.SIZE || buffer === 0)
+                {
+                    return STATUS.INFO_LENGTH_MISMATCH;
+                }
+                const struct = new Uint8Array(OBJECT_BASIC.SIZE);
+                const view = new DataView(struct.buffer);
+                view.setUint32(OBJECT_BASIC.GRANTED_ACCESS, ALL_ACCESS, true);
+                view.setUint32(OBJECT_BASIC.HANDLE_COUNT, 1, true);
+                view.setUint32(OBJECT_BASIC.POINTER_COUNT, 1, true);
+                host.writeMemory(buffer >>> 0, struct);
+                host.divergence?.('NtQueryObject',
+                    'granted access and counts are not kept; every right and one handle answered');
+                return STATUS.SUCCESS;
             },
         },
     };

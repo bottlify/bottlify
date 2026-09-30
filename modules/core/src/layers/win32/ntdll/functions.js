@@ -114,6 +114,8 @@ const KERNEL32_ALIASES = Object.freeze({
  * @property {import('../kernel32/versions.js').WindowsVersion} [windows]
  *           The machine's Windows, for what RtlGetVersion cannot read from the
  *           process block. Absent, the default.
+ * @property {(handle: number) => string | null} [handleType]
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /**
@@ -178,6 +180,8 @@ export function createNtdllFunctions(host){
             teb: host.teb,
             arena: host.arena,
             version: host.windows,
+            handleType: host.handleType,
+            divergence: host.divergence,
         }),
 
         ...(host.setRegisters

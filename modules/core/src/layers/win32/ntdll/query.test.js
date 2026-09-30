@@ -263,3 +263,33 @@ test('RtlVerifyVersionInfo compares against the version the process block holds'
     assert.equal(ask(10, 0, 0), STATUS.INVALID_PARAMETER, 'a request that names nothing');
     assert.equal(fns.RtlVerifyVersionInfo.argBytes, 16);
 });
+
+test('NtQueryObject answers the basic class for a handle that names something', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const host = fakeHost();
+    const fns = createQueryFunctions({
+        ...host,
+        handleType: handle=>(handle === 0x44 ? 'event' : null),
+        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+    });
+    assert.equal(fns.NtQueryObject.argBytes, 20);
+
+    assert.equal(fns.NtQueryObject.handler([0x44, 0, BUFFER, 0x38, RETURN_LENGTH]),
+        STATUS.SUCCESS);
+    assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x38);
+    assert.equal(host.view.getUint32(BUFFER + 4, true), 0x001fffff, 'every right');
+    assert.equal(host.view.getUint32(BUFFER + 8, true), 1, 'one handle');
+    assert.ok(said.some(line=>line.startsWith('NtQueryObject: granted access')),
+        'the untracked access is reported');
+
+    assert.equal(fns.NtQueryObject.handler([0xffffffff, 0, BUFFER, 0x38, 0]), STATUS.SUCCESS,
+        'the current-process pseudo-handle names something without a table entry');
+    assert.equal(fns.NtQueryObject.handler([0x44, 0, BUFFER, 0x37, RETURN_LENGTH]),
+        STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x38, 'the size needed is still told');
+    assert.equal(fns.NtQueryObject.handler([0x48, 0, BUFFER, 0x38, 0]), STATUS.INVALID_HANDLE);
+    assert.equal(fns.NtQueryObject.handler([0x44, 2, BUFFER, 0x100, 0]),
+        STATUS.INVALID_INFO_CLASS);
+    assert.ok(said.some(line=>line.includes('class 2')), 'a refused class is reported');
+});

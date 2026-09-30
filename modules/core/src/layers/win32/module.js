@@ -2224,6 +2224,8 @@ export function createWin32Module(){
                 arena,
                 setRegisters,
                 windows,
+                handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
+                divergence: config?.divergence,
             });
 
             /** Every function, whichever library exports it. */
