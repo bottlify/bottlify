@@ -551,3 +551,25 @@ test('the abbreviated names, the digit grouping and the currency are answered', 
     assert.equal(ask(0x0001), '0409', 'ILANGUAGE stays four hex digits as text');
     assert.equal(ask(0x000B), '437', 'IDEFAULTCODEPAGE');
 });
+
+test('SetLocaleInfo replaces a string for this user, and LOCALE_NOUSEROVERRIDE reads past it',
+    ()=>{
+        const host = fakeHost();
+        const fns = createLocaleFunctions(host);
+        const SDECIMAL = 0x0e;
+        const LOCALE_NOUSEROVERRIDE = 0x80000000;
+        host.bytes.set([0x2c, 0], 0x100);
+        assert.equal(fns.SetLocaleInfoA.handler([0x409, SDECIMAL, 0x100]), 1);
+        assert.equal(fns.GetLocaleInfoA.handler([0x409, SDECIMAL, 0x200, 8]), 2);
+        assert.equal(host.bytes[0x200], 0x2c, 'the user\'s comma');
+        assert.equal(fns.GetLocaleInfoA.handler(
+            [0x409, SDECIMAL | LOCALE_NOUSEROVERRIDE, 0x200, 8]), 2);
+        assert.equal(host.bytes[0x200], 0x2e, 'the locale\'s own point');
+
+        host.bytes.set([0x2e, 0, 0, 0], 0x100);
+        assert.equal(fns.SetLocaleInfoW.handler([0x409, SDECIMAL, 0x100]), 1);
+        assert.equal(fns.GetLocaleInfoA.handler([0x409, SDECIMAL, 0x200, 8]), 2);
+        assert.equal(host.bytes[0x200], 0x2e);
+
+        assert.equal(fns.SetLocaleInfoA.handler([0x409, SDECIMAL, 0]), 0, 'no value');
+    });

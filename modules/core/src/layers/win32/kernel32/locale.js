@@ -754,6 +754,36 @@ export function createLocaleFunctions(host){
     };
 
     /**
+     * What SetLocaleInfo changed, by type: the user's own values, which
+     * GetLocaleInfo answers unless LOCALE_NOUSEROVERRIDE asks past them.
+     *
+     * @type {Map<number, string>}
+     */
+    const userValues = new Map();
+
+    /**
+     * SetLocaleInfo in either width: a string the locale holds, replaced for
+     * this user.
+     *
+     * @param {number} locale @param {number} type @param {string | null} value
+     */
+    const setLocaleInfo = (locale, type, value)=>{
+        if (!isOurLocale(locale) || value === null)
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const wanted = type & ~LOCALE_USE_CP_ACP;
+        if (/** @type {Record<number, string>} */ (LOCALE_STRINGS)[wanted] === undefined)
+        {
+            host.setLastError(ERROR_INVALID_FLAGS);
+            return 0;
+        }
+        userValues.set(wanted, value);
+        return 1;
+    };
+
+    /**
      * @param {number} locale @param {number} type @param {number} buffer
      * @param {number} count @param {boolean} isWide
      */
@@ -768,7 +798,8 @@ export function createLocaleFunctions(host){
         // answers are the same one and the bit is simply ignored.
         const wanted = type & ~LOCALE_FLAGS;
         const number = /** @type {Record<number, number>} */ (LOCALE_NUMBERS)[wanted];
-        const text = /** @type {Record<number, string>} */ (LOCALE_STRINGS)[wanted];
+        const text = ((type & LOCALE_NOUSEROVERRIDE) === 0 ? userValues.get(wanted) : undefined)
+            ?? /** @type {Record<number, string>} */ (LOCALE_STRINGS)[wanted];
         const genitive = (type & LOCALE_RETURN_GENITIVE_NAMES) !== 0;
         const asNumber = (type & LOCALE_RETURN_NUMBER) !== 0;
         // What the type cannot be asked for is a bad flag rather than a bad
@@ -1049,6 +1080,22 @@ export function createLocaleFunctions(host){
             /** @param {number[]} args */
             handler: ([locale, type, buffer, count])=>localeInfo(
                 locale >>> 0, type >>> 0, buffer >>> 0, count | 0, false),
+        },
+
+        /** BOOL SetLocaleInfoA(LCID Locale, LCTYPE LCType, LPCSTR lpLCData) */
+        SetLocaleInfoA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([locale, type, data])=>setLocaleInfo(locale >>> 0, type >>> 0,
+                (data >>> 0) === 0 ? null : readAnsiSpan(data >>> 0, -1)),
+        },
+
+        /** BOOL SetLocaleInfoW(LCID Locale, LCTYPE LCType, LPCWSTR lpLCData) */
+        SetLocaleInfoW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([locale, type, data])=>setLocaleInfo(locale >>> 0, type >>> 0,
+                (data >>> 0) === 0 ? null : readWideSpan(data >>> 0, -1)),
         },
 
         /** int GetLocaleInfoW(LCID Locale, LCTYPE LCType, LPWSTR lpLCData, int cchData) */
