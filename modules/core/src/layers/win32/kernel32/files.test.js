@@ -1902,3 +1902,32 @@ test('a lock is the file\'s, seen through every handle, and goes with its handle
         'a range past the last offset is not one');
     assert.equal(error.code, ERROR_INVALID_PARAMETER);
 });
+
+test('ReplaceFile moves the replacement onto the replaced name, keeping a backup when asked',
+    ()=>{
+        const { files, error, fns, at } = setup();
+        const dir = 'C:\\GAME\\';
+        files.put(`${dir}OLD.TXT`, 'old');
+        files.put(`${dir}NEW.TXT`, 'new');
+        const replaced = at(NAME, `${dir}OLD.TXT`);
+        const replacement = at(NAME2, `${dir}NEW.TXT`);
+        const backup = at(0x200, `${dir}OLD.BAK`);
+        assert.equal(fns.ReplaceFileA.argBytes, 24);
+        assert.equal(fns.ReplaceFileA.handler([replaced, replacement, backup, 0, 0, 0]), 1);
+        assert.equal(files.text(`${dir}OLD.TXT`), 'new');
+        assert.equal(files.text(`${dir}OLD.BAK`), 'old');
+        assert.ok(!files.stat(`${dir}NEW.TXT`)?.exists, 'the replacement name is gone');
+
+        files.put(`${dir}NEW.TXT`, 'newer');
+        assert.equal(fns.ReplaceFileA.handler([replaced, replacement, 0, 0, 0, 0]), 1);
+        assert.equal(files.text(`${dir}OLD.TXT`), 'newer');
+
+        assert.equal(fns.ReplaceFileA.handler([replaced, replacement, 0, 0, 0, 0]), 0);
+        assert.equal(error.code, 2, 'ERROR_FILE_NOT_FOUND without a replacement');
+
+        files.put(`${dir}NEW.TXT`, 'x');
+        files.setAttributes(`${dir}OLD.TXT`, 1);
+        assert.equal(fns.ReplaceFileA.handler([replaced, replacement, 0, 0, 0, 0]), 0);
+        assert.equal(error.code, ERROR_ACCESS_DENIED, 'a read-only file is not replaced');
+        assert.equal(files.text(`${dir}NEW.TXT`), 'x', 'and nothing moved');
+    });

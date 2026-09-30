@@ -960,6 +960,39 @@ export function createFileFunctions(host){
     });
 
     /**
+     * ReplaceFile: the replacement takes the replaced file's name, and the
+     * replaced file goes to the backup name when one is given. Either file
+     * read-only refuses the whole replacement before anything moves.
+     */
+    const replaceFile = bothForms(24, ([replaced, replacement, backup], text)=>{
+        const target = text.path(replaced);
+        const source = text.path(replacement);
+        const old = files.stat(target);
+        const incoming = files.stat(source);
+        if (!old?.exists || !incoming?.exists)
+        {
+            return fail(ERROR_FILE_NOT_FOUND);
+        }
+        if (readOnlyFile(old) || readOnlyFile(incoming))
+        {
+            return fail(ERROR_ACCESS_DENIED);
+        }
+        if ((backup >>> 0) !== 0)
+        {
+            const kept = renamePath(target, text.path(backup), true);
+            if (kept !== 1)
+            {
+                return kept;
+            }
+        }
+        else if (!files.remove(target))
+        {
+            return fail(denied(target));
+        }
+        return renamePath(source, target, true);
+    });
+
+    /**
      * The copy every spelling shares. Copied through the ordinary read and
      * write path rather than by asking the filesystem for a copy, because a
      * copy that is not a read followed by a write is a second implementation
@@ -2374,6 +2407,8 @@ export function createFileFunctions(host){
          * BOOL MoveFileEx(LPCSTR lpExistingFileName, LPCSTR lpNewFileName,
          *                 DWORD dwFlags) -- one body, both spellings.
          */
+        ReplaceFileA: replaceFile.ansi,
+        ReplaceFileW: replaceFile.wide,
         MoveFileExA: moveFileEx.ansi,
         MoveFileExW: moveFileEx.wide,
 
