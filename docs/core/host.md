@@ -414,7 +414,7 @@ the first one's history and poll are gone with it.
   B12 superseded by the measurement below); still on the engine thread: the DirectSound cursor walk
   and its notifications (`feedBuffers`, run before every mix so a program waiting on a position is
   woken whether or not anything is listening), waveOut's own queue draining, and the hosted MPEG
-  provider's decoder callbacks (`ASI_stream_process` and the WebCodecs path). Measured on a title's
+  provider's decoder callbacks (`ASI_stream_process`). Measured on a title's
   heaviest window, on a cross-origin-isolated page: the `pump` phase inclusive of the DirectSound
   feed and one copy went from 526 ms of a 19.4 s window (2.7 % of the worker) to 397.6 ms of a
   20.7 s window (1.9 %) -- a real improvement, but short of the < 200 ms / < 1.0 % this was designed

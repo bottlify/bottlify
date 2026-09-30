@@ -45,13 +45,7 @@
  * - `available()` -- whether this build can decode at all
  * - `prepare()` -- instantiates the decoder ahead of the first open
  * - `open(bytes)` -- a clip, from the whole file in memory
- * - `openAudio({ formatTag, sampleRate, channels })` -- an elementary audio
- *   stream with no container, decoded a packet at a time inside the call that
- *   fed it: `feed(bytes)` answers with the interleaved 16-bit PCM that frame
- *   produced, `flush()` with what the decoder still held, `close()`. Null when
- *   the build cannot serve one, so the caller can fall back; synchronous,
- *   because the caller is a hosted codec answering a call that cannot wait.
- * - `closeAll()` -- drops every clip and stream, for a teardown between games
+ * - `closeAll()` -- drops every clip, for a teardown between games
  *
  * A clip carries its own description (`width`, `height`, `fps`, `frameCount`,
  * `codec`, `fourcc`, `pixelFormat`, `sampleRate`, `channels`, `hasVideo`,
