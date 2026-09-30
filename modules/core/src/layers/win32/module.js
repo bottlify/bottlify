@@ -1420,6 +1420,7 @@ export function createWin32Module(){
                     // entry points for a file as for a console or an event, and the
                     // one that knows about files answers for all of them.
                     ...createFileFunctions({
+                        divergence: config?.divergence,
                         readMemory,
                         writeMemory,
                         readCString,

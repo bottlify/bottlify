@@ -307,6 +307,7 @@ export const WIN32_FIND_DATAA = Object.freeze({
  *           MAX_PATH characters is twice that.
  * @property {FileSystem} files
  * @property {(code: number) => void} setLastError
+ * @property {(api: string, detail: string) => void} [divergence]
  * @property {(handle: number, text: string) => void} writeConsole
  *           Where a write to a standard handle goes instead of the filesystem.
  * @property {{ open: (type: string, object: any) => number,
@@ -974,6 +975,20 @@ export function createFileFunctions(host){
         }
         return renamePath(text.path(from), text.path(to),
             (flags >>> 0 & MOVEFILE_REPLACE_EXISTING) !== 0);
+    });
+
+    /**
+     * The volume has no hard links, as a FAT volume has none, and it answers
+     * as FAT does; NTFS would link the name, so the refusal is reported.
+     */
+    const createHardLink = bothForms(12, ([name, existing], text)=>{
+        const target = text.path(existing);
+        if (!files.stat(target)?.exists)
+        {
+            return fail(missing(target));
+        }
+        host.divergence?.('CreateHardLink', `no hard links; ${text.path(name)} not linked`);
+        return fail(ERROR_INVALID_FUNCTION);
     });
 
     /**
@@ -2513,6 +2528,8 @@ export function createFileFunctions(host){
          * BOOL MoveFileEx(LPCSTR lpExistingFileName, LPCSTR lpNewFileName,
          *                 DWORD dwFlags) -- one body, both spellings.
          */
+        CreateHardLinkA: createHardLink.ansi,
+        CreateHardLinkW: createHardLink.wide,
         ReplaceFileA: replaceFile.ansi,
         ReplaceFileW: replaceFile.wide,
         MoveFileExA: moveFileEx.ansi,

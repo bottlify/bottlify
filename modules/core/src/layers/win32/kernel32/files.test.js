@@ -1970,6 +1970,22 @@ test('WriteFileGather and ReadFileScatter move a page per segment and complete o
     assert.equal(fns.ReadFileScatter.handler([handle, 0x300, 4, 0, 0]), 0, 'overlapped only');
 });
 
+test('CreateHardLink answers as a volume without links does, and says so', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const { files, error, fns, at } = setup({
+        divergence: (/** @type {string} */ api)=>said.push(api) });
+    files.put('C:\\GAME\\SAVE.DAT', 'x');
+    assert.equal(fns.CreateHardLinkA.argBytes, 12);
+    assert.equal(fns.CreateHardLinkA.handler(
+        [at(NAME2, 'C:\\GAME\\LINK.DAT'), at(NAME, 'C:\\GAME\\SAVE.DAT'), 0]), 0);
+    assert.equal(error.code, 1, 'ERROR_INVALID_FUNCTION, as FAT answers');
+    assert.deepEqual(said, ['CreateHardLink']);
+    assert.equal(fns.CreateHardLinkA.handler(
+        [NAME2, at(NAME, 'C:\\GAME\\NONE.DAT'), 0]), 0);
+    assert.equal(error.code, 2, 'a missing file is missing first');
+});
+
 test('GetFileAttributesEx fills the head a find would, and nothing past it', ()=>{
     const { memory, files, error, fns, at } = setup();
     files.put('C:\\GAME\\SAVE.DAT', 'abcdefghij');
