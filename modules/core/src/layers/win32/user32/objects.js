@@ -382,6 +382,11 @@ const parseMenuTemplate = bytes=>{
  *           open.
  */
 
+/** CopyImage's image types it copies, and the flag that lets the original go. */
+const IMAGE_ICON = 1;
+const IMAGE_CURSOR = 2;
+const LR_COPYDELETEORG = 0x8;
+
 /**
  * @param {Object} options
  * @param {any} options.host
@@ -1658,6 +1663,50 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>(destroyObjectHandle(host, handle >>> 0) ? 1 : 0),
+        },
+
+        /**
+         * HANDLE CopyImage(HANDLE h, UINT type, int cx, int cy, UINT flags)
+         *
+         * An icon or cursor copied as the picture it is, at the size it has:
+         * the handle is new, the object behind it the same drawing, and
+         * LR_COPYDELETEORG lets the original go. A bitmap is GDI's, and not
+         * copied here.
+         */
+        CopyImage: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, type, , , flags])=>{
+                const kind = type >>> 0 === IMAGE_ICON ? 'icon'
+                    : type >>> 0 === IMAGE_CURSOR ? 'cursor' : null;
+                if (kind === null)
+                {
+                    host.divergence?.('CopyImage', `image type ${type >>> 0} is not copied`);
+                    return 0;
+                }
+                /** @param {string} which */
+                const held = which=>{
+                    try
+                    {
+                        return host.handles.resolve?.(handle >>> 0, which) ?? null;
+                    }
+                    catch {
+                        return null;
+                    }
+                };
+                // LoadIcon and LoadCursor make the same picture; either kind is taken.
+                const object = held(kind) ?? held(kind === 'icon' ? 'cursor' : 'icon');
+                if (!object)
+                {
+                    return 0;
+                }
+                const copy = host.handles.open(kind, { ...object });
+                if ((flags & LR_COPYDELETEORG) !== 0)
+                {
+                    destroyObjectHandle(host, handle >>> 0);
+                }
+                return copy;
+            },
         },
 
         /** BOOL DestroyIcon(HICON hIcon) */
