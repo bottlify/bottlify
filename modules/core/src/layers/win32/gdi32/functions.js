@@ -917,6 +917,15 @@ export function createGdiFunctions(host){
         return 1;
     };
 
+    /** @param {number} handle @param {string} api */
+    const noOutlineMetrics = (handle, api)=>{
+        if (dcOf(handle))
+        {
+            host.divergence?.(api, 'no font here is an outline font; no outline metrics');
+        }
+        return 0;
+    };
+
     /**
      * GetTextExtentExPoint in its three forms.
      *
@@ -3490,6 +3499,99 @@ export function createGdiFunctions(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: args=>textExtentEx(args, (string, count)=>wideText(string, count, true)),
+        },
+
+        /**
+         * UINT GetOutlineTextMetricsA/W(HDC hdc, UINT cjCopy, LPOUTLINETEXTMETRIC potm)
+         *
+         * Zero: a font here reports no TMPF_TRUETYPE, and a font that is not
+         * an outline font has no outline metrics. A TrueType face on Windows
+         * would answer them, so the refusal is reported.
+         */
+        GetOutlineTextMetricsA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle])=>noOutlineMetrics(handle, 'GetOutlineTextMetricsA'),
+        },
+        GetOutlineTextMetricsW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle])=>noOutlineMetrics(handle, 'GetOutlineTextMetricsW'),
+        },
+
+        /**
+         * DWORD GetKerningPairsA/W(HDC hdc, DWORD nPairs, LPKERNINGPAIR lpKernPair)
+         *
+         * None: a font here spaces every pair of characters by their widths.
+         */
+        GetKerningPairsA: {
+            argBytes: 12,
+            handler: ()=>0,
+        },
+        GetKerningPairsW: {
+            argBytes: 12,
+            handler: ()=>0,
+        },
+
+        /**
+         * DWORD GetFontUnicodeRanges(HDC hdc, LPGLYPHSET lpgs)
+         *
+         * The one range a font here covers, from its first character to its
+         * last; with no buffer, the size the GLYPHSET needs.
+         */
+        GetFontUnicodeRanges: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                const size = 20;
+                if ((out >>> 0) !== 0)
+                {
+                    const { firstChar, lastChar } = currentMetrics(dc);
+                    const glyphs = lastChar - firstChar + 1;
+                    writeU32s(host, out >>> 0, [size, 0, glyphs, 1,
+                        (firstChar & 0xffff | glyphs << 16) >>> 0]);
+                }
+                return size;
+            },
+        },
+
+        /**
+         * DWORD GetFontData(HDC hdc, DWORD dwTable, DWORD dwOffset, PVOID pvBuffer, DWORD cjBuffer)
+         *
+         * GDI_ERROR: a font here is no TrueType file with tables to read.
+         */
+        GetFontData: {
+            argBytes: 20,
+            handler: ()=>GDI_ERROR,
+        },
+
+        /**
+         * BOOL SetTextJustification(HDC hdc, int extra, int count)
+         *
+         * Kept on the DC; the extra space is not spread through the breaks
+         * text is drawn with, which is reported when there is any.
+         */
+        SetTextJustification: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, extra, count])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                dc.justification = { extra: extra | 0, count: count | 0 };
+                if ((extra | 0) !== 0)
+                {
+                    host.divergence?.('SetTextJustification', 'the extra space is not applied');
+                }
+                return 1;
+            },
         },
 
         /** BOOL GetCharWidth32W(HDC hdc, UINT iFirst, UINT iLast, LPINT lpBuffer) */

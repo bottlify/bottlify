@@ -2450,4 +2450,12 @@ test('GetTextExtentExPoint answers the extent of each prefix and how many fit', 
     assert.deepEqual([memory.u32(DX), memory.u32(DX + 8)], [one, one * 3]);
     assert.equal(memory.u32(SIZE_AT), one * 3);
     assert.equal(fns.GetTextExtentExPointW.handler([hdc, 0, 3, 0, 0, 0, SIZE_AT]), 0);
+    assert.equal(fns.GetOutlineTextMetricsW.handler([hdc, 0, 0]), 0, 'no outline font here');
+    assert.equal(fns.GetKerningPairsW.handler(), 0);
+    assert.equal(fns.GetFontData.handler(), 0xffffffff);
+    assert.equal(fns.SetTextJustification.handler([hdc, 0, 0]), 1);
+    assert.equal(fns.GetFontUnicodeRanges.handler([hdc, 0]), 20, 'the size of one range');
+    assert.equal(fns.GetFontUnicodeRanges.handler([hdc, FIT]), 20);
+    assert.deepEqual([memory.u32(FIT + 8), memory.u32(FIT + 12), memory.u32(FIT + 16) & 0xffff],
+        [0xe0, 1, 0x20], 'the printable range and past it');
 });
