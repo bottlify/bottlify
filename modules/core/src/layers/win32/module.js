@@ -1801,10 +1801,15 @@ export function createWin32Module(){
 
                 'UXTHEME.dll': createThemeFunctions({ setLastError: setError }),
 
-                // Audio middleware links against the codec manager statically;
-                // with no drivers installed it answers "not possible" and the
-                // middleware decodes on its own.
-                'MSACM32.dll': createAcmFunctions(),
+                // The codec manager, with the drivers Windows installs: a sound
+                // engine that keeps its effects ADPCM finds its decoder here.
+                'MSACM32.dll': createAcmFunctions({
+                    readMemory, writeMemory,
+                    /** @param {number} entry @param {number[]} args @param {any} [thread] */
+                    callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    currentThread: ()=>kernel.currentThread(),
+                    divergence: config?.divergence,
+                }),
 
                 // The transport is the assembling caller's to supply and is absent
                 // by default: this build has no network, and the entry points say
