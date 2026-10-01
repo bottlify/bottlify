@@ -728,11 +728,14 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * renderer prepares once per change rather than once per draw. The world
      * transform is left out, as the Direct3D 8 device leaves it out: it moves
      * between most draws, and whoever reads this owes it a fresh read on every
-     * draw. A texture binding raises `textureBindingVersion` too, so the
-     * difference versions everything beside the bindings.
+     * draw. A binding raises `bindingVersion` too, so the difference versions
+     * everything beside the bindings: a texture, a buffer bound at the stride
+     * its stream already had, and the shaders and the declaration, which a
+     * renderer keys its preparations by apart from the rest -- a program that
+     * switches shaders between draws has changed no render state.
      */
     let drawStateVersion = 1;
-    let textureBindingVersion = 0;
+    let bindingVersion = 0;
 
     /** @type {Map<number, Map<number, number>>} stage -> its states, made on first touch */
     let stageStates = new Map();
@@ -1373,7 +1376,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             return drawStateVersion;
         },
         get stateVersionBesideTextures(){
-            return drawStateVersion - textureBindingVersion;
+            return drawStateVersion - bindingVersion;
         },
         get material(){
             return material;
@@ -1672,7 +1675,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      *
      * @param {(record: import('./stateblock.js').StateBlockRecord) => void} record
      * @param {() => void} apply
-     * @param {boolean} [binding]  the value is a texture binding
+     * @param {boolean} [binding]  the value is a binding: a texture, a buffer at
+     *     its stream's stride, a shader or the declaration
      */
     const setState = (record, apply, binding = false)=>{
         if (recording)
@@ -1685,7 +1689,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             drawStateVersion++;
             if (binding)
             {
-                textureBindingVersion++;
+                bindingVersion++;
             }
         }
         return D3D_OK;
@@ -2662,6 +2666,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 });
                 fvfDeclarations.set(fvf, declaration);
             }
+            if (!recording && vertexDeclaration.declaration === declaration)
+            {
+                return D3D_OK;
+            }
             const next = { declaration, fvf };
             return setState(
                 record=>{
@@ -2669,7 +2677,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 },
                 ()=>{
                     vertexDeclaration = next;
-                });
+                }, true);
         },
 
         /**
@@ -2704,6 +2712,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         /** @param {any} declaration  null unbinds. */
         SetVertexDeclaration(declaration){
+            // Set again, it changes nothing a draw reads. A program that sets
+            // its declaration before every draw would otherwise move the
+            // state's version every draw, and every preparation keyed to it.
+            if (!recording && vertexDeclaration.declaration === (declaration ?? null))
+            {
+                return D3D_OK;
+            }
             const next = { declaration: declaration ?? null, fvf: declaration?.fvf ?? 0 };
             return setState(
                 record=>{
@@ -2711,7 +2726,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 },
                 ()=>{
                     vertexDeclaration = next;
-                });
+                }, true);
         },
 
         /** @param {{ declaration?: any }} out */
@@ -2740,13 +2755,17 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         /** @param {any} shader  null unbinds. */
         SetVertexShader(shader){
+            if (!recording && vertexShader === (shader ?? null))
+            {
+                return D3D_OK;
+            }
             return setState(
                 record=>{
                     record.vertexShader = shader ?? null;
                 },
                 ()=>{
                     vertexShader = shader ?? null;
-                });
+                }, true);
         },
 
         /** @param {{ shader?: any }} out */
@@ -2769,13 +2788,17 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         /** @param {any} shader */
         SetPixelShader(shader){
+            if (!recording && pixelShader === (shader ?? null))
+            {
+                return D3D_OK;
+            }
             return setState(
                 record=>{
                     record.pixelShader = shader ?? null;
                 },
                 ()=>{
                     pixelShader = shader ?? null;
-                });
+                }, true);
         },
 
         /** @param {{ shader?: any }} out */
@@ -3076,13 +3099,18 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         /** @param {any} buffer */
         SetIndices(buffer){
+            if (!recording && indices === (buffer ?? null))
+            {
+                return D3D_OK;
+            }
+            // Which buffer the indices come from shapes no preparation.
             return setState(
                 record=>{
                     record.indices = buffer ?? null;
                 },
                 ()=>{
                     indices = buffer ?? null;
-                });
+                }, true);
         },
 
         /** @param {{ buffer?: any }} out */
@@ -3106,6 +3134,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
+            const bound = stream(index);
+            if (!recording && bound.buffer === (buffer ?? null)
+                && (!buffer || (bound.offset === offset && bound.stride === stride)))
+            {
+                return D3D_OK;
+            }
+            // Another buffer at the stride the stream had is a binding: a
+            // preparation reads the stride, never the buffer.
+            const sameStride = !buffer || bound.stride === stride;
             return setState(
                 record=>{
                     const held = record.streams.get(index) ?? stream(index);
@@ -3116,14 +3153,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     });
                 },
                 ()=>{
-                    const record = stream(index);
-                    record.buffer = buffer ?? null;
+                    bound.buffer = buffer ?? null;
                     if (buffer)
                     {
-                        record.offset = offset;
-                        record.stride = stride;
+                        bound.offset = offset;
+                        bound.stride = stride;
                     }
-                });
+                }, sameStride);
         },
 
         /**
@@ -3226,6 +3262,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             if (!value || !(value.Width > 0) || !(value.Height > 0) || value.X < 0 || value.Y < 0)
             {
                 return D3DERR_INVALIDCALL;
+            }
+            // The same rectangle again keeps the object a renderer names the
+            // state by, so the state it names is still the one it has.
+            const held = viewport.rect;
+            if (!recording && held.x === value.X && held.y === value.Y
+                && held.width === value.Width && held.height === value.Height
+                && held.minDepth === (value.MinZ ?? 0) && held.maxDepth === (value.MaxZ ?? 1))
+            {
+                return D3D_OK;
             }
             const next = viewportState({
                 x: value.X,

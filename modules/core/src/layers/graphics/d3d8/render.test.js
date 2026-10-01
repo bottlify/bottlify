@@ -37,7 +37,8 @@ import {
     normalMatrixOf, viewerDirection,
     HARDWARE_SAMPLER, filledIndices, listIndices, multiplyMatrices, packLight, pipelineStateOf,
     samplerFlagsOf,
-    screenExtent, transformPosition, uniformBlock, fogModeOf, fogOf, isAffine,
+    screenExtent, transformPosition, uniformBlock, uniformsOf, pixelUniformsOf, fogModeOf, fogOf,
+    isAffine,
     vertexCountOf,
 } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -910,7 +911,8 @@ test('recorded: NOOVERWRITE with DISCARD is NOOVERWRITE, and the buffer is not r
     await h.present();
 
     const bound = gpu.of('setVertexBuffer').map((/** @type {any} */ call)=>call.buffer);
-    assert.equal(bound[0], bound[1], 'one generation serves both draws');
+    // A rename between them would bind another buffer for the second draw.
+    assert.equal(new Set(bound).size, 1, 'one generation serves both draws');
     out.buffer.release();
 });
 
@@ -2851,6 +2853,47 @@ test('the block lays a texture transform out as two rows per sampled stage', ()=
     assert.deepEqual([...plain.subarray(76, 204)],
         Array.from({ length: 8 }, ()=>[...IDENTITY]).flat());
 });
+
+test('a fixed pixel stage behind a shader reads from its own block what the full block holds',
+    ()=>{
+        // Behind a vertex shader the fixed stages read the texture factor, the
+        // fog, the alpha reference and each stage's flags and transform. The
+        // block made for them holds those as the full block does, and leaves
+        // the vertex half, the shader's work, as identity.
+        const tilted = [0.5, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 0, 0.25, 0.75, 0, 1];
+        const model = /** @type {any} */ ({
+            renderStates: new Map([
+                [D3DRS.TEXTUREFACTOR, 0x80402010], [D3DRS.FOGCOLOR, 0xff336699],
+                [D3DRS.FOGSTART, 0x3f800000], [D3DRS.FOGEND, 0x42c80000],
+                [D3DRS.FOGDENSITY, 0x3e800000], [D3DRS.ALPHAREF, 0x1a7f],
+            ]),
+            stageStates: (/** @type {number} */ stage)=>new Map(stage === 0
+                ? [[D3DTSS.TEXTURETRANSFORMFLAGS, 2], [D3DTSS.MAGFILTER, 2]]
+                : []),
+            textures: new Map(),
+            transforms: new Map([
+                [D3DTS.WORLD, tilted], [D3DTS.VIEW, tilted], [D3DTS.PROJECTION, tilted],
+                [D3DTS.TEXTURE0, tilted],
+            ]),
+            lights: new Map(),
+            material: material8(),
+            viewport: viewportState({ x: 2, y: 4, width: 320, height: 200 }),
+        });
+        const full = uniformsOf(model, null);
+        const pixel = pixelUniformsOf(model);
+        const at = UNIFORM_AT;
+        for (const [name, from, to] of /** @type {[string, number, number][]} */ ([
+            ['viewport', at.viewportOffset, at.textureFactor],
+            ['texture factor and fog', at.textureFactor, at.materialDiffuse],
+            ['alpha reference and stage flags', at.alphaRef, at.textureTransforms],
+            ['texture transforms', at.textureTransforms, at.worldView],
+        ]))
+        {
+            assert.deepEqual([...pixel.subarray(from, to)], [...full.subarray(from, to)], name);
+        }
+        assert.deepEqual([...pixel.subarray(at.worldViewProjection, at.world)], [...IDENTITY],
+            'the vertex half is left to the shader');
+    });
 
 test('the dump prints a texture transform as the elements a coordinate travels through', async()=>{
     // Recorded commands. The flags and the matrix by columns -- u's, v's,

@@ -69,6 +69,30 @@ const TextureUsage = {
 const OPAQUE_BLACK = { r: 0, g: 0, b: 0, a: 1 };
 
 /**
+ * Whether a group's dynamic offsets are the ones it is bound at.
+ *
+ * @param {number[]} held @param {number[] | undefined} offsets
+ */
+function sameOffsets(held, offsets){
+    if (!offsets)
+    {
+        return held.length === 0;
+    }
+    if (held.length !== offsets.length)
+    {
+        return false;
+    }
+    for (let at = 0; at < held.length; at++)
+    {
+        if (held[at] !== offsets[at])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
  * @param {import('./contract.js').BackendOptions} options
  * @returns {any}
  */
@@ -385,6 +409,22 @@ export function createBackend(options){
         let viewport = null;
         /** @type {any} */
         let pipeline = null;
+        // What each slot and group of the pass holds now. The same set again
+        // is a call into the browser for nothing, and draws that share a
+        // buffer or a texture make one a draw; the state lasts the pass, which
+        // is this closure's life.
+        /** @type {any[]} */
+        const vertexBound = [];
+        /** @type {number[]} */
+        const vertexOffsets = [];
+        /** @type {any} */
+        let indexBound = null;
+        let indexFormat = '';
+        let indexOffset = -1;
+        /** @type {any[]} */
+        const groupsBound = [];
+        /** @type {number[][]} */
+        const groupOffsets = [];
 
         /**
          * A scissor rectangle kept on the attachment. The viewport may reach
@@ -500,8 +540,19 @@ export function createBackend(options){
                     : 'bindGroupsReused');
                 // setBindGroup copies the offsets it is handed.
                 const offsets = dynamicOffsetsOf(entries, bindOffsets);
+                const held = groupOffsets[index] ??= [];
+                if (groupsBound[index] === group && sameOffsets(held, offsets))
+                {
+                    return group;
+                }
+                groupsBound[index] = group;
+                held.length = 0;
                 if (offsets)
                 {
+                    for (let at = 0; at < offsets.length; at++)
+                    {
+                        held.push(offsets[at]);
+                    }
                     raw.setBindGroup(index, group, offsets);
                 }
                 else
@@ -528,12 +579,29 @@ export function createBackend(options){
 
             /** @param {number} slot @param {any} buffer @param {number} [offset] */
             setVertexBuffer(slot, buffer, offset = 0){
-                raw.setVertexBuffer(slot, buffer.gpu === undefined ? buffer : buffer.gpu, offset);
+                // A dynamic buffer answers its live backing, so a rename is
+                // another object and binds again.
+                const gpu = buffer.gpu === undefined ? buffer : buffer.gpu;
+                if (vertexBound[slot] === gpu && vertexOffsets[slot] === offset)
+                {
+                    return;
+                }
+                vertexBound[slot] = gpu;
+                vertexOffsets[slot] = offset;
+                raw.setVertexBuffer(slot, gpu, offset);
             },
 
             /** @param {any} buffer @param {string} format @param {number} [offset] */
             setIndexBuffer(buffer, format, offset = 0){
-                raw.setIndexBuffer(buffer.gpu === undefined ? buffer : buffer.gpu, format, offset);
+                const gpu = buffer.gpu === undefined ? buffer : buffer.gpu;
+                if (indexBound === gpu && indexFormat === format && indexOffset === offset)
+                {
+                    return;
+                }
+                indexBound = gpu;
+                indexFormat = format;
+                indexOffset = offset;
+                raw.setIndexBuffer(gpu, format, offset);
             },
 
             /**

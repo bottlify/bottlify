@@ -631,6 +631,199 @@ test('a vertex shader over the fixed-function pixel stage gets a fragment stage 
         assert.equal(h.device.release(), 0);
     });
 
+test('a vertex shader over the fixed pixel stage is prepared once for the state its draws share',
+    async()=>{
+        // How a program that draws each model through its own buffer goes:
+        // before every draw the same declaration and shader again, another
+        // buffer of the same layout, the model's constants. Nothing a draw's
+        // preparation is built from has changed, so the state is named and
+        // the pieces are made once -- while each draw still reads its own
+        // constants from its own buffer.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        assert.equal(h.device.CreateVertexShader(TEXTURED_VERTEX_SHADER, vs), D3D_OK);
+        /** @type {{ buffer?: any }} */
+        const other = {};
+        assert.equal(h.device.CreateVertexBuffer(STRIDE * 3, 0, 0, D3DPOOL.MANAGED, other),
+            D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetTexture(0, h.texture);
+        assert.equal(h.device.BeginScene(), D3D_OK);
+        for (let index = 0; index < 4; index++)
+        {
+            assert.equal(h.device.SetVertexDeclaration(h.declaration), D3D_OK);
+            assert.equal(h.device.SetVertexShader(vs.shader), D3D_OK);
+            assert.equal(h.device.SetStreamSource(0, index & 1 ? other.buffer : h.vb, 0, STRIDE),
+                D3D_OK);
+            assert.equal(h.device.SetVertexShaderConstantF(0,
+                [index + 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 4), D3D_OK);
+            assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        }
+        const shared = h.device.diagnostics();
+        assert.deepEqual(shared.prepared, { built: 1, reused: 3 });
+        assert.equal(shared.statesNamed, 1, 'the state named once, not once a draw');
+
+        // A render state changed is a state of its own.
+        h.device.SetRenderState(D3DRS.CULLMODE, 1);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(h.device.EndScene(), D3D_OK);
+        assert.equal(h.device.Present(), D3D_OK);
+        await h.device.idle();
+        assert.equal(h.device.diagnostics().prepared.built, 2);
+        assert.equal(h.device.diagnostics().statesNamed, 2);
+
+        const firsts = h.gpu.of('setBindGroup')
+            .filter((/** @type {any} */ call)=>call.index === 0)
+            .map((/** @type {any} */ call)=>new Float32Array(call.resolved[0].range.buffer)[0]);
+        assert.deepEqual(firsts, [1, 2, 3, 4, 4], 'each draw its own c0');
+        const buffers = h.gpu.of('setVertexBuffer')
+            .map((/** @type {any} */ call)=>call.buffer);
+        assert.equal(new Set(buffers).size, 2, 'two buffers bound');
+        assert.deepEqual(buffers.slice(0, 4).map(buffer=>buffer === buffers[0]),
+            [true, false, true, false], 'each draw its own buffer');
+        other.buffer.release();
+        vs.shader.release();
+    });
+
+test('a fixed pixel stage over a vertex shader is prepared again when a texture comes or goes',
+    async()=>{
+        // Which stages have a texture shapes the cascade and moves no
+        // version: a stage that reads a texture with none bound passes its
+        // colour on, a different fragment stage.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        assert.equal(h.device.CreateVertexShader(TEXTURED_VERTEX_SHADER, vs), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        assert.equal(h.device.BeginScene(), D3D_OK);
+        h.device.SetTexture(0, h.texture);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        h.device.SetTexture(0, null);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(h.device.diagnostics().prepared.built, 2, 'untextured is another stage');
+        h.device.SetTexture(0, h.texture);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.deepEqual(h.device.diagnostics().prepared, { built: 2, reused: 1 },
+            'and textured again is the first one, kept');
+        assert.equal(h.device.EndScene(), D3D_OK);
+        assert.equal(h.device.Present(), D3D_OK);
+        await h.device.idle();
+        const fragments = h.gpu.of('createShaderModule')
+            .filter((/** @type {any} */ call)=>call.descriptor.label.startsWith('ps:'));
+        assert.equal(fragments.length, 2);
+        assert.ok(fragments[0].descriptor.code.includes('sampleStage0'));
+        assert.ok(!fragments[1].descriptor.code.includes('sampleStage0'));
+        vs.shader.release();
+    });
+
+test('draws switching between two vertex shaders name their state once, each with its shader',
+    async()=>{
+        // A shader switched between draws changes no render state: the pieces
+        // are keyed by the shader, so the state is named once and each shader's
+        // pieces are made once.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const textured = {};
+        /** @type {{ shader?: any }} */
+        const tinted = {};
+        assert.equal(h.device.CreateVertexShader(TEXTURED_VERTEX_SHADER, textured), D3D_OK);
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, tinted), D3D_OK);
+        h.device.SetTexture(0, h.texture);
+        assert.equal(h.device.BeginScene(), D3D_OK);
+        for (const shader of [textured, tinted, textured, tinted])
+        {
+            assert.equal(h.device.SetVertexShader(shader.shader), D3D_OK);
+            assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        }
+        assert.equal(h.device.EndScene(), D3D_OK);
+        assert.equal(h.device.Present(), D3D_OK);
+        await h.device.idle();
+        assert.deepEqual(h.device.diagnostics().prepared, { built: 2, reused: 2 });
+        assert.equal(h.device.diagnostics().statesNamed, 1);
+        const pipelines = h.gpu.of('setPipeline')
+            .map((/** @type {any} */ call)=>call.pipeline);
+        assert.equal(new Set(pipelines).size, 2, 'a pipeline for each shader');
+        assert.deepEqual(pipelines.map(pipeline=>pipeline === pipelines[0]),
+            [true, false, true, false], 'and each draw with its own');
+        textured.shader.release();
+        tinted.shader.release();
+    });
+
+test('fixed-function draws switching declarations each read through their own', async()=>{
+    // The declaration is a binding the version does not move for, and the
+    // fixed-function key holds the layout it names: a draw through another
+    // declaration is another preparation, never the last one's.
+    const h = harness();
+    /** @type {{ declaration?: any }} */
+    const short = {};
+    assert.equal(h.device.CreateVertexDeclaration(ELEMENTS.slice(0, 2), short), D3D_OK);
+    assert.equal(h.device.BeginScene(), D3D_OK);
+    for (const declaration of [h.declaration, short.declaration, h.declaration])
+    {
+        assert.equal(h.device.SetVertexDeclaration(declaration), D3D_OK);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    }
+    assert.equal(h.device.EndScene(), D3D_OK);
+    assert.equal(h.device.Present(), D3D_OK);
+    await h.device.idle();
+    assert.deepEqual(h.device.diagnostics().prepared, { built: 2, reused: 1 });
+    const attributes = h.gpu.of('setPipeline').map((/** @type {any} */ call)=>
+        call.pipeline.descriptor.vertex.buffers[0].attributes.length);
+    assert.deepEqual(attributes, [3, 2, 3], 'position, colour and coordinates; then two');
+    short.declaration.release();
+});
+
+test('a material set between shader draws is no new state for their pieces', async()=>{
+    // A shader draw lights itself from its constants; the material is the
+    // fixed-function vertex stage's. A program that sets one before every
+    // model has changed nothing a shader draw's pieces are built from.
+    const h = harness();
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    assert.equal(h.device.CreateVertexShader(TEXTURED_VERTEX_SHADER, vs), D3D_OK);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetTexture(0, h.texture);
+    const none = { r: 0, g: 0, b: 0, a: 0 };
+    assert.equal(h.device.BeginScene(), D3D_OK);
+    for (const red of [0.25, 0.5, 0.75])
+    {
+        assert.equal(h.device.SetMaterial({ Diffuse: { r: red, g: 0, b: 0, a: 1 }, Ambient: none,
+            Specular: none, Emissive: none, Power: 0 }), D3D_OK);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    }
+    assert.deepEqual(h.device.diagnostics().prepared, { built: 1, reused: 2 });
+    // A render state is one.
+    h.device.SetRenderState(D3DRS.ALPHABLENDENABLE, 1);
+    assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(h.device.diagnostics().prepared.built, 2);
+    assert.equal(h.device.EndScene(), D3D_OK);
+    vs.shader.release();
+});
+
+test('a viewport set again names no new state; another viewport does', async()=>{
+    // The viewport is part of the state a draw is named by, compared as the
+    // object the device holds: one made again for the same rectangle was a
+    // state named again on the next draw.
+    const h = harness();
+    h.device.SetTexture(0, h.texture);
+    assert.equal(h.device.BeginScene(), D3D_OK);
+    assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    const named = h.device.diagnostics().statesNamed;
+    const viewport = { X: 0, Y: 0, Width: 8, Height: 8, MinZ: 0, MaxZ: 1 };
+    assert.equal(h.device.SetViewport(viewport), D3D_OK);
+    assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(h.device.diagnostics().statesNamed, named, 'the viewport in force, set again');
+    assert.equal(h.device.SetViewport({ ...viewport, Width: 4 }), D3D_OK);
+    assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(h.device.diagnostics().statesNamed, named + 1, 'another is a state of its own');
+    /** @type {{ viewport?: any }} */
+    const out = {};
+    assert.equal(h.device.GetViewport(out), D3D_OK);
+    assert.equal(out.viewport.Width, 4);
+    assert.equal(h.device.EndScene(), D3D_OK);
+});
+
 test('a vertex shader that writes no coordinate set leaves a sampling stage reading zero',
     async()=>{
         const h = harness();

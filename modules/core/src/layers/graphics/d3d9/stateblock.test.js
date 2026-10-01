@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { D3DERR_INVALIDCALL, D3DFMT, D3DRS, D3DSWAPEFFECT, D3D_OK } from './constants.js';
-import { D3DTS } from '../d3d8/constants.js';
+import { D3DFMT_INDEX, D3DPOOL, D3DTS } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
 import { D3DSBT, PIXEL_RENDER_STATES, VERTEX_RENDER_STATES } from './stateblock.js';
 import { D3DSAMP, D3DTSS9 } from './samplerstates.js';
@@ -71,6 +71,62 @@ test('a recorded state is not applied until the block is, and the block is what 
     assert.equal(renderState(device, D3DRS.ZENABLE), 0);
     assert.equal(out.block.release(), 0);
     assert.equal(device.release(), 0);
+});
+
+test('a block records a shader, declaration, indices and stream set to what is in force', ()=>{
+    // A set that changes nothing is passed over outside a recording; inside
+    // one it is the block's, and applied later it puts back what it named.
+    const device = createDevice();
+    /** @type {{ shader?: any }} */
+    const shader = {};
+    assert.equal(device.CreateVertexShader([0xfffe0200, 0x0000ffff], shader), D3D_OK);
+    /** @type {{ declaration?: any }} */
+    const declaration = {};
+    assert.equal(device.CreateVertexDeclaration([
+        { Stream: 0, Offset: 0, Type: 2, Method: 0, Usage: 0, UsageIndex: 0 },
+    ], declaration), D3D_OK);
+    /** @type {{ buffer?: any }} */
+    const vertices = {};
+    assert.equal(device.CreateVertexBuffer(64, 0, 0, D3DPOOL.MANAGED, vertices), D3D_OK);
+    /** @type {{ buffer?: any }} */
+    const indices = {};
+    assert.equal(device.CreateIndexBuffer(64, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.MANAGED, indices),
+        D3D_OK);
+    const bind = ()=>{
+        assert.equal(device.SetVertexShader(shader.shader), D3D_OK);
+        assert.equal(device.SetVertexDeclaration(declaration.declaration), D3D_OK);
+        assert.equal(device.SetIndices(indices.buffer), D3D_OK);
+        assert.equal(device.SetStreamSource(0, vertices.buffer, 8, 12), D3D_OK);
+    };
+    bind();
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    bind();
+    /** @type {{ block?: any }} */
+    const out = {};
+    assert.equal(device.EndStateBlock(out), D3D_OK);
+
+    assert.equal(device.SetVertexShader(null), D3D_OK);
+    assert.equal(device.SetVertexDeclaration(null), D3D_OK);
+    assert.equal(device.SetIndices(null), D3D_OK);
+    assert.equal(device.SetStreamSource(0, null, 0, 0), D3D_OK);
+    assert.equal(out.block.Apply(), D3D_OK);
+
+    /** @type {{ shader?: any }} */
+    const heldShader = {};
+    assert.equal(device.GetVertexShader(heldShader), D3D_OK);
+    assert.equal(heldShader.shader, shader.shader);
+    /** @type {{ declaration?: any }} */
+    const heldDeclaration = {};
+    assert.equal(device.GetVertexDeclaration(heldDeclaration), D3D_OK);
+    assert.equal(heldDeclaration.declaration, declaration.declaration);
+    /** @type {{ buffer?: any }} */
+    const heldIndices = {};
+    assert.equal(device.GetIndices(heldIndices), D3D_OK);
+    assert.equal(heldIndices.buffer, indices.buffer);
+    /** @type {{ buffer?: any, offset?: number, stride?: number }} */
+    const stream = {};
+    assert.equal(device.GetStreamSource(0, stream), D3D_OK);
+    assert.deepEqual([stream.buffer, stream.offset, stream.stride], [vertices.buffer, 8, 12]);
 });
 
 test('capture and apply are refused while another block is recording, and so is a create', ()=>{
