@@ -24,6 +24,7 @@
  * POINTSIZE_MAX follows the reported maximum point size.
  */
 
+import { HashedStates } from '../d3d8/statehash.js';
 import {
     D3DBLEND, D3DBLENDOP, D3DCMP, D3DCULL, D3DDEGREE, D3DDMT, D3DFILL, D3DFOG, D3DMCS,
     D3DPATCHEDGE, D3DRS, D3DSHADE, D3DSTENCILOP, D3DVBF, D3DZB, floatToDword,
@@ -198,8 +199,7 @@ export function resolveRenderStateDefault(entry, inputs){
  * @returns {Map<number, number>} every render state, at the value a fresh device has
  */
 export function createDefaultRenderStates(inputs){
-    /** @type {Map<number, number>} */
-    const states = new Map();
+    const states = new HashedStates();
     for (const entry of DEFAULT_RENDER_STATES)
     {
         states.set(entry.state, resolveRenderStateDefault(entry, inputs) >>> 0);
