@@ -2151,8 +2151,9 @@ const CLEAR_STRIDE = 20;
  * @property {number} [dumpEvery]
  *     The same account for every this-many-th presented frame, the last
  *     `DUMPS_KEPT` of them kept: a picture wrong in one frame of a few is
- *     caught with its draws, where the last frame alone misses it. The lines
- *     only -- the copies `dumpDraws` keeps for its checks are not made.
+ *     caught with its draws, where the last frame alone misses it. Its first
+ *     draws are checked against what the GPU held, as `dumpDraws` checks them;
+ *     the texture copies `dumpDraws` keeps are not made.
  * @property {number} [maxDraws]
  *     Record only this many draws of each frame and drop the rest. Negative --
  *     the default -- keeps all of them. A frame dump says which draws could
@@ -2207,7 +2208,7 @@ export function createRenderer(options){
     const { LockFlags, BufferUsage, TextureUsage } = backend;
     // A dumping run reads vertex buffers back off the GPU to compare them
     // with what the program wrote, which needs them made as copy sources.
-    const dumpCopySource = dumpDraws ? BufferUsage.COPY_SRC : 0;
+    const dumpCopySource = dumpDraws || dumpEvery > 0 ? BufferUsage.COPY_SRC : 0;
 
     /** @type {WeakMap<object, any>} d3d8 surface -> backend surface */
     const surfaces = new WeakMap();
@@ -3152,8 +3153,8 @@ export function createRenderer(options){
      *     `offset` is where `vertices` begins within the bound buffer.
      */
     const noteDumpVertices = (prepared, vertices, offset, stride)=>{
-        // The check reads buffers back, which only `dumpDraws` made readable.
-        if (!dumpDraws)
+        // The check reads buffers back, which a dump made readable.
+        if (!dumping())
         {
             return;
         }

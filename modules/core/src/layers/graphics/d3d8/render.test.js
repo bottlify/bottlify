@@ -2646,7 +2646,7 @@ test('the frame dump says where each draw landed and is empty unless asked for',
         'the corners themselves, because the union of a draw`s quads is not one of them');
 });
 
-test('every few frames keep their dump, without the read-back of the last frame', async()=>{
+test('every few frames keep their dump, each checked against what the GPU held', async()=>{
     // A picture wrong in one frame of a few is caught with its draws only when
     // more than the last frame is written down.
     const h = harness({ width: 640, height: 480, dumpEvery: 2 });
@@ -2669,8 +2669,8 @@ test('every few frames keep their dump, without the read-back of the last frame'
     assert.deepEqual(kept.map((/** @type {any} */ one)=>one.lines.length), [1, 3, 5],
         'each frame with its own draws');
     assert.match(kept[1].lines[2], /^#2 10,20\.\.110,70 \(100x50\) /);
-    assert.doesNotMatch(kept[2].lines[4], / gpu=/,
-        'no read-back: the buffers were not made readable for it');
+    assert.match(kept[2].lines[4], / gpu=same ugpu=same$/,
+        'the vertices and the block the GPU drew with, against what the program wrote');
     assert.equal(harness({ width: 640, height: 480 }).device.diagnostics().dumps, undefined,
         'a run that did not ask keeps none');
 });
