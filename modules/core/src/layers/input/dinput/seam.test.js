@@ -2003,7 +2003,6 @@ test('a mouse\'s properties are answered as Windows answers them', ()=>{
         f.memory.setU32(AT.property + 12, how);
         return f.bridge.call(device, 'GetProperty', [property, AT.property]);
     };
-    const DIERR_NOTFOUND = 0x80070002 | 0;
     assert.equal(ask(3, 20, 1, 0), DIERR_NOTFOUND, 'by offset, with no format set');
     assert.equal(ask(7, 20, 0, 0), DI_OK, 'FFGAIN');
     assert.equal(f.memory.u32(AT.property + 16), 10000);
