@@ -58,7 +58,7 @@ import {
 import { importHelpers } from './helpers.js';
 import { Tables, blockSlot } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
-import { inlineReturns } from '../region.js';
+import { callsOut, inlineReturns } from '../region.js';
 import {
     analyseX87, floatCondition, isX87, prepareX87, sameState, x87BlockEnd, x87BlockStart,
     x87Edge, x87EntryCheck, x87Epilogue, x87LoadRegisters, x87Normalise,
@@ -725,10 +725,9 @@ export class RegionEmitter {
         this.planned = planned;
         /** By ret block: the return addresses it jumps to rather than leaves by. */
         this.returns = planned?.returns ?? inlineReturns(region);
-        /** A call out of this region is a wasm call it goes on after: no x87 or MMX
-         * state to carry across one. */
+        /** A call out of this region is a wasm call it goes on after: no MMX state
+         * to carry across one (the x87 stack goes through the state block). */
         this.callReturn = context.callReturn === true
-            && !region.blocks.some(block=>block.instructions.some(isX87))
             && !regionHasMmx(region, context.leaveOut ?? new Set());
         /** Whether the block's call returned here and went on. */
         this.returned = false;
@@ -743,7 +742,7 @@ export class RegionEmitter {
             ? region : { ...region, blocks: this.structure.order.map(at=>region.blocks[at]) });
         /** The planning of the region's x87 (`analyseX87`). */
         this.x87Plan = planned !== null ? planned.x87
-            : analyseX87(this.region, context.leaveOut, entryTop, checked);
+            : analyseX87(this.region, context.leaveOut, entryTop, checked, this.callReturn);
         // Room for what a region's code comes to, a good sixteen bytes of wasm
         // for each of its bytes, rather than doubling up to it.
         this.b = new Body(Math.min(1 << 16, 2 ** Math.ceil(Math.log2(Math.max(64,
@@ -3356,13 +3355,11 @@ function naturalLoops(successors, roots){
  */
 function jumpsOf(block, returns, callReturn = false, index = new Map()){
     const { kind, targets, next, table, predicted } = block.exit;
-    const last = block.instructions[block.instructions.length - 1];
     // A call whose callee is formed in jumps there and its `ret` jumps back
     // (`returns`): its return address is no way on of its own, and an edge to
     // it could make the callee's first block one inside a loop, with no entry
     // for the callers in other regions.
-    if (callReturn && (kind === 'call' && !index.has(targets[0])
-        || kind === 'indirect' && last?.op === 'call' && table === undefined && !predicted))
+    if (callReturn && callsOut(block, index))
     {
         return [...targets, next];
     }

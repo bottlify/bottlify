@@ -31,7 +31,7 @@ import { checkAccess, emitStaleExit, noteStore, stackAccess } from './memory.js'
 import { Tables } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
-import { emitX87, isX87, x87Normalise, x87Reloaded } from './x87.js';
+import { emitX87, isX87, topAfterCall, x87AfterCall, x87Normalise, x87Reloaded } from './x87.js';
 
 /** i64 opcodes. */
 const I64 = Object.freeze({
@@ -148,6 +148,12 @@ function callAndReturn(e, next, pushTarget){
     // What the callee does not take in its parameters goes through the state
     // block; the count is left alone, the callee answering what is left of
     // the budget when it returns.
+    const top = topAfterCall(e.region.blocks[/** @type {number} */ (e.labels.get(next))],
+        e.x87.current?.top ?? 0);
+    if (e.x87.active)
+    {
+        x87Normalise(e);
+    }
     e.storeMemoryState();
     e.storeUncarriedState();
     b.localGet(Local.eip);
@@ -165,6 +171,10 @@ function callAndReturn(e, next, pushTarget){
     b.i32const(0).load('i32', { offset: layout.tables + CallStack.BUDGET })
         .localSet(Local.budget);
     e.loadState();
+    if (e.x87.active)
+    {
+        x87AfterCall(e, next, top);
+    }
     b.i32const(next).localSet(Local.eip);
     e.returned = true;
 }
@@ -669,7 +679,8 @@ export function emitInstruction(e, instruction, flagsLive){
                 return true;
             }
             if (e.callReturn && e.labels.has(next)
-                && !(dst.kind !== 'rel' && e.region.blocks[e.blockIndex].exit.predicted))
+                && !(dst.kind !== 'rel' && e.region.blocks[e.blockIndex].exit.predicted)
+                && (!e.x87.active || e.x87.current !== null))
             {
                 if (dst.kind !== 'rel')
                 {

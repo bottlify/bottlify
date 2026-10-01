@@ -1152,7 +1152,8 @@ test('the diagnostics histogram names the untranslated exits and why each target
 
 test('a return block the tracker cannot reach gets a region of its own, not a broken entry',
     async()=>{
-        const m = machine();
+        // The call leaves: made as a wasm call, its return block is reached across it.
+        const m = machine({ callReturn: false });
         const RA = CODE + 7;
         // fninit; call F (elsewhere); RA: mov eax, [0x2000]; fld dword [0x2000];
         // fstp st0; hlt -- the integer head emits, the x87 is refused, so the
@@ -2214,12 +2215,14 @@ async function runToHalt(m){
     let retired = 0;
     for (let turn = 0; turn < 64; turn++)
     {
-        if (m.runtime.entryOf(m.eip()) < 0)
+        // The entry for the x87 top the machine has, as the host asks.
+        const top = new DataView(m.memory.buffer).getUint8(m.layout.x87Top);
+        if (m.runtime.entryOf(m.eip(), top) < 0)
         {
-            m.runtime.noteHot(m.eip());
+            m.runtime.noteHot(m.eip(), top);
             await m.runtime.translatePending();
         }
-        const exit = m.runtime.run(m.runtime.entryOf(m.eip()), 10_000_000);
+        const exit = m.runtime.run(m.runtime.entryOf(m.eip(), top), 10_000_000);
         retired += exit.retired;
         if (exit.kind === 'halt')
         {
@@ -2284,6 +2287,59 @@ test('with callReturn an x87 callee returns the stack as it left it: its top, it
     assert.deepEqual(results[0].slice(0, 4), [6, 0x3f, 0, 0], 'two pushes from top 0');
     assert.deepEqual(results[0].slice(8), [1, 0], 'ST0 (register 6) 1, ST1 0 after the exchange');
     assert.deepEqual(results[1], results[0]);
+});
+
+/**
+ * A run of `program` at CODE to its halt with callReturn off and on: the transfers, edx,
+ * the dword at DATA and the x87 top and empty mask of each.
+ *
+ * @param {number[]} program
+ */
+async function bothWays(program){
+    /** @type {{ transfers: number, state: number[] }[]} */
+    const runs = [];
+    for (const callReturn of [false, true])
+    {
+        const m = machine({ leafCalls: false, callReturn, countTransfers: true });
+        m.write(CODE, program);
+        m.setReg(4, 0x80000);
+        const view = new DataView(m.memory.buffer);
+        view.setUint32(m.layout.eip, CODE, true);
+        await runToHalt(m);
+        runs.push({ transfers: m.runtime.diagnostics().transfers ?? 0,
+            state: [m.reg(1), m.reg(2), m.reg(4), view.getUint32(m.layout.ramBase + 0x3000, true),
+                view.getUint8(m.layout.x87Top), view.getUint8(m.layout.x87Empty)] });
+    }
+    return runs;
+}
+
+test('with callReturn a region with x87 makes its calls as wasm calls and goes on after them',
+    async()=>{
+        // mov ecx, 100; L: call F; fld1; fstp dword [0x3000]; dec ecx; jnz L; hlt;
+        // F: inc edx; ret
+        const [plain, called] = await bothWays([
+            0xb9, 100, 0, 0, 0, 0xe8, 0x0c, 0, 0, 0, 0xd9, 0xe8, 0xd9, 0x1d, 0, 0x30, 0, 0,
+            0x49, 0x75, 0xf0, 0xf4, 0x42, 0xc3,
+        ]);
+        assert.deepEqual(called.state, plain.state);
+        assert.deepEqual(called.state, [0, 100, 0x80000, 0x3f800000, 0, 0xff]);
+        if (plain.transfers > 0)
+        {
+            assert.ok(called.transfers <= plain.transfers / 2 + 2,
+                `returns do not go through the hash: ${called.transfers} of ${plain.transfers}`);
+        }
+    });
+
+test('with callReturn a callee that returns a float on the x87 stack has its caller leave at the'
+    + ' return address, the stack as the callee left it', async()=>{
+    // mov ecx, 100; L: call F; fstp dword [0x3000]; inc edx; dec ecx; jnz L; hlt;
+    // F: fld1; ret -- the top after the call one below the call's
+    const [plain, called] = await bothWays([
+        0xb9, 100, 0, 0, 0, 0xe8, 0x0b, 0, 0, 0, 0xd9, 0x1d, 0, 0x30, 0, 0,
+        0x42, 0x49, 0x75, 0xf1, 0xf4, 0xd9, 0xe8, 0xc3,
+    ]);
+    assert.deepEqual(called.state, plain.state);
+    assert.deepEqual(called.state, [0, 100, 0x80000, 0x3f800000, 0, 0xff]);
 });
 
 test('with callReturn calls deeper than the stack of waiting calls go on as plain transfers',
