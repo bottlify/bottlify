@@ -71,7 +71,8 @@ import { createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
-    createShadow, getRenderStateCode, getTextureStageStateCode, setMaterialCode,
+    createShadow, getRenderStateCode, getTextureStageStateCode, getTransformCode,
+    setMaterialCode,
     setRenderStateCode, setSamplerStateCode, setTextureCode, setTextureStageStateCode,
     setTransformCode,
 } from './shadow.js';
@@ -2373,6 +2374,7 @@ export function createDirect3D9Seam(
             SetRenderState: ({ trap })=>placeCode(at=>setRenderStateCode(at, trap)),
             GetRenderState: ({ trap })=>placeCode(at=>getRenderStateCode(at, trap)),
             SetTransform: ({ trap })=>placeCode(at=>setTransformCode(at, trap)),
+            GetTransform: ({ trap })=>placeCode(at=>getTransformCode(at, trap)),
             SetTextureStageState: ({ trap })=>placeCode(at=>setTextureStageStateCode(at, trap,
                 STAGE_STATE_TYPES_9)),
             GetTextureStageState: ({ trap })=>placeCode(at=>getTextureStageStateCode(at, trap,

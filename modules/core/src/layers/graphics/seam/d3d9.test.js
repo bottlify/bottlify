@@ -1634,7 +1634,7 @@ test('with guest memory, the setters and GetRenderState of a device run in the g
     const { device } = h.createDevice(root);
     const guest = (/** @type {string} */ name)=>h.box.isGuest(device,
         slot(IDIRECT3DDEVICE9_SLOTS, name));
-    for (const name of ['SetRenderState', 'GetRenderState', 'SetTransform',
+    for (const name of ['SetRenderState', 'GetRenderState', 'SetTransform', 'GetTransform',
         'SetTextureStageState', 'GetTextureStageState', 'SetMaterial', 'SetSamplerState',
         'SetTexture'])
     {

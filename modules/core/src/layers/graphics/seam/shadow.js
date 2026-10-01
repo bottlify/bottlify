@@ -897,6 +897,87 @@ export function setTextureStageStateCode(at, trap, types = STAGE_STATE_TYPES){
     ]);
 }
 
+/** The transform types below WORLD a device answers for: VIEW, PROJECTION, TEXTURE0..7. */
+const ANSWERED_TRANSFORMS = (1 << 2 | 1 << 3 | 0xff << 16) >>> 0;
+
+/**
+ * HRESULT GetTransform(this, D3DTRANSFORMSTATETYPE type, D3DMATRIX *), as
+ * guest code: the matrix of every type the device answers for is in the
+ * block, the guest's own writes included and the host's own changes mirrored
+ * there, so it is copied out of the type's slot. A type the device refuses, a
+ * null pointer and the host's flag go to the host.
+ *
+ *     (prologue)
+ *     mov eax, [esp+8]            ; type
+ *     cmp eax, 24
+ *     jb low
+ *     sub eax, 232                ; WORLD..WORLD3 -> 24..27
+ *     cmp eax, 24
+ *     jb slow
+ *     cmp eax, 28
+ *     jae slow
+ *     jmp slot
+ *   low:
+ *     mov edx, ANSWERED_TRANSFORMS
+ *     bt edx, eax
+ *     jnc slow
+ *   slot:
+ *     mov edx, [esp+12]           ; the matrix
+ *     test edx, edx
+ *     jz slow
+ *     push esi
+ *     push edi
+ *     mov edi, edx
+ *     mov esi, eax
+ *     shl esi, 6
+ *     lea esi, [ecx + esi + TRANSFORMS]
+ *     mov ecx, 16
+ *     rep movsd
+ *     pop edi
+ *     pop esi
+ *     xor eax, eax
+ *     ret 12
+ *   slow:
+ *     jmp trap
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function getTransformCode(at, trap){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x3d, ...dword(WORLD_SLOT)],                            // cmp eax, 24
+        { jcc: 0x72, to: 'low' },                                // jb low
+        [0x2d, ...dword(WORLD_TYPE - WORLD_SLOT)],               // sub eax, 232
+        [0x3d, ...dword(WORLD_SLOT)],                            // cmp eax, 24
+        { jcc: 0x72, to: 'slow' },                               // jb slow
+        [0x3d, ...dword(SHADOW.TRANSFORM_SLOTS)],                // cmp eax, 28
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        { jcc: 0xeb, to: 'slot' },                               // jmp slot
+        { label: 'low' },
+        [0xba, ...dword(ANSWERED_TRANSFORMS)],                   // mov edx, imm32
+        [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
+        { jcc: 0x73, to: 'slow' },                               // jnc slow
+        { label: 'slot' },
+        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x56],                                                  // push esi
+        [0x57],                                                  // push edi
+        [0x89, 0xd7],                                            // mov edi, edx
+        [0x89, 0xc6],                                            // mov esi, eax
+        [0xc1, 0xe6, 0x06],                                      // shl esi, 6
+        [0x8d, 0xb4, 0x31, ...dword(SHADOW.TRANSFORMS)],         // lea esi, [ecx+esi+disp]
+        [0xb9, ...dword(16)],                                    // mov ecx, 16
+        [0xf3, 0xa5],                                            // rep movsd
+        [0x5f],                                                  // pop edi
+        [0x5e],                                                  // pop esi
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x0c, 0x00],                                      // ret 12
+    ]);
+}
+
 /**
  * HRESULT GetTextureStageState(this, DWORD stage, D3DTEXTURESTAGESTATETYPE
  * type, DWORD *value), as guest code: a type the version's setter takes is
