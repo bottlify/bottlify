@@ -224,11 +224,13 @@ function plain(value, depth = 0){
 /**
  * Two frames of lit, textured draws through Direct3D 9 -- buffers and
  * textures written through their locks, one texture written again between
- * the frames -- and every call they asked of the GPU.
+ * the frames -- and every call they asked of the GPU. `late` writes the
+ * texture again after its unlock, through the pointer the lock gave, before
+ * the draws that sample it.
  *
- * @param {(services: any) => any} make
+ * @param {(services: any) => any} make @param {boolean} [late]
  */
-async function framesThrough(make){
+async function framesThrough(make, late = false){
     const gpu = createFakeDevice();
     const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
@@ -294,6 +296,10 @@ async function framesThrough(make){
         const at = /** @type {number} */ (rect.pBits) - RAM_BASE;
         ram.fill(value, at, at + (64 >> (2 * level)));
         ok(texture.texture.UnlockRect(level));
+        if (late)
+        {
+            ram.fill(value ^ 0xff, at, at + 16);
+        }
     };
     fill(0, 0x30);
     fill(1, 0x60);
@@ -374,6 +380,13 @@ test('frames whose calls cross a port ask of the GPU what the device itself aske
     const played = await framesThrough(services=>(made = acrossAPort(services)));
     made.close();
     assert.equal(played.length, direct.length);
+    played.forEach((frame, index)=>assert.ok(frame === direct[index],
+        `frame ${index} asked the same`));
+});
+
+test('a texture written after its unlock, before a draw samples it, is drawn as written', async()=>{
+    const direct = await framesThrough(createDirect3D9, true);
+    const played = await framesThrough(services=>loopbackDirect3D(createDirect3D9, services), true);
     played.forEach((frame, index)=>assert.ok(frame === direct[index],
         `frame ${index} asked the same`));
 });

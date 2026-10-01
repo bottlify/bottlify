@@ -1220,10 +1220,11 @@ after it was made and the report answering 53 to 118 s after the run.
 
 Drawn in the graphics worker (`device.worker`), a Direct3D 8 or 9 device is two: the one the
 program holds keeps the state and answers, with no renderer, and its twin in the worker draws. The
-twin reads the guest's bytes as they were sent: what a lock let the program write, at the unlock,
-and what a call copied between resources. A program that writes through a pointer it kept after
-the unlock writes where the twin never looks, though a device drawn on the engine's thread would
-have read it at the next draw. What only a renderer knows -- an occlusion query's count, a render
+twin reads the guest's bytes as they were sent: what a call copied between resources, what a lock
+of a buffer let the program write as of the unlock, and what a lock of a texture or a surface let
+it write as of the next call that may read it -- a draw, a copy, a present, a call on that
+resource -- which is where a renderer drawing on the engine's thread reads them too, so a write
+through the pointer between the unlock and the draw is drawn either way. What only a renderer knows -- an occlusion query's count, a render
 target's pixels for a lock, a context or a copy, `GetFrontBuffer(Data)` -- is the twin's answer,
 and the program waits for the worker to reach the call; a present waits only while the worker
 owes more than two presents and its own bound. The renderer's diagnostics are the twin's as of

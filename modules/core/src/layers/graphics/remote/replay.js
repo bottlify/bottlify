@@ -47,6 +47,23 @@ function handsOut(name){
 const UNLOCKS = new Set(['Unlock', 'UnlockRect', 'UnlockCubeRect', 'UnlockBox', 'ReleaseDC']);
 
 /**
+ * Whether a call reads no resource's bytes on the played side -- a state set,
+ * a lock -- so that a texture's bytes unlocked before it may wait for the
+ * next call that does: a renderer takes a texture's bytes at the first draw
+ * that samples it after the unlock, not at the unlock, and the program's
+ * writes between the two are in what it draws. A buffer's are taken at the
+ * unlock, there and here.
+ *
+ * @param {string} name
+ */
+function readsNothing(name){
+    return (name.startsWith('Set') && name !== 'SetCursorProperties')
+        || name.startsWith('Lock') || name.startsWith('Unlock')
+        || name === 'BeginScene' || name === 'LightEnable' || name === 'AddRef'
+        || name === 'addRef';
+}
+
+/**
  * Which part of a resource a lock or an unlock names: its leading numbers --
  * a level, a face and a level -- up to the structure the lock answers into.
  * A buffer's unlock names none, and so every lock of it.
@@ -294,15 +311,16 @@ export function createRecording(options){
     };
 
     /**
-     * The guest bytes the locks an unlock ends let the program write -- all of
-     * the object's, when it names no part -- each from the address its lock
-     * handed out to the end of the block that lies in; the object's own bytes
-     * when no lock handed any out, as a context over a surface writes them.
+     * Where the bytes the locks an unlock ends let the program write begin --
+     * all of the object's, when it names no part -- each running from the
+     * address its lock handed out to the end of the block that lies in; the
+     * object's own bytes when no lock handed any out, as a context over a
+     * surface writes them.
      *
      * @param {object} object @param {string} part
-     * @returns {{ address: number, bytes: Uint8Array }[]}
+     * @returns {number[]}
      */
-    const lockedBytes = (object, part)=>{
+    const lockedAddresses = (object, part)=>{
         const locks = lockedAt.get(object);
         /** @type {number[]} */
         const addresses = [];
@@ -318,7 +336,23 @@ export function createRecording(options){
         {
             addresses.push(/** @type {any} */ (object).base);
         }
-        return addresses.flatMap(blockFrom);
+        return addresses;
+    };
+
+    /**
+     * Textures' and surfaces' bytes unlocked and not yet sent, by where they
+     * begin, and the objects they belong to: sent with the next call that may
+     * read them, or that is made on one of those objects.
+     */
+    const pending = { addresses: /** @type {Set<number>} */ (new Set()),
+        objects: /** @type {Set<object>} */ (new Set()) };
+
+    /** The pending bytes, read now; none are pending after. */
+    const takePending = ()=>{
+        const taken = [...pending.addresses].flatMap(blockFrom);
+        pending.addresses.clear();
+        pending.objects.clear();
+        return taken;
     };
 
     /**
@@ -493,6 +527,10 @@ export function createRecording(options){
      */
     const methodOf = (target, name, method)=>{
         const unlocking = UNLOCKS.has(name);
+        // A buffer's bytes go with its unlock; a texture's or a surface's
+        // wait (`readsNothing`).
+        const deferring = unlocking && name !== 'Unlock';
+        const quiet = readsNothing(name);
         const locking = name.startsWith('Lock');
         const paced = PACED.has(name);
         const mayAnswer = answers.has(name);
@@ -542,9 +580,29 @@ export function createRecording(options){
                 }
                 applied = unwrapInto(applied, args, index);
             }
-            const shipped = unlocking
-                ? lockedBytes(target, name === 'ReleaseDC' ? '' : partOf(args))
-                : null;
+            /** @type {{ address: number, bytes: Uint8Array }[] | null} */
+            let shipped = null;
+            if (pending.addresses.size > 0
+                && (!quiet || (!unlocking && pending.objects.has(target))))
+            {
+                shipped = takePending();
+            }
+            if (unlocking)
+            {
+                const addresses = lockedAddresses(target, name === 'ReleaseDC' ? '' : partOf(args));
+                if (deferring)
+                {
+                    for (const address of addresses)
+                    {
+                        pending.addresses.add(address);
+                    }
+                    pending.objects.add(target);
+                }
+                else
+                {
+                    shipped = [...shipped ?? [], ...addresses.flatMap(blockFrom)];
+                }
+            }
             allocs = null;
             writes = null;
             depth++;
