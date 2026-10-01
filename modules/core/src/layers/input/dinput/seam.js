@@ -389,6 +389,7 @@ const DIDATAFORMAT = Object.freeze({
 });
 const DIOBJECTDATAFORMAT = Object.freeze({ pguid: 0x0, dwOfs: 0x4, dwType: 0x8, SIZE: 16 });
 const DIDFT_AXIS = 0x03;
+const DIDFT_POV = 0x10;
 /**
  * DIACTIONFORMAT and DIACTION, the action map a program describes its
  * controls with: the two widths differ only in the format's trailing name.
@@ -440,7 +441,9 @@ const DIDFT_OPTIONAL = 0x80000000;
  * @param {number} format
  * @param {readonly import('./devices.js').DeviceObject[]} objects
  * @param {(why: string) => void} [refused]  Told what refused the format.
- * @returns {{ dataSize: number, places: Map<number, number> } | null}
+ * @returns {{ dataSize: number, places: Map<number, number>, centred: number[] } | null}
+ *     `centred` is where an optional point-of-view entry no object answered
+ *     sits: the state reads it as a POV at rest, all ones.
  */
 export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
     const dataSize = readU32(format + DIDATAFORMAT.dwDataSize);
@@ -456,6 +459,8 @@ export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
     const array = readU32(format + DIDATAFORMAT.rgodf);
     /** @type {Map<number, number>} */
     const places = new Map();
+    /** @type {number[]} */
+    const centred = [];
     const taken = new Set();
     for (let index = 0; index < count; index++)
     {
@@ -478,6 +483,10 @@ export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
                     + ' matches none of the device objects');
                 return null;
             }
+            if ((type & DIDFT_POV) !== 0 && offset + 4 <= dataSize)
+            {
+                centred.push(offset);
+            }
             continue;
         }
         const width = (object.type & DIDFT_AXIS) !== 0 ? 4 : 1;
@@ -489,7 +498,7 @@ export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
         taken.add(object);
         places.set(object.offset, offset);
     }
-    return { dataSize, places };
+    return { dataSize, places, centred };
 }
 
 /**
@@ -772,7 +781,7 @@ export function createDirectInput(
      * What each device's SetDataFormat, or SetActionMap, settled on.
      *
      * @type {WeakMap<object, { dataSize: number, places: Map<number, number>,
-     *     appData?: Map<number, number>, relative?: boolean }>}
+     *     appData?: Map<number, number>, relative?: boolean, centred?: number[] }>}
      */
     const formats = new WeakMap();
     /**
@@ -1252,6 +1261,10 @@ export function createDirectInput(
                     }
                 }
             }
+            for (const place of format.centred ?? [])
+            {
+                view.setUint32(place, 0xffffffff, true);
+            }
             memory.writeMemory(data >>> 0, bytes);
             return DI_OK;
         },
@@ -1260,10 +1273,10 @@ export function createDirectInput(
          * HRESULT GetDeviceData(DWORD size, LPDIDEVICEOBJECTDATA, LPDWORD count,
          *                       DWORD flags)
          *
-         * Two calls in one. With a null array the program is asking how many
-         * events are waiting; with one it is draining. Both answer through
-         * `count`, and confusing them loses every event a program was told
-         * about but never asked for.
+         * Drains up to `count` events into the array, answering through
+         * `count` how many; a null array drains them all the same, which is
+         * how a program flushes the buffer. DIGDD_PEEK leaves them where they
+         * were.
          */
         GetDeviceData(device, [size, array, count, flags]){
             if ((count >>> 0) === 0)
@@ -1291,7 +1304,9 @@ export function createDirectInput(
             }
 
             const asked = readU32(count);
-            const peek = (flags & DIGDD_PEEK) !== 0 || (array >>> 0) === 0;
+            // A null array is still a read: what it would have received is
+            // taken out of the buffer, which is how a program flushes it.
+            const peek = (flags & DIGDD_PEEK) !== 0;
             const drained = device.drain(asked, peek);
             const overflow = drained.overflow;
             // An event carries its object's offset in the program's format,

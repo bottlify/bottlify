@@ -679,7 +679,26 @@ test('GetDeviceData on a device with no buffer says it has none', ()=>{
         [DIDEVICEOBJECTDATA.SIZE, AT.data, AT.count, 0]), DI_OK);
 });
 
-test('GetDeviceData with a null array counts without consuming', ()=>{
+test('an optional POV the keyboard cannot answer reads as one at rest, over what it overlaps', ()=>{
+    // Wine's device8.c test_overlapped_format.
+    const f = fixture();
+    const device = createDevice(f, GUID_SysKeyboard);
+    const GUID_POV = '{A36D02F2-C9F3-11CF-BFC7-444553540000}';
+    const format = dataFormat(f.memory, 8, [
+        { guid: GUID_Key, offset: 0, type: (DIDFT_OPTIONAL | 0x0c | DIK_A << 8) >>> 0 },
+        { guid: GUID_Key, offset: 1, type: (DIDFT_OPTIONAL | 0x0c | DIK_S << 8) >>> 0 },
+        { guid: GUID_POV, offset: 0, type: (DIDFT_OPTIONAL | 0x10 | 0xffff << 8) >>> 0 },
+    ]);
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [format]), DI_OK);
+    assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+    f.dinput.post({ kind: 'key', code: DIK_A, down: true });
+    assert.equal(f.bridge.call(device, 'GetDeviceState', [8, AT.state]), DI_OK);
+    assert.equal(f.memory.u32(AT.state), 0xffffffff);
+    assert.equal(f.memory.u32(AT.state + 4), 0);
+});
+
+test('GetDeviceData with a null array takes the events out, which is how a buffer is flushed', ()=>{
+    // DirectInput's documentation and Wine's device8.c test_overlapped_format.
     const f = keyboard();
     setBufferSize(f, f.device, 32);
     f.dinput.post({ kind: 'key', code: DIK_A, down: true });
@@ -691,8 +710,7 @@ test('GetDeviceData with a null array counts without consuming', ()=>{
 
     f.memory.setU32(AT.count, 10);
     f.bridge.call(f.device, 'GetDeviceData', [DIDEVICEOBJECTDATA.SIZE, AT.data, AT.count, 0]);
-    assert.equal(f.memory.u32(AT.count), 1,
-        'a count that consumed would lose every event it reported');
+    assert.equal(f.memory.u32(AT.count), 0, 'nothing is left to read');
 });
 
 test('DIGDD_PEEK leaves the events where they were', ()=>{
