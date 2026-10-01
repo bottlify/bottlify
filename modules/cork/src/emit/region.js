@@ -112,7 +112,7 @@ export function mathImports(){
 export const Exit = Object.freeze({
     UNTRANSLATED: 0, BUDGET: 1, TRAP: 2, HALT: 3, FAULT: 4, STALE: 5, INTERPRETED: 6,
     // A `ret` to the address a call made as a wasm call (`callReturn`) is waiting at:
-    // the state block complete, the caller goes on there. The host never sees it.
+    // the caller goes on there. The host never sees it.
     RETURNED: 7,
 });
 
@@ -124,6 +124,8 @@ export const Exit = Object.freeze({
  */
 export const CallStack = Object.freeze({
     DEPTH: Tables.UNDO_RING,
+    // What a returning call left of the budget, for its caller to go on with.
+    BUDGET: Tables.UNDO_RING + 4,
     STACK: Tables.UNDO_RING + 16,
     // Deeper calls leave as any call does, so the wasm stack stays bounded.
     LIMIT: 256,
@@ -1321,6 +1323,28 @@ export class RegionEmitter {
             b.i32const(0).localGet(local).store('i32', { offset: this.flagRecord + i * 4 });
         }
         b.i32const(0).localGet(Local.flags).store('i32', { offset: layout.eflags });
+    }
+
+    /**
+     * A `ret` back to a call that made this run a wasm call (`callReturn`):
+     * the registers, the record, the flags word and the vector registers
+     * written into the state block, the count left alone, what is left of the
+     * budget beside the calls waiting (`CallStack.BUDGET`), and the function
+     * returning `RETURNED`.
+     */
+    returnToCaller(){
+        const { b, layout } = this;
+        this.charge();
+        this.storeMemoryState();
+        this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false });
+        for (const [i, local] of RECORD_LOCALS.entries())
+        {
+            b.i32const(0).localGet(local).store('i32', { offset: this.flagRecord + i * 4 });
+        }
+        b.i32const(0).localGet(Local.flags).store('i32', { offset: layout.eflags });
+        b.i32const(0).localGet(Local.budget)
+            .store('i32', { offset: layout.tables + CallStack.BUDGET });
+        b.i32const(Exit.RETURNED).return();
     }
 
     /**
@@ -2954,7 +2978,7 @@ export function planStructure(region, returns, callReturn = false){
     const successors = blocks.map(block=>{
         /** @type {number[]} */
         const out = [];
-        for (const target of jumpsOf(block, returns, callReturn))
+        for (const target of jumpsOf(block, returns, callReturn, index))
         {
             const at = index.get(target);
             if (at !== undefined && !out.includes(at))
@@ -3319,12 +3343,19 @@ function naturalLoops(successors, roots){
  * past a port write the host's call channel answers from inside the region.
  *
  * @param {import('../region.js').Block} block @param {Map<number, number[]>} returns
+ * @param {boolean} [callReturn]  a call that leaves the region is a wasm call, its return
+ *     address its way on
+ * @param {Map<number, number>} [index]  the region's blocks by start, with `callReturn`
  * @returns {number[]} addresses, some perhaps outside the region
  */
-function jumpsOf(block, returns, callReturn = false){
+function jumpsOf(block, returns, callReturn = false, index = new Map()){
     const { kind, targets, next, table, predicted } = block.exit;
     const last = block.instructions[block.instructions.length - 1];
-    if (callReturn && (kind === 'call'
+    // A call whose callee is formed in jumps there and its `ret` jumps back
+    // (`returns`): its return address is no way on of its own, and an edge to
+    // it could make the callee's first block one inside a loop, with no entry
+    // for the callers in other regions.
+    if (callReturn && (kind === 'call' && !index.has(targets[0])
         || kind === 'indirect' && last?.op === 'call' && table === undefined && !predicted))
     {
         return [...targets, next];

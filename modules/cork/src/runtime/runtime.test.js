@@ -1699,7 +1699,7 @@ test('a transfer to a region of its own module is not a crossing; one into anoth
         return; // no hash: every transfer is the host's
     }
     // The loop and its callee in one batch: one module.
-    const one = machine({ leafCalls: false, dispatch: true });
+    const one = machine({ leafCalls: false, dispatch: true, callReturn: false });
     one.write(CODE, callLoop(1000));
     one.setReg(4, 0x80000);
     one.runtime.noteHot(CODE);
@@ -1708,7 +1708,7 @@ test('a transfer to a region of its own module is not a crossing; one into anoth
     assert.equal(one.reg(2), 1000);
     assert.equal(one.runtime.diagnostics().crossings, 0);
     // The callee first, in a batch of its own: each call and each return crosses.
-    const two = machine({ leafCalls: false, mergeAfter: 0, dispatch: true });
+    const two = machine({ leafCalls: false, mergeAfter: 0, dispatch: true, callReturn: false });
     two.write(CODE, callLoop(1000));
     two.setReg(4, 0x80000);
     two.runtime.noteHot(CODE + 14);
@@ -1728,7 +1728,8 @@ test('a placed module whose regions have all gone gives its range of the table b
     // The callee and the loop in modules of their own, dropped and made again
     // three hundred times, as a program rewriting its code in place has them:
     // six hundred ranges, where the table starts with 256 indices.
-    const m = machine({ leafCalls: false, mergeAfter: 0, volatileAfter: 1000, dispatch: true });
+    const m = machine({ leafCalls: false, mergeAfter: 0, volatileAfter: 1000, dispatch: true,
+        callReturn: false });
     for (let round = 0; round < 300; round++)
     {
         m.write(CODE, callLoop(100));
@@ -1753,7 +1754,8 @@ test('two modules that keep transferring into each other are gathered into one, 
     {
         return;
     }
-    const m = machine({ leafCalls: false, mergeAfter: 1000, worker: true, dispatch: true });
+    const m = machine({ leafCalls: false, mergeAfter: 1000, worker: true, dispatch: true,
+        callReturn: false });
     // Enough calls for the crossings to be read (every 2^20 translated instructions).
     m.write(CODE, callLoop(300_000));
     m.setReg(4, 0x80000);
@@ -2006,7 +2008,7 @@ test('an indirect call sampled going to a few small callees has them formed into
     {
         return; // no hash, no transfers to count
     }
-    const m = machine({ countTransfers: true, callTargets: true });
+    const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
     const { code, table, slots, f, g, h } = dispatchLoop(1600);
     m.write(CODE, code);
     m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));

@@ -152,8 +152,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         dispatch: false,
         // A call out of a region a wasm call, and the region going on after the
         // `ret` that comes back to it, rather than a transfer through the entry
-        // hash each way (`callAndReturn` in emit/integer.js). Off unless asked.
-        callReturn: false,
+        // hash each way (`callAndReturn` in emit/integer.js).
+        callReturn: true,
         // x87 regions compiled for the precision control the program runs
         // under -- the wide ones (double, extended) until it is seen with
         // single set, single from then on until it is seen with another --

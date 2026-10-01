@@ -106,9 +106,10 @@ function profileCall(e, site){
 
 /**
  * A call out of the region as a wasm call (`callReturn`): the return address
- * on the call stack, the state written back, the module's transfer called --
- * not tail-called -- with the target, and the region going on after the call
- * when the `ret` that pops that address answers `RETURNED`. The transfer then
+ * on the call stack, what the parameters do not carry written back, the
+ * module's transfer called -- not tail-called -- with the target, and the
+ * region going on after the call, on the budget the `ret` that pops that
+ * address left (`CallStack.BUDGET`) when it answers `RETURNED`. The transfer then
  * ran every region in between inside the call, and the host's return stack
  * predicts the way back where the entry hash and its indirect jump did not.
  * Any other answer is an exit the state block already holds: it goes up as it
@@ -144,11 +145,11 @@ function callAndReturn(e, next, pushTarget){
     b.localGet(Local.t1).i32const(2).op(I32.shl).i32const(next)
         .store('i32', { offset: layout.tables + CallStack.STACK });
     b.i32const(0).localGet(Local.t1).i32const(1).op(I32.add).store('i32', { offset: depth });
-    e.storeState();
-    e.resetRun();
-    // What the calls in between retire is added to the counter; the budget
-    // goes down by the same.
-    b.i32const(0).load('i32', { offset: layout.counter }).localSet(Local.t2);
+    // What the callee does not take in its parameters goes through the state
+    // block; the count is left alone, the callee answering what is left of
+    // the budget when it returns.
+    e.storeMemoryState();
+    e.storeUncarriedState();
     b.localGet(Local.eip);
     for (let local = Local.budget; local < STATE_PARAMS; local++)
     {
@@ -157,26 +158,22 @@ function callAndReturn(e, next, pushTarget){
     b.call(/** @type {number} */ (e.context.transfer)).localTee(Local.t0)
         .i32const(Exit.RETURNED).op(I32.ne);
     e.openIf('elsewhere');
+    // Left for the host somewhere inside: the state block holds it all.
     b.i32const(0).localGet(Local.t1).store('i32', { offset: depth });
     b.localGet(Local.t0).return();
     e.close();
+    b.i32const(0).load('i32', { offset: layout.tables + CallStack.BUDGET })
+        .localSet(Local.budget);
     e.loadState();
-    b.localGet(Local.budget)
-        .i32const(0).load('i32', { offset: layout.counter }).localGet(Local.t2).op(I32.sub)
-        .op(I32.sub).localTee(Local.budget).localSet(Local.origin);
-    if (e.flagRecord >= 0)
-    {
-        b.i32const(0).localGet(Local.budget)
-            .store('i32', { offset: /** @type {number} */ (layout.origin) });
-    }
     b.i32const(next).localSet(Local.eip);
     e.returned = true;
 }
 
 /**
  * A `ret` whose address is the one the innermost call made as a wasm call
- * waits at: that entry off the stack, and the region answers `RETURNED` with
- * the state written back, for the caller to go on.
+ * waits at: that entry off the stack, and the region answers `RETURNED` and
+ * what is left of the budget, the registers back in the state block, for the
+ * caller to go on.
  *
  * @param {import('./region.js').RegionEmitter} e
  */
@@ -190,7 +187,7 @@ function returnToCall(e){
         .localGet(Local.eip).op(I32.eq);
     e.openIf('returns');
     b.i32const(0).localGet(Local.t1).i32const(1).op(I32.sub).store('i32', { offset: depth });
-    e.exitDynamic(Exit.RETURNED);
+    e.returnToCaller();
     e.close();
     e.close();
 }
@@ -674,6 +671,10 @@ export function emitInstruction(e, instruction, flagsLive){
             if (e.callReturn && e.labels.has(next)
                 && !(dst.kind !== 'rel' && e.region.blocks[e.blockIndex].exit.predicted))
             {
+                if (dst.kind !== 'rel')
+                {
+                    profileCall(e, instruction.eip);
+                }
                 callAndReturn(e, next, dst.kind === 'rel'
                     ? ()=>b.i32const(/** @type {number} */ (dst.target))
                     : ()=>b.localGet(Local.count));
