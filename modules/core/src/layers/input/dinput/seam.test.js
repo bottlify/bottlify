@@ -681,6 +681,26 @@ test('GetDeviceData on a device with no buffer says it has none', ()=>{
         [DIDEVICEOBJECTDATA.SIZE, AT.data, AT.count, 0]), DI_OK);
 });
 
+test('a key injected by virtual key alone is DirectInput 8\'s by its scan code', ()=>{
+    // Wine's device8.c test_sys_keyboard: keybd_event('Q', 0, 0, 0) is no key to
+    // DirectInput 8, and Q to an older version, which takes the virtual key.
+    const legacy = keyboard();
+    const f = fixture();
+    const eight = device8(f, GUID_SysKeyboard, false);
+    assert.equal(f.bridge.call(eight, 'SetDataFormat', [dataFormat(f.memory, 256)]), DI_OK);
+    assert.equal(f.bridge.call(eight, 'Acquire', []), DI_OK);
+    const DIK_Q = 0x10;
+    for (const target of [legacy, f])
+    {
+        target.dinput.post({ kind: 'key', code: DIK_Q, down: true, scanned: 0 });
+    }
+    assert.equal(legacy.bridge.call(legacy.device, 'GetDeviceState', [256, AT.state]), DI_OK);
+    assert.equal(legacy.memory.bytes[AT.state + DIK_Q], 0x80);
+    assert.equal(f.bridge.call(eight, 'GetDeviceState', [256, AT.state]), DI_OK);
+    assert.equal(f.memory.bytes[AT.state + DIK_Q], 0, 'no scan code, no key');
+    assert.equal(f.memory.bytes[AT.state], 0);
+});
+
 test('an optional POV the keyboard cannot answer reads as one at rest, over what it overlaps', ()=>{
     // Wine's device8.c test_overlapped_format.
     const f = fixture();

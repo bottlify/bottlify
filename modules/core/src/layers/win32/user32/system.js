@@ -1260,9 +1260,11 @@ export function createSystemFunctions({ host, live, windows, classes }){
         }
 
         const extended = (flags & KEYEVENTF_EXTENDEDKEY) !== 0;
+        // A key named by its virtual key still carries the scan code the
+        // program wrote beside it, which is what DirectInput 8 reads.
         const named = (flags & KEYEVENTF_SCANCODE) !== 0
             ? { scan: wScan, extended }
-            : { vk: wVk };
+            : { vk: wVk, scanGiven: wScan, extended };
         host.sendInput?.({ kind: 'key', ...named, down: !up });
         return true;
     };

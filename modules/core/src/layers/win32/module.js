@@ -2475,7 +2475,6 @@ export function createWin32Module(){
                  */
                 /** Every top-level window's rectangle, as the program declared it. */
                 windows: ()=>windowService.list(),
-
                 /** The window the program is active through, as GetForegroundWindow answers. */
                 activeWindow: ()=>windowService.active(),
 

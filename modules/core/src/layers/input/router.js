@@ -93,6 +93,9 @@ const BUTTONS = Object.freeze({
  * @property {number} [scan]     For `key` with no `code`: a scan code,
  *           `SendInput`'s other way, read together with `extended`.
  * @property {boolean} [extended] Whether `scan` carries the E0 prefix.
+ * @property {number} [scanGiven] For `key` named by `vk`: the scan code the
+ *           program wrote beside it, perhaps none -- what DirectInput 8 keys
+ *           the event by, where earlier versions take the virtual key.
  * @property {boolean} [down]    For `key`, `pointerButton` and `padButton`.
  * @property {string} [text]     For `text`: the character the browser composed.
  *           For `paste`: what the person pasted, for the clipboard.
@@ -378,7 +381,9 @@ export function createInputRouter(
         {
             emit(messages[system ? 1 : 0], mapping.vk, lParam);
         }
-        device({ kind: 'key', code: dikOf(mapping), down: event.down === true });
+        device({ kind: 'key', code: dikOf(mapping), down: event.down === true,
+            ...event.scanGiven === undefined ? {}
+                : { scanned: (event.scanGiven & 0x7f) | (event.extended ? 0x80 : 0) } });
         report({ device: 'key', scan: mapping.scan & 0xff, extended: mapping.extended === true,
             vk: mapping.vk, down: event.down === true, message: messages[system ? 1 : 0] });
         return true;

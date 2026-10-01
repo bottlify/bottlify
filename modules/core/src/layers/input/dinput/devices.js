@@ -92,6 +92,9 @@ const KEY_NAMES = new Map(/** @type {[number, string][]} */ ([
     [0xcb, 'Left'], [0xcd, 'Right'], [0xcf, 'End'], [0xd0, 'Down'], [0xd1, 'Page Down'],
     [0xd2, 'Insert'], [0xd3, 'Delete'], [0xdb, 'Left Windows'], [0xdc, 'Right Windows'],
     [0xdd, 'Application'],
+    [0x90, 'Prev Track'], [0x99, 'Next Track'], [0xa0, 'Mute'], [0xa1, 'Calculator'],
+    [0xa2, 'Play/Pause'], [0xa4, 'Media Stop'], [0xae, 'Volume -'], [0xb0, 'Volume +'],
+    [0xb2, 'Web/Home'],
 ]));
 
 /**
@@ -166,6 +169,9 @@ export function objectsOf(kind){
  * @typedef {Object} InputEvent
  * @property {'key' | 'mouseMove' | 'mouseWheel' | 'mouseButton'} kind
  * @property {number} [code]     A DIK scan code, or a button index.
+ * @property {number} [scanned]  For a key a program injected by virtual key: the
+ *           DIK of the scan code it gave, which DirectInput 8 keys it by -- zero,
+ *           when it gave none, is no key.
  * @property {boolean} [down]
  * @property {number} [x]
  * @property {number} [y]

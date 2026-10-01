@@ -2414,7 +2414,8 @@ test('SendInput injects a keyboard event named by virtual key', ()=>{
     memory.putU32s(INPUT_BUFFER, [INPUT_KEYBOARD, VK_A, 0, 0, 0, 0, 0]);
 
     assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 28]), 1);
-    assert.deepEqual(sent, [{ kind: 'key', vk: VK_A, down: true }]);
+    assert.deepEqual(sent, [{ kind: 'key', vk: VK_A, scanGiven: 0, extended: false, down: true }],
+        'the scan code written beside it goes along, none here');
 });
 
 test('SendInput reads a scan code and the key-up flag off KEYBDINPUT', ()=>{
@@ -2971,8 +2972,8 @@ test('keybd_event and mouse_event are one INPUT each, handed over as arguments',
     fns.mouse_event.handler([MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN, -3 >>> 0, 4, 0, 0]);
     fns.mouse_event.handler([MOUSEEVENTF_WHEEL, 0, 0, -120 >>> 0, 0]);
     assert.deepEqual(sent, [
-        { kind: 'key', vk: 0x41, down: true },
-        { kind: 'key', vk: 0x41, down: false },
+        { kind: 'key', vk: 0x41, scanGiven: 0x1e, extended: false, down: true },
+        { kind: 'key', vk: 0x41, scanGiven: 0x1e, extended: false, down: false },
         { kind: 'pointerMove', dx: -3, dy: 4 },
         { kind: 'pointerButton', button: 'left', down: true },
         { kind: 'wheel', delta: -120 },

@@ -2125,7 +2125,18 @@ export function createDirectInput(
             for (const guid of guids)
             {
                 const device = devices.get(guid);
-                if (!device || device.destroyed || !device.post(event))
+                const keyed = event.scanned !== undefined && device?.version >= 0x0800
+                    ? { ...event, code: event.scanned } : event;
+                if (keyed.kind === 'key' && keyed.code === 0)
+                {
+                    // No key of its own, but input it heard all the same.
+                    if (device?.acquired && device.notifyEvent !== 0)
+                    {
+                        signal?.(device.notifyEvent);
+                    }
+                    continue;
+                }
+                if (!device || device.destroyed || !device.post(keyed))
                 {
                     continue;
                 }

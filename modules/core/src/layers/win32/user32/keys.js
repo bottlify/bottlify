@@ -111,6 +111,13 @@ const TABLE = Object.freeze({
     MetaLeft: [0x5b, 0x5b, 1],
     MetaRight: [0x5c, 0x5c, 1],
     ContextMenu: [0x5d, 0x5d, 1],
+    // The media keys, E0-prefixed codes of their own; DirectInput names
+    // them by the same bytes (DIK_PREVTRACK is 0x90).
+    MediaTrackPrevious: [0x10, 0xb1, 1], MediaTrackNext: [0x19, 0xb0, 1],
+    AudioVolumeMute: [0x20, 0xad, 1], LaunchApp2: [0x21, 0xb7, 1],
+    MediaPlayPause: [0x22, 0xb3, 1], MediaStop: [0x24, 0xb2, 1],
+    AudioVolumeDown: [0x2e, 0xae, 1], AudioVolumeUp: [0x30, 0xaf, 1],
+    BrowserHome: [0x32, 0xac, 1],
 });
 
 /** @type {Map<string, KeyMapping>} */
