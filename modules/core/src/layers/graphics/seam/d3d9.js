@@ -75,7 +75,7 @@ import {
     unlockCode,
     setMaterialCode,
     setRenderStateCode, setSamplerStateCode, setStreamSource9Code, setTextureCode,
-    setTextureStageStateCode, setTransformCode, setVertexDeclarationCode,
+    setTextureStageStateCode, setTransformCode, setBindingCode, SHADOW,
 } from './shadow.js';
 import { D3DTSS9, SAMPLER_STATE_KEY } from '../d3d9/samplerstates.js';
 
@@ -209,8 +209,8 @@ export function createDirect3D9Seam(
      * (`shadow.js`). Direct3D 9's render states, transforms, stage states,
      * material and first eight textures are laid out as Direct3D 8's and take
      * the same routines, and its sampler states share the stage state slots;
-     * its stream, index and shader bindings are its own and stay with the
-     * host.
+     * its streams, with their offsets, its declaration, indices and shaders
+     * take routines of their own.
      *
      * @type {WeakMap<any, ReturnType<typeof createShadow>>}
      */
@@ -973,11 +973,12 @@ export function createDirect3D9Seam(
             return hr;
         },
     };
+    // A shader let go of leaves no slot of the block naming it.
     const vertexShaderInterfaces = [
-        describe(IID_IDirect3DVertexShader9, IDIRECT3DSHADER9_SLOTS, shaderMethods),
+        describe(IID_IDirect3DVertexShader9, IDIRECT3DSHADER9_SLOTS, shaderMethods, {}, retire),
     ];
     const pixelShaderInterfaces = [
-        describe(IID_IDirect3DPixelShader9, IDIRECT3DSHADER9_SLOTS, shaderMethods),
+        describe(IID_IDirect3DPixelShader9, IDIRECT3DSHADER9_SLOTS, shaderMethods, {}, retire),
     ];
 
     const stateBlockInterfaces = [
@@ -1005,6 +1006,7 @@ export function createDirect3D9Seam(
                     material: record.material !== undefined,
                     bindings: record.streams.size > 0 || record.indices !== undefined
                         || record.vertexShader !== undefined
+                        || record.pixelShader !== undefined
                         || record.vertexDeclaration !== undefined,
                 });
                 return hr;
@@ -2448,7 +2450,13 @@ export function createDirect3D9Seam(
             SetSamplerState: ({ trap })=>placeCode(at=>setSamplerStateCode(at, trap)),
             SetTexture: ({ trap })=>placeCode(at=>setTextureCode(at, trap, 'slow')),
             SetStreamSource: ({ trap })=>placeCode(at=>setStreamSource9Code(at, trap)),
-            SetVertexDeclaration: ({ trap })=>placeCode(at=>setVertexDeclarationCode(at, trap)),
+            SetVertexDeclaration: ({ trap })=>placeCode(at=>
+                setBindingCode(at, trap, SHADOW.DECLARATION)),
+            SetIndices: ({ trap })=>placeCode(at=>setBindingCode(at, trap, SHADOW.INDICES)),
+            SetVertexShader: ({ trap })=>placeCode(at=>
+                setBindingCode(at, trap, SHADOW.VERTEX_SHADER)),
+            SetPixelShader: ({ trap })=>placeCode(at=>
+                setBindingCode(at, trap, SHADOW.PIXEL_SHADER)),
         }
         : {};
     const deviceInterfaces = [

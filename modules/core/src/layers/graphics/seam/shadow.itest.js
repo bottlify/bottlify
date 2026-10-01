@@ -27,7 +27,7 @@ import {
     setIndicesCode, setSamplerStateCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
     setTextureStageStateCode, setTransformCode, setVertexShaderCode, unlockCode,
-    getTextureStageStateCode, getTransformCode, setStreamSource9Code, setVertexDeclarationCode,
+    getTextureStageStateCode, getTransformCode, setStreamSource9Code, setBindingCode,
 } from './shadow.js';
 import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
 
@@ -40,6 +40,7 @@ const ROUTINES = {
     stream: 0x8a00, indices: 0x8a80, shader: 0x8b00, texture: 0x8b80, stageState: 0x8c00,
     material: 0x8c80, surfaceLevel: 0x8d80, getState: 0x8e00, sampler: 0x8e80, texture9: 0x8f00,
     getStage: 0x8f80, getTransform: 0x9100, stream9: 0x9200, declaration: 0x9300,
+    indices9: 0x9380,
 };
 /** Where the routines jump when they leave the case to the host: a halt here. */
 const TRAP = 0x8d00;
@@ -135,6 +136,8 @@ const STEPS = [
     step(ROUTINES.stream9, OBJECT, [16, 1, 0, 1]),       // 55: no such stream: the trap
     step(ROUTINES.declaration, OBJECT, [0x3456]),        // 56: a declaration
     step(ROUTINES.declaration, BARE, [0x3456]),          // 57: no block: the trap
+    step(ROUTINES.indices9, OBJECT, [0x4567]),           // 58: Direct3D 9's indices
+    step(ROUTINES.indices9, OBJECT, [0]),                // 59: none, in the guest too
 ];
 
 /** @param {typeof STEPS[number]} entry @param {number} at */
@@ -253,7 +256,9 @@ async function routines(engine){
     host.writePhysical(ROUTINES.getStage, getTextureStageStateCode(ROUTINES.getStage, TRAP));
     host.writePhysical(ROUTINES.getTransform, getTransformCode(ROUTINES.getTransform, TRAP));
     host.writePhysical(ROUTINES.stream9, setStreamSource9Code(ROUTINES.stream9, TRAP));
-    host.writePhysical(ROUTINES.declaration, setVertexDeclarationCode(ROUTINES.declaration, TRAP));
+    host.writePhysical(ROUTINES.declaration,
+        setBindingCode(ROUTINES.declaration, TRAP, SHADOW.DECLARATION));
+    host.writePhysical(ROUTINES.indices9, setBindingCode(ROUTINES.indices9, TRAP, SHADOW.INDICES));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
     host.writePhysical(TEX + 4, new Uint8Array(u32(TBLOCK)));
     host.writePhysical(TBLOCK, new Uint8Array(TEXTURE.SIZE));
@@ -529,8 +534,12 @@ async function routines(engine){
     assert.equal(run(56), 'ok');
     assert.equal(read(BLOCK + SHADOW.DECLARATION), 0x3456);
     assert.equal(run(57), 'trap', 'an object with no block');
-    assert.equal(read(BLOCK + SHADOW.BINDING_CALLS), bindings + 2);
-    assert.equal(calls(), 19);
+    assert.equal(run(58), 'ok');
+    assert.equal(read(BLOCK + SHADOW.INDICES), 0x4567);
+    assert.equal(run(59), 'ok');
+    assert.equal(read(BLOCK + SHADOW.INDICES), 0);
+    assert.equal(read(BLOCK + SHADOW.BINDING_CALLS), bindings + 4);
+    assert.equal(calls(), 21);
 
     machine.stop();
 }

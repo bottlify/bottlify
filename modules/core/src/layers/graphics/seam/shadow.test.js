@@ -10,7 +10,7 @@ import {
     BUFFER, FLAG_SLOW_PATH, SHADOW, STALE_POINTER, TEXTURE, createShadow, getSurfaceLevelCode,
     lockCode, materialFloats, materialOf, setIndicesCode, setMaterialCode, setRenderStateCode,
     setStreamSourceCode, setTextureCode, setTextureStageStateCode, setTransformCode,
-    setStreamSource9Code, setVertexDeclarationCode,
+    setStreamSource9Code, setBindingCode,
     setVertexShaderCode, transformSlot, transformType, unlockCode,
 } from './shadow.js';
 import { D3DTSS } from '../d3d8/constants.js';
@@ -183,8 +183,8 @@ function fakeDevice(){
             out.stride = record?.stride ?? 0;
             return 0;
         },
-        /** @param {any} buffer @param {number} base */
-        SetIndices(buffer, base){
+        /** @param {any} buffer @param {number} [base] */
+        SetIndices(buffer, base = 0){
             calls.push(`indices=${buffer ? buffer.name : 'none'}+${base}`);
             device.indices = buffer;
             device.baseVertexIndex = base;
@@ -375,7 +375,8 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.RENDER_STATE_VALID + SHADOW.RENDER_STATE_COUNT / 8, SHADOW.SAMPLER_KEYS);
     assert.equal(SHADOW.SAMPLER_KEYS + SHADOW.SAMPLER_KEY_COUNT, SHADOW.STREAM_OFFSETS);
     assert.equal(SHADOW.STREAM_OFFSETS + SHADOW.STREAM_COUNT * 4, SHADOW.DECLARATION);
-    assert.equal(SHADOW.DECLARATION + 4, SHADOW.SIZE);
+    assert.equal(SHADOW.DECLARATION + 4, SHADOW.PIXEL_SHADER);
+    assert.equal(SHADOW.PIXEL_SHADER + 4, SHADOW.SIZE);
     assert.ok(SHADOW.CALLS > SHADOW.TRANSFORM_CALLS && SHADOW.CALLS < SHADOW.RENDER_STATES,
         'the count of every call in the header, where a disp8 reaches it');
     assert.equal(BUFFER.SIZE, 32);
@@ -415,7 +416,8 @@ test('the routines end in a jump to their own trap, and check the flag first', (
         shader: [setVertexShaderCode(0x20600, 0x105060), 8],
         material: [setMaterialCode(0x20700, 0x105070), 8],
         stream9: [setStreamSource9Code(0x20800, 0x105080), 20],
-        declaration: [setVertexDeclarationCode(0x20900, 0x105090), 8],
+        declaration: [setBindingCode(0x20900, 0x105090, SHADOW.DECLARATION), 8],
+        pixelShader: [setBindingCode(0x20a00, 0x1050a0, SHADOW.PIXEL_SHADER), 8],
     };
     for (const [name, [code, popped]] of Object.entries(rets))
     {
@@ -442,6 +444,7 @@ test('the routines end in a jump to their own trap, and check the flag first', (
         ['material', rets.material[0], rets.material[0].length - 15, 0x42],
         ['stream9', rets.stream9[0], rets.stream9[0].length - 13, 0x41],
         ['declaration', rets.declaration[0], rets.declaration[0].length - 13, 0x41],
+        ['pixelShader', rets.pixelShader[0], rets.pixelShader[0].length - 13, 0x41],
     ];
     for (const [name, code, at, modrm] of lastWrites)
     {

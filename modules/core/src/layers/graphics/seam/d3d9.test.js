@@ -44,6 +44,7 @@ import {
 import { guidBytes } from './d3d7.js';
 import { D3DCREATE, D3DDEVTYPE, D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
 import { D3DFMT, D3DPOOL, D3DRS } from '../d3d9/constants.js';
+import { D3DFMT_INDEX } from '../d3d8/constants.js';
 import { SAMPLER_STATE_KEY } from '../d3d9/samplerstates.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { END_TOKEN, SHADER_KIND, versionToken } from '../d3d9/shader.js';
@@ -1673,12 +1674,13 @@ test('with guest memory, a buffer locks and unlocks in the guest, and the host s
     assert.equal(h.release(pointer), 0);
 });
 
-test('with guest memory, a stream and a declaration set in the guest reach the device', ()=>{
-    // The two routines leave a pointer, an offset and a stride in the block,
-    // and the next host method adopts them. What the host changes itself -- a
-    // format set, a user-pointer draw emptying stream zero -- goes back into
-    // the block, so the guest's next write of what it had set before is
-    // still a change; and a declaration let go of leaves its slot stale.
+test('with guest memory, the bindings set in the guest reach the device', ()=>{
+    // The routines leave a pointer, an offset and a stride in the block, and
+    // the next host method adopts them. What the host changes itself -- a
+    // format set, a user-pointer draw emptying stream zero and the indices --
+    // goes back into the block, so the guest's next write of what it had set
+    // before is still a change; and a declaration let go of leaves its slot
+    // stale.
     const h = seamed({ shadow: true });
     const root = h.create();
     const { device } = h.createDevice(root);
@@ -1693,6 +1695,9 @@ test('with guest memory, a stream and a declaration set in the guest reach the d
     ]));
     assert.equal(h.device(device, 'CreateVertexDeclaration', [elements, out]), D3D_OK);
     const declaration = h.box.memory.readU32(out);
+    assert.equal(h.device(device, 'CreateIndexBuffer',
+        [64, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.MANAGED, out, 0]), D3D_OK);
+    const indexBuffer = h.box.memory.readU32(out);
     const block = h.box.memory.readU32(device + 4);
     // As the two routines leave the block (shadow.itest.js runs them): the
     // values, then the binding calls and every call counted.
@@ -1712,6 +1717,11 @@ test('with guest memory, a stream and a declaration set in the guest reach the d
     /** @param {number} pointer */
     const setDeclaration = pointer=>{
         h.box.memory.writeU32(block + SHADOW.DECLARATION, pointer);
+        counted();
+    };
+    /** @param {number} pointer */
+    const setIndices = pointer=>{
+        h.box.memory.writeU32(block + SHADOW.INDICES, pointer);
         counted();
     };
 
@@ -1734,12 +1744,26 @@ test('with guest memory, a stream and a declaration set in the guest reach the d
         }
         return bound;
     };
+    const indices = ()=>{
+        assert.equal(h.device(device, 'GetIndices', [0x3400]), D3D_OK);
+        const bound = h.box.memory.readU32(0x3400);
+        if (bound !== 0)
+        {
+            h.release(bound);
+        }
+        return bound;
+    };
 
     setStream(vertices, 12, 12);
     setDeclaration(declaration);
+    setIndices(indexBuffer);
     assert.equal(h.box.memory.readU32(block + SHADOW.STREAM_OFFSETS), 12, 'in the block');
     assert.deepEqual(stream(), [vertices, 12, 12], 'adopted on the way into the host');
     assert.equal(held(), declaration);
+    assert.equal(indices(), indexBuffer);
+    setIndices(0);
+    assert.equal(indices(), 0, 'none, set in the guest');
+    setIndices(indexBuffer);
 
     // A format set through the trap makes a declaration of the device's own;
     // the guest's declaration set again is the change it is.
@@ -1763,14 +1787,74 @@ test('with guest memory, a stream and a declaration set in the guest reach the d
     assert.equal(h.device(device, 'BeginScene'), D3D_OK);
     assert.equal(h.device(device, 'DrawPrimitiveUP', [4, 1, 0x4000, 12]), D3D_OK);
     assert.equal(stream()[0], 0, 'emptied by the draw');
+    assert.equal(indices(), 0, 'the indices with it');
     setStream(vertices, 12, 12);
+    setIndices(indexBuffer);
     assert.deepEqual(stream(), [vertices, 12, 12], 'and bound again');
+    assert.equal(indices(), indexBuffer);
     assert.equal(h.device(device, 'EndScene'), D3D_OK);
 
     // The program lets the declaration go: the slot naming it is stale.
     setDeclaration(declaration);
     assert.equal(h.release(declaration), 0);
     assert.equal(h.box.memory.readU32(block + SHADOW.DECLARATION), STALE_POINTER);
+});
+
+test('with guest memory, shaders set in the guest reach the device', ()=>{
+    // SetVertexShader and SetPixelShader leave the pointer in the block as the
+    // other bindings do. A shader the program lets go of leaves its slot
+    // stale, so whatever is made at its address next and set is a change.
+    const h = seamed({ shadow: true, caps: {
+        vertexShaderVersion: { major: 2, minor: 0 }, pixelShaderVersion: { major: 2, minor: 0 },
+    } });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const at = 0x3000;
+    const out = 0x3100;
+    /** @param {string} kind @param {string} method */
+    const make = (kind, method)=>{
+        h.box.services.writeMemory(at, new Uint8Array(
+            Uint32Array.from([versionToken(kind, 2, 0), END_TOKEN]).buffer));
+        assert.equal(h.device(device, method, [at, out]), D3D_OK);
+        return h.box.memory.readU32(out);
+    };
+    const vertexShader = make(SHADER_KIND.VERTEX, 'CreateVertexShader');
+    const pixelShader = make(SHADER_KIND.PIXEL, 'CreatePixelShader');
+    const block = h.box.memory.readU32(device + 4);
+    // As the routine leaves the block (shadow.itest.js runs it).
+    /** @param {number} place @param {number} pointer */
+    const set = (place, pointer)=>{
+        h.box.memory.writeU32(block + place, pointer);
+        for (const counter of [SHADOW.BINDING_CALLS, SHADOW.CALLS])
+        {
+            h.box.memory.writeU32(block + counter, h.box.memory.readU32(block + counter) + 1);
+        }
+    };
+    /** What the device holds, through the host. @param {string} method */
+    const bound = method=>{
+        assert.equal(h.device(device, method, [0x3200]), D3D_OK);
+        const shader = h.box.memory.readU32(0x3200);
+        if (shader !== 0)
+        {
+            h.release(shader);
+        }
+        return shader;
+    };
+
+    set(SHADOW.VERTEX_SHADER, vertexShader);
+    set(SHADOW.PIXEL_SHADER, pixelShader);
+    assert.equal(bound('GetVertexShader'), vertexShader, 'adopted on the way into the host');
+    assert.equal(bound('GetPixelShader'), pixelShader);
+    set(SHADOW.PIXEL_SHADER, 0);
+    assert.equal(bound('GetPixelShader'), 0, 'none, set in the guest');
+
+    assert.equal(h.release(vertexShader), 0);
+    assert.equal(h.box.memory.readU32(block + SHADOW.VERTEX_SHADER), STALE_POINTER,
+        'the slot naming a shader let go of');
+    const next = make(SHADER_KIND.VERTEX, 'CreateVertexShader');
+    set(SHADOW.VERTEX_SHADER, next);
+    assert.equal(bound('GetVertexShader'), next, 'the next one set is bound');
+    assert.deepEqual(h.divergences, []);
 });
 
 test('with guest memory, the setters and GetRenderState of a device run in the guest', ()=>{
@@ -1788,7 +1872,8 @@ test('with guest memory, the setters and GetRenderState of a device run in the g
         slot(IDIRECT3DDEVICE9_SLOTS, name));
     for (const name of ['SetRenderState', 'GetRenderState', 'SetTransform', 'GetTransform',
         'SetTextureStageState', 'GetTextureStageState', 'SetMaterial', 'SetSamplerState',
-        'SetTexture', 'SetStreamSource', 'SetVertexDeclaration'])
+        'SetTexture', 'SetStreamSource', 'SetVertexDeclaration', 'SetIndices', 'SetVertexShader',
+        'SetPixelShader'])
     {
         assert.ok(guest(name), `${name} runs in the guest`);
     }

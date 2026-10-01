@@ -157,11 +157,13 @@ export const SHADOW = {
     SAMPLER_KEY_COUNT: 16,
     /**
      * Direct3D 9: each stream's offset, beside its pointer and stride in
-     * `STREAMS`, and the vertex declaration's pointer.
+     * `STREAMS`, and the vertex declaration's and the pixel shader's
+     * pointers; its indices and its vertex shader take Direct3D 8's slots.
      */
     STREAM_OFFSETS: 4496,
     DECLARATION: 4560,
-    SIZE: 4564,
+    PIXEL_SHADER: 4564,
+    SIZE: 4568,
 };
 
 /**
@@ -844,18 +846,22 @@ export function setStreamSource9Code(at, trap){
 }
 
 /**
- * HRESULT SetVertexDeclaration(this, IDirect3DVertexDeclaration9*), as guest
- * code. The pointer is stored as it is; the host turns it into the
- * declaration it names when it next looks.
+ * A Direct3D 9 binding made by one pointer -- SetVertexDeclaration,
+ * SetIndices, SetVertexShader, SetPixelShader: HRESULT (this, interface*) --
+ * as guest code. The pointer is stored as it is, a null one too, which
+ * leaves nothing behind that the device keeps; the host turns it into what
+ * it names when it next looks.
  *
  * @param {number} at @param {number} trap
+ * @param {number} slot  `SHADOW.DECLARATION`, `INDICES`, `VERTEX_SHADER` or
+ *     `PIXEL_SHADER`.
  * @returns {Uint8Array}
  */
-export function setVertexDeclarationCode(at, trap){
+export function setBindingCode(at, trap, slot){
     return routine(at, trap, [
         ...prologue(),
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x89, 0x81, ...dword(SHADOW.DECLARATION)],              // mov [ecx+disp], eax
+        [0x89, 0x81, ...dword(slot)],                            // mov [ecx+disp], eax
         [0xff, 0x81, ...dword(SHADOW.BINDING_CALLS)],            // inc dword [ecx+disp]
         counted(1),                                              // inc dword [ecx+12]
         [0x31, 0xc0],                                            // xor eax, eax
@@ -1340,9 +1346,11 @@ export function materialFloats(material){
  * @property {(index: number, out: { buffer?: any, offset?: number, stride?: number }) => number
  *     } GetStreamSource
  * @property {(declaration: any) => number} [SetVertexDeclaration]  Direct3D 9's.
- * @property {(buffer: any, base: number) => number} SetIndices
+ * @property {(buffer: any, base?: number) => number} SetIndices  Direct3D 9's has no base.
  * @property {(out: { buffer?: any, baseVertexIndex?: number }) => number} GetIndices
- * @property {(handle: number) => number} SetVertexShader
+ * @property {(handleOrShader: any) => number} SetVertexShader  Direct3D 8's handle or 9's
+ *     shader.
+ * @property {(shader: any) => number} [SetPixelShader]  Direct3D 9's.
  * @property {(out: { handle?: number }) => number} GetVertexShader
  * @property {(stage: number, texture: any) => number} SetTexture
  * @property {(sampler: number, type: number, value: number) => number} [SetSamplerState]
@@ -1405,6 +1413,7 @@ export function createShadow(deps){
     let seenIndices = 0;
     let seenBaseVertex = 0;
     let seenShader = 0;
+    let seenPixelShader = 0;
     const seenTextures = new Uint32Array(SHADOW.STAGE_COUNT);
     const seenStageStates = new Uint32Array(SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE);
     const seenMaterial = new Uint32Array(SHADOW.MATERIAL_WORDS);
@@ -1566,6 +1575,16 @@ export function createShadow(deps){
         seenDeclaration = STALE_POINTER;
         deps.writeMemory(address + SHADOW.DECLARATION, dwordBytes(seenDeclaration));
     };
+    const mirrorIndices9 = ()=>{
+        seenIndices = STALE_POINTER;
+        deps.writeMemory(address + SHADOW.INDICES, dwordBytes(seenIndices));
+    };
+    const mirrorShaders9 = ()=>{
+        seenShader = STALE_POINTER;
+        seenPixelShader = STALE_POINTER;
+        deps.writeMemory(address + SHADOW.VERTEX_SHADER, dwordBytes(STALE_POINTER));
+        deps.writeMemory(address + SHADOW.PIXEL_SHADER, dwordBytes(STALE_POINTER));
+    };
 
     /**
      * Direct3D 8's stream, as the pointer the program knows the buffer by. A
@@ -1590,6 +1609,8 @@ export function createShadow(deps){
                 mirrorStream9(index);
             }
             mirrorDeclaration();
+            mirrorIndices9();
+            mirrorShaders9();
             return;
         }
         for (let index = 0; index < (deps.bindings === false ? 0 : SHADOW.STREAM_COUNT); index++)
@@ -1864,11 +1885,29 @@ export function createShadow(deps){
         return marks !== 0;
     };
 
+    /**
+     * What a pointer the guest bound names. One that names nothing this
+     * device published unbinds, as the call through the trap does with what
+     * it cannot look up, and says so.
+     *
+     * @param {number} pointer @param {string} method
+     * @returns {any}
+     */
+    const named9 = (pointer, method)=>{
+        const object = pointer === 0 ? null : deps.objectAt(pointer) ?? null;
+        if (pointer !== 0 && !object)
+        {
+            refuse(`${name}::${method}`, `0x${pointer.toString(16)} set in the guest is`
+                + ' not an interface this device published');
+        }
+        return object;
+    };
+
     /** @param {Uint32Array} block */
     const syncBindings9 = block=>{
         const from = SHADOW.STREAMS >>> 2;
         const offsets = SHADOW.STREAM_OFFSETS >>> 2;
-        compared += SHADOW.STREAM_COUNT * 3 + 1;
+        compared += SHADOW.STREAM_COUNT * 3 + 4;
         for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
         {
             const pointer = block[from + index * 2];
@@ -1899,16 +1938,25 @@ export function createShadow(deps){
         if (declaration !== seenDeclaration)
         {
             seenDeclaration = declaration;
-            // A pointer that names no declaration unbinds, as the call through
-            // the trap does with what it cannot look up.
-            const named = declaration === 0 ? null : deps.objectAt(declaration) ?? null;
-            if (declaration !== 0 && !named)
-            {
-                refuse(`${name}::SetVertexDeclaration`,
-                    `0x${declaration.toString(16)} set in the guest is not an interface this`
-                    + ' device published');
-            }
-            device.SetVertexDeclaration?.(named);
+            device.SetVertexDeclaration?.(named9(declaration, 'SetVertexDeclaration'));
+        }
+        const indices = block[SHADOW.INDICES >>> 2];
+        if (indices !== seenIndices)
+        {
+            seenIndices = indices;
+            device.SetIndices(named9(indices, 'SetIndices'));
+        }
+        const vertexShader = block[SHADOW.VERTEX_SHADER >>> 2];
+        if (vertexShader !== seenShader)
+        {
+            seenShader = vertexShader;
+            device.SetVertexShader(named9(vertexShader, 'SetVertexShader'));
+        }
+        const pixelShader = block[SHADOW.PIXEL_SHADER >>> 2];
+        if (pixelShader !== seenPixelShader)
+        {
+            seenPixelShader = pixelShader;
+            device.SetPixelShader?.(named9(pixelShader, 'SetPixelShader'));
         }
     };
 
@@ -2142,6 +2190,7 @@ export function createShadow(deps){
             if (address !== 0 && nine)
             {
                 mirrorStream9(0);
+                mirrorIndices9();
                 return;
             }
             if (address === 0 || deps.bindings === false
@@ -2287,6 +2336,16 @@ export function createShadow(deps){
             if (nine && seenDeclaration === pointer)
             {
                 mirrorDeclaration();
+            }
+            if (nine && seenShader === pointer)
+            {
+                seenShader = STALE_POINTER;
+                deps.writeMemory(address + SHADOW.VERTEX_SHADER, stale);
+            }
+            if (nine && seenPixelShader === pointer)
+            {
+                seenPixelShader = STALE_POINTER;
+                deps.writeMemory(address + SHADOW.PIXEL_SHADER, stale);
             }
         },
 
