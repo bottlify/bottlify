@@ -12,8 +12,11 @@
  * bytes. Honouring them is the difference between uploading the ranges that
  * changed and uploading the whole buffer every time:
  *
- * - `DISCARD` -- the old contents are gone. The buffer is renamed, and only the
- *   bytes written since the rename have to travel.
+ * - `DISCARD` -- the guest gives the old contents up, yet its memory still
+ *   holds them, and a draw after the discard may read bytes written before it:
+ *   a driver hands back the same memory once the GPU is done with it. The
+ *   buffer is renamed with its contents carried over, and only the bytes
+ *   written since the rename have to travel.
  * - `NOOVERWRITE` -- the guest promises not to touch bytes that recorded draws
  *   still read. Nothing is renamed and the newly written ranges are enough.
  * - neither -- the guest may write anywhere. Only if a draw of a frame not yet
@@ -193,10 +196,7 @@ export function createDynamicBuffer(options){
         return bytes;
     };
 
-    /**
-     * @param {boolean} discard whether the guest gave up the old contents
-     */
-    const rename = discard=>{
+    const rename = ()=>{
         // Whatever is still dirty belongs to the generation being retired: draws
         // already recorded read that buffer object, not the new one.
         flush();
@@ -207,10 +207,6 @@ export function createDynamicBuffer(options){
         // Nothing has read the replacement yet.
         readSinceSubmit = false;
         carryInto = null;
-        if (discard)
-        {
-            return;
-        }
         if (options.carry)
         {
             carryInto = { from: old, to: gpu, size: capacity, written: [] };
@@ -251,11 +247,11 @@ export function createDynamicBuffer(options){
             if (flags & LockFlags.DISCARD)
             {
                 discards++;
-                rename(true);
+                rename();
             }
             else if (flags & LockFlags.RENAME)
             {
-                rename(false);
+                rename();
             }
             else if (!(flags & LockFlags.NOOVERWRITE) && readSinceSubmit)
             {
@@ -264,7 +260,7 @@ export function createDynamicBuffer(options){
                 // backing is renamed and all of it is resent through the new
                 // one.
                 hazards++;
-                rename(false);
+                rename();
             }
             locks++;
             if (offset === 0 && length === options.size)

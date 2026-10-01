@@ -44,7 +44,8 @@ test('an outward alignment never trims the written bytes off either end', ()=>{
 });
 
 test('DISCARD sends only the dirty range, from that range own offset', ()=>{
-    const { gpu, dynamic } = buffer(4096);
+    // The rest of the contents is carried on the GPU, not sent.
+    const { gpu, dynamic } = carrying(4096);
 
     fill(dynamic, 260, 40, LockFlags.DISCARD);
     dynamic.flush();
@@ -121,7 +122,7 @@ test('NOOVERWRITE writes into the live buffer and uploads only what was locked',
 });
 
 test('several locks since the last upload merge into one range', ()=>{
-    const { gpu, dynamic } = buffer(4096);
+    const { gpu, dynamic } = carrying(4096);
 
     fill(dynamic, 260, 8, LockFlags.DISCARD);
     fill(dynamic, 300, 8, LockFlags.NOOVERWRITE);
@@ -208,6 +209,7 @@ test('the upload cost is reported per buffer, not just in total', ()=>{
         usage: 0,
         label: 'indices',
         onUpload: (label, bytes)=>uploads.push([label, bytes]),
+        carry: ()=>{},
     });
 
     fill(dynamic, 17, 20, LockFlags.DISCARD);
@@ -309,4 +311,28 @@ test('carried ranges are the complement of what was written, in order', ()=>{
     assert.deepEqual(carriedRanges({ from: null, to: null, size: 100,
         written: [{ start: 40, end: 60 }, { start: 0, end: 8 }, { start: 50, end: 70 }] }),
     [{ start: 8, end: 40 }, { start: 70, end: 100 }]);
+});
+
+test('bytes written before a DISCARD are in the backing a draw after it reads', ()=>{
+    // A program fills the end of its ring, wraps the ring with DISCARD for the
+    // next batch, and only then draws what it filled first. Its memory still
+    // holds those bytes, and a driver hands back the same memory once the GPU
+    // is done with it, so the backing the draw reads has to hold them too --
+    // a pooled one holds whatever its last generation left.
+    const { gpu, dynamic, endFrame } = carrying(4096);
+    fill(dynamic, 0, 4096, LockFlags.DISCARD, 0x22);
+    endFrame();
+    fill(dynamic, 3072, 512, LockFlags.NOOVERWRITE, 0x55);
+    const before = gpu.of('writeBuffer').length;
+    fill(dynamic, 0, 256, LockFlags.DISCARD, 0x66);
+    const read = dynamic.gpu;
+    endFrame();
+
+    assert.ok(read.bytes.subarray(3072, 3584).every((/** @type {number} */ byte)=>byte === 0x55),
+        'the range written before the discard');
+    assert.ok(read.bytes.subarray(0, 256).every((/** @type {number} */ byte)=>byte === 0x66),
+        'and the one written after it');
+    const uploads = gpu.of('writeBuffer').slice(before);
+    assert.equal(uploads.reduce((sum, one)=>sum + one.size, 0), 512 + 256,
+        'each range travels once; the rest is a copy on the GPU');
 });
