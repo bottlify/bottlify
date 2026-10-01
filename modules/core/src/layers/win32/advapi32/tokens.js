@@ -658,6 +658,37 @@ export function createTokenFunctions(host){
         },
 
         /**
+         * BOOL DuplicateToken(HANDLE ExistingTokenHandle,
+         *     SECURITY_IMPERSONATION_LEVEL ImpersonationLevel, PHANDLE DuplicateTokenHandle)
+         *
+         * A second handle onto the same token, with the impersonation level the
+         * caller asked for carried on it. There is one account, so the duplicate
+         * names the same process; the level is recorded but nothing checks it.
+         */
+        DuplicateToken: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([existing, level, out])=>{
+                const token = isToken(existing)
+                    ? host.handles.resolve(existing >>> 0, 'token')
+                    : null;
+                if (!token)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                writeDword(out >>> 0, host.handles.open('token', {
+                    process: token.process,
+                    impersonationLevel: level >>> 0,
+                }));
+                return 1;
+            },
+        },
+
+        /**
          * BOOL GetTokenInformation(HANDLE TokenHandle,
          *   TOKEN_INFORMATION_CLASS TokenInformationClass, LPVOID TokenInformation,
          *   DWORD TokenInformationLength, PDWORD ReturnLength)

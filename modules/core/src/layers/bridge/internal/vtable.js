@@ -440,8 +440,14 @@ export function createVtables({ memory, register, heap }){
         }
         // No interface named at all: refused as DirectDraw refuses it (Wine's
         // ddraw test_surface_qi), rather than a GUID read out of address zero.
+        // A runtime that answers E_POINTER and leaves the pointer alone says
+        // so (DirectInput: Wine's dinput test_QueryInterface).
         if ((riid >>> 0) === 0)
         {
+            if (object.nullInterface === 'pointer')
+            {
+                return E_POINTER;
+            }
             memory.writeU32(ppv >>> 0, 0);
             return 0x80070057; // E_INVALIDARG
         }

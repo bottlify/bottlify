@@ -157,6 +157,8 @@ async function playing({ silent = false, drained = true, shared = false, memory 
     f.view.setUint16(FORMAT_AT + WAVEFORMATEX.nChannels, CHANNELS, true);
     f.view.setUint32(FORMAT_AT + WAVEFORMATEX.nSamplesPerSec, RATE, true);
     f.view.setUint16(FORMAT_AT + WAVEFORMATEX.wBitsPerSample, BITS, true);
+    f.view.setUint16(FORMAT_AT + WAVEFORMATEX.nBlockAlign, CHANNELS * BITS / 8, true);
+    f.view.setUint32(FORMAT_AT + WAVEFORMATEX.nAvgBytesPerSec, RATE * CHANNELS * BITS / 8, true);
     f.view.setUint32(DESC_AT + DSBUFFERDESC.dwSize, DSBUFFERDESC.SIZE, true);
     // The controls a program of this era asks for, and the positions it waits on.
     f.view.setUint32(DESC_AT + DSBUFFERDESC.dwFlags,
@@ -786,3 +788,44 @@ test('a stream whose writer stalls for longer than a quarter second is still not
         const stalled = await refillAcrossAStall(600);
         assert.equal(stalled.stale, 0, 'nothing the program had not written is played');
     });
+
+test('a sound device made again after the last one was let go of is heard', async()=>{
+    // TRON 2.0 makes its device again for each level: the stream buffer and
+    // the device are released, the primary buffer it played is not, and a new
+    // device's primary and stream buffer are made and played. The new stream
+    // has to reach the ring as the first did.
+    const f = await playing();
+    const PRIMARY_DESC = 0x500;
+    f.view.setUint32(PRIMARY_DESC + DSBUFFERDESC.dwSize, DSBUFFERDESC.SIZE, true);
+    f.view.setUint32(PRIMARY_DESC + DSBUFFERDESC.dwFlags, 1, true);
+    assert.equal(f.call(f.root, 'SetCooperativeLevel', [0x1c, 2]), DS_OK);
+    assert.equal(f.call(f.root, 'CreateSoundBuffer', [PRIMARY_DESC, OUT_AT + 8, 0]), DS_OK);
+    const primary = f.view.getUint32(OUT_AT + 8, true);
+    assert.equal(f.call(primary, 'Play', [0, 0, DSBPLAY_LOOPING]), DS_OK);
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.advance(50);
+    assert.ok(f.api.pump() > 0, 'the first device is heard');
+
+    f.call(f.buffer, 'Stop', []);
+    // The bridge's IUnknown, which this fixture does not have: the objects'
+    // own counts, as a release through it reaches them.
+    assert.equal(f.objectAt(f.buffer).release(), 0);
+    assert.equal(f.objectAt(f.root).release(), 0);
+
+    const dsound = f.api.libraries()['DSOUND.dll'];
+    assert.equal(dsound.DirectSoundCreate.handler([0, OUT_AT, 0]), DS_OK);
+    const root = f.view.getUint32(OUT_AT, true);
+    assert.equal(f.call(root, 'SetCooperativeLevel', [0x1c, 2]), DS_OK);
+    assert.equal(f.call(root, 'CreateSoundBuffer', [PRIMARY_DESC, OUT_AT + 8, 0]), DS_OK);
+    assert.equal(f.call(f.view.getUint32(OUT_AT + 8, true), 'Play', [0, 0, DSBPLAY_LOOPING]),
+        DS_OK);
+    assert.equal(f.call(root, 'CreateSoundBuffer', [DESC_AT, OUT_AT + 4, 0]), DS_OK);
+    const stream = f.view.getUint32(OUT_AT + 4, true);
+    const held = f.api.buffers().at(-1);
+    f.bytes.fill(0x40, held.address, held.address + BUFFER_BYTES);
+    assert.equal(f.call(stream, 'Play', [0, 0, DSBPLAY_LOOPING]), DS_OK);
+    const before = f.api.output().diagnostics().produced;
+    f.advance(50);
+    f.api.pump();
+    assert.ok(f.api.output().diagnostics().produced > before, 'the second device is heard too');
+});

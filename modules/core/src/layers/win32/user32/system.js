@@ -166,6 +166,8 @@ export const SYS_COLORS = Object.freeze({
 });
 
 /** MonitorFromRect and friends answer with this, there being one display. */
+/** What SetClassWord answers for the atom, or a word past the extra bytes. */
+const ERROR_INVALID_INDEX = 1413;
 const PRIMARY_MONITOR = 0x00010001;
 const MONITOR_DEFAULTTONULL = 0;
 const MONITORINFOF_PRIMARY = 1;
@@ -391,6 +393,14 @@ const DMLERR_NO_ERROR = 0;
 
 /** Where RegisterWindowMessage numbers start: 0xc000 to 0xffff is theirs. */
 const REGISTERED_MESSAGE_FIRST = 0xc000;
+
+/** The names of the fixed clipboard formats, the ones GetClipboardFormatName reads back. */
+const CLIPBOARD_FORMAT_NAMES = new Map([
+    [1, 'Text'], [2, 'Bitmap'], [3, 'MetaFilePict'], [4, 'SYLK'], [5, 'DIF'],
+    [6, 'TIFF'], [7, 'OEM Text'], [8, 'DIB'], [9, 'Palette'], [10, 'Pen Data'],
+    [11, 'RIFF'], [12, 'Wave'], [13, 'Unicode Text'], [14, 'Enhanced Metafile'],
+    [15, 'Drop'], [16, 'Locale'], [17, 'DIB V5'],
+]);
 
 /** RegisterHotKey's failure codes, which a caller reads with GetLastError. */
 const ERROR_HOTKEY_ALREADY_REGISTERED = 1409;
@@ -694,6 +704,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
      * @type {Map<string, number>}
      */
     const registeredMessages = new Map();
+    /** A registered number's name in the case it was first registered. */
+    const registeredMessageNames = new Map();
 
     /**
      * SetWindowPos, shared with the deferred form. The two flags that say
@@ -906,6 +918,16 @@ export function createSystemFunctions({ host, live, windows, classes }){
         // them would be reading whatever happens to follow in our own record.
         cls.extra ??= new DataView(new ArrayBuffer(Math.max(cls.classExtra, 0)));
         return at >= 0 && at + 4 <= cls.extra.byteLength ? cls.extra.getUint32(at, true) : 0;
+    };
+
+    /**
+     * Where a word of the class's extra bytes is, or null outside them.
+     *
+     * @param {any} cls @param {number} index
+     */
+    const classWordAt = (cls, index)=>{
+        cls.extra ??= new DataView(new ArrayBuffer(Math.max(cls.classExtra, 0)));
+        return (index | 0) >= 0 && (index | 0) + 2 <= cls.extra.byteLength ? index | 0 : null;
     };
 
     /** @param {any} cls @param {number} index @param {number} value */
@@ -1238,9 +1260,11 @@ export function createSystemFunctions({ host, live, windows, classes }){
         }
 
         const extended = (flags & KEYEVENTF_EXTENDEDKEY) !== 0;
+        // A key named by its virtual key still carries the scan code the
+        // program wrote beside it, which is what DirectInput 8 reads.
         const named = (flags & KEYEVENTF_SCANCODE) !== 0
             ? { scan: wScan, extended }
-            : { vk: wVk };
+            : { vk: wVk, scanGiven: wScan, extended };
         host.sendInput?.({ kind: 'key', ...named, down: !up });
         return true;
     };
@@ -1587,8 +1611,9 @@ export function createSystemFunctions({ host, live, windows, classes }){
         {
             return 0;
         }
-        const key = (wide ? readWideString(name >>> 0).slice(0, MAX_NAME)
-            : host.readCString(name >>> 0, MAX_NAME)).toLowerCase();
+        const original = wide ? readWideString(name >>> 0).slice(0, MAX_NAME)
+            : host.readCString(name >>> 0, MAX_NAME);
+        const key = original.toLowerCase();
         if (key.length === 0)
         {
             return 0;
@@ -1598,9 +1623,41 @@ export function createSystemFunctions({ host, live, windows, classes }){
         {
             id = REGISTERED_MESSAGE_FIRST + registeredMessages.size;
             registeredMessages.set(key, id);
+            // The name as the program wrote it, so GetClipboardFormatName
+            // reads back the case it registered rather than a folded one.
+            registeredMessageNames.set(id, original);
         }
         return id;
     };
+
+    /**
+     * The name a clipboard format's number was registered under, or its fixed
+     * name for the formats Windows numbers itself; null when the number names
+     * nothing this table knows.
+     *
+     * @param {number} format
+     * @returns {string | null}
+     */
+    const clipboardFormatName = format=>{
+        const fixed = CLIPBOARD_FORMAT_NAMES.get(format);
+        if (fixed !== undefined)
+        {
+            return fixed;
+        }
+        return registeredMessageNames.get(format) ?? null;
+    };
+
+    /** GetClassName in either width. @param {number[]} args @param {boolean} wide */
+    const writeClassName = ([hwnd, out, maxCount], wide)=>{
+        const record = live(hwnd);
+        const room = maxCount | 0;
+        if (!record || (out >>> 0) === 0 || room <= 0)
+        {
+            return 0;
+        }
+        return (wide ? writeWideString : writeString)(out >>> 0, record.className, room);
+    };
+
     return {
         /** int GetSystemMetrics(int nIndex) */
         GetSystemMetrics: {
@@ -1682,6 +1739,47 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 const inside = (x | 0) >= 0 && (y | 0) >= 0 && (x | 0) < screen.width
                     && (y | 0) < screen.height;
                 return inside || (flags >>> 0) !== MONITOR_DEFAULTTONULL ? PRIMARY_MONITOR : 0;
+            },
+        },
+
+        /**
+         * BOOL EnumDisplayMonitors(HDC hdc, LPCRECT lprcClip, MONITORENUMPROC, LPARAM)
+         *
+         * The one monitor, handed to the callback with the part of it the
+         * clip leaves, when the clip leaves any; the callback's answer is
+         * not the call's, which succeeds once it has asked.
+         */
+        EnumDisplayMonitors: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hdc, clipRect, callback, data])=>{
+                if ((callback >>> 0) === 0 || !host.call || !host.allocate)
+                {
+                    return 0;
+                }
+                const box = { left: 0, top: 0, right: screen.width, bottom: screen.height };
+                if ((clipRect >>> 0) !== 0)
+                {
+                    const limit = readRect(host, clipRect >>> 0);
+                    box.left = Math.max(box.left, limit.left);
+                    box.top = Math.max(box.top, limit.top);
+                    box.right = Math.min(box.right, limit.right);
+                    box.bottom = Math.min(box.bottom, limit.bottom);
+                    if (box.left >= box.right || box.top >= box.bottom)
+                    {
+                        return 1;
+                    }
+                }
+                const at = host.allocate(16);
+                if (at === 0)
+                {
+                    return 0;
+                }
+                writeRect(host, at, box);
+                return Promise.resolve(host.call(callback >>> 0,
+                    [PRIMARY_MONITOR, hdc >>> 0, at, data >>> 0], host.callerThread?.()))
+                    .then(()=>1, ()=>0)
+                    .finally(()=>host.release?.(at));
             },
         },
 
@@ -2684,6 +2782,40 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: args=>registerName(args, true),
+        },
+
+        /**
+         * int GetClipboardFormatNameA/W(UINT format, LPSTR/LPWSTR lpszFormatName,
+         *     int cchMaxCount)
+         *
+         * The name behind a format's number: a fixed format's own, or the name a
+         * program registered. The count written excludes the terminator, and a
+         * format no table here knows is answered with zero, which is the
+         * "not registered" answer.
+         */
+        GetClipboardFormatNameA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([format, name, count])=>{
+                const text = clipboardFormatName(format >>> 0);
+                if (text === null)
+                {
+                    return 0;
+                }
+                return writeString(name >>> 0, text, count | 0);
+            },
+        },
+        GetClipboardFormatNameW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([format, name, count])=>{
+                const text = clipboardFormatName(format >>> 0);
+                if (text === null)
+                {
+                    return 0;
+                }
+                return writeWideString(name >>> 0, text, count | 0);
+            },
         },
 
         /** BOOL MessageBeep(UINT uType) */
@@ -3768,6 +3900,51 @@ export function createSystemFunctions({ host, live, windows, classes }){
             },
         },
 
+        /**
+         * WORD GetClassWord(HWND hWnd, int nIndex) / WORD SetClassWord(HWND, int, WORD)
+         *
+         * A word of the class's extra bytes, or its atom to read; the atom is
+         * the class's name and is not set, ERROR_INVALID_INDEX, and nor is a
+         * word past the extra bytes.
+         */
+        GetClassWord: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, index])=>{
+                const cls = classOfWindow(hwnd);
+                if (!cls)
+                {
+                    return 0;
+                }
+                if ((index | 0) === GCW_ATOM)
+                {
+                    return cls.atom & 0xffff;
+                }
+                return classWordAt(cls, index) === null ? 0
+                    : /** @type {DataView} */ (cls.extra).getUint16(index | 0, true);
+            },
+        },
+        SetClassWord: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, index, value])=>{
+                const cls = classOfWindow(hwnd);
+                if (!cls)
+                {
+                    return 0;
+                }
+                if (classWordAt(cls, index) === null)
+                {
+                    host.setLastError?.(ERROR_INVALID_INDEX);
+                    return 0;
+                }
+                const extra = /** @type {DataView} */ (cls.extra);
+                const previous = extra.getUint16(index | 0, true);
+                extra.setUint16(index | 0, value & 0xffff, true);
+                return previous;
+            },
+        },
+
         /** DWORD GetClassLongW(HWND hWnd, int nIndex) */
         GetClassLongW: {
             argBytes: 8,
@@ -3798,30 +3975,32 @@ export function createSystemFunctions({ host, live, windows, classes }){
         GetClassNameW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([hwnd, out, maxCount])=>{
-                const record = live(hwnd);
-                const room = maxCount | 0;
-                if (!record || (out >>> 0) === 0 || room <= 0)
-                {
-                    return 0;
-                }
-                return writeWideString(out >>> 0, record.className, room);
-            },
+            handler: args=>writeClassName(args, true),
         },
 
         /** int GetClassNameA(HWND hWnd, LPSTR lpClassName, int nMaxCount) */
         GetClassNameA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([hwnd, out, maxCount])=>{
-                const record = live(hwnd);
-                const room = maxCount | 0;
-                if (!record || (out >>> 0) === 0 || room <= 0)
-                {
-                    return 0;
-                }
-                return writeString(out >>> 0, record.className, room);
-            },
+            handler: args=>writeClassName(args, false),
+        },
+
+        /**
+         * UINT RealGetWindowClassA/W(HWND, LPSTR/LPWSTR, UINT)
+         *
+         * The class a window was made with: a superclass of a system class
+         * would answer the system class it is built on, and no window here is
+         * made on one, so it is the class name.
+         */
+        RealGetWindowClassA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>writeClassName(args, false),
+        },
+        RealGetWindowClassW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>writeClassName(args, true),
         },
 
         /**

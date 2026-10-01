@@ -1047,6 +1047,26 @@ test('before IDirectDraw7 a full mip chain ends when the shorter side reaches on
     }
 });
 
+test('before IDirectDraw7 a mip sublevel holds a palette of its own', ()=>{
+    // Wine's ddraw1, ddraw2 and ddraw4 test_mipmap_palette set one on every level.
+    for (const version of /** @type {const} */ ([1, 2, 4]))
+    {
+        const ddraw = withLevel({ version });
+        const top = /** @type {any} */ (requestMips(ddraw,
+            { caps: MIPPED, width: 16, height: 16, version }).surface);
+        const [, level1] = levelsOf(top);
+        const palette = /** @type {any} */ (ddraw.createPalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256,
+            new Array(256).fill(0)).palette);
+        assert.equal(level1.getPalette().hr, DDERR_NOPALETTEATTACHED);
+        assert.equal(level1.setPalette(palette), DD_OK, `version ${version}`);
+        const got = level1.getPalette();
+        assert.equal(got.palette, palette);
+        got.palette.release();
+        assert.equal(top.getPalette().hr, DDERR_NOPALETTEATTACHED, 'the top keeps its own');
+        assert.equal(top.release(), 0);
+    }
+});
+
 test('a mip sublevel takes no palette, no colour key and no detaching of its own', ()=>{
     // Wine's ddraw7 test_palette_complex, test_ckey_complex and
     // test_device_load: DDERR_NOTONMIPMAPSUBLEVEL, and nothing attached.

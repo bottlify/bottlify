@@ -861,6 +861,23 @@ test('SetWindowLongA answers with the value it replaced', ()=>{
         'code that restores what it changed needs the old value back');
 });
 
+test('SetLayeredWindowAttributes records what GetLayeredWindowAttributes reads back', ()=>{
+    const { fns, memory, hwnd } = withWindow();
+    assert.equal(fns.SetLayeredWindowAttributes.handler([hwnd, 0x00ff00, 0x80, 0x2]), 1);
+
+    const KEY = 0x5000;
+    const ALPHA = 0x5004;
+    const FLAGS = 0x5008;
+    assert.equal(fns.GetLayeredWindowAttributes.handler([hwnd, KEY, ALPHA, FLAGS]), 1);
+    assert.equal(memory.u32(KEY), 0x00ff00);
+    assert.equal(memory.u32(ALPHA) & 0xff, 0x80);
+    assert.equal(memory.u32(FLAGS), 0x2);
+
+    assert.equal(fns.SetLayeredWindowAttributes.handler([0x1234, 0, 0, 0]), 0, 'not a window');
+    assert.deepEqual([fns.SetLayeredWindowAttributes.argBytes,
+        fns.GetLayeredWindowAttributes.argBytes], [16, 16]);
+});
+
 test('the extra bytes a class asked for are the window\'s own storage', ()=>{
     const { fns, memory } = withWindow({ windowExtra: 8 });
     const first = createWindow(fns, memory);
@@ -1973,6 +1990,24 @@ test('DefWindowProcA does nothing at all with a message it has no opinion on', (
     assert.equal(queue.quitPending(), false);
 });
 
+test('DefFrameProcA is the default procedure with an MDI client it ignores', ()=>{
+    const { fns, hwnd } = withWindow();
+    assert.equal(fns.DefFrameProcA.handler([hwnd, 0x1234, WM_USER, 5, 6]),
+        fns.DefWindowProcA.handler([hwnd, WM_USER, 5, 6]));
+    assert.equal(fns.DefFrameProcW.handler([hwnd, 0x1234, WM_USER, 5, 6]),
+        fns.DefWindowProcW.handler([hwnd, WM_USER, 5, 6]));
+    assert.deepEqual([fns.DefFrameProcA.argBytes, fns.DefFrameProcW.argBytes], [20, 20]);
+});
+
+test('DefMDIChildProc is the child\'s default procedure, which is DefWindowProc', ()=>{
+    const { fns, hwnd } = withWindow();
+    assert.equal(fns.DefMDIChildProcA.handler([hwnd, WM_USER, 5, 6]),
+        fns.DefWindowProcA.handler([hwnd, WM_USER, 5, 6]));
+    assert.equal(fns.DefMDIChildProcW.handler([hwnd, WM_USER, 5, 6]),
+        fns.DefWindowProcW.handler([hwnd, WM_USER, 5, 6]));
+    assert.deepEqual([fns.DefMDIChildProcA.argBytes, fns.DefMDIChildProcW.argBytes], [16, 16]);
+});
+
 // --- the stack every one of them pops ---
 
 test('every function declares the stack its arguments occupy', ()=>{
@@ -2975,6 +3010,34 @@ test('RegisterRawInputDevices checks its devices, and the registered list is ord
     memory.putU32s(COUNT, [0]);
     assert.equal(registered(0, RAWINPUTDEVICE_SIZE), 0);
     assert.equal(memory.u32(COUNT), 0, 'both removed');
+});
+
+test('GetRawInputBuffer takes the queued reports end to end, as many as fit', ()=>{
+    const RAWINPUT_MOUSE_SIZE = 40;
+    const { fns, memory, hwnd, queue, service, errors } = withWindow({ style: WS_VISIBLE });
+    fns.SetFocus.handler([hwnd]);
+    putDevices(memory, [[1, 2, 0, hwnd]]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, 1, RAWINPUTDEVICE_SIZE]), 1);
+
+    memory.putU32s(COUNT, [0x100]);
+    assert.equal(fns.GetRawInputBuffer.handler([RAW, COUNT, RAWINPUTHEADER_SIZE]), 0);
+    assert.equal(memory.u32(COUNT), 0, 'nothing queued');
+    assert.equal(fns.GetRawInputBuffer.handler([RAW, COUNT, 0]), 0xffffffff);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+
+    for (const dx of [1, 2, 3])
+    {
+        service.rawInput({ device: 'mouse', dx, dy: 0 });
+    }
+    assert.equal(fns.GetRawInputBuffer.handler([0, COUNT, RAWINPUTHEADER_SIZE]), 0);
+    assert.equal(memory.u32(COUNT), RAWINPUT_MOUSE_SIZE, 'a null buffer asks the size');
+    memory.putU32s(COUNT, [RAWINPUT_MOUSE_SIZE * 2 + 8]);
+    assert.equal(fns.GetRawInputBuffer.handler([RAW, COUNT, RAWINPUTHEADER_SIZE]), 2);
+    assert.deepEqual([RAW + 28, RAW + 40 + 28].map(at=>memory.u32(at)), [1, 2]);
+    assert.equal(queue.depth(), 1, 'the two taken are off the queue');
+    memory.putU32s(COUNT, [8]);
+    assert.equal(fns.GetRawInputBuffer.handler([RAW, COUNT, RAWINPUTHEADER_SIZE]), 0xffffffff);
+    assert.equal(memory.u32(COUNT), RAWINPUT_MOUSE_SIZE, 'too small even for one');
 });
 
 test('GetRawInputData refuses a handle that names no input', ()=>{

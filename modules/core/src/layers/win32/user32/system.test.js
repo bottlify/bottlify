@@ -198,11 +198,12 @@ function fakeContexts(){
  * @param {any} [options.files]  The volume, for an image loaded from a file.
  * @param {(bytes: number) => number} [options.allocate]
  * @param {(address: number) => void} [options.release]
+ * @param {(entry: number, args: number[]) => number} [options.call]
  */
 function setup(
     { cursor, keyState, asyncKeyState, keyboardState, setKeyboardState,
         findResource, loadString, dispatch = ()=>0, screen, regionBox,
-        moduleBase, bitmapFromDib, files, allocate, release } = {})
+        moduleBase, bitmapFromDib, files, allocate, release, call } = {})
 {
     screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
     const memory = fakeMemory();
@@ -250,6 +251,7 @@ function setup(
         files,
         allocate,
         release,
+        call,
         loadString,
         regionBox,
         /** @param {string} text */
@@ -835,6 +837,40 @@ test('MonitorFromPoint finds the monitor for a point on the screen, and none off
     assert.equal(fns.MonitorFromPoint.handler([-5, 10, 0]), 0, 'MONITOR_DEFAULTTONULL');
     assert.equal(fns.MonitorFromPoint.handler([-5, 10, 1]), monitor, 'MONITOR_DEFAULTTOPRIMARY');
     assert.equal(fns.MonitorFromPoint.handler([5000, 10, 2]), monitor, 'MONITOR_DEFAULTTONEAREST');
+});
+
+test('EnumDisplayMonitors hands the one monitor to the callback, cut by the clip', async()=>{
+    /** @type {number[][]} */
+    const seen = [];
+    /** @type {any} */
+    let box = null;
+    const { memory, fns, screen } = setup({
+        allocate: ()=>0x7000,
+        release: ()=>{},
+        call: (entry, args)=>{
+            seen.push([entry, ...args]);
+            box = Array.from({ length: 4 }, (_, i)=>{
+                const b = memory.readMemory(args[2] + i * 4, 4);
+                return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) | 0;
+            });
+            return 0;
+        },
+    });
+    const monitor = fns.MonitorFromWindow.handler([0, 0]);
+    assert.equal(fns.EnumDisplayMonitors.argBytes, 16);
+    assert.equal(await fns.EnumDisplayMonitors.handler([0, 0, 0x9000, 0x55]), 1,
+        'the callback answering FALSE is not the call failing');
+    assert.deepEqual(seen, [[0x9000, monitor, 0, 0x7000, 0x55]]);
+    assert.deepEqual(box, [0, 0, screen.width, screen.height]);
+
+    memory.writeMemory(RECT_BUFFER, new Uint8Array(new Int32Array([10, 20, 30, 40]).buffer));
+    assert.equal(await fns.EnumDisplayMonitors.handler([0, RECT_BUFFER, 0x9000, 0]), 1);
+    assert.deepEqual(box, [10, 20, 30, 40]);
+
+    memory.writeMemory(RECT_BUFFER, new Uint8Array(new Int32Array([-50, -50, -10, -10]).buffer));
+    assert.equal(await fns.EnumDisplayMonitors.handler([0, RECT_BUFFER, 0x9000, 0]), 1);
+    assert.equal(seen.length, 2, 'a clip off the screen leaves no monitor to call about');
+    assert.equal(fns.EnumDisplayMonitors.handler([0, 0, 0, 0]), 0, 'no callback');
 });
 
 test('SetWindowRgn accepts a shape it does not clip to, and says so', ()=>{
@@ -2084,6 +2120,18 @@ test('a class long is class data: every window of a class reads the same value',
     assert.equal(memory.readCString(OUT_BUFFER, 32), 'MainWnd');
 });
 
+test('a class word is read from the atom or the extra bytes, and the atom is not set', ()=>{
+    const { memory, fns, errors } = setup();
+    const hwnd = makeWindow(memory, fns);
+    const GCW_ATOM = -32;
+    assert.equal(fns.GetClassWord.handler([hwnd, GCW_ATOM]),
+        fns.GetClassLongA.handler([hwnd, GCW_ATOM]) & 0xffff);
+    assert.equal(fns.SetClassWord.handler([hwnd, GCW_ATOM, 2]), 0);
+    assert.equal(errors.at(-1), 1413, 'ERROR_INVALID_INDEX');
+    assert.equal(fns.SetClassWord.handler([hwnd, 0, 2]), 0, 'the class asked for no extra bytes');
+    assert.equal(errors.at(-1), 1413);
+});
+
 // --- display mode ---
 
 /** @param {any} memory @param {number} width @param {number} height */
@@ -2366,7 +2414,8 @@ test('SendInput injects a keyboard event named by virtual key', ()=>{
     memory.putU32s(INPUT_BUFFER, [INPUT_KEYBOARD, VK_A, 0, 0, 0, 0, 0]);
 
     assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 28]), 1);
-    assert.deepEqual(sent, [{ kind: 'key', vk: VK_A, down: true }]);
+    assert.deepEqual(sent, [{ kind: 'key', vk: VK_A, scanGiven: 0, extended: false, down: true }],
+        'the scan code written beside it goes along, none here');
 });
 
 test('SendInput reads a scan code and the key-up flag off KEYBDINPUT', ()=>{
@@ -2530,6 +2579,27 @@ test('a message registered by a UTF-16 name is the number its narrow name has', 
     assert.equal(fns.RegisterWindowMessageW.handler([FORMAT_BUFFER]), narrow);
     assert.equal(fns.RegisterClipboardFormatW.handler([FORMAT_BUFFER]), narrow);
     assert.equal(fns.RegisterWindowMessageW.argBytes, 4);
+});
+
+test('GetClipboardFormatName reads back a fixed and a registered name', ()=>{
+    const { memory, fns } = setup();
+    const OUT = 0x12000;
+
+    assert.equal(fns.GetClipboardFormatNameW.handler([13, OUT, 20]), 12,
+        'CF_UNICODETEXT is "Unicode Text", 12 characters');
+    assert.equal(memory.bytes[OUT], 'U'.charCodeAt(0));
+    assert.equal(memory.bytes[OUT + 1], 0, 'and it is wide');
+
+    memory.putString(FORMAT_BUFFER, 'MyFormat');
+    const id = fns.RegisterClipboardFormatA.handler([FORMAT_BUFFER]);
+    assert.equal(fns.GetClipboardFormatNameA.handler([id, OUT, 20]), 8,
+        '"MyFormat" is 8 characters');
+    assert.equal(memory.bytes[OUT], 'M'.charCodeAt(0));
+    assert.equal(memory.bytes[OUT + 8], 0, 'and it is terminated');
+
+    assert.equal(fns.GetClipboardFormatNameW.handler([0xffff, OUT, 20]), 0, 'no such format');
+    assert.deepEqual([fns.GetClipboardFormatNameA.argBytes, fns.GetClipboardFormatNameW.argBytes],
+        [12, 12]);
 });
 
 // --- hot keys ---
@@ -2902,10 +2972,19 @@ test('keybd_event and mouse_event are one INPUT each, handed over as arguments',
     fns.mouse_event.handler([MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN, -3 >>> 0, 4, 0, 0]);
     fns.mouse_event.handler([MOUSEEVENTF_WHEEL, 0, 0, -120 >>> 0, 0]);
     assert.deepEqual(sent, [
-        { kind: 'key', vk: 0x41, down: true },
-        { kind: 'key', vk: 0x41, down: false },
+        { kind: 'key', vk: 0x41, scanGiven: 0x1e, extended: false, down: true },
+        { kind: 'key', vk: 0x41, scanGiven: 0x1e, extended: false, down: false },
         { kind: 'pointerMove', dx: -3, dy: 4 },
         { kind: 'pointerButton', button: 'left', down: true },
         { kind: 'wheel', delta: -120 },
     ]);
 });
+
+test('RealGetWindowClass answers the class name, as no window is made on a system superclass',
+    ()=>{
+        const { memory, fns } = setup();
+        const hwnd = makeWindow(memory, fns);
+        assert.equal(fns.RealGetWindowClassA.handler([hwnd, OUT_BUFFER, 32]), 7);
+        assert.equal(memory.readCString(OUT_BUFFER, 32), 'MainWnd');
+        assert.equal(fns.RealGetWindowClassA.handler([0x9999, OUT_BUFFER, 32]), 0);
+    });

@@ -869,9 +869,11 @@ export function createOleFunctions(host){
      */
     let mainSta = null;
     let mtaThreads = 0;
+    /** Whether the multithreaded apartment exists: a thread in it, or a usage holding it open. */
+    const mtaOpen = ()=>mtaThreads > 0 || (host.registry?.mtaUsage?.users ?? 0) > 0;
 
     /** @param {any} thread */
-    const inApartment = thread=>Boolean(thread?.ole32) || mtaThreads > 0;
+    const inApartment = thread=>Boolean(thread?.ole32) || mtaOpen();
 
     /**
      * The flags ole32 keeps in its per-thread record, which the thread's
@@ -1040,6 +1042,41 @@ export function createOleFunctions(host){
         },
 
         /**
+         * HRESULT CoIncrementMTAUsage(CO_MTA_USAGE_COOKIE *pCookie)
+         *
+         * Keeps the multithreaded apartment open with no thread in it, so a
+         * thread that entered none is in it implicitly; the cookie is what
+         * CoDecrementMTAUsage takes back.
+         */
+        CoIncrementMTAUsage: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([cookie])=>{
+                if ((cookie >>> 0) === 0 || !host.registry?.mtaUsage)
+                {
+                    return E_INVALIDARG;
+                }
+                host.registry.mtaUsage.enter();
+                writeU32(cookie >>> 0, host.registry.mtaUsage.users);
+                return S_OK;
+            },
+        },
+
+        /** HRESULT CoDecrementMTAUsage(CO_MTA_USAGE_COOKIE cookie) */
+        CoDecrementMTAUsage: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([cookie])=>{
+                if ((cookie >>> 0) === 0 || !host.registry?.mtaUsage?.users)
+                {
+                    return E_INVALIDARG;
+                }
+                host.registry.mtaUsage.leave();
+                return S_OK;
+            },
+        },
+
+        /**
          * HRESULT CoGetApartmentType(APTTYPE *pAptType, APTTYPEQUALIFIER *pAptQualifier)
          *
          * The apartment the calling thread is in: the main single-threaded
@@ -1065,7 +1102,7 @@ export function createOleFunctions(host){
                 {
                     kind = mainSta === thread ? APTTYPE_MAINSTA : APTTYPE_STA;
                 }
-                else if (!apartment && mtaThreads > 0)
+                else if (!apartment && mtaOpen())
                 {
                     detail = APTTYPEQUALIFIER_IMPLICIT_MTA;
                 }
@@ -1078,6 +1115,19 @@ export function createOleFunctions(host){
                 writeU32(qualifier >>> 0, detail);
                 return answer;
             },
+        },
+
+        /**
+         * DWORD CoGetCurrentLogicalThreadId(void)
+         *
+         * The identifier of the calling thread's apartment, which for a thread
+         * in an apartment of its own is its own thread id: the same number
+         * GetCurrentThreadId answers, and the one a program uses to tell its
+         * own logical thread from another's.
+         */
+        CoGetCurrentLogicalThreadId: {
+            argBytes: 0,
+            handler: ()=>(host.currentThread()?.id ?? 0) >>> 0,
         },
 
         /** void CoUninitialize(void) */

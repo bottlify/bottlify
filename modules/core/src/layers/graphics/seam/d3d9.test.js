@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
-import { SHADOW, STALE_POINTER } from './shadow.js';
+import { BUFFER, SHADOW, STALE_POINTER, transformSlot } from './shadow.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { IDIRECT3D9_SLOTS } from './vtables.js';
 import {
@@ -36,7 +36,7 @@ import {
     IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS, IDIRECT3DQUERY9_SLOTS,
     IDIRECT3DSHADER9_SLOTS,
     IDIRECT3DSTATEBLOCK9_SLOTS, IDIRECT3DSURFACE9_SLOTS, IDIRECT3DSWAPCHAIN9_SLOTS,
-    IDIRECT3DTEXTURE9_SLOTS,
+    IDIRECT3DTEXTURE9_SLOTS, IDIRECT3DVERTEXBUFFER9_SLOTS,
     IDIRECT3DVERTEXDECLARATION9_SLOTS, IDIRECT3DVOLUME9_SLOTS, IDIRECT3DVOLUMETEXTURE9_SLOTS,
     IDIRECT3D9EX_SLOTS, IDIRECT3DDEVICE9EX_SLOTS, IDIRECT3DSWAPCHAIN9EX_SLOTS, IID_IDirect3D9,
     IID_IDirect3D9Ex, IID_IDirect3DDevice9Ex, IID_IDirect3DSwapChain9Ex,
@@ -1622,6 +1622,57 @@ test('the adapter a Direct3D 9 program is told about is the one every generation
     h.box.call(root, 2, []);
 });
 
+test('with guest memory, a buffer locks and unlocks in the guest, and the host settles it', ()=>{
+    // As Direct3D 8's do: the lock hands back the guest's own bytes, the
+    // unlock puts the buffer's block on the device's ring, and the next host
+    // method replays the range onto the buffer before it reads anything.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const out = 0x3000;
+    assert.equal(h.device(device, 'CreateVertexBuffer', [64, 0, 0, D3DPOOL.DEFAULT, out, 0]),
+        D3D_OK);
+    const pointer = h.box.memory.readU32(out);
+    const lockSlot = slot(IDIRECT3DVERTEXBUFFER9_SLOTS, 'Lock');
+    assert.ok(h.box.isGuest(pointer, lockSlot), 'Lock runs in the guest');
+    assert.ok(h.box.isGuest(pointer, slot(IDIRECT3DVERTEXBUFFER9_SLOTS, 'Unlock')));
+    const block = h.box.memory.readU32(pointer + 4);
+    assert.notEqual(block, 0, 'the buffer\'s block is one word past the interface pointer');
+    const base = h.box.memory.readU32(block + BUFFER.BASE);
+    assert.equal(h.box.memory.readU32(block + BUFFER.LENGTH), 64);
+    const owner = h.box.memory.readU32(device + 4);
+    assert.equal(h.box.memory.readU32(block + BUFFER.DEVICE), owner);
+
+    // As the two routines leave it: a range locked and let go of, on the ring.
+    h.box.memory.writeU32(block + BUFFER.FROM, 0);
+    h.box.memory.writeU32(block + BUFFER.TO, 16);
+    h.box.memory.writeU32(owner + SHADOW.RING, block);
+    h.box.memory.writeU32(owner + SHADOW.RING_HEAD, 1);
+    h.box.memory.writeU32(owner + SHADOW.LOCK_CALLS, 1);
+    h.box.memory.writeU32(owner + SHADOW.UNLOCK_CALLS, 1);
+    h.box.memory.writeU32(owner + SHADOW.CALLS, 2);
+    h.box.memory.writeU32(base, 0x3f800000);
+    const buffer = h.publisher.objectAt(pointer);
+    /** @type {[number, number][]} */
+    const replayed = [];
+    const lock = buffer.Lock.bind(buffer);
+    /** @param {number} offset @param {number} size @param {any} held @param {number} flags */
+    buffer.Lock = (offset, size, held, flags)=>{
+        replayed.push([offset, size]);
+        return lock(offset, size, held, flags);
+    };
+    assert.equal(h.device(device, 'GetRenderState', [D3DRS.CULLMODE, 0x3100]), D3D_OK);
+    assert.deepEqual(replayed, [[0, 16]], 'the range is replayed on the way into the host');
+    assert.equal(h.box.memory.readU32(owner + SHADOW.RING_HEAD), 0, 'and the ring emptied');
+    assert.equal(h.box.memory.readU32(block + BUFFER.TO), 0);
+
+    // A lock the host takes is the block's too, so the guest refuses a second.
+    assert.equal(h.box.trap(pointer, 'Lock', [0, 0, 0x3200, 0]), D3D_OK);
+    assert.equal(h.box.memory.readU32(block + BUFFER.LOCKED), 1);
+    assert.equal(h.box.memory.readU32(0x3200), base);
+    assert.equal(h.release(pointer), 0);
+});
+
 test('with guest memory, the setters and GetRenderState of a device run in the guest', ()=>{
     // Direct3D 9's render states, transforms, stage states and material take
     // Direct3D 8's routines, and its sampler states share the stage state
@@ -1634,8 +1685,9 @@ test('with guest memory, the setters and GetRenderState of a device run in the g
     const { device } = h.createDevice(root);
     const guest = (/** @type {string} */ name)=>h.box.isGuest(device,
         slot(IDIRECT3DDEVICE9_SLOTS, name));
-    for (const name of ['SetRenderState', 'GetRenderState', 'SetTransform',
-        'SetTextureStageState', 'SetMaterial', 'SetSamplerState', 'SetTexture'])
+    for (const name of ['SetRenderState', 'GetRenderState', 'SetTransform', 'GetTransform',
+        'SetTextureStageState', 'GetTextureStageState', 'SetMaterial', 'SetSamplerState',
+        'SetTexture'])
     {
         assert.ok(guest(name), `${name} runs in the guest`);
     }
@@ -1690,4 +1742,70 @@ test('with guest memory, the setters and GetRenderState of a device run in the g
     assert.equal(h.device(device, 'Reset', [parameters]), D3D_OK);
     assert.equal(h.box.memory.readU32(at(SHADOW.RENDER_STATES + D3DRS.CULLMODE * 4)), 3,
         'a reset is mirrored into the block');
+});
+
+test('a state block applied mirrors into the block only the states it holds', ()=>{
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const block = h.box.memory.readU32(device + 4);
+    const out = 0x3200;
+    /** @param {[string, number[]][]} setters */
+    const record = setters=>{
+        assert.equal(h.device(device, 'BeginStateBlock'), D3D_OK);
+        for (const [name, args] of setters)
+        {
+            assert.equal(h.device(device, name, args), D3D_OK, name);
+        }
+        assert.equal(h.device(device, 'EndStateBlock', [out]), D3D_OK);
+        return h.box.memory.readU32(out);
+    };
+    const object = h.object(device);
+    let reads = 0;
+    for (const name of ['GetRenderState', 'GetTextureStageState', 'GetSamplerState',
+        'GetTransform', 'GetMaterial'])
+    {
+        const original = object[name];
+        object[name] = (/** @type {any[]} */ ...args)=>{
+            reads++;
+            return original.apply(object, args);
+        };
+    }
+    const apply = (/** @type {number} */ stateBlock)=>h.box.call(stateBlock, 5, []);
+
+    // Shaders and a declaration are not in the block: nothing is read back.
+    const shaders = record([['SetVertexShader', [0]], ['SetPixelShader', [0]]]);
+    reads = 0;
+    assert.equal(apply(shaders), D3D_OK);
+    assert.equal(reads, 0, 'a block of bindings reads no state back');
+
+    // A render state is read back alone, and lands in the block.
+    const cull = record([['SetRenderState', [D3DRS.CULLMODE, 1]]]);
+    assert.equal(h.device(device, 'SetRenderState', [D3DRS.CULLMODE, 3]), D3D_OK);
+    reads = 0;
+    assert.equal(apply(cull), D3D_OK);
+    assert.ok(reads <= 1, `${reads} reads for one render state`);
+    assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + D3DRS.CULLMODE * 4), 1);
+    const value = 0x3300;
+    assert.equal(h.device(device, 'GetRenderState', [D3DRS.CULLMODE, value]), D3D_OK);
+    assert.equal(h.fields.readU32(value), 1);
+
+    // A matrix and a stage state the block holds land in the block too.
+    const matrix = 0x3400;
+    for (let index = 0; index < 16; index++)
+    {
+        const bits = new Uint32Array(Float32Array.of(index + 1).buffer)[0];
+        h.fields.writeU32(matrix + index * 4, bits);
+    }
+    const world = record([['SetTransform', [256, matrix]], ['SetTextureStageState', [1, 1, 2]]]);
+    for (let index = 0; index < 16; index++)
+    {
+        h.fields.writeU32(matrix + index * 4, 0);
+    }
+    assert.equal(h.device(device, 'SetTransform', [256, matrix]), D3D_OK);
+    assert.equal(apply(world), D3D_OK);
+    assert.equal(new Float32Array(Uint32Array.of(h.box.memory.readU32(
+        block + SHADOW.TRANSFORMS + transformSlot(256) * 64 + 4)).buffer)[0], 2);
+    assert.equal(h.box.memory.readU32(block + SHADOW.STAGE_STATES
+        + (SHADOW.STAGE_STATE_STRIDE + 1) * 4), 2);
 });

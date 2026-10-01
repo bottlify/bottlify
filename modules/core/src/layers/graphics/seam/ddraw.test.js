@@ -43,6 +43,7 @@ import {
     DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT,
     DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK, DDERR_UNSUPPORTED,
     DDERR_EXCLUSIVEMODEALREADYSET, DDERR_NOEXCLUSIVEMODE, DDERR_SURFACELOST, DDERR_WRONGMODE,
+    DDERR_ALREADYINITIALIZED, DDERR_NOPALETTEATTACHED,
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
@@ -473,6 +474,14 @@ test('GetDC is a real device context over the surface, and not a mutex with Lock
     assert.equal(h.surface7(surface, 'GetDC', [out]), DD_OK);
     const hdc = h.box.memory.readU32(out);
     assert.notEqual(hdc, 0xdeadbeef);
+    // DDRAW.dll's export finds the surface by the DC alone, as the first generation.
+    assert.equal(h.ddrawDll.GetSurfaceFromDC.handler([hdc, 0x5500, 0x5504]), DD_OK);
+    assert.equal(h.publisher.objectAt(h.box.memory.readU32(0x5500)), model);
+    h.release(h.box.memory.readU32(0x5500));
+    assert.equal(h.ddrawDll.GetSurfaceFromDC.handler([hdc, 0, 0x5504]) >>> 0, 0x80070057);
+    assert.equal(h.ddrawDll.GetSurfaceFromDC.handler([0x1234, 0x5500, 0x5504]) >>> 0,
+        DDERR_NOTFOUND);
+    assert.deepEqual([h.box.memory.readU32(0x5500), h.box.memory.readU32(0x5504)], [0, 0]);
     assert.deepEqual(h.dcs[0], { event: 'create', handle: hdc, attributes: {
         width: 8, height: 8, pitch: 32, bitCount: 32, bits: model.buffer, palette: null,
         format: '555',
@@ -636,6 +645,11 @@ test('a mip chain reports its levels through the descriptor and is walked level 
     assert.equal(h.surface7(levels[1], 'SetColorKey', [DDCKEY_SRCBLT, 0x5700]),
         DDERR_NOTONMIPMAPSUBLEVEL);
     assert.equal(h.surface7(top, 'SetColorKey', [DDCKEY_SRCBLT, 0x5700]), DD_OK);
+
+    // No palette attached: the refusal clears the caller's pointer.
+    h.box.memory.writeU32(0x5710, 0xdeadbeef);
+    assert.equal(h.surface7(top, 'GetPalette', [0x5710]) >>> 0, DDERR_NOPALETTEATTACHED);
+    assert.equal(h.box.memory.readU32(0x5710), 0);
 
     assert.equal(h.release(levels[2]), 1);
     assert.equal(h.release(levels[1]), 1);
@@ -2230,3 +2244,29 @@ test('exclusive full screen places its window over the mode; a windowed one keep
     assert.deepEqual(placed.at(-1), [800, 600, { window: HWND, fullscreen: true }]);
     assert.equal(h.release(ddraw), 0);
 });
+
+test('CoCreateInstance reaches DirectDraw through its class object, and it waits for Initialize',
+    ()=>{
+        const h = seamed();
+        const clsid = h.box.putGuid(0x4000, '{D7B70EE0-4340-11CF-B063-0020AFC2CD35}');
+        const factoryId = h.box.putGuid(0x4010, '{00000001-0000-0000-C000-000000000046}');
+        const wanted = h.box.putGuid(0x4020, IID_IDirectDraw7);
+        assert.equal(h.ddrawDll.DllGetClassObject.handler([clsid, factoryId, 0x4100]), DD_OK);
+        const factory = h.box.memory.readU32(0x4100);
+        assert.equal(h.box.call(factory, 3, [0x1234, wanted, 0x4200]) >>> 0, 0x80040110,
+            'aggregation is refused');
+        assert.equal(h.box.call(factory, 3, [0, wanted, 0x4200]), DD_OK);
+        const made = h.box.memory.readU32(0x4200);
+        const initialize = slot(IDIRECTDRAW7_SLOTS, 'Initialize');
+        assert.equal(h.box.call(made, initialize, [0]), DD_OK, 'the first Initialize takes');
+        assert.equal(h.box.call(made, initialize, [0]) >>> 0, DDERR_ALREADYINITIALIZED);
+
+        // One DirectDrawCreate made was initialized when it was made.
+        assert.equal(h.ddrawDll.DirectDrawCreate.handler([0, 0x4300, 0]), DD_OK);
+        assert.equal(h.box.call(h.box.memory.readU32(0x4300), slot(IDIRECTDRAW_SLOTS, 'Initialize'),
+            [0]) >>> 0, DDERR_ALREADYINITIALIZED);
+
+        const other = h.box.putGuid(0x4030, '{47D4D946-62E8-11CF-93BC-444553540000}');
+        assert.equal(h.ddrawDll.DllGetClassObject.handler([other, factoryId, 0x4100]) >>> 0,
+            0x80040111, 'CLASS_E_CLASSNOTAVAILABLE for a class it does not serve');
+    });

@@ -35,6 +35,10 @@ import { parseTypeLibrary } from './sltg.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { dateOf, fieldsOf, rollYear } from './dates.js';
+import {
+    compareExact, decimalBytes, exactOf, readDecimal, round, roundNumber, toNumber,
+} from './varmath.js';
 
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
 const PREFIX_BYTES = 4;
@@ -117,6 +121,7 @@ const TYPE_E_CANTLOADLIBRARY = 0x80029c4a | 0;
 const TYPE_E_LIBNOTREGISTERED = 0x8002801d | 0;
 const TYPE_E_REGISTRYACCESS = 0x8002801c | 0;
 const E_INVALIDARG = 0x80070057;
+const E_POINTER = 0x80004003;
 const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
 const DISP_E_TYPEMISMATCH = 0x80020005;
@@ -125,6 +130,50 @@ const DISP_E_BADINDEX = 0x8002000b | 0;
 const E_UNEXPECTED = 0x8000ffff | 0;
 const DISP_E_BADVARTYPE = 0x80020008;
 const DISP_E_OVERFLOW = 0x8002000a;
+
+/**
+ * NUMPARSE's fields (six 32-bit words) and the NUMPRS_* flags this build
+ * recognises. dwInFlags says which forms the caller allows; dwOutFlags which
+ * the string actually used.
+ */
+const NUMPARSE_C_DIG = 0;
+const NUMPARSE_IN_FLAGS = 4;
+const NUMPARSE_OUT_FLAGS = 8;
+const NUMPARSE_CCH_USED = 12;
+const NUMPARSE_BASE_SHIFT = 16;
+const NUMPARSE_PWR10 = 20;
+const NUMPRS_LEADING_WHITE = 0x0001;
+const NUMPRS_TRAILING_WHITE = 0x0002;
+const NUMPRS_LEADING_PLUS = 0x0004;
+const NUMPRS_TRAILING_PLUS = 0x0008;
+const NUMPRS_LEADING_MINUS = 0x0010;
+const NUMPRS_TRAILING_MINUS = 0x0020;
+const NUMPRS_HEX_OCT = 0x0040;
+const NUMPRS_PARENS = 0x0080;
+const NUMPRS_DECIMAL = 0x0100;
+const NUMPRS_THOUSANDS = 0x0200;
+const NUMPRS_CURRENCY = 0x0400;
+const NUMPRS_EXPONENT = 0x0800;
+const NUMPRS_USE_ALL = 0x1000;
+const NUMPRS_NEG = 0x10000;
+const NUMPRS_INEXACT = 0x20000;
+
+/** The forms a string can take that this parser does not pull apart. */
+const NUMPRS_UNPARSED = NUMPRS_TRAILING_PLUS | NUMPRS_TRAILING_MINUS | NUMPRS_HEX_OCT
+    | NUMPRS_PARENS | NUMPRS_CURRENCY;
+
+/** The variant types VarNumFromParseNum can choose between, beyond this file's own. */
+const VT_CY = 6;
+const VT_DECIMAL = 14;
+const VT_DATE = 7;
+const VT_UI8 = 21;
+/** A flag bit in a VARTYPE the arithmetic calls read past. */
+const VT_RESERVED = 0x8000;
+/** VarCmp's answer when either side is null. */
+const VARCMP_NULL = 3;
+/** VarCmp's flag for a comparison of text without case. */
+const NORM_IGNORECASE = 1;
+const VT_I8 = 20;
 
 /**
  * @typedef {Object} AutomationHeap
@@ -233,6 +282,158 @@ export function createAutomationFunctions(host){
 
     /** The IErrorInfo a program last set and nothing has yet collected. */
     let heldErrorInfo = 0;
+
+    /** @param {number} low @param {number} high */
+    const doubleOf = (low, high)=>{
+        const view = new DataView(new ArrayBuffer(8));
+        view.setUint32(0, low >>> 0, true);
+        view.setUint32(4, high >>> 0, true);
+        return view.getFloat64(0, true);
+    };
+
+    /** @param {number} address @param {number} value */
+    const writeDouble = (address, value)=>{
+        const bytes = new Uint8Array(8);
+        new DataView(bytes.buffer).setFloat64(0, value, true);
+        host.writeMemory(address, bytes);
+    };
+
+    /** Signed words, as SYSTEMTIME's fields are read. @param {number} address @param {number} count */
+    const readWords = (address, count)=>{
+        const view = peek(address, count * 2);
+        return Array.from({ length: count }, (_, index)=>view.getInt16(index * 2, true));
+    };
+
+    /** @param {number} address @param {number[]} words */
+    const writeWords = (address, words)=>{
+        const bytes = new Uint8Array(words.length * 2);
+        const view = new DataView(bytes.buffer);
+        words.forEach((word, index)=>view.setUint16(index * 2, word & 0xffff, true));
+        host.writeMemory(address, bytes);
+    };
+
+    /**
+     * A UDATE: SYSTEMTIME's eight words, then the day of the year.
+     *
+     * @param {import('./dates.js').Fields} fields
+     */
+    const udateWords = fields=>[fields.year, fields.month, fields.dayOfWeek, fields.day,
+        fields.hour, fields.minute, fields.second, fields.milliseconds, fields.dayOfYear];
+
+    /**
+     * @typedef {Object} Operand
+     * @property {number} type
+     * @property {number | null} number
+     * @property {import('./varmath.js').Exact | null} exact  a CY or DECIMAL
+     * @property {string | null} text
+     */
+
+    /**
+     * A variant as an operand of the arithmetic calls, a reference followed;
+     * null for a type they take no operand of.
+     *
+     * @param {number} pvar
+     * @returns {Operand | null}
+     */
+    const operand = pvar=>{
+        const declared = readU16(pvar);
+        const type = declared & VT_TYPEMASK;
+        if ((declared & ~(VT_TYPEMASK | VT_BYREF | VT_RESERVED)) !== 0)
+        {
+            return null;
+        }
+        const byref = (declared & VT_BYREF) !== 0;
+        const at = byref ? readU32(pvar + VARIANT_VALUE) : pvar + VARIANT_VALUE;
+        if (at === 0)
+        {
+            return null;
+        }
+        /** @type {Operand} */
+        const none = { type, number: null, exact: null, text: null };
+        switch (type)
+        {
+            case VT_BSTR:
+                try
+                {
+                    return { ...none, text: readBstr(readU32(at)) };
+                }
+                catch {
+                    // A string pointer into nothing: no text to act on.
+                    return null;
+                }
+            case VT_EMPTY:
+            case VT_NULL:
+                return { ...none, number: 0 };
+            case VT_DATE:
+                return { ...none, number: peek(at, 8).getFloat64(0, true) };
+            case VT_CY:
+                return { ...none, exact: { value: peek(at, 8).getBigInt64(0, true), scale: 4 } };
+            case VT_DECIMAL:
+                // A DECIMAL fills the variant, its reserved word over the type.
+                return { ...none, exact: readDecimal(host.readMemory(byref ? at : pvar, 16)) };
+            case VT_DISPATCH:
+            case VT_UNKNOWN:
+            case VT_ERROR:
+                return none;
+            default: {
+                const number = numberAt(type, at);
+                return number === null && type !== VT_NULL ? null : { ...none, number };
+            }
+        }
+    };
+
+    /** @param {Operand} value @returns {string | null} */
+    const textOf = value=>{
+        if (value.text !== null)
+        {
+            return value.text;
+        }
+        if (value.type === VT_NULL || value.type === VT_EMPTY)
+        {
+            return '';
+        }
+        if (value.type === VT_BOOL)
+        {
+            return value.number !== 0 ? 'True' : 'False';
+        }
+        if (value.exact !== null)
+        {
+            return String(toNumber(value.exact));
+        }
+        return value.number === null ? null : String(value.number);
+    };
+
+    /**
+     * A variant written whole: its type, and the value's bytes after it.
+     *
+     * @param {number} pvar @param {number} type @param {Uint8Array} value
+     */
+    const writeVariant = (pvar, type, value)=>{
+        const bytes = new Uint8Array(VARIANT_BYTES);
+        new DataView(bytes.buffer).setUint16(0, type, true);
+        bytes.set(value.subarray(0, 8), VARIANT_VALUE);
+        host.writeMemory(pvar, bytes);
+        return S_OK;
+    };
+
+    /** @param {number} pvar @param {Uint8Array} decimal  its fourteen bytes past the type */
+    const writeDecimal = (pvar, decimal)=>{
+        const bytes = new Uint8Array(VARIANT_BYTES);
+        new DataView(bytes.buffer).setUint16(0, VT_DECIMAL, true);
+        bytes.set(decimal, 2);
+        host.writeMemory(pvar, bytes);
+        return S_OK;
+    };
+
+    /** @param {(view: DataView) => void} fill */
+    const valueBytes = fill=>{
+        const bytes = new Uint8Array(8);
+        fill(new DataView(bytes.buffer));
+        return bytes;
+    };
+
+    /** @param {bigint} value */
+    const cyBytes = value=>valueBytes(view=>view.setBigInt64(0, BigInt.asIntN(64, value), true));
 
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
@@ -1243,6 +1444,485 @@ export function createAutomationFunctions(host){
         },
 
         /**
+         * HRESULT VarBstrFromBool(VARIANT_BOOL boolIn, LCID lcid, ULONG dwFlags,
+         *                         BSTR *pbstrOut)
+         *
+         * The one spelling the English locale uses: "True" for VARIANT_TRUE and
+         * "False" for VARIANT_FALSE, which is every nonzero against zero. The
+         * locale and flags are accepted and ignored, since this build speaks
+         * one language; the out pointer is required, E_POINTER without it.
+         */
+        VarBstrFromBool: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([boolIn, , , out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                const bstr = allocateBstr(encode(boolIn ? 'True' : 'False'));
+                writeU32(out >>> 0, bstr);
+                return bstr === 0 ? E_OUTOFMEMORY : S_OK;
+            },
+        },
+        /** HRESULT VarRound(LPVARIANT pvarIn, int cDecimals, LPVARIANT pvarResult) */
+        VarRound: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([pin, places, pout])=>{
+                if ((places | 0) < 0 || (pin >>> 0) === 0 || (pout >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const value = operand(pin >>> 0);
+                if (value === null)
+                {
+                    return DISP_E_BADVARTYPE;
+                }
+                const out = pout >>> 0;
+                const number = Number(value.number);
+                switch (value.type)
+                {
+                    case VT_NULL:
+                        return writeVariant(out, VT_NULL, new Uint8Array(0));
+                    case VT_BSTR: {
+                        const parsed = parseText(String(value.text));
+                        return parsed === null ? DISP_E_TYPEMISMATCH
+                            : writeVariant(out, VT_R8, valueBytes(view=>
+                                view.setFloat64(0, roundNumber(parsed, places), true)));
+                    }
+                    case VT_CY: {
+                        const rounded = round(/** @type {any} */ (value.exact), places);
+                        return writeVariant(out, VT_CY,
+                            cyBytes(rounded.value * 10n ** BigInt(4 - rounded.scale)));
+                    }
+                    case VT_DECIMAL: {
+                        const bytes = decimalBytes(round(/** @type {any} */ (value.exact), places));
+                        return bytes === null ? DISP_E_OVERFLOW : writeDecimal(out, bytes);
+                    }
+                    case VT_R4:
+                        return writeVariant(out, VT_R4, valueBytes(view=>
+                            view.setFloat32(0, roundNumber(number, places), true)));
+                    case VT_R8:
+                    case VT_DATE:
+                        return writeVariant(out, value.type, valueBytes(view=>
+                            view.setFloat64(0, roundNumber(number, places), true)));
+                    case VT_EMPTY:
+                    case VT_BOOL:
+                        return writeVariant(out, VT_I2,
+                            valueBytes(view=>view.setInt16(0, number, true)));
+                    case VT_I1:
+                    case VT_UI1:
+                    case VT_I2:
+                    case VT_UI2:
+                    case VT_I4:
+                    case VT_UI4:
+                    case VT_INT:
+                    case VT_UINT:
+                        return writeVariant(out, value.type,
+                            host.readMemory((pin >>> 0) + VARIANT_VALUE, 8).slice());
+                    default:
+                        return DISP_E_BADVARTYPE;
+                }
+            },
+        },
+
+        /**
+         * HRESULT VarCmp(LPVARIANT pvarLeft, LPVARIANT pvarRight, LCID lcid, ULONG dwFlags)
+         *
+         * VARCMP_LT, EQ or GT, VARCMP_NULL when either side is null. A number
+         * is below any text; empty is zero beside a number and "" beside text.
+         */
+        VarCmp: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([pleft, pright, , flags])=>{
+                const types = [pleft, pright].map(pvar=>readU16(pvar >>> 0));
+                // Refused as Windows refuses them, even the ones it would
+                // convert anywhere else -- and an int only on the right.
+                const refused = [VT_I1, VT_UI2, VT_UI4, VT_UI8, VT_UINT];
+                if (types.some(type=>refused.includes(type & VT_TYPEMASK))
+                    || (types[1] & VT_TYPEMASK) === VT_INT)
+                {
+                    return DISP_E_TYPEMISMATCH;
+                }
+                // Text beside a number is above it whatever it says, and is
+                // not read.
+                const isText = types.map(type=>(type & VT_TYPEMASK) === VT_BSTR);
+                const blank = types.map(type=>[VT_EMPTY, VT_NULL, VT_BSTR]
+                    .includes(type & VT_TYPEMASK));
+                if (isText[0] !== isText[1] && !blank[0] !== !blank[1])
+                {
+                    const other = operand((isText[0] ? pright : pleft) >>> 0);
+                    if (other === null || (other.number === null && other.exact === null))
+                    {
+                        return DISP_E_TYPEMISMATCH;
+                    }
+                    return isText[0] ? 2 : 0;
+                }
+                const left = operand(pleft >>> 0);
+                const right = operand(pright >>> 0);
+                if (left === null || right === null)
+                {
+                    return DISP_E_BADVARTYPE;
+                }
+                if (left.type === VT_NULL || right.type === VT_NULL)
+                {
+                    return VARCMP_NULL;
+                }
+                if (left.text !== null || right.text !== null)
+                {
+                    const texts = [left, right].map(side=>(side.text !== null ? side.text
+                        : side.type === VT_EMPTY ? '' : null));
+                    if (texts[0] === null || texts[1] === null)
+                    {
+                        return texts[0] === null ? 0 : 2;
+                    }
+                    const [a, b] = texts.map(text=>((flags & NORM_IGNORECASE) !== 0
+                        ? String(text).toLowerCase() : String(text)));
+                    return a < b ? 0 : a > b ? 2 : 1;
+                }
+                if ((left.number === null && left.exact === null)
+                    || (right.number === null && right.exact === null))
+                {
+                    return DISP_E_TYPEMISMATCH;
+                }
+                if (left.exact === null && right.exact === null)
+                {
+                    const a = Number(left.number);
+                    const b = Number(right.number);
+                    return a < b ? 0 : a > b ? 2 : 1;
+                }
+                /** @param {Operand} side */
+                const exact = side=>side.exact
+                    ?? exactOf(Number(side.number)) ?? { value: 0n, scale: 0 };
+                return compareExact(exact(left), exact(right)) + 1;
+            },
+        },
+
+        /**
+         * HRESULT VarCat(LPVARIANT left, LPVARIANT right, LPVARIANT out)
+         *
+         * Both sides as text, null and empty as nothing; null only when both
+         * are null.
+         */
+        VarCat: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([pleft, pright, pout])=>{
+                const left = operand(pleft >>> 0);
+                const right = operand(pright >>> 0);
+                if (left === null || right === null)
+                {
+                    return DISP_E_BADVARTYPE;
+                }
+                if (left.type === VT_NULL && right.type === VT_NULL)
+                {
+                    return writeVariant(pout >>> 0, VT_NULL, new Uint8Array(0));
+                }
+                const a = textOf(left);
+                const b = textOf(right);
+                if (a === null || b === null)
+                {
+                    return DISP_E_TYPEMISMATCH;
+                }
+                const bstr = allocateBstr(encode(a + b));
+                if (bstr === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                return writeVariant(pout >>> 0, VT_BSTR,
+                    valueBytes(view=>view.setUint32(0, bstr, true)));
+            },
+        },
+
+        /** HRESULT VarCyFromI4(LONG lIn, CY *pCyOut) */
+        VarCyFromI4: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([number, out])=>{
+                host.writeMemory(out >>> 0, cyBytes(BigInt(number | 0) * 10000n));
+                return S_OK;
+            },
+        },
+
+        /** HRESULT VarR8FromCy(CY cyIn, double *pDblOut) */
+        VarR8FromCy: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([low, high, out])=>{
+                const cy = BigInt.asIntN(64, BigInt(high >>> 0) << 32n | BigInt(low >>> 0));
+                writeDouble(out >>> 0, toNumber({ value: cy, scale: 4 }));
+                return S_OK;
+            },
+        },
+
+        /** HRESULT VarDecFromI4(LONG lIn, DECIMAL *pDecOut) */
+        VarDecFromI4: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([number, out])=>{
+                host.writeMemory((out >>> 0) + 2, /** @type {Uint8Array} */ (
+                    decimalBytes({ value: BigInt(number | 0), scale: 0 })));
+                return S_OK;
+            },
+        },
+
+        /** HRESULT VarDecFromR8(double dblIn, DECIMAL *pDecOut) */
+        VarDecFromR8: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([low, high, out])=>{
+                const exact = exactOf(doubleOf(low, high));
+                const bytes = exact && decimalBytes(exact);
+                if (!bytes)
+                {
+                    return DISP_E_OVERFLOW;
+                }
+                host.writeMemory((out >>> 0) + 2, bytes);
+                return S_OK;
+            },
+        },
+
+        /** HRESULT VarR8FromDec(const DECIMAL *pDecIn, double *pDblOut) */
+        VarR8FromDec: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([decimal, out])=>{
+                const bytes = host.readMemory(decimal >>> 0, 16);
+                if (bytes[2] > 28)
+                {
+                    return E_INVALIDARG;
+                }
+                writeDouble(out >>> 0, toNumber(readDecimal(bytes)));
+                return S_OK;
+            },
+        },
+
+        /** HRESULT VarR8FromStr(LPCOLESTR strIn, LCID lcid, ULONG dwFlags, double *pDblOut) */
+        VarR8FromStr: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([strIn, , , out])=>{
+                if ((strIn >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const number = parseText(wideAt(strIn >>> 0));
+                if (number === null || !Number.isFinite(number))
+                {
+                    return DISP_E_TYPEMISMATCH;
+                }
+                writeDouble(out >>> 0, number);
+                return S_OK;
+            },
+        },
+
+        /** HRESULT VarUdateFromDate(DATE dateIn, ULONG dwFlags, UDATE *pudateOut) */
+        VarUdateFromDate: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([low, high, , out])=>{
+                const fields = fieldsOf(doubleOf(low, high));
+                if (!fields)
+                {
+                    return E_INVALIDARG;
+                }
+                writeWords(out >>> 0, udateWords(fields));
+                return S_OK;
+            },
+        },
+
+        /** HRESULT VarDateFromUdate(UDATE *pudateIn, ULONG dwFlags, DATE *pdateOut) */
+        VarDateFromUdate: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([udate, flags, out])=>{
+                const words = readWords(udate >>> 0, 8);
+                if (words[0] > 9999 || words[0] < -9999)
+                {
+                    return E_INVALIDARG;
+                }
+                const { year, month } = rollYear(words[0], words[1]);
+                writeDouble(out >>> 0, dateOf({ year, month, day: words[3], hour: words[4],
+                    minute: words[5], second: words[6] }, flags >>> 0));
+                return S_OK;
+            },
+        },
+
+        /**
+         * INT SystemTimeToVariantTime(LPSYSTEMTIME, double *pvtime)
+         *
+         * Stricter than VarDateFromUdate: every field in its range, save a
+         * day of zero, which is the last of the month before. A two-digit
+         * year below 50 is this century.
+         */
+        SystemTimeToVariantTime: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([time, out])=>{
+                const [year, month, , day, hour, minute, second] = readWords(time >>> 0, 8);
+                if (year < 0 || year > 9999 || month < 1 || month > 12 || day > 31
+                    || hour > 23 || minute > 59 || second > 59)
+                {
+                    return 0;
+                }
+                writeDouble(out >>> 0, dateOf({
+                    year: year < 50 ? 2000 + year : year < 100 ? 1900 + year : year,
+                    month, day, hour, minute, second }));
+                return 1;
+            },
+        },
+
+        /** INT VariantTimeToSystemTime(double vtime, LPSYSTEMTIME lpSystemTime) */
+        VariantTimeToSystemTime: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([low, high, out])=>{
+                const fields = fieldsOf(doubleOf(low, high));
+                if (!fields)
+                {
+                    return 0;
+                }
+                writeWords(out >>> 0, udateWords(fields).slice(0, 8));
+                return 1;
+            },
+        },
+
+        /**
+         * INT DosDateTimeToVariantTime(USHORT wDosDate, USHORT wDosTime, double *pvtime)
+         *
+         * The packed fields as they are, a day or month of zero rolling back
+         * and a day past the month's end rolling on, up to the last DOS year.
+         */
+        DosDateTimeToVariantTime: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([date, time, out])=>{
+                const year = 1980 + ((date >>> 9) & 0x7f);
+                const month = (date >>> 5) & 0xf;
+                const hour = (time >>> 11) & 0x1f;
+                const minute = (time >>> 5) & 0x3f;
+                const second = (time & 0x1f) * 2;
+                if (year > 2099 || month > 12 || hour > 23 || minute > 59 || second > 59)
+                {
+                    return 0;
+                }
+                writeDouble(out >>> 0,
+                    dateOf({ year, month, day: date & 0x1f, hour, minute, second }));
+                return 1;
+            },
+        },
+
+        /** INT VariantTimeToDosDateTime(double vtime, USHORT *pwDosDate, USHORT *pwDosTime) */
+        VariantTimeToDosDateTime: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([low, high, dateOut, timeOut])=>{
+                const fields = fieldsOf(doubleOf(low, high));
+                if (!fields || fields.year < 1980 || fields.year > 2099)
+                {
+                    return 0;
+                }
+                writeWords(dateOut >>> 0, [fields.day | fields.month << 5
+                    | (fields.year - 1980) << 9]);
+                writeWords(timeOut >>> 0, [fields.second >>> 1 | fields.minute << 5
+                    | fields.hour << 11]);
+                return 1;
+            },
+        },
+
+        /**
+         * HRESULT VarParseNumFromStr(LPCOLESTR strIn, LCID lcid, ULONG dwFlags,
+         *                            NUMPARSE *pnumprs, BYTE *rgbDig)
+         *
+         * cDig comes in as the digit buffer's size and goes out as the count
+         * written; dwInFlags is only read. Nothing is written when the string
+         * holds no number, or when NUMPRS_USE_ALL is set and some is left over.
+         */
+        VarParseNumFromStr: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([strIn, lcid, , pnumprs, rgbDig])=>{
+                const numprs = pnumprs >>> 0;
+                if ((strIn >>> 0) === 0 || numprs === 0 || (rgbDig >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const language = lcid & 0x3ff;
+                if (language !== 0 && language !== 0x09 && language !== 0x7f)
+                {
+                    report('VarParseNumFromStr',
+                        `locale ${lcid >>> 0} is read with the invariant '.' and ','`);
+                }
+                const fields = peek(numprs, 24);
+                const capacity = fields.getInt32(NUMPARSE_C_DIG, true);
+                const allowed = fields.getUint32(NUMPARSE_IN_FLAGS, true);
+                const text = wideAt(strIn >>> 0);
+                const parsed = parseNumberText(text, allowed, capacity);
+                const rest = parsed === null ? text : text.slice(parsed.used);
+                if ((allowed & NUMPRS_UNPARSED) !== 0 && /^\s*[&()$+-]/.test(rest))
+                {
+                    report('VarParseNumFromStr',
+                        'hex/octal, currency, parenthesised and trailing-sign forms are not read');
+                }
+                if (parsed === null
+                    || ((allowed & NUMPRS_USE_ALL) !== 0 && parsed.used < text.length))
+                {
+                    return DISP_E_TYPEMISMATCH;
+                }
+                const out = new DataView(new ArrayBuffer(24));
+                out.setInt32(NUMPARSE_C_DIG, parsed.digits.length, true);
+                out.setUint32(NUMPARSE_IN_FLAGS, allowed, true);
+                out.setUint32(NUMPARSE_OUT_FLAGS, parsed.flags, true);
+                out.setInt32(NUMPARSE_CCH_USED, parsed.used, true);
+                out.setInt32(NUMPARSE_BASE_SHIFT, 0, true);
+                out.setInt32(NUMPARSE_PWR10, parsed.pwr10, true);
+                host.writeMemory(numprs, new Uint8Array(out.buffer));
+                host.writeMemory(rgbDig >>> 0, Uint8Array.from(parsed.digits));
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT VarNumFromParseNum(NUMPARSE *pnumprs, BYTE *rgbDig,
+         *                            ULONG dwVtBits, VARIANT *pvar)
+         *
+         * The parsed number as the smallest type the caller allows; an
+         * overflow when none holds it.
+         */
+        VarNumFromParseNum: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([pnumprs, rgbDig, vtBits, pvar])=>{
+                const numprs = pnumprs >>> 0;
+                if (numprs === 0 || (rgbDig >>> 0) === 0 || (pvar >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const fields = peek(numprs, 24);
+                const count = Math.max(fields.getInt32(NUMPARSE_C_DIG, true), 0);
+                const digits = [...host.readMemory(rgbDig >>> 0, count)];
+                const negative = (fields.getUint32(NUMPARSE_OUT_FLAGS, true) & NUMPRS_NEG) !== 0;
+                const made = numberVariant(digits, fields.getInt32(NUMPARSE_PWR10, true),
+                    fields.getInt32(NUMPARSE_BASE_SHIFT, true), negative, vtBits >>> 0);
+                if (made === null)
+                {
+                    if ((vtBits & (1 << VT_DECIMAL)) !== 0)
+                    {
+                        report('VarNumFromParseNum', 'VT_DECIMAL is never produced');
+                    }
+                    return DISP_E_OVERFLOW;
+                }
+                const variant = new Uint8Array(VARIANT_BYTES);
+                variant[0] = made.type;
+                variant.set(made.bytes, VARIANT_VALUE);
+                host.writeMemory(pvar >>> 0, variant);
+                return S_OK;
+            },
+        },
+
+        /**
          * HRESULT SetErrorInfo(ULONG dwReserved, IErrorInfo *perrinfo)
          * HRESULT GetErrorInfo(ULONG dwReserved, IErrorInfo **pperrinfo)
          *
@@ -1960,6 +2640,204 @@ export function createAutomationFunctions(host){
             },
         },
     };
+}
+
+/** @param {string} char */
+const isWhite = char=>char === ' ' || char === '\t' || char === '\n' || char === '\r'
+    || char === '\v' || char === '\f';
+
+/**
+ * A number string pulled apart the way VarParseNumFromStr does, in the
+ * invariant spelling: sign, digits, thousands commas, a '.' and an exponent,
+ * each only where `allowed` lets it in. The digits come back without leading
+ * or trailing zeros (those move into the power of ten), at most `capacity` of
+ * them, INEXACT set when a dropped one was not zero.
+ *
+ * @param {string} text @param {number} allowed @param {number} capacity
+ * @returns {{ digits: number[], flags: number, used: number, pwr10: number } | null}
+ *   null when the string holds no number at all.
+ */
+export function parseNumberText(text, allowed, capacity){
+    let at = 0;
+    let flags = 0;
+    if ((allowed & NUMPRS_LEADING_WHITE) !== 0)
+    {
+        while (at < text.length && isWhite(text[at]))
+        {
+            at++;
+            flags |= NUMPRS_LEADING_WHITE;
+        }
+    }
+    if (text[at] === '+' && (allowed & NUMPRS_LEADING_PLUS) !== 0)
+    {
+        at++;
+        flags |= NUMPRS_LEADING_PLUS;
+    }
+    else if (text[at] === '-' && (allowed & NUMPRS_LEADING_MINUS) !== 0)
+    {
+        at++;
+        flags |= NUMPRS_LEADING_MINUS | NUMPRS_NEG;
+    }
+    let whole = '';
+    let fraction = '';
+    let inFraction = false;
+    for (; at < text.length; at++)
+    {
+        const char = text[at];
+        if (char >= '0' && char <= '9')
+        {
+            if (inFraction)
+            {
+                fraction += char;
+            }
+            else
+            {
+                whole += char;
+            }
+        }
+        else if (char === '.' && !inFraction && (allowed & NUMPRS_DECIMAL) !== 0)
+        {
+            inFraction = true;
+            flags |= NUMPRS_DECIMAL;
+        }
+        else if (char === ',' && !inFraction && (allowed & NUMPRS_THOUSANDS) !== 0)
+        {
+            flags |= NUMPRS_THOUSANDS;
+        }
+        else
+        {
+            break;
+        }
+    }
+    if (whole === '' && fraction === '')
+    {
+        return null;
+    }
+    let exponent = 0;
+    if ((text[at] === 'e' || text[at] === 'E') && (allowed & NUMPRS_EXPONENT) !== 0)
+    {
+        // An 'e' with no digits after it is not an exponent, and is left unread.
+        const match = /^[eE]([+-]?)(\d+)/.exec(text.slice(at));
+        if (match)
+        {
+            exponent = Number(match[2]) * (match[1] === '-' ? -1 : 1);
+            at += match[0].length;
+            flags |= NUMPRS_EXPONENT;
+        }
+    }
+    if ((allowed & NUMPRS_TRAILING_WHITE) !== 0)
+    {
+        while (at < text.length && isWhite(text[at]))
+        {
+            at++;
+            flags |= NUMPRS_TRAILING_WHITE;
+        }
+    }
+
+    let all = (whole + fraction).replace(/^0+/, '');
+    let pwr10 = exponent - fraction.length;
+    const significant = all.replace(/0+$/, '');
+    pwr10 += all.length - significant.length;
+    all = significant;
+    if (all === '')
+    {
+        return { digits: [0], flags, used: at, pwr10: 0 };
+    }
+    const kept = Math.max(capacity, 0);
+    if (all.length > kept)
+    {
+        if (/[1-9]/.test(all.slice(kept)))
+        {
+            flags |= NUMPRS_INEXACT;
+        }
+        pwr10 += all.length - kept;
+        all = all.slice(0, kept);
+    }
+    return { digits: [...all].map(Number), flags, used: at, pwr10 };
+}
+
+/**
+ * The VARIANT VarNumFromParseNum makes of parsed digits: the first type in
+ * `vtBits` (a mask of 1 << VT_*) that holds the value, integers smallest
+ * first, then R4 for at most seven significant digits, R8, CY. A fraction
+ * given only integer types is rounded to one. null when nothing holds it;
+ * VT_DECIMAL is never chosen, since this build does not carry it.
+ *
+ * @param {number[]} digits @param {number} pwr10 @param {number} baseShift
+ * @param {boolean} negative @param {number} vtBits
+ * @returns {{ type: number, bytes: Uint8Array } | null} the eight value bytes
+ */
+export function numberVariant(digits, pwr10, baseShift, negative, vtBits){
+    let magnitude;
+    if (baseShift !== 0)
+    {
+        magnitude = digits.reduce((sum, digit)=>sum * (1 << baseShift) + digit, 0);
+    }
+    else
+    {
+        magnitude = Number(`${digits.join('') || '0'}e${pwr10}`);
+    }
+    const value = negative ? -magnitude : magnitude;
+    const bytes = new Uint8Array(8);
+    const data = new DataView(bytes.buffer);
+    const allows = (/** @type {number} */ type)=>(vtBits & (1 << type)) !== 0;
+    const integral = Number.isInteger(value);
+    const floats = allows(VT_R4) || allows(VT_R8) || allows(VT_CY);
+    // Rounding to an integer happens only when no type could keep the fraction.
+    const whole = integral || floats ? value : Math.sign(value) * Math.round(Math.abs(value));
+    if (Number.isInteger(whole))
+    {
+        /** @type {[number, number, number, (n: number) => void][]} */
+        const integers = [
+            [VT_I1, -128, 127, n=>data.setInt8(0, n)],
+            [VT_UI1, 0, 255, n=>data.setUint8(0, n)],
+            [VT_I2, -32768, 32767, n=>data.setInt16(0, n, true)],
+            [VT_UI2, 0, 65535, n=>data.setUint16(0, n, true)],
+            [VT_I4, -2147483648, 2147483647, n=>data.setInt32(0, n, true)],
+            [VT_UI4, 0, 4294967295, n=>data.setUint32(0, n, true)],
+        ];
+        for (const [type, low, high, write] of integers)
+        {
+            if (allows(type) && whole >= low && whole <= high)
+            {
+                write(whole);
+                return { type, bytes };
+            }
+        }
+        const big = Number.isSafeInteger(whole)
+            ? BigInt(whole)
+            : (baseShift === 0 && pwr10 >= 0
+                ? BigInt(digits.join('')) * 10n ** BigInt(pwr10) * (negative ? -1n : 1n)
+                : null);
+        if (big !== null && allows(VT_I8) && big >= -(2n ** 63n) && big < 2n ** 63n)
+        {
+            data.setBigInt64(0, big, true);
+            return { type: VT_I8, bytes };
+        }
+        if (big !== null && allows(VT_UI8) && big >= 0n && big < 2n ** 64n)
+        {
+            data.setBigUint64(0, big, true);
+            return { type: VT_UI8, bytes };
+        }
+    }
+    const significant = digits.length;
+    if (allows(VT_R4) && significant <= 7 && Math.abs(value) <= 3.4028234663852886e38)
+    {
+        data.setFloat32(0, value, true);
+        return { type: VT_R4, bytes };
+    }
+    if (allows(VT_R8) && Number.isFinite(value))
+    {
+        data.setFloat64(0, value, true);
+        return { type: VT_R8, bytes };
+    }
+    const units = Math.round(value * 10000);
+    if (allows(VT_CY) && Number.isSafeInteger(units))
+    {
+        data.setBigInt64(0, BigInt(units), true);
+        return { type: VT_CY, bytes };
+    }
+    return null;
 }
 
 /**

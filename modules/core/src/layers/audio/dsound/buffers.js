@@ -77,6 +77,8 @@ export const DSBPAN_RIGHT = 10000;
  * @property {number} sampleRate
  * @property {number} bitsPerSample
  * @property {number} blockAlign      Bytes one frame occupies, across channels.
+ * @property {number} [averageBytes]   nAvgBytesPerSec as the program gave it, which
+ *     GetFormat hands back; DirectSound accepts one that disagrees with the rest.
  */
 
 /**
@@ -94,6 +96,7 @@ export function normaliseFormat(format){
         // structure that disagrees with itself is common, and every cursor here
         // is in bytes, so the frame size is what everything else derives from.
         blockAlign: Math.max(1, channels * (bitsPerSample >> 3)),
+        ...format.averageBytes === undefined ? {} : { averageBytes: format.averageBytes },
     };
 }
 
@@ -159,8 +162,16 @@ export function createSoundBuffer({
     // ring -- which every menu click is. The flag makes the last drain hand
     // over the rest of the buffer linearly instead.
     let reachedEnd = false;
-    /** @type {{ offset: number, first: number, second: number } | null} */
-    let lock = null;
+    /**
+     * The ranges locked and not yet let go of. Windows holds any number of
+     * locks that do not overlap and takes each range back by its own Unlock
+     * pointer (Wine's dsound.c test_lock); `lock` is the Lock call a range
+     * came from, and `left` how many of its ranges are still held.
+     *
+     * @type {{ at: number, length: number,
+     *          lock: { offset: number, length: number, left: number } }[]}
+     */
+    const held = [];
     /**
      * The sound device's voice for this buffer, once one is attached
      * (`attachDevice`): a mirror of the buffer that the device plays on its
@@ -405,6 +416,33 @@ export function createSoundBuffer({
         return first === covered
             ? [{ from, bytes: covered }]
             : [{ from, bytes: first }, { from: 0, bytes: covered - first }];
+    };
+
+    /**
+     * Lets go of one held range. Counted at the unlock, not the lock: the
+     * program writes in between, and what is heard is what was there when it
+     * let go. The stream moves on once the whole of a lock is back.
+     *
+     * @param {number} index
+     */
+    const release = index=>{
+        const [{ at, length, lock }] = held.splice(index, 1);
+        markWritten(at, length);
+        device?.copy(at, length);
+        if (--lock.left > 0)
+        {
+            return;
+        }
+        if (device && playing)
+        {
+            device.voice.wrote(lock.offset, lock.length);
+        }
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+        {
+            const { play, write } = cursorsNow();
+            note(['u', Math.round(now()), lock.offset, lock.length, play, write]);
+        }
+        streamEnd = (lock.offset + lock.length) % bytes;
     };
 
     return {
@@ -692,13 +730,15 @@ export function createSoundBuffer({
         },
 
         /**
-         * The one or two ranges a lock hands back.
+         * The one or two ranges a lock hands back, or null where Windows
+         * refuses it (Wine's dsound.c test_lock): nothing asked for, a start
+         * or a length past the buffer, or a lock still held.
          *
          * @param {number} offset
          * @param {number} requested
          * @param {number} flags
          * @returns {{ first: { address: number, bytes: number },
-         *             second: { address: number, bytes: number } }}
+         *             second: { address: number, bytes: number } } | null}
          */
         lockRange(offset, requested, flags){
             let start = offset >>> 0;
@@ -709,17 +749,23 @@ export function createSoundBuffer({
             }
             if ((flags & DSBLOCK_ENTIREBUFFER) !== 0)
             {
-                // The whole buffer from its beginning, not a buffer-sized span
-                // from wherever the cursor happens to be -- which would wrap
-                // and overwrite audio that has not been played.
-                start = 0;
+                // A whole lap from where the lock starts, wrapping.
                 wanted = bytes;
             }
+            if (wanted === 0 || wanted > bytes || start >= bytes)
+            {
+                return null;
+            }
 
-            start = Math.min(start, bytes);
-            const target = Math.min(wanted, bytes);
-            const first = Math.min(target, bytes - start);
-            const second = target - first;
+            const first = Math.min(wanted, bytes - start);
+            const second = wanted - first;
+            const overlaps = (/** @type {number} */ at, /** @type {number} */ length)=>
+                length > 0
+                && held.some(range=>at < range.at + range.length && range.at < at + length);
+            if (overlaps(start, first) || overlaps(0, second))
+            {
+                return null;
+            }
             // Only a lock at a place the program chose can skip: one placed
             // at the write cursor or over the whole buffer says nothing about
             // where the stream was. Forward by less than half a lap, because
@@ -734,43 +780,50 @@ export function createSoundBuffer({
                     skips++;
                 }
             }
-            lock = { offset: start, first, second };
+            const lock = { offset: start, length: wanted, left: second > 0 ? 2 : 1 };
+            held.push({ at: start, length: first, lock });
+            if (second > 0)
+            {
+                held.push({ at: 0, length: second, lock });
+            }
             return {
                 first: { address: address + start, bytes: first },
                 second: { address: second > 0 ? address : 0, bytes: second },
             };
         },
 
-        unlock(){
-            const held = lock;
-            lock = null;
-            if (held)
+        /**
+         * Lets go of the ranges the program hands back by their addresses, in
+         * order, stopping at one that is not held -- the ones before it are
+         * let go of all the same, as on Windows. Naming none lets go of all.
+         * Answers whether every address named a held range (and, naming
+         * none, whether anything was held).
+         *
+         * @param {number[]} [addresses]
+         */
+        unlock(addresses){
+            if (!addresses || addresses.length === 0)
             {
-                // Counted at the unlock, not the lock: the program writes in
-                // between, and what is heard is what was there when it let go.
-                markWritten(held.offset, held.first);
-                markWritten(0, held.second);
-                if (device)
+                const any = held.length > 0;
+                while (held.length > 0)
                 {
-                    device.copy(held.offset, held.first);
-                    device.copy(0, held.second);
-                    if (playing)
-                    {
-                        device.voice.wrote(held.offset, held.first + held.second);
-                    }
+                    release(0);
                 }
-                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
-                {
-                    const { play, write } = cursorsNow();
-                    note(['u', Math.round(now()), held.offset, held.first + held.second,
-                        play, write]);
-                }
-                streamEnd = (held.offset + held.first + held.second) % bytes;
+                return any;
             }
-            return held;
+            for (const at of addresses)
+            {
+                const index = held.findIndex(range=>address + range.at === at);
+                if (index < 0)
+                {
+                    return false;
+                }
+                release(index);
+            }
+            return true;
         },
         get locked(){
-            return lock !== null;
+            return held.length > 0;
         },
 
         /**

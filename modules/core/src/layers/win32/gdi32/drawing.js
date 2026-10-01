@@ -166,6 +166,11 @@ const DIB_BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 
 /** CombineRgn's modes. */
 /** GdiSetBatchLimit's limit until a program sets one. */
+/** The two ways an arc can run. */
+const AD_COUNTERCLOCKWISE = 1;
+const AD_CLOCKWISE = 2;
+/** The raster operation that copies the source as it is. */
+const SRCCOPY = 0x00cc0020;
 const DEFAULT_BATCH_LIMIT = 20;
 /** The static colours are the system's: GetSystemPaletteUse. */
 const SYSPAL_STATIC = 1;
@@ -356,6 +361,64 @@ function masksFor(shape, bitCount){
     return shape.bitCount === 16 && (shape.section >>> 0) !== 0 && shape.format !== RGB_565
         ? [0x7c00, 0x03e0, 0x001f]
         : [0xf800, 0x07e0, 0x001f];
+}
+
+/**
+ * The points of an arc along the ellipse a rectangle bounds, counterclockwise
+ * on the screen from the start radial to the end radial, a segment for about
+ * every two pixels of the way.
+ *
+ * @param {number} left @param {number} top @param {number} right @param {number} bottom
+ * @param {number} xStart @param {number} yStart @param {number} xEnd @param {number} yEnd
+ * @returns {{ x: number, y: number }[]}
+ */
+export function arcPoints(left, top, right, bottom, xStart, yStart, xEnd, yEnd){
+    const cx = (left + right) / 2;
+    const cy = (top + bottom) / 2;
+    const rx = Math.abs(right - left) / 2;
+    const ry = Math.abs(bottom - top) / 2;
+    // Screen y grows downward, so counterclockwise is the angle of -y.
+    const from = Math.atan2(cy - yStart, xStart - cx);
+    let to = Math.atan2(cy - yEnd, xEnd - cx);
+    if (to <= from)
+    {
+        to += 2 * Math.PI;
+    }
+    const steps = Math.max(8, Math.ceil((to - from) * Math.max(rx, ry) / 2));
+    return Array.from({ length: steps + 1 }, (_, index)=>{
+        const angle = from + (to - from) * index / steps;
+        return {
+            x: Math.round(cx + rx * Math.cos(angle)),
+            y: Math.round(cy - ry * Math.sin(angle)),
+        };
+    });
+}
+
+/**
+ * The outline of a rounded rectangle, clockwise from the top edge: each
+ * corner a quarter of an ellipse of the radii given, inside the box.
+ *
+ * @param {{ left: number, top: number, right: number, bottom: number }} box
+ * @param {number} rx @param {number} ry
+ * @returns {{ x: number, y: number }[]}
+ */
+export function roundRectPoints(box, rx, ry){
+    const right = box.right - 1;
+    const bottom = box.bottom - 1;
+    const corners = [
+        { cx: right - rx, cy: box.top + ry, from: Math.PI / 2 },
+        { cx: right - rx, cy: bottom - ry, from: 0 },
+        { cx: box.left + rx, cy: bottom - ry, from: -Math.PI / 2 },
+        { cx: box.left + rx, cy: box.top + ry, from: -Math.PI },
+    ];
+    const steps = Math.max(2, Math.ceil(Math.max(rx, ry) / 2));
+    return corners.flatMap(({ cx, cy, from })=>Array.from({ length: steps + 1 }, (_, index)=>{
+        const angle = from - (Math.PI / 2) * index / steps;
+        return {
+            x: Math.round(cx + rx * Math.cos(angle)),
+            y: Math.round(cy - ry * Math.sin(angle)),
+        };
+    }));
 }
 
 /**
@@ -683,6 +746,30 @@ export function createDrawingFunctions(
         },
 
         /**
+         * BOOL GdiTransparentBlt(HDC hdcDest, int xDest, int yDest, int wDest, int hDest,
+         *   HDC hdcSrc, int xSrc, int ySrc, int wSrc, int hSrc, UINT crTransparent)
+         *
+         * A stretch that leaves the key colour's pixels out. The drawing
+         * layer copies every pixel, the key's too, so the copy is made whole
+         * and that is reported; a negative size is refused, as it is there.
+         */
+        GdiTransparentBlt: {
+            argBytes: 44,
+            /** @param {number[]} args */
+            handler: ([dest, x, y, cx, cy, source, x1, y1, cx1, cy1])=>{
+                const interfaces = bound(dest);
+                if (!interfaces || !bound(source) || (cx | 0) < 0 || (cy | 0) < 0
+                    || (cx1 | 0) < 0 || (cy1 | 0) < 0)
+                {
+                    return 0;
+                }
+                host.divergence?.('GdiTransparentBlt', 'the key colour is copied too');
+                return interfaces.stretchBlt(dest >>> 0, x | 0, y | 0, cx | 0, cy | 0,
+                    source >>> 0, x1 | 0, y1 | 0, cx1 | 0, cy1 | 0, SRCCOPY) ? 1 : 0;
+            },
+        },
+
+        /**
          * int StretchDIBits(HDC hdc, int xDest, int yDest, int DestWidth, int DestHeight,
          *                   int xSrc, int ySrc, int SrcWidth, int SrcHeight,
          *                   const VOID *lpBits, const BITMAPINFO *lpbmi, UINT iUsage,
@@ -912,6 +999,120 @@ export function createDrawingFunctions(
                 }
                 interfaces.textOutA(handle >>> 0, x | 0, y | 0, text);
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL Arc(HDC hdc, int left, int top, int right, int bottom,
+         *          int xStart, int yStart, int xEnd, int yEnd)
+         *
+         * The outline of the ellipse the rectangle bounds, counterclockwise
+         * from where the start radial meets it to where the end radial does,
+         * drawn with the pen and leaving the current position where it was.
+         * The same radial twice is the whole ellipse.
+         */
+        Arc: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([handle, left, top, right, bottom, xStart, yStart, xEnd, yEnd])=>{
+                const interfaces = bound(handle);
+                if (!interfaces)
+                {
+                    return 0;
+                }
+                // Clockwise is the counterclockwise arc from the end radial back.
+                const clockwise = dcOf(handle)?.arcDirection === AD_CLOCKWISE;
+                const points = clockwise
+                    ? arcPoints(left | 0, top | 0, right | 0, bottom | 0,
+                        xEnd | 0, yEnd | 0, xStart | 0, yStart | 0).reverse()
+                    : arcPoints(left | 0, top | 0, right | 0, bottom | 0,
+                        xStart | 0, yStart | 0, xEnd | 0, yEnd | 0);
+                const back = interfaces.moveToEx(handle >>> 0, points[0].x, points[0].y);
+                for (const point of points.slice(1))
+                {
+                    interfaces.lineTo(handle >>> 0, point.x, point.y);
+                }
+                if (back)
+                {
+                    interfaces.moveToEx(handle >>> 0, back.x, back.y);
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * int SetArcDirection(HDC hdc, int dir) / int GetArcDirection(HDC hdc)
+         *
+         * Which way Arc runs, counterclockwise until a program says otherwise;
+         * anything but the two directions is ERROR_INVALID_PARAMETER.
+         */
+        SetArcDirection: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, direction])=>{
+                const dc = dcOf(handle);
+                if (!dc || ((direction | 0) !== AD_COUNTERCLOCKWISE
+                    && (direction | 0) !== AD_CLOCKWISE))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const previous = dc.arcDirection ?? AD_COUNTERCLOCKWISE;
+                dc.arcDirection = direction | 0;
+                return previous;
+            },
+        },
+        GetArcDirection: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                return dc ? dc.arcDirection ?? AD_COUNTERCLOCKWISE : 0;
+            },
+        },
+
+        /**
+         * BOOL RoundRect(HDC hdc, int left, int top, int right, int bottom,
+         *                int width, int height)
+         *
+         * A rectangle whose corners are quarters of the ellipse width by
+         * height, outlined with the pen and filled with the brush; the
+         * ellipse's size is taken without its sign and no larger than the
+         * rectangle, and a flat one is the plain rectangle.
+         */
+        RoundRect: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([handle, left, top, right, bottom, width, height])=>{
+                const interfaces = bound(handle);
+                if (!interfaces)
+                {
+                    return 0;
+                }
+                const box = {
+                    left: Math.min(left | 0, right | 0), top: Math.min(top | 0, bottom | 0),
+                    right: Math.max(left | 0, right | 0), bottom: Math.max(top | 0, bottom | 0),
+                };
+                const cornerX = Math.min(Math.abs(width | 0), box.right - box.left) / 2;
+                const cornerY = Math.min(Math.abs(height | 0), box.bottom - box.top) / 2;
+                if (cornerX < 1 || cornerY < 1)
+                {
+                    return interfaces.rectangle(handle >>> 0, box.left, box.top, box.right,
+                        box.bottom) ? 1 : 0;
+                }
+                return interfaces.polygon(handle >>> 0, roundRectPoints(box, cornerX, cornerY))
+                    ? 1 : 0;
+            },
+        },
+
+        /** BOOL Ellipse(HDC hdc, int left, int top, int right, int bottom) */
+        Ellipse: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, left, top, right, bottom])=>{
+                const interfaces = bound(handle);
+                return interfaces && interfaces.ellipse(handle >>> 0,
+                    left | 0, top | 0, right | 0, bottom | 0) ? 1 : 0;
             },
         },
 

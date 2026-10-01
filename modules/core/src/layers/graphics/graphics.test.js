@@ -533,6 +533,15 @@ test('GDI drawing binds a memory context to the bytes of its bitmap in guest mem
         'a build with no heap has no desktop for a window context to draw on');
     assert.equal(gdi.surfaceFor({ kind: 'memory' }, { ...bitmap, bits: 0 }), null,
         'a bitmap with no storage has nothing to draw into');
+
+    // Rows at a stride the program chose, wider than a DIB's: the whole of
+    // the last row is reached, not only the DIB's count of bytes.
+    const strided = gdi.surfaceFor({ kind: 'memory' },
+        { width: 3, height: 3, bitCount: 24, bits: 0x200, topDown: true, pitch: 48 });
+    assert.ok(strided);
+    drawing.bind(2, strided);
+    assert.ok(drawing.setPixel(2, 2, 2, 0x000000ff));
+    assert.deepEqual([...ram.subarray(0x200 + 96 + 6, 0x200 + 96 + 9)], [0, 0, 0xff]);
     await graphicsModule.dispose();
 });
 

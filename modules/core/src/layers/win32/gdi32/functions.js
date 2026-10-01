@@ -81,11 +81,15 @@ const OBJ_FONT = 6;
 const OBJ_BITMAP = 7;
 const OBJ_REGION = 8;
 const OBJ_MEMDC = 10;
+const OBJ_ENHMETADC = 12;
+const OBJ_ENHMETAFILE = 13;
+const OBJ_METADC = 4;
+const OBJ_METAFILE = 9;
 
 /** @type {Record<string, number>} */
 const OBJECT_TYPES = {
     pen: OBJ_PEN, brush: OBJ_BRUSH, palette: OBJ_PAL, font: OBJ_FONT, bitmap: OBJ_BITMAP,
-    region: OBJ_REGION,
+    region: OBJ_REGION, enhmetafile: OBJ_ENHMETAFILE, metafile: OBJ_METAFILE,
 };
 
 /** Brush styles. BS_PATTERN's hatch field is a bitmap handle instead of an index. */
@@ -136,6 +140,14 @@ const SCALABLE_MAP_MODES = new Set([MM_ISOTROPIC, MM_ANISOTROPIC]);
  */
 const LAYOUT_RTL = 0x01;
 const GDI_ERROR = 0xffffffff;
+/** GetGlyphOutline's formats this layer answers, and the flags it reads past. */
+const GGO_METRICS = 0;
+const GGO_GLYPH_INDEX = 0x80;
+const GGO_UNHINTED = 0x100;
+const GLYPHMETRICS_SIZE = 20;
+const GGI_MARK_NONEXISTING_GLYPHS = 1;
+/** GetCharacterPlacement's flag that stops the fit at nMaxExtent. */
+const GCP_MAXEXTENT = 0x100000;
 
 /**
  * The fixed modes, by how many logical units make an inch: MM_LOMETRIC's
@@ -215,7 +227,30 @@ const BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 const MAX_BITMAP_SIDE = 0x7ffffff;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_NOT_SUPPORTED = 50;
 const STATUS_INVALID_PARAMETER = 0xc000000d;
+
+/** GetBoundsRect's and SetBoundsRect's flags; DCB_SET is reset and accumulate together. */
+/** ExtCreatePen's style word: the line style, and whether the pen is geometric. */
+const PS_STYLE_MASK = 0x0000000f;
+const PS_USERSTYLE = 7;
+const PS_ALTERNATE = 8;
+const PS_TYPE_MASK = 0x000f0000;
+const PS_GEOMETRIC = 0x00010000;
+
+/** The graphics modes, and ModifyWorldTransform's three ways. */
+const GM_COMPATIBLE = 1;
+const GM_ADVANCED = 2;
+const MWT_IDENTITY = 1;
+const MWT_LEFTMULTIPLY = 2;
+const MWT_RIGHTMULTIPLY = 3;
+const IDENTITY_XFORM = Object.freeze([1, 0, 0, 1, 0, 0]);
+
+const DCB_RESET = 0x0001;
+const DCB_ACCUMULATE = 0x0002;
+const DCB_SET = DCB_RESET | DCB_ACCUMULATE;
+const DCB_ENABLE = 0x0004;
+const DCB_DISABLE = 0x0008;
 
 /** @param {any} memory @param {number} address @param {number} count @returns {number[]} */
 const readU32s = (memory, address, count)=>Array.from({ length: count },
@@ -631,8 +666,19 @@ export function createGdiFunctions(host){
             viewportExt: { cx: 1, cy: 1 },
             windowExt: { cx: 1, cy: 1 },
             position: { x: 0, y: 0 },
+            /** GetBoundsRect's accumulated bounding rectangle, or null. */
+            boundingRect: null,
+            /** GetBoundsRect's accumulation state: DCB_ENABLE, DCB_DISABLE, or none. */
+            boundsState: 0,
             /** @type {any[]} */
             saved: [],
+            /**
+             * Which kind of metafile a Create made it for, whose Close alone
+             * ends it; false for any other DC.
+             *
+             * @type {false | 'enhmetafile' | 'metafile'}
+             */
+            metafile: false,
         };
         dc.hdc = host.handles.open('dc', dc);
         forEachSelection(dc, handle=>objects.retain(handle));
@@ -659,6 +705,31 @@ export function createGdiFunctions(host){
         objects.remove(dc.defaultBitmap);
         contexts.delete(dc.hdc);
         host.handles.close(dc.hdc);
+    };
+
+    /**
+     * CreateEnhMetaFileA and W, which differ only in the file name this build
+     * does not write.
+     *
+     * @param {number} reference @param {number} filename @param {string} api
+     * @param {'enhmetafile' | 'metafile'} [kind]  which Close ends it
+     */
+    const createEnhMetaFile = (reference, filename, api, kind = 'enhmetafile')=>{
+        if ((reference >>> 0) !== 0 && !dcOf(reference))
+        {
+            return 0;
+        }
+        if ((filename >>> 0) !== 0)
+        {
+            host.divergence?.(api, 'a metafile on disk is not written; refused');
+            host.setLastError?.(ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+        host.divergence?.(api, 'drawing on the metafile DC is not recorded; it closes empty');
+        const dc = createContext(0, 'memory');
+        select(dc, defaultBitmap());
+        dc.metafile = kind;
+        return dc.hdc;
     };
 
     /** @param {any} dc @returns {any} a copy of everything SaveDC remembers */
@@ -848,6 +919,134 @@ export function createGdiFunctions(host){
         return 1;
     };
 
+    /** GetCharacterPlacement in either width. @param {number[]} args @param {boolean} wide */
+    const characterPlacement = ([handle, string, count, maxExtent, results, flags], wide)=>{
+        const dc = dcOf(handle);
+        if (!dc || (count | 0) <= 0 || (string >>> 0) === 0)
+        {
+            return 0;
+        }
+        const text = wide ? wideText(string >>> 0, count | 0, true)
+            : decodeAnsi(host.readMemory(string >>> 0, count | 0));
+        const advances = Array.from(text, character=>widthOf(dc, character));
+        const width = advances.reduce((sum, advance)=>sum + advance, 0);
+        if ((results >>> 0) !== 0)
+        {
+            const [, outString, order, dx, caret, kind, glyphs, room] =
+                readU32s(host, results >>> 0, 8);
+            const placed = Math.min(text.length, room >>> 0 || text.length);
+            /** @param {number} at @param {number[]} values @param {number} size */
+            const put = (at, values, size)=>{
+                if (at === 0)
+                {
+                    return;
+                }
+                const bytes = new Uint8Array(values.length * size);
+                const view = new DataView(bytes.buffer);
+                values.forEach((value, index)=>{
+                    if (size === 4)
+                    {
+                        view.setInt32(index * 4, value, true);
+                    }
+                    else if (size === 2)
+                    {
+                        view.setUint16(index * 2, value, true);
+                    }
+                    else
+                    {
+                        view.setUint8(index, value);
+                    }
+                });
+                host.writeMemory(at, bytes);
+            };
+            const codes = Array.from(text, character=>character.charCodeAt(0)).slice(0, placed);
+            put(outString, codes, wide ? 2 : 1);
+            put(order, codes.map((_, index)=>index), 4);
+            put(dx, advances.slice(0, placed), 4);
+            put(caret, advances.slice(0, placed)
+                .map((_, index)=>advances.slice(0, index).reduce((sum, a)=>sum + a, 0)), 4);
+            put(kind, codes.map(()=>0), 1);
+            put(glyphs, codes, 2);
+            let fit = placed;
+            if ((flags & GCP_MAXEXTENT) !== 0)
+            {
+                let sum = 0;
+                fit = advances.findIndex(advance=>(sum += advance) > (maxExtent | 0));
+                fit = fit < 0 ? placed : fit;
+            }
+            writeU32s(host, (results >>> 0) + 28, [placed, fit]);
+        }
+        return (width & 0xffff | currentMetrics(dc).height << 16) >>> 0;
+    };
+
+    /** @param {number} handle @param {string} api */
+    const noOutlineMetrics = (handle, api)=>{
+        if (dcOf(handle))
+        {
+            host.divergence?.(api, 'no font here is an outline font; no outline metrics');
+        }
+        return 0;
+    };
+
+    /**
+     * GetTextExtentExPoint in its three forms.
+     *
+     * @param {number[]} args @param {(string: number, count: number) => string} read
+     */
+    const textExtentEx = ([handle, string, count, maxExtent, fit, dx, size], read)=>{
+        const dc = dcOf(handle);
+        if (!dc || (count | 0) < 0 || ((string >>> 0) === 0 && (count | 0) !== 0))
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const text = (count | 0) === 0 ? '' : read(string >>> 0, count | 0);
+        const extents = Array.from(text, (_, index)=>widthOf(dc, text.slice(0, index + 1)));
+        if ((fit >>> 0) !== 0)
+        {
+            const limit = maxExtent | 0;
+            writeU32s(host, fit >>> 0, [extents.filter(extent=>extent <= limit).length]);
+        }
+        if ((dx >>> 0) !== 0 && extents.length > 0)
+        {
+            writeU32s(host, dx >>> 0, extents);
+        }
+        if ((size >>> 0) !== 0)
+        {
+            writeSize(host, size, { cx: extents.at(-1) ?? 0, cy: currentMetrics(dc).height });
+        }
+        return 1;
+    };
+
+    /** A float's bits as the dword they are written as. @param {number} value */
+    const floatBits = value=>{
+        const view = new DataView(new ArrayBuffer(4));
+        view.setFloat32(0, value, true);
+        return view.getUint32(0, true);
+    };
+
+    /**
+     * The glyph-index form of the width calls.
+     *
+     * @param {number[]} args @param {number} stride
+     * @param {(width: number) => number[]} record
+     */
+    const glyphWidths = ([handle, first, count, glyphs, out], stride, record)=>{
+        const dc = dcOf(handle);
+        if (!dc || (out >>> 0) === 0)
+        {
+            return 0;
+        }
+        const list = (glyphs >>> 0) === 0 ? null : host.readMemory(glyphs >>> 0, (count >>> 0) * 2);
+        for (let index = 0; index < (count >>> 0); index++)
+        {
+            const glyph = list ? list[index * 2] | list[index * 2 + 1] << 8 : (first >>> 0) + index;
+            writeU32s(host, (out >>> 0) + index * stride,
+                record(widthOf(dc, String.fromCharCode(glyph))));
+        }
+        return 1;
+    };
+
     /**
      * The extents a mapping mode fixes, or null for MM_ANISOTROPIC, which
      * keeps whatever the DC had.
@@ -883,10 +1082,17 @@ export function createGdiFunctions(host){
      * A logical point as the device sees it, or a device point as the
      * program's logical space names it: what LPtoDP and DPtoLP answer.
      *
-     * @param {any} dc @param {{ x: number, y: number }} point
+     * @param {any} dc @param {{ x: number, y: number }} given
      * @param {boolean} toDevice
      */
-    const transform = (dc, point, toDevice)=>{
+    const transform = (dc, given, toDevice)=>{
+        const world = dc.world ?? null;
+        // The world transform comes before the page's on the way to the
+        // device, and is undone after it on the way back.
+        const point = world && toDevice ? {
+            x: Math.round(world[0] * given.x + world[2] * given.y + world[4]),
+            y: Math.round(world[1] * given.x + world[3] * given.y + world[5]),
+        } : given;
         const [from, to, fromExt, toExt] = toDevice
             ? [dc.windowOrg, dc.viewportOrg, dc.windowExt, dc.viewportExt]
             : [dc.viewportOrg, dc.windowOrg, dc.viewportExt, dc.windowExt];
@@ -900,7 +1106,58 @@ export function createGdiFunctions(host){
         {
             result.x = edge - result.x;
         }
+        if (world && !toDevice)
+        {
+            const [m11, m12, m21, m22, dx, dy] = world;
+            const det = m11 * m22 - m12 * m21;
+            const x0 = result.x - dx;
+            const y0 = result.y - dy;
+            return { x: Math.round((m22 * x0 - m21 * y0) / det),
+                y: Math.round((m11 * y0 - m12 * x0) / det) };
+        }
         return result;
+    };
+
+    /** @param {number} address @returns {number[]} an XFORM's six floats */
+    const readXform = address=>{
+        const bytes = host.readMemory(address, 24);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, 24);
+        return Array.from({ length: 6 }, (_, index)=>view.getFloat32(index * 4, true));
+    };
+
+    /** @param {number} address @param {readonly number[]} xform */
+    const writeXform = (address, xform)=>{
+        const bytes = new Uint8Array(24);
+        const view = new DataView(bytes.buffer);
+        xform.forEach((value, index)=>view.setFloat32(index * 4, value, true));
+        host.writeMemory(address, bytes);
+    };
+
+    /**
+     * a then b, as XFORMs compose: a point goes through a first.
+     *
+     * @param {readonly number[]} a @param {readonly number[]} b
+     */
+    const compose = (a, b)=>[
+        a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3],
+        a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3],
+        a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5],
+    ];
+
+    /**
+     * Keeps a DC's world transform, none for the identity; one the drawing
+     * layer does not apply is reported.
+     *
+     * @param {any} dc @param {readonly number[]} xform
+     */
+    const setWorld = (dc, xform)=>{
+        const identity = xform.every((value, index)=>value === IDENTITY_XFORM[index]);
+        dc.world = identity ? null : xform;
+        if (!identity)
+        {
+            host.divergence?.('SetWorldTransform',
+                'the transform maps coordinates but drawing does not apply it');
+        }
     };
 
     /**
@@ -983,6 +1240,56 @@ export function createGdiFunctions(host){
 
     /** @param {any} dc @returns {import('./structs.js').TextMetricFields} */
     const currentMetrics = dc=>metricsOf(currentFont(dc));
+
+    /** GetGlyphIndices in either width. @param {number[]} args @param {boolean} wide */
+    const glyphIndices = ([handle, text, count, out, flags], wide)=>{
+        const dc = dcOf(handle);
+        if (!dc || (count | 0) < 0 || (text >>> 0) === 0 || (out >>> 0) === 0)
+        {
+            return GDI_ERROR;
+        }
+        host.divergence?.(wide ? 'GetGlyphIndicesW' : 'GetGlyphIndicesA',
+            'a glyph index is the character code, not the index in the font');
+        const { firstChar, lastChar, defaultChar } = currentMetrics(dc);
+        const bytes = host.readMemory(text >>> 0, (count | 0) * (wide ? 2 : 1));
+        const indices = new Uint8Array((count | 0) * 2);
+        const view = new DataView(indices.buffer);
+        for (let index = 0; index < (count | 0); index++)
+        {
+            const code = wide ? bytes[index * 2] | bytes[index * 2 + 1] << 8 : bytes[index];
+            const inside = code >= firstChar && code <= lastChar;
+            view.setUint16(index * 2, inside ? code
+                : (flags & GGI_MARK_NONEXISTING_GLYPHS) !== 0 ? 0xffff : defaultChar, true);
+        }
+        host.writeMemory(out >>> 0, indices);
+        return count | 0;
+    };
+
+    /** GetGlyphOutline in either width. @param {number[]} args @param {string} api */
+    const glyphOutline = ([handle, char, format, metrics, , , matrix], api)=>{
+        const dc = dcOf(handle);
+        if (!dc || (matrix >>> 0) === 0 || (metrics >>> 0) === 0)
+        {
+            return GDI_ERROR;
+        }
+        if (((format >>> 0) & ~(GGO_GLYPH_INDEX | GGO_UNHINTED)) !== GGO_METRICS)
+        {
+            host.divergence?.(api, 'the outline and bitmap of a glyph are not made; only metrics');
+            return GDI_ERROR;
+        }
+        const width = widthOf(dc, String.fromCharCode(char & 0xffff));
+        const { ascent } = currentMetrics(dc);
+        const bytes = new Uint8Array(GLYPHMETRICS_SIZE);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, Math.max(1, width), true);
+        view.setUint32(4, Math.max(1, ascent), true);
+        view.setInt32(8, 0, true);
+        view.setInt32(12, ascent, true);
+        view.setInt16(16, width, true);
+        view.setInt16(18, 0, true);
+        host.writeMemory(metrics >>> 0, bytes);
+        return 1;
+    };
 
     /**
      * The face a context's font is drawn in, as GetTextFace names it: the one
@@ -1523,9 +1830,11 @@ export function createGdiFunctions(host){
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                const [memory, format, width, height, pitch, , colors] = readU32s(host, desc, 7);
+                const [memory, format, width, height, pitch, device, colors] =
+                    readU32s(host, desc, 7);
                 const layout = KMT_FORMATS.get(format);
-                if (!layout || memory === 0 || width === 0 || height === 0
+                // The device DC the memory is to be compatible with is required.
+                if (!layout || !dcOf(device) || memory === 0 || width === 0 || height === 0
                     || pitch < Math.ceil((width * layout.bitCount) / 8)
                     || (layout.bitCount <= 8 && colors === 0))
                 {
@@ -1603,6 +1912,94 @@ export function createGdiFunctions(host){
                 destroyContext(dc);
                 return 1;
             },
+        },
+
+        /**
+         * HDC CreateEnhMetaFileA(HDC hdcRef, LPCSTR lpFilename, const RECT *lprc,
+         *                        LPCSTR lpDesc)
+         * HDC CreateEnhMetaFileW(HDC hdcRef, LPCWSTR lpFilename, const RECT *lprc,
+         *                        LPCWSTR lpDesc)
+         *
+         * A metafile in memory: a DC that accepts drawing over a memory DC's
+         * surface, which CloseEnhMetaFile turns into a metafile handle. Nothing
+         * drawn is recorded, so the metafile closes empty, and that is reported.
+         * One on disk is refused, reported likewise, rather than closed into a
+         * file that never gets written.
+         */
+        CreateEnhMetaFileA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([reference, file])=>createEnhMetaFile(reference, file, 'CreateEnhMetaFileA'),
+        },
+        CreateEnhMetaFileW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([reference, file])=>createEnhMetaFile(reference, file, 'CreateEnhMetaFileW'),
+        },
+
+        /** HENHMETAFILE CloseEnhMetaFile(HDC hdc) */
+        CloseEnhMetaFile: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                if (dc?.metafile !== 'enhmetafile')
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                destroyContext(dc);
+                return objects.create('enhmetafile', {});
+            },
+        },
+
+        /**
+         * HDC CreateMetaFileA(LPCSTR pszFile) / CreateMetaFileW(LPCWSTR)
+         *
+         * The Windows 3 metafile, made as the enhanced one is: in memory only,
+         * closing empty.
+         */
+        CreateMetaFileA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([file])=>createEnhMetaFile(0, file, 'CreateMetaFileA', 'metafile'),
+        },
+        CreateMetaFileW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([file])=>createEnhMetaFile(0, file, 'CreateMetaFileW', 'metafile'),
+        },
+
+        /** HMETAFILE CloseMetaFile(HDC hdc) */
+        CloseMetaFile: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                if (dc?.metafile !== 'metafile')
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                destroyContext(dc);
+                return objects.create('metafile', {});
+            },
+        },
+
+        /** BOOL DeleteMetaFile(HMETAFILE hmf) */
+        DeleteMetaFile: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>(objects.get(handle)?.type === 'metafile'
+                && objects.remove(handle) ? 1 : 0),
+        },
+
+        /** BOOL DeleteEnhMetaFile(HENHMETAFILE hmf) */
+        DeleteEnhMetaFile: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>(objects.get(handle)?.type === 'enhmetafile'
+                && objects.remove(handle) ? 1 : 0),
         },
 
         /** int SaveDC(HDC hdc) */
@@ -1734,6 +2131,10 @@ export function createGdiFunctions(host){
                 const dc = dcOf(handle);
                 if (dc)
                 {
+                    if (dc.metafile)
+                    {
+                        return dc.metafile === 'metafile' ? OBJ_METADC : OBJ_ENHMETADC;
+                    }
                     return dc.kind === 'memory' ? OBJ_MEMDC : OBJ_DC;
                 }
                 const type = OBJECT_TYPES[objects.get(handle)?.type ?? ''];
@@ -1772,6 +2173,34 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 return objects.create('pen', fields);
+            },
+        },
+
+        /**
+         * HPEN ExtCreatePen(DWORD dwPenStyle, DWORD dwWidth, const LOGBRUSH *plbrush,
+         *                   DWORD dwStyleCount, const DWORD *lpStyle)
+         *
+         * A pen of a style and a brush's colour. A cosmetic pen is one pixel
+         * wide; only PS_USERSTYLE takes a dash table, and it must have one.
+         */
+        ExtCreatePen: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([style, width, brush, count, dashes])=>{
+                const kind = (style >>> 0) & PS_STYLE_MASK;
+                const geometric = ((style >>> 0) & PS_TYPE_MASK) === PS_GEOMETRIC;
+                const user = kind === PS_USERSTYLE;
+                if ((brush >>> 0) === 0 || kind > PS_ALTERNATE
+                    || (!geometric && (width >>> 0) !== 1)
+                    || (user ? (count >>> 0) === 0 || (dashes >>> 0) === 0 : (count >>> 0) !== 0))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const [, color] = readU32s(host, brush >>> 0, 2);
+                return objects.create('pen', {
+                    style: kind, width: width | 0, color: color >>> 0, extended: style >>> 0,
+                });
             },
         },
 
@@ -2472,6 +2901,103 @@ export function createGdiFunctions(host){
             handler: ([handle])=>dcOf(handle)?.layout ?? GDI_ERROR,
         },
 
+        /** int SetGraphicsMode(HDC hdc, int iMode) / int GetGraphicsMode(HDC hdc) */
+        SetGraphicsMode: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, mode])=>{
+                const dc = dcOf(handle);
+                if (!dc || ((mode | 0) !== GM_COMPATIBLE && (mode | 0) !== GM_ADVANCED))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                // Back to compatible only once the world transform is the identity.
+                if ((mode | 0) === GM_COMPATIBLE && dc.world)
+                {
+                    return 0;
+                }
+                const previous = dc.graphicsMode ?? GM_COMPATIBLE;
+                dc.graphicsMode = mode | 0;
+                return previous;
+            },
+        },
+        GetGraphicsMode: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                return dc ? dc.graphicsMode ?? GM_COMPATIBLE : 0;
+            },
+        },
+
+        /**
+         * BOOL SetWorldTransform(HDC hdc, const XFORM *lpxf)
+         * BOOL GetWorldTransform(HDC hdc, LPXFORM lpxf)
+         * BOOL ModifyWorldTransform(HDC hdc, const XFORM *lpxf, DWORD mode)
+         *
+         * A DC's world transform, which only GM_ADVANCED may change. It maps
+         * coordinates through LPtoDP and DPtoLP; the drawing layer does not
+         * apply it, and that is reported when one is set.
+         */
+        SetWorldTransform: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, xform])=>{
+                const dc = dcOf(handle);
+                if (!dc || (xform >>> 0) === 0 || dc.graphicsMode !== GM_ADVANCED)
+                {
+                    return 0;
+                }
+                const values = readXform(xform >>> 0);
+                if (values[0] * values[3] - values[1] * values[2] === 0)
+                {
+                    return 0;
+                }
+                setWorld(dc, values);
+                return 1;
+            },
+        },
+        GetWorldTransform: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, xform])=>{
+                const dc = dcOf(handle);
+                if (!dc || (xform >>> 0) === 0)
+                {
+                    return 0;
+                }
+                writeXform(xform >>> 0, dc.world ?? IDENTITY_XFORM);
+                return 1;
+            },
+        },
+        ModifyWorldTransform: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, xform, mode])=>{
+                const dc = dcOf(handle);
+                if (!dc || dc.graphicsMode !== GM_ADVANCED)
+                {
+                    return 0;
+                }
+                if ((mode >>> 0) === MWT_IDENTITY)
+                {
+                    setWorld(dc, IDENTITY_XFORM);
+                    return 1;
+                }
+                if ((xform >>> 0) === 0 || ((mode >>> 0) !== MWT_LEFTMULTIPLY
+                    && (mode >>> 0) !== MWT_RIGHTMULTIPLY))
+                {
+                    return 0;
+                }
+                const given = readXform(xform >>> 0);
+                const current = dc.world ?? IDENTITY_XFORM;
+                setWorld(dc, (mode >>> 0) === MWT_LEFTMULTIPLY
+                    ? compose(given, current) : compose(current, given));
+                return 1;
+            },
+        },
+
         /** int GetMapMode(HDC hdc) */
         GetMapMode: {
             argBytes: 4,
@@ -2624,7 +3150,6 @@ export function createGdiFunctions(host){
          *
          * HMETAFILE SetMetaFileBitsEx(UINT cbBuffer, const BYTE *lpData)
          * BOOL PlayMetaFile(HDC hdc, HMETAFILE hmf)
-         * BOOL DeleteMetaFile(HMETAFILE hmf)
          */
         SetMetaFileBitsEx: {
             argBytes: 8,
@@ -2633,11 +3158,6 @@ export function createGdiFunctions(host){
 
         PlayMetaFile: {
             argBytes: 8,
-            handler: ()=>0,
-        },
-
-        DeleteMetaFile: {
-            argBytes: 4,
             handler: ()=>0,
         },
 
@@ -2877,6 +3397,116 @@ export function createGdiFunctions(host){
             },
         },
 
+        /**
+         * UINT GetBoundsRect(HDC hdc, LPRECT lprect, UINT flags)
+         *
+         * The bounds in logical units, DCB_SET when there are any and
+         * DCB_RESET with an empty rectangle when not; DCB_RESET empties them
+         * after they are read. Without a rectangle to write, it answers zero.
+         */
+        GetBoundsRect: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, rect, flags])=>{
+                const dc = dcOf(handle);
+                if (!dc || (flags & ~DCB_RESET) !== 0)
+                {
+                    return 0;
+                }
+                const held = dc.boundingRect;
+                if ((flags & DCB_RESET) !== 0)
+                {
+                    dc.boundingRect = null;
+                }
+                if ((rect >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const corners = held
+                    ? [transform(dc, { x: held.left, y: held.top }, false),
+                        transform(dc, { x: held.right, y: held.bottom }, false)]
+                    : [{ x: 0, y: 0 }, { x: 0, y: 0 }];
+                writeU32s(host, rect >>> 0,
+                    [corners[0].x, corners[0].y, corners[1].x, corners[1].y]);
+                return held ? DCB_SET : DCB_RESET;
+            },
+        },
+
+        /**
+         * UINT SetBoundsRect(HDC hdc, const RECT *lprect, UINT flags)
+         *
+         * The bounds are kept in device units: DCB_RESET empties them,
+         * DCB_ACCUMULATE adds the rectangle given in logical units, an empty
+         * one adding nothing, and DCB_ENABLE and DCB_DISABLE turn the
+         * accumulation on and off. It answers the state before: whether there
+         * were bounds, and whether they were accumulating. Drawing does not
+         * accumulate here, so an enabled DC holds only what was set.
+         */
+        SetBoundsRect: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, rect, flags])=>{
+                const dc = dcOf(handle);
+                if (!dc || (flags & ~(DCB_SET | DCB_ENABLE | DCB_DISABLE)) !== 0)
+                {
+                    return 0;
+                }
+                const before = (dc.boundingRect ? DCB_SET : DCB_RESET)
+                    | (dc.boundsState === DCB_ENABLE ? DCB_ENABLE : DCB_DISABLE);
+                if ((flags & DCB_RESET) !== 0)
+                {
+                    dc.boundingRect = null;
+                }
+                if ((flags & DCB_ACCUMULATE) !== 0 && (rect >>> 0) !== 0)
+                {
+                    const [left, top, right, bottom] = readU32s(host, rect >>> 0, 4)
+                        .map(value=>value | 0);
+                    const a = transform(dc, { x: left, y: top }, true);
+                    const b = transform(dc, { x: right, y: bottom }, true);
+                    const added = { left: Math.min(a.x, b.x), top: Math.min(a.y, b.y),
+                        right: Math.max(a.x, b.x), bottom: Math.max(a.y, b.y) };
+                    if (left < right && top < bottom)
+                    {
+                        const was = dc.boundingRect;
+                        dc.boundingRect = was ? {
+                            left: Math.min(was.left, added.left),
+                            top: Math.min(was.top, added.top),
+                            right: Math.max(was.right, added.right),
+                            bottom: Math.max(was.bottom, added.bottom),
+                        } : added;
+                    }
+                }
+                if ((flags & DCB_ENABLE) !== 0)
+                {
+                    dc.boundsState = DCB_ENABLE;
+                }
+                else if ((flags & DCB_DISABLE) !== 0)
+                {
+                    dc.boundsState = DCB_DISABLE;
+                }
+                return before;
+            },
+        },
+
+        /**
+         * HDC ResetDCA/W(HDC hdc, const DEVMODEA/W *lpInitData)
+         *
+         * A DC put back to the device mode given. There is one display mode
+         * here and a DC's own settings are the program's to change, so nothing
+         * is reset; the call answers the DC's own handle, which is what Windows
+         * answers with on success.
+         */
+        ResetDCA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>dcOf(handle) ? handle >>> 0 : 0,
+        },
+        ResetDCW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>dcOf(handle) ? handle >>> 0 : 0,
+        },
+
         /** BOOL GetTextMetricsW(HDC hdc, LPTEXTMETRICW lptm) */
         GetTextMetricsW: {
             argBytes: 8,
@@ -2908,6 +3538,143 @@ export function createGdiFunctions(host){
             },
         },
 
+        /**
+         * BOOL GetTextExtentExPointA/W/I(HDC hdc, LPCSTR/LPCWSTR/LPWORD text, int count,
+         *   int nMaxExtent, LPINT lpnFit, LPINT lpnDx, LPSIZE lpSize)
+         *
+         * The whole string's extent, each prefix's extent in lpnDx, and in
+         * lpnFit how many characters fit within nMaxExtent; the I form takes
+         * glyph indices, which are characters here.
+         */
+        GetTextExtentExPointA: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: args=>textExtentEx(args, (string, count)=>decodeAnsi(
+                host.readMemory(string, count))),
+        },
+        GetTextExtentExPointW: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: args=>textExtentEx(args, (string, count)=>wideText(string, count, true)),
+        },
+        GetTextExtentExPointI: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: args=>textExtentEx(args, (string, count)=>wideText(string, count, true)),
+        },
+
+        /**
+         * UINT GetOutlineTextMetricsA/W(HDC hdc, UINT cjCopy, LPOUTLINETEXTMETRIC potm)
+         *
+         * Zero: a font here reports no TMPF_TRUETYPE, and a font that is not
+         * an outline font has no outline metrics. A TrueType face on Windows
+         * would answer them, so the refusal is reported.
+         */
+        GetOutlineTextMetricsA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle])=>noOutlineMetrics(handle, 'GetOutlineTextMetricsA'),
+        },
+        GetOutlineTextMetricsW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle])=>noOutlineMetrics(handle, 'GetOutlineTextMetricsW'),
+        },
+
+        /**
+         * DWORD GetKerningPairsA/W(HDC hdc, DWORD nPairs, LPKERNINGPAIR lpKernPair)
+         *
+         * None: a font here spaces every pair of characters by their widths.
+         */
+        GetKerningPairsA: {
+            argBytes: 12,
+            handler: ()=>0,
+        },
+        GetKerningPairsW: {
+            argBytes: 12,
+            handler: ()=>0,
+        },
+
+        /**
+         * DWORD GetFontUnicodeRanges(HDC hdc, LPGLYPHSET lpgs)
+         *
+         * The one range a font here covers, from its first character to its
+         * last; with no buffer, the size the GLYPHSET needs.
+         */
+        GetFontUnicodeRanges: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                const size = 20;
+                if ((out >>> 0) !== 0)
+                {
+                    const { firstChar, lastChar } = currentMetrics(dc);
+                    const glyphs = lastChar - firstChar + 1;
+                    writeU32s(host, out >>> 0, [size, 0, glyphs, 1,
+                        (firstChar & 0xffff | glyphs << 16) >>> 0]);
+                }
+                return size;
+            },
+        },
+
+        /**
+         * DWORD GetFontData(HDC hdc, DWORD dwTable, DWORD dwOffset, PVOID pvBuffer, DWORD cjBuffer)
+         *
+         * GDI_ERROR: a font here is no TrueType file with tables to read.
+         */
+        GetFontData: {
+            argBytes: 20,
+            handler: ()=>GDI_ERROR,
+        },
+
+        /**
+         * BOOL SetTextJustification(HDC hdc, int extra, int count)
+         *
+         * Kept on the DC; the extra space is not spread through the breaks
+         * text is drawn with, which is reported when there is any.
+         */
+        SetTextJustification: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, extra, count])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                dc.justification = { extra: extra | 0, count: count | 0 };
+                if ((extra | 0) !== 0)
+                {
+                    host.divergence?.('SetTextJustification', 'the extra space is not applied');
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * DWORD GetCharacterPlacementA/W(HDC hdc, LPCSTR/LPCWSTR lpString, int nCount,
+         *   int nMexExtent, LPGCP_RESULTS lpResults, DWORD dwFlags)
+         *
+         * Left to right, one glyph per character, placed by its advance:
+         * the arrays the results name are filled as far as they reach, and
+         * the answer is the string's extent, width low and height high.
+         */
+        GetCharacterPlacementA: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>characterPlacement(args, false),
+        },
+        GetCharacterPlacementW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>characterPlacement(args, true),
+        },
+
         /** BOOL GetCharWidth32W(HDC hdc, UINT iFirst, UINT iLast, LPINT lpBuffer) */
         GetCharWidth32W: {
             argBytes: 16,
@@ -2932,6 +3699,55 @@ export function createGdiFunctions(host){
                     width=>[0, width, 0], 0xff),
         },
 
+        /**
+         * BOOL GetCharABCWidthsI(HDC hdc, UINT giFirst, UINT cgi, LPWORD pgi, LPABC pabc)
+         * BOOL GetCharWidthI(HDC hdc, UINT giFirst, UINT cgi, LPWORD pgi, LPINT piWidths)
+         *
+         * The widths by glyph index -- the list given, or the run from the
+         * first -- where an index is the character GetGlyphIndices named.
+         */
+        GetCharABCWidthsI: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>glyphWidths(args, ABC_SIZE, width=>[0, width, 0]),
+        },
+        GetCharWidthI: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>glyphWidths(args, 4, width=>[width]),
+        },
+
+        /**
+         * BOOL GetCharABCWidthsFloatA/W(HDC, UINT iFirst, UINT iLast, LPABCFLOAT)
+         * BOOL GetCharWidthFloatA/W(HDC, UINT iFirst, UINT iLast, PFLOAT)
+         *
+         * The same widths as floats; a null DC or buffer is refused.
+         */
+        GetCharABCWidthsFloatA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, first, last, out])=>writeWidths(handle, first >>> 0, last >>> 0,
+                out, ABC_SIZE, width=>[0, floatBits(width), 0], 0xff),
+        },
+        GetCharABCWidthsFloatW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, first, last, out])=>writeWidths(handle, first >>> 0, last >>> 0,
+                out, ABC_SIZE, width=>[0, floatBits(width), 0], 0xffff),
+        },
+        GetCharWidthFloatA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, first, last, out])=>writeWidths(handle, first >>> 0, last >>> 0,
+                out, 4, width=>[floatBits(width)], 0xff),
+        },
+        GetCharWidthFloatW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, first, last, out])=>writeWidths(handle, first >>> 0, last >>> 0,
+                out, 4, width=>[floatBits(width)], 0xffff),
+        },
+
         /** BOOL GetCharABCWidthsW(HDC hdc, UINT wFirst, UINT wLast, LPABC lpABC) */
         GetCharABCWidthsW: {
             argBytes: 16,
@@ -2939,6 +3755,44 @@ export function createGdiFunctions(host){
             handler: ([handle, first, last, out])=>
                 writeWidths(handle, first >>> 0, last >>> 0, out, ABC_SIZE,
                     width=>[0, width, 0], 0xffff),
+        },
+
+        /**
+         * DWORD GetGlyphOutlineA/W(HDC hdc, UINT uChar, UINT fuFormat, LPGLYPHMETRICS lpgm,
+         *   DWORD cjBuffer, LPVOID pvBuffer, const MAT2 *lpmat2)
+         *
+         * A glyph's metrics, from the same measurements text is laid out
+         * with. Its outline or bitmap is the font engine's, which is not
+         * reached from here: those formats are refused, and that reported.
+         */
+        GetGlyphOutlineA: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: args=>glyphOutline(args, 'GetGlyphOutlineA'),
+        },
+        GetGlyphOutlineW: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: args=>glyphOutline(args, 'GetGlyphOutlineW'),
+        },
+
+        /**
+         * DWORD GetGlyphIndicesA/W(HDC hdc, LPCSTR/LPCWSTR lpstr, int c, LPWORD pgi, DWORD fl)
+         *
+         * A character's glyph is its own code within the font's range: the
+         * font engine's table of glyphs is not reached from here, which is
+         * reported. One outside the range is the default character, or
+         * 0xffff under GGI_MARK_NONEXISTING_GLYPHS.
+         */
+        GetGlyphIndicesA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>glyphIndices(args, false),
+        },
+        GetGlyphIndicesW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>glyphIndices(args, true),
         },
 
         /** BOOL GetTextMetricsA(HDC hdc, LPTEXTMETRICA lptm) */

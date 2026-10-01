@@ -28,6 +28,7 @@
 
 import { createCountedStringFunctions } from './strings.js';
 import { createQueryFunctions } from './query.js';
+import { createImageFunctions } from './image.js';
 import { createIntegerFunctions } from './integer.js';
 import { createWaitFunctions } from './waits.js';
 import { createPathFunctions } from './paths.js';
@@ -114,6 +115,8 @@ const KERNEL32_ALIASES = Object.freeze({
  * @property {import('../kernel32/versions.js').WindowsVersion} [windows]
  *           The machine's Windows, for what RtlGetVersion cannot read from the
  *           process block. Absent, the default.
+ * @property {(handle: number) => string | null} [handleType]
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /**
@@ -128,6 +131,9 @@ const alias = (table, names)=>Object.fromEntries(
     Object.entries(names)
         .filter(([, from])=>table[from] !== undefined)
         .map(([to, from])=>[to, table[from]]));
+
+/** Where a thread block keeps its process's block. */
+const TEB_PEB = 0x30;
 
 /**
  * Builds the function table: name -> { argBytes, handler }.
@@ -172,12 +178,16 @@ export function createNtdllFunctions(host){
             free,
         }),
 
+        ...createImageFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
+
         ...createQueryFunctions({
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             teb: host.teb,
             arena: host.arena,
             version: host.windows,
+            handleType: host.handleType,
+            divergence: host.divergence,
         }),
 
         ...(host.setRegisters
@@ -228,6 +238,20 @@ export function createNtdllFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([status])=>toDosError(status),
+        },
+
+        /** PPEB RtlGetCurrentPeb(void): where the running thread's block says it is. */
+        RtlGetCurrentPeb: {
+            argBytes: 0,
+            handler: ()=>{
+                const teb = host.teb();
+                if (teb === 0)
+                {
+                    return 0;
+                }
+                const bytes = host.readMemory(teb + TEB_PEB, 4);
+                return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+            },
         },
 
         /**

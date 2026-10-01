@@ -36,15 +36,26 @@ import { decodeAnsi, encodeAnsi } from './locale.js';
 const ERROR_SUCCESS = 0;
 const ERROR_INVALID_FUNCTION = 1;
 const ERROR_FILE_NOT_FOUND = 2;
+/** What CreateSymbolicLink answers a user who may not make links. */
+const ERROR_PRIVILEGE_NOT_HELD = 1314;
 const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_ACCESS_DENIED = 5;
 /** CreateFile's dwShareMode bit that lets another handle write the file too. */
 const FILE_SHARE_WRITE = 0x2;
+/** A buffer the call cannot read from, as NT answers a null one. */
+const ERROR_INVALID_USER_BUFFER = 1784;
+/** What NT answers a read into a null buffer. */
+const ERROR_NOACCESS = 998;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NO_MORE_FILES = 18;
 const ERROR_WRITE_PROTECT = 19;
 const ERROR_FILE_EXISTS = 80;
 const ERROR_INVALID_PARAMETER = 87;
+/** The unit a FILE_SEGMENT_ELEMENT names: one page of the caller's memory. */
+const PAGE_SIZE = 4096;
+/** GetFileAttributesEx's one information level. */
+const GET_FILE_EX_INFO_STANDARD = 0;
+const WIN32_FILE_ATTRIBUTE_DATA_SIZE = 36;
 const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_DIR_NOT_EMPTY = 145;
@@ -108,6 +119,14 @@ const FILE_DELETE_ON_CLOSE = 0x1000;
 
 /** The statuses the native opens answer with. */
 const STATUS_SUCCESS = 0;
+const STATUS_BUFFER_OVERFLOW = 0x80000005;
+const STATUS_INVALID_INFO_CLASS = 0xc0000003;
+const STATUS_INVALID_DEVICE_REQUEST = 0xc0000010;
+const STATUS_INFO_LENGTH_MISMATCH = 0xc0000004;
+/** The FILE_INFORMATION_CLASS values NtQueryInformationFile answers. */
+const FILE_STANDARD_INFORMATION = 5;
+const FILE_NAME_INFORMATION = 9;
+const FILE_POSITION_INFORMATION = 14;
 const STATUS_UNSUCCESSFUL = 0xc0000001;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
 const STATUS_INVALID_HANDLE = 0xc0000008;
@@ -298,12 +317,14 @@ export const WIN32_FIND_DATAA = Object.freeze({
  *           MAX_PATH characters is twice that.
  * @property {FileSystem} files
  * @property {(code: number) => void} setLastError
+ * @property {(api: string, detail: string) => void} [divergence]
  * @property {(handle: number, text: string) => void} writeConsole
  *           Where a write to a standard handle goes instead of the filesystem.
  * @property {{ open: (type: string, object: any) => number,
  *              resolve: (handle: number, type?: string) => any,
  *              close: (handle: number) => any,
- *              typeOf?: (handle: number) => string | undefined }} handles
+ *              typeOf?: (handle: number) => string | undefined,
+ *              holds?: (object: any) => boolean }} handles
  *           The one handle table, shared with every other kind of object.
  * @property {() => any} [currentThread]
  *           Whose call this is, for an answer that arrives after the thread has
@@ -452,9 +473,14 @@ export function createFileFunctions(host){
         return text.length;
     };
 
-    /** @param {number} pointer */
+    /**
+     * A name longer than MAX_PATH is still a name: it is read to its end,
+     * and then found or not as any other is.
+     *
+     * @param {number} pointer
+     */
     const pathArgument = pointer=>fullPath(
-        pointer === 0 ? '' : host.readCString(pointer >>> 0, MAX_PATH));
+        pointer === 0 ? '' : host.readCString(pointer >>> 0, MAX_PATH_LIST));
 
     /**
      * Turns what the guest wrote into the absolute path the filesystem takes.
@@ -645,14 +671,12 @@ export function createFileFunctions(host){
     };
 
     /**
-     * Fills in a whole WIN32_FIND_DATAA. Written in one piece so that no field
-     * can be left holding whatever the caller's buffer had in it -- the times
-     * and the alternate 8.3 name we have nothing to say about are zeros the
-     * guest can read, not gaps.
+     * A WIN32_FIND_DATAA with its head filled -- attributes, the three times,
+     * the size -- which is also the whole of a WIN32_FILE_ATTRIBUTE_DATA.
      *
-     * @param {number} address @param {DirectoryEntry} entry
+     * @param {DirectoryEntry | FileStat} entry
      */
-    const writeFindData = (address, entry)=>{
+    const findDataHead = entry=>{
         const data = new Uint8Array(WIN32_FIND_DATAA.SIZE);
         const view = new DataView(data.buffer);
         view.setUint32(WIN32_FIND_DATAA.dwFileAttributes, attributesOf(entry), true);
@@ -666,6 +690,19 @@ export function createFileFunctions(host){
         const size = entry.size ?? 0;
         view.setUint32(WIN32_FIND_DATAA.nFileSizeHigh, high(size), true);
         view.setUint32(WIN32_FIND_DATAA.nFileSizeLow, low(size), true);
+        return data;
+    };
+
+    /**
+     * Fills in a whole WIN32_FIND_DATAA. Written in one piece so that no field
+     * can be left holding whatever the caller's buffer had in it -- the times
+     * and the alternate 8.3 name we have nothing to say about are zeros the
+     * guest can read, not gaps.
+     *
+     * @param {number} address @param {DirectoryEntry} entry
+     */
+    const writeFindData = (address, entry)=>{
+        const data = findDataHead(entry);
         data.set(encodeAnsi(entry.name.slice(0, MAX_PATH - 1)), WIN32_FIND_DATAA.cFileName);
         host.writeMemory(address, data);
     };
@@ -951,6 +988,62 @@ export function createFileFunctions(host){
     });
 
     /**
+     * The volume has no hard links, as a FAT volume has none, and it answers
+     * as FAT does; NTFS would link the name, so the refusal is reported.
+     */
+    const createHardLink = bothForms(12, ([name, existing], text)=>{
+        const target = text.path(existing);
+        if (!files.stat(target)?.exists)
+        {
+            return fail(missing(target));
+        }
+        host.divergence?.('CreateHardLink', `no hard links; ${text.path(name)} not linked`);
+        return fail(ERROR_INVALID_FUNCTION);
+    });
+
+    /**
+     * The volume has no reparse points to make a link of; the caller is
+     * answered as a user without the privilege to create one is.
+     */
+    const createSymbolicLink = bothForms(12, ([name], text)=>{
+        host.divergence?.('CreateSymbolicLink', `no symbolic links; ${text.path(name)} not made`);
+        return fail(ERROR_PRIVILEGE_NOT_HELD);
+    });
+
+    /**
+     * ReplaceFile: the replacement takes the replaced file's name, and the
+     * replaced file goes to the backup name when one is given. Either file
+     * read-only refuses the whole replacement before anything moves.
+     */
+    const replaceFile = bothForms(24, ([replaced, replacement, backup], text)=>{
+        const target = text.path(replaced);
+        const source = text.path(replacement);
+        const old = files.stat(target);
+        const incoming = files.stat(source);
+        if (!old?.exists || !incoming?.exists)
+        {
+            return fail(ERROR_FILE_NOT_FOUND);
+        }
+        if (readOnlyFile(old) || readOnlyFile(incoming))
+        {
+            return fail(ERROR_ACCESS_DENIED);
+        }
+        if ((backup >>> 0) !== 0)
+        {
+            const kept = renamePath(target, text.path(backup), true);
+            if (kept !== 1)
+            {
+                return kept;
+            }
+        }
+        else if (!files.remove(target))
+        {
+            return fail(denied(target));
+        }
+        return renamePath(source, target, true);
+    });
+
+    /**
      * The copy every spelling shares. Copied through the ordinary read and
      * write path rather than by asking the filesystem for a copy, because a
      * copy that is not a read followed by a write is a second implementation
@@ -1150,6 +1243,23 @@ export function createFileFunctions(host){
             return fail(missing(path), INVALID_FILE_ATTRIBUTES);
         }
         return attributesOf(entry);
+    });
+
+    /** WIN32_FILE_ATTRIBUTE_DATA is the head of a WIN32_FIND_DATA. */
+    const getFileAttributesEx = bothForms(12, ([name, level, out], text)=>{
+        if ((level >>> 0) !== GET_FILE_EX_INFO_STANDARD)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const path = text.path(name);
+        const entry = files.stat(path);
+        if (!entry || !entry.exists)
+        {
+            return fail(missing(path));
+        }
+        host.writeMemory(out >>> 0,
+            findDataHead(entry).subarray(0, WIN32_FILE_ATTRIBUTE_DATA_SIZE));
+        return 1;
     });
 
     const setFileAttributes = bothForms(8, ([name, attributes], text)=>{
@@ -1710,7 +1820,8 @@ export function createFileFunctions(host){
                     locks.set(key, kept);
                 }
             }
-            if (closed?.deleteOnClose)
+            // With the last handle to the file, not with a duplicate of it.
+            if (closed?.deleteOnClose && !host.handles.holds?.(closed))
             {
                 files.remove(closed.path);
             }
@@ -1736,8 +1847,11 @@ export function createFileFunctions(host){
      * @param {number} block @param {number} status @param {number} information
      */
     const report = (block, status, information)=>{
-        writeDword(block, status);
-        writeDword(block + 4, information);
+        if (block !== 0)
+        {
+            writeDword(block, status);
+            writeDword(block + 4, information);
+        }
         return status;
     };
 
@@ -1796,6 +1910,94 @@ export function createFileFunctions(host){
         },
 
         NtCreateFile: { argBytes: 44, handler: ntCreateFile },
+
+        /**
+         * NTSTATUS NtFsControlFile(HANDLE, HANDLE Event, PIO_APC_ROUTINE, PVOID,
+         *   PIO_STATUS_BLOCK, ULONG FsControlCode, PVOID, ULONG, PVOID, ULONG)
+         *
+         * The volume answers no file-system control: reparse points,
+         * compression and the rest are the requests of a volume it is not.
+         */
+        NtFsControlFile: {
+            argBytes: 40,
+            /** @param {number[]} args */
+            handler: ([handle, , , , block, code])=>{
+                if (!object(handle, 'file'))
+                {
+                    return report(block >>> 0, STATUS_INVALID_HANDLE, 0);
+                }
+                host.divergence?.('NtFsControlFile',
+                    `control code 0x${(code >>> 0).toString(16)} is not one this volume answers`);
+                return report(block >>> 0, STATUS_INVALID_DEVICE_REQUEST, 0);
+            },
+        },
+
+        /**
+         * NTSTATUS NtQueryInformationFile(HANDLE, PIO_STATUS_BLOCK, PVOID,
+         *                                 ULONG Length, FILE_INFORMATION_CLASS)
+         *
+         * The name, the size and the position of an open file; a class
+         * this surface keeps nothing for is refused, and the refusal said.
+         */
+        NtQueryInformationFile: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, block, out, length, kind])=>{
+                const file = object(handle, 'file');
+                if (!file)
+                {
+                    return report(block >>> 0, STATUS_INVALID_HANDLE, 0);
+                }
+                /** @type {Uint8Array} */
+                let data;
+                switch (kind >>> 0)
+                {
+                    case FILE_STANDARD_INFORMATION: {
+                        const size = BigInt(files.stat(file.path)?.size ?? 0);
+                        data = new Uint8Array(24);
+                        const view = new DataView(data.buffer);
+                        // AllocationSize, EndOfFile, NumberOfLinks, DeletePending, Directory.
+                        view.setBigUint64(0, size, true);
+                        view.setBigUint64(8, size, true);
+                        view.setUint32(16, 1, true);
+                        data[20] = file.deleteOnClose ? 1 : 0;
+                        break;
+                    }
+                    case FILE_NAME_INFORMATION: {
+                        // The path from the volume's root, without its drive.
+                        const name = String(file.path).replace(/^[A-Za-z]:/, '');
+                        data = new Uint8Array(4 + name.length * 2);
+                        new DataView(data.buffer).setUint32(0, name.length * 2, true);
+                        for (let at = 0; at < name.length; at++)
+                        {
+                            data[4 + at * 2] = name.charCodeAt(at) & 0xff;
+                            data[5 + at * 2] = name.charCodeAt(at) >>> 8;
+                        }
+                        break;
+                    }
+                    case FILE_POSITION_INFORMATION:
+                        data = new Uint8Array(8);
+                        new DataView(data.buffer).setBigUint64(0, BigInt(file.position), true);
+                        break;
+                    default:
+                        host.divergence?.('NtQueryInformationFile',
+                            `information class ${kind >>> 0} is not kept`);
+                        return report(block >>> 0, STATUS_INVALID_INFO_CLASS, 0);
+                }
+                if ((length >>> 0) < data.length)
+                {
+                    const fits = kind >>> 0 === FILE_NAME_INFORMATION && (length >>> 0) >= 4;
+                    if (fits)
+                    {
+                        host.writeMemory(out >>> 0, data.subarray(0, length >>> 0));
+                    }
+                    return report(block >>> 0, fits ? STATUS_BUFFER_OVERFLOW
+                        : STATUS_INFO_LENGTH_MISMATCH, fits ? length >>> 0 : 0);
+                }
+                host.writeMemory(out >>> 0, data);
+                return report(block >>> 0, STATUS_SUCCESS, data.length);
+            },
+        },
 
         /**
          * NTSTATUS NtOpenFile(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
@@ -1871,6 +2073,11 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
+                if ((buffer >>> 0) === 0 && (length >>> 0) !== 0)
+                {
+                    writeDwordIf(read >>> 0, 0);
+                    return fail(ERROR_NOACCESS);
+                }
                 const pointer = overlapped >>> 0;
                 const at = pointer !== 0 && host.ports
                     ? host.ports.offsetOf(pointer)
@@ -1943,6 +2150,11 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
+                if ((buffer >>> 0) === 0 && count !== 0)
+                {
+                    writeDwordIf(written >>> 0, 0);
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
                 // Copied, not passed on: the memory layer may hand back a view
                 // onto guest memory, and what the filesystem stores outlives
                 // this call.
@@ -1965,6 +2177,75 @@ export function createFileFunctions(host){
                     host.ports?.completed(handle >>> 0, stored, pointer);
                 }
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL WriteFileGather(HANDLE, FILE_SEGMENT_ELEMENT aSegmentArray[],
+         *   DWORD nNumberOfBytesToWrite, LPDWORD lpReserved, LPOVERLAPPED)
+         *
+         * One transfer at the OVERLAPPED's offset from a page per segment,
+         * completed at once and reported once, as an overlapped WriteFile is.
+         */
+        WriteFileGather: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, segments, length, , overlapped])=>{
+                const file = object(handle, 'file');
+                if (!file || (overlapped >>> 0) === 0 || !host.ports)
+                {
+                    return fail(file ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
+                }
+                if (!file.write)
+                {
+                    return fail(ERROR_ACCESS_DENIED);
+                }
+                const bytes = new Uint8Array(length >>> 0);
+                for (let at = 0; at < bytes.length; at += PAGE_SIZE)
+                {
+                    const page = readDword((segments >>> 0) + at / PAGE_SIZE * 8);
+                    bytes.set(host.readMemory(page, Math.min(PAGE_SIZE, bytes.length - at)), at);
+                }
+                const stored = files.write(file.node, host.ports.offsetOf(overlapped >>> 0), bytes);
+                host.ports.completed(handle >>> 0, stored, overlapped >>> 0);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL ReadFileScatter(HANDLE, FILE_SEGMENT_ELEMENT aSegmentArray[],
+         *   DWORD nNumberOfBytesToRead, LPDWORD lpReserved, LPOVERLAPPED)
+         *
+         * The read WriteFileGather's write is the mirror of: a page per segment.
+         */
+        ReadFileScatter: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, segments, length, , overlapped])=>{
+                const file = object(handle, 'file');
+                const ports = host.ports;
+                if (!file || (overlapped >>> 0) === 0 || !ports)
+                {
+                    return fail(file ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
+                }
+                if (!file.read)
+                {
+                    return fail(ERROR_ACCESS_DENIED);
+                }
+                /** @param {Uint8Array} bytes */
+                const deliver = bytes=>{
+                    for (let at = 0; at < bytes.length; at += PAGE_SIZE)
+                    {
+                        const page = readDword((segments >>> 0) + at / PAGE_SIZE * 8);
+                        host.writeMemory(page, bytes.subarray(at, at + PAGE_SIZE));
+                    }
+                    ports.completed(handle >>> 0, bytes.length, overlapped >>> 0);
+                    return 1;
+                };
+                const bytes = files.read(file.node, ports.offsetOf(overlapped >>> 0), length >>> 0);
+                return typeof (/** @type {any} */ (bytes))?.then === 'function'
+                    ? /** @type {Promise<Uint8Array>} */ (bytes).then(deliver)
+                    : deliver(/** @type {Uint8Array} */ (bytes));
             },
         },
 
@@ -2266,6 +2547,8 @@ export function createFileFunctions(host){
         /** DWORD GetFileAttributes(LPCSTR) -- one body, both spellings. */
         GetFileAttributesA: getFileAttributes.ansi,
         GetFileAttributesW: getFileAttributes.wide,
+        GetFileAttributesExA: getFileAttributesEx.ansi,
+        GetFileAttributesExW: getFileAttributesEx.wide,
 
         /** BOOL SetFileAttributes(LPCSTR, DWORD dwFileAttributes) -- one body, both spellings. */
         SetFileAttributesA: setFileAttributes.ansi,
@@ -2351,6 +2634,12 @@ export function createFileFunctions(host){
         GetTempFileNameA: getTempFileName.ansi,
         GetTempFileNameW: getTempFileName.wide,
 
+        CreateSymbolicLinkA: createSymbolicLink.ansi,
+        CreateSymbolicLinkW: createSymbolicLink.wide,
+        CreateHardLinkA: createHardLink.ansi,
+        CreateHardLinkW: createHardLink.wide,
+        ReplaceFileA: replaceFile.ansi,
+        ReplaceFileW: replaceFile.wide,
         /**
          * BOOL MoveFileEx(LPCSTR lpExistingFileName, LPCSTR lpNewFileName,
          *                 DWORD dwFlags) -- one body, both spellings.

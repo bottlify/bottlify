@@ -231,6 +231,11 @@ export function createComObject(clsid, definition){
  * @property {(clsid: string, factory: () => ComClassDefinition | null) => void} registerClass
  * @property {(clsid: string) => boolean} isRegistered
  * @property {(clsid: string) => ComObject | null} create
+ * @property {{ enter: () => void, leave: () => void, readonly users: number }} mtaUsage
+ *           Holds the multithreaded apartment open with no thread in it, as
+ *           CoIncrementMTAUsage does -- and as a system object with worker
+ *           threads of its own does, which is how a thread that entered no
+ *           apartment finds itself in it implicitly.
  */
 
 /**
@@ -245,6 +250,7 @@ export function createComObject(clsid, definition){
 export function createComRegistry(){
     /** @type {Map<string, () => ComClassDefinition | null>} */
     const classes = new Map();
+    let mtaUsers = 0;
 
     return {
         /**
@@ -256,6 +262,18 @@ export function createComRegistry(){
          */
         registerClass(clsid, factory){
             classes.set(requireGuid(clsid, 'class id'), factory);
+        },
+
+        mtaUsage: {
+            enter(){
+                mtaUsers++;
+            },
+            leave(){
+                mtaUsers = Math.max(0, mtaUsers - 1);
+            },
+            get users(){
+                return mtaUsers;
+            },
         },
 
         /** @param {string} clsid @returns {boolean} */

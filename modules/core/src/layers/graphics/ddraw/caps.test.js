@@ -222,35 +222,39 @@ test('a device target is judged on its caps first and its palette second', ()=>{
 
     assert.equal(validateDeviceTarget({
         caps: DDSCAPS_3DDEVICE, pixelFormatFlags: rgb, hasPalette: false,
-    }), DD_OK);
+    }, true), DD_OK);
     assert.equal(validateDeviceTarget({
         caps: 0, pixelFormatFlags: rgb, hasPalette: false,
-    }), DDERR_INVALIDCAPS);
+    }, true), DDERR_INVALIDCAPS);
     assert.equal(validateDeviceTarget({
         caps: DDSCAPS_3DDEVICE | DDSCAPS_ZBUFFER, pixelFormatFlags: rgb, hasPalette: false,
-    }), DDERR_INVALIDCAPS);
+    }, true), DDERR_INVALIDCAPS);
     assert.equal(validateDeviceTarget({
         caps: DDSCAPS_3DDEVICE | DDSCAPS_SYSTEMMEMORY, pixelFormatFlags: rgb, hasPalette: false,
-    }), D3DERR_SURFACENOTINVIDMEM);
+    }, true), D3DERR_SURFACENOTINVIDMEM);
+    // A software rasteriser draws into system memory: that is where it wants its target.
+    assert.equal(validateDeviceTarget({
+        caps: DDSCAPS_3DDEVICE | DDSCAPS_SYSTEMMEMORY, pixelFormatFlags: rgb, hasPalette: false,
+    }, false), DD_OK);
 
     // The palette is only ever looked at once the caps were acceptable: the
     // same format with unusable caps never gets that far.
     assert.equal(validateDeviceTarget({
         caps: DDSCAPS_OFFSCREENPLAIN, pixelFormatFlags: p8, hasPalette: false,
-    }), DDERR_INVALIDCAPS);
+    }, true), DDERR_INVALIDCAPS);
     assert.equal(validateDeviceTarget({
         caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE, pixelFormatFlags: p8, hasPalette: false,
-    }), DDERR_NOPALETTEATTACHED);
+    }, true), DDERR_NOPALETTEATTACHED);
     assert.equal(validateDeviceTarget({
         caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE, pixelFormatFlags: p8, hasPalette: true,
-    }), DD_OK);
+    }, true), DD_OK);
 
     // And the palette is looked at before the memory it sits in.
     assert.equal(validateDeviceTarget({
         caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY | DDSCAPS_3DDEVICE,
         pixelFormatFlags: p8,
         hasPalette: false,
-    }), DDERR_NOPALETTEATTACHED);
+    }, true), DDERR_NOPALETTEATTACHED);
 });
 
 test('only a texture the runtime keeps a copy of tolerates a malformed rectangle', ()=>{

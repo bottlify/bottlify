@@ -35,6 +35,7 @@
  * upload, in integer arithmetic that is the same on every machine.
  */
 
+import { HashedStates } from './statehash.js';
 import {
     COLORWRITEENABLE_ALPHA, COORD_SET_MASK, D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFILL, D3DFMT,
     D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPOOL, D3DPT, D3DRS, D3DSHADE, D3DTA, D3DTADDRESS, D3DTEXF,
@@ -5896,6 +5897,28 @@ export function createRenderer(options){
         for (let index = 0; index < streams.length; index++)
         {
             words[at++] = strideOf(model, streams[index]);
+        }
+        // Maps that keep a hash of themselves are named by it: two words
+        // each, rather than every pair laid out and hashed (`statehash.js`).
+        const renderStates = model.renderStates;
+        if (renderStates instanceof HashedStates)
+        {
+            const hashedStates = /** @type {HashedStates} */ (renderStates);
+            words[at++] = hashedStates.low;
+            words[at++] = hashedStates.high;
+            let hashed = true;
+            for (let stage = 0; stage < STAGE_COUNT && hashed; stage++)
+            {
+                const states = model.stageStates(stage);
+                hashed = states instanceof HashedStates;
+                words[at++] = hashed ? /** @type {HashedStates} */ (states).low : 0;
+                words[at++] = hashed ? /** @type {HashedStates} */ (states).high : 0;
+            }
+            if (hashed)
+            {
+                return stateNumbering(words, at);
+            }
+            at -= 2 + 2 * STAGE_COUNT;
         }
         words[at++] = model.renderStates.size;
         stateAt = at;

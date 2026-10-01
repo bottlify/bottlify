@@ -23,6 +23,7 @@
  * maximum point size.
  */
 
+import { HashedStates } from './statehash.js';
 import { floatToDword } from '../d3d9/constants.js';
 import {
     DEFAULT_RENDER_STATES as DEFAULT_RENDER_STATES_9, resolveRenderStateDefault
@@ -108,8 +109,7 @@ export function resolveRenderStateDefault(entry, inputs){
  * @returns {Map<number, number>} every render state, at the value a fresh device has
  */
 export function createDefaultRenderStates(inputs){
-    /** @type {Map<number, number>} */
-    const states = new Map();
+    const states = new HashedStates();
     for (const entry of DEFAULT_RENDER_STATES)
     {
         states.set(entry.state, resolveRenderStateDefault(entry, inputs) >>> 0);

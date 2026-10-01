@@ -340,6 +340,8 @@ export function createWin32Module(){
                 close: handle=>kernel.handles.close(handle),
                 /** @param {number} handle */
                 typeOf: handle=>kernel.handles.typeOf(handle),
+                /** @param {any} object */
+                holds: object=>kernel.handles.holds(object),
             };
 
             const { setError, lastErrorOf, setErrorOn: setErrorOnBlock } = createThreadState(
@@ -426,6 +428,8 @@ export function createWin32Module(){
                 return threadReturnStub ?? 0;
             };
             const com = createComRegistry();
+            /** @type {import('./msacm32/functions.js').AcmCodec[]} */
+            const acmCodecs = [];
 
             /**
              * The last error of a thread that is not the one running.
@@ -1242,11 +1246,21 @@ export function createWin32Module(){
                         allocateCode: bytes=>heap.allocateCode(bytes),
                         advanceClock: (/** @type {number} */ ms)=>kernel.clock.advance(ms),
                         setLastError: setError,
+                        registers: ()=>Object.fromEntries([...registerNames, 'eflags']
+                            .map(name=>[name, cpuRegisters.read(name)])),
+                        divergence: config?.divergence,
                     }),
                     ...createLocaleFunctions({
                         readMemory, writeMemory, stringLength,
                         setLastError: setError,
                         systemTimeMs: ()=>kernel.clock.wallClock(),
+                        /** @param {number} entry @param {number[]} args @param {unknown} [thread] */
+                        call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                        callerThread: ()=>bridge.callerThread(),
+                        /** @param {number} bytes */
+                        allocate: bytes=>heap.allocate(bytes),
+                        /** @param {number} address */
+                        free: address=>heap.free(address),
                     }),
                     ...createResourceFunctions({
                         readCString,
@@ -1285,6 +1299,7 @@ export function createWin32Module(){
                     }),
                     ...createMappingFunctions({
                         readMemory,
+                        divergence: config?.divergence,
                         writeMemory,
                         readCString,
                         readWideString,
@@ -1356,6 +1371,7 @@ export function createWin32Module(){
                         readMemory,
                         writeMemory,
                         setLastError: setError,
+                        divergence: config?.divergence,
                         ramTop: arena.size > 0 ? arena.base + arena.size : 0,
                         systemTimeMs: ()=>kernel.clock.wallClock(),
                         /** @param {number} bytes */
@@ -1414,6 +1430,7 @@ export function createWin32Module(){
                     // entry points for a file as for a console or an event, and the
                     // one that knows about files answers for all of them.
                     ...createFileFunctions({
+                        divergence: config?.divergence,
                         readMemory,
                         writeMemory,
                         readCString,
@@ -1791,10 +1808,16 @@ export function createWin32Module(){
 
                 'UXTHEME.dll': createThemeFunctions({ setLastError: setError }),
 
-                // Audio middleware links against the codec manager statically;
-                // with no drivers installed it answers "not possible" and the
-                // middleware decodes on its own.
-                'MSACM32.dll': createAcmFunctions(),
+                // The codec manager, with the drivers Windows installs: a sound
+                // engine that keeps its effects ADPCM finds its decoder here.
+                'MSACM32.dll': createAcmFunctions({
+                    readMemory, writeMemory,
+                    /** @param {number} entry @param {number[]} args @param {any} [thread] */
+                    callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    currentThread: ()=>kernel.currentThread(),
+                    divergence: config?.divergence,
+                    codecs: ()=>acmCodecs,
+                }),
 
                 // The transport is the assembling caller's to supply and is absent
                 // by default: this build has no network, and the entry points say
@@ -2221,6 +2244,8 @@ export function createWin32Module(){
                 arena,
                 setRegisters,
                 windows,
+                handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
+                divergence: config?.divergence,
             });
 
             /** Every function, whichever library exports it. */
@@ -2381,6 +2406,17 @@ export function createWin32Module(){
                 com: ()=>com,
 
                 /**
+                 * Installs a driver in the Audio Compression Manager: a codec another
+                 * layer implements, found by a program that enumerates the drivers as
+                 * it finds Windows' own.
+                 *
+                 * @param {import('./msacm32/functions.js').AcmCodec} codec
+                 */
+                installAcmCodec: codec=>{
+                    acmCodecs.push(codec);
+                },
+
+                /**
                  * The one allocator the whole process draws from.
                  *
                  * Handed out because a layer that puts bytes where a guest will
@@ -2458,7 +2494,6 @@ export function createWin32Module(){
                  */
                 /** Every top-level window's rectangle, as the program declared it. */
                 windows: ()=>windowService.list(),
-
                 /** The window the program is active through, as GetForegroundWindow answers. */
                 activeWindow: ()=>windowService.active(),
 

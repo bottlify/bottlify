@@ -39,6 +39,8 @@ export const DI_NOEFFECT = 1;
 const DIERR_INVALIDPARAM = 0x80070057 | 0;
 const DIERR_NOTACQUIRED = 0x8007000c | 0;
 const DIERR_ACQUIRED = 0x800700aa | 0;
+/** Another window is in the foreground of a device that reads only there. */
+const DIERR_OTHERAPPHASPRIO = 0x80070005 | 0;
 const DIERR_UNSUPPORTED = 0x80004001 | 0;
 const DIERR_DEVICENOTREG = 0x80040154 | 0;
 const DIERR_NOTFOUND = 0x80070002 | 0;
@@ -145,6 +147,15 @@ const DISCL_BACKGROUND = 0x00000008;
 /** The devices a program creates, named by the GUIDs it was compiled with. */
 export const GUID_SysKeyboard = '{6F1D2B61-D5A0-11CF-BFC7-444553540000}';
 export const GUID_SysMouse = '{6F1D2B60-D5A0-11CF-BFC7-444553540000}';
+/** The same two devices reached as emulated ones, each a device of its own. */
+const GUID_SysMouseEm = '{6F1D2B80-D5A0-11CF-BFC7-444553540000}';
+const GUID_SysMouseEm2 = '{6F1D2B81-D5A0-11CF-BFC7-444553540000}';
+const GUID_SysKeyboardEm = '{6F1D2B82-D5A0-11CF-BFC7-444553540000}';
+const GUID_SysKeyboardEm2 = '{6F1D2B83-D5A0-11CF-BFC7-444553540000}';
+const KEYBOARD_GUIDS = new Set([GUID_SysKeyboard, GUID_SysKeyboardEm, GUID_SysKeyboardEm2]);
+const MOUSE_GUIDS = new Set([GUID_SysMouse, GUID_SysMouseEm, GUID_SysMouseEm2]);
+/** IDirectInputJoyConfig8, which an IDirectInput8 answers for and DirectInput8Create does not. */
+const IID_IDirectInputJoyConfig8 = '{EB0D7DFA-1990-4F27-B4D6-EDF2EEC4A44C}';
 
 /** The root interfaces, ANSI and wide. Same vtable; the strings differ. */
 export const IID_IDirectInputA = '{89521360-AA8A-11CF-BFC7-444553540000}';
@@ -189,6 +200,43 @@ export const DIPROPDWORD_DATA = 0x10;
 /** MAKEDIPROP packs a small integer into a pointer; these are the ones we read. */
 export const DIPROP_BUFFERSIZE = 1;
 const DIPROP_AXISMODE = 2;
+/** The other MAKEDIPROP properties, by number. */
+const DIPROP = Object.freeze({
+    GRANULARITY: 3, RANGE: 4, DEADZONE: 5, SATURATION: 6, FFGAIN: 7, FFLOAD: 8,
+    AUTOCENTER: 9, CALIBRATIONMODE: 10, CALIBRATION: 11, GUIDANDPATH: 12, INSTANCENAME: 13,
+    PRODUCTNAME: 14, JOYSTICKID: 15, GETPORTDISPLAYNAME: 16, PHYSICALRANGE: 18,
+    LOGICALRANGE: 19, KEYNAME: 20, CPOINTS: 21, APPDATA: 22, SCANCODE: 23, VIDPID: 24,
+    USERNAME: 25, TYPENAME: 26,
+});
+/** The structure each property is read through: DIPROPDWORD, DIPROPRANGE and so on. */
+const PROPERTY_SIZE = new Map([
+    [DIPROP_BUFFERSIZE, 20], [DIPROP_AXISMODE, 20], [DIPROP.GRANULARITY, 20],
+    [DIPROP.RANGE, 24], [DIPROP.DEADZONE, 20], [DIPROP.SATURATION, 20], [DIPROP.FFGAIN, 20],
+    [DIPROP.FFLOAD, 20], [DIPROP.AUTOCENTER, 20], [DIPROP.CALIBRATIONMODE, 20],
+    [DIPROP.CALIBRATION, 28], [DIPROP.GUIDANDPATH, 552], [DIPROP.INSTANCENAME, 536],
+    [DIPROP.PRODUCTNAME, 536], [DIPROP.JOYSTICKID, 20], [DIPROP.GETPORTDISPLAYNAME, 536],
+    [DIPROP.PHYSICALRANGE, 24], [DIPROP.LOGICALRANGE, 24], [DIPROP.KEYNAME, 536],
+    [DIPROP.CPOINTS, 84], [DIPROP.APPDATA, 20], [DIPROP.SCANCODE, 20], [DIPROP.VIDPID, 20],
+    [DIPROP.USERNAME, 536], [DIPROP.TYPENAME, 536],
+]);
+const DIPROPHEADER_SIZE = 16;
+const DIPROPRANGE_NOMIN = 0x80000000 | 0;
+const DIPROPRANGE_NOMAX = 0x7fffffff;
+const DIPROPAXISMODE_ABS = 0;
+const DIPROPAXISMODE_REL = 1;
+const DIDF_RELAXIS = 0x00000002;
+/**
+ * The scan code DIPROP_SCANCODE reports for a key, as the bytes the keyboard
+ * sends, first byte lowest: an extended key behind its 0xE0, and NumLock and
+ * Pause each with the other's sequence, as Windows reports them.
+ *
+ * @param {number} dik
+ */
+const scanCodeOf = dik=>(dik === 0x45 ? 0x451de1 : dik === 0xc5 ? 0x45
+    : dik >= 0x80 ? 0xe0 | ((dik & 0x7f) << 8) : dik);
+/** A wheel notch, as the mouse reports its Z axis. */
+const WHEEL_DELTA = 120;
+const DIPH_DEVICE = 0;
 
 /** DIDEVCAPS, as far as a program reads it. */
 export const DIDEVCAPS = Object.freeze({
@@ -198,7 +246,9 @@ export const DIDEVCAPS = Object.freeze({
     dwAxes: 0x0c,
     dwButtons: 0x10,
     dwPOVs: 0x14,
-    SIZE: 0x44,
+    /** DirectX 3's structure ends after dwPOVs; the whole one carries five more. */
+    SIZE_DX3: 24,
+    SIZE: 44,
 });
 
 /**
@@ -341,6 +391,41 @@ const DIDATAFORMAT = Object.freeze({
 });
 const DIOBJECTDATAFORMAT = Object.freeze({ pguid: 0x0, dwOfs: 0x4, dwType: 0x8, SIZE: 16 });
 const DIDFT_AXIS = 0x03;
+const DIDFT_POV = 0x10;
+/**
+ * DIACTIONFORMAT and DIACTION, the action map a program describes its
+ * controls with: the two widths differ only in the format's trailing name.
+ */
+const DIACTIONFORMAT = Object.freeze({
+    dwSize: 0x00, dwActionSize: 0x04, dwNumActions: 0x0c, rgoAction: 0x10, guidActionMap: 0x14,
+    dwBufferSize: 0x28,
+    SIZE_A: 0x148, SIZE_W: 0x24c,
+});
+const DIACTION = Object.freeze({
+    uAppData: 0x00, dwSemantic: 0x04, dwFlags: 0x08, guidInstance: 0x10, dwObjID: 0x20,
+    dwHow: 0x24, SIZE: 40,
+});
+/** DIA_*: the program's own word on an action. */
+const DIA_APPMAPPED = 0x02;
+const DIA_APPNOMAP = 0x04;
+/** DIAH_*: how an action came to be mapped. */
+const DIAH_UNMAPPED = 0;
+const DIAH_APPREQUESTED = 0x02;
+const DIAH_DEFAULT = 0x20;
+const DIAH_ERROR = 0x80000000;
+const DIDBAM_INITIALIZE = 0x02;
+const DIDSAM_FORCESAVE = 0x02;
+/** A success that says the map applied was not kept for the user. */
+const DI_SETTINGSNOTSAVED = 0x0000000b;
+/** A semantic's top byte names its device for these two. */
+const SEMANTIC_KEYBOARD = 0x81;
+const SEMANTIC_MOUSE = 0x82;
+const DIEDBS_MAPPEDPRI1 = 0x01;
+const DIEDBSFL_FORCEFEEDBACK = 0x100;
+const DIEDBSFL_THISUSER = 0x10;
+const DIEDBSFL_AVAILABLEDEVICES = 0x1000;
+/** The owner a device is given by a SetActionMap that names no user: whoever is logged on. */
+const LOGGED_ON_USER = Symbol('logged-on user');
 const DIDFT_ANYINSTANCE = 0xffff;
 const DIDFT_OPTIONAL = 0x80000000;
 
@@ -358,7 +443,9 @@ const DIDFT_OPTIONAL = 0x80000000;
  * @param {number} format
  * @param {readonly import('./devices.js').DeviceObject[]} objects
  * @param {(why: string) => void} [refused]  Told what refused the format.
- * @returns {{ dataSize: number, places: Map<number, number> } | null}
+ * @returns {{ dataSize: number, places: Map<number, number>, centred: number[] } | null}
+ *     `centred` is where an optional point-of-view entry no object answered
+ *     sits: the state reads it as a POV at rest, all ones.
  */
 export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
     const dataSize = readU32(format + DIDATAFORMAT.dwDataSize);
@@ -374,6 +461,8 @@ export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
     const array = readU32(format + DIDATAFORMAT.rgodf);
     /** @type {Map<number, number>} */
     const places = new Map();
+    /** @type {number[]} */
+    const centred = [];
     const taken = new Set();
     for (let index = 0; index < count; index++)
     {
@@ -396,6 +485,10 @@ export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
                     + ' matches none of the device objects');
                 return null;
             }
+            if ((type & DIDFT_POV) !== 0 && offset + 4 <= dataSize)
+            {
+                centred.push(offset);
+            }
             continue;
         }
         const width = (object.type & DIDFT_AXIS) !== 0 ? 4 : 1;
@@ -407,7 +500,7 @@ export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
         taken.add(object);
         places.set(object.offset, offset);
     }
-    return { dataSize, places };
+    return { dataSize, places, centred };
 }
 
 /**
@@ -467,6 +560,14 @@ export const IDIRECTINPUT8_SLOTS = /** @type {[string, number][]} */ ([
     ['FindDevice', 3],
     ['EnumDevicesBySemantics', 5],
     ['ConfigureDevices', 4],
+]);
+
+/** IDirectInputJoyConfig8, after IUnknown's three. */
+const IDIRECTINPUTJOYCONFIG8_SLOTS = /** @type {[string, number][]} */ ([
+    ['Acquire', 0], ['Unacquire', 0], ['SetCooperativeLevel', 2], ['SendNotify', 0],
+    ['EnumTypes', 2], ['GetTypeInfo', 3], ['SetTypeInfo', 4], ['DeleteType', 1],
+    ['GetConfig', 3], ['SetConfig', 3], ['DeleteConfig', 1], ['GetUserValues', 2],
+    ['SetUserValues', 1], ['AddNewHardware', 2], ['OpenTypeKey', 3], ['OpenAppStatusKey', 1],
 ]);
 
 /** IDirectInputDevice, after IUnknown's three. */
@@ -572,8 +673,15 @@ export function createPublisher({ publishInterface }){
             const declared = new Map(interfaces.map(entry=>[entry.id, entry]));
             adapter = {
                 api,
+                // DirectInput answers a null interface id with E_POINTER and
+                // leaves the caller's pointer as it was.
+                nullInterface: 'pointer',
                 /** @param {string} id */
                 interfaceFor(id){
+                    if (id !== IID_IUNKNOWN && api.offers && !api.offers(id))
+                    {
+                        return null;
+                    }
                     const descriptor = id === IID_IUNKNOWN
                         ? interfaces.find(entry=>entry.unknown === true)
                         : declared.get(id);
@@ -653,12 +761,16 @@ export function createPublisher({ publishInterface }){
  * @param {(api: string, detail: string) => void} [deps.divergence]
  *        Where a refusal the program may not expect is said.
  * @param {(hwnd: number) => 'top' | 'child' | null | undefined} [deps.windowKind]
+ * @param {() => number | undefined} [deps.foreground]
+ *        The program's foreground window, or zero; undefined where there are
+ *        no windows to tell apart.
  *        What a handle names: a top-level window, a child one, nothing -- or
  *        undefined when there are no windows to ask about, in which case any
  *        handle is taken as a window. SetCooperativeLevel wants a top-level one.
  */
 export function createDirectInput(
     { memory, now, publishInterface, signal, allocate, callGuest, callerThread, windowKind,
+        foreground,
         divergence },
 )
 {
@@ -671,8 +783,50 @@ export function createDirectInput(
     /** @param {number} address */
     const guidAt = address=>readGuid(memory, address >>> 0);
 
-    /** What each device's SetDataFormat settled on. @type {WeakMap<object, { dataSize: number, places: Map<number, number> }>} */
+    /**
+     * What each device's SetDataFormat, or SetActionMap, settled on.
+     *
+     * @type {WeakMap<object, { dataSize: number, places: Map<number, number>,
+     *     appData?: Map<number, number>, relative?: boolean, centred?: number[] }>}
+     */
     const formats = new WeakMap();
+    /**
+     * Whose each device is, once a SetActionMap gave it to a user.
+     *
+     * @type {WeakMap<object, string | symbol>}
+     */
+    const owners = new WeakMap();
+    /** @type {WeakMap<object, { window: number, background: boolean }>} */
+    const cooperation = new WeakMap();
+
+    /**
+     * A user name a program passes, in its width; no name and an empty one
+     * are both the empty string.
+     *
+     * @param {number} pointer @param {boolean} wide
+     */
+    const readName = (pointer, wide)=>{
+        if ((pointer >>> 0) === 0)
+        {
+            return '';
+        }
+        const width = wide ? 2 : 1;
+        const bytes = memory.readMemory(pointer >>> 0, 256 * width);
+        let text = '';
+        for (let at = 0; at + width <= bytes.length; at += width)
+        {
+            const unit = wide ? bytes[at] | bytes[at + 1] << 8 : bytes[at];
+            if (unit === 0)
+            {
+                break;
+            }
+            text += String.fromCharCode(unit);
+        }
+        return text;
+    };
+
+    /** Each device's force-feedback gain, which these devices keep and never use. */
+    const gains = new WeakMap();
 
     /** @param {number} address */
     const readU32 = address=>{
@@ -745,6 +899,59 @@ export function createDirectInput(
         return found ?? DIERR_NOTFOUND;
     };
 
+    /** @param {any} device */
+    const guidOfDevice = device=>instanceGuids.get(device)
+        ?? (device.kind === KEYBOARD ? GUID_SysKeyboard : GUID_SysMouse);
+
+    /**
+     * A DIACTIONFORMAT's actions, or null for one that cannot be read.
+     *
+     * @param {number} format
+     */
+    const readActions = format=>{
+        if ((format >>> 0) === 0)
+        {
+            return null;
+        }
+        const size = readU32(format + DIACTIONFORMAT.dwSize);
+        const count = readU32(format + DIACTIONFORMAT.dwNumActions);
+        const array = readU32(format + DIACTIONFORMAT.rgoAction);
+        if ((size !== DIACTIONFORMAT.SIZE_A && size !== DIACTIONFORMAT.SIZE_W)
+            || readU32(format + DIACTIONFORMAT.dwActionSize) !== DIACTION.SIZE
+            || (count > 0 && array === 0))
+        {
+            divergence?.('DirectInput', `an action format of ${size} bytes, actions of`
+                + ` ${readU32(format + DIACTIONFORMAT.dwActionSize)}, ${count} at 0x${
+                    array.toString(16)} was refused`);
+            return null;
+        }
+        return {
+            count,
+            /** @param {number} index */
+            at: index=>array + index * DIACTION.SIZE,
+            bufferSize: readU32(format + DIACTIONFORMAT.dwBufferSize),
+        };
+    };
+
+    /**
+     * The object of this device a semantic names, if it names one: a
+     * keyboard semantic carries its key's DIK code and a mouse semantic its
+     * offset in DIMOUSESTATE2, both in the low byte. A genre's semantic names
+     * a control of a game device, and neither of these is one.
+     *
+     * @param {any} device @param {number} semantic
+     */
+    const objectForSemantic = (device, semantic)=>{
+        const kind = semantic >>> 24;
+        if ((kind === SEMANTIC_KEYBOARD && device.kind === KEYBOARD)
+            || (kind === SEMANTIC_MOUSE && device.kind === MOUSE))
+        {
+            return objectsOf(device.kind).find(object=>object.offset === (semantic & 0xff))
+                ?? null;
+        }
+        return null;
+    };
+
     /** @type {Record<string, (target: any, args: number[], descriptor?: any) => any>} */
     const deviceMethods = {
         /**
@@ -757,6 +964,16 @@ export function createDirectInput(
             if (device.acquired)
             {
                 return DI_NOEFFECT;
+            }
+            // A device that reads only in the foreground is not the
+            // program's while another window is (Wine's device8.c
+            // test_sys_mouse).
+            const level = cooperation.get(device);
+            const front = foreground?.();
+            if (level && !level.background && level.window !== 0 && front !== undefined
+                && front !== level.window)
+            {
+                return DIERR_OTHERAPPHASPRIO;
             }
             device.acquire();
             return DI_OK;
@@ -793,7 +1010,10 @@ export function createDirectInput(
             {
                 return DIERR_INVALIDPARAM;
             }
-            formats.set(device, read);
+            formats.set(device, {
+                ...read,
+                relative: (readU32((format >>> 0) + 8) & DIDF_RELAXIS) !== 0,
+            });
             device.setDataSize(read.dataSize);
             return DI_OK;
         },
@@ -840,6 +1060,7 @@ export function createDirectInput(
                 return DIERR_UNSUPPORTED;
             }
             device.setExclusive(exclusive);
+            cooperation.set(device, { window, background });
             return DI_OK;
         },
 
@@ -870,21 +1091,135 @@ export function createDirectInput(
                 device.setBufferSize(readU32((header >>> 0) + DIPROPDWORD_DATA));
                 return DI_OK;
             }
+            if (property === DIPROP.FFGAIN)
+            {
+                const gain = readU32((header >>> 0) + DIPROPDWORD_DATA);
+                if (gain > 10000)
+                {
+                    return DIERR_INVALIDPARAM;
+                }
+                gains.set(device, gain);
+                return DI_OK;
+            }
             // Axis mode, ranges, dead zones: accepted and ignored. The device
             // is already relative and already unscaled, which is what every
             // one of them would be asking for.
             return DI_OK;
         },
 
-        /** HRESULT GetProperty(REFGUID, LPDIPROPHEADER) */
+        /**
+         * HRESULT GetProperty(REFGUID, LPDIPROPHEADER)
+         *
+         * As Windows answers for its system mouse and keyboard (Wine's
+         * device8.c): the structure has to be the property's, an object is
+         * named by its offset in the program's format or by its id, and what
+         * these devices do not have is DIERR_UNSUPPORTED.
+         */
         GetProperty(device, [guid, header]){
             if ((header >>> 0) === 0)
             {
                 return DIERR_INVALIDPARAM;
             }
-            if ((guid >>> 0) === DIPROP_BUFFERSIZE)
+            const property = guid >>> 0;
+            const expected = PROPERTY_SIZE.get(property);
+            if (expected === undefined)
             {
-                writeU32((header >>> 0) + DIPROPDWORD_DATA, device.bufferSize);
+                return DIERR_UNSUPPORTED;
+            }
+            const at = header >>> 0;
+            if (readU32(at) !== expected || readU32(at + 4) !== DIPROPHEADER_SIZE)
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            const which = readU32(at + 8);
+            const how = readU32(at + 12);
+            const eight = device.version >= 0x0800;
+            if (how === DIPH_DEVICE)
+            {
+                if (which !== 0)
+                {
+                    return DIERR_INVALIDPARAM;
+                }
+                switch (property)
+                {
+                    case DIPROP_BUFFERSIZE:
+                        writeU32(at + DIPROPDWORD_DATA, device.bufferSize);
+                        return DI_OK;
+                    case DIPROP_AXISMODE:
+                        writeU32(at + DIPROPDWORD_DATA, formats.get(device)?.relative === true
+                            ? DIPROPAXISMODE_REL : DIPROPAXISMODE_ABS);
+                        return DI_OK;
+                    case DIPROP.FFGAIN:
+                        writeU32(at + DIPROPDWORD_DATA, gains.get(device) ?? 10000);
+                        return DI_OK;
+                    case DIPROP.USERNAME:
+                        if (!eight)
+                        {
+                            return DIERR_UNSUPPORTED;
+                        }
+                        memory.writeMemory(at + DIPROPHEADER_SIZE, new Uint8Array(2));
+                        return DI_NOEFFECT;
+                    case DIPROP.SCANCODE:
+                    case DIPROP.KEYNAME:
+                        // An object's property, asked of the whole device.
+                        return eight ? DIERR_INVALIDPARAM : DIERR_UNSUPPORTED;
+                    default:
+                        return DIERR_UNSUPPORTED;
+                }
+            }
+            if (how === DIPH_BYUSAGE)
+            {
+                return DIERR_UNSUPPORTED;
+            }
+            /** @type {import('./devices.js').DeviceObject | undefined} */
+            let object;
+            if (how === DIPH_BYOFFSET)
+            {
+                // The offset is the program's, in the format it set.
+                const places = formats.get(device)?.places;
+                const own = places
+                    ? [...places].find(([, place])=>place === which)?.[0] : undefined;
+                object = own === undefined ? undefined
+                    : objectsOf(device.kind).find(candidate=>candidate.offset === own);
+            }
+            else if (how === DIPH_BYID)
+            {
+                const named = objectNamed(device, which, DIPH_BYID);
+                object = typeof named === 'number' ? undefined : named;
+            }
+            else
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            if (!object)
+            {
+                return DIERR_NOTFOUND;
+            }
+            const axis = (object.type & DIDFT_AXIS) !== 0;
+            if (axis && property === DIPROP.GRANULARITY)
+            {
+                writeU32(at + DIPROPDWORD_DATA,
+                    object.offset === DIMOUSE_OFS.Z ? WHEEL_DELTA : 1);
+                return DI_OK;
+            }
+            if (axis && property === DIPROP.RANGE)
+            {
+                writeU32(at + DIPROPDWORD_DATA, DIPROPRANGE_NOMIN);
+                writeU32(at + DIPROPDWORD_DATA + 4, DIPROPRANGE_NOMAX);
+                return DI_OK;
+            }
+            if (device.kind === KEYBOARD && property === DIPROP.SCANCODE)
+            {
+                if (!eight)
+                {
+                    return DIERR_UNSUPPORTED;
+                }
+                writeU32(at + DIPROPDWORD_DATA, scanCodeOf(object.offset));
+                return DI_OK;
+            }
+            if (device.kind === KEYBOARD && property === DIPROP.KEYNAME)
+            {
+                memory.writeMemory(at + DIPROPHEADER_SIZE, textBytes(object.name, true));
                 return DI_OK;
             }
             return DIERR_UNSUPPORTED;
@@ -945,6 +1280,10 @@ export function createDirectInput(
                     }
                 }
             }
+            for (const place of format.centred ?? [])
+            {
+                view.setUint32(place, 0xffffffff, true);
+            }
             memory.writeMemory(data >>> 0, bytes);
             return DI_OK;
         },
@@ -953,10 +1292,10 @@ export function createDirectInput(
          * HRESULT GetDeviceData(DWORD size, LPDIDEVICEOBJECTDATA, LPDWORD count,
          *                       DWORD flags)
          *
-         * Two calls in one. With a null array the program is asking how many
-         * events are waiting; with one it is draining. Both answer through
-         * `count`, and confusing them loses every event a program was told
-         * about but never asked for.
+         * Drains up to `count` events into the array, answering through
+         * `count` how many; a null array drains them all the same, which is
+         * how a program flushes the buffer. DIGDD_PEEK leaves them where they
+         * were.
          */
         GetDeviceData(device, [size, array, count, flags]){
             if ((count >>> 0) === 0)
@@ -984,12 +1323,15 @@ export function createDirectInput(
             }
 
             const asked = readU32(count);
-            const peek = (flags & DIGDD_PEEK) !== 0 || (array >>> 0) === 0;
+            // A null array is still a read: what it would have received is
+            // taken out of the buffer, which is how a program flushes it.
+            const peek = (flags & DIGDD_PEEK) !== 0;
             const drained = device.drain(asked, peek);
             const overflow = drained.overflow;
             // An event carries its object's offset in the program's format,
             // and an object the format left out is not reported.
             const places = formats.get(device)?.places;
+            const appData = formats.get(device)?.appData;
             const events = places
                 ? drained.events.filter((/** @type {any} */ event)=>places.has(event.offset))
                     .map((/** @type {any} */ event)=>({ ...event, offset: places.get(event.offset) }))
@@ -1005,6 +1347,11 @@ export function createDirectInput(
                     view.setInt32(at + DIDEVICEOBJECTDATA.dwData, event.data, true);
                     view.setUint32(at + DIDEVICEOBJECTDATA.dwTimeStamp, event.time >>> 0, true);
                     view.setUint32(at + DIDEVICEOBJECTDATA.dwSequence, event.sequence, true);
+                    if (entrySize === DIDEVICEOBJECTDATA.SIZE_DX8)
+                    {
+                        view.setUint32(at + DIDEVICEOBJECTDATA.uAppData,
+                            appData?.get(event.offset) ?? 0, true);
+                    }
                 });
                 if (bytes.length > 0)
                 {
@@ -1013,14 +1360,167 @@ export function createDirectInput(
             }
 
             writeU32(count, events.length);
-            return overflow ? DI_BUFFEROVERFLOW : DI_OK;
+            // DirectInput 8 says so; earlier versions drop the oldest quietly.
+            return overflow && device.version >= 0x0800 ? DI_BUFFEROVERFLOW : DI_OK;
+        },
+
+        /**
+         * HRESULT BuildActionMap(LPDIACTIONFORMAT, LPCTSTR user, DWORD flags)
+         *
+         * Each action whose semantic names an object of this device is mapped
+         * to it -- its guidInstance this device, its dwObjID the object, how
+         * DIAH_DEFAULT -- unless another device already holds it; an action
+         * the program mapped itself is checked against the object it named.
+         * DI_NOEFFECT when nothing here answers any of them.
+         */
+        BuildActionMap(device, [format, , flags]){
+            const actions = readActions(format);
+            if (!actions)
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            const own = guidOfDevice(device);
+            const ownBytes = parseGuid(own) ?? new Uint8Array(16);
+            let mapped = 0;
+            for (let index = 0; index < actions.count; index++)
+            {
+                const at = actions.at(index);
+                // Initializing starts over: what the program said of each
+                // action before is dropped with the mapping it had.
+                if ((flags & DIDBAM_INITIALIZE) !== 0)
+                {
+                    writeU32(at + DIACTION.dwFlags, 0);
+                }
+                const actionFlags = readU32(at + DIACTION.dwFlags);
+                const holder = guidAt(at + DIACTION.guidInstance);
+                if ((actionFlags & DIA_APPNOMAP) !== 0)
+                {
+                    continue;
+                }
+                if ((actionFlags & DIA_APPMAPPED) !== 0)
+                {
+                    if (holder === own)
+                    {
+                        const named = objectNamed(device, readU32(at + DIACTION.dwObjID),
+                            DIPH_BYID);
+                        writeU32(at + DIACTION.dwHow,
+                            typeof named === 'number' ? DIAH_ERROR : DIAH_APPREQUESTED);
+                        mapped += typeof named === 'number' ? 0 : 1;
+                    }
+                    continue;
+                }
+                if (readU32(at + DIACTION.dwHow) !== DIAH_UNMAPPED && holder !== own
+                    && (flags & DIDBAM_INITIALIZE) === 0)
+                {
+                    continue;
+                }
+                const object = objectForSemantic(device, readU32(at + DIACTION.dwSemantic));
+                if (!object)
+                {
+                    continue;
+                }
+                memory.writeMemory(at + DIACTION.guidInstance, ownBytes);
+                writeU32(at + DIACTION.dwObjID, object.type);
+                writeU32(at + DIACTION.dwHow, DIAH_DEFAULT);
+                mapped++;
+            }
+            return mapped > 0 ? DI_OK : DI_NOEFFECT;
+        },
+
+        /**
+         * HRESULT SetActionMap(LPDIACTIONFORMAT, LPCTSTR user, DWORD flags)
+         *
+         * The device's data format becomes the action map: a dword per action,
+         * in the actions' order, each mapped one's object reported at its
+         * action's place and with its action's uAppData; the format's buffer
+         * size is the device's. Settled while nobody holds the device.
+         */
+        SetActionMap(device, [format, user, flags], descriptor){
+            const actions = readActions(format);
+            if (!actions)
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            if (device.acquired)
+            {
+                return DIERR_ACQUIRED;
+            }
+            const own = guidOfDevice(device);
+            /** @type {Map<number, number>} */
+            const places = new Map();
+            /** @type {Map<number, number>} */
+            const appData = new Map();
+            for (let index = 0; index < actions.count; index++)
+            {
+                const at = actions.at(index);
+                const how = readU32(at + DIACTION.dwHow);
+                if (how === DIAH_UNMAPPED || (how & DIAH_ERROR) !== 0
+                    || guidAt(at + DIACTION.guidInstance) !== own)
+                {
+                    continue;
+                }
+                const object = objectNamed(device, readU32(at + DIACTION.dwObjID), DIPH_BYID);
+                if (typeof object === 'number' || places.has(object.offset))
+                {
+                    continue;
+                }
+                places.set(object.offset, index * 4);
+                appData.set(index * 4, readU32(at + DIACTION.uAppData));
+            }
+            const dataSize = actions.count * 4;
+            formats.set(device, { dataSize, places, appData });
+            // The device is the user's from now on, as EnumDevicesBySemantics
+            // tells a program asking whose it is.
+            owners.set(device, readName(user, descriptor?.wide === true) || LOGGED_ON_USER);
+            device.setDataSize(dataSize);
+            if (actions.bufferSize > 0)
+            {
+                device.setBufferSize(actions.bufferSize);
+            }
+            // There is nowhere a user's map is kept, so one forced to be
+            // saved is applied and not saved.
+            return (flags & DIDSAM_FORCESAVE) !== 0 ? DI_SETTINGSNOTSAVED : DI_OK;
+        },
+
+        /**
+         * HRESULT Initialize(HINSTANCE, DWORD version, REFGUID)
+         *
+         * The device becomes the one the GUID names among those of its own
+         * kind -- the system device or one of its emulated twins -- as that
+         * version makes it.
+         */
+        Initialize(device, [, version, guid]){
+            if ((guid >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            const named = guidAt(guid);
+            const kind = KEYBOARD_GUIDS.has(named) ? KEYBOARD
+                : MOUSE_GUIDS.has(named) ? MOUSE : null;
+            if (kind !== device.kind)
+            {
+                return DIERR_DEVICENOTREG;
+            }
+            instanceGuids.set(device, named);
+            if ((version >>> 0) !== 0)
+            {
+                device.setVersion(version >>> 0);
+            }
+            return DI_OK;
         },
 
         /** HRESULT GetCapabilities(LPDIDEVCAPS) */
         GetCapabilities(device, [caps], descriptor){
-            if ((caps >>> 0) === 0 || readU32(caps + DIDEVCAPS.dwSize) < DIDEVCAPS.SIZE)
+            const size = (caps >>> 0) === 0 ? 0 : readU32(caps + DIDEVCAPS.dwSize);
+            if (size !== DIDEVCAPS.SIZE && size !== DIDEVCAPS.SIZE_DX3)
             {
                 return DIERR_INVALIDPARAM;
+            }
+            if (size === DIDEVCAPS.SIZE)
+            {
+                // No force feedback, no firmware or hardware to name.
+                memory.writeMemory(caps + DIDEVCAPS.SIZE_DX3,
+                    new Uint8Array(DIDEVCAPS.SIZE - DIDEVCAPS.SIZE_DX3));
             }
             const keyboard = device.kind === KEYBOARD;
             writeU32(caps + DIDEVCAPS.dwFlags, DIDC_ATTACHED | DIDC_EMULATED);
@@ -1045,7 +1545,7 @@ export function createDirectInput(
             const wide = descriptor?.wide === true;
             const keyboard = device.kind === KEYBOARD;
             const name = keyboard ? 'Keyboard' : 'Mouse';
-            const whole = deviceInstanceBytes(keyboard ? GUID_SysKeyboard : GUID_SysMouse,
+            const whole = deviceInstanceBytes(guidOfDevice(device),
                 devTypeOf(device.kind, descriptor?.legacy === true), name, name, wide);
             return fillSized(info, whole, wide
                 ? [DIDEVICEINSTANCE.SIZE_DX3_W, DIDEVICEINSTANCE.SIZE_W]
@@ -1166,7 +1666,21 @@ export function createDirectInput(
     ];
 
     /** @param {string} guid  Whether it names a device this machine has. */
-    const isDevice = guid=>guid === GUID_SysKeyboard || guid === GUID_SysMouse;
+    const isDevice = guid=>KEYBOARD_GUIDS.has(guid) || MOUSE_GUIDS.has(guid);
+
+    /**
+     * The interfaces of one generation: a device made by IDirectInput8 is
+     * reached as IDirectInputDevice8 and nothing older, one made by an
+     * earlier root as the older ones and not as 8 (Wine's device8.c).
+     *
+     * @param {any} device
+     */
+    const generationOf = device=>(/** @type {string} */ id)=>
+        (id === IID_IDirectInputDevice8A || id === IID_IDirectInputDevice8W)
+            === (device.version >= 0x0800);
+
+    /** The GUID each device was made or initialized as. @type {WeakMap<object, string>} */
+    const instanceGuids = new WeakMap();
 
     /** @param {string} guid */
     const deviceFor = guid=>{
@@ -1184,9 +1698,11 @@ export function createDirectInput(
             return device;
         }
         device = createInputDevice({
-            kind: guid === GUID_SysKeyboard ? KEYBOARD : MOUSE,
+            kind: KEYBOARD_GUIDS.has(guid) ? KEYBOARD : MOUSE,
             now,
         });
+        device.offers = generationOf(device);
+        instanceGuids.set(device, guid);
         devices.set(guid, device);
         return device;
     };
@@ -1386,6 +1902,83 @@ export function createDirectInput(
                 descriptor?.wide === true, descriptor?.legacy === true);
         },
 
+        /**
+         * HRESULT EnumDevicesBySemantics(LPCTSTR user, LPDIACTIONFORMAT,
+         *     LPDIENUMDEVICESBYSEMANTICSCB, LPVOID, DWORD flags)
+         *
+         * Each attached device is made and handed to the program's callback
+         * with how the actions map to it and how many devices are still to
+         * come; the program keeps one by taking a reference of its own, since
+         * the one it was handed with is let go of after the callback.
+         *
+         * @param {any} root @param {number[]} args
+         * @param {{ wide?: boolean }} descriptor
+         */
+        EnumDevicesBySemantics(root, [user, format, callback, context, flags], descriptor){
+            const actions = readActions(format);
+            if (!actions || (callback >>> 0) === 0
+                || memory.readMemory((format >>> 0) + DIACTIONFORMAT.guidActionMap, 16)
+                    .every((/** @type {number} */ byte)=>byte === 0))
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            const run = callGuest;
+            if (!run || allocate === undefined || (flags & DIEDBSFL_FORCEFEEDBACK) !== 0)
+            {
+                return DI_OK;
+            }
+            const wide = descriptor?.wide === true;
+            const semantics = Array.from({ length: actions.count },
+                (_, index)=>readU32(actions.at(index) + DIACTION.dwSemantic));
+            // Which devices, by whose they are (Wine's dinput.c
+            // test_EnumDevicesBySemantics): a user's own are those a
+            // SetActionMap gave that user -- any user's, when none is named --
+            // and the available ones those nobody has.
+            const asked = readName(user, wide);
+            const mine = (/** @type {any} */ device)=>{
+                const owner = owners.get(device);
+                return owner !== undefined && (asked === '' || owner === asked);
+            };
+            const free = (/** @type {any} */ device)=>!owners.has(device);
+            const wanted = (/** @type {any} */ device)=>{
+                switch (flags & (DIEDBSFL_THISUSER | DIEDBSFL_AVAILABLEDEVICES))
+                {
+                    case DIEDBSFL_THISUSER: return mine(device);
+                    case DIEDBSFL_AVAILABLEDEVICES: return free(device);
+                    case DIEDBSFL_THISUSER | DIEDBSFL_AVAILABLEDEVICES:
+                        return mine(device) || free(device);
+                    default: return true;
+                }
+            };
+            const offers = /** @type {const} */ ([
+                { guid: GUID_SysKeyboard, kind: KEYBOARD, name: 'Keyboard' },
+                { guid: GUID_SysMouse, kind: MOUSE, name: 'Mouse' },
+            ]).filter(offer=>wanted(deviceFor(offer.guid)));
+            enumerations++;
+            const thread = callerThread?.();
+            return (async()=>{
+                for (const [index, offer] of offers.entries())
+                {
+                    const device = /** @type {any} */ (deviceFor(offer.guid));
+                    device.setVersion(root.version);
+                    const pointer = publisher.publish(device, deviceInterfaces(),
+                        wide ? IID_IDirectInputDevice8W : IID_IDirectInputDevice8A);
+                    const instance = writeInstance(offer.guid, devTypeOf(offer.kind, false),
+                        offer.name, offer.name, wide);
+                    const mapped = semantics.some(semantic=>objectForSemantic(device, semantic));
+                    const more = await run(callback >>> 0, [instance, pointer,
+                        mapped ? DIEDBS_MAPPEDPRI1 : 0, offers.length - 1 - index,
+                        context >>> 0], thread);
+                    device.release();
+                    if ((more | 0) === DIENUM_STOP)
+                    {
+                        break;
+                    }
+                }
+                return DI_OK;
+            })();
+        },
+
         /** HRESULT GetDeviceStatus(REFGUID) */
         GetDeviceStatus(root, [guid]){
             if ((guid >>> 0) === 0)
@@ -1447,6 +2040,11 @@ export function createDirectInput(
     ];
     const isRootOf = (/** @type {string} */ id, /** @type {boolean} */ eight)=>
         (eight ? rootInterfaces8 : legacyRootInterfaces).some(entry=>entry.id === id);
+    // A root a program already holds also answers as the joystick
+    // configuration interface; the configuration it would change is none
+    // here, so each method is the not-implemented answer.
+    const joyConfigInterface = describe(IID_IDirectInputJoyConfig8,
+        IDIRECTINPUTJOYCONFIG8_SLOTS, {});
 
     /**
      * A new DirectInput object, as each creation call makes on Windows. It
@@ -1499,7 +2097,8 @@ export function createDirectInput(
                 return references === 0;
             },
         };
-        const pointer = publisher.publish(root, eight ? rootInterfaces8 : legacyRootInterfaces, id);
+        const pointer = publisher.publish(root,
+            eight ? [...rootInterfaces8, joyConfigInterface] : legacyRootInterfaces, id);
         writeU32(out, pointer);
         return pointer === 0 ? DIERR_NOINTERFACE : DI_OK;
     };
@@ -1519,17 +2118,35 @@ export function createDirectInput(
          * @param {import('./devices.js').InputEvent} event
          */
         post(event){
-            const guid = event.kind === 'key' ? GUID_SysKeyboard : GUID_SysMouse;
-            const device = devices.get(guid);
-            if (!device || !device.post(event))
+            // The system device and its emulated twins all hear the keyboard,
+            // or the mouse, each taking it as its own state allows.
+            const guids = event.kind === 'key' ? KEYBOARD_GUIDS : MOUSE_GUIDS;
+            let taken = false;
+            for (const guid of guids)
             {
-                return false;
+                const device = devices.get(guid);
+                const keyed = event.scanned !== undefined && device?.version >= 0x0800
+                    ? { ...event, code: event.scanned } : event;
+                if (keyed.kind === 'key' && keyed.code === 0)
+                {
+                    // No key of its own, but input it heard all the same.
+                    if (device?.acquired && device.notifyEvent !== 0)
+                    {
+                        signal?.(device.notifyEvent);
+                    }
+                    continue;
+                }
+                if (!device || device.destroyed || !device.post(keyed))
+                {
+                    continue;
+                }
+                taken = true;
+                if (device.notifyEvent !== 0)
+                {
+                    signal?.(device.notifyEvent);
+                }
             }
-            if (device.notifyEvent !== 0)
-            {
-                signal?.(device.notifyEvent);
-            }
-            return true;
+            return taken;
         },
 
         /** @param {string} guid */

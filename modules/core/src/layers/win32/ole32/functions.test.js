@@ -254,6 +254,13 @@ const initialize = (fns, mode)=>fns.CoInitializeEx.handler([0, mode]);
 const createInstance = (fns, { clsid = CLSID_ARG, outer = 0, iid = IID_ARG, ppv = PPV } = {})=>
     fns.CoCreateInstance.handler([clsid, outer, 1, iid, ppv]);
 
+test('CoGetCurrentLogicalThreadId answers the calling thread\'s id', ()=>{
+    const { host, fns } = setup();
+    assert.equal(fns.CoGetCurrentLogicalThreadId.handler(), 0x100);
+    host.run(host.threads.second);
+    assert.equal(fns.CoGetCurrentLogicalThreadId.handler(), 0x104);
+});
+
 test('CoInitialize nests and only the matching CoUninitialize leaves', ()=>{
     const { host, fns } = setup();
     assert.equal(fns.CoInitialize.handler(), S_OK);
@@ -359,6 +366,26 @@ test('CoGetApartmentType names the apartment, and wants both pointers', ()=>{
     assert.deepEqual(answer(), [S_OK, 1, 0], 'APTTYPE_MTA');
     host.run(host.threads.second);
     assert.deepEqual(answer(), [S_OK, 1, 1], 'APTTYPEQUALIFIER_IMPLICIT_MTA');
+});
+
+test('a usage of the multithreaded apartment puts a thread in no apartment in it implicitly', ()=>{
+    // What CoIncrementMTAUsage does, and what DirectSound's worker threads do
+    // (Wine's dsound tests' apartment checks).
+    const { host, fns } = setup();
+    const TYPE = 0x9000;
+    const QUALIFIER = 0x9004;
+    const COOKIE = 0x9008;
+    const answer = ()=>[fns.CoGetApartmentType.handler([TYPE, QUALIFIER]) >>> 0,
+        host.u32(TYPE), host.u32(QUALIFIER)];
+    assert.deepEqual(answer(), [CO_E_NOTINITIALIZED, 0xffffffff, 0]);
+    assert.equal(fns.CoIncrementMTAUsage.handler([COOKIE]), S_OK);
+    assert.notEqual(host.u32(COOKIE), 0);
+    assert.deepEqual(answer(), [S_OK, 1, 1], 'APTTYPEQUALIFIER_IMPLICIT_MTA');
+    assert.equal(fns.CoDecrementMTAUsage.handler([host.u32(COOKIE)]), S_OK);
+    assert.deepEqual(answer(), [CO_E_NOTINITIALIZED, 0xffffffff, 0]);
+    host.registry.mtaUsage.enter();
+    assert.deepEqual(answer(), [S_OK, 1, 1], 'held by a system object, as DirectSound holds it');
+    host.registry.mtaUsage.leave();
 });
 
 test('the thread\'s block points at ole32\'s record, whose flags name the apartment', ()=>{
@@ -788,6 +815,9 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoInitialize: 4,
         CoInitializeEx: 8,
         CoGetApartmentType: 8,
+        CoIncrementMTAUsage: 4,
+        CoDecrementMTAUsage: 4,
+        CoGetCurrentLogicalThreadId: 0,
         CoInitializeSecurity: 36,
         CoUninitialize: 0,
         OleInitialize: 4,

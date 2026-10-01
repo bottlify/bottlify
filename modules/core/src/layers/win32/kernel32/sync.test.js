@@ -108,7 +108,7 @@ function fakeKernel(){
             state.blocked.push(thread);
             return null;
         },
-        clock: { virtualTime: ()=>state.now },
+        clock: { virtualTime: ()=>state.now, wallClock: ()=>state.now },
         /** @param {any[]} objects @param {any} thread @param {any} [timed] */
         waitAll(objects, thread, timed){
             state.timed.push(timed);
@@ -612,6 +612,49 @@ test('a suspension past MAXIMUM_SUSPEND_COUNT fails and leaves the count alone',
     assert.deepEqual(host.errors, [ERROR_SIGNAL_REFUSED]);
 });
 
+test('GetThreadTimes fills a FILETIME per slot, zero exit for a running thread', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.register(0x20, 'thread', host.threads.second);
+
+    const read64 = (/** @type {number} */ at)=>new DataView(host.bytes.buffer).getBigInt64(at, true);
+    assert.equal(fns.GetThreadTimes.handler([0x20, 0x300, 0x308, 0x310, 0x318]), 1);
+    assert.notEqual(read64(0x300), 0n, 'a creation time');
+    assert.equal(read64(0x308), 0n, 'a running thread has no exit time');
+    assert.equal(read64(0x310), 0n);
+    assert.equal(read64(0x318), 0n);
+
+    host.threads.second.exitCode = 0;
+    assert.equal(fns.GetThreadTimes.handler([0x20, 0x300, 0x308, 0x310, 0x318]), 1);
+    assert.notEqual(read64(0x308), 0n, 'an ended thread has an exit time');
+
+    assert.equal(fns.GetThreadTimes.handler([0x1234, 0x300, 0x308, 0x310, 0x318]), 0);
+    assert.deepEqual(host.errors, [6], 'ERROR_INVALID_HANDLE');
+});
+
+test('SetThreadAffinityMask records the mask and answers the one before', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.register(0x20, 'thread', host.threads.second);
+
+    assert.equal(fns.SetThreadAffinityMask.handler([0x20, 2]), 1, 'the one processor');
+    assert.equal(fns.SetThreadAffinityMask.handler([0x20, 4]), 2, 'what was set before');
+    assert.equal(host.threads.second.affinityMask, 4);
+
+    assert.equal(fns.SetThreadAffinityMask.handler([0x1234, 1]), 0, 'not a thread');
+    assert.deepEqual(host.errors, [6], 'ERROR_INVALID_HANDLE');
+});
+
+test('SetThreadIdealProcessor records the ideal and answers the one before', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.register(0x20, 'thread', host.threads.second);
+
+    assert.equal(fns.SetThreadIdealProcessor.handler([0x20, 1]), 0, 'processor 0 before');
+    assert.equal(fns.SetThreadIdealProcessor.handler([0x20, 3]), 1);
+    assert.equal(host.threads.second.idealProcessor, 3);
+});
+
 test('a thread resumed while queued behind a released section takes it', ()=>{
     // Suspended behind a section, a thread is passed over by the release that
     // nobody else could take; resuming it hands it the section then.
@@ -840,4 +883,56 @@ test('a count of nothing or of too much is ERROR_INVALID_PARAMETER', ()=>{
     fns.WaitForMultipleObjects.handler([0, 0x400, 0, INFINITE]);
     fns.WaitForMultipleObjects.handler([65, 0x400, 0, INFINITE]);
     assert.deepEqual(host.errors, [87, 87]);
+});
+
+test('GetThreadContext fills the groups asked for, and SetThreadContext is refused', ()=>{
+    const host = /** @type {any} */ (fakeHost());
+    const said = /** @type {string[]} */ ([]);
+    host.divergence = (/** @type {string} */ api)=>said.push(api);
+    host.registers = ()=>({ eax: 1, ecx: 2, edx: 3, ebx: 4, esp: 0x5000, ebp: 6, esi: 7, edi: 8,
+        eip: 0x401000, eflags: 0x246 });
+    const fns = createSyncFunctions(host);
+    const other = host.threads.second;
+    other.context = { reg32: Int32Array.of(10, 11, 12, 13, 0x6000, 15, 16, 17), eip: 0x402000,
+        flags: 0x202 };
+    host.register(0x20, 'thread', other);
+    const at = 0x400;
+    const view = new DataView(host.bytes.buffer);
+    const CONTEXT_FULL = 0x10007;
+
+    view.setUint32(at, CONTEXT_FULL, true);
+    assert.equal(fns.GetThreadContext.handler([0xfffffffe, at]), 1, 'the calling thread');
+    assert.deepEqual([view.getUint32(at + 0xb0, true), view.getUint32(at + 0xc4, true),
+        view.getUint32(at + 0xb8, true)], [1, 0x5000, 0x401000]);
+    assert.equal(view.getUint32(at, true), CONTEXT_FULL, 'the flags stay as given');
+
+    view.setUint32(at, 0x10001, true);
+    view.setUint32(at + 0xb0, 0xcccccccc, true);
+    assert.equal(fns.GetThreadContext.handler([0x20, at]), 1, 'a switched-away thread');
+    assert.equal(view.getUint32(at + 0xb8, true), 0x402000);
+    assert.equal(view.getUint32(at + 0xc4, true), 0x6000);
+    assert.equal(view.getUint32(at + 0xb0, true), 0xcccccccc, 'integer registers not asked for');
+
+    assert.equal(fns.SetThreadContext.handler([0x20, at]), 0);
+    assert.deepEqual(said, ['SetThreadContext']);
+    assert.equal(fns.GetThreadContext.handler([0x99, at]), 0, 'no such thread');
+});
+
+test('GetThreadSelectorEntry describes the flat selectors and the thread block behind FS', ()=>{
+    const host = /** @type {any} */ (fakeHost());
+    const fns = createSyncFunctions(host);
+    const self = host.currentThread();
+    self.tebAddress = 0x7ffd0000;
+    const at = 0x400;
+    assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 0x3b, at]), 1);
+    const bytes = host.bytes.subarray(at, at + 8);
+    const base = (bytes[7] << 24 | bytes[4] << 16 | bytes[2] | bytes[3] << 8) >>> 0;
+    assert.equal(base, 0x7ffd0000, 'FS is the thread block');
+    assert.equal(bytes[0] | bytes[1] << 8, 0xfff);
+    assert.equal(bytes[5] & 0x1f, 0x13);
+    assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 0x1b, at]), 1);
+    assert.equal(bytes[6] & 0xc0, 0xc0, 'flat code: 32-bit and page granular');
+    assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 3, at]), 1, 'the null one');
+    assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 0x123, at]), 0);
+    assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 0xdeadbeef, at]), 0);
 });

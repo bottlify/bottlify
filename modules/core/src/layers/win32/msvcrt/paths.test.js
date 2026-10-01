@@ -441,6 +441,20 @@ test('_tempnam names a file that is not there, in TMP\'s directory, the one aske
     assert.match(memory.text(table._tempnam.handler([0, 0])), /^C:\\here\\[0-9a-v]+$/);
 });
 
+test('tmpnam names a file in the root, a dot ending only the first name', ()=>{
+    const memory = fakeMemory();
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory,
+        files: { stat: ()=>({ exists: false }), currentDirectory: ()=>'C:\\here' },
+    }));
+    const own = table.tmpnam.handler([0]);
+    assert.match(memory.text(own), /^\\s[0-9a-v]+\.$/, 'a backslash, then a name ending in a dot');
+    const buffer = memory.put('abc');
+    assert.equal(table.tmpnam.handler([buffer]), buffer, 'the buffer of the caller is used');
+    assert.match(memory.text(buffer), /^\\s[0-9a-v]+\.[0-9a-v]+$/);
+    assert.equal(table.tmpnam.handler([0]), own, 'the runtime keeps one buffer');
+});
+
 test('a path operation refuses no path with -1 and EINVAL, reading nothing', ()=>{
     const memory = fakeMemory();
     /** @type {number[]} */

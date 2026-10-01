@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LockFlags, alignOutward, createDynamicBuffer } from './buffers.js';
+import { LockFlags, alignOutward, carriedRanges, createDynamicBuffer } from './buffers.js';
 import { createFakeDevice } from './fake-device.js';
 
 /** @param {number} size @param {number} [alignment] */
@@ -244,4 +244,69 @@ test('a backing is not reused until the frame that read it has been submitted', 
     dynamic.endFrame();
     fill(dynamic, 0, 16, LockFlags.DISCARD);
     assert.equal(dynamic.gpu, second, 'released once its frame was submitted');
+});
+
+/**
+ * A buffer whose renames carry the old contents on the GPU, and the frame's
+ * end as the backend runs it: uploads flushed, the carries copied in a command
+ * buffer submitted ahead of the frame's, then the frame ended.
+ *
+ * @param {number} size
+ */
+function carrying(size){
+    const gpu = createFakeDevice();
+    /** @type {import('./buffers.js').Carry[]} */
+    const carries = [];
+    const dynamic = createDynamicBuffer({
+        device: gpu.device, queue: gpu.queue, size, usage: 0, label: 'vertices',
+        carry: carry=>carries.push(carry),
+    });
+    const endFrame = ()=>{
+        dynamic.flush();
+        const encoder = gpu.device.createCommandEncoder();
+        for (const carry of carries.splice(0))
+        {
+            for (const range of carriedRanges(carry))
+            {
+                encoder.copyBufferToBuffer(carry.from, range.start, carry.to, range.start,
+                    range.end - range.start);
+            }
+        }
+        gpu.queue.submit([encoder.finish()]);
+
+        dynamic.endFrame();
+    };
+    return { gpu, dynamic, endFrame };
+}
+
+test('a lock with neither flag after a read carries the rest on the GPU and sends the range', ()=>{
+    // World of Warcraft locks part of a large buffer a draw of the frame has
+    // read: resending all of it was most of a frame's uploads.
+    const { gpu, dynamic, endFrame } = carrying(1 << 20);
+    fill(dynamic, 0, 1 << 20, LockFlags.NONE, 0x22);
+    endFrame();
+    const first = dynamic.gpu;
+
+    dynamic.markRead();
+    fill(dynamic, 4096, 64, LockFlags.NONE, 0x33);
+    fill(dynamic, 8192, 64, LockFlags.NOOVERWRITE, 0x44);
+    const before = gpu.of('writeBuffer').length;
+    endFrame();
+
+    assert.notEqual(dynamic.gpu, first, 'renamed: the draw that read it keeps its bytes');
+    const uploads = gpu.of('writeBuffer').slice(before);
+    assert.equal(uploads.reduce((sum, one)=>sum + one.size, 0), 4096 + 64,
+        'only the span the two locks wrote travels');
+    const expected = new Uint8Array(1 << 20).fill(0x22);
+    expected.fill(0x33, 4096, 4160);
+    expected.fill(0x44, 8192, 8256);
+    assert.deepEqual(dynamic.gpu.bytes, expected, 'the new backing holds everything');
+    assert.ok(first.bytes.subarray(4096, 4160).every((/** @type {number} */ byte)=>byte === 0x22),
+        'and the old one what the draw read');
+});
+
+test('carried ranges are the complement of what was written, in order', ()=>{
+    assert.deepEqual(carriedRanges({ from: null, to: null, size: 100,
+        written: [{ start: 40, end: 60 }, { start: 0, end: 8 }, { start: 50, end: 70 }] }),
+    [{ start: 8, end: 40 }, { start: 70, end: 100 }]);
 });

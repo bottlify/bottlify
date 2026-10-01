@@ -316,6 +316,8 @@ function fakeHandles(){
         },
         /** @param {number} handle */
         has: handle=>entries.has(handle),
+        /** @param {any} object */
+        holds: object=>[...entries.values()].some(entry=>entry.object === object),
     };
 }
 
@@ -379,6 +381,16 @@ function setup(extra = {}){
 
     return { memory, files, handles, error, console, fns, open, at };
 }
+
+test('a name past MAX_PATH is read whole, not cut at 260 characters', ()=>{
+    const { files, fns, at } = setup();
+    const long = 'C:\\GAME\\' + 'x'.repeat(300) + '.DAT';
+    const cut = long.slice(0, 260);
+    files.put(cut, 'the wrong file');
+    assert.equal(fns.CreateFileA.handler(
+        [at(NAME, long), GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0]), INVALID_HANDLE_VALUE,
+    'the first 260 characters name another file');
+});
 
 test('CREATE_NEW refuses a file that is already there', ()=>{
     const { files, error, fns, at } = setup();
@@ -514,6 +526,24 @@ test('a zero-length write still reports a count', ()=>{
 
     assert.equal(fns.WriteFile.handler([handle, BUFFER, 0, OUT_COUNT, 0]), 1);
     assert.equal(memory.dword(OUT_COUNT), 0);
+});
+
+test('a write from a null buffer is refused, a zero-length one is not', ()=>{
+    const { memory, files, error, fns, open } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'abcd');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    memory.putDword(OUT_COUNT, 0xdeadbeef);
+    assert.equal(fns.WriteFile.handler([handle, 0, 10, OUT_COUNT, 0]), 0);
+    assert.equal(error.code, 1784, 'ERROR_INVALID_USER_BUFFER');
+    assert.equal(memory.dword(OUT_COUNT), 0);
+    assert.equal(files.text('C:\\GAME\\SAVE.DAT'), 'abcd');
+    assert.equal(fns.WriteFile.handler([handle, 0, 0, OUT_COUNT, 0]), 1);
+
+    memory.putDword(OUT_COUNT, 0xdeadbeef);
+    assert.equal(fns.ReadFile.handler([handle, 0, 10, OUT_COUNT, 0]), 0);
+    assert.equal(error.code, 998, 'ERROR_NOACCESS');
+    assert.equal(memory.dword(OUT_COUNT), 0);
+    assert.equal(fns.SetFilePointer.handler([handle, 0, 0, FILE_CURRENT]), 0, 'nothing consumed');
 });
 
 test('a file opened for reading refuses a write, and the other way round', ()=>{
@@ -1670,6 +1700,18 @@ test('FILE_FLAG_DELETE_ON_CLOSE takes the file away with its handle', ()=>{
     assert.equal(files.stat('C:\\GAME\\SCRATCH.TMP'), null);
 });
 
+test('FILE_FLAG_DELETE_ON_CLOSE waits for the last handle, not a duplicate', ()=>{
+    const { files, fns, at, handles } = setup();
+    const handle = fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\SCRATCH.TMP'),
+        GENERIC_READ | GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE, 0]);
+    // What DuplicateHandle files: a second handle onto the same open file.
+    const duplicate = handles.open('file', handles.resolve(handle));
+    fns.CloseHandle.handler([duplicate]);
+    assert.equal(files.stat('C:\\GAME\\SCRATCH.TMP')?.exists, true, 'the first still holds it');
+    fns.CloseHandle.handler([handle]);
+    assert.equal(files.stat('C:\\GAME\\SCRATCH.TMP'), null);
+});
+
 /** Where the native-open fixtures put their structures. */
 const NT_NAME = 0x700;
 const NT_STRING = 0x7a0;
@@ -1873,4 +1915,127 @@ test('a lock is the file\'s, seen through every handle, and goes with its handle
     assert.equal(fns.LockFile.handler([first, 0xffffffff, 0xffffffff, 2, 0]), 0,
         'a range past the last offset is not one');
     assert.equal(error.code, ERROR_INVALID_PARAMETER);
+});
+
+test('ReplaceFile moves the replacement onto the replaced name, keeping a backup when asked',
+    ()=>{
+        const { files, error, fns, at } = setup();
+        const dir = 'C:\\GAME\\';
+        files.put(`${dir}OLD.TXT`, 'old');
+        files.put(`${dir}NEW.TXT`, 'new');
+        const replaced = at(NAME, `${dir}OLD.TXT`);
+        const replacement = at(NAME2, `${dir}NEW.TXT`);
+        const backup = at(0x200, `${dir}OLD.BAK`);
+        assert.equal(fns.ReplaceFileA.argBytes, 24);
+        assert.equal(fns.ReplaceFileA.handler([replaced, replacement, backup, 0, 0, 0]), 1);
+        assert.equal(files.text(`${dir}OLD.TXT`), 'new');
+        assert.equal(files.text(`${dir}OLD.BAK`), 'old');
+        assert.ok(!files.stat(`${dir}NEW.TXT`)?.exists, 'the replacement name is gone');
+
+        files.put(`${dir}NEW.TXT`, 'newer');
+        assert.equal(fns.ReplaceFileA.handler([replaced, replacement, 0, 0, 0, 0]), 1);
+        assert.equal(files.text(`${dir}OLD.TXT`), 'newer');
+
+        assert.equal(fns.ReplaceFileA.handler([replaced, replacement, 0, 0, 0, 0]), 0);
+        assert.equal(error.code, 2, 'ERROR_FILE_NOT_FOUND without a replacement');
+
+        files.put(`${dir}NEW.TXT`, 'x');
+        files.setAttributes(`${dir}OLD.TXT`, 1);
+        assert.equal(fns.ReplaceFileA.handler([replaced, replacement, 0, 0, 0, 0]), 0);
+        assert.equal(error.code, ERROR_ACCESS_DENIED, 'a read-only file is not replaced');
+        assert.equal(files.text(`${dir}NEW.TXT`), 'x', 'and nothing moved');
+    });
+
+test('WriteFileGather and ReadFileScatter move a page per segment and complete once', ()=>{
+    /** @type {number[][]} */
+    const done = [];
+    const { memory, files, fns, open } = setup({ ports: {
+        offsetOf: ()=>2,
+        /** @param {number} handle @param {number} count @param {number} pointer */
+        completed: (handle, count, pointer)=>done.push([count, pointer]),
+    } });
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdefghij');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    memory.putString(0x400, 'XYZ');
+    memory.putDword(0x300, 0x400);
+    memory.putDword(0x304, 0);
+    assert.equal(fns.WriteFileGather.handler([handle, 0x300, 3, 0, 0x500]), 1);
+    assert.equal(files.text('C:\\GAME\\SAVE.DAT'), 'abXYZfghij', 'at the OVERLAPPED\'s offset');
+    assert.deepEqual(done, [[3, 0x500]]);
+
+    memory.putDword(0x300, 0x600);
+    assert.equal(fns.ReadFileScatter.handler([handle, 0x300, 4, 0, 0x500]), 1);
+    assert.equal(memory.readCString(0x600, 4), 'XYZf');
+    assert.deepEqual(done.at(-1), [4, 0x500]);
+    assert.equal(fns.ReadFileScatter.handler([handle, 0x300, 4, 0, 0]), 0, 'overlapped only');
+});
+
+test('NtQueryInformationFile answers the name, the size and the position of an open file', ()=>{
+    const { memory, files, fns, open } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdefghij');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    fns.SetFilePointer.handler([handle, 3, 0, FILE_BEGIN]);
+    const query = /** @type {any} */ (fns.CreateFileW).natives.NtQueryInformationFile;
+    const block = 0x300;
+    const out = 0x400;
+
+    assert.equal(query.handler([handle, block, out, 0x100, 9]), 0, 'FileNameInformation');
+    const name = '\\GAME\\SAVE.DAT';
+    assert.equal(memory.dword(out), name.length * 2);
+    assert.equal(memory.bytes[out + 4], name.charCodeAt(0));
+    assert.equal(memory.dword(block + 4), 4 + name.length * 2);
+
+    assert.equal(query.handler([handle, block, out, 0x100, 5]), 0, 'FileStandardInformation');
+    assert.equal(memory.dword(out + 8), 10, 'EndOfFile');
+    assert.equal(query.handler([handle, block, out, 8, 14]), 0, 'FilePositionInformation');
+    assert.equal(memory.dword(out), 3);
+
+    assert.equal(query.handler([handle, block, out, 4, 5]) >>> 0, 0xc0000004, 'too short');
+    assert.equal(query.handler([handle, block, out, 0x100, 34]) >>> 0, 0xc0000003,
+        'a class nothing keeps');
+    assert.equal(query.handler([0x999, block, out, 0x100, 9]) >>> 0, 0xc0000008);
+
+    const control = /** @type {any} */ (fns.CreateFileW).natives.NtFsControlFile;
+    assert.equal(control.argBytes, 40);
+    assert.equal(control.handler([handle, 0, 0, 0, block, 0x900a8]) >>> 0, 0xc0000010,
+        'STATUS_INVALID_DEVICE_REQUEST');
+    assert.equal(memory.dword(block) >>> 0, 0xc0000010);
+    assert.equal(control.handler([0xffffffff, 0, 0, 0, 0, 0]) >>> 0, 0xc0000008,
+        'no block to write is not a fault');
+});
+
+test('CreateHardLink answers as a volume without links does, and says so', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const { files, error, fns, at } = setup({
+        divergence: (/** @type {string} */ api)=>said.push(api) });
+    files.put('C:\\GAME\\SAVE.DAT', 'x');
+    assert.equal(fns.CreateHardLinkA.argBytes, 12);
+    assert.equal(fns.CreateHardLinkA.handler(
+        [at(NAME2, 'C:\\GAME\\LINK.DAT'), at(NAME, 'C:\\GAME\\SAVE.DAT'), 0]), 0);
+    assert.equal(error.code, 1, 'ERROR_INVALID_FUNCTION, as FAT answers');
+    assert.deepEqual(said, ['CreateHardLink']);
+    assert.equal(fns.CreateHardLinkA.handler(
+        [NAME2, at(NAME, 'C:\\GAME\\NONE.DAT'), 0]), 0);
+    assert.equal(error.code, 2, 'a missing file is missing first');
+
+    assert.equal(fns.CreateSymbolicLinkW.argBytes, 12);
+    assert.equal(fns.CreateSymbolicLinkA.handler([NAME2, NAME, 0]), 0);
+    assert.equal(error.code, 1314, 'ERROR_PRIVILEGE_NOT_HELD');
+    assert.equal(said.at(-1), 'CreateSymbolicLink');
+});
+
+test('GetFileAttributesEx fills the head a find would, and nothing past it', ()=>{
+    const { memory, files, error, fns, at } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdefghij');
+    memory.bytes.fill(0xa5, 0x400, 0x440);
+    assert.equal(fns.GetFileAttributesExA.argBytes, 12);
+    assert.equal(fns.GetFileAttributesExA.handler([at(NAME, 'C:\\GAME\\SAVE.DAT'), 0, 0x400]), 1);
+    assert.equal(memory.dword(0x400), fns.GetFileAttributesA.handler([NAME]));
+    assert.equal(memory.dword(0x400 + 32), 10, 'nFileSizeLow');
+    assert.equal(memory.bytes[0x400 + 36], 0xa5, 'thirty-six bytes');
+    assert.equal(fns.GetFileAttributesExA.handler([NAME, 1, 0x400]), 0, 'one level');
+    assert.equal(error.code, 87);
+    assert.equal(fns.GetFileAttributesExA.handler([at(NAME, 'C:\\GAME\\NONE.DAT'), 0, 0x400]), 0);
+    assert.equal(error.code, 2);
 });

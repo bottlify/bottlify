@@ -897,6 +897,145 @@ export function setTextureStageStateCode(at, trap, types = STAGE_STATE_TYPES){
     ]);
 }
 
+/** The transform types below WORLD a device answers for: VIEW, PROJECTION, TEXTURE0..7. */
+const ANSWERED_TRANSFORMS = (1 << 2 | 1 << 3 | 0xff << 16) >>> 0;
+
+/**
+ * HRESULT GetTransform(this, D3DTRANSFORMSTATETYPE type, D3DMATRIX *), as
+ * guest code: the matrix of every type the device answers for is in the
+ * block, the guest's own writes included and the host's own changes mirrored
+ * there, so it is copied out of the type's slot. A type the device refuses, a
+ * null pointer and the host's flag go to the host.
+ *
+ *     (prologue)
+ *     mov eax, [esp+8]            ; type
+ *     cmp eax, 24
+ *     jb low
+ *     sub eax, 232                ; WORLD..WORLD3 -> 24..27
+ *     cmp eax, 24
+ *     jb slow
+ *     cmp eax, 28
+ *     jae slow
+ *     jmp slot
+ *   low:
+ *     mov edx, ANSWERED_TRANSFORMS
+ *     bt edx, eax
+ *     jnc slow
+ *   slot:
+ *     mov edx, [esp+12]           ; the matrix
+ *     test edx, edx
+ *     jz slow
+ *     push esi
+ *     push edi
+ *     mov edi, edx
+ *     mov esi, eax
+ *     shl esi, 6
+ *     lea esi, [ecx + esi + TRANSFORMS]
+ *     mov ecx, 16
+ *     rep movsd
+ *     pop edi
+ *     pop esi
+ *     xor eax, eax
+ *     ret 12
+ *   slow:
+ *     jmp trap
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function getTransformCode(at, trap){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x3d, ...dword(WORLD_SLOT)],                            // cmp eax, 24
+        { jcc: 0x72, to: 'low' },                                // jb low
+        [0x2d, ...dword(WORLD_TYPE - WORLD_SLOT)],               // sub eax, 232
+        [0x3d, ...dword(WORLD_SLOT)],                            // cmp eax, 24
+        { jcc: 0x72, to: 'slow' },                               // jb slow
+        [0x3d, ...dword(SHADOW.TRANSFORM_SLOTS)],                // cmp eax, 28
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        { jcc: 0xeb, to: 'slot' },                               // jmp slot
+        { label: 'low' },
+        [0xba, ...dword(ANSWERED_TRANSFORMS)],                   // mov edx, imm32
+        [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
+        { jcc: 0x73, to: 'slow' },                               // jnc slow
+        { label: 'slot' },
+        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x56],                                                  // push esi
+        [0x57],                                                  // push edi
+        [0x89, 0xd7],                                            // mov edi, edx
+        [0x89, 0xc6],                                            // mov esi, eax
+        [0xc1, 0xe6, 0x06],                                      // shl esi, 6
+        [0x8d, 0xb4, 0x31, ...dword(SHADOW.TRANSFORMS)],         // lea esi, [ecx+esi+disp]
+        [0xb9, ...dword(16)],                                    // mov ecx, 16
+        [0xf3, 0xa5],                                            // rep movsd
+        [0x5f],                                                  // pop edi
+        [0x5e],                                                  // pop esi
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x0c, 0x00],                                      // ret 12
+    ]);
+}
+
+/**
+ * HRESULT GetTextureStageState(this, DWORD stage, D3DTEXTURESTAGESTATETYPE
+ * type, DWORD *value), as guest code: a type the version's setter takes is
+ * kept in the block, where the guest's own writes land and the host mirrors
+ * every change it makes itself, so the answer is read there. A stage past the
+ * block, a type the setter leaves to the host, a null pointer and the host's
+ * flag go to the host.
+ *
+ *     (prologue)
+ *     mov eax, [esp+12]           ; type
+ *     cmp eax, 32
+ *     jae slow
+ *     mov edx, types
+ *     bt edx, eax
+ *     jnc slow
+ *     mov eax, [esp+8]            ; stage
+ *     cmp eax, 8
+ *     jae slow
+ *     shl eax, 5
+ *     add eax, [esp+12]
+ *     mov edx, [esp+16]           ; value
+ *     test edx, edx
+ *     jz slow
+ *     mov eax, [ecx + eax*4 + STAGE_STATES]
+ *     mov [edx], eax
+ *     xor eax, eax
+ *     ret 16
+ *   slow:
+ *     jmp trap
+ *
+ * @param {number} at @param {number} trap
+ * @param {number} [types]  The stage state types the setter takes, Direct3D 8's by default.
+ * @returns {Uint8Array}
+ */
+export function getTextureStageStateCode(at, trap, types = STAGE_STATE_TYPES){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
+        [0x3d, ...dword(SHADOW.STAGE_STATE_STRIDE)],             // cmp eax, 32
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0xba, ...dword(types)],                                 // mov edx, imm32
+        [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
+        { jcc: 0x73, to: 'slow' },                               // jnc slow
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x3d, ...dword(SHADOW.STAGE_COUNT)],                    // cmp eax, 8
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0xc1, 0xe0, 0x05],                                      // shl eax, 5
+        [0x03, 0x44, 0x24, 0x0c],                                // add eax, [esp+12]
+        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x8b, 0x84, 0x81, ...dword(SHADOW.STAGE_STATES)],       // mov eax, [ecx+eax*4+disp]
+        [0x89, 0x02],                                            // mov [edx], eax
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x10, 0x00],                                      // ret 16
+    ]);
+}
+
 /**
  * HRESULT SetSamplerState(this, DWORD sampler, D3DSAMPLERSTATETYPE type,
  * DWORD value), as guest code: the state is kept in its sampler's stage
@@ -1281,26 +1420,33 @@ export function createShadow(deps){
      * Writes the device's current values into the block, so that the block
      * and the copy agree with the device before the guest touches either.
      */
-    const mirror = ()=>{
+    /** @param {number} state @returns {number | null} what the device holds, if it answers */
+    const renderStateOf = state=>{
+        /** @type {{ value?: number }} */
+        const out = {};
+        return device.GetRenderState(state, out) === 0 ? (out.value ?? 0) >>> 0 : null;
+    };
+
+    const mirrorRenderStates = ()=>{
         const states = new Uint8Array(SHADOW.RENDER_STATE_COUNT * 4);
         const view = new DataView(states.buffer);
         const valid = new Uint8Array(SHADOW.RENDER_STATE_COUNT / 8);
         for (let state = 0; state < SHADOW.RENDER_STATE_COUNT; state++)
         {
-            /** @type {{ value?: number }} */
-            const out = {};
-            const answered = device.GetRenderState(state, out) === 0;
-            const value = answered ? (out.value ?? 0) >>> 0 : 0;
+            const answered = renderStateOf(state);
+            const value = answered ?? 0;
             seenStates[state] = value;
             view.setUint32(state * 4, value, true);
-            if (answered)
+            if (answered !== null)
             {
                 valid[state >>> 3] |= 1 << (state & 7);
             }
         }
         deps.writeMemory(address + SHADOW.RENDER_STATES, states);
         deps.writeMemory(address + SHADOW.RENDER_STATE_VALID, valid);
+    };
 
+    const mirrorTransforms = ()=>{
         const matrices = new Uint8Array(SHADOW.TRANSFORM_SLOTS * 64);
         const floats = new Float32Array(matrices.buffer);
         for (let slot = 0; slot < SHADOW.TRANSFORM_SLOTS; slot++)
@@ -1314,7 +1460,9 @@ export function createShadow(deps){
         }
         seenTransforms.set(new Uint32Array(matrices.buffer));
         deps.writeMemory(address + SHADOW.TRANSFORMS, matrices);
+    };
 
+    const mirrorBindings = ()=>{
         // The bindings, as the pointers the program knows the buffers by. A
         // Get* adds a reference the caller owes back.
         for (let index = 0; index < (deps.bindings === false ? 0 : SHADOW.STREAM_COUNT); index++)
@@ -1338,14 +1486,18 @@ export function createShadow(deps){
             ? (shader.handle ?? 0) >>> 0 : 0;
         deps.writeMemory(address + SHADOW.STREAMS,
             dwordsBytes([...seenStreams, seenIndices, seenBaseVertex, seenShader]));
+    };
 
+    const mirrorTextures = ()=>{
         // The textures are mirrored as stale rather than as pointers: a
         // program that never writes a stage leaves the device with what it
         // holds, and reading a bound texture back would take a reference on
         // one the program may already have let go of.
         seenTextures.fill(STALE_POINTER);
         deps.writeMemory(address + SHADOW.TEXTURES, dwordsBytes([...seenTextures]));
+    };
 
+    const mirrorStageStates = ()=>{
         for (let stage = 0; stage < SHADOW.STAGE_COUNT; stage++)
         {
             for (let type = 0; type < SHADOW.STAGE_STATE_STRIDE; type++)
@@ -1377,7 +1529,9 @@ export function createShadow(deps){
         });
         deps.writeMemory(address + SHADOW.SAMPLER_KEYS, keys);
         deps.writeMemory(address + SHADOW.STAGE_STATES, dwordsBytes([...seenStageStates]));
+    };
 
+    const mirrorMaterial = ()=>{
         /** @type {{ material?: ShadowMaterial }} */
         const held = {};
         const material = device.GetMaterial(held) === 0 && held.material
@@ -1385,6 +1539,34 @@ export function createShadow(deps){
             : new Float32Array(SHADOW.MATERIAL_WORDS);
         seenMaterial.set(new Uint32Array(material.buffer));
         deps.writeMemory(address + SHADOW.MATERIAL, new Uint8Array(material.buffer));
+    };
+
+    /** @param {number} type */
+    const refreshTransform = type=>{
+        const slot = transformSlot(type);
+        if (address === 0 || slot < 0)
+        {
+            return;
+        }
+        /** @type {{ matrix?: ArrayLike<number> }} */
+        const out = {};
+        if (device.GetTransform(type, out) !== 0 || !out.matrix)
+        {
+            return;
+        }
+        const floats = new Float32Array(out.matrix);
+        seenTransforms.set(new Uint32Array(floats.buffer), slot * 16);
+        deps.writeMemory(address + SHADOW.TRANSFORMS + slot * 64,
+            new Uint8Array(floats.buffer));
+    };
+
+    const mirror = ()=>{
+        mirrorRenderStates();
+        mirrorTransforms();
+        mirrorBindings();
+        mirrorTextures();
+        mirrorStageStates();
+        mirrorMaterial();
     };
 
     /**
@@ -1708,12 +1890,53 @@ export function createShadow(deps){
 
         /**
          * After the host changed state on its own -- a state block applied, a
-         * reset -- the block is brought to what the device now holds.
+         * reset -- the block is brought to what the device now holds: the
+         * groups named, or all of it. A small state block applied between
+         * draws is common, and reading back every state the block holds cost
+         * each Apply hundreds of calls into the device.
+         *
+         * @param {{ renderStates?: Iterable<number>, transforms?: Iterable<number>,
+         *     bindings?: boolean, textures?: boolean, stageStates?: boolean,
+         *     material?: boolean }} [touched]
          */
-        remirror(){
-            if (address !== 0)
+        remirror(touched){
+            if (address === 0)
+            {
+                return;
+            }
+            if (!touched)
             {
                 mirror();
+                return;
+            }
+            for (const state of touched.renderStates ?? [])
+            {
+                if (state >= 0 && state < SHADOW.RENDER_STATE_COUNT)
+                {
+                    seenStates[state] = renderStateOf(state) ?? 0;
+                    deps.writeMemory(address + SHADOW.RENDER_STATES + state * 4,
+                        dwordBytes(seenStates[state]));
+                }
+            }
+            for (const type of touched.transforms ?? [])
+            {
+                refreshTransform(type);
+            }
+            if (touched.bindings)
+            {
+                mirrorBindings();
+            }
+            if (touched.textures)
+            {
+                mirrorTextures();
+            }
+            if (touched.stageStates)
+            {
+                mirrorStageStates();
+            }
+            if (touched.material)
+            {
+                mirrorMaterial();
             }
         },
 
@@ -1765,23 +1988,7 @@ export function createShadow(deps){
          *
          * @param {number} type
          */
-        refreshTransform(type){
-            const slot = transformSlot(type);
-            if (address === 0 || slot < 0)
-            {
-                return;
-            }
-            /** @type {{ matrix?: ArrayLike<number> }} */
-            const out = {};
-            if (device.GetTransform(type, out) !== 0 || !out.matrix)
-            {
-                return;
-            }
-            const floats = new Float32Array(out.matrix);
-            seenTransforms.set(new Uint32Array(floats.buffer), slot * 16);
-            deps.writeMemory(address + SHADOW.TRANSFORMS + slot * 64,
-                new Uint8Array(floats.buffer));
-        },
+        refreshTransform,
 
         /**
          * Adopts whatever the guest wrote since the last entry. Every

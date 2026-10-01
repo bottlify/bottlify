@@ -34,7 +34,10 @@ function setup(names = {}){
     /** @type {{ data: Uint8Array, arrives?: Promise<boolean> }} */
     const file = { data: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]) };
 
+    /** @type {string[]} */
+    const said = [];
     const fns = createMappingFunctions({
+        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
         readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         readCString: pointer=>names[pointer] ?? '',
@@ -103,7 +106,7 @@ function setup(names = {}){
     // Shaped as kernel32 keeps an open file: the volume's node is a field of
     // the record a handle resolves to, not the record itself.
     table.set(fileHandle, { type: 'file', object: { node: file, position: 0 } });
-    return { fns, bytes, errors, errorsFor, file, fileHandle };
+    return { fns, bytes, errors, errorsFor, file, fileHandle, said };
 }
 
 /** @param {Uint8Array} bytes @param {number} at */
@@ -264,4 +267,43 @@ test('OpenFileMapping finds a named mapping, and says why when it cannot', ()=>{
     assert.deepEqual(errors, [2, 87], 'no such name, and no name at all');
     assert.equal(fns.OpenFileMappingA.argBytes, 12);
     assert.equal(fns.OpenFileMappingW.argBytes, 12);
+});
+
+test('a section in the global namespace is not the program\'s to make, not being elevated', ()=>{
+    // SeCreateGlobalPrivilege, which a program started the usual way does not
+    // hold (Wine's dinput hid.c skips its driver tests on this answer).
+    const GLOBAL = 0x900;
+    const LOCAL = 0x940;
+    const { fns, errors } = setup({ [GLOBAL]: 'Global\\winetest_section', [LOCAL]: 'Local\\Foo' });
+    errors.length = 0;
+    assert.equal(fns.CreateFileMappingW.handler(
+        [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, 0x1000, GLOBAL]), 0);
+    assert.deepEqual(errors, [5], 'ERROR_ACCESS_DENIED');
+    assert.notEqual(fns.CreateFileMappingW.handler(
+        [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, 0x1000, LOCAL]), 0);
+});
+
+test('CreateNamedPipe is refused as Windows 9x refuses it, and says so', ()=>{
+    // With no namespace for a client to open the other end in, a server end
+    // would be a handle nothing can ever connect to.
+    const { fns, errors, said } = setup();
+    for (const entry of [fns.CreateNamedPipeA, fns.CreateNamedPipeW])
+    {
+        assert.equal(entry.argBytes, 32);
+        assert.equal(entry.handler() >>> 0, 0xffffffff);
+        assert.equal(errors.at(-1), 120, 'ERROR_CALL_NOT_IMPLEMENTED');
+    }
+    assert.equal(said.length, 2);
+    assert.match(said[1], /^CreateNamedPipeW: /);
+});
+
+test('CreateMailslot is refused, and says so', ()=>{
+    const { fns, errors, said } = setup();
+    for (const entry of [fns.CreateMailslotA, fns.CreateMailslotW])
+    {
+        assert.equal(entry.argBytes, 16);
+        assert.equal(entry.handler() >>> 0, 0xffffffff);
+        assert.equal(errors.at(-1), 120, 'ERROR_CALL_NOT_IMPLEMENTED');
+    }
+    assert.match(said[1], /^CreateMailslotW: /);
 });

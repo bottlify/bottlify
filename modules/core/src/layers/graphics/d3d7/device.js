@@ -40,7 +40,7 @@ import {
     D3DERR_SCENE_NOT_IN_SCENE, D3DERR_VERTEXBUFFERLOCKED, D3DFMT, D3DLIGHTTYPE,
     D3DRENDERSTATE_D3D7_ONLY, D3DRENDERSTATE_MAX, D3DSBT, D3DTRANSFORMSTATE, D3DTSS_MAX,
     D3DVBCAPS_OPTIMIZED, D3D_OK, DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DDLOCK_DISCARDCONTENTS,
-    DDLOCK_NOOVERWRITE, DDLOCK_READONLY, transformStateOf,
+    DDLOCK_NOOVERWRITE, DDLOCK_READONLY, DEVICE_IDS, transformStateOf,
 } from './constants.js';
 import { DEVICE_DESCRIPTIONS } from './caps.js';
 import { D3DCLEAR, D3DLOCK, D3DFMT_INDEX, D3DTSS } from '../d3d8/constants.js';
@@ -261,7 +261,7 @@ export function createDirect3D7(ddraw, services = {}){
                 caps: surface.caps,
                 pixelFormatFlags: surface.pixelFormat.flags,
                 hasPalette: surface.palette !== null,
-            });
+            }, description.id !== DEVICE_IDS.RGB);
             if (hr !== D3D_OK)
             {
                 return { hr, device: null };
@@ -862,7 +862,7 @@ export function createDirect3D7(ddraw, services = {}){
                     caps: surface.caps,
                     pixelFormatFlags: surface.pixelFormat.flags,
                     hasPalette: surface.palette !== null,
-                });
+                }, description.id !== DEVICE_IDS.RGB);
                 if (hr !== D3D_OK)
                 {
                     return hr;

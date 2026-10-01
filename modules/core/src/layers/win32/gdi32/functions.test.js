@@ -366,6 +366,48 @@ test('CreateCompatibleDC starts with the one-pixel bitmap, and answers for the d
         fns.GetDeviceCaps.handler([hdc, HORZRES]));
 });
 
+test('the bounds accumulate what SetBoundsRect adds, and each call answers the state before',
+    ()=>{
+        // Wine's dc.c test_boundsrect, in the order it asks.
+        const DCB_RESET = 1;
+        const DCB_SET = 3;
+        const DCB_ENABLE = 4;
+        const DCB_DISABLE = 8;
+        const { fns, hdc, memory } = withDC();
+        const RECT = STRUCT + 0x800;
+        const read = ()=>[0, 4, 8, 12].map(at=>memory.i32(RECT + at));
+        assert.equal(fns.GetBoundsRect.handler([hdc, 0, 0]), 0);
+        assert.equal(fns.GetBoundsRect.handler([hdc, 0, ~0]), 0);
+
+        memory.putU32s(RECT, [10, 20, 40, 50]);
+        assert.equal(fns.SetBoundsRect.handler([hdc, RECT, DCB_SET]), DCB_RESET | DCB_DISABLE);
+        assert.equal(fns.GetBoundsRect.handler([hdc, RECT, 0]), DCB_SET);
+        assert.deepEqual(read(), [10, 20, 40, 50]);
+
+        memory.putU32s(RECT, [8, 8, 23, 23]);
+        assert.equal(fns.SetBoundsRect.handler([hdc, RECT, 2]), DCB_SET | DCB_DISABLE,
+            'DCB_ACCUMULATE adds to them');
+        fns.GetBoundsRect.handler([hdc, RECT, 0]);
+        assert.deepEqual(read(), [8, 8, 40, 50]);
+
+        memory.putU32s(RECT, [20, 20, 10, 10]);
+        fns.SetBoundsRect.handler([hdc, RECT, DCB_SET]);
+        assert.equal(fns.GetBoundsRect.handler([hdc, RECT, 0]), DCB_RESET, 'an empty one resets');
+        assert.deepEqual(read(), [0, 0, 0, 0]);
+
+        assert.equal(fns.SetBoundsRect.handler([hdc, 0, DCB_ENABLE]), DCB_RESET | DCB_DISABLE);
+        assert.equal(fns.SetBoundsRect.handler([hdc, 0, DCB_DISABLE]), DCB_RESET | DCB_ENABLE);
+        assert.equal(fns.SetBoundsRect.handler([hdc, 0, ~0]), 0, 'flags it does not know');
+        assert.equal(fns.SetBoundsRect.handler([0, 0, 0]), 0, 'no DC');
+    });
+
+test('ResetDC answers the DC it was given', ()=>{
+    const { fns, hdc } = withDC();
+    assert.equal(fns.ResetDCA.handler([hdc, 0]), hdc);
+    assert.equal(fns.ResetDCW.handler([hdc, 0]), hdc);
+    assert.equal(fns.ResetDCA.handler([0x1234, 0]), 0, 'not a DC');
+});
+
 test('deleting a DC lets go of what it had selected', ()=>{
     const { fns, hdc } = withDC();
     const pen = fns.CreatePen.handler([PS_SOLID, 1, 0xff]);
@@ -456,6 +498,23 @@ test('CreatePenIndirect reads LOGPEN at the documented offsets', ()=>{
 
     memory.putU32s(STRUCT + LOGPEN.lopnStyle, [PS_NULL]);
     assert.ok(fns.CreatePenIndirect.handler([STRUCT]) > 0);
+});
+
+test('ExtCreatePen takes its colour from a brush and checks its width and dashes', ()=>{
+    const { fns, memory, hdc } = withDC();
+    const PS_GEOMETRIC = 0x10000;
+    memory.putU32s(STRUCT, [0, 0x00123456, 0]);
+    const pen = fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 5, STRUCT, 0, 0]);
+    assert.ok(pen > 0);
+    fns.SelectObject.handler([hdc, pen]);
+    assert.equal(fns.GetCurrentObject.handler([hdc, OBJ_PEN]), pen);
+    assert.ok(fns.ExtCreatePen.handler([PS_SOLID, 1, STRUCT, 0, 0]) > 0, 'cosmetic, one wide');
+    assert.equal(fns.ExtCreatePen.handler([PS_SOLID, 3, STRUCT, 0, 0]), 0, 'a wide cosmetic pen');
+    assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | 7, 5, STRUCT, 0, 0]), 0,
+        'PS_USERSTYLE without its dashes');
+    assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 5, STRUCT, 2, STRUCT]), 0,
+        'dashes on a style that takes none');
+    assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 5, 0, 0, 0]), 0, 'no brush');
 });
 
 test('CreateBrushIndirect reads LOGBRUSH at the documented offsets', ()=>{
@@ -1474,7 +1533,7 @@ test('the extents a DC has are read back, and a metafile is refused', ()=>{
 
     assert.equal(fns.SetMetaFileBitsEx.handler(), 0);
     assert.equal(fns.PlayMetaFile.handler(), 0);
-    assert.equal(fns.DeleteMetaFile.handler(), 0);
+    assert.equal(fns.DeleteMetaFile.handler([0x7777]), 0, 'not a metafile');
     assert.deepEqual([fns.GetViewportExtEx, fns.GetWindowExtEx, fns.SetMetaFileBitsEx,
         fns.PlayMetaFile, fns.DeleteMetaFile].map(fn=>fn.argBytes), [8, 8, 8, 8, 4]);
 });
@@ -2228,6 +2287,8 @@ test('D3DKMTCreateDCFromMemory makes a memory DC over the program\'s own pixels'
     const view = new DataView(memory.bytes.buffer);
     // pMemory, Format (A8R8G8B8), Width, Height, Pitch, hDeviceDc, pColorTable
     [PIXELS, 21, 4, 4, 16, 0, 0].forEach((value, at)=>view.setUint32(DESC + at * 4, value, true));
+    assert.equal(fns.D3DKMTCreateDCFromMemory.handler([DESC]), 0xc000000d, 'no device DC');
+    view.setUint32(DESC + 20, fns.CreateCompatibleDC.handler([0]), true);
     assert.equal(fns.D3DKMTCreateDCFromMemory.handler([DESC]), 0);
     const hdc = view.getUint32(DESC + 28, true);
     const bitmap = view.getUint32(DESC + 32, true);
@@ -2249,4 +2310,169 @@ test('D3DKMTCreateDCFromMemory makes a memory DC over the program\'s own pixels'
     assert.equal(fns.GetObjectType.handler([hdc]), 0, 'the DC is gone');
     assert.equal(fns.GetObjectType.handler([bitmap]), 0, 'and the bitmap');
     assert.ok(!context.surfaces.freed.includes(PIXELS), 'the pixels stay the program\'s');
+});
+
+test('an enhanced metafile DC closes into a metafile handle, and says it recorded nothing', ()=>{
+    const memory = fakeMemory();
+    /** @type {string[]} */
+    const said = [];
+    const { table: fns } = createGdiFunctions({
+        readMemory: (address, length)=>memory.readMemory(address, length),
+        writeMemory: (address, data)=>memory.writeMemory(address, data),
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        handles: fakeHandles(),
+        surfaces: fakeSurfaces(),
+        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+    });
+    const OBJ_ENHMETADC = 12;
+    const OBJ_ENHMETAFILE = 13;
+
+    const hdc = fns.CreateEnhMetaFileA.handler([0, 0, 0, 0]);
+    assert.notEqual(hdc, 0);
+    assert.equal(fns.GetObjectType.handler([hdc]), OBJ_ENHMETADC);
+    assert.ok(said.some(line=>line.startsWith('CreateEnhMetaFileA: drawing')));
+    assert.equal(fns.GetDeviceCaps.handler([hdc, TECHNOLOGY]), 1,
+        'the reference device is the display');
+
+    const metafile = fns.CloseEnhMetaFile.handler([hdc]);
+    assert.notEqual(metafile, 0);
+    assert.equal(fns.GetObjectType.handler([metafile]), OBJ_ENHMETAFILE);
+    assert.equal(fns.GetObjectType.handler([hdc]), 0, 'closing ends the DC');
+    assert.equal(fns.CloseEnhMetaFile.handler([hdc]), 0, 'and it cannot be closed twice');
+    assert.equal(fns.DeleteEnhMetaFile.handler([metafile]), 1);
+    assert.equal(fns.DeleteEnhMetaFile.handler([metafile]), 0);
+
+    const display = fns.CreateCompatibleDC.handler([0]);
+    assert.equal(fns.CloseEnhMetaFile.handler([display]), 0, 'a DC that is no metafile');
+    assert.equal(fns.CreateEnhMetaFileW.handler([0x7777, 0, 0, 0]), 0, 'a reference that is no DC');
+    memory.putString(STRUCT, 'out.emf');
+    assert.equal(fns.CreateEnhMetaFileA.handler([0, STRUCT, 0, 0]), 0);
+    assert.ok(said.some(line=>line.includes('on disk')), 'a file is refused, and reported');
+
+    // The Windows 3 metafile the same way, each Close ending only its own kind.
+    const old = fns.CreateMetaFileA.handler([0]);
+    assert.equal(fns.GetObjectType.handler([old]), 4, 'OBJ_METADC');
+    assert.equal(fns.CloseEnhMetaFile.handler([old]), 0);
+    const closed = fns.CloseMetaFile.handler([old]);
+    assert.equal(fns.GetObjectType.handler([closed]), 9, 'OBJ_METAFILE');
+    assert.equal(fns.DeleteEnhMetaFile.handler([closed]), 0);
+    assert.equal(fns.DeleteMetaFile.handler([closed]), 1);
+});
+
+test('a world transform needs GM_ADVANCED, composes, and maps LPtoDP and DPtoLP', ()=>{
+    const { fns, hdc, memory } = withDC();
+    const XF = STRUCT + 0x900;
+    const PT = STRUCT + 0x940;
+    const view = new DataView(memory.bytes.buffer);
+    const putXform = (/** @type {number[]} */ values)=>values
+        .forEach((value, index)=>view.setFloat32(XF + index * 4, value, true));
+    putXform([1, 0, 0, -1, 0, 35]);
+    assert.equal(fns.SetWorldTransform.handler([hdc, XF]), 0, 'not in GM_COMPATIBLE');
+    assert.equal(fns.SetGraphicsMode.handler([hdc, 2]), 1);
+    assert.equal(fns.SetWorldTransform.handler([hdc, XF]), 1);
+    memory.putU32s(PT, [10, 10]);
+    assert.equal(fns.LPtoDP.handler([hdc, PT, 1]), 1);
+    assert.deepEqual([memory.i32(PT), memory.i32(PT + 4)], [10, 25], 'flipped about 17.5');
+    assert.equal(fns.DPtoLP.handler([hdc, PT, 1]), 1);
+    assert.deepEqual([memory.i32(PT), memory.i32(PT + 4)], [10, 10], 'and back');
+    assert.equal(fns.SetGraphicsMode.handler([hdc, 1]), 0, 'not back while transformed');
+
+    putXform([2, 0, 0, 2, 0, 0]);
+    assert.equal(fns.ModifyWorldTransform.handler([hdc, XF, 3]), 1, 'right: after the flip');
+    assert.equal(fns.GetWorldTransform.handler([hdc, XF]), 1);
+    assert.deepEqual([0, 1, 2, 3, 4, 5].map(index=>view.getFloat32(XF + index * 4, true)),
+        [2, 0, 0, -2, 0, 70]);
+    assert.equal(fns.ModifyWorldTransform.handler([hdc, 0, 1]), 1, 'MWT_IDENTITY');
+    assert.equal(fns.SetGraphicsMode.handler([hdc, 1]), 2);
+    assert.equal(fns.GetGraphicsMode.handler([hdc]), 1);
+});
+
+test('GetGlyphOutline answers a glyph\'s metrics and refuses its shape', ()=>{
+    const { fns, hdc, memory } = withDC();
+    const GM = STRUCT + 0xa00;
+    const MAT = STRUCT + 0xa40;
+    memory.putU32s(MAT, [0x10000, 0, 0, 0x10000]);
+    assert.equal(fns.GetGlyphOutlineA.handler([hdc, 65, 0, GM, 0, 0, MAT]), 1);
+    assert.ok(memory.u32(GM) > 0, 'a black box');
+    assert.equal(memory.i32(GM + 12) > 0, true, 'the origin at the ascent');
+    assert.ok((memory.u32(GM + 16) & 0xffff) > 0, 'the advance');
+    assert.equal(fns.GetGlyphOutlineW.handler([hdc, 65, 1, GM, 0, 0, MAT]), 0xffffffff,
+        'GGO_BITMAP is not made');
+    assert.equal(fns.GetGlyphOutlineA.handler([hdc, 65, 0, GM, 0, 0, 0]), 0xffffffff,
+        'the matrix is required');
+});
+
+test('GetGlyphIndices maps each character, marking the ones outside the font', ()=>{
+    const { fns, hdc, memory } = withDC();
+    const TEXT = STRUCT + 0xb00;
+    const INDICES = STRUCT + 0xb40;
+    memory.putString(TEXT, 'A\x01');
+    assert.equal(fns.GetGlyphIndicesA.handler([hdc, TEXT, 2, INDICES, 1]), 2);
+    assert.deepEqual([memory.u32(INDICES) & 0xffff, memory.u32(INDICES + 2) & 0xffff],
+        [65, 0xffff]);
+    assert.equal(fns.GetGlyphIndicesA.handler([hdc, TEXT, 2, INDICES, 0]), 2);
+    assert.equal(memory.u32(INDICES + 2) & 0xffff, 0x1f, 'the default character');
+    assert.equal(fns.GetGlyphIndicesW.handler([0x7777, TEXT, 1, INDICES, 0]), 0xffffffff);
+});
+
+test('the glyph-index width calls read a glyph as the character GetGlyphIndices named', ()=>{
+    const { fns, hdc, memory } = withDC();
+    const GLYPHS = STRUCT + 0xc00;
+    const WIDTHS = STRUCT + 0xc40;
+    assert.equal(fns.GetCharWidth32A.handler([hdc, 65, 66, WIDTHS]), 1);
+    const [a, b] = [memory.u32(WIDTHS), memory.u32(WIDTHS + 4)];
+    assert.equal(fns.GetCharWidthI.handler([hdc, 65, 2, 0, WIDTHS]), 1, 'a run from the first');
+    assert.deepEqual([memory.u32(WIDTHS), memory.u32(WIDTHS + 4)], [a, b]);
+    memory.bytes.set([66, 0, 65, 0], GLYPHS);
+    assert.equal(fns.GetCharABCWidthsI.handler([hdc, 0, 2, GLYPHS, WIDTHS]), 1, 'or the list');
+    assert.deepEqual([memory.u32(WIDTHS + 4), memory.u32(WIDTHS + 16)], [b, a]);
+    assert.equal(fns.GetCharWidthI.handler([0x7777, 65, 1, 0, WIDTHS]), 0);
+
+    const view = new DataView(memory.bytes.buffer);
+    assert.equal(fns.GetCharWidthFloatA.handler([hdc, 65, 65, WIDTHS]), 1);
+    assert.equal(view.getFloat32(WIDTHS, true), a, 'the same width, as a float');
+    assert.equal(fns.GetCharABCWidthsFloatW.handler([hdc, 66, 66, WIDTHS]), 1);
+    assert.equal(view.getFloat32(WIDTHS + 4, true), b);
+    assert.equal(fns.GetCharABCWidthsFloatW.handler([0, 66, 66, WIDTHS]), 0);
+});
+
+test('GetTextExtentExPoint answers the extent of each prefix and how many fit', ()=>{
+    const { fns, hdc, memory } = withDC();
+    const TEXT = STRUCT + 0xd00;
+    const FIT = STRUCT + 0xd40;
+    const DX = STRUCT + 0xd50;
+    const SIZE_AT = STRUCT + 0xd80;
+    memory.putString(TEXT, 'AAA');
+    assert.equal(fns.GetTextExtentPoint32A.handler([hdc, TEXT, 1, SIZE_AT]), 1);
+    const one = memory.u32(SIZE_AT);
+    assert.equal(fns.GetTextExtentExPointA.handler([hdc, TEXT, 3, one * 2, FIT, DX, SIZE_AT]), 1);
+    assert.equal(memory.u32(FIT), 2);
+    assert.deepEqual([memory.u32(DX), memory.u32(DX + 8)], [one, one * 3]);
+    assert.equal(memory.u32(SIZE_AT), one * 3);
+    assert.equal(fns.GetTextExtentExPointW.handler([hdc, 0, 3, 0, 0, 0, SIZE_AT]), 0);
+    assert.equal(fns.GetOutlineTextMetricsW.handler([hdc, 0, 0]), 0, 'no outline font here');
+    assert.equal(fns.GetKerningPairsW.handler(), 0);
+    assert.equal(fns.GetFontData.handler(), 0xffffffff);
+    assert.equal(fns.SetTextJustification.handler([hdc, 0, 0]), 1);
+    assert.equal(fns.GetFontUnicodeRanges.handler([hdc, 0]), 20, 'the size of one range');
+    assert.equal(fns.GetFontUnicodeRanges.handler([hdc, FIT]), 20);
+    assert.deepEqual([memory.u32(FIT + 8), memory.u32(FIT + 12), memory.u32(FIT + 16) & 0xffff],
+        [0xe0, 1, 0x20], 'the printable range and past it');
+});
+
+test('GetCharacterPlacement places one glyph per character by its advance', ()=>{
+    const { fns, hdc, memory } = withDC();
+    const TEXT = STRUCT + 0xe00;
+    const RESULTS = STRUCT + 0xe40;
+    const CARET = STRUCT + 0xe80;
+    const GLYPHS = STRUCT + 0xec0;
+    memory.putString(TEXT, 'Wine Test');
+    memory.putU32s(RESULTS, [36, 0, 0, 0, CARET, 0, GLYPHS, 20, 0]);
+    const size = fns.GetCharacterPlacementA.handler([hdc, TEXT, 9, 0, RESULTS, 0]);
+    assert.ok(size > 0);
+    assert.equal(memory.u32(RESULTS + 28), 9, 'nGlyphs');
+    assert.equal(memory.u32(GLYPHS) & 0xffff, 'W'.charCodeAt(0));
+    assert.equal(memory.u32(CARET), 0);
+    assert.equal(fns.GetCharacterPlacementA.handler([hdc, TEXT, 9, 0, 0, 0]), size, 'no results');
+    assert.equal(fns.GetCharacterPlacementA.handler([hdc, TEXT, 0, 0, RESULTS, 0]), 0);
 });

@@ -16,6 +16,7 @@
  * coordinate set unless told otherwise.
  */
 
+import { HashedStates } from './statehash.js';
 import { D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTSS } from './constants.js';
 
 /**
@@ -85,8 +86,7 @@ export function resolveStageStateDefault(entry, stage){
  * @returns {Map<number, number>} every stage state, at the value a fresh device has
  */
 export function createDefaultStageStates(stage){
-    /** @type {Map<number, number>} */
-    const states = new Map();
+    const states = new HashedStates();
     for (const entry of DEFAULT_STAGE_STATES)
     {
         states.set(entry.state, resolveStageStateDefault(entry, stage) >>> 0);

@@ -17,7 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { combine } from './drawing.js';
+import { arcPoints, combine, roundRectPoints } from './drawing.js';
 import { createGdiFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 
@@ -158,6 +158,21 @@ function fakeDrawing(){
         /** @param {number} hdc @param {number} x @param {number} y */
         lineTo(hdc, x, y){
             calls.push(['lineTo', hdc, x, y]);
+        },
+        /** @param {number} hdc @param {any[]} points */
+        polygon(hdc, points){
+            calls.push(['polygon', hdc, points]);
+            return true;
+        },
+        /** @param {number} hdc @param {number[]} box */
+        ellipse(hdc, ...box){
+            calls.push(['ellipse', hdc, ...box]);
+            return true;
+        },
+        /** @param {number} hdc @param {number} x @param {number} y */
+        moveToEx(hdc, x, y){
+            calls.push(['moveToEx', hdc, x, y]);
+            return { x: 1, y: 2 };
         },
         /** @param {number} hdc @param {number} x @param {number} y @param {number} color */
         setPixel(hdc, x, y, color){
@@ -336,6 +351,10 @@ test('the blits that need no source, and the ones that scale, reach the service'
 
     assert.equal(fns.PatBlt.handler([hdc, 1, 2, 30, 40, PATCOPY]), 1);
     assert.equal(fns.StretchBlt.handler([hdc, 0, 0, 10, 10, hdc, 0, 0, 5, 5, SRCCOPY]), 1);
+    assert.equal(fns.GdiTransparentBlt.handler([hdc, 0, 0, 10, 10, hdc, 0, 0, 5, 5, 0xff]), 1,
+        'a transparent blit is a stretch, the key copied too');
+    assert.equal(graphics.calls.filter(call=>call[0] === 'stretchBlt').at(-1)?.at(-1), SRCCOPY);
+    assert.equal(fns.GdiTransparentBlt.handler([hdc, 0, 0, -1, 10, hdc, 0, 0, 5, 5, 0]), 0);
     assert.equal(fns.SetStretchBltMode.handler([hdc, 3]), 1, 'the previous mode comes back');
     assert.equal(fns.GetStretchBltMode.handler([hdc]), 3);
 
@@ -1260,4 +1279,47 @@ test('the pixel-format calls on a handle that is no DC say why with the last err
     // Wine's opengl32 test_setpixelformat: the format query alone says the
     // format is bad; the rest say the handle is.
     assert.deepEqual(errors, [2000, 6, 6, 6, 6]);
+});
+
+test('an arc runs counterclockwise from the start radial to the end one', ()=>{
+    const quarter = arcPoints(0, 0, 20, 20, 20, 10, 10, 0);
+    assert.deepEqual(quarter[0], { x: 20, y: 10 }, 'starts on the right');
+    assert.deepEqual(quarter.at(-1), { x: 10, y: 0 }, 'ends at the top');
+    assert.ok(quarter.every(point=>point.x >= 10 && point.y <= 10), 'the upper right quarter');
+    const whole = arcPoints(0, 0, 20, 20, 20, 10, 20, 10);
+    assert.ok(whole.some(point=>point.x === 0), 'the same radial twice is the whole ellipse');
+});
+
+test('Arc draws with the pen and puts the current position back', ()=>{
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+    assert.equal(fns.Arc.handler([hdc, 0, 0, 20, 20, 20, 10, 10, 0]), 1);
+    assert.deepEqual(graphics.calls.filter(call=>call[0] === 'moveToEx').at(-1),
+        ['moveToEx', hdc, 1, 2]);
+    assert.ok(graphics.calls.filter(call=>call[0] === 'lineTo').length >= 8);
+    assert.equal(fns.Arc.handler([0x7777, 0, 0, 1, 1, 0, 0, 0, 0]), 0, 'not a DC');
+});
+
+test('a rounded rectangle is a polygon inside its box, square where the corners are flat', ()=>{
+    const points = roundRectPoints({ left: 10, top: 10, right: 40, bottom: 25 }, 3, 4.5);
+    assert.ok(points.every(({ x, y })=>x >= 10 && x <= 39 && y >= 10 && y <= 24));
+    assert.ok(!points.some(({ x, y })=>x === 10 && y === 10), 'the corner itself is cut');
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+    assert.equal(fns.RoundRect.handler([hdc, 10, 10, 40, 25, -6, -9]), 1, 'the sign is dropped');
+    assert.equal(graphics.calls.at(-1)[0], 'polygon');
+    assert.equal(fns.Ellipse.handler([hdc, 0, 0, 5, 5]), 1);
+    assert.deepEqual(graphics.calls.at(-1), ['ellipse', hdc, 0, 0, 5, 5]);
+});
+
+test('the arc direction is the DC\'s, and a clockwise Arc runs the other way round', ()=>{
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+    assert.equal(fns.GetArcDirection.handler([hdc]), 1, 'counterclockwise to begin with');
+    assert.equal(fns.SetArcDirection.handler([hdc, 2]), 1);
+    assert.equal(fns.SetArcDirection.handler([hdc, 3]), 0, 'no such direction');
+    assert.equal(fns.GetArcDirection.handler([hdc]), 2);
+    fns.Arc.handler([hdc, 0, 0, 20, 20, 20, 10, 10, 0]);
+    const drawn = graphics.calls.filter(call=>call[0] === 'lineTo').map(([, , x, y])=>({ x, y }));
+    assert.ok(drawn.some(({ x })=>x === 0), 'the long way round, past the left side');
 });

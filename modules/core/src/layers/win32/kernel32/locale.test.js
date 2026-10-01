@@ -92,6 +92,47 @@ test('the code pages reported are the ones a Western build was linked against', 
     assert.equal(fns.GetOEMCP.handler(), CP_OEM_437);
 });
 
+test('EnumTimeFormatsA hands each format to the callback until it stops', async()=>{
+    const host = fakeHost();
+    /** @type {string[]} */
+    const seen = [];
+    let next = 0x800;
+    const fns = createLocaleFunctions({
+        ...host,
+        callerThread: ()=>({ id: 1 }),
+        /** @param {number} bytes */
+        allocate: bytes=>{
+            const at = next;
+            next += bytes + 8;
+            return at;
+        },
+        free: ()=>{},
+        /** @param {number} entry @param {number[]} args */
+        call: async(entry, [buffer])=>{
+            void entry;
+            let text = '';
+            for (let at = 0; host.bytes[buffer + at] !== 0; at++)
+            {
+                text += String.fromCharCode(host.bytes[buffer + at]);
+            }
+            seen.push(text);
+            return seen.length === 3 ? 0 : 1;
+        },
+    });
+
+    assert.equal(await fns.EnumTimeFormatsA.handler([0x1234, 0x0409, 0, 0]), 0,
+        'the callback stopped the run');
+    assert.deepEqual(seen, ['h:mm:ss tt', 'hh:mm:ss tt', 'H:mm:ss'],
+        'the locale formats, first three then stopped');
+    assert.equal(fns.EnumTimeFormatsA.argBytes, 16);
+});
+
+test('EnumTimeFormatsA fails without a callback or a bridge to call through', ()=>{
+    const fns = createLocaleFunctions(fakeHost());
+    assert.equal(fns.EnumTimeFormatsA.handler([0, 0x0409, 0, 0]), 0);
+});
+
+
 test('a single-byte page reports one byte per character and no lead-byte ranges', ()=>{
     // A lead-byte range that is not empty tells a caller to look for two-byte
     // sequences, and it will then read one character where there are two.
@@ -520,3 +561,25 @@ test('the abbreviated names, the digit grouping and the currency are answered', 
     assert.equal(ask(0x0001), '0409', 'ILANGUAGE stays four hex digits as text');
     assert.equal(ask(0x000B), '437', 'IDEFAULTCODEPAGE');
 });
+
+test('SetLocaleInfo replaces a string for this user, and LOCALE_NOUSEROVERRIDE reads past it',
+    ()=>{
+        const host = fakeHost();
+        const fns = createLocaleFunctions(host);
+        const SDECIMAL = 0x0e;
+        const LOCALE_NOUSEROVERRIDE = 0x80000000;
+        host.bytes.set([0x2c, 0], 0x100);
+        assert.equal(fns.SetLocaleInfoA.handler([0x409, SDECIMAL, 0x100]), 1);
+        assert.equal(fns.GetLocaleInfoA.handler([0x409, SDECIMAL, 0x200, 8]), 2);
+        assert.equal(host.bytes[0x200], 0x2c, 'the user\'s comma');
+        assert.equal(fns.GetLocaleInfoA.handler(
+            [0x409, SDECIMAL | LOCALE_NOUSEROVERRIDE, 0x200, 8]), 2);
+        assert.equal(host.bytes[0x200], 0x2e, 'the locale\'s own point');
+
+        host.bytes.set([0x2e, 0, 0, 0], 0x100);
+        assert.equal(fns.SetLocaleInfoW.handler([0x409, SDECIMAL, 0x100]), 1);
+        assert.equal(fns.GetLocaleInfoA.handler([0x409, SDECIMAL, 0x200, 8]), 2);
+        assert.equal(host.bytes[0x200], 0x2e);
+
+        assert.equal(fns.SetLocaleInfoA.handler([0x409, SDECIMAL, 0]), 0, 'no value');
+    });
