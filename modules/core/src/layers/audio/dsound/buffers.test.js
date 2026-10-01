@@ -141,7 +141,7 @@ test('a frequency of zero means the format\'s own rate', ()=>{
 
 test('a lock that runs off the end comes back as two ranges', ()=>{
     const { sound } = buffer({ bytes: 4096, address: 0x40000000 });
-    const { first, second } = sound.lockRange(4000, 200, 0);
+    const { first, second } = sound.lockRange(4000, 200, 0) ?? assert.fail();
     assert.deepEqual(first, { address: 0x40000000 + 4000, bytes: 96 });
     assert.deepEqual(second, { address: 0x40000000, bytes: 104 },
         'the remainder continues at the start, or the program writes off the end');
@@ -150,18 +150,17 @@ test('a lock that runs off the end comes back as two ranges', ()=>{
 
 test('a lock that fits comes back as one, with an empty second', ()=>{
     const { sound } = buffer({ bytes: 4096 });
-    const { first, second } = sound.lockRange(0, 100, 0);
+    const { first, second } = sound.lockRange(0, 100, 0) ?? assert.fail();
     assert.equal(first.bytes, 100);
     assert.deepEqual(second, { address: 0, bytes: 0 });
 });
 
-test('DSBLOCK_ENTIREBUFFER locks the whole buffer from its beginning', ()=>{
-    const { sound, time } = buffer({ bytes: 4096 });
-    sound.play(DSBPLAY_LOOPING);
-    time.advance(20);
-    const { first, second } = sound.lockRange(1234, 7, DSBLOCK_ENTIREBUFFER);
-    assert.equal(first.bytes, 4096, 'not a buffer-sized span from wherever the cursor is');
-    assert.equal(second.bytes, 0);
+test('DSBLOCK_ENTIREBUFFER locks a whole lap from the offset, wrapping', ()=>{
+    const { sound } = buffer({ bytes: 4096, address: 0x40000000 });
+    assert.deepEqual(sound.lockRange(1234, 7, DSBLOCK_ENTIREBUFFER), {
+        first: { address: 0x40000000 + 1234, bytes: 4096 - 1234 },
+        second: { address: 0x40000000, bytes: 1234 },
+    });
 });
 
 test('DSBLOCK_FROMWRITECURSOR starts where the write cursor is', ()=>{
@@ -169,14 +168,21 @@ test('DSBLOCK_FROMWRITECURSOR starts where the write cursor is', ()=>{
     sound.play(DSBPLAY_LOOPING);
     time.advance(10);
     const write = sound.cursors().write;
-    const { first } = sound.lockRange(0, 16, DSBLOCK_FROMWRITECURSOR);
+    const { first } = sound.lockRange(0, 16, DSBLOCK_FROMWRITECURSOR) ?? assert.fail();
     assert.equal(first.address, 0x40000000 + write, 'the offset argument is ignored');
 });
 
-test('a request longer than the buffer is clamped to it', ()=>{
+test('a lock of nothing, past the end, longer than the buffer or over a held one is refused', ()=>{
     const { sound } = buffer({ bytes: 4096 });
-    const { first, second } = sound.lockRange(0, 999999, 0);
-    assert.equal(first.bytes + second.bytes, 4096);
+    assert.equal(sound.lockRange(0, 4097, 0), null);
+    assert.equal(sound.lockRange(100, 0, 0), null);
+    assert.equal(sound.lockRange(4096, 8, 0), null);
+    assert.ok(sound.lockRange(0, 4096, 0));
+    assert.equal(sound.lockRange(0, 0, DSBLOCK_ENTIREBUFFER), null, 'over a range still held');
+    assert.equal(sound.unlock(), true);
+    assert.ok(sound.lockRange(0, 1024, 0));
+    assert.ok(sound.lockRange(1024, 1024, 0), 'locks side by side');
+    assert.equal(sound.lockRange(1000, 100, 0), null);
 });
 
 test('unlock reports what was held, and only once', ()=>{
@@ -185,7 +191,24 @@ test('unlock reports what was held, and only once', ()=>{
     assert.equal(sound.locked, true);
     assert.ok(sound.unlock());
     assert.equal(sound.locked, false);
-    assert.equal(sound.unlock(), null, 'a second unlock has nothing to report');
+    assert.equal(sound.unlock(), false, 'a second unlock has nothing to report');
+});
+
+test('each range of a wrapped lock is let go of by its own pointer', ()=>{
+    const { sound } = buffer({ bytes: 4096, address: 0x40000000 });
+    sound.lockRange(3000, 2000, 0);
+    assert.equal(sound.unlock([0x12345678]), false, 'a pointer the lock never handed out');
+    assert.equal(sound.unlock([0x40000000 + 3000]), true);
+    assert.equal(sound.locked, true, 'the range at the start is still held');
+    assert.equal(sound.unlock([0x40000000 + 3000]), false);
+    assert.equal(sound.unlock([0x40000000]), true);
+    assert.equal(sound.locked, false);
+    assert.ok(sound.lockRange(0, 8, 0));
+    // Handed a held range and then one that is not, the first is let go of.
+    sound.lockRange(100, 8, 0);
+    assert.equal(sound.unlock([0x40000000 + 100, 0x12345678]), false);
+    assert.equal(sound.unlock([0x40000000]), true);
+    assert.equal(sound.locked, false);
 });
 
 test('notifications fire once, in the order the cursor passed them', ()=>{

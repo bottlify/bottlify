@@ -602,23 +602,58 @@ test('Lock refuses without somewhere to put the first range', ()=>{
         DSERR_INVALIDPARAM);
 });
 
-test('DSBLOCK_ENTIREBUFFER locks all of it from the start', ()=>{
+test('DSBLOCK_ENTIREBUFFER locks a whole lap from the offset', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f, { bytes: 4096 });
+    const base = f.dsound.buffers()[0].address;
+    const [p1, n1, p2, n2] = [0x1900, 0x1904, 0x1908, 0x190c];
+    assert.equal(f.bridge.call(buffer, 'Lock',
+        [3000, 8, p1, n1, p2, n2, DSBLOCK_ENTIREBUFFER]), DS_OK);
+    assert.equal(f.memory.u32(p1), base + 3000);
+    assert.equal(f.memory.u32(n1), 1096);
+    assert.equal(f.memory.u32(p2), base);
+    assert.equal(f.memory.u32(n2), 3000);
+});
+
+test('Lock refuses as Windows does, and says so in what it hands back', ()=>{
+    // Wine's dsound.c test_lock.
     const f = createRoot();
     const buffer = createBuffer(f, { bytes: 4096 });
     const [p1, n1, p2, n2] = [0x1900, 0x1904, 0x1908, 0x190c];
-    f.bridge.call(buffer, 'Lock',
-        [3000, 8, p1, n1, p2, n2, DSBLOCK_ENTIREBUFFER]);
-    assert.equal(f.memory.u32(p1), f.dsound.buffers()[0].address);
-    assert.equal(f.memory.u32(n1), 4096);
-    assert.equal(f.memory.u32(n2), 0);
+    const fill = ()=>[p1, n1, p2, n2].forEach(at=>f.memory.setU32(at, 0xdeadbeef));
+    for (const [offset, bytes] of [[100, 0], [4096, 0], [4096, 8], [0, 4097]])
+    {
+        fill();
+        assert.equal(f.bridge.call(buffer, 'Lock', [offset, bytes, p1, n1, p2, n2, 0]),
+            DSERR_INVALIDPARAM, `${offset}+${bytes}`);
+        assert.deepEqual([p1, n1, p2, n2].map(at=>f.memory.u32(at)), [0, 0, 0, 0]);
+    }
+    fill();
+    assert.equal(f.bridge.call(buffer, 'Lock', [0, 64, 0, n1, p2, n2, 0]), DSERR_INVALIDPARAM);
+    assert.deepEqual([n1, p2, n2].map(at=>f.memory.u32(at)), [0xdeadbeef, 0xdeadbeef, 0xdeadbeef],
+        'no pointer for the first range: nothing is written');
+    assert.equal(f.bridge.call(buffer, 'Lock', [0, 64, p1, 0, p2, n2, 0]), DSERR_INVALIDPARAM);
+    assert.equal(f.memory.u32(p1), 0, 'a pointer with no size beside it comes back null');
+    assert.equal(f.memory.u32(p2), 0xdeadbeef);
+    // A wrapping lock takes either half of the second range alone.
+    assert.equal(f.bridge.call(buffer, 'Lock', [3000, 4096, p1, n1, 0, n2, 0]), DS_OK);
+    assert.equal(f.memory.u32(n2), 3000);
+    assert.equal(f.bridge.call(buffer, 'Lock', [0, 8, p1, n1, p2, n2, 0]), DSERR_INVALIDPARAM,
+        'over a range still held');
 });
 
-test('Unlock succeeds once and then reports the mistake', ()=>{
+test('Unlock lets go of the ranges it is handed back, by pointer, and of nothing twice', ()=>{
     const f = createRoot();
-    const buffer = createBuffer(f);
+    const buffer = createBuffer(f, { bytes: 4096 });
+    const base = f.dsound.buffers()[0].address;
     f.bridge.call(buffer, 'Lock', [0, 64, 0x1900, 0x1904, 0x1908, 0x190c, 0]);
-    assert.equal(f.bridge.call(buffer, 'Unlock', [0, 0, 0, 0]), DS_OK);
-    assert.notEqual(f.bridge.call(buffer, 'Unlock', [0, 0, 0, 0]), DS_OK);
+    assert.equal(f.bridge.call(buffer, 'Unlock', [base, 0, 0, 0]), DS_OK,
+        'the size is not looked at');
+    assert.equal(f.bridge.call(buffer, 'Unlock', [base, 64, 0, 0]), DSERR_INVALIDPARAM);
+    f.bridge.call(buffer, 'Lock', [3000, 4096, 0x1900, 0x1904, 0x1908, 0x190c, 0]);
+    assert.equal(f.bridge.call(buffer, 'Unlock', [base + 3000, 4096, 0, 0]), DS_OK);
+    assert.equal(f.bridge.call(buffer, 'Unlock', [base, 0xdeadbeef, 0, 0]), DS_OK,
+        'the second range on its own');
 });
 
 test('GetCaps fills DSBCAPS and refuses a header that does not declare its size', ()=>{

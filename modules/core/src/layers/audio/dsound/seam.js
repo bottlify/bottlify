@@ -764,26 +764,36 @@ export function createDirectSound(
         Lock(buffer, [offset, bytes, p1, n1, p2, n2, flags]){
             calls.Lock = (calls.Lock || 0) + 1;
             record(`b${buffers.indexOf(buffer)} Lock off=${offset >>> 0} bytes=${bytes >>> 0}`);
-            if ((p1 >>> 0) === 0 || (n1 >>> 0) === 0)
+            if ((p1 >>> 0) === 0)
             {
                 return DSERR_INVALIDPARAM;
             }
+            if ((n1 >>> 0) === 0)
+            {
+                writeU32(p1, 0);
+                return DSERR_INVALIDPARAM;
+            }
             deliver(buffer);
-            const { first, second } = buffer.lockRange(offset, bytes, flags >>> 0);
+            const ranges = buffer.lockRange(offset, bytes, flags >>> 0);
+            const none = { address: 0, bytes: 0 };
+            const { first, second } = ranges ?? { first: none, second: none };
             writeU32(p1, first.address);
             writeU32(n1, first.bytes);
-            // The second range is written whenever the caller offered somewhere
+            // The second range is written wherever the caller offered somewhere
             // to put it, zero included: a caller that passed pointers and reads
-            // a stale value there splices audio from a previous lock.
+            // a stale value there splices audio from a previous lock. Either of
+            // the two may be missing, even when the lock wraps.
             writeU32(p2, second.address);
             writeU32(n2, second.bytes);
-            return DS_OK;
+            return ranges ? DS_OK : DSERR_INVALIDPARAM;
         },
 
         /** HRESULT Unlock(LPVOID p1, DWORD n1, LPVOID p2, DWORD n2) */
-        Unlock(buffer){
+        Unlock(buffer, [p1, , p2]){
             record(`b${buffers.indexOf(buffer)} Unlock`);
-            return buffer.unlock() ? DS_OK : DSERR_INVALIDCALL;
+            // A range is named by its pointer; the sizes are not looked at.
+            return buffer.unlock([p1 >>> 0, p2 >>> 0].filter(at=>at !== 0))
+                ? DS_OK : DSERR_INVALIDPARAM;
         },
 
         /** HRESULT GetCaps(LPDSBCAPS caps) */
