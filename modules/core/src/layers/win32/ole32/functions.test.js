@@ -368,6 +368,26 @@ test('CoGetApartmentType names the apartment, and wants both pointers', ()=>{
     assert.deepEqual(answer(), [S_OK, 1, 1], 'APTTYPEQUALIFIER_IMPLICIT_MTA');
 });
 
+test('a usage of the multithreaded apartment puts a thread in no apartment in it implicitly', ()=>{
+    // What CoIncrementMTAUsage does, and what DirectSound's worker threads do
+    // (Wine's dsound tests' apartment checks).
+    const { host, fns } = setup();
+    const TYPE = 0x9000;
+    const QUALIFIER = 0x9004;
+    const COOKIE = 0x9008;
+    const answer = ()=>[fns.CoGetApartmentType.handler([TYPE, QUALIFIER]) >>> 0,
+        host.u32(TYPE), host.u32(QUALIFIER)];
+    assert.deepEqual(answer(), [CO_E_NOTINITIALIZED, 0xffffffff, 0]);
+    assert.equal(fns.CoIncrementMTAUsage.handler([COOKIE]), S_OK);
+    assert.notEqual(host.u32(COOKIE), 0);
+    assert.deepEqual(answer(), [S_OK, 1, 1], 'APTTYPEQUALIFIER_IMPLICIT_MTA');
+    assert.equal(fns.CoDecrementMTAUsage.handler([host.u32(COOKIE)]), S_OK);
+    assert.deepEqual(answer(), [CO_E_NOTINITIALIZED, 0xffffffff, 0]);
+    host.registry.mtaUsage.enter();
+    assert.deepEqual(answer(), [S_OK, 1, 1], 'held by a system object, as DirectSound holds it');
+    host.registry.mtaUsage.leave();
+});
+
 test('the thread\'s block points at ole32\'s record, whose flags name the apartment', ()=>{
     // ole32's compobj tests read NtCurrentTeb()->ReservedForOle->flags.
     const { host, fns } = setup();
@@ -795,6 +815,8 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoInitialize: 4,
         CoInitializeEx: 8,
         CoGetApartmentType: 8,
+        CoIncrementMTAUsage: 4,
+        CoDecrementMTAUsage: 4,
         CoGetCurrentLogicalThreadId: 0,
         CoInitializeSecurity: 36,
         CoUninitialize: 0,

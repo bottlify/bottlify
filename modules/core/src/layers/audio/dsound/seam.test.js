@@ -145,6 +145,11 @@ function fixture(){
     /** @type {number[]} */
     const signalled = [];
     let nextAddress = 0x50000;
+    const mta = { users: 0, enter(){
+        mta.users++;
+    }, leave(){
+        mta.users--;
+    } };
     const dsound = createDirectSound({
         memory,
         allocate: (/** @type {number} */ bytes)=>{
@@ -155,8 +160,9 @@ function fixture(){
         now: time.now,
         publishInterface: (object, id)=>bridge.publishInterface(object, id),
         signal: event=>signalled.push(event),
+        mtaUsage: mta,
     });
-    return { memory, bridge, time, dsound, signalled };
+    return { memory, bridge, time, dsound, signalled, mta };
 }
 
 /** DirectSoundCreate, giving back the interface pointer. */
@@ -297,6 +303,19 @@ test('a device\'s IUnknown counts apart from IDirectSound, and an over-release f
     assert.equal(device.release(IID_IUNKNOWN), 0);
     assert.equal(device.release(IID_IUNKNOWN), 0, 'and never below');
     assert.equal(device.api.references, 0);
+});
+
+test('an initialized device holds the multithreaded apartment open while it lives', ()=>{
+    // Wine's dsound.c test_apttype: a thread in no apartment is in the MTA
+    // implicitly while a device exists, and in none once it is gone.
+    const f = createRoot();
+    assert.equal(f.mta.users, 1);
+    const device = f.bridge.recordAt(f.root).object;
+    device.addRef(IID_IUNKNOWN);
+    device.release(IID_IDirectSound);
+    assert.equal(f.mta.users, 1, 'its IUnknown still holds it');
+    device.release(IID_IUNKNOWN);
+    assert.equal(f.mta.users, 0);
 });
 
 test('DirectSoundCreate\'s object is IDirectSound alone; DirectSoundCreate8\'s is both', ()=>{

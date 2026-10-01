@@ -557,10 +557,14 @@ export function createPublisher({ publishInterface }){
  *        the thread on the processor may no longer be this one.
  * @param {(api: string, detail: string) => void} [deps.divergence]
  *        Told where this DirectSound behaves differently from Windows'.
+ * @param {{ enter: () => void, leave: () => void }} [deps.mtaUsage]
+ *        ole32's hold on the multithreaded apartment. An initialized device
+ *        keeps it open while it lives, as Windows' worker threads do, so a
+ *        thread that entered no apartment is in it implicitly.
  */
-export function createDirectSound(
-    { memory, allocate, now, publishInterface, signal, callGuest, callerThread, divergence },
-)
+export function createDirectSound({
+    memory, allocate, now, publishInterface, signal, callGuest, callerThread, divergence, mtaUsage,
+})
 {
     const publisher = createPublisher({ publishInterface });
 
@@ -1316,6 +1320,7 @@ export function createDirectSound(
                 return DSERR_NODRIVER;
             }
             root.initialized = true;
+            mtaUsage?.enter();
             return DS_OK;
         },
 
@@ -1372,10 +1377,21 @@ export function createDirectSound(
             return DSERR_INVALIDPARAM;
         }
         let references = 1;
+        if (initialized)
+        {
+            mtaUsage?.enter();
+        }
         const device = {
             initialized,
             addRef: ()=>++references,
-            release: ()=>(references = Math.max(0, references - 1)),
+            release(){
+                if (references === 1 && device.initialized)
+                {
+                    mtaUsage?.leave();
+                }
+                references = Math.max(0, references - 1);
+                return references;
+            },
             get references(){
                 return references;
             },
