@@ -296,21 +296,22 @@ function switchTable(read, block, blocks){
         }
     }
     // What the bound test must have compared: the index register itself, or
-    // the memory a `mov` at the block's start loads it from.
+    // the memory a `mov` at the block's start loads it from. Writes to other
+    // registers may stand between that and the jump, where a compiler
+    // schedules the code the cases share.
     /** @type {import('./decode/decoder.js').Operand} */
     let tested = { kind: 'reg', size: 4, reg: index };
-    if (instructions.length === 2)
+    const [load] = instructions;
+    const [into, from] = load.operands;
+    const loads = instructions.length > 1 && load.op === 'mov' && into.kind === 'reg'
+        && into.size === 4 && into.reg === index && from.kind === 'mem';
+    if (loads)
     {
-        const [load] = instructions;
-        const [into, from] = load.operands;
-        if (load.op !== 'mov' || into.kind !== 'reg' || into.size !== 4 || into.reg !== index
-            || from.kind !== 'mem')
-        {
-            return null;
-        }
         tested = from;
     }
-    else if (instructions.length !== 1)
+    if (!instructions.slice(loads ? 1 : 0, -1).every(one=>PLAIN_WRITES.has(one.op)
+        && one.operands[0]?.kind === 'reg' && one.operands[0].reg !== index
+        && !(one.op === 'imul' && one.operands.length === 1)))
     {
         return null;
     }

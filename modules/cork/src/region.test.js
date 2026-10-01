@@ -271,6 +271,28 @@ test('a jump through a bounded table takes the table\'s cases into the region', 
     assert.deepEqual(plain?.exit.targets, []);
 });
 
+test('a switch whose jump\'s block holds other register writes before it is still one', ()=>{
+    // cmp eax, 2; ja D; mov ecx, edx; lea ebx, [esi+1]; jmp [0x3000 + eax*4];
+    // C0: ret; C1: ret; C2: ret; D: hlt -- the cases' shared setup scheduled into the
+    // jump's block, as a compiler does.
+    /** @param {number[]} setup */
+    const formed = setup=>{
+        const code = [0x83, 0xf8, 0x02, 0x77, 0x0f, ...setup, 0x8d, 0x5e, 0x01,
+            0xff, 0x24, 0x85, 0x00, 0x30, 0x00, 0x00, 0xc3, 0xc3, 0xc3, 0xf4];
+        const memory = new Map([
+            ...code.map((byte, i)=>/** @type {[number, number]} */ ([0x1000 + i, byte])),
+            ...[0x1011, 0x1012, 0x1013].flatMap((target, i)=>[0, 1, 2, 3].map(k=>
+                /** @type {[number, number]} */ ([0x3000 + i * 4 + k, target >>> (k * 8) & 0xff]))),
+        ]);
+        return formRegion(address=>memory.get(address) ?? 0, 0x1000)
+            .blocks.find(block=>block.start === 0x1005);
+    };
+    assert.deepEqual(formed([0x89, 0xd1])?.exit.table,
+        { index: 0, address: 0x3000, entries: [0x1011, 0x1012, 0x1013] });
+    // A write to the index among them unbounds it: inc eax; nop.
+    assert.equal(formed([0x40, 0x90])?.exit.table, undefined);
+});
+
 test('a switch whose index its own block masks takes every case of the mask', ()=>{
     // and eax, 3; mov ecx, edx; jmp [0x3000 + eax*4]; C0..C3: ret -- `switch (x & 3)` with
     // every case written, which a compiler lays out with no bound test.
