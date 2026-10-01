@@ -1362,6 +1362,20 @@ test('what queues while a batch is with the worker goes out when its answer come
         }
     });
 
+test('a candidate that got an entry while it waited is not formed again', async()=>{
+    // Batches of one: the loop's head waits while its caller's region, which
+    // holds it as a block, is formed and published.
+    const m = machine({ batchRegions: 1, maxBatchRegions: 1 });
+    m.write(CODE, COUNTDOWN);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE + 5, 0, 2);
+    m.runtime.noteHot(CODE, 0, 64);
+    assert.equal(await m.runtime.translatePending(), 1, 'the hotter start first');
+    assert.ok(m.runtime.entryOf(CODE + 5) >= 0, 'its region holds the loop head');
+    await m.runtime.translatePending();
+    assert.equal(m.runtime.diagnostics().regions, 1, 'the loop head not a region of its own');
+});
+
 test('a worker that cannot load is dropped and the batches are emitted inline', async()=>{
     // A worker file that throws as it loads: the worker is made, and fails after.
     const m = machine({ workerUrl: 'data:text/javascript,throw new Error("cannot load")' });

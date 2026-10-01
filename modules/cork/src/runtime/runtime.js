@@ -2605,7 +2605,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 const [key, eip] = batch[i];
                 const entryTop = key % 16;
-                if (covered.has(eip) || closedIn.has(eip))
+                // A candidate that has an entry by now -- a block of a region
+                // published while it waited, the return address of a call the
+                // interpreter met before its caller's region came back -- would
+                // be formed again as a region of its own.
+                if (covered.has(eip) || closedIn.has(eip) || entries.entryOf(eip, entryTop) >= 0)
                 {
                     inFlight.delete(key);
                     continue;
