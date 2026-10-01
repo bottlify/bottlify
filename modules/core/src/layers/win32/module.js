@@ -1111,6 +1111,7 @@ export function createWin32Module(){
             const imageLists = createImageLists({
                 readMemory, writeMemory, divergence: config?.divergence,
                 gdi32: name=>libraries['GDI32.dll']?.[name],
+                user32: name=>libraries['USER32.dll']?.[name],
                 bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
             });
 
