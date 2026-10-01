@@ -45,6 +45,19 @@ instruments folded out):
     node modules/cork/bench/browser/suite.mjs \
         '{"cork":{"bundle":"head"},"v86":{"bundle":"head","engine":"emulator"}}'
 
+At a workload's own iterations a run is a few hundred milliseconds, and the
+load, the translation and the engine's compiles are a quarter to most of it:
+such a run measures the start. `--scale 10` runs ten times the iterations,
+which leaves a few per cent of that, so it measures the translated code; with
+`bin/peload` (Linux) the processor runs the same and its rate is shown
+beside, the loss against the hardware rather than against another emulator:
+
+    node modules/cork/bench/browser/suite.mjs '{"cork":{"bundle":"head"}}' --scale 10 --reps 3
+
+Its runs differ by about a tenth from one rep to the next, where the runs at
+their own iterations differed by up to two thirds. The emulator is too slow
+for ten times the x87 workloads within the two minutes a run is given.
+
 `build.mjs` takes any number of checkouts, so an A/B is two bundles,
 `'{"base":"../base","new":"."}'`, and two configurations naming them; a
 configuration's `cork` is the translator's configuration, so a flag is A/B'd
