@@ -5935,6 +5935,7 @@ export function createRenderer(options){
         if (renderStates instanceof HashedStates)
         {
             const hashedStates = /** @type {HashedStates} */ (renderStates);
+            const mark = at;
             words[at++] = hashedStates.low;
             words[at++] = hashedStates.high;
             let hashed = true;
@@ -5949,7 +5950,7 @@ export function createRenderer(options){
             {
                 return stateNumbering(words, at);
             }
-            at -= 2 + 2 * STAGE_COUNT;
+            at = mark;
         }
         words[at++] = model.renderStates.size;
         stateAt = at;
