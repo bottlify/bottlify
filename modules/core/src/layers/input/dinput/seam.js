@@ -39,6 +39,8 @@ export const DI_NOEFFECT = 1;
 const DIERR_INVALIDPARAM = 0x80070057 | 0;
 const DIERR_NOTACQUIRED = 0x8007000c | 0;
 const DIERR_ACQUIRED = 0x800700aa | 0;
+/** Another window is in the foreground of a device that reads only there. */
+const DIERR_OTHERAPPHASPRIO = 0x80070005 | 0;
 const DIERR_UNSUPPORTED = 0x80004001 | 0;
 const DIERR_DEVICENOTREG = 0x80040154 | 0;
 const DIERR_NOTFOUND = 0x80070002 | 0;
@@ -759,12 +761,16 @@ export function createPublisher({ publishInterface }){
  * @param {(api: string, detail: string) => void} [deps.divergence]
  *        Where a refusal the program may not expect is said.
  * @param {(hwnd: number) => 'top' | 'child' | null | undefined} [deps.windowKind]
+ * @param {() => number | undefined} [deps.foreground]
+ *        The program's foreground window, or zero; undefined where there are
+ *        no windows to tell apart.
  *        What a handle names: a top-level window, a child one, nothing -- or
  *        undefined when there are no windows to ask about, in which case any
  *        handle is taken as a window. SetCooperativeLevel wants a top-level one.
  */
 export function createDirectInput(
     { memory, now, publishInterface, signal, allocate, callGuest, callerThread, windowKind,
+        foreground,
         divergence },
 )
 {
@@ -790,6 +796,8 @@ export function createDirectInput(
      * @type {WeakMap<object, string | symbol>}
      */
     const owners = new WeakMap();
+    /** @type {WeakMap<object, { window: number, background: boolean }>} */
+    const cooperation = new WeakMap();
 
     /**
      * A user name a program passes, in its width; no name and an empty one
@@ -957,6 +965,16 @@ export function createDirectInput(
             {
                 return DI_NOEFFECT;
             }
+            // A device that reads only in the foreground is not the
+            // program's while another window is (Wine's device8.c
+            // test_sys_mouse).
+            const level = cooperation.get(device);
+            const front = foreground?.();
+            if (level && !level.background && level.window !== 0 && front !== undefined
+                && front !== level.window)
+            {
+                return DIERR_OTHERAPPHASPRIO;
+            }
             device.acquire();
             return DI_OK;
         },
@@ -1042,6 +1060,7 @@ export function createDirectInput(
                 return DIERR_UNSUPPORTED;
             }
             device.setExclusive(exclusive);
+            cooperation.set(device, { window, background });
             return DI_OK;
         },
 
@@ -1341,7 +1360,8 @@ export function createDirectInput(
             }
 
             writeU32(count, events.length);
-            return overflow ? DI_BUFFEROVERFLOW : DI_OK;
+            // DirectInput 8 says so; earlier versions drop the oldest quietly.
+            return overflow && device.version >= 0x0800 ? DI_BUFFEROVERFLOW : DI_OK;
         },
 
         /**

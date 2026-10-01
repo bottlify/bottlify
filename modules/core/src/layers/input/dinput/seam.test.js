@@ -156,7 +156,8 @@ function clock(){
  *     The windows a SetCooperativeLevel may name, by handle. Without it the
  *     seam is told nothing and takes any handle as a window.
  */
-function fixture({ windows } = {}){
+/** @param {{ windows?: Record<number, 'top' | 'child'>, foreground?: () => number }} [options] */
+function fixture({ windows, foreground } = {}){
     const memory = guestMemory();
     const bridge = fakeBridge();
     const time = clock();
@@ -197,6 +198,7 @@ function fixture({ windows } = {}){
         },
         callerThread: ()=>`thread-token-${++threadRequests}`,
         windowKind: windows && (hwnd=>windows[hwnd] ?? null),
+        foreground,
     });
     const root = (()=>{
         const result = dinput.libraries['DINPUT.dll']
@@ -727,16 +729,48 @@ test('DIGDD_PEEK leaves the events where they were', ()=>{
     assert.equal(f.memory.u32(AT.count), 1, 'the peek consumed nothing');
 });
 
-test('an overflowed buffer answers DI_BUFFEROVERFLOW, which is a success', ()=>{
-    const f = keyboard();
-    setBufferSize(f, f.device, 3);
+test('a foreground device is acquired only while its window is the foreground one', ()=>{
+    // Wine's device8.c test_sys_mouse: another window of the program's own
+    // in front is DIERR_OTHERAPPHASPRIO; a background device does not care.
+    let front = 0x100;
+    const f = fixture({ windows: { 0x100: 'top', 0x200: 'top' }, foreground: ()=>front });
+    const device = device8(f, GUID_SysMouse, false);
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 16)]), DI_OK);
+    assert.equal(f.bridge.call(device, 'SetCooperativeLevel', [0x100, 0x4 | 0x2]), DI_OK);
+    front = 0x200;
+    assert.equal(f.bridge.call(device, 'Acquire', []), 0x80070005 | 0);
+    front = 0x100;
+    assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+    f.bridge.call(device, 'Unacquire', []);
+    assert.equal(f.bridge.call(device, 'SetCooperativeLevel', [0x100, 0x8 | 0x2]), DI_OK);
+    front = 0x200;
+    assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+});
+
+test('an overflowed buffer answers DI_BUFFEROVERFLOW from DirectInput 8, a success', ()=>{
+    // Before 8 the oldest events are dropped quietly (Wine's device8.c
+    // test_sys_mouse).
+    const legacy = keyboard();
+    setBufferSize(legacy, legacy.device, 3);
+    for (const code of [1, 2, 3, 4])
+    {
+        legacy.dinput.post({ kind: 'key', code, down: true });
+    }
+    legacy.memory.setU32(AT.count, 10);
+    assert.equal(legacy.bridge.call(legacy.device, 'GetDeviceData',
+        [DIDEVICEOBJECTDATA.SIZE, AT.data, AT.count, 0]), DI_OK);
+
+    const f = fixture();
+    const device = device8(f, GUID_SysKeyboard, false);
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 256)]), DI_OK);
+    setBufferSize(f, device, 3);
     for (const code of [1, 2, 3, 4])
     {
         f.dinput.post({ kind: 'key', code, down: true });
     }
     f.memory.setU32(AT.count, 10);
-    const result = f.bridge.call(f.device, 'GetDeviceData',
-        [DIDEVICEOBJECTDATA.SIZE, AT.data, AT.count, 0]);
+    const result = f.bridge.call(device, 'GetDeviceData',
+        [DIDEVICEOBJECTDATA.SIZE_DX8, AT.data, AT.count, 0]);
     assert.equal(result, DI_BUFFEROVERFLOW);
     assert.ok(result >= 0, 'a program testing FAILED() must not see this as an error');
     assert.equal(f.memory.u32(AT.count), 2);

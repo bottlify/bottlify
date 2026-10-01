@@ -92,6 +92,18 @@ export function createInputModule(){
                     const found = listed.find(entry=>Number(entry.hwnd) === hwnd);
                     return found ? (found.child ? 'child' : 'top') : null;
                 }),
+                // The program's own foreground window, which a device that
+                // reads input only in the foreground needs to be acquired. Not
+                // the browser's focus: that never reaches the guest.
+                foreground: config?.foreground ?? (()=>{
+                    try
+                    {
+                        return win32.activeWindow?.();
+                    }
+                    catch {
+                        return undefined;
+                    }
+                }),
             });
 
             const xinput = createXInput();
