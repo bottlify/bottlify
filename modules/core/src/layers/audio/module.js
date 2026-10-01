@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { createMp3AcmCodec } from './asi/mp3acm.js';
 import { createDirectSound } from './dsound/seam.js';
 import { registerDirectMusic } from './dmusic/classes.js';
 import { DSBSTATUS_PLAYING } from './dsound/buffers.js';
@@ -96,6 +97,16 @@ export function createAudioModule(){
             }
             catch {
                 com = null;
+            }
+            // The MPEG Layer-3 codec Windows has in its codec manager, for an
+            // engine that decodes its MP3 WAVs there; absent, like DirectMusic,
+            // where win32 is.
+            try
+            {
+                win32?.installAcmCodec?.(createMp3AcmCodec());
+            }
+            catch {
+                // win32 stubbed: no codec manager to install into.
             }
             /** @type {any} */
             let dmusic = null;

@@ -423,6 +423,8 @@ export function createWin32Module(){
                 return threadReturnStub ?? 0;
             };
             const com = createComRegistry();
+            /** @type {import('./msacm32/functions.js').AcmCodec[]} */
+            const acmCodecs = [];
 
             /**
              * The last error of a thread that is not the one running.
@@ -1809,6 +1811,7 @@ export function createWin32Module(){
                     callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     currentThread: ()=>kernel.currentThread(),
                     divergence: config?.divergence,
+                    codecs: ()=>acmCodecs,
                 }),
 
                 // The transport is the assembling caller's to supply and is absent
@@ -2396,6 +2399,17 @@ export function createWin32Module(){
                  * it through CoCreateInstance like any other.
                  */
                 com: ()=>com,
+
+                /**
+                 * Installs a driver in the Audio Compression Manager: a codec another
+                 * layer implements, found by a program that enumerates the drivers as
+                 * it finds Windows' own.
+                 *
+                 * @param {import('./msacm32/functions.js').AcmCodec} codec
+                 */
+                installAcmCodec: codec=>{
+                    acmCodecs.push(codec);
+                },
 
                 /**
                  * The one allocator the whole process draws from.

@@ -198,3 +198,60 @@ test('the PCM converter changes the rate, joining one piece to the next', ()=>{
     assert.equal(f.view.getUint32(HEADER + 20, true), 8, 'the whole piece was taken');
     assert.deepEqual(convert([400, 500]), [300, 350, 400, 450], 'joined at the seam');
 });
+
+test('a codec another layer installs is a driver like Windows\' own', async()=>{
+    const bytes = new Uint8Array(0x20000);
+    const view = new DataView(bytes.buffer);
+    /** @type {number[][]} */
+    const calls = [];
+    /** @type {import('./functions.js').AcmCodec} */
+    const codec = {
+        tag: 0x55, short: 'MPEG Layer-3 Codec', long: 'MPEG Layer-3', comp: 'l3ac',
+        tagName: 'MPEG Layer-3', formats: [],
+        converts: (from, to)=>to.tag === 1 && to.rate === from.rate,
+        open: ()=>({
+            convert: (source, room)=>({ consumed: source.length,
+                output: new Uint8Array(Math.min(room, 8)).fill(7) }),
+            size: bytesIn=>bytesIn * 10,
+        }),
+    };
+    const fns = createAcmFunctions({
+        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        callGuest: (entry, args)=>{
+            calls.push([entry, ...args]);
+            return Promise.resolve(1);
+        },
+        currentThread: ()=>'t',
+        codecs: ()=>[codec],
+    });
+    await fns.acmDriverEnum.handler([0x9000, 0, 0]);
+    assert.deepEqual(calls.map(([, id])=>id), [0x41c00001, 0x41c00002, 0x41c00003, 0x41c00004]);
+    fns.acmMetrics.handler([0, 1, 0x100]);
+    assert.equal(view.getUint32(0x100, true), 4, 'ACM_METRIC_COUNT_DRIVERS');
+
+    const SOURCE = 0x200;
+    const DESTINATION = 0x300;
+    const HANDLE = 0x400;
+    writeFormat(view, SOURCE, { tag: 0x55, channels: 2, rate: 22050, blockAlign: 1, bits: 0 });
+    writeFormat(view, DESTINATION, { tag: 1, channels: 2, rate: 22050, blockAlign: 4, bits: 16 });
+    assert.equal(fns.acmStreamOpen.handler([HANDLE, 0, SOURCE, DESTINATION, 0, 0, 0, 0]), 0);
+    const stream = view.getUint32(HANDLE, true);
+    fns.acmStreamSize.handler([stream, 100, 0x404, 0]);
+    assert.equal(view.getUint32(0x404, true), 1000, 'the codec says how much');
+
+    const HEADER = 0x500;
+    view.setUint32(HEADER, 84, true);
+    view.setUint32(HEADER + 12, 0x1000, true);
+    view.setUint32(HEADER + 16, 5, true);
+    view.setUint32(HEADER + 28, 0x2000, true);
+    view.setUint32(HEADER + 32, 64, true);
+    assert.equal(fns.acmStreamPrepareHeader.handler([stream, HEADER, 0]), 0);
+    assert.equal(fns.acmStreamConvert.handler([stream, HEADER, 0]), 0);
+    assert.equal(view.getUint32(HEADER + 20, true), 5, 'cbSrcLengthUsed');
+    assert.equal(view.getUint32(HEADER + 36, true), 8, 'cbDstLengthUsed');
+    assert.equal(bytes[0x2000], 7);
+    writeFormat(view, DESTINATION, { tag: 1, channels: 2, rate: 44100, blockAlign: 4, bits: 16 });
+    assert.equal(fns.acmStreamOpen.handler([HANDLE, 0, SOURCE, DESTINATION, 0, 0, 0, 1]), 0x203,
+        'what the codec cannot do is ACMERR_NOTPOSSIBLE');
+});

@@ -182,7 +182,7 @@ function listedFormat(tag, channels, rate, bits){
  * @param {typeof DRIVERS[number]} driver
  * @returns {{ tag: number, name: string, formats: ListedFormat[] }[]}
  */
-function tagsOf(driver){
+function tagsOf(/** @type {typeof DRIVERS[number] & { codec?: AcmCodec }} */ driver){
     /** @param {number} tag @param {number[]} widths */
     const all = (tag, widths)=>STANDARD_RATES.flatMap(rate=>[1, 2].flatMap(
         channels=>widths.map(bits=>listedFormat(tag, channels, rate, bits))));
@@ -190,6 +190,11 @@ function tagsOf(driver){
     if (driver.tag === WAVE_FORMAT_PCM)
     {
         return [pcm];
+    }
+    if (driver.codec)
+    {
+        return [pcm,
+            { tag: driver.tag, name: driver.codec.tagName, formats: driver.codec.formats }];
     }
     return [pcm, { tag: driver.tag, name: driver.tag === WAVE_FORMAT_ADPCM
         ? 'Microsoft ADPCM' : 'IMA ADPCM', formats: all(driver.tag, [4]) }];
@@ -204,6 +209,33 @@ function tagsOf(driver){
  * @property {number} bits
  * @property {number} samplesPerBlock
  * @property {number[][]} coefficients
+ * @property {number} [averageBytes]
+ * @property {Uint8Array} [extra]  The bytes after WAVEFORMATEX, as cbSize counts them.
+ */
+
+/**
+ * A driver another layer installs: a codec from its own tag to PCM, as
+ * Windows installs one for MPEG Layer-3 beside the ADPCM ones.
+ *
+ * @typedef {Object} AcmCodec
+ * @property {number} tag
+ * @property {string} short
+ * @property {string} long
+ * @property {string} comp      the driver's four-character code
+ * @property {string} tagName   what acmFormatTagDetails calls its tag
+ * @property {ListedFormat[]} formats  its own tag's formats
+ * @property {(from: WaveFormat, to: WaveFormat) => boolean} converts
+ * @property {(from: WaveFormat, to: WaveFormat) => AcmCodecStream} open
+ */
+
+/**
+ * One conversion through an installed codec.
+ *
+ * @typedef {Object} AcmCodecStream
+ * @property {(source: Uint8Array, room: number)
+ *     => { consumed: number, output: Uint8Array }} convert
+ *     As much of `source` as fits `room` bytes of output.
+ * @property {(bytes: number, toDestination: boolean) => number} size
  */
 
 /**
@@ -213,9 +245,23 @@ function tagsOf(driver){
  * @param {(entry: number, args: number[], thread?: any) => Promise<number>} [host.callGuest]
  * @param {() => any} [host.currentThread]
  * @param {(api: string, detail: string) => void} [host.divergence]
+ * @param {() => readonly AcmCodec[]} [host.codecs]  Drivers other layers installed.
  */
 export function createAcmFunctions(host = /** @type {any} */ ({})){
     const { readMemory, writeMemory } = host;
+
+    /**
+     * Every driver, Windows' own first and then the installed ones, each of
+     * those numbered after them.
+     *
+     * @returns {(typeof DRIVERS[number] & { codec?: AcmCodec })[]}
+     */
+    const allDrivers = ()=>[...DRIVERS, ...(host.codecs?.() ?? []).map((codec, index)=>({
+        id: 0x41c00004 + index, tag: codec.tag, support: ACMDRIVERDETAILS_SUPPORTF_CODEC,
+        short: codec.short, long: codec.long, comp: codec.comp, codec,
+    }))];
+    /** The installed codec that decodes a tag. @param {number} tag */
+    const codecFor = tag=>(host.codecs?.() ?? []).find(codec=>codec.tag === tag) ?? null;
 
     /** @param {number} address */
     const u32 = address=>{
@@ -248,6 +294,9 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
             bits: view.getUint16(WAVEFORMATEX.wBitsPerSample, true),
             samplesPerBlock: 0,
             coefficients: [],
+            averageBytes: view.getUint32(WAVEFORMATEX.nAvgBytesPerSec, true),
+            extra: extra > 0 ? readMemory(address + WAVEFORMATEX.SIZE, Math.min(extra, 64)).slice()
+                : new Uint8Array(0),
         };
         if (channels === 0 || channels > 2)
         {
@@ -284,20 +333,20 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         return format;
     };
 
-    /** Opened drivers, by handle. @type {Map<number, typeof DRIVERS[number]>} */
+    /** Opened drivers, by handle. @type {Map<number, ReturnType<typeof allDrivers>[number]>} */
     const opened = new Map();
     let nextDriver = 0x41d00001;
     /**
      * Open conversion streams, by handle.
      *
      * @type {Map<number, { from: WaveFormat, to: WaveFormat,
-     *     carry: { position: number, previous: number[] } }>}
+     *     carry: { position: number, previous: number[] }, codec?: AcmCodecStream }>}
      */
     const streams = new Map();
     let nextStream = 0x41e00001;
 
     /** A driver named by its id or by an opened handle. @param {number} handle */
-    const driverOf = handle=>DRIVERS.find(driver=>driver.id === (handle >>> 0))
+    const driverOf = handle=>allDrivers().find(driver=>driver.id === (handle >>> 0))
         ?? opened.get(handle >>> 0) ?? null;
 
     /** @param {WaveFormat} format */
@@ -322,7 +371,8 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
             return to.bits === 16 && to.channels === from.channels && to.rate === from.rate
                 && from.blockAlign > 0 && from.samplesPerBlock > 0;
         }
-        return isPcm(from);
+        const codec = codecFor(from.tag);
+        return codec ? codec.converts(from, to) : isPcm(from);
     };
 
     /** @param {WaveFormat} format */
@@ -465,6 +515,12 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         view.setUint32(DETAILS.fccComp, fourcc(driver.comp), true);
         view.setUint16(DETAILS.wMid, 1, true);
         view.setUint16(DETAILS.wPid, driver.tag === WAVE_FORMAT_PCM ? 38 : 36, true);
+        // An installed codec answers as one more driver, without a vendor's ids.
+        if ('codec' in driver)
+        {
+            view.setUint16(DETAILS.wMid, 0, true);
+            view.setUint16(DETAILS.wPid, 0, true);
+        }
         view.setUint32(DETAILS.vdwACM, ACM_VERSION, true);
         view.setUint32(DETAILS.vdwDriver, ACM_VERSION, true);
         view.setUint32(DETAILS.fdwSupport, driver.support, true);
@@ -530,7 +586,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         {
             return MMSYSERR_INVALPARAM;
         }
-        const drivers = (handle >>> 0) === 0 ? DRIVERS : [driverOf(handle)];
+        const drivers = (handle >>> 0) === 0 ? allDrivers() : [driverOf(handle)];
         if (drivers.some(driver=>!driver))
         {
             return MMSYSERR_INVALHANDLE;
@@ -550,7 +606,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         }
         const thread = host.currentThread?.();
         return (async()=>{
-            for (const driver of /** @type {typeof DRIVERS[number][]} */ (drivers))
+            for (const driver of /** @type {ReturnType<typeof allDrivers>} */ (drivers))
             {
                 for (const tag of tagsOf(driver))
                 {
@@ -585,7 +641,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         {
             return MMSYSERR_INVALPARAM;
         }
-        const tags = ((handle >>> 0) === 0 ? DRIVERS : [driverOf(handle)])
+        const tags = ((handle >>> 0) === 0 ? allDrivers() : [driverOf(handle)])
             .flatMap(driver=>(driver ? tagsOf(driver).map(tag=>({ ...tag, driver })) : []));
         const query = flags & 0xf;
         let found;
@@ -638,7 +694,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
             return MMSYSERR_INVALPARAM;
         }
         const tag = u32(details + FORMAT_DETAILS.dwFormatTag);
-        const listed = ((handle >>> 0) === 0 ? DRIVERS : [driverOf(handle)])
+        const listed = ((handle >>> 0) === 0 ? allDrivers() : [driverOf(handle)])
             .flatMap(driver=>(driver ? tagsOf(driver) : []))
             .find(entry=>entry.tag === tag);
         if (!listed)
@@ -685,13 +741,14 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 {
                     return MMSYSERR_INVALPARAM;
                 }
-                const codecs = DRIVERS.filter(
+                const drivers = allDrivers();
+                const codecs = drivers.filter(
                     driver=>driver.support & ACMDRIVERDETAILS_SUPPORTF_CODEC);
                 /** @type {Record<number, number>} */
                 const counts = {
-                    [METRIC.COUNT_DRIVERS]: DRIVERS.length,
+                    [METRIC.COUNT_DRIVERS]: drivers.length,
                     [METRIC.COUNT_CODECS]: codecs.length,
-                    [METRIC.COUNT_CONVERTERS]: DRIVERS.length - codecs.length,
+                    [METRIC.COUNT_CONVERTERS]: drivers.length - codecs.length,
                     [METRIC.COUNT_FILTERS]: 0,
                     [METRIC.COUNT_DISABLED]: 0,
                     [METRIC.COUNT_HARDWARE]: 0,
@@ -712,7 +769,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                         return MMSYSERR_INVALHANDLE;
                     }
                     put32(out, metric === METRIC.DRIVER_SUPPORT
-                        ? driver.support : DRIVERS.indexOf(driver) + 1);
+                        ? driver.support : drivers.findIndex(one=>one.id === driver.id) + 1);
                     return MMSYSERR_NOERROR;
                 }
                 if (counts[metric] === undefined)
@@ -745,7 +802,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 }
                 const thread = host.currentThread?.();
                 return (async()=>{
-                    for (const driver of DRIVERS)
+                    for (const driver of allDrivers())
                     {
                         const more = await run(callback >>> 0,
                             [driver.id, instance >>> 0, driver.support], thread);
@@ -770,7 +827,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 {
                     return MMSYSERR_INVALFLAG;
                 }
-                const driver = DRIVERS.find(candidate=>candidate.id === (id >>> 0));
+                const driver = allDrivers().find(candidate=>candidate.id === (id >>> 0));
                 if (!driver)
                 {
                     return MMSYSERR_INVALHANDLE;
@@ -878,7 +935,8 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                     return MMSYSERR_INVALPARAM;
                 }
                 const handle = nextStream++;
-                streams.set(handle, { from, to, carry: { position: 0, previous: [0, 0] } });
+                streams.set(handle, { from, to, carry: { position: 0, previous: [0, 0] },
+                    codec: codecFor(from.tag)?.open(from, to) });
                 put32(out, handle);
                 return MMSYSERR_NOERROR;
             },
@@ -911,7 +969,11 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 const { from, to } = stream;
                 const toDestination = (flags & ACM_STREAMSIZEF_DESTINATION) === 0;
                 let size;
-                if (from.tag === WAVE_FORMAT_PCM)
+                if (stream.codec)
+                {
+                    size = stream.codec.size(input >>> 0, toDestination);
+                }
+                else if (from.tag === WAVE_FORMAT_PCM)
                 {
                     const inFrame = from.channels * (from.bits / 8);
                     const outFrame = to.channels * (to.bits / 8);
@@ -998,7 +1060,14 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 let used;
                 /** @type {Uint8Array} */
                 let output;
-                if (from.tag === WAVE_FORMAT_PCM)
+                if (stream.codec)
+                {
+                    const converted = stream.codec.convert(
+                        readMemory(sourceAt, sourceLength).slice(), destinationLength);
+                    used = converted.consumed;
+                    output = converted.output;
+                }
+                else if (from.tag === WAVE_FORMAT_PCM)
                 {
                     const inFrame = from.channels * (from.bits / 8);
                     const outFrame = to.channels * (to.bits / 8);
