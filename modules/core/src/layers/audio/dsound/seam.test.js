@@ -1141,7 +1141,8 @@ test('the library\'s entry points keep the ordinals Windows gives them', ()=>{
     assert.deepEqual(pinned, {
         1: 'DirectSoundCreate', 2: 'DirectSoundEnumerateA', 3: 'DirectSoundEnumerateW',
         6: 'DirectSoundCaptureCreate', 7: 'DirectSoundCaptureEnumerateA',
-        8: 'DirectSoundCaptureEnumerateW', 9: 'GetDeviceID', 11: 'DirectSoundCreate8',
+        8: 'DirectSoundCaptureEnumerateW', 9: 'GetDeviceID', 10: 'DirectSoundFullDuplexCreate',
+        11: 'DirectSoundCreate8',
         12: 'DirectSoundCaptureCreate8',
     });
     for (const name of Object.values(pinned))
@@ -1740,6 +1741,39 @@ test('DirectSound\'s class object makes objects that wait for Initialize', ()=>{
     assert.equal(g.call(sound, slotOf(IDIRECTSOUND_SLOTS, 'GetCaps'), [caps]), DS_OK);
     assert.equal(g.call(sound, slotOf(IDIRECTSOUND_SLOTS, 'Initialize'), [0]) >>> 0, 0x88780082,
         'and one DirectSoundCreate made is named already');
+});
+
+test('capture and full duplex objects are made, and initializing one finds no driver', ()=>{
+    // Wine's capture.c and duplex.c, on a machine with no capture device.
+    const g = guestMachine();
+    const dll = g.dsound.libraries['DSOUND.dll'];
+    const CLSID = 0x1e00;
+    const IID = 0x1e20;
+    const out = 0x1e40;
+    for (const [clsid, iid, initialize] of [
+        ['{B0210780-89CD-11D0-AF08-00A0C925CD16}', '{B0210781-89CD-11D0-AF08-00A0C925CD16}',
+            [0x1e60]],
+        ['{FEA4300C-7959-4147-B26A-2377B9E7A91D}', '{EDCB4C7A-DAAB-4216-A42E-6C50596DDC1D}',
+            [0, 0, 0, 0, 0, 0, 0x1f00, 0x1f04]],
+    ])
+    {
+        writeGuid(g.memory, CLSID, /** @type {string} */ (clsid));
+        writeGuid(g.memory, IID, '{00000001-0000-0000-C000-000000000046}');
+        assert.equal(dll.DllGetClassObject.handler([CLSID, IID, out]), DS_OK);
+        const factory = g.memory.u32(out);
+        writeGuid(g.memory, IID, IID_IDirectSound);
+        assert.equal(g.call(factory, 3, [0, IID, out]) >>> 0, 0x80004002, 'E_NOINTERFACE');
+        writeGuid(g.memory, IID, /** @type {string} */ (iid));
+        assert.equal(g.call(factory, 3, [0, IID, out]), DS_OK);
+        const object = g.memory.u32(out);
+        // Initialize is the last slot of either.
+        const slot = String(clsid).startsWith('{B02') ? 5 : 3;
+        assert.equal(g.call(object, slot, /** @type {number[]} */ (initialize)) >>> 0,
+            0x88780078, 'DSERR_NODRIVER');
+    }
+    assert.equal(dll.DirectSoundFullDuplexCreate.handler([0, 0, 0, 0, 0, 0, out, 0, 0, 0]) >>> 0,
+        0x88780078);
+    assert.equal(g.memory.u32(out), 0);
 });
 
 test('there is no capture device, as Windows says of a machine without one', ()=>{

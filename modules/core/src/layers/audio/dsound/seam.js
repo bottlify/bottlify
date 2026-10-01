@@ -49,13 +49,32 @@ const DSSCL_PRIORITY = 2;
 const DSERR_ALREADYINITIALIZED = 0x88780082 | 0;
 /** CLASS_E_NOAGGREGATION, under the name DirectSound gives it. */
 const DSERR_NOAGGREGATION = 0x80040110 | 0;
-const E_POINTER = 0x80004003 | 0;
 const E_NOINTERFACE = 0x80004002 | 0;
 const CLASS_E_CLASSNOTAVAILABLE = 0x80040111 | 0;
 
 /** The classes this library's DllGetClassObject makes, and which generation each is. */
 const CLSID_DirectSound = '{47D4D946-62E8-11CF-93BC-444553540000}';
 const CLSID_DirectSound8 = '{3901CC3F-84B5-4FA4-BA35-AA8172B8A09B}';
+const CLSID_DirectSoundCapture = '{B0210780-89CD-11D0-AF08-00A0C925CD16}';
+const CLSID_DirectSoundCapture8 = '{E4BCAC13-7F99-4908-9A8E-74E3BF24B6E1}';
+const CLSID_DirectSoundFullDuplex = '{FEA4300C-7959-4147-B26A-2377B9E7A91D}';
+/** Each class this library makes, and the kind of object its factory makes. */
+const CLASS_KINDS = new Map([
+    [CLSID_DirectSound, 'sound'], [CLSID_DirectSound8, 'sound8'],
+    [CLSID_DirectSoundCapture, 'capture'], [CLSID_DirectSoundCapture8, 'capture'],
+    [CLSID_DirectSoundFullDuplex, 'duplex'],
+]);
+/** IDirectSoundCapture, which IDirectSoundCapture8 is by another name. */
+const IID_IDirectSoundCapture = '{B0210781-89CD-11D0-AF08-00A0C925CD16}';
+const IDIRECTSOUNDCAPTURE_SLOTS = /** @type {[string, number][]} */ ([
+    ['CreateCaptureBuffer', 3],
+    ['GetCaps', 1],
+    ['Initialize', 1],
+]);
+const IID_IDirectSoundFullDuplex = '{EDCB4C7A-DAAB-4216-A42E-6C50596DDC1D}';
+const IDIRECTSOUNDFULLDUPLEX_SLOTS = /** @type {[string, number][]} */ ([
+    ['Initialize', 8],
+]);
 const IID_IClassFactory = '{00000001-0000-0000-C000-000000000046}';
 /** IClassFactory, after IUnknown's three. */
 const ICLASSFACTORY_SLOTS = /** @type {[string, number][]} */ ([
@@ -231,6 +250,7 @@ export const DSOUND_ORDINALS = Object.freeze({
     7: 'DirectSoundCaptureEnumerateA',
     8: 'DirectSoundCaptureEnumerateW',
     9: 'GetDeviceID',
+    10: 'DirectSoundFullDuplexCreate',
     11: 'DirectSoundCreate8',
     12: 'DirectSoundCaptureCreate8',
 });
@@ -1450,7 +1470,7 @@ export function createDirectSound({
         CreateInstance(factory, [outer, iid, out]){
             if ((out >>> 0) === 0)
             {
-                return E_POINTER;
+                return DSERR_INVALIDPARAM;
             }
             writeU32(out, 0);
             if ((outer >>> 0) !== 0)
@@ -1458,6 +1478,10 @@ export function createDirectSound({
                 return DSERR_NOAGGREGATION;
             }
             const wanted = (iid >>> 0) === 0 ? '' : readGuid(memory, iid >>> 0);
+            if (factory.kind === 'capture' || factory.kind === 'duplex')
+            {
+                return createDriverless(factory.kind, wanted, out);
+            }
             const interfaces = factory.eight ? sound8Interfaces : soundInterfaces;
             if (!interfaces.some(entry=>entry.id === wanted) && wanted !== IID_IUNKNOWN)
             {
@@ -1513,11 +1537,69 @@ export function createDirectSound({
         return DSERR_NODRIVER;
     };
 
-    /** A class object, counting its own references. @param {boolean} eight */
-    const classFactory = eight=>{
+    /**
+     * Capture and full duplex, over a machine with no capture device: the
+     * object is made, and initializing it is DSERR_NODRIVER, as Windows
+     * answers without a microphone (Wine's capture.c and duplex.c).
+     */
+    const driverlessInterfaces = {
+        capture: [describe(IID_IDirectSoundCapture, IDIRECTSOUNDCAPTURE_SLOTS, {
+            CreateCaptureBuffer: ()=>DSERR_UNINITIALIZED,
+            GetCaps: ()=>DSERR_UNINITIALIZED,
+            Initialize: ()=>DSERR_NODRIVER,
+        })],
+        duplex: [describe(IID_IDirectSoundFullDuplex, IDIRECTSOUNDFULLDUPLEX_SLOTS, {
+            /** The two buffers it would hand back must have somewhere to go. */
+            Initialize(_object, [, , , , , , captureOut, renderOut]){
+                if ((captureOut >>> 0) === 0 || (renderOut >>> 0) === 0)
+                {
+                    return DSERR_INVALIDPARAM;
+                }
+                writeU32(captureOut, 0);
+                writeU32(renderOut, 0);
+                return DSERR_NODRIVER;
+            },
+        })],
+    };
+
+    /**
+     * @param {'capture' | 'duplex'} kind @param {string} wanted @param {number} out
+     */
+    const createDriverless = (kind, wanted, out)=>{
+        const interfaces = driverlessInterfaces[kind];
+        const own = interfaces[0].id;
+        if (wanted !== own && wanted !== IID_IUNKNOWN)
+        {
+            return E_NOINTERFACE;
+        }
+        let references = 1;
+        const object = {
+            addRef: ()=>++references,
+            release: ()=>(references = Math.max(0, references - 1)),
+            get references(){
+                return references;
+            },
+            get destroyed(){
+                return references === 0;
+            },
+        };
+        publisher.publish(object, interfaces, own, DEVICE_COUNTED_ON_ITS_OWN);
+        if (wanted === IID_IUNKNOWN)
+        {
+            writeU32(out, publisher.publish(object, interfaces, IID_IUNKNOWN));
+            publisher.hand(object, own, IID_IUNKNOWN);
+            return DS_OK;
+        }
+        writeU32(out, publisher.publish(object, interfaces, own));
+        return DS_OK;
+    };
+
+    /** A class object, counting its own references. @param {string} kind */
+    const classFactory = kind=>{
         let references = 1;
         return {
-            eight,
+            kind,
+            eight: kind === 'sound8',
             addRef: ()=>++references,
             release: ()=>(references = Math.max(0, references - 1)),
             get destroyed(){
@@ -1710,6 +1792,33 @@ export function createDirectSound({
                  */
                 DirectSoundCaptureCreate: { argBytes: 12, handler: noCaptureDevice },
                 DirectSoundCaptureCreate8: { argBytes: 12, handler: noCaptureDevice },
+                /**
+                 * HRESULT DirectSoundFullDuplexCreate(LPCGUID capture, LPCGUID render,
+                 *     LPCDSCBUFFERDESC, LPCDSBUFFERDESC, HWND, DWORD level,
+                 *     LPDIRECTSOUNDFULLDUPLEX*, LPDIRECTSOUNDCAPTUREBUFFER8*,
+                 *     LPDIRECTSOUNDBUFFER8*, LPUNKNOWN outer)
+                 *
+                 * Full duplex needs the capture device there is not.
+                 */
+                DirectSoundFullDuplexCreate: {
+                    argBytes: 40,
+                    /** @param {number[]} args */
+                    handler: ([, , , , , , out, captureOut, renderOut, outer])=>{
+                        if ((outer >>> 0) !== 0)
+                        {
+                            return DSERR_NOAGGREGATION;
+                        }
+                        if ((out >>> 0) === 0)
+                        {
+                            return DSERR_INVALIDPARAM;
+                        }
+                        for (const at of [out, captureOut, renderOut])
+                        {
+                            writeU32(at, 0);
+                        }
+                        return DSERR_NODRIVER;
+                    },
+                },
                 /** HRESULT DirectSoundCaptureEnumerateA/W(callback, context): there is none. */
                 DirectSoundCaptureEnumerateA: { argBytes: 8, handler: ()=>DS_OK },
                 DirectSoundCaptureEnumerateW: { argBytes: 8, handler: ()=>DS_OK },
@@ -1728,11 +1837,12 @@ export function createDirectSound({
                     handler: ([clsid, iid, out])=>{
                         if ((out >>> 0) === 0)
                         {
-                            return E_POINTER;
+                            return DSERR_INVALIDPARAM;
                         }
                         writeU32(out, 0);
                         const asked = (clsid >>> 0) === 0 ? '' : readGuid(memory, clsid >>> 0);
-                        if (asked !== CLSID_DirectSound && asked !== CLSID_DirectSound8)
+                        const kind = CLASS_KINDS.get(asked);
+                        if (!kind)
                         {
                             return CLASS_E_CLASSNOTAVAILABLE;
                         }
@@ -1741,8 +1851,8 @@ export function createDirectSound({
                         {
                             return E_NOINTERFACE;
                         }
-                        writeU32(out, publisher.publish(classFactory(asked === CLSID_DirectSound8),
-                            factoryInterfaces, wanted));
+                        writeU32(out,
+                            publisher.publish(classFactory(kind), factoryInterfaces, wanted));
                         return DS_OK;
                     },
                 },
