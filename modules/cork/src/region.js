@@ -153,6 +153,32 @@ function isLeaf(decodeAt, target, translatable, calls = false){
 }
 
 /**
+ * The callee of a call through a fixed slot -- `call [address]`, an import's
+ * call through the import table -- when it is a leaf to form in: predicted
+ * from the slot as it reads now, as the runtime predicts an indirect call
+ * from the targets it sampled. The call compares the slot's value with it
+ * when it runs, so a slot written since goes out as any indirect call does.
+ *
+ * @param {(address: number) => number} read
+ * @param {import('./decode/decoder.js').Instruction} call
+ * @param {(target: number, calls: boolean) => boolean} leafAt
+ * @returns {number[] | undefined}
+ */
+function slotCallee(read, call, leafAt){
+    const [operand] = call.operands;
+    if (operand.kind !== 'mem' || operand.size !== 4 || (operand.base ?? -1) >= 0
+        || (operand.index ?? -1) >= 0 || operand.segment === 4 || operand.segment === 5
+        || operand.addressSize === 16)
+    {
+        return undefined;
+    }
+    const slot = (operand.disp ?? 0) >>> 0;
+    const target = (read(slot) | read(slot + 1) << 8 | read(slot + 2) << 16
+        | read(slot + 3) << 24) >>> 0;
+    return target !== 0 && leafAt(target, false) ? [target] : undefined;
+}
+
+/**
  * The callees a call block may go to inside the region: a direct call's, or
  * a predicted indirect call's.
  *
@@ -666,8 +692,8 @@ export function formRegion(read, entry,
                 // the port write: a block there lets the return come back
                 // into translated code.
                 follow(exit.next, depth);
-                const predicted = exit.kind === 'indirect' ? callTargets?.get(decoded.eip)
-                    : undefined;
+                const predicted = exit.kind !== 'indirect' ? undefined
+                    : callTargets?.get(decoded.eip) ?? slotCallee(read, decoded, leafAt);
                 if (leafCalls && predicted !== undefined && predicted.length > 0)
                 {
                     exit.predicted = true;

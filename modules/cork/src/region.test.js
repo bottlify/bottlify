@@ -243,6 +243,29 @@ test('an indirect call\'s predicted callees are formed in as a direct call\'s ar
         callTargets: new Map([[0x1000, [0x1003]]]) }).entries, [0x1000, 0x1002]);
 });
 
+test('a call through a fixed slot predicts the leaf the slot holds', ()=>{
+    // 1000: call [0x3000]; ret; F = 1007: inc eax; ret; G = 1009: call F; ret
+    const code = [0xff, 0x15, 0x00, 0x30, 0, 0, 0xc3, 0x40, 0xc3,
+        0xe8, 0xf9, 0xff, 0xff, 0xff, 0xc3];
+    /** @param {number} target */
+    const formed = target=>{
+        const memory = new Map([
+            ...code.map((byte, i)=>/** @type {[number, number]} */ ([0x1000 + i, byte])),
+            ...[0, 1, 2, 3].map(k=>/** @type {[number, number]} */ (
+                [0x3000 + k, target >>> (k * 8) & 0xff])),
+        ]);
+        return formRegion(address=>memory.get(address) ?? 0, 0x1000);
+    };
+    const leaf = formed(0x1007);
+    assert.equal(leaf.blocks[0].exit.predicted, true);
+    assert.deepEqual(leaf.blocks[0].exit.targets, [0x1007]);
+    assert.deepEqual(leaf.entries, [0x1000, 0x1006, 0x1007]);
+    assert.notEqual(leaf.hash, formed(0).hash, 'the prediction is part of what the region is');
+    // A callee that calls on is not formed through a slot, nor an empty slot.
+    assert.equal(formed(0x1009).blocks[0].exit.predicted, undefined);
+    assert.equal(formed(0).blocks[0].exit.predicted, undefined);
+});
+
 test('a jump through a bounded table takes the table\'s cases into the region', ()=>{
     // cmp eax, 2; ja D; jmp [0x3000 + eax*4]; C0: ret; C1: ret; C2: ret; D: hlt
     const table = [0x100e, 0x100f, 0x1010];

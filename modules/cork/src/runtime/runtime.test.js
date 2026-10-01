@@ -716,17 +716,19 @@ test('a candidate is barren on its own block, not on the lowest one the region h
 
 test('an address the translator keeps leaving for becomes a candidate of its own', async()=>{
     const m = machine({ missThreshold: 3 });
-    // mov ecx, 5; L: call [0x2000]; dec ecx; jnz L; hlt; F: ret -- an indirect
-    // call, so the former gathers nothing and F is reached by misses alone.
+    // mov ecx, 5; mov ebx, 0x2000; L: call [ebx]; dec ecx; jnz L; hlt; F: ret --
+    // an indirect call through a register, so the former gathers nothing and
+    // F is reached by misses alone.
     m.write(CODE, [
         0xb9, 5, 0, 0, 0,
-        0xff, 0x15, 0x00, 0x20, 0, 0,
-        0x49, 0x75, 0xf7,
+        0xbb, 0x00, 0x20, 0, 0,
+        0xff, 0x13,
+        0x49, 0x75, 0xfb,
         0xf4,
         0xc3,
     ]);
-    m.write(0x2000, [0x0f, 0x10, 0, 0]);
-    const F = CODE + 15;
+    m.write(0x2000, [0x10, 0x10, 0, 0]);
+    const F = CODE + 16;
     m.setReg(4, 0x80000);
     m.runtime.noteHot(CODE);
     assert.equal(await m.runtime.translatePending(), 1);
@@ -749,6 +751,43 @@ test('an address the translator keeps leaving for becomes a candidate of its own
     new DataView(m.memory.buffer).setUint32(m.layout.eip, CODE, true);
     assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt',
         'the call and the return transfer now');
+});
+
+test('a call through a fixed slot forms its leaf in, and goes where the slot says', async()=>{
+    const m = machine();
+    // mov ecx, 5; xor eax, eax; L: call [0x2000]; dec ecx; jnz L; hlt;
+    // F: inc eax; ret; G: add eax, 2; ret -- an import's call through its table.
+    m.write(CODE, [
+        0xb9, 5, 0, 0, 0,
+        0x31, 0xc0,
+        0xff, 0x15, 0x00, 0x20, 0, 0,
+        0x49, 0x75, 0xf7,
+        0xf4,
+        0x40, 0xc3,
+        0x83, 0xc0, 0x02, 0xc3,
+    ]);
+    const F = CODE + 17;
+    const G = CODE + 19;
+    m.write(0x2000, [F & 0xff, F >>> 8, 0, 0]);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 1);
+    const run = ()=>{
+        m.setReg(0, 0);
+        m.setReg(4, 0x80000);
+        new DataView(m.memory.buffer).setUint32(m.layout.eip, CODE, true);
+        return m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind;
+    };
+    assert.equal(run(), 'halt', 'the call and its return stay in the region');
+    assert.equal(m.reg(0), 5);
+    // The slot written: the call compares and leaves for where it points now,
+    // its return address pushed.
+    m.write(0x2000, [G & 0xff, G >>> 8, 0, 0]);
+    assert.equal(run(), 'untranslated');
+    assert.equal(m.eip(), G);
+    assert.equal(m.reg(4), 0x80000 - 4);
+    assert.equal(new DataView(m.memory.buffer).getUint32(m.layout.ramBase + 0x80000 - 4, true),
+        CODE + 13);
 });
 
 test('a loop that stores into data on its own page keeps its region', async()=>{
