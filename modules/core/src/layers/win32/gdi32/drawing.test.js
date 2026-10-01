@@ -1300,6 +1300,25 @@ test('Arc draws with the pen and puts the current position back', ()=>{
     assert.equal(fns.Arc.handler([0x7777, 0, 0, 1, 1, 0, 0, 0, 0]), 0, 'not a DC');
 });
 
+test('Polyline draws through its points and keeps the position, PolylineTo moves it', ()=>{
+    const graphics = fakeDrawing();
+    const { memory, fns, hdc } = setup(graphics.services);
+    const at = 0x500;
+    memory.writeMemory(at, new Uint8Array(new Int32Array([3, 4, 30, 4, 50, -6]).buffer));
+    assert.equal(fns.Polyline.handler([hdc, at, 3]), 1);
+    const drawn = graphics.calls.filter(call=>call[0] === 'moveToEx' || call[0] === 'lineTo');
+    assert.deepEqual(drawn.slice(-4), [
+        ['moveToEx', hdc, 3, 4], ['lineTo', hdc, 30, 4], ['lineTo', hdc, 50, -6],
+        ['moveToEx', hdc, 1, 2],
+    ], 'from the first point, and back where the position was');
+    assert.equal(fns.Polyline.handler([hdc, at, 1]), 0, 'one point is no line');
+    assert.equal(fns.Polyline.handler([0x7777, at, 3]), 0, 'not a DC');
+    const before = graphics.calls.length;
+    assert.equal(fns.PolylineTo.handler([hdc, at, 2]), 1);
+    assert.deepEqual(graphics.calls.slice(before), [['lineTo', hdc, 3, 4], ['lineTo', hdc, 30, 4]],
+        'from the current position on');
+});
+
 test('a rounded rectangle is a polygon inside its box, square where the corners are flat', ()=>{
     const points = roundRectPoints({ left: 10, top: 10, right: 40, bottom: 25 }, 3, 4.5);
     assert.ok(points.every(({ x, y })=>x >= 10 && x <= 39 && y >= 10 && y <= 24));

@@ -488,6 +488,19 @@ export function createDrawingFunctions(
     };
 
     /**
+     * A POINT array out of guest memory.
+     *
+     * @param {number} address @param {number} count
+     * @returns {{ x: number, y: number }[]}
+     */
+    const pointsAt = (address, count)=>{
+        const bytes = host.readMemory(address, Math.max(0, count) * 8);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        return Array.from({ length: Math.floor(bytes.byteLength / 8) }, (_, at)=>(
+            { x: view.getInt32(at * 8, true), y: view.getInt32(at * 8 + 4, true) }));
+    };
+
+    /**
      * Binds a device context to its pixels, once, and answers with the drawing
      * context. Null when this build cannot draw or this DC has no surface --
      * both of which the caller must turn into a truthful failure.
@@ -1035,6 +1048,57 @@ export function createDrawingFunctions(
                 if (back)
                 {
                     interfaces.moveToEx(handle >>> 0, back.x, back.y);
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL Polyline(HDC hdc, const POINT *apt, int cpt)
+         *
+         * Lines through the points with the pen, two points at least, leaving
+         * the current position where it was.
+         */
+        Polyline: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, points, count])=>{
+                const interfaces = bound(handle);
+                if (!interfaces || (count | 0) < 2 || (points >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const through = pointsAt(points >>> 0, count | 0);
+                const back = interfaces.moveToEx(handle >>> 0, through[0].x, through[0].y);
+                for (const point of through.slice(1))
+                {
+                    interfaces.lineTo(handle >>> 0, point.x, point.y);
+                }
+                if (back)
+                {
+                    interfaces.moveToEx(handle >>> 0, back.x, back.y);
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL PolylineTo(HDC hdc, const POINT *apt, DWORD cpt)
+         *
+         * The same from the current position, which ends at the last point.
+         */
+        PolylineTo: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, points, count])=>{
+                const interfaces = bound(handle);
+                if (!interfaces || (points >>> 0) === 0)
+                {
+                    return 0;
+                }
+                for (const point of pointsAt(points >>> 0, count >>> 0))
+                {
+                    interfaces.lineTo(handle >>> 0, point.x, point.y);
                 }
                 return 1;
             },
