@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { buildHelpersModule, HELPER_NAMES } from './helpers.js';
 import { ownLayout, Tables, pagesFor } from '../runtime/layout.js';
 import { createTestMachine } from '../testing/machine.js';
+import { PageFlag } from '../runtime/pages.js';
 
 const layout = ownLayout({ ramSize: 1 << 20 });
 
@@ -45,4 +46,33 @@ test('a region module imports the helpers instead of defining them', ()=>{
     const { bytes } = machine.translate(0x1000);
     assert.ok(bytes.length < 1000,
         `a two-instruction region's module is ${bytes.length} B`);
+});
+
+test('spanHit finds code in any granule a span reaches, windowHit an inaccessible page too', ()=>{
+    const bytes = buildHelpersModule(layout);
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const { spanHit, windowHit } = /** @type {Record<string, Function>} */ (new WebAssembly.Instance(
+        new WebAssembly.Module(/** @type {Uint8Array<ArrayBuffer>} */ (bytes)),
+        { env: { memory } }).exports);
+    const view = new Uint8Array(memory.buffer);
+    // Page 5 holds code in its granules 2 and 3 (bytes 0x40 to 0x7f); page 7 is unmapped.
+    view[layout.tables + Tables.PAGE_FLAGS + 5] = PageFlag.HAS_CODE;
+    view[layout.tables + Tables.CODE_RANGES + 5 * 2] = 2;
+    view[layout.tables + Tables.CODE_RANGES + 5 * 2 + 1] = 4;
+    view[layout.tables + Tables.PAGE_FLAGS + 7] = PageFlag.INACCESSIBLE;
+    const page = 0x5000;
+    assert.equal(spanHit(page, page + 0x3f), 0, 'below the code');
+    assert.equal(spanHit(page + 0x80, page + 0x200), 0, 'above it');
+    assert.equal(spanHit(page + 0x3c, page + 0x3f), 0, 'touching it');
+    assert.equal(spanHit(page + 0x3c, page + 0x40), 1, 'its first byte');
+    assert.equal(spanHit(page + 0x7f, page + 0x82), 1, 'its last');
+    assert.equal(spanHit(page + 0x10, page + 0xa0), 1, 'across it, only its ends outside');
+    assert.equal(spanHit(0xffffffe0, 0xffffffff), 0, 'a span at the top of the space ends');
+    // A window: its first byte, its byte `last` past it, its stores from `from` to `to`.
+    assert.equal(windowHit(page, 0x3f, 0, 0x3f), 0);
+    assert.equal(windowHit(page, 0x7f, 0, 0x3f), 0, 'code read, not written');
+    assert.equal(windowHit(page, 0x7f, 0x30, 0x50), 1, 'a store reaches it');
+    assert.equal(windowHit(page, 0x7f, 1, 0), 0, 'no stores');
+    assert.equal(windowHit(0x6ff0, 0x1f, 1, 0), 1, 'running into the unmapped page');
+    assert.equal(windowHit(0x7000, 0, 1, 0), 1, 'starting in it');
 });

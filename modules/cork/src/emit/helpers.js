@@ -28,12 +28,12 @@ import { addMaterialiseHelper } from './flags.js';
 import {
     addBcdHelper, addF80Helpers, addInvalidHelper, addRemainderHelper, addRoundHelper,
 } from './x87.js';
-import { addCodeHitHelper } from './memory.js';
+import { addCodeHitHelper, addSpanHitHelper, addWindowHitHelper } from './memory.js';
 
 /** The imported helper names, in the order a region module imports them. */
 export const HELPER_NAMES = Object.freeze([
     'materialise', 'f80ToF64', 'f64ToF80', 'round', 'codeHit', 'f64ToBcd', 'x87Invalid',
-    'remainder',
+    'remainder', 'spanHit', 'windowHit',
 ]);
 
 /**
@@ -51,7 +51,12 @@ export function defineHelpers(m, layout){
     const f64ToBcd = addBcdHelper(m);
     const x87Invalid = addInvalidHelper(m, layout);
     const remainder = addRemainderHelper(m);
-    return { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid, remainder };
+    const spanHit = addSpanHitHelper(m, codeHit);
+    const windowHit = addWindowHitHelper(m, layout, spanHit);
+    return {
+        materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid, remainder,
+        spanHit, windowHit,
+    };
 }
 
 /**
@@ -78,7 +83,7 @@ export function buildHelpersModule(layout){
  * @param {ModuleBuilder} m
  * @returns {{ materialise: number, f80ToF64: number, f64ToF80: number,
  *     round: number, codeHit: number, f64ToBcd: number, x87Invalid: number,
- *     remainder: number }}
+ *     remainder: number, spanHit: number, windowHit: number }}
  */
 export function importHelpers(m){
     const i32 = ValType.i32;
@@ -99,5 +104,12 @@ export function importHelpers(m){
         m.type({ params: [f64, f64, i32, i32], results: [i32] }));
     const remainder = m.importFunction('env', 'remainder',
         m.type({ params: [f64, f64, i32], results: [f64, i32] }));
-    return { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid, remainder };
+    const spanHit = m.importFunction('env', 'spanHit',
+        m.type({ params: [i32, i32], results: [i32] }));
+    const windowHit = m.importFunction('env', 'windowHit',
+        m.type({ params: [i32, i32, i32, i32], results: [i32] }));
+    return {
+        materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid, remainder,
+        spanHit, windowHit,
+    };
 }

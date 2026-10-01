@@ -225,6 +225,8 @@ const LOCAL_TYPES = [
  *     rely on (real processors differ there), single is rounded by Veltkamp's split, and an
  *     instruction that only reads memory is not tested against the page flags (`checkAccess`)
  * @property {number} codeHit         the helper telling whether a byte lies in translated code
+ * @property {number} spanHit         whether a store to a span of bytes reaches translated code
+ * @property {number} windowHit       an access group's window test (`emitGroupChecks`)
  * @property {number} [getEflags]      the host's flag fold, imported when the layout keeps
  *                                     lazy flags (the emulator's `flags_changed`)
  * @property {number} rdtsc            the host's time-stamp counter, imported by every region
@@ -323,12 +325,15 @@ export function prepareModule(m, layout, features, memory = {},
     // The helpers are one shared module every region imports, rather than a
     // copy in each; the host instantiates it once with the same memory (they
     // are defined in `./helpers.js`).
-    const { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid, remainder } =
-        importHelpers(m);
+    const {
+        materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid, remainder, spanHit,
+        windowHit,
+    } = importHelpers(m);
     /** @type {ModuleContext} */
     const context = {
         m, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,
-        hash: hashed, codeHit, f64ToBcd, x87Invalid, remainder, rdtsc, leaveOut,
+        hash: hashed, codeHit, spanHit, windowHit, f64ToBcd, x87Invalid, remainder, rdtsc,
+        leaveOut,
     };
     if (trapPort !== undefined)
     {

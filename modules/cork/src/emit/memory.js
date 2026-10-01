@@ -251,6 +251,98 @@ export function addCodeHitHelper(m, layout){
     return m.function(type, [ValType.i32, ValType.i32], b.toBytes());
 }
 
+/**
+ * Adds the helper `spanHit(lo, hi) -> 0|1`: whether a store to the bytes `lo`
+ * to `hi` reaches translated code -- `codeHit` at `lo`, at every 32 bytes past
+ * it and at `hi`, so one byte of every granule the bytes lie in.
+ *
+ * @param {import('../wasm/encoder.js').ModuleBuilder} m @param {number} codeHit
+ * @returns {number} the function index
+ */
+export function addSpanHitHelper(m, codeHit){
+    const type = m.type({ params: [ValType.i32, ValType.i32], results: [ValType.i32] });
+    const b = new Body();
+    // local 2: the granules past `lo` still to look at, counted rather than
+    // compared, so a span that wraps at 4 GiB ends.
+    b.localGet(1).localGet(0).op(I32.sub).i32const(5).op(I32.shrU).localSet(2);
+    b.loop(EMPTY);
+    b.localGet(0).call(codeHit);
+    b.if(EMPTY);
+    b.i32const(1).op(0x0f); // return
+    b.end();
+    b.localGet(2);
+    b.if(EMPTY);
+    b.localGet(0).i32const(32).op(I32.add).localSet(0);
+    b.localGet(2).i32const(1).op(I32.sub).localSet(2);
+    b.br(1);
+    b.end();
+    b.end();
+    b.localGet(1).call(codeHit);
+    return m.function(type, [ValType.i32], b.toBytes());
+}
+
+/**
+ * Adds the helper `windowHit(address, last, from, to) -> 0|1`, the test of an
+ * access group's window once its pages are flagged (`emitGroupChecks`):
+ * whether the page of its first byte or of its byte `last` past it is
+ * inaccessible, or a store to its bytes `from` to `to` past it reaches
+ * translated code (none when `from` is past `to`).
+ *
+ * @param {import('../wasm/encoder.js').ModuleBuilder} m
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @param {number} spanHit
+ * @returns {number} the function index
+ */
+export function addWindowHitHelper(m, layout, spanHit){
+    const i32 = ValType.i32;
+    const type = m.type({ params: [i32, i32, i32, i32], results: [i32] });
+    const b = new Body();
+    const flags = layout.tables + Tables.PAGE_FLAGS;
+    b.localGet(0).i32const(12).op(I32.shrU).load('i32_8u', { offset: flags });
+    b.localGet(0).localGet(1).op(I32.add).i32const(12).op(I32.shrU)
+        .load('i32_8u', { offset: flags });
+    b.op(I32.or).i32const(PageFlag.INACCESSIBLE).op(I32.and);
+    b.if(EMPTY);
+    b.i32const(1).op(0x0f); // return
+    b.end();
+    b.localGet(2).localGet(3).op(I32.gtS);
+    b.if(EMPTY);
+    b.i32const(0).op(0x0f); // return
+    b.end();
+    b.localGet(0).localGet(2).op(I32.add);
+    b.localGet(0).localGet(3).op(I32.add);
+    b.call(spanHit);
+    return m.function(type, [], b.toBytes());
+}
+
+/**
+ * The bytes a group's stores write, past its window's first, as the fewest
+ * spans: stores that touch or overlap are one span.
+ *
+ * @param {{ off: number, size: number, store: boolean }[]} list @param {number} lo
+ * @returns {[number, number][]}  each span's first byte and its last
+ */
+function storeSpans(list, lo){
+    /** @type {[number, number][]} */
+    const spans = [];
+    const stores = list.filter(access=>access.store)
+        .map(access=>[access.off - lo, access.off - lo + access.size - 1])
+        .sort((x, y)=>x[0] - y[0]);
+    for (const [from, to] of stores)
+    {
+        const last = spans[spans.length - 1];
+        if (last !== undefined && from <= last[1] + 1)
+        {
+            last[1] = Math.max(last[1], to);
+        }
+        else
+        {
+            spans.push([from, to]);
+        }
+    }
+    return spans;
+}
+
 // --- the region's access groups ---
 //
 // Most accesses go off a register the code does not change in between -- a
@@ -1198,14 +1290,6 @@ function copyReg(values, r, from, by){
 export function emitGroupChecks(e, checks, at = -1){
     const { b } = e;
     const table = e.layout.tables + Tables.PAGE_FLAGS;
-    const flagsOf = (/** @type {number} */ offset)=>{
-        b.localGet(Local.addr);
-        if (offset !== 0)
-        {
-            b.i32const(offset).op(I32.add);
-        }
-        b.i32const(12).op(I32.shrU).load('i32_8u', { offset: table });
-    };
     // Held: the epilogue's hash probe would find this very address's entry
     // and tail-call it, whose check leaves again with nothing retired -- for
     // ever, the budget untouched. Back at the host, the interpreter runs it.
@@ -1262,37 +1346,23 @@ export function emitGroupChecks(e, checks, at = -1){
         // in the two), against INACCESSIBLE -- and against HAS_CODE for a
         // group that stores. Only when a flag is up are the window's own
         // pages and the stores' granules looked at.
-        const stores = group.list.filter(access=>access.store);
-        const bits = PageFlag.INACCESSIBLE | (stores.length > 0 ? PageFlag.HAS_CODE : 0);
+        const stores = group.list.some(access=>access.store);
+        const bits = PageFlag.INACCESSIBLE | (stores ? PageFlag.HAS_CODE : 0);
         b.localGet(Local.addr).i32const(12).op(I32.shrU).load('i32_16u', { offset: table })
             .i32const(bits * 0x101).op(I32.and);
+        // Out of line: a window seldom finds a flag up, and its test inline
+        // was most of the bytes of a region's stack accesses.
         e.openGuard('window', EMPTY);
-        flagsOf(0);
-        flagsOf(group.width - 1);
-        b.op(I32.or).i32const(PageFlag.INACCESSIBLE).op(I32.and);
-        leaveIf('windowFaults');
-        if (stores.length > 0)
+        const [first = [1, 0], ...more] = storeSpans(group.list, group.lo);
+        b.localGet(Local.addr).i32const(group.width - 1).i32const(first[0]).i32const(first[1])
+            .call(e.context.windowHit);
+        for (const [from, to] of more)
         {
-            const first = Math.min(...stores.map(a=>a.off)) - group.lo;
-            const last = Math.max(...stores.map(a=>a.off + a.size)) - 1 - group.lo;
-            flagsOf(first);
-            flagsOf(last);
-            b.op(I32.or).i32const(PageFlag.HAS_CODE).op(I32.and);
-            e.openGuard('windowCode', EMPTY);
-            stores.forEach((access, k)=>{
-                for (const end of access.size > 1 ? [0, access.size - 1] : [0])
-                {
-                    b.localGet(Local.addr).i32const(access.off - group.lo + end).op(I32.add)
-                        .call(e.context.codeHit);
-                    if (k > 0 || end > 0)
-                    {
-                        b.op(I32.or);
-                    }
-                }
-            });
-            leaveIf('storeCode');
-            e.close();
+            b.localGet(Local.addr).i32const(from).op(I32.add)
+                .localGet(Local.addr).i32const(to).op(I32.add)
+                .call(e.context.spanHit).op(I32.or);
         }
+        leaveIf('window');
         e.close();
     }
     if (shared)
