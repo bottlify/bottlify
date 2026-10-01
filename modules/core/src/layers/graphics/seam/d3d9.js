@@ -71,7 +71,8 @@ import { createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
-    createShadow, getRenderStateCode, getTextureStageStateCode, getTransformCode,
+    createShadow, getRenderStateCode, getTextureStageStateCode, getTransformCode, lockCode,
+    unlockCode,
     setMaterialCode,
     setRenderStateCode, setSamplerStateCode, setTextureCode, setTextureStageStateCode,
     setTransformCode,
@@ -824,13 +825,25 @@ export function createDirect3D9Seam(
      * A buffer hands back an address in the guest's own memory, so locking is
      * one out-parameter and nothing else: the program writes there itself, and
      * the unlock is what tells this engine to look.
+     *
+     * Both usually run in the guest, as Direct3D 8's do (`shadow.js`); the
+     * host's path is the one the guest routine leaves for it -- a lock already
+     * held, a read-only lock, a full ring -- and it settles what the guest did
+     * to the buffer first, then tells the block what it did, so the two paths
+     * see one lock.
      */
     const bufferMethods = {
         /** @param {any} buffer @param {number[]} args */
         Lock: (buffer, [offset, size, out, flags])=>{
+            const shadow = shadowOf(owners.get(buffer));
+            shadow?.settleBuffer(buffer);
             /** @type {{ pBits?: number }} */
             const locked = {};
             const hr = buffer.Lock(offset >>> 0, size >>> 0, locked, flags >>> 0);
+            if (hr === D3D_OK)
+            {
+                shadow?.noteLocked(buffer, true);
+            }
             if ((out >>> 0) !== 0)
             {
                 // Cleared on a refusal: a program that reads the pointer
@@ -840,7 +853,36 @@ export function createDirect3D9Seam(
             return hr;
         },
         /** @param {any} buffer */
-        Unlock: (/** @type {any} */ buffer)=>buffer.Unlock(),
+        Unlock: (/** @type {any} */ buffer)=>{
+            const shadow = shadowOf(owners.get(buffer));
+            shadow?.settleBuffer(buffer);
+            const hr = buffer.Unlock();
+            if (hr === D3D_OK)
+            {
+                shadow?.noteLocked(buffer, false);
+            }
+            return hr;
+        },
+    };
+    /** @type {Record<string, (builder: { trap: number }) => number>} */
+    const bufferGuests = allocate
+        ? {
+            Lock: ({ trap })=>placeCode(at=>lockCode(at, trap)),
+            Unlock: ({ trap })=>placeCode(at=>unlockCode(at, trap)),
+        }
+        : {};
+    /**
+     * A buffer the device just made gets its block before it is handed out:
+     * the block's address is written when the interface is published.
+     *
+     * @param {any} device @param {any} buffer
+     */
+    const attachBuffer = (device, buffer)=>{
+        const shadow = shadowOf(device);
+        if (shadow)
+        {
+            buffer.guestState = ()=>shadow.attachBuffer(buffer);
+        }
     };
 
     const vertexBufferInterfaces = [
@@ -858,7 +900,7 @@ export function createDirect3D9Seam(
                 }
                 return hr;
             },
-        }, {}, privateData.released),
+        }, bufferGuests, retire),
     ];
     const indexBufferInterfaces = [
         describe(IID_IDirect3DIndexBuffer9, IDIRECT3DINDEXBUFFER9_SLOTS, {
@@ -875,7 +917,7 @@ export function createDirect3D9Seam(
                 }
                 return hr;
             },
-        }, {}, privateData.released),
+        }, bufferGuests, retire),
     ];
 
     const declarationInterfaces = [
@@ -1513,6 +1555,7 @@ export function createDirect3D9Seam(
                 length >>> 0, usage >>> 0, fvf >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.buffer)
             {
+                attachBuffer(device, held.buffer);
                 return handBack(held.buffer, vertexBufferInterfaces,
                     IID_IDirect3DVertexBuffer9, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
@@ -1531,6 +1574,7 @@ export function createDirect3D9Seam(
                 length >>> 0, usage >>> 0, format >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.buffer)
             {
+                attachBuffer(device, held.buffer);
                 return handBack(held.buffer, indexBufferInterfaces,
                     IID_IDirect3DIndexBuffer9, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
