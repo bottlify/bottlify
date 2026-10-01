@@ -1335,6 +1335,12 @@ export class RegionEmitter {
     returnToCaller(){
         const { b, layout } = this;
         this.charge();
+        if (this.x87.active)
+        {
+            // As at any exit: the registers back in their own locals and the
+            // top and the mask the plain forms keep in locals written.
+            x87Normalise(this);
+        }
         this.storeMemoryState();
         this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false });
         for (const [i, local] of RECORD_LOCALS.entries())

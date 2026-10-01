@@ -2260,6 +2260,32 @@ test('with callReturn a call out of a region returns into it as a wasm call: the
     }
 });
 
+test('with callReturn an x87 callee returns the stack as it left it: its top, its empty mask and'
+    + ' its registers in their places', async()=>{
+    // mov ecx, 1; L: call F; dec ecx; jnz L; hlt; F: fld1; fldz; fxch; ret -- the return
+    // with the top and the mask its plain forms keep in locals, the registers exchanged.
+    const program = [
+        0xb9, 1, 0, 0, 0, 0xe8, 0x04, 0, 0, 0, 0x49, 0x75, 0xf8, 0xf4,
+        0xd9, 0xe8, 0xd9, 0xee, 0xd9, 0xc9, 0xc3,
+    ];
+    /** @type {number[][]} */
+    const results = [];
+    for (const callReturn of [false, true])
+    {
+        const m = machine({ leafCalls: false, callReturn });
+        m.write(CODE, program);
+        m.setReg(4, 0x80000);
+        new DataView(m.memory.buffer).setUint32(m.layout.eip, CODE, true);
+        await runToHalt(m);
+        const view = new DataView(m.memory.buffer);
+        results.push([view.getUint8(m.layout.x87Top), view.getUint8(m.layout.x87Empty),
+            ...[0, 1, 2, 3, 4, 5, 6, 7].map(k=>view.getFloat64(m.layout.x87 + k * 16, true))]);
+    }
+    assert.deepEqual(results[0].slice(0, 4), [6, 0x3f, 0, 0], 'two pushes from top 0');
+    assert.deepEqual(results[0].slice(8), [1, 0], 'ST0 (register 6) 1, ST1 0 after the exchange');
+    assert.deepEqual(results[1], results[0]);
+});
+
 test('with callReturn calls deeper than the stack of waiting calls go on as plain transfers',
     async()=>{
         // Mutual recursion 600 deep, past CallStack.LIMIT:
