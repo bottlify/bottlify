@@ -1324,6 +1324,33 @@ test('a batch whose answer waits behind a hold of the engine thread past the lim
         }
     });
 
+/**
+ * Waits until the runtime's worker has loaded: until then a batch is emitted
+ * inline and published at once, so fresh starts are tried until one is not,
+ * and then that batch's answer is waited for.
+ *
+ * @param {ReturnType<typeof machine>} m
+ */
+async function untilWorkerLoaded(m){
+    for (let i = 0, at = 0x40000; i < 200; i++, at += 0x100)
+    {
+        m.write(at, COUNTDOWN);
+        m.runtime.noteHot(at, 0, 2);
+        await m.runtime.translatePending();
+        if (m.runtime.entryOf(at) < 0)
+        {
+            for (let k = 0; k < 200 && m.runtime.entryOf(at) < 0; k++)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 10));
+            }
+            assert.ok(m.runtime.entryOf(at) >= 0, 'the worker answers');
+            return;
+        }
+        await new Promise(resolve=>setTimeout(resolve, 10));
+    }
+    assert.fail('the worker never loaded');
+}
+
 test('what queues while a batch is with the worker goes out when its answer comes, unasked',
     async()=>{
         const m = machine({ worker: true });
@@ -1335,14 +1362,7 @@ test('what queues while a batch is with the worker goes out when its answer come
         m.setReg(4, 0x80000);
         try
         {
-            // The worker is open once a first batch has come back from it.
-            m.runtime.noteHot(CODE, 0, 2);
-            for (let i = 0; i < 200 && m.runtime.entryOf(CODE) < 0; i++)
-            {
-                await m.runtime.translatePending();
-                await new Promise(resolve=>setTimeout(resolve, 10));
-            }
-            assert.ok(m.runtime.entryOf(CODE) >= 0, 'the worker answers');
+            await untilWorkerLoaded(m);
             m.runtime.noteHot(A, 0, 2);
             await m.runtime.translatePending();
             // B is noted while A's batch is out: the host's ask finds a batch away.
@@ -1375,6 +1395,26 @@ test('a candidate that got an entry while it waited is not formed again', async(
     await m.runtime.translatePending();
     assert.equal(m.runtime.diagnostics().regions, 1, 'the loop head not a region of its own');
 });
+
+test('a batch asked for while the worker is still loading is emitted inline, not held for it',
+    async()=>{
+        const m = machine({ worker: true });
+        m.write(CODE, COUNTDOWN);
+        m.setReg(4, 0x80000);
+        try
+        {
+            // The worker is made, and is loading its modules.
+            await new Promise(resolve=>setImmediate(resolve));
+            await new Promise(resolve=>setImmediate(resolve));
+            m.runtime.noteHot(CODE, 0, 2);
+            await m.runtime.translatePending();
+            assert.ok(m.runtime.entryOf(CODE) >= 0, 'published at once');
+        }
+        finally
+        {
+            await m.runtime.flush();
+        }
+    });
 
 test('a worker that cannot load is dropped and the batches are emitted inline', async()=>{
     // A worker file that throws as it loads: the worker is made, and fails after.

@@ -925,6 +925,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** @type {{ post: (message: any, transfer: any[]) => void,
      *     terminate: () => void } | null} */
     let worker = null;
+    /** A worker made and still loading, which `flush` ends too.
+     * @type {{ post: (message: any, transfer: any[]) => void, terminate: () => void } | null} */
+    let loading = null;
     let workerClosed = false;
     /** @type {{ id: number, metas?: any[], relink?: RegionRecord[], store: any,
      *     at: number } | null} */
@@ -2055,12 +2058,31 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 adapter?.terminate();
                 return;
             }
-            adapter.onMessage(onWorkerResults);
+            // A worker is made at once and loads its modules after: a batch
+            // posted before then waited out the load -- a quarter of a second
+            // from source -- while inline it would have run. So the batches go
+            // to it only once it has answered a first message of its own, and
+            // are emitted inline until then.
+            let ready = false;
+            loading = adapter;
+            adapter.onMessage(data=>{
+                if (data?.ready === true)
+                {
+                    ready = true;
+                    loading = null;
+                    if (!workerClosed)
+                    {
+                        worker = adapter;
+                    }
+                    return;
+                }
+                onWorkerResults(data);
+            });
             adapter.onLost(reason=>{
                 // A worker that cannot load or has died answers nothing
                 // again: emitting goes back inline, and a batch it held is
                 // given up so the next one is not held behind it.
-                if (worker !== adapter)
+                if (worker !== adapter && ready)
                 {
                     return;
                 }
@@ -2070,7 +2092,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 inFlight.clear();
                 adapter.terminate();
             });
-            worker = adapter;
+            adapter.post({ ready: true }, []);
         }, ()=>{});
     }
 
@@ -2505,6 +2527,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             workerClosed = true;
             worker?.terminate();
             worker = null;
+            loading?.terminate();
+            loading = null;
             outstanding = null;
         },
 

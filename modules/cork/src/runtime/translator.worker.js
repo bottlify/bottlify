@@ -32,10 +32,16 @@ const cache = createEmitCache();
  * formed here again from a copy of their pages).
  *
  * @param {{ id: number, jobs?: { region: any, entryTop: number }[], relink?: any,
- *     layout: any, features: any, options: any }} data
+ *     layout: any, features: any, options: any, ready?: boolean }} data
  * @param {(message: any, transfer: any[]) => void} send
  */
 function handle(data, send){
+    if (data?.ready === true)
+    {
+        // Loaded: the runtime sends batches from here on.
+        send({ ready: true }, []);
+        return;
+    }
     const { id, jobs, relink, layout, features, options } = data;
     try
     {
