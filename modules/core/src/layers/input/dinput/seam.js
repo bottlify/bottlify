@@ -341,6 +341,32 @@ const DIDATAFORMAT = Object.freeze({
 });
 const DIOBJECTDATAFORMAT = Object.freeze({ pguid: 0x0, dwOfs: 0x4, dwType: 0x8, SIZE: 16 });
 const DIDFT_AXIS = 0x03;
+/**
+ * DIACTIONFORMAT and DIACTION, the action map a program describes its
+ * controls with: the two widths differ only in the format's trailing name.
+ */
+const DIACTIONFORMAT = Object.freeze({
+    dwSize: 0x00, dwActionSize: 0x04, dwNumActions: 0x0c, rgoAction: 0x10, dwBufferSize: 0x28,
+    SIZE_A: 0x148, SIZE_W: 0x24c,
+});
+const DIACTION = Object.freeze({
+    uAppData: 0x00, dwSemantic: 0x04, dwFlags: 0x08, guidInstance: 0x10, dwObjID: 0x20,
+    dwHow: 0x24, SIZE: 40,
+});
+/** DIA_*: the program's own word on an action. */
+const DIA_APPMAPPED = 0x02;
+const DIA_APPNOMAP = 0x04;
+/** DIAH_*: how an action came to be mapped. */
+const DIAH_UNMAPPED = 0;
+const DIAH_APPREQUESTED = 0x02;
+const DIAH_DEFAULT = 0x20;
+const DIAH_ERROR = 0x80000000;
+const DIDBAM_INITIALIZE = 0x02;
+/** A semantic's top byte names its device for these two. */
+const SEMANTIC_KEYBOARD = 0x81;
+const SEMANTIC_MOUSE = 0x82;
+const DIEDBS_MAPPEDPRI1 = 0x01;
+const DIEDBSFL_FORCEFEEDBACK = 0x100;
 const DIDFT_ANYINSTANCE = 0xffff;
 const DIDFT_OPTIONAL = 0x80000000;
 
@@ -671,7 +697,12 @@ export function createDirectInput(
     /** @param {number} address */
     const guidAt = address=>readGuid(memory, address >>> 0);
 
-    /** What each device's SetDataFormat settled on. @type {WeakMap<object, { dataSize: number, places: Map<number, number> }>} */
+    /**
+     * What each device's SetDataFormat, or SetActionMap, settled on.
+     *
+     * @type {WeakMap<object, { dataSize: number, places: Map<number, number>,
+     *     appData?: Map<number, number> }>}
+     */
     const formats = new WeakMap();
 
     /** @param {number} address */
@@ -743,6 +774,58 @@ export function createDirectInput(
                 return DIERR_INVALIDPARAM;
         }
         return found ?? DIERR_NOTFOUND;
+    };
+
+    /** @param {any} device */
+    const guidOfDevice = device=>(device.kind === KEYBOARD ? GUID_SysKeyboard : GUID_SysMouse);
+
+    /**
+     * A DIACTIONFORMAT's actions, or null for one that cannot be read.
+     *
+     * @param {number} format
+     */
+    const readActions = format=>{
+        if ((format >>> 0) === 0)
+        {
+            return null;
+        }
+        const size = readU32(format + DIACTIONFORMAT.dwSize);
+        const count = readU32(format + DIACTIONFORMAT.dwNumActions);
+        const array = readU32(format + DIACTIONFORMAT.rgoAction);
+        if ((size !== DIACTIONFORMAT.SIZE_A && size !== DIACTIONFORMAT.SIZE_W)
+            || readU32(format + DIACTIONFORMAT.dwActionSize) !== DIACTION.SIZE
+            || (count > 0 && array === 0))
+        {
+            divergence?.('DirectInput', `an action format of ${size} bytes, actions of`
+                + ` ${readU32(format + DIACTIONFORMAT.dwActionSize)}, ${count} at 0x${
+                    array.toString(16)} was refused`);
+            return null;
+        }
+        return {
+            count,
+            /** @param {number} index */
+            at: index=>array + index * DIACTION.SIZE,
+            bufferSize: readU32(format + DIACTIONFORMAT.dwBufferSize),
+        };
+    };
+
+    /**
+     * The object of this device a semantic names, if it names one: a
+     * keyboard semantic carries its key's DIK code and a mouse semantic its
+     * offset in DIMOUSESTATE2, both in the low byte. A genre's semantic names
+     * a control of a game device, and neither of these is one.
+     *
+     * @param {any} device @param {number} semantic
+     */
+    const objectForSemantic = (device, semantic)=>{
+        const kind = semantic >>> 24;
+        if ((kind === SEMANTIC_KEYBOARD && device.kind === KEYBOARD)
+            || (kind === SEMANTIC_MOUSE && device.kind === MOUSE))
+        {
+            return objectsOf(device.kind).find(object=>object.offset === (semantic & 0xff))
+                ?? null;
+        }
+        return null;
     };
 
     /** @type {Record<string, (target: any, args: number[], descriptor?: any) => any>} */
@@ -990,6 +1073,7 @@ export function createDirectInput(
             // An event carries its object's offset in the program's format,
             // and an object the format left out is not reported.
             const places = formats.get(device)?.places;
+            const appData = formats.get(device)?.appData;
             const events = places
                 ? drained.events.filter((/** @type {any} */ event)=>places.has(event.offset))
                     .map((/** @type {any} */ event)=>({ ...event, offset: places.get(event.offset) }))
@@ -1005,6 +1089,11 @@ export function createDirectInput(
                     view.setInt32(at + DIDEVICEOBJECTDATA.dwData, event.data, true);
                     view.setUint32(at + DIDEVICEOBJECTDATA.dwTimeStamp, event.time >>> 0, true);
                     view.setUint32(at + DIDEVICEOBJECTDATA.dwSequence, event.sequence, true);
+                    if (entrySize === DIDEVICEOBJECTDATA.SIZE_DX8)
+                    {
+                        view.setUint32(at + DIDEVICEOBJECTDATA.uAppData,
+                            appData?.get(event.offset) ?? 0, true);
+                    }
                 });
                 if (bytes.length > 0)
                 {
@@ -1014,6 +1103,113 @@ export function createDirectInput(
 
             writeU32(count, events.length);
             return overflow ? DI_BUFFEROVERFLOW : DI_OK;
+        },
+
+        /**
+         * HRESULT BuildActionMap(LPDIACTIONFORMAT, LPCTSTR user, DWORD flags)
+         *
+         * Each action whose semantic names an object of this device is mapped
+         * to it -- its guidInstance this device, its dwObjID the object, how
+         * DIAH_DEFAULT -- unless another device already holds it; an action
+         * the program mapped itself is checked against the object it named.
+         * DI_NOEFFECT when nothing here answers any of them.
+         */
+        BuildActionMap(device, [format, , flags]){
+            const actions = readActions(format);
+            if (!actions)
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            const own = guidOfDevice(device);
+            const ownBytes = parseGuid(own) ?? new Uint8Array(16);
+            let mapped = 0;
+            for (let index = 0; index < actions.count; index++)
+            {
+                const at = actions.at(index);
+                const actionFlags = readU32(at + DIACTION.dwFlags);
+                const holder = guidAt(at + DIACTION.guidInstance);
+                if ((actionFlags & DIA_APPNOMAP) !== 0)
+                {
+                    continue;
+                }
+                if ((actionFlags & DIA_APPMAPPED) !== 0)
+                {
+                    if (holder === own)
+                    {
+                        const named = objectNamed(device, readU32(at + DIACTION.dwObjID),
+                            DIPH_BYID);
+                        writeU32(at + DIACTION.dwHow,
+                            typeof named === 'number' ? DIAH_ERROR : DIAH_APPREQUESTED);
+                        mapped += typeof named === 'number' ? 0 : 1;
+                    }
+                    continue;
+                }
+                if (readU32(at + DIACTION.dwHow) !== DIAH_UNMAPPED && holder !== own
+                    && (flags & DIDBAM_INITIALIZE) === 0)
+                {
+                    continue;
+                }
+                const object = objectForSemantic(device, readU32(at + DIACTION.dwSemantic));
+                if (!object)
+                {
+                    continue;
+                }
+                memory.writeMemory(at + DIACTION.guidInstance, ownBytes);
+                writeU32(at + DIACTION.dwObjID, object.type);
+                writeU32(at + DIACTION.dwHow, DIAH_DEFAULT);
+                mapped++;
+            }
+            return mapped > 0 ? DI_OK : DI_NOEFFECT;
+        },
+
+        /**
+         * HRESULT SetActionMap(LPDIACTIONFORMAT, LPCTSTR user, DWORD flags)
+         *
+         * The device's data format becomes the action map: a dword per action,
+         * in the actions' order, each mapped one's object reported at its
+         * action's place and with its action's uAppData; the format's buffer
+         * size is the device's. Settled while nobody holds the device.
+         */
+        SetActionMap(device, [format]){
+            const actions = readActions(format);
+            if (!actions)
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            if (device.acquired)
+            {
+                return DIERR_ACQUIRED;
+            }
+            const own = guidOfDevice(device);
+            /** @type {Map<number, number>} */
+            const places = new Map();
+            /** @type {Map<number, number>} */
+            const appData = new Map();
+            for (let index = 0; index < actions.count; index++)
+            {
+                const at = actions.at(index);
+                const how = readU32(at + DIACTION.dwHow);
+                if (how === DIAH_UNMAPPED || (how & DIAH_ERROR) !== 0
+                    || guidAt(at + DIACTION.guidInstance) !== own)
+                {
+                    continue;
+                }
+                const object = objectNamed(device, readU32(at + DIACTION.dwObjID), DIPH_BYID);
+                if (typeof object === 'number' || places.has(object.offset))
+                {
+                    continue;
+                }
+                places.set(object.offset, index * 4);
+                appData.set(index * 4, readU32(at + DIACTION.uAppData));
+            }
+            const dataSize = actions.count * 4;
+            formats.set(device, { dataSize, places, appData });
+            device.setDataSize(dataSize);
+            if (actions.bufferSize > 0)
+            {
+                device.setBufferSize(actions.bufferSize);
+            }
+            return DI_OK;
         },
 
         /** HRESULT GetCapabilities(LPDIDEVCAPS) */
@@ -1384,6 +1580,61 @@ export function createDirectInput(
             return enumerate(
                 type >>> 0, callback, context, flags >>> 0,
                 descriptor?.wide === true, descriptor?.legacy === true);
+        },
+
+        /**
+         * HRESULT EnumDevicesBySemantics(LPCTSTR user, LPDIACTIONFORMAT,
+         *     LPDIENUMDEVICESBYSEMANTICSCB, LPVOID, DWORD flags)
+         *
+         * Each attached device is made and handed to the program's callback
+         * with how the actions map to it and how many devices are still to
+         * come; the program keeps one by taking a reference of its own, since
+         * the one it was handed with is let go of after the callback.
+         *
+         * @param {any} root @param {number[]} args
+         * @param {{ wide?: boolean }} descriptor
+         */
+        EnumDevicesBySemantics(root, [, format, callback, context, flags], descriptor){
+            const actions = readActions(format);
+            if (!actions || (callback >>> 0) === 0)
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            const run = callGuest;
+            if (!run || allocate === undefined || (flags & DIEDBSFL_FORCEFEEDBACK) !== 0)
+            {
+                return DI_OK;
+            }
+            const wide = descriptor?.wide === true;
+            const semantics = Array.from({ length: actions.count },
+                (_, index)=>readU32(actions.at(index) + DIACTION.dwSemantic));
+            const offers = /** @type {const} */ ([
+                { guid: GUID_SysKeyboard, kind: KEYBOARD, name: 'Keyboard' },
+                { guid: GUID_SysMouse, kind: MOUSE, name: 'Mouse' },
+            ]);
+            enumerations++;
+            const thread = callerThread?.();
+            return (async()=>{
+                for (const [index, offer] of offers.entries())
+                {
+                    const device = /** @type {any} */ (deviceFor(offer.guid));
+                    device.setVersion(root.version);
+                    const pointer = publisher.publish(device, deviceInterfaces(),
+                        wide ? IID_IDirectInputDevice8W : IID_IDirectInputDevice8A);
+                    const instance = writeInstance(offer.guid, devTypeOf(offer.kind, false),
+                        offer.name, offer.name, wide);
+                    const mapped = semantics.some(semantic=>objectForSemantic(device, semantic));
+                    const more = await run(callback >>> 0, [instance, pointer,
+                        mapped ? DIEDBS_MAPPEDPRI1 : 0, offers.length - 1 - index,
+                        context >>> 0], thread);
+                    device.release();
+                    if ((more | 0) === DIENUM_STOP)
+                    {
+                        break;
+                    }
+                }
+                return DI_OK;
+            })();
         },
 
         /** HRESULT GetDeviceStatus(REFGUID) */

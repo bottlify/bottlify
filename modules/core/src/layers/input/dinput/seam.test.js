@@ -1809,3 +1809,102 @@ test('a device released to nothing is made anew by the next CreateDevice', async
     assert.equal(g.call(third, 2), 1, 'with a reference of its own');
     assert.equal(g.call(second, 2), 0);
 });
+
+/** DIKEYBOARD_UP, DIMOUSE_BUTTON0 and a driving genre's steering axis. */
+const DIKEYBOARD_UP = 0x810004c8;
+const DIMOUSE_BUTTON0 = 0x8200040c;
+const DIAXIS_DRIVINGR_STEER = 0x01008a01;
+const ACTIONS = 0x6000;
+const ACTION_FORMAT = 0x6800;
+
+/**
+ * A DIACTIONFORMATA over DIACTIONAs, one per semantic, each carrying its
+ * index plus 0x1000 as its application data.
+ *
+ * @param {any} memory @param {number[]} semantics @param {number} [bufferSize]
+ */
+function actionFormat(memory, semantics, bufferSize = 16){
+    memory.bytes.fill(0, ACTION_FORMAT, ACTION_FORMAT + 0x148);
+    memory.setU32(ACTION_FORMAT, 0x148);
+    memory.setU32(ACTION_FORMAT + 4, 40);
+    memory.setU32(ACTION_FORMAT + 8, semantics.length * 4);
+    memory.setU32(ACTION_FORMAT + 12, semantics.length);
+    memory.setU32(ACTION_FORMAT + 16, ACTIONS);
+    memory.setU32(ACTION_FORMAT + 36, 0x01000000);
+    memory.setU32(ACTION_FORMAT + 40, bufferSize);
+    semantics.forEach((semantic, index)=>{
+        const at = ACTIONS + index * 40;
+        memory.bytes.fill(0, at, at + 40);
+        memory.setU32(at, 0x1000 + index);
+        memory.setU32(at + 4, semantic);
+    });
+    return ACTION_FORMAT;
+}
+
+/** @param {any} memory @param {number} index */
+const actionAt = (memory, index)=>({
+    guid: readGuid(memory, ACTIONS + index * 40 + 16),
+    objId: memory.u32(ACTIONS + index * 40 + 32),
+    how: memory.u32(ACTIONS + index * 40 + 36),
+});
+
+test('EnumDevicesBySemantics offers the keyboard and the mouse, each a device to keep', async()=>{
+    const f = fixture();
+    const root8 = directInput8(f, false);
+    const format = actionFormat(f.memory, [DIKEYBOARD_UP, DIMOUSE_BUTTON0, DIAXIS_DRIVINGR_STEER]);
+    assert.equal(await f.bridge.callAsync(root8, 'EnumDevicesBySemantics',
+        [0, format, 0x7777, 0x9999, 0]), DI_OK);
+    assert.equal(f.calls.length, 2);
+    const offered = f.calls.map(call=>readGuid(f.memory,
+        call.args[0] + DIDEVICEINSTANCE.guidInstance));
+    assert.deepEqual(offered, [GUID_SysKeyboard, GUID_SysMouse]);
+    for (const [index, call] of f.calls.entries())
+    {
+        assert.equal(call.entry, 0x7777);
+        assert.notEqual(call.args[1], 0, 'a device the callback may keep');
+        assert.equal(call.args[2] & 1, 1, 'mapped in priority 1');
+        assert.equal(call.args[3], 1 - index, 'how many come after it');
+        assert.equal(call.args[4], 0x9999);
+    }
+});
+
+test('BuildActionMap maps the semantics of the device itself and leaves the rest', ()=>{
+    const f = fixture();
+    const keys = device8(f, GUID_SysKeyboard, false);
+    const pointer = device8(f, GUID_SysMouse, false);
+    const format = actionFormat(f.memory, [DIKEYBOARD_UP, DIMOUSE_BUTTON0, DIAXIS_DRIVINGR_STEER]);
+    assert.equal(f.bridge.call(keys, 'BuildActionMap', [format, 0, 0]), DI_OK);
+    assert.deepEqual(actionAt(f.memory, 0),
+        { guid: GUID_SysKeyboard, objId: 0x04 | 0xc8 << 8, how: 0x20 });
+    assert.equal(actionAt(f.memory, 1).how, 0, 'the mouse\'s semantic is not the keyboard\'s');
+    assert.equal(f.bridge.call(pointer, 'BuildActionMap', [format, 0, 0]), DI_OK);
+    assert.deepEqual(actionAt(f.memory, 1),
+        { guid: GUID_SysMouse, objId: 0x04 | 3 << 8, how: 0x20 });
+    assert.equal(actionAt(f.memory, 2).how, 0, 'a genre semantic maps to neither');
+    assert.equal(actionAt(f.memory, 0).guid, GUID_SysKeyboard, 'nor takes the keyboard\'s');
+    const genre = actionFormat(f.memory, [DIAXIS_DRIVINGR_STEER]);
+    assert.equal(f.bridge.call(keys, 'BuildActionMap', [genre, 0, 0]), DI_NOEFFECT);
+    assert.equal(f.bridge.call(keys, 'BuildActionMap', [0, 0, 0]), DIERR_INVALIDPARAM);
+});
+
+test('SetActionMap: an event comes back at its action\'s place with its application data', ()=>{
+    const f = fixture();
+    const keys = device8(f, GUID_SysKeyboard, false);
+    const format = actionFormat(f.memory, [DIMOUSE_BUTTON0, DIKEYBOARD_UP], 8);
+    assert.equal(f.bridge.call(keys, 'BuildActionMap', [format, 0, 0]), DI_OK);
+    assert.equal(f.bridge.call(keys, 'SetActionMap', [format, 0, 0]), DI_OK);
+    assert.equal(f.bridge.call(keys, 'Acquire', []), DI_OK);
+    assert.equal(f.bridge.call(keys, 'SetActionMap', [format, 0, 0]), DIERR_ACQUIRED);
+    f.dinput.post({ kind: 'key', code: 0xc8, down: true });
+    f.dinput.post({ kind: 'key', code: DIK_A, down: true });
+    f.memory.setU32(AT.count, 10);
+    assert.equal(f.bridge.call(keys, 'GetDeviceData',
+        [DIDEVICEOBJECTDATA.SIZE_DX8, AT.data, AT.count, 0]), DI_OK);
+    assert.equal(f.memory.u32(AT.count), 1, 'a key no action names is not reported');
+    assert.equal(f.memory.u32(AT.data + DIDEVICEOBJECTDATA.dwOfs), 4, 'action 1, a dword each');
+    assert.equal(f.memory.u32(AT.data + DIDEVICEOBJECTDATA.dwData), KEY_DOWN);
+    assert.equal(f.memory.u32(AT.data + DIDEVICEOBJECTDATA.uAppData), 0x1001);
+    // The state is laid out the same way: a dword per action.
+    assert.equal(f.bridge.call(keys, 'GetDeviceState', [8, AT.state]), DI_OK);
+    assert.equal(f.memory.bytes[AT.state + 4], KEY_DOWN);
+});
