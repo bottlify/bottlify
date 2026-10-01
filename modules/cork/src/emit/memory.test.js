@@ -622,7 +622,8 @@ test('an SSE store checks its page and code in one test, exact at both edges', (
     assert.equal(over.exit.eip, CODE);
 });
 
-test('outside precise a read past RAM wraps into it; a store, or precise, faults', ()=>{
+test('outside precise a read past RAM wraps into it, and a store leaves before it for the host,'
+    + ' which faults; precise, both fault', ()=>{
     const read = [0xa1, 0x10, 0x00, 0x10, 0x00];   // mov eax, [0x100010]: 1 MiB of RAM, 16 past it
     const store = [0xa3, 0x10, 0x00, 0x10, 0x00];  // mov [0x100010], eax
     /** @param {number[]} bytes @param {boolean} precise */
@@ -636,12 +637,58 @@ test('outside precise a read past RAM wraps into it; a store, or precise, faults
     const wrapped = runAt(read, false);
     assert.equal(wrapped.exit.kind, Exit.HALT);
     assert.equal(wrapped.m.reg('eax'), 0x12345678, 'the read found RAM at 0x10');
-    const faulting = /** @type {[number[], boolean][]} */ ([[read, true], [store, false], [store, true]]);
+    // The store a window of its own: its exit is the block's, before the store, for the
+    // host's interpreter to run it and raise the fault -- this machine has none, and
+    // stops where it left with nothing run (kind -2).
+    const held = runAt(store, false);
+    assert.deepEqual([held.exit.kind, held.exit.eip], [-2, CODE]);
+    assert.equal(held.m.readU32(0x10), 0x12345678, 'nothing stored, wrapped or not');
+    const faulting = /** @type {[number[], boolean][]} */ ([[read, true], [store, true]]);
     for (const [bytes, precise] of faulting)
     {
         const { exit } = runAt(bytes, precise);
         assert.equal(exit.kind, Exit.FAULT, `${bytes[0].toString(16)} precise ${precise}`);
         assert.equal(exit.eip, CODE);
+    }
+});
+
+test('the operand of a jmp, call or push through memory is a read: outside precise past RAM it'
+    + ' wraps, precise it faults', ()=>{
+    // jmp [0x100010]; call [0x100010]; push [0x100010]; pop eax -- 16 past 1 MiB of RAM,
+    // which wraps to 0x10, where the address of a hlt is
+    const target = CODE + 0x40;
+    const forms = /** @type {[string, number[]][]} */ ([
+        ['jmp', [0xff, 0x25, 0x10, 0x00, 0x10, 0x00]],
+        ['call', [0xff, 0x15, 0x10, 0x00, 0x10, 0x00]],
+        ['push', [0xff, 0x35, 0x10, 0x00, 0x10, 0x00, 0x58, 0xf4]],
+    ]);
+    for (const [name, bytes] of forms)
+    {
+        for (const precise of [false, true])
+        {
+            const m = createTestMachine({ precise });
+            m.write(CODE, bytes);
+            m.write(target, [0xf4]);
+            m.write(0x10, [target & 0xff, target >>> 8 & 0xff, target >>> 16 & 0xff, 0]);
+            m.setReg('esp', STACK);
+            const exit = m.runProgram(CODE);
+            if (precise)
+            {
+                assert.equal(exit.kind, Exit.FAULT, `${name} precise`);
+                assert.equal(exit.eip, CODE, `${name} precise`);
+                continue;
+            }
+            assert.equal(exit.kind, Exit.HALT, name);
+            if (name === 'push')
+            {
+                assert.equal(m.reg('eax'), target, 'the push read RAM at 0x10');
+            }
+            else
+            {
+                assert.equal(m.eip(), target + 1, `${name} went where RAM at 0x10 says`);
+            }
+            assert.equal(m.reg('esp'), name === 'call' ? STACK - 4 : STACK, name);
+        }
     }
 });
 

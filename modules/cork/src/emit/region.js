@@ -1021,7 +1021,8 @@ export class RegionEmitter {
             : this.layout.codePages < 0
                 ? planRegion(blocks, { entry: this.region.entry, backward: flat,
                     heads: new Set([...this.loopEnds.keys(), ...this.x87.cut]),
-                    returns: this.returns })
+                    returns: this.returns, masked: this.context.precise !== true
+                        && (this.layout.ramSize & this.layout.ramSize - 1) === 0 })
                 : null;
         if (this.copies.length > 0 && !this.copyFunction)
         {

@@ -21,7 +21,7 @@
  * Bumped whenever the emitter changes what it emits for the same bytes, or
  * the record's format changes: a record of another version is a miss.
  */
-export const CACHE_VERSION = 69;
+export const CACHE_VERSION = 70;
 
 const MAGIC = 0x4b524f43; // 'CORK'
 

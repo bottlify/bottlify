@@ -479,12 +479,12 @@ test('a page whose regions partly go keeps the code range of the ones left on it
 test('a region that leaves a block inside its loop to the host on purpose is not formed again'
     + ' for it', async()=>{
     const m = machine();
-    // mov ecx, 10; L: inc edx; test dl, 1; jz N; mov eax, [ebx]; mov esi, [ebx+4]; N: dec
-    // ecx; jnz L; hlt -- the loads a block of their own inside the loop, with no entry, one
+    // mov ecx, 10; L: inc edx; test dl, 1; jz N; mov [ebx], eax; mov [ebx+4], esi; N: dec
+    // ecx; jnz L; hlt -- the stores a block of their own inside the loop, with no entry, one
     // window tested at its start, and ebx past the RAM: the window faults, and the region
     // leaves there for the host to raise the fault.
-    m.write(CODE, [0xb9, 10, 0, 0, 0, 0x42, 0xf6, 0xc2, 0x01, 0x74, 0x05, 0x8b, 0x03,
-        0x8b, 0x73, 0x04, 0x49, 0x75, 0xf2, 0xf4]);
+    m.write(CODE, [0xb9, 10, 0, 0, 0, 0x42, 0xf6, 0xc2, 0x01, 0x74, 0x05, 0x89, 0x03,
+        0x89, 0x73, 0x04, 0x49, 0x75, 0xf2, 0xf4]);
     m.runtime.noteHot(CODE);
     await m.runtime.translatePending();
     for (let i = 0; i < 100; i++)
@@ -503,7 +503,9 @@ test('a region that leaves a block inside its loop to the host on purpose is not
 });
 
 test('a store into a code page leaves stale and drops the page\'s regions', async()=>{
-    const m = machine();
+    // Precise: the store's own test, and the stale exit after it (outside precise the
+    // store is a window, below).
+    const m = machine({ precise: true });
     // The loop at CODE; a writer at CODE + 0x100 that stores into the loop's page.
     m.write(CODE, COUNTDOWN);
     // mov byte [0x1008], 0x90; hlt
@@ -526,6 +528,24 @@ test('a store into a code page leaves stale and drops the page\'s regions', asyn
     assert.equal(d.invalidations, 2);
     assert.equal(d.exits.stale, 1);
 });
+
+test('outside precise a store into a code page leaves before it for the host, nothing stored',
+    async()=>{
+        const m = machine();
+        m.write(CODE, COUNTDOWN);
+        // mov byte [0x1008], 0x90; hlt
+        m.write(CODE + 0x100, [0xc6, 0x05, 0x08, 0x10, 0, 0, 0x90, 0xf4]);
+        m.runtime.noteHot(CODE);
+        m.runtime.noteHot(CODE + 0x100);
+        assert.equal(await m.runtime.translatePending(), 2);
+        const exit = m.runtime.run(m.runtime.entryOf(CODE + 0x100), 1000);
+        // The store's window finds code in its granule: the host's interpreter runs the
+        // store, and its write drops the page's regions.
+        assert.equal(exit.kind, 'untranslated');
+        assert.equal(m.eip(), CODE + 0x100, 'before the store');
+        assert.equal(new Uint8Array(m.memory.buffer)[m.layout.ramBase + 0x1008], COUNTDOWN[8],
+            'nothing stored');
+    });
 
 test('a page invalidated too often becomes volatile and is not translated again', async()=>{
     const m = machine({ volatileAfter: 3 });

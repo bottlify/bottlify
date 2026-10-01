@@ -604,7 +604,15 @@ checked once, there, as one access is -- the flags of its first page and the nex
 halfword, against inaccessible and, for a group with a store, against code; only when a flag is
 up are the window's own pages and the stores' granules (`codeHit`) looked at -- and its accesses
 carry no test at all. Two accesses make a group, then, since its test costs what one access's
-does. A window that would fault, or a store that would land in code, leaves the region
+does -- except outside `precise`, where a read is wrapped into RAM rather than tested: there a
+group is a store's, a single store's too, and a group that only reads is none. A single access's
+own test carries its fault's exit and its code note inline and a `stale` exit after the store,
+where a window's slow test is out of line and its exit the block's one; in Chromium 141, the
+sixteen at ten times their iterations against the per-store tests, best of four: 1.04-1.05x
+over all (the bytecode interpreter 1.06-1.18x, the path search 1.06-1.12x), where taking every
+store's test out was 1.16-1.19x and its exits alone 1.05x. The operand of a `jmp`, `call` or
+`push` through memory is a read like any other there: its stack store is tested on its own
+(`readsOnly`). A window that would fault, or a store that would land in code, leaves the region
 untranslated before the group's first access, and the interpreter runs the rest with a check on
 every access, so the fault is raised at its instruction and the note made at its store as they
 would be here. The emitter's own calls are held to the plan: an access it did not foresee, or a

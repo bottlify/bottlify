@@ -84,7 +84,7 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
     // guest memory then reads RAM where it raised #GP.
     const { ramSize } = e.layout;
     if (!store && e.context.precise !== true && (ramSize & ramSize - 1) === 0
-        && e.layout.codePages < 0 && accessOf(e.current)?.store === false)
+        && e.layout.codePages < 0 && readsOnly(e.current))
     {
         b.localGet(Local.addr).i32const(ramSize - 1).op(I32.and).localSet(Local.addr);
         return;
@@ -524,6 +524,24 @@ function accessOf(ins){
 }
 
 /**
+ * Whether an instruction's memory operand is only read: an instruction whose
+ * one access reads (`accessOf`), or a `jmp`, `call` or `push` through memory,
+ * which reads its operand and stores, if at all, only to the stack -- a store
+ * with a check of its own. A read and write of one operand (`add [m], r`) is
+ * not: the read's test is the write's.
+ *
+ * @param {import('../decode/decoder.js').Instruction} ins
+ */
+function readsOnly(ins){
+    if (accessOf(ins)?.store === false)
+    {
+        return true;
+    }
+    const { op, operands } = ins;
+    return (op === 'jmp' || op === 'call' || op === 'push') && operands[0]?.kind === 'mem';
+}
+
+/**
  * The accesses of an instruction a group can take: `accessOf`'s one, or the
  * two of a `push`, `call` or `jmp` through memory -- the operand read, then
  * the push.
@@ -579,17 +597,19 @@ function placeOf({ operand, size, store, stack }){
  *
  * @param {import('../region.js').Block[]} blocks  in address order
  * @param {{ entry?: number, backward?: boolean, heads?: Set<number>,
- *     returns?: Map<number, number[]>, reach?: boolean }} [options]  entry: the
- *     region's entry; backward: a jump back can carry windows (the dispatch
+ *     returns?: Map<number, number[]>, reach?: boolean, masked?: boolean }} [options]  entry:
+ *     the region's entry; backward: a jump back can carry windows (the dispatch
  *     takes an inner label for it); heads: blocks that take none (a
  *     structured region's loop heads); returns: by ret block, the return
  *     addresses it jumps to (`inlineReturns`); reach: false keeps every group
- *     within its block
+ *     within its block; masked: a read is wrapped into RAM rather than tested
+ *     (`checkAccess`): a group that only reads is no window, and a store is
+ *     one on its own
  * @returns {RegionPlan}
  */
 export function planRegion(blocks, options = {}){
     const { entry = blocks[0]?.start ?? 0, backward = false, heads = new Set(),
-        returns = new Map(), reach = true } = options;
+        returns = new Map(), reach = true, masked = false } = options;
     const inherit = reach ? inheritance(blocks, entry, backward, heads, returns)
         : blocks.map(()=>-1);
     // Most blocks take nothing and give nothing: what each keeps is made
@@ -727,8 +747,13 @@ export function planRegion(blocks, options = {}){
             walk(s, freshValues(next), new Map(), 0);
         }
     });
-    // A window's test costs what one access's does.
-    const kept = new Set(groups.filter(group=>group.list.length >= 2));
+    // A window's test costs what one access's does, where its exit is the
+    // block's one and its slow test out of line; a single access's own test
+    // carries its fault's exit and its code note inline, and the `stale` exit
+    // after the instruction. Where reads are wrapped into RAM (`masked`) a
+    // window is a store's, even of one access, and a read is never one.
+    const kept = new Set(groups.filter(group=>(masked
+        ? group.list.some(access=>access.store) : group.list.length >= 2)));
     // What each block's entry test covers: every access of a kept group in
     // the block or after it whose window was opened before it.
     /** @type {(Set<Access> | undefined)[]} */
