@@ -90,6 +90,8 @@ export const IID_IDirectSound3DBuffer = '{279AFA86-4981-11CE-A521-0020AF0BE560}'
 export const IID_IKsPropertySet = '{31EFAC30-515C-11D0-A9AA-00AA0061BE93}';
 const COUNTED_ON_THEIR_OWN = new Set([IID_IDirectSoundNotify, IID_IKsPropertySet,
     IID_IDirectSound3DListener, IID_IDirectSound3DBuffer]);
+/** IDirectSound and IDirectSound8 share the device's count; its IUnknown has one of its own. */
+const DEVICE_COUNTED_ON_ITS_OWN = new Set([IID_IUNKNOWN]);
 
 /** WAVEFORMATEX. The two-byte fields are why this is not a table of dwords. */
 export const WAVEFORMATEX = Object.freeze({
@@ -413,15 +415,20 @@ export function createPublisher({ publishInterface }){
      */
     const refused = {};
 
-    /** @param {any} api @param {any[]} interfaces */
-    const adapterFor = (api, interfaces)=>{
+    /**
+     * @param {any} api @param {any[]} interfaces
+     * @param {ReadonlySet<string>} ownCounted  The interfaces that count their
+     *     references apart from the object's own.
+     */
+    const adapterFor = (api, interfaces, ownCounted)=>{
         let adapter = adapters.get(api);
         if (!adapter)
         {
             const declared = new Map(interfaces.map(entry=>[entry.id, entry]));
-            // A buffer's notify and property-set interfaces keep counts of
-            // their own, as on Windows: each holds the buffer once while it
-            // is held, and the buffer's own count leaves those holds out.
+            // Some interfaces keep counts of their own, as on Windows -- a
+            // buffer's notify, property-set and 3D ones, a device's IUnknown:
+            // each holds the object once while it is held, and the object's
+            // own count leaves those holds out.
             /** @type {Map<string, number>} */
             const sides = new Map();
             const held = ()=>[...sides.values()].filter(count=>count > 0).length;
@@ -443,7 +450,7 @@ export function createPublisher({ publishInterface }){
                 },
                 /** @param {string} id */
                 addRef(id){
-                    if (COUNTED_ON_THEIR_OWN.has(id))
+                    if (ownCounted.has(id))
                     {
                         const count = (sides.get(id) ?? 0) + 1;
                         sides.set(id, count);
@@ -457,15 +464,15 @@ export function createPublisher({ publishInterface }){
                 },
                 /** @param {string} id */
                 release(id){
-                    if (COUNTED_ON_THEIR_OWN.has(id))
+                    if (ownCounted.has(id))
                     {
-                        const count = Math.max(0, (sides.get(id) ?? 0) - 1);
-                        sides.set(id, count);
-                        if (count === 0)
+                        const before = sides.get(id) ?? 0;
+                        sides.set(id, Math.max(0, before - 1));
+                        if (before === 1)
                         {
                             api.release?.();
                         }
-                        return count;
+                        return Math.max(0, before - 1);
                     }
                     if (held() >= (api.references ?? 1))
                     {
@@ -496,15 +503,29 @@ export function createPublisher({ publishInterface }){
     };
 
     return {
-        /** @param {any} api @param {any[]} interfaces @param {string} id */
-        publish(api, interfaces, id){
-            const pointer = publishInterface(adapterFor(api, interfaces), id);
+        /**
+         * @param {any} api @param {any[]} interfaces @param {string} id
+         * @param {ReadonlySet<string>} [ownCounted]
+         */
+        publish(api, interfaces, id, ownCounted = COUNTED_ON_THEIR_OWN){
+            const pointer = publishInterface(adapterFor(api, interfaces, ownCounted), id);
             if (pointer !== 0)
             {
                 byPointer.set(pointer >>> 0, api);
                 published++;
             }
             return pointer;
+        },
+        /**
+         * Moves the reference an object was made with from one of its
+         * interfaces to another, as a class factory asked for the second.
+         *
+         * @param {any} api @param {string} from @param {string} to
+         */
+        hand(api, from, to){
+            const adapter = adapters.get(api);
+            adapter?.addRef(to);
+            adapter?.release(from);
         },
         /** @param {number} pointer */
         objectAt: pointer=>((pointer >>> 0) === 0
@@ -1371,8 +1392,10 @@ export function createDirectSound(
             primary: null,
         };
         writeU32(out, eight
-            ? publisher.publish(device, sound8Interfaces, IID_IDirectSound8)
-            : publisher.publish(device, soundInterfaces, IID_IDirectSound));
+            ? publisher.publish(device, sound8Interfaces, IID_IDirectSound8,
+                DEVICE_COUNTED_ON_ITS_OWN)
+            : publisher.publish(device, soundInterfaces, IID_IDirectSound,
+                DEVICE_COUNTED_ON_ITS_OWN));
         return DS_OK;
     };
 
@@ -1403,6 +1426,11 @@ export function createDirectSound(
             // holding the one reference the object was made with.
             const object = publisher.objectAt(readU32(out >>> 0));
             writeU32(out, publisher.publish(object, interfaces, wanted));
+            if (wanted === IID_IUNKNOWN)
+            {
+                publisher.hand(object, factory.eight ? IID_IDirectSound8 : IID_IDirectSound,
+                    IID_IUNKNOWN);
+            }
             return DS_OK;
         },
         /** HRESULT LockServer(BOOL): nothing here is unloaded to be kept. */

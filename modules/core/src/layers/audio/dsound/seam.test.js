@@ -284,6 +284,21 @@ test('each DirectSoundCreate makes an object of its own, counting its own refere
     assert.equal(device.release(), 0, 'and never below');
 });
 
+test('a device\'s IUnknown counts apart from IDirectSound, and an over-release frees nothing', ()=>{
+    // Wine's dsound8.c test_COM.
+    const f = createRoot();
+    const device = f.bridge.recordAt(f.root).object;
+    assert.equal(device.addRef(IID_IUNKNOWN), 1);
+    assert.equal(device.addRef(IID_IUNKNOWN), 2);
+    assert.equal(device.addRef(IID_IDirectSound), 2, 'the device\'s own count');
+    assert.equal(device.release(IID_IDirectSound), 1);
+    assert.equal(device.release(IID_IDirectSound), 0);
+    assert.equal(device.release(IID_IUNKNOWN), 1);
+    assert.equal(device.release(IID_IUNKNOWN), 0);
+    assert.equal(device.release(IID_IUNKNOWN), 0, 'and never below');
+    assert.equal(device.api.references, 0);
+});
+
 test('DirectSoundCreate\'s object is IDirectSound alone; DirectSoundCreate8\'s is both', ()=>{
     // Wine's dsound IDirectSound_test: QueryInterface for IID_IDirectSound8 on
     // what DirectSoundCreate returned is E_NOINTERFACE; its dsound8 counterpart
