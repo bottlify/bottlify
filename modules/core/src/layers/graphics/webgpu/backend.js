@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { LockFlags, createDynamicBuffer } from './internal/buffers.js';
+import { LockFlags, carriedRanges, createDynamicBuffer } from './internal/buffers.js';
 import { createBindingCache, createUniformPool, dynamicOffsetsOf } from './internal/bindings.js';
 import { ABSENT_PROFILER, createProfiler } from './internal/profiler.js';
 import { createShaderCache } from './internal/shaders.js';
@@ -189,6 +189,8 @@ export function createBackend(options){
 
     /** @type {any[]} */
     const dynamicBuffers = [];
+    /** Renames' carries waiting for the frame's end. @type {import('./internal/buffers.js').Carry[]} */
+    const carries = [];
     /** @type {any[]} */
     const pendingCopies = [];
     /**
@@ -652,7 +654,10 @@ export function createBackend(options){
                 device,
                 queue,
                 ...descriptor,
-                onUpload: (label, bytes)=>profiler.bufferUpload(label, bytes),
+                onUpload: (/** @type {string} */ label, /** @type {number} */ bytes)=>
+                    profiler.bufferUpload(label, bytes),
+                carry: (/** @type {import('./internal/buffers.js').Carry} */ carry)=>
+                    carries.push(carry),
             });
             dynamicBuffers.push(buffer);
             return buffer;
@@ -1005,10 +1010,28 @@ export function createBackend(options){
                         buffer.flush();
                     }
                     uniforms.flush();
+                    // The contents renames kept, copied old backing to new on
+                    // the GPU, ahead of the frame's draws and after the
+                    // uploads above, which the copies leave alone.
+                    /** @type {any[]} */
+                    const commands = [];
+                    if (carries.length > 0)
+                    {
+                        const copier = device.createCommandEncoder({ label: 'carries' });
+                        for (const carry of carries.splice(0))
+                        {
+                            for (const range of carriedRanges(carry))
+                            {
+                                copier.copyBufferToBuffer(carry.from, range.start, carry.to,
+                                    range.start, range.end - range.start);
+                            }
+                        }
+                        commands.push(copier.finish());
+                    }
                     endUpload();
 
                     const endSubmit = profiler.phase('submit');
-                    queue.submit([encoder.finish()]);
+                    queue.submit([...commands, encoder.finish()]);
                     profiler.count('submits');
                     endSubmit();
 

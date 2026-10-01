@@ -25,6 +25,11 @@
  *   how a recorder says a draw has read the current backing; the flag is
  *   dropped at `endFrame`, once the frames that read it are submitted.
  *
+ * A rename that keeps the old contents need not send them again: with a
+ * `carry` the old backing is copied into the new one on the GPU, all but the
+ * ranges written through the new one since, and only those travel -- what a
+ * driver does for a lock with neither flag on a buffer the GPU still reads.
+ *
  * Two consequences that are easy to get subtly wrong and are asserted in the
  * tests: the uploaded range is aligned *outward*, because trimming it inward
  * loses written bytes; and it is uploaded from its own offset, not from zero.
@@ -43,6 +48,9 @@ export const LockFlags = {
      */
     RENAME: 4,
 };
+
+/** GPUBufferUsage.COPY_SRC. */
+const COPY_SRC = 0x0004;
 
 /** `writeBuffer` wants both the destination offset and the size in whole words. */
 export const UPLOAD_ALIGNMENT = 4;
@@ -64,6 +72,42 @@ export function alignOutward(start, end, alignment){
 }
 
 /**
+ * The old backing's bytes owed to the new one: all of it but the ranges
+ * `written` through the new one, which the queue writes and the copy must not
+ * overwrite. Complete once the frame's uploads are flushed.
+ *
+ * @typedef {{ from: any, to: any, size: number,
+ *     written: { start: number, end: number }[] }} Carry
+ */
+
+/**
+ * The ranges of `[0, size)` a carry copies: the complement of what was
+ * written, in whole words.
+ *
+ * @param {Carry} carry
+ * @returns {{ start: number, end: number }[]}
+ */
+export function carriedRanges(carry){
+    const written = carry.written.slice().sort((a, b)=>a.start - b.start);
+    /** @type {{ start: number, end: number }[]} */
+    const ranges = [];
+    let at = 0;
+    for (const range of written)
+    {
+        if (range.start > at)
+        {
+            ranges.push({ start: at, end: range.start });
+        }
+        at = Math.max(at, range.end);
+    }
+    if (at < carry.size)
+    {
+        ranges.push({ start: at, end: carry.size });
+    }
+    return ranges;
+}
+
+/**
  * @param {Object} options
  * @param {import('../contract.js').GpuDeviceLike} options.device
  * @param {import('../contract.js').GpuQueueLike} options.queue
@@ -72,6 +116,8 @@ export function alignOutward(start, end, alignment){
  * @param {string} [options.label]
  * @param {number} [options.alignment]
  * @param {(label: string, bytes: number)=>void} [options.onUpload]
+ * @param {(carry: Carry)=>void} [options.carry]  Takes the GPU copy a rename
+ *     that keeps the contents needs; without it, the whole buffer is resent.
  * @returns {any}
  */
 export function createDynamicBuffer(options){
@@ -98,6 +144,17 @@ export function createDynamicBuffer(options){
     let submits = 0;
     let generation = 0;
     let renames = 0;
+    // What the uploads cost, for a report: each write is a trip to the GPU
+    // process, and a rename without DISCARD resends the whole buffer.
+    let writes = 0;
+    let written = 0;
+    let discards = 0;
+    let hazards = 0;
+    let lockedBytes = 0;
+    let locks = 0;
+    let wholeLocks = 0;
+    /** The carry whose copy fills the live backing, while it can still be written. @type {Carry | null} */
+    let carryInto = null;
     let dirtyStart = -1;
     let dirtyEnd = -1;
     // Whether a draw recorded in a frame not yet submitted read the live
@@ -110,7 +167,8 @@ export function createDynamicBuffer(options){
     const allocate = ()=>options.device.createBuffer({
         label: `${label}#${generation++}`,
         size: capacity,
-        usage: options.usage,
+        // The source of a carry is read by a copy.
+        usage: options.carry ? options.usage | COPY_SRC : options.usage,
     });
 
     let gpu = allocate();
@@ -123,6 +181,9 @@ export function createDynamicBuffer(options){
         const range = alignOutward(dirtyStart, dirtyEnd, alignment);
         const bytes = Math.min(range.end, capacity) - range.start;
         options.queue.writeBuffer(gpu, range.start, shadow, range.start, bytes);
+        writes++;
+        written += bytes;
+        carryInto?.written.push({ start: range.start, end: range.start + bytes });
         dirtyStart = -1;
         dirtyEnd = -1;
         if (options.onUpload)
@@ -139,13 +200,21 @@ export function createDynamicBuffer(options){
         // Whatever is still dirty belongs to the generation being retired: draws
         // already recorded read that buffer object, not the new one.
         flush();
+        const old = gpu;
         retired.push({ gpu, at: presents });
         gpu = available.length > 0 ? available.shift() : allocate();
         renames++;
         // Nothing has read the replacement yet.
         readSinceSubmit = false;
+        carryInto = null;
         if (discard)
         {
+            return;
+        }
+        if (options.carry)
+        {
+            carryInto = { from: old, to: gpu, size: capacity, written: [] };
+            options.carry(carryInto);
             return;
         }
         dirtyStart = 0;
@@ -181,6 +250,7 @@ export function createDynamicBuffer(options){
             }
             if (flags & LockFlags.DISCARD)
             {
+                discards++;
                 rename(true);
             }
             else if (flags & LockFlags.RENAME)
@@ -193,7 +263,13 @@ export function createDynamicBuffer(options){
                 // overwrite, and the old contents stay observable, so the
                 // backing is renamed and all of it is resent through the new
                 // one.
+                hazards++;
                 rename(false);
+            }
+            locks++;
+            if (offset === 0 && length === options.size)
+            {
+                wholeLocks++;
             }
             held = { data: shadow.subarray(offset, offset + length), offset, length, flags };
             return held;
@@ -208,6 +284,7 @@ export function createDynamicBuffer(options){
                 throw new Error(`Unlock of "${label}" without a matching lock`);
             }
             const end = lock.offset + lock.length;
+            lockedBytes += lock.length;
             dirtyStart = dirtyStart < 0 ? lock.offset : Math.min(dirtyStart, lock.offset);
             dirtyEnd = Math.max(dirtyEnd, end);
             held = null;
@@ -240,6 +317,8 @@ export function createDynamicBuffer(options){
         /** A frame was submitted; the backings its draws read are free now. */
         endFrame(){
             submits++;
+            // Its carry was copied with the frame; later writes go in place.
+            carryInto = null;
             // Every frame that could have read the live backing is submitted by
             // the time this runs (the replay chain is serial), so a lock is
             // free to write in place again.
@@ -259,6 +338,13 @@ export function createDynamicBuffer(options){
                 label,
                 size: options.size,
                 renames,
+                writes,
+                written,
+                discards,
+                hazards,
+                locked: lockedBytes,
+                locks,
+                wholeLocks,
                 pooled: available.length + retired.length,
                 dirty: dirtyStart < 0 ? 0 : dirtyEnd - dirtyStart,
             };

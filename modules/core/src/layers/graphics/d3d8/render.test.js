@@ -942,11 +942,12 @@ test('recorded: a lock with neither flag sends only the locked range when no dra
         out.buffer.release();
     });
 
-test('recorded: a lock with neither flag after a draw renames and resends the whole buffer',
+test('recorded: a lock with neither flag after a draw renames, and carries the rest on the GPU',
     async()=>{
         // The draw already recorded reads the bytes the lock overwrites, so the
         // backing has to be renamed and its contents carried into the new one,
-        // because the old bytes stay observable through it.
+        // because the old bytes stay observable through it -- by a copy on the
+        // GPU, with only the locked range travelling.
         const h = harness();
         const { device, gpu } = h;
         /** @type {{ buffer?: any }} */
@@ -970,9 +971,13 @@ test('recorded: a lock with neither flag after a draw renames and resends the wh
         const writes = gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
             call.buffer.descriptor.label.startsWith('vertices'));
         assert.equal(writes.length, 1);
-        assert.equal(writes[0].size, 1024,
-            'the old contents stayed observable, so all of it travels');
-        assert.notEqual(writes[0].buffer, drawn, 'and through a renamed backing');
+        assert.equal(writes[0].size, 20, 'only the locked range travels');
+        assert.notEqual(writes[0].buffer, drawn, 'through a renamed backing');
+        const copies = gpu.of('copyBufferToBuffer');
+        assert.deepEqual(copies.map((/** @type {any} */ copy)=>[copy.sourceOffset, copy.size]),
+            [[0, 100], [120, 904]], 'the rest is carried from the backing the draw read');
+        assert.ok(copies.every((/** @type {any} */ copy)=>copy.source === drawn
+            && copy.destination === writes[0].buffer));
         out.buffer.release();
     });
 

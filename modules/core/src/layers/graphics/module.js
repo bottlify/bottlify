@@ -143,6 +143,25 @@ export function uncoveredRegion(windows, owner, exclusive, screen){
  * the ramp is the display's rather than a process's: the next process on the
  * same canvas replaces it rather than stacking another on top.
  */
+/**
+ * What every dynamic buffer of the backend uploaded, summed: writes to the
+ * queue, bytes, and the renames a DISCARD asked for or a hazard forced.
+ *
+ * @param {any} backend
+ */
+const bufferTotals = backend=>{
+    /** @type {any[]} */
+    const buffers = backend?.diagnostics?.().buffers ?? [];
+    const sum = (/** @type {string} */ key)=>buffers.reduce(
+        (total, one)=>total + (one[key] ?? 0), 0);
+    return {
+        bufferWrites: sum('writes'), bufferBytes: sum('written'),
+        bufferDiscards: sum('discards'), bufferHazards: sum('hazards'),
+        bufferLocks: sum('locks'), bufferWholeLocks: sum('wholeLocks'),
+        bufferLocked: sum('locked'), dynamicBuffers: buffers.length,
+    };
+};
+
 const DISPLAY_RAMP = 'display';
 
 /** The graphics layer's module for one graph; see `defaultModules`. */
@@ -1110,6 +1129,9 @@ export function createGraphicsModule(){
                     // crossed: the saving is a number here, not a belief.
                     shadow: instance.seam.shadow(),
                     backend: instance.backend ? instance.backend.diagnostics() : null,
+                    // The dynamic buffers' uploads as numbers, which a report keeps
+                    // where it drops the structure above.
+                    ...bufferTotals(instance.backend),
                     // Counted separately from the backend's own: a surface shown
                     // through DirectDraw never enters a drawing pass, so nothing
                     // in those numbers says whether anything reached the screen.
