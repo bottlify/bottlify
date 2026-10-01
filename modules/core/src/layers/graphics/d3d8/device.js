@@ -263,6 +263,7 @@ function isTransformType(type){
  * @property {boolean} [dumpDraws]
  *     Ask the renderer for a per-draw account of the last frame. Off by
  *     default: it costs a transform of every vertex of every draw.
+ * @property {number} [dumpEvery]  The same for every this-many-th frame.
  * @property {number} [maxDraws]
  *     Cut every frame short after this many draws. Negative keeps all of them.
  * @property {(api: string, detail: string)=>void} [divergence]
@@ -381,16 +382,16 @@ function reportPresentParameters(parameters){
 export function createDirect3D8(options = {}){
     const {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
-        free: giveBack, dumpDraws, maxDraws, divergence, skipTexture, probeTexture, fog, mips,
-        onDeviceLost, gamma, frameQueued, ...caps
+        free: giveBack, dumpDraws, dumpEvery, maxDraws, divergence, skipTexture, probeTexture,
+        fog, mips, onDeviceLost, gamma, frameQueued, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
     /** @type {DeviceServices} */
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
-        free: giveBack, dumpDraws, maxDraws, divergence, skipTexture, probeTexture, fog, mips,
-        onDeviceLost, gamma, frameQueued,
+        free: giveBack, dumpDraws, dumpEvery, maxDraws, divergence, skipTexture, probeTexture,
+        fog, mips, onDeviceLost, gamma, frameQueued,
     };
     if (backend && !readMemory)
     {
@@ -740,6 +741,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             windowMemory: services.windowMemory,
             createSampler: services.createSampler ?? null,
             dumpDraws: services.dumpDraws === true,
+            dumpEvery: services.dumpEvery,
             maxDraws: services.maxDraws,
             divergence: services.divergence,
             skipTexture: services.skipTexture ?? null,

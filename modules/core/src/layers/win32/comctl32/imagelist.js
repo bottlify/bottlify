@@ -29,6 +29,10 @@ const FAILED = -1;
 
 /** ImageList_Create's flag for a list with a mask. */
 const ILC_MASK = 0x0001;
+const ILC_COLOR24 = 0x0018;
+
+/** LoadImage's type for a bitmap. */
+const IMAGE_BITMAP = 0;
 
 /** How an image is drawn. The blend flags are accepted and drawn as normal. */
 const ILD_TRANSPARENT = 0x0001;
@@ -73,6 +77,9 @@ const dwords = values=>new Uint8Array(new Uint32Array(values.map(value=>value >>
  *           as the single image it can be sure of.
  * @property {(name: string) => ({ handler: (args: number[]) => any } | undefined)} [gdi32]
  *           gdi32's exports, which the list's pixels are copied and drawn with.
+ * @property {(name: string) => ({ handler: (args: number[]) => any } | undefined)} [user32]
+ *           user32's exports, which a list made out of a module's bitmap
+ *           resource loads it with.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {ReturnType<typeof createImageLists>} [imageLists]  The lists to
  *           export, when the host built them itself to share with the
@@ -368,6 +375,50 @@ export function createImageLists(host){
                     image: 0, mask: 0, background: CLR_NONE };
                 reserve(list, Math.max(1, initial | 0));
                 lists.set(handle, list);
+                return handle;
+            },
+        },
+
+        /**
+         * HIMAGELIST ImageList_LoadImageA(HINSTANCE hi, LPCSTR lpbmp, int cx,
+         *     int cGrow, COLORREF crMask, UINT uType, UINT uFlags)
+         *
+         * A bitmap resource cut into images cx wide -- as wide as it is high
+         * for a cx of 0 -- and masked where it is the colour named, unless that
+         * is CLR_NONE. The bitmap is loaded and let go of; the list keeps its
+         * copy. An icon or a cursor resource is not loaded.
+         */
+        ImageList_LoadImageA: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([instance, name, cx, grow, key, type, flags])=>{
+                if ((type >>> 0) !== IMAGE_BITMAP)
+                {
+                    host.divergence?.('ImageList_LoadImageA',
+                        `an image list of type ${type >>> 0} is not loaded: only a bitmap's`);
+                    return 0;
+                }
+                const bitmap = (host.user32?.('LoadImageA')
+                    ?.handler([instance, name, IMAGE_BITMAP, 0, 0, flags]) ?? 0) >>> 0;
+                const size = bitmap === 0 ? null : host.bitmapSize?.(bitmap) ?? null;
+                if (!size || size.height <= 0)
+                {
+                    if (bitmap !== 0)
+                    {
+                        gdi('DeleteObject', bitmap);
+                    }
+                    return 0;
+                }
+                const width = (cx | 0) > 0 ? cx | 0 : size.height;
+                const masked = (key >>> 0) !== CLR_NONE;
+                const handle = functions.ImageList_Create.handler([width, size.height,
+                    ILC_COLOR24 | (masked ? ILC_MASK : 0),
+                    Math.max(1, Math.floor(size.width / width)), grow]);
+                if (handle !== 0)
+                {
+                    add(handle, bitmap, 0, masked ? key >>> 0 : null);
+                }
+                gdi('DeleteObject', bitmap);
                 return handle;
             },
         },

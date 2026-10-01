@@ -1518,6 +1518,7 @@ export function createHarness(canvas, how = {}){
                 // given patch of the picture, and working that out costs a
                 // transform of every vertex -- so it is off unless asked for.
                 dumpDraws: Boolean(request.dumpDraws),
+                dumpEvery: request.dumpEvery ?? 0,
                 // Cutting a frame short is what turns "one of these draws painted
                 // this" into "this one did": the region is either there or not.
                 maxDraws: request.maxDraws ?? -1,

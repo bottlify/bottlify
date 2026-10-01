@@ -2006,6 +2006,23 @@ test('a device is handed out with its block already in place, and reads what the
     assert.equal(h.box.memory.readU32(stride), 24);
     h.release(h.box.memory.readU32(out));
 
+    // An unbinding is the host's. A bind the guest made just before it, at
+    // another stride, reaches the device first, and the device keeps the
+    // stride that bind set; the block names no buffer after it, so the same
+    // buffer bound again is a change.
+    h.box.memory.writeU32(block + SHADOW.STREAMS + 4, 40);
+    counted(h, block, SHADOW.BINDING_CALLS, 2);
+    assert.equal(h.device(device, 'SetStreamSource', [0, 0, 0]), D3D_OK);
+    assert.equal(h.device(device, 'GetStreamSource', [0, out, stride]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), 0, 'unbound');
+    assert.equal(h.box.memory.readU32(stride), 40, 'at the stride the bind before it set');
+    assert.equal(h.box.memory.readU32(block + SHADOW.STREAMS), 0, 'and the block says so');
+    h.box.memory.writeU32(block + SHADOW.STREAMS, vb);
+    counted(h, block, SHADOW.BINDING_CALLS, 3);
+    assert.equal(h.device(device, 'GetStreamSource', [0, out, stride]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), vb, 'the same buffer bound again');
+    h.release(h.box.memory.readU32(out));
+
     // A lock taken in the guest is a lock the host's path refuses; once the
     // guest lets go, the host's path locks, and the block says so.
     h.box.memory.writeU32(vblock + BUFFER.LOCKED, 1);

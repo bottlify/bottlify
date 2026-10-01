@@ -74,8 +74,8 @@ import {
     createShadow, getRenderStateCode, getTextureStageStateCode, getTransformCode, lockCode,
     unlockCode,
     setMaterialCode,
-    setRenderStateCode, setSamplerStateCode, setTextureCode, setTextureStageStateCode,
-    setTransformCode,
+    setRenderStateCode, setSamplerStateCode, setStreamSource9Code, setTextureCode,
+    setTextureStageStateCode, setTransformCode, setBindingCode, SHADOW,
 } from './shadow.js';
 import { D3DTSS9, SAMPLER_STATE_KEY } from '../d3d9/samplerstates.js';
 
@@ -209,8 +209,8 @@ export function createDirect3D9Seam(
      * (`shadow.js`). Direct3D 9's render states, transforms, stage states,
      * material and first eight textures are laid out as Direct3D 8's and take
      * the same routines, and its sampler states share the stage state slots;
-     * its stream, index and shader bindings are its own and stay with the
-     * host.
+     * its streams, with their offsets, its declaration, indices and shaders
+     * take routines of their own.
      *
      * @type {WeakMap<any, ReturnType<typeof createShadow>>}
      */
@@ -945,7 +945,7 @@ export function createDirect3D9Seam(
                 }
                 return hr;
             },
-        }),
+        }, {}, retire),
     ];
 
     const shaderMethods = {
@@ -973,11 +973,12 @@ export function createDirect3D9Seam(
             return hr;
         },
     };
+    // A shader let go of leaves no slot of the block naming it.
     const vertexShaderInterfaces = [
-        describe(IID_IDirect3DVertexShader9, IDIRECT3DSHADER9_SLOTS, shaderMethods),
+        describe(IID_IDirect3DVertexShader9, IDIRECT3DSHADER9_SLOTS, shaderMethods, {}, retire),
     ];
     const pixelShaderInterfaces = [
-        describe(IID_IDirect3DPixelShader9, IDIRECT3DSHADER9_SLOTS, shaderMethods),
+        describe(IID_IDirect3DPixelShader9, IDIRECT3DSHADER9_SLOTS, shaderMethods, {}, retire),
     ];
 
     const stateBlockInterfaces = [
@@ -1004,7 +1005,9 @@ export function createDirect3D9Seam(
                     stageStates: record.stageStates.size > 0 || record.samplerStates.size > 0,
                     material: record.material !== undefined,
                     bindings: record.streams.size > 0 || record.indices !== undefined
-                        || record.vertexShader !== undefined,
+                        || record.vertexShader !== undefined
+                        || record.pixelShader !== undefined
+                        || record.vertexDeclaration !== undefined,
                 });
                 return hr;
             },
@@ -2114,24 +2117,32 @@ export function createDirect3D9Seam(
                 startIndex >>> 0, count >>> 0),
 
         /** @param {any} device @param {number[]} args */
-        DrawPrimitiveUP: (device, [type, primitiveCount, vertices, stride])=>
-            device.DrawPrimitiveUP(type >>> 0, primitiveCount >>> 0,
+        DrawPrimitiveUP: (device, [type, primitiveCount, vertices, stride])=>{
+            const hr = device.DrawPrimitiveUP(type >>> 0, primitiveCount >>> 0,
                 readArray(vertices,
                     vertexCountOf(type >>> 0, primitiveCount >>> 0) * (stride >>> 0)),
-                stride >>> 0),
+                stride >>> 0);
+            // Stream zero is empty after it, which the block has to say.
+            shadowOf(device)?.refreshStreamZero();
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         DrawIndexedPrimitiveUP: (device,
             [type, minIndex, numVertices, count, indices, format, vertices, stride])=>
-            device.DrawIndexedPrimitiveUP(type >>> 0, minIndex >>> 0, numVertices >>> 0,
-                count >>> 0,
+        {
+            const hr = device.DrawIndexedPrimitiveUP(type >>> 0, minIndex >>> 0,
+                numVertices >>> 0, count >>> 0,
                 readArray(indices,
                     vertexCountOf(type >>> 0, count >>> 0) * indexWidth(format)),
                 format >>> 0,
                 // An index counts from the start of the vertices, so the
                 // range reaches past its lowest by the count.
                 readArray(vertices, ((minIndex >>> 0) + (numVertices >>> 0)) * (stride >>> 0)),
-                stride >>> 0),
+                stride >>> 0);
+            shadowOf(device)?.refreshStreamZero();
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         ProcessVertices: (device, [start, index, count, destination, declaration, flags])=>
@@ -2158,8 +2169,11 @@ export function createDirect3D9Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        SetVertexDeclaration: (device, [declaration])=>
-            device.SetVertexDeclaration(publisher.objectAt(declaration)),
+        SetVertexDeclaration: (device, [declaration])=>{
+            const hr = device.SetVertexDeclaration(publisher.objectAt(declaration));
+            shadowOf(device)?.refreshDeclaration();
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         GetVertexDeclaration: (device, [out])=>{
@@ -2187,7 +2201,12 @@ export function createDirect3D9Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        SetFVF: (device, [fvf])=>device.SetFVF(fvf >>> 0),
+        SetFVF: (device, [fvf])=>{
+            // The declaration it makes is one the guest has no pointer to.
+            const hr = device.SetFVF(fvf >>> 0);
+            shadowOf(device)?.refreshDeclaration();
+            return hr;
+        },
         /** @param {any} device @param {number[]} args */
         GetFVF: (device, [out])=>{
             if ((out >>> 0) === 0)
@@ -2297,8 +2316,12 @@ export function createDirect3D9Seam(
         // --- streams ---
 
         /** @param {any} device @param {number[]} args */
-        SetStreamSource: (device, [index, buffer, offset, stride])=>device.SetStreamSource(
-            index >>> 0, publisher.objectAt(buffer), offset >>> 0, stride >>> 0),
+        SetStreamSource: (device, [index, buffer, offset, stride])=>{
+            const hr = device.SetStreamSource(
+                index >>> 0, publisher.objectAt(buffer), offset >>> 0, stride >>> 0);
+            shadowOf(device)?.refreshStream(index >>> 0);
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         GetStreamSource: (device, [index, out, offset, stride])=>{
@@ -2426,6 +2449,14 @@ export function createDirect3D9Seam(
             SetMaterial: ({ trap })=>placeCode(at=>setMaterialCode(at, trap)),
             SetSamplerState: ({ trap })=>placeCode(at=>setSamplerStateCode(at, trap)),
             SetTexture: ({ trap })=>placeCode(at=>setTextureCode(at, trap, 'slow')),
+            SetStreamSource: ({ trap })=>placeCode(at=>setStreamSource9Code(at, trap)),
+            SetVertexDeclaration: ({ trap })=>placeCode(at=>
+                setBindingCode(at, trap, SHADOW.DECLARATION)),
+            SetIndices: ({ trap })=>placeCode(at=>setBindingCode(at, trap, SHADOW.INDICES)),
+            SetVertexShader: ({ trap })=>placeCode(at=>
+                setBindingCode(at, trap, SHADOW.VERTEX_SHADER)),
+            SetPixelShader: ({ trap })=>placeCode(at=>
+                setBindingCode(at, trap, SHADOW.PIXEL_SHADER)),
         }
         : {};
     const deviceInterfaces = [
@@ -2868,7 +2899,7 @@ export function createDirect3D9Seam(
                 pointerOf: ()=>0,
                 divergence,
                 name: 'IDirect3DDevice9',
-                bindings: false,
+                bindings: 'd3d9',
                 samplerStates: SAMPLER_STATE_KEY,
             });
             shadows.set(held.device, shadow);

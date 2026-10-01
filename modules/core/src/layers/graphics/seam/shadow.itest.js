@@ -27,7 +27,7 @@ import {
     setIndicesCode, setSamplerStateCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
     setTextureStageStateCode, setTransformCode, setVertexShaderCode, unlockCode,
-    getTextureStageStateCode, getTransformCode,
+    getTextureStageStateCode, getTransformCode, setStreamSource9Code, setBindingCode,
 } from './shadow.js';
 import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
 
@@ -39,7 +39,8 @@ const ROUTINES = {
     renderState: 0x8800, transform: 0x8880, lock: 0x8900, unlock: 0x89a0,
     stream: 0x8a00, indices: 0x8a80, shader: 0x8b00, texture: 0x8b80, stageState: 0x8c00,
     material: 0x8c80, surfaceLevel: 0x8d80, getState: 0x8e00, sampler: 0x8e80, texture9: 0x8f00,
-    getStage: 0x8f80, getTransform: 0x9100,
+    getStage: 0x8f80, getTransform: 0x9100, stream9: 0x9200, declaration: 0x9300,
+    indices9: 0x9380,
 };
 /** Where the routines jump when they leave the case to the host: a halt here. */
 const TRAP = 0x8d00;
@@ -89,7 +90,7 @@ const STEPS = [
     step(ROUTINES.lock, VBUF, [0xf0, 0x20, OUT, 0]),     // 9: past the end: the trap
     step(ROUTINES.lock, VBUF, [0, 0, OUT, 0]),           // 10: the whole buffer, widening
     step(ROUTINES.stream, OBJECT, [2, 0x1234, 20]),      // 11: stream 2
-    step(ROUTINES.stream, OBJECT, [2, 0, 99]),           // 12: unbound, stride kept
+    step(ROUTINES.stream, OBJECT, [2, 0, 99]),           // 12: unbinding: the trap
     step(ROUTINES.stream, OBJECT, [16, 1, 1]),           // 13: no such stream: the trap
     step(ROUTINES.indices, OBJECT, [0x5678, 3]),         // 14
     step(ROUTINES.shader, OBJECT, [0x102]),              // 15: a vertex format
@@ -130,6 +131,13 @@ const STEPS = [
     step(ROUTINES.getTransform, OBJECT, [1, OUT]),       // 50: no such type: the trap
     step(ROUTINES.getTransform, OBJECT, [260, OUT]),     // 51: past WORLD3: the trap
     step(ROUTINES.getTransform, OBJECT, [256, 0]),       // 52: nowhere to put it: the trap
+    step(ROUTINES.stream9, OBJECT, [3, 0x2345, 64, 28]), // 53: Direct3D 9's stream 3, at an offset
+    step(ROUTINES.stream9, OBJECT, [3, 0, 8, 99]),       // 54: unbinding: the trap
+    step(ROUTINES.stream9, OBJECT, [16, 1, 0, 1]),       // 55: no such stream: the trap
+    step(ROUTINES.declaration, OBJECT, [0x3456]),        // 56: a declaration
+    step(ROUTINES.declaration, BARE, [0x3456]),          // 57: no block: the trap
+    step(ROUTINES.indices9, OBJECT, [0x4567]),           // 58: Direct3D 9's indices
+    step(ROUTINES.indices9, OBJECT, [0]),                // 59: none, in the guest too
 ];
 
 /** @param {typeof STEPS[number]} entry @param {number} at */
@@ -247,6 +255,10 @@ async function routines(engine){
     host.writePhysical(ROUTINES.texture9, setTextureCode(ROUTINES.texture9, TRAP, 'slow'));
     host.writePhysical(ROUTINES.getStage, getTextureStageStateCode(ROUTINES.getStage, TRAP));
     host.writePhysical(ROUTINES.getTransform, getTransformCode(ROUTINES.getTransform, TRAP));
+    host.writePhysical(ROUTINES.stream9, setStreamSource9Code(ROUTINES.stream9, TRAP));
+    host.writePhysical(ROUTINES.declaration,
+        setBindingCode(ROUTINES.declaration, TRAP, SHADOW.DECLARATION));
+    host.writePhysical(ROUTINES.indices9, setBindingCode(ROUTINES.indices9, TRAP, SHADOW.INDICES));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
     host.writePhysical(TEX + 4, new Uint8Array(u32(TBLOCK)));
     host.writePhysical(TBLOCK, new Uint8Array(TEXTURE.SIZE));
@@ -378,11 +390,12 @@ async function routines(engine){
     assert.equal(run(11), 'ok');
     assert.equal(read(BLOCK + SHADOW.STREAMS + 2 * 8), 0x1234);
     assert.equal(read(BLOCK + SHADOW.STREAMS + 2 * 8 + 4), 20);
-    assert.equal(run(12), 'ok');
-    assert.equal(read(BLOCK + SHADOW.STREAMS + 2 * 8), 0);
-    assert.equal(read(BLOCK + SHADOW.STREAMS + 2 * 8 + 4), 20, 'unbinding keeps the stride');
+    // The bind before it is still in the block for the host to adopt first.
+    assert.equal(run(12), 'trap', 'an unbinding');
+    assert.equal(read(BLOCK + SHADOW.STREAMS + 2 * 8), 0x1234, 'the block untouched');
+    assert.equal(read(BLOCK + SHADOW.STREAMS + 2 * 8 + 4), 20);
     assert.equal(run(13), 'trap', 'a stream the block has no slot for');
-    assert.equal(read(BLOCK + SHADOW.BINDING_CALLS), 2);
+    assert.equal(read(BLOCK + SHADOW.BINDING_CALLS), 1);
 
     assert.equal(run(14), 'ok');
     assert.equal(read(BLOCK + SHADOW.INDICES), 0x5678);
@@ -390,7 +403,7 @@ async function routines(engine){
 
     assert.equal(run(15), 'ok');
     assert.equal(read(BLOCK + SHADOW.VERTEX_SHADER), 0x102);
-    assert.equal(read(BLOCK + SHADOW.BINDING_CALLS), 4);
+    assert.equal(read(BLOCK + SHADOW.BINDING_CALLS), 3);
     assert.equal(run(16), 'trap', 'a shader handle is the host\'s to check');
     assert.equal(read(BLOCK + SHADOW.VERTEX_SHADER), 0x102);
 
@@ -456,7 +469,7 @@ async function routines(engine){
     // One for every call a routine answered on the device's behalf: steps 0,
     // 1, 5, 7, 10, 11, 12, 14, 15, 18, 20, 24 and 30 to 34. A refusal made
     // in the guest is not one, and a level handed out is the texture's.
-    assert.equal(calls(), 17);
+    assert.equal(calls(), 16);
 
     // The getter answers from the block for a state the host marked as one
     // the device answers for, and changes nothing the host counts.
@@ -469,7 +482,7 @@ async function routines(engine){
     assert.equal(run(37), 'trap', 'a state past the block');
     assert.equal(run(38), 'trap', 'a null out-pointer');
     assert.equal(read(OUT), 0xdead, 'nothing written by the three the host answers');
-    assert.equal(calls(), 17, 'a read is no call the host has to adopt');
+    assert.equal(calls(), 16, 'a read is no call the host has to adopt');
 
     // A sampler state goes to the stage state slot the block's table names
     // for its type -- MAGFILTER's is 16 -- marked as a stage state is.
@@ -478,17 +491,17 @@ async function routines(engine){
     assert.equal(run(39), 'ok');
     assert.equal(read(BLOCK + SHADOW.STAGE_STATES + (1 * 32 + 16) * 4), 2);
     assert.equal(marks().stages[1], (sampled[1] | 1 << 16) >>> 0);
-    assert.equal(calls(), 18);
+    assert.equal(calls(), 17);
     assert.equal(run(40), 'trap', 'a type the table has no slot for');
     assert.equal(run(41), 'trap', 'a sampler past the stages the block holds');
     assert.equal(run(42), 'trap', 'a type past the table');
     assert.equal(run(43), 'trap', 'Direct3D 9 leaves a stage past the block to the host');
-    assert.equal(calls(), 18);
+    assert.equal(calls(), 17);
 
     write(OUT, 0);
     assert.equal(run(44), 'ok', 'a stage state read from the block');
     assert.equal(read(OUT), 5, 'what step 20 set');
-    assert.equal(calls(), 18, 'a read is not a call the host must adopt');
+    assert.equal(calls(), 17, 'a read is not a call the host must adopt');
     assert.equal(run(45), 'trap', 'a type the setter leaves to the host');
     assert.equal(run(46), 'trap', 'a stage past the block');
     assert.equal(run(47), 'trap', 'a null pointer');
@@ -504,7 +517,29 @@ async function routines(engine){
     assert.equal(run(50), 'trap', 'a type the device refuses');
     assert.equal(run(51), 'trap', 'a type past WORLD3');
     assert.equal(run(52), 'trap', 'a null pointer');
-    assert.equal(calls(), 18, 'reads are not calls the host must adopt');
+    assert.equal(calls(), 17, 'reads are not calls the host must adopt');
+
+    // Direct3D 9's stream, with its offset in a slot of its own, and its
+    // declaration: binding calls the host adopts like Direct3D 8's.
+    const bindings = read(BLOCK + SHADOW.BINDING_CALLS);
+    assert.equal(run(53), 'ok');
+    assert.equal(read(BLOCK + SHADOW.STREAMS + 3 * 8), 0x2345);
+    assert.equal(read(BLOCK + SHADOW.STREAMS + 3 * 8 + 4), 28);
+    assert.equal(read(BLOCK + SHADOW.STREAM_OFFSETS + 3 * 4), 64);
+    assert.equal(run(54), 'trap', 'an unbinding');
+    assert.equal(read(BLOCK + SHADOW.STREAMS + 3 * 8), 0x2345, 'the block untouched');
+    assert.equal(read(BLOCK + SHADOW.STREAMS + 3 * 8 + 4), 28);
+    assert.equal(read(BLOCK + SHADOW.STREAM_OFFSETS + 3 * 4), 64);
+    assert.equal(run(55), 'trap', 'a stream the block has no slot for');
+    assert.equal(run(56), 'ok');
+    assert.equal(read(BLOCK + SHADOW.DECLARATION), 0x3456);
+    assert.equal(run(57), 'trap', 'an object with no block');
+    assert.equal(run(58), 'ok');
+    assert.equal(read(BLOCK + SHADOW.INDICES), 0x4567);
+    assert.equal(run(59), 'ok');
+    assert.equal(read(BLOCK + SHADOW.INDICES), 0);
+    assert.equal(read(BLOCK + SHADOW.BINDING_CALLS), bindings + 4);
+    assert.equal(calls(), 21);
 
     machine.stop();
 }

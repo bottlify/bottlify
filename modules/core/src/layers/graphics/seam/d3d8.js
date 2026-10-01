@@ -1276,8 +1276,14 @@ export function createDirect3D8Seam(
             device.SetTexture(stage >>> 0, publisher.objectAt(texture)),
 
         /** @param {any} device @param {number[]} args */
-        SetStreamSource: (device, [index, buffer, stride])=>
-            device.SetStreamSource(index >>> 0, publisher.objectAt(buffer), stride >>> 0),
+        SetStreamSource: (device, [index, buffer, stride])=>{
+            const hr = device.SetStreamSource(
+                index >>> 0, publisher.objectAt(buffer), stride >>> 0);
+            // An unbinding comes here past the routine, which left the block
+            // naming the buffer before.
+            shadowOf(device)?.refreshStream(index >>> 0);
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         SetIndices: (device, [buffer, base])=>

@@ -36,7 +36,11 @@ const CLR_NONE = 0xffffffff;
 const SRCCOPY = 0x00cc0020;
 const SRCINVERT = 0x00660046;
 
-function machine(){
+/**
+ * @param {{ user32?: (name: string) => ({ handler: (args: number[]) => number } | undefined) }}
+ *     [wired]
+ */
+function machine(wired = {}){
     const bytes = new Uint8Array(0x40000);
     const view = new DataView(bytes.buffer);
     let next = 0x10000;
@@ -67,6 +71,7 @@ function machine(){
         readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         gdi32: name=>gdi32[name],
+        user32: wired.user32,
         bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
     });
     const fns = /** @type {Record<string, { argBytes: number,
@@ -115,6 +120,32 @@ function machine(){
     };
     return { bytes, view, gdi32, fns, section, mono, target };
 }
+
+test('a list loaded out of a bitmap resource is cut into images cx wide', ()=>{
+    // What a framework's toolbar loads its buttons with: the strip the
+    // resource holds, masked by a colour, the bitmap let go of after.
+    /** @type {number[]} */
+    const loaded = [];
+    /** @type {any} */
+    let made = null;
+    made = machine({
+        user32: name=>(name === 'LoadImageA'
+            ? { handler: ([, resource])=>{
+                loaded.push(resource);
+                return made.section(4, 2, Array(8).fill(0x00ff00ff)).bitmap;
+            } }
+            : undefined),
+    });
+    const { fns } = made;
+    const list = fns.ImageList_LoadImageA.handler([0x400000, 0x71, 2, 10, 0xff00ff, 0, 0]);
+    assert.notEqual(list, 0);
+    assert.deepEqual(loaded, [0x71], 'the resource it named');
+    assert.equal(fns.ImageList_GetImageCount.handler([list]), 2, 'a strip four wide in twos');
+    const square = fns.ImageList_LoadImageA.handler([0x400000, 0x71, 0, 10, CLR_NONE, 0, 0]);
+    assert.equal(fns.ImageList_GetImageCount.handler([square]), 2, 'a cx of 0 cuts squares');
+    assert.equal(fns.ImageList_LoadImageA.handler([0x400000, 0x71, 16, 10, CLR_NONE, 1, 0]), 0,
+        'an icon resource is not loaded');
+});
 
 test('ImageList_DrawIndirect refuses no structure, no DC, no list and a missing image', ()=>{
     // Wine's test_DrawIndirect: three 48-pixel images, the structure checked
