@@ -385,4 +385,4 @@ test('the normal matrix is the same bits as the minors gathered one by one gave'
     }
 });
 
-const EXPECTED = ['e9efd744', '51803e24', '8278ac61', 'bf6e68cb'];
+const EXPECTED = ['a2bb439b', 'b1154cdd', 'cfbf7b1c', 'f70a60ca'];

@@ -911,7 +911,8 @@ test('recorded: NOOVERWRITE with DISCARD is NOOVERWRITE, and the buffer is not r
     await h.present();
 
     const bound = gpu.of('setVertexBuffer').map((/** @type {any} */ call)=>call.buffer);
-    assert.equal(bound[0], bound[1], 'one generation serves both draws');
+    // A rename between them would bind another buffer for the second draw.
+    assert.equal(new Set(bound).size, 1, 'one generation serves both draws');
     out.buffer.release();
 });
 

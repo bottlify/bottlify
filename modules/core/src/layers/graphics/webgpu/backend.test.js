@@ -156,6 +156,48 @@ test('a viewport past the target keeps its mapping, and its scissor stays on the
     ]);
 });
 
+test('a pass sends a buffer or a group it already holds once, and binds again in the next pass',
+    ()=>{
+        // Draws that share a vertex buffer, an index buffer or a texture set
+        // it again for each draw; the pass already holds it, and every call is
+        // a trip into the browser.
+        const { gpu, backend } = harness();
+        const layout = backend.createBindGroupLayout({ entries: [] });
+        const view = {};
+        const vertices = gpu.device.createBuffer({ size: 64, usage: 0x20 });
+        const indices = gpu.device.createBuffer({ size: 64, usage: 0x10 });
+        const frame = backend.beginFrame();
+        const pass = frame.beginPass({ target: target(backend) });
+        for (let draw = 0; draw < 3; draw++)
+        {
+            pass.setVertexBuffer(0, vertices, 0);
+            pass.setIndexBuffer(indices, 'uint16', 0);
+            pass.setBindings(1, layout, [{ binding: 0, resource: view }]);
+        }
+        assert.equal(gpu.count('setVertexBuffer'), 1);
+        assert.equal(gpu.count('setIndexBuffer'), 1);
+        assert.equal(gpu.count('setBindGroup'), 1);
+
+        // Another offset, format or block is another binding.
+        pass.setVertexBuffer(0, vertices, 32);
+        pass.setIndexBuffer(indices, 'uint32', 0);
+        const block = pass.uniforms(new Uint8Array(64));
+        pass.setBindings(1, layout, [{ binding: 0, resource: block }]);
+        pass.setBindings(1, layout, [{ binding: 0, resource: block }]);
+        pass.setBindings(1, layout, [{ binding: 0, resource: pass.uniforms(new Uint8Array(64)) }]);
+        assert.equal(gpu.count('setVertexBuffer'), 2);
+        assert.equal(gpu.count('setIndexBuffer'), 2);
+        assert.equal(gpu.count('setBindGroup'), 3, 'the same block once, the next at its offset');
+
+        // A pass begins with nothing bound.
+        const next = frame.beginPass({ target: target(backend) });
+        next.setVertexBuffer(0, vertices, 32);
+        next.setIndexBuffer(indices, 'uint32', 0);
+        assert.equal(gpu.count('setVertexBuffer'), 3);
+        assert.equal(gpu.count('setIndexBuffer'), 3);
+        frame.end();
+    });
+
 test('the binding cache survives a pass boundary and a frame boundary', ()=>{
     // A group names a layout, a view, a sampler and the uniform ring: nothing
     // that changes per draw, so the one made in the first pass is the one
