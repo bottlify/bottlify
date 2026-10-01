@@ -46,13 +46,21 @@ export function compressedBytes(kind, width, height){
  * conforms the result afterward, the way every other format's alpha is
  * conformed on upload -- decoding is the same either way.
  *
+ * A block's palette and alphas are worked in small arrays made once per
+ * call, not per block: a texture of a few hundred texels square is thousands
+ * of blocks, and arrays made for each are garbage by the thousand. `into`,
+ * when it is large enough, receives the texels instead of an array made for
+ * them -- for a caller that hands them on at once and decodes the next level
+ * into the same bytes.
+ *
  * @param {Uint8Array} bytes
  * @param {S3tcKind} kind
  * @param {number} width
  * @param {number} height
+ * @param {Uint8Array} [into]
  * @returns {Uint8Array | null} null when the bytes are too few for the shape
  */
-export function decodeS3tc(bytes, kind, width, height){
+export function decodeS3tc(bytes, kind, width, height, into){
     const needed = compressedBytes(kind, width, height);
     if (bytes.byteLength < needed)
     {
@@ -60,11 +68,17 @@ export function decodeS3tc(bytes, kind, width, height){
     }
     const dxt1 = kind === 'dxt1';
     const blockBytes = dxt1 ? 8 : 16;
-    const texels = new Uint8Array(width * height * 4);
+    const length = width * height * 4;
+    const texels = into !== undefined && into.length >= length
+        ? into.subarray(0, length)
+        : new Uint8Array(length);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const blocksAcross = Math.ceil(width / 4);
     const blocksDown = Math.ceil(height / 4);
-    const alpha = new Array(16).fill(255);
+    // Four RGBA entries, and the eight values DXT5's indices pick from.
+    const palette = new Uint8Array(16);
+    const table = new Uint8Array(8);
+    const alpha = new Uint8Array(16).fill(255);
     for (let by = 0; by < blocksDown; by++)
     {
         for (let bx = 0; bx < blocksAcross; bx++)
@@ -74,21 +88,31 @@ export function decodeS3tc(bytes, kind, width, height){
             const c0 = view.getUint16(colourAt, true);
             const c1 = view.getUint16(colourAt + 2, true);
             const indices = view.getUint32(colourAt + 4, true);
-            const rgb0 = [from5(c0 >> 11), from6((c0 >> 5) & 0x3f), from5(c0 & 0x1f)];
-            const rgb1 = [from5(c1 >> 11), from6((c1 >> 5) & 0x3f), from5(c1 & 0x1f)];
+            const r0 = from5(c0 >> 11), g0 = from6((c0 >> 5) & 0x3f), b0 = from5(c0 & 0x1f);
+            const r1 = from5(c1 >> 11), g1 = from6((c1 >> 5) & 0x3f), b1 = from5(c1 & 0x1f);
+            palette[0] = r0; palette[1] = g0; palette[2] = b0; palette[3] = 255;
+            palette[4] = r1; palette[5] = g1; palette[6] = b1; palette[7] = 255;
             // Only DXT1 has the two-colour-plus-transparent mode; DXT3 and
             // DXT5 always interpolate four colours, whatever the order.
-            const fourColours = !dxt1 || c0 > c1;
-            const palette = [
-                [...rgb0, 255],
-                [...rgb1, 255],
-                fourColours
-                    ? [0, 1, 2].map(k=>Math.round((2 * rgb0[k] + rgb1[k]) / 3)).concat(255)
-                    : [0, 1, 2].map(k=>Math.round((rgb0[k] + rgb1[k]) / 2)).concat(255),
-                fourColours
-                    ? [0, 1, 2].map(k=>Math.round((rgb0[k] + 2 * rgb1[k]) / 3)).concat(255)
-                    : [0, 0, 0, 0],
-            ];
+            if (!dxt1 || c0 > c1)
+            {
+                palette[8] = Math.round((2 * r0 + r1) / 3);
+                palette[9] = Math.round((2 * g0 + g1) / 3);
+                palette[10] = Math.round((2 * b0 + b1) / 3);
+                palette[11] = 255;
+                palette[12] = Math.round((r0 + 2 * r1) / 3);
+                palette[13] = Math.round((g0 + 2 * g1) / 3);
+                palette[14] = Math.round((b0 + 2 * b1) / 3);
+                palette[15] = 255;
+            }
+            else
+            {
+                palette[8] = Math.round((r0 + r1) / 2);
+                palette[9] = Math.round((g0 + g1) / 2);
+                palette[10] = Math.round((b0 + b1) / 2);
+                palette[11] = 255;
+                palette[12] = 0; palette[13] = 0; palette[14] = 0; palette[15] = 0;
+            }
             if (kind === 'dxt3')
             {
                 for (let i = 0; i < 16; i++)
@@ -101,11 +125,24 @@ export function decodeS3tc(bytes, kind, width, height){
             {
                 const a0 = view.getUint8(block);
                 const a1 = view.getUint8(block + 1);
-                const table = a0 > a1
-                    ? [a0, a1,
-                        ...[6, 5, 4, 3, 2, 1].map(k=>Math.round((k * a0 + (7 - k) * a1) / 7))]
-                    : [a0, a1, ...[4, 3, 2, 1].map(k=>Math.round((k * a0 + (5 - k) * a1) / 5)),
-                        0, 255];
+                table[0] = a0;
+                table[1] = a1;
+                if (a0 > a1)
+                {
+                    for (let k = 6; k >= 1; k--)
+                    {
+                        table[8 - k] = Math.round((k * a0 + (7 - k) * a1) / 7);
+                    }
+                }
+                else
+                {
+                    for (let k = 4; k >= 1; k--)
+                    {
+                        table[6 - k] = Math.round((k * a0 + (5 - k) * a1) / 5);
+                    }
+                    table[6] = 0;
+                    table[7] = 255;
+                }
                 // 48 bits of 3-bit indices, low bits first.
                 for (let i = 0; i < 16; i++)
                 {
@@ -123,12 +160,12 @@ export function decodeS3tc(bytes, kind, width, height){
                 {
                     continue;
                 }
-                const colour = palette[(indices >>> (i * 2)) & 3];
+                const colour = ((indices >>> (i * 2)) & 3) * 4;
                 const at = (y * width + x) * 4;
-                texels[at] = colour[0];
-                texels[at + 1] = colour[1];
-                texels[at + 2] = colour[2];
-                texels[at + 3] = dxt1 ? colour[3] : alpha[i];
+                texels[at] = palette[colour];
+                texels[at + 1] = palette[colour + 1];
+                texels[at + 2] = palette[colour + 2];
+                texels[at + 3] = dxt1 ? palette[colour + 3] : alpha[i];
             }
         }
     }
