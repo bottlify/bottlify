@@ -1215,12 +1215,53 @@ export function createWindowFunctions(host){
      * @returns {any[]}
      */
     const paintOrder = ()=>{
+        // Every window's children gathered in one pass, in creation order, as
+        // childrenOf finds them: a pass of every window for each window grew
+        // with the square of every window a program ever made, which is what
+        // a destroyed one stays among.
+        /** @type {Map<number, any[]>} */
+        const byParent = new Map();
+        for (const record of windows.values())
+        {
+            if (!record.destroyed && isChild(record))
+            {
+                const siblings = byParent.get(record.parent);
+                if (siblings)
+                {
+                    siblings.push(record);
+                }
+                else
+                {
+                    byParent.set(record.parent, [record]);
+                }
+            }
+        }
         /** @type {any[]} */
         const listed = [];
         /** @param {any} record */
         const visit = record=>{
             listed.push(record);
-            paintedChildrenOf(record).forEach(visit);
+            const children = byParent.get(record.hwnd);
+            if (!children)
+            {
+                return;
+            }
+            // Opaque siblings first, then the transparent ones, as
+            // paintedChildrenOf orders them.
+            for (const child of children)
+            {
+                if ((child.exStyle & WS_EX_TRANSPARENT) === 0)
+                {
+                    visit(child);
+                }
+            }
+            for (const child of children)
+            {
+                if ((child.exStyle & WS_EX_TRANSPARENT) !== 0)
+                {
+                    visit(child);
+                }
+            }
         };
         for (const record of windows.values())
         {
@@ -3559,7 +3600,18 @@ export function createWindowFunctions(host){
 
     host.queue.paintsFrom?.(filter=>{
         const asking = filter.thread ?? null;
-        for (const record of paintOrder())
+        // Asked at every look into a queue, and mostly there is nothing to
+        // paint: the order is only worked out when a window waits for one.
+        let waiting = false;
+        for (const record of windows.values())
+        {
+            if (record.updateRect && !record.destroyed)
+            {
+                waiting = true;
+                break;
+            }
+        }
+        for (const record of waiting ? paintOrder() : [])
         {
             if (record.updateRect && shown(record)
                 && (filter.hwnd === ANY_WINDOW || filter.hwnd === record.hwnd)
