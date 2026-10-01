@@ -3367,7 +3367,10 @@ export function deadFlagPass(block, liveOut = ARITH_FLAGS | DF, after = [], prec
 
 /**
  * The flags an instruction leaves no earlier record's value in. A shift or
- * rotate by cl may write none. Precisely, only a defined write: the emulator
+ * rotate by cl may write none, and so may a repeated compare or scan, which
+ * with ecx zero runs no iteration and leaves the flags as they were: the
+ * `je` after a `repe cmpsb` of no bytes reads the flags of what came before.
+ * Precisely, only a defined write: the emulator
  * leaves an undefined flag as it was, and the emitter with it, so an earlier
  * record may still be what a later reader sees. Otherwise an undefined flag is
  * killed as well -- whatever the code left there, no program can rely on it,
@@ -3378,7 +3381,7 @@ export function deadFlagPass(block, liveOut = ARITH_FLAGS | DF, after = [], prec
  * @param {boolean} precise @param {number | null} count  its `shiftCount`
  */
 function killedBy(instruction, precise, count){
-    if (count === -1)
+    if (count === -1 || repeatedCompare(instruction))
     {
         return 0;
     }
@@ -3457,7 +3460,7 @@ function relaxedFlagReads(block, into){
             into.set(instruction.opcode, (into.get(instruction.opcode) ?? 0) + 1);
         }
         const count = shiftCount(instruction);
-        if (count === 0 || count === -1)
+        if (count === 0 || count === -1 || repeatedCompare(instruction))
         {
             continue;
         }
@@ -3466,6 +3469,14 @@ function relaxedFlagReads(block, into){
 }
 
 const SHIFT_OPS = new Set(['rol', 'ror', 'rcl', 'rcr', 'shl', 'shr', 'sal', 'sar', 'shld', 'shrd']);
+
+/**
+ * A `rep` or `repne` compare or scan: whether it writes the flags is ecx's to say.
+ *
+ * @param {import('../decode/decoder.js').Instruction} instruction
+ */
+const repeatedCompare = instruction=>(instruction.op === 'cmps' || instruction.op === 'scas')
+    && (instruction.prefixes.rep === true || instruction.prefixes.repne === true);
 
 /**
  * The count of a shift or rotate masked to five bits, -1 when it is in cl,

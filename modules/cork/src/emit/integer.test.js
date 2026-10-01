@@ -310,6 +310,35 @@ test('a zero-count rep touches nothing and keeps the flags', ()=>{
     assert.equal(r.m.eflags() >>> 6 & 1, 1, 'ZF from the xor survives the rep');
 });
 
+test('a zero-count rep compare or scan leaves the flags of what came before it', ()=>{
+    // A one-character strfind compares the rest of the pattern, nothing, with
+    // a memcmp: xor edx, edx; repe cmpsb with ecx = 0; je found. The compare
+    // runs no iteration and writes no flag, so the je sees the xor's ZF --
+    // the xor's flags are not dead for the compare after it.
+    for (const [name, op] of /** @type {[string, number[]][]} */ ([
+        ['repe cmpsb', [0xf3, 0xa6]], ['repe cmpsd', [0xf3, 0xa7]],
+        ['repne scasb', [0xf2, 0xae]], ['repe scasb', [0xf3, 0xae]],
+    ]))
+    {
+        const r = both([
+            0xb8, 1, 0, 0, 0,       // mov eax, 1
+            0x85, 0xc0,             // test eax, eax  (ZF = 0)
+            0xbe, 0x00, 0x20, 0, 0, // mov esi, 0x2000
+            0xbf, 0x00, 0x30, 0, 0, // mov edi, 0x3000
+            0x31, 0xc9,             // xor ecx, ecx
+            0x31, 0xd2,             // xor edx, edx   (ZF = 1)
+            ...op,                  // ecx = 0
+            0x74, 0x06,             // je found
+            0xbb, 1, 0, 0, 0,       // mov ebx, 1
+            0xf4,
+            0xbb, 2, 0, 0, 0,       // found: mov ebx, 2
+            0xf4,
+        ], { memory: [[0x2000, [1, 2, 3, 4]], [0x3000, [5, 6, 7, 8]]] });
+        agree(r);
+        assert.equal(r.m.reg('ebx'), 2, `${name}: the je is taken on the xor's ZF`);
+    }
+});
+
 test('rep stops on a compare and leaves the count and pointers at the stop', ()=>{
     // repe cmpsb over three equal bytes then a difference: the count is what
     // is left, and both pointers stand one past the mismatching pair.
