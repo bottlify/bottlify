@@ -157,6 +157,47 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
     };
 
     /**
+     * The bytes in place, for a scan done with them before anything else
+     * runs: the search for a terminator. Each chunk of a string's scan copied
+     * by `read` was most of what reading a string cost a host call. Not for a
+     * decode -- `TextDecoder` refuses a view of shared memory, which a page's
+     * guest memory is.
+     *
+     * @param {number} address @param {number} length
+     */
+    const view = (address, length)=>{
+        readableSpan(address, length);
+        return raw.readPhysical(address, length);
+    };
+
+    /**
+     * The terminator's place in a UTF-16 string, in code units: its length,
+     * for a caller that does not want the text.
+     *
+     * @param {number} address
+     * @param {number} [limit]  Bytes, not characters.
+     * @returns {number}
+     */
+    const scanWideString = (address, limit = 8192)=>{
+        // The span and the chunk are both even, so a code unit never straddles
+        // two chunks and the scan can read a chunk at a time like the byte one.
+        const span = scannable(address, limit) & ~1;
+        for (let at = 0; at < span; at += SCAN_CHUNK)
+        {
+            const bytes = view(address + at, Math.min(SCAN_CHUNK, span - at));
+            for (let i = 0; i + 1 < bytes.length; i += 2)
+            {
+                if (bytes[i] === 0 && bytes[i + 1] === 0)
+                {
+                    return (at + i) >>> 1;
+                }
+            }
+        }
+        throw new Error(
+            `No wide NUL within ${limit} bytes of 0x${address.toString(16)}`);
+    };
+
+    /**
      * How far a scan for a terminator may actually read.
      *
      * A limit is how far the caller is willing to look, not a claim that all of
@@ -422,7 +463,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
             let length = -1;
             for (let at = 0; at < span; at += SCAN_CHUNK)
             {
-                const end = read(address + at, Math.min(SCAN_CHUNK, span - at)).indexOf(0);
+                const end = view(address + at, Math.min(SCAN_CHUNK, span - at)).indexOf(0);
                 if (end !== -1)
                 {
                     length = at + end;
@@ -458,7 +499,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
             const span = scannable(address, limit);
             for (let at = 0; at < span; at += SCAN_CHUNK)
             {
-                const bytes = read(address + at, Math.min(SCAN_CHUNK, span - at));
+                const bytes = view(address + at, Math.min(SCAN_CHUNK, span - at));
                 for (let i = 0; i < bytes.length; i++)
                 {
                     const byte = bytes[i];
@@ -481,28 +522,10 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
          * @returns {string}
          */
         readWideString(address, limit = 8192){
-            // The span and the chunk are both even, so a code unit never straddles
-            // two chunks and the scan can read a chunk at a time like the byte one.
-            const span = scannable(address, limit) & ~1;
-            let length = -1;
-            for (let at = 0; at < span && length === -1; at += SCAN_CHUNK)
-            {
-                const bytes = read(address + at, Math.min(SCAN_CHUNK, span - at));
-                for (let i = 0; i + 1 < bytes.length; i += 2)
-                {
-                    if (bytes[i] === 0 && bytes[i + 1] === 0)
-                    {
-                        length = at + i;
-                        break;
-                    }
-                }
-            }
-            if (length === -1)
-            {
-                throw new Error(
-                    `No wide NUL within ${limit} bytes of 0x${address.toString(16)}`);
-            }
-            return new TextDecoder('utf-16le').decode(read(address, length));
+            const units = scanWideString(address, limit);
+            return new TextDecoder('utf-16le').decode(read(address, units * 2));
         },
+
+        scanWideString,
     };
 }

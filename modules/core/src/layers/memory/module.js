@@ -312,6 +312,9 @@ export function createMemoryModule(){
                 /** @param {number} address @param {number} [limit] */
                 readWideString: (address, limit)=>
                     live() ? state.accessors.readWideString(address, limit) : '',
+                /** @param {number} address @param {number} [limit] */
+                scanWideString: (address, limit)=>
+                    live() ? state.accessors.scanWideString(address, limit) : -1,
             };
         },
 

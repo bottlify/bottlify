@@ -188,6 +188,7 @@ test('a disposed memory answers harmlessly rather than throwing', async()=>{
     assert.equal(memory.readCString(0x1000), '');
     assert.deepEqual(memory.scanCString(0x1000), { index: -1, byte: 0 });
     assert.equal(memory.readWideString(0x1000), '');
+    assert.equal(memory.scanWideString(0x1000), -1);
 });
 
 test('readU32sInto and readF32sInto read a whole span in one call, through the module\'s api',

@@ -301,6 +301,11 @@ export function createWin32Module(){
             // never materialises the string.
             const scanCString = (/** @type {number} */ address, /** @type {number} */ limit,
                 /** @type {Uint8Array} */ wanted)=>memory.scanCString(address, limit, wanted);
+            /** A NUL-terminated string's units before its terminator, 1- or 2-byte units,
+             * as far as its region goes. @param {number} address @param {number} unit */
+            const stringLength = (address, unit)=>(unit === 1
+                ? memory.scanCString(address, 0x7fffffff).index
+                : memory.scanWideString(address, 0x7fffffff));
 
             // Registers, reached through configuration rather than by requiring the
             // cpu layer: win32 does not depend on it and should not start to. What
@@ -1239,7 +1244,7 @@ export function createWin32Module(){
                         setLastError: setError,
                     }),
                     ...createLocaleFunctions({
-                        readMemory, writeMemory,
+                        readMemory, writeMemory, stringLength,
                         setLastError: setError,
                         systemTimeMs: ()=>kernel.clock.wallClock(),
                     }),

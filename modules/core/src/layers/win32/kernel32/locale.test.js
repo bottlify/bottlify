@@ -38,6 +38,16 @@ function fakeHost(){
         errors,
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.slice(address, address + length),
+        /** @param {number} address @param {number} unit */
+        stringLength(address, unit){
+            let count = 0;
+            while ((unit === 1 ? bytes[address + count] : bytes[address + count * 2]
+                | bytes[address + count * 2 + 1]) !== 0)
+            {
+                count++;
+            }
+            return count;
+        },
         /** @param {number} address @param {Uint8Array} data */
         writeMemory(address, data){
             bytes.set(data, address);

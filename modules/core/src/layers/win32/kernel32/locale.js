@@ -480,6 +480,9 @@ const characterType = code=>{
 /**
  * @typedef {Object} LocaleHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, unit: number) => number} stringLength
+ *           The code units of a NUL-terminated string of 1- or 2-byte units
+ *           before its terminator.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
  * @property {() => number} [systemTimeMs]
@@ -507,18 +510,7 @@ export function createLocaleFunctions(host){
         {
             return { length: Math.max(declared | 0, 0), terminated: false };
         }
-        let count = 0;
-        for (;;)
-        {
-            const bytes = host.readMemory(address + count * unit, unit);
-            const code = unit === 1 ? bytes[0] : bytes[0] | bytes[1] << 8;
-            if (code === 0)
-            {
-                break;
-            }
-            count++;
-        }
-        return { length: count + 1, terminated: true };
+        return { length: host.stringLength(address, unit) + 1, terminated: true };
     };
 
     /** @param {number} address @param {number} count */
