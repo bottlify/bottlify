@@ -22,6 +22,62 @@ const MAX_PATH = 260;
 
 const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 
+const S_OK = 0;
+const E_POINTER = 0x80004003;
+const E_INVALIDARG = 0x80070057;
+const URL_UNESCAPE_INPLACE = 0x00100000;
+const URL_DONT_UNESCAPE_EXTRA_INFO = 0x02000000;
+
+/**
+ * Where a path's extension begins: the last dot of its last component, or the
+ * end of the path when that component has none -- a dot in a directory's name
+ * is not an extension of the file inside it.
+ *
+ * @param {string} path
+ */
+const extensionIndex = path=>{
+    let dot = path.length;
+    for (let at = 0; at < path.length; at++)
+    {
+        if (path[at] === '.')
+        {
+            dot = at;
+        }
+        else if (isSeparator(path[at]) || path[at] === ':')
+        {
+            dot = path.length;
+        }
+    }
+    return dot;
+};
+
+/**
+ * A URL with its %XX escapes decoded; with `extraInfo` false, what follows the
+ * first ? or # is left as it is.
+ *
+ * @param {string} url @param {boolean} extraInfo
+ */
+const unescapeUrl = (url, extraInfo)=>{
+    let out = '';
+    let escaping = true;
+    for (let at = 0; at < url.length; at++)
+    {
+        const char = url[at];
+        if (!extraInfo && (char === '?' || char === '#'))
+        {
+            escaping = false;
+        }
+        if (escaping && char === '%' && /^[0-9A-Fa-f]{2}$/.test(url.slice(at + 1, at + 3)))
+        {
+            out += String.fromCharCode(parseInt(url.slice(at + 1, at + 3), 16));
+            at += 2;
+            continue;
+        }
+        out += char;
+    }
+    return out;
+};
+
 /**
  * Hue, luminance and saturation each run from 0 to 240 here, against 255 for
  * a colour channel. A grey has no hue and is given two thirds of the way
@@ -48,6 +104,8 @@ const isSeparator = c=>c === '\\' || c === '/';
  * @property {(path: string) => string} [fullPath]
  *           A path made absolute against the current directory, as the file
  *           functions make it.
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ *           For the counts a caller passes by pointer.
  */
 
 /**
@@ -287,6 +345,13 @@ export function createShlwapiFunctions(host){
         },
     });
 
+    /** @param {string} text */
+    const bytesOf = text=>Uint8Array.from(text, char=>char.charCodeAt(0) & 0xff);
+
+    /** @param {number} address @param {number} value */
+    const writeDword = (address, value)=>host.writeMemory(address,
+        Uint8Array.of(value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff));
+
     /** @param {number} address @param {number} value */
     const writeWord = (address, value)=>{
         if ((address >>> 0) !== 0)
@@ -308,23 +373,7 @@ export function createShlwapiFunctions(host){
             /** @param {number[]} args */
             handler: ([pointer])=>{
                 const path = pathAt(pointer);
-                if (path === null)
-                {
-                    return 0;
-                }
-                let dot = path.length;
-                for (let at = 0; at < path.length; at++)
-                {
-                    if (path[at] === '.')
-                    {
-                        dot = at;
-                    }
-                    else if (isSeparator(path[at]) || path[at] === ':')
-                    {
-                        dot = path.length;
-                    }
-                }
-                return (pointer >>> 0) + dot;
+                return path === null ? 0 : (pointer >>> 0) + extensionIndex(path);
             },
         },
 
@@ -381,6 +430,98 @@ export function createShlwapiFunctions(host){
                     host.writeMemory((pointer >>> 0) + keep, new Uint8Array([0]));
                 }
                 return root ? 1 : 0;
+            },
+        },
+
+        /**
+         * LPSTR PathAddBackslashA(LPSTR pszPath)
+         *
+         * A backslash after the last character unless one is there, answering
+         * where the terminator now is; an empty path is left empty, and one of
+         * MAX_PATH characters or more is refused untouched.
+         */
+        PathAddBackslashA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                const path = pathAt(pointer);
+                if (path === null || path.length >= MAX_PATH)
+                {
+                    return 0;
+                }
+                if (path === '' || path.endsWith('\\'))
+                {
+                    return (pointer >>> 0) + path.length;
+                }
+                host.writeMemory((pointer >>> 0) + path.length, Uint8Array.of(0x5c, 0));
+                return (pointer >>> 0) + path.length + 1;
+            },
+        },
+
+        /** BOOL PathFileExistsA(LPCSTR pszPath): a file or a directory there. */
+        PathFileExistsA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                const path = pathAt(pointer);
+                return path && host.files && host.fullPath
+                    && host.files.stat(host.fullPath(path))?.exists ? 1 : 0;
+            },
+        },
+
+        /** void PathRemoveExtensionA(LPSTR pszPath): cut at the extension. */
+        PathRemoveExtensionA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                const path = pathAt(pointer);
+                const dot = path === null ? 0 : extensionIndex(path);
+                if (path !== null && dot < path.length)
+                {
+                    host.writeMemory((pointer >>> 0) + dot, Uint8Array.of(0));
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * HRESULT UrlUnescapeA(LPSTR pszUrl, LPSTR pszUnescaped,
+         *                      LPDWORD pcchUnescaped, DWORD dwFlags)
+         *
+         * In place with URL_UNESCAPE_INPLACE. Otherwise into the buffer while
+         * it has room: the count is then the characters written, or with
+         * E_POINTER the room the whole answer and its terminator need.
+         */
+        UrlUnescapeA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([pointer, output, count, flags])=>{
+                const url = pathAt(pointer);
+                if (url === null)
+                {
+                    return E_INVALIDARG;
+                }
+                const answer = unescapeUrl(url, !((flags >>> 0) & URL_DONT_UNESCAPE_EXTRA_INFO));
+                if ((flags >>> 0) & URL_UNESCAPE_INPLACE)
+                {
+                    host.writeMemory(pointer >>> 0, bytesOf(`${answer}\0`));
+                    return S_OK;
+                }
+                if ((output >>> 0) === 0 || (count >>> 0) === 0 || !host.readMemory)
+                {
+                    return E_INVALIDARG;
+                }
+                const word = host.readMemory(count >>> 0, 4);
+                const room = (word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) >>> 0;
+                if (answer.length < room)
+                {
+                    host.writeMemory(output >>> 0, bytesOf(`${answer}\0`));
+                    writeDword(count >>> 0, answer.length);
+                    return S_OK;
+                }
+                host.writeMemory(output >>> 0, bytesOf(answer.slice(0, room)));
+                writeDword(count >>> 0, answer.length + 1);
+                return E_POINTER;
             },
         },
 

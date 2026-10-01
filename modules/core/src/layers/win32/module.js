@@ -1706,7 +1706,7 @@ export function createWin32Module(){
                 'IMM32.dll': createImmFunctions({ writeMemory }),
 
                 'SHLWAPI.dll': createShlwapiFunctions({
-                    readCString, readWideString, writeMemory,
+                    readCString, readWideString, readMemory, writeMemory,
                     files: volume,
                     /** @param {string} path */
                     fullPath: path=>filesystem.resolve(path).path,
