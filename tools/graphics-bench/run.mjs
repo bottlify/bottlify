@@ -17,7 +17,11 @@
  *
  * `--model` gives the Direct3D devices no backend, so a frame is the calls'
  * cost to the device's own model alone: what the thread keeps of a frame whose
- * rendering is somebody else's.
+ * rendering is somebody else's. `--remote` records the calls and plays them in
+ * a worker of their own on its device, as the engine's graphics worker does:
+ * the thread's frame is then the calls and the present, and `tail` the wait for
+ * the played side to come within its bound of frames behind, which the thread
+ * spends on nothing.
  *
  * `--roots` names checkouts whose graphics layer is measured, each against
  * this checkout's scenes; the runs are interleaved and the fastest of `--reps`
@@ -47,6 +51,7 @@ const frames = Number(flag('--frames', '200'));
 const warm = Number(flag('--warm', '30'));
 const reps = Number(flag('--reps', '3'));
 const modelOnly = args.includes('--model');
+const remote = args.includes('--remote');
 
 const server = await serveStatic({
     sandboxDir: HERE,
@@ -62,6 +67,9 @@ const browser = await launchWithGpu();
 const cdp = new CdpEndpoint(browser.browserWs);
 /** @type {((payload: string) => void) | null} */
 let waiter = null;
+
+/** What a frame costs the thread: a remote frame's wait is not work. @param {any} run */
+const threadOf = run=>run.record + run.replay + (remote ? 0 : run.tail);
 
 /** One scene's run under one root, in a tab of its own. @param {string} label @param {string} scene */
 async function job(label, scene){
@@ -91,7 +99,8 @@ async function job(label, scene){
         const answer = new Promise(done=>{
             waiter = done;
         });
-        const options = { scene, draws, frames, warm, root: `/g/${label}/layers/graphics`, modelOnly };
+        const options = { scene, draws, frames, warm, root: `/g/${label}/layers/graphics`, modelOnly,
+            remote };
         await cdp.send('Runtime.evaluate',
             { expression: `job(${JSON.stringify(options)})`, returnByValue: true }, sessionId);
         return JSON.parse(await answer);
@@ -129,7 +138,7 @@ try
                 }
                 const key = `${scene} ${label}`;
                 const was = best.get(key);
-                if (!was || run.record + run.replay + run.tail < was.record + was.replay + was.tail)
+                if (!was || threadOf(run) < threadOf(was))
                 {
                     best.set(key, run);
                 }
@@ -147,7 +156,7 @@ try
         for (const { label } of roots)
         {
             const run = best.get(`${scene} ${label}`);
-            const thread = run.record + run.replay + run.tail;
+            const thread = threadOf(run);
             const cells = [run.record, run.replay, run.tail, thread, thread * 1000 / draws,
                 run.gpu];
             console.log(`${scene.padEnd(20)}${label.padEnd(10)}`

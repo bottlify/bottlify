@@ -1,0 +1,296 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * The recorded calls carried across a port: the sender on the side the
+ * program runs on, the receiver where the played device draws.
+ *
+ * Calls go in batches, one message for every call made in a turn of the
+ * sender's thread, written as they are made into one buffer that is
+ * transferred rather than copied. A
+ * call the caller waits for goes at once, and its answer comes back as a
+ * promise; so does a present, which is answered at once unless the played
+ * side has more than `framesAhead` presents still to finish, and then when it
+ * has caught up -- the bound on how far behind the program the pictures are.
+ *
+ * Sender to receiver:  { type: 'calls', buffer }       a batch, as `wire.js` writes it
+ * Receiver to sender:  { type: 'answer', serial, answer, outs }
+ *                      { type: 'presented', count }
+ *                      { type: 'diagnostics', diagnostics }
+ *                                                      what a device said of itself when asked
+ *                      { type: 'wrote', writes }       guest memory the played side wrote later
+ *                      { type: 'divergence', api, detail }
+ *                      { type: 'lost' }                its GPU went away
+ *                      { type: 'failed', message }     a call could not be played
+ */
+
+import { WAIT, createWriter } from './wire.js';
+
+/**
+ * A value as it can cross: the device's objects and functions left out, its
+ * bytes copied.
+ *
+ * @param {any} value @param {number} [depth]
+ * @returns {any}
+ */
+export function crossable(value, depth = 0){
+    if (value === null || value === undefined || typeof value !== 'object')
+    {
+        return typeof value === 'function' ? undefined : value;
+    }
+    if (ArrayBuffer.isView(value))
+    {
+        return /** @type {any} */ (value).slice();
+    }
+    if (value instanceof Promise || depth > 8)
+    {
+        return undefined;
+    }
+    if (Array.isArray(value))
+    {
+        return value.map(one=>crossable(one, depth + 1));
+    }
+    if (value instanceof Map)
+    {
+        return new Map([...value].map(([key, one])=>[key, crossable(one, depth + 1)]));
+    }
+    if (value instanceof Set)
+    {
+        return new Set([...value].map(one=>crossable(one, depth + 1)));
+    }
+    if (Object.values(value).some(one=>typeof one === 'function'))
+    {
+        return undefined;
+    }
+    /** @type {Record<string, any>} */
+    const out = {};
+    for (const key of Object.keys(value))
+    {
+        out[key] = crossable(value[key], depth + 1);
+    }
+    return out;
+}
+
+/**
+ * @typedef {Object} SenderEvents
+ * @property {(address: number, bytes: Uint8Array) => void} [wrote]
+ *     guest memory the played side wrote outside a call: a read-back's pixels
+ * @property {(api: string, detail: string) => void} [divergence]
+ * @property {() => void} [lost]
+ * @property {(message: string) => void} [failed]
+ */
+
+/**
+ * The program's side: the transport a recording writes to.
+ *
+ * @param {Object} options
+ * @param {(message: any, transfer: Transferable[]) => void} options.post
+ * @param {number} [options.framesAhead]  presents the played side may still owe before one waits
+ * @param {(flush: () => void) => void} [options.later]  how a batch waits for the end of the turn
+ * @param {SenderEvents} [options.on]
+ */
+export function createSender({ post, framesAhead = 2, later = queueMicrotask, on = {} }){
+    const writer = createWriter();
+    let pending = false;
+    let serial = 0;
+    /** @type {Map<number, (reply: any) => void>} */
+    const waiting = new Map();
+    let presents = 0;
+    let presented = 0;
+    /** @type {{ count: number, release: () => void }[]} */
+    const held = [];
+    /** What the played side's diagnostics said last. @type {any} */
+    let diagnostics = null;
+    let failure = /** @type {string | null} */ (null);
+
+    const flush = ()=>{
+        pending = false;
+        if (writer.empty())
+        {
+            return;
+        }
+        const buffer = writer.take();
+        post({ type: 'calls', buffer }, [buffer]);
+    };
+    const soon = ()=>{
+        if (!pending)
+        {
+            pending = true;
+            later(flush);
+        }
+    };
+
+    return {
+        writer,
+
+        /**
+         * @param {number} wait @param {string} name
+         * @returns {any}
+         */
+        called(wait, name){
+            if (failure)
+            {
+                throw new Error(`remote: the played device stopped: ${failure}`);
+            }
+            // What the played side says of itself comes back when it has
+            // played the asking; the caller -- a diagnostic, which may not
+            // wait -- is answered with what it said the time before.
+            if (wait === WAIT.ANSWER && name === 'diagnostics')
+            {
+                writer.u8(WAIT.NONE);
+                soon();
+                return { answer: diagnostics, outs: [] };
+            }
+            writer.u8(wait);
+            if (wait === WAIT.ANSWER)
+            {
+                const number = ++serial;
+                writer.u32(number);
+                flush();
+                return new Promise(resolve=>waiting.set(number, resolve));
+            }
+            if (wait === WAIT.PACED)
+            {
+                presents++;
+                flush();
+                const owed = presents - framesAhead;
+                if (presented >= owed)
+                {
+                    return undefined;
+                }
+                return new Promise(resolve=>held.push({ count: owed,
+                    release: ()=>resolve(0) }));
+            }
+            soon();
+            return undefined;
+        },
+
+        recorded: soon,
+
+        /** @param {any} message  what the receiver posted */
+        receive(message){
+            switch (message?.type)
+            {
+                case 'answer':
+                {
+                    const resolve = waiting.get(message.serial);
+                    waiting.delete(message.serial);
+                    resolve?.({ answer: message.answer, outs: message.outs ?? [] });
+                    break;
+                }
+                case 'diagnostics':
+                    diagnostics = message.diagnostics;
+                    break;
+                case 'presented':
+                    presented = message.count;
+                    while (held.length > 0 && held[0].count <= presented)
+                    {
+                        /** @type {{ release: () => void }} */ (held.shift()).release();
+                    }
+                    break;
+                case 'wrote':
+                    for (const { address, bytes } of message.writes)
+                    {
+                        on.wrote?.(address, bytes);
+                    }
+                    break;
+                case 'divergence':
+                    on.divergence?.(message.api, message.detail);
+                    break;
+                case 'lost':
+                    on.lost?.();
+                    break;
+                case 'failed':
+                    failure = String(message.message);
+                    on.failed?.(failure);
+                    break;
+                default:
+                    break;
+            }
+        },
+
+        /** Sends what the turn has made so far. */
+        flush,
+
+        /** How many presents the played side still owes. */
+        behind: ()=>presents - presented,
+    };
+}
+
+/**
+ * The played side.
+ *
+ * @param {Object} options
+ * @param {ReturnType<typeof import('./direct3d.js').playedDirect3D>} options.played
+ * @param {(message: any, transfer?: Transferable[]) => void} options.post
+ */
+export function createReceiver({ played, post }){
+    let presented = 0;
+    /** Presents finish in their order, whatever order their answers settle in. */
+    let presents = Promise.resolve();
+    let failed = false;
+
+    /** @param {unknown} error */
+    const fail = error=>{
+        failed = true;
+        post({ type: 'failed', message: error instanceof Error ? error.message : String(error) });
+    };
+
+    /** @param {any} call @param {any} answered */
+    const reply = (call, answered)=>{
+        /** @param {{ answer: any, outs: any[] }} settled */
+        const send = settled=>post({ type: 'answer', serial: call.serial,
+            answer: crossable(settled.answer), outs: crossable(settled.outs) });
+        if (answered instanceof Promise)
+        {
+            answered.then(send, fail);
+        }
+        else
+        {
+            send(answered);
+        }
+    };
+
+    /** @param {any} held  what the played present holds its caller on, if anything */
+    const present = held=>{
+        const done = held instanceof Promise ? held : Promise.resolve();
+        presents = presents.then(()=>done).then(()=>{
+            presented++;
+            post({ type: 'presented', count: presented });
+        }, fail);
+    };
+
+    return {
+        /** @param {any} message  what the sender posted */
+        receive(message){
+            if (message?.type !== 'calls' || failed)
+            {
+                return;
+            }
+            try
+            {
+                played.read(message.buffer, call=>{
+                    const answer = played.play(call);
+                    if (call.m === 'diagnostics')
+                    {
+                        post({ type: 'diagnostics', diagnostics: crossable(answer) });
+                    }
+                    else if (call.wait === WAIT.ANSWER)
+                    {
+                        reply(call, answer);
+                    }
+                    else if (call.wait === WAIT.PACED)
+                    {
+                        present(answer);
+                    }
+                });
+            }
+            catch (e){
+                fail(e);
+            }
+        },
+    };
+}

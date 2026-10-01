@@ -33,7 +33,7 @@ allows because `win32` is declared.
 
 | option | type | default | meaning |
 |---|---|---|---|
-| `device` | `{ device, queue, adapter?, canvas?, screen?, presentTo?, onFrame?, onPresented?, onPresentFailed?, dumpDraws?, maxDraws?, skipTexture?, probeTexture?, fog?, mips? }` or absent | absent | The GPU. `device` and `queue` are the WebGPU objects; `presentTo(frame)` receives a finished frame in a build that did not supply a presenter; `canvas`/`screen` and the three frame callbacks are what the run's presenter is made from. Absent, `available()` is false, `backend()` throws on first use, and every API still answers state questions. The layer watches `device.lost`: once the GPU device is lost for any reason but its own destruction, every Direct3D 8 and 9 device made on it is lost, and one made afterwards starts lost (see *Limitations*). |
+| `device` | `{ device, queue, adapter?, canvas?, screen?, presentTo?, onFrame?, onPresented?, onPresentFailed?, dumpDraws?, maxDraws?, skipTexture?, probeTexture?, fog?, mips?, worker? }` or absent | absent | The GPU. `worker` is a graphics worker that has answered `open` (`remote/worker.js`): the Direct3D 8 and 9 devices are then recorded here and played there (`remote/`), and its frames are copied onto this device and handed to `presentTo` as this thread's own are; `diagnostics().worker` counts the roots it plays and the frames it sent back. `device` and `queue` are the WebGPU objects; `presentTo(frame)` receives a finished frame in a build that did not supply a presenter; `canvas`/`screen` and the three frame callbacks are what the run's presenter is made from. Absent, `available()` is false, `backend()` throws on first use, and every API still answers state questions. The layer watches `device.lost`: once the GPU device is lost for any reason but its own destruction, every Direct3D 8 and 9 device made on it is lost, and one made afterwards starts lost (see *Limitations*). |
 | `presenter` | a presenter made by the run, or absent | made from `device` | The canvas, its configured format, the pacer and the texture the primary is copied into. It is a service of the run rather than of a machine, so the assembling caller makes one and hands the same object to every machine the run is rebuilt on; the layer attaches its own backend and address space to it, presents and claims through what the attachment answers, and at `dispose()` detaches rather than disposing it. The last frame one process presented stays on the canvas until the next presents. |
 | `device.adapter` | `{ vendor?, architecture?, description? }` | absent | What `GetAdapterIdentifier` and `vkGetPhysicalDeviceProperties` describe. |
 | `compressedTextures` | boolean | `false` | Whether a kept S3TC texture travels to the device as BC blocks instead of decoded `rgba8unorm`, once the format is legal to create at all -- `CheckDeviceFormat` and `glCompressedTexImage2D` answer a DXT format creatable either way, whatever this flag says. Applies to OpenGL and Direct3D 8/9 alike; DirectDraw has no DXT/FOURCC surface path for it to apply to, and Vulkan's flag instead gates whether `textureCompressionBC` is *advertised* as a supported feature -- a legality signal, not an upload choice, pre-existing before this flag and exercised by no title. The device's own `texture-compression-bc` feature still gates it either way: `true` here without the feature is `false`. Off by default: measured to stall the GPU process on the one machine this project has run it on; a build turns it on once it is checked clean on its own hardware. Set through `createApp`'s `graphics` option, which is forwarded to this layer as given. |
@@ -1217,6 +1217,21 @@ present -- the one just made among them -- and the page's report answering 1.0 t
 run; with no bound, 15.4 to 16.4 a second by the wall clock and 12.6 to 13.1 by the demo's own
 while the device finished 1.7 to 3.3, up to 183 frames unfinished, the last finishing 52 to 117 s
 after it was made and the report answering 53 to 118 s after the run.
+
+Drawn in the graphics worker (`device.worker`), a Direct3D 8 or 9 device is two: the one the
+program holds keeps the state and answers, with no renderer, and its twin in the worker draws. The
+twin reads the guest's bytes as they were sent: what a lock let the program write, at the unlock,
+and what a call copied between resources. A program that writes through a pointer it kept after
+the unlock writes where the twin never looks, though a device drawn on the engine's thread would
+have read it at the next draw. What only a renderer knows -- an occlusion query's count, a render
+target's pixels for a lock, a context or a copy, `GetFrontBuffer(Data)` -- is the twin's answer,
+and the program waits for the worker to reach the call; a present waits only while the worker
+owes more than two presents and its own bound. The renderer's diagnostics are the twin's as of
+the last time they were asked for, one asking behind. In the bench (`tools/graphics-bench --remote`,
+SwiftShader, 400 draws a frame) the engine's thread spent 0.74 ms of a shader scene's frame against
+2.67 ms drawing it itself, 1.25 against 3.79 through a vertex shader and the fixed pixel stage, and
+1.57 to 1.76 against 1.87 to 1.88 in the lit scenes, whose `SetLight` before every draw crosses
+member by member.
 
 ## Tests
 

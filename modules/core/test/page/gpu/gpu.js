@@ -22,6 +22,7 @@
  */
 
 import { createApp } from '../../../src/app.js';
+import { openGraphicsWorker } from '../../../src/host/graphics-worker.js';
 
 const out = document.querySelector('#out');
 const canvas = /** @type {HTMLCanvasElement} */ (document.querySelector('#frame'));
@@ -206,7 +207,7 @@ function show(image){
  * Runs one guest program and reports what came out of it.
  *
  * @param {{ exe: string, samples: { name: string, x: number, y: number }[],
- *           words: number, maxTurns?: number }} request
+ *           words: number, maxTurns?: number, graphicsWorker?: boolean }} request
  * @returns {Promise<any>}
  */
 async function run(request){
@@ -218,6 +219,18 @@ async function run(request){
 
     const wasm = await fetch(new URL('../../../vendor/prebuilt/v86.wasm', import.meta.url))
         .then(response=>response.arrayBuffer());
+
+    // Asked for, the Direct3D devices draw in the graphics worker, on a
+    // device of its own, and its frames come back to this one.
+    const graphics = request.graphicsWorker
+        ? await openGraphicsWorker({
+            url: new URL('../../../src/host/graphics.worker.js', import.meta.url),
+            frames: request.graphicsWorker === true ? 'bitmap' : request.graphicsWorker })
+        : null;
+    if (graphics && !graphics.worker)
+    {
+        return { ok: false, gpu: true, reason: `graphics worker: ${graphics.reason}` };
+    }
 
     /** @type {any} */
     let presented = null;
@@ -231,6 +244,7 @@ async function run(request){
         device: {
             device: handle.device,
             queue: handle.device.queue,
+            worker: graphics?.worker ?? undefined,
             /** @param {any} frame */
             presentTo: frame=>{
                 presented = frame;

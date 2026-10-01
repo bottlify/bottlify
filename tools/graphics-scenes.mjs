@@ -24,8 +24,12 @@
  * `modelOnly` gives a Direct3D device no backend: it keeps its state and answers, and
  * nothing is rendered -- what the calls cost without the renderer behind them.
  *
+ * `root`, when given, makes the Direct3D root from its factory and services in
+ * the scene's place: a root whose calls are recorded and sent elsewhere.
+ *
  * @typedef {{ device: any, queue: any, reset: () => void,
- *     mark?: (name: 'recorded' | 'replayed') => void, modelOnly?: boolean }} SceneGpu
+ *     mark?: (name: 'recorded' | 'replayed') => void, modelOnly?: boolean,
+ *     root?: (factory: (services: any) => any, services: any) => any }} SceneGpu
  */
 
 const GRAPHICS = new URL(import.meta.url).searchParams.get('root')
@@ -144,17 +148,22 @@ function directScene({ version, draws, gpu, moving = false, shader = false, rebi
             ram.slice(address - RAM_BASE, address - RAM_BASE + length),
         windowMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
             ram.subarray(address - RAM_BASE, address - RAM_BASE + length),
-        createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
+        // A real device's own, so that what is drawn on one is drawn; the
+        // double makes none.
+        createSampler: (/** @type {any} */ descriptor)=>gpu.device.createSampler?.(descriptor)
+            ?? ({ kind: 'sampler', descriptor }),
         allocate: (/** @type {number} */ bytes)=>{
             const address = next;
             next += bytes + 0x100;
             return address;
         },
     };
+    const make = gpu.root ?? ((/** @type {any} */ factory, /** @type {any} */ given)=>
+        factory(given));
     const d3d = nine
-        ? createDirect3D9({ ...services, vertexShaderVersion: { major: 2, minor: 0 },
+        ? make(createDirect3D9, { ...services, vertexShaderVersion: { major: 2, minor: 0 },
             pixelShaderVersion: { major: 2, minor: 0 } })
-        : createDirect3D8(services);
+        : make(createDirect3D8, services);
     /** @type {{ device?: any }} */
     const out = {};
     check(d3d.CreateDevice({
@@ -320,9 +329,20 @@ function directScene({ version, draws, gpu, moving = false, shader = false, rebi
             }
             check(device.EndScene());
             gpu.mark?.('recorded');
-            check(device.Present());
-            await device.idle();
-            gpu.mark?.('replayed');
+            const presented = device.Present();
+            if (gpu.root)
+            {
+                // Played elsewhere: the present is the frame's last call
+                // here, and what it holds the caller on is a wait.
+                gpu.mark?.('replayed');
+                check(await presented);
+            }
+            else
+            {
+                check(presented);
+                await device.idle();
+                gpu.mark?.('replayed');
+            }
             gpu.reset();
         },
     };

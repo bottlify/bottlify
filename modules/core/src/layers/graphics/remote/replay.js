@@ -10,23 +10,38 @@
  * The device the program talks to keeps its model and answers every call, with
  * no renderer behind it: its state, its return codes, the guest pointers its
  * locks hand out. Every call the program makes on it and on the objects it
- * hands out is recorded -- the method, the arguments with the device's objects
- * by number, the guest memory each allocation in the call gave, and after an
- * unlock the bytes the lock let the program write -- and played, in the same
- * order, on a device made with the renderer, wherever that one lives. The two
- * take the same calls, so they hold the same state, and the renderer behind
- * the second draws what the first was told to; the guest memory the second
- * reads is the bytes that were sent to it, as they were when they were sent.
+ * hands out is recorded (`wire.js`) -- the method, the arguments with the
+ * device's objects by number, the guest memory each allocation in the call
+ * gave, and after an unlock the bytes the lock let the program write -- and
+ * played, in the same order, on a device made with the renderer, wherever
+ * that one lives. The two take the same calls, so they hold the same state,
+ * and the renderer behind the second draws what the first was told to; the
+ * guest memory the second reads is the bytes that were sent to it, as they
+ * were when they were sent.
  *
  * What only the renderer can answer -- what a device's diagnostics say, when
  * its frames are done -- is asked of the second device (`answered`).
  */
+
+import { OP, SECTION, SERVICE_REF, WAIT, createReader } from './wire.js';
 
 /**
  * The calls whose answer the played device holds back while it has too many
  * frames in flight, and the caller with it.
  */
 const PACED = new Set(['Present']);
+
+/**
+ * Whether a method may hand out one of the device's objects through a
+ * structure it is given -- what makes one, gets one or asks for one -- so
+ * that the structures are looked through after it. Both sides ask this.
+ *
+ * @param {string} name
+ */
+function handsOut(name){
+    return name.startsWith('Create') || name.startsWith('Get') || name.startsWith('Query')
+        || name === 'EndStateBlock';
+}
 
 /** The calls after which the bytes a lock let the program write are sent. */
 const UNLOCKS = new Set(['Unlock', 'UnlockRect', 'UnlockCubeRect', 'UnlockBox', 'ReleaseDC']);
@@ -47,15 +62,11 @@ function partOf(args){
     return args.slice(0, end).join(',');
 }
 
-/** A reference to one of the device's objects, by its number. */
-const REF = '\u0000ref';
+/** No arguments to look through. */
+const NOTHING = /** @type {readonly unknown[]} */ (Object.freeze([]));
 
-/**
- * A service of the caller's passed to a call -- the GDI a surface's context
- * is made by: the played side is given a stand-in whose functions answer
- * what the caller's answered.
- */
-const SERVICE = '\u0000service';
+/** The objects found to be a device's: one never stops being one. @type {WeakSet<object>} */
+const DEVICE_OBJECTS = new WeakSet();
 
 /**
  * Whether a value is one of a device's objects -- the device, a resource, a
@@ -71,10 +82,17 @@ function isDeviceObject(value){
     {
         return false;
     }
-    for (const key of Object.keys(value))
+    if (DEVICE_OBJECTS.has(value))
+    {
+        return true;
+    }
+    // Asked of the same few objects on every call, each with a hundred
+    // methods: a walk that stops at the first, and once known, never again.
+    for (const key in value)
     {
         if (typeof /** @type {any} */ (value)[key] === 'function')
         {
+            DEVICE_OBJECTS.add(value);
             return true;
         }
     }
@@ -83,64 +101,56 @@ function isDeviceObject(value){
 
 /**
  * Numbers every device object a call's answer or arguments reached, in one
- * order on both sides: the answer, then each argument, depth first; an object
- * already numbered is not entered.
+ * order on both sides: the answer, then each argument, each with its own
+ * members -- where a call puts what it makes, an out-structure's member --
+ * and no deeper.
  *
- * @param {unknown[]} values
- * @param {(object: Record<string, any>) => boolean} bind  numbers a new one, false for a known one
+ * @param {unknown} result @param {readonly unknown[]} args
+ * @param {(object: Record<string, any>) => void} bind  numbers one not yet numbered
  */
-function bindAll(values, bind){
-    /** @param {unknown} value @param {number} depth */
-    const visit = (value, depth)=>{
-        if (value === null || typeof value !== 'object' || ArrayBuffer.isView(value)
-            || value instanceof Promise || depth > 8)
-        {
-            return;
-        }
-        if (isDeviceObject(value))
-        {
-            bind(value);
-            return;
-        }
-        if (Array.isArray(value))
-        {
-            for (const one of value)
-            {
-                visit(one, depth + 1);
-            }
-            return;
-        }
-        for (const key of Object.keys(value))
-        {
-            visit(/** @type {any} */ (value)[key], depth + 1);
-        }
-    };
-    for (const value of values)
+function bindAll(result, args, bind){
+    visit(result, bind);
+    for (let index = 0; index < args.length; index++)
     {
-        visit(value, 0);
+        visit(args[index], bind);
     }
 }
 
 /**
- * @typedef {Object} RecordedCall
- * @property {number} t           the object called, by number (0, the root)
- * @property {string} [m]         the method
- * @property {any[]} [a]          its arguments, encoded
- * @property {string} [get]       a property read that reached a device object
- * @property {string} [set]       a property written
- * @property {any} [v]            the value written, encoded
- * @property {number[]} [allocs]  the guest addresses the call's allocations gave
- * @property {any[]} [replies]    what the caller's services answered the call, in order
- * @property {{ address: number, bytes: Uint8Array }[]} [ship]
- *     guest memory the program wrote through a lock, put in place before the call is played
- * @property {{ address: number, bytes: Uint8Array }[]} [wrote]
- *     guest memory the recorded call wrote itself -- a copy between two
- *     resources' bytes -- put in place after it is played, over what the
- *     played call wrote there from bytes it was never sent
- * @property {true} [w]           the caller waits for the played call's answer
- * @property {true} [p]           the caller waits for the played call's answer when that
- *     is held: a present past the frames a device may have in flight
+ * @param {unknown} value
+ * @param {(object: Record<string, any>) => void} bind
  */
+function visit(value, bind){
+    if (value === null || typeof value !== 'object' || ArrayBuffer.isView(value)
+        || value instanceof Promise)
+    {
+        return;
+    }
+    if (isDeviceObject(value))
+    {
+        bind(value);
+        return;
+    }
+    if (Array.isArray(value))
+    {
+        for (let index = 0; index < value.length; index++)
+        {
+            if (isDeviceObject(value[index]))
+            {
+                bind(value[index]);
+            }
+        }
+        return;
+    }
+    for (const key in value)
+    {
+        const member = /** @type {any} */ (value)[key];
+        if (isDeviceObject(member))
+        {
+            bind(member);
+        }
+    }
+}
 
 /**
  * What a played call answers a call the caller waits for: its answer, and the
@@ -149,6 +159,19 @@ function bindAll(values, bind){
  * @typedef {Object} PlayedAnswer
  * @property {any} answer
  * @property {any[]} outs
+ */
+
+/**
+ * Where a recording writes its calls, and what it is told of each: the
+ * writer's end of `wire.js`, and the carrier that takes what is written.
+ *
+ * @typedef {Object} Transport
+ * @property {ReturnType<typeof import('./wire.js').createWriter>} writer
+ * @property {(wait: number, name: string) => any} called
+ *     the call just written is whole but for how it is waited for, which this
+ *     writes: what it gives back is a waited call's `PlayedAnswer` (or a
+ *     promise of one), and for a paced call a promise when the caller is held
+ * @property {() => void} recorded  a record that is not a call was written
  */
 
 /**
@@ -161,18 +184,22 @@ function bindAll(values, bind){
  *     the device's root (`IDirect3D9`), made with no renderer behind it
  * @param {(address: number, length: number) => Uint8Array} options.readMemory
  *     the guest memory the locked bytes are read from
- * @param {(call: RecordedCall) => PlayedAnswer | Promise<PlayedAnswer> | undefined} options.send
- *     where each call goes; what it gives back is the answer of a call marked `w`
+ * @param {Transport} options.transport
  * @param {(target: any, name: string, args: any[]) => boolean} [options.answered]
  *     whether a call's answer is the other side's: what only its renderer
- *     knows, which the recorded device has no say in
+ *     knows, which the recorded device has no say in. It is given the
+ *     device's own objects, so what it asks of them is not recorded.
+ * @param {ReadonlySet<string>} [options.answers]  the only methods `answered` is asked about
  * @returns {{ root: any, allocated: (address: number, bytes: number) => void,
+ *     freed: (address: number) => void,
  *     wrote: (address: number, bytes: Uint8Array) => void, outward: (value: any) => any }}
- *     `allocated` is told every allocation the recorded device makes, and
- *     `wrote` every write it makes into guest memory; `outward` is a value of
- *     the device's as the caller is given it
+ *     `allocated` and `freed` are told every allocation the recorded device
+ *     makes and gives back, and `wrote` every write it makes into guest
+ *     memory; `outward` is a value of the device's as the caller is given it
  */
-export function createRecording({ root, readMemory, send, answered = ()=>false }){
+export function createRecording(options){
+    const { root, readMemory, transport, answered = ()=>false, answers = new Set() } = options;
+    const { writer } = transport;
     /** @type {WeakMap<object, number>} */
     const numbers = new WeakMap([[root, 0]]);
     let next = 1;
@@ -191,7 +218,7 @@ export function createRecording({ root, readMemory, send, answered = ()=>false }
     const services = new WeakSet();
     /** The functions the caller put on the device's objects, its own. @type {WeakMap<object, Set<string>>} */
     const owned = new WeakMap();
-    /** The allocations so far, by address, for the extent of a locked block. */
+    /** The allocations held, by address, for the extent of a locked block. */
     const blocks = { starts: /** @type {number[]} */ ([]), ends: /** @type {number[]} */ ([]) };
     /** The current call's allocations. @type {number[] | null} */
     let allocs = null;
@@ -199,88 +226,56 @@ export function createRecording({ root, readMemory, send, answered = ()=>false }
     let writes = null;
     /** How deep in calls the program is: a call the device makes back through the caller is part of its own. */
     let depth = 0;
+    /**
+     * Each object's methods as the caller calls them, made once for each
+     * method the object has under that name.
+     *
+     * @type {WeakMap<object, Map<string, { of: Function, as: Function }>>}
+     */
+    const methods = new WeakMap();
 
-    /** @param {object} object */
+    /**
+     * Numbers an object, under itself and under its proxy, so that either is
+     * found by one look.
+     *
+     * @param {object} object
+     */
     const bind = object=>{
         const own = raws.get(object) ?? object;
-        if (numbers.has(own) || services.has(own))
+        if (!numbers.has(own) && !services.has(own))
         {
-            return false;
+            const number = next++;
+            numbers.set(own, number);
+            const proxy = proxies.get(own);
+            if (proxy)
+            {
+                numbers.set(proxy, number);
+            }
         }
-        numbers.set(own, next++);
-        return true;
     };
-
-    /** @param {any} value */
-    const raw = value=>(value !== null && typeof value === 'object' ? raws.get(value) ?? value
-        : value);
 
     /**
-     * An argument as it is sent: a device object by its number, bytes copied,
-     * structures and arrays member by member.
+     * What one of the values a call is given is on the wire.
      *
-     * @param {any} value @returns {any}
+     * @type {import('./wire.js').RefOf}
      */
-    const encode = value=>{
-        if (typeof value === 'function')
-        {
-            throw new TypeError('remote: a call passed a function, which cannot be replayed');
-        }
-        if (value === null || typeof value !== 'object')
-        {
-            return value;
-        }
-        const object = raw(value);
-        const number = numbers.get(object);
-        if (number !== undefined)
-        {
-            return { [REF]: number };
-        }
-        if (services.has(object))
-        {
-            return { [SERVICE]: true };
-        }
-        if (ArrayBuffer.isView(object))
-        {
-            return /** @type {any} */ (object).slice();
-        }
-        if (Array.isArray(object))
-        {
-            return object.map(encode);
-        }
-        if (isDeviceObject(object))
-        {
-            // Not this device's: what a structure the call writes its answer
-            // into held before, from another. The call reads nothing of it.
-            return null;
-        }
-        /** @type {Record<string, any>} */
-        const out = {};
-        for (const key of Object.keys(object))
-        {
-            out[key] = encode(object[key]);
-        }
-        return out;
-    };
+    const refOf = value=>numbers.get(value) ?? (services.has(value) ? SERVICE_REF : undefined);
+
     /**
      * An argument as the recorded device takes it: its own objects rather than
-     * their proxies, one level into a structure or an array.
+     * their proxies, one level into an array.
      *
      * @param {any} value @returns {any}
      */
     const unwrap = value=>{
-        if (value === null || typeof value !== 'object')
-        {
-            return value;
-        }
         const object = raws.get(value);
         if (object)
         {
             return object;
         }
-        if (Array.isArray(value))
+        if (Array.isArray(value) && value.some(one=>raws.has(one)))
         {
-            return value.some(one=>raws.has(one)) ? value.map(one=>raws.get(one) ?? one) : value;
+            return value.map(one=>raws.get(one) ?? one);
         }
         return value;
     };
@@ -291,12 +286,11 @@ export function createRecording({ root, readMemory, send, answered = ()=>false }
      * @param {any} value
      */
     const wrapInto = value=>{
-        if (value === null || typeof value !== 'object' || ArrayBuffer.isView(value)
-            || isDeviceObject(value) || raws.has(value))
+        if (ArrayBuffer.isView(value) || isDeviceObject(value) || raws.has(value))
         {
             return;
         }
-        for (const key of Object.keys(value))
+        for (const key in value)
         {
             const member = value[key];
             if (!raws.has(member) && isDeviceObject(member))
@@ -335,12 +329,11 @@ export function createRecording({ root, readMemory, send, answered = ()=>false }
     };
 
     /**
-     * From an address to the end of the allocation it lies in.
+     * Where an address's block lies among those held: its index, or -1.
      *
      * @param {number} address
-     * @returns {{ address: number, bytes: Uint8Array }[]}
      */
-    const blockFrom = address=>{
+    const blockAt = address=>{
         let lo = 0;
         let hi = blocks.starts.length - 1;
         let found = -1;
@@ -357,11 +350,19 @@ export function createRecording({ root, readMemory, send, answered = ()=>false }
                 hi = mid - 1;
             }
         }
-        if (found < 0 || address >= blocks.ends[found])
-        {
-            return [];
-        }
-        return [{ address, bytes: readMemory(address, blocks.ends[found] - address) }];
+        return found >= 0 && address < blocks.ends[found] ? found : -1;
+    };
+
+    /**
+     * From an address to the end of the allocation it lies in.
+     *
+     * @param {number} address
+     * @returns {{ address: number, bytes: Uint8Array }[]}
+     */
+    const blockFrom = address=>{
+        const found = blockAt(address);
+        return found < 0 ? []
+            : [{ address, bytes: readMemory(address, blocks.ends[found] - address) }];
     };
 
     /**
@@ -383,7 +384,7 @@ export function createRecording({ root, readMemory, send, answered = ()=>false }
         }
         /** @type {Record<string, any> | null} */
         let copy = null;
-        for (const key of Object.keys(result))
+        for (const key in result)
         {
             if (isDeviceObject(result[key]))
             {
@@ -415,13 +416,16 @@ export function createRecording({ root, readMemory, send, answered = ()=>false }
             const value = from[key];
             if (value === null || typeof value !== 'object')
             {
-                into[key] = value;
+                if (value !== undefined)
+                {
+                    into[key] = value;
+                }
             }
             else if (ArrayBuffer.isView(value))
             {
                 into[key] = /** @type {any} */ (value).slice();
             }
-            else if (!isDeviceObject(value) && !(REF in value))
+            else if (!isDeviceObject(value) && !isDeviceObject(into[key]))
             {
                 if (into[key] === null || typeof into[key] !== 'object')
                 {
@@ -457,85 +461,199 @@ export function createRecording({ root, readMemory, send, answered = ()=>false }
     };
 
     /**
+     * `applied` with the argument at `index` as the device takes it, copied
+     * from `args` the first time one differs.
+     *
+     * @param {any[]} applied @param {any[]} args @param {number} index
+     */
+    const unwrapInto = (applied, args, index)=>{
+        const arg = args[index];
+        if (arg === null || typeof arg !== 'object')
+        {
+            return applied;
+        }
+        const own = unwrap(arg);
+        if (own === arg)
+        {
+            return applied;
+        }
+        const copy = applied === args ? args.slice() : applied;
+        copy[index] = own;
+        return copy;
+    };
+
+    /** @param {{ address: number, bytes: Uint8Array }[]} list */
+    const writeMemory = list=>{
+        writer.u32(list.length);
+        for (let index = 0; index < list.length; index++)
+        {
+            writer.memory(list[index].address, list[index].bytes);
+        }
+    };
+
+    /**
+     * A method of one of the device's objects as the caller calls it: made on
+     * the object, recorded and sent.
+     *
      * @param {object} target @param {string} name @param {Function} method
      * @returns {(...args: any[]) => any}
      */
-    const methodOf = (target, name, method)=>(...given)=>{
-        if (depth > 0)
-        {
-            return method.apply(target, given.map(unwrap));
-        }
-        /** @type {any[]} */
-        const replies = [];
-        const args = given.map(arg=>(isDeviceObject(arg) && !numbers.has(raw(arg))
-            ? serviceOf(arg, replies) : arg));
-        /** @type {RecordedCall} */
-        const call = { t: /** @type {number} */ (numbers.get(target)), m: name,
-            a: args.map(encode) };
-        if (UNLOCKS.has(name))
-        {
-            call.ship = lockedBytes(target, name === 'ReleaseDC' ? '' : partOf(args));
-        }
-        allocs = [];
-        writes = [];
-        depth++;
-        let result;
-        try
-        {
-            result = method.apply(target, args.map(unwrap));
-        }
-        finally
-        {
-            depth--;
-            if (allocs.length > 0)
+    const methodOf = (target, name, method)=>{
+        const unlocking = UNLOCKS.has(name);
+        const locking = name.startsWith('Lock');
+        const paced = PACED.has(name);
+        const mayAnswer = answers.has(name);
+        const making = handsOut(name);
+        /** The method's number in the writer's table, once it has one. */
+        let nameId = -1;
+        /** @type {number | undefined} */
+        let number;
+        return (/** @type {any[]} */ ...args)=>{
+            const count = args.length;
+            /** What the device is given: its own objects rather than their proxies. */
+            let applied = args;
+            if (depth > 0)
             {
-                call.allocs = allocs;
+                for (let index = 0; index < count; index++)
+                {
+                    applied = unwrapInto(applied, args, index);
+                }
+                return method.apply(target, applied);
             }
-            if (writes.length > 0)
+            /** @type {any[] | null} */
+            let replies = null;
+            number ??= /** @type {number} */ (numbers.get(target));
+            if (nameId < 0)
             {
-                call.wrote = writes;
+                writer.u8(OP.CALL);
+                writer.u32(number);
+                nameId = writer.string(name);
+                writer.u8(count);
             }
+            else
+            {
+                writer.call(number, nameId, count);
+            }
+            for (let index = 0; index < count; index++)
+            {
+                const arg = args[index];
+                if (writer.value(arg, refOf))
+                {
+                    // A service of the caller's: the device is given one that
+                    // keeps what it answers.
+                    replies ??= [];
+                    args[index] = serviceOf(arg, replies);
+                }
+                applied = unwrapInto(applied, args, index);
+            }
+            const shipped = unlocking
+                ? lockedBytes(target, name === 'ReleaseDC' ? '' : partOf(args))
+                : null;
             allocs = null;
             writes = null;
-        }
-        if (replies.length > 0)
-        {
-            call.replies = replies.map(encode);
-        }
-        bindAll([result, ...args], bind);
-        for (const arg of args)
-        {
-            wrapInto(arg);
-            const bits = arg?.pBits;
-            if (name.startsWith('Lock') && typeof bits === 'number')
+            depth++;
+            let result;
+            let failed = true;
+            try
             {
-                const locks = lockedAt.get(target) ?? new Map();
-                locks.set(partOf(args), bits);
-                lockedAt.set(target, locks);
+                result = method.apply(target, applied);
+                failed = false;
             }
-        }
-        if (PACED.has(name))
-        {
-            call.p = true;
-            const held = send(call);
-            return held instanceof Promise ? held : result;
-        }
-        if (!answered(target, name, args))
-        {
-            send(call);
-            return answerOf(result);
-        }
-        call.w = true;
-        /** @param {PlayedAnswer} played */
-        const take = played=>{
-            for (let index = 0; index < args.length; index++)
+            finally
             {
-                copyOut(args[index], played.outs[index]);
+                depth--;
+                // What the call set, which the checker cannot follow into it.
+                const made = /** @type {number[] | null} */ (allocs);
+                const wrote = /** @type {{ address: number, bytes: Uint8Array }[] | null} */ (writes);
+                allocs = null;
+                writes = null;
+                // Whatever the call did, the record is finished, so the next
+                // one starts where it should.
+                const shipping = shipped !== null && shipped.length > 0;
+                writer.u8((made ? SECTION.ALLOCS : 0) | (replies ? SECTION.REPLIES : 0)
+                    | (shipping ? SECTION.SHIP : 0) | (wrote ? SECTION.WROTE : 0));
+                if (made)
+                {
+                    writer.u32(made.length);
+                    for (let index = 0; index < made.length; index++)
+                    {
+                        writer.u32(made[index]);
+                    }
+                }
+                if (replies)
+                {
+                    writer.u32(replies.length);
+                    for (let index = 0; index < replies.length; index++)
+                    {
+                        writer.value(replies[index], refOf, 1);
+                    }
+                }
+                if (shipping)
+                {
+                    writeMemory(/** @type {{ address: number, bytes: Uint8Array }[]} */ (shipped));
+                }
+                if (wrote)
+                {
+                    writeMemory(wrote);
+                }
+                if (failed)
+                {
+                    // The record is sent as it is, and what the played device
+                    // makes of it is its own failure, not this one's.
+                    try
+                    {
+                        transport.called(WAIT.NONE, name);
+                    }
+                    catch {
+                        // The caller is told of the recorded call's failure.
+                    }
+                }
             }
-            return played.answer;
+            bindAll(result, making ? args : NOTHING, bind);
+            if (making || locking)
+            {
+                for (let index = 0; index < count; index++)
+                {
+                    const arg = args[index];
+                    if (arg === null || typeof arg !== 'object')
+                    {
+                        continue;
+                    }
+                    if (making)
+                    {
+                        wrapInto(arg);
+                    }
+                    const bits = arg.pBits;
+                    if (locking && typeof bits === 'number')
+                    {
+                        const locks = lockedAt.get(target) ?? new Map();
+                        locks.set(partOf(args), bits);
+                        lockedAt.set(target, locks);
+                    }
+                }
+            }
+            if (paced)
+            {
+                const held = transport.called(WAIT.PACED, name);
+                return held instanceof Promise ? held.then(()=>result) : result;
+            }
+            if (!mayAnswer || !answered(target, name, applied))
+            {
+                transport.called(WAIT.NONE, name);
+                return typeof result === 'object' ? answerOf(result) : result;
+            }
+            /** @param {PlayedAnswer} played */
+            const take = played=>{
+                for (let index = 0; index < args.length; index++)
+                {
+                    copyOut(args[index], played.outs[index]);
+                }
+                return played.answer;
+            };
+            const reply = /** @type {PlayedAnswer | Promise<PlayedAnswer>} */ (
+                transport.called(WAIT.ANSWER, name));
+            return reply instanceof Promise ? reply.then(take) : take(reply);
         };
-        const reply = /** @type {PlayedAnswer | Promise<PlayedAnswer>} */ (send(call));
-        return reply instanceof Promise ? reply.then(take) : take(reply);
     };
 
     /** @type {ProxyHandler<any>} */
@@ -548,13 +666,34 @@ export function createRecording({ root, readMemory, send, answered = ()=>false }
             }
             if (typeof value === 'function')
             {
-                return owned.get(target)?.has(key) ? value : methodOf(target, key, value);
+                let made = methods.get(target);
+                const known = made?.get(key);
+                if (known !== undefined && known.of === value)
+                {
+                    return known.as;
+                }
+                if (owned.get(target)?.has(key))
+                {
+                    return value;
+                }
+                if (!made)
+                {
+                    made = new Map();
+                    methods.set(target, made);
+                }
+                const method = methodOf(target, key, value);
+                made.set(key, { of: value, as: method });
+                return method;
             }
             if (isDeviceObject(value))
             {
-                if (bind(value))
+                if (!numbers.has(value))
                 {
-                    send({ t: /** @type {number} */ (numbers.get(target)), get: key });
+                    bind(value);
+                    writer.u8(OP.GET);
+                    writer.u32(/** @type {number} */ (numbers.get(target)));
+                    writer.string(key);
+                    transport.recorded();
                 }
                 return proxyOf(value);
             }
@@ -572,8 +711,11 @@ export function createRecording({ root, readMemory, send, answered = ()=>false }
             }
             if (typeof key === 'string')
             {
-                send({ t: /** @type {number} */ (numbers.get(target)), set: key,
-                    v: encode(value) });
+                writer.u8(OP.SET);
+                writer.u32(/** @type {number} */ (numbers.get(target)));
+                writer.string(key);
+                writer.value(value, refOf);
+                transport.recorded();
             }
             return Reflect.set(target, key, unwrap(value));
         },
@@ -587,6 +729,11 @@ export function createRecording({ root, readMemory, send, answered = ()=>false }
             proxy = new Proxy(object, handler);
             proxies.set(object, proxy);
             raws.set(proxy, object);
+            const number = numbers.get(object);
+            if (number !== undefined)
+            {
+                numbers.set(proxy, number);
+            }
         }
         return proxy;
     };
@@ -595,7 +742,10 @@ export function createRecording({ root, readMemory, send, answered = ()=>false }
         root: proxyOf(root),
         outward: answerOf,
         allocated(address, bytes){
-            allocs?.push(address);
+            if (depth > 0)
+            {
+                (allocs ??= []).push(address);
+            }
             let at = blocks.starts.length;
             while (at > 0 && blocks.starts[at - 1] > address)
             {
@@ -604,21 +754,30 @@ export function createRecording({ root, readMemory, send, answered = ()=>false }
             blocks.starts.splice(at, 0, address);
             blocks.ends.splice(at, 0, address + bytes);
         },
+        freed(address){
+            const found = blockAt(address);
+            if (found >= 0 && blocks.starts[found] === address)
+            {
+                blocks.starts.splice(found, 1);
+                blocks.ends.splice(found, 1);
+            }
+        },
         wrote(address, bytes){
-            if (writes)
+            if (depth > 0)
             {
-                writes.push({ address, bytes: bytes.slice() });
+                (writes ??= []).push({ address, bytes: bytes.slice() });
+                return;
             }
-            else
-            {
-                send({ t: 0, wrote: [{ address, bytes: bytes.slice() }] });
-            }
+            writer.u8(OP.WROTE);
+            writer.u32(1);
+            writer.memory(address, bytes);
+            transport.recorded();
         },
     };
 }
 
 /**
- * The playing side: the calls a recording sent, made in their order on a
+ * The playing side: the calls a recording wrote, made in their order on a
  * root of the same build, with the same objects by the same numbers.
  *
  * @param {Object} options
@@ -628,10 +787,14 @@ export function createRecording({ root, readMemory, send, answered = ()=>false }
  *     this side reads
  * @param {(address: number, length: number) => Uint8Array} options.read
  *     that memory read, for the copies a call describes and its caller makes
- * @returns {{ play: (call: RecordedCall) => PlayedAnswer | Promise<PlayedAnswer> | undefined,
- *     allocate: () => number }}
- *     `allocate` is the played device's: the next address its recorded call
- *     was given
+ * @returns {{ play: (call: import('./wire.js').ReadCall) => any, allocate: () => number,
+ *     object: (number: number) => any,
+ *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
+ *         => void }}
+ *     `play` answers a waited call with its `PlayedAnswer` (or a promise of
+ *     one), and a paced one with the promise its device holds the caller on;
+ *     `allocate` is the played device's, the next address its recorded call
+ *     was given; `read` reads a batch of calls
  */
 export function createPlayer({ root, ship, read }){
     /** @type {object[]} */
@@ -640,8 +803,8 @@ export function createPlayer({ root, ship, read }){
     const known = new WeakSet([root]);
     /** @type {number[]} */
     let allocs = [];
-    /** The call being played, for what a failure says. @type {RecordedCall | null} */
-    let playing = null;
+    /** The call being played, for what a failure says. @type {string} */
+    let playing = '';
     /** @type {any[]} */
     let replies = [];
     /**
@@ -651,42 +814,15 @@ export function createPlayer({ root, ship, read }){
     const standIn = new Proxy({}, {
         get: (_, key)=>(typeof key === 'string' ? ()=>replies.shift() : undefined),
     });
+    const reader = createReader({ ref: number=>objects[number], service: ()=>standIn });
 
     /** @param {object} object */
     const bind = object=>{
-        if (known.has(object))
+        if (!known.has(object))
         {
-            return false;
+            known.add(object);
+            objects.push(object);
         }
-        known.add(object);
-        objects.push(object);
-        return true;
-    };
-    /** @param {any} value @returns {any} */
-    const decode = value=>{
-        if (value === null || typeof value !== 'object' || ArrayBuffer.isView(value))
-        {
-            return value;
-        }
-        if (Array.isArray(value))
-        {
-            return value.map(decode);
-        }
-        if (REF in value)
-        {
-            return objects[value[REF]];
-        }
-        if (SERVICE in value)
-        {
-            return standIn;
-        }
-        /** @type {Record<string, any>} */
-        const out = {};
-        for (const key of Object.keys(value))
-        {
-            out[key] = decode(value[key]);
-        }
-        return out;
     };
 
     /**
@@ -711,69 +847,73 @@ export function createPlayer({ root, ship, read }){
 
     return {
         play(call){
-            for (const { address, bytes } of call.ship ?? [])
-            {
-                ship(address, bytes);
-            }
-            allocs = call.allocs ? [...call.allocs] : [];
-            replies = call.replies ? call.replies.map(decode) : [];
-            playing = call;
             const target = /** @type {any} */ (objects[call.t]);
-            if (call.get !== undefined)
+            if (call.op === OP.GET)
             {
-                bindAll([target[call.get]], bind);
+                bindAll(target[/** @type {string} */ (call.m)], [], bind);
+                return undefined;
             }
-            else if (call.set !== undefined)
+            if (call.op === OP.SET)
             {
-                target[call.set] = decode(call.v);
+                target[/** @type {string} */ (call.m)] = call.v;
+                return undefined;
             }
-            else if (call.m !== undefined)
+            if (call.op !== OP.CALL)
             {
-                const args = (call.a ?? []).map(decode);
-                const answer = target[call.m](...args);
-                bindAll([answer, ...args], bind);
-                if (allocs.length > 0)
-                {
-                    throw new Error(`remote: ${call.m} allocated less on the played device`);
-                }
-                const later = answer instanceof Promise;
-                if (!later)
-                {
-                    move(args);
-                }
                 for (const { address, bytes } of call.wrote ?? [])
                 {
                     ship(address, bytes);
                 }
-                if (later)
-                {
-                    const settled = answer.then(value=>{
-                        move(args);
-                        return { answer: value, outs: args };
-                    });
-                    if (call.w)
-                    {
-                        return settled;
-                    }
-                    return call.p ? answer : undefined;
-                }
-                return call.w ? { answer, outs: args } : undefined;
+                return undefined;
+            }
+            for (const { address, bytes } of call.ship ?? [])
+            {
+                ship(address, bytes);
+            }
+            allocs = call.allocs ?? [];
+            replies = call.replies ?? [];
+            playing = /** @type {string} */ (call.m);
+            const args = /** @type {any[]} */ (call.a);
+            const answer = target[playing](...args);
+            bindAll(answer, handsOut(playing) ? args : NOTHING, bind);
+            if (allocs.length > 0)
+            {
+                throw new Error(`remote: ${playing} allocated less on the played device`);
+            }
+            const later = answer instanceof Promise;
+            if (!later)
+            {
+                move(args);
             }
             for (const { address, bytes } of call.wrote ?? [])
             {
                 ship(address, bytes);
             }
-            return undefined;
+            if (later)
+            {
+                const settled = answer.then(value=>{
+                    move(args);
+                    return { answer: value, outs: args };
+                });
+                if (call.wait === WAIT.ANSWER)
+                {
+                    return settled;
+                }
+                return call.wait === WAIT.PACED ? answer : undefined;
+            }
+            return call.wait === WAIT.ANSWER ? { answer, outs: args } : undefined;
         },
+        object: number=>objects[number],
         allocate(){
             const address = allocs.shift();
             if (address === undefined)
             {
                 throw new Error('remote: the played device allocated more than the recorded one'
-                    + ` in ${playing?.m ?? playing?.get ?? playing?.set}`);
+                    + ` in ${playing}`);
             }
             return address;
         },
+        read: (buffer, each)=>reader.read(buffer, each),
     };
 }
 

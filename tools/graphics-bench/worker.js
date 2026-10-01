@@ -11,9 +11,14 @@
  * present (`record`), the present and the replay onto the device (`replay`),
  * what the frame did after (`tail`) -- and the wait for the device to finish
  * the frame's work (`gpu`), which a frame on this thread does not pay.
+ *
+ * `remote` records the Direct3D calls here and plays them in a worker of
+ * their own (`played.js`) on its device: the replay is that worker's, and a
+ * frame here is the calls and the present; `tail` is then the wait for the
+ * played side to come within its bound of frames behind.
  */
 
-self.onmessage = async({ data: { scene, draws, frames, warm, root, modelOnly } })=>{
+self.onmessage = async({ data: { scene, draws, frames, warm, root, modelOnly, remote } })=>{
     try
     {
         const graphics = new URL(root, location.href).href;
@@ -34,6 +39,39 @@ self.onmessage = async({ data: { scene, draws, frames, warm, root, modelOnly } }
                 marks[name] = performance.now();
             },
         };
+        if (remote)
+        {
+            const { recordedDirect3D } = await import(`${graphics}/remote/direct3d.js`);
+            const { createSender } = await import(`${graphics}/remote/channel.js`);
+            const played = new Worker(new URL(`./played.js?root=${encodeURIComponent(graphics)}`,
+                location.href), { type: 'module' });
+            played.postMessage({ type: 'open' });
+            /** @param {any} factory @param {any} services */
+            const recordedRoot = (factory, services)=>{
+                const { port1, port2 } = new MessageChannel();
+                /** @type {Record<string, any>} */
+                const options = {};
+                for (const [key, value] of Object.entries(services))
+                {
+                    if (typeof value !== 'function' && key !== 'backend')
+                    {
+                        options[key] = value;
+                    }
+                }
+                played.postMessage({ type: 'root', api: factory.name === 'createDirect3D8'
+                    ? 'd3d8' : 'd3d9', options, port: port2 }, [port2]);
+                const sender = createSender({
+                    post: (/** @type {any} */ message, /** @type {any[]} */ transfer)=>
+                        port1.postMessage(message, transfer),
+                    on: { failed: (/** @type {string} */ message)=>{
+                        throw new Error(`the played device stopped: ${message}`);
+                    } },
+                });
+                port1.onmessage = event=>sender.receive(event.data);
+                return recordedDirect3D(factory, services, sender);
+            };
+            /** @type {any} */ (gpu).root = recordedRoot;
+        }
         const run = SCENES[scene](draws, gpu);
         /** @type {number[][]} */
         const rows = [];
@@ -43,7 +81,10 @@ self.onmessage = async({ data: { scene, draws, frames, warm, root, modelOnly } }
             const start = performance.now();
             await run.frame();
             const end = performance.now();
-            await device.queue.onSubmittedWorkDone();
+            if (!remote)
+            {
+                await device.queue.onSubmittedWorkDone();
+            }
             if (frame >= warm)
             {
                 rows.push([marks.recorded - start, marks.replayed - marks.recorded,

@@ -8,6 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loopbackDirect3D } from './loopback.js';
 import { createMirror } from './replay.js';
+import { playedDirect3D, recordedDirect3D } from './direct3d.js';
+import { createReceiver, createSender } from './channel.js';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from '../d3d9/constants.js';
 import { D3DCLEAR, D3DFMT_INDEX, D3DPT, D3DRS, D3DTS } from '../d3d8/constants.js';
 import { createDirect3D9 } from '../d3d9/device.js';
@@ -330,6 +332,47 @@ async function framesThrough(make){
 test('frames played from a record ask of the GPU what the device itself asked', async()=>{
     const direct = await framesThrough(createDirect3D9);
     const played = await framesThrough(services=>loopbackDirect3D(createDirect3D9, services));
+    assert.equal(played.length, direct.length);
+    played.forEach((frame, index)=>assert.ok(frame === direct[index],
+        `frame ${index} asked the same`));
+});
+
+/**
+ * A Direct3D 9 root whose calls cross a port to their played twin, as they
+ * cross to a worker.
+ *
+ * @param {any} services
+ */
+function acrossAPort(services){
+    const { port1, port2 } = new MessageChannel();
+    const played = playedDirect3D(createDirect3D9, {
+        ...services,
+        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+            port2.postMessage({ type: 'wrote', writes: [{ address, bytes: bytes.slice() }] }),
+    });
+    const receiver = createReceiver({
+        played,
+        post: (message, transfer)=>port2.postMessage(message, transfer ?? []),
+    });
+    port2.onmessage = event=>receiver.receive(event.data);
+    const sender = createSender({
+        post: (message, transfer)=>port1.postMessage(message, transfer),
+        on: { wrote: services.writeMemory },
+    });
+    port1.onmessage = event=>sender.receive(event.data);
+    const root = recordedDirect3D(createDirect3D9, services, sender);
+    return Object.assign(root, { close: ()=>{
+        port1.close();
+        port2.close();
+    } });
+}
+
+test('frames whose calls cross a port ask of the GPU what the device itself asked', async()=>{
+    const direct = await framesThrough(createDirect3D9);
+    /** @type {any} */
+    let made = null;
+    const played = await framesThrough(services=>(made = acrossAPort(services)));
+    made.close();
     assert.equal(played.length, direct.length);
     played.forEach((frame, index)=>assert.ok(frame === direct[index],
         `frame ${index} asked the same`));

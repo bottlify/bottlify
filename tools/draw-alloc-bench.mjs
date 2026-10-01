@@ -40,6 +40,12 @@
  * `--top K` prints the K functions of the engine's own code that allocated
  * the most, with the file and line each starts at. `--root DIR` measures the
  * engine of another checkout, for a tree before a change against one after.
+ *
+ * `--model` gives the Direct3D devices no backend: what the calls cost the
+ * device's model alone. `--remote` gives the scene a recorded root whose calls
+ * go out as a worker's would -- each turn's batch cloned as a port clones it --
+ * and are played nowhere: what the program's thread keeps of a frame whose
+ * rendering is another thread's.
  */
 
 import { Session } from 'node:inspector/promises';
@@ -54,6 +60,10 @@ const ROOT = rootAt > 0 ? resolve(process.argv[rootAt + 1]) : HERE;
 const GRAPHICS = pathToFileURL(`${ROOT}/modules/core/src/layers/graphics`).href;
 
 const { createFakeDevice } = await import(`${GRAPHICS}/webgpu/internal/fake-device.js`);
+const remote = process.argv.includes('--remote');
+const modelOnly = process.argv.includes('--model');
+const { recordedDirect3D } = remote ? await import(`${GRAPHICS}/remote/direct3d.js`) : {};
+const { createSender } = remote ? await import(`${GRAPHICS}/remote/channel.js`) : {};
 // The scenes of this checkout, over the graphics layer of the one measured.
 const { SCENES } = await import(`${pathToFileURL(`${HERE}/tools/graphics-scenes.mjs`).href}`
     + `?root=${encodeURIComponent(GRAPHICS)}`);
@@ -73,6 +83,7 @@ function parse(argv){
         else if (arg === '--top') options.top = Number(value());
         else if (arg === '--json') options.json = true;
         else if (arg === '--root') index++;
+        else if (arg === '--remote' || arg === '--model') continue;
         else throw new Error(`unknown argument ${arg}`);
     }
     return options;
@@ -228,7 +239,38 @@ async function main(){
     const runs = {};
     for (const draws of [options.draws, options.draws * 2])
     {
-        const scene = make(draws, quietPasses(createFakeDevice()));
+        const gpu = quietPasses(createFakeDevice());
+        gpu.modelOnly = modelOnly;
+        if (remote)
+        {
+            // The batch crosses as a port carries it; what waits for an
+            // answer is answered at once, with nothing.
+            /** @type {number[]} */
+            const owed = [];
+            const sender = createSender({
+                post: (/** @type {any} */ message, /** @type {any[]} */ transfer)=>{
+                    structuredClone(message, { transfer });
+                    for (const serial of owed.splice(0))
+                    {
+                        queueMicrotask(()=>sender.receive({ type: 'answer', serial, answer: 0,
+                            outs: [] }));
+                    }
+                },
+                framesAhead: Infinity,
+            });
+            const called = sender.called;
+            let serials = 0;
+            sender.called = (/** @type {number} */ wait, /** @type {string} */ name)=>{
+                if (wait === 1 && name !== 'diagnostics')
+                {
+                    owed.push(++serials);
+                }
+                return called(wait, name);
+            };
+            gpu.root = (/** @type {any} */ factory, /** @type {any} */ services)=>
+                recordedDirect3D(factory, services, sender);
+        }
+        const scene = make(draws, gpu);
         for (let frame = 0; frame < warm; frame++)
         {
             await scene.frame();

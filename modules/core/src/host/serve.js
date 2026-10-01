@@ -21,6 +21,7 @@
  */
 
 import { createMacrotask, pacedYield, pagePacing } from '../app.js';
+import { openGraphicsWorker } from './graphics-worker.js';
 import { createLogReader } from '../layers/log/reader.js';
 
 /** How many presented frames are remembered for a diagnostic to read back. */
@@ -370,6 +371,13 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     /** The GPU device of the running program. @type {any} */
     let device = null;
     /**
+     * The worker Direct3D draws in, and how its frames come back. Kept across
+     * programs, as the canvas is: its GPU device outlives the process.
+     *
+     * @type {{ worker: any, frames: string } | null}
+     */
+    let graphics = null;
+    /**
      * A reader on *this* thread, and only where the page could not have one:
      * without shared memory the log's block cannot cross, so the answers a
      * reader would have given here are computed here and posted. With shared
@@ -539,6 +547,28 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             const { bundle, storage, watch, hooks, device: knobs, signal: word, network: relay,
                 ...rest } = options;
             void word;
+            const { graphicsWorker = true, ...deviceKnobs } = knobs ?? {};
+            const returned = graphicsWorker === 'pixels' ? 'pixels' : 'bitmap';
+            if (graphics && (graphicsWorker === false || graphics.frames !== returned))
+            {
+                graphics.worker.terminate();
+                graphics = null;
+            }
+            if (opened && graphicsWorker !== false && !graphics)
+            {
+                // A worker that opens no device is no worker to draw in: the
+                // devices then draw here, and the journal says why.
+                const answer = await openGraphicsWorker({ frames: returned });
+                if (answer.worker)
+                {
+                    graphics = { worker: answer.worker, frames: returned };
+                }
+                else
+                {
+                    console.warn(`graphics worker: ${'reason' in answer ? answer.reason : ''};`
+                        + ' Direct3D draws on the engine\'s thread');
+                }
+            }
             if (relay)
             {
                 const { connectRelay } = await import(/* @vite-ignore */ relay.module);
@@ -569,7 +599,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 pageHidden: ()=>hidden,
                 device: opened
                     ? {
-                        ...knobs,
+                        ...deviceKnobs,
+                        worker: graphics?.worker,
                         device,
                         queue: device.queue,
                         adapter,
