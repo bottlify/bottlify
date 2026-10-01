@@ -68,6 +68,7 @@ import { createLzFunctions } from './lz32/functions.js';
 import { createCommonDialogFunctions } from './comdlg32/functions.js';
 import { createImmFunctions } from './imm32/functions.js';
 import { createShlwapiFunctions } from './shlwapi/functions.js';
+import { createIphlpapiFunctions } from './iphlpapi/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
 import { createIostreamFunctions } from './msvcirt/functions.js';
@@ -581,15 +582,16 @@ export function createWin32Module(){
             // The transport is injected, as the GPU device and the block store are.
             // Without one this is a machine with a network card and no cable: every
             // call behaves, and nothing reaches anywhere.
+            const sockets = createSocketRegistry({
+                adapter: config?.network ?? createLoopbackAdapter(),
+            });
             const winsock = createWinsockFunctions({
                 readMemory,
                 writeMemory,
                 readCString,
                 heap,
                 currentThread: ()=>kernel.currentThread(),
-                registry: createSocketRegistry({
-                    adapter: config?.network ?? createLoopbackAdapter(),
-                }),
+                registry: sockets,
                 // Readiness as a window message, over the same queue PostMessage
                 // uses -- built below, but a function reaching for it now only
                 // ever runs once the machine is up and the queue exists.
@@ -1598,6 +1600,11 @@ export function createWin32Module(){
                 // opened through one of these names is the same socket seen through
                 // another, and they share one error domain.
                 'WSOCK32.dll': winsock.sockets,
+
+                // The adapters behind the sockets: one, on the network they reach.
+                'IPHLPAPI.dll': createIphlpapiFunctions({
+                    readMemory, writeMemory, localAddress: ()=>sockets.localAddress(),
+                }),
                 'WS2_32.dll': winsock.sockets,
                 'MSWSOCK.dll': winsock.extensions,
 

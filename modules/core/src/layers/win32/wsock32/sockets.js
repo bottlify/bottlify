@@ -275,6 +275,9 @@ export function createSocketRegistry({ adapter: supplied } = {}){
     };
 
     const api = {
+        /** The address this machine answers to: the network's, or the loopback. */
+        localAddress: self,
+
         /** @param {number} handle */
         get(handle){
             return sockets.get(handle >>> 0) ?? null;
