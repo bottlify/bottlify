@@ -200,11 +200,16 @@ const CUBE_ELEMENTS = [
 /**
  * A Direct3D 8 or 9 device over the recording double, and a frame of
  * `draws` draws on it: fixed-function and lit, or through a shader pair whose
- * matrix constants are set before every draw.
+ * matrix constants are set before every draw, or through a vertex shader
+ * alone with the fixed pixel stage after it (`shader: 'vertex'`). With
+ * `rebind`, every draw sets its declaration, its shader and its stream again,
+ * the stream alternating between two buffers of one layout -- how a program
+ * that draws each model through its own buffer goes.
  *
- * @param {{ version: 8 | 9, draws: number, moving?: boolean, shader?: boolean }} scene
+ * @param {{ version: 8 | 9, draws: number, moving?: boolean, shader?: boolean | 'vertex',
+ *     rebind?: boolean }} scene
  */
-function directScene({ version, draws, moving = false, shader = false }){
+function directScene({ version, draws, moving = false, shader = false, rebind = false }){
     const nine = version === 9;
     const gpu = quietPasses(createFakeDevice());
     const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
@@ -277,6 +282,13 @@ function directScene({ version, draws, moving = false, shader = false }){
         index16.set([0, 1, 2, 2, 1, 3].map(corner=>face * 4 + corner), face * 6);
     }
     check(indices.buffer.Unlock());
+    /** @type {{ buffer?: any }} */
+    const otherVertices = {};
+    check(device.CreateVertexBuffer(24 * stride, 0, fvf, D3DPOOL.MANAGED, otherVertices));
+    check(otherVertices.buffer.Lock(0, 0, locked, 0));
+    ram.copyWithin(/** @type {number} */ (locked.pBits) - RAM_BASE, view.byteOffset,
+        view.byteOffset + 24 * stride);
+    check(otherVertices.buffer.Unlock());
 
     /** @type {any[]} */
     const textures = [];
@@ -310,18 +322,25 @@ function directScene({ version, draws, moving = false, shader = false }){
         check(device.SetLight(index, one));
         check(device.LightEnable(index, true));
     });
+    /** @type {{ shader?: any, declaration?: any }} */
+    const made = {};
+    /** @type {any} */
+    let vertexShader = null;
     if (shader)
     {
-        /** @type {{ shader?: any, declaration?: any }} */
-        const made = {};
         check(device.CreateVertexDeclaration(CUBE_ELEMENTS, made));
         check(device.SetVertexDeclaration(made.declaration));
         check(device.CreateVertexShader(VERTEX_SHADER, made));
-        check(device.SetVertexShader(made.shader));
-        check(device.CreatePixelShader(PIXEL_SHADER, made));
-        check(device.SetPixelShader(made.shader));
-        check(device.SetPixelShaderConstantF(2, [0.1, 0.2, 0.3, 0.4], 1));
+        vertexShader = made.shader;
+        check(device.SetVertexShader(vertexShader));
+        if (shader !== 'vertex')
+        {
+            check(device.CreatePixelShader(PIXEL_SHADER, made));
+            check(device.SetPixelShader(made.shader));
+            check(device.SetPixelShaderConstantF(2, [0.1, 0.2, 0.3, 0.4], 1));
+        }
     }
+    const declaration = made.declaration;
     // Made before the frames, so the scene's own arrays are not what is counted.
     const worlds = Array.from({ length: draws }, (_, index)=>{
         const matrix = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
@@ -354,6 +373,13 @@ function directScene({ version, draws, moving = false, shader = false }){
             check(nine ? device.SetIndices(indices.buffer) : device.SetIndices(indices.buffer, 0));
             for (let index = 0; index < draws; index++)
             {
+                if (rebind)
+                {
+                    check(device.SetVertexDeclaration(declaration), index);
+                    check(device.SetStreamSource(0,
+                        (index & 1 ? otherVertices : vertices).buffer, 0, stride), index);
+                    check(device.SetVertexShader(vertexShader), index);
+                }
                 if (shader)
                 {
                     check(device.SetVertexShaderConstantF(0, worlds[index], 4), index);
@@ -448,6 +474,7 @@ const SCENES = {
     'd3d9-lit': draws=>directScene({ version: 9, draws }),
     'd3d9-moving': draws=>directScene({ version: 9, draws, moving: true }),
     'd3d9-shader': draws=>directScene({ version: 9, draws, shader: true }),
+    'd3d9-vertex-shader': draws=>directScene({ version: 9, draws, shader: 'vertex', rebind: true }),
 };
 
 /**

@@ -2288,6 +2288,12 @@ export function createRenderer(options){
          */
         prepared: { built: 0, reused: 0 },
         /**
+         * How many times a draw's state was laid out and named. Once per change
+         * of state a draw reads, when the device versions its state; one per
+         * draw is a version moved by a set that changed nothing.
+         */
+        statesNamed: 0,
+        /**
          * Draws that ran fewer stages than the program had set up.
          *
          * A cascade cut short draws untextured geometry and reports success,
@@ -4682,14 +4688,15 @@ export function createRenderer(options){
      * beside the textures as `stateNumberOf` names it (kept while
      * `stateVersionBesideTextures` holds still), the two shaders, the
      * declaration, the stride and topology, a 1.x pixel shader's texture
-     * dimensions and projections, and every stream's stride and frequency,
-     * which the vertex layout is read through.
+     * dimensions and projections, the stages' textures as `textureShapeOf`
+     * has them for the fixed pixel stage, and every stream's stride and
+     * frequency, which the vertex layout is read through.
      *
      * @param {RenderModel} model @param {number} stride @param {string} topology
-     * @param {ProgramState} program @param {string} legacyKey
+     * @param {ProgramState} program @param {string} legacyKey @param {number} [shape]
      * @returns {number}
      */
-    const programKeyOf = (model, stride, topology, program, legacyKey)=>{
+    const programKeyOf = (model, stride, topology, program, legacyKey, shape = 0)=>{
         const version = model.stateVersionBesideTextures;
         if (version === undefined || version !== programStateVersion)
         {
@@ -4705,6 +4712,7 @@ export function createRenderer(options){
         words[at++] = stride;
         words[at++] = topologyIdOf(topology);
         words[at++] = legacyIdOf(legacyKey);
+        words[at++] = shape;
         const frequencies = model.streamFrequencies;
         for (let stream = 0; stream < PROGRAM_STREAMS; stream++)
         {
@@ -4718,7 +4726,7 @@ export function createRenderer(options){
     const PROGRAM_STREAMS = 16;
     /** A shader draw's state is named apart from any vertex format. */
     const PROGRAM_PROCESSING = Object.freeze({ fvf: 0, fixedFunctionLayout: null });
-    const programWords = new Int32Array(7 + PROGRAM_STREAMS * 2);
+    const programWords = new Int32Array(8 + PROGRAM_STREAMS * 2);
     const programNumbering = createNumbering();
     let programStateNumber = -1;
     /** @type {number | undefined} */
@@ -5000,6 +5008,113 @@ export function createRenderer(options){
      * @returns {PreparedDraw | null}
      */
     const prepareMixed = (model, stride, topology, program)=>{
+        // Everything but the constants and the textures' views depends on
+        // state the device versions, as a pixel shader's draw does (see
+        // `prepareProgram`): a program that draws its models through one
+        // shader, setting their constants and binding their textures and
+        // buffers between draws, changes none of it. Which stages have a
+        // texture, and of what dimension, shapes the cascade and is no
+        // version's, so it is looked at on every draw.
+        const version = model.stateVersionBesideTextures;
+        const shape = textureShapeOf(model);
+        const last = mixedPieces;
+        let pieces = version !== undefined && last.made !== null
+            && last.version === version
+            && last.vertexShader === program.vertexShader
+            && last.declarationId === program.declarationId
+            && last.stride === stride && last.topology === topology && last.shape === shape
+            ? last.made
+            : null;
+        if (pieces === null)
+        {
+            const key = programKeyOf(model, stride, topology, program, '', shape);
+            pieces = mixedPiecesKept.get(key) ?? null;
+            if (pieces === null)
+            {
+                pieces = mixedPiecesOf(model, stride, topology, program);
+                if (pieces === null)
+                {
+                    return null;
+                }
+                mixedPiecesKept.set(key, pieces);
+                if (mixedPiecesKept.size > PREPARED_CACHE_LIMIT)
+                {
+                    const oldest = mixedPiecesKept.keys().next().value;
+                    if (oldest !== undefined)
+                    {
+                        mixedPiecesKept.delete(oldest);
+                    }
+                }
+            }
+            else
+            {
+                counters.prepared.reused++;
+            }
+            last.version = version;
+            last.vertexShader = program.vertexShader;
+            last.declarationId = program.declarationId;
+            last.stride = stride;
+            last.topology = topology;
+            last.shape = shape;
+            last.made = version === undefined ? null : pieces;
+        }
+        else
+        {
+            counters.prepared.reused++;
+        }
+        reportCascade(pieces);
+        /** @type {(any | null)[]} */
+        const sampled = pieces.sampling.map((/** @type {boolean} */ samples,
+            /** @type {number} */ stage)=>(samples ? model.textures.get(stage) ?? null : null));
+        const samplerBindings = sampled.map((texture, index)=>({
+            stage: index,
+            texture,
+            view: texture ? uploadIfDirty(texture).view : placeholderView(),
+            sampler: pieces.samplers[index],
+            placeholder: !texture,
+        }));
+        const take = ensureFrame().arena.take;
+        const vertexBlocks = shaderVertexBlocks(model, program, pieces.vertex, take);
+        const pixelBlocks = [uniformsOf(model, null, take, mipsApplied), take(64), take(16)];
+        return {
+            version: undefined,
+            contentVersion: 0,
+            stride,
+            topology,
+            state: pieces.state,
+            uniforms: vertexBlocks[0],
+            template: null,
+            stageBindings: samplerBindings,
+            lighting: null,
+            fogSetting: '',
+            layout: null,
+            textures: sampled,
+            truncated: pieces.truncated,
+            pipelineFrame: null,
+            pipelineIndex: 0,
+            program: {
+                source: pieces.source,
+                declarationId: program.declarationId,
+                vertexBlocks,
+                pixelBlocks,
+                samplerBindings,
+                held: pieces,
+            },
+        };
+    };
+
+    /**
+     * What `prepareMixed` keeps of a draw for its state: the vertex stage, the
+     * fragment stage over the cascade, the pipeline state, which stages sample
+     * and the samplers they sample with. Null, counted and reported, when the
+     * draw cannot be built.
+     *
+     * @param {RenderModel} model
+     * @param {number} stride
+     * @param {string} topology
+     * @param {ProgramState} program
+     */
+    const mixedPiecesOf = (model, stride, topology, program)=>{
         const base = translationOf(/** @type {object} */ (program.vertexShader), 'vs',
             ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex)));
@@ -5062,7 +5177,6 @@ export function createRenderer(options){
         const cascade = stageCascade(model, {
             texCoordSets: sets, attributes: [], stride, preTransformed: false, blendWeights: 0,
         });
-        reportCascade(cascade);
         const state = {
             ...pipelineStateOf(model, {
                 fvf: 0, topology, ...formatsOf(model), stages: cascade.stages, lighting: null,
@@ -5072,48 +5186,63 @@ export function createRenderer(options){
             pixelShader: -1,
         };
         const pixel = fixedFragmentStage(state, vertex.outputs);
-        const samplerBindings = cascade.stages.map((stage, index)=>{
-            const texture = cascade.textures[index];
-            return {
-                stage: index,
-                texture,
-                view: texture ? uploadIfDirty(texture).view : placeholderView(),
-                sampler: samplerFor(model.stageStates(index)),
-                placeholder: !texture,
-            };
-        });
-        const take = ensureFrame().arena.take;
-        const vertexBlocks = shaderVertexBlocks(model, program, vertex, take);
-        const pixelBlocks = [uniformsOf(model, null, take, mipsApplied), take(64), take(16)];
         counters.prepared.built++;
         return {
-            version: undefined,
-            contentVersion: 0,
-            stride,
-            topology,
-            state,
-            uniforms: vertexBlocks[0],
-            template: null,
-            stageBindings: samplerBindings,
-            lighting: null,
-            fogSetting: '',
-            layout: null,
-            textures: cascade.textures,
-            truncated: cascade.truncated,
+            // What `record` asks the pipeline for once a frame by.
             pipelineFrame: null,
             pipelineIndex: 0,
-            program: {
-                source: {
-                    key: `${state.vertexShader}/ffp/${program.declarationId}/${shapes}/${stride}`
-                        + `${streamsKey(layout)}/${pipelineKey(state)}`,
-                    vertex, pixel, layout,
-                },
-                declarationId: program.declarationId,
-                vertexBlocks,
-                pixelBlocks,
-                samplerBindings,
+            vertex,
+            state,
+            truncated: cascade.truncated,
+            sampling: cascade.textures.map(texture=>texture !== null),
+            samplers: cascade.stages.map((stage, index)=>samplerFor(model.stageStates(index))),
+            source: {
+                key: `${state.vertexShader}/ffp/${program.declarationId}/${shapes}/${stride}`
+                    + `${streamsKey(layout)}/${pipelineKey(state)}`,
+                vertex, pixel, layout,
             },
         };
+    };
+
+    /**
+     * The last mixed draw's pieces and the state they were made for; see
+     * `prepareMixed`.
+     *
+     * @type {{ version: number | undefined, vertexShader: any, declarationId: number,
+     *          stride: number, topology: string, shape: number, made: any }}
+     */
+    const mixedPieces = { version: undefined, vertexShader: null, declarationId: 0, stride: 0,
+        topology: '', shape: 0, made: null };
+
+    /**
+     * The pieces of the states this frame's mixed draws were made with, by
+     * `programKeyOf`, bounded as `preparedCache` is.
+     *
+     * @type {Map<number, any>}
+     */
+    const mixedPiecesKept = new Map();
+
+    /** What `textureShapeOf` writes for a stage's texture, by its dimension. */
+    const DIMENSION_CODES = Object.freeze({ '2d': 1, cube: 2, '3d': 3 });
+
+    /**
+     * Which stages have a texture and of what dimension, two bits a stage:
+     * what a cascade is shaped by among the bindings.
+     *
+     * @param {RenderModel} model
+     * @returns {number}
+     */
+    const textureShapeOf = model=>{
+        let shape = 0;
+        for (let stage = 0; stage < STAGE_COUNT; stage++)
+        {
+            const texture = model.textures.get(stage);
+            if (texture)
+            {
+                shape |= DIMENSION_CODES[textureDimensionOf(texture)] << (stage * 2);
+            }
+        }
+        return shape;
     };
 
     /**
@@ -5907,6 +6036,7 @@ export function createRenderer(options){
      * @returns {number}
      */
     const stateNumberOf = (model, processing)=>{
+        counters.statesNamed++;
         const streams = processing.fixedFunctionLayout?.streams ?? NO_STREAMS;
         // Sized once for the words below, so that writing them tests nothing.
         let needed = 4 + streams.length + 2 * model.renderStates.size;
@@ -7496,6 +7626,7 @@ export function createRenderer(options){
                 programmable: counters.programmable,
                 mipsGenerated: counters.mipsGenerated,
                 prepared: { ...counters.prepared },
+                statesNamed: counters.statesNamed,
                 programs: programs.stats(),
                 skipped: { ...counters.skipped },
                 cascade: {

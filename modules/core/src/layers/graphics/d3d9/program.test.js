@@ -631,6 +631,92 @@ test('a vertex shader over the fixed-function pixel stage gets a fragment stage 
         assert.equal(h.device.release(), 0);
     });
 
+test('a vertex shader over the fixed pixel stage is prepared once for the state its draws share',
+    async()=>{
+        // How a program that draws each model through its own buffer goes:
+        // before every draw the same declaration and shader again, another
+        // buffer of the same layout, the model's constants. Nothing a draw's
+        // preparation is built from has changed, so the state is named and
+        // the pieces are made once -- while each draw still reads its own
+        // constants from its own buffer.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        assert.equal(h.device.CreateVertexShader(TEXTURED_VERTEX_SHADER, vs), D3D_OK);
+        /** @type {{ buffer?: any }} */
+        const other = {};
+        assert.equal(h.device.CreateVertexBuffer(STRIDE * 3, 0, 0, D3DPOOL.MANAGED, other),
+            D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetTexture(0, h.texture);
+        assert.equal(h.device.BeginScene(), D3D_OK);
+        for (let index = 0; index < 4; index++)
+        {
+            assert.equal(h.device.SetVertexDeclaration(h.declaration), D3D_OK);
+            assert.equal(h.device.SetVertexShader(vs.shader), D3D_OK);
+            assert.equal(h.device.SetStreamSource(0, index & 1 ? other.buffer : h.vb, 0, STRIDE),
+                D3D_OK);
+            assert.equal(h.device.SetVertexShaderConstantF(0,
+                [index + 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 4), D3D_OK);
+            assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        }
+        const shared = h.device.diagnostics();
+        assert.deepEqual(shared.prepared, { built: 1, reused: 3 });
+        assert.equal(shared.statesNamed, 1, 'the state named once, not once a draw');
+
+        // A render state changed is a state of its own.
+        h.device.SetRenderState(D3DRS.CULLMODE, 1);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(h.device.EndScene(), D3D_OK);
+        assert.equal(h.device.Present(), D3D_OK);
+        await h.device.idle();
+        assert.equal(h.device.diagnostics().prepared.built, 2);
+        assert.equal(h.device.diagnostics().statesNamed, 2);
+
+        const firsts = h.gpu.of('setBindGroup')
+            .filter((/** @type {any} */ call)=>call.index === 0)
+            .map((/** @type {any} */ call)=>new Float32Array(call.resolved[0].range.buffer)[0]);
+        assert.deepEqual(firsts, [1, 2, 3, 4, 4], 'each draw its own c0');
+        const buffers = h.gpu.of('setVertexBuffer')
+            .map((/** @type {any} */ call)=>call.buffer);
+        assert.equal(new Set(buffers).size, 2, 'two buffers bound');
+        assert.deepEqual(buffers.slice(0, 4).map(buffer=>buffer === buffers[0]),
+            [true, false, true, false], 'each draw its own buffer');
+        other.buffer.release();
+        vs.shader.release();
+    });
+
+test('a fixed pixel stage over a vertex shader is prepared again when a texture comes or goes',
+    async()=>{
+        // Which stages have a texture shapes the cascade and moves no
+        // version: a stage that reads a texture with none bound passes its
+        // colour on, a different fragment stage.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        assert.equal(h.device.CreateVertexShader(TEXTURED_VERTEX_SHADER, vs), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        assert.equal(h.device.BeginScene(), D3D_OK);
+        h.device.SetTexture(0, h.texture);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        h.device.SetTexture(0, null);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(h.device.diagnostics().prepared.built, 2, 'untextured is another stage');
+        h.device.SetTexture(0, h.texture);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.deepEqual(h.device.diagnostics().prepared, { built: 2, reused: 1 },
+            'and textured again is the first one, kept');
+        assert.equal(h.device.EndScene(), D3D_OK);
+        assert.equal(h.device.Present(), D3D_OK);
+        await h.device.idle();
+        const fragments = h.gpu.of('createShaderModule')
+            .filter((/** @type {any} */ call)=>call.descriptor.label.startsWith('ps:'));
+        assert.equal(fragments.length, 2);
+        assert.ok(fragments[0].descriptor.code.includes('sampleStage0'));
+        assert.ok(!fragments[1].descriptor.code.includes('sampleStage0'));
+        vs.shader.release();
+    });
+
 test('a vertex shader that writes no coordinate set leaves a sampling stage reading zero',
     async()=>{
         const h = harness();
