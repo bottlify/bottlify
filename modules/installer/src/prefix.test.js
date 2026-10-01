@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    MEDIA_DIRECTORY, REGISTRY_PATH, chooseRoot, collect, guessEntry, prefixOptions,
+    MEDIA_DIRECTORY, REGISTRY_PATH, chooseRoot, collect, guessEntry, installLocations,
+    prefixOptions,
 } from './prefix.js';
 
 /** @param {string} text */
@@ -100,6 +101,52 @@ test('what an installer unpacks beside itself is the distribution, not the insta
     // An archive that unpacks the game itself put it nowhere else.
     assert.equal(chooseRoot(tree([`${MEDIA_DIRECTORY}\\Title\\title.exe`])),
         `${MEDIA_DIRECTORY}\\Title`);
+});
+
+/**
+ * A hive as `toJSON` gives it, with one Uninstall entry per location, each
+ * InstallLocation a REG_SZ in the ANSI page as the registry keeps it.
+ *
+ * @param {string[]} locations @param {number} [root]  HKEY_LOCAL_MACHINE by default.
+ */
+const uninstallHive = (locations, root = 0x80000002)=>{
+    /** @param {string} name @param {any[]} keys @param {any[]} [values] */
+    const key = (name, keys, values = [])=>({ name, values, keys });
+    const entries = locations.map((location, index)=>key(`{entry-${index}}`, [], [
+        { name: 'DisplayName', type: 1, data: [...bytes(`Title ${index}\0`)] },
+        { name: 'InstallLocation', type: 1, data: [...bytes(`${location}\0`)] },
+    ]));
+    return { roots: [{ id: root, key: key('ROOT', [key('SOFTWARE', [key('Microsoft', [
+        key('Windows', [key('CurrentVersion', [key('Uninstall', entries)])])])])]) }] };
+};
+
+test('the root is where the install told Windows it put the application', ()=>{
+    // An installer's maintenance copy of itself sits shallower than the game,
+    // and the shallowest-executable rule alone would bottle the setup.
+    const files = tree([
+        'C:\\Program Files\\Setup Information\\{1234}\\setup.exe',
+        'C:\\Program Files\\Publisher\\Demo\\Title\\title.exe',
+        'C:\\Program Files\\Publisher\\Demo\\Title\\Video\\intro.bik',
+    ]);
+    const prefix = collect({ files,
+        registry: uninstallHive(['c:\\program files\\publisher\\demo\\title\\']) });
+    assert.equal(prefix.root, 'C:\\Program Files\\Publisher\\Demo\\Title',
+        'spelt as the volume spells it, without the trailing separator');
+    assert.deepEqual(prefix.files.filter(file=>file.path !== REGISTRY_PATH)
+        .map(file=>file.path), ['title.exe', 'Video\\intro.bik']);
+    const perUser = uninstallHive(['C:\\Program Files\\Publisher\\Demo\\Title'], 0x80000001);
+    assert.equal(collect({ files, registry: perUser }).root,
+        'C:\\Program Files\\Publisher\\Demo\\Title', 'a per-user entry too');
+});
+
+test('a recorded location holding nothing the install wrote leaves the layout to decide', ()=>{
+    // Another program's entry, or a location the program was moved from.
+    const files = tree(['C:\\Games\\Title\\title.exe']);
+    assert.equal(collect({ files, registry: uninstallHive(['C:\\Elsewhere']) }).root,
+        'C:\\Games\\Title');
+    assert.deepEqual(installLocations(uninstallHive(['C:\\Elsewhere', 'not a path'])),
+        ['C:\\Elsewhere']);
+    assert.deepEqual(installLocations(undefined), []);
 });
 
 test('among equally shallow candidates the one with more executables wins', ()=>{
