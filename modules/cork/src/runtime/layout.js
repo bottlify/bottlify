@@ -105,6 +105,8 @@ export function ownLayout({ ramSize }){
         // The indirect calls' profile: a flag the runtime sets, a count, and
         // sixteen (address, target) pairs, the last calls made while it is set.
         callProfile: 352,
+        // The budget the run started with, past the call profile's sixteen pairs.
+        origin: 488,
         tables: ramBase + ramSize,
         codePages: -1,
         // The entry hash's slot is the top bits of eip times the golden ratio,

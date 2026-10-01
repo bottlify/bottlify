@@ -59,6 +59,8 @@
  * @property {number} [callProfile] Cork's own: where translated code notes its indirect calls
  *     while the runtime asks -- a flag, a count, and sixteen pairs of the call's address and
  *     its target, the last calls (`callTargets`); absent, no profile.
+ * @property {number} [origin]     Cork's own: i32, the budget the current run started with,
+ *     which the retired count is taken from when it leaves for the host.
  * @property {number} tables       Wasm address of the engine's own tables.
  * @property {number} codePages    Wasm address of the other executor's byte-per-page
  *                                 "has compiled code" table (hybrid), or -1: a store into

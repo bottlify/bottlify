@@ -74,10 +74,9 @@ export const MATH_IMPORTS = Object.freeze([
 ]);
 
 /**
- * Enters a region function from the host: the state a transfer between
- * regions carries in its parameters, read from the state block -- the eight
- * registers, the flag record (zero under a layout with none), the flags word,
- * and the budget again, as the one the run started with.
+ * Enters a region function from the host: the registers a transfer between
+ * regions carries in its parameters, read from the state block, and the budget
+ * written there as the one the run started with.
  *
  * @param {Function} fn  the region's function
  * @param {number} label @param {number} budget
@@ -90,18 +89,13 @@ export function enterRegion(fn, label, budget, view, layout){
     // closures would be most of the garbage a call into a page left to the
     // interpreter makes, entered again once per call.
     const { regs } = layout;
-    const record = layout.flagRecord ?? -1;
+    if ((layout.origin ?? -1) >= 0)
+    {
+        view.setInt32(/** @type {number} */ (layout.origin), budget, true);
+    }
     return fn(label, budget,
         view.getInt32(regs, true), view.getInt32(regs + 4, true),
-        view.getInt32(regs + 8, true), view.getInt32(regs + 12, true),
-        view.getInt32(regs + 16, true), view.getInt32(regs + 20, true),
-        view.getInt32(regs + 24, true), view.getInt32(regs + 28, true),
-        record >= 0 ? view.getInt32(record, true) : 0,
-        record >= 0 ? view.getInt32(record + 4, true) : 0,
-        record >= 0 ? view.getInt32(record + 8, true) : 0,
-        record >= 0 ? view.getInt32(record + 12, true) : 0,
-        record >= 0 ? view.getInt32(record + 16, true) : 0,
-        view.getInt32(layout.eflags, true), budget);
+        view.getInt32(regs + 8, true), view.getInt32(regs + 12, true));
 }
 
 /** The import object entries for `MATH_IMPORTS`. */
@@ -171,17 +165,26 @@ export const Local = Object.freeze({
 /** The record's locals in the order the layout's `flagRecord` keeps them. */
 const RECORD_LOCALS = [Local.kind, Local.res, Local.op1, Local.op2, Local.cin];
 /**
- * The function's parameters, locals 0..16: the label and the budget, then the
- * state a transfer between regions carries rather than writing it to the state
- * block and reading it back -- the eight registers, the flag record, the flags
- * word, and the budget the run started with at the host, which no block changes:
- * the instructions retired are what the run took off the budget since, added to
- * the counter word once, when it leaves for the host, and a block charges the
- * budget alone. A region over a layout with no flag record (the emulator's)
- * takes them and loads its state as before.
+ * The function's parameters, locals 0..5: the label and the budget, then the
+ * registers a transfer between regions carries rather than writing them to the
+ * state block and reading them back -- eax, ecx, edx and ebx. As many as V8
+ * passes in machine registers: a seventh parameter went through the stack on
+ * every call and transfer, and with seventeen a direct call and its return took
+ * twice what they take with six. The other four registers, the flag record and
+ * the flags word stay in the state block across a transfer, a region loading
+ * the registers it names and storing the ones it writes; the budget the run
+ * started with is there too (`layout.origin`), the instructions retired being
+ * what the run took off the budget since, added to the counter word once, when
+ * it leaves for the host. A region over a layout with no flag record (the
+ * emulator's) takes the parameters and loads its state as before.
  */
-export const STATE_PARAMS = 17;
+export const STATE_PARAMS = 6;
+/** The registers among the parameters: eax, ecx, edx, ebx. */
+export const CARRIED_REGS = STATE_PARAMS - 2;
 const LOCAL_TYPES = [
+    // esp, ebp, esi, edi, the record, the flags word and the run's budget: the
+    // parameters they once were, locals of the function now.
+    ...new Array(Local.eip - STATE_PARAMS).fill(ValType.i32),
     ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, // eip..addr
     ValType.i64, ValType.i64,
     ValType.i32, // count
@@ -534,17 +537,14 @@ export function finishModule(context, functions){
     if (carried)
     {
         // As the region's epilogue writes it (`storeCarriedState`): the
-        // registers, the flag record, the flags word, EIP and the count.
-        const record = /** @type {number} */ (layout.flagRecord);
-        for (let r = 0; r < 8; r++)
+        // registers the parameters carry -- the rest, the record and the flags
+        // word the region left in the block -- EIP and the count, the run's
+        // budget restarting from here for a resume that goes on.
+        const origin = /** @type {number} */ (layout.origin);
+        for (let r = 0; r < CARRIED_REGS; r++)
         {
             b.i32const(0).localGet(Local.reg + r).store('i32', { offset: layout.regs + r * 4 });
         }
-        for (const [i, local] of RECORD_LOCALS.entries())
-        {
-            b.i32const(0).localGet(local).store('i32', { offset: record + i * 4 });
-        }
-        b.i32const(0).localGet(Local.flags).store('i32', { offset: layout.eflags });
         if (layout.flagsChanged >= 0)
         {
             b.i32const(0).i32const(0).store('i32', { offset: layout.flagsChanged });
@@ -555,9 +555,11 @@ export function finishModule(context, functions){
             b.i32const(0).localGet(eip).store('i32', { offset: layout.previousIp });
         }
         b.i32const(0);
-        b.i32const(0).load('i32', { offset: layout.counter }).localGet(Local.origin).op(I32.add)
+        b.i32const(0).load('i32', { offset: layout.counter })
+            .i32const(0).load('i32', { offset: origin }).op(I32.add)
             .localGet(Local.budget).op(I32.sub);
         b.store('i32', { offset: layout.counter });
+        b.i32const(0).localGet(Local.budget).store('i32', { offset: origin });
     }
     if (context.resume !== undefined && carried)
     {
@@ -620,18 +622,14 @@ function addResume(m, layout, materialise, transfer){
     b.localGet(code).i32const(0xff).op(I32.and).i32const(TIER_ENTRY).op(I32.eq)
         .localGet(left).i32const(0).op(I32.gtS).op(I32.and);
     b.if(EMPTY);
+    // The run goes on from what is left, counted from here.
+    b.i32const(0).localGet(left).store('i32', { offset: /** @type {number} */ (layout.origin) });
     b.i32const(0).load('i32', { offset: layout.eip });
     b.localGet(left);
-    for (let r = 0; r < 8; r++)
+    for (let r = 0; r < CARRIED_REGS; r++)
     {
         b.i32const(0).load('i32', { offset: layout.regs + r * 4 });
     }
-    for (let i = 0; i < RECORD_LOCALS.length; i++)
-    {
-        b.i32const(0);
-    }
-    b.i32const(0).load('i32', { offset: layout.eflags });
-    b.localGet(left);
     b.returnCall(transfer);
     b.end();
     b.localGet(code).i32const(0xff).op(I32.and).i32const(8).op(I32.shl)
@@ -962,8 +960,11 @@ export class RegionEmitter {
         /**
          * Where the registers' loads and stores go, filled once the body is
          * written and the locals it uses are known (`fillDeferred`): the
-         * integer registers, the x87 ones, or both.
-         * @type {{ at: number, kind: 'load' | 'store', regs: boolean, x87: boolean }[]}
+         * integer registers, the x87 ones, or both. `regs`: every register the
+         * body names (`all`), only the ones the parameters do not carry
+         * (`uncarried`), or none.
+         * @type {{ at: number, kind: 'load' | 'store', regs: 'all' | 'uncarried' | 'none',
+         *     x87: boolean }[]}
          */
         this.deferred = [];
     }
@@ -1147,23 +1148,15 @@ export class RegionEmitter {
 
     /**
      * The registers, the flags, the vector registers and the x87 block into the
-     * locals. `fromParams`: the registers, the record, the flags word and the
-     * count came in as parameters (cork's layout, on entry), so only what
-     * lives in the state block alone is loaded.
+     * locals. `fromParams`: eax to ebx came in as parameters (cork's layout,
+     * on entry), so only the other registers are loaded.
      *
      * @param {boolean} [fromParams]
      */
     loadState(fromParams = false){
         const { b, layout } = this;
-        if (fromParams)
-        {
-            this.pending = null;
-        }
-        else
-        {
-            b.i32const(0).load('i32', { offset: layout.eflags }).localSet(Local.flags);
-        }
-        if (this.flagRecord >= 0 && !fromParams)
+        b.i32const(0).load('i32', { offset: layout.eflags }).localSet(Local.flags);
+        if (this.flagRecord >= 0)
         {
             // The record the last region left, as it left it: its kind is not
             // known here, and a read folds it only when it must.
@@ -1194,8 +1187,10 @@ export class RegionEmitter {
         {
             x87Prologue(this);
         }
-        // The registers, after the x87 empty mask they are loaded under.
-        this.deferred.push({ at: b.length, kind: 'load', regs: !fromParams, x87: true });
+        // The registers, after the x87 empty mask they are loaded under: on
+        // entry under cork's layout the ones the parameters did not bring.
+        this.deferred.push({ at: b.length, kind: 'load', regs: fromParams ? 'uncarried' : 'all',
+            x87: true });
     }
 
     /**
@@ -1214,6 +1209,11 @@ export class RegionEmitter {
         if (!fromParams)
         {
             b.localGet(Local.budget).localSet(Local.origin);
+            if (this.flagRecord >= 0)
+            {
+                b.i32const(0).localGet(Local.budget)
+                    .store('i32', { offset: /** @type {number} */ (this.layout.origin) });
+            }
         }
         b.i32const(0).localSet(Local.mmxTouched);
         b.i32const(0).localSet(Local.stale);
@@ -1230,6 +1230,7 @@ export class RegionEmitter {
         if (this.flagRecord >= 0 && this.context.hash)
         {
             this.storeMemoryState();
+            this.storeUncarriedState();
             this.transfer();
             this.storeCarriedState();
         }
@@ -1277,7 +1278,7 @@ export class RegionEmitter {
         {
             this.materialise();
         }
-        this.deferred.push({ at: b.length, kind: 'store', regs: true, x87: false });
+        this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false });
         b.i32const(0).localGet(Local.flags).store('i32', { offset: layout.eflags });
         if (layout.flagsChanged >= 0)
         {
@@ -1289,9 +1290,37 @@ export class RegionEmitter {
             b.i32const(0).localGet(Local.eip).store('i32', { offset: layout.previousIp });
         }
         b.i32const(0);
-        b.i32const(0).load('i32', { offset: layout.counter }).localGet(Local.origin).op(I32.add)
-            .localGet(Local.budget).op(I32.sub);
+        b.i32const(0).load('i32', { offset: layout.counter });
+        this.pushOrigin();
+        b.op(I32.add).localGet(Local.budget).op(I32.sub);
         b.store('i32', { offset: layout.counter });
+    }
+
+    /** The budget the run started with: in the state block under cork's layout. */
+    pushOrigin(){
+        if (this.flagRecord >= 0)
+        {
+            this.b.i32const(0).load('i32', { offset: /** @type {number} */ (this.layout.origin) });
+        }
+        else
+        {
+            this.b.localGet(Local.origin);
+        }
+    }
+
+    /**
+     * What a transfer under cork's layout leaves in the state block for its
+     * callee rather than in its parameters: esp to edi as far as written, the
+     * record and the flags word.
+     */
+    storeUncarriedState(){
+        const { b, layout } = this;
+        this.deferred.push({ at: b.length, kind: 'store', regs: 'uncarried', x87: false });
+        for (const [i, local] of RECORD_LOCALS.entries())
+        {
+            b.i32const(0).localGet(local).store('i32', { offset: this.flagRecord + i * 4 });
+        }
+        b.i32const(0).localGet(Local.flags).store('i32', { offset: layout.eflags });
     }
 
     /**
@@ -1300,7 +1329,7 @@ export class RegionEmitter {
      */
     storeMemoryState(){
         const { b, layout } = this;
-        this.deferred.push({ at: b.length, kind: 'store', regs: false, x87: true });
+        this.deferred.push({ at: b.length, kind: 'store', regs: 'none', x87: true });
         for (const index of this.xmmWritten)
         {
             b.i32const(0).localGet(this.xmmLocal(index))
@@ -1366,23 +1395,30 @@ export class RegionEmitter {
     fillDeferred(){
         const main = this.b;
         const { layout } = this;
-        // Under cork's layout the registers a region did not load came in as
-        // parameters, so the block does not hold them: every one is stored,
-        // and a reload (after a trap's handler) takes every one back.
-        const all = this.flagRecord >= 0;
+        // Under cork's layout the registers the parameters carry are not in
+        // the block between regions: each is stored when the run leaves for
+        // the host, and a reload (after a trap's handler) takes each back --
+        // the next transfer passes them whether the region names them or not.
+        // The others are, as every register is under the emulator's layout.
+        const carried = this.flagRecord >= 0 ? CARRIED_REGS : 0;
         /** @type {{ at: number, body: Body }[]} */
         const pieces = [];
         for (const { at, kind, regs, x87 } of this.deferred.reverse())
         {
             const b = this.b = new Body();
-            for (let r = 0; r < (regs ? 8 : 0); r++)
+            for (let r = 0; r < (regs === 'none' ? 0 : 8); r++)
             {
                 const offset = layout.regs + r * 4;
-                if (kind === 'load' && (all || main.uses(Local.reg + r)))
+                const always = r < carried && regs === 'all';
+                if (regs === 'uncarried' && r < carried)
+                {
+                    continue;
+                }
+                if (kind === 'load' && (always || main.uses(Local.reg + r)))
                 {
                     b.i32const(0).load('i32', { offset }).localSet(Local.reg + r);
                 }
-                if (kind === 'store' && (all || main.writes(Local.reg + r)))
+                if (kind === 'store' && (always || main.writes(Local.reg + r)))
                 {
                     b.i32const(0).localGet(Local.reg + r).store('i32', { offset });
                 }

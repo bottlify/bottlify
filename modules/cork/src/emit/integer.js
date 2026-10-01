@@ -164,6 +164,11 @@ function callAndReturn(e, next, pushTarget){
     b.localGet(Local.budget)
         .i32const(0).load('i32', { offset: layout.counter }).localGet(Local.t2).op(I32.sub)
         .op(I32.sub).localTee(Local.budget).localSet(Local.origin);
+    if (e.flagRecord >= 0)
+    {
+        b.i32const(0).localGet(Local.budget)
+            .store('i32', { offset: /** @type {number} */ (layout.origin) });
+    }
     b.i32const(next).localSet(Local.eip);
     e.returned = true;
 }
