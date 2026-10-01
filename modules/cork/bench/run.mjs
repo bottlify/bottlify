@@ -14,6 +14,8 @@
  *   --variant x87|sse|both     which build (default both)
  *   --only a,b,c               workloads to run (default all)
  *   --cork '<json>'            the translator's configuration (`EngineConfig`)
+ *   --engine cork|emulator     which engine runs the guest (default cork); the emulator
+ *                              needs modules/core/vendor/prebuilt (`npm run fetch:v86`)
  *   --reps n                   runs of each, the fastest kept (default 1)
  *   --iterations n             instead of each workload's own count
  *   --root <dir>               a checkout whose engine to run instead of this one
@@ -64,8 +66,17 @@ const variants = options.variant === 'x87' || options.variant === 'sse'
 const only = typeof options.only === 'string' ? options.only.split(',') : WORKLOADS;
 const reps = Number(options.reps ?? 1);
 const corkConfig = typeof options.cork === 'string' ? JSON.parse(options.cork) : {};
+const engineName = options.engine === 'emulator' ? 'emulator' : 'cork';
 const root = typeof options.root === 'string' ? resolve(options.root) : resolve(HERE, '../../..');
 const { createApp } = await import(pathToFileURL(join(root, 'modules/core/src/app.js')).href);
+const prebuilt = join(root, 'modules/core/vendor/prebuilt');
+/** The emulator's build, read once: what a launch under `engine: 'emulator'` is handed. */
+const v86 = engineName === 'emulator'
+    ? await readFile(join(prebuilt, 'v86.wasm')).then(bytes=>({
+        moduleUrl: pathToFileURL(join(prebuilt, 'libv86.mjs')).href,
+        wasmBytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+    }))
+    : null;
 
 /**
  * The processor's run of one workload.
@@ -93,8 +104,9 @@ function native(variant, workload, iterations){
 async function engine(executable, workload, iterations){
     const app = await createApp({
         executable,
-        engine: 'cork',
+        engine: engineName,
         exitNotice: false,
+        ...v86 === null ? {} : { v86 },
         commandLine: `bench.exe ${workload}${iterations ? ` ${iterations}` : ''}`,
         cork: { config: corkConfig },
     });
@@ -169,8 +181,9 @@ for (const variant of variants)
                 `${(run.instructions / 1e6).toFixed(0).padStart(6)} M`,
                 `${mips.toFixed(0).padStart(5)} MIPS`,
                 slowdown === null ? '' : `x${slowdown.toFixed(1).padStart(5)} native`,
-                `translated ${((run.translated ?? 0) * 100).toFixed(2)}%`,
-                `regions ${run.regions}`, `crossings ${run.crossings}`, run.checksum, ok,
+                run.translated === null ? '' : `translated ${(run.translated * 100).toFixed(2)}%`,
+                run.regions === null ? '' : `regions ${run.regions}`,
+                `crossings ${run.crossings}`, run.checksum, ok,
             ].filter(Boolean).join('  '));
         }
     }
