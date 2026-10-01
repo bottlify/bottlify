@@ -223,6 +223,15 @@ const DIPROPRANGE_NOMAX = 0x7fffffff;
 const DIPROPAXISMODE_ABS = 0;
 const DIPROPAXISMODE_REL = 1;
 const DIDF_RELAXIS = 0x00000002;
+/**
+ * The scan code DIPROP_SCANCODE reports for a key, as the bytes the keyboard
+ * sends, first byte lowest: an extended key behind its 0xE0, and NumLock and
+ * Pause each with the other's sequence, as Windows reports them.
+ *
+ * @param {number} dik
+ */
+const scanCodeOf = dik=>(dik === 0x45 ? 0x451de1 : dik === 0xc5 ? 0x45
+    : dik >= 0x80 ? 0xe0 | ((dik & 0x7f) << 8) : dik);
 /** A wheel notch, as the mouse reports its Z axis. */
 const WHEEL_DELTA = 120;
 const DIPH_DEVICE = 0;
@@ -401,6 +410,9 @@ const DIAH_APPREQUESTED = 0x02;
 const DIAH_DEFAULT = 0x20;
 const DIAH_ERROR = 0x80000000;
 const DIDBAM_INITIALIZE = 0x02;
+const DIDSAM_FORCESAVE = 0x02;
+/** A success that says the map applied was not kept for the user. */
+const DI_SETTINGSNOTSAVED = 0x0000000b;
 /** A semantic's top byte names its device for these two. */
 const SEMANTIC_KEYBOARD = 0x81;
 const SEMANTIC_MOUSE = 0x82;
@@ -1133,7 +1145,11 @@ export function createDirectInput(
             }
             if (device.kind === KEYBOARD && property === DIPROP.SCANCODE)
             {
-                writeU32(at + DIPROPDWORD_DATA, object.offset);
+                if (!eight)
+                {
+                    return DIERR_UNSUPPORTED;
+                }
+                writeU32(at + DIPROPDWORD_DATA, scanCodeOf(object.offset));
                 return DI_OK;
             }
             if (device.kind === KEYBOARD && property === DIPROP.KEYNAME)
@@ -1297,6 +1313,12 @@ export function createDirectInput(
             for (let index = 0; index < actions.count; index++)
             {
                 const at = actions.at(index);
+                // Initializing starts over: what the program said of each
+                // action before is dropped with the mapping it had.
+                if ((flags & DIDBAM_INITIALIZE) !== 0)
+                {
+                    writeU32(at + DIACTION.dwFlags, 0);
+                }
                 const actionFlags = readU32(at + DIACTION.dwFlags);
                 const holder = guidAt(at + DIACTION.guidInstance);
                 if ((actionFlags & DIA_APPNOMAP) !== 0)
@@ -1341,7 +1363,7 @@ export function createDirectInput(
          * action's place and with its action's uAppData; the format's buffer
          * size is the device's. Settled while nobody holds the device.
          */
-        SetActionMap(device, [format]){
+        SetActionMap(device, [format, , flags]){
             const actions = readActions(format);
             if (!actions)
             {
@@ -1380,7 +1402,9 @@ export function createDirectInput(
             {
                 device.setBufferSize(actions.bufferSize);
             }
-            return DI_OK;
+            // There is nowhere a user's map is kept, so one forced to be
+            // saved is applied and not saved.
+            return (flags & DIDSAM_FORCESAVE) !== 0 ? DI_SETTINGSNOTSAVED : DI_OK;
         },
 
         /**
