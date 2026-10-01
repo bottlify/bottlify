@@ -950,6 +950,9 @@ test('DirectSoundCreate names the playback device and refuses a capture one', ()
     assert.equal(create([guid, 0x2900, 0]), 0x88780078 | 0);
     f.memory.bytes[guid] = 2; // DSDEVID_DefaultVoicePlayback
     assert.equal(create([guid, 0x2900, 0]), DS_OK);
+    // GUID_NULL, which FMOD copies for the enumeration's primary driver.
+    f.memory.writeMemory(guid, new Uint8Array(16));
+    assert.equal(create([guid, 0x2900, 0]), DS_OK);
 });
 
 test('SetNotificationPositions reads an array of DSBPOSITIONNOTIFY', ()=>{

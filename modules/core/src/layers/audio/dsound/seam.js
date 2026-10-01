@@ -1508,8 +1508,8 @@ export function createDirectSound({
     })];
 
     /**
-     * Whether a device GUID names the one playback device: no GUID, the
-     * device's own, or a playback default.
+     * Whether a device GUID names the one playback device: no GUID, GUID_NULL,
+     * the device's own, or a playback default.
      *
      * @param {number} guid
      */
@@ -1520,7 +1520,23 @@ export function createDirectSound({
         }
         const asked = memory.readMemory(guid >>> 0, 16);
         const names = (/** @type {readonly number[]} */ id)=>id.every((byte, at)=>asked[at] === byte);
-        return names(DEVICE_GUID) || DEFAULT_PLAYBACK_IDS.some(names);
+        // GUID_NULL is the default device as much as no GUID is: it is what
+        // a sound library copies for the "Primary Sound Driver" entry an
+        // enumeration hands over with no GUID.
+        return asked.every((/** @type {number} */ byte)=>byte === 0)
+            || names(DEVICE_GUID) || DEFAULT_PLAYBACK_IDS.some(names);
+    };
+
+    /**
+     * A device GUID that names no playback device here: DSERR_NODRIVER, as
+     * Windows answers, said aloud -- a program refused its device plays
+     * nothing and says so only in its own log.
+     *
+     * @param {number} guid
+     */
+    const refuseDevice = guid=>{
+        divergence?.('DirectSoundCreate', `no playback device ${readGuid(memory, guid >>> 0)}`);
+        return DSERR_NODRIVER;
     };
 
     /** @param {number[]} args */
@@ -1721,14 +1737,14 @@ export function createDirectSound({
                     argBytes: 12,
                     /** @param {number[]} args */
                     handler: ([guid, out])=>(namesPlayback(guid) ? createInto(out, false)
-                        : DSERR_NODRIVER),
+                        : refuseDevice(guid)),
                 },
                 /** HRESULT DirectSoundCreate8(LPCGUID, LPDIRECTSOUND8*, IUnknown*) */
                 DirectSoundCreate8: {
                     argBytes: 12,
                     /** @param {number[]} args */
                     handler: ([guid, out])=>(namesPlayback(guid) ? createInto(out, true)
-                        : DSERR_NODRIVER),
+                        : refuseDevice(guid)),
                 },
                 /**
                  * HRESULT DirectSoundEnumerateA(LPDSENUMCALLBACKA, LPVOID)
