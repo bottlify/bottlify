@@ -700,6 +700,9 @@ const DEPTH_FORMAT = Object.freeze({
  */
 const blockAligned = (width, height)=>width % 4 === 0 && height % 4 === 0;
 
+/** The largest level `decodeRoom` keeps bytes for: a 1024-texel square of RGBA. */
+const DECODE_ROOM_LIMIT = 1024 * 1024 * 4;
+
 /**
  * A compressed level decoded into the texel order every other format is
  * expanded to: the decoder answers R, G, B, A and the textures here are
@@ -714,10 +717,11 @@ const blockAligned = (width, height)=>width % 4 === 0 && height % 4 === 0;
  * @param {Uint8Array} bytes
  * @param {import('../webgpu/internal/s3tc.js').S3tcKind} kind
  * @param {number} width @param {number} height
+ * @param {Uint8Array} [into]  bytes to decode into, when they are enough
  * @returns {Uint8Array}
  */
-const decodeCompressed = (bytes, kind, width, height)=>{
-    const decoded = /** @type {Uint8Array} */ (decodeS3tc(bytes, kind, width, height));
+const decodeCompressed = (bytes, kind, width, height, into)=>{
+    const decoded = /** @type {Uint8Array} */ (decodeS3tc(bytes, kind, width, height, into));
     for (let at = 0; at < decoded.length; at += 4)
     {
         const red = decoded[at];
@@ -3984,6 +3988,28 @@ export function createRenderer(options){
     };
 
     /**
+     * Where a compressed level is decoded on its way up, kept from one level
+     * to the next: the upload copies the texels before it returns, so bytes
+     * made for each level would only be garbage. A frame command keeps its
+     * texels, so an ordered upload decodes into bytes of its own, as a dump
+     * does; so does a level larger than a 1024-texel square, rather than the
+     * renderer holding that much for good.
+     */
+    let decodeBytes = new Uint8Array(0);
+    /** @param {number} length @returns {Uint8Array | undefined} */
+    const decodeRoom = length=>{
+        if (length > DECODE_ROOM_LIMIT)
+        {
+            return undefined;
+        }
+        if (decodeBytes.length < length)
+        {
+            decodeBytes = new Uint8Array(length);
+        }
+        return decodeBytes;
+    };
+
+    /**
      * The GPU texture behind a d3d8 texture, with level zero uploaded if the
      * program has written it since the last draw that read it.
      *
@@ -4049,7 +4075,10 @@ export function createRenderer(options){
                     continue;
                 }
                 held.surface.release();
-                const bytes = readMemory(held.surface.base,
+                // A level decoded here is read where it lies: the decoder is
+                // done with it before the guest runs again.
+                const decodes = isCompressed(record.format) && !keepsBlocks;
+                const bytes = (decodes ? windowMemory : readMemory)(held.surface.base,
                     surfaceBytes(record.format, width, height));
                 // Compressed blocks go as they lie when the surface stayed a
                 // BC texture; a compressed base too narrow or short for a
@@ -4057,10 +4086,12 @@ export function createRenderer(options){
                 // format expandTexels does not know), so it is decompressed
                 // instead of expanded; everything else is widened to the one
                 // uncompressed format the backend samples.
+                const room = decodes && !record.ordered && !dumpDraws
+                    ? decodeRoom(width * height * 4) : undefined;
                 const texels = keepsBlocks
                     ? bytes
-                    : isCompressed(record.format)
-                        ? decodeCompressed(bytes, S3TC_OF[record.format], width, height)
+                    : decodes
+                        ? decodeCompressed(bytes, S3TC_OF[record.format], width, height, room)
                         : expandTexels(record.format, bytes, width * height);
                 uploadTexels(record.gpu,
                     { format: gpuFormat, mipLevel: level, width, height, texels, layer: face },
@@ -5904,6 +5935,7 @@ export function createRenderer(options){
         if (renderStates instanceof HashedStates)
         {
             const hashedStates = /** @type {HashedStates} */ (renderStates);
+            const mark = at;
             words[at++] = hashedStates.low;
             words[at++] = hashedStates.high;
             let hashed = true;
@@ -5918,7 +5950,7 @@ export function createRenderer(options){
             {
                 return stateNumbering(words, at);
             }
-            at -= 2 + 2 * STAGE_COUNT;
+            at = mark;
         }
         words[at++] = model.renderStates.size;
         stateAt = at;

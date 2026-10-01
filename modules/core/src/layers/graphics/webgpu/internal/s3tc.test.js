@@ -138,3 +138,27 @@ test('every DXT5 alpha index reads its own table entry, through the byte straddl
         }
     }
 });
+
+test('decoded into bytes the caller gives, the texels are those bytes and the same texels', ()=>{
+    // Random bytes are a valid image in every format, and cover both colour
+    // modes and both alpha tables; the shapes cover the partial blocks.
+    let seed = 7;
+    const next = ()=>(seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 24;
+    for (const kind of /** @type {const} */ (['dxt1', 'dxt3', 'dxt5']))
+    {
+        for (const [width, height] of [[1, 1], [3, 5], [4, 4], [13, 7], [32, 16]])
+        {
+            const bytes = Uint8Array.from({ length: compressedBytes(kind, width, height) }, next);
+            const fresh = some(decodeS3tc(bytes, kind, width, height));
+            const into = new Uint8Array(width * height * 4 + 8).fill(0xcd);
+            const placed = some(decodeS3tc(bytes, kind, width, height, into));
+            assert.equal(placed.buffer, into.buffer,
+                `${kind} ${width}x${height}: in the bytes given`);
+            assert.deepEqual([...placed], [...fresh], `${kind} ${width}x${height}`);
+            assert.equal(into[width * height * 4], 0xcd, 'and nothing past them');
+        }
+    }
+    const short = new Uint8Array(15);
+    const decoded = some(decodeS3tc(new Uint8Array(8), 'dxt1', 2, 2, short));
+    assert.notEqual(decoded.buffer, short.buffer, 'bytes too few for the texels are left alone');
+});

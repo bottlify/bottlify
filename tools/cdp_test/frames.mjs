@@ -30,6 +30,7 @@ import { launchWithGpu, shutdown } from './browser.mjs';
 import { CdpEndpoint } from './cdp.mjs';
 import { serveStatic } from './server.mjs';
 import { frameSpread } from './frame-window.mjs';
+import { summariseAllocations } from './profile.mjs';
 import { openBundle } from '../btl.mjs';
 import { placementOf } from '../../modules/installer/src/prefix.js';
 import { windowsVersion } from '../../modules/core/src/layers/win32/kernel32/versions.js';
@@ -95,43 +96,6 @@ function parse(argv){
 
 /** @param {number} value */
 const asMs = value=>`${value.toFixed(2)}ms`;
-
-/**
- * Folds a sampling heap profile into the functions that allocated most, by
- * self size, with the caller that reached each so a helper is not blamed for
- * what every caller asked of it.
- *
- * @param {any} profile  HeapProfiler's SamplingHeapProfile.
- */
-function summariseAllocations(profile){
-    /** @type {Map<string, number>} */
-    const bySite = new Map();
-    let total = 0;
-    /** @param {any} node @param {string} parent */
-    const walk = (node, parent)=>{
-        const frame = node.callFrame ?? {};
-        const file = String(frame.url ?? '').split('/').pop() || '<native>';
-        const line = (frame.lineNumber ?? -1) + 1;
-        const here = `${frame.functionName || '<anonymous>'} ${file}:${line}`;
-        const size = Number(node.selfSize ?? 0);
-        if (size > 0)
-        {
-            const key = `${here}  <- ${parent}`;
-            bySite.set(key, (bySite.get(key) ?? 0) + size);
-            total += size;
-        }
-        for (const child of node.children ?? [])
-        {
-            walk(child, here);
-        }
-    };
-    walk(profile.head, '(root)');
-    return {
-        total,
-        sites: [...bySite].sort((left, right)=>right[1] - left[1]).slice(0, 24)
-            .map(([site, bytes])=>({ site, bytes, share: bytes / Math.max(1, total) })),
-    };
-}
 
 /**
  * @param {any} before @param {any} after @param {number} windowMs

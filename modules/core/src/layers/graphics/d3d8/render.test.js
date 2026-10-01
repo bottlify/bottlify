@@ -1945,6 +1945,95 @@ test('recorded: a block-aligned DXT5 surface decodes with compressedTextures off
         'the level travelled through staging, undecoded');
 });
 
+/** One DXT1 block of a single 5-6-5 colour: both endpoints it, every index 0. @param {number} rgb565 */
+const solidDxt1 = rgb565=>{
+    const block = new Uint8Array(8);
+    const view = new DataView(block.buffer);
+    view.setUint16(0, rgb565, true);
+    view.setUint16(2, rgb565, true);
+    return block;
+};
+
+/** @param {any} device @param {any} texture */
+const drawTextured = (device, texture)=>{
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+        quad([0, 0, 2, 2], argb(255, 255, 255), true), 28), D3D_OK);
+};
+
+test('compressed textures decoded one after another in a frame each go up as their own texels',
+    async()=>{
+        // The renderer decodes every level into the same bytes, kept from one
+        // level to the next: the upload has copied them before the next level
+        // is decoded over them.
+        const h = harness({ compressedTextures: false });
+        const { device, gpu } = h;
+        const red = textureFrom(h, 4, 4, D3DFMT.DXT1, solidDxt1(0xf800));
+        const blue = textureFrom(h, 4, 4, D3DFMT.DXT1, solidDxt1(0x001f));
+        selectTexture(device);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+        drawTextured(device, red);
+        drawTextured(device, blue);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+
+        const [first, second] = gpu.of('createTexture')
+            .filter(c=>c.descriptor.label === 'texture');
+        /** @param {any} surface */
+        const texelOf = surface=>[...gpu.of('writeTexture')
+            .find(w=>w.destination.texture === surface.texture).bytes.subarray(0, 4)];
+        assert.deepEqual(texelOf(first), [0, 0, 255, 255], 'red, as B, G, R, A');
+        assert.deepEqual(texelOf(second), [255, 0, 0, 255], 'blue');
+    });
+
+test('a compressed level uploaded in the frame\'s order keeps its texels past the next decode',
+    async()=>{
+        // A texture the GPU has copied into uploads as a frame command, which
+        // holds its texels until the frame is replayed: a level decoded later
+        // in the same frame must not land in them.
+        const h = harness({ compressedTextures: false });
+        const { device, gpu } = h;
+        const target = textureFrom(h, 4, 4, D3DFMT.DXT1, solidDxt1(0xf800));
+        const source = textureFrom(h, 4, 4, D3DFMT.DXT1, solidDxt1(0x001f));
+        const later = textureFrom(h, 4, 4, D3DFMT.DXT1, solidDxt1(0xffff));
+        selectTexture(device);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+        drawTextured(device, target);
+        drawTextured(device, source);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+
+        /** @param {any} texture */
+        const levelOf = texture=>{
+            /** @type {{ surface?: any }} */
+            const held = {};
+            assert.equal(texture.GetSurfaceLevel(0, held), D3D_OK);
+            return held.surface;
+        };
+        assert.equal(device.CopyRects(levelOf(source), null, 0, levelOf(target), null, {}),
+            D3D_OK);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(target.LockRect(0, locked, null, 0), D3D_OK);
+        h.write(/** @type {number} */ (locked.pBits), solidDxt1(0x07e0));
+        assert.equal(target.UnlockRect(0), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        drawTextured(device, target);
+        drawTextured(device, later);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+
+        const surface = gpu.of('createTexture').filter(c=>c.descriptor.label === 'texture')[0];
+        const staged = gpu.of('copyBufferToTexture')
+            .filter(c=>c.destination.texture === surface.texture);
+        assert.equal(staged.length, 1, 'the second upload went in the frame\'s order');
+        const written = gpu.of('writeBuffer').find(w=>w.buffer === staged[0].source.buffer);
+        assert.deepEqual([...written.bytes.subarray(0, 4)], [0, 255, 0, 255],
+            'green, as it was written, not the white decoded after it');
+    });
+
 // --- transform and lighting ---
 
 /** @param {object} over @returns {any} a D3DLIGHT8 with every field written */
