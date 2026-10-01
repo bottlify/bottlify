@@ -40,6 +40,7 @@ export const WINDING = 2;
  * @typedef {Object} Painter
  * @property {import("./contract.js").Surface} surface
  * @property {import("./contract.js").Rect} clip
+ * @property {boolean} copies  Whether a pixel plotted replaces what is there, whatever it was.
  * @property {(x: number, y: number, pixel: number) => void} plot
  * @property {(rect: import("./contract.js").Rect) => Painter} narrow
  */
@@ -65,6 +66,8 @@ export function createPainter(surface, clip, rop2){
     return {
         surface,
         clip: bounds,
+        /** Whether a pixel plotted replaces what is there, whatever it was. */
+        copies: mode === R2_COPYPEN,
         plot(x, y, pixel){
             if (pixel === TRANSPARENT_PIXEL)
             {
@@ -178,6 +181,13 @@ export function fillRect(painter, rect, pattern){
     const area = intersectRect(rect, painter.clip);
     if (isEmptyRect(area))
     {
+        return;
+    }
+    // One colour copied over is one run a row, which the surface writes as
+    // such rather than as a call a pixel.
+    if (pattern.solid !== undefined && painter.copies && painter.surface.fill)
+    {
+        painter.surface.fill(area.left, area.top, area.right, area.bottom, pattern.solid);
         return;
     }
     for (let y = area.top; y < area.bottom; y++)

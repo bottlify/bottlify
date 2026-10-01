@@ -131,7 +131,7 @@ export function createPattern(options){
             return colours ? colours[(pixel & 0xffffff) === 0 ? 0 : 1] : pixel;
         };
     }
-    return ()=>foreground;
+    return Object.assign(()=>foreground, { solid: foreground });
 }
 
 /**
@@ -143,5 +143,5 @@ export function createPattern(options){
  */
 export function solidPattern(color){
     const pixel = colorToPixel(color);
-    return ()=>pixel;
+    return Object.assign(()=>pixel, { solid: pixel });
 }
