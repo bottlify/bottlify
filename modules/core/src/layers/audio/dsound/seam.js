@@ -39,7 +39,10 @@ const DSERR_INVALIDPARAM = 0x80070057 | 0;
 const DSERR_OUTOFMEMORY = 0x8007000e | 0;
 const DSERR_UNSUPPORTED = 0x80004001 | 0;
 /** An object a class factory made, before Initialize names its device. */
-const DSERR_UNINITIALIZED = 0x889000aa | 0;
+const DSERR_UNINITIALIZED = 0x887800aa | 0;
+/** What Compact answers below DSSCL_PRIORITY. */
+const DSERR_PRIOLEVELNEEDED = 0x88780046 | 0;
+const DSSCL_PRIORITY = 2;
 const DSERR_ALREADYINITIALIZED = 0x88780082 | 0;
 /** CLASS_E_NOAGGREGATION, under the name DirectSound gives it. */
 const DSERR_NOAGGREGATION = 0x80040110 | 0;
@@ -92,6 +95,9 @@ export const WAVEFORMATEX = Object.freeze({
     cbSize: 0x10,
     SIZE: 0x12,
 });
+/** WAVE_FORMAT_EXTENSIBLE, and where its extension's fields sit after WAVEFORMATEX. */
+const WAVE_FORMAT_EXTENSIBLE = 0xfffe;
+const EXTENSIBLE = Object.freeze({ wValidBitsPerSample: 18, SubFormat: 24, EXTRA: 22 });
 
 /**
  * DSBUFFERDESC.
@@ -566,10 +572,30 @@ export function createDirectSound(
         {
             return null;
         }
+        // WAVEFORMATEXTENSIBLE: the extension has to be whole, name its sample
+        // type, and claim no more valid bits than the container has (Wine's
+        // dsound.c test_primary_secondary); zero valid bits means all of them.
+        if (readU16(address + WAVEFORMATEX.wFormatTag) === WAVE_FORMAT_EXTENSIBLE)
+        {
+            const subFormat = memory.readMemory((address >>> 0) + EXTENSIBLE.SubFormat, 16);
+            if (readU16(address + WAVEFORMATEX.cbSize) < EXTENSIBLE.EXTRA
+                || subFormat.every((/** @type {number} */ byte)=>byte === 0)
+                || readU16(address + EXTENSIBLE.wValidBitsPerSample)
+                    > readU16(address + WAVEFORMATEX.wBitsPerSample))
+            {
+                return null;
+            }
+        }
+        // The frame size is derived, not read: today's DirectSound refuses a
+        // block or byte rate that disagrees with the rest (Wine's dsound.c
+        // perform_invalid_fmt_tests), and a program written for an older one
+        // may well pass such a structure.
+        const averageBytes = readU32(address + WAVEFORMATEX.nAvgBytesPerSec);
         return normaliseFormat({
             channels: readU16(address + WAVEFORMATEX.nChannels),
             sampleRate: readU32(address + WAVEFORMATEX.nSamplesPerSec),
             bitsPerSample: readU16(address + WAVEFORMATEX.wBitsPerSample),
+            ...averageBytes === 0 ? {} : { averageBytes },
         });
     };
 
@@ -581,7 +607,7 @@ export function createDirectSound(
         view.setUint16(WAVEFORMATEX.nChannels, format.channels, true);
         view.setUint32(WAVEFORMATEX.nSamplesPerSec, format.sampleRate, true);
         view.setUint32(WAVEFORMATEX.nAvgBytesPerSec,
-            format.sampleRate * format.blockAlign, true);
+            format.averageBytes ?? format.sampleRate * format.blockAlign, true);
         view.setUint16(WAVEFORMATEX.nBlockAlign, format.blockAlign, true);
         view.setUint16(WAVEFORMATEX.wBitsPerSample, format.bitsPerSample, true);
         view.setUint16(WAVEFORMATEX.cbSize, 0, true);
@@ -1064,6 +1090,7 @@ export function createDirectSound(
          */
         SetCooperativeLevel(root, [, level]){
             cooperativeLevel = level >>> 0;
+            root.level = cooperativeLevel;
             record(`SetCooperativeLevel ${cooperativeLevel}`);
             // Recorded and not enforced. Windows refuses SetFormat on the
             // primary buffer below DSSCL_PRIORITY and this does not: a program
@@ -1117,9 +1144,12 @@ export function createDirectSound(
             return DS_OK;
         },
 
-        /** HRESULT Compact(void) */
-        Compact(){
-            return DS_OK;
+        /**
+         * HRESULT Compact(void): there is no sound memory to compact, but
+         * asking needs DSSCL_PRIORITY, as on Windows.
+         */
+        Compact(root){
+            return (root.level ?? 0) >= DSSCL_PRIORITY ? DS_OK : DSERR_PRIOLEVELNEEDED;
         },
 
         /** HRESULT GetSpeakerConfig(LPDWORD) */

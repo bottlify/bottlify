@@ -77,6 +77,8 @@ export const DSBPAN_RIGHT = 10000;
  * @property {number} sampleRate
  * @property {number} bitsPerSample
  * @property {number} blockAlign      Bytes one frame occupies, across channels.
+ * @property {number} [averageBytes]   nAvgBytesPerSec as the program gave it, which
+ *     GetFormat hands back; DirectSound accepts one that disagrees with the rest.
  */
 
 /**
@@ -94,6 +96,7 @@ export function normaliseFormat(format){
         // structure that disagrees with itself is common, and every cursor here
         // is in bytes, so the frame size is what everything else derives from.
         blockAlign: Math.max(1, channels * (bitsPerSample >> 3)),
+        ...format.averageBytes === undefined ? {} : { averageBytes: format.averageBytes },
     };
 }
 

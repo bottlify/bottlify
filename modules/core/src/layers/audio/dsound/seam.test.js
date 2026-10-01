@@ -1544,8 +1544,11 @@ test('DirectSound\'s class object makes objects that wait for Initialize', ()=>{
     assert.equal(g.call(factory, 3, [0, IID, out]), DS_OK, 'CreateInstance');
     const sound = g.memory.u32(out);
     const caps = 0x1f00;
-    assert.equal(g.call(sound, slotOf(IDIRECTSOUND_SLOTS, 'GetCaps'), [caps]) >>> 0, 0x889000aa);
-    assert.equal(g.call(sound, slotOf(IDIRECTSOUND_SLOTS, 'Compact')) >>> 0, 0x889000aa);
+    const DSERR_UNINITIALIZED = 0x887800aa;
+    assert.equal(g.call(sound, slotOf(IDIRECTSOUND_SLOTS, 'GetCaps'), [caps]) >>> 0,
+        DSERR_UNINITIALIZED);
+    assert.equal(g.call(sound, slotOf(IDIRECTSOUND_SLOTS, 'Compact')) >>> 0,
+        DSERR_UNINITIALIZED);
     assert.equal(g.call(sound, slotOf(IDIRECTSOUND_SLOTS, 'Initialize'), [0]), DS_OK);
     assert.equal(g.call(sound, slotOf(IDIRECTSOUND_SLOTS, 'Initialize'), [0]) >>> 0, 0x88780082,
         'DSERR_ALREADYINITIALIZED');
