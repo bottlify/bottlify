@@ -1865,6 +1865,7 @@ function actionFormat(memory, semantics, bufferSize = 16){
     memory.setU32(ACTION_FORMAT + 8, semantics.length * 4);
     memory.setU32(ACTION_FORMAT + 12, semantics.length);
     memory.setU32(ACTION_FORMAT + 16, ACTIONS);
+    memory.setU32(ACTION_FORMAT + 20, 0x12345678); // guidActionMap, which may not be null
     memory.setU32(ACTION_FORMAT + 36, 0x01000000);
     memory.setU32(ACTION_FORMAT + 40, bufferSize);
     semantics.forEach((semantic, index)=>{
@@ -1901,6 +1902,35 @@ test('EnumDevicesBySemantics offers the keyboard and the mouse, each a device to
         assert.equal(call.args[3], 1 - index, 'how many come after it');
         assert.equal(call.args[4], 0x9999);
     }
+});
+
+test('EnumDevicesBySemantics offers a user\'s own devices, or those nobody has', async()=>{
+    // Wine's dinput.c test_EnumDevicesBySemantics.
+    const f = fixture();
+    const root8 = directInput8(f, false);
+    const format = actionFormat(f.memory, [DIKEYBOARD_UP, DIMOUSE_BUTTON0]);
+    const NAME = 0x6000;
+    f.memory.writeMemory(NAME, new TextEncoder().encode('Ninja Brian\0'));
+    const offered = async(/** @type {number} */ user, /** @type {number} */ flags)=>{
+        f.calls.length = 0;
+        assert.equal(await f.bridge.callAsync(root8, 'EnumDevicesBySemantics',
+            [user, format, 0x7777, 0, flags]), DI_OK);
+        return f.calls.length;
+    };
+    const THISUSER = 0x10;
+    const AVAILABLE = 0x1000;
+    assert.equal(await offered(0, THISUSER), 0, 'nobody\'s yet');
+    assert.equal(await offered(0, AVAILABLE), 2);
+    const keys = device8(f, GUID_SysKeyboard, false);
+    assert.equal(f.bridge.call(keys, 'SetActionMap', [format, NAME, 0]), DI_OK);
+    assert.equal(await offered(NAME, THISUSER), 1, 'the keyboard is Ninja Brian\'s');
+    assert.equal(await offered(0, THISUSER), 1, 'and any user\'s, when none is named');
+    assert.equal(await offered(NAME, THISUSER | AVAILABLE), 2);
+    assert.equal(await offered(0, AVAILABLE), 1, 'the mouse alone is nobody\'s');
+    assert.equal(await offered(0, 0), 2);
+    f.memory.setU32(format + 20, 0);
+    assert.equal(f.bridge.call(root8, 'EnumDevicesBySemantics', [0, format, 0x7777, 0, 0]),
+        DIERR_INVALIDPARAM, 'a null action map GUID');
 });
 
 test('BuildActionMap maps the semantics of the device itself and leaves the rest', ()=>{

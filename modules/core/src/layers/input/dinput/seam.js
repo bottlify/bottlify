@@ -394,7 +394,8 @@ const DIDFT_AXIS = 0x03;
  * controls with: the two widths differ only in the format's trailing name.
  */
 const DIACTIONFORMAT = Object.freeze({
-    dwSize: 0x00, dwActionSize: 0x04, dwNumActions: 0x0c, rgoAction: 0x10, dwBufferSize: 0x28,
+    dwSize: 0x00, dwActionSize: 0x04, dwNumActions: 0x0c, rgoAction: 0x10, guidActionMap: 0x14,
+    dwBufferSize: 0x28,
     SIZE_A: 0x148, SIZE_W: 0x24c,
 });
 const DIACTION = Object.freeze({
@@ -418,6 +419,10 @@ const SEMANTIC_KEYBOARD = 0x81;
 const SEMANTIC_MOUSE = 0x82;
 const DIEDBS_MAPPEDPRI1 = 0x01;
 const DIEDBSFL_FORCEFEEDBACK = 0x100;
+const DIEDBSFL_THISUSER = 0x10;
+const DIEDBSFL_AVAILABLEDEVICES = 0x1000;
+/** The owner a device is given by a SetActionMap that names no user: whoever is logged on. */
+const LOGGED_ON_USER = Symbol('logged-on user');
 const DIDFT_ANYINSTANCE = 0xffff;
 const DIDFT_OPTIONAL = 0x80000000;
 
@@ -770,6 +775,38 @@ export function createDirectInput(
      *     appData?: Map<number, number>, relative?: boolean }>}
      */
     const formats = new WeakMap();
+    /**
+     * Whose each device is, once a SetActionMap gave it to a user.
+     *
+     * @type {WeakMap<object, string | symbol>}
+     */
+    const owners = new WeakMap();
+
+    /**
+     * A user name a program passes, in its width; no name and an empty one
+     * are both the empty string.
+     *
+     * @param {number} pointer @param {boolean} wide
+     */
+    const readName = (pointer, wide)=>{
+        if ((pointer >>> 0) === 0)
+        {
+            return '';
+        }
+        const width = wide ? 2 : 1;
+        const bytes = memory.readMemory(pointer >>> 0, 256 * width);
+        let text = '';
+        for (let at = 0; at + width <= bytes.length; at += width)
+        {
+            const unit = wide ? bytes[at] | bytes[at + 1] << 8 : bytes[at];
+            if (unit === 0)
+            {
+                break;
+            }
+            text += String.fromCharCode(unit);
+        }
+        return text;
+    };
 
     /** Each device's force-feedback gain, which these devices keep and never use. */
     const gains = new WeakMap();
@@ -1363,7 +1400,7 @@ export function createDirectInput(
          * action's place and with its action's uAppData; the format's buffer
          * size is the device's. Settled while nobody holds the device.
          */
-        SetActionMap(device, [format, , flags]){
+        SetActionMap(device, [format, user, flags], descriptor){
             const actions = readActions(format);
             if (!actions)
             {
@@ -1397,6 +1434,9 @@ export function createDirectInput(
             }
             const dataSize = actions.count * 4;
             formats.set(device, { dataSize, places, appData });
+            // The device is the user's from now on, as EnumDevicesBySemantics
+            // tells a program asking whose it is.
+            owners.set(device, readName(user, descriptor?.wide === true) || LOGGED_ON_USER);
             device.setDataSize(dataSize);
             if (actions.bufferSize > 0)
             {
@@ -1839,9 +1879,11 @@ export function createDirectInput(
          * @param {any} root @param {number[]} args
          * @param {{ wide?: boolean }} descriptor
          */
-        EnumDevicesBySemantics(root, [, format, callback, context, flags], descriptor){
+        EnumDevicesBySemantics(root, [user, format, callback, context, flags], descriptor){
             const actions = readActions(format);
-            if (!actions || (callback >>> 0) === 0)
+            if (!actions || (callback >>> 0) === 0
+                || memory.readMemory((format >>> 0) + DIACTIONFORMAT.guidActionMap, 16)
+                    .every((/** @type {number} */ byte)=>byte === 0))
             {
                 return DIERR_INVALIDPARAM;
             }
@@ -1853,10 +1895,30 @@ export function createDirectInput(
             const wide = descriptor?.wide === true;
             const semantics = Array.from({ length: actions.count },
                 (_, index)=>readU32(actions.at(index) + DIACTION.dwSemantic));
+            // Which devices, by whose they are (Wine's dinput.c
+            // test_EnumDevicesBySemantics): a user's own are those a
+            // SetActionMap gave that user -- any user's, when none is named --
+            // and the available ones those nobody has.
+            const asked = readName(user, wide);
+            const mine = (/** @type {any} */ device)=>{
+                const owner = owners.get(device);
+                return owner !== undefined && (asked === '' || owner === asked);
+            };
+            const free = (/** @type {any} */ device)=>!owners.has(device);
+            const wanted = (/** @type {any} */ device)=>{
+                switch (flags & (DIEDBSFL_THISUSER | DIEDBSFL_AVAILABLEDEVICES))
+                {
+                    case DIEDBSFL_THISUSER: return mine(device);
+                    case DIEDBSFL_AVAILABLEDEVICES: return free(device);
+                    case DIEDBSFL_THISUSER | DIEDBSFL_AVAILABLEDEVICES:
+                        return mine(device) || free(device);
+                    default: return true;
+                }
+            };
             const offers = /** @type {const} */ ([
                 { guid: GUID_SysKeyboard, kind: KEYBOARD, name: 'Keyboard' },
                 { guid: GUID_SysMouse, kind: MOUSE, name: 'Mouse' },
-            ]);
+            ]).filter(offer=>wanted(deviceFor(offer.guid)));
             enumerations++;
             const thread = callerThread?.();
             return (async()=>{
