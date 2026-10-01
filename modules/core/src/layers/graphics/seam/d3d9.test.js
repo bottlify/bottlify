@@ -1656,8 +1656,8 @@ test('with guest memory, a buffer locks and unlocks in the guest, and the host s
     /** @type {[number, number][]} */
     const replayed = [];
     const lock = buffer.Lock.bind(buffer);
-    buffer.Lock = (/** @type {number} */ offset, /** @type {number} */ size,
-        /** @type {any} */ held, /** @type {number} */ flags)=>{
+    /** @param {number} offset @param {number} size @param {any} held @param {number} flags */
+    buffer.Lock = (offset, size, held, flags)=>{
         replayed.push([offset, size]);
         return lock(offset, size, held, flags);
     };
