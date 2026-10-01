@@ -1705,7 +1705,12 @@ export function createWin32Module(){
 
                 'IMM32.dll': createImmFunctions({ writeMemory }),
 
-                'SHLWAPI.dll': createShlwapiFunctions({ readCString, readWideString, writeMemory }),
+                'SHLWAPI.dll': createShlwapiFunctions({
+                    readCString, readWideString, writeMemory,
+                    files: volume,
+                    /** @param {string} path */
+                    fullPath: path=>filesystem.resolve(path).path,
+                }),
 
                 'ADVPACK.dll': createAdvpackFunctions({
                     isAdministrator: ()=>isTokenMember(ADMINISTRATORS_SID),

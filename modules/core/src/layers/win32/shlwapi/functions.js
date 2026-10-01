@@ -20,6 +20,8 @@ const MAX_LENGTH = 0x1000;
 /** What PathCombine may produce, terminator included. */
 const MAX_PATH = 260;
 
+const FILE_ATTRIBUTE_DIRECTORY = 0x10;
+
 /**
  * Hue, luminance and saturation each run from 0 to 240 here, against 255 for
  * a colour channel. A grey has no hue and is given two thirds of the way
@@ -40,6 +42,12 @@ const isSeparator = c=>c === '\\' || c === '/';
  *           Reads a UTF-16 argument. Absent in a build that cannot, and the
  *           W spellings then fail as they would for an argument they could
  *           not read.
+ * @property {{ stat(path: string): { exists: boolean, isDirectory: boolean } | null }} [files]
+ *           The volume, for the functions that ask what a path names. Absent,
+ *           every path names nothing.
+ * @property {(path: string) => string} [fullPath]
+ *           A path made absolute against the current directory, as the file
+ *           functions make it.
  */
 
 /**
@@ -258,6 +266,27 @@ export function createShlwapiFunctions(host){
         },
     });
 
+    /**
+     * PathIsDirectory for either width: the directory attribute of what the
+     * path names, which is what Windows answers with, or 0 for a file or for
+     * nothing there.
+     *
+     * @param {(address: number) => string | null} read
+     */
+    const pathIsDirectory = read=>({
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([pointer])=>{
+            const path = read(pointer);
+            if (!path || !host.files || !host.fullPath)
+            {
+                return 0;
+            }
+            const entry = host.files.stat(host.fullPath(path));
+            return entry?.exists && entry.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : 0;
+        },
+    });
+
     /** @param {number} address @param {number} value */
     const writeWord = (address, value)=>{
         if ((address >>> 0) !== 0)
@@ -354,6 +383,13 @@ export function createShlwapiFunctions(host){
                 return root ? 1 : 0;
             },
         },
+
+        /**
+         * BOOL PathIsDirectoryA(LPCSTR pszPath)
+         * BOOL PathIsDirectoryW(LPCWSTR pszPath)
+         */
+        PathIsDirectoryA: pathIsDirectory(pathAt),
+        PathIsDirectoryW: pathIsDirectory(widePathAt),
 
         /** BOOL PathIsUNCA(LPCSTR pszPath) */
         PathIsUNCA: {

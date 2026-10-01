@@ -42,6 +42,61 @@ function machine(){
     return { fns, put, at };
 }
 
+test('a directory is answered with its attribute, a file and nothing with 0', ()=>{
+    // PathIsDirectory asks the volume, against the current directory as the
+    // file functions do; without one every path names nothing.
+    const memory = new Uint8Array(0x400);
+    /** @type {Record<string, boolean>} */
+    const volume = { 'C:\\App': true, 'C:\\App\\Data': true, 'C:\\App\\game.exe': false };
+    const fns = createShlwapiFunctions({
+        readCString: (address, maxLength)=>{
+            let text = '';
+            for (let at = address; at < address + maxLength && memory[at] !== 0; at++)
+            {
+                text += String.fromCharCode(memory[at]);
+            }
+            return text;
+        },
+        readWideString: (address, maxLength)=>{
+            let text = '';
+            for (let at = address; at < address + maxLength && memory[at] !== 0; at += 2)
+            {
+                text += String.fromCharCode(memory[at] | memory[at + 1] << 8);
+            }
+            return text;
+        },
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        files: { stat: path=>({ exists: path in volume, isDirectory: volume[path] === true }) },
+        fullPath: path=>(/^[A-Za-z]:/.test(path) ? path : `C:\\App\\${path}`)
+            .replace(/\\+$/, ''),
+    });
+    /** @param {string} text */
+    const put = text=>{
+        memory.fill(0, AT, AT + 0x100);
+        memory.set(new TextEncoder().encode(text), AT);
+        return AT;
+    };
+    /** @param {string} text */
+    const putWide = text=>{
+        memory.fill(0, AT, AT + 0x100);
+        for (let at = 0; at < text.length; at++)
+        {
+            memory[AT + at * 2] = text.charCodeAt(at);
+        }
+        return AT;
+    };
+    assert.equal(fns.PathIsDirectoryA.handler([put('C:\\App')]), 0x10);
+    assert.equal(fns.PathIsDirectoryA.handler([put('Data')]), 0x10,
+        'a relative path, against the current directory');
+    assert.equal(fns.PathIsDirectoryA.handler([put('C:\\App\\game.exe')]), 0, 'a file');
+    assert.equal(fns.PathIsDirectoryA.handler([put('C:\\Missing')]), 0, 'nothing there');
+    assert.equal(fns.PathIsDirectoryA.handler([0]), 0, 'no path');
+    assert.equal(fns.PathIsDirectoryW.handler([putWide('C:\\App\\Data\\')]), 0x10,
+        'the wide spelling, a trailing separator and all');
+    assert.equal(machine().fns.PathIsDirectoryA.handler([put('C:\\App')]), 0,
+        'with no volume, nothing is there');
+});
+
 test('the extension is the last dot of the last component, or the terminator', ()=>{
     const { fns, put, at } = machine();
     assert.equal(at(fns.PathFindExtensionA.handler([put('C:\\dir.d\\file.tar.gz')])), '.gz');
