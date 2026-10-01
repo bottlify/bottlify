@@ -1325,30 +1325,16 @@ test('a batch whose answer waits behind a hold of the engine thread past the lim
     });
 
 /**
- * Waits until the runtime's worker has loaded: until then a batch is emitted
- * inline and published at once, so fresh starts are tried until one is not,
- * and then that batch's answer is waited for.
+ * Waits until the runtime's worker has loaded and takes the batches.
  *
  * @param {ReturnType<typeof machine>} m
  */
 async function untilWorkerLoaded(m){
-    for (let i = 0, at = 0x40000; i < 200; i++, at += 0x100)
+    for (let i = 0; i < 300 && m.runtime.diagnostics().worker !== 'ready'; i++)
     {
-        m.write(at, COUNTDOWN);
-        m.runtime.noteHot(at, 0, 2);
-        await m.runtime.translatePending();
-        if (m.runtime.entryOf(at) < 0)
-        {
-            for (let k = 0; k < 200 && m.runtime.entryOf(at) < 0; k++)
-            {
-                await new Promise(resolve=>setTimeout(resolve, 10));
-            }
-            assert.ok(m.runtime.entryOf(at) >= 0, 'the worker answers');
-            return;
-        }
         await new Promise(resolve=>setTimeout(resolve, 10));
     }
-    assert.fail('the worker never loaded');
+    assert.equal(m.runtime.diagnostics().worker, 'ready', 'the worker loaded');
 }
 
 test('what queues while a batch is with the worker goes out when its answer comes, unasked',
@@ -1795,6 +1781,8 @@ test('after a merge, the next waits for translated instructions in proportion to
     };
     try
     {
+        // The merges are the worker's: its batches go whole once it has loaded.
+        await untilWorkerLoaded(m);
         m.runtime.noteHot(CODE + 14);
         await until(()=>m.runtime.entryOf(CODE + 14) >= 0);
         m.runtime.noteHot(CODE);
@@ -1829,9 +1817,13 @@ test('after a merge, the next waits for translated instructions in proportion to
  * @param {Record<string, unknown>} config */
 function mergeMachine(config){
     const m = machine({ leafCalls: false, dispatch: true, worker: true, ...config });
+    // Batches go whole to the worker once it has loaded, and in small pieces
+    // emitted inline before: the merges are the worker's.
+    const loaded = untilWorkerLoaded(m);
     /** Translates until the condition holds, the worker answering on its own turns.
      * @param {() => boolean} done */
     const until = async done=>{
+        await loaded;
         for (let i = 0; i < 300 && !done(); i++)
         {
             await m.runtime.translatePending();

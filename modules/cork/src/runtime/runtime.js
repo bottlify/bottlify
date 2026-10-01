@@ -58,6 +58,12 @@ const KINDS = /** @type {ExitKind[]} */ (
         // to arrive, the state block is whole and the run goes on at its EIP.
         'untranslated']);
 
+/** While the translation worker loads: the largest batch emitted on the engine
+ * thread, and the share of the time since the worker was made that emitting
+ * there may take. */
+const LOADING_BATCH = 16;
+const LOADING_SHARE = 0.25;
+
 /** @type {Function | null} */
 let noTier = null;
 /**
@@ -925,6 +931,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** @type {{ post: (message: any, transfer: any[]) => void,
      *     terminate: () => void } | null} */
     let worker = null;
+    /** When the worker in `loading` was made, and the time spent emitting here since. */
+    let loadingSince = 0;
+    let inlineWhileLoading = 0;
     /** A worker made and still loading, which `flush` ends too.
      * @type {{ post: (message: any, transfer: any[]) => void, terminate: () => void } | null} */
     let loading = null;
@@ -2065,6 +2074,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // are emitted inline until then.
             let ready = false;
             loading = adapter;
+            loadingSince = performance.now();
             adapter.onMessage(data=>{
                 if (data?.ready === true)
                 {
@@ -2073,6 +2083,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     if (!workerClosed)
                     {
                         worker = adapter;
+                        // What waited for it goes now.
+                        sendNext();
                     }
                     return;
                 }
@@ -2308,6 +2320,241 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         return top;
     };
 
+    /**
+     * One batch: formed here, and emitted here too while no worker takes it.
+     * What `translatePending` runs, synchronously throughout.
+     *
+     * @returns {number}
+     */
+    const translateNow = ()=>{
+        if (profileAt >= 0)
+        {
+            sampleCalls();
+        }
+        // A batch is with the worker: its answer is published when it
+        // comes back, so the engine never waits for it. Candidates
+        // formed in the meantime stay queued for the next call. A
+        // batch's store lookups are likewise in flight: the next batch
+        // waits for them, so the pending ones publish in order.
+        // A batch the worker has held past the in-flight limit is given
+        // up: its answer, should it come, no longer matches, and the
+        // candidates it held are free to be taken again.
+        if (outstanding !== null && overdue(outstanding.at))
+        {
+            refused['worker: no answer'] = (refused['worker: no answer'] ?? 0) + 1;
+            outstanding = null;
+            inFlight.clear();
+        }
+        if (outstanding !== null || storePending)
+        {
+            owed++;
+            return 0;
+        }
+        owed = Math.max(0, owed - 1);
+        if (!settings.translate)
+        {
+            return 0;
+        }
+        // A relink only while nothing hot waits: a chunk holds the worker for
+        // seconds, and code the interpreter keeps meeting runs interpreted
+        // until its own batch comes back. A title's queue is never empty --
+        // the cold starts met twice stay -- so the test is the heat, not the
+        // length.
+        const keeps = leaveOut.size > 0 || settings.undoLog || profiling
+            ? null : (settings.store ?? null);
+        if (copiesWanted.size > 0 && copiesStep(keeps))
+        {
+            return 0;
+        }
+        if (!buckets.slice(HOT_BUCKET).some(bucket=>bucket.size > 0)
+            && (profileAt >= 0 && reformStep(keeps) || relinkStep(keeps)))
+        {
+            return 0;
+        }
+        if (queue.size === 0)
+        {
+            return 0;
+        }
+        // Single set as the batch is formed: the wide regions it would make
+        // would each leave at its first rounding block. A program under
+        // Direct3D has had it set since the device was made.
+        if (precision === 'wide'
+            && (view().getUint16(layout.x87Control, true) & 0x300) === 0)
+        {
+            precisionSeen();
+        }
+        // A deep queue -- a loading phase, where every start met twice is
+        // a candidate and one batch is in flight at a time -- takes a bigger
+        // batch, a quarter of what waits up to `maxBatchRegions`, so the
+        // round trip through the worker and the store is paid per hundreds
+        // of regions rather than per thirty-two.
+        // While the worker loads, a batch emitted here is kept small.
+        const ceiling = loading !== null && worker === null
+            ? LOADING_BATCH : settings.maxBatchRegions;
+        const wanted = Math.min(ceiling,
+            Math.max(settings.batchRegions, queue.size >> 2));
+        const batch = hottest(wanted);
+        const takenAt = performance.now();
+        for (const [key] of batch)
+        {
+            unqueue(key);
+            dropKey(key);
+            inFlight.set(key, takenAt);
+        }
+        // A diagnostic run with classes left out, or with an undo log the
+        // stored modules were built without, keeps no translations.
+        const store = leaveOut.size > 0 || settings.undoLog || profiling
+            ? null : (settings.store ?? null);
+        /** @type {{ region: import('../region.js').Region, entryTop: number,
+         *     stamp: string, cached: import('./cache.js').CachedRegion | null, wide?: boolean,
+         *     narrow?: boolean, checked?: boolean, moduleBytes?: Uint8Array | null,
+         *     waited?: boolean }[]} */
+        const formed = [];
+        const formedAt = clock();
+        // The block starts of the regions this batch formed with no x87 in
+        // them, each an entry at any top once published: a candidate among
+        // them is already translated by one (a loop's head and its cases
+        // were all hot at once, and each formed the whole loop again). It
+        // is noted again should its block get no entry after all.
+        /** @type {Set<number>} */
+        const covered = new Set();
+        // Nothing runs while the batch is formed, so its regions share
+        // what decoding finds.
+        const shared = formShared();
+        for (let i = 0; i < batch.length; i++)
+        {
+            const [key, eip] = batch[i];
+            const entryTop = key % 16;
+            // A candidate that has an entry by now -- a block of a region
+            // published while it waited, the return address of a call the
+            // interpreter met before its caller's region came back -- would
+            // be formed again as a region of its own.
+            if (covered.has(eip) || closedIn.has(eip) || entries.entryOf(eip, entryTop) >= 0)
+            {
+                inFlight.delete(key);
+                continue;
+            }
+            const region = formRegion(read, eip, { ...formOptions, translatable, shared });
+            // What the region calls directly lands in the same batch, so
+            // the call and the return transfer without a miss -- each
+            // callee at the top the call site has, which the tracker
+            // knows wherever it reached the block: batching it at the
+            // entry's top compiled a callee nobody calls for a region
+            // whose own x87 moved the stack before the call. Up to the
+            // batch's ceiling, not its usual size: a loader's function
+            // calls dozens, each of which the interpreter otherwise ran
+            // and whose loop, hot first, became a region of its own
+            // headed there rather than at the function's start.
+            const tracked = usesX87(region) ? trackRegion(region, entryTop) : null;
+            for (let at = 0; at < region.blocks.length; at++)
+            {
+                const block = region.blocks[at];
+                if (block.exit.kind !== 'call')
+                {
+                    continue;
+                }
+                const [callee] = block.exit.targets;
+                const end = tracked === null ? null : tracked.ends[at];
+                const top = end === null ? entryTop : end.top;
+                if (batch.length < ceiling
+                    && entries.entryOf(callee, top) < 0 && translatable(callee)
+                    && !batch.some(([queued])=>queued === keyOf(callee, top)))
+                {
+                    batch.push([keyOf(callee, top), callee]);
+                    unqueue(keyOf(callee, top));
+                    dropKey(keyOf(callee, top));
+                    inFlight.set(keyOf(callee, top), takenAt);
+                }
+            }
+            for (const [opcode, times] of region.refused)
+            {
+                refused[opcode] = (refused[opcode] ?? 0) + times;
+            }
+            // The entry's own block decides whether nothing was formed:
+            // the first in address order is another block wherever the
+            // region reaches code below the entry.
+            const entryBlock = region.blocks.find(block=>block.start === eip);
+            if (entryBlock === undefined || entryBlock.instructions.length === 0)
+            {
+                barrenAdd(eip, entryTop);
+                continue;
+            }
+            formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null,
+                wide: precision === 'wide' && usesX87(region),
+                narrow: precision === 'narrow' && usesX87(region),
+                checked: checkedAt(region, entryTop) });
+            if (!usesX87(region))
+            {
+                for (const block of region.blocks)
+                {
+                    covered.add(block.start);
+                }
+            }
+        }
+        counts.formingMs += clock() - formedAt;
+        if (store === null)
+        {
+            return finishBatch(formed, null);
+        }
+        const lookupAt = clock();
+        if (lookUpNow(formed, store))
+        {
+            counts.lookedUpNow++;
+            counts.lookupMs += clock() - lookupAt;
+            return finishBatch(formed, store);
+        }
+        // A store that cannot answer at once answers off the slice path:
+        // the batch's records are requested here and the slice goes on. The
+        // batch is published when the bytes are back -- between frames, as
+        // instantiation already is -- and a region not back is not
+        // published this frame. `lookupMs` is the engine thread's own time
+        // to start them.
+        storePending = true;
+        counts.lookedUpLater++;
+        // A batch module's bytes are read once for every record naming it.
+        /** @type {Map<string, Promise<Uint8Array | null>>} */
+        const modules = new Map();
+        /** @param {string} key */
+        const moduleBytes = key=>{
+            let pending = modules.get(key);
+            if (pending === undefined)
+            {
+                /** @param {Uint8Array | null} bytes */
+                const unpack = bytes=>(bytes === null
+                    ? null : unpackRegion(bytes)?.module ?? null);
+                pending = /** @type {Promise<Uint8Array | null>} */ (store.get(key).then(unpack));
+                modules.set(key, pending);
+            }
+            return pending;
+        };
+        // The guest runs on while the store answers.
+        const answered = ()=>{
+            storePending = false;
+            for (const one of formed)
+            {
+                one.waited = true;
+            }
+            finishBatch(formed, store);
+            sendNext();
+        };
+        Promise.all(formed.map(async one=>{
+            try
+            {
+                const bytes = await store.get(regionKey(one));
+                const cached = bytes === null ? null : unpackRegion(bytes);
+                const batchKey = cached?.moduleKey;
+                // Its batch's module, unless this run instantiated it already.
+                settle(one, cached, batchKey !== undefined && !batchInstances.has(batchKey)
+                    ? await moduleBytes(batchKey) : undefined);
+            }
+            catch {
+                settle(one, null);
+            }
+        })).then(answered, answered);
+        counts.lookupMs += clock() - lookupAt;
+        return 0;
+    };
+
     /** @type {Runtime & { pages: import('./pages.js').PageTable }} */
     const api = {
         pages,
@@ -2534,229 +2781,29 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
 
         /** @type {() => Promise<number>} */
         async translatePending(){
-            if (profileAt >= 0)
+            if (loading === null || worker !== null)
             {
-                sampleCalls();
+                return translateNow();
             }
-            // A batch is with the worker: its answer is published when it
-            // comes back, so the engine never waits for it. Candidates
-            // formed in the meantime stay queued for the next call. A
-            // batch's store lookups are likewise in flight: the next batch
-            // waits for them, so the pending ones publish in order.
-            // A batch the worker has held past the in-flight limit is given
-            // up: its answer, should it come, no longer matches, and the
-            // candidates it held are free to be taken again.
-            if (outstanding !== null && overdue(outstanding.at))
-            {
-                refused['worker: no answer'] = (refused['worker: no answer'] ?? 0) + 1;
-                outstanding = null;
-                inFlight.clear();
-            }
-            if (outstanding !== null || storePending)
+            // The worker is loading: what is asked for now is emitted here, in
+            // small batches and for a quarter of the time the load has taken at
+            // most, and the rest waits for it. A loading phase's thousands of
+            // starts, each run a few times, cost more emitted on this thread
+            // than interpreted until the worker takes them.
+            if (inlineWhileLoading > LOADING_SHARE * (performance.now() - loadingSince))
             {
                 owed++;
                 return 0;
             }
-            owed = Math.max(0, owed - 1);
-            if (!settings.translate)
+            const startedAt = performance.now();
+            try
             {
-                return 0;
+                return translateNow();
             }
-            // A relink only while nothing hot waits: a chunk holds the worker for
-            // seconds, and code the interpreter keeps meeting runs interpreted
-            // until its own batch comes back. A title's queue is never empty --
-            // the cold starts met twice stay -- so the test is the heat, not the
-            // length.
-            const keeps = leaveOut.size > 0 || settings.undoLog || profiling
-                ? null : (settings.store ?? null);
-            if (copiesWanted.size > 0 && copiesStep(keeps))
+            finally
             {
-                return 0;
+                inlineWhileLoading += performance.now() - startedAt;
             }
-            if (!buckets.slice(HOT_BUCKET).some(bucket=>bucket.size > 0)
-                && (profileAt >= 0 && reformStep(keeps) || relinkStep(keeps)))
-            {
-                return 0;
-            }
-            if (queue.size === 0)
-            {
-                return 0;
-            }
-            // Single set as the batch is formed: the wide regions it would make
-            // would each leave at its first rounding block. A program under
-            // Direct3D has had it set since the device was made.
-            if (precision === 'wide'
-                && (view().getUint16(layout.x87Control, true) & 0x300) === 0)
-            {
-                precisionSeen();
-            }
-            // A deep queue -- a loading phase, where every start met twice is
-            // a candidate and one batch is in flight at a time -- takes a bigger
-            // batch, a quarter of what waits up to `maxBatchRegions`, so the
-            // round trip through the worker and the store is paid per hundreds
-            // of regions rather than per thirty-two.
-            const wanted = Math.min(settings.maxBatchRegions,
-                Math.max(settings.batchRegions, queue.size >> 2));
-            const batch = hottest(wanted);
-            const takenAt = performance.now();
-            for (const [key] of batch)
-            {
-                unqueue(key);
-                dropKey(key);
-                inFlight.set(key, takenAt);
-            }
-            // A diagnostic run with classes left out, or with an undo log the
-            // stored modules were built without, keeps no translations.
-            const store = leaveOut.size > 0 || settings.undoLog || profiling
-                ? null : (settings.store ?? null);
-            /** @type {{ region: import('../region.js').Region, entryTop: number,
-             *     stamp: string, cached: import('./cache.js').CachedRegion | null, wide?: boolean,
-             *     narrow?: boolean, checked?: boolean, moduleBytes?: Uint8Array | null,
-             *     waited?: boolean }[]} */
-            const formed = [];
-            const formedAt = clock();
-            // The block starts of the regions this batch formed with no x87 in
-            // them, each an entry at any top once published: a candidate among
-            // them is already translated by one (a loop's head and its cases
-            // were all hot at once, and each formed the whole loop again). It
-            // is noted again should its block get no entry after all.
-            /** @type {Set<number>} */
-            const covered = new Set();
-            // Nothing runs while the batch is formed, so its regions share
-            // what decoding finds.
-            const shared = formShared();
-            for (let i = 0; i < batch.length; i++)
-            {
-                const [key, eip] = batch[i];
-                const entryTop = key % 16;
-                // A candidate that has an entry by now -- a block of a region
-                // published while it waited, the return address of a call the
-                // interpreter met before its caller's region came back -- would
-                // be formed again as a region of its own.
-                if (covered.has(eip) || closedIn.has(eip) || entries.entryOf(eip, entryTop) >= 0)
-                {
-                    inFlight.delete(key);
-                    continue;
-                }
-                const region = formRegion(read, eip, { ...formOptions, translatable, shared });
-                // What the region calls directly lands in the same batch, so
-                // the call and the return transfer without a miss -- each
-                // callee at the top the call site has, which the tracker
-                // knows wherever it reached the block: batching it at the
-                // entry's top compiled a callee nobody calls for a region
-                // whose own x87 moved the stack before the call. Up to the
-                // batch's ceiling, not its usual size: a loader's function
-                // calls dozens, each of which the interpreter otherwise ran
-                // and whose loop, hot first, became a region of its own
-                // headed there rather than at the function's start.
-                const tracked = usesX87(region) ? trackRegion(region, entryTop) : null;
-                for (let at = 0; at < region.blocks.length; at++)
-                {
-                    const block = region.blocks[at];
-                    if (block.exit.kind !== 'call')
-                    {
-                        continue;
-                    }
-                    const [callee] = block.exit.targets;
-                    const end = tracked === null ? null : tracked.ends[at];
-                    const top = end === null ? entryTop : end.top;
-                    if (batch.length < settings.maxBatchRegions
-                        && entries.entryOf(callee, top) < 0 && translatable(callee)
-                        && !batch.some(([queued])=>queued === keyOf(callee, top)))
-                    {
-                        batch.push([keyOf(callee, top), callee]);
-                        unqueue(keyOf(callee, top));
-                        dropKey(keyOf(callee, top));
-                        inFlight.set(keyOf(callee, top), takenAt);
-                    }
-                }
-                for (const [opcode, times] of region.refused)
-                {
-                    refused[opcode] = (refused[opcode] ?? 0) + times;
-                }
-                // The entry's own block decides whether nothing was formed:
-                // the first in address order is another block wherever the
-                // region reaches code below the entry.
-                const entryBlock = region.blocks.find(block=>block.start === eip);
-                if (entryBlock === undefined || entryBlock.instructions.length === 0)
-                {
-                    barrenAdd(eip, entryTop);
-                    continue;
-                }
-                formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null,
-                    wide: precision === 'wide' && usesX87(region),
-                    narrow: precision === 'narrow' && usesX87(region),
-                    checked: checkedAt(region, entryTop) });
-                if (!usesX87(region))
-                {
-                    for (const block of region.blocks)
-                    {
-                        covered.add(block.start);
-                    }
-                }
-            }
-            counts.formingMs += clock() - formedAt;
-            if (store === null)
-            {
-                return finishBatch(formed, null);
-            }
-            const lookupAt = clock();
-            if (lookUpNow(formed, store))
-            {
-                counts.lookedUpNow++;
-                counts.lookupMs += clock() - lookupAt;
-                return finishBatch(formed, store);
-            }
-            // A store that cannot answer at once answers off the slice path:
-            // the batch's records are requested here and the slice goes on. The
-            // batch is published when the bytes are back -- between frames, as
-            // instantiation already is -- and a region not back is not
-            // published this frame. `lookupMs` is the engine thread's own time
-            // to start them.
-            storePending = true;
-            counts.lookedUpLater++;
-            // A batch module's bytes are read once for every record naming it.
-            /** @type {Map<string, Promise<Uint8Array | null>>} */
-            const modules = new Map();
-            /** @param {string} key */
-            const moduleBytes = key=>{
-                let pending = modules.get(key);
-                if (pending === undefined)
-                {
-                    /** @param {Uint8Array | null} bytes */
-                    const unpack = bytes=>(bytes === null
-                        ? null : unpackRegion(bytes)?.module ?? null);
-                    pending = /** @type {Promise<Uint8Array | null>} */ (store.get(key).then(unpack));
-                    modules.set(key, pending);
-                }
-                return pending;
-            };
-            // The guest runs on while the store answers.
-            const answered = ()=>{
-                storePending = false;
-                for (const one of formed)
-                {
-                    one.waited = true;
-                }
-                finishBatch(formed, store);
-                sendNext();
-            };
-            Promise.all(formed.map(async one=>{
-                try
-                {
-                    const bytes = await store.get(regionKey(one));
-                    const cached = bytes === null ? null : unpackRegion(bytes);
-                    const batchKey = cached?.moduleKey;
-                    // Its batch's module, unless this run instantiated it already.
-                    settle(one, cached, batchKey !== undefined && !batchInstances.has(batchKey)
-                        ? await moduleBytes(batchKey) : undefined);
-                }
-                catch {
-                    settle(one, null);
-                }
-            })).then(answered, answered);
-            counts.lookupMs += clock() - lookupAt;
-            return 0;
         },
         invalidatePage,
         interpretWith(entry, entered){
@@ -2871,6 +2918,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 relaxedFlagReads: { ...relaxedFlagReads },
                 forcedSteps,
                 handoffMisses: 0,
+                worker: worker !== null ? 'ready' : loading !== null ? 'loading' : 'none',
             };
         },
     };

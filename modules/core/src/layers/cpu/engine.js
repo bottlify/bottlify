@@ -253,6 +253,9 @@
  * @property {number} [merges]         Two modules gathered into one because one kept
  *     transferring into the other (`mergeAfter`).
  * @property {number} [merged]         The regions those merges built again (of `relinked`).
+ * @property {'none' | 'loading' | 'ready'} [worker]  The translation worker: none (batches
+ *     are emitted on the engine thread), made and still loading its modules (small batches
+ *     emitted here meanwhile), or taking the batches.
  * @property {number} [reforms]        Regions formed again with the callees their indirect
  *     calls were sampled going to (`callTargets`).
  * @property {number} [copied]         Regions formed again with copies of the blocks inside
