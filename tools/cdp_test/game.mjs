@@ -282,6 +282,10 @@ function parse(argv){
         // differ by them and nothing else.
         hooks: !argv.includes('--no-hooks'),
         dumpDraws: argv.includes('--dump-draws'),
+        // The same account for every N-th frame, the last of them kept, each
+        // checked against what the GPU held: a picture wrong in one frame of
+        // a few is caught with its draws.
+        dumpEvery: number('--dump-every', 0),
         // Every host call timed as a phase of its own, so the report's phase
         // table says which API a frame's host time went to, not only that it
         // went to the crossing.
@@ -1347,6 +1351,7 @@ export async function game(options){
             logLines: options.logLines,
             video: options.video,
             dumpDraws: options.dumpDraws,
+            dumpEvery: options.dumpEvery || undefined,
             profileCalls: options.profileCalls,
             maxDraws: options.maxDraws,
             skipTexture: options.skipTexture,
@@ -1788,6 +1793,16 @@ the run as it stands: ${path}`;
             }
             writeFileSync(join(REPORTS_DIR, `game-${stamp}-image-${kept.index}.png`),
                 toPng(kept.width, kept.height, rgba));
+        }
+        // Every kept frame's lines, one block a frame, beside the graphics
+        // dump rather than inside it: tens of megabytes to grep.
+        const everyDump = result.graphics?.device?.dumps ?? [];
+        if (everyDump.length > 0)
+        {
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-dumps.txt`), everyDump
+                .map((/** @type {any} */ one)=>`== frame ${one.frame}\n${one.lines.join('\n')}\n`)
+                .join(''));
+            delete result.graphics.device.dumps;
         }
         if (result.graphics)
         {
