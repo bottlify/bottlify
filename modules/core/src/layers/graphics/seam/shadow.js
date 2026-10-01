@@ -155,7 +155,13 @@ export const SHADOW = {
      */
     SAMPLER_KEYS: 4480,
     SAMPLER_KEY_COUNT: 16,
-    SIZE: 4496,
+    /**
+     * Direct3D 9: each stream's offset, beside its pointer and stride in
+     * `STREAMS`, and the vertex declaration's pointer.
+     */
+    STREAM_OFFSETS: 4496,
+    DECLARATION: 4560,
+    SIZE: 4564,
 };
 
 /**
@@ -707,18 +713,20 @@ export function unlockCode(at, trap){
 
 /**
  * HRESULT SetStreamSource(this, UINT index, IDirect3DVertexBuffer8*, UINT
- * stride), as guest code. Unbinding leaves the stride, as the device does.
+ * stride), as guest code. Unbinding is the host's, the block untouched: the
+ * device keeps the stride a null buffer comes with, so a bind just before it,
+ * which did set the stride, has to reach the device first -- and the host
+ * adopts the block before any call it takes.
  *
  *     mov eax, [esp+8]            ; index
  *     cmp eax, STREAM_COUNT
  *     jae slow
  *     mov edx, [esp+12]           ; the buffer
- *     mov [ecx + eax*8 + STREAMS], edx
  *     test edx, edx
- *     jz unbound
+ *     jz slow
+ *     mov [ecx + eax*8 + STREAMS], edx
  *     mov edx, [esp+16]           ; stride
  *     mov [ecx + eax*8 + STREAMS + 4], edx
- *   unbound:
  *     inc dword [ecx+BINDING_CALLS]
  *     inc dword [ecx+CALLS]
  *     xor eax, eax
@@ -734,12 +742,11 @@ export function setStreamSourceCode(at, trap){
         [0x3d, ...dword(SHADOW.STREAM_COUNT)],                   // cmp eax, 16
         { jcc: 0x73, to: 'slow' },                               // jae slow
         [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
-        [0x89, 0x94, 0xc1, ...dword(SHADOW.STREAMS)],            // mov [ecx+eax*8+disp], edx
         [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'unbound' },                            // jz unbound
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x89, 0x94, 0xc1, ...dword(SHADOW.STREAMS)],            // mov [ecx+eax*8+disp], edx
         [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
         [0x89, 0x94, 0xc1, ...dword(SHADOW.STREAMS + 4)],        // mov [ecx+eax*8+disp+4], edx
-        { label: 'unbound' },
         [0xff, 0x81, ...dword(SHADOW.BINDING_CALLS)],            // inc dword [ecx+disp]
         counted(1),                                              // inc dword [ecx+12]
         [0x31, 0xc0],                                            // xor eax, eax
@@ -783,6 +790,72 @@ export function setVertexShaderCode(at, trap){
         [0xa8, 0x01],                                            // test al, 1
         { jcc: 0x75, to: 'slow' },                               // jnz slow
         [0x89, 0x81, ...dword(SHADOW.VERTEX_SHADER)],            // mov [ecx+disp], eax
+        [0xff, 0x81, ...dword(SHADOW.BINDING_CALLS)],            // inc dword [ecx+disp]
+        counted(1),                                              // inc dword [ecx+12]
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x08, 0x00],                                      // ret 8
+    ]);
+}
+
+/**
+ * HRESULT SetStreamSource(this, UINT index, IDirect3DVertexBuffer9*, UINT
+ * offset, UINT stride), as guest code: Direct3D 9's, with an offset.
+ * Unbinding is the host's, as Direct3D 8's is: the device keeps the offset
+ * and the stride a null buffer comes with.
+ *
+ *     mov eax, [esp+8]            ; index
+ *     cmp eax, STREAM_COUNT
+ *     jae slow
+ *     mov edx, [esp+12]           ; the buffer
+ *     test edx, edx
+ *     jz slow
+ *     mov [ecx + eax*8 + STREAMS], edx
+ *     mov edx, [esp+20]           ; stride
+ *     mov [ecx + eax*8 + STREAMS + 4], edx
+ *     mov edx, [esp+16]           ; offset
+ *     mov [ecx + eax*4 + STREAM_OFFSETS], edx
+ *     inc dword [ecx+BINDING_CALLS]
+ *     inc dword [ecx+CALLS]
+ *     xor eax, eax
+ *     ret 20
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function setStreamSource9Code(at, trap){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x3d, ...dword(SHADOW.STREAM_COUNT)],                   // cmp eax, 16
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x89, 0x94, 0xc1, ...dword(SHADOW.STREAMS)],            // mov [ecx+eax*8+disp], edx
+        [0x8b, 0x54, 0x24, 0x14],                                // mov edx, [esp+20]
+        [0x89, 0x94, 0xc1, ...dword(SHADOW.STREAMS + 4)],        // mov [ecx+eax*8+disp+4], edx
+        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
+        [0x89, 0x94, 0x81, ...dword(SHADOW.STREAM_OFFSETS)],     // mov [ecx+eax*4+disp], edx
+        [0xff, 0x81, ...dword(SHADOW.BINDING_CALLS)],            // inc dword [ecx+disp]
+        counted(1),                                              // inc dword [ecx+12]
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x14, 0x00],                                      // ret 20
+    ]);
+}
+
+/**
+ * HRESULT SetVertexDeclaration(this, IDirect3DVertexDeclaration9*), as guest
+ * code. The pointer is stored as it is; the host turns it into the
+ * declaration it names when it next looks.
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function setVertexDeclarationCode(at, trap){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x89, 0x81, ...dword(SHADOW.DECLARATION)],              // mov [ecx+disp], eax
         [0xff, 0x81, ...dword(SHADOW.BINDING_CALLS)],            // inc dword [ecx+disp]
         counted(1),                                              // inc dword [ecx+12]
         [0x31, 0xc0],                                            // xor eax, eax
@@ -1261,8 +1334,12 @@ export function materialFloats(material){
  * @property {(state: number, out: { value?: number }) => number} GetRenderState
  * @property {(type: number, matrix: ArrayLike<number>) => number} SetTransform
  * @property {(type: number, out: { matrix?: ArrayLike<number> }) => number} GetTransform
- * @property {(index: number, buffer: any, stride: number) => number} SetStreamSource
- * @property {(index: number, out: { buffer?: any, stride?: number }) => number} GetStreamSource
+ * @property {(index: number, buffer: any, offsetOrStride: number, stride?: number) => number
+ *     } SetStreamSource  Direct3D 8's (index, buffer, stride) or 9's (index, buffer,
+ *     offset, stride).
+ * @property {(index: number, out: { buffer?: any, offset?: number, stride?: number }) => number
+ *     } GetStreamSource
+ * @property {(declaration: any) => number} [SetVertexDeclaration]  Direct3D 9's.
  * @property {(buffer: any, base: number) => number} SetIndices
  * @property {(out: { buffer?: any, baseVertexIndex?: number }) => number} GetIndices
  * @property {(handle: number) => number} SetVertexShader
@@ -1296,9 +1373,9 @@ export function materialFloats(material){
  *     by type: the guest writes one there, and the host sets it back through
  *     SetSamplerState.
  * @property {string} [name]  The device interface a refusal names.
- * @property {boolean} [bindings]  Whether the device's stream, index and
- *     vertex shader bindings are Direct3D 8's and mirrored; a Direct3D 9
- *     device's are not, and no routine of this block sets them.
+ * @property {boolean | 'd3d9'} [bindings]  Whose bindings the block holds:
+ *     Direct3D 8's streams, indices and vertex shader (the default), Direct3D
+ *     9's streams with their offsets and its declaration (`'d3d9'`), or none.
  */
 
 /**
@@ -1322,6 +1399,9 @@ export function createShadow(deps){
     const seenStates = new Uint32Array(SHADOW.RENDER_STATE_COUNT);
     const seenTransforms = new Uint32Array(SHADOW.TRANSFORM_SLOTS * 16);
     const seenStreams = new Uint32Array(SHADOW.STREAM_COUNT * 2);
+    const seenOffsets = new Uint32Array(SHADOW.STREAM_COUNT);
+    let seenDeclaration = 0;
+    const nine = deps.bindings === 'd3d9';
     let seenIndices = 0;
     let seenBaseVertex = 0;
     let seenShader = 0;
@@ -1462,17 +1542,59 @@ export function createShadow(deps){
         deps.writeMemory(address + SHADOW.TRANSFORMS, matrices);
     };
 
+    /**
+     * Direct3D 9's bindings, as stale pointers beside the offset and stride
+     * the device holds: the next pointer the guest writes is a change whatever
+     * it names, and reading the bound buffer back would take a reference.
+     *
+     * @param {number} index
+     */
+    const mirrorStream9 = index=>{
+        /** @type {{ buffer?: ShadowBuffer, offset?: number, stride?: number }} */
+        const out = {};
+        const ok = device.GetStreamSource(index, out) === 0;
+        out.buffer?.release();
+        seenStreams[index * 2] = STALE_POINTER;
+        seenStreams[index * 2 + 1] = ok ? (out.stride ?? 0) >>> 0 : 0;
+        seenOffsets[index] = ok ? (out.offset ?? 0) >>> 0 : 0;
+        deps.writeMemory(address + SHADOW.STREAMS + index * 8,
+            dwordsBytes([seenStreams[index * 2], seenStreams[index * 2 + 1]]));
+        deps.writeMemory(address + SHADOW.STREAM_OFFSETS + index * 4,
+            dwordBytes(seenOffsets[index]));
+    };
+    const mirrorDeclaration = ()=>{
+        seenDeclaration = STALE_POINTER;
+        deps.writeMemory(address + SHADOW.DECLARATION, dwordBytes(seenDeclaration));
+    };
+
+    /**
+     * Direct3D 8's stream, as the pointer the program knows the buffer by. A
+     * Get* adds a reference the caller owes back.
+     *
+     * @param {number} index
+     */
+    const readStream8 = index=>{
+        /** @type {{ buffer?: ShadowBuffer, stride?: number }} */
+        const out = {};
+        const ok = device.GetStreamSource(index, out) === 0;
+        seenStreams[index * 2] = ok && out.buffer ? deps.pointerOf(out.buffer) : 0;
+        seenStreams[index * 2 + 1] = ok ? (out.stride ?? 0) >>> 0 : 0;
+        out.buffer?.release();
+    };
+
     const mirrorBindings = ()=>{
-        // The bindings, as the pointers the program knows the buffers by. A
-        // Get* adds a reference the caller owes back.
+        if (nine)
+        {
+            for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
+            {
+                mirrorStream9(index);
+            }
+            mirrorDeclaration();
+            return;
+        }
         for (let index = 0; index < (deps.bindings === false ? 0 : SHADOW.STREAM_COUNT); index++)
         {
-            /** @type {{ buffer?: ShadowBuffer, stride?: number }} */
-            const out = {};
-            const ok = device.GetStreamSource(index, out) === 0;
-            seenStreams[index * 2] = ok && out.buffer ? deps.pointerOf(out.buffer) : 0;
-            seenStreams[index * 2 + 1] = ok ? (out.stride ?? 0) >>> 0 : 0;
-            out.buffer?.release();
+            readStream8(index);
         }
         /** @type {{ buffer?: ShadowBuffer, baseVertexIndex?: number }} */
         const indices = {};
@@ -1742,10 +1864,63 @@ export function createShadow(deps){
         return marks !== 0;
     };
 
+    /** @param {Uint32Array} block */
+    const syncBindings9 = block=>{
+        const from = SHADOW.STREAMS >>> 2;
+        const offsets = SHADOW.STREAM_OFFSETS >>> 2;
+        compared += SHADOW.STREAM_COUNT * 3 + 1;
+        for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
+        {
+            const pointer = block[from + index * 2];
+            const stride = block[from + index * 2 + 1];
+            const offset = block[offsets + index];
+            if (pointer === seenStreams[index * 2] && stride === seenStreams[index * 2 + 1]
+                && offset === seenOffsets[index])
+            {
+                continue;
+            }
+            seenStreams[index * 2] = pointer;
+            seenStreams[index * 2 + 1] = stride;
+            seenOffsets[index] = offset;
+            const buffer = pointer === 0 ? null : deps.objectAt(pointer);
+            if (pointer !== 0 && !buffer)
+            {
+                refuse(`${name}::SetStreamSource`,
+                    `stream ${index} bound in the guest to 0x${pointer.toString(16)},`
+                    + ' which is not an interface this device published');
+            }
+            else if (device.SetStreamSource(index, buffer, offset, stride) !== 0)
+            {
+                refuse(`${name}::SetStreamSource`,
+                    `stream ${index} bound in the guest was accepted; the device refuses it`);
+            }
+        }
+        const declaration = block[SHADOW.DECLARATION >>> 2];
+        if (declaration !== seenDeclaration)
+        {
+            seenDeclaration = declaration;
+            // A pointer that names no declaration unbinds, as the call through
+            // the trap does with what it cannot look up.
+            const named = declaration === 0 ? null : deps.objectAt(declaration) ?? null;
+            if (declaration !== 0 && !named)
+            {
+                refuse(`${name}::SetVertexDeclaration`,
+                    `0x${declaration.toString(16)} set in the guest is not an interface this`
+                    + ' device published');
+            }
+            device.SetVertexDeclaration?.(named);
+        }
+    };
+
     // The three small groups are compared whole: a scan of thirty-five words,
     // eight or seventeen costs less than keeping marks for them would.
     /** @param {Uint32Array} block */
     const syncBindings = block=>{
+        if (nine)
+        {
+            syncBindings9(block);
+            return;
+        }
         const from = SHADOW.STREAMS >>> 2;
         compared += SHADOW.STREAM_COUNT * 2 + 3;
         for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
@@ -1964,6 +2139,11 @@ export function createShadow(deps){
          * buffer it had bound before would read as no change.
          */
         refreshStreamZero(){
+            if (address !== 0 && nine)
+            {
+                mirrorStream9(0);
+                return;
+            }
             if (address === 0 || deps.bindings === false
                 || (seenStreams[0] === 0 && seenStreams[1] === 0 && seenIndices === 0
                     && seenBaseVertex === 0))
@@ -2103,6 +2283,45 @@ export function createShadow(deps){
             {
                 seenIndices = STALE_POINTER;
                 deps.writeMemory(address + SHADOW.INDICES, stale);
+            }
+            if (nine && seenDeclaration === pointer)
+            {
+                mirrorDeclaration();
+            }
+        },
+
+        /**
+         * After a call through the trap changed a stream -- the routine's
+         * slow path -- the block takes what the device now holds, so the
+         * guest's next write of the binding before is the change it is.
+         *
+         * @param {number} index
+         */
+        refreshStream(index){
+            if (address === 0 || deps.bindings === false || index < 0
+                || index >= SHADOW.STREAM_COUNT)
+            {
+                return;
+            }
+            if (nine)
+            {
+                mirrorStream9(index);
+                return;
+            }
+            readStream8(index);
+            deps.writeMemory(address + SHADOW.STREAMS + index * 8,
+                dwordsBytes([seenStreams[index * 2], seenStreams[index * 2 + 1]]));
+        },
+
+        /**
+         * The same after the declaration changed through the trap: SetFVF,
+         * which makes a declaration the guest has no pointer to, or the
+         * routine's slow path.
+         */
+        refreshDeclaration(){
+            if (address !== 0 && nine)
+            {
+                mirrorDeclaration();
             }
         },
 
