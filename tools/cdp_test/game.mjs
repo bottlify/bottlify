@@ -23,7 +23,8 @@
  *                                  [--command-line STRING] [--windows NAME]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
- *                                  [--exact] [--cpu-profile SECONDS] [--export-translations FILE]
+ *                                  [--exact] [--cpu-profile SECONDS] [--heap-profile [old]]
+ *                                  [--export-translations FILE]
  *                                  [--watch SECONDS]
  *
  * `--watch S` is for a program that does not present, an installer above
@@ -44,7 +45,7 @@ import { launchWithGpu, shutdown } from './browser.mjs';
 import { CdpEndpoint } from './cdp.mjs';
 import { reportTimeout } from './timeout-report.mjs';
 import { serveStatic } from './server.mjs';
-import { describeProfile, profileWorkers, summarise } from './profile.mjs';
+import { describeProfile, profileWorkers, summarise, summariseAllocations } from './profile.mjs';
 import { describeDevice, watchDevice } from './device-lag.mjs';
 import { openBundle } from '../btl.mjs';
 import { placementOf } from '../../modules/installer/src/prefix.js';
@@ -226,6 +227,13 @@ function parse(argv){
         // runtime, the layers -- the engine thread's time went to.
         cpuProfile: number('--cpu-profile', 0),
         cpuProfileFrom: number('--cpu-profile-from', 0),
+        // With --cpu-profile: the same workers' allocations sampled over the
+        // same window, garbage included (`old`: only what lived to be
+        // promoted), and their heaps read every second -- what a long
+        // collection pause was paid for.
+        heapProfile: argv.includes('--heap-profile')
+            ? argv[argv.indexOf('--heap-profile') + 1] === 'old' ? 'old' : 'all'
+            : null,
         // V8 flags for the browser ("--no-liftoff", "--liftoff-only"): how a run
         // depends on the wasm tiers.
         jsFlags: argv.includes('--js-flags') ? argv[argv.indexOf('--js-flags') + 1] : undefined,
@@ -1155,6 +1163,18 @@ function describe(result, context, calls, symbols){
             say(`  frames presented in the window: ${one.frames}`
                 + `, ${(one.windowMs / one.frames).toFixed(1)} ms a frame`);
         }
+        if (one.allocations)
+        {
+            const { total, sites } = one.allocations;
+            const mib = (/** @type {number} */ bytes)=>(bytes / 1024 / 1024).toFixed(1);
+            say(`  allocated in the window, sampled: ${mib(total)} MiB`
+                + `, ${mib(total / (one.windowMs / 1000))} MiB/s`);
+            for (const row of sites)
+            {
+                say(`    ${(row.share * 100).toFixed(1).padStart(5)}%`
+                    + `  ${mib(row.bytes).padStart(7)} MiB  ${row.site}`);
+            }
+        }
     }
 
     if (result.profile)
@@ -1373,15 +1393,27 @@ export async function game(options){
         const device = watchDevice(cdp, sessionId, { worker: options.worker });
         /** @type {Awaited<ReturnType<typeof profileWorkers>> | null} */
         const profiler = options.cpuProfile > 0 && options.worker
-            ? await profileWorkers(cdp, sessionId) : null;
+            ? await profileWorkers(cdp, sessionId, { heap: options.heapProfile }) : null;
         const deviceWatched = await device.install({ attach: profiler === null });
         let profilingFrom = Date.now();
-        /** @type {{ url: string, profile: any, windowMs: number, from: number }[] | null} */
+        /** @type {{ url: string, profile: any, allocations: any, windowMs: number, from: number }[] | null} */
         let cpuProfiles = null;
+        /** @type {{ at: number, workers: any[] }[]} */
+        const heapSeries = [];
+        const heapTimer = profiler !== null && options.heapProfile
+            ? setInterval(()=>{
+                profiler.usage().then(workers=>heapSeries.push({ at: Date.now(), workers }))
+                    .catch(()=>{});
+            }, 1000)
+            : null;
         const stopProfiling = async()=>{
             if (profiler === null || cpuProfiles !== null)
             {
                 return;
+            }
+            if (heapTimer !== null)
+            {
+                clearInterval(heapTimer);
             }
             const windowMs = Date.now() - profilingFrom;
             const from = profilingFrom;
@@ -1407,6 +1439,16 @@ export async function game(options){
             {
                 writeFileSync(join(REPORTS_DIR, `game-${stampFor}-cpu-${index}.cpuprofile`),
                     JSON.stringify(one.profile));
+                if (one.allocations)
+                {
+                    writeFileSync(join(REPORTS_DIR, `game-${stampFor}-heap-${index}.heapprofile`),
+                        JSON.stringify(one.allocations));
+                }
+            }
+            if (heapSeries.length > 0)
+            {
+                writeFileSync(join(REPORTS_DIR, `game-${stampFor}-heap-usage.json`),
+                    JSON.stringify(heapSeries));
             }
         };
         await cdp.send('Runtime.evaluate',
@@ -1630,6 +1672,7 @@ the run as it stands: ${path}`;
         }
         result.cpuProfiles = (cpuProfiles ?? []).map(one=>({
             url: one.url, windowMs: one.windowMs, summary: summarise(one.profile, one.windowMs),
+            allocations: one.allocations ? summariseAllocations(one.allocations) : null,
             // The frames the program presented inside the window, so a profile's
             // milliseconds divide into a frame's.
             frames: (result.presentTimes ?? []).filter((/** @type {number} */ at)=>at >= one.from

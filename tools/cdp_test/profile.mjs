@@ -79,16 +79,65 @@ export function summarise(profile, windowMs, keep = 40){
 }
 
 /**
+ * Folds a sampling heap profile into the functions that allocated most, by
+ * self size, with the caller that reached each so a helper is not blamed for
+ * what every caller asked of it.
+ *
+ * @param {any} profile  HeapProfiler's SamplingHeapProfile.
+ */
+export function summariseAllocations(profile){
+    /** @type {Map<string, number>} */
+    const bySite = new Map();
+    let total = 0;
+    /** @param {any} node @param {string} parent */
+    const walk = (node, parent)=>{
+        const frame = node.callFrame ?? {};
+        const file = String(frame.url ?? '').split('/').pop() || '<native>';
+        const line = (frame.lineNumber ?? -1) + 1;
+        const here = `${frame.functionName || '<anonymous>'} ${file}:${line}`;
+        const size = Number(node.selfSize ?? 0);
+        if (size > 0)
+        {
+            const key = `${here}  <- ${parent}`;
+            bySite.set(key, (bySite.get(key) ?? 0) + size);
+            total += size;
+        }
+        for (const child of node.children ?? [])
+        {
+            walk(child, here);
+        }
+    };
+    walk(profile.head, '(root)');
+    return {
+        total,
+        sites: [...bySite].sort((left, right)=>right[1] - left[1]).slice(0, 24)
+            .map(([site, bytes])=>({ site, bytes, share: bytes / Math.max(1, total) })),
+    };
+}
+
+/**
  * Profiles every worker a page creates from now on (and the workers those
  * create), each caught at its first instruction. `stop` answers one profile
  * per worker that was still alive, labelled by its script URL.
  *
+ * With `heap`, each worker's allocations are sampled too, garbage included:
+ * what a long collection pause is paid for is what was thrown away, which
+ * the default sampling -- what survived -- does not show. `'old'` leaves out
+ * what died young, so what remains is what lived long enough to be promoted:
+ * the garbage only a full collection takes back.
+ *
  * @param {import('./cdp.mjs').CdpEndpoint} cdp
  * @param {string} pageSessionId
- * @param {{ intervalMicros?: number }} [options]
+ * @param {{ intervalMicros?: number, heap?: 'all' | 'old' | null }} [options]
  */
 export async function profileWorkers(cdp, pageSessionId, options = {}){
     const interval = options.intervalMicros ?? 500;
+    const heap = options.heap ?? null;
+    const sampleHeap = (/** @type {string} */ worker)=>cdp.send('HeapProfiler.startSampling', {
+        samplingInterval: 32768,
+        includeObjectsCollectedByMajorGC: true,
+        includeObjectsCollectedByMinorGC: heap === 'all',
+    }, worker);
     /** @type {Map<string, { url: string }>} */
     const sessions = new Map();
     const attach = (/** @type {string} */ sessionId)=>cdp.send('Target.setAutoAttach',
@@ -107,6 +156,11 @@ export async function profileWorkers(cdp, pageSessionId, options = {}){
             await cdp.send('Profiler.enable', {}, worker);
             await cdp.send('Profiler.setSamplingInterval', { interval }, worker);
             await cdp.send('Profiler.start', {}, worker);
+            if (heap)
+            {
+                await cdp.send('HeapProfiler.enable', {}, worker);
+                await sampleHeap(worker);
+            }
         }
         catch {
             // A worker that went away between the two: nothing to profile.
@@ -145,9 +199,14 @@ export async function profileWorkers(cdp, pageSessionId, options = {}){
             {
                 await cdp.send('Profiler.stop', {}, worker).catch(()=>{});
                 await cdp.send('Profiler.start', {}, worker).catch(()=>{});
+                if (heap)
+                {
+                    await cdp.send('HeapProfiler.stopSampling', {}, worker).catch(()=>{});
+                    await sampleHeap(worker).catch(()=>{});
+                }
             }
         },
-        /** @returns {Promise<{ url: string, profile: any }[]>} */
+        /** @returns {Promise<{ url: string, profile: any, allocations: any }[]>} */
         async stop(){
             const out = [];
             for (const [worker, { url }] of sessions)
@@ -155,13 +214,36 @@ export async function profileWorkers(cdp, pageSessionId, options = {}){
                 try
                 {
                     const { profile } = await cdp.send('Profiler.stop', {}, worker);
-                    out.push({ url, profile });
+                    const allocations = heap
+                        ? (await cdp.send('HeapProfiler.stopSampling', {}, worker)
+                            .catch(()=>({}))).profile ?? null
+                        : null;
+                    out.push({ url, profile, allocations });
                 }
                 catch {
                     // Gone, or never started.
                 }
             }
             sessions.clear();
+            return out;
+        },
+        /**
+         * Each worker's heap as it stands: what the collector holds, and the
+         * array buffers' bytes outside it, which push it to collect as well.
+         *
+         * @returns {Promise<{ url: string, usedSize: number, totalSize: number,
+         *     backingStorageSize?: number }[]>}
+         */
+        async usage(){
+            const out = [];
+            for (const [worker, { url }] of sessions)
+            {
+                const one = await cdp.send('Runtime.getHeapUsage', {}, worker).catch(()=>null);
+                if (one)
+                {
+                    out.push({ url, ...one });
+                }
+            }
             return out;
         },
     };
