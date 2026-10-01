@@ -27,6 +27,7 @@ import { TAKEN } from './named-objects.js';
 
 /** Codes this surface reports. */
 const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
@@ -179,6 +180,14 @@ export function createMappingFunctions(host){
             if (found === TAKEN)
             {
                 return fail(ERROR_INVALID_HANDLE);
+            }
+            if (!found && name !== null && /^global\\/i.test(name))
+            {
+                // Making a section in the global namespace takes
+                // SeCreateGlobalPrivilege, which a program started the usual
+                // way -- not elevated -- does not hold; opening one that a
+                // service made is allowed.
+                return fail(ERROR_ACCESS_DENIED);
             }
             if (found)
             {

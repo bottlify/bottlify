@@ -269,6 +269,20 @@ test('OpenFileMapping finds a named mapping, and says why when it cannot', ()=>{
     assert.equal(fns.OpenFileMappingW.argBytes, 12);
 });
 
+test('a section in the global namespace is not the program\'s to make, not being elevated', ()=>{
+    // SeCreateGlobalPrivilege, which a program started the usual way does not
+    // hold (Wine's dinput hid.c skips its driver tests on this answer).
+    const GLOBAL = 0x900;
+    const LOCAL = 0x940;
+    const { fns, errors } = setup({ [GLOBAL]: 'Global\\winetest_section', [LOCAL]: 'Local\\Foo' });
+    errors.length = 0;
+    assert.equal(fns.CreateFileMappingW.handler(
+        [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, 0x1000, GLOBAL]), 0);
+    assert.deepEqual(errors, [5], 'ERROR_ACCESS_DENIED');
+    assert.notEqual(fns.CreateFileMappingW.handler(
+        [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, 0x1000, LOCAL]), 0);
+});
+
 test('CreateNamedPipe is refused as Windows 9x refuses it, and says so', ()=>{
     // With no namespace for a client to open the other end in, a server end
     // would be a handle nothing can ever connect to.
