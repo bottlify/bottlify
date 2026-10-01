@@ -257,7 +257,11 @@ test('every slot is present, including the ones nothing implements', ()=>{
     const f = createRoot();
     const buffer = createBuffer(f);
     const names = f.bridge.methodsOf(buffer).slice(3).map((/** @type {any} */ m)=>m.name);
-    assert.deepEqual(names, IDIRECTSOUNDBUFFER_SLOTS.map(([name])=>name));
+    // A secondary buffer is reached through IDirectSoundBuffer8's table,
+    // which begins with IDirectSoundBuffer's.
+    assert.deepEqual(names, IDIRECTSOUNDBUFFER8_SLOTS.map(([name])=>name));
+    assert.equal(f.bridge.recordAt(buffer).object.interfaceFor(IID_IDirectSoundBuffer).sharedWith,
+        IID_IDirectSoundBuffer8, 'one pointer for both');
     // Initialize is declared and unimplemented; leaving it out would shift
     // Lock, Play and everything after it. SetFormat used to be in this list,
     // and being unimplemented was not harmless: a sound library sets the
@@ -702,6 +706,22 @@ test('GetCaps fills DSBCAPS and refuses a header that does not declare its size'
     assert.equal(f.memory.u32(caps + DSBCAPS.dwBufferBytes), 4096);
     assert.equal(f.memory.u32(caps + DSBCAPS.dwFlags), DSBCAPS_LOCSOFTWARE,
         'asked for nothing, it is mixed in software and says so');
+});
+
+test('a deferred buffer is placed in software once acquired; the primary takes no effects', ()=>{
+    // Wine's dsound8.c test_AcquireResources and test_primary_flags.
+    const f = createRoot();
+    const DSBCAPS_LOCDEFER = 0x40000;
+    const pointer = createBuffer(f, { flags: DSBCAPS_LOCDEFER });
+    const status = 0x1f00;
+    f.bridge.call(pointer, 'GetStatus', [status]);
+    assert.equal(f.memory.u32(status), 0);
+    assert.equal(f.bridge.call(pointer, 'AcquireResources', [0, 0, 0]), DS_OK);
+    f.bridge.call(pointer, 'GetStatus', [status]);
+    assert.equal(f.memory.u32(status), 0x10, 'DSBSTATUS_LOCSOFTWARE');
+    const descriptor = describeBuffer(f.memory, { flags: DSBCAPS_PRIMARYBUFFER | 0x200, bytes: 0 });
+    assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, 0x1800, 0]),
+        DSERR_INVALIDPARAM, 'DSBCAPS_CTRLFX on the primary');
 });
 
 test('GetCaps reports the flags a buffer was created with, and where it is mixed', ()=>{

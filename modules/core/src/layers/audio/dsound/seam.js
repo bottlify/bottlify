@@ -78,6 +78,8 @@ const DSBCAPS_CTRLPAN = 0x00000040;
 const DSBCAPS_CTRLVOLUME = 0x00000080;
 const DSBCAPS_CTRLPOSITIONNOTIFY = 0x00000100;
 const DSBCAPS_CTRLFX = 0x00000200;
+const DSBCAPS_LOCDEFER = 0x00040000;
+const DSBSTATUS_LOCSOFTWARE = 0x00000010;
 
 /** Interface identifiers. Facts about somebody else's ABI; there is no partial credit. */
 export const IID_IDirectSound = '{279AFA83-4981-11CE-A521-0020AF0BE560}';
@@ -446,6 +448,13 @@ export function createPublisher({ publishInterface }){
                         refused[id] = (refused[id] ?? 0) + 1;
                         return null;
                     }
+                    // One pointer for two interfaces, the later table holding
+                    // the earlier's slots and more.
+                    if (descriptor.sharedWith)
+                    {
+                        return { id, sharedWith: descriptor.sharedWith,
+                            methods: methodsFor(declared.get(descriptor.sharedWith)) };
+                    }
                     return { id, methods: methodsFor(descriptor) };
                 },
                 /** @param {string} id */
@@ -592,6 +601,8 @@ export function createDirectSound({
     /** @type {any[]} */
     const buffers = [];
     let placedOnce = false;
+    /** Deferred buffers whose place has been settled. @type {WeakSet<object>} */
+    const placedInSoftware = new WeakSet();
     // How often a program drove each buffer method. A sound that is never heard
     // and a sound that is played and dropped on the way to the mixer look the
     // same from outside, and this is the first thing that tells them apart.
@@ -743,9 +754,11 @@ export function createDirectSound({
     const bufferInterfaces = buffer=>{
         const { buffer: base, buffer8, notify, properties, listener, placed } = bufferDescriptors();
         return [
-            base,
+            // A secondary buffer is IDirectSoundBuffer and IDirectSoundBuffer8
+            // through one pointer (Wine's dsound8.c test_buffer8); the
+            // primary buffer is the one IDirectSoundBuffer8 is not.
+            buffer.primary ? base : { id: base.id, sharedWith: buffer8.id },
             properties,
-            // The primary buffer is the one IDirectSoundBuffer8 is not.
             ...buffer.primary ? [listener] : [buffer8],
             ...(buffer.capabilities & DSBCAPS_CTRLPOSITIONNOTIFY) !== 0 ? [notify] : [],
             ...!buffer.primary && (buffer.capabilities & DSBCAPS_CTRL3D) !== 0 ? [placed] : [],
@@ -826,7 +839,22 @@ export function createDirectSound({
             {
                 return DSERR_INVALIDPARAM;
             }
-            writeU32(status, buffer.status());
+            writeU32(status, buffer.status()
+                | (placedInSoftware.has(buffer) ? DSBSTATUS_LOCSOFTWARE : 0));
+            return DS_OK;
+        },
+
+        /**
+         * HRESULT AcquireResources(DWORD flags, DWORD count, LPDWORD results)
+         *
+         * Where a buffer created with DSBCAPS_LOCDEFER is mixed is settled
+         * here, or at its first Play: in software, the one place there is.
+         */
+        AcquireResources(buffer){
+            if ((buffer.capabilities & DSBCAPS_LOCDEFER) !== 0)
+            {
+                placedInSoftware.add(buffer);
+            }
             return DS_OK;
         },
 
@@ -835,6 +863,7 @@ export function createDirectSound({
             calls.Play = (calls.Play || 0) + 1;
             record(`b${buffers.indexOf(buffer)} Play loop=${(flags >>> 0) & 1} n=${buffer.bytes}`);
             buffer.play(flags >>> 0);
+            bufferMethods.AcquireResources(buffer, []);
             return DS_OK;
         },
 
@@ -1116,8 +1145,9 @@ export function createDirectSound({
             creations.push(asked);
 
             // The primary buffer's format is the device's, set afterwards
-            // through SetFormat; a description that names one is refused.
-            if (primary && formatAt !== 0)
+            // through SetFormat; a description that names one is refused, as
+            // is one asking for effects, which only a secondary buffer takes.
+            if (primary && (formatAt !== 0 || (flags & DSBCAPS_CTRLFX) !== 0))
             {
                 writeU32(out, 0);
                 return DSERR_INVALIDPARAM;
