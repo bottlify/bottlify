@@ -62,6 +62,8 @@ const ICLASSFACTORY_SLOTS = /** @type {[string, number][]} */ ([
 const DSERR_INVALIDCALL = 0x88780032 | 0;
 const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
 const DSERR_NODRIVER = 0x88780078 | 0;
+const DSERR_ALLOCATED = 0x8878000a | 0;
+const WAVE_FORMAT_PCM = 1;
 
 /** DSBCAPS flags a program sets when it describes a buffer it wants. */
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
@@ -83,6 +85,7 @@ export const IID_IDirectSoundNotify = '{B0210783-89CD-11D0-AF08-00A0C925CD16}';
 export const IID_IDirectSound3DListener = '{279AFA84-4981-11CE-A521-0020AF0BE560}';
 export const IID_IDirectSound3DBuffer = '{279AFA86-4981-11CE-A521-0020AF0BE560}';
 export const IID_IKsPropertySet = '{31EFAC30-515C-11D0-A9AA-00AA0061BE93}';
+const COUNTED_ON_THEIR_OWN = new Set([IID_IDirectSoundNotify, IID_IKsPropertySet]);
 
 /** WAVEFORMATEX. The two-byte fields are why this is not a table of dwords. */
 export const WAVEFORMATEX = Object.freeze({
@@ -412,6 +415,12 @@ export function createPublisher({ publishInterface }){
         if (!adapter)
         {
             const declared = new Map(interfaces.map(entry=>[entry.id, entry]));
+            // A buffer's notify and property-set interfaces keep counts of
+            // their own, as on Windows: each holds the buffer once while it
+            // is held, and the buffer's own count leaves those holds out.
+            /** @type {Map<string, number>} */
+            const sides = new Map();
+            const held = ()=>[...sides.values()].filter(count=>count > 0).length;
             adapter = {
                 api,
                 /** @param {string} id */
@@ -428,8 +437,38 @@ export function createPublisher({ publishInterface }){
                     }
                     return { id, methods: methodsFor(descriptor) };
                 },
-                addRef: ()=>api.addRef?.() ?? 1,
-                release: ()=>api.release?.() ?? 0,
+                /** @param {string} id */
+                addRef(id){
+                    if (COUNTED_ON_THEIR_OWN.has(id))
+                    {
+                        const count = (sides.get(id) ?? 0) + 1;
+                        sides.set(id, count);
+                        if (count === 1)
+                        {
+                            api.addRef?.();
+                        }
+                        return count;
+                    }
+                    return (api.addRef?.() ?? 1) - held();
+                },
+                /** @param {string} id */
+                release(id){
+                    if (COUNTED_ON_THEIR_OWN.has(id))
+                    {
+                        const count = Math.max(0, (sides.get(id) ?? 0) - 1);
+                        sides.set(id, count);
+                        if (count === 0)
+                        {
+                            api.release?.();
+                        }
+                        return count;
+                    }
+                    if (held() >= (api.references ?? 1))
+                    {
+                        return 0;
+                    }
+                    return (api.release?.() ?? 0) - held();
+                },
                 // Whether the bridge keeps the pointer at a count of zero: a
                 // primary buffer lives as long as its device does.
                 reachable: ()=>api.reachable?.() ?? false,
@@ -586,18 +625,42 @@ export function createDirectSound(
                 return null;
             }
         }
-        // The frame size is derived, not read: today's DirectSound refuses a
-        // block or byte rate that disagrees with the rest (Wine's dsound.c
-        // perform_invalid_fmt_tests), and a program written for an older one
-        // may well pass such a structure.
+        // As DirectSound checks every format (Wine's dsound.c
+        // perform_invalid_fmt_tests): channels, a rate, whole bytes a sample,
+        // a block of exactly one frame and some byte rate, which need not
+        // agree with the rest. Plain PCM stops at stereo; more channels are
+        // said with WAVEFORMATEXTENSIBLE.
+        const channels = readU16(address + WAVEFORMATEX.nChannels);
+        const sampleRate = readU32(address + WAVEFORMATEX.nSamplesPerSec);
+        const bitsPerSample = readU16(address + WAVEFORMATEX.wBitsPerSample);
         const averageBytes = readU32(address + WAVEFORMATEX.nAvgBytesPerSec);
-        return normaliseFormat({
-            channels: readU16(address + WAVEFORMATEX.nChannels),
-            sampleRate: readU32(address + WAVEFORMATEX.nSamplesPerSec),
-            bitsPerSample: readU16(address + WAVEFORMATEX.wBitsPerSample),
-            ...averageBytes === 0 ? {} : { averageBytes },
-        });
+        if (channels === 0 || sampleRate === 0 || bitsPerSample === 0 || bitsPerSample % 8 !== 0
+            || readU16(address + WAVEFORMATEX.nBlockAlign) !== channels * bitsPerSample / 8
+            || averageBytes === 0
+            || (readU16(address + WAVEFORMATEX.wFormatTag) === WAVE_FORMAT_PCM && channels > 2))
+        {
+            return null;
+        }
+        return normaliseFormat({ channels, sampleRate, bitsPerSample, averageBytes });
     };
+
+    /**
+     * The format structure as the program wrote it, which GetFormat hands
+     * back whole -- its tag and its extension included.
+     *
+     * @param {number} address
+     */
+    const formatBytes = address=>{
+        const extra = readU16(address + WAVEFORMATEX.cbSize);
+        const tag = readU16(address + WAVEFORMATEX.wFormatTag);
+        const length = tag === WAVE_FORMAT_PCM ? WAVEFORMATEX.SIZE - 2
+            : WAVEFORMATEX.SIZE + Math.min(extra, EXTENSIBLE.EXTRA);
+        const bytes = new Uint8Array(WAVEFORMATEX.SIZE + EXTENSIBLE.EXTRA);
+        bytes.set(memory.readMemory(address >>> 0, length));
+        return bytes.subarray(0, Math.max(length, WAVEFORMATEX.SIZE));
+    };
+    /** @type {WeakMap<object, Uint8Array>} */
+    const programFormats = new WeakMap();
 
     /** @param {number} address @param {import('./buffers.js').SoundFormat} format */
     const writeFormat = (address, format)=>{
@@ -752,6 +815,10 @@ export function createDirectSound(
 
         /** HRESULT SetCurrentPosition(DWORD position) */
         SetCurrentPosition(buffer, [position]){
+            if ((position >>> 0) >= buffer.bytes)
+            {
+                return DSERR_INVALIDPARAM;
+            }
             buffer.setCurrentPosition(position);
             record(`b${buffers.indexOf(buffer)} SetPos ${position >>> 0}`);
             return DS_OK;
@@ -834,28 +901,42 @@ export function createDirectSound(
             const wanted = readFormat(format);
             if (!wanted)
             {
-                return DSERR_INVALIDPARAM;
+                // More than stereo in plain PCM is a mix the device will not
+                // take, rather than a structure that makes no sense.
+                return (format >>> 0) !== 0 && readU16(format + WAVEFORMATEX.nChannels) > 2
+                    && readU16(format + WAVEFORMATEX.wFormatTag) === WAVE_FORMAT_PCM
+                    ? DSERR_ALLOCATED : DSERR_INVALIDPARAM;
             }
             buffer.setFormat(wanted);
+            programFormats.set(buffer, formatBytes(format));
             return DS_OK;
         },
 
         /** HRESULT GetFormat(LPWAVEFORMATEX, DWORD size, LPDWORD written) */
         GetFormat(buffer, [format, size, written]){
+            const given = programFormats.get(buffer);
+            const length = given ? given.length : WAVEFORMATEX.SIZE;
             if ((format >>> 0) !== 0)
             {
-                if ((size >>> 0) < WAVEFORMATEX.SIZE)
+                if ((size >>> 0) < length)
                 {
                     return DSERR_INVALIDPARAM;
                 }
-                writeFormat(format, buffer.format);
+                if (given)
+                {
+                    memory.writeMemory(format >>> 0, given);
+                }
+                else
+                {
+                    writeFormat(format, buffer.format);
+                }
             }
             // Optional, and a caller that wants only the structure passes null
             // for it -- which is what Miles passes. Writing through it anyway
             // puts four bytes at address zero.
             if ((written >>> 0) !== 0)
             {
-                writeU32(written, WAVEFORMATEX.SIZE);
+                writeU32(written, length);
             }
             return DS_OK;
         },
@@ -1056,6 +1137,10 @@ export function createDirectSound(
                 kept: primary ? ()=>root.references > 0 : undefined,
             });
             buffers.push(buffer);
+            if (format)
+            {
+                programFormats.set(buffer, formatBytes(formatAt));
+            }
             if (primary)
             {
                 root.primary = buffer;
@@ -1188,15 +1273,9 @@ export function createDirectSound(
             {
                 return DSERR_ALREADYINITIALIZED;
             }
-            if ((guid >>> 0) !== 0)
+            if (!namesPlayback(guid))
             {
-                const asked = memory.readMemory(guid >>> 0, 16);
-                const names = (/** @type {readonly number[]} */ id)=>
-                    id.every((byte, at)=>asked[at] === byte);
-                if (!names(DEVICE_GUID) && !DEFAULT_PLAYBACK_IDS.some(names))
-                {
-                    return DSERR_NODRIVER;
-                }
+                return DSERR_NODRIVER;
             }
             root.initialized = true;
             return DS_OK;
@@ -1312,6 +1391,22 @@ export function createDirectSound(
         /** HRESULT LockServer(BOOL): nothing here is unloaded to be kept. */
         LockServer: ()=>DS_OK,
     })];
+
+    /**
+     * Whether a device GUID names the one playback device: no GUID, the
+     * device's own, or a playback default.
+     *
+     * @param {number} guid
+     */
+    const namesPlayback = guid=>{
+        if ((guid >>> 0) === 0)
+        {
+            return true;
+        }
+        const asked = memory.readMemory(guid >>> 0, 16);
+        const names = (/** @type {readonly number[]} */ id)=>id.every((byte, at)=>asked[at] === byte);
+        return names(DEVICE_GUID) || DEFAULT_PLAYBACK_IDS.some(names);
+    };
 
     /** @param {number[]} args */
     const noCaptureDevice = ([, out, outer])=>{
@@ -1452,13 +1547,15 @@ export function createDirectSound(
                 DirectSoundCreate: {
                     argBytes: 12,
                     /** @param {number[]} args */
-                    handler: ([, out])=>createInto(out, false),
+                    handler: ([guid, out])=>(namesPlayback(guid) ? createInto(out, false)
+                        : DSERR_NODRIVER),
                 },
                 /** HRESULT DirectSoundCreate8(LPCGUID, LPDIRECTSOUND8*, IUnknown*) */
                 DirectSoundCreate8: {
                     argBytes: 12,
                     /** @param {number[]} args */
-                    handler: ([, out])=>createInto(out, true),
+                    handler: ([guid, out])=>(namesPlayback(guid) ? createInto(out, true)
+                        : DSERR_NODRIVER),
                 },
                 /**
                  * HRESULT DirectSoundEnumerateA(LPDSENUMCALLBACKA, LPVOID)

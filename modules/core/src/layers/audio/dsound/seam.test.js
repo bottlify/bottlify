@@ -178,8 +178,8 @@ function describeBuffer(memory, spec = {}){
     memory.setU16(format + WAVEFORMATEX.nChannels, channels);
     memory.setU32(format + WAVEFORMATEX.nSamplesPerSec, rate);
     memory.setU16(format + WAVEFORMATEX.wBitsPerSample, bits);
-    // Deliberately wrong: the model derives the frame size and must not read it.
-    memory.setU16(format + WAVEFORMATEX.nBlockAlign, 999);
+    memory.setU16(format + WAVEFORMATEX.nBlockAlign, channels * bits / 8);
+    memory.setU32(format + WAVEFORMATEX.nAvgBytesPerSec, rate * channels * bits / 8);
 
     memory.setU32(descriptor + DSBUFFERDESC.dwSize, DSBUFFERDESC.SIZE);
     memory.setU32(descriptor + DSBUFFERDESC.dwFlags, flags);
@@ -742,7 +742,7 @@ test('a size that splits a frame is rounded up to the next whole one', ()=>{
     assert.equal(f.memory.u32(0x1904), 44104, 'the whole buffer is the rounded size');
 });
 
-test('GetFormat writes a WAVEFORMATEX derived from the format, not echoed back', ()=>{
+test('GetFormat hands back the structure the program gave', ()=>{
     const f = createRoot();
     const buffer = createBuffer(f, { channels: 2, rate: 44100, bits: 16 });
     const out = 0x1b00;
@@ -750,8 +750,6 @@ test('GetFormat writes a WAVEFORMATEX derived from the format, not echoed back',
     assert.equal(f.bridge.call(buffer, 'GetFormat',
         [out, WAVEFORMATEX.SIZE, written]), DS_OK);
     assert.equal(f.memory.u32(out + WAVEFORMATEX.nSamplesPerSec), 44100);
-    // The descriptor said 999; the frame size is four, because that is what
-    // two channels of sixteen bits actually occupy.
     assert.equal(f.memory.bytes[out + WAVEFORMATEX.nBlockAlign], 4);
     assert.equal(f.memory.u32(out + WAVEFORMATEX.nAvgBytesPerSec), 44100 * 4);
     assert.equal(f.memory.u32(written), WAVEFORMATEX.SIZE);
@@ -859,6 +857,44 @@ test('IDirectSoundNotify is there only on a buffer created to notify', ()=>{
     const out = 0x1e00;
     assert.equal(f.bridge.call(f.root, 'DuplicateSoundBuffer', [plain, out, 0]), DS_OK);
     assert.equal(notifyOn(f, f.memory.u32(out)), 0, 'a duplicate has what its original has');
+});
+
+test('a buffer\'s notify interface counts its references on its own', ()=>{
+    // Wine's dsound.c test_notify: the notify interface is released to zero
+    // while the buffer is still held, and holds the buffer until it is.
+    const f = createRoot();
+    const pointer = createBuffer(f, { flags: DSBCAPS_CTRLPOSITIONNOTIFY });
+    const adapter = f.bridge.recordAt(pointer).object;
+    assert.notEqual(notifyOn(f, pointer), 0);
+    // What QueryInterface adds, which the fixture's query leaves out.
+    assert.equal(adapter.addRef(IID_IDirectSoundNotify), 1);
+    assert.equal(adapter.addRef(IID_IDirectSoundNotify), 2);
+    assert.equal(adapter.addRef(IID_IDirectSoundBuffer), 2, 'the buffer\'s own count');
+    assert.equal(adapter.release(IID_IDirectSoundBuffer), 1);
+    assert.equal(adapter.release(IID_IDirectSoundBuffer), 0);
+    assert.equal(f.dsound.buffers()[0].destroyed, false, 'the notify interface holds it');
+    assert.equal(adapter.release(IID_IDirectSoundNotify), 1);
+    assert.equal(adapter.release(IID_IDirectSoundNotify), 0);
+    assert.equal(f.dsound.buffers()[0].destroyed, true);
+});
+
+test('SetCurrentPosition past the end of the buffer is refused and moves nothing', ()=>{
+    const f = createRoot();
+    const pointer = createBuffer(f, { bytes: 4096 });
+    assert.equal(f.bridge.call(pointer, 'SetCurrentPosition', [4096]), DSERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(pointer, 'SetCurrentPosition', [4000]), DS_OK);
+});
+
+test('DirectSoundCreate names the playback device and refuses a capture one', ()=>{
+    const f = createRoot();
+    const guid = 0x2800;
+    // DSDEVID_DefaultVoiceCapture, {DEF00003-9C6D-47ED-AAF1-4DDA8F2B5C03}.
+    f.memory.writeMemory(guid, new Uint8Array([3, 0, 0xf0, 0xde, 0x6d, 0x9c, 0xed, 0x47,
+        0xaa, 0xf1, 0x4d, 0xda, 0x8f, 0x2b, 0x5c, 0x03]));
+    const create = f.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler;
+    assert.equal(create([guid, 0x2900, 0]), 0x88780078 | 0);
+    f.memory.bytes[guid] = 2; // DSDEVID_DefaultVoicePlayback
+    assert.equal(create([guid, 0x2900, 0]), DS_OK);
 });
 
 test('SetNotificationPositions reads an array of DSBPOSITIONNOTIFY', ()=>{
@@ -1362,6 +1398,8 @@ test('the primary buffer takes the format a program sets on it', ()=>{
     f.memory.setU16(wanted + WAVEFORMATEX.nChannels, 2);
     f.memory.setU32(wanted + WAVEFORMATEX.nSamplesPerSec, 44100);
     f.memory.setU16(wanted + WAVEFORMATEX.wBitsPerSample, 16);
+    f.memory.setU16(wanted + WAVEFORMATEX.nBlockAlign, 4);
+    f.memory.setU32(wanted + WAVEFORMATEX.nAvgBytesPerSec, 44100 * 4);
 
     assert.equal(f.bridge.call(primary, 'SetFormat', [wanted]), DS_OK);
 
@@ -1369,6 +1407,54 @@ test('the primary buffer takes the format a program sets on it', ()=>{
     assert.equal(f.bridge.call(primary, 'GetFormat', [read, WAVEFORMATEX.SIZE, 0]), DS_OK);
     assert.equal(f.memory.u32(read + WAVEFORMATEX.nSamplesPerSec), 44100,
         'and reports back what it was given');
+});
+
+test('a format is checked as DirectSound checks it, and handed back as it was given', ()=>{
+    // Wine's dsound.c perform_invalid_fmt_tests.
+    const f = createRoot();
+    const create = (/** @type {(at: number) => void} */ spoil)=>{
+        const descriptor = describeBuffer(f.memory, { channels: 2, rate: 44100, bits: 16 });
+        spoil(0x2000);
+        return f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, 0x1800, 0]);
+    };
+    for (const [field, value] of /** @type {[keyof typeof WAVEFORMATEX, number][]} */ ([
+        ['nChannels', 0], ['wBitsPerSample', 12], ['nSamplesPerSec', 0],
+        ['nBlockAlign', 3], ['nBlockAlign', 5]]))
+    {
+        assert.equal(create(at=>f.memory.setU16(at + WAVEFORMATEX[field], value)),
+            DSERR_INVALIDPARAM, `${field}=${value}`);
+    }
+    assert.equal(create(at=>f.memory.setU32(at + WAVEFORMATEX.nAvgBytesPerSec, 0)),
+        DSERR_INVALIDPARAM);
+    // More than stereo is said with WAVEFORMATEXTENSIBLE, not plain PCM.
+    assert.equal(create(at=>{
+        f.memory.setU16(at + WAVEFORMATEX.nChannels, 4);
+        f.memory.setU16(at + WAVEFORMATEX.nBlockAlign, 8);
+    }), DSERR_INVALIDPARAM);
+    // A byte rate that disagrees with the rest is kept as given.
+    assert.equal(create(at=>f.memory.setU32(at + WAVEFORMATEX.nAvgBytesPerSec, 44100 * 4 + 1)),
+        DS_OK);
+    const buffer = f.memory.u32(0x1800);
+    assert.equal(f.bridge.call(buffer, 'GetFormat', [0x2600, WAVEFORMATEX.SIZE, 0]), DS_OK);
+    assert.equal(f.memory.u32(0x2600 + WAVEFORMATEX.nAvgBytesPerSec), 44100 * 4 + 1);
+    // A tag DirectSound takes on trust comes back as itself.
+    assert.equal(create(at=>f.memory.setU16(at + WAVEFORMATEX.wFormatTag, 6)), DS_OK); // A-law
+    assert.equal(f.bridge.call(f.memory.u32(0x1800), 'GetFormat',
+        [0x2600, WAVEFORMATEX.SIZE, 0]), DS_OK);
+    assert.equal(f.memory.bytes[0x2600 + WAVEFORMATEX.wFormatTag], 6);
+});
+
+test('the primary buffer answers more than stereo in plain PCM as a mix it will not take', ()=>{
+    const f = createRoot();
+    const primary = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER, bytes: 0 });
+    const wanted = 0x2400;
+    f.memory.setU16(wanted + WAVEFORMATEX.wFormatTag, 1);
+    f.memory.setU16(wanted + WAVEFORMATEX.nChannels, 6);
+    f.memory.setU32(wanted + WAVEFORMATEX.nSamplesPerSec, 44100);
+    f.memory.setU16(wanted + WAVEFORMATEX.wBitsPerSample, 16);
+    f.memory.setU16(wanted + WAVEFORMATEX.nBlockAlign, 12);
+    f.memory.setU32(wanted + WAVEFORMATEX.nAvgBytesPerSec, 44100 * 12);
+    assert.equal(f.bridge.call(primary, 'SetFormat', [wanted]), 0x8878000a | 0);
 });
 
 test('a secondary buffer refuses to have its format set', ()=>{

@@ -157,6 +157,8 @@ async function playing({ silent = false, drained = true, shared = false, memory 
     f.view.setUint16(FORMAT_AT + WAVEFORMATEX.nChannels, CHANNELS, true);
     f.view.setUint32(FORMAT_AT + WAVEFORMATEX.nSamplesPerSec, RATE, true);
     f.view.setUint16(FORMAT_AT + WAVEFORMATEX.wBitsPerSample, BITS, true);
+    f.view.setUint16(FORMAT_AT + WAVEFORMATEX.nBlockAlign, CHANNELS * BITS / 8, true);
+    f.view.setUint32(FORMAT_AT + WAVEFORMATEX.nAvgBytesPerSec, RATE * CHANNELS * BITS / 8, true);
     f.view.setUint32(DESC_AT + DSBUFFERDESC.dwSize, DSBUFFERDESC.SIZE, true);
     // The controls a program of this era asks for, and the positions it waits on.
     f.view.setUint32(DESC_AT + DSBUFFERDESC.dwFlags,
