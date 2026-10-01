@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Graphics bench</title>
+<script type="module">
+// One scene's run in a worker of its own, answered through the `report` binding.
+window.job = options=>{
+    const worker = new Worker('./worker.js', { type: 'module' });
+    const done = (/** @type {unknown} */ answer)=>{
+        worker.terminate();
+        window.report(JSON.stringify(answer));
+    };
+    worker.onmessage = ({ data })=>done(data);
+    worker.onerror = event=>done({ error: String(event.message) });
+    worker.postMessage(options);
+};
+window.ready = true;
+</script>
