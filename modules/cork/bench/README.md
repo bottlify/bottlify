@@ -31,3 +31,24 @@ engine was.
 
 `run.mjs --help` is its header comment. A run's time includes translation and
 the cold code before it, which a program pays too.
+
+## In the browser
+
+Node is not where the engine runs: Chromium's V8 is newer, inlines and tiers
+wasm differently, and the engine there is the product's bundle with its
+translation worker, so a change is judged by its figures from Chromium.
+`browser/` runs the same workloads there, each run in a fresh tab and a
+dedicated worker of a production-style bundle (minified, the diagnostic
+instruments folded out):
+
+    node modules/cork/bench/browser/build.mjs '{"head":"."}'       # bundles/head from this checkout
+    node modules/cork/bench/browser/suite.mjs \
+        '{"cork":{"bundle":"head"},"v86":{"bundle":"head","engine":"emulator"}}'
+
+`build.mjs` takes any number of checkouts, so an A/B is two bundles,
+`'{"base":"../base","new":"."}'`, and two configurations naming them; a
+configuration's `cork` is the translator's configuration, so a flag is A/B'd
+on one bundle. Both builds of every workload, two reps of each, take about a
+minute and a half. The browser is `CDP_TEST_CHROME` or the first one
+`tools/cdp_test` finds; the emulator's build is `modules/core/vendor/prebuilt`
+(`npm run fetch:v86`).

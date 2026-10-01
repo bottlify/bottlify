@@ -20,6 +20,8 @@ export default [
             // A title's bundle content beside its manifest (its sidecar kernels)
             // is not this project's code.
             'bundles/**',
+            // What the cork bench's browser runner builds from a checkout.
+            'modules/cork/bench/browser/bundles/**',
             // Agents' scratch checkouts: full copies of the tree that are not this tree.
             '.claude/**',
             'dbg/**',

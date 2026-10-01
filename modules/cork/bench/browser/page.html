@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>cork bench</title>
+<script type="module">
+// One job a tab: the worker is made from the job's bundle and its answer handed to
+// the driver's binding.
+window.job = (bundle, exeUrl, options)=>{
+    const worker = new Worker(`/b/${bundle}/worker.js`, { type: 'module' });
+    worker.onmessage = event=>{
+        worker.terminate();
+        window.report(event.data);
+    };
+    worker.onerror = event=>{
+        worker.terminate();
+        window.report(JSON.stringify({ error: `worker error: ${event.message}` }));
+    };
+    worker.postMessage({ exeUrl, options });
+    return true;
+};
+window.ready = true;
+</script>
