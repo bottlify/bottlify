@@ -420,7 +420,7 @@ test('CreateDevice hands back the device interface its root is declared with', (
 test('CreateDeviceEx hands back the interface the caller named', ()=>{
     const f = fixture();
     writeGuid(f.memory, AT.guid, GUID_SysKeyboard);
-    writeGuid(f.memory, AT.iid, IID_IDirectInputDevice8A);
+    writeGuid(f.memory, AT.iid, IID_IDirectInputDevice7A);
     // CreateDeviceEx arrived with IDirectInput7, so the call has to be made
     // through that interface rather than the one DirectInputCreateA hands out.
     const adapter = f.bridge.recordAt(f.root).object;
@@ -429,10 +429,14 @@ test('CreateDeviceEx hands back the interface the caller named', ()=>{
         DI_OK);
     const pointer = f.memory.u32(AT.out);
     // Handing back an IDirectInputDevice here would give a program expecting
-    // device8 a vtable fifteen slots long where it calls the twenty-seventh.
-    assert.equal(f.bridge.recordAt(pointer).id, IID_IDirectInputDevice8A);
+    // device7 a vtable fifteen slots long where it calls the twentieth.
+    assert.equal(f.bridge.recordAt(pointer).id, IID_IDirectInputDevice7A);
     assert.equal(f.bridge.methodsOf(pointer).length,
-        3 + IDIRECTINPUTDEVICE8_SLOTS.length);
+        3 + IDIRECTINPUTDEVICE7_SLOTS.length);
+    // IDirectInputDevice8 is not a generation a root before 8 makes.
+    writeGuid(f.memory, AT.iid, IID_IDirectInputDevice8A);
+    assert.equal(f.bridge.call(root7, 'CreateDeviceEx', [AT.guid, AT.iid, AT.out, 0]),
+        0x80004002 | 0);
 });
 
 test('CreateDeviceEx refuses an interface the device does not have', ()=>{
@@ -446,15 +450,23 @@ test('CreateDeviceEx refuses an interface the device does not have', ()=>{
     assert.equal(f.memory.u32(AT.out), 0);
 });
 
-test('a device answers to every generation of its interface, and to IUnknown', ()=>{
+test('a device answers to the generations of the root that made it, and to IUnknown', ()=>{
+    // Wine's device8.c: a device of a root before 8 is not an
+    // IDirectInputDevice8, and one of IDirectInput8 is nothing older.
     const f = keyboard();
     const adapter = f.bridge.recordAt(f.device).object;
     for (const iid of [IID_IDirectInputDeviceA, IID_IDirectInputDevice2A,
-        IID_IDirectInputDevice8A, IID_IUNKNOWN])
+        IID_IDirectInputDevice7A, IID_IUNKNOWN])
     {
         assert.ok(adapter.interfaceFor(iid), iid);
     }
+    assert.equal(adapter.interfaceFor(IID_IDirectInputDevice8A), null);
     assert.equal(adapter.interfaceFor('{11111111-2222-3333-4444-555555555555}'), null);
+    const eight = f.bridge.recordAt(device8(f, GUID_SysMouse, false)).object;
+    assert.ok(eight.interfaceFor(IID_IDirectInputDevice8A));
+    assert.ok(eight.interfaceFor('{54D41081-DC15-4833-A41B-748F73A38179}'), 'Device8W');
+    assert.equal(eight.interfaceFor(IID_IDirectInputDeviceA), null);
+    assert.equal(eight.interfaceFor('{57D7C6BD-2356-11D3-8E9D-00C04F6844AE}'), null, 'Device7W');
 });
 
 test('an unacquired device reports so rather than handing back zeroes', ()=>{
@@ -1559,12 +1571,20 @@ test('QueryInterface finds each device generation by the IID the header defines'
     {
         writeGuid(g.memory, AT.iid, iid);
         g.memory.setU32(AT.state, 0);
+        if (slots === IDIRECTINPUTDEVICE8_SLOTS)
+        {
+            assert.equal(g.call(device, 0, [AT.iid, AT.state]), 0x80004002 | 0,
+                `a root of 0x500 makes no ${iid}`);
+            continue;
+        }
         assert.equal(g.call(device, 0, [AT.iid, AT.state]), 0, `QueryInterface ${iid}`);
         const asked = g.memory.u32(AT.state);
         assert.notEqual(asked, 0, iid);
         // The table behind the answer is the one that IID names, down to its
-        // last slot, which the generation before it does not have.
-        assert.equal(g.call(asked, 3 + slots.length - 1), DIERR_UNSUPPORTED, iid);
+        // last slot, which the generation before it does not have: Initialize
+        // for the first, which refuses a null GUID, and an effect call after.
+        assert.equal(g.call(asked, 3 + slots.length - 1),
+            slots === IDIRECTINPUTDEVICE_SLOTS ? 0x80004003 | 0 : DIERR_UNSUPPORTED, iid);
         if (slots !== IDIRECTINPUTDEVICE_SLOTS)
         {
             assert.equal(g.call(asked, slotOf(slots, 'Poll')), DI_OK, iid);
@@ -1907,4 +1927,51 @@ test('SetActionMap: an event comes back at its action\'s place with its applicat
     // The state is laid out the same way: a dword per action.
     assert.equal(f.bridge.call(keys, 'GetDeviceState', [8, AT.state]), DI_OK);
     assert.equal(f.memory.bytes[AT.state + 4], KEY_DOWN);
+});
+
+test('the root answers a null interface id with E_POINTER and leaves the pointer alone', ()=>{
+    // Wine's dinput.c test_QueryInterface; DirectDraw answers it otherwise.
+    const g = guestMachine();
+    assert.equal(g.dinput.libraries['DINPUT.dll']
+        .DirectInputCreateA.handler([INSTANCE, 0x0700, AT.out, 0]), DI_OK);
+    const root = g.memory.u32(AT.out);
+    g.memory.setU32(AT.state, 0xdeadbeef);
+    assert.equal(g.call(root, 0, [0, AT.state]), 0x80004003 | 0);
+    assert.equal(g.memory.u32(AT.state), 0xdeadbeef);
+});
+
+test('IDirectInput8 also answers as IDirectInputJoyConfig8, which creation does not', ()=>{
+    const g = guestMachine();
+    const JOYCONFIG8 = '{EB0D7DFA-1990-4F27-B4D6-EDF2EEC4A44C}';
+    writeGuid(g.memory, AT.iid, JOYCONFIG8);
+    assert.equal(g.dinput.libraries['DINPUT8.dll']
+        .DirectInput8Create.handler([INSTANCE, 0x0800, AT.iid, AT.out, 0]), 0x80004002 | 0);
+    writeGuid(g.memory, AT.iid, IID_IDirectInput8A);
+    assert.equal(g.dinput.libraries['DINPUT8.dll']
+        .DirectInput8Create.handler([INSTANCE, 0x0800, AT.iid, AT.out, 0]), DI_OK);
+    const root = g.memory.u32(AT.out);
+    writeGuid(g.memory, AT.iid, JOYCONFIG8);
+    assert.equal(g.call(root, 0, [AT.iid, AT.state]), 0);
+    assert.notEqual(g.memory.u32(AT.state), 0);
+});
+
+test('an emulated device is a device of its own, and Initialize makes one into it', ()=>{
+    const f = fixture();
+    const GUID_SysMouseEm = '{6F1D2B80-D5A0-11CF-BFC7-444553540000}';
+    const GUID_SysKeyboardEm2 = '{6F1D2B83-D5A0-11CF-BFC7-444553540000}';
+    const mouseEm = createDevice(f, GUID_SysMouseEm);
+    const keyboardEm2 = createDevice(f, GUID_SysKeyboardEm2);
+    assert.notEqual(mouseEm, keyboardEm2);
+    f.memory.setU32(AT.caps, DIDEVICEINSTANCE.SIZE_A);
+    assert.equal(f.bridge.call(mouseEm, 'GetDeviceInfo', [AT.caps]), DI_OK);
+    assert.equal(readGuid(f.memory, AT.caps + DIDEVICEINSTANCE.guidInstance), GUID_SysMouseEm);
+
+    const plain = createDevice(f, GUID_SysMouse);
+    writeGuid(f.memory, AT.guid, GUID_SysMouseEm);
+    assert.equal(f.bridge.call(plain, 'Initialize', [INSTANCE, 0x0700, AT.guid]), DI_OK);
+    assert.equal(f.bridge.call(plain, 'GetDeviceInfo', [AT.caps]), DI_OK);
+    assert.equal(readGuid(f.memory, AT.caps + DIDEVICEINSTANCE.guidInstance), GUID_SysMouseEm);
+    writeGuid(f.memory, AT.guid, GUID_SysKeyboardEm2);
+    assert.equal(f.bridge.call(plain, 'Initialize', [INSTANCE, 0x0700, AT.guid]),
+        0x80040154 | 0, 'a keyboard is not a mouse');
 });

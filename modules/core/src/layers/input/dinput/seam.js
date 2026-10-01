@@ -145,6 +145,15 @@ const DISCL_BACKGROUND = 0x00000008;
 /** The devices a program creates, named by the GUIDs it was compiled with. */
 export const GUID_SysKeyboard = '{6F1D2B61-D5A0-11CF-BFC7-444553540000}';
 export const GUID_SysMouse = '{6F1D2B60-D5A0-11CF-BFC7-444553540000}';
+/** The same two devices reached as emulated ones, each a device of its own. */
+const GUID_SysMouseEm = '{6F1D2B80-D5A0-11CF-BFC7-444553540000}';
+const GUID_SysMouseEm2 = '{6F1D2B81-D5A0-11CF-BFC7-444553540000}';
+const GUID_SysKeyboardEm = '{6F1D2B82-D5A0-11CF-BFC7-444553540000}';
+const GUID_SysKeyboardEm2 = '{6F1D2B83-D5A0-11CF-BFC7-444553540000}';
+const KEYBOARD_GUIDS = new Set([GUID_SysKeyboard, GUID_SysKeyboardEm, GUID_SysKeyboardEm2]);
+const MOUSE_GUIDS = new Set([GUID_SysMouse, GUID_SysMouseEm, GUID_SysMouseEm2]);
+/** IDirectInputJoyConfig8, which an IDirectInput8 answers for and DirectInput8Create does not. */
+const IID_IDirectInputJoyConfig8 = '{EB0D7DFA-1990-4F27-B4D6-EDF2EEC4A44C}';
 
 /** The root interfaces, ANSI and wide. Same vtable; the strings differ. */
 export const IID_IDirectInputA = '{89521360-AA8A-11CF-BFC7-444553540000}';
@@ -495,6 +504,14 @@ export const IDIRECTINPUT8_SLOTS = /** @type {[string, number][]} */ ([
     ['ConfigureDevices', 4],
 ]);
 
+/** IDirectInputJoyConfig8, after IUnknown's three. */
+const IDIRECTINPUTJOYCONFIG8_SLOTS = /** @type {[string, number][]} */ ([
+    ['Acquire', 0], ['Unacquire', 0], ['SetCooperativeLevel', 2], ['SendNotify', 0],
+    ['EnumTypes', 2], ['GetTypeInfo', 3], ['SetTypeInfo', 4], ['DeleteType', 1],
+    ['GetConfig', 3], ['SetConfig', 3], ['DeleteConfig', 1], ['GetUserValues', 2],
+    ['SetUserValues', 1], ['AddNewHardware', 2], ['OpenTypeKey', 3], ['OpenAppStatusKey', 1],
+]);
+
 /** IDirectInputDevice, after IUnknown's three. */
 export const IDIRECTINPUTDEVICE_SLOTS = /** @type {[string, number][]} */ ([
     ['GetCapabilities', 1],
@@ -598,8 +615,15 @@ export function createPublisher({ publishInterface }){
             const declared = new Map(interfaces.map(entry=>[entry.id, entry]));
             adapter = {
                 api,
+                // DirectInput answers a null interface id with E_POINTER and
+                // leaves the caller's pointer as it was.
+                nullInterface: 'pointer',
                 /** @param {string} id */
                 interfaceFor(id){
+                    if (id !== IID_IUNKNOWN && api.offers && !api.offers(id))
+                    {
+                        return null;
+                    }
                     const descriptor = id === IID_IUNKNOWN
                         ? interfaces.find(entry=>entry.unknown === true)
                         : declared.get(id);
@@ -777,7 +801,8 @@ export function createDirectInput(
     };
 
     /** @param {any} device */
-    const guidOfDevice = device=>(device.kind === KEYBOARD ? GUID_SysKeyboard : GUID_SysMouse);
+    const guidOfDevice = device=>instanceGuids.get(device)
+        ?? (device.kind === KEYBOARD ? GUID_SysKeyboard : GUID_SysMouse);
 
     /**
      * A DIACTIONFORMAT's actions, or null for one that cannot be read.
@@ -1212,6 +1237,33 @@ export function createDirectInput(
             return DI_OK;
         },
 
+        /**
+         * HRESULT Initialize(HINSTANCE, DWORD version, REFGUID)
+         *
+         * The device becomes the one the GUID names among those of its own
+         * kind -- the system device or one of its emulated twins -- as that
+         * version makes it.
+         */
+        Initialize(device, [, version, guid]){
+            if ((guid >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            const named = guidAt(guid);
+            const kind = KEYBOARD_GUIDS.has(named) ? KEYBOARD
+                : MOUSE_GUIDS.has(named) ? MOUSE : null;
+            if (kind !== device.kind)
+            {
+                return DIERR_DEVICENOTREG;
+            }
+            instanceGuids.set(device, named);
+            if ((version >>> 0) !== 0)
+            {
+                device.setVersion(version >>> 0);
+            }
+            return DI_OK;
+        },
+
         /** HRESULT GetCapabilities(LPDIDEVCAPS) */
         GetCapabilities(device, [caps], descriptor){
             if ((caps >>> 0) === 0 || readU32(caps + DIDEVCAPS.dwSize) < DIDEVCAPS.SIZE)
@@ -1241,7 +1293,7 @@ export function createDirectInput(
             const wide = descriptor?.wide === true;
             const keyboard = device.kind === KEYBOARD;
             const name = keyboard ? 'Keyboard' : 'Mouse';
-            const whole = deviceInstanceBytes(keyboard ? GUID_SysKeyboard : GUID_SysMouse,
+            const whole = deviceInstanceBytes(guidOfDevice(device),
                 devTypeOf(device.kind, descriptor?.legacy === true), name, name, wide);
             return fillSized(info, whole, wide
                 ? [DIDEVICEINSTANCE.SIZE_DX3_W, DIDEVICEINSTANCE.SIZE_W]
@@ -1362,7 +1414,21 @@ export function createDirectInput(
     ];
 
     /** @param {string} guid  Whether it names a device this machine has. */
-    const isDevice = guid=>guid === GUID_SysKeyboard || guid === GUID_SysMouse;
+    const isDevice = guid=>KEYBOARD_GUIDS.has(guid) || MOUSE_GUIDS.has(guid);
+
+    /**
+     * The interfaces of one generation: a device made by IDirectInput8 is
+     * reached as IDirectInputDevice8 and nothing older, one made by an
+     * earlier root as the older ones and not as 8 (Wine's device8.c).
+     *
+     * @param {any} device
+     */
+    const generationOf = device=>(/** @type {string} */ id)=>
+        (id === IID_IDirectInputDevice8A || id === IID_IDirectInputDevice8W)
+            === (device.version >= 0x0800);
+
+    /** The GUID each device was made or initialized as. @type {WeakMap<object, string>} */
+    const instanceGuids = new WeakMap();
 
     /** @param {string} guid */
     const deviceFor = guid=>{
@@ -1380,9 +1446,11 @@ export function createDirectInput(
             return device;
         }
         device = createInputDevice({
-            kind: guid === GUID_SysKeyboard ? KEYBOARD : MOUSE,
+            kind: KEYBOARD_GUIDS.has(guid) ? KEYBOARD : MOUSE,
             now,
         });
+        device.offers = generationOf(device);
+        instanceGuids.set(device, guid);
         devices.set(guid, device);
         return device;
     };
@@ -1698,6 +1766,11 @@ export function createDirectInput(
     ];
     const isRootOf = (/** @type {string} */ id, /** @type {boolean} */ eight)=>
         (eight ? rootInterfaces8 : legacyRootInterfaces).some(entry=>entry.id === id);
+    // A root a program already holds also answers as the joystick
+    // configuration interface; the configuration it would change is none
+    // here, so each method is the not-implemented answer.
+    const joyConfigInterface = describe(IID_IDirectInputJoyConfig8,
+        IDIRECTINPUTJOYCONFIG8_SLOTS, {});
 
     /**
      * A new DirectInput object, as each creation call makes on Windows. It
@@ -1750,7 +1823,8 @@ export function createDirectInput(
                 return references === 0;
             },
         };
-        const pointer = publisher.publish(root, eight ? rootInterfaces8 : legacyRootInterfaces, id);
+        const pointer = publisher.publish(root,
+            eight ? [...rootInterfaces8, joyConfigInterface] : legacyRootInterfaces, id);
         writeU32(out, pointer);
         return pointer === 0 ? DIERR_NOINTERFACE : DI_OK;
     };
