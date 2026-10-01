@@ -717,6 +717,29 @@ test('a fixed pixel stage over a vertex shader is prepared again when a texture 
         vs.shader.release();
     });
 
+test('a viewport set again names no new state; another viewport does', async()=>{
+    // The viewport is part of the state a draw is named by, compared as the
+    // object the device holds: one made again for the same rectangle was a
+    // state named again on the next draw.
+    const h = harness();
+    h.device.SetTexture(0, h.texture);
+    assert.equal(h.device.BeginScene(), D3D_OK);
+    assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    const named = h.device.diagnostics().statesNamed;
+    const viewport = { X: 0, Y: 0, Width: 8, Height: 8, MinZ: 0, MaxZ: 1 };
+    assert.equal(h.device.SetViewport(viewport), D3D_OK);
+    assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(h.device.diagnostics().statesNamed, named, 'the viewport in force, set again');
+    assert.equal(h.device.SetViewport({ ...viewport, Width: 4 }), D3D_OK);
+    assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(h.device.diagnostics().statesNamed, named + 1, 'another is a state of its own');
+    /** @type {{ viewport?: any }} */
+    const out = {};
+    assert.equal(h.device.GetViewport(out), D3D_OK);
+    assert.equal(out.viewport.Width, 4);
+    assert.equal(h.device.EndScene(), D3D_OK);
+});
+
 test('a vertex shader that writes no coordinate set leaves a sampling stage reading zero',
     async()=>{
         const h = harness();

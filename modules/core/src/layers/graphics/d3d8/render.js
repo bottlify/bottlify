@@ -958,6 +958,44 @@ function pointLimits(model){
 /** What a block carries for points when nothing says: one pixel, unscaled. */
 const NO_POINTS = Object.freeze([1, 0, 1, 0, 1, 0, 0, 1]);
 
+/*
+ * The constants a block is filled from, as floats: a typed array is copied
+ * into a block in one move, a frozen array an element at a time -- thirty
+ * times slower, and a block takes a dozen of them.
+ */
+const IDENTITY_FLOATS = new Float32Array(IDENTITY);
+const PLANAR_IDENTITY_FLOATS = new Float32Array(PLANAR_IDENTITY);
+const NO_POINTS_FLOATS = new Float32Array(NO_POINTS);
+
+/**
+ * A value to fill a block from, as floats when it is one of the constants.
+ *
+ * @param {ArrayLike<number>} values
+ */
+const asFloats = values=>(values === IDENTITY ? IDENTITY_FLOATS
+    : values === PLANAR_IDENTITY ? PLANAR_IDENTITY_FLOATS : values);
+
+/** The storage `wordsOver` last made a view of, and the view. */
+let wordsStorage = /** @type {ArrayBufferLike | null} */ (null);
+/** @type {Uint32Array<ArrayBufferLike>} */
+let wordsView = new Uint32Array(0);
+
+/**
+ * A block's words through one view of the storage it lies in: every block
+ * of a frame is taken out of one arena, and a view made for each would be
+ * garbage by the draw.
+ *
+ * @param {ArrayBufferLike} storage
+ */
+const wordsOver = storage=>{
+    if (storage !== wordsStorage)
+    {
+        wordsStorage = storage;
+        wordsView = new Uint32Array(storage);
+    }
+    return wordsView;
+};
+
 /**
  * @param {UniformValues} values
  * @param {(floats: number) => Float32Array} [take]
@@ -968,8 +1006,8 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     const at = UNIFORM_AT;
     const lights = values.lights ?? [];
     const block = take(UNIFORM_FLOATS + lights.length * LIGHT_FLOATS);
-    block.set(values.worldViewProjection, at.worldViewProjection);
-    block.set(values.world ?? IDENTITY, at.world);
+    block.set(asFloats(values.worldViewProjection), at.worldViewProjection);
+    block.set(asFloats(values.world ?? IDENTITY_FLOATS), at.world);
     block.set(values.viewport.offset, at.viewportOffset);
     block.set(values.viewport.scale, at.viewportScale);
     putDword(block, at.textureFactor, values.textureFactor);
@@ -993,20 +1031,22 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     block[at.alphaRef] = (values.alphaRef & 0xff) / 255;
     // Raw bit patterns, not colours: the shader reads these fields as u32.
     const stages = values.stages ?? [];
-    const words = new Uint32Array(block.buffer, block.byteOffset, block.length);
+    const words = wordsOver(block.buffer);
+    const first = block.byteOffset / 4 + at.stage0;
     for (let index = 0; index < SAMPLED_STAGES; index++)
     {
-        words[at.stage0 + index] = (stages[index] ?? 0) >>> 0;
+        words[first + index] = (stages[index] ?? 0) >>> 0;
     }
     const transforms = values.textureTransforms ?? [];
     for (let index = 0; index < TRANSFORM_STAGES; index++)
     {
-        block.set(transforms[index] ?? PLANAR_IDENTITY, at.textureTransforms + index * 16);
+        block.set(asFloats(transforms[index] ?? PLANAR_IDENTITY_FLOATS),
+            at.textureTransforms + index * 16);
     }
-    block.set(values.worldView ?? IDENTITY, at.worldView);
-    block.set(values.normalMatrix ?? IDENTITY, at.normalMatrix);
-    block.set(values.cameraNormalMatrix ?? IDENTITY, at.cameraNormalMatrix);
-    block.set(values.points ?? NO_POINTS, at.point);
+    block.set(asFloats(values.worldView ?? IDENTITY_FLOATS), at.worldView);
+    block.set(asFloats(values.normalMatrix ?? IDENTITY_FLOATS), at.normalMatrix);
+    block.set(asFloats(values.cameraNormalMatrix ?? IDENTITY_FLOATS), at.cameraNormalMatrix);
+    block.set(values.points ?? NO_POINTS_FLOATS, at.point);
     for (let index = 0; index < lights.length; index++)
     {
         packLight(block, at.lights + index * LIGHT_FLOATS, lights[index]);
@@ -1380,6 +1420,39 @@ export function lightingOf(model, layout){
         localViewer: (model.renderStates.get(D3DRS.LOCALVIEWER) ?? 1) !== 0,
     };
 }
+
+/**
+ * The block a fixed pixel stage reads behind a vertex shader: the texture
+ * factor, the fog, the alpha reference, and each stage's flags and texture
+ * transform. The vertex half of the block -- the matrices, the eye, the
+ * material and the points -- is the shader's work, and is carried as
+ * identity and zero rather than worked out for a stage that never reads it.
+ *
+ * @param {RenderModel} model
+ * @param {(floats: number) => Float32Array} [take]
+ * @param {boolean} [mips]
+ * @returns {Float32Array}
+ */
+export function pixelUniformsOf(model, take, mips = true){
+    const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
+    PIXEL_FOG[0] = dwordToFloat(rs('FOGSTART'));
+    PIXEL_FOG[1] = dwordToFloat(rs('FOGEND'));
+    PIXEL_FOG[2] = dwordToFloat(rs('FOGDENSITY'));
+    return uniformBlock({
+        worldViewProjection: IDENTITY,
+        viewport: model.viewport,
+        textureFactor: rs('TEXTUREFACTOR'),
+        fogColor: rs('FOGCOLOR'),
+        fogFactors: PIXEL_FOG,
+        affineProjection: isAffine(transformOf(model, D3DTS.PROJECTION)),
+        alphaRef: rs('ALPHAREF'),
+        stages: stageFlags(model, mips),
+        textureTransforms: stageTransforms(model),
+    }, take);
+}
+
+/** The fog factors `pixelUniformsOf` hands on, written over for each block. */
+const PIXEL_FOG = [0, 1, 1];
 
 /**
  * @param {RenderModel} model
@@ -5075,7 +5148,7 @@ export function createRenderer(options){
         }));
         const take = ensureFrame().arena.take;
         const vertexBlocks = shaderVertexBlocks(model, program, pieces.vertex, take);
-        const pixelBlocks = [uniformsOf(model, null, take, mipsApplied), take(64), take(16)];
+        const pixelBlocks = [pixelUniformsOf(model, take, mipsApplied), take(64), take(16)];
         return {
             version: undefined,
             contentVersion: 0,

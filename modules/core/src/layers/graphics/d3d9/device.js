@@ -3261,6 +3261,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
+            // The same rectangle again keeps the object a renderer names the
+            // state by, so the state it names is still the one it has.
+            const held = viewport.rect;
+            if (!recording && held.x === value.X && held.y === value.Y
+                && held.width === value.Width && held.height === value.Height
+                && held.minDepth === (value.MinZ ?? 0) && held.maxDepth === (value.MaxZ ?? 1))
+            {
+                return D3D_OK;
+            }
             const next = viewportState({
                 x: value.X,
                 y: value.Y,
