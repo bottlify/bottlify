@@ -728,9 +728,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * renderer prepares once per change rather than once per draw. The world
      * transform is left out, as the Direct3D 8 device leaves it out: it moves
      * between most draws, and whoever reads this owes it a fresh read on every
-     * draw. A binding no preparation is built from -- a texture, or a buffer
-     * bound at the stride its stream already had -- raises `bindingVersion`
-     * too, so the difference versions everything beside the bindings.
+     * draw. A binding raises `bindingVersion` too, so the difference versions
+     * everything beside the bindings: a texture, a buffer bound at the stride
+     * its stream already had, and the shaders and the declaration, which a
+     * renderer keys its preparations by apart from the rest -- a program that
+     * switches shaders between draws has changed no render state.
      */
     let drawStateVersion = 1;
     let bindingVersion = 0;
@@ -1673,8 +1675,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      *
      * @param {(record: import('./stateblock.js').StateBlockRecord) => void} record
      * @param {() => void} apply
-     * @param {boolean} [binding]  the value is a binding no preparation reads: a
-     *     texture, or a buffer at its stream's stride
+     * @param {boolean} [binding]  the value is a binding: a texture, a buffer at
+     *     its stream's stride, a shader or the declaration
      */
     const setState = (record, apply, binding = false)=>{
         if (recording)
@@ -2675,7 +2677,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 },
                 ()=>{
                     vertexDeclaration = next;
-                });
+                }, true);
         },
 
         /**
@@ -2724,7 +2726,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 },
                 ()=>{
                     vertexDeclaration = next;
-                });
+                }, true);
         },
 
         /** @param {{ declaration?: any }} out */
@@ -2763,7 +2765,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 },
                 ()=>{
                     vertexShader = shader ?? null;
-                });
+                }, true);
         },
 
         /** @param {{ shader?: any }} out */
@@ -2796,7 +2798,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 },
                 ()=>{
                     pixelShader = shader ?? null;
-                });
+                }, true);
         },
 
         /** @param {{ shader?: any }} out */

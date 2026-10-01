@@ -1272,9 +1272,11 @@ function inverseRotation(view){
  *     reads this owes the world matrix a fresh read on every draw. A device
  *     that does not offer it is prepared for on every draw, as before.
  * @property {number} [stateVersionBesideTextures]
- *     Raised by every change `drawStateVersion` counts except a texture
- *     binding, so the part of a preparation's key that bindings do not reach is
- *     built once per such change rather than once per draw.
+ *     Raised by every change `drawStateVersion` counts except a binding -- a
+ *     texture, and for a device that says so a buffer at its stream's stride,
+ *     the shaders and the declaration -- so the part of a preparation's key
+ *     that bindings do not reach is built once per such change rather than
+ *     once per draw. Whoever keys a preparation by a binding names it apart.
  * @property {Material} material
  * @property {any} backBuffer                                What Present shows.
  * @property {{ vertexShader: number, fvf: number, pixelShader: number,
@@ -6184,6 +6186,10 @@ export function createRenderer(options){
     let stateKey = -1;
     /** @type {number | undefined} */
     let stateKeyVersion;
+    /** The vertex format and declared layout `stateKey` was named with. */
+    let stateKeyFvf = 0;
+    /** @type {unknown} */
+    let stateKeyLayout = null;
 
     /**
      * The whole key, as a number numbered like the state's: the state beside
@@ -6201,11 +6207,17 @@ export function createRenderer(options){
      * @returns {number}
      */
     const preparationKeyOf = (model, processing, stride, topology)=>{
+        // The format and the declared layout are in the state's name, and a
+        // declaration is a binding the version may not move for.
         const version = model.stateVersionBesideTextures;
-        if (version === undefined || version !== stateKeyVersion)
+        const layout = processing.fixedFunctionLayout ?? null;
+        if (version === undefined || version !== stateKeyVersion
+            || processing.fvf !== stateKeyFvf || layout !== stateKeyLayout)
         {
             stateKey = stateNumberOf(model, processing);
             stateKeyVersion = version;
+            stateKeyFvf = processing.fvf;
+            stateKeyLayout = layout;
         }
         const words = keyWords;
         let at = 0;

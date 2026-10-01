@@ -717,6 +717,63 @@ test('a fixed pixel stage over a vertex shader is prepared again when a texture 
         vs.shader.release();
     });
 
+test('draws switching between two vertex shaders name their state once, each with its shader',
+    async()=>{
+        // A shader switched between draws changes no render state: the pieces
+        // are keyed by the shader, so the state is named once and each shader's
+        // pieces are made once.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const textured = {};
+        /** @type {{ shader?: any }} */
+        const tinted = {};
+        assert.equal(h.device.CreateVertexShader(TEXTURED_VERTEX_SHADER, textured), D3D_OK);
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, tinted), D3D_OK);
+        h.device.SetTexture(0, h.texture);
+        assert.equal(h.device.BeginScene(), D3D_OK);
+        for (const shader of [textured, tinted, textured, tinted])
+        {
+            assert.equal(h.device.SetVertexShader(shader.shader), D3D_OK);
+            assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        }
+        assert.equal(h.device.EndScene(), D3D_OK);
+        assert.equal(h.device.Present(), D3D_OK);
+        await h.device.idle();
+        assert.deepEqual(h.device.diagnostics().prepared, { built: 2, reused: 2 });
+        assert.equal(h.device.diagnostics().statesNamed, 1);
+        const pipelines = h.gpu.of('setPipeline')
+            .map((/** @type {any} */ call)=>call.pipeline);
+        assert.equal(new Set(pipelines).size, 2, 'a pipeline for each shader');
+        assert.deepEqual(pipelines.map(pipeline=>pipeline === pipelines[0]),
+            [true, false, true, false], 'and each draw with its own');
+        textured.shader.release();
+        tinted.shader.release();
+    });
+
+test('fixed-function draws switching declarations each read through their own', async()=>{
+    // The declaration is a binding the version does not move for, and the
+    // fixed-function key holds the layout it names: a draw through another
+    // declaration is another preparation, never the last one's.
+    const h = harness();
+    /** @type {{ declaration?: any }} */
+    const short = {};
+    assert.equal(h.device.CreateVertexDeclaration(ELEMENTS.slice(0, 2), short), D3D_OK);
+    assert.equal(h.device.BeginScene(), D3D_OK);
+    for (const declaration of [h.declaration, short.declaration, h.declaration])
+    {
+        assert.equal(h.device.SetVertexDeclaration(declaration), D3D_OK);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    }
+    assert.equal(h.device.EndScene(), D3D_OK);
+    assert.equal(h.device.Present(), D3D_OK);
+    await h.device.idle();
+    assert.deepEqual(h.device.diagnostics().prepared, { built: 2, reused: 1 });
+    const attributes = h.gpu.of('setPipeline').map((/** @type {any} */ call)=>
+        call.pipeline.descriptor.vertex.buffers[0].attributes.length);
+    assert.deepEqual(attributes, [3, 2, 3], 'position, colour and coordinates; then two');
+    short.declaration.release();
+});
+
 test('a viewport set again names no new state; another viewport does', async()=>{
     // The viewport is part of the state a draw is named by, compared as the
     // object the device holds: one made again for the same rectangle was a
