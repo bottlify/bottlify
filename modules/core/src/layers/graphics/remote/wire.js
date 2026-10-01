@@ -11,9 +11,10 @@
  *
  * A value is a tag and what it holds: a number as a 32-bit integer or a
  * double, a string by its number in a table both ends build -- its text
- * where it is first sent -- bytes aligned to eight so the reader views them where they lie, an
- * array or a structure member by member, and one of the device's objects by
- * its number.
+ * where it is first sent -- bytes aligned to eight so the reader views them
+ * where they lie, an array or a structure member by member, and one of the
+ * device's objects by its number. A structure is a shape, its keys, which
+ * both ends number as it is first sent from a place (`Site`), and its values.
  *
  * A call is its object's number, its method, its arguments, and after them
  * what making it gave: the guest addresses its allocations got, what the
@@ -29,8 +30,30 @@ const NEW_STRING = 0xffffffff;
 
 const TAG = {
     UNDEFINED: 0, NULL: 1, FALSE: 2, TRUE: 3, INT: 4, DOUBLE: 5, STRING: 6, ARRAY: 7,
-    OBJECT: 8, BYTES: 9, REF: 10, SERVICE: 11,
+    OBJECT: 8, BYTES: 9, REF: 10, SERVICE: 11, NEW_SHAPE: 12, SHAPE: 13, FLAT: 14,
 };
+
+/**
+ * What a place in a call -- an argument of one method, a member of one, an
+ * element of one -- was given the last time: the keys of the structure, in
+ * order, and the shape's number on the wire. A structure in the same place
+ * with the same keys goes as that number and its values, the keys unsent;
+ * the call sites of a program pass the same structures every time. One whose
+ * every member is a number, or such a structure itself -- a light, a
+ * material, a viewport -- goes flat: the number and the members' values as
+ * doubles, depth first, with no tag between them.
+ *
+ * @typedef {{ keys: string[] | null, id: number, members: (Site | undefined)[],
+ *     element?: Site, flat: boolean, leaves: number }} Site
+ */
+
+/** @returns {Site} */
+export function createSite(){
+    return { keys: null, id: -1, members: [], flat: false, leaves: 0 };
+}
+
+/** @param {Site} site @param {number} index */
+const memberSite = (site, index)=>(site.members[index] ??= createSite());
 
 /** The kinds of typed array, by number. */
 const ARRAYS = [Uint8Array, Int8Array, Uint16Array, Int16Array, Uint32Array, Int32Array,
@@ -68,6 +91,8 @@ export function createWriter(){
     const strings = new Map();
     /** The strings by number, to forget those defined in what is taken back. @type {string[]} */
     const defined = [];
+    /** The places whose shapes were sent, by the shape's number. @type {Site[]} */
+    const shaped = [];
 
     /** @param {number} more */
     const room = more=>{
@@ -119,6 +144,23 @@ export function createWriter(){
         at += encoded.length;
         return strings.size - 1;
     };
+    /**
+     * What was written from `start` is taken back, and the strings and
+     * shapes it defined with it.
+     *
+     * @param {number} start @param {number} knownStrings @param {number} knownShapes
+     */
+    const takeBack = (start, knownStrings, knownShapes)=>{
+        at = start;
+        while (defined.length > knownStrings)
+        {
+            strings.delete(/** @type {string} */ (defined.pop()));
+        }
+        while (shaped.length > knownShapes)
+        {
+            /** @type {Site} */ (shaped.pop()).keys = null;
+        }
+    };
     /** @param {ArrayBufferView} array */
     const typed = array=>{
         const kind = KINDS.get(array.constructor) ?? -1;
@@ -139,9 +181,10 @@ export function createWriter(){
 
     /**
      * @param {any} item @param {RefOf} refOf @param {number} [depth]
+     * @param {Site} [site]  where in a call the value is, for a structure's shape
      * @returns {boolean} whether an argument was a service, sent as one
      */
-    const value = (item, refOf, depth = 0)=>{
+    const value = (item, refOf, depth = 0, site = undefined)=>{
         switch (typeof item)
         {
             case 'number':
@@ -209,19 +252,64 @@ export function createWriter(){
         {
             u8(TAG.ARRAY);
             u32(item.length);
+            const element = site ? (site.element ??= createSite()) : undefined;
             for (let index = 0; index < item.length; index++)
             {
-                value(item[index], refOf, depth + 1);
+                value(item[index], refOf, depth + 1, element);
             }
             return false;
         }
         const start = at;
-        const known = defined.length;
-        u8(TAG.OBJECT);
+        const knownStrings = defined.length;
+        const knownShapes = shaped.length;
+        if (site?.keys && site.flat)
+        {
+            room(5 + site.leaves * 8);
+            bytes[at++] = TAG.FLAT;
+            view.setUint32(at, site.id, true);
+            at += 4;
+            if (flat(item, site))
+            {
+                return false;
+            }
+            at = start;
+        }
+        if (site?.keys)
+        {
+            const keys = site.keys;
+            room(5);
+            bytes[at++] = TAG.SHAPE;
+            view.setUint32(at, site.id, true);
+            at += 4;
+            let index = 0;
+            let fits = true;
+            for (const key in item)
+            {
+                const member = item[key];
+                if (index >= keys.length || key !== keys[index] || typeof member === 'function')
+                {
+                    fits = false;
+                    break;
+                }
+                value(member, refOf, depth + 1, memberSite(site, index));
+                index++;
+            }
+            if (fits && index === keys.length)
+            {
+                return false;
+            }
+            takeBack(start, knownStrings, knownShapes);
+        }
+        u8(site ? TAG.NEW_SHAPE : TAG.OBJECT);
         room(4);
         const counted = at;
         at += 4;
-        let count = 0;
+        /** @type {string[]} */
+        const keys = [];
+        if (site)
+        {
+            site.members = [];
+        }
         for (const key in item)
         {
             const member = item[key];
@@ -229,20 +317,86 @@ export function createWriter(){
             {
                 // An object with methods that is not the device's own; what
                 // was written of it is taken back.
-                at = start;
-                while (defined.length > known)
-                {
-                    strings.delete(/** @type {string} */ (defined.pop()));
-                }
+                takeBack(start, knownStrings, knownShapes);
                 u8(depth === 0 ? TAG.SERVICE : TAG.NULL);
                 return depth === 0;
             }
             string(key);
-            value(member, refOf, depth + 1);
-            count++;
+            value(member, refOf, depth + 1, site ? memberSite(site, keys.length) : undefined);
+            keys.push(key);
         }
-        view.setUint32(counted, count, true);
+        view.setUint32(counted, keys.length, true);
+        if (site)
+        {
+            // Flat when every member is a number or a flat structure of its
+            // own: what the reader works out from the same values' tags.
+            let leaves = 0;
+            let flatAll = true;
+            for (let index = 0; index < keys.length && flatAll; index++)
+            {
+                const member = item[keys[index]];
+                const child = site.members[index];
+                if (typeof member === 'number')
+                {
+                    leaves++;
+                }
+                else if (member !== null && typeof member === 'object' && child?.keys && child.flat
+                    && child.id >= knownShapes)
+                {
+                    leaves += child.leaves;
+                }
+                else
+                {
+                    flatAll = false;
+                }
+            }
+            site.flat = flatAll;
+            site.leaves = leaves;
+            site.keys = keys;
+            site.id = shaped.length;
+            shaped.push(site);
+        }
         return false;
+    };
+
+    /**
+     * A structure's values as doubles, depth first, in its place's shape;
+     * false when it is not that shape, or a value is not a number.
+     *
+     * @param {any} item @param {Site} site
+     * @returns {boolean}
+     */
+    const flat = (item, site)=>{
+        const keys = /** @type {string[]} */ (site.keys);
+        let index = 0;
+        for (const key in item)
+        {
+            if (index >= keys.length || key !== keys[index])
+            {
+                return false;
+            }
+            const member = item[key];
+            if (typeof member === 'number')
+            {
+                if (site.members[index]?.keys)
+                {
+                    return false;
+                }
+                view.setFloat64(at, member, true);
+                at += 8;
+            }
+            else
+            {
+                const child = site.members[index];
+                if (member === null || typeof member !== 'object' || !child?.keys
+                    || !flat(member, child))
+                {
+                    return false;
+                }
+            }
+            index++;
+        }
+        return index === keys.length;
     };
 
     const writer = {
@@ -317,6 +471,13 @@ export function createWriter(){
 export function createReader({ ref, service }){
     /** @type {string[]} */
     const strings = [];
+    /**
+     * Each shape: its keys, and for a flat one each member's child shape, or
+     * -1 for a number.
+     *
+     * @type {{ keys: string[], kinds: number[] | null }[]}
+     */
+    const shapes = [];
     return {
         /**
          * Every record of a batch, in order. What a record holds of the
@@ -356,6 +517,28 @@ export function createReader({ ref, service }){
                 at += length;
                 return array;
             };
+            /**
+             * @param {{ keys: string[], kinds: number[] | null }} shape
+             * @returns {Record<string, any>}
+             */
+            const flat = shape=>{
+                const kinds = /** @type {number[]} */ (shape.kinds);
+                /** @type {Record<string, any>} */
+                const out = {};
+                for (let index = 0; index < kinds.length; index++)
+                {
+                    if (kinds[index] < 0)
+                    {
+                        out[shape.keys[index]] = view.getFloat64(at, true);
+                        at += 8;
+                    }
+                    else
+                    {
+                        out[shape.keys[index]] = flat(shapes[kinds[index]]);
+                    }
+                }
+                return out;
+            };
             /** @returns {any} */
             const value = ()=>{
                 const tag = u8();
@@ -392,17 +575,54 @@ export function createReader({ ref, service }){
                         return out;
                     }
                     case TAG.OBJECT:
+                    case TAG.NEW_SHAPE:
                     {
                         const count = u32();
+                        const known = shapes.length;
                         /** @type {Record<string, any>} */
                         const out = {};
+                        /** @type {string[]} */
+                        const keys = [];
+                        /** @type {number[] | null} */
+                        let kinds = [];
                         for (let index = 0; index < count; index++)
                         {
                             const key = string();
+                            keys.push(key);
+                            const kind = bytes[at];
                             out[key] = value();
+                            if (kind === TAG.INT || kind === TAG.DOUBLE)
+                            {
+                                kinds?.push(-1);
+                            }
+                            else if (kind === TAG.NEW_SHAPE && shapes.length > known
+                                && shapes[shapes.length - 1].kinds)
+                            {
+                                kinds?.push(shapes.length - 1);
+                            }
+                            else
+                            {
+                                kinds = null;
+                            }
+                        }
+                        if (tag === TAG.NEW_SHAPE)
+                        {
+                            shapes.push({ keys, kinds });
                         }
                         return out;
                     }
+                    case TAG.SHAPE:
+                    {
+                        const { keys } = shapes[u32()];
+                        /** @type {Record<string, any>} */
+                        const out = {};
+                        for (let index = 0; index < keys.length; index++)
+                        {
+                            out[keys[index]] = value();
+                        }
+                        return out;
+                    }
+                    case TAG.FLAT: return flat(shapes[u32()]);
                     default:
                         throw new Error(`remote: a value of tag ${tag} on the wire`);
                 }

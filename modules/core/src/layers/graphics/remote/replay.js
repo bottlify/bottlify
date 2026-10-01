@@ -23,7 +23,7 @@
  * its frames are done -- is asked of the second device (`answered`).
  */
 
-import { OP, SECTION, SERVICE_REF, WAIT, createReader } from './wire.js';
+import { OP, SECTION, SERVICE_REF, WAIT, createReader, createSite } from './wire.js';
 
 /**
  * The calls whose answer the played device holds back while it has too many
@@ -226,13 +226,6 @@ export function createRecording(options){
     let writes = null;
     /** How deep in calls the program is: a call the device makes back through the caller is part of its own. */
     let depth = 0;
-    /**
-     * Each object's methods as the caller calls them, made once for each
-     * method the object has under that name.
-     *
-     * @type {WeakMap<object, Map<string, { of: Function, as: Function }>>}
-     */
-    const methods = new WeakMap();
 
     /**
      * Numbers an object, under itself and under its proxy, so that either is
@@ -508,6 +501,9 @@ export function createRecording(options){
         let nameId = -1;
         /** @type {number | undefined} */
         let number;
+        /** Each argument's place, for the shapes of the structures passed there. */
+        /** @type {import('./wire.js').Site[]} */
+        const sites = [];
         return (/** @type {any[]} */ ...args)=>{
             const count = args.length;
             /** What the device is given: its own objects rather than their proxies. */
@@ -537,7 +533,7 @@ export function createRecording(options){
             for (let index = 0; index < count; index++)
             {
                 const arg = args[index];
-                if (writer.value(arg, refOf))
+                if (writer.value(arg, refOf, 0, sites[index] ??= createSite()))
                 {
                     // A service of the caller's: the device is given one that
                     // keeps what it answers.
@@ -656,69 +652,86 @@ export function createRecording(options){
         };
     };
 
-    /** @type {ProxyHandler<any>} */
-    const handler = {
-        get(target, key){
-            const value = Reflect.get(target, key);
-            if (typeof key !== 'string')
-            {
-                return value;
-            }
-            if (typeof value === 'function')
-            {
-                let made = methods.get(target);
-                const known = made?.get(key);
-                if (known !== undefined && known.of === value)
+    /**
+     * A proxy's handler, its own: what the proxy's methods are as the caller
+     * calls them is kept in it, found without a look-up by object.
+     *
+     * @returns {ProxyHandler<any>}
+     */
+    const handlerOf = ()=>{
+        /**
+         * Each method as the caller calls it, made once for each method the
+         * object has under that name.
+         *
+         * @type {Map<string, { of: Function, as: Function }>}
+         */
+        const made = new Map();
+        return {
+            get(target, key){
+                const value = Reflect.get(target, key);
+                if (typeof value === 'function' && typeof key === 'string')
                 {
-                    return known.as;
+                    const known = made.get(key);
+                    if (known !== undefined && known.of === value)
+                    {
+                        return known.as;
+                    }
+                    if (owned.get(target)?.has(key))
+                    {
+                        return value;
+                    }
+                    const method = methodOf(target, key, value);
+                    made.set(key, { of: value, as: method });
+                    return method;
                 }
-                if (owned.get(target)?.has(key))
-                {
-                    return value;
-                }
-                if (!made)
-                {
-                    made = new Map();
-                    methods.set(target, made);
-                }
-                const method = methodOf(target, key, value);
-                made.set(key, { of: value, as: method });
-                return method;
-            }
-            if (isDeviceObject(value))
-            {
-                if (!numbers.has(value))
-                {
-                    bind(value);
-                    writer.u8(OP.GET);
-                    writer.u32(/** @type {number} */ (numbers.get(target)));
-                    writer.string(key);
-                    transport.recorded();
-                }
-                return proxyOf(value);
-            }
+                return typeof key === 'string' ? reached(target, key, value) : value;
+            },
+            set,
+        };
+    };
+
+    /**
+     * A property read that is not a method: one of the device's objects is
+     * given as its proxy, and numbered on both sides the first time.
+     *
+     * @param {object} target @param {string} key @param {any} value
+     */
+    const reached = (target, key, value)=>{
+        if (!isDeviceObject(value))
+        {
             return value;
-        },
-        set(target, key, value){
-            if (typeof key === 'string' && typeof value === 'function')
-            {
-                // The caller's own wrapping of a method, on its side alone:
-                // what it calls through is recorded as it is called.
-                const keys = owned.get(target) ?? new Set();
-                keys.add(key);
-                owned.set(target, keys);
-                return Reflect.set(target, key, value);
-            }
-            if (typeof key === 'string')
-            {
-                writer.u8(OP.SET);
-                writer.u32(/** @type {number} */ (numbers.get(target)));
-                writer.string(key);
-                writer.value(value, refOf);
-                transport.recorded();
-            }
-            return Reflect.set(target, key, unwrap(value));
-        },
+        }
+        if (!numbers.has(value))
+        {
+            bind(value);
+            writer.u8(OP.GET);
+            writer.u32(/** @type {number} */ (numbers.get(target)));
+            writer.string(key);
+            transport.recorded();
+        }
+        return proxyOf(value);
+    };
+
+    /** @type {NonNullable<ProxyHandler<any>['set']>} */
+    const set = (target, key, value)=>{
+        if (typeof key === 'string' && typeof value === 'function')
+        {
+            // The caller's own wrapping of a method, on its side alone:
+            // what it calls through is recorded as it is called.
+            const keys = owned.get(target) ?? new Set();
+            keys.add(key);
+            owned.set(target, keys);
+            return Reflect.set(target, key, value);
+        }
+        if (typeof key === 'string')
+        {
+            writer.u8(OP.SET);
+            writer.u32(/** @type {number} */ (numbers.get(target)));
+            writer.string(key);
+            writer.value(value, refOf);
+            transport.recorded();
+        }
+        return Reflect.set(target, key, unwrap(value));
     };
     /** @param {object} given */
     const proxyOf = given=>{
@@ -726,7 +739,7 @@ export function createRecording(options){
         let proxy = proxies.get(object);
         if (!proxy)
         {
-            proxy = new Proxy(object, handler);
+            proxy = new Proxy(object, handlerOf());
             proxies.set(object, proxy);
             raws.set(proxy, object);
             const number = numbers.get(object);

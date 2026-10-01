@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { OP, SECTION, SERVICE_REF, WAIT, createReader, createWriter } from './wire.js';
+import { OP, SECTION, SERVICE_REF, WAIT, createReader, createSite, createWriter } from './wire.js';
 
 /**
  * Each value written as the one argument of a call, read back.
@@ -110,4 +110,47 @@ test('a call\'s sections and its wait come back with it', ()=>{
     assert.deepEqual([...calls[0].ship[0].bytes], [9, 8, 7]);
     assert.equal(calls[0].wait, WAIT.ANSWER);
     assert.equal(calls[0].serial, 42);
+});
+
+test('a structure from one place goes by its shape, flat while it holds numbers only', ()=>{
+    const writer = createWriter();
+    const site = createSite();
+    const light = ()=>({ Type: 1, Diffuse: { r: 0.5, g: -0, b: NaN, a: 1 }, Range: 2 ** 40 });
+    const values = [
+        light(),
+        light(),
+        { ...light(), Range: 'far' },
+        { ...light(), Extra: 3 },
+        { Type: 1, Diffuse: { r: 1, g: 2, b: 3, a: 4 } },
+        light(),
+        { Type: 2, Diffuse: null, Range: 1 },
+        light(),
+    ];
+    /** @type {number[]} */
+    const sizes = [];
+    for (const value of values)
+    {
+        const before = writer.size();
+        writer.u8(OP.CALL);
+        writer.u32(0);
+        writer.string('SetLight');
+        writer.u8(1);
+        writer.value(value, ()=>undefined, 0, site);
+        writer.u8(0);
+        writer.u8(WAIT.NONE);
+        sizes.push(writer.size() - before);
+    }
+    /** @type {any[]} */
+    const read = [];
+    createReader({ ref: number=>number, service: ()=>null }).read(writer.take(), call=>{
+        read.push(/** @type {any[]} */ (call.a)[0]);
+    });
+    assert.equal(read.length, values.length);
+    for (const [index, value] of values.entries())
+    {
+        assert.deepEqual(read[index], value, `value ${index}`);
+    }
+    assert.ok(Object.is(read[1].Diffuse.g, -0));
+    assert.ok(sizes[1] < sizes[0], 'the second goes flat, without its keys');
+    assert.ok(sizes[7] <= sizes[1] + 8, 'and flat again once the place is given its shape back');
 });

@@ -1227,11 +1227,12 @@ have read it at the next draw. What only a renderer knows -- an occlusion query'
 target's pixels for a lock, a context or a copy, `GetFrontBuffer(Data)` -- is the twin's answer,
 and the program waits for the worker to reach the call; a present waits only while the worker
 owes more than two presents and its own bound. The renderer's diagnostics are the twin's as of
-the last time they were asked for, one asking behind. In the bench (`tools/graphics-bench --remote`,
-SwiftShader, 400 draws a frame) the engine's thread spent 0.74 ms of a shader scene's frame against
-2.67 ms drawing it itself, 1.25 against 3.79 through a vertex shader and the fixed pixel stage, and
-1.57 to 1.76 against 1.87 to 1.88 in the lit scenes, whose `SetLight` before every draw crosses
-member by member.
+the last time they were asked for, one asking behind. A structure passed from the same place in a
+call with the same keys crosses as its shape's number and its values, and one of numbers only as
+bare doubles. In the bench (`tools/graphics-bench --remote`, SwiftShader, 400 draws a frame) the
+engine's thread spent 0.69 ms of a shader scene's frame against 2.95 ms drawing it itself, 1.19
+against 4.20 through a vertex shader and the fixed pixel stage, and 1.17 to 1.27 against 2.07 to
+2.24 in the lit scenes, which set a light before every draw.
 
 ## Tests
 
