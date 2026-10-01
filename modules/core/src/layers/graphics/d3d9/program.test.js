@@ -774,6 +774,33 @@ test('fixed-function draws switching declarations each read through their own', 
     short.declaration.release();
 });
 
+test('a material set between shader draws is no new state for their pieces', async()=>{
+    // A shader draw lights itself from its constants; the material is the
+    // fixed-function vertex stage's. A program that sets one before every
+    // model has changed nothing a shader draw's pieces are built from.
+    const h = harness();
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    assert.equal(h.device.CreateVertexShader(TEXTURED_VERTEX_SHADER, vs), D3D_OK);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetTexture(0, h.texture);
+    const none = { r: 0, g: 0, b: 0, a: 0 };
+    assert.equal(h.device.BeginScene(), D3D_OK);
+    for (const red of [0.25, 0.5, 0.75])
+    {
+        assert.equal(h.device.SetMaterial({ Diffuse: { r: red, g: 0, b: 0, a: 1 }, Ambient: none,
+            Specular: none, Emissive: none, Power: 0 }), D3D_OK);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    }
+    assert.deepEqual(h.device.diagnostics().prepared, { built: 1, reused: 2 });
+    // A render state is one.
+    h.device.SetRenderState(D3DRS.ALPHABLENDENABLE, 1);
+    assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(h.device.diagnostics().prepared.built, 2);
+    assert.equal(h.device.EndScene(), D3D_OK);
+    vs.shader.release();
+});
+
 test('a viewport set again names no new state; another viewport does', async()=>{
     // The viewport is part of the state a draw is named by, compared as the
     // object the device holds: one made again for the same rectangle was a

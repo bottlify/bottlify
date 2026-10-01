@@ -4775,7 +4775,7 @@ export function createRenderer(options){
         const version = model.stateVersionBesideTextures;
         if (version === undefined || version !== programStateVersion)
         {
-            programStateNumber = stateNumberOf(model, PROGRAM_PROCESSING);
+            programStateNumber = programStateNumberOf(model);
             programStateVersion = version;
         }
         const words = programWords;
@@ -4796,6 +4796,48 @@ export function createRenderer(options){
         }
         return programNumbering(words, at);
     };
+
+    /**
+     * What a shader draw's pieces are built from beside the shaders, the
+     * declaration, the streams and the textures: the render and stage states
+     * and the targets' formats. Not the transforms, the material, the lights
+     * or the viewport, which a shader draw's blocks read afresh at every draw
+     * and its pieces never do: a program that sets its material before every
+     * model would otherwise name the whole state again for each, and build its
+     * pieces again for every material.
+     *
+     * @param {RenderModel} model
+     * @returns {number}
+     */
+    const programStateNumberOf = model=>{
+        const renderStates = model.renderStates;
+        if (!(renderStates instanceof HashedStates))
+        {
+            return stateNumberOf(model, PROGRAM_PROCESSING);
+        }
+        const words = programStateWords;
+        let at = 0;
+        words[at++] = /** @type {HashedStates} */ (renderStates).low;
+        words[at++] = /** @type {HashedStates} */ (renderStates).high;
+        for (let stage = 0; stage < STAGE_COUNT; stage++)
+        {
+            const states = model.stageStates(stage);
+            if (!(states instanceof HashedStates))
+            {
+                return stateNumberOf(model, PROGRAM_PROCESSING);
+            }
+            words[at++] = /** @type {HashedStates} */ (states).low;
+            words[at++] = /** @type {HashedStates} */ (states).high;
+        }
+        counters.statesNamed++;
+        const formats = formatsOf(model);
+        words[at++] = formatIdOf(formats.targetFormat);
+        words[at++] = formats.targetHasAlpha ? 1 : 0;
+        words[at++] = formats.depthFormat === undefined ? -1 : formatIdOf(formats.depthFormat);
+        return programStateNumbering(words, at);
+    };
+    const programStateWords = new Int32Array(2 + STAGE_COUNT * 2 + 3);
+    const programStateNumbering = createNumbering();
 
     /** The streams a declaration may read, as Direct3D 9 has them. */
     const PROGRAM_STREAMS = 16;
