@@ -317,6 +317,19 @@ function mouse(f = fixture(), size = 16){
 }
 
 /**
+ * A DIPROPHEADER at AT.property for the whole device, in a structure of
+ * `size` bytes: DIPROPDWORD is 20, DIPROPRANGE 24.
+ *
+ * @param {any} memory @param {number} size
+ */
+function propertyHeader(memory, size){
+    memory.setU32(AT.property, size);
+    memory.setU32(AT.property + 4, 16);
+    memory.setU32(AT.property + 8, 0);
+    memory.setU32(AT.property + 12, 0);
+}
+
+/**
  * DIPROP_BUFFERSIZE, set the one way it can be: with the device let go of
  * and taken back afterwards.
  *
@@ -324,6 +337,7 @@ function mouse(f = fixture(), size = 16){
  */
 function setBufferSize(f, device, size){
     f.bridge.call(device, 'Unacquire', []);
+    propertyHeader(f.memory, 20);
     f.memory.setU32(AT.property + DIPROPDWORD_DATA, size);
     assert.equal(
         f.bridge.call(device, 'SetProperty', [DIPROP_BUFFERSIZE, AT.property]), DI_OK);
@@ -585,9 +599,10 @@ test('an unknown property is accepted on set and refused on get', ()=>{
     const f = keyboard();
     // Ranges and dead zones: the device is already relative and unscaled.
     // joystick8.c takes DIPROP_RANGE on an acquired device.
+    propertyHeader(f.memory, 24);
     assert.equal(f.bridge.call(f.device, 'SetProperty', [DIPROP_RANGE, AT.property]), DI_OK);
     assert.equal(f.bridge.call(f.device, 'GetProperty', [DIPROP_RANGE, AT.property]),
-        DIERR_UNSUPPORTED);
+        DIERR_UNSUPPORTED, 'the keyboard as a whole has no range');
     assert.equal(f.bridge.call(f.device, 'SetProperty', [DIPROP_BUFFERSIZE, 0]),
         DIERR_INVALIDPARAM);
 });
@@ -1974,4 +1989,47 @@ test('an emulated device is a device of its own, and Initialize makes one into i
     writeGuid(f.memory, AT.guid, GUID_SysKeyboardEm2);
     assert.equal(f.bridge.call(plain, 'Initialize', [INSTANCE, 0x0700, AT.guid]),
         0x80040154 | 0, 'a keyboard is not a mouse');
+});
+
+test('a mouse\'s properties are answered as Windows answers them', ()=>{
+    // Wine's device8.c test_mouse_info.
+    const f = fixture();
+    const device = device8(f, GUID_SysMouse, false);
+    /** @param {number} property @param {number} size @param {number} how @param {number} which */
+    const ask = (property, size, how, which)=>{
+        f.memory.setU32(AT.property, size);
+        f.memory.setU32(AT.property + 4, 16);
+        f.memory.setU32(AT.property + 8, which);
+        f.memory.setU32(AT.property + 12, how);
+        return f.bridge.call(device, 'GetProperty', [property, AT.property]);
+    };
+    const DIERR_NOTFOUND = 0x80070002 | 0;
+    assert.equal(ask(3, 20, 1, 0), DIERR_NOTFOUND, 'by offset, with no format set');
+    assert.equal(ask(7, 20, 0, 0), DI_OK, 'FFGAIN');
+    assert.equal(f.memory.u32(AT.property + 16), 10000);
+    assert.equal(ask(11, 20, 0, 0), DIERR_INVALIDPARAM, 'CALIBRATION through a DIPROPDWORD');
+    assert.equal(ask(25, 536, 0, 0), DI_NOEFFECT, 'USERNAME, of 8');
+    assert.equal(ask(23, 20, 0, 0), DIERR_INVALIDPARAM, 'SCANCODE of the whole device');
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 20)]), DI_OK);
+    assert.equal(ask(3, 20, 1, 0), DI_OK, 'GRANULARITY of X');
+    assert.equal(f.memory.u32(AT.property + 16), 1);
+    assert.equal(ask(3, 20, 1, 8), DI_OK, 'and of the wheel');
+    assert.equal(f.memory.u32(AT.property + 16), 120);
+    assert.equal(ask(4, 24, 2, 0x00000101), DI_OK, 'RANGE of Y by id');
+    assert.equal(f.memory.u32(AT.property + 16), 0x80000000);
+    assert.equal(f.memory.u32(AT.property + 20), 0x7fffffff);
+    assert.equal(ask(5, 20, 1, 0), DIERR_UNSUPPORTED, 'no dead zone');
+    assert.equal(ask(3, 20, 3, 0x00010030), DIERR_UNSUPPORTED, 'nothing by HID usage');
+});
+
+test('GetCapabilities takes either size of DIDEVCAPS', ()=>{
+    const f = mouse();
+    for (const size of [24, 44])
+    {
+        f.memory.setU32(AT.caps, size);
+        assert.equal(f.bridge.call(f.device, 'GetCapabilities', [AT.caps]), DI_OK, `${size}`);
+        assert.equal(f.memory.u32(AT.caps + 0x0c), 3, 'three axes');
+    }
+    f.memory.setU32(AT.caps, 68);
+    assert.equal(f.bridge.call(f.device, 'GetCapabilities', [AT.caps]), DIERR_INVALIDPARAM);
 });

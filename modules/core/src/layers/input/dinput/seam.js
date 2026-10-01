@@ -198,6 +198,34 @@ export const DIPROPDWORD_DATA = 0x10;
 /** MAKEDIPROP packs a small integer into a pointer; these are the ones we read. */
 export const DIPROP_BUFFERSIZE = 1;
 const DIPROP_AXISMODE = 2;
+/** The other MAKEDIPROP properties, by number. */
+const DIPROP = Object.freeze({
+    GRANULARITY: 3, RANGE: 4, DEADZONE: 5, SATURATION: 6, FFGAIN: 7, FFLOAD: 8,
+    AUTOCENTER: 9, CALIBRATIONMODE: 10, CALIBRATION: 11, GUIDANDPATH: 12, INSTANCENAME: 13,
+    PRODUCTNAME: 14, JOYSTICKID: 15, GETPORTDISPLAYNAME: 16, PHYSICALRANGE: 18,
+    LOGICALRANGE: 19, KEYNAME: 20, CPOINTS: 21, APPDATA: 22, SCANCODE: 23, VIDPID: 24,
+    USERNAME: 25, TYPENAME: 26,
+});
+/** The structure each property is read through: DIPROPDWORD, DIPROPRANGE and so on. */
+const PROPERTY_SIZE = new Map([
+    [DIPROP_BUFFERSIZE, 20], [DIPROP_AXISMODE, 20], [DIPROP.GRANULARITY, 20],
+    [DIPROP.RANGE, 24], [DIPROP.DEADZONE, 20], [DIPROP.SATURATION, 20], [DIPROP.FFGAIN, 20],
+    [DIPROP.FFLOAD, 20], [DIPROP.AUTOCENTER, 20], [DIPROP.CALIBRATIONMODE, 20],
+    [DIPROP.CALIBRATION, 28], [DIPROP.GUIDANDPATH, 552], [DIPROP.INSTANCENAME, 536],
+    [DIPROP.PRODUCTNAME, 536], [DIPROP.JOYSTICKID, 20], [DIPROP.GETPORTDISPLAYNAME, 536],
+    [DIPROP.PHYSICALRANGE, 24], [DIPROP.LOGICALRANGE, 24], [DIPROP.KEYNAME, 536],
+    [DIPROP.CPOINTS, 84], [DIPROP.APPDATA, 20], [DIPROP.SCANCODE, 20], [DIPROP.VIDPID, 20],
+    [DIPROP.USERNAME, 536], [DIPROP.TYPENAME, 536],
+]);
+const DIPROPHEADER_SIZE = 16;
+const DIPROPRANGE_NOMIN = 0x80000000 | 0;
+const DIPROPRANGE_NOMAX = 0x7fffffff;
+const DIPROPAXISMODE_ABS = 0;
+const DIPROPAXISMODE_REL = 1;
+const DIDF_RELAXIS = 0x00000002;
+/** A wheel notch, as the mouse reports its Z axis. */
+const WHEEL_DELTA = 120;
+const DIPH_DEVICE = 0;
 
 /** DIDEVCAPS, as far as a program reads it. */
 export const DIDEVCAPS = Object.freeze({
@@ -207,7 +235,9 @@ export const DIDEVCAPS = Object.freeze({
     dwAxes: 0x0c,
     dwButtons: 0x10,
     dwPOVs: 0x14,
-    SIZE: 0x44,
+    /** DirectX 3's structure ends after dwPOVs; the whole one carries five more. */
+    SIZE_DX3: 24,
+    SIZE: 44,
 });
 
 /**
@@ -725,9 +755,12 @@ export function createDirectInput(
      * What each device's SetDataFormat, or SetActionMap, settled on.
      *
      * @type {WeakMap<object, { dataSize: number, places: Map<number, number>,
-     *     appData?: Map<number, number> }>}
+     *     appData?: Map<number, number>, relative?: boolean }>}
      */
     const formats = new WeakMap();
+
+    /** Each device's force-feedback gain, which these devices keep and never use. */
+    const gains = new WeakMap();
 
     /** @param {number} address */
     const readU32 = address=>{
@@ -901,7 +934,10 @@ export function createDirectInput(
             {
                 return DIERR_INVALIDPARAM;
             }
-            formats.set(device, read);
+            formats.set(device, {
+                ...read,
+                relative: (readU32((format >>> 0) + 8) & DIDF_RELAXIS) !== 0,
+            });
             device.setDataSize(read.dataSize);
             return DI_OK;
         },
@@ -978,21 +1014,131 @@ export function createDirectInput(
                 device.setBufferSize(readU32((header >>> 0) + DIPROPDWORD_DATA));
                 return DI_OK;
             }
+            if (property === DIPROP.FFGAIN)
+            {
+                const gain = readU32((header >>> 0) + DIPROPDWORD_DATA);
+                if (gain > 10000)
+                {
+                    return DIERR_INVALIDPARAM;
+                }
+                gains.set(device, gain);
+                return DI_OK;
+            }
             // Axis mode, ranges, dead zones: accepted and ignored. The device
             // is already relative and already unscaled, which is what every
             // one of them would be asking for.
             return DI_OK;
         },
 
-        /** HRESULT GetProperty(REFGUID, LPDIPROPHEADER) */
+        /**
+         * HRESULT GetProperty(REFGUID, LPDIPROPHEADER)
+         *
+         * As Windows answers for its system mouse and keyboard (Wine's
+         * device8.c): the structure has to be the property's, an object is
+         * named by its offset in the program's format or by its id, and what
+         * these devices do not have is DIERR_UNSUPPORTED.
+         */
         GetProperty(device, [guid, header]){
             if ((header >>> 0) === 0)
             {
                 return DIERR_INVALIDPARAM;
             }
-            if ((guid >>> 0) === DIPROP_BUFFERSIZE)
+            const property = guid >>> 0;
+            const expected = PROPERTY_SIZE.get(property);
+            if (expected === undefined)
             {
-                writeU32((header >>> 0) + DIPROPDWORD_DATA, device.bufferSize);
+                return DIERR_UNSUPPORTED;
+            }
+            const at = header >>> 0;
+            if (readU32(at) !== expected || readU32(at + 4) !== DIPROPHEADER_SIZE)
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            const which = readU32(at + 8);
+            const how = readU32(at + 12);
+            const eight = device.version >= 0x0800;
+            if (how === DIPH_DEVICE)
+            {
+                if (which !== 0)
+                {
+                    return DIERR_INVALIDPARAM;
+                }
+                switch (property)
+                {
+                    case DIPROP_BUFFERSIZE:
+                        writeU32(at + DIPROPDWORD_DATA, device.bufferSize);
+                        return DI_OK;
+                    case DIPROP_AXISMODE:
+                        writeU32(at + DIPROPDWORD_DATA, formats.get(device)?.relative === true
+                            ? DIPROPAXISMODE_REL : DIPROPAXISMODE_ABS);
+                        return DI_OK;
+                    case DIPROP.FFGAIN:
+                        writeU32(at + DIPROPDWORD_DATA, gains.get(device) ?? 10000);
+                        return DI_OK;
+                    case DIPROP.USERNAME:
+                        if (!eight)
+                        {
+                            return DIERR_UNSUPPORTED;
+                        }
+                        memory.writeMemory(at + DIPROPHEADER_SIZE, new Uint8Array(2));
+                        return DI_NOEFFECT;
+                    case DIPROP.SCANCODE:
+                    case DIPROP.KEYNAME:
+                        // An object's property, asked of the whole device.
+                        return eight ? DIERR_INVALIDPARAM : DIERR_UNSUPPORTED;
+                    default:
+                        return DIERR_UNSUPPORTED;
+                }
+            }
+            if (how === DIPH_BYUSAGE)
+            {
+                return DIERR_UNSUPPORTED;
+            }
+            /** @type {import('./devices.js').DeviceObject | undefined} */
+            let object;
+            if (how === DIPH_BYOFFSET)
+            {
+                // The offset is the program's, in the format it set.
+                const places = formats.get(device)?.places;
+                const own = places
+                    ? [...places].find(([, place])=>place === which)?.[0] : undefined;
+                object = own === undefined ? undefined
+                    : objectsOf(device.kind).find(candidate=>candidate.offset === own);
+            }
+            else if (how === DIPH_BYID)
+            {
+                const named = objectNamed(device, which, DIPH_BYID);
+                object = typeof named === 'number' ? undefined : named;
+            }
+            else
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            if (!object)
+            {
+                return DIERR_NOTFOUND;
+            }
+            const axis = (object.type & DIDFT_AXIS) !== 0;
+            if (axis && property === DIPROP.GRANULARITY)
+            {
+                writeU32(at + DIPROPDWORD_DATA,
+                    object.offset === DIMOUSE_OFS.Z ? WHEEL_DELTA : 1);
+                return DI_OK;
+            }
+            if (axis && property === DIPROP.RANGE)
+            {
+                writeU32(at + DIPROPDWORD_DATA, DIPROPRANGE_NOMIN);
+                writeU32(at + DIPROPDWORD_DATA + 4, DIPROPRANGE_NOMAX);
+                return DI_OK;
+            }
+            if (device.kind === KEYBOARD && property === DIPROP.SCANCODE)
+            {
+                writeU32(at + DIPROPDWORD_DATA, object.offset);
+                return DI_OK;
+            }
+            if (device.kind === KEYBOARD && property === DIPROP.KEYNAME)
+            {
+                memory.writeMemory(at + DIPROPHEADER_SIZE, textBytes(object.name, true));
                 return DI_OK;
             }
             return DIERR_UNSUPPORTED;
@@ -1266,9 +1412,16 @@ export function createDirectInput(
 
         /** HRESULT GetCapabilities(LPDIDEVCAPS) */
         GetCapabilities(device, [caps], descriptor){
-            if ((caps >>> 0) === 0 || readU32(caps + DIDEVCAPS.dwSize) < DIDEVCAPS.SIZE)
+            const size = (caps >>> 0) === 0 ? 0 : readU32(caps + DIDEVCAPS.dwSize);
+            if (size !== DIDEVCAPS.SIZE && size !== DIDEVCAPS.SIZE_DX3)
             {
                 return DIERR_INVALIDPARAM;
+            }
+            if (size === DIDEVCAPS.SIZE)
+            {
+                // No force feedback, no firmware or hardware to name.
+                memory.writeMemory(caps + DIDEVCAPS.SIZE_DX3,
+                    new Uint8Array(DIDEVCAPS.SIZE - DIDEVCAPS.SIZE_DX3));
             }
             const keyboard = device.kind === KEYBOARD;
             writeU32(caps + DIDEVCAPS.dwFlags, DIDC_ATTACHED | DIDC_EMULATED);
@@ -1844,17 +1997,24 @@ export function createDirectInput(
          * @param {import('./devices.js').InputEvent} event
          */
         post(event){
-            const guid = event.kind === 'key' ? GUID_SysKeyboard : GUID_SysMouse;
-            const device = devices.get(guid);
-            if (!device || !device.post(event))
+            // The system device and its emulated twins all hear the keyboard,
+            // or the mouse, each taking it as its own state allows.
+            const guids = event.kind === 'key' ? KEYBOARD_GUIDS : MOUSE_GUIDS;
+            let taken = false;
+            for (const guid of guids)
             {
-                return false;
+                const device = devices.get(guid);
+                if (!device || device.destroyed || !device.post(event))
+                {
+                    continue;
+                }
+                taken = true;
+                if (device.notifyEvent !== 0)
+                {
+                    signal?.(device.notifyEvent);
+                }
             }
-            if (device.notifyEvent !== 0)
-            {
-                signal?.(device.notifyEvent);
-            }
-            return true;
+            return taken;
         },
 
         /** @param {string} guid */

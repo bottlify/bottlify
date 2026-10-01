@@ -3191,6 +3191,18 @@ async function buildApp(options){
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
                 core.api('bridge').publishInterface(object, iid),
             divergence: reportDivergence,
+            // The event SetEventNotification names, set when the device takes
+            // input -- the kernel's, handed down as the sound layer's is.
+            signal: (/** @type {number} */ handle)=>{
+                try
+                {
+                    const kernel = core.api('kernel');
+                    kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                }
+                catch (e){
+                    void e;
+                }
+            },
             now: ()=>core.api('kernel').clock.virtualTime(),
             // Where a keystroke goes: the window win32 reports as foreground --
             // the active one, not merely the last made, which may be hidden or
