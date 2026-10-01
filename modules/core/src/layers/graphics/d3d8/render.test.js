@@ -76,7 +76,8 @@ const FVF_TEXTURED_QUAD = FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
  * A device with a backend over the recording GPU, and guest memory it can read.
  *
  * @param {{ width?: number, height?: number, format?: number, depth?: boolean,
- *           dumpDraws?: boolean, maxDraws?: number, fog?: boolean, mips?: boolean,
+ *           dumpDraws?: boolean, dumpEvery?: number, maxDraws?: number, fog?: boolean,
+ *           mips?: boolean,
  *           probeTexture?: string,
  *           divergence?: (api: string, detail: string)=>void,
  *           skipTexture?: string, compressedTextures?: boolean,
@@ -116,6 +117,7 @@ function harness(options = {}){
             return sampler;
         },
         dumpDraws: options.dumpDraws ?? false,
+        dumpEvery: options.dumpEvery,
         maxDraws: options.maxDraws,
         divergence: options.divergence,
         skipTexture: options.skipTexture,
@@ -2642,6 +2644,35 @@ test('the frame dump says where each draw landed and is empty unless asked for',
     assert.match(dumped[0], / \[\] /, 'no stage is on, so the cascade is empty');
     assert.match(dumped[0], / at=10,20 110,20 10,70 110,70 pipe\d+ vb\d+@\d+\([^)]*\) gpu=same ugpu=same$/,
         'the corners themselves, because the union of a draw`s quads is not one of them');
+});
+
+test('every few frames keep their dump, without the read-back of the last frame', async()=>{
+    // A picture wrong in one frame of a few is caught with its draws only when
+    // more than the last frame is written down.
+    const h = harness({ width: 640, height: 480, dumpEvery: 2 });
+    const device = h.device;
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    for (let frame = 0; frame < 5; frame++)
+    {
+        assert.equal(device.BeginScene(), D3D_OK);
+        // A frame of its own number of draws, so each dump is told apart.
+        for (let draw = 0; draw <= frame; draw++)
+        {
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+                quad([10, 20, 110, 70], argb(255, 0, 0)), 20), D3D_OK);
+        }
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+    }
+    const kept = device.diagnostics().dumps;
+    assert.deepEqual(kept.map((/** @type {any} */ one)=>one.frame), [0, 2, 4]);
+    assert.deepEqual(kept.map((/** @type {any} */ one)=>one.lines.length), [1, 3, 5],
+        'each frame with its own draws');
+    assert.match(kept[1].lines[2], /^#2 10,20\.\.110,70 \(100x50\) /);
+    assert.doesNotMatch(kept[2].lines[4], / gpu=/,
+        'no read-back: the buffers were not made readable for it');
+    assert.equal(harness({ width: 640, height: 480 }).device.diagnostics().dumps, undefined,
+        'a run that did not ask keeps none');
 });
 
 test('the dump reads back what the GPU holds for a draw: vertices, block and indices', async()=>{

@@ -422,6 +422,7 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {(api: string, detail: string)=>void} [divergence]
  *     Where "this call succeeded and did not do all of what it promises" goes.
  * @property {boolean} [dumpDraws]
+ * @property {number} [dumpEvery]
  * @property {number} [maxDraws]
  * @property {string} [skipTexture]
  * @property {string} [probeTexture]
@@ -457,16 +458,16 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
 export function createDirect3D9(options = {}){
     const {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
-        free: giveBack, divergence, dumpDraws, maxDraws, skipTexture, probeTexture, fog, mips,
-        onDeviceLost, gamma, frameQueued, ...caps
+        free: giveBack, divergence, dumpDraws, dumpEvery, maxDraws, skipTexture, probeTexture,
+        fog, mips, onDeviceLost, gamma, frameQueued, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
     /** @type {DeviceServices} */
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
-        free: giveBack, divergence, dumpDraws, maxDraws, skipTexture, probeTexture, fog, mips,
-        onDeviceLost, gamma, frameQueued,
+        free: giveBack, divergence, dumpDraws, dumpEvery, maxDraws, skipTexture, probeTexture,
+        fog, mips, onDeviceLost, gamma, frameQueued,
     };
     if (backend && !readMemory)
     {
@@ -836,6 +837,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             windowMemory: services.windowMemory,
             createSampler: services.createSampler ?? null,
             dumpDraws: services.dumpDraws,
+            dumpEvery: services.dumpEvery,
             maxDraws: services.maxDraws,
             divergence: services.divergence,
             skipTexture: services.skipTexture,

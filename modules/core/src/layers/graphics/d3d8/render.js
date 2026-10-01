@@ -2148,6 +2148,11 @@ const CLEAR_STRIDE = 20;
  *     Record where every draw of the last frame landed and what state it ran
  *     under. Off by default: it transforms every vertex of every draw a second
  *     time on the processor, which is a cost an ordinary run must not pay.
+ * @property {number} [dumpEvery]
+ *     The same account for every this-many-th presented frame, the last
+ *     `DUMPS_KEPT` of them kept: a picture wrong in one frame of a few is
+ *     caught with its draws, where the last frame alone misses it. The lines
+ *     only -- the copies `dumpDraws` keeps for its checks are not made.
  * @property {number} [maxDraws]
  *     Record only this many draws of each frame and drop the rest. Negative --
  *     the default -- keeps all of them. A frame dump says which draws could
@@ -2189,6 +2194,7 @@ export function createRenderer(options){
     const windowMemory = options.windowMemory ?? readMemory;
     const createSampler = options.createSampler ?? null;
     const dumpDraws = options.dumpDraws === true;
+    const dumpEvery = Math.max(0, Math.floor(options.dumpEvery ?? 0));
     const maxDraws = options.maxDraws === undefined ? -1 : options.maxDraws;
     const divergence = options.divergence ?? null;
     // One id or several, comma-separated: a picture painted by a family of
@@ -2316,6 +2322,10 @@ export function createRenderer(options){
     let dump = [];
     /** @type {string[]} the same, for the frame most recently presented */
     let lastDump = [];
+    /** @type {{ frame: number, lines: string[] }[]} the frames `dumpEvery` kept */
+    const dumps = [];
+    /** Whether the draws of the frame being recorded are written down. */
+    const dumping = ()=>dumpDraws || (dumpEvery > 0 && counters.frames % dumpEvery === 0);
     /** Draws kept in the frame being recorded, against `maxDraws`. */
     let kept = 0;
 
@@ -3142,6 +3152,11 @@ export function createRenderer(options){
      *     `offset` is where `vertices` begins within the bound buffer.
      */
     const noteDumpVertices = (prepared, vertices, offset, stride)=>{
+        // The check reads buffers back, which only `dumpDraws` made readable.
+        if (!dumpDraws)
+        {
+            return;
+        }
         const commands = recording?.commands ?? [];
         const command = commands[commands.length - 1];
         // The draw just recorded, and only that one: a draw cut by `maxDraws`
@@ -4235,6 +4250,8 @@ export function createRenderer(options){
      *     offscreenTargets: number, viewport: string, target: string }[]} */
     const frameHistory = [];
     const FRAME_HISTORY = 240;
+    /** How many frames `dumpEvery` keeps the account of. */
+    const DUMPS_KEPT = 120;
 
     const ensureFrame = ()=>{
         if (!recording)
@@ -7392,11 +7409,11 @@ export function createRenderer(options){
                     ? expandedGeometry(type, ascending(count), startVertex, fill)
                     : { indices: null, count, first: startVertex }),
             }, true, streamZeroBias(model));
-            if (dumpDraws && prepared.program)
+            if (dumping() && prepared.program)
             {
                 dumpProgram(model, prepared, count);
             }
-            else if (dumpDraws)
+            else if (dumping())
             {
                 const vertices = readMemory(stream.buffer.base + startVertex * stream.stride,
                     count * stream.stride);
@@ -7466,11 +7483,11 @@ export function createRenderer(options){
                 geometry.first = 0;
                 geometry.baseVertex = model.baseVertexIndex;
                 record(model, prepared, geometry, true, streamZeroBias(model));
-                if (dumpDraws && prepared.program)
+                if (dumping() && prepared.program)
                 {
                     dumpProgram(model, prepared, count);
                 }
-                else if (dumpDraws)
+                else if (dumping())
                 {
                     const bytes = readMemory(model.indices.base + byteOffset, count * format.bytes);
                     dumpIndexed(model, prepared, indicesFrom(bytes, format.bytes));
@@ -7485,11 +7502,11 @@ export function createRenderer(options){
                 vertices,
                 ...expandedGeometry(type, order, model.baseVertexIndex, fill),
             }, true, streamZeroBias(model));
-            if (dumpDraws && prepared.program)
+            if (dumping() && prepared.program)
             {
                 dumpProgram(model, prepared, count);
             }
-            else if (dumpDraws)
+            else if (dumping())
             {
                 dumpIndexed(model, prepared, order);
             }
@@ -7517,11 +7534,11 @@ export function createRenderer(options){
                 ? expandedGeometry(type, ascending(count), 0, fill)
                 : { indices: null, count, first: 0 };
             record(model, prepared, { vertices, ...geometry });
-            if (dumpDraws && prepared.program)
+            if (dumping() && prepared.program)
             {
                 dumpProgram(model, prepared, count);
             }
-            else if (dumpDraws)
+            else if (dumping())
             {
                 dumpDraw(model, prepared, vertexData.subarray(0, count * stride), stride, null);
                 noteDumpVertices(prepared, vertexData.subarray(0, count * stride), 0, stride);
@@ -7581,11 +7598,11 @@ export function createRenderer(options){
                     }
                     : expandedGeometry(type, indices, 0, fill)),
             });
-            if (dumpDraws && prepared.program)
+            if (dumping() && prepared.program)
             {
                 dumpProgram(model, prepared, count);
             }
-            else if (dumpDraws)
+            else if (dumping())
             {
                 dumpDraw(model, prepared, vertexData.subarray(0, numVertices * stride),
                     stride, indices);
@@ -7615,6 +7632,14 @@ export function createRenderer(options){
             // at replay, which happens after another frame may have begun.
             recorded.dump = dump;
             lastDump = dump;
+            if (dumpEvery > 0 && dump.length > 0 && counters.frames % dumpEvery === 0)
+            {
+                dumps.push({ frame: counters.frames, lines: dump });
+                if (dumps.length > DUMPS_KEPT)
+                {
+                    dumps.shift();
+                }
+            }
             dump = [];
             kept = 0;
             const shown = describe(model.backBuffer);
@@ -7784,6 +7809,8 @@ export function createRenderer(options){
                 recentFrames: frameHistory.slice(),
                 // Empty unless the build asked for it; see `dumpDraws`.
                 lastDump,
+                // The same, every `dumpEvery`-th frame.
+                ...(dumpEvery > 0 ? { dumps: dumps.slice() } : {}),
                 // What the program made, and where its pixels live. Addresses
                 // rather than pixels: a reader that can read guest memory can
                 // fetch the ones it wants, and every texture at once would be

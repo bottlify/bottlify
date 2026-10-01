@@ -423,6 +423,7 @@ export function createGraphicsModule(){
                     // per-draw account of a frame is a thing only that caller can
                     // decide it wants: it costs a transform of every vertex.
                     dumpDraws: device?.dumpDraws === true,
+                    dumpEvery: device?.dumpEvery,
                     maxDraws: device?.maxDraws,
                     divergence: config?.divergence,
                     skipTexture: device?.skipTexture,
@@ -461,6 +462,7 @@ export function createGraphicsModule(){
                     // The same per-draw account and the same knobs Direct3D 8
                     // takes, for the same reason.
                     dumpDraws: device?.dumpDraws === true,
+                    dumpEvery: device?.dumpEvery,
                     maxDraws: device?.maxDraws,
                     divergence: config?.divergence,
                     skipTexture: device?.skipTexture,
@@ -498,6 +500,7 @@ export function createGraphicsModule(){
                     // the device handle for the same reason: only the assembling
                     // caller decides it wants one.
                     dumpDraws: device?.dumpDraws === true,
+                    dumpEvery: device?.dumpEvery,
                     maxDraws: device?.maxDraws,
                     skipTexture: device?.skipTexture,
                     probeTexture: device?.probeTexture,
