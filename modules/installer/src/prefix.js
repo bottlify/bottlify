@@ -21,10 +21,12 @@
  * today.
  *
  * What comes out is a tree relative to a root, because a bundle is mounted at
- * one directory and a prefix is a whole volume. The rule that picks that root
- * is a rule about layouts, never about titles: the shallowest directory holding
- * an executable, ignoring the places the system itself lives. It is reported so
- * a caller can disagree, and overridden by naming one.
+ * one directory and a prefix is a whole volume. The root is where the install
+ * told Windows it put the application -- the InstallLocation of its uninstall
+ * entry -- and, for an install that recorded none, a rule about layouts, never
+ * about titles: the shallowest directory holding an executable, ignoring the
+ * places the system itself lives. It is reported so a caller can disagree, and
+ * overridden by naming one.
  */
 
 import { windowsChoice } from './windows.js';
@@ -197,6 +199,82 @@ export function chooseRoot(entries){
         depth(a[0]) - depth(b[0]) || b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0][0];
 }
 
+/** The hive's two roots an application's uninstall entry is written under. */
+const HKEY_CURRENT_USER = 0x80000001;
+const HKEY_LOCAL_MACHINE = 0x80000002;
+/** Where Add or Remove Programs finds what is installed, one subkey a program. */
+const UNINSTALL = ['software', 'microsoft', 'windows', 'currentversion', 'uninstall'];
+const REG_SZ = 1;
+const REG_EXPAND_SZ = 2;
+
+/**
+ * Every InstallLocation the install recorded under an Uninstall entry: the
+ * directory an installer tells Windows it put the application in, which is
+ * what Add or Remove Programs shows and removes. String data is kept in the
+ * ANSI page whichever entry point wrote it, so it is read as that page.
+ *
+ * @param {any} registry  The hive, as `toJSON` gives it.
+ * @returns {string[]}
+ */
+export function installLocations(registry){
+    const ansi = new TextDecoder('windows-1252');
+    /** @type {string[]} */
+    const found = [];
+    for (const { id, key } of registry?.roots ?? [])
+    {
+        if ((id >>> 0) !== HKEY_LOCAL_MACHINE && (id >>> 0) !== HKEY_CURRENT_USER)
+        {
+            continue;
+        }
+        let at = key;
+        for (const part of UNINSTALL)
+        {
+            at = (at?.keys ?? []).find((/** @type {any} */ child)=>fold(child.name) === part);
+        }
+        for (const entry of at?.keys ?? [])
+        {
+            const value = (entry.values ?? []).find((/** @type {any} */ one)=>
+                fold(one.name) === 'installlocation'
+                && (one.type === REG_SZ || one.type === REG_EXPAND_SZ));
+            const text = value ? ansi.decode(Uint8Array.from(value.data)).replace(/\0.*$/s, '')
+                .trim().replace(/[\\/]+$/, '') : '';
+            if (/^[a-z]:\\/i.test(text))
+            {
+                found.push(text);
+            }
+        }
+    }
+    return found;
+}
+
+/**
+ * The installation the install itself named: of the locations its uninstall
+ * entries record, the one holding the most of the executables it produced,
+ * spelt as the volume spells it. Null when none holds any -- an entry that
+ * names nothing this install wrote is another program's, or a location the
+ * program was moved from.
+ *
+ * @param {{ path: string }[]} produced  Absolute guest paths.
+ * @param {any} registry
+ * @returns {string | null}
+ */
+function recordedRoot(produced, registry){
+    let best = null;
+    let most = 0;
+    for (const location of installLocations(registry))
+    {
+        const under = fold(`${location}\\`);
+        const executables = produced.filter(file=>fold(file.path).startsWith(under)
+            && fold(file.path).endsWith('.exe'));
+        if (executables.length > most)
+        {
+            most = executables.length;
+            best = executables[0].path.slice(0, location.length);
+        }
+    }
+    return best;
+}
+
 /**
  * The entry point a bundle will be started from: the largest executable that
  * does not name itself a setup program.
@@ -230,7 +308,9 @@ export function collect({ files, registry, seeded = [], root }){
     const planted = new Set(seeded.map(fold));
     const produced = files.filter(file=>!planted.has(fold(file.path)));
 
-    const chosen = root ?? chooseRoot(produced);
+    // Where the install said it put the application, when it said so;
+    // otherwise the layout's own answer.
+    const chosen = root ?? recordedRoot(produced, registry) ?? chooseRoot(produced);
     const under = fold(chosen.endsWith('\\') ? chosen : `${chosen}\\`);
 
     /** @type {PrefixFile[]} */
