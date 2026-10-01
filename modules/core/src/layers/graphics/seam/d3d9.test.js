@@ -1635,7 +1635,8 @@ test('with guest memory, the setters and GetRenderState of a device run in the g
     const guest = (/** @type {string} */ name)=>h.box.isGuest(device,
         slot(IDIRECT3DDEVICE9_SLOTS, name));
     for (const name of ['SetRenderState', 'GetRenderState', 'SetTransform',
-        'SetTextureStageState', 'SetMaterial', 'SetSamplerState', 'SetTexture'])
+        'SetTextureStageState', 'GetTextureStageState', 'SetMaterial', 'SetSamplerState',
+        'SetTexture'])
     {
         assert.ok(guest(name), `${name} runs in the guest`);
     }
@@ -1742,7 +1743,8 @@ test('a state block applied mirrors into the block only the states it holds', ()
     const matrix = 0x3400;
     for (let index = 0; index < 16; index++)
     {
-        h.fields.writeU32(matrix + index * 4, new Uint32Array(Float32Array.of(index + 1).buffer)[0]);
+        const bits = new Uint32Array(Float32Array.of(index + 1).buffer)[0];
+        h.fields.writeU32(matrix + index * 4, bits);
     }
     const world = record([['SetTransform', [256, matrix]], ['SetTextureStageState', [1, 1, 2]]]);
     for (let index = 0; index < 16; index++)

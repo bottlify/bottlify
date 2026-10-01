@@ -898,6 +898,64 @@ export function setTextureStageStateCode(at, trap, types = STAGE_STATE_TYPES){
 }
 
 /**
+ * HRESULT GetTextureStageState(this, DWORD stage, D3DTEXTURESTAGESTATETYPE
+ * type, DWORD *value), as guest code: a type the version's setter takes is
+ * kept in the block, where the guest's own writes land and the host mirrors
+ * every change it makes itself, so the answer is read there. A stage past the
+ * block, a type the setter leaves to the host, a null pointer and the host's
+ * flag go to the host.
+ *
+ *     (prologue)
+ *     mov eax, [esp+12]           ; type
+ *     cmp eax, 32
+ *     jae slow
+ *     mov edx, types
+ *     bt edx, eax
+ *     jnc slow
+ *     mov eax, [esp+8]            ; stage
+ *     cmp eax, 8
+ *     jae slow
+ *     shl eax, 5
+ *     add eax, [esp+12]
+ *     mov edx, [esp+16]           ; value
+ *     test edx, edx
+ *     jz slow
+ *     mov eax, [ecx + eax*4 + STAGE_STATES]
+ *     mov [edx], eax
+ *     xor eax, eax
+ *     ret 16
+ *   slow:
+ *     jmp trap
+ *
+ * @param {number} at @param {number} trap
+ * @param {number} [types]  The stage state types the setter takes, Direct3D 8's by default.
+ * @returns {Uint8Array}
+ */
+export function getTextureStageStateCode(at, trap, types = STAGE_STATE_TYPES){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
+        [0x3d, ...dword(SHADOW.STAGE_STATE_STRIDE)],             // cmp eax, 32
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0xba, ...dword(types)],                                 // mov edx, imm32
+        [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
+        { jcc: 0x73, to: 'slow' },                               // jnc slow
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x3d, ...dword(SHADOW.STAGE_COUNT)],                    // cmp eax, 8
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0xc1, 0xe0, 0x05],                                      // shl eax, 5
+        [0x03, 0x44, 0x24, 0x0c],                                // add eax, [esp+12]
+        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x8b, 0x84, 0x81, ...dword(SHADOW.STAGE_STATES)],       // mov eax, [ecx+eax*4+disp]
+        [0x89, 0x02],                                            // mov [edx], eax
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x10, 0x00],                                      // ret 16
+    ]);
+}
+
+/**
  * HRESULT SetSamplerState(this, DWORD sampler, D3DSAMPLERSTATETYPE type,
  * DWORD value), as guest code: the state is kept in its sampler's stage
  * state slot for its type, which the block's table names, and marked there

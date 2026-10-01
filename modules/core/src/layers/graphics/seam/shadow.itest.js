@@ -27,6 +27,7 @@ import {
     setIndicesCode, setSamplerStateCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
     setTextureStageStateCode, setTransformCode, setVertexShaderCode, unlockCode,
+    getTextureStageStateCode,
 } from './shadow.js';
 import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
 
@@ -38,6 +39,7 @@ const ROUTINES = {
     renderState: 0x8800, transform: 0x8880, lock: 0x8900, unlock: 0x89a0,
     stream: 0x8a00, indices: 0x8a80, shader: 0x8b00, texture: 0x8b80, stageState: 0x8c00,
     material: 0x8c80, surfaceLevel: 0x8d80, getState: 0x8e00, sampler: 0x8e80, texture9: 0x8f00,
+    getStage: 0x8f80,
 };
 /** Where the routines jump when they leave the case to the host: a halt here. */
 const TRAP = 0x8d00;
@@ -119,6 +121,10 @@ const STEPS = [
     step(ROUTINES.sampler, OBJECT, [8, 5, 2]),           // 41: a sampler past the block: the trap
     step(ROUTINES.sampler, OBJECT, [1, 16, 2]),          // 42: past the table: the trap
     step(ROUTINES.texture9, OBJECT, [8, 0x4242]),        // 43: Direct3D 9's stage 8: the trap
+    step(ROUTINES.getStage, OBJECT, [2, D3DTSS.COLOROP, OUT]),   // 44: what step 20 wrote
+    step(ROUTINES.getStage, OBJECT, [2, 12, OUT]),       // 45: not a type of this version: the trap
+    step(ROUTINES.getStage, OBJECT, [8, D3DTSS.COLOROP, OUT]),   // 46: no such stage: the trap
+    step(ROUTINES.getStage, OBJECT, [2, D3DTSS.COLOROP, 0]),     // 47: nowhere to put it: the trap
 ];
 
 /** @param {typeof STEPS[number]} entry @param {number} at */
@@ -234,6 +240,7 @@ async function routines(engine){
     host.writePhysical(ROUTINES.getState, getRenderStateCode(ROUTINES.getState, TRAP));
     host.writePhysical(ROUTINES.sampler, setSamplerStateCode(ROUTINES.sampler, TRAP));
     host.writePhysical(ROUTINES.texture9, setTextureCode(ROUTINES.texture9, TRAP, 'slow'));
+    host.writePhysical(ROUTINES.getStage, getTextureStageStateCode(ROUTINES.getStage, TRAP));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
     host.writePhysical(TEX + 4, new Uint8Array(u32(TBLOCK)));
     host.writePhysical(TBLOCK, new Uint8Array(TEXTURE.SIZE));
@@ -471,6 +478,14 @@ async function routines(engine){
     assert.equal(run(42), 'trap', 'a type past the table');
     assert.equal(run(43), 'trap', 'Direct3D 9 leaves a stage past the block to the host');
     assert.equal(calls(), 18);
+
+    write(OUT, 0);
+    assert.equal(run(44), 'ok', 'a stage state read from the block');
+    assert.equal(read(OUT), 5, 'what step 20 set');
+    assert.equal(calls(), 18, 'a read is not a call the host must adopt');
+    assert.equal(run(45), 'trap', 'a type the setter leaves to the host');
+    assert.equal(run(46), 'trap', 'a stage past the block');
+    assert.equal(run(47), 'trap', 'a null pointer');
 
     machine.stop();
 }
