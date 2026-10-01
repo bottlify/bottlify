@@ -37,7 +37,9 @@ test('it decodes to 16-bit PCM of the stream\'s own rate and channels, and nothi
     assert.equal(codec.converts(format(44100, 2), format(44100, 1, 1)), false);
 });
 
-test('a stream takes whole frames that fit, past a tag in front, and leaves a cut one', ()=>{
+test('a stream takes every byte, keeps a cut frame and what did not fit for the next call', ()=>{
+    // As the Windows codec: SndDrv streams voice lines a file read at a time
+    // and never reads back how much of its source was used.
     const codec = createMp3AcmCodec();
     const stream = codec.open(format(44100, 2), format(44100, 2, 1));
     const id3 = Uint8Array.from([0x49, 0x44, 0x33, 3, 0, 0, 0, 0, 0, 2, 0, 0]);
@@ -49,11 +51,34 @@ test('a stream takes whole frames that fit, past a tag in front, and leaves a cu
     }
     source.set(FRAME.subarray(0, 100), id3.length + FRAME.length * 3);
     const first = stream.convert(source, FRAME_PCM * 2);
-    assert.equal(first.output.length, FRAME_PCM * 2, 'as many frames as the room holds');
-    assert.equal(first.consumed, id3.length + FRAME.length * 2);
-    const rest = stream.convert(source.subarray(first.consumed), FRAME_PCM * 4);
-    assert.equal(rest.output.length, FRAME_PCM, 'the cut frame waits for its bytes');
-    assert.equal(rest.consumed, FRAME.length);
+    assert.equal(first.consumed, source.length, 'all of it taken');
+    assert.equal(first.output.length, FRAME_PCM * 2, 'as much as the room holds');
+    const rest = stream.convert(FRAME.subarray(100), FRAME_PCM * 4);
+    assert.equal(rest.consumed, FRAME.length - 100);
+    assert.equal(rest.output.length, FRAME_PCM * 2,
+        'the frame that did not fit, then the one whose rest arrived');
     assert.equal(stream.size(FRAME.length * 3, true) >= FRAME_PCM * 3, true,
         'the size it asks for holds what it decodes');
+});
+
+test('fed in pieces that cut frames, a stream gives every frame once', ()=>{
+    const codec = createMp3AcmCodec();
+    const stream = codec.open(format(44100, 2), format(44100, 2, 1));
+    const frames = 20;
+    const source = new Uint8Array(FRAME.length * frames);
+    for (let index = 0; index < frames; index++)
+    {
+        source.set(FRAME, index * FRAME.length);
+    }
+    let produced = 0;
+    for (let at = 0; at < source.length; at += 836)
+    {
+        produced += stream.convert(source.subarray(at, at + 836), 0x2000).output.length;
+    }
+    for (let drained = -1; drained !== 0;)
+    {
+        drained = stream.convert(new Uint8Array(0), 0x2000).output.length;
+        produced += drained;
+    }
+    assert.equal(produced, frames * FRAME_PCM);
 });

@@ -100,42 +100,52 @@ export function createMp3AcmCodec(){
             const frameBytes = Math.max(1, declared || Math.floor(
                 samplesPerFrame(from.rate) * (from.averageBytes ?? 0) / from.rate) || 1);
             let first = true;
+            // As the Windows codec: every byte handed in is taken, a cut frame
+            // waits here for the rest of itself, and decoded samples that do
+            // not fit the room wait for the next call. A streaming caller
+            // that never reads cbSrcLengthUsed refills from where its file
+            // read left off, and bytes handed back to it are lost.
+            let pending = new Uint8Array(0);
+            let owed = new Uint8Array(0);
             return {
                 convert(source, room){
-                    const start = first ? id3Length(source) : 0;
+                    const joined = new Uint8Array(pending.length + source.length);
+                    joined.set(pending);
+                    joined.set(source, pending.length);
+                    const start = first ? id3Length(joined) : 0;
                     first = false;
-                    const { frames } = scanFrames(source, start, source.length, true);
-                    let consumed = frames.length === 0 ? 0 : frames[0].offset;
-                    /** @type {Int16Array[]} */
-                    const out = [];
-                    let length = 0;
+                    const { frames, next } = scanFrames(joined, start, joined.length, true);
+                    /** @type {Uint8Array[]} */
+                    const parts = [owed];
+                    let length = owed.length;
                     for (const frame of frames)
                     {
-                        const owed = frame.header.samples * frame.header.channels * 2;
-                        if (length + owed > room)
-                        {
-                            break;
-                        }
+                        const whole = frame.header.samples * frame.header.channels * 2;
                         decoded.length = 0;
                         stream.feed(
-                            source.subarray(frame.offset, frame.offset + frame.header.length),
+                            joined.subarray(frame.offset, frame.offset + frame.header.length),
                             frame.header);
                         for (const pcm of decoded)
                         {
-                            const kept = pcm.subarray(0, owed / 2);
-                            out.push(kept);
-                            length += kept.length * 2;
+                            const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset,
+                                Math.min(whole, pcm.length * 2));
+                            parts.push(bytes);
+                            length += bytes.length;
                         }
-                        consumed = frame.offset + frame.header.length;
                     }
-                    const output = new Uint8Array(length);
+                    pending = joined.slice(frames.length > 0
+                        ? frames[frames.length - 1].offset + frames[frames.length - 1].header.length
+                        : Math.max(start, next));
+                    const all = new Uint8Array(length);
                     let at = 0;
-                    for (const pcm of out)
+                    for (const part of parts)
                     {
-                        output.set(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.length * 2), at);
-                        at += pcm.length * 2;
+                        all.set(part, at);
+                        at += part.length;
                     }
-                    return { consumed, output };
+                    const output = all.slice(0, Math.min(room, length));
+                    owed = all.slice(output.length);
+                    return { consumed: source.length, output };
                 },
                 size: (bytes, toDestination)=>(toDestination
                     ? Math.ceil(bytes / frameBytes) * frameOutput
