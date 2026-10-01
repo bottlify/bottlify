@@ -14,7 +14,8 @@
  *     node modules/cork/bench/browser/build.mjs '{"base":"../base-checkout","new":"."}'
  *
  * The emulator's build is this checkout's `modules/core/vendor/prebuilt`
- * (`npm run fetch:v86`). Set MINIFY=0 for bundles a profiler can read.
+ * (`npm run fetch:v86`). Set MINIFY=0 for bundles a profiler can read, DIAGNOSTICS=1 to
+ * keep the instruments (a run's `cork` timings then report where translation went).
  */
 
 import { build } from 'esbuild';
@@ -24,7 +25,8 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const PREBUILT = resolve(HERE, '../../../core/vendor/prebuilt');
-const DIAGNOSTICS_OFF = { 'import.meta.BOTTLIFY_DIAGNOSTICS': 'false' };
+const DIAGNOSTICS_OFF = process.env.DIAGNOSTICS === '1' ? {}
+    : { 'import.meta.BOTTLIFY_DIAGNOSTICS': 'false' };
 const COMMON = {
     bundle: true, format: /** @type {const} */ ('esm'), platform: /** @type {const} */ ('browser'),
     target: ['es2022'], minify: process.env.MINIFY !== '0', sourcemap: false,

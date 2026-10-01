@@ -45,5 +45,8 @@ export async function measureOnce(createApp, executable, options){
         mips: instructions / ms / 1000,
         translatedShare: cpu.cork?.translatedShare ?? null,
         regions: cpu.cork?.regions ?? null,
+        // Only from a bundle built with the instruments and a run asking for `timings`.
+        timings: Object.fromEntries(Object.entries(cpu.cork ?? {})
+            .filter(([key, value])=>key.endsWith('Ms') && value > 0)),
     };
 }
