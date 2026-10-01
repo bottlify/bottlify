@@ -450,6 +450,14 @@ class Dispatcher {
         this.ringAt = 0;
         /** @type {CallRecord[]} */
         this.records = new Array(DETAIL_RING).fill(null);
+        /**
+         * By ring slot, an argument array of each length its record has
+         * held, made the first time: consecutive calls take different
+         * counts, and a record whose array was the wrong length was given a
+         * new one -- an allocation on most crossings of a mixed run.
+         * @type {(number[] | null)[][]}
+         */
+        this.recordArgs = new Array(DETAIL_RING).fill(null);
         this.detailAt = 0;
         /** Guest address of each stub, so a return address can be given a name. */
         /** @type {Map<number, string>} */
@@ -967,7 +975,8 @@ class Dispatcher {
         // second, was the garbage collector's whole share of a frame.
         // Whoever reads the ring gets a copy; a sink gets the record for
         // the length of its call and nothing longer.
-        const record = this.records[this.detailAt++ % DETAIL_RING] ??= makeRecord();
+        const detail = this.detailAt++ % DETAIL_RING;
+        const record = this.records[detail] ??= makeRecord();
         record.name = entry.name;
         // Which instruction made this call. Read from the frame that was
         // captured above rather than the stack, because a handler that
@@ -977,16 +986,15 @@ class Dispatcher {
         // Copied, because a handler that writes through a pointer can
         // change what the arguments describe before anyone reads them.
         const kept = Math.min(args.length, 6);
-        // A fresh array only when the length differs: setting `length` is
-        // a trip into the runtime every time, a fifth of the crossing.
-        if (record.args.length !== kept)
-        {
-            record.args = new Array(kept);
-        }
+        // An array of the length kept rather than `length` set: setting it
+        // is a trip into the runtime every time, a fifth of the crossing.
+        const sized = this.recordArgs[detail] ??= [null, null, null, null, null, null, null];
+        const into = sized[kept] ??= new Array(kept);
         for (let i = 0; i < kept; i++)
         {
-            record.args[i] = args[i];
+            into[i] = args[i];
         }
+        record.args = into;
         // Read now rather than later when asked for: a string a program
         // assembled on its own stack has been overwritten several
         // frames deep by the time anybody reads the trace, and what
