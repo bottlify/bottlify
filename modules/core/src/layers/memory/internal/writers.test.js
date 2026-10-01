@@ -134,18 +134,30 @@ test('the write path allocates nothing', ()=>{
     it.charging(it.writer('DrawIndexedPrimitive'));
     // A million charges through a fixed table: what this proves is that the
     // path is arrays and numbers, so a leak would show as growth here.
-    const before = process.memoryUsage().heapUsed;
-    for (let i = 0; i < 1_000_000; i++)
-    {
-        it.charge(64);
-        if ((i & 0xffff) === 0)
+    const million = ()=>{
+        for (let i = 0; i < 1_000_000; i++)
         {
-            it.publish();
+            it.charge(64);
+            if ((i & 0xffff) === 0)
+            {
+                it.publish();
+            }
         }
+    };
+    // The first round pays for the engine's own compiles of the path, and a
+    // busy process's heap moves by more than the bound on its own: the least
+    // any of three later rounds grew is the path's, and an allocation a charge
+    // would still be sixteen megabytes in every one.
+    million();
+    let grew = Infinity;
+    for (let round = 0; round < 3; round++)
+    {
+        const before = process.memoryUsage().heapUsed;
+        million();
+        grew = Math.min(grew, process.memoryUsage().heapUsed - before);
     }
-    const grew = process.memoryUsage().heapUsed - before;
     assert.ok(grew < 1 << 20, `the write path grew the heap by ${grew} bytes`);
-    assert.equal(it.rows().DrawIndexedPrimitive.writes, 1_000_000);
+    assert.equal(it.rows().DrawIndexedPrimitive.writes, 4_000_000);
 });
 
 test('the slot is what charging swaps, and a write goes to whoever it holds', ()=>{
