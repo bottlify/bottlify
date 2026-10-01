@@ -155,6 +155,7 @@ export function createAudioModule(){
                 now: config?.now ?? (()=>Date.now()),
                 publishInterface: config?.publishInterface ?? (()=>0),
                 signal: config?.signal,
+                divergence: config?.divergence,
                 /**
                  * Runs a guest routine and answers with what it returned. The
                  * bridge parks the caller while it does, which is what makes a

@@ -32,6 +32,9 @@
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 import { readGuid } from '../../win32/ole32/guid.js';
 import { createSoundBuffer, normaliseFormat, DSBSTATUS_PLAYING } from './buffers.js';
+import {
+    createSpatial, IDIRECTSOUND3DLISTENER_SLOTS, IDIRECTSOUND3DBUFFER_SLOTS,
+} from './spatial.js';
 
 export const DS_OK = 0;
 const DS_UNCERTIFIED = 1;
@@ -85,7 +88,8 @@ export const IID_IDirectSoundNotify = '{B0210783-89CD-11D0-AF08-00A0C925CD16}';
 export const IID_IDirectSound3DListener = '{279AFA84-4981-11CE-A521-0020AF0BE560}';
 export const IID_IDirectSound3DBuffer = '{279AFA86-4981-11CE-A521-0020AF0BE560}';
 export const IID_IKsPropertySet = '{31EFAC30-515C-11D0-A9AA-00AA0061BE93}';
-const COUNTED_ON_THEIR_OWN = new Set([IID_IDirectSoundNotify, IID_IKsPropertySet]);
+const COUNTED_ON_THEIR_OWN = new Set([IID_IDirectSoundNotify, IID_IKsPropertySet,
+    IID_IDirectSound3DListener, IID_IDirectSound3DBuffer]);
 
 /** WAVEFORMATEX. The two-byte fields are why this is not a table of dwords. */
 export const WAVEFORMATEX = Object.freeze({
@@ -530,9 +534,11 @@ export function createPublisher({ publishInterface }){
  *        Whose call `EnumDevices` is answering, named before the loop's first
  *        await: a second callback is a call made after that await, by when
  *        the thread on the processor may no longer be this one.
+ * @param {(api: string, detail: string) => void} [deps.divergence]
+ *        Told where this DirectSound behaves differently from Windows'.
  */
 export function createDirectSound(
-    { memory, allocate, now, publishInterface, signal, callGuest, callerThread },
+    { memory, allocate, now, publishInterface, signal, callGuest, callerThread, divergence },
 )
 {
     const publisher = createPublisher({ publishInterface });
@@ -560,6 +566,7 @@ export function createDirectSound(
 
     /** @type {any[]} */
     const buffers = [];
+    let placedOnce = false;
     // How often a program drove each buffer method. A sound that is never heard
     // and a sound that is played and dropped on the way to the mixer look the
     // same from outside, and this is the first thing that tells them apart.
@@ -680,24 +687,27 @@ export function createDirectSound(
     // Described once: the bridge shares one table of stubs per method list, and
     // a list per buffer was a table per buffer. Built on first use, because the
     // methods it names are defined below.
-    /** @type {{ buffer: any, buffer8: any, notify: any, properties: any } | null} */
+    /** @type {{ buffer: any, buffer8: any, notify: any, properties: any, listener: any,
+     *     placed: any } | null} */
     let describedBuffer = null;
     const bufferDescriptors = ()=>describedBuffer ??= {
         buffer: describe(IID_IDirectSoundBuffer, IDIRECTSOUNDBUFFER_SLOTS, bufferMethods),
         buffer8: describe(IID_IDirectSoundBuffer8, IDIRECTSOUNDBUFFER8_SLOTS, bufferMethods),
         notify: describe(IID_IDirectSoundNotify, IDIRECTSOUNDNOTIFY_SLOTS, notifyMethods),
         properties: describe(IID_IKsPropertySet, IKSPROPERTYSET_SLOTS, propertySetMethods),
+        listener: describe(IID_IDirectSound3DListener, IDIRECTSOUND3DLISTENER_SLOTS,
+            spatial.listenerMethods),
+        placed: describe(IID_IDirectSound3DBuffer, IDIRECTSOUND3DBUFFER_SLOTS,
+            spatial.bufferMethods),
     };
+    const spatial = createSpatial({ memory });
     /**
      * What one buffer answers QueryInterface for. IDirectSoundNotify only when
      * it was created to notify: a program asks for it to learn which kind of
      * buffer it holds, and E_NOINTERFACE is the answer for one that is not.
      *
-     * IID_IDirectSound3DBuffer is deliberately absent: nothing here positions
-     * a sound, and an interface declared with no methods answers
-     * QueryInterface with a table that ends after IUnknown -- the program then
-     * calls slot 3 and jumps off the end of it. E_NOINTERFACE is an answer a
-     * program handles; a short vtable is not.
+     * The 3D interfaces: the listener is the primary buffer's, a placement in
+     * space a secondary buffer's only when it was created with DSBCAPS_CTRL3D.
      *
      * IKsPropertySet is every buffer's, primary too, as on Windows: a program
      * asks it for EAX and the voice manager, and is told the device has
@@ -706,13 +716,14 @@ export function createDirectSound(
      * @param {any} buffer
      */
     const bufferInterfaces = buffer=>{
-        const { buffer: base, buffer8, notify, properties } = bufferDescriptors();
+        const { buffer: base, buffer8, notify, properties, listener, placed } = bufferDescriptors();
         return [
             base,
             properties,
             // The primary buffer is the one IDirectSoundBuffer8 is not.
-            ...buffer.primary ? [] : [buffer8],
+            ...buffer.primary ? [listener] : [buffer8],
             ...(buffer.capabilities & DSBCAPS_CTRLPOSITIONNOTIFY) !== 0 ? [notify] : [],
+            ...!buffer.primary && (buffer.capabilities & DSBCAPS_CTRL3D) !== 0 ? [placed] : [],
         ];
     };
 
@@ -1137,6 +1148,12 @@ export function createDirectSound(
                 kept: primary ? ()=>root.references > 0 : undefined,
             });
             buffers.push(buffer);
+            if (!primary && (flags & DSBCAPS_CTRL3D) !== 0 && !placedOnce)
+            {
+                placedOnce = true;
+                divergence?.('DirectSound', 'a 3D buffer keeps its place in space but is heard'
+                    + ' as with 3D processing disabled');
+            }
             if (format)
             {
                 programFormats.set(buffer, formatBytes(formatAt));

@@ -15,6 +15,7 @@ import {
     DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBCAPS, DSCAPS, DSCAPS_FLAGS, DSBPOSITIONNOTIFY,
     IID_IDirectSound, IID_IDirectSound8, IID_IDirectSoundBuffer,
     IID_IDirectSoundBuffer8, IID_IDirectSoundNotify, IID_IDirectSound3DBuffer, IID_IKsPropertySet,
+    IID_IDirectSound3DListener,
     IDIRECTSOUND_SLOTS, IDIRECTSOUND8_SLOTS, IDIRECTSOUNDBUFFER_SLOTS,
     IDIRECTSOUNDBUFFER8_SLOTS,
 } from './seam.js';
@@ -1592,6 +1593,14 @@ test('the wide spelling writes the names a wide caller reads', async()=>{
     assert.equal(f.memory.bytes[at + 2], 'r'.charCodeAt(0));
 });
 
+test('the primary buffer is the listener, and a DSBCAPS_CTRL3D buffer has a place in space', ()=>{
+    const f = createRoot();
+    const primary = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER, bytes: 0 });
+    assert.ok(f.bridge.recordAt(primary).object.interfaceFor(IID_IDirectSound3DListener));
+    const placed = createBuffer(f, { flags: 0x10, channels: 1 });
+    assert.ok(f.bridge.recordAt(placed).object.interfaceFor(IID_IDirectSound3DBuffer));
+});
+
 test('what a program asked the device for is kept whole: buffers and refused interfaces', ()=>{
     // The event ring is short and turns over in seconds of mixing; what a
     // sound library asked for while starting up is the record that says why
@@ -1599,7 +1608,7 @@ test('what a program asked the device for is kept whole: buffers and refused int
     const f = createRoot();
     const buffer = createBuffer(f, { bytes: 4096 });
     assert.equal(f.bridge.recordAt(buffer).object.interfaceFor(IID_IDirectSound3DBuffer), null,
-        'a positional buffer is refused');
+        'a buffer created without DSBCAPS_CTRL3D has no place in space');
     const diagnostics = f.dsound.diagnostics();
     assert.equal(diagnostics.creations.length, 1);
     assert.match(diagnostics.creations[0], /^CreateSoundBuffer flags=0x[0-9a-f]+ bytes=4096 fmt=/);
