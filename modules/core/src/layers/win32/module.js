@@ -1413,6 +1413,7 @@ export function createWin32Module(){
                         readCString,
                         readWideString,
                         writeMemory,
+                        readMemory,
                         find: name=>modules.find(name),
                         byBase: base=>modules.byBase(base),
                         setLastError: setError,

@@ -34,6 +34,10 @@ const ERROR_PROC_NOT_FOUND = 127;
 const ERROR_INVALID_PARAMETER = 87;
 /** What FreeLibrary says of a data-file handle that names no mapping. */
 const ERROR_BAD_EXE_FORMAT = 193;
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_INSUFFICIENT_BUFFER = 122;
+/** sizeof(MODULEINFO): the base, the image's size and its entry point. */
+const MODULEINFO_SIZE = 12;
 
 /**
  * A pointer whose high word is zero is an ordinal, not a string. It is the rule
@@ -80,6 +84,8 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  * @typedef {Object} ModulesHost
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ *           For a module's own headers; absent, its information is not given.
  * @property {(name: string | null) => ModuleRecord | null} find
  *           A module by name; null asks for the running program's own image.
  * @property {(base: number) => ModuleRecord | null} byBase
@@ -364,6 +370,43 @@ export function createModuleFunctions(host){
                 }
                 host.writeMemory(buffer >>> 0, bytes);
                 return kept.length;
+            },
+        },
+
+        /**
+         * BOOL K32GetModuleInformation(HANDLE hProcess, HMODULE hModule,
+         *     LPMODULEINFO lpmodinfo, DWORD cb)
+         *
+         * psapi's GetModuleInformation as kernel32 exports it: where a module
+         * of this process is mapped, the size of its image and where it starts,
+         * read from its own headers -- a NULL handle is the program's.
+         */
+        K32GetModuleInformation: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, handle, info, size])=>{
+                const module = handle === 0 ? host.find(null) : host.byBase(handle >>> 0);
+                if (!module || !host.readMemory)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                if ((size >>> 0) < MODULEINFO_SIZE)
+                {
+                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                    return 0;
+                }
+                const read = (/** @type {number} */ address)=>new DataView(
+                    host.readMemory?.(address, 4).slice().buffer ?? new ArrayBuffer(4))
+                    .getUint32(0, true);
+                const optional = module.base + read(module.base + 0x3c) + 24;
+                const entry = read(optional + 16);
+                const out = new DataView(new ArrayBuffer(MODULEINFO_SIZE));
+                out.setUint32(0, module.base, true);
+                out.setUint32(4, read(optional + 56), true);
+                out.setUint32(8, entry === 0 ? 0 : module.base + entry, true);
+                host.writeMemory(info >>> 0, new Uint8Array(out.buffer));
+                return 1;
             },
         },
 

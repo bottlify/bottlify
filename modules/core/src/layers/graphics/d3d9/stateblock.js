@@ -474,7 +474,11 @@ export function applyRecord(record, view){
     {
         view.scissor = record.scissor;
     }
-    if (record.vertexDeclaration !== undefined)
+    // A block that holds no declaration leaves the device's as it is, though
+    // it captured that nothing: Windows applies none (Wine's
+    // test_vertex_declaration_stateblock).
+    if (record.vertexDeclaration !== undefined
+        && (record.vertexDeclaration.declaration !== null || record.vertexDeclaration.fvf !== 0))
     {
         view.vertexDeclaration = { ...record.vertexDeclaration };
     }
