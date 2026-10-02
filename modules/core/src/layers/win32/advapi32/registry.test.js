@@ -359,7 +359,21 @@ test('a key with subkeys is refused rather than deleted', ()=>{
     assert.equal(hive.remove(root, 'Software\\Vendor\\Product'), 'deleted');
     assert.equal(hive.remove(root, 'SOFTWARE\\VENDOR'), 'deleted', 'case is no obstacle');
     assert.equal(hive.remove(root, 'Software\\Vendor'), 'missing');
-    assert.equal(hive.remove(root, ''), 'missing', 'a key cannot delete itself');
+    assert.equal(hive.remove(root, ''), 'missing', 'a root hangs from nothing, and stays');
+});
+
+test('a key named by no subkey is the key itself, deleted through its own handle', ()=>{
+    // Wine's advapi32 registry test deletes a tree by opening each key and
+    // deleting it with an empty subkey; refused, its loop never ended.
+    const hive = createHive();
+    const root = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));
+    const product = hive.create(root, 'Software\\Vendor\\Product').key;
+    const vendor = /** @type {any} */ (hive.open(root, 'Software\\Vendor'));
+    assert.equal(hive.remove(vendor, ''), 'has-subkeys');
+    assert.equal(hive.remove(product, ''), 'deleted');
+    assert.deepEqual(hive.subkeys(vendor), []);
+    assert.equal(hive.remove(vendor, ''), 'deleted');
+    assert.equal(hive.open(root, 'Software\\Vendor'), null);
 });
 
 test('deleting a value reports whether there was one', ()=>{
