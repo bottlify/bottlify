@@ -1018,14 +1018,22 @@ test('an extended template is read with its own layout, font block and item ids'
         (fns.GetDlgItemTextA.handler([dialog, 101, OUT, 32]), OUT), 32), 'Cancel');
 });
 
-test('ending a dialog destroys it and the controls it owns', ()=>{
+test('EndDialog hides a dialog, and destroying it takes the controls it owns', ()=>{
+    // EndDialog destroys nothing on Windows: a modal dialog is destroyed by
+    // the loop running it once it sees the dialog ended, and a modeless one
+    // -- a framework's modal loop is one -- by the DestroyWindow after.
     const { memory, fns } = setup();
-    putTemplate(memory, [{ id: 500, x: 0, y: 0, cx: 4, cy: 4 }]);
+    const WS_VISIBLE = 0x10000000;
+    putTemplate(memory, [{ id: 500, x: 0, y: 0, cx: 4, cy: 4 }], { style: WS_VISIBLE });
     const dialog = fns.CreateDialogIndirectParamA.handler(
         [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
     const control = fns.GetDlgItem.handler([dialog, 500]);
+    assert.equal(fns.IsWindowVisible.handler([dialog]), 1);
 
     assert.equal(fns.EndDialog.handler([dialog, 7]), 1);
+    assert.equal(fns.IsWindow.handler([dialog]), 1, 'ended, not destroyed');
+    assert.equal(fns.IsWindowVisible.handler([dialog]), 0, 'but hidden');
+    assert.equal(fns.DestroyWindow.handler([dialog]), 1);
     assert.equal(fns.IsWindow.handler([dialog]), 0);
     assert.equal(fns.IsWindow.handler([control]), 0, 'a child outliving its parent is a leak');
 });

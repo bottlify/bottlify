@@ -4092,6 +4092,10 @@ export function createWindowFunctions(host){
                     const record = live(hwnd);
                     return record ? showWindow(record, SW_SHOW) : 0;
                 },
+                hide: (/** @type {number} */ hwnd)=>{
+                    const record = live(hwnd);
+                    return record ? showWindow(record, SW_HIDE) : 0;
+                },
                 translate,
                 // GetMessage, as the dialog manager's loop is: what other
                 // threads sent is handled first, or a thread waiting on its

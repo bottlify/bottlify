@@ -259,6 +259,7 @@ const MAX_RESOURCE_NAME = 256;
  * @property {(hwnd: number) => number | Promise<number>} [show]
  *           Shows a window as ShowWindow(SW_SHOW) would, answering once the
  *           procedures it sent to have.
+ * @property {(hwnd: number) => number | Promise<number>} [hide]  And hides one.
  * @property {(message: { hwnd: number, message: number, wParam: number, lParam: number })
  *     => number} [translate]  What TranslateMessage does with a key message.
  * @property {(record: any) => any[]} children
@@ -734,7 +735,8 @@ export function createDialogFunctions(options){
                     // A template that said WS_VISIBLE is shown only now, after the
                     // procedure has had its say. A procedure that ended the dialog
                     // from WM_INITDIALOG has left nothing to show.
-                    if (wantsVisible && live(dialog.hwnd))
+                    const standing = live(dialog.hwnd);
+                    if (wantsVisible && standing && !standing.dialogEnded)
                     {
                         return after(host.show?.(dialog.hwnd) ?? 0, ()=>dialog.hwnd);
                     }
@@ -903,8 +905,9 @@ export function createDialogFunctions(options){
     };
 
     /**
-     * The modal loop: the dialog's thread pumps until EndDialog destroys the
-     * window, and what EndDialog was given is the answer.
+     * The modal loop: the dialog's thread pumps until EndDialog ends the
+     * dialog, which the loop then destroys, and what EndDialog was given is
+     * the answer.
      *
      * A WM_QUIT retrieved here ends the dialog and is put back, because the
      * quit belongs to the loop outside this one, which has not seen it yet.
@@ -939,12 +942,16 @@ export function createDialogFunctions(options){
         }
         // A modal dialog is shown by the call whether or not its template
         // says WS_VISIBLE: most templates leave the bit off and rely on this.
-        await host.show?.(hwnd);
+        // One its WM_INITDIALOG already ended is not shown at all.
+        if (!record.dialogEnded)
+        {
+            await host.show?.(hwnd);
+        }
         // Unattended, a dialog waiting for input is put to whoever answers for
         // the run, and the button chosen is pressed as a click presses it; one
         // that stays up after a few presses is left.
         let presses = 0;
-        while (!record.destroyed)
+        while (!record.destroyed && !record.dialogEnded)
         {
             // The program's own loop would have been GetMessage, and what
             // that does as it takes a message the dialog's loop does too.
@@ -1004,6 +1011,10 @@ export function createDialogFunctions(options){
         if (ownerWasEnabled)
         {
             owner.style = (owner.style & ~WS_DISABLED) >>> 0;
+        }
+        if (!record.destroyed)
+        {
+            await destroyWindow(hwnd, thread);
         }
         return record.dialogResult ?? 0;
     };
@@ -1179,8 +1190,12 @@ export function createDialogFunctions(options){
         /**
          * BOOL EndDialog(HWND hDlg, INT_PTR nResult)
          *
-         * The result is remembered on the window, where the modal loop reads
-         * it back once the window is gone.
+         * Nothing is destroyed here, as Windows destroys nothing here: the
+         * answer is noted and the dialog hidden, and the loop running it
+         * destroys it when it next looks. The procedure that called this is
+         * still running when it returns -- often from inside a framework's own
+         * procedure for the window, which a destruction underneath it would
+         * pull out of its hands.
          */
         EndDialog: {
             argBytes: 8,
@@ -1192,7 +1207,8 @@ export function createDialogFunctions(options){
                     return 0;
                 }
                 record.dialogResult = result | 0;
-                return destroyWindow(hwnd >>> 0);
+                record.dialogEnded = true;
+                return after(host.hide?.(hwnd >>> 0) ?? 0, ()=>1);
             },
         },
 
