@@ -1,5 +1,7 @@
 # Bottlify изнутри
 
+English version: [architecture.md](architecture.md).
+
 По коду `bottlify` d066d2b и `bottlify-ui` bea9c9b, 2 октября 2026. Пути без префикса считаются от
 `modules/` в bottlify, пути с `ui/` — от корня bottlify-ui. Если схема разошлась с кодом, прав код.
 
@@ -38,7 +40,7 @@ Bottlify запускает 32-битные приложения для Windows 
 | Что нужно приложению | Кто это даёт | На чём работает |
 | --- | --- | --- |
 | Процессор x86 | cork переводит x86 в wasm | WebAssembly |
-| Системные DLL | слой `win32`: функции на JS, которые игра видит как настоящие PE-образы | — |
+| Системные DLL | слой `win32`: функции на JS, которые программа видит как настоящие PE-образы | — |
 | DirectDraw, Direct3D 7–10, OpenGL, Vulkan, GDI | слой `graphics` | WebGPU |
 | DirectSound, waveOut, DirectMusic | слой `audio` | AudioWorklet, SharedArrayBuffer |
 | DirectInput, XInput, сообщения окна | слой `input` | события клавиатуры и мыши, Gamepad API |
