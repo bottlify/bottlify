@@ -872,6 +872,8 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         RevokeDragDrop: 4,
         OleFlushClipboard: 0,
         OleIsCurrentClipboard: 4,
+        OleSetMenuDescriptor: 20,
+        CoCreateInstanceEx: 24,
         PropVariantCopy: 8,
         PropVariantClear: 4,
     };
@@ -951,6 +953,51 @@ test('a class object the program registers is what CoCreateInstance asks, outer 
     assert.equal(fns.CoCreateInstance.handler([GUEST_CLSID_ARG, 0, 1, IID_ARG, PPV]),
         REGDB_E_CLASSNOTREG);
 });
+
+test('CoCreateInstanceEx makes the object once and asks it for every interface in the array',
+    async()=>{
+        // compobj.c test_CoCreateInstanceEx: each MULTI_QI told its own answer.
+        const { fns, host, view } = withGuestCalls();
+        await fns.CoRegisterClassObject.handler([GUEST_CLSID_ARG, GUEST_OBJECT, 1, 0, 0x1400]);
+        view.setUint32(CREATED, GUEST_VTABLE, true);
+        /** @type {number[][]} */
+        const asked = [];
+        /** @param {number} entry @param {number[]} args */
+        const call = async(entry, args)=>{
+            const slot = (entry - METHOD_BASE) / 0x10;
+            if (slot === 3)
+            {
+                view.setUint32(args[3], CREATED, true);
+                return S_OK;
+            }
+            if (slot === 0)
+            {
+                asked.push(args.slice(1));
+                if (args[1] === IID_OTHER_ARG)
+                {
+                    return 0x80004002;
+                }
+                view.setUint32(args[2], CREATED, true);
+            }
+            return S_OK;
+        };
+        /** @type {any} */ (host).call = call;
+        const RESULTS = 0x7000;
+        [IID_ARG, IID_OTHER_ARG, IID_ARG].forEach((iid, index)=>{
+            view.setUint32(RESULTS + index * 12, iid, true);
+            view.setUint32(RESULTS + index * 12 + 4, 0xdead, true);
+            view.setUint32(RESULTS + index * 12 + 8, 0xbeef, true);
+        });
+        assert.equal(fns.CoCreateInstanceEx.handler([GUEST_CLSID_ARG, 0, 1, 0, 0, RESULTS]),
+            0x80070057, 'E_INVALIDARG for an empty array');
+        assert.equal(await fns.CoCreateInstanceEx.handler([GUEST_CLSID_ARG, 0, 1, 0, 3,
+            RESULTS]), 0x00080012, 'CO_S_NOTALLINTERFACES');
+        assert.deepEqual([0, 1, 2].map(index=>[host.u32(RESULTS + index * 12 + 4),
+            host.u32(RESULTS + index * 12 + 8)]),
+        [[CREATED, S_OK], [0, 0x80004002], [CREATED, S_OK]]);
+        assert.deepEqual(asked, [[IID_OTHER_ARG, RESULTS + 16], [IID_ARG, RESULTS + 28]],
+            'the first interface is the one it was made with, the rest asked of it');
+    });
 
 test('the last CoUninitialize revokes the class objects its apartment registered', async()=>{
     const { fns, calls } = withGuestCalls();
@@ -1070,6 +1117,15 @@ function withWindow(){
     calls.length = 0;
     return { ...context, fns, live };
 }
+
+test('a menu descriptor taken off a frame, or put on one, is answered S_OK', ()=>{
+    // compobj.c test_ole_menu: NULL removes the dispatching from a frame.
+    const { fns } = withWindow();
+    assert.equal(fns.OleSetMenuDescriptor.handler([0, WINDOW, 0, 0, 0]), S_OK);
+    assert.equal(fns.OleSetMenuDescriptor.handler([0x1234, WINDOW, 0, 0, 0]), S_OK);
+    assert.equal(fns.OleSetMenuDescriptor.handler([0x1234, 0xdeadbeef, 0, 0, 0]), E_INVALIDARG,
+        'a composite menu needs a frame to hang on');
+});
 
 test('a drop target is registered once per window and holds a reference until revoked',
     async()=>{

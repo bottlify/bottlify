@@ -46,7 +46,7 @@ const CALLBACK_EVENT = 0x00050000;
  * @param {(entry: number, args: number[], thread?: any) => Promise<number>} deps.callGuest
  *        Calls a guest routine and answers when it returns.
  * @param {(message: { hwnd: number, message: number,
- *                     wParam: number, lParam: number }) => void} deps.post
+ *                     wParam: number, lParam: number, thread?: number }) => void} deps.post
  * @param {(handle: number) => void} deps.signal  Sets an event, by handle.
  * @returns {(notice: WaveNotice, thread?: any) => void | Promise<number>}
  */
