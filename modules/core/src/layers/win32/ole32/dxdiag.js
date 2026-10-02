@@ -19,7 +19,7 @@
  * refused as an unknown one is, and said through the divergence reporter.
  */
 
-import { DIRECTX_RELEASE, DIRECTX_VERSION } from '../advapi32/registry.js';
+import { DIRECTX_RELEASES } from '../advapi32/registry.js';
 import { createComObject } from './objects.js';
 import { ADAPTER_NAME, ADAPTER_RAM } from './wbem.js';
 
@@ -154,19 +154,20 @@ function displayDevice(screen){
  *
  * @param {import('../kernel32/versions.js').WindowsVersion} windows
  * @param {{ width: number, height: number, bitsPerPixel: number }} screen
+ * @param {import('../advapi32/registry.js').DirectXRelease} [directx]  Absent, 9.0c.
  * @returns {DxDiagNode}
  */
-export function dxDiagTree(windows, screen){
-    const [major, minor, release, build] = DIRECTX_VERSION.split('.');
+export function dxDiagTree(windows, screen, directx = DIRECTX_RELEASES[9]){
+    const [major, minor, release, build] = directx.version.split('.');
     /** @type {Record<string, DxDiagProperty>} */
     const systemInfo = {
         dwOSMajorVersion: u32(windows.major),
         dwOSMinorVersion: u32(windows.minor),
         dwOSBuildNumber: u32(windows.build),
         dwOSPlatformID: u32(windows.platformId),
-        dwDirectXVersionMajor: u32(DIRECTX_RELEASE.major),
-        dwDirectXVersionMinor: u32(DIRECTX_RELEASE.minor),
-        szDirectXVersionLetter: text(DIRECTX_RELEASE.letter),
+        dwDirectXVersionMajor: u32(directx.major),
+        dwDirectXVersionMinor: u32(directx.minor),
+        szDirectXVersionLetter: text(directx.letter),
         szDirectXVersionEnglish: text(`${major}.${minor}.${release.padStart(4, '0')}.${build}`),
         bDebug: bool(false),
         szWindowsDir: text('C:\\WINDOWS'),
@@ -193,6 +194,8 @@ export function dxDiagTree(windows, screen){
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {import('../kernel32/versions.js').WindowsVersion} windows
+ * @property {import('../advapi32/registry.js').DirectXRelease} [directx]
+ *           The DirectX the bottle reports; absent, 9.0c.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           The desktop, as GDI and the drawing layer see it; read when a
  *           provider is initialised.
@@ -411,7 +414,8 @@ export function registerDxDiagClasses(host){
                                 return E_INVALIDARG;
                             }
                             tree = dxDiagTree(host.windows,
-                                host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 });
+                                host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 },
+                                host.directx);
                             return S_OK;
                         } },
                     /** HRESULT GetRootContainer(IDxDiagContainer **ppInstance) */

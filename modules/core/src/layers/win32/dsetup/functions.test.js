@@ -44,3 +44,14 @@ test('DirectXSetup installs nothing over a runtime as new as its own and asks fo
     assert.equal(fns.DirectXSetupA.argBytes, 12, 'hWnd, the root path and the flags');
     assert.equal(fns.DirectXSetupGetVersion.argBytes, 8);
 });
+
+test('a bottle that names its DirectX hears that release from DirectXSetupGetVersion', ()=>{
+    const bytes = new Uint8Array(0x40);
+    const view = new DataView(bytes.buffer);
+    const fns = /** @type {Record<string, { handler: (args: number[]) => number }>} */
+        (createDsetupFunctions({ writeMemory: (address, data)=>bytes.set(data, address),
+            directx: '4.07.00.0700' }));
+    assert.equal(fns.DirectXSetupGetVersion.handler([0x10, 0x20]), 1);
+    assert.equal(view.getUint32(0x10, true), 0x00040007);
+    assert.equal(view.getUint32(0x20, true), 700);
+});

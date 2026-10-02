@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     createHive,
+    DIRECTX_RELEASES,
     HKEY_CLASSES_ROOT,
     HKEY_CURRENT_USER,
     HKEY_LOCAL_MACHINE,
@@ -256,6 +257,33 @@ test('a hive restored under another Windows describes that one, and keeps the re
     assert.equal(valueOf(hive, HKEY_CURRENT_USER, USER_FOLDERS, 'AppData'),
         shellFolders(WINDOWS_VERSIONS.winxp).AppData);
     assert.equal(valueOf(hive, HKEY_CURRENT_USER, 'Software\\Vendor', 'Path'), 'C:\\Games');
+});
+
+test('a bottle\'s DirectX is the release the machine names, put back over a setup\'s', ()=>{
+    const DIRECTX = 'SOFTWARE\\Microsoft\\DirectX';
+    /** @param {ReturnType<typeof createHive>} hive */
+    const installed = hive=>{
+        const key = hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)), DIRECTX);
+        return [...(key && hive.getValue(key, 'InstalledVersion'))?.data ?? []];
+    };
+    const seven = createHive({ directx: DIRECTX_RELEASES[7] });
+    assert.equal(valueOf(seven, HKEY_LOCAL_MACHINE, DIRECTX, 'Version'), '4.07.00.0700');
+    assert.deepEqual(installed(seven), [0, 0, 0, 7, 0, 0, 7, 0]);
+    const eight = createHive({ directx: DIRECTX_RELEASES[8] });
+    assert.equal(valueOf(eight, HKEY_LOCAL_MACHINE, DIRECTX, 'Version'), '4.08.01.0881');
+    assert.deepEqual(installed(eight), [0, 0, 0, 8, 0, 1, 8, 0x81]);
+
+    // A hive kept from a run under 9.0c, or with a setup's own write in it,
+    // reports the bottle's release at the next start...
+    const saved = createHive();
+    saved.setValue(machine(saved, DIRECTX), 'Version', REG_SZ, latin1('4.09.00.0905\0'));
+    seven.fromJSON(saved.toJSON());
+    assert.equal(valueOf(seven, HKEY_LOCAL_MACHINE, DIRECTX, 'Version'), '4.07.00.0700');
+    assert.deepEqual(installed(seven), [0, 0, 0, 7, 0, 0, 7, 0]);
+    // ...while a bottle that names none keeps what a setup wrote, as before.
+    const none = createHive();
+    none.fromJSON(saved.toJSON());
+    assert.equal(valueOf(none, HKEY_LOCAL_MACHINE, DIRECTX, 'Version'), '4.09.00.0905');
 });
 
 test('a key path is created once and found again whatever its case', ()=>{
