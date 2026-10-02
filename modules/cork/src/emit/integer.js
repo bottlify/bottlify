@@ -27,7 +27,7 @@ import { CPUID_LEAVES } from '../cpuid.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
-import { checkAccess, emitStaleExit, noteStore, stackAccess } from './memory.js';
+import { checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess } from './memory.js';
 import { Tables } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
@@ -1165,8 +1165,11 @@ export function push(e, size, pushValue){
     pushValue();
     b.localSet(Local.t2);
     b.localGet(Local.reg + 4).i32const(size).op(I32.sub).localSet(Local.addr);
-    checkAccess(e, size, { store: true });
-    noteStore(e, size);
+    if (!looseStackStore(e, size))
+    {
+        checkAccess(e, size, { store: true });
+        noteStore(e, size);
+    }
     b.localGet(Local.addr).localGet(Local.t2)
         .store(storeKind(size), { offset: e.layout.ramBase });
     b.localGet(Local.addr).localSet(Local.reg + 4);

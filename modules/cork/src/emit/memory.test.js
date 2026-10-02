@@ -406,6 +406,12 @@ test('with looseStacks the group off esp alone tests no page; one with an index,
         assert.equal(r.m.reg('esi'), 1);
         assert.equal(r.m.readU32(0x4ffc), 2, 'the push stored');
     }
+    // push dword [0x3000]; pop eax: the push's other access, the read, is no
+    // window, and the push is left out of the plan with it -- untested all the same.
+    const through = once([0xff, 0x35, 0x00, 0x30, 0, 0, 0x58], { regs: { esp: 0x5004 },
+        inaccessible: [0x5000], data: [[0x3000, [7, 0, 0, 0]]], machine: loose });
+    assert.equal(through.exit.kind, Exit.HALT);
+    assert.equal(through.m.reg('eax'), 7);
     // A precise machine relaxes nothing, looseStacks or not.
     const precise = once(stack, { regs: { esp: 0x5004 }, inaccessible: [0x4000],
         machine: { precise: true, looseStacks: true } });

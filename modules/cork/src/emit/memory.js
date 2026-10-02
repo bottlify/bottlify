@@ -1651,6 +1651,23 @@ export function stackAccess(e, size){
 }
 
 /**
+ * Whether a store at `addr`, the stack pointer moved down by a push, goes
+ * untested (`looseStacks`): an instruction whose other access the plan
+ * could not take -- `push [m]`, `call [m]` -- has its push left out of the
+ * plan too, and would otherwise test it on its own.
+ *
+ * @param {E} e @param {number} size
+ */
+export function looseStackStore(e, size){
+    if (e.context.looseStacks !== true)
+    {
+        return false;
+    }
+    planned(e, size, true);
+    return true;
+}
+
+/**
  * After an instruction that stored: leaves `stale` with EIP at the next
  * instruction when the store went into a code page.
  *
