@@ -15,7 +15,7 @@
  *       [--every 30] [--minutes 20]
  *       [--journal SECONDS] [--memory MB] [--key Code@S]... [--click X,Y@S]...
  *       [--shots DIR] [--list 'C:\Program Files'] [--collect]
- *       [--screen 1024x768] [--cat 'C:\WINDOWS\DirectX.log']...
+ *       [--screen 1024x768] [--cat 'C:\WINDOWS\DirectX.log']... [--siblings]
  *
  * `--journal S` prints, S seconds in, the last cross-process COM calls and
  * message waits from the call journal (every call area on); `--trace S` prints
@@ -46,7 +46,7 @@
  * same keys, clicks and pictures as a wizard's. `--attended` leaves a message
  * box on the desktop for those to answer rather than answering it unseen.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { deflateSync } from 'node:zlib';
@@ -122,7 +122,17 @@ const mountBundle = async id=>{
         },
     };
 };
-const media = bundleId ? null : { name: basename(file), bytes: new Uint8Array(readFileSync(file)) };
+// `--siblings`: the files beside the setup go on the medium with it, as an
+// unpacked distribution's do -- a setup reads its cabinets from its own place.
+const besideSetup = ()=>readdirSync(dirname(file), { withFileTypes: true })
+    .filter(one=>one.isFile() && one.name !== basename(file))
+    .map(one=>({ name: one.name,
+        bytes: new Uint8Array(readFileSync(join(dirname(file), one.name))) }));
+const media = bundleId ? null : {
+    name: basename(file),
+    bytes: new Uint8Array(readFileSync(file)),
+    ...argv.includes('--siblings') ? { files: besideSetup() } : {},
+};
 const prefix = media ? prefixOptions(media) : await mountBundle(file);
 const started = Date.now();
 const seconds = ()=>((Date.now() - started) / 1000).toFixed(1);
