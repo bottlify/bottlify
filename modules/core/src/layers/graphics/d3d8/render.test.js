@@ -931,6 +931,45 @@ test('recorded: a draw after a DISCARD reads the vertices written before it', as
     out.buffer.release();
 });
 
+test('recorded: a draw after a DISCARD keeps its bytes when the ring reaches them again in the '
+    + 'frame', async()=>{
+    // A program fills the end of its ring, wraps it with DISCARD, draws
+    // what it filled first, and before the frame ends its NOOVERWRITE
+    // locks reach those bytes again. A frame's draws read at its submit,
+    // after every write it made, where a driver has long drawn them.
+    const h = harness({ width: 640, height: 480, dumpDraws: true });
+    const { device } = h;
+    /** @type {{ buffer?: any }} */
+    const out = {};
+    assert.equal(device.CreateVertexBuffer(1200, 0, FVF_QUAD, D3DPOOL.DEFAULT, out), D3D_OK);
+    /** @param {number} at @param {Uint8Array} bytes @param {number} flags */
+    const fill = (at, bytes, flags)=>{
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(out.buffer.Lock(at, bytes.length, locked, flags), D3D_OK);
+        h.write(/** @type {number} */ (locked.pBits), bytes);
+        assert.equal(out.buffer.Unlock(), D3D_OK);
+    };
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.SetStreamSource(0, out.buffer, 20), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    fill(960, quad([10, 20, 110, 70], argb(255, 0, 255, 0)), D3DLOCK.NOOVERWRITE);
+    fill(0, quad([0, 0, 40, 40], argb(255, 255, 0, 0)), D3DLOCK.DISCARD);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 48, 2), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 2), D3D_OK);
+    fill(940, quad([200, 200, 300, 300], argb(255, 255, 255, 0)), D3DLOCK.NOOVERWRITE);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 47, 2), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const dumped = device.diagnostics().lastDump;
+    assert.match(dumped[0], /^#0 10,20\.\.110,70 /, 'the quad written before the wrap');
+    assert.match(dumped[0], / gpu=same /, 'drawn from the bytes it was drawn with');
+    assert.match(dumped[2], /^#2 200,200\.\.300,300 .* gpu=same /,
+        'and the one written over them from its own');
+    out.buffer.release();
+});
+
 test('recorded: NOOVERWRITE with DISCARD is NOOVERWRITE, and the buffer is not renamed', async()=>{
     // Wine's d3d8 and d3d9 test_map_synchronisation have
     // D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD lock unsynchronised, as

@@ -166,6 +166,8 @@ export function createDynamicBuffer(options){
     let written = 0;
     let discards = 0;
     let hazards = 0;
+    // NOOVERWRITE locks over bytes a draw not yet submitted reads.
+    let overwrites = 0;
     let lockedBytes = 0;
     let locks = 0;
     let wholeLocks = 0;
@@ -180,8 +182,73 @@ export function createDynamicBuffer(options){
     // submit ends is not always the one being recorded, which may have read
     // the backing already.
     let readIn = -1;
+    // The byte ranges of the live backing that draws not yet submitted read,
+    // each with the frame of its last reader: sorted, and merged where they
+    // touch. NOOVERWRITE promises only that the bytes the GPU still reads are
+    // left alone, and the GPU reads a frame's draws at its submit -- after
+    // every write the frame made, where a driver has usually drawn them long
+    // before. A program that wraps its ring with DISCARD, draws bytes it wrote
+    // before the wrap and then reaches them again in the same frame relies on
+    // that; a lock over such a range renames instead.
+    /** @type {{ start: number, end: number, frame: number }[]} */
+    let reads = [];
     /** @type {any} */
     let held = null;
+
+    /** @param {number} start @param {number} end */
+    const noteRead = (start, end)=>{
+        const frame = frames.presents;
+        // Draws mostly read ranges at or past the last one, so the search
+        // starts from the end.
+        let at = reads.length;
+        while (at > 0 && reads[at - 1].start > start)
+        {
+            at--;
+        }
+        if (at > 0 && reads[at - 1].end >= start)
+        {
+            // Into the range before, in place: the common case allocates
+            // nothing.
+            const merged = reads[at - 1];
+            merged.end = Math.max(merged.end, end);
+            merged.frame = frame;
+            let past = at;
+            while (past < reads.length && reads[past].start <= merged.end)
+            {
+                merged.end = Math.max(merged.end, reads[past].end);
+                past++;
+            }
+            if (past > at)
+            {
+                reads.splice(at, past - at);
+            }
+            return;
+        }
+        const merged = { start, end, frame };
+        let past = at;
+        while (past < reads.length && reads[past].start <= merged.end)
+        {
+            merged.end = Math.max(merged.end, reads[past].end);
+            past++;
+        }
+        reads.splice(at, past - at, merged);
+    };
+
+    /** @param {number} start @param {number} end */
+    const readUnsubmitted = (start, end)=>{
+        for (const range of reads)
+        {
+            if (range.start >= end)
+            {
+                return false;
+            }
+            if (range.end > start && range.frame >= frames.submits)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
 
     const allocate = ()=>options.device.createBuffer({
         label: `${label}#${generation++}`,
@@ -223,6 +290,7 @@ export function createDynamicBuffer(options){
         renames++;
         // Nothing has read the replacement yet.
         readIn = -1;
+        reads = [];
         carryInto = null;
         if (options.carry)
         {
@@ -283,6 +351,11 @@ export function createDynamicBuffer(options){
                 hazards++;
                 rename();
             }
+            else if (reads.length > 0 && readUnsubmitted(offset, offset + length))
+            {
+                overwrites++;
+                rename();
+            }
             locks++;
             if (offset === 0 && length === options.size)
             {
@@ -314,13 +387,21 @@ export function createDynamicBuffer(options){
          * A draw of the frame being recorded reads the live backing. A later
          * lock with neither flag then has to rename instead of writing in
          * place, because the bytes it overwrites are still observed by that
-         * draw at replay.
+         * draw at replay; given the bytes it reads, so does a NOOVERWRITE
+         * lock over them.
+         *
+         * @param {number} [start]
+         * @param {number} [end]
          */
-        markRead(){
+        markRead(start, end){
             if (readIn !== frames.presents)
             {
                 readIn = frames.presents;
                 touch();
+            }
+            if (start !== undefined && end !== undefined && end > start)
+            {
+                noteRead(start, end);
             }
         },
 
@@ -368,6 +449,10 @@ export function createDynamicBuffer(options){
             const submits = frames.submits;
             // Its carry was copied with the frame; later writes go in place.
             carryInto = null;
+            if (reads.length > 0)
+            {
+                reads = reads.filter(range=>range.frame >= submits);
+            }
             for (let index = retired.length - 1; index >= 0; index--)
             {
                 if (retired[index].at < submits)
@@ -387,6 +472,7 @@ export function createDynamicBuffer(options){
                 written,
                 discards,
                 hazards,
+                overwrites,
                 locked: lockedBytes,
                 locks,
                 wholeLocks,

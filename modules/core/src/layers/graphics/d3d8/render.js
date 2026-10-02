@@ -7453,7 +7453,10 @@ export function createRenderer(options){
             const streamBuffer = bufferFor(stream.buffer).gpu;
             // The bytes this draw reads must survive a later lock of the same
             // buffer in this frame, which is what makes such a lock rename.
-            streamBuffer.markRead();
+            // Stream zero's offset is in the first vertex here, as the
+            // binding below starts the buffer at zero.
+            const from = startVertex * stream.stride;
+            streamBuffer.markRead(from, from + count * stream.stride);
             record(model, prepared, {
                 vertices: { gpu: streamBuffer.gpu, offset: 0 },
                 ...(rewrite
@@ -7478,8 +7481,11 @@ export function createRenderer(options){
          * @param {number} type
          * @param {number} startIndex
          * @param {number} primitiveCount
+         * @param {number} [minIndex]  the program's hint of the vertices the
+         *     indices reach, which says what a later lock must not overwrite
+         * @param {number} [numVertices]
          */
-        drawIndexedPrimitive(model, type, startIndex, primitiveCount){
+        drawIndexedPrimitive(model, type, startIndex, primitiveCount, minIndex, numVertices){
             const stream = model.stream;
             const format = indexFormatOf(model.indices.format);
             if (!format)
@@ -7522,8 +7528,16 @@ export function createRenderer(options){
             }
             const streamBuffer = bufferFor(stream.buffer).gpu;
             const indexBuffer = bufferFor(model.indices).gpu;
-            streamBuffer.markRead();
-            indexBuffer.markRead();
+            if (minIndex !== undefined && numVertices !== undefined)
+            {
+                const from = (model.baseVertexIndex + minIndex) * stream.stride;
+                streamBuffer.markRead(from, from + numVertices * stream.stride);
+            }
+            else
+            {
+                streamBuffer.markRead();
+            }
+            indexBuffer.markRead(byteOffset, byteOffset + count * format.bytes);
             const vertices = wholeBinding(streamBuffer.gpu);
             if (list === undefined)
             {

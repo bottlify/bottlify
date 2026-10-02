@@ -334,6 +334,25 @@ test('a lock with neither flag renames while the frame being recorded read the b
     assert.equal(dynamic.gpu, live, 'once that frame is submitted, a write goes in place');
 });
 
+test('a NOOVERWRITE lock over bytes a draw not yet submitted reads renames, and one beside them '
+    + 'does not', ()=>{
+    const { dynamic, endFrame } = carrying(4096);
+    fill(dynamic, 0, 4096, LockFlags.DISCARD, 0x22);
+    endFrame();
+    dynamic.markRead(1024, 2048);
+    const read = dynamic.gpu;
+    fill(dynamic, 2048, 512, LockFlags.NOOVERWRITE, 0x33);
+    assert.equal(dynamic.gpu, read, 'beside the range: in place');
+    fill(dynamic, 1536, 512, LockFlags.NOOVERWRITE, 0x44);
+    assert.notEqual(dynamic.gpu, read, 'over it: renamed');
+    endFrame();
+    assert.ok(read.bytes.subarray(1536, 2048).every((/** @type {number} */ byte)=>byte === 0x22),
+        'the draw reads what it was drawn with');
+    assert.ok(dynamic.gpu.bytes.subarray(1536, 2048).every(
+        (/** @type {number} */ byte)=>byte === 0x44), 'and the next draws the new bytes');
+    assert.equal(dynamic.diagnostics().overwrites, 1);
+});
+
 test('carried ranges are the complement of what was written, in order', ()=>{
     assert.deepEqual(carriedRanges({ from: null, to: null, size: 100,
         written: [{ start: 40, end: 60 }, { start: 0, end: 8 }, { start: 50, end: 70 }] }),

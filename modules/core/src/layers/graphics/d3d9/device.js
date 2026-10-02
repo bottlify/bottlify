@@ -3010,16 +3010,17 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         /**
          * The base vertex is an argument of the draw in this version, where
          * D3D8 carried it on the index binding. The minimum index and vertex
-         * count are hints; nothing here needs them.
+         * count are hints, which say only which bytes a later lock must not
+         * overwrite under the draw.
          *
          * @param {number} type
          * @param {number} base
-         * @param {number} _minIndex
-         * @param {number} _numVertices
+         * @param {number} minIndex
+         * @param {number} numVertices
          * @param {number} startIndex
          * @param {number} primitiveCount
          */
-        DrawIndexedPrimitive(type, base, _minIndex, _numVertices, startIndex, primitiveCount){
+        DrawIndexedPrimitive(type, base, minIndex, numVertices, startIndex, primitiveCount){
             const bias = streamBias();
             if (drawPreconditions(type, primitiveCount) !== D3D_OK || bias === null || !indices)
             {
@@ -3027,7 +3028,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             noteUndrawable();
             baseVertexIndex = base + bias;
-            renderer?.drawIndexedPrimitive(model, type, startIndex, primitiveCount);
+            renderer?.drawIndexedPrimitive(model, type, startIndex, primitiveCount, minIndex,
+                numVertices);
             return D3D_OK;
         },
 
