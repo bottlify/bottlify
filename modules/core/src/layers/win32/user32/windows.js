@@ -4096,6 +4096,9 @@ export function createWindowFunctions(host){
                     const record = live(hwnd);
                     return record ? showWindow(record, SW_HIDE) : 0;
                 },
+                loadImage: (/** @type {number} */ instance, /** @type {number} */ name,
+                    /** @type {number} */ type)=>table.LoadImageW.handler([instance, name, type,
+                    0, 0, 0]),
                 translate,
                 // GetMessage, as the dialog manager's loop is: what other
                 // threads sent is handled first, or a thread waiting on its

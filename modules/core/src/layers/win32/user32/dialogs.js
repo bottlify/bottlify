@@ -226,6 +226,14 @@ const EM_SETSEL = 0x00b1;
 const BS_TYPEMASK = 0x0f;
 const BS_DEFPUSHBUTTON = 0x01;
 
+/** A static's kind, and the two that show a picture rather than text. */
+const SS_TYPEMASK = 0x1f;
+const SS_ICON = 0x03;
+const SS_BITMAP = 0x0e;
+const STM_SETIMAGE = 0x0172;
+const IMAGE_BITMAP = 0;
+const IMAGE_ICON = 1;
+
 /** What DialogBox answers when the dialog could not be made. */
 const DIALOG_FAILED = -1;
 
@@ -260,6 +268,9 @@ const MAX_RESOURCE_NAME = 256;
  *           Shows a window as ShowWindow(SW_SHOW) would, answering once the
  *           procedures it sent to have.
  * @property {(hwnd: number) => number | Promise<number>} [hide]  And hides one.
+ * @property {(instance: number, name: number, type: number) => number | Promise<number>
+ *     } [loadImage]  LoadImage of a module's resource, by ordinal or by a
+ *     UTF-16 name in guest memory.
  * @property {(message: { hwnd: number, message: number, wParam: number, lParam: number })
  *     => number} [translate]  What TranslateMessage does with a key message.
  * @property {(record: any) => any[]} children
@@ -493,12 +504,18 @@ export function createDialogFunctions(options){
                 id: extended ? template.u32(at + item.id) & 0xffff : template.u16(at + item.id),
                 className: '',
                 title: '',
+                image: 0,
                 data: 0,
             };
             template.at = at + item.size;
             const cls = template.nameOrOrdinal();
             control.className = cls.name ?? `#${cls.ordinal}`;
-            control.title = template.nameOrOrdinal().name ?? '';
+            const titleAt = (address + template.at) >>> 0;
+            const title = template.nameOrOrdinal();
+            control.title = title.name ?? '';
+            // What a static showing a picture loads it by: the ordinal, or the
+            // name where it lies in the template.
+            control.image = title.ordinal ?? (title.name ? titleAt : 0);
 
             // The creation data begins with its size in bytes. In the old
             // layout that word counts itself, so a zero means there is only
@@ -711,7 +728,8 @@ export function createDialogFunctions(options){
                 return after(cls ? announce(record, [extended, 0, 0, style,
                     placed.x, placed.y, placed.width, placed.height,
                     dialog.hwnd, control.id, instance >>> 0, control.data], false, thread) : 0,
-                ()=>createFrom(index + 1));
+                ()=>after(picture(record, control, instance >>> 0, thread),
+                    ()=>createFrom(index + 1)));
             };
             // Every control is told the dialog's font once it exists and has
             // set itself up, as the dialog manager tells it: before
@@ -902,6 +920,27 @@ export function createDialogFunctions(options){
             host.translate?.(message);
             return after(deliver({ x: 0, y: 0, ...message }, thread), ()=>1);
         });
+    };
+
+    /**
+     * A static that shows a picture loads it from the module whose template
+     * made it, by the name the template gives as its title -- as the static's
+     * own WM_CREATE does on Windows, where that name is the window's text.
+     *
+     * @param {any} record @param {{ image: number }} control @param {number} instance
+     * @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const picture = (record, control, instance, thread)=>{
+        const kind = record.style & SS_TYPEMASK;
+        if (record.className !== 'Static' || (kind !== SS_BITMAP && kind !== SS_ICON)
+            || control.image === 0 || !host.loadImage)
+        {
+            return 0;
+        }
+        const type = kind === SS_BITMAP ? IMAGE_BITMAP : IMAGE_ICON;
+        return after(host.loadImage(instance, control.image, type), image=>(image === 0 ? 0
+            : host.send(record.hwnd, STM_SETIMAGE, type, image, thread)));
     };
 
     /**
