@@ -66,6 +66,16 @@ const DEFAULT_EFLAGS = 0x2;
  * run back to back to the same total.
  */
 const YIELD_CHUNK = 10_000;
+/**
+ * An interpreted stretch runs a hundred times slower than translated code, so a
+ * quantum of it held the engine thread for tens of milliseconds while frames,
+ * the translator's answers and the other threads waited. The interpreter runs
+ * in chunks of this many instructions, and a slice that has interpreted ends
+ * once it has taken `SLICE_MS`, as a time slice would; translated code, which
+ * runs a quantum in a fraction of that, is not looked at.
+ */
+const INTERPRET_CHUNK = 8192;
+const SLICE_MS = 8;
 /** The flat 32-bit code selector the segments are implicit at. */
 const FLAT_CS = 0x08;
 /**
@@ -849,6 +859,7 @@ export function createCorkHost(config){
      */
     const runSlice = maxInstructions=>{
         const sliceAt = clock();
+        const wallAt = performance.now();
         stopped = false;
         feedDue = false;
         // A slice is the clock's tick. On the emulator a `hlt` holds the
@@ -985,7 +996,8 @@ export function createCorkHost(config){
                 continue;
             }
             const interpretAt = clock();
-            const stepped = interpretRange(at, remaining, false, jumpedIn);
+            const stepped = interpretRange(at, Math.min(remaining, INTERPRET_CHUNK), false,
+                jumpedIn);
             interpretMs += clock() - interpretAt;
             interpreted += stepped;
             jumpedIn = false;
@@ -1003,6 +1015,10 @@ export function createCorkHost(config){
                 {
                     break;
                 }
+            }
+            if (performance.now() - wallAt >= SLICE_MS)
+            {
+                break;
             }
         }
         fold();

@@ -769,8 +769,11 @@ would have saved -- so the layer's `onFault` handler sees the same record under 
 a program's exception handlers run under cork too; only one the handler declines is recorded and
 stops the machine. Where the translator has no entry for an
 address, the slice loop runs cork's own interpreter tier over the same state block
-(`interpret`/`blockState` in the engine module) for the slice's whole budget in one call,
-`syncIn`/`syncOut` bracketing the run rather than one per instruction; it stops at a halt, a
+(`interpret`/`blockState` in the engine module) in chunks of 8 192 instructions,
+`syncIn`/`syncOut` bracketing each run rather than one per instruction, and a slice that has
+interpreted ends once it has taken 8 ms of the engine thread, as a time slice would: a quantum
+of interpreted code took 25-35 ms where translated code takes a fraction of one, and frames,
+the translator's answers and the other threads waited behind it. It stops at a halt, a
 trap the host has to answer, or an address the translator has an entry for, where translated
 code's own register file takes over. A fault it raises goes the same way; an instruction the evaluator has no model for is the engine's no-tier answer,
 `cpu: cork has no tier for 0x0f (fxsave) (eip 0x00001003)`: the byte and address are the
