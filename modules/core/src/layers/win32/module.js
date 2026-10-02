@@ -967,10 +967,11 @@ export function createWin32Module(){
                 divergence: config?.divergence,
             });
 
-            // DxDiag's provider, which an installer asks which DirectX this is.
+            // DxDiag's provider, which an installer asks which DirectX this is
+            // and a configuration tool how much video memory there is.
             registerDxDiagClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
-                windows, divergence: config?.divergence,
+                windows, screen: config?.screen, divergence: config?.divergence,
             });
 
             // One way of starting a program, behind three spellings of asking for

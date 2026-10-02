@@ -6,8 +6,9 @@
 
 /**
  * DxDiag's provider, as dxdiagn serves it in process: CLSID_DxDiagProvider,
- * a tree of named containers, and the properties of the one a program reads
- * to learn which DirectX it runs on, DxDiag_SystemInfo.
+ * a tree of named containers, and the properties of the two a program reads
+ * -- DxDiag_SystemInfo, to learn which DirectX it runs on, and
+ * DxDiag_DisplayDevices, to learn what card and how much video memory.
  *
  * The DirectX SDK's own way of telling 9.0c from 9.0 goes through here: the
  * major and minor numbers and the release letter. Its fallback, when the
@@ -20,6 +21,7 @@
 
 import { DIRECTX_RELEASE, DIRECTX_VERSION } from '../advapi32/registry.js';
 import { createComObject } from './objects.js';
+import { ADAPTER_NAME, ADAPTER_RAM } from './wbem.js';
 
 export const CLSID_DXDIAG_PROVIDER = '{A65B8071-3BFE-4213-9A5B-491DA4461CA7}';
 export const IID_IDXDIAG_PROVIDER = '{9C6B4CB0-23F8-49CC-A3ED-45A55000A6D2}';
@@ -39,6 +41,7 @@ const CO_E_NOTINITIALIZED = 0x800401f0 | 0;
 export const DXDIAG_E_INSUFFICIENT_BUFFER = 0x8007007a | 0;
 
 const VT_UI4 = 19;
+const VT_I4 = 3;
 const VT_BOOL = 11;
 const VT_BSTR = 8;
 
@@ -53,19 +56,107 @@ const MAX_NAME = 256;
 
 /** @param {number} value @returns {DxDiagProperty} */
 const u32 = value=>({ vt: VT_UI4, value });
+/** @param {number} value @returns {DxDiagProperty} */
+const i32 = value=>({ vt: VT_I4, value });
 /** @param {string} value @returns {DxDiagProperty} */
 const text = value=>({ vt: VT_BSTR, value });
 /** @param {boolean} value @returns {DxDiagProperty} */
 const bool = value=>({ vt: VT_BOOL, value: value ? 0xffff : 0 });
 
 /**
- * The tree the provider answers from. DxDiag's long form of the version pads
- * the release to four digits: 4.09.0000.0904.
+ * DxDiag_DisplayDevices' one child, "0", with the properties dxdiagn gives an
+ * adapter: its name and video memory as WMI and GetAvailableTextureMem give
+ * them, the mode the desktop is in, the driver Direct3D names, and
+ * acceleration present and enabled -- what a setup or configuration tool
+ * reads to decide whether the card is enough.
+ *
+ * @param {{ width: number, height: number, bitsPerPixel: number }} screen
+ * @returns {Record<string, DxDiagProperty>}
+ */
+function displayDevice(screen){
+    const memory = `${(ADAPTER_RAM / 1048576).toFixed(1)} MB`;
+    const mode = `${screen.width} x ${screen.height} (${screen.bitsPerPixel} bit) (60Hz)`;
+    /** @type {Record<string, DxDiagProperty>} */
+    const both = {};
+    /** @param {string} name @param {string} value  The Localized and English pair. */
+    const pair = (name, value)=>{
+        both[`${name}Localized`] = text(value);
+        both[`${name}English`] = text(value);
+    };
+    pair('szDisplayMemory', memory);
+    pair('szDisplayMode', mode);
+    pair('szDriverLanguage', 'English');
+    pair('szDriverDate', '1/1/2026 12:00:00');
+    pair('szMiniVddDate', 'n/a');
+    pair('szDDIVersion', '9');
+    pair('szDDStatus', 'Enabled');
+    pair('szD3DStatus', 'Enabled');
+    pair('szAGPStatus', 'Enabled');
+    pair('szNotes', 'No problems found.');
+    pair('szTestResultDD', 'Not run');
+    pair('szTestResultD3D7', 'Not run');
+    pair('szTestResultD3D8', 'Not run');
+    pair('szTestResultD3D9', 'Not run');
+    return {
+        szDeviceName: text('\\\\.\\DISPLAY1'),
+        szDescription: text(ADAPTER_NAME),
+        szKeyDeviceID: text('Enum\\PCI\\VEN_0000&DEV_0000'),
+        szKeyDeviceKey: text('System\\CurrentControlSet\\Control\\Video\\0000'),
+        szManufacturer: text('Bottlify'),
+        szChipType: text('WebGPU'),
+        szDACType: text('Internal'),
+        szRevision: text(''),
+        dwWidth: u32(screen.width),
+        dwHeight: u32(screen.height),
+        dwBpp: u32(screen.bitsPerPixel),
+        dwRefreshRate: u32(60),
+        szMonitorName: text('Default Monitor'),
+        szMonitorMaxRes: text(`${screen.width},${screen.height}`),
+        szDriverName: text('webgpu'),
+        // Direct3D's DriverVersion, as DxDiag spells one.
+        szDriverVersion: text('1.00.0000.0000'),
+        szDriverAttributes: text('Final Retail'),
+        lDriverSize: i32(0),
+        szMiniVdd: text('n/a'),
+        lMiniVddSize: i32(0),
+        szVdd: text('n/a'),
+        bCanRenderWindow: bool(true),
+        bDriverBeta: bool(false),
+        bDriverDebug: bool(false),
+        bDriverSigned: bool(true),
+        bDriverSignedValid: bool(true),
+        szDeviceIdentifier: text('{0D6C1B7A-9F3E-1140-8A2B-5C6D7E8F90A1}'),
+        szDriverSignDate: text('n/a'),
+        dwDDIVersion: u32(9),
+        iAdapter: u32(0),
+        szVendorId: text('0x0000'),
+        szDeviceId: text('0x0000'),
+        szSubSysId: text('0x00000000'),
+        szRevisionId: text('0x0000'),
+        dwWHQLLevel: u32(1),
+        bNoHardware: bool(false),
+        bDDAccelerationEnabled: bool(true),
+        b3DAccelerationExists: bool(true),
+        b3DAccelerationEnabled: bool(true),
+        bAGPEnabled: bool(true),
+        bAGPExists: bool(true),
+        bAGPExistenceValid: bool(true),
+        szDXVAModes: text(''),
+        szRegHelpText: text(''),
+        ...both,
+    };
+}
+
+/**
+ * The tree the provider answers from, as Initialize gathers it: the display
+ * mode is the one the desktop is in then. DxDiag's long form of the version
+ * pads the release to four digits: 4.09.0000.0904.
  *
  * @param {import('../kernel32/versions.js').WindowsVersion} windows
+ * @param {{ width: number, height: number, bitsPerPixel: number }} screen
  * @returns {DxDiagNode}
  */
-export function dxDiagTree(windows){
+export function dxDiagTree(windows, screen){
     const [major, minor, release, build] = DIRECTX_VERSION.split('.');
     /** @type {Record<string, DxDiagProperty>} */
     const systemInfo = {
@@ -85,6 +176,9 @@ export function dxDiagTree(windows){
         children: new Map() });
     const root = node({});
     root.children.set('DxDiag_SystemInfo', node(systemInfo));
+    const displays = node({});
+    displays.children.set('0', node(displayDevice(screen)));
+    root.children.set('DxDiag_DisplayDevices', displays);
     return root;
 }
 
@@ -99,6 +193,9 @@ export function dxDiagTree(windows){
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {import('../kernel32/versions.js').WindowsVersion} windows
+ * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
+ *           The desktop, as GDI and the drawing layer see it; read when a
+ *           provider is initialised.
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -108,7 +205,6 @@ export function dxDiagTree(windows){
  * @param {DxDiagHost} host
  */
 export function registerDxDiagClasses(host){
-    const tree = dxDiagTree(host.windows);
     const writeU32 = (/** @type {number} */ address, /** @type {number} */ value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
@@ -288,7 +384,8 @@ export function registerDxDiagClasses(host){
     };
 
     host.registry.registerClass(CLSID_DXDIAG_PROVIDER, ()=>{
-        let initialised = false;
+        /** @type {DxDiagNode | null} */
+        let tree = null;
         return {
             interfaces: [{
                 id: IID_IDXDIAG_PROVIDER,
@@ -313,13 +410,14 @@ export function registerDxDiagClasses(host){
                             {
                                 return E_INVALIDARG;
                             }
-                            initialised = true;
+                            tree = dxDiagTree(host.windows,
+                                host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 });
                             return S_OK;
                         } },
                     /** HRESULT GetRootContainer(IDxDiagContainer **ppInstance) */
                     { name: 'GetRootContainer', argBytes: 8,
                         invoke: (_, [out])=>{
-                            if (!initialised)
+                            if (!tree)
                             {
                                 return CO_E_NOTINITIALIZED;
                             }
