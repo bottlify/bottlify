@@ -53,7 +53,7 @@ function plainOf(services){
  * @property {(api: 'd3d7' | 'd3d8' | 'd3d9' | 'opengl', factory: (services: any) => any,
  *     services: any) => any} root
  *     a root the program is given, whose twin the worker plays
- * @property {() => { roots: number, frames: number,
+ * @property {() => { roots: number, frames: number, dropped: number,
  *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[] }}
  *     diagnostics  `waits`: what the program's thread waited on the worker for, by call
  * @property {() => void} dispose
@@ -127,12 +127,18 @@ export function connectGraphicsWorker(options){
         presentTo({ surface, frameIndex });
     };
 
+    /** Frames the worker presented and replaced before they were sent. */
+    let dropped = 0;
+
     /** @param {{ data: any }} event */
     const listener = ({ data })=>{
         switch (data?.type)
         {
             case 'frame':
+                dropped = data.dropped ?? dropped;
                 present(data);
+                // The worker sends the next once this one is on this thread's queue.
+                worker.postMessage({ type: 'shown' });
                 break;
             case 'lost':
                 lost?.();
@@ -178,7 +184,7 @@ export function connectGraphicsWorker(options){
                     sum.maxMs = Math.max(sum.maxMs, held.maxMs);
                 }
             }
-            return { roots: ports.length, frames, waits,
+            return { roots: ports.length, frames, dropped, waits,
                 behind: senders.map(sender=>sender.behind()) };
         },
         dispose(){
