@@ -53,7 +53,9 @@ function plainOf(services){
  * @property {(api: 'd3d7' | 'd3d8' | 'd3d9' | 'opengl', factory: (services: any) => any,
  *     services: any) => any} root
  *     a root the program is given, whose twin the worker plays
- * @property {() => { roots: number, frames: number }} diagnostics
+ * @property {() => { roots: number, frames: number,
+ *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[] }}
+ *     diagnostics  `waits`: what the program's thread waited on the worker for, by call
  * @property {() => void} dispose
  */
 
@@ -79,6 +81,8 @@ export function connectGraphicsWorker(options){
     let surface = null;
     /** @type {MessagePort[]} */
     const ports = [];
+    /** @type {ReturnType<typeof createSender>[]} */
+    const senders = [];
     let frames = 0;
 
     /**
@@ -150,6 +154,7 @@ export function connectGraphicsWorker(options){
                 on: { wrote: writeMemory, divergence, lost, failed },
             });
             port1.onmessage = event=>sender.receive(event.data);
+            senders.push(sender);
             switch (api)
             {
                 case 'opengl':
@@ -160,7 +165,22 @@ export function connectGraphicsWorker(options){
                     return recordedDirect3D(factory, services, sender);
             }
         },
-        diagnostics: ()=>({ roots: ports.length, frames }),
+        diagnostics: ()=>{
+            /** @type {Record<string, { count: number, ms: number, maxMs: number }>} */
+            const waits = {};
+            for (const sender of senders)
+            {
+                for (const [name, held] of Object.entries(sender.waits()))
+                {
+                    const sum = waits[name] ??= { count: 0, ms: 0, maxMs: 0 };
+                    sum.count += held.count;
+                    sum.ms += held.ms;
+                    sum.maxMs = Math.max(sum.maxMs, held.maxMs);
+                }
+            }
+            return { roots: ports.length, frames, waits,
+                behind: senders.map(sender=>sender.behind()) };
+        },
         dispose(){
             worker.removeEventListener('message', listener);
             for (const port of ports.splice(0))
