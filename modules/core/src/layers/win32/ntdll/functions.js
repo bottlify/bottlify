@@ -146,6 +146,103 @@ const TEB_PEB = 0x30;
 /** @param {Uint8Array} bytes  Four of them, little-endian. */
 const readU32 = bytes=>(bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
 
+/** The user flags a heap block may carry, HEAP_SETTABLE_USER_FLAGS, and a new block's. */
+const SETTABLE_USER_FLAGS = 0xe00;
+const DEFAULT_USER_FLAGS = 0x200;
+const ERROR_INVALID_PARAMETER = 87;
+
+/**
+ * The value and flags a program may keep in a heap block of its own:
+ * RtlSetUserValueHeap, RtlSetUserFlagsHeap and RtlGetUserInfoHeap, over the
+ * blocks kernel32's heaps hand out. A pointer that is no live block of the
+ * heap is refused, as the heap refuses it.
+ *
+ * @param {Record<string, Entry>} kernel32
+ * @param {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @returns {Record<string, Entry>}
+ */
+function createUserInfoFunctions(kernel32, writeMemory){
+    /** @type {Map<number, { value: number, flags: number }>} by block */
+    const kept = new Map();
+    /** @param {number} heap @param {number} block */
+    const infoOf = (heap, block)=>{
+        if (kernel32.HeapValidate.handler([heap, 0, block]) === 0 || block === 0)
+        {
+            kernel32.SetLastError?.handler([ERROR_INVALID_PARAMETER]);
+            return null;
+        }
+        let info = kept.get(block);
+        if (!info)
+        {
+            info = { value: 0, flags: DEFAULT_USER_FLAGS };
+            kept.set(block, info);
+        }
+        return info;
+    };
+    /** @param {number} address @param {number} value */
+    const writeU32 = (address, value)=>{
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        writeMemory(address, bytes);
+    };
+    return {
+        /** BOOLEAN RtlGetUserInfoHeap(HANDLE, ULONG, PVOID, PVOID *UserValue, PULONG UserFlags) */
+        RtlGetUserInfoHeap: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([heap, , block, value, flags])=>{
+                const info = infoOf(heap >>> 0, block >>> 0);
+                if (!info)
+                {
+                    return 0;
+                }
+                if ((value >>> 0) !== 0)
+                {
+                    writeU32(value >>> 0, info.value);
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    writeU32(flags >>> 0, info.flags);
+                }
+                return 1;
+            },
+        },
+        /** BOOLEAN RtlSetUserValueHeap(HANDLE, ULONG, PVOID, PVOID UserValue) */
+        RtlSetUserValueHeap: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([heap, , block, value])=>{
+                const info = infoOf(heap >>> 0, block >>> 0);
+                if (!info)
+                {
+                    return 0;
+                }
+                info.value = value >>> 0;
+                return 1;
+            },
+        },
+        /** BOOLEAN RtlSetUserFlagsHeap(HANDLE, ULONG, PVOID, ULONG FlagsReset, ULONG FlagsSet) */
+        RtlSetUserFlagsHeap: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([heap, , block, reset, set])=>{
+                if (((reset | set) & ~SETTABLE_USER_FLAGS) !== 0)
+                {
+                    kernel32.SetLastError?.handler([ERROR_INVALID_PARAMETER]);
+                    return 0;
+                }
+                const info = infoOf(heap >>> 0, block >>> 0);
+                if (!info)
+                {
+                    return 0;
+                }
+                info.flags = ((info.flags & ~reset) | set) >>> 0;
+                return 1;
+            },
+        },
+    };
+}
+
 /**
  * Builds the function table: name -> { argBytes, handler }.
  *
@@ -220,6 +317,8 @@ export function createNtdllFunctions(host){
             ? createMemoryFunctions({ readMemory: host.readMemory,
                 writeMemory: host.writeMemory, kernel32, allocate })
             : {}),
+
+        ...(kernel32.HeapValidate ? createUserInfoFunctions(kernel32, host.writeMemory) : {}),
 
         /**
          * NTSTATUS NtQuerySystemTime(PLARGE_INTEGER SystemTime)

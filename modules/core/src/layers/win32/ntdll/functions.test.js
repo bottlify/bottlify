@@ -323,3 +323,29 @@ test('NtQuerySystemTime is GetSystemTimeAsFileTime answered as a status', ()=>{
     assert.deepEqual([...host.bytes.subarray(0x180, 0x188)], [1, 2, 3, 4, 5, 6, 7, 8]);
     assert.equal(fns.NtQuerySystemTime.handler([0]), 0xc0000005, 'nowhere to put it');
 });
+
+test('a heap block keeps a user value and user flags, and a pointer no block is refused', ()=>{
+    // kernel32's heap test: RtlSetUserValueHeap, RtlSetUserFlagsHeap, RtlGetUserInfoHeap.
+    const host = fakeHost();
+    /** @type {number[]} */
+    const errors = [];
+    host.kernel32 = /** @type {any} */ ({ ...host.kernel32,
+        HeapValidate: { argBytes: 12, handler: (/** @type {number[]} */ [, , block])=>
+            (block === 0x2000 ? 1 : 0) },
+        SetLastError: { argBytes: 4, handler: (/** @type {number[]} */ [code])=>errors.push(code) },
+    });
+    const fns = createNtdllFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(fns.RtlGetUserInfoHeap.handler([0x10, 0, 0x2000, 0x180, 0x184]), 1);
+    assert.deepEqual([view.getUint32(0x180, true), view.getUint32(0x184, true)], [0, 0x200]);
+    assert.equal(fns.RtlSetUserValueHeap.handler([0x10, 0, 0x2000, 0xdeadbeef]), 1);
+    assert.equal(fns.RtlSetUserFlagsHeap.handler([0x10, 0, 0x2000, 0, 0x1000]), 0,
+        'a flag no program may set');
+    assert.equal(fns.RtlSetUserFlagsHeap.handler([0x10, 0, 0x2000, 0x400, 0x800]), 1);
+    fns.RtlGetUserInfoHeap.handler([0x10, 0, 0x2000, 0x180, 0x184]);
+    assert.deepEqual([view.getUint32(0x180, true), view.getUint32(0x184, true)],
+        [0xdeadbeef, 0xa00]);
+    assert.equal(fns.RtlGetUserInfoHeap.handler([0x10, 0, 0x3000, 0x180, 0x184]), 0,
+        'no block there');
+    assert.deepEqual(errors, [87, 87]);
+});
