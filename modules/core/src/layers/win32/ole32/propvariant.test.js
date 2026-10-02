@@ -47,7 +47,7 @@ const VALID = {
 };
 
 /** Guest memory, a task heap that counts what it holds, and objects that count references. */
-function build({ calls = true } = {}){
+function build({ calls = true, slowDestroy = false } = {}){
     const bytes = new Uint8Array(0x40000);
     const view = new DataView(bytes.buffer);
     /** @type {Map<number, number>} */
@@ -120,18 +120,30 @@ function build({ calls = true } = {}){
     /** @type {string[]} */
     const arrays = [];
     const safeArray = {
-        /** @param {number} psa @param {number} out */
+        /** @param {number} psa @param {number} out @returns {number | Promise<number>} */
         copy(psa, out){
             arrays.push(`copy ${psa}`);
             const made = heap.allocate(24);
             view.setUint32(out, made, true);
-            return S_OK;
+            return slowDestroy ? new Promise(resolve=>{
+                setImmediate(()=>{
+                    arrays.push(`copied ${psa}`);
+                    resolve(S_OK);
+                });
+            }) : S_OK;
         },
-        /** @param {number} psa */
+        /** @param {number} psa @returns {number | Promise<number>} */
         destroy(psa){
             arrays.push(`destroy ${psa}`);
             heap.free(psa);
-            return S_OK;
+            // As oleaut32's answers once it has released what the array held,
+            // a call into the program.
+            return slowDestroy ? new Promise(resolve=>{
+                setImmediate(()=>{
+                    arrays.push(`destroyed ${psa}`);
+                    resolve(S_OK);
+                });
+            }) : S_OK;
         },
     };
     /** @type {string[]} */
@@ -320,6 +332,25 @@ test('an interface is copied with a reference of its own, and let go of by the c
     assert.deepEqual(m.arrays, [`copy ${array}`, `destroy ${copied}`, `destroy ${array}`]);
     assert.equal(m.heap.live.size, 0);
 });
+
+test('a copy or a clear of an array answers once the array has its references settled',
+    async()=>{
+        // Answered at once, the release ran after the program had gone on --
+        // with no host call of its thread to run on, which stopped the engine.
+        const m = build({ slowDestroy: true });
+        const array = m.heap.allocate(24);
+        m.set(SOURCE, VT_ARRAY | VT_UNKNOWN, array);
+        const copied = m.fns.PropVariantCopy.handler([DEST, SOURCE]);
+        assert.equal(typeof copied?.then, 'function', 'and a copy waits on the references');
+        assert.equal(await copied, S_OK);
+        const copy = m.read(DEST)[1];
+        assert.equal(await m.fns.PropVariantClear.handler([DEST]), S_OK);
+        const answer = m.fns.PropVariantClear.handler([SOURCE]);
+        assert.equal(typeof answer?.then, 'function', 'the call waits on the destruction');
+        assert.equal(await answer, S_OK);
+        assert.deepEqual(m.arrays, [`copy ${array}`, `copied ${array}`, `destroy ${copy}`,
+            `destroyed ${copy}`, `destroy ${array}`, `destroyed ${array}`]);
+    });
 
 test('a vector is copied element by element, a variant vector to any depth', async()=>{
     const m = build();

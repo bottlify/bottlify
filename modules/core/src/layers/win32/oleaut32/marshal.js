@@ -138,7 +138,8 @@ const LONGEST_STRING = 0x10000;
  * @property {(bstr: number) => void} freeBstr
  * @property {(vt: number, bounds: { elements: number, lower: number }[]) => number}
  *           createSafeArray  SafeArrayCreate, the bounds leftmost first.
- * @property {(array: number) => void} destroySafeArray
+ * @property {(array: number) => unknown} destroySafeArray  Answered once the
+ *     array has released what it holds, which may be a call into the program.
  * @property {(pointer: number, iid: string, transfer: boolean) => Promise<any>}
  *           exportInterface  An interface pointer as the other side will know
  *           it. With `transfer`, the reference it carries goes with it;
@@ -1114,7 +1115,7 @@ export function createWire(side){
                 {
                     if (u32(bytes, 8) !== 0)
                     {
-                        side.destroySafeArray(u32(bytes, 8));
+                        await side.destroySafeArray(u32(bytes, 8));
                     }
                     return;
                 }
@@ -1128,7 +1129,7 @@ export function createWire(side){
             case 'safearray':
                 if (at !== 0)
                 {
-                    side.destroySafeArray(at);
+                    await side.destroySafeArray(at);
                 }
                 return;
             case 'dispparams': {

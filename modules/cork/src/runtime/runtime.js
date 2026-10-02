@@ -876,7 +876,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
 
     /** @param {number} address */
     const translatable = address=>(pages.get(address >>> 12)
-        & (PageFlag.VOLATILE | PageFlag.INACCESSIBLE)) === 0;
+        & (PageFlag.VOLATILE | PageFlag.INACCESSIBLE | PageFlag.NO_EXECUTE)) === 0;
 
     /**
      * Why the translator has no entry at an untranslated exit's target, the

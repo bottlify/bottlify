@@ -232,6 +232,44 @@ test('StretchDIBits scales and honours the stretch mode', ()=>{
     assert.equal(dest.read(3, 3), 0x0000ff00);
 });
 
+test('StretchDIBits into a clip its rectangle misses reads no bits and answers as if drawn', ()=>{
+    const bits = twoByTwo24();
+    let reads = 0;
+    /** @param {import('./contract.js').Rect} clip @param {number} rop */
+    const draw = (clip, rop)=>{
+        const dest = createSurface({ width: 8, height: 8 });
+        clearSurface(dest, BACKGROUND);
+        const answer = stretchDIBits({
+            dest,
+            clip,
+            xDest: 0, yDest: 0, destWidth: 4, destHeight: 4,
+            xSrc: 0, ySrc: 0, srcWidth: 2, srcHeight: 2,
+            image: {
+                header: header(2, -2, 24),
+                get bits(){
+                    reads++;
+                    return bits;
+                },
+            },
+            rop,
+        });
+        return { answer, dest };
+    };
+    const missed = { left: 4, top: 4, right: 8, bottom: 8 };
+    const met = { left: 0, top: 0, right: 8, bottom: 8 };
+    // A stretch answers the DIB's height, signed as in the header under an
+    // operation other than SRCCOPY -- the same whether or not it drew.
+    for (const rop of [0x00cc0020, 0x008800c6])
+    {
+        reads = 0;
+        const outside = draw(missed, rop);
+        assert.equal(reads, 0, 'nothing of the picture is read');
+        assert.equal(outside.dest.read(0, 0), BACKGROUND);
+        assert.equal(outside.answer, draw(met, rop).answer);
+        assert.ok(reads > 0, 'and the same call into a clip it meets reads it');
+    }
+});
+
 test('a negative source height in StretchDIBits mirrors the rows below ySrc', ()=>{
     // As a negative extent runs everywhere in GDI: ySrc 2 and a height of -2
     // are the same two rows as ySrc 0 and 2, upside down; ySrc 0 and -2 lie

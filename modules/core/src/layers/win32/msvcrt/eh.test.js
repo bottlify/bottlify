@@ -463,10 +463,3 @@ test('abort ends the process and never returns', ()=>{
     assert.equal(m.eh.table.abort.handler(), 'parked');
     assert.deepEqual(m.aborted, ['abort']);
 });
-
-test('type_info\'s vtable is data an image can bind to, not code', ()=>{
-    const m = machine();
-    const entry = /** @type {any} */ (m.eh.table)['??_7type_info@@6B@'];
-    assert.equal(typeof entry.data, 'function');
-    assert.ok(entry.data() instanceof Uint8Array);
-});

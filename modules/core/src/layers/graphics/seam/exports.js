@@ -25,6 +25,7 @@
 
 import { ARGUMENT_WORDS } from '../opengl/exports.js';
 import { createGlu } from '../glu/exports.js';
+import { createComObject } from '../../win32/ole32/objects.js';
 import { createPublisher } from './com.js';
 import { createDirect3D8Seam } from './d3d8.js';
 import { createDirect3D9Seam } from './d3d9.js';
@@ -42,6 +43,11 @@ const DDERR_INVALIDPARAMS = 0x80070057 | 0;
 const CLASS_E_NOAGGREGATION = 0x80040110 | 0;
 const S_OK = 0;
 const E_FAIL = 0x80004005 | 0;
+/**
+ * The shader validator's class and interface, both ours: Windows publishes no
+ * identifier for either.
+ */
+const SHADER_VALIDATOR = '{6c4b1bd5-2f36-4b9e-9a41-3d0b7f1e8c27}';
 /** The shader versions Direct3D 8 validates: vs_1_0-1_1 and ps_1_0-1_4. */
 const VERTEX_SHADER_VERSIONS = [0xfffe0100, 0xfffe0101];
 const PIXEL_SHADER_VERSIONS = [0xffff0100, 0xffff0101, 0xffff0102, 0xffff0103, 0xffff0104];
@@ -446,6 +452,33 @@ export function createGraphicsLibraries(
                     created.push('d3d9');
                     return d3d9.publishRoot(root);
                 },
+            },
+
+            /**
+             * IDirect3DShaderValidator9 *Direct3DShaderValidatorCreate9(void)
+             *
+             * The validator a shader assembler drives a token stream through:
+             * Begin, Instruction and End answer S_OK, judging nothing, but an
+             * instruction of no tokens fails. Windows names no interface
+             * identifier for it, so nothing can query its way to it.
+             */
+            Direct3DShaderValidatorCreate9: {
+                argBytes: 0,
+                handler: ()=>publishInterface(createComObject(SHADER_VALIDATOR, {
+                    interfaces: [{
+                        id: SHADER_VALIDATOR,
+                        methods: [
+                            { name: 'Begin', argBytes: 16, invoke: ()=>S_OK },
+                            {
+                                name: 'Instruction',
+                                argBytes: 20,
+                                invoke: (/** @type {any} */ _, /** @type {number[]} */ args)=>
+                                    ((args[3] >>> 0) === 0 ? E_FAIL : S_OK),
+                            },
+                            { name: 'End', argBytes: 4, invoke: ()=>S_OK },
+                        ],
+                    }],
+                }), SHADER_VALIDATOR),
             },
 
             /** HRESULT Direct3DCreate9Ex(UINT SDKVersion, IDirect3D9Ex **out) */

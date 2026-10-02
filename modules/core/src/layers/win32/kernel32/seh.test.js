@@ -526,3 +526,66 @@ test('without the exception\'s flags, a handler is told none and continues with 
     assert.equal(result.handled, true);
     assert.equal('eflags' in (result.registers ?? {}), false);
 });
+
+test('vectored handlers are offered an exception before any frame, in their order', async()=>{
+    const m = machine();
+    m.registerFrames([0x51000]);
+    const table = m.seh.table;
+    const second = table.AddVectoredExceptionHandler.handler([0, 0x61000]);
+    const first = table.AddVectoredExceptionHandler.handler([1, 0x62000]);
+    assert.ok(first !== 0 && second !== 0 && first !== second);
+    assert.equal(table.AddVectoredExceptionHandler.handler([0, 0]), 0, 'no handler, no handle');
+
+    await m.seh.dispatch({ code: STATUS.ACCESS_VIOLATION, address: 0x401000 });
+    assert.deepEqual(m.called.map(call=>call.entry), [0x62000, 0x61000, 0x51000],
+        'First goes in front, and then the frames');
+    // Handed EXCEPTION_POINTERS: the record and the context the frame sees.
+    const pointers = m.called[0].args[0];
+    const frameCall = m.called[2];
+    assert.equal(m.get(pointers), frameCall.args[0]);
+    assert.equal(m.get(pointers + 4), frameCall.args[2]);
+    assert.equal(m.get(m.get(pointers) + RECORD.CODE), STATUS.ACCESS_VIOLATION);
+
+    assert.equal(table.RemoveVectoredExceptionHandler.handler([first]), 1);
+    assert.equal(table.RemoveVectoredExceptionHandler.handler([first]), 0, 'once');
+    m.called.length = 0;
+    await m.seh.dispatch({ code: STATUS.ACCESS_VIOLATION, address: 0x401000 });
+    assert.deepEqual(m.called.map(call=>call.entry), [0x61000, 0x51000]);
+});
+
+test('a vectored handler that fixes the exception goes on from its context, past the frames',
+    async()=>{
+        // EXCEPTION_CONTINUE_EXECUTION is -1; the continue handlers then see
+        // the same pointers.
+        const m = machine({ answer: entry=>(entry === 0x61000 ? 0xffffffff : 0) });
+        m.registerFrames([0x51000]);
+        const table = m.seh.table;
+        table.AddVectoredExceptionHandler.handler([0, 0x61000]);
+        table.AddVectoredContinueHandler.handler([0, 0x63000]);
+        // The handler skips the faulting instruction, as a program's does.
+        const original = m.host.callGuest;
+        m.host.callGuest = async call=>{
+            if (call.entry === 0x61000)
+            {
+                const context = m.get(call.args[0] + 4);
+                m.put(context + CONTEXT.EIP, 0x401003);
+            }
+            return original(call);
+        };
+        const result = await m.seh.dispatch({ code: STATUS.ACCESS_VIOLATION, address: 0x401000 });
+        assert.equal(result.handled, true);
+        assert.equal(result.registers?.eip, 0x401003);
+        assert.deepEqual(m.called.map(call=>call.entry), [0x61000, 0x63000],
+            'no frame asked, the continue handler told');
+        assert.equal(m.called[1].args[0], m.called[0].args[0]);
+    });
+
+test('a frame that fixes the exception tells the continue handlers too', async()=>{
+    const m = machine({ answer: entry=>(entry === 0x51000 ? Disposition.CONTINUE_EXECUTION
+        : Disposition.CONTINUE_SEARCH) });
+    m.registerFrames([0x51000]);
+    const handle = m.seh.table.AddVectoredContinueHandler.handler([0, 0x63000]);
+    await m.seh.dispatch({ code: STATUS.ACCESS_VIOLATION, address: 0x401000 });
+    assert.deepEqual(m.called.map(call=>call.entry), [0x51000, 0x63000]);
+    assert.equal(m.seh.table.RemoveVectoredContinueHandler.handler([handle]), 1);
+});

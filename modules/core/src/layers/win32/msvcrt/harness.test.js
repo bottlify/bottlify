@@ -160,6 +160,8 @@ export function fakeMemory(base = 0x10000, size = 1 << 20){
 export function fakeVolume(files, { late = false, directories = [], modified = 0 } = {}){
     /** @type {string[]} */
     const closed = [];
+    /** Extra holders of an open node, which a close gives back before it closes, as the volume's. */
+    const holds = new Map();
     const folders = new Set(directories);
     const volume = {
         files,
@@ -204,7 +206,17 @@ export function fakeVolume(files, { late = false, directories = [], modified = 0
             return bytes.length;
         },
         /** @param {string} node */
-        close: node=>closed.push(node),
+        retain: node=>void holds.set(node, (holds.get(node) ?? 0) + 1),
+        /** @param {string} node */
+        close(node){
+            const extra = holds.get(node) ?? 0;
+            if (extra > 0)
+            {
+                holds.set(node, extra - 1);
+                return;
+            }
+            closed.push(node);
+        },
         /** @param {string} path */
         remove(path){
             if (!files[path])

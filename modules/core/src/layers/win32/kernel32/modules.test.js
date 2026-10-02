@@ -233,3 +233,33 @@ test('the program\'s file name is written in the ANSI page', ()=>{
     assert.equal(fns.GetModuleFileNameA.handler([0, 0x1000, 64]), 15);
     assert.deepEqual([...written[0].subarray(3, 8)], [0x80, 0x99, 0x97, 0xe9, 0x5c]);
 });
+
+test("K32GetModuleInformation reads a module's base, size and entry from its own headers", ()=>{
+    // d3d9's device.c test_vtbl_hook asks for d3d9.dll's image to scan it.
+    const { host, lastError } = hostFor({ lookup: { 'd3d9.dll': 0x10000 } });
+    const image = new Uint8Array(0x400);
+    const view = new DataView(image.buffer);
+    view.setUint32(0x3c, 0x80, true);
+    view.setUint32(0x80 + 24 + 16, 0x1234, true);
+    view.setUint32(0x80 + 24 + 56, 0x9000, true);
+    const seen = { bytes: /** @type {Uint8Array} */ (new Uint8Array(0)) };
+    const fns = createModuleFunctions({
+        ...host,
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>image.slice(address - 0x10000, address - 0x10000 + length),
+        /** @param {number} address @param {Uint8Array} bytes */
+        writeMemory: (address, bytes)=>{
+            assert.equal(address, 0x500);
+            seen.bytes = bytes;
+        },
+    });
+    const entry = fns.K32GetModuleInformation;
+    assert.equal(entry.argBytes, 16);
+    assert.equal(entry.handler([0xffffffff, 0x10000, 0x500, 12]), 1);
+    const out = new DataView(seen.bytes.buffer);
+    assert.deepEqual([0, 4, 8].map(at=>out.getUint32(at, true)), [0x10000, 0x9000, 0x11234]);
+    assert.equal(entry.handler([0xffffffff, 0x10000, 0x500, 8]), 0);
+    assert.equal(lastError(), 122, 'ERROR_INSUFFICIENT_BUFFER');
+    assert.equal(entry.handler([0xffffffff, 0x20000, 0x500, 12]), 0);
+    assert.equal(lastError(), 6, 'ERROR_INVALID_HANDLE');
+});

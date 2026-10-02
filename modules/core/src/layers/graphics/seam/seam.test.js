@@ -758,3 +758,20 @@ test('Direct3D 8 validates a shader by its version token, and never has messages
     assert.equal(d3d8.ValidatePixelShader.handler([code, 0, 0, 0]), E_FAIL);
     assert.equal(d3d8.ValidatePixelShader.argBytes, 16);
 });
+
+test('Direct3DShaderValidatorCreate9 hands out a validator that answers the stream through', ()=>{
+    // device.c test_shader_validator calls through the table it gets back
+    // with no check: a null pointer there was a call to address zero.
+    const { box, libraries } = seamed();
+    const entry = libraries.libraries['D3D9.dll'].Direct3DShaderValidatorCreate9;
+    assert.equal(entry.argBytes, 0);
+    const validator = entry.handler([]);
+    assert.notEqual(validator, 0);
+    // Begin(callback, context, arg3), Instruction(file, line, tokens, count), End().
+    assert.deepEqual([3, 4, 5].map(slot=>box.argBytesOf(validator, slot)), [16, 20, 4]);
+    assert.equal(box.call(validator, 3, [0, 0, 0]), 0);
+    assert.equal(box.call(validator, 4, [0, 0, 0x100, 3]), 0);
+    assert.equal(box.call(validator, 4, [0, 0, 0x100, 0]) >>> 0, 0x80004005, 'no tokens');
+    assert.equal(box.call(validator, 5), 0);
+    assert.equal(box.call(validator, 2), 0, 'the last reference released');
+});

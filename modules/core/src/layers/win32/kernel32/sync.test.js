@@ -936,3 +936,35 @@ test('GetThreadSelectorEntry describes the flat selectors and the thread block b
     assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 0x123, at]), 0);
     assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 0xdeadbeef, at]), 0);
 });
+
+test('a debugged child reports its creation, then its exit, waited for as the child is', ()=>{
+    // Wine's kernel32 process.c test_DebuggingFlag reads events until the
+    // child's exit; WaitForDebugEvent was missing.
+    const host = fakeHost();
+    const kernel = /** @type {any} */ (host.kernel);
+    const child = { id: 0x300, threadId: 0x304, handle: 0x40, threadHandle: 0x44,
+        imagePath: 'C:/child.exe', exitCode: 259, completed: false,
+        debugEvents: ['create', 'exit'], waiters: /** @type {any[]} */ ([]) };
+    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[child] };
+    /** @type {any[]} */
+    const blocked = [];
+    kernel.block = (/** @type {any} */ thread, /** @type {string} */ why)=>blocked.push(why);
+    const fns = createSyncFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    const event = ()=>[0, 4, 8, 12, 16, 20].map(at=>view.getUint32(0x200 + at, true));
+
+    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0xffffffff]), 1);
+    assert.deepEqual(event(), [3, 0x300, 0x304, 0, 0x40, 0x44], 'CREATE_PROCESS_DEBUG_EVENT');
+    assert.equal(/** @type {any} */ (fns.ContinueDebugEvent).handler([0x300, 0x304, 0x10002]), 1);
+    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0]), 0, 'a poll while it runs');
+    assert.equal(host.errors.at(-1), 121, 'ERROR_SEM_TIMEOUT');
+
+    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0xffffffff]), PARKED);
+    assert.equal(blocked.length, 1, 'the debugger waits on the child');
+    child.exitCode = 7;
+    assert.equal(child.waiters[0].settle(), 1, 'its exit is the answer');
+    assert.deepEqual(event().slice(0, 4), [5, 0x300, 0x304, 7], 'EXIT_PROCESS_DEBUG_EVENT');
+    assert.equal(fns.WaitForDebugEvent.handler([0x200, 100]), 0, 'and then nothing more');
+    assert.equal(fns.WaitForDebugEvent.argBytes, 8);
+    assert.equal(fns.ContinueDebugEvent.argBytes, 12);
+});

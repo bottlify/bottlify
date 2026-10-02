@@ -44,7 +44,7 @@ const MAX_WBEM_STRING = 1024;
 
 /** The video memory reported, the figure GetAvailableTextureMem also gives. */
 export const ADAPTER_RAM = 256 << 20;
-const ADAPTER_NAME = 'Bottlify WebGPU Display Adapter';
+export const ADAPTER_NAME = 'Bottlify WebGPU Display Adapter';
 
 /**
  * A class's properties as `name -> [cimType, value]`; the keys are matched

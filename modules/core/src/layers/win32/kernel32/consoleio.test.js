@@ -101,3 +101,23 @@ test('a control handler is accepted, because none of what it waits for can happe
     const { fns } = setup();
     assert.equal(fns.SetConsoleCtrlHandler.handler(), 1);
 });
+
+test('no console is made, none is a screen buffer, and the one page is the one taken', ()=>{
+    // Wine's kernel32 process.c test_Console frees and allocates one, then
+    // asks the screen buffer and sets the pages; the three were missing.
+    const { fns, errors } = setup();
+    assert.equal(fns.FreeConsole.handler(), 1, 'leaving none is done');
+    assert.equal(fns.AllocConsole.handler(), 0);
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+    assert.equal(fns.GetConsoleScreenBufferInfo.handler(), 0);
+    assert.equal(errors.at(-1), 6);
+    assert.equal(fns.SetConsoleCursorPosition.handler(), 0);
+    assert.equal(fns.SetConsoleCursorPosition.argBytes, 8, 'a handle and a COORD by value');
+    assert.equal(fns.SetConsoleCP.handler([0]), 0);
+    assert.equal(fns.SetConsoleOutputCP.handler([0]), 0);
+    assert.deepEqual(errors.slice(-2), [87, 87]);
+    assert.equal(fns.SetConsoleCP.handler([1252]), 1);
+    assert.equal(fns.SetConsoleOutputCP.handler([1252]), 1);
+    assert.deepEqual([fns.SetConsoleCP.argBytes, fns.GetConsoleScreenBufferInfo.argBytes,
+        fns.AllocConsole.argBytes], [4, 8, 0]);
+});

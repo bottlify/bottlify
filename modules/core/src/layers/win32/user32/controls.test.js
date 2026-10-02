@@ -1406,6 +1406,34 @@ test('a dropdown list takes no typed text', async()=>{
     assert.equal(context.memory.readCString(OUT, 16), 'One', 'the field shows the selection');
 });
 
+test('a dropdown combo box is as tall as its field, and its scroll bars are its list\'s',
+    async()=>{
+        // A template gives a dropdown combo box the height of its dropped list;
+        // made at that height, three of them in a column of a launcher's
+        // settings covered one another with empty boxes and scroll bars.
+        const context = setup();
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'ComboBox');
+        /** @param {number} kind @returns {{ height: number, style: number }} */
+        const made = kind=>{
+            const combo = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | kind, 8, 60, 100, 120, dialog, 500,
+                HINSTANCE, 0]);
+            context.fns.GetWindowRect.handler([combo, OUT]);
+            const height = context.memory.u32(OUT + 12) - context.memory.u32(OUT + 4);
+            const style = context.fns.GetWindowLongA.handler([combo, -16]);
+            context.fns.DestroyWindow.handler([combo]);
+            return { height, style };
+        };
+        for (const kind of [0x0002, 0x0003])
+        {
+            const { height, style } = made(kind);
+            assert.ok(height > 8 && height < 40, `the field's height, not the list's: ${height}`);
+            assert.equal(style & WS_VSCROLL, 0, 'the scroll bar is the list\'s');
+        }
+        assert.equal(made(0x0001).height, 120, 'a simple combo box shows its list, at its height');
+    });
+
 test('a scroll bar keeps its range and position, and a click on an arrow asks its parent',
     async()=>{
         const context = setup();

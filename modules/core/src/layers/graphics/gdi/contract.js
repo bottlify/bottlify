@@ -53,6 +53,9 @@
  * @property {number} offset         Where row zero starts inside `bytes`.
  * @property {(x: number, y: number) => number} read     Raw 32-bit pixel.
  * @property {(x: number, y: number, pixel: number) => void} write
+ * @property {(left: number, top: number, right: number, bottom: number, pixel: number) => void
+ *     } [fill]  Every pixel of the half-open rectangle written as `write` writes one, in
+ *     runs rather than a call a pixel.
  * @property {(pixel: number) => number} [nearest]
  *           What a write of `pixel` reads back as: the entry an indexed
  *           surface would store, the colour sixteen bits keep. A 32-bit
@@ -82,10 +85,10 @@
  * What a brush contributes at a given surface coordinate. Solid brushes ignore
  * both, hatched ones fold in the brush origin, and a pattern brush tiles.
  *
- * @callback PatternSource
- * @param {number} x
- * @param {number} y
- * @returns {number} the raw 32-bit pixel the pattern shows there
+ * The raw 32-bit pixel the pattern shows at a point; `solid` is that pixel
+ * when it is the same everywhere.
+ *
+ * @typedef {((x: number, y: number) => number) & { solid?: number }} PatternSource
  */
 
 /**

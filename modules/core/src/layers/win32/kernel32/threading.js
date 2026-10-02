@@ -125,15 +125,32 @@ const PROCESSENTRY32 = Object.freeze({
     dwSize: 0,
     th32ProcessID: 8,
     cntThreads: 20,
+    th32ParentProcessID: 24,
     pcPriClassBase: 28,
     szExeFile: 36,
     SIZE: 296,
 });
+/** THREADENTRY32: the size, a use count, the thread, its process and its priority. */
+const THREADENTRY32 = Object.freeze({
+    dwSize: 0,
+    th32ThreadID: 8,
+    th32OwnerProcessID: 12,
+    tpBasePri: 16,
+    SIZE: 28,
+});
 const MAX_PATH = 260;
 const TH32CS_SNAPPROCESS = 0x2;
+const TH32CS_SNAPTHREAD = 0x4;
+const HANDLE_FLAG_INHERIT = 0x1;
+const HANDLE_FLAG_PROTECT_FROM_CLOSE = 0x2;
 const NORMAL_PRIORITY_BASE = 8;
 const ERROR_NO_MORE_FILES = 18;
 const ERROR_INSUFFICIENT_BUFFER = 122;
+
+/**
+ * @typedef {{ id: number, parent: number, threads: number, path: string }} SnapshotProcess
+ * @typedef {{ id: number, owner: number }} SnapshotThread
+ */
 
 /** @param {Uint8Array} bytes @param {number} at */
 const readU32 = (bytes, at)=>
@@ -148,7 +165,11 @@ const readU32 = (bytes, at)=>
  * @param {ThreadingHost} host
  */
 export function createThreadingFunctions(host){
-    /** @param {number} handle @returns {{ flags: number, walked: boolean } | null} */
+    /**
+     * @param {number} handle
+     * @returns {{ flags: number, processes: SnapshotProcess[], threads: SnapshotThread[],
+     *     process: number, thread: number } | null}
+     */
     const snapshotOf = handle=>{
         try
         {
@@ -158,6 +179,61 @@ export function createThreadingFunctions(host){
             void e;
             return null;
         }
+    };
+
+    /**
+     * One step of a snapshot's walk: the first entry, or the next, written
+     * into the caller's PROCESSENTRY32 or THREADENTRY32.
+     *
+     * @param {number} handle @param {number} entry
+     * @param {boolean} processes @param {boolean} first
+     */
+    const walkSnapshot = (handle, entry, processes, first)=>{
+        const snapshot = snapshotOf(handle);
+        if (!snapshot)
+        {
+            host.setLastError(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        const layout = processes ? PROCESSENTRY32 : THREADENTRY32;
+        const list = processes ? snapshot.processes : snapshot.threads;
+        const at = first ? 0 : (processes ? snapshot.process : snapshot.thread);
+        if ((snapshot.flags & (processes ? TH32CS_SNAPPROCESS : TH32CS_SNAPTHREAD)) === 0
+            || (entry >>> 0) === 0 || at >= list.length)
+        {
+            host.setLastError(ERROR_NO_MORE_FILES);
+            return 0;
+        }
+        if (readU32(host.readMemory(entry >>> 0, 4), 0) < layout.SIZE)
+        {
+            host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        const bytes = new Uint8Array(layout.SIZE);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, layout.SIZE, true);
+        if (processes)
+        {
+            const process = snapshot.processes[at];
+            view.setUint32(PROCESSENTRY32.th32ProcessID, process.id, true);
+            view.setUint32(PROCESSENTRY32.cntThreads, process.threads, true);
+            view.setUint32(PROCESSENTRY32.th32ParentProcessID, process.parent, true);
+            view.setUint32(PROCESSENTRY32.pcPriClassBase, NORMAL_PRIORITY_BASE, true);
+            const name = process.path.slice(process.path.lastIndexOf('\\') + 1)
+                .slice(0, MAX_PATH - 1);
+            bytes.set(encodeAnsi(name), PROCESSENTRY32.szExeFile);
+            snapshot.process = at + 1;
+        }
+        else
+        {
+            const thread = snapshot.threads[at];
+            view.setUint32(THREADENTRY32.th32ThreadID, thread.id, true);
+            view.setUint32(THREADENTRY32.th32OwnerProcessID, thread.owner, true);
+            view.setUint32(THREADENTRY32.tpBasePri, NORMAL_PRIORITY_BASE, true);
+            snapshot.thread = at + 1;
+        }
+        host.writeMemory(entry >>> 0, bytes);
+        return 1;
     };
     const { kernel } = host;
 
@@ -222,6 +298,16 @@ export function createThreadingFunctions(host){
             return null;
         }
     };
+
+    /**
+     * HANDLE_FLAG_INHERIT and HANDLE_FLAG_PROTECT_FROM_CLOSE, by handle: what
+     * a duplicate was made inheritable with and SetHandleInformation set.
+     * Handles are not reissued while the table has fresh ones, so an entry
+     * outliving its handle names nothing.
+     *
+     * @type {Map<number, number>}
+     */
+    const handleFlags = new Map();
 
     /**
      * What kind of object a handle names, the pseudo-handles included.
@@ -779,7 +865,7 @@ export function createThreadingFunctions(host){
         DuplicateHandle: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([, source, , target, , , options])=>{
+            handler: ([, source, , target, , inherit, options])=>{
                 const held = object(source >>> 0);
                 const kind = kindOf(source >>> 0);
                 if (!held || target === 0 || kind === null)
@@ -805,6 +891,7 @@ export function createThreadingFunctions(host){
                     host.retainNode?.(held.node);
                 }
                 const duplicate = kernel.handles.open(kind, held);
+                handleFlags.set(duplicate, inherit !== 0 ? HANDLE_FLAG_INHERIT : 0);
                 host.writeMemory(target >>> 0, new Uint8Array([
                     duplicate & 0xff, duplicate >>> 8 & 0xff,
                     duplicate >>> 16 & 0xff, duplicate >>> 24 & 0xff,
@@ -816,6 +903,43 @@ export function createThreadingFunctions(host){
                     kernel.handles.close(source >>> 0);
                     host.namedObjects.forget(held);
                 }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetHandleInformation(HANDLE hObject, LPDWORD lpdwFlags) and
+         * BOOL SetHandleInformation(HANDLE hObject, DWORD dwMask, DWORD dwFlags):
+         * a handle's inheritance and protection flags, which nothing here
+         * acts on but which read back as they were set.
+         */
+        GetHandleInformation: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                if (pseudo(handle) || !object(handle >>> 0) || (out >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const flags = handleFlags.get(untagged(handle >>> 0)) ?? 0;
+                host.writeMemory(out >>> 0, new Uint8Array([flags, 0, 0, 0]));
+                return 1;
+            },
+        },
+        SetHandleInformation: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, mask, flags])=>{
+                if (pseudo(handle) || !object(handle >>> 0))
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const key = untagged(handle >>> 0);
+                const kept = HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE;
+                handleFlags.set(key, ((handleFlags.get(key) ?? 0) & ~(mask & kept))
+                    | (flags & mask & kept));
                 return 1;
             },
         },
@@ -979,65 +1103,100 @@ export function createThreadingFunctions(host){
 
         /**
          * The Toolhelp snapshot, which a program walks to see whether another
-         * copy of itself is running. One process is running here, so the
-         * snapshot holds one entry -- this one -- and the walk ends after it,
-         * with the error the end of a real walk carries.
+         * copy of itself is running: this process and the children it started
+         * that are still running, and their threads, as they stood when it was
+         * taken. A walk ends with the error the end of a real walk carries.
          *
          * HANDLE CreateToolhelp32Snapshot(DWORD dwFlags, DWORD th32ProcessID)
-         * BOOL Process32First(HANDLE, LPPROCESSENTRY32)
-         * BOOL Process32Next(HANDLE, LPPROCESSENTRY32)
          */
         CreateToolhelp32Snapshot: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([flags])=>
-                kernel.handles.open('snapshot', { flags: flags >>> 0, walked: false }),
+            handler: ([flags])=>{
+                const self = (host.processId ?? 0x1000) >>> 0;
+                const own = (kernel.threads?.() ?? [])
+                    .filter((/** @type {any} */ thread)=>thread.state !== 'terminated');
+                const children = (kernel.processes?.all() ?? [])
+                    .filter((/** @type {any} */ child)=>!child.completed
+                        && child.exitCode === kernel.processes.STILL_ACTIVE);
+                return kernel.handles.open('snapshot', {
+                    flags: flags >>> 0,
+                    processes: [
+                        { id: self, parent: 0, threads: Math.max(own.length, 1),
+                            path: host.imagePath?.() ?? '' },
+                        ...children.map((/** @type {any} */ child)=>({
+                            id: child.id >>> 0, parent: self, threads: 1,
+                            path: String(child.imagePath ?? ''),
+                        })),
+                    ],
+                    threads: [
+                        ...own.map((/** @type {any} */ thread)=>({
+                            id: thread.id >>> 0, owner: self })),
+                        ...children.map((/** @type {any} */ child)=>({
+                            id: child.threadId >>> 0, owner: child.id >>> 0 })),
+                    ],
+                    process: 0,
+                    thread: 0,
+                });
+            },
         },
 
+        /**
+         * HANDLE OpenThread(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwThreadId)
+         *
+         * A new handle to a thread of this process that has not ended, or to
+         * the first thread of a child it started; any other id is refused.
+         */
+        OpenThread: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , id])=>{
+                const wanted = id >>> 0;
+                const own = (kernel.threads?.() ?? []).find((/** @type {any} */ thread)=>
+                    (thread.id >>> 0) === wanted && thread.state !== 'terminated');
+                if (own)
+                {
+                    return kernel.handles.open('thread', own);
+                }
+                const child = (kernel.processes?.all() ?? []).find((/** @type {any} */ made)=>
+                    (made.threadId >>> 0) === wanted);
+                if (child)
+                {
+                    return kernel.handles.open('process-thread', child);
+                }
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            },
+        },
+
+        /**
+         * BOOL Process32First(HANDLE, LPPROCESSENTRY32) and Process32Next: the
+         * snapshot's processes in turn.
+         */
         Process32First: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([handle, entry])=>{
-                const snapshot = snapshotOf(handle);
-                if (!snapshot)
-                {
-                    host.setLastError(ERROR_INVALID_HANDLE);
-                    return 0;
-                }
-                if ((snapshot.flags & TH32CS_SNAPPROCESS) === 0 || (entry >>> 0) === 0)
-                {
-                    host.setLastError(ERROR_NO_MORE_FILES);
-                    return 0;
-                }
-                const size = readU32(host.readMemory(entry >>> 0, 4), 0);
-                if (size < PROCESSENTRY32.SIZE)
-                {
-                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
-                    return 0;
-                }
-                const bytes = new Uint8Array(PROCESSENTRY32.SIZE);
-                const view = new DataView(bytes.buffer);
-                view.setUint32(PROCESSENTRY32.dwSize, PROCESSENTRY32.SIZE, true);
-                view.setUint32(PROCESSENTRY32.th32ProcessID,
-                    (host.processId ?? 0x1000) >>> 0, true);
-                view.setUint32(PROCESSENTRY32.cntThreads, 1, true);
-                view.setUint32(PROCESSENTRY32.pcPriClassBase, NORMAL_PRIORITY_BASE, true);
-                const path = host.imagePath?.() ?? '';
-                const name = path.slice(path.lastIndexOf('\\') + 1).slice(0, MAX_PATH - 1);
-                bytes.set(encodeAnsi(name), PROCESSENTRY32.szExeFile);
-                host.writeMemory(entry >>> 0, bytes);
-                snapshot.walked = true;
-                return 1;
-            },
+            handler: ([handle, entry])=>walkSnapshot(handle, entry, true, true),
         },
-
         Process32Next: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([handle])=>{
-                host.setLastError(snapshotOf(handle) ? ERROR_NO_MORE_FILES : ERROR_INVALID_HANDLE);
-                return 0;
-            },
+            handler: ([handle, entry])=>walkSnapshot(handle, entry, true, false),
+        },
+
+        /**
+         * BOOL Thread32First(HANDLE, LPTHREADENTRY32) and Thread32Next: the
+         * snapshot's threads in turn.
+         */
+        Thread32First: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, entry])=>walkSnapshot(handle, entry, false, true),
+        },
+        Thread32Next: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, entry])=>walkSnapshot(handle, entry, false, false),
         },
 
         /** BOOL CloseHandle(HANDLE) */

@@ -134,8 +134,8 @@ const holdable = vt=>{
  * @property {{ copy: (bstr: number) => number, free: (bstr: number) => unknown }} [bstr]
  *           oleaut32's SysAllocString and SysFreeString. Absent, a BSTR
  *           cannot be copied.
- * @property {{ copy: (array: number, out: number) => number,
- *              destroy: (array: number) => number }} [safeArray]
+ * @property {{ copy: (array: number, out: number) => number | Promise<number>,
+ *              destroy: (array: number) => number | Promise<number> }} [safeArray]
  *           oleaut32's SafeArrayCopy and SafeArrayDestroy. Absent, a
  *           SAFEARRAY cannot be copied.
  * @property {(entry: number, args: number[], thread?: unknown) => Promise<number>} [call]
@@ -152,7 +152,17 @@ const holdable = vt=>{
  * @typedef {Object} Owed
  * @property {number[]} addRef
  * @property {number[]} release
+ * @property {number[]} [arrays]  SAFEARRAYs to destroy, which releases what they hold.
+ * @property {Promise<number>[]} [pending]  Copies of arrays still taking the
+ *     references they hold, which have to be waited for first.
  */
+
+/**
+ * `then` of a value, or of what a promise of one settles to.
+ *
+ * @param {any} value @param {(value: any) => any} then
+ */
+const after = (value, then)=>(typeof value?.then === 'function' ? value.then(then) : then(value));
 
 /**
  * @param {PropVariantHost} host
@@ -265,7 +275,14 @@ export function createPropVariantFunctions(host){
             const answer = host.safeArray.copy(pointer, slot);
             const array = readU32(slot);
             host.heap.free(slot);
-            if (answer !== S_OK)
+            // A copy of interfaces is answered once their references are
+            // taken, calls into the program: the copy is made and named
+            // already, and only that much is left to wait for.
+            if (typeof answer !== 'number')
+            {
+                (owed.pending ??= []).push(answer);
+            }
+            else if (answer !== S_OK)
             {
                 return answer;
             }
@@ -459,7 +476,7 @@ export function createPropVariantFunctions(host){
         {
             if (pointer !== 0)
             {
-                host.safeArray?.destroy(pointer);
+                (owed.arrays ??= []).push(pointer);
             }
             return true;
         }
@@ -555,13 +572,27 @@ export function createPropVariantFunctions(host){
     };
 
     /**
+     * Destroys SAFEARRAYs one after another. oleaut32's SafeArrayDestroy
+     * answers once it has released the interfaces an array holds, which is a
+     * call into the program, so a call that destroys one answers no sooner.
+     *
+     * @param {number[]} arrays
+     * @returns {number | Promise<number>}
+     */
+    const destroyAll = arrays=>arrays.reduce((before, array)=>
+        after(before, ()=>host.safeArray?.destroy(array) ?? S_OK), S_OK);
+
+    /** @param {Owed} owed @returns {number | Promise<unknown>} */
+    const waited = owed=>(owed.pending ? Promise.all(owed.pending) : S_OK);
+
+    /**
      * Takes or gives back the references a copy or a clear owes, one call
      * into the program at a time, on the thread whose call this is.
      *
      * @param {Owed} owed @param {unknown} thread @param {string} api
      * @returns {number | Promise<number>}
      */
-    const settle = (owed, thread, api)=>{
+    const reference = (owed, thread, api)=>{
         const calls = [...owed.addRef.map(object=>[object, 1]),
             ...owed.release.map(object=>[object, 2])];
         if (calls.length === 0)
@@ -580,6 +611,16 @@ export function createPropVariantFunctions(host){
             call(readU32(readU32(object) + slot * 4), [object], thread)),
         Promise.resolve(0)).then(()=>S_OK);
     };
+
+    /**
+     * Everything a copy or a clear owes once its records are written: the
+     * copied arrays' references, the arrays it destroys, then its own.
+     *
+     * @param {Owed} owed @param {unknown} thread @param {string} api
+     * @returns {number | Promise<number>}
+     */
+    const settle = (owed, thread, api)=>after(waited(owed),
+        ()=>after(destroyAll(owed.arrays ?? []), ()=>reference(owed, thread, api)));
 
     return {
         /**
@@ -608,8 +649,7 @@ export function createPropVariantFunctions(host){
                 {
                     made.blocks.forEach(block=>host.heap.free(block));
                     made.strings.forEach(string=>host.bstr?.free(string));
-                    made.arrays.forEach(array=>host.safeArray?.destroy(array));
-                    return copy;
+                    return after(waited(owed), ()=>after(destroyAll(made.arrays), ()=>copy));
                 }
                 host.writeMemory(dest >>> 0, copy);
                 return settle(owed, thread, 'PropVariantCopy');

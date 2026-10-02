@@ -27,6 +27,17 @@
 /** Codes this surface reports. */
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_BAD_LENGTH = 24;
+const ERROR_MORE_DATA = 234;
+
+/** GetFileInformationByHandleEx's classes here, and the fixed ones' sizes. */
+const FILE_BASIC_INFO = 0;
+const FILE_STANDARD_INFO = 1;
+const FILE_NAME_INFO = 2;
+const FILE_ATTRIBUTE_TAG_INFO = 9;
+const FILE_INFO_SIZES = new Map([
+    [FILE_BASIC_INFO, 40], [FILE_STANDARD_INFO, 24], [FILE_ATTRIBUTE_TAG_INFO, 8],
+]);
 
 /** What GetTimeZoneInformation answers: this machine is not in daylight time. */
 const TIME_ZONE_ID_UNKNOWN = 0;
@@ -449,6 +460,82 @@ export function createFileTimeFunctions(host){
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nNumberOfLinks, 1, true);
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nFileIndexLow, index, true);
                 host.writeMemory(information >>> 0, data);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetFileInformationByHandleEx(HANDLE hFile,
+         *   FILE_INFO_BY_HANDLE_CLASS FileInformationClass, LPVOID lpFileInformation,
+         *   DWORD dwBufferSize)
+         *
+         * The four classes a program reads about an open file: its times and
+         * attributes, its sizes and kind, its name below the drive, and its
+         * attributes with no reparse tag. A name too long for the buffer gives
+         * its length and what fits, with ERROR_MORE_DATA; any other class is
+         * refused.
+         */
+        GetFileInformationByHandleEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, kind, buffer, size])=>{
+                const file = object(handle, 'file');
+                if (!file)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const entry = host.stat(file.path);
+                const room = size >>> 0;
+                const at = buffer >>> 0;
+                if ((kind >>> 0) === FILE_NAME_INFO)
+                {
+                    const name = String(file.path).replace(/^[A-Za-z]:/, '');
+                    const bytes = new Uint8Array(4 + name.length * 2);
+                    const view = new DataView(bytes.buffer);
+                    view.setUint32(0, name.length * 2, true);
+                    [...name].forEach((character, index)=>
+                        view.setUint16(4 + index * 2, character.charCodeAt(0), true));
+                    if (room < 4 || at === 0)
+                    {
+                        return fail(ERROR_BAD_LENGTH);
+                    }
+                    host.writeMemory(at, bytes.subarray(0, Math.min(room, bytes.length)));
+                    return room < bytes.length ? fail(ERROR_MORE_DATA) : 1;
+                }
+                const layout = FILE_INFO_SIZES.get(kind >>> 0);
+                if (layout === undefined)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if (room < layout || at === 0)
+                {
+                    return fail(ERROR_BAD_LENGTH);
+                }
+                const bytes = new Uint8Array(layout);
+                const view = new DataView(bytes.buffer);
+                const attributes = fileAttributes(entry);
+                if ((kind >>> 0) === FILE_BASIC_INFO)
+                {
+                    const time = msToFileTime(entry?.modified ?? 0);
+                    for (const offset of [0, 8, 16, 24])
+                    {
+                        view.setBigUint64(offset, time, true);
+                    }
+                    view.setUint32(32, attributes, true);
+                }
+                else if ((kind >>> 0) === FILE_STANDARD_INFO)
+                {
+                    const length = BigInt(entry?.size ?? 0);
+                    view.setBigUint64(0, (length + 4095n) & ~4095n, true);
+                    view.setBigUint64(8, length, true);
+                    view.setUint32(16, 1, true);
+                    bytes[21] = (attributes & FILE_ATTRIBUTE_DIRECTORY) !== 0 ? 1 : 0;
+                }
+                else
+                {
+                    view.setUint32(0, attributes, true);
+                }
+                host.writeMemory(at, bytes);
                 return 1;
             },
         },

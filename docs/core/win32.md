@@ -538,7 +538,10 @@ gets its own heap, hive, queue and COM registry.
   `MEM_COMMIT` alone at an address commits inside an existing reservation, 487 outside one;
   `MEM_RESET` keeps the pages and their contents, since there is no paging to spare them from. A
   type with none of those, `MEM_RESET` with another, or a zero size is `ERROR_INVALID_PARAMETER`
-  (87); `MEM_TOP_DOWN` and `MEM_WRITE_WATCH` are accepted and ignored. `VirtualFree` takes exactly
+  (87); `MEM_TOP_DOWN` is accepted and ignored. A `MEM_WRITE_WATCH` reservation is one
+  `GetWriteWatch` and `ResetWriteWatch` answer for; writes are not tracked, so `GetWriteWatch`
+  tells every committed page of the range as written -- more than a collector must rescan, never
+  less -- and says so as a divergence. `VirtualFree` takes exactly
   one of `MEM_DECOMMIT` and `MEM_RELEASE` (87 otherwise); a release takes the reservation's base
   and no size (487 for an interior address, 87 for a size), a decommit any pages inside it. Both
   set the last error on every refusal. The compiled `virtual.exe` (`src/virtual.itest.js`) checks
@@ -898,8 +901,15 @@ yet. A read that fails once parked writes `ERROR_IO_DEVICE` for the parked threa
 is running by then. File mappings (`kernel32/mapping.js`) are a copy read at map time and written
 back at unmap, and park the same way; a mapping handle and each view hold the file they map, as a
 duplicated file handle does, so a program may close the file, the mapping and the view in any
-order and the file closes with the last of them. The standard handles are never files: writing to
-them goes to `onOutput`.
+order and the file closes with the last of them. A mapping is a section with the attributes
+`CreateFileMapping` and ntdll's `NtCreateSection` share: over a file it is `SEC_FILE`, keeping
+only `SEC_NOCACHE`/`SEC_WRITECOMBINE`, over the page file what was asked (`SEC_COMMIT` when
+nothing was) in whole pages; the combinations Windows refuses are refused with its errors, a
+read-only section past its file's end is `ERROR_NOT_ENOUGH_MEMORY`, and a `SEC_IMAGE` view holds
+the file as it lies rather than laid out, said as a divergence. `NtQuerySection` reports them,
+`NtMapViewOfSection`/`NtUnmapViewOfSection` are `MapViewOfFile`'s views in this process. No
+handle keeps the access it was opened with, so one without `SECTION_QUERY` is answered as one
+with it. The standard handles are never files: writing to them goes to `onOutput`.
 
 ### Drives and discs
 
@@ -1027,9 +1037,15 @@ nothing implements).
   `ferror` and `getc` macros read what the functions do. `_stat`/`_fstat` fill the 36-byte
   `struct _stat`; `_findfirst`/`_findnext` walk a directory as `FindFirstFile` does into a
   `_finddata_t`. `printf`, `vprintf` and `puts` are `fprintf` and `fputs` on `stdout`, so they
-  follow it wherever `freopen` moved it. Every printer formats a double as msvcrt does
-  (`msvcrt/format.js`, `cvtDigits`, which `_ecvt` and `_fcvt` share): seventeen significant
-  digits rounded half up, zeros past them, an exponent of three digits, and an infinity or NaN as
+  follow it wherever `freopen` moved it. `_dup` and `_dup2` make a second descriptor on a file,
+  sharing its position; `_dup2` onto 0, 1 or 2 sends that standard number to the file, and
+  `freopen` of a standard stream puts its file on the stream's own number, as Windows does --
+  closing a file there gives the number back to the console. `__pioinfo` is msvcrt.dll's table
+  as a program reads it in place: the first block of 32 entries, each descriptor's handle (none
+  until one is asked for) and `wxflag` written as it opens and closes. A stream's `_bufsiz` says
+  4096, or what `setvbuf` named, though nothing is held in it. Every printer formats a double as
+  msvcrt does (`msvcrt/format.js`, `cvtDigits`, which `_ecvt` and `_fcvt` share): seventeen
+  significant digits rounded half up, zeros past them, an exponent of three digits, and an infinity or NaN as
   `1#INF`, `1#QNAN`, `1#SNAN` or `1#IND` rounded as if digits (`%.2f` of one is `1.#J`); a
   conversion it does not know is written as its own character. The scanners (`msvcrt/scan.js`)
   read as msvcrt does -- width digits and length modifiers in any order, a character that is no

@@ -522,3 +522,60 @@ test('a STARTUPINFO\'s output and error files are handed to the child, the paren
     assert.equal(host.requests.at(-1).standardFiles, undefined,
         'without the flag the child keeps the console');
 });
+
+test('this process and its children are in the interactive session, and no other id is', ()=>{
+    // Wine's kernel32 process.c test_session_info.
+    const host = fakeHost();
+    const fns = createSpawnFunctions(host);
+    const child = host.kernel.processes.create({ imagePath: 'C:/App/child.exe', commandLine: '' });
+    for (const id of [0x1000, child.id])
+    {
+        host.view.setUint32(0x100, 0xdeadbeef, true);
+        assert.equal(fns.ProcessIdToSessionId.handler([id, 0x100]), 1);
+        assert.equal(host.view.getUint32(0x100, true), 1);
+    }
+    assert.equal(fns.ProcessIdToSessionId.handler([0x7777, 0x100]), 0);
+    assert.equal(host.errors.at(-1), 87);
+    assert.equal(fns.WTSGetActiveConsoleSessionId.handler(), 1);
+    assert.equal(fns.ProcessIdToSessionId.argBytes, 8);
+});
+
+test('a process-thread attribute list is laid out as Windows lays it, each kind once', ()=>{
+    // Wine's kernel32 process.c test_ProcThreadAttributeList and
+    // test_handle_list_attribute, which called the missing entry blind.
+    const host = fakeHost();
+    const fns = createSpawnFunctions(host);
+    const LIST = 0x400;
+    const SIZE = 0x100;
+    const VALUE = 0x200;
+    host.bytes.fill(0xcc, LIST, LIST + 0x100);
+    host.view.setUint32(SIZE, 0, true);
+    assert.equal(fns.InitializeProcThreadAttributeList.handler([0, 3, 0, SIZE]), 0);
+    assert.equal(host.errors.at(-1), 122, 'ERROR_INSUFFICIENT_BUFFER');
+    assert.equal(host.view.getUint32(SIZE, true), 20 + 3 * 12);
+    assert.equal(fns.InitializeProcThreadAttributeList.handler([LIST, 3, 0, SIZE]), 1);
+    const word = (/** @type {number} */ at)=>host.view.getUint32(LIST + at, true);
+    assert.deepEqual([0, 4, 8, 12, 16].map(word), [0, 3, 0, 0xcccccccc, 0],
+        'mask, room, count, an untouched pad, a zero word');
+
+    const update = (/** @type {number} */ attribute, /** @type {number} */ size)=>
+        fns.UpdateProcThreadAttribute.handler([LIST, 0, attribute, VALUE, size, 0, 0]);
+    assert.equal(update(0xcafe, 4), 0);
+    assert.equal(host.errors.at(-1), 50, 'ERROR_NOT_SUPPORTED');
+    assert.equal(update(0x20000, 2), 0);
+    assert.equal(host.errors.at(-1), 24, 'ERROR_BAD_LENGTH');
+    assert.equal(update(0x20000, 4), 1, 'the parent process');
+    assert.equal(update(0x20000, 4), 0);
+    assert.equal(host.errors.at(-1), 5010, 'ERROR_OBJECT_NAME_EXISTS');
+    assert.equal(update(0x20002, 15), 0, 'a handle list of part of a handle');
+    assert.equal(update(0x20002, 16), 1);
+    assert.equal(update(0x30003, 12), 1, 'group affinity');
+    assert.equal(update(0x30005, 4), 0, 'no room left');
+    assert.equal(host.errors.at(-1), 31, 'ERROR_GEN_FAILURE');
+    assert.deepEqual([0, 8].map(word), [(1 << 0 | 1 << 2 | 1 << 3) >>> 0, 3]);
+    assert.deepEqual([20, 24, 28, 32, 36, 40].map(word),
+        [0x20000, 4, VALUE, 0x20002, 16, VALUE], 'each entry its number, size and value');
+    assert.deepEqual([fns.InitializeProcThreadAttributeList.argBytes,
+        fns.UpdateProcThreadAttribute.argBytes, fns.DeleteProcThreadAttributeList.argBytes],
+    [16, 28, 4]);
+});

@@ -223,3 +223,55 @@ test('an Ex device takes FLIPEX and up to thirty back buffers', ()=>{
         out.device?.release();
     }
 });
+
+test("an Ex device keeps a system-memory texture or surface in the program's own memory", ()=>{
+    // Wine's d3d9ex.c test_user_memory: the shared handle of a system-memory
+    // texture of one level, or a plain surface, is memory the program owns,
+    // and a lock hands it back with a pitch of the rows laid end to end.
+    const device = make(true);
+    const MEMORY = 0x40000;
+    /** @type {{ texture?: any }} */
+    const made = {};
+    for (const [width, levels, pool] of [[128, 0, D3DPOOL.SYSTEMMEM], [128, 2, D3DPOOL.SYSTEMMEM],
+        [128, 1, D3DPOOL.SCRATCH]])
+    {
+        assert.equal(device.CreateTexture(width, width, levels, 0, D3DFMT.A8R8G8B8, pool, made,
+            MEMORY), D3DERR_INVALIDCALL, `${levels} levels in pool ${pool}`);
+    }
+    assert.equal(device.CreateTexture(33, 33, 1, 0, D3DFMT.L8, D3DPOOL.SYSTEMMEM, made, MEMORY),
+        D3D_OK);
+    /** @type {{ pBits?: number, Pitch?: number }} */
+    const locked = {};
+    assert.equal(made.texture.LockRect(0, locked, null, 0), D3D_OK);
+    assert.deepEqual([locked.pBits, locked.Pitch], [MEMORY, 33]);
+    assert.equal(made.texture.UnlockRect(0), D3D_OK);
+
+    /** @type {{ surface?: any }} */
+    const plain = {};
+    assert.equal(device.CreateOffscreenPlainSurface(128, 128, D3DFMT.A8R8G8B8, D3DPOOL.SCRATCH,
+        plain, 0, MEMORY), D3DERR_INVALIDCALL);
+    assert.equal(device.CreateOffscreenPlainSurface(128, 128, D3DFMT.A8R8G8B8,
+        D3DPOOL.SYSTEMMEM, plain, 0, MEMORY), D3D_OK);
+    assert.equal(plain.surface.LockRect(locked, null, 0), D3D_OK);
+    assert.deepEqual([locked.pBits, locked.Pitch], [MEMORY, 512]);
+});
+
+test("a back buffer an Ex device's program holds past a reset is the chain's no longer", ()=>{
+    // Wine's d3d9ex.c test_backbuffer_resize: its container is the device.
+    const device = make(true);
+    /** @type {{ surface?: any }} */
+    const out = {};
+    assert.equal(device.GetBackBuffer(0, 0, 0, out), D3D_OK);
+    const old = out.surface;
+    assert.notEqual(old.container, null, 'the chain holds it');
+    assert.equal(device.Reset({
+        swapEffect: D3DSWAPEFFECT.DISCARD, backBufferWidth: 80, backBufferHeight: 60,
+        backBufferFormat: D3DFMT.A8R8G8B8,
+    }), D3D_OK);
+    assert.equal(old.container, null);
+    /** @type {{ surface?: any }} */
+    const fresh = {};
+    assert.equal(device.GetBackBuffer(0, 0, 0, fresh), D3D_OK);
+    assert.notEqual(fresh.surface, old);
+    assert.notEqual(fresh.surface.container, null);
+});

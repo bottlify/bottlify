@@ -57,9 +57,25 @@ const MAX_DESCRIPTORS = 2048;
 
 /** 0, 1 and 2: stdin, stdout and stderr. */
 const STANDARD_DESCRIPTORS = 3;
+const STANDARD_HANDLES = [HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR];
 
 /** What `_get_osfhandle` answers for a number not open. */
 const INVALID_HANDLE_VALUE = -1;
+
+/**
+ * `__pioinfo`, msvcrt.dll's table of descriptors as a program reads it in
+ * place: a pointer per block of 32, then the first block, each entry 36 bytes
+ * -- the handle, `wxflag`, three bytes of lookahead, `exflag` and a critical
+ * section.
+ */
+const IOINFO = Object.freeze({
+    BLOCK: 32, SIZE: 36, BLOCKS: MAX_DESCRIPTORS / 32, HANDLE: 0, WXFLAG: 4,
+});
+/** `wxflag`'s bits: open, appending, a character device, text mode. */
+const WX_OPEN = 0x01;
+const WX_APPEND = 0x20;
+const WX_TTY = 0x40;
+const WX_TEXT = 0x80;
 
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
@@ -259,6 +275,10 @@ const onConsole = (handle, settings)=>{
  * @property {FileHandles} [handles]
  *           Where a descriptor's file becomes a handle and a handle a
  *           descriptor. Absent, neither is asked for.
+ * @property {() => number} [ioinfo]  Where `__pioinfo` is, 0 before the
+ *           runtime's image is placed; each change to a descriptor of the
+ *           first block is written there.
+ * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  */
 
 /**
@@ -277,6 +297,39 @@ export function createDescriptors(host){
     table.set(0, onConsole(HANDLE_STDIN, { text: true }));
     table.set(1, onConsole(HANDLE_STDOUT, { text: true }));
     table.set(2, onConsole(HANDLE_STDERR, { text: true }));
+
+    /**
+     * A descriptor's `__pioinfo` entry, its handle and `wxflag`: a number not
+     * open has no handle. A file's handle is made only when one is asked
+     * for, so until then the entry holds none, though `wxflag` says it is
+     * open.
+     *
+     * @param {number} fd
+     */
+    const entryOf = fd=>{
+        const descriptor = table.get(fd);
+        const bytes = new Uint8Array(IOINFO.WXFLAG + 1);
+        new DataView(bytes.buffer).setInt32(IOINFO.HANDLE,
+            descriptor?.handle || INVALID_HANDLE_VALUE, true);
+        bytes[IOINFO.WXFLAG] = !descriptor ? 0 : WX_OPEN | (descriptor.append ? WX_APPEND : 0)
+            | (descriptor.console !== undefined ? WX_TTY : 0) | (descriptor.text ? WX_TEXT : 0);
+        return bytes;
+    };
+
+    /**
+     * Writes a descriptor's entry where the program reads it.
+     * ponytail: the first block only, the one msvcrt.dll starts with; the
+     * next are made as descriptors past 31 are opened, when one is read.
+     *
+     * @param {number} fd
+     */
+    const mirror = fd=>{
+        const at = host.ioinfo?.() ?? 0;
+        if (at !== 0 && fd >= 0 && fd < IOINFO.BLOCK)
+        {
+            host.writeMemory?.(at + IOINFO.BLOCKS * 4 + fd * IOINFO.SIZE, entryOf(fd));
+        }
+    };
 
     /** @param {number} code */
     const fail = code=>{
@@ -451,6 +504,7 @@ export function createDescriptors(host){
                 unicode: request.unicode,
             });
             table.set(fd, descriptor);
+            mirror(fd);
             return descriptor.unicode === 0 ? fd : settle(markFile(descriptor), ()=>fd);
         },
 
@@ -466,6 +520,13 @@ export function createDescriptors(host){
             if (descriptor.handle === 0 && host.handles)
             {
                 descriptor.handle = host.handles.open(descriptor.file);
+                for (const [fd, held] of table)
+                {
+                    if (held === descriptor)
+                    {
+                        mirror(fd);
+                    }
+                }
             }
             return descriptor.handle;
         },
@@ -493,6 +554,7 @@ export function createDescriptors(host){
                 table.set(fd, file
                     ? over(file, { ...settings, handle })
                     : onConsole(handle, settings));
+                mirror(fd);
             }
             return fd;
         },
@@ -509,16 +571,27 @@ export function createDescriptors(host){
          * @param {number} fd @returns {boolean} false for a number not open
          */
         close(fd){
-            const descriptor = table.get(fd | 0);
+            const number = fd | 0;
+            const descriptor = table.get(number);
             if (!descriptor)
             {
                 return false;
             }
-            if ((fd | 0) < STANDARD_DESCRIPTORS)
+            if (number < STANDARD_DESCRIPTORS && descriptor.console !== undefined)
             {
                 return true;
             }
-            table.delete(fd | 0);
+            // A file `_dup2` or freopen put on a standard number closes, and the
+            // number is the console's again.
+            if (number < STANDARD_DESCRIPTORS)
+            {
+                table.set(number, onConsole(STANDARD_HANDLES[number], { text: true }));
+            }
+            else
+            {
+                table.delete(number);
+            }
+            mirror(number);
             if (descriptor.console !== undefined)
             {
                 return true;
@@ -540,6 +613,53 @@ export function createDescriptors(host){
         },
 
         /**
+         * A second descriptor on what `fd` has open, sharing its position, as
+         * `_dup` and `_dup2` make one: the lowest number free, or `onto`,
+         * closing what was there first -- a standard number included, which
+         * is how a program sends its output to a file. -1 with EBADF for a
+         * number not open or a target out of range.
+         *
+         * @param {number} fd @param {number} [onto]
+         */
+        duplicate(fd, onto){
+            const source = table.get(fd | 0);
+            const outOfReach = onto !== undefined
+                && ((onto | 0) < 0 || (onto | 0) >= MAX_DESCRIPTORS);
+            if (!source || outOfReach)
+            {
+                fail(EBADF);
+                return -1;
+            }
+            if (onto !== undefined && (onto | 0) === (fd | 0))
+            {
+                return fd | 0;
+            }
+            const target = onto === undefined ? lowestFree() : onto | 0;
+            if (target < 0)
+            {
+                return -1;
+            }
+            if (table.has(target))
+            {
+                this.close(target);
+            }
+            // Each descriptor holds the file once: a copy takes a hold of its
+            // own, which its close gives back.
+            if (source.console === undefined)
+            {
+                host.files.retain?.(source.node);
+            }
+            const copy = over(source.file, {
+                append: source.append, text: source.text, unicode: source.unicode,
+                console: source.console, handle: source.console === undefined ? 0 : source.handle,
+            });
+            copy.encoding = source.encoding;
+            table.set(target, copy);
+            mirror(target);
+            return target;
+        },
+
+        /**
          * Closes every descriptor but the console's three, as the end of the
          * process closes every handle it held, however it ended: a temporary
          * file goes then if it has not gone before.
@@ -549,6 +669,19 @@ export function createDescriptors(host){
             {
                 this.close(fd);
             }
+        },
+
+        /**
+         * `__pioinfo` as the image starts with it: the first block's pointer,
+         * filled by the loader, and the block with every descriptor open now.
+         */
+        ioinfoBytes(){
+            const bytes = new Uint8Array(IOINFO.BLOCKS * 4 + IOINFO.BLOCK * IOINFO.SIZE);
+            for (let fd = 0; fd < IOINFO.BLOCK; fd++)
+            {
+                bytes.set(entryOf(fd), IOINFO.BLOCKS * 4 + fd * IOINFO.SIZE);
+            }
+            return bytes;
         },
 
         size: sizeOf,
@@ -961,8 +1094,36 @@ export function createIoFunctions(host, descriptors){
         }
         : {};
 
+    const duplicates = {
+        /** int _dup(int fd) -- a second descriptor on the same file, its position shared. */
+        _dup: cdecl(4, ([fd])=>descriptors.duplicate(fd)),
+
+        /**
+         * int _dup2(int fd1, int fd2)
+         *
+         * `fd2` made a second descriptor on `fd1`'s file, closing what it
+         * had: 0, or -1 with EBADF for either number out of reach.
+         */
+        _dup2: cdecl(8, ([fd, onto])=>(descriptors.duplicate(fd, onto) < 0 ? -1 : 0)),
+    };
+
+    /**
+     * ioinfo *__pioinfo[]
+     *
+     * Data: the runtime's descriptors as a program reads them in place, its
+     * first pointer to the block that follows it.
+     */
+    const ioinfo = {
+        __pioinfo: {
+            data: ()=>descriptors.ioinfoBytes(),
+            pointers: [{ at: 0, to: '__pioinfo', offset: IOINFO.BLOCKS * 4 }],
+        },
+    };
+
     return {
         ...osHandles,
+        ...ioinfo,
+        ...duplicates,
 
         /**
          * int _open(const char *filename, int oflag [, int pmode])

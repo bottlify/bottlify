@@ -34,6 +34,7 @@ import { createWaitFunctions } from './waits.js';
 import { createPathFunctions } from './paths.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
 import { STATUS, toDosError } from './status.js';
+import { UNLOAD_KEY } from '../advapi32/functions.js';
 
 /**
  * The C runtime functions ntdll publishes under its own name.
@@ -65,7 +66,15 @@ const CRT_EXPORTS = [
  * The names ntdll exports for functions kernel32 exports too, and what they are
  * called there. Each pair is the same entry point on a real machine.
  */
+/** 'MZ' and 'PE' with two zero bytes, as an image's two headers begin. */
+const IMAGE_DOS_SIGNATURE = 0x5a4d;
+const IMAGE_NT_SIGNATURE = 0x00004550;
+
 const KERNEL32_ALIASES = Object.freeze({
+    RtlAddVectoredExceptionHandler: 'AddVectoredExceptionHandler',
+    RtlRemoveVectoredExceptionHandler: 'RemoveVectoredExceptionHandler',
+    RtlAddVectoredContinueHandler: 'AddVectoredContinueHandler',
+    RtlRemoveVectoredContinueHandler: 'RemoveVectoredContinueHandler',
     RtlAllocateHeap: 'HeapAlloc',
     RtlFreeHeap: 'HeapFree',
     RtlReAllocateHeap: 'HeapReAlloc',
@@ -117,6 +126,9 @@ const KERNEL32_ALIASES = Object.freeze({
  *           process block. Absent, the default.
  * @property {(handle: number) => string | null} [handleType]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {Record<string | symbol, any>} [advapi32]
+ *           The assembled ADVAPI32.dll table, whose registry NtUnloadKey
+ *           unloads a hive from. Absent, NtUnloadKey stays unexported.
  */
 
 /**
@@ -134,6 +146,106 @@ const alias = (table, names)=>Object.fromEntries(
 
 /** Where a thread block keeps its process's block. */
 const TEB_PEB = 0x30;
+
+/** @param {Uint8Array} bytes  Four of them, little-endian. */
+const readU32 = bytes=>(bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+
+/** The user flags a heap block may carry, HEAP_SETTABLE_USER_FLAGS, and a new block's. */
+const SETTABLE_USER_FLAGS = 0xe00;
+const DEFAULT_USER_FLAGS = 0x200;
+const ERROR_INVALID_PARAMETER = 87;
+
+/**
+ * The value and flags a program may keep in a heap block of its own:
+ * RtlSetUserValueHeap, RtlSetUserFlagsHeap and RtlGetUserInfoHeap, over the
+ * blocks kernel32's heaps hand out. A pointer that is no live block of the
+ * heap is refused, as the heap refuses it.
+ *
+ * @param {Record<string, Entry>} kernel32
+ * @param {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @returns {Record<string, Entry>}
+ */
+function createUserInfoFunctions(kernel32, writeMemory){
+    /** @type {Map<number, { value: number, flags: number }>} by block */
+    const kept = new Map();
+    /** @param {number} heap @param {number} block */
+    const infoOf = (heap, block)=>{
+        if (kernel32.HeapValidate.handler([heap, 0, block]) === 0 || block === 0)
+        {
+            kernel32.SetLastError?.handler([ERROR_INVALID_PARAMETER]);
+            return null;
+        }
+        let info = kept.get(block);
+        if (!info)
+        {
+            info = { value: 0, flags: DEFAULT_USER_FLAGS };
+            kept.set(block, info);
+        }
+        return info;
+    };
+    /** @param {number} address @param {number} value */
+    const writeU32 = (address, value)=>{
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        writeMemory(address, bytes);
+    };
+    return {
+        /** BOOLEAN RtlGetUserInfoHeap(HANDLE, ULONG, PVOID, PVOID *UserValue, PULONG UserFlags) */
+        RtlGetUserInfoHeap: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([heap, , block, value, flags])=>{
+                const info = infoOf(heap >>> 0, block >>> 0);
+                if (!info)
+                {
+                    return 0;
+                }
+                if ((value >>> 0) !== 0)
+                {
+                    writeU32(value >>> 0, info.value);
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    writeU32(flags >>> 0, info.flags);
+                }
+                return 1;
+            },
+        },
+        /** BOOLEAN RtlSetUserValueHeap(HANDLE, ULONG, PVOID, PVOID UserValue) */
+        RtlSetUserValueHeap: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([heap, , block, value])=>{
+                const info = infoOf(heap >>> 0, block >>> 0);
+                if (!info)
+                {
+                    return 0;
+                }
+                info.value = value >>> 0;
+                return 1;
+            },
+        },
+        /** BOOLEAN RtlSetUserFlagsHeap(HANDLE, ULONG, PVOID, ULONG FlagsReset, ULONG FlagsSet) */
+        RtlSetUserFlagsHeap: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([heap, , block, reset, set])=>{
+                if (((reset | set) & ~SETTABLE_USER_FLAGS) !== 0)
+                {
+                    kernel32.SetLastError?.handler([ERROR_INVALID_PARAMETER]);
+                    return 0;
+                }
+                const info = infoOf(heap >>> 0, block >>> 0);
+                if (!info)
+                {
+                    return 0;
+                }
+                info.flags = ((info.flags & ~reset) | set) >>> 0;
+                return 1;
+            },
+        },
+    };
+}
 
 /**
  * Builds the function table: name -> { argBytes, handler }.
@@ -210,6 +322,73 @@ export function createNtdllFunctions(host){
                 writeMemory: host.writeMemory, kernel32, allocate })
             : {}),
 
+        ...(kernel32.HeapValidate ? createUserInfoFunctions(kernel32, host.writeMemory) : {}),
+
+        /**
+         * NTSTATUS NtQuerySystemTime(PLARGE_INTEGER SystemTime)
+         *
+         * GetSystemTimeAsFileTime's clock, as a status: no place to put it is
+         * an access violation.
+         */
+        ...(kernel32.GetSystemTimeAsFileTime
+            ? {
+                NtQuerySystemTime: {
+                    argBytes: 4,
+                    /** @param {number[]} args */
+                    handler: ([out])=>{
+                        if ((out >>> 0) === 0)
+                        {
+                            return STATUS.ACCESS_VIOLATION;
+                        }
+                        kernel32.GetSystemTimeAsFileTime.handler([out >>> 0]);
+                        return STATUS.SUCCESS;
+                    },
+                },
+            }
+            : {}),
+
+        /**
+         * NTSTATUS NtUnloadKey(POBJECT_ATTRIBUTES TargetKey)
+         *
+         * A hive RegLoadKey mounted, named the native way --
+         * \REGISTRY\Machine\<key> or \REGISTRY\User\<key> -- unloaded
+         * through the same table: a key that is no loaded hive is refused,
+         * one a handle is still open on cannot go.
+         */
+        ...(host.advapi32?.[UNLOAD_KEY]
+            ? {
+                NtUnloadKey: {
+                    argBytes: 4,
+                    /** @param {number[]} args */
+                    handler: ([attributes])=>{
+                        const name = (attributes >>> 0) === 0 ? 0
+                            : readU32(host.readMemory((attributes >>> 0) + 8, 4));
+                        if (name === 0)
+                        {
+                            return STATUS.INVALID_PARAMETER;
+                        }
+                        const length = host.readMemory(name, 2);
+                        const buffer = readU32(host.readMemory(name + 4, 4));
+                        const units = host.readMemory(buffer, length[0] | length[1] << 8);
+                        let path = '';
+                        for (let at = 0; at + 1 < units.length; at += 2)
+                        {
+                            path += String.fromCharCode(units[at] | units[at + 1] << 8);
+                        }
+                        const match = /^\\registry\\(machine|user)\\(.+)$/i.exec(path);
+                        if (!match)
+                        {
+                            return STATUS.OBJECT_NAME_NOT_FOUND;
+                        }
+                        const HKEY_LOCAL_MACHINE = 0x80000002;
+                        const HKEY_USERS = 0x80000003;
+                        return host.advapi32?.[UNLOAD_KEY](match[1].toLowerCase() === 'machine'
+                            ? HKEY_LOCAL_MACHINE : HKEY_USERS, match[2]);
+                    },
+                },
+            }
+            : {}),
+
         /**
          * NTSTATUS NtClose(HANDLE Handle)
          *
@@ -238,6 +417,34 @@ export function createNtdllFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([status])=>toDosError(status),
+        },
+
+        /**
+         * PIMAGE_NT_HEADERS RtlImageNtHeader(PVOID BaseOfImage)
+         *
+         * The headers an image's DOS stub points at, when the stub is one and
+         * they carry the PE signature; NULL for anything else.
+         */
+        RtlImageNtHeader: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([base])=>{
+                const at = base >>> 0;
+                if (at === 0)
+                {
+                    return 0;
+                }
+                const read = (/** @type {number} */ address)=>{
+                    const bytes = host.readMemory(address, 4);
+                    return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+                };
+                if ((read(at) & 0xffff) !== IMAGE_DOS_SIGNATURE)
+                {
+                    return 0;
+                }
+                const headers = (at + read(at + 0x3c)) >>> 0;
+                return read(headers) === IMAGE_NT_SIGNATURE ? headers : 0;
+            },
         },
 
         /** PPEB RtlGetCurrentPeb(void): where the running thread's block says it is. */

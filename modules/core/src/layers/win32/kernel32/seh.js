@@ -111,6 +111,13 @@ export const Disposition = Object.freeze({
     COLLIDED_UNWIND: 3,
 });
 
+/**
+ * The handles AddVectored*Handler answers: never null, and apart from each
+ * other. A program only hands one back to remove what it registered.
+ */
+const VECTORED_HANDLE_BASE = 0x00ec0000;
+const VECTORED_HANDLE_STRIDE = 8;
+
 /** The chain ends with this, not with zero -- zero is an address. */
 export const END_OF_CHAIN = 0xffffffff;
 
@@ -355,6 +362,88 @@ export function createSeh(host){
     };
 
     /**
+     * The vectored handlers AddVectoredExceptionHandler and
+     * AddVectoredContinueHandler registered, the whole process's, each under
+     * the handle its registration answered.
+     */
+    const vectored = {
+        /** @type {{ handle: number, entry: number }[]} */
+        exception: [],
+        /** @type {{ handle: number, entry: number }[]} */
+        continue: [],
+    };
+    let nextVectored = VECTORED_HANDLE_BASE;
+
+    /**
+     * Calls a list of vectored handlers in order with the exception's
+     * pointers, stopping at the first that answers
+     * EXCEPTION_CONTINUE_EXECUTION. Over a copy: a handler may add or remove
+     * one while it runs.
+     *
+     * @param {{ entry: number }[]} list
+     * @param {number} pointers @param {any} thread @param {number} flags
+     * @returns {Promise<boolean>} whether one asked to continue
+     */
+    const callVectored = async(list, pointers, thread, flags)=>{
+        for (const { entry } of [...list])
+        {
+            const answer = await host.callGuest({
+                entry, args: [pointers], thread, stackAtRest: pointers, ...entryFlags(flags),
+            }) | 0;
+            if (answer === EXCEPTION_CONTINUE_EXECUTION)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    /**
+     * AddVectored*Handler and RemoveVectored*Handler over one list.
+     *
+     * @param {{ handle: number, entry: number }[]} list
+     */
+    const vectoredCalls = list=>({
+        add: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([first, entry])=>{
+                if ((entry >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const handle = nextVectored;
+                nextVectored = (nextVectored + VECTORED_HANDLE_STRIDE) >>> 0;
+                const record = { handle, entry: entry >>> 0 };
+                if (first !== 0)
+                {
+                    list.unshift(record);
+                }
+                else
+                {
+                    list.push(record);
+                }
+                return handle;
+            },
+        },
+        remove: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const at = list.findIndex(one=>one.handle === (handle >>> 0));
+                if (at < 0)
+                {
+                    return 0;
+                }
+                list.splice(at, 1);
+                return 1;
+            },
+        },
+    });
+    const exceptionHandlers = vectoredCalls(vectored.exception);
+    const continueHandlers = vectoredCalls(vectored.continue);
+
+    /**
      * Carves the record and context out of the program's own stack, and moves
      * the stack pointer below them.
      *
@@ -406,6 +495,18 @@ export function createSeh(host){
         // code and the loop turns between them, so from the second one onwards
         // the thread on the processor is somebody else's.
         const asked = host.currentThread?.();
+
+        // The vectored handlers first, the whole process's, in their order,
+        // each handed EXCEPTION_POINTERS below the record.
+        const pointers = (at.top - 8) >>> 0;
+        writeU32(pointers, at.record);
+        writeU32(pointers + 4, at.context);
+        if (await callVectored(vectored.exception, pointers, asked, flags))
+        {
+            await callVectored(vectored.continue, pointers, asked, flags);
+            return { handled: true, registers: continuation(at.context, flags) };
+        }
+
         const { frames, damaged } = chain();
         host.trace?.(`exception ${hex(what.code)} at ${hex(what.address)}, `
             + `${frames.length} frame(s)${damaged ? ', chain damaged' : ''}`);
@@ -432,6 +533,14 @@ export function createSeh(host){
                 // and that includes the stack pointer: restoring only the
                 // instruction pointer leaves the stack a frame out, every time.
                 // The flags too: DF is the faulting code's again.
+                if (vectored.continue.length > 0)
+                {
+                    // The frame's handler ran on the stack below the record,
+                    // over where the pointers were.
+                    writeU32(pointers, at.record);
+                    writeU32(pointers + 4, at.context);
+                    await callVectored(vectored.continue, pointers, asked, flags);
+                }
                 return { handled: true, registers: continuation(at.context, flags) };
             }
             if (answer === Disposition.NESTED_EXCEPTION
@@ -654,6 +763,26 @@ export function createSeh(host){
 
         /** The guest-callable half. */
         table: {
+            /**
+             * PVOID AddVectoredExceptionHandler(ULONG First, PVECTORED_EXCEPTION_HANDLER)
+             *
+             * A handler every exception in the process is offered before any
+             * frame's, first in line when First is nonzero; the handle it
+             * answers removes it again.
+             */
+            AddVectoredExceptionHandler: exceptionHandlers.add,
+            /** ULONG RemoveVectoredExceptionHandler(PVOID Handle) */
+            RemoveVectoredExceptionHandler: exceptionHandlers.remove,
+            /**
+             * PVOID AddVectoredContinueHandler(ULONG First, PVECTORED_EXCEPTION_HANDLER)
+             *
+             * Called when a handler has decided an exception is fixed and
+             * execution goes on, with the context it will go on with.
+             */
+            AddVectoredContinueHandler: continueHandlers.add,
+            /** ULONG RemoveVectoredContinueHandler(PVOID Handle) */
+            RemoveVectoredContinueHandler: continueHandlers.remove,
+
             /**
              * VOID RaiseException(DWORD dwExceptionCode, DWORD dwExceptionFlags,
              *                     DWORD nNumberOfArguments, const ULONG_PTR *lpArguments)

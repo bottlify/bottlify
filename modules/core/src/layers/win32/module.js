@@ -967,10 +967,11 @@ export function createWin32Module(){
                 divergence: config?.divergence,
             });
 
-            // DxDiag's provider, which an installer asks which DirectX this is.
+            // DxDiag's provider, which an installer asks which DirectX this is
+            // and a configuration tool how much video memory there is.
             registerDxDiagClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
-                windows, divergence: config?.divergence,
+                windows, screen: config?.screen, divergence: config?.divergence,
             });
 
             // One way of starting a program, behind three spellings of asking for
@@ -1352,6 +1353,7 @@ export function createWin32Module(){
                         readMemory,
                         writeMemory,
                         setLastError: setError,
+                        divergence: config?.divergence,
                         write: (/** @type {number} */ handle, /** @type {string} */ text)=>
                             sink(handle, text),
                     }),
@@ -1413,6 +1415,7 @@ export function createWin32Module(){
                         readCString,
                         readWideString,
                         writeMemory,
+                        readMemory,
                         find: name=>modules.find(name),
                         byBase: base=>modules.byBase(base),
                         setLastError: setError,
@@ -2041,6 +2044,17 @@ export function createWin32Module(){
                         readCString,
                         hive,
                         setLastError: setError,
+                        // Where RegSaveKey writes a hive and RegLoadKey reads one.
+                        files: volume,
+                        divergence: config?.divergence,
+                        // The events a change notification signals: kernel32's own.
+                        events: {
+                            /** @param {number} handle */
+                            set: handle=>libraries['KERNEL32.dll'].SetEvent.handler([handle]) !== 0,
+                            /** @param {number} handle */
+                            reset: handle=>
+                                libraries['KERNEL32.dll'].ResetEvent.handler([handle]) !== 0,
+                        },
                         // A SID has to live where a program can compare it byte by byte.
                         /** @param {number} bytes */
                         allocate: bytes=>heap.allocate(bytes),
@@ -2259,6 +2273,7 @@ export function createWin32Module(){
                 windows,
                 handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
                 divergence: config?.divergence,
+                advapi32: libraries['ADVAPI32.dll'],
             });
 
             /** Every function, whichever library exports it. */

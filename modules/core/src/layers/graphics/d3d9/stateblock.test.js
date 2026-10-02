@@ -291,3 +291,50 @@ test('a light recorded by enabling alone is applied with the light the device ho
     out.block.release();
     assert.equal(device.release(), 0);
 });
+
+test('a block that captured no declaration applies none, and one it holds is applied', ()=>{
+    // device.c test_vertex_declaration_stateblock: a NULL declaration is
+    // captured, but applying it leaves the device's declaration standing.
+    const device = createDevice();
+    const declare = ()=>{
+        /** @type {{ declaration?: any }} */
+        const made = {};
+        assert.equal(device.CreateVertexDeclaration([
+            { Stream: 0, Offset: 0, Type: 2, Method: 0, Usage: 0, UsageIndex: 0 },
+        ], made), D3D_OK);
+        return made.declaration;
+    };
+    const first = declare();
+    const second = declare();
+    const held = ()=>{
+        /** @type {{ declaration?: any }} */
+        const out = {};
+        assert.equal(device.GetVertexDeclaration(out), D3D_OK);
+        return out.declaration;
+    };
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    assert.equal(device.SetVertexDeclaration(first), D3D_OK);
+    /** @type {{ block?: any }} */
+    const out = {};
+    assert.equal(device.EndStateBlock(out), D3D_OK);
+    const block = out.block;
+    assert.equal(device.SetVertexDeclaration(null), D3D_OK);
+    assert.equal(block.Apply(), D3D_OK);
+    assert.equal(held(), first, 'the recorded declaration');
+
+    assert.equal(device.SetVertexDeclaration(null), D3D_OK);
+    assert.equal(block.Capture(), D3D_OK);
+    assert.equal(device.SetVertexDeclaration(second), D3D_OK);
+    assert.equal(block.Apply(), D3D_OK);
+    assert.equal(held(), second, 'a captured NULL applies nothing');
+
+    assert.equal(block.Capture(), D3D_OK);
+    assert.equal(device.SetVertexDeclaration(null), D3D_OK);
+    assert.equal(block.Apply(), D3D_OK);
+    assert.equal(held(), second, 'a captured declaration is applied');
+
+    assert.equal(device.SetVertexDeclaration(null), D3D_OK);
+    assert.equal(block.Capture(), D3D_OK);
+    assert.equal(block.Apply(), D3D_OK);
+    assert.equal(held(), null);
+});

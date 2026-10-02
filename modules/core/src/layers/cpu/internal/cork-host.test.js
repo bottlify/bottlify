@@ -144,8 +144,7 @@ test('the interpreter\'s retired instructions read back through instructionCount
     const loop = host();
     // mov ecx, 2000; dec ecx; jnz -3; hlt -- 1 + 2000*2 + 1 = 4002.
     load(loop, 0x2000, [0xb9, 0xd0, 0x07, 0, 0, 0x49, 0x75, 0xfd, 0xf4]);
-    // As many slices as it takes: a slice that interprets ends on time, and a
-    // loaded machine interprets four thousand instructions past it.
+    // To its halt, however many slices: an interpreted slice also ends on time.
     for (let slices = 0; !loop.halted() && slices < 1000; slices++)
     {
         loop.runSlice(1 << 16);
@@ -172,13 +171,43 @@ test('a slice that interprets ends once it has taken its time, and the next goes
         assert.equal(h.instructionCount(), total, 'every instruction once, across the slices');
     });
 
-test('a slice that dies on a no-tier instruction still counts what it ran', ()=>{
-    const h = host();
-    // Four nops, then sldt [eax]: the model has no case for it.
-    load(h, 0x1000, [0x90, 0x90, 0x90, 0x90, 0x0f, 0x00, 0x00, 0xf4]);
-    assert.throws(()=>h.runSlice(100), /no tier for 0x0f/);
-    assert.equal(h.instructionCount(), 4, 'the four nops it ran, not the one it stopped on');
-});
+test('an instruction no tier carries is an invalid-opcode fault, and the slice counts what ran',
+    ()=>{
+        // A fault the program's own handlers can take, as a processor raises
+        // for an instruction it does not know, rather than the engine stopping.
+        const h = host();
+        // Four nops, then sldt [eax]: the model has no case for it.
+        load(h, 0x1000, [0x90, 0x90, 0x90, 0x90, 0x0f, 0x00, 0x00, 0xf4]);
+        h.runSlice(100);
+        assert.equal(h.instructionCount(), 4, 'the four nops it ran, not the one it stopped on');
+        const fault = h.fault();
+        assert.equal(fault?.vector, 6, '#UD');
+        assert.equal(fault?.eip, 0x1004, 'at the instruction');
+        assert.deepEqual(h.corkDiagnostics().untiered?.length, 1, 'and named in the diagnostics');
+    });
+
+for (const wasmInterpreter of [false, true])
+{
+    test(`a call through a null pointer faults where nothing runs, and the range still reads, `
+        + `on the ${wasmInterpreter ? 'wasm' : 'JavaScript'} tier`, ()=>{
+        // The first 64 KiB stay open to reads, which a title leans on, but a
+        // call into them slid through zeroes into the entry vector and ran it --
+        // on the wasm tier, through zeroes into whatever lay above.
+        const h = host({ noExecuteBelow: 0x10000,
+            cork: { wasmInterpreter, wasmInterpreterAfter: 0 } });
+        // mov eax, [0x100]; xor ecx, ecx; call ecx -- at 0x20000.
+        load(h, 0x20000, [0xa1, 0x00, 0x01, 0x00, 0x00, 0x31, 0xc9, 0xff, 0xd1, 0xf4]);
+        h.writePhysical(0x100, Uint8Array.of(0x78, 0x56, 0x34, 0x12));
+        for (let slices = 0; !h.halted() && slices < 1000; slices++)
+        {
+            h.runSlice(100);
+        }
+        assert.equal(h.readReg32('eax'), 0x12345678, 'the read below went through');
+        const fault = h.fault();
+        assert.equal(fault?.vector, 14, 'a page fault');
+        assert.equal(fault?.eip, 0, 'at the address the call went to');
+    });
+}
 
 test('a call into code left untranslated runs on the wasm tier in place, not through the host',
     async()=>{
@@ -503,8 +532,7 @@ function runCounted(counted, code, cork = {}){
     const before = { ...counted.retired };
     const h = host({ engine: counted.counting, cork: { translate: false, ...cork } });
     load(h, 0x1000, code);
-    // Slices to the halt: one that interprets ends on time, which a loaded
-    // machine reaches before the program does.
+    // To its halt, however many slices: an interpreted slice also ends on time.
     for (let slices = 0; !h.halted() && slices < 1000; slices++)
     {
         h.runSlice(100_000);

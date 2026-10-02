@@ -284,6 +284,29 @@ function snapshot(src, left, top, width, height){
 }
 
 /**
+ * The part of a destination a stretch can reach: its rectangle, whichever way
+ * the extents point, inside the clip and the surface.
+ *
+ * @param {import("./contract.js").Surface} dest
+ * @param {import("./contract.js").Rect | undefined} clip
+ * @param {number} x
+ * @param {number} y
+ * @param {number} width
+ * @param {number} height
+ * @returns {import("./contract.js").Rect}
+ */
+export function stretchTarget(dest, clip, x, y, width, height){
+    const left = Math.min(x | 0, (x | 0) + (width | 0));
+    const top = Math.min(y | 0, (y | 0) + (height | 0));
+    return intersectRect(intersectRect(clip ?? surfaceBounds(dest), surfaceBounds(dest)), {
+        left,
+        top,
+        right: left + Math.abs(width | 0),
+        bottom: top + Math.abs(height | 0),
+    });
+}
+
+/**
  * @param {StretchOptions} options
  * @returns {boolean} what StretchBlt reports
  */
@@ -309,13 +332,8 @@ export function stretchBlt(options){
     const srcTop = Math.min(options.srcY | 0, (options.srcY | 0) + (options.srcHeight | 0));
 
     const dest = options.dest;
-    const clip = intersectRect(options.clip ?? surfaceBounds(dest), surfaceBounds(dest));
-    const target = intersectRect(clip, {
-        left: destLeft,
-        top: destTop,
-        right: destLeft + destWidth,
-        bottom: destTop + destHeight,
-    });
+    const target = stretchTarget(dest, options.clip, options.x, options.y,
+        options.width, options.height);
     if (isEmptyRect(target))
     {
         return true;

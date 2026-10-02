@@ -12,6 +12,7 @@ import {
     CLSID_DXDIAG_PROVIDER, DXDIAG_DX9_SDK_VERSION, DXDIAG_E_INSUFFICIENT_BUFFER,
     IID_IDXDIAG_CONTAINER, IID_IDXDIAG_PROVIDER, registerDxDiagClasses,
 } from './dxdiag.js';
+import { ADAPTER_NAME, ADAPTER_RAM } from './wbem.js';
 
 const S_OK = 0;
 const E_POINTER = 0x80004003 | 0;
@@ -20,7 +21,8 @@ const CO_E_NOTINITIALIZED = 0x800401f0 | 0;
 const VT_UI4 = 19;
 const VT_BSTR = 8;
 
-function setup(){
+/** @param {{ width: number, height: number, bitsPerPixel: number }} [screen] */
+function setup(screen){
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
     /** @type {string[]} */
@@ -57,6 +59,7 @@ function setup(){
             return text;
         },
         windows: windowsVersion('winxp'),
+        screen,
         divergence: (api, detail)=>reported.push(`${api}: ${detail}`),
     });
     /** @param {number} at */
@@ -227,4 +230,52 @@ test('a dotted name is a path: an empty part, or one not under the one before it
     assert.equal(host.call(root, 'GetChildContainer',
         [host.wide('DxDiag_SystemInfo.DxDiag_SystemInfo'), OUT]), E_INVALIDARG,
     'each part is looked for under the one before it');
+});
+
+test('the display device says how much video memory there is, and the mode Initialize found', ()=>{
+    // A configuration tool reads DxDiag_DisplayDevices.0's memory as text and
+    // compares the number with what its game needs.
+    const screen = { width: 1024, height: 768, bitsPerPixel: 32 };
+    const host = setup(screen);
+    const call = provider(host);
+    assert.equal(call('Initialize', [initParams(host, 16, DXDIAG_DX9_SDK_VERSION)]), S_OK);
+    call('GetRootContainer', [OUT]);
+    const root = host.view.getUint32(OUT, true);
+    assert.equal(host.call(root, 'GetChildContainer', [host.wide('DxDiag_DisplayDevices'), OUT]),
+        S_OK);
+    const displays = host.view.getUint32(OUT, true);
+    assert.equal(host.call(displays, 'GetNumberOfChildContainers', [OUT]), S_OK);
+    assert.equal(host.view.getUint32(OUT, true), 1, 'one adapter');
+    assert.equal(host.call(displays, 'EnumChildContainerNames', [0, NAME, 64]), S_OK);
+    assert.equal(host.wideAt(NAME), '0');
+    assert.equal(host.call(root, 'GetChildContainer', [host.wide('DxDiag_DisplayDevices.0'), OUT]),
+        S_OK);
+    const device = host.view.getUint32(OUT, true);
+    /** @param {string} name */
+    const prop = name=>{
+        assert.equal(host.call(device, 'GetProp', [host.wide(name), VARIANT]), S_OK, name);
+        const vt = host.view.getUint16(VARIANT, true);
+        const value = host.view.getUint32(VARIANT + 8, true);
+        return vt === VT_BSTR ? host.wideAt(value) : value;
+    };
+    assert.equal(prop('szDisplayMemoryEnglish'), `${(ADAPTER_RAM / 1048576).toFixed(1)} MB`,
+        'the figure WMI and GetAvailableTextureMem give');
+    assert.equal(prop('szDisplayMemoryLocalized'), '256.0 MB');
+    assert.equal(prop('szDisplayModeEnglish'), '1024 x 768 (32 bit) (60Hz)');
+    assert.equal(prop('dwWidth'), 1024);
+    assert.equal(prop('szDescription'), ADAPTER_NAME);
+    assert.equal(prop('b3DAccelerationEnabled'), 0xffff);
+    assert.equal(prop('bNoHardware'), 0);
+
+    // A mode changed afterwards is what the next Initialize gathers.
+    screen.width = 800;
+    screen.height = 600;
+    call('Initialize', [initParams(host, 16, DXDIAG_DX9_SDK_VERSION)]);
+    call('GetRootContainer', [OUT]);
+    const again = host.view.getUint32(OUT, true);
+    host.call(again, 'GetChildContainer', [host.wide('DxDiag_DisplayDevices.0'), OUT]);
+    const now = host.view.getUint32(OUT, true);
+    assert.equal(host.call(now, 'GetProp', [host.wide('dwWidth'), VARIANT]), S_OK);
+    assert.equal(host.view.getUint32(VARIANT + 8, true), 800);
+    assert.deepEqual(host.reported, []);
 });

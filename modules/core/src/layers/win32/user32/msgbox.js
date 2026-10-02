@@ -22,6 +22,7 @@
  */
 
 import { readText } from './unicode.js';
+import { after } from './controls.js';
 
 const WM_INITDIALOG = 0x0110;
 const WM_COMMAND = 0x0111;
@@ -282,7 +283,7 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
         if (answer !== 0)
         {
             standing.delete(message.hwnd >>> 0);
-            call('EndDialog', [message.hwnd, answer]);
+            return after(call('EndDialog', [message.hwnd, answer]), ()=>1);
         }
         return 1;
     };

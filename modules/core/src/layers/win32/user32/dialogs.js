@@ -226,6 +226,14 @@ const EM_SETSEL = 0x00b1;
 const BS_TYPEMASK = 0x0f;
 const BS_DEFPUSHBUTTON = 0x01;
 
+/** A static's kind, and the two that show a picture rather than text. */
+const SS_TYPEMASK = 0x1f;
+const SS_ICON = 0x03;
+const SS_BITMAP = 0x0e;
+const STM_SETIMAGE = 0x0172;
+const IMAGE_BITMAP = 0;
+const IMAGE_ICON = 1;
+
 /** What DialogBox answers when the dialog could not be made. */
 const DIALOG_FAILED = -1;
 
@@ -259,6 +267,10 @@ const MAX_RESOURCE_NAME = 256;
  * @property {(hwnd: number) => number | Promise<number>} [show]
  *           Shows a window as ShowWindow(SW_SHOW) would, answering once the
  *           procedures it sent to have.
+ * @property {(hwnd: number) => number | Promise<number>} [hide]  And hides one.
+ * @property {(instance: number, name: number, type: number) => number | Promise<number>
+ *     } [loadImage]  LoadImage of a module's resource, by ordinal or by a
+ *     UTF-16 name in guest memory.
  * @property {(message: { hwnd: number, message: number, wParam: number, lParam: number })
  *     => number} [translate]  What TranslateMessage does with a key message.
  * @property {(record: any) => any[]} children
@@ -492,12 +504,18 @@ export function createDialogFunctions(options){
                 id: extended ? template.u32(at + item.id) & 0xffff : template.u16(at + item.id),
                 className: '',
                 title: '',
+                image: 0,
                 data: 0,
             };
             template.at = at + item.size;
             const cls = template.nameOrOrdinal();
             control.className = cls.name ?? `#${cls.ordinal}`;
-            control.title = template.nameOrOrdinal().name ?? '';
+            const titleAt = (address + template.at) >>> 0;
+            const title = template.nameOrOrdinal();
+            control.title = title.name ?? '';
+            // What a static showing a picture loads it by: the ordinal, or the
+            // name where it lies in the template.
+            control.image = title.ordinal ?? (title.name ? titleAt : 0);
 
             // The creation data begins with its size in bytes. In the old
             // layout that word counts itself, so a zero means there is only
@@ -666,9 +684,9 @@ export function createDialogFunctions(options){
                 // A class the program registered is the program's, procedure and
                 // all: a template names its own controls this way, and one of
                 // them keeps its state in the extra bytes and sets it up in
-                // WM_CREATE like a window made any other way. A system class has
-                // no procedure here, and a control that answered messages from
-                // nowhere would be inventing behaviour.
+                // WM_CREATE like a window made any other way. A system class's
+                // procedure is the window manager's, and is told WM_CREATE the
+                // same way.
                 const cls = classNamed(control.className);
                 // A control is a child of the dialog whatever its template
                 // says, told nothing of its parent's creation, and a border
@@ -707,10 +725,11 @@ export function createDialogFunctions(options){
                 // The class and title are in the template, not in guest
                 // memory, so the CREATESTRUCT names neither: a procedure that
                 // reads them there finds NULL. The ceiling on this.
-                return after(cls ? announce(record, [extended, 0, 0, style,
+                return after(record.wndProc !== 0 ? announce(record, [extended, 0, 0, style,
                     placed.x, placed.y, placed.width, placed.height,
                     dialog.hwnd, control.id, instance >>> 0, control.data], false, thread) : 0,
-                ()=>createFrom(index + 1));
+                ()=>after(picture(record, control, instance >>> 0, thread),
+                    ()=>createFrom(index + 1)));
             };
             // Every control is told the dialog's font once it exists and has
             // set itself up, as the dialog manager tells it: before
@@ -734,7 +753,8 @@ export function createDialogFunctions(options){
                     // A template that said WS_VISIBLE is shown only now, after the
                     // procedure has had its say. A procedure that ended the dialog
                     // from WM_INITDIALOG has left nothing to show.
-                    if (wantsVisible && live(dialog.hwnd))
+                    const standing = live(dialog.hwnd);
+                    if (wantsVisible && standing && !standing.dialogEnded)
                     {
                         return after(host.show?.(dialog.hwnd) ?? 0, ()=>dialog.hwnd);
                     }
@@ -903,8 +923,30 @@ export function createDialogFunctions(options){
     };
 
     /**
-     * The modal loop: the dialog's thread pumps until EndDialog destroys the
-     * window, and what EndDialog was given is the answer.
+     * A static that shows a picture loads it from the module whose template
+     * made it, by the name the template gives as its title -- as the static's
+     * own WM_CREATE does on Windows, where that name is the window's text.
+     *
+     * @param {any} record @param {{ image: number }} control @param {number} instance
+     * @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const picture = (record, control, instance, thread)=>{
+        const kind = record.style & SS_TYPEMASK;
+        if (record.className !== 'Static' || (kind !== SS_BITMAP && kind !== SS_ICON)
+            || control.image === 0 || !host.loadImage)
+        {
+            return 0;
+        }
+        const type = kind === SS_BITMAP ? IMAGE_BITMAP : IMAGE_ICON;
+        return after(host.loadImage(instance, control.image, type), image=>(image === 0 ? 0
+            : host.send(record.hwnd, STM_SETIMAGE, type, image, thread)));
+    };
+
+    /**
+     * The modal loop: the dialog's thread pumps until EndDialog ends the
+     * dialog, which the loop then destroys, and what EndDialog was given is
+     * the answer.
      *
      * A WM_QUIT retrieved here ends the dialog and is put back, because the
      * quit belongs to the loop outside this one, which has not seen it yet.
@@ -939,12 +981,16 @@ export function createDialogFunctions(options){
         }
         // A modal dialog is shown by the call whether or not its template
         // says WS_VISIBLE: most templates leave the bit off and rely on this.
-        await host.show?.(hwnd);
+        // One its WM_INITDIALOG already ended is not shown at all.
+        if (!record.dialogEnded)
+        {
+            await host.show?.(hwnd);
+        }
         // Unattended, a dialog waiting for input is put to whoever answers for
         // the run, and the button chosen is pressed as a click presses it; one
         // that stays up after a few presses is left.
         let presses = 0;
-        while (!record.destroyed)
+        while (!record.destroyed && !record.dialogEnded)
         {
             // The program's own loop would have been GetMessage, and what
             // that does as it takes a message the dialog's loop does too.
@@ -1004,6 +1050,10 @@ export function createDialogFunctions(options){
         if (ownerWasEnabled)
         {
             owner.style = (owner.style & ~WS_DISABLED) >>> 0;
+        }
+        if (!record.destroyed)
+        {
+            await destroyWindow(hwnd, thread);
         }
         return record.dialogResult ?? 0;
     };
@@ -1179,8 +1229,12 @@ export function createDialogFunctions(options){
         /**
          * BOOL EndDialog(HWND hDlg, INT_PTR nResult)
          *
-         * The result is remembered on the window, where the modal loop reads
-         * it back once the window is gone.
+         * Nothing is destroyed here, as Windows destroys nothing here: the
+         * answer is noted and the dialog hidden, and the loop running it
+         * destroys it when it next looks. The procedure that called this is
+         * still running when it returns -- often from inside a framework's own
+         * procedure for the window, which a destruction underneath it would
+         * pull out of its hands.
          */
         EndDialog: {
             argBytes: 8,
@@ -1192,7 +1246,8 @@ export function createDialogFunctions(options){
                     return 0;
                 }
                 record.dialogResult = result | 0;
-                return destroyWindow(hwnd >>> 0);
+                record.dialogEnded = true;
+                return after(host.hide?.(hwnd >>> 0) ?? 0, ()=>1);
             },
         },
 

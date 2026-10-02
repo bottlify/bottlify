@@ -28,10 +28,10 @@
  * table to index, and the caller chooses it; this layer never invents one.
  */
 
-import { COLORONCOLOR, bitBlt, stretchBlt } from './blit.js';
+import { COLORONCOLOR, bitBlt, stretchBlt, stretchTarget } from './blit.js';
 import { channelsOf, packPixel, unpackPixel } from './channels.js';
 import { SRCCOPY } from './rop.js';
-import { BI_BITFIELDS, createSurface, dibPitch, nearestEntry } from './surface.js';
+import { BI_BITFIELDS, createSurface, dibPitch, isEmptyRect, nearestEntry } from './surface.js';
 
 /** BI_RGB: uncompressed, with the channel layout the bit count implies. */
 export const BI_RGB = 0;
@@ -553,8 +553,7 @@ export function setDIBitsToDevice(options){
  */
 export function stretchDIBits(options){
     const header = options.image.header;
-    const source = isRle(header) ? null : decodeDib(options.image);
-    if (!source && !isRle(header))
+    if (!isConvertibleDib(options.image))
     {
         return 0;
     }
@@ -570,7 +569,14 @@ export function stretchDIBits(options){
     const copy = rop === SRCCOPY && across > 0 && down > 0
         && (options.destWidth | 0) === across && (options.destHeight | 0) === down;
     const height = Math.abs(header.height);
-    const drawn = !source ? stretchRle(options) : stretchBlt({
+    // A picture whose rectangle misses the clip is not decoded at all, and is
+    // answered as a stretch answers one that draws nothing: a window that
+    // repaints one bar of itself draws its whole picture into a clip that
+    // leaves the picture out, after every block an installer copies.
+    const reaches = !isEmptyRect(stretchTarget(options.dest, options.clip, options.xDest,
+        options.yDest, options.destWidth, options.destHeight));
+    const source = reaches && !isRle(header) ? decodeDib(options.image) : null;
+    const drawn = !reaches || (!source ? stretchRle(options) : stretchBlt({
         dest: options.dest,
         clip: options.clip,
         x: options.xDest | 0,
@@ -585,7 +591,7 @@ export function stretchDIBits(options){
         rop,
         mode: options.mode,
         pattern: options.pattern,
-    });
+    }));
     if (!drawn)
     {
         return 0;

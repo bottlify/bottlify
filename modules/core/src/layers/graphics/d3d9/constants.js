@@ -262,6 +262,10 @@ export const D3DFMT = Object.freeze({
     A8L8: 51,
     A4L4: 52,
     A2R10G10B10: 35,
+    // Signed bump-map offsets, which a pixel shader's texbem and the
+    // fixed-function BUMPENVMAP read as -1..1.
+    V8U8: 60,
+    Q8W8V8U8: 63,
     D32: 71,
     D24S8: 75,
     D24X8: 77,
@@ -295,9 +299,11 @@ export const D3DFMT = Object.freeze({
  * undefined and never read -- so a target of one must never be written with an
  * alpha, whatever the surface it is really rendered into happens to carry.
  *
+ * `signed` marks a format whose channels are -1..1: sampled, never drawn into.
+ *
  * @type {Readonly<Record<number,
  *     { bytesPerPixel: number, depth: boolean, alpha: boolean,
- *       blockBytes?: number, blockSize?: number, video?: boolean }>>}
+ *       blockBytes?: number, blockSize?: number, video?: boolean, signed?: boolean }>>}
  */
 export const FORMAT_INFO = Object.freeze({
     [D3DFMT.A8R8G8B8]: Object.freeze({ bytesPerPixel: 4, depth: false, alpha: true }),
@@ -321,6 +327,11 @@ export const FORMAT_INFO = Object.freeze({
     [D3DFMT.L8]: Object.freeze({ bytesPerPixel: 1, depth: false, alpha: false }),
     [D3DFMT.A8L8]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: true }),
     [D3DFMT.A4L4]: Object.freeze({ bytesPerPixel: 1, depth: false, alpha: true }),
+    // U in the low byte, then V (and W and Q): a device that runs ps_1_1
+    // samples them, and a program that has one expects its bump map to load.
+    [D3DFMT.V8U8]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false, signed: true }),
+    [D3DFMT.Q8W8V8U8]: Object.freeze({
+        bytesPerPixel: 4, depth: false, alpha: true, signed: true }),
     [D3DFMT.D32]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24S8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24X8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),

@@ -254,11 +254,23 @@ const initialize = (fns, mode)=>fns.CoInitializeEx.handler([0, mode]);
 const createInstance = (fns, { clsid = CLSID_ARG, outer = 0, iid = IID_ARG, ppv = PPV } = {})=>
     fns.CoCreateInstance.handler([clsid, outer, 1, iid, ppv]);
 
-test('CoGetCurrentLogicalThreadId answers the calling thread\'s id', ()=>{
+test('CoGetCurrentLogicalThreadId writes a GUID of the calling thread\'s own', ()=>{
+    // compobj.c test_CoGetCurrentLogicalThreadId: NULL is refused, and the
+    // GUID is never GUID_NULL. It takes a pointer, which a stdcall pops.
     const { host, fns } = setup();
-    assert.equal(fns.CoGetCurrentLogicalThreadId.handler(), 0x100);
+    const OUT = 0x7200;
+    /** @returns {string} */
+    const read = ()=>[...host.bytes.subarray(OUT, OUT + 16)]
+        .map(byte=>byte.toString(16).padStart(2, '0')).join('');
+    assert.equal(fns.CoGetCurrentLogicalThreadId.handler([0]), 0x80070057, 'E_INVALIDARG');
+    assert.equal(fns.CoGetCurrentLogicalThreadId.handler([OUT]), S_OK);
+    const first = read();
+    assert.notEqual(first, '0'.repeat(32), 'never GUID_NULL');
+    assert.equal(fns.CoGetCurrentLogicalThreadId.handler([OUT]), S_OK);
+    assert.equal(read(), first, 'the same for the same thread');
     host.run(host.threads.second);
-    assert.equal(fns.CoGetCurrentLogicalThreadId.handler(), 0x104);
+    fns.CoGetCurrentLogicalThreadId.handler([OUT]);
+    assert.notEqual(read(), first, 'and another for another');
 });
 
 test('CoInitialize nests and only the matching CoUninitialize leaves', ()=>{
@@ -817,7 +829,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoGetApartmentType: 8,
         CoIncrementMTAUsage: 4,
         CoDecrementMTAUsage: 4,
-        CoGetCurrentLogicalThreadId: 0,
+        CoGetCurrentLogicalThreadId: 4,
         CoInitializeSecurity: 36,
         CoUninitialize: 0,
         OleInitialize: 4,
@@ -844,6 +856,10 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         StgCreateDocfile: 16,
         StgOpenStorage: 24,
         StgIsStorageFile: 4,
+        StgIsStorageILockBytes: 4,
+        StgCreateStorageEx: 32,
+        CreateILockBytesOnHGlobal: 12,
+        GetHGlobalFromILockBytes: 8,
         StgCreateDocfileOnILockBytes: 16,
         StgOpenStorageOnILockBytes: 24,
         GetHGlobalFromStream: 8,
@@ -872,6 +888,9 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         RevokeDragDrop: 4,
         OleFlushClipboard: 0,
         OleIsCurrentClipboard: 4,
+        OleSetMenuDescriptor: 20,
+        CoCreateInstanceEx: 24,
+        CoRegisterMessageFilter: 8,
         PropVariantCopy: 8,
         PropVariantClear: 4,
     };
@@ -951,6 +970,76 @@ test('a class object the program registers is what CoCreateInstance asks, outer 
     assert.equal(fns.CoCreateInstance.handler([GUEST_CLSID_ARG, 0, 1, IID_ARG, PPV]),
         REGDB_E_CLASSNOTREG);
 });
+
+test('CoCreateInstanceEx makes the object once and asks it for every interface in the array',
+    async()=>{
+        // compobj.c test_CoCreateInstanceEx: each MULTI_QI told its own answer.
+        const { fns, host, view } = withGuestCalls();
+        await fns.CoRegisterClassObject.handler([GUEST_CLSID_ARG, GUEST_OBJECT, 1, 0, 0x1400]);
+        view.setUint32(CREATED, GUEST_VTABLE, true);
+        /** @type {number[][]} */
+        const asked = [];
+        /** @param {number} entry @param {number[]} args */
+        const call = async(entry, args)=>{
+            const slot = (entry - METHOD_BASE) / 0x10;
+            if (slot === 3)
+            {
+                view.setUint32(args[3], CREATED, true);
+                return S_OK;
+            }
+            if (slot === 0)
+            {
+                asked.push(args.slice(1));
+                if (args[1] === IID_OTHER_ARG)
+                {
+                    return 0x80004002;
+                }
+                view.setUint32(args[2], CREATED, true);
+            }
+            return S_OK;
+        };
+        /** @type {any} */ (host).call = call;
+        const RESULTS = 0x7000;
+        [IID_ARG, IID_OTHER_ARG, IID_ARG].forEach((iid, index)=>{
+            view.setUint32(RESULTS + index * 12, iid, true);
+            view.setUint32(RESULTS + index * 12 + 4, 0xdead, true);
+            view.setUint32(RESULTS + index * 12 + 8, 0xbeef, true);
+        });
+        assert.equal(fns.CoCreateInstanceEx.handler([GUEST_CLSID_ARG, 0, 1, 0, 0, RESULTS]),
+            0x80070057, 'E_INVALIDARG for an empty array');
+        assert.equal(await fns.CoCreateInstanceEx.handler([GUEST_CLSID_ARG, 0, 1, 0, 3,
+            RESULTS]), 0x00080012, 'CO_S_NOTALLINTERFACES');
+        assert.deepEqual([0, 1, 2].map(index=>[host.u32(RESULTS + index * 12 + 4),
+            host.u32(RESULTS + index * 12 + 8)]),
+        [[CREATED, S_OK], [0, 0x80004002], [CREATED, S_OK]]);
+        assert.deepEqual(asked, [[IID_OTHER_ARG, RESULTS + 16], [IID_ARG, RESULTS + 28]],
+            'the first interface is the one it was made with, the rest asked of it');
+    });
+
+test('a single-threaded apartment keeps one message filter and hands back the one replaced',
+    async()=>{
+        // compobj.c test_CoRegisterMessageFilter.
+        const { fns, host, calls, view } = withGuestCalls();
+        const PREVIOUS = 0x7100;
+        host.currentThread().ole32 = null;
+        assert.equal(fns.CoRegisterMessageFilter.handler([GUEST_OBJECT, PREVIOUS]), 0x80004021,
+            'no apartment, no filter: CO_E_NOT_SUPPORTED');
+        initialize(fns, 0);
+        assert.equal(fns.CoRegisterMessageFilter.handler([GUEST_OBJECT, PREVIOUS]), 0x80004021,
+            'nor in the multithreaded apartment');
+        await fns.CoUninitialize.handler();
+        initialize(fns, COINIT_APARTMENTTHREADED);
+        calls.length = 0;
+        view.setUint32(PREVIOUS, 0xdead, true);
+        assert.equal(await fns.CoRegisterMessageFilter.handler([0, PREVIOUS]), S_OK);
+        assert.equal(host.u32(PREVIOUS), 0, 'there was none before');
+        assert.equal(await fns.CoRegisterMessageFilter.handler([GUEST_OBJECT, PREVIOUS]), S_OK);
+        assert.equal(host.u32(PREVIOUS), 0);
+        assert.deepEqual(calls.map(call=>call.slot), [1], 'the filter is held');
+        assert.equal(await fns.CoRegisterMessageFilter.handler([0, 0]), S_OK);
+        assert.deepEqual(calls.map(call=>call.slot), [1, 2],
+            'and let go of when the caller does not take it back');
+    });
 
 test('the last CoUninitialize revokes the class objects its apartment registered', async()=>{
     const { fns, calls } = withGuestCalls();
@@ -1070,6 +1159,15 @@ function withWindow(){
     calls.length = 0;
     return { ...context, fns, live };
 }
+
+test('a menu descriptor taken off a frame, or put on one, is answered S_OK', ()=>{
+    // compobj.c test_ole_menu: NULL removes the dispatching from a frame.
+    const { fns } = withWindow();
+    assert.equal(fns.OleSetMenuDescriptor.handler([0, WINDOW, 0, 0, 0]), S_OK);
+    assert.equal(fns.OleSetMenuDescriptor.handler([0x1234, WINDOW, 0, 0, 0]), S_OK);
+    assert.equal(fns.OleSetMenuDescriptor.handler([0x1234, 0xdeadbeef, 0, 0, 0]), E_INVALIDARG,
+        'a composite menu needs a frame to hang on');
+});
 
 test('a drop target is registered once per window and holds a reference until revoked',
     async()=>{

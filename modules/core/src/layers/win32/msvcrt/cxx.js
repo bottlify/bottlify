@@ -208,17 +208,5 @@ export function createCxxFunctions(host){
             /** @param {number[]} args */
             handler: ([self])=>(self >>> 0) + TYPE_NAME,
         },
-
-        /**
-         * type_info::~type_info()
-         *
-         * Frees the undecorated name `name()` would have cached. Nothing here
-         * caches one, so there is nothing to free.
-         */
-        '??1type_info@@UAE@XZ': {
-            convention: 'thiscall',
-            argBytes: 4,
-            handler: ()=>0,
-        },
     };
 }

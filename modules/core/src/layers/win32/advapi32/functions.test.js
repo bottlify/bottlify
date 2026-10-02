@@ -1034,3 +1034,195 @@ test('a tree is copied whole and deleted whole, and data below 64 KiB is refused
     assert.equal(fns.RegSetValueExA.handler([from, NAME, 0, REG_SZ, 0, 0]), ERROR_SUCCESS,
         'no data at all is fine');
 });
+
+/** A volume of whole files in memory, as the registry's `files` asks for one. */
+function fakeFiles(){
+    /** @type {Map<string, Uint8Array>} */
+    const stored = new Map();
+    const key = (/** @type {string} */ path)=>path.toLowerCase();
+    return {
+        stored,
+        /** @param {string} path */
+        stat: path=>(stored.has(key(path))
+            ? { exists: true, isDirectory: false, size: /** @type {Uint8Array} */ (stored.get(key(path))).length }
+            : null),
+        /** @param {string} path @param {{ create?: boolean, truncate?: boolean }} mode */
+        open(path, mode){
+            if (!stored.has(key(path)) && !mode.create)
+            {
+                return null;
+            }
+            if (mode.truncate || !stored.has(key(path)))
+            {
+                stored.set(key(path), new Uint8Array(0));
+            }
+            return { path: key(path) };
+        },
+        /** @param {{ path: string }} node @param {number} offset @param {number} length */
+        read: (node, offset, length)=>(stored.get(node.path) ?? new Uint8Array(0))
+            .slice(offset, offset + length),
+        /** @param {{ path: string }} node @param {number} offset @param {Uint8Array} bytes */
+        write(node, offset, bytes){
+            const held = stored.get(node.path) ?? new Uint8Array(0);
+            const grown = new Uint8Array(Math.max(held.length, offset + bytes.length));
+            grown.set(held);
+            grown.set(bytes, offset);
+            stored.set(node.path, grown);
+            return bytes.length;
+        },
+        close: ()=>{},
+        /** @param {string} path */
+        remove: path=>stored.delete(key(path)),
+    };
+}
+
+test('a key saved to a file loads under a root, writes its changes back as it unloads, '
+    + 'and opens as an app key', async()=>{
+    // advapi32's registry test, test_reg_load_key and test_reg_load_app_key.
+    const memory = fakeMemory();
+    const hive = createHive();
+    const files = fakeFiles();
+    const fns = /** @type {any} */ (createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive,
+        files,
+    }));
+    const ERROR_ALREADY_EXISTS = 183;
+    const STATUS_CANNOT_DELETE = 0xc0000121;
+    const STATUS_ACCESS_DENIED = 0xc0000022;
+    const HKEY_USERS = 0x80000003;
+    const FILE = 0x800;
+    const unload = fns[Object.getOwnPropertySymbols(fns)[0]];
+
+    memory.putString(SUBKEY, 'Software\\Saved\\Inner');
+    fns.RegCreateKeyExA.handler([HKEY_LOCAL_MACHINE, SUBKEY, 0, 0, 0, 0, 0, OUT_HANDLE, 0]);
+    const inner = memory.dword(OUT_HANDLE);
+    memory.putString(NAME, 'kept');
+    memory.putString(INPUT, 'yes');
+    fns.RegSetValueExA.handler([inner, NAME, 0, REG_SZ, INPUT, 4]);
+    memory.putString(SUBKEY, 'Software\\Saved');
+    fns.RegOpenKeyExA.handler([HKEY_LOCAL_MACHINE, SUBKEY, 0, 0, OUT_HANDLE]);
+    const saved = memory.dword(OUT_HANDLE);
+
+    memory.putString(FILE, 'C:\\temp\\saved_key');
+    assert.equal(fns.RegSaveKeyA.handler([saved, FILE, 0]), ERROR_SUCCESS);
+    assert.equal(fns.RegSaveKeyA.handler([saved, FILE, 0]), ERROR_ALREADY_EXISTS,
+        'a file already there');
+
+    memory.putString(SUBKEY, 'Test');
+    assert.equal(await fns.RegLoadKeyA.handler([HKEY_LOCAL_MACHINE, SUBKEY, FILE]), ERROR_SUCCESS);
+    memory.putString(SUBKEY, 'Test\\Inner');
+    assert.equal(fns.RegOpenKeyExA.handler([HKEY_LOCAL_MACHINE, SUBKEY, 0, 0, OUT_HANDLE]),
+        ERROR_SUCCESS, 'the saved subkey is there');
+    const loadedInner = memory.dword(OUT_HANDLE);
+    memory.putString(NAME, 'added');
+    memory.putString(INPUT, 'value');
+    fns.RegSetValueExA.handler([loadedInner, NAME, 0, REG_SZ, INPUT, 6]);
+    assert.equal(unload(HKEY_LOCAL_MACHINE, 'Test'), STATUS_CANNOT_DELETE,
+        'a handle is open on it');
+    fns.RegCloseKey.handler([loadedInner]);
+    memory.putString(SUBKEY, 'Test');
+    assert.equal(fns.RegUnLoadKeyA.handler([HKEY_LOCAL_MACHINE, SUBKEY]), ERROR_SUCCESS);
+    assert.equal(fns.RegOpenKeyExA.handler([HKEY_LOCAL_MACHINE, SUBKEY, 0, 0, OUT_HANDLE]),
+        ERROR_FILE_NOT_FOUND, 'gone once unloaded');
+    memory.putString(FILE + 0x100, '');
+    assert.equal(await fns.RegLoadKeyA.handler([HKEY_LOCAL_MACHINE, SUBKEY, FILE + 0x100]),
+        ERROR_INVALID_PARAMETER);
+    memory.putString(SUBKEY, '.Default');
+    assert.equal(fns.RegUnLoadKeyA.handler([HKEY_USERS, SUBKEY]), ERROR_ACCESS_DENIED,
+        'no hive loaded there');
+    assert.equal(unload(HKEY_USERS, '.Default'), STATUS_ACCESS_DENIED);
+
+    // Loaded again, the change made while it was loaded is in the file.
+    memory.putString(SUBKEY, 'Test');
+    assert.equal(await fns.RegLoadKeyA.handler([HKEY_LOCAL_MACHINE, SUBKEY, FILE]), ERROR_SUCCESS);
+    memory.putString(SUBKEY, 'Test\\Inner');
+    fns.RegOpenKeyExA.handler([HKEY_LOCAL_MACHINE, SUBKEY, 0, 0, OUT_HANDLE]);
+    const again = memory.dword(OUT_HANDLE);
+    memory.putString(NAME, 'added');
+    memory.putDword(OUT_SIZE, 16);
+    assert.equal(fns.RegQueryValueExA.handler([again, NAME, 0, OUT_TYPE, OUT_DATA, OUT_SIZE]),
+        ERROR_SUCCESS);
+    assert.equal(memory.string(OUT_DATA), 'value');
+    fns.RegCloseKey.handler([again]);
+    memory.putString(SUBKEY, 'Test');
+    fns.RegUnLoadKeyA.handler([HKEY_LOCAL_MACHINE, SUBKEY]);
+
+    // An app key is the file's tree on a handle of its own, written back as it closes.
+    assert.equal(await fns.RegLoadAppKeyA.handler([FILE, OUT_HANDLE, 0, 0, 0]), ERROR_SUCCESS);
+    const app = memory.dword(OUT_HANDLE);
+    memory.putString(NAME, 'app');
+    memory.putString(INPUT, 'set');
+    assert.equal(fns.RegSetValueExA.handler([app, NAME, 0, REG_SZ, INPUT, 4]), ERROR_SUCCESS);
+    fns.RegCloseKey.handler([app]);
+    assert.equal(await fns.RegLoadAppKeyA.handler([FILE, OUT_HANDLE, 0, 0, 0]), ERROR_SUCCESS);
+    memory.putDword(OUT_SIZE, 16);
+    assert.equal(fns.RegQueryValueExA.handler([memory.dword(OUT_HANDLE), NAME, 0, OUT_TYPE,
+        OUT_DATA, OUT_SIZE]), ERROR_SUCCESS);
+    assert.equal(memory.string(OUT_DATA), 'set');
+    memory.putString(FILE, 'C:\\temp\\missing');
+    assert.equal(await fns.RegLoadAppKeyA.handler([FILE, OUT_HANDLE, 0, 0, 0]),
+        ERROR_FILE_NOT_FOUND);
+});
+
+test('RegNotifyChangeKeyValue answers one change to the key or under it, and a close', async()=>{
+    // advapi32's registry test, test_RegNotifyChangeKeyValue.
+    const memory = fakeMemory();
+    /** @type {string[]} */
+    const told = [];
+    const fns = /** @type {any} */ (createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createHive(),
+        events: {
+            set: handle=>told.push(`set ${handle}`) > 0,
+            reset: handle=>told.push(`reset ${handle}`) > 0,
+        },
+    }));
+    const NAME_AND_LAST_SET = 0x5;
+    const EVENT = 0x77;
+    /** @param {number} base @param {string} path */
+    const create = (base, path)=>{
+        memory.putString(SUBKEY, path);
+        assert.equal(fns.RegCreateKeyExA.handler(
+            [base, SUBKEY, 0, 0, 0, 0, 0, OUT_HANDLE, 0]), ERROR_SUCCESS);
+        return memory.dword(OUT_HANDLE);
+    };
+    const key = create(HKEY_LOCAL_MACHINE, 'Watched');
+    assert.equal(fns.RegNotifyChangeKeyValue.handler([key, 1, NAME_AND_LAST_SET, EVENT, 1]),
+        ERROR_SUCCESS);
+    assert.deepEqual(told, ['reset 119'], 'reset as it is asked for');
+    const sub = create(key, 'Sub');
+    assert.deepEqual(told, ['reset 119', 'set 119'], 'a subkey made');
+    create(key, 'Sub');
+    assert.equal(told.length, 2, 'once, and a key that was there already is no change');
+
+    fns.RegNotifyChangeKeyValue.handler([key, 1, NAME_AND_LAST_SET, EVENT, 1]);
+    const deeper = create(sub, 'Deeper');
+    assert.equal(told.at(-1), 'set 119', 'under it, watching the subtree');
+
+    fns.RegNotifyChangeKeyValue.handler([key, 0, NAME_AND_LAST_SET, EVENT, 1]);
+    memory.putString(INPUT, 'v');
+    fns.RegSetValueA.handler([deeper, 0, REG_SZ, INPUT, 0]);
+    assert.equal(told.at(-1), 'reset 119', 'deeper values not, without the subtree');
+    memory.putString(NAME, 'own');
+    fns.RegSetValueExA.handler([key, NAME, 0, REG_SZ, INPUT, 2]);
+    assert.equal(told.at(-1), 'set 119', 'its own values');
+
+    fns.RegNotifyChangeKeyValue.handler([key, 0, NAME_AND_LAST_SET, EVENT, 1]);
+    fns.RegCloseKey.handler([key]);
+    assert.equal(told.at(-1), 'set 119', 'a close signals');
+
+    const again = create(HKEY_LOCAL_MACHINE, 'Watched');
+    assert.equal(fns.RegNotifyChangeKeyValue.handler([again, 0, 0, EVENT, 1]),
+        ERROR_INVALID_PARAMETER, 'no kind of change');
+    assert.equal(fns.RegNotifyChangeKeyValue.handler([again, 0, 1, 0, 1]),
+        ERROR_INVALID_PARAMETER, 'no event to signal');
+    const waited = fns.RegNotifyChangeKeyValue.handler([again, 0, 1, 0, 0]);
+    assert.ok(waited instanceof Promise, 'without one, the caller waits');
+    create(again, 'Another');
+    assert.equal(await waited, ERROR_SUCCESS);
+});

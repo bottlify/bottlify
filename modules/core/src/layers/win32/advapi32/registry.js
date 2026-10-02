@@ -112,6 +112,16 @@ function makeKey(name){
 }
 
 /**
+ * A key outside every root: the tree RegLoadAppKey opens a hive file as,
+ * which no path from a root reaches.
+ *
+ * @returns {RegistryNode}
+ */
+export function detachedKey(){
+    return makeKey('');
+}
+
+/**
  * Splits a subkey path. A leading or trailing separator is tolerated because
  * guest code builds these paths by concatenation and often leaves one behind.
  *
@@ -705,11 +715,36 @@ export function createHive({ processorMhz = PROCESSOR.mhz, windows = windowsVers
     };
 
     /**
+     * The key a key hangs from, and its name there: found by looking, since
+     * a key does not point back. Null for a root, which hangs from nothing.
+     *
+     * @param {RegistryNode} key
+     * @returns {{ parent: RegistryNode, name: string } | null}
+     */
+    const holderOf = key=>{
+        const pending = [...roots.values()];
+        while (pending.length > 0)
+        {
+            const node = /** @type {RegistryNode} */ (pending.pop());
+            for (const child of node.keys.values())
+            {
+                if (child === key)
+                {
+                    return { parent: node, name: child.name };
+                }
+                pending.push(child);
+            }
+        }
+        return null;
+    };
+
+    /**
      * @param {RegistryNode} key @param {string | null} [path]
      * @returns {'deleted' | 'missing' | 'has-subkeys'}
      */
     const removeNode = (key, path)=>{
-        const target = parentOf(key, path);
+        // No subkey named is the key itself, as RegDeleteKey(hKey, "") asks.
+        const target = segments(path).length === 0 ? holderOf(key) : parentOf(key, path);
         if (!target)
         {
             return 'missing';

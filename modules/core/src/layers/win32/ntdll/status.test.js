@@ -104,6 +104,14 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
         [STATUS.NAME_TOO_LONG, 206],
         [STATUS.CANNOT_DELETE, 5],
         [STATUS.REVISION_MISMATCH, 1306],
+        [STATUS.NOT_MAPPED_VIEW, 487],
+        [STATUS.INVALID_VIEW_SIZE, 5],
+        [STATUS.INVALID_FILE_FOR_SECTION, 193],
+        [STATUS.OBJECT_TYPE_MISMATCH, 6],
+        [STATUS.SECTION_TOO_BIG, 8],
+        [STATUS.SECTION_NOT_IMAGE, 87],
+        [STATUS.MAPPED_FILE_SIZE_ZERO, 1006],
+        [STATUS.INVALID_IMAGE_NOT_MZ, 193],
     ];
     for (const [status, expected] of rows)
     {

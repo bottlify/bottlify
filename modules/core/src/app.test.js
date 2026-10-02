@@ -953,12 +953,25 @@ test('the wait is named for what is being waited on', ()=>{
     // anything else is a host call that has not answered -- and a table that
     // calls all three the same thing cannot say which a run went into.
     assert.equal(waitOn({ fetching: 1, suspended: 1 }).phase, 'idle-fetch');
-    assert.equal(waitOn({ idlers: 1 }).phase, 'idle-message');
+    assert.equal(waitOn({ idlers: 1, spun: 1 }).phase, 'idle-message');
     assert.equal(waitOn({ suspended: 1 }).phase, 'idle-host');
     assert.equal(waitOn({ fetching: 1, idlers: 3, suspended: 2 }).phase, 'idle-fetch',
         'a range request outranks the message queue: it is the one with a cost');
     assert.equal(waitOn({ suspended: 1, spun: 64 }).phase, 'idle-host-wait',
         'and the name says which of the two waits it took');
+});
+
+test("a caller parked on the guest's own queue is no wait while the guest still runs", ()=>{
+    // An installer's window thread sits in GetMessage while another thread
+    // copies; the window thread looks at its queue every turn without the
+    // host, so a trip round the event loop for it every turn -- over a hundred
+    // microseconds each on a page -- was paid behind every slice of copying.
+    assert.equal(idleWait(busy({ idlers: 1 })), null);
+    assert.deepEqual(waitOn({ idlers: 1, spun: 1 }), { phase: 'idle-message', timer: false },
+        'once nothing ran, the queue is all there is and the loop comes straight back');
+    assert.equal(waitOn({ idlers: 1, spun: 64 }).timer, true, 'and then backs off');
+    assert.equal(waitOn({ idlers: 1, suspended: 1 }).phase, 'idle-message',
+        'a call on the host beside it is still waited for');
 });
 
 test('a run that nobody is looking at does not wait on a clamped timer', async()=>{
@@ -1006,15 +1019,17 @@ test('the loop yields at once for something pending, otherwise on a clock it res
     assert.equal(yieldNow(nothing), null, 'nothing pending and the interval not up');
     now = 3;
     assert.equal(yieldNow(nothing), null);
-    for (const pending of [{ suspended: 1 }, { fetching: 1 }, { idlers: 1 }, { spun: 1 }])
+    for (const pending of [{ suspended: 1 }, { fetching: 1 }, { spun: 1 }])
     {
         await yieldNow({ ...nothing, ...pending });
     }
-    assert.equal(trips, 4, 'each kind of pending work yields at once');
+    assert.equal(trips, 3, 'each kind of pending work yields at once');
+    assert.equal(yieldNow({ ...nothing, idlers: 1 }), null,
+        "a caller on the guest's own queue is not the host's to answer");
     assert.equal(yieldNow(nothing), null, 'and a trip resets the clock');
     now += 4;
     await yieldNow(nothing);
-    assert.equal(trips, 5, 'the interval is up');
+    assert.equal(trips, 4, 'the interval is up');
     assert.equal(yieldNow(nothing), null, 'once');
     now += 3;
     assert.equal(yieldNow(nothing), null,

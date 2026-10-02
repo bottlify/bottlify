@@ -75,8 +75,8 @@ import { processStreams } from '../d3d8/process.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import {
-    MAX_STREAMS, createVertexDeclaration, elementsOfFvf, fixedFunctionLayoutOf, fvfOfElements,
-    validateElements,
+    D3DDECLUSAGE, MAX_STREAMS, createVertexDeclaration, elementsOfFvf, fixedFunctionLayoutOf,
+    fvfOfElements, validateElements,
 } from './declaration.js';
 import {
     CONSTANT_FILE, SHADER_KIND, createConstantFile, createShader, validateShader, versionOf,
@@ -518,7 +518,7 @@ export function createDirect3D9(options = {}){
             // which only chooses how a created texture's bytes travel to the
             // GPU; nothing draws into blocks, so a target or depth usage is
             // still refused.
-            if (isCompressed(format) && (wantsTarget || wantsDepth))
+            if ((isCompressed(format) || info.signed) && (wantsTarget || wantsDepth))
             {
                 return D3DERR_NOTAVAILABLE;
             }
@@ -813,7 +813,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const pixelConstants = createConstantFile(CONSTANT_FILE.pixel);
 
     /** @type {Map<number, { buffer: any, offset: number, stride: number }>} */
-    const streams = new Map();
+    const streams = new BindingMap();
     /** @type {Map<number, number>} */
     const streamFrequencies = new Map();
     /** @type {Map<number, any>} */
@@ -945,11 +945,16 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      *     reference goes, before the device's is released.
      */
     const explicitCount = (pool = D3DPOOL.MANAGED, onGone = ()=>{})=>{
+        // The reference a resource holds on the device follows the program's
+        // count: one the device keeps bound past the program's last Release
+        // holds none, and taking it back takes one again (Wine's d3d9ex
+        // test_reset_ex ends with the device's count at zero).
         count.addRef();
-        const made = createReferenceCount({ onLastRef: ()=>{
-            onGone();
-            count.release();
-        } });
+        const made = createReferenceCount({
+            onFirstRef: ()=>count.addRef(),
+            onZero: ()=>count.release(),
+            onLastRef: onGone,
+        });
         pooled.add({ pool, count: made });
         return made;
     };
@@ -1033,6 +1038,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         for (const surface of backBuffers)
         {
             retireSurface(surface);
+            // A back buffer a program still holds past a reset is the
+            // chain's no longer: its container is the device (Wine's
+            // d3d9ex test_backbuffer_resize).
+            surface.container = null;
         }
         if (autoDepthStencil)
         {
@@ -1190,7 +1199,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      *           format?: number }} options
      */
     const createBuffer = options=>{
-        const bufferCount = explicitCount(options.pool);
+        // Its storage goes back when the last reference does, the program's or
+        // the device's binding, whichever is later.
+        const bufferCount = explicitCount(options.pool, ()=>free(base));
         const base = allocate(options.length);
         let locked = false;
         const buffer = {
@@ -1200,15 +1211,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             get refCount(){
                 return bufferCount.value;
             },
-            addRef: ()=>bufferCount.addRef(),
-            release(){
-                const left = bufferCount.release();
-                if (bufferCount.destroyed)
-                {
-                    free(base);
-                }
-                return left;
+            get destroyed(){
+                return bufferCount.destroyed;
             },
+            reachable: ()=>!bufferCount.destroyed,
+            addRef: ()=>bufferCount.addRef(),
+            release: ()=>bufferCount.release(),
+            /** The device binds it (see `createReferenceCount`). */
+            hold: ()=>bufferCount.hold?.(),
+            letGo: ()=>bufferCount.letGo?.(),
 
             /**
              * A size of zero means "to the end", which is the only way a
@@ -1307,6 +1318,32 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         return true;
     };
 
+    /** @type {WeakMap<object, boolean>} */
+    const transformedDeclarations = new WeakMap();
+    /**
+     * The vertex shader a draw runs: the bound one, unless the bound
+     * declaration carries a POSITIONT element. Vertices already in target
+     * pixels skip vertex processing altogether, a bound shader included --
+     * which stays bound for the next draw through untransformed vertices. A
+     * program that draws its screen quads that way without unbinding its
+     * shader would otherwise run the shader on a position it never feeds.
+     */
+    const drawnVertexShader = ()=>{
+        const declaration = vertexDeclaration.declaration;
+        if (!vertexShader || !declaration)
+        {
+            return vertexShader;
+        }
+        let transformed = transformedDeclarations.get(declaration);
+        if (transformed === undefined)
+        {
+            transformed = /** @type {boolean} */ (declaration.elements.some(
+                (/** @type {any} */ element)=>element.Usage === D3DDECLUSAGE.POSITIONT));
+            transformedDeclarations.set(declaration, transformed);
+        }
+        return transformed ? null : vertexShader;
+    };
+
     /**
      * The layout the fixed-function pipeline reads the bound declaration
      * through when no vertex format spells it, worked out once per declaration.
@@ -1316,7 +1353,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const fixedFunctionLayouts = new WeakMap();
     const fixedFunctionLayout = ()=>{
         const declaration = vertexDeclaration.declaration;
-        if (!declaration || vertexShader || effectiveFvf() !== 0)
+        if (!declaration || drawnVertexShader() || effectiveFvf() !== 0)
         {
             return null;
         }
@@ -1460,7 +1497,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             return indices;
         },
         set indices(value){
-            indices = value;
+            indices = rebound(indices, value);
         },
         get nPatchMode(){
             return nPatchMode;
@@ -1502,7 +1539,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * as declined on its own.
      */
     const noteUndrawable = ()=>{
-        if (vertexShader || pixelShader)
+        if (drawnVertexShader() || pixelShader)
         {
             // The renderer builds the program and says what it could not.
             return;
@@ -1541,8 +1578,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * afterwards has to bind it again.
      */
     const unbindStreamZero = ()=>{
-        stream(0).buffer = null;
-        indices = null;
+        stream(0).buffer = rebound(stream(0).buffer, null);
+        indices = rebound(indices, null);
         baseVertexIndex = 0;
     };
 
@@ -1656,14 +1693,17 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * A texture's storage, for whoever needs to know what a lock hands out.
      *
      * @param {{ width: number, height: number, levels: number, format: number, pool: number,
-     *           usage: number, cube?: boolean }} spec
+     *           usage: number, cube?: boolean, allocate?: (bytes: number) => number,
+     *           free?: (address: number) => void }} spec
+     *        `allocate` and `free`: where the levels are kept, when not in
+     *        memory of the device's own.
      */
     const makeTexture = spec=>{
         const texture = createTexture({
             ...spec,
             count: explicitCount(spec.pool),
-            allocate,
-            free,
+            allocate: spec.allocate ?? allocate,
+            free: spec.free ?? free,
             // This version refuses a lock rectangle that is not one.
             rejectsMalformedRects: true,
         });
@@ -1754,7 +1794,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         streams.clear();
         streamFrequencies.clear();
         textures.clear();
-        indices = null;
+        indices = rebound(indices, null);
         baseVertexIndex = 0;
     };
 
@@ -1813,6 +1853,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 stopWatchingLoss?.();
                 showGamma(true);
+                // What it kept bound goes with it.
+                streams.clear();
+                indices = rebound(indices, null);
                 retireImplicitSurfaces();
                 // The reference CreateDevice took on the object that made it.
                 identity?.direct3D?.release?.();
@@ -2865,17 +2908,18 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             held.vertexShader = vertexShader;
             held.pixelShader = pixelShader;
             held.declaration = vertexDeclaration;
+            const vertex = drawnVertexShader();
             held.answer = {
-                vertexShader: vertexShader ? vertexShader.id : 0,
+                vertexShader: vertex ? vertex.id : 0,
                 fvf: effectiveFvf(),
                 fixedFunctionLayout: fixedFunctionLayout(),
-                fixedFunctionVertex: !vertexShader,
+                fixedFunctionVertex: !vertex,
                 pixelShader: pixelShader ? pixelShader.id : 0,
-                program: vertexShader || pixelShader
+                program: vertex || pixelShader
                     ? {
-                        vertex: vertexShader?.parsed ?? null,
-                        vertexShader: vertexShader ?? null,
-                        vertexId: vertexShader?.id ?? 0,
+                        vertex: vertex?.parsed ?? null,
+                        vertexShader: vertex ?? null,
+                        vertexId: vertex?.id ?? 0,
                         pixel: pixelShader?.parsed ?? null,
                         pixelShader: pixelShader ?? null,
                         pixelId: pixelShader?.id ?? 0,
@@ -3111,7 +3155,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     record.indices = buffer ?? null;
                 },
                 ()=>{
-                    indices = buffer ?? null;
+                    indices = rebound(indices, buffer ?? null);
                 }, true);
         },
 
@@ -3155,7 +3199,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     });
                 },
                 ()=>{
-                    bound.buffer = buffer ?? null;
+                    bound.buffer = rebound(bound.buffer, buffer ?? null);
                     if (buffer)
                     {
                         bound.offset = offset;
@@ -3403,8 +3447,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {number} format
          * @param {number} pool
          * @param {{ texture?: any }} out
+         * @param {number} [userMemory]  An Ex device's memory of the program's
+         *     own for the texture's one level, in the system-memory pool alone.
          */
-        CreateTexture(width, height, levels, usage, format, pool, out){
+        CreateTexture(width, height, levels, usage, format, pool, out, userMemory = 0){
             if (unmanaged(pool) || !blockAligned(format, width, height))
             {
                 return D3DERR_INVALIDCALL;
@@ -3419,9 +3465,14 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (userMemory !== 0 && (pool !== D3DPOOL.SYSTEMMEM || levels !== 1))
+            {
+                return D3DERR_INVALIDCALL;
+            }
             out.texture = makeTexture({
                 width, height, format, pool, usage,
                 ...chainOf(usage, format, levels, fullMipCount(width, height)),
+                ...userMemory === 0 ? {} : { allocate: ()=>userMemory, free: ()=>{} },
             });
             return D3D_OK;
         },
@@ -3510,7 +3561,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          */
         CreateRenderTarget(width, height, format, lockable, out, usage = 0){
             const info = FORMAT_INFO[format];
-            if (!info || info.depth || isCompressed(format) || !(width > 0) || !(height > 0))
+            if (!info || info.depth || info.signed || isCompressed(format)
+                || !(width > 0) || !(height > 0))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -3567,12 +3619,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {number} pool
          * @param {{ surface?: any }} out
          * @param {number} [usage]  What an Ex create adds.
+         * @param {number} [userMemory]  An Ex device's memory of the program's own
+         *     for the surface, in the system-memory pool alone.
          */
-        CreateOffscreenPlainSurface(width, height, format, pool, out, usage = 0){
+        CreateOffscreenPlainSurface(width, height, format, pool, out, usage = 0, userMemory = 0){
             const info = FORMAT_INFO[format];
             if (!info || pool === D3DPOOL.MANAGED || (info.depth && !caps.depthPlain)
                 || (info.video && !videoPoolAllowed(pool, true))
-                || !(width > 0) || !(height > 0) || !blockAligned(format, width, height))
+                || !(width > 0) || !(height > 0) || !blockAligned(format, width, height)
+                || (userMemory !== 0 && pool !== D3DPOOL.SYSTEMMEM))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -3583,8 +3638,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 format,
                 pool,
                 usage,
-                base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(pool, ()=>retireSurface(surface)),
+                base: userMemory || allocate(surfaceBytes(format, width, height)),
+                // The program's own memory stays the program's.
+                count: explicitCount(pool, ()=>(userMemory === 0 ? retireSurface(surface)
+                    : renderer?.retire(surface))),
                 rejectsMalformedRects: true,
             });
             out.surface = surface;
@@ -4348,7 +4405,7 @@ function chainOf(usage, format, levels, full){
 
 /** @param {number} format */
 function generatesMips(format){
-    return !isCompressed(format) && !FORMAT_INFO[format]?.depth;
+    return !isCompressed(format) && !FORMAT_INFO[format]?.depth && !FORMAT_INFO[format]?.signed;
 }
 
 /**
@@ -4366,6 +4423,51 @@ function fullMipCount(width, height){
         levels++;
     }
     return levels;
+}
+
+/**
+ * A binding's move from one resource to another: the device holds what it
+ * binds, so a resource the program released to nothing while bound lives on
+ * until it is unbound, as Windows keeps it (Wine's d3d9ex test_reset_ex).
+ *
+ * @param {any} previous @param {any} next
+ * @returns {any} next
+ */
+function rebound(previous, next){
+    if (previous !== next)
+    {
+        next?.hold?.();
+        previous?.letGo?.();
+    }
+    return next;
+}
+
+/**
+ * The device's streams, whose records carry the binding's hold with them:
+ * a record set over another moves it, and clearing them lets every one go.
+ *
+ * @extends {Map<number, { buffer: any, offset: number, stride: number }>}
+ */
+class BindingMap extends Map {
+    /** @param {number} index @param {{ buffer: any, offset: number, stride: number }} record */
+    set(index, record){
+        rebound(this.get(index)?.buffer ?? null, record?.buffer ?? null);
+        return super.set(index, record);
+    }
+
+    /** @param {number} index */
+    delete(index){
+        this.get(index)?.buffer?.letGo?.();
+        return super.delete(index);
+    }
+
+    clear(){
+        for (const record of this.values())
+        {
+            record.buffer?.letGo?.();
+        }
+        super.clear();
+    }
 }
 
 /**
@@ -4398,7 +4500,8 @@ function checkTextureArguments(usage, format, pool, caps, cube){
     // how the surface's bytes travel to the GPU (blocks or a decode) -- and
     // never as something the pipeline draws into: the blocks are not writable
     // by it.
-    if (isCompressed(format) && (usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL)) !== 0)
+    if ((isCompressed(format) || info.signed)
+        && (usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL)) !== 0)
     {
         return D3DERR_INVALIDCALL;
     }

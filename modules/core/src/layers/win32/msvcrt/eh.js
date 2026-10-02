@@ -778,16 +778,6 @@ export function createCxxExceptions(host){
                 argBytes: 0,
                 handler: ()=>terminate('terminate'),
             },
-
-            /**
-             * const type_info::`vftable'
-             *
-             * Data, not code: every type descriptor the compiler emits points
-             * its first word here. Nothing calls through it -- a catch compares
-             * descriptors by address and by name -- so it only has to be an
-             * address the image can bind to.
-             */
-            '??_7type_info@@6B@': { data: ()=>new Uint8Array(8) },
         },
     };
 }

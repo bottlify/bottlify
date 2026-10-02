@@ -43,6 +43,12 @@ const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
 const E_NOTIMPL = 0x80004001;
 const E_NOINTERFACE = 0x80004002;
+/** What a call the apartment model does not allow answers. */
+const CO_E_NOT_SUPPORTED = 0x80004021;
+/** Some of the interfaces CoCreateInstanceEx was asked for, not all. */
+const CO_S_NOTALLINTERFACES = 0x00080012;
+/** MULTI_QI: the interface asked for, the pointer found, and the answer. */
+const MULTI_QI_SIZE = 12;
 const E_POINTER = 0x80004003;
 const E_FAIL = 0x80004005;
 const E_OUTOFMEMORY = 0x8007000e;
@@ -182,8 +188,8 @@ const MAX_PROGID = 255;
  * @property {{ copy: (bstr: number) => number, free: (bstr: number) => unknown }} [bstr]
  *           oleaut32's SysAllocString and SysFreeString, for a BSTR a
  *           PROPVARIANT holds. Absent, such a value cannot be copied.
- * @property {{ copy: (array: number, out: number) => number,
- *              destroy: (array: number) => number }} [safeArray]
+ * @property {{ copy: (array: number, out: number) => number | Promise<number>,
+ *              destroy: (array: number) => number | Promise<number> }} [safeArray]
  *           oleaut32's SafeArrayCopy and SafeArrayDestroy, likewise.
  * @property {(window: number) => boolean} [isWindow]
  *           Whether a handle names a window that exists, as user32's IsWindow
@@ -1025,6 +1031,103 @@ export function createOleFunctions(host){
         },
     };
 
+    /**
+     * CoCreateInstance's work, which CoCreateInstanceEx shares.
+     *
+     * @param {number[]} args  rclsid, pUnkOuter, dwClsContext, riid, ppv.
+     * @returns {number | Promise<number>}
+     */
+    const coCreateInstance = ([classId, outer, context, interfaceId, ppv])=>{
+        const out = ppv >>> 0;
+        if (out === 0)
+        {
+            return E_POINTER;
+        }
+        writeU32(out, 0);
+
+        if (!inApartment(host.currentThread()))
+        {
+            return CO_E_NOTINITIALIZED;
+        }
+        const clsid = guidAt(classId);
+        const iid = guidAt(interfaceId);
+        if (clsid === null || iid === null)
+        {
+            return E_INVALIDARG;
+        }
+        const thread = host.callerThread?.();
+
+        // A class object the program registered itself comes first,
+        // as Windows looks there first: its CreateInstance is the
+        // program's, aggregation included.
+        const registered = registeredObject(clsid);
+        if (registered)
+        {
+            return callMethod(registered.object, SLOT_CREATE_INSTANCE,
+                [outer >>> 0, interfaceId >>> 0, out], thread);
+        }
+        if (host.registry.isRegistered(clsid))
+        {
+            return createBuiltIn(clsid, outer, iid, out);
+        }
+
+        // An executable serves it, and the caller cannot take it in
+        // process: the object is made over there.
+        const channel = outOfProcess(clsid, context) ? remote() : null;
+        if (channel)
+        {
+            if ((outer >>> 0) !== 0)
+            {
+                return CLASS_E_NOAGGREGATION;
+            }
+            const made = channel.activate(clsid, iid, out, localServer(clsid), 'activate');
+            return andThen(made,
+                (/** @type {number} */ hr)=>{
+                    if (hr === REGDB_E_CLASSNOTREG)
+                    {
+                        host.divergence?.('COM', `no class ${clsid} is registered,`
+                            + ' so CoCreateInstance refused it');
+                    }
+                    return hr;
+                });
+        }
+
+        // A server the registry names: its class object, asked for
+        // the instance and let go.
+        const factorySlot = host.heap.allocate(4 + GUID_SIZE);
+        if (factorySlot === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        writeU32(factorySlot, 0);
+        writeGuid(host, factorySlot + 4, IID_ICLASSFACTORY);
+        const served = fromServer(clsid, classId, factorySlot + 4, factorySlot, thread);
+        if (served === null)
+        {
+            host.heap.free(factorySlot);
+            // Named, because the number alone is the whole question. A
+            // program that asks for a class and is refused takes a
+            // different path -- often a quieter one -- and which class
+            // it wanted is the difference between "a component we have
+            // not built" and "a filter the game brought with it".
+            host.divergence?.('COM',
+                `no class ${clsid} is registered, so CoCreateInstance refused it`);
+            return REGDB_E_CLASSNOTREG;
+        }
+        return andThen(served, (/** @type {number} */ hr)=>{
+            const factory = readU32(factorySlot);
+            host.heap.free(factorySlot);
+            if ((hr | 0) < 0 || factory === 0)
+            {
+                return hr;
+            }
+            return callMethod(factory, SLOT_CREATE_INSTANCE,
+                [outer >>> 0, interfaceId >>> 0, out], thread)
+                .then(created=>callMethod(factory, SLOT_RELEASE, [], thread)
+                    .then(()=>created));
+        });
+    };
+
     return {
         /** HRESULT CoInitialize(LPVOID pvReserved) */
         CoInitialize: {
@@ -1118,16 +1221,25 @@ export function createOleFunctions(host){
         },
 
         /**
-         * DWORD CoGetCurrentLogicalThreadId(void)
+         * HRESULT CoGetCurrentLogicalThreadId(GUID *pguid)
          *
-         * The identifier of the calling thread's apartment, which for a thread
-         * in an apartment of its own is its own thread id: the same number
-         * GetCurrentThreadId answers, and the one a program uses to tell its
-         * own logical thread from another's.
+         * A GUID naming the calling thread's logical thread, the same one
+         * every time that thread asks and another for any other thread; never
+         * GUID_NULL. Its last word is the thread's id, which makes it its own.
          */
         CoGetCurrentLogicalThreadId: {
-            argBytes: 0,
-            handler: ()=>(host.currentThread()?.id ?? 0) >>> 0,
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const id = (host.currentThread()?.id ?? 0) >>> 0;
+                writeGuid(host, out >>> 0, `{1063CB43-B0F3-4A56-B7C1-${
+                    id.toString(16).toUpperCase().padStart(12, '0')}}`);
+                return S_OK;
+            },
         },
 
         /** void CoUninitialize(void) */
@@ -1312,6 +1424,67 @@ export function createOleFunctions(host){
         },
 
         /**
+         * HRESULT CoRegisterMessageFilter(LPMESSAGEFILTER lpMessageFilter,
+         *   LPMESSAGEFILTER *lplpMessageFilter)
+         *
+         * A single-threaded apartment's filter, kept with a reference and the
+         * one it replaces handed back to the caller, or let go of when the
+         * caller asked not to have it; a thread in the multithreaded
+         * apartment, or in none, has no filter to set. Nothing calls into
+         * one: no call here ever waits on another apartment's answer while
+         * messages arrive.
+         */
+        CoRegisterMessageFilter: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([filter, previous])=>{
+                const apartment = host.currentThread()?.ole32;
+                if (!apartment || apartment.model !== COINIT_APARTMENTTHREADED)
+                {
+                    return CO_E_NOT_SUPPORTED;
+                }
+                const thread = host.callerThread?.();
+                const held = apartment.messageFilter ?? 0;
+                apartment.messageFilter = filter >>> 0;
+                if ((previous >>> 0) !== 0)
+                {
+                    writeU32(previous >>> 0, held);
+                }
+                const taken = (filter >>> 0) !== 0
+                    ? callMethod(filter >>> 0, SLOT_ADD_REF, [], thread) : S_OK;
+                return andThen(taken, ()=>(held !== 0 && (previous >>> 0) === 0
+                    ? callMethod(held, SLOT_RELEASE, [], thread).then(()=>S_OK) : S_OK));
+            },
+        },
+
+        /**
+         * HRESULT OleSetMenuDescriptor(HOLEMENU holemenu, HWND hwndFrame,
+         *   HWND hwndActiveObject, LPOLEINPLACEFRAME lpFrame,
+         *   LPOLEINPLACEACTIVEOBJECT lpActiveObj)
+         *
+         * No object is ever active in place here, so there are no menu
+         * messages to send one: a NULL descriptor -- taking the dispatching
+         * off a frame -- has nothing to undo, and a composite menu is told so.
+         */
+        OleSetMenuDescriptor: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([holemenu, frame])=>{
+                if ((holemenu >>> 0) === 0)
+                {
+                    return S_OK;
+                }
+                if (!host.isWindow?.(frame >>> 0))
+                {
+                    return E_INVALIDARG;
+                }
+                host.divergence?.('OleSetMenuDescriptor',
+                    'a composite menu is accepted but its messages are never dispatched');
+                return S_OK;
+            },
+        },
+
+        /**
          * HRESULT CoCreateInstance(REFCLSID rclsid, LPUNKNOWN pUnkOuter,
          *   DWORD dwClsContext, REFIID riid, LPVOID *ppv)
          *
@@ -1323,95 +1496,74 @@ export function createOleFunctions(host){
          */
         CoCreateInstance: {
             argBytes: 20,
-            /** @param {number[]} args */
-            handler: ([classId, outer, context, interfaceId, ppv])=>{
-                const out = ppv >>> 0;
-                if (out === 0)
-                {
-                    return E_POINTER;
-                }
-                writeU32(out, 0);
+            handler: coCreateInstance,
+        },
 
-                if (!inApartment(host.currentThread()))
-                {
-                    return CO_E_NOTINITIALIZED;
-                }
-                const clsid = guidAt(classId);
-                const iid = guidAt(interfaceId);
-                if (clsid === null || iid === null)
+        /**
+         * HRESULT CoCreateInstanceEx(REFCLSID rclsid, IUnknown *punkOuter,
+         *   DWORD dwClsCtx, COSERVERINFO *pServerInfo, DWORD dwCount, MULTI_QI *pResults)
+         *
+         * The object is made as CoCreateInstance makes it, asked for the
+         * first interface of the array, and then for each of the rest, every
+         * entry told its own answer: S_OK when all were found,
+         * CO_S_NOTALLINTERFACES when some were and E_NOINTERFACE when none
+         * was. A server named in pServerInfo is this machine: there is no
+         * other.
+         */
+        CoCreateInstanceEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([classId, outer, context, server, count, results])=>{
+                if ((count >>> 0) === 0 || (results >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
+                if ((server >>> 0) !== 0 && readU32((server >>> 0) + 4) !== 0)
+                {
+                    host.divergence?.('CoCreateInstanceEx',
+                        'the server a program names is made on this machine');
+                }
+                /** @param {number} index */
+                const entry = index=>(results >>> 0) + index * MULTI_QI_SIZE;
+                for (let index = 0; index < (count >>> 0); index++)
+                {
+                    writeU32(entry(index) + 4, 0);
+                    writeU32(entry(index) + 8, E_NOINTERFACE);
+                }
                 const thread = host.callerThread?.();
-
-                // A class object the program registered itself comes first,
-                // as Windows looks there first: its CreateInstance is the
-                // program's, aggregation included.
-                const registered = registeredObject(clsid);
-                if (registered)
-                {
-                    return callMethod(registered.object, SLOT_CREATE_INSTANCE,
-                        [outer >>> 0, interfaceId >>> 0, out], thread);
-                }
-                if (host.registry.isRegistered(clsid))
-                {
-                    return createBuiltIn(clsid, outer, iid, out);
-                }
-
-                // An executable serves it, and the caller cannot take it in
-                // process: the object is made over there.
-                const channel = outOfProcess(clsid, context) ? remote() : null;
-                if (channel)
-                {
-                    if ((outer >>> 0) !== 0)
+                const first = entry(0);
+                return andThen(coCreateInstance([classId, outer, context, readU32(first),
+                    first + 4]), (/** @type {number} */ made)=>{
+                    if ((made | 0) < 0)
                     {
-                        return CLASS_E_NOAGGREGATION;
+                        for (let index = 0; index < (count >>> 0); index++)
+                        {
+                            writeU32(entry(index) + 8, made);
+                        }
+                        return made;
                     }
-                    const made = channel.activate(clsid, iid, out, localServer(clsid), 'activate');
-                    return andThen(made,
-                        (/** @type {number} */ hr)=>{
-                            if (hr === REGDB_E_CLASSNOTREG)
+                    writeU32(first + 8, S_OK);
+                    const object = readU32(first + 4);
+                    /** @param {number} index @returns {number | Promise<number>} */
+                    const ask = index=>{
+                        if (index >= (count >>> 0))
+                        {
+                            let found = 0;
+                            for (let at = 0; at < (count >>> 0); at++)
                             {
-                                host.divergence?.('COM', `no class ${clsid} is registered,`
-                                    + ' so CoCreateInstance refused it');
+                                found += readU32(entry(at) + 8) === S_OK ? 1 : 0;
                             }
-                            return hr;
-                        });
-                }
-
-                // A server the registry names: its class object, asked for
-                // the instance and let go.
-                const factorySlot = host.heap.allocate(4 + GUID_SIZE);
-                if (factorySlot === 0)
-                {
-                    return E_OUTOFMEMORY;
-                }
-                writeU32(factorySlot, 0);
-                writeGuid(host, factorySlot + 4, IID_ICLASSFACTORY);
-                const served = fromServer(clsid, classId, factorySlot + 4, factorySlot, thread);
-                if (served === null)
-                {
-                    host.heap.free(factorySlot);
-                    // Named, because the number alone is the whole question. A
-                    // program that asks for a class and is refused takes a
-                    // different path -- often a quieter one -- and which class
-                    // it wanted is the difference between "a component we have
-                    // not built" and "a filter the game brought with it".
-                    host.divergence?.('COM',
-                        `no class ${clsid} is registered, so CoCreateInstance refused it`);
-                    return REGDB_E_CLASSNOTREG;
-                }
-                return andThen(served, (/** @type {number} */ hr)=>{
-                    const factory = readU32(factorySlot);
-                    host.heap.free(factorySlot);
-                    if ((hr | 0) < 0 || factory === 0)
-                    {
-                        return hr;
-                    }
-                    return callMethod(factory, SLOT_CREATE_INSTANCE,
-                        [outer >>> 0, interfaceId >>> 0, out], thread)
-                        .then(created=>callMethod(factory, SLOT_RELEASE, [], thread)
-                            .then(()=>created));
+                            return found === (count >>> 0) ? S_OK
+                                : found === 0 ? E_NOINTERFACE : CO_S_NOTALLINTERFACES;
+                        }
+                        return callMethod(object, SLOT_QUERY_INTERFACE,
+                            [readU32(entry(index)), entry(index) + 4], thread)
+                            .then(hr=>{
+                                writeU32(entry(index) + 8, hr);
+                                return ask(index + 1);
+                            });
+                    };
+                    return ask(1);
                 });
             },
         },

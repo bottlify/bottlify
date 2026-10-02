@@ -360,3 +360,54 @@ test('a view draws onto its parent at its own origin and drops what falls outsid
     assert.equal(view.read(4, 2), 0, 'off the screen reads as black');
     assert.equal(view.bytes, screen.bytes, 'the bytes are the parent\'s own');
 });
+
+test('a fill writes what a write a pixel would, at every depth and either way up', ()=>{
+    // The run is the first pixel's bytes copied along the row, so it is only
+    // right if the first pixel is written exactly as write writes it.
+    const palette = [0x00000000, 0x00ff0000, 0x0000ff00, 0x000000ff, 0x00808080];
+    /** @type {any[]} */
+    const kinds = [
+        { bitCount: 1, palette: [0, 0x00ffffff] },
+        { bitCount: 4, palette },
+        { bitCount: 8, palette },
+        { bitCount: 16, format: RGB_555 },
+        { bitCount: 16, format: RGB_565 },
+        { bitCount: 16, masks: [0xf800, 0x07e0, 0x001f] },
+        { bitCount: 24 },
+        { bitCount: 32 },
+        { bitCount: 32, masks: [0x00ff0000, 0x0000ff00, 0x000000ff] },
+    ];
+    for (const kind of kinds)
+    {
+        for (const topDown of [true, false])
+        {
+            const made = ()=>createSurface({ width: 13, height: 5, topDown, ...kind });
+            const filled = made();
+            const written = made();
+            filled.fill?.(2, 1, 11, 4, 0x00808080);
+            for (let y = 1; y < 4; y++)
+            {
+                for (let x = 2; x < 11; x++)
+                {
+                    written.write(x, y, 0x00808080);
+                }
+            }
+            assert.deepEqual([...filled.bytes], [...written.bytes],
+                `${kind.bitCount} bits ${kind.format ?? (kind.masks ? 'masks' : '')}, `
+                + `${topDown ? 'top-down' : 'bottom-up'}`);
+        }
+    }
+});
+
+test('a view fills its part of the parent, clipped to the parent\'s edges', ()=>{
+    const parent = createSurface({ width: 8, height: 6, bitCount: 32 });
+    const view = viewOf(parent, { left: 5, top: 2, right: 12, bottom: 9 });
+    view.fill?.(0, 0, 7, 7, 0x00123456);
+    for (let y = 0; y < 6; y++)
+    {
+        for (let x = 0; x < 8; x++)
+        {
+            assert.equal(parent.read(x, y), x >= 5 && y >= 2 ? 0x00123456 : 0, `(${x},${y})`);
+        }
+    }
+});

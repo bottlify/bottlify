@@ -169,19 +169,15 @@ test('a pure virtual call stops the program rather than returning', ()=>{
     assert.deepEqual(aborted, ['pure virtual function call']);
 });
 
-test('raw_name is the decorated name inside the descriptor; the destructor pops nothing', ()=>{
+test('raw_name is the decorated name inside the descriptor, and pops nothing', ()=>{
     // typeid(x) == typeid(y) is a strcmp of raw_name(): an answer of zero
-    // there is a null pointer handed to strcmp. Both are thiscall, with `this`
+    // there is a null pointer handed to strcmp. It is thiscall, with `this`
     // in ECX and nothing on the stack, so the stub must pop nothing.
     const { graph, memory, table } = build();
     const raw = table['?raw_name@type_info@@QBEPBDXZ'];
     assert.equal(memory.readCString(raw.handler([graph.types.derived]), 64), '.?AVDerived@@');
     assert.equal(raw.convention, 'thiscall');
     assert.equal(raw.argBytes, 4);
-    const destructor = table['??1type_info@@UAE@XZ'];
-    assert.equal(destructor.handler([graph.types.derived]), 0);
-    assert.equal(destructor.convention, 'thiscall');
-    assert.equal(destructor.argBytes, 4);
 });
 
 test('_EH_prolog is code of its own, not a variable: it lies in .text, apart from the data', ()=>{

@@ -1181,3 +1181,44 @@ test('the Ex forms act on the running process, and refuse any other', ()=>{
     assert.equal(fns.VirtualProtectEx.argBytes, 20);
     assert.equal(fns.VirtualQueryEx.argBytes, 16);
 });
+
+test('GetWriteWatch tells every committed page of a watched reservation as written', ()=>{
+    // Writes are not tracked, so the answer errs on the side a collector can
+    // live with: it rescans more than it must, never less.
+    const MEM_WRITE_WATCH = 0x200000;
+    const ERROR_NOACCESS = 998;
+    const FAILED = 0xffffffff;
+    const { host, errors, fns } = recording();
+    const view = new DataView(host.bytes.buffer);
+    const base = fns.VirtualAlloc.handler([0, 3 * PAGE_SIZE, MEM_RESERVE | MEM_WRITE_WATCH, 0x04]);
+    assert.notEqual(base, 0);
+    /** @param {number} from @param {number} size @param {number} room */
+    const watch = (from, size, room)=>{
+        view.setUint32(0x100, room, true);
+        return fns.GetWriteWatch.handler([0, from, size, 0x200, 0x100, 0x104]);
+    };
+    assert.equal(watch(base, 3 * PAGE_SIZE, 64), 0);
+    assert.equal(view.getUint32(0x100, true), 0, 'nothing committed, nothing written');
+
+    fns.VirtualAlloc.handler([base + PAGE_SIZE, 2 * PAGE_SIZE, MEM_COMMIT, 0x04]);
+    assert.equal(watch(base, 3 * PAGE_SIZE, 64), 0);
+    assert.equal(view.getUint32(0x100, true), 2);
+    assert.deepEqual([view.getUint32(0x200, true), view.getUint32(0x204, true)],
+        [base + PAGE_SIZE, base + 2 * PAGE_SIZE]);
+    assert.equal(view.getUint32(0x104, true), PAGE_SIZE, 'the granularity is a page');
+    assert.equal(watch(base, 3 * PAGE_SIZE, 1), 0);
+    assert.equal(view.getUint32(0x100, true), 1, 'no more than there is room for');
+    assert.equal(fns.ResetWriteWatch.handler([base, PAGE_SIZE]), 0);
+
+    assert.equal(watch(base, 3 * PAGE_SIZE, 0), FAILED, 'no room at all');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(fns.GetWriteWatch.handler([0, base, PAGE_SIZE, 0x200, 0, 0x104]), FAILED);
+    assert.equal(errors.at(-1), ERROR_NOACCESS, 'nowhere to say how many');
+    assert.equal(watch(base, 0, 64), FAILED, 'an empty range');
+    assert.equal(watch(base + 2 * PAGE_SIZE, GRANULARITY, 64), FAILED, 'past the reservation');
+    const plain = fns.VirtualAlloc.handler([0, PAGE_SIZE, MEM_RESERVE | MEM_COMMIT, 0x04]);
+    assert.equal(watch(plain, PAGE_SIZE, 64), FAILED, 'a reservation made without the watch');
+    assert.equal(fns.ResetWriteWatch.handler([plain, PAGE_SIZE]), FAILED);
+    fns.VirtualFree.handler([base, 0, MEM_RELEASE]);
+    assert.equal(watch(base, PAGE_SIZE, 64), FAILED, 'a released reservation is watched no more');
+});

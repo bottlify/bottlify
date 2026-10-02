@@ -88,6 +88,12 @@ const ERROR_GEN_FAILURE = 31;
 /** What GetThreadSelectorEntry answers for a selector it holds nothing for. */
 const ERROR_NOACCESS = 998;
 const ERROR_INVALID_THREAD_ID = 1444;
+const ERROR_SEM_TIMEOUT = 121;
+
+/** The debug events a child reports here, and the size of the record they fill. */
+const CREATE_PROCESS_DEBUG_EVENT = 3;
+const EXIT_PROCESS_DEBUG_EVENT = 5;
+const DEBUG_EVENT_SIZE = 96;
 /** The CONTEXT groups GetThreadContext fills, and the size of the record. */
 const CONTEXT_CONTROL = 0x10001;
 const CONTEXT_INTEGER = 0x10002;
@@ -361,7 +367,83 @@ export function createSyncFunctions(host){
         writeI32(address + CS_SPIN_COUNT, spinCount);
     };
 
+    /**
+     * A DEBUG_EVENT of the two kinds a debugged child gives here: its
+     * creation, and its exit with the code it left.
+     *
+     * @param {number} address @param {any} child @param {boolean} exited
+     */
+    const writeDebugEvent = (address, child, exited)=>{
+        const bytes = new Uint8Array(DEBUG_EVENT_SIZE);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, exited ? EXIT_PROCESS_DEBUG_EVENT : CREATE_PROCESS_DEBUG_EVENT, true);
+        view.setUint32(4, child.id >>> 0, true);
+        view.setUint32(8, child.threadId >>> 0, true);
+        if (exited)
+        {
+            view.setUint32(12, child.exitCode >>> 0, true);
+        }
+        else
+        {
+            // hFile, hProcess, hThread: no file is handed over, and the
+            // process and thread are the handles CreateProcess gave.
+            view.setUint32(16, child.handle >>> 0, true);
+            view.setUint32(20, child.threadHandle >>> 0, true);
+        }
+        host.writeMemory(address, bytes);
+    };
+
     return {
+        /**
+         * BOOL WaitForDebugEvent(LPDEBUG_EVENT lpDebugEvent, DWORD dwMilliseconds)
+         *
+         * A child started with DEBUG_PROCESS reports its creation and then
+         * its exit -- no thread, library or exception of its own is reported,
+         * since nothing stops it to report one -- the second waited for as a
+         * wait on the child is. With no debugged child to hear from, or no
+         * time to wait, the wait times out.
+         */
+        WaitForDebugEvent: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([event, timeout])=>{
+                const child = (kernel.processes?.all() ?? []).find(
+                    (/** @type {any} */ made)=>made.debugEvents?.length > 0);
+                if (!child || (event >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_SEM_TIMEOUT);
+                    return 0;
+                }
+                if (child.debugEvents[0] === 'create')
+                {
+                    child.debugEvents.shift();
+                    writeDebugEvent(event >>> 0, child, false);
+                    return 1;
+                }
+                const report = ()=>{
+                    child.debugEvents = [];
+                    writeDebugEvent(event >>> 0, child, true);
+                    return 1;
+                };
+                if (child.completed || child.exitCode !== kernel.processes.STILL_ACTIVE)
+                {
+                    return report();
+                }
+                if ((timeout >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_SEM_TIMEOUT);
+                    return 0;
+                }
+                const thread = host.currentThread();
+                (child.waiters ??= []).push({ thread, result: 1, settle: report });
+                kernel.block(thread, `debug event of ${child.imagePath}`);
+                return host.park(thread);
+            },
+        },
+
+        /** BOOL ContinueDebugEvent(DWORD dwProcessId, DWORD dwThreadId, DWORD dwContinueStatus) */
+        ContinueDebugEvent: { argBytes: 12, handler: ()=>1 },
+
         /** VOID InitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection) */
         InitializeCriticalSection: {
             argBytes: 4,

@@ -5,6 +5,7 @@
  */
 
 import { TAKEN } from './named-objects.js';
+import { STATUS, toDosError } from '../ntdll/status.js';
 
 /**
  * The two things kernel32 lets a program treat as memory instead of as a
@@ -33,8 +34,6 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 /** What CreateNamedPipe answers where there are no named pipes, as on Windows 9x. */
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
-/** What a mapping of an empty file is refused with, as documented. */
-const ERROR_FILE_INVALID = 1006;
 /** What a read that failed after the caller was parked answers. */
 const ERROR_IO_DEVICE = 1117;
 
@@ -44,13 +43,58 @@ const INVALID_HANDLE_VALUE = 0xffffffff;
 /** A name is at most this long; longer is a pointer that is not a string. */
 const MAX_NAME = 260;
 
-/** flProtect values we distinguish. Everything else is read-only. */
-const PAGE_READWRITE = 0x04;
-const PAGE_WRITECOPY = 0x08;
+/**
+ * The PAGE_* half of flProtect, and the protections of it a view can be
+ * written through. Everything else is read-only.
+ */
+const PAGE_MASK = 0xff;
+const WRITABLE_PAGES = [0x04, 0x08, 0x40, 0x80];
+const PAGE_SIZE = 0x1000;
+
+/**
+ * The SEC_* half: what a section is made as, and the attributes
+ * NtQuerySection reports of it.
+ */
+const SEC_FILE = 0x800000;
+const SEC_IMAGE = 0x1000000;
+const SEC_RESERVE = 0x4000000;
+const SEC_COMMIT = 0x8000000;
+const SEC_NOCACHE = 0x10000000;
+const SEC_WRITECOMBINE = 0x40000000;
+const SEC_LARGE_PAGES = 0x80000000;
+
+/** NtQuerySection's classes, by number, and the size of each answer. */
+const SECTION_BASIC_INFORMATION = 0;
+const SECTION_IMAGE_INFORMATION = 1;
+const SECTION_INFORMATION_SIZES = [16, 48];
+
+/** GetCurrentProcess(): the one process a view is mapped into here. */
+const CURRENT_PROCESS = 0xffffffff;
 
 /** dwDesiredAccess for MapViewOfFile. */
 const FILE_MAP_WRITE = 0x0002;
+const FILE_MAP_READ = 0x0004;
 const FILE_MAP_ALL_ACCESS = 0xf001f;
+
+/**
+ * A mapping object: the file it is over (null for the page file's), whether a
+ * view of it can be written back, its size, and its SEC_* attributes.
+ *
+ * @typedef {{ node: any, writable: boolean, size: number, attributes: number }} Section
+ */
+
+/**
+ * Runs `then` on a value now, or on a promise's when it comes.
+ *
+ * @template T, R
+ * @param {T | Promise<T>} value @param {(value: T) => R} then
+ * @returns {R | Promise<R>}
+ */
+const settle = (value, then)=>(typeof (/** @type {any} */ (value))?.then === 'function'
+    ? /** @type {Promise<T>} */ (value).then(then) : then(/** @type {T} */ (value)));
+
+/** @param {number} bytes */
+const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
 
 /**
  * @typedef {Object} MappingHost
@@ -106,7 +150,7 @@ export function createMappingFunctions(host){
      */
     const views = new Map();
 
-    /** @param {number} handle @param {string} type */
+    /** @param {number} handle @param {string} [type] */
     const object = (handle, type)=>{
         try
         {
@@ -129,12 +173,23 @@ export function createMappingFunctions(host){
         host.divergence?.(api, 'there are no named pipes; refused as Windows 9x refuses it');
         return fail(ERROR_CALL_NOT_IMPLEMENTED, INVALID_HANDLE_VALUE);
     };
+    /** @param {string} api */
+    const refusePipeCall = api=>{
+        host.divergence?.(api, 'there are no named pipes; refused as Windows 9x refuses it');
+        return fail(ERROR_CALL_NOT_IMPLEMENTED, 0);
+    };
 
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
         host.writeMemory(address, new Uint8Array([
             value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
         ]));
+    };
+
+    /** @param {number} address */
+    const readDword = address=>{
+        const bytes = host.readMemory(address, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
 
     /** @param {number} address @param {number} value */
@@ -153,6 +208,86 @@ export function createMappingFunctions(host){
         }
         return (wide ? host.readWideString(pointer >>> 0, MAX_NAME * 2)
             : host.readCString(pointer >>> 0, MAX_NAME)) || null;
+    };
+
+    /**
+     * A new section, or the status it is refused with: the checks
+     * CreateFileMapping and NtCreateSection share. A section over a file is
+     * SEC_FILE whatever was asked, keeping only its caching; the page file's
+     * keeps what was asked, and is whole pages.
+     *
+     * @param {any} node  the file's, or null for the page file's
+     * @param {number} page  the PAGE_* protection
+     * @param {number} flags  the SEC_* attributes asked for
+     * @param {number} sizeHigh @param {number} sizeLow  zero for the file's own size
+     * @returns {Section | { status: number } | Promise<Section | { status: number }>}
+     */
+    const makeSection = (node, page, flags, sizeHigh, sizeLow)=>{
+        const caching = flags & (SEC_NOCACHE | SEC_WRITECOMBINE);
+        const committing = flags & (SEC_RESERVE | SEC_COMMIT);
+        if ((flags & (SEC_FILE | SEC_LARGE_PAGES)) !== 0
+            || committing === (SEC_RESERVE | SEC_COMMIT)
+            || ((flags & SEC_IMAGE) !== 0
+                ? committing !== 0 || (flags & SEC_WRITECOMBINE) !== 0
+                : caching !== 0 && committing === 0))
+        {
+            return { status: STATUS.INVALID_PARAMETER };
+        }
+        if (sizeHigh !== 0)
+        {
+            // A mapping larger than 4 GiB has nowhere to go: a view of it
+            // would not fit in the address space it is mapped into.
+            return { status: STATUS.SECTION_TOO_BIG };
+        }
+        const writable = WRITABLE_PAGES.includes(page);
+        const asked = sizeLow >>> 0;
+        if (!node)
+        {
+            // A mapping with no file must be told how big it is; there is
+            // nothing else to derive a size from.
+            return (flags & SEC_IMAGE) !== 0 ? { status: STATUS.INVALID_FILE_FOR_SECTION }
+                : asked === 0 ? { status: STATUS.INVALID_PARAMETER }
+                    : { node, writable, size: pageRound(asked),
+                        attributes: (committing || SEC_COMMIT) | caching };
+        }
+        const length = host.files.size?.(node) ?? 0;
+        if ((flags & SEC_IMAGE) !== 0)
+        {
+            if (length < 2)
+            {
+                return { status: STATUS.INVALID_FILE_FOR_SECTION };
+            }
+            return settle(host.files.read(node, 0, 2), head=>{
+                if (head[0] !== 0x4d || head[1] !== 0x5a)
+                {
+                    return { status: STATUS.INVALID_IMAGE_NOT_MZ };
+                }
+                host.divergence?.('NtCreateSection',
+                    'a SEC_IMAGE view holds the file as it lies, not laid out as an image');
+                return { node, writable: false, size: length, attributes: SEC_FILE | SEC_IMAGE };
+            });
+        }
+        if (asked === 0 && length === 0)
+        {
+            return { status: STATUS.MAPPED_FILE_SIZE_ZERO };
+        }
+        if (asked > length && !writable && host.files.size)
+        {
+            // Only a section that may be written grows its file to its size.
+            return { status: STATUS.SECTION_TOO_BIG };
+        }
+        // A size of zero over a file means the file's own size, which is
+        // how a program maps a file whole without asking first.
+        return { node, writable, size: asked || length, attributes: SEC_FILE | caching };
+    };
+
+    /** @param {Section} section */
+    const openSection = section=>{
+        if (section.node)
+        {
+            host.files.retain(section.node);
+        }
+        return host.handles.open('mapping', section);
     };
 
     /**
@@ -198,12 +333,6 @@ export function createMappingFunctions(host){
                 }
                 return host.handles.open('mapping', found);
             }
-            if (sizeHigh !== 0)
-            {
-                // A mapping larger than 4 GiB has nowhere to go: a view of it
-                // would not fit in the address space it is mapped into.
-                return fail(ERROR_NOT_ENOUGH_MEMORY);
-            }
             const anonymous = (file >>> 0) === INVALID_HANDLE_VALUE || file === 0;
             const opened = anonymous ? null : object(file, 'file');
             if (!anonymous && !opened)
@@ -214,29 +343,26 @@ export function createMappingFunctions(host){
             // position, access -- and the volume's node is a field of it. The
             // mapping keeps the node, because the record's position is the
             // handle's and a view has its own offset.
-            const node = opened ? opened.node : null;
-            const writable = (protect >>> 0) === PAGE_READWRITE
-                || (protect >>> 0) === PAGE_WRITECOPY;
-            if (anonymous && (sizeLow >>> 0) === 0)
-            {
-                // A mapping with no file must be told how big it is; there is
-                // nothing else to derive a size from.
-                return fail(ERROR_INVALID_PARAMETER);
-            }
-            // A size of zero over a file means the file's own size, which is
-            // how a program maps a file whole without asking first.
-            const size = (sizeLow >>> 0) || (node ? host.files.size?.(node) ?? 0 : 0);
-            if (size === 0)
-            {
-                return fail(ERROR_FILE_INVALID);
-            }
-            const mapping = { node, writable, size };
-            if (node)
-            {
-                host.files.retain(node);
-            }
-            host.namedObjects.remember(name, 'mapping', mapping, false, host.setLastError);
-            return host.handles.open('mapping', mapping);
+            // An image's header is read to check it, and may not be here yet:
+            // the answer is then the asking thread's, on somebody else's turn.
+            const owner = host.currentThread?.() ?? null;
+            let waited = false;
+            const answer = settle(makeSection(opened ? opened.node : null,
+                protect & PAGE_MASK, (protect & ~PAGE_MASK) || SEC_COMMIT, sizeHigh, sizeLow),
+            made=>{
+                /** @param {number} code */
+                const setError = code=>(waited && host.setLastErrorFor
+                    ? host.setLastErrorFor(owner, code) : host.setLastError(code));
+                if ('status' in made)
+                {
+                    setError(toDosError(made.status));
+                    return 0;
+                }
+                host.namedObjects.remember(name, 'mapping', made, false, setError);
+                return openSection(made);
+            });
+            waited = true;
+            return /** @type {any} */ (answer);
         },
     });
 
@@ -277,9 +403,185 @@ export function createMappingFunctions(host){
         },
     });
 
-    return {
+    /**
+     * @param {number} handle
+     * @returns {Section | number} the section, or the status a handle that
+     *          names none is answered with
+     */
+    const sectionOf = handle=>object(handle, 'mapping')
+        ?? (object(handle) ? STATUS.OBJECT_TYPE_MISMATCH : STATUS.INVALID_HANDLE);
+
+    /**
+     * The native calls over the same sections, which ntdll publishes. The
+     * table keeps no access rights with a handle, so one opened without
+     * SECTION_QUERY is answered as one with it.
+     */
+    const natives = {
+        /**
+         * NTSTATUS NtCreateSection(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
+         *   PLARGE_INTEGER MaximumSize, ULONG SectionPageProtection,
+         *   ULONG AllocationAttributes, HANDLE FileHandle)
+         */
+        NtCreateSection: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([out, , attributes, maximum, page, flags, file])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                const opened = (file >>> 0) === 0 ? null : object(file, 'file');
+                if ((file >>> 0) !== 0 && !opened)
+                {
+                    return STATUS.INVALID_HANDLE;
+                }
+                if ((attributes >>> 0) !== 0 && readDword((attributes >>> 0) + 8) !== 0)
+                {
+                    host.divergence?.('NtCreateSection',
+                        'a named section is made without its name');
+                }
+                const size = (maximum >>> 0) === 0 ? [0, 0]
+                    : [readDword((maximum >>> 0) + 4), readDword(maximum >>> 0)];
+                return settle(makeSection(opened ? opened.node : null, page & PAGE_MASK,
+                    flags || SEC_COMMIT, size[0], size[1]), made=>{
+                    if ('status' in made)
+                    {
+                        return made.status;
+                    }
+                    writeDword(out >>> 0, openSection(made));
+                    return STATUS.SUCCESS;
+                });
+            },
+        },
+
+        /**
+         * NTSTATUS NtQuerySection(HANDLE, SECTION_INFORMATION_CLASS, PVOID,
+         *                         SIZE_T Length, PSIZE_T ResultLength)
+         *
+         * What a section was made as. An image section's image information
+         * is not kept, and is answered as zeros.
+         */
+        NtQuerySection: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, kind, buffer, length, returned])=>{
+                const section = sectionOf(handle);
+                if (typeof section === 'number')
+                {
+                    return section;
+                }
+                const size = SECTION_INFORMATION_SIZES[kind];
+                if (size === undefined)
+                {
+                    return STATUS.INVALID_INFO_CLASS;
+                }
+                if ((length >>> 0) < size)
+                {
+                    return STATUS.INFO_LENGTH_MISMATCH;
+                }
+                if (kind === SECTION_IMAGE_INFORMATION && (section.attributes & SEC_IMAGE) === 0)
+                {
+                    return STATUS.SECTION_NOT_IMAGE;
+                }
+                if ((buffer >>> 0) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                const info = new Uint8Array(size);
+                if (kind === SECTION_BASIC_INFORMATION)
+                {
+                    // BaseAddress, which only a based section has, Attributes, Size.
+                    const fields = new DataView(info.buffer);
+                    fields.setUint32(4, section.attributes >>> 0, true);
+                    fields.setUint32(8, section.size, true);
+                }
+                else
+                {
+                    host.divergence?.('NtQuerySection', 'image information is answered as zeros');
+                }
+                host.writeMemory(buffer >>> 0, info);
+                writeDwordIf(returned >>> 0, size);
+                return STATUS.SUCCESS;
+            },
+        },
+
+        /**
+         * NTSTATUS NtMapViewOfSection(HANDLE SectionHandle, HANDLE ProcessHandle,
+         *   PVOID *BaseAddress, ULONG_PTR ZeroBits, SIZE_T CommitSize,
+         *   PLARGE_INTEGER SectionOffset, PSIZE_T ViewSize, SECTION_INHERIT,
+         *   ULONG AllocationType, ULONG Win32Protect)
+         *
+         * MapViewOfFile's view, in this process; one that would reach past
+         * the section's end is refused rather than cut short.
+         */
+        NtMapViewOfSection: {
+            argBytes: 40,
+            /** @param {number[]} args */
+            handler: ([handle, process, base, , , offsetAt, sizeAt, , , page])=>{
+                const section = sectionOf(handle);
+                if (typeof section === 'number')
+                {
+                    return section;
+                }
+                if ((process >>> 0) !== CURRENT_PROCESS)
+                {
+                    host.divergence?.('NtMapViewOfSection', 'a view maps into this process only');
+                    return STATUS.NOT_SUPPORTED;
+                }
+                if ((base >>> 0) === 0 || (sizeAt >>> 0) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                if (readDword(base >>> 0) !== 0)
+                {
+                    host.divergence?.('NtMapViewOfSection',
+                        'a view goes where there is room, not at the address asked for');
+                }
+                const offset = (offsetAt >>> 0) === 0 ? 0 : readDword(offsetAt >>> 0);
+                const length = readDword(sizeAt >>> 0) || section.size - offset;
+                if (length <= 0 || offset + length > section.size)
+                {
+                    return STATUS.INVALID_VIEW_SIZE;
+                }
+                const access = WRITABLE_PAGES.includes(page & PAGE_MASK) ? FILE_MAP_WRITE
+                    : FILE_MAP_READ;
+                return settle(table.MapViewOfFile.handler([handle, access, 0, offset, length]),
+                    /** @param {number} address */
+                    address=>{
+                        if (address === 0)
+                        {
+                            return STATUS.NO_MEMORY;
+                        }
+                        writeDword(base >>> 0, address);
+                        writeDword(sizeAt >>> 0, pageRound(length));
+                        return STATUS.SUCCESS;
+                    });
+            },
+        },
+
+        /** NTSTATUS NtUnmapViewOfSection(HANDLE ProcessHandle, PVOID BaseAddress) */
+        NtUnmapViewOfSection: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([process, address])=>{
+                if ((process >>> 0) !== CURRENT_PROCESS)
+                {
+                    host.divergence?.('NtUnmapViewOfSection', 'a view maps into this process only');
+                    return STATUS.NOT_SUPPORTED;
+                }
+                if (!views.has(address >>> 0))
+                {
+                    return STATUS.NOT_MAPPED_VIEW;
+                }
+                table.UnmapViewOfFile.handler([address]);
+                return STATUS.SUCCESS;
+            },
+        },
+    };
+
+    const table = {
         CreateFileMappingA: createFileMapping(false),
-        CreateFileMappingW: createFileMapping(true),
+        CreateFileMappingW: { ...createFileMapping(true), natives },
         OpenFileMappingA: openFileMapping(false),
         OpenFileMappingW: openFileMapping(true),
 
@@ -458,6 +760,34 @@ export function createMappingFunctions(host){
         },
 
         /**
+         * The rest of the named-pipe calls, refused the same way, since no
+         * handle can be a named pipe's:
+         *
+         *   BOOL ConnectNamedPipe(HANDLE, LPOVERLAPPED)
+         *   BOOL DisconnectNamedPipe(HANDLE)
+         *   BOOL WaitNamedPipeA/W(LPCTSTR lpNamedPipeName, DWORD nTimeOut)
+         *   BOOL TransactNamedPipe(HANDLE, LPVOID, DWORD, LPVOID, DWORD, LPDWORD, LPOVERLAPPED)
+         *   BOOL GetNamedPipeInfo(HANDLE, LPDWORD, LPDWORD, LPDWORD, LPDWORD)
+         *   BOOL GetNamedPipeHandleStateA(HANDLE, LPDWORD, LPDWORD, LPDWORD, LPDWORD,
+         *                                 LPSTR, DWORD)
+         *   BOOL SetNamedPipeHandleState(HANDLE, LPDWORD, LPDWORD, LPDWORD)
+         */
+        ConnectNamedPipe: { argBytes: 8, handler: ()=>refusePipeCall('ConnectNamedPipe') },
+        DisconnectNamedPipe: { argBytes: 4, handler: ()=>refusePipeCall('DisconnectNamedPipe') },
+        WaitNamedPipeA: { argBytes: 8, handler: ()=>refusePipeCall('WaitNamedPipeA') },
+        WaitNamedPipeW: { argBytes: 8, handler: ()=>refusePipeCall('WaitNamedPipeW') },
+        TransactNamedPipe: { argBytes: 28, handler: ()=>refusePipeCall('TransactNamedPipe') },
+        GetNamedPipeInfo: { argBytes: 20, handler: ()=>refusePipeCall('GetNamedPipeInfo') },
+        GetNamedPipeHandleStateA: {
+            argBytes: 28,
+            handler: ()=>refusePipeCall('GetNamedPipeHandleStateA'),
+        },
+        SetNamedPipeHandleState: {
+            argBytes: 16,
+            handler: ()=>refusePipeCall('SetNamedPipeHandleState'),
+        },
+
+        /**
          * HANDLE CreateMailslotA(LPCSTR lpName, DWORD nMaxMessageSize,
          *   DWORD lReadTimeout, LPSECURITY_ATTRIBUTES lpSecurityAttributes)
          * HANDLE CreateMailslotW(LPCWSTR, ...): the same in wide text
@@ -513,4 +843,5 @@ export function createMappingFunctions(host){
             },
         },
     };
+    return table;
 }

@@ -46,7 +46,7 @@ const CALLBACK_EVENT = 0x00050000;
  * @param {(entry: number, args: number[], thread?: any) => Promise<number>} deps.callGuest
  *        Calls a guest routine and answers when it returns.
  * @param {(message: { hwnd: number, message: number,
- *                     wParam: number, lParam: number }) => void} deps.post
+ *                     wParam: number, lParam: number, thread?: number }) => void} deps.post
  * @param {(handle: number) => void} deps.signal  Sets an event, by handle.
  * @returns {(notice: WaveNotice, thread?: any) => void | Promise<number>}
  */
@@ -67,15 +67,15 @@ export function createWaveNotifier({ callGuest, post, signal }){
                 return;
 
             case CALLBACK_THREAD:
-                // A thread message, which is a posted message with no window.
-                // The queue here is the process's rather than one per thread, so
-                // this reaches whoever is pumping -- which for the programs that
-                // use this form is the thread that asked.
+                // A thread message, which is a posted message with no window,
+                // to the thread the program named: often one of its own that
+                // does nothing but pump for these.
                 post({
                     hwnd: 0,
                     message: notice.message,
                     wParam: notice.device,
                     lParam: notice.param,
+                    thread: notice.target,
                 });
                 return;
 

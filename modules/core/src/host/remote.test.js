@@ -824,20 +824,21 @@ test('a worker runs turns back to back and yields for something pending or on it
     assert.equal(pacing.yield(nothing), null);
     await pacing.yield({ ...nothing, suspended: 1 });
     await pacing.yield({ ...nothing, fetching: 1 });
-    await pacing.yield({ ...nothing, idlers: 1 });
     await pacing.yield({ ...nothing, spun: 1 });
-    assert.equal(yields, 4, 'a call suspended, a range in flight, a caller on an empty '
-        + 'queue and a turn that retired nothing each yield at once');
+    assert.equal(yields, 3, 'a call suspended, a range in flight and a turn that retired '
+        + 'nothing each yield at once');
+    assert.equal(pacing.yield({ ...nothing, idlers: 1 }), null,
+        "a caller on the guest's own queue looks again without the host");
     signalled = true;
     await pacing.yield(nothing);
-    assert.equal(yields, 5, 'the page posted something');
+    assert.equal(yields, 4, 'the page posted something');
     signalled = false;
     assert.equal(pacing.yield(nothing), null);
     now += WORKER_YIELD_MS - 1;
     assert.equal(pacing.yield(nothing), null, 'the interval is not up');
     now += 1;
     await pacing.yield(nothing);
-    assert.equal(yields, 6, 'the interval is up');
+    assert.equal(yields, 5, 'the interval is up');
     assert.equal(pacing.yield(nothing), null, 'and the clock was reset');
 });
 

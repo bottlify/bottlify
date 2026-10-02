@@ -59,6 +59,7 @@ enum
 #define HAS_CODE 2u
 /* A page with a block closed in a translated loop (PageFlag.CLOSED): see enter. */
 #define CLOSED 8u
+#define NO_EXECUTE 16u
 #define NONE 0xffffffffu
 
 static u8 *ram;
@@ -2144,9 +2145,12 @@ static u32 runInteger(u32 budget)
             break;
         }
         start = eip;
-        /* A fetch within one readable page, or across into a readable one. */
-        if ((pageFlags[eip >> 12] & INACCESSIBLE)
-            || ((eip & 0xfff) > 0xff0 && (pageFlags[(eip + 15) >> 12] & INACCESSIBLE)))
+        /* A fetch within one page that runs, or across into one that does; anything
+         * else -- a page no-access, or one that only reads, as the null range does --
+         * is the host's to fault. */
+        if ((pageFlags[eip >> 12] & (INACCESSIBLE | NO_EXECUTE))
+            || ((eip & 0xfff) > 0xff0
+                && (pageFlags[(eip + 15) >> 12] & (INACCESSIBLE | NO_EXECUTE))))
         {
             code = W_UNSUPPORTED;
             break;

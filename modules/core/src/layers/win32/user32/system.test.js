@@ -1446,6 +1446,45 @@ test('OemToCharA copies through the terminator and refuses a null on either side
     assert.equal(fns.OemToCharA.argBytes, 8);
 });
 
+test('the wide and uncounted OEM conversions agree with the counted ANSI ones', ()=>{
+    // 0x81 is u-umlaut in page 437, U+00FC as a character, 0xfc in Windows-1252.
+    const { memory, fns } = setup();
+    memory.writeMemory(TEXT_BUFFER, Uint8Array.of(0x81, 0x61, 0x00, 0x7a));
+    memory.fill(OUT_BUFFER, 16);
+    assert.equal(fns.OemToCharBuffW.handler([TEXT_BUFFER, OUT_BUFFER, 2]), 1);
+    assert.deepEqual([...memory.readMemory(OUT_BUFFER, 6)],
+        [0xfc, 0x00, 0x61, 0x00, UNTOUCHED & 0xff, UNTOUCHED & 0xff], 'counted: no terminator');
+    assert.equal(fns.OemToCharW.handler([TEXT_BUFFER, OUT_BUFFER]), 1);
+    assert.deepEqual([...memory.readMemory(OUT_BUFFER, 6)], [0xfc, 0x00, 0x61, 0x00, 0, 0]);
+    assert.equal(fns.CharToOemW.handler([OUT_BUFFER, OUT_BUFFER + 8]), 1);
+    assert.deepEqual([...memory.readMemory(OUT_BUFFER + 8, 3)], [0x81, 0x61, 0x00]);
+    // A character page 437 has no byte for becomes the default character.
+    memory.writeMemory(OUT_BUFFER, Uint8Array.of(0xac, 0x20, 0x62, 0x00));
+    assert.equal(fns.CharToOemBuffW.handler([OUT_BUFFER, OUT_BUFFER + 8, 2]), 1);
+    assert.deepEqual([...memory.readMemory(OUT_BUFFER + 8, 2)], [0x3f, 0x62]);
+    memory.writeMemory(TEXT_BUFFER, Uint8Array.of(0xfc, 0x61, 0x00));
+    assert.equal(fns.CharToOemA.handler([TEXT_BUFFER, OUT_BUFFER]), 1);
+    assert.deepEqual([...memory.readMemory(OUT_BUFFER, 3)], [0x81, 0x61, 0x00]);
+    for (const name of ['OemToCharW', 'CharToOemW', 'CharToOemA'])
+    {
+        assert.equal(fns[name].handler([0, OUT_BUFFER]), 0, `${name} refuses a null`);
+    }
+});
+
+test('OemKeyScan answers the scan code and shift state that type an OEM character', ()=>{
+    // input.c's test_OemKeyScan: VkKeyScan's shift state moved to the high
+    // word, MapVirtualKey's scan code in the low, -1 for a character no key
+    // types; only the low byte of the argument counts.
+    const { fns } = setup();
+    assert.equal(fns.OemKeyScan.handler([0x61]), 0x0000001e, 'a');
+    assert.equal(fns.OemKeyScan.handler([0x41]), 0x0001001e, 'A, with shift');
+    assert.equal(fns.OemKeyScan.handler([0x141]), 0x0001001e, 'the high byte ignored');
+    assert.equal(fns.OemKeyScan.handler([0x01]), 0x0002001e, 'control and A');
+    assert.equal(fns.OemKeyScan.handler([0x31]), 0x00000002, '1');
+    assert.equal(fns.OemKeyScan.handler([0x81]), 0xffffffff, 'u-umlaut: no key on this layout');
+    assert.equal(fns.OemKeyScan.argBytes, 4);
+});
+
 test('wvsprintfA reads its arguments through the list it was handed', ()=>{
     const { memory, fns } = setup();
     memory.putString(FORMAT_BUFFER, '%s scored %d of %d');
@@ -1767,6 +1806,64 @@ test('SystemParametersInfo answers the hover time and the hover rectangle', ()=>
         .map(ask), [4, 4, HOVER_TIME]);
 });
 
+test('SPI_GETNONCLIENTMETRICS answers the frame the metrics describe and its fonts', ()=>{
+    // A launcher takes its menu font from here without looking at the answer:
+    // left unwritten, the structure's height was whatever its stack held, and
+    // every label came out three million pixels tall.
+    const { memory, fns } = setup();
+    const SPI_GETNONCLIENTMETRICS = 0x0029;
+    /** @param {number} at */
+    const i32 = at=>memory.u32(OUT_BUFFER + at) | 0;
+    /** @param {number} at @param {boolean} wide */
+    const face = (at, wide)=>{
+        let name = '';
+        for (let index = 0; index < 32; index++)
+        {
+            const unit = wide
+                ? memory.bytes[OUT_BUFFER + at + 28 + index * 2]
+                    | memory.bytes[OUT_BUFFER + at + 29 + index * 2] << 8
+                : memory.bytes[OUT_BUFFER + at + 28 + index];
+            if (unit === 0)
+            {
+                break;
+            }
+            name += String.fromCharCode(unit);
+        }
+        return name;
+    };
+    const metric = (/** @type {number} */ index)=>fns.GetSystemMetrics.handler([index]);
+    for (const [name, sizes, font] of /** @type {const} */ ([
+        ['SystemParametersInfoA', [340, 344], 60], ['SystemParametersInfoW', [500, 504], 92]]))
+    {
+        for (const size of sizes)
+        {
+            memory.fill(OUT_BUFFER, 130);
+            memory.putU32s(OUT_BUFFER, [size]);
+            assert.equal(fns[name].handler([SPI_GETNONCLIENTMETRICS, size, OUT_BUFFER, 0]), 1);
+            assert.deepEqual([4, 8, 12, 16, 20].map(i32), [1, metric(2), metric(3), metric(30),
+                metric(4) - 1], 'border, scroll bars, caption buttons, caption');
+            const smallCaption = 24 + font;
+            const menu = smallCaption + 8 + font;
+            assert.deepEqual([smallCaption, smallCaption + 4, menu, menu + 4].map(i32),
+                [metric(52), metric(53), metric(54), metric(15) - 1]);
+            const fonts = [24, smallCaption + 8, menu + 8, menu + 8 + font, menu + 8 + 2 * font];
+            assert.deepEqual(fonts.map(at=>[i32(at), i32(at + 16), face(at, font === 92)]), [
+                [-11, 700, 'Tahoma'], [-11, 700, 'Tahoma'], [-11, 400, 'Tahoma'],
+                [-11, 400, 'Tahoma'], [-11, 400, 'Tahoma']],
+            `caption, small caption, menu, status and message fonts at ${size} bytes`);
+            if (size % 4 === 0 && size === sizes[1])
+            {
+                assert.equal(i32(size - 4), 0, 'and a padded border of nothing');
+            }
+        }
+        memory.fill(OUT_BUFFER, 4);
+        memory.putU32s(OUT_BUFFER, [sizes[0] - 4]);
+        assert.equal(fns[name].handler([SPI_GETNONCLIENTMETRICS, 0, OUT_BUFFER, 0]), 0,
+            'a size that is neither layout is refused');
+        assert.equal(memory.u32(OUT_BUFFER + 4), UNTOUCHED);
+    }
+});
+
 test('wsprintfA reads its arguments off the stack and pops none of them', ()=>{
     // cdecl: the caller cleans up, so the count declared here says how many
     // slots to read. Declaring too few is a conversion that gets nothing.
@@ -1900,6 +1997,9 @@ test('the one layout there is is named, listed, activated and loaded', ()=>{
     assert.equal(memory.u32(OUT_BUFFER), layout);
     assert.equal(fns.ActivateKeyboardLayout.handler([layout, 0]), layout);
     assert.equal(fns.LoadKeyboardLayoutA.handler([TEXT_BUFFER, 1]), layout);
+    // input.c's test_LoadKeyboardLayoutEx: a layout to replace, or nothing.
+    assert.equal(fns.LoadKeyboardLayoutEx.handler([0, TEXT_BUFFER, 0]), 0);
+    assert.equal(fns.LoadKeyboardLayoutEx.handler([layout, TEXT_BUFFER, 0]), layout);
 });
 
 test('GetKeyboardLayout answers the one supported layout for any thread, including zero', ()=>{
@@ -2988,3 +3088,29 @@ test('RealGetWindowClass answers the class name, as no window is made on a syste
         assert.equal(memory.readCString(OUT_BUFFER, 32), 'MainWnd');
         assert.equal(fns.RealGetWindowClassA.handler([0x9999, OUT_BUFFER, 32]), 0);
     });
+
+test('GetKeyNameText names a key from its scan code, the extended bit and the sideless bit', ()=>{
+    // Wine's user32 input.c test_keynames; GetKeyNameTextA was missing, and
+    // a key-binding screen asks it for every key it shows.
+    const { memory, fns } = setup();
+    /** @param {number} lParam */
+    const name = lParam=>{
+        memory.bytes.fill(0x2d, 0x100, 0x120);
+        const length = fns.GetKeyNameTextA.handler([lParam, 0x100, 32]);
+        return new TextDecoder().decode(memory.bytes.slice(0x100, 0x100 + length));
+    };
+    assert.equal(name(0x01480000), 'Up');
+    assert.equal(name(0x011d0000), 'Right Ctrl');
+    assert.equal(name(0x021d0000), 'Ctrl');
+    assert.equal(name(0xe0450000), 'Pause', 'the top bits are the message\'s, not the key\'s');
+    assert.equal(name(0x01450000), 'Num Lock');
+    assert.equal(name(0x00390000), 'Space');
+    assert.equal(name(0x001e0000), 'A');
+    assert.equal(name(0x03380000), 'Alt', 'the right Alt with left and right as one');
+    assert.equal(fns.GetKeyNameTextA.handler([0x007f0000, 0x100, 32]), 0, 'a key with no name');
+    assert.equal(memory.bytes[0x100], 0, 'and an empty string');
+    const length = fns.GetKeyNameTextW.handler([0x002a0000, 0x100, 3]);
+    assert.equal(length, 2, 'cut to the room with its terminator');
+    assert.deepEqual([...memory.bytes.slice(0x100, 0x106)], [0x53, 0, 0x68, 0, 0, 0]);
+    assert.equal(fns.GetKeyNameTextW.argBytes, 12);
+});

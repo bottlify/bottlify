@@ -420,6 +420,40 @@ export function createSurface(options){
             bytes[at + 3] = (value >>> 24) & 0xff;
         },
 
+        /**
+         * The first pixel of a row is written as any is, and the rest of the
+         * row are copies of its bytes; below a byte, where pixels share one,
+         * each is written in turn.
+         *
+         * @param {number} x0 @param {number} y0 @param {number} x1 @param {number} y1
+         * @param {number} pixel
+         */
+        fill(x0, y0, x1, y1, pixel){
+            const fromX = Math.max(0, x0);
+            const toX = Math.min(width, x1);
+            const size = bitCount >>> 3;
+            const toY = fromX < toX ? Math.min(height, y1) : 0;
+            for (let y = Math.max(0, y0); y < toY; y++)
+            {
+                if (size === 0)
+                {
+                    for (let x = fromX; x < toX; x++)
+                    {
+                        this.write(x, y, pixel);
+                    }
+                    continue;
+                }
+                this.write(fromX, y, pixel);
+                const start = rowOffset(y) + fromX * size;
+                const end = rowOffset(y) + toX * size;
+                for (let filled = size; start + filled < end; filled *= 2)
+                {
+                    bytes.copyWithin(start + filled, start,
+                        start + Math.min(filled, end - start - filled));
+                }
+            }
+        },
+
         /** @param {number} pixel @returns {number} what a write of it reads back as */
         nearest(pixel){
             if (bitCount <= 8)
@@ -648,6 +682,32 @@ export function viewOf(parent, rect){
             if (inside(x, y))
             {
                 parent.write(x + left, y + top, pixel);
+            }
+        },
+        /**
+         * @param {number} x0 @param {number} y0 @param {number} x1 @param {number} y1
+         * @param {number} pixel
+         */
+        fill(x0, y0, x1, y1, pixel){
+            const fromX = Math.max(x0 + left, 0);
+            const fromY = Math.max(y0 + top, 0);
+            const toX = Math.min(x1 + left, parent.width);
+            const toY = Math.min(y1 + top, parent.height);
+            if (fromX >= toX || fromY >= toY)
+            {
+                return;
+            }
+            if (parent.fill)
+            {
+                parent.fill(fromX, fromY, toX, toY, pixel);
+                return;
+            }
+            for (let y = fromY; y < toY; y++)
+            {
+                for (let x = fromX; x < toX; x++)
+                {
+                    parent.write(x, y, pixel);
+                }
             }
         },
     };

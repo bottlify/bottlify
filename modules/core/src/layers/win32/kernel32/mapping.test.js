@@ -297,6 +297,22 @@ test('CreateNamedPipe is refused as Windows 9x refuses it, and says so', ()=>{
     assert.match(said[1], /^CreateNamedPipeW: /);
 });
 
+test('the other named-pipe calls are refused the same way, each popping its own arguments', ()=>{
+    // Wine's kernel32 process.c connects the pipe it could not create.
+    const { fns, errors, said } = setup();
+    const table = /** @type {Record<string, any>} */ (fns);
+    for (const [name, argBytes] of /** @type {[string, number][]} */ ([
+        ['ConnectNamedPipe', 8], ['DisconnectNamedPipe', 4], ['WaitNamedPipeA', 8],
+        ['WaitNamedPipeW', 8], ['TransactNamedPipe', 28], ['GetNamedPipeInfo', 20],
+        ['GetNamedPipeHandleStateA', 28], ['SetNamedPipeHandleState', 16]]))
+    {
+        assert.equal(table[name].argBytes, argBytes, name);
+        assert.equal(table[name].handler(), 0, name);
+        assert.equal(errors.at(-1), 120, 'ERROR_CALL_NOT_IMPLEMENTED');
+        assert.match(said.at(-1) ?? '', new RegExp(`^${name}: `));
+    }
+});
+
 test('CreateMailslot is refused, and says so', ()=>{
     const { fns, errors, said } = setup();
     for (const entry of [fns.CreateMailslotA, fns.CreateMailslotW])
@@ -306,4 +322,141 @@ test('CreateMailslot is refused, and says so', ()=>{
         assert.equal(errors.at(-1), 120, 'ERROR_CALL_NOT_IMPLEMENTED');
     }
     assert.match(said[1], /^CreateMailslotW: /);
+});
+
+const SEC_FILE = 0x800000;
+const SEC_IMAGE = 0x1000000;
+const SEC_RESERVE = 0x4000000;
+const SEC_COMMIT = 0x8000000;
+const SEC_NOCACHE = 0x10000000;
+const SEC_LARGE_PAGES = 0x80000000;
+const CURRENT_PROCESS = 0xffffffff;
+
+/**
+ * NtQuerySection's basic information for a handle, read back.
+ *
+ * @param {ReturnType<typeof setup>} at @param {number} handle
+ */
+const basicInformation = ({ fns, bytes }, handle)=>{
+    const status = fns.CreateFileMappingW.natives.NtQuerySection.handler(
+        [handle, 0, 0x300, 16, 0x320]);
+    return { status, base: dword(bytes, 0x300), attributes: dword(bytes, 0x304),
+        size: dword(bytes, 0x308), high: dword(bytes, 0x30c), returned: dword(bytes, 0x320) };
+};
+
+test('a file\'s section is SEC_FILE; the page file\'s keeps what was asked, in whole pages', ()=>{
+    // What NtQuerySection reports is what CreateFileMapping made: kernel32's
+    // tests pin it for every combination of the SEC_* half of flProtect.
+    const at = setup();
+    const { fns, fileHandle } = at;
+    const reserved = fns.CreateFileMappingA.handler(
+        [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE | SEC_RESERVE, 0, 4090, 0]);
+    assert.deepEqual(basicInformation(at, reserved),
+        { status: 0, base: 0, attributes: SEC_RESERVE, size: 0x1000, high: 0, returned: 16 });
+    const plain = fns.CreateFileMappingA.handler(
+        [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, 64, 0]);
+    assert.equal(basicInformation(at, plain).attributes, SEC_COMMIT, 'nothing asked is SEC_COMMIT');
+    const overFile = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READWRITE | SEC_COMMIT | SEC_NOCACHE, 0, 0, 0]);
+    assert.deepEqual(basicInformation(at, overFile),
+        { status: 0, base: 0, attributes: SEC_FILE | SEC_NOCACHE, size: 8, high: 0, returned: 16 },
+        'the commit is dropped, the caching kept, and the size is the file\'s own');
+});
+
+test('the SEC_* combinations Windows refuses are refused, each with its own error', ()=>{
+    const { fns, fileHandle, errors } = setup();
+    const ERROR_NOT_ENOUGH_MEMORY = 8;
+    const ERROR_INVALID_PARAMETER = 87;
+    const ERROR_BAD_EXE_FORMAT = 193;
+    for (const [file, protect, error] of [
+        [INVALID_HANDLE_VALUE, PAGE_READWRITE | SEC_RESERVE | SEC_COMMIT, ERROR_INVALID_PARAMETER],
+        [INVALID_HANDLE_VALUE, PAGE_READWRITE | SEC_NOCACHE, ERROR_INVALID_PARAMETER],
+        [INVALID_HANDLE_VALUE, PAGE_READWRITE | SEC_RESERVE | SEC_LARGE_PAGES,
+            ERROR_INVALID_PARAMETER],
+        [INVALID_HANDLE_VALUE, PAGE_READWRITE | SEC_FILE, ERROR_INVALID_PARAMETER],
+        [INVALID_HANDLE_VALUE, PAGE_READONLY | SEC_IMAGE, ERROR_BAD_EXE_FORMAT],
+        [fileHandle, PAGE_READONLY | SEC_IMAGE, ERROR_BAD_EXE_FORMAT],
+        [fileHandle, PAGE_READONLY | SEC_IMAGE | SEC_COMMIT, ERROR_INVALID_PARAMETER],
+    ])
+    {
+        assert.equal(fns.CreateFileMappingA.handler([file, 0, protect, 0, 0x10, 0]), 0,
+            `0x${(protect >>> 0).toString(16)} is refused`);
+        assert.equal(errors.at(-1), error, `0x${(protect >>> 0).toString(16)}'s error`);
+    }
+    // Larger than its file: only a section that may be written grows the file.
+    assert.equal(fns.CreateFileMappingA.handler([fileHandle, 0, PAGE_READONLY, 0, 9, 0]), 0);
+    assert.equal(errors.at(-1), ERROR_NOT_ENOUGH_MEMORY);
+    assert.notEqual(fns.CreateFileMappingA.handler([fileHandle, 0, PAGE_READWRITE, 0, 9, 0]), 0);
+});
+
+test('a read-write mapping that names its commit is still written back to its file', ()=>{
+    // PAGE_READWRITE | SEC_COMMIT is how many programs spell an ordinary
+    // read-write mapping; read as one number it is no PAGE_* at all, and the
+    // view's writes never reached the file.
+    const { fns, bytes, file, fileHandle } = setup();
+    const mapping = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READWRITE | SEC_COMMIT, 0, 8, 0]);
+    const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_WRITE, 0, 0, 8]);
+    bytes[view + 2] = 0x77;
+    assert.equal(fns.UnmapViewOfFile.handler([view]), 1);
+    assert.equal(file.data[2], 0x77);
+});
+
+test('NtQuerySection refuses a short buffer, a plain section\'s image class, a non-section', ()=>{
+    const at = setup();
+    const { fns, fileHandle } = at;
+    const query = fns.CreateFileMappingW.natives.NtQuerySection.handler;
+    const STATUS_INVALID_INFO_CLASS = 0xc0000003;
+    const STATUS_INFO_LENGTH_MISMATCH = 0xc0000004;
+    const STATUS_INVALID_HANDLE = 0xc0000008;
+    const STATUS_OBJECT_TYPE_MISMATCH = 0xc0000024;
+    const STATUS_SECTION_NOT_IMAGE = 0xc0000049;
+    const mapping = fns.CreateFileMappingA.handler(
+        [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, 64, 0]);
+    assert.equal(query([mapping, 0, 0x300, 15, 0]), STATUS_INFO_LENGTH_MISMATCH);
+    assert.equal(query([mapping, 0, 0x300, 17, 0]), 0, 'a longer buffer is fine');
+    assert.equal(query([mapping, 1, 0x300, 47, 0]), STATUS_INFO_LENGTH_MISMATCH,
+        'the length is checked before the kind of section');
+    assert.equal(query([mapping, 1, 0x300, 48, 0]), STATUS_SECTION_NOT_IMAGE);
+    assert.equal(query([mapping, 2, 0x300, 64, 0]), STATUS_INVALID_INFO_CLASS);
+    assert.equal(query([fileHandle, 0, 0x300, 16, 0]), STATUS_OBJECT_TYPE_MISMATCH);
+    assert.equal(query([0x999, 0, 0x300, 16, 0]), STATUS_INVALID_HANDLE);
+});
+
+test('a native section maps a view that must fit inside it, and unmaps it once', ()=>{
+    const at = setup();
+    const { fns, bytes, fileHandle } = at;
+    const { NtCreateSection, NtMapViewOfSection, NtUnmapViewOfSection } =
+        fns.CreateFileMappingW.natives;
+    const STATUS_INVALID_VIEW_SIZE = 0xc000001f;
+    const STATUS_SECTION_TOO_BIG = 0xc0000040;
+    const STATUS_NOT_MAPPED_VIEW = 0xc0000019;
+    /** @param {number} size */
+    const create = (size, file = fileHandle)=>{
+        bytes.set([size & 0xff, size >>> 8, 0, 0, 0, 0, 0, 0], 0x210);
+        return NtCreateSection.handler([0x200, 0, 0, 0x210, PAGE_READONLY, SEC_COMMIT, file]);
+    };
+    assert.equal(create(9), STATUS_SECTION_TOO_BIG, 'past the end of a read-only file');
+    assert.equal(create(6), 0);
+    const section = dword(bytes, 0x200);
+    assert.deepEqual(basicInformation(at, section),
+        { status: 0, base: 0, attributes: SEC_FILE, size: 6, high: 0, returned: 16 });
+
+    /** @param {number} size */
+    const map = size=>{
+        bytes.set([0, 0, 0, 0, size, 0, 0, 0], 0x220);
+        return NtMapViewOfSection.handler(
+            [section, CURRENT_PROCESS, 0x220, 0, 0, 0, 0x224, 1, 0, PAGE_READONLY]);
+    };
+    assert.equal(map(7), STATUS_INVALID_VIEW_SIZE, 'a view past the section is refused');
+    assert.equal(map(6), 0);
+    const view = dword(bytes, 0x220);
+    assert.deepEqual([...bytes.slice(view, view + 6)], [1, 2, 3, 4, 5, 6]);
+    assert.equal(dword(bytes, 0x224), 0x1000, 'the view\'s size is whole pages');
+    assert.equal(NtUnmapViewOfSection.handler([CURRENT_PROCESS, view]), 0);
+    assert.equal(NtUnmapViewOfSection.handler([CURRENT_PROCESS, view]), STATUS_NOT_MAPPED_VIEW);
+
+    assert.equal(create(0x3452, 0), 0);
+    assert.equal(basicInformation(at, dword(bytes, 0x200)).size, 0x4000,
+        'the page file\'s section is whole pages');
 });

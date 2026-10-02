@@ -292,6 +292,9 @@ const LBN_KILLFOCUS = 5;
 
 /** Combo box styles, messages and notifications. */
 const CBS_TYPEMASK = 0x0003;
+/** The scroll bars a combo box is given, which are its list's. */
+const WS_VSCROLL = 0x00200000;
+const WS_HSCROLL = 0x00100000;
 const CBS_SIMPLE = 0x0001;
 const CBS_DROPDOWN = 0x0002;
 const CBS_SORT = 0x0100;
@@ -2114,7 +2117,7 @@ export function createControlProcedures(host){
     /**
      * @param {any} record
      * @returns {{ items: ListItem[], current: number, top: number, itemHeight?: number,
-     *     dropDivergenceSaid?: boolean }}
+     *     dropDivergenceSaid?: boolean, droppedHeight?: number }}
      */
     const listState = record=>{
         const state = stateOf(record);
@@ -2580,6 +2583,36 @@ export function createControlProcedures(host){
         || (record.style & CBS_TYPEMASK) === CBS_SIMPLE;
 
     /**
+     * A dropdown combo box is as tall as its field shows: its text and the
+     * margin and edge round it. The height it was made with is the dropped
+     * list's, and the scroll bars it was given are the list's too -- Windows
+     * takes both off the window as the combo box is made, and fits the field
+     * again to every font it is given.
+     *
+     * @param {any} record @param {boolean} creating
+     */
+    const fitComboField = (record, creating)=>{
+        if (creating)
+        {
+            record.style = (record.style & ~(WS_VSCROLL | WS_HSCROLL)) >>> 0;
+            listState(record).droppedHeight = record.height;
+        }
+        if ((record.style & CBS_TYPEMASK) === CBS_SIMPLE)
+        {
+            return;
+        }
+        // The system font's thirteen rows where nothing can be measured.
+        let rows = 13;
+        if (host.draw)
+        {
+            const { hdc } = host.contextOn(record);
+            rows = (hdc !== 0 ? host.draw.measure(hdc, 'M')?.height : null) ?? rows;
+            host.endPaint(record, hdc);
+        }
+        record.height = rows + 8;
+    };
+
+    /**
      * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
      */
     const comboBoxProc = (record, message, thread)=>{
@@ -2599,6 +2632,14 @@ export function createControlProcedures(host){
             return answer ?? CB_ERR;
         }
         switch (message.message){
+            case WM_CREATE:
+                fitComboField(record, true);
+                return common(record, message, thread);
+            case WM_SETFONT:
+                return after(common(record, message, thread), answer=>{
+                    fitComboField(record, false);
+                    return answer;
+                });
             case WM_PAINT:
                 return painting(record, (hdc, rect)=>{
                     paintCombo(record, hdc, rect);

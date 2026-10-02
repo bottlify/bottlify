@@ -789,3 +789,75 @@ test('every entry is cdecl with the argument count it reads', ()=>{
         assert.deepEqual([fns[name].convention, fns[name].argBytes], ['cdecl', argBytes], name);
     }
 });
+
+test('_dup shares a file and its position; _dup2 puts one on a standard number and back', ()=>{
+    // Wine's msvcrt test_std_stream_buffering: stdout sent to a file through
+    // a copy of the console's descriptor, and given back to it the same way.
+    const { memory, files, errno, fns, open, text, console } = withHandles();
+    const fd = open('C:\\game\\dup.txt', O_CREAT | O_RDWR | O_BINARY);
+    const copy = fns._dup.handler([fd]);
+    assert.ok(copy > fd);
+    assert.equal(fns._write.handler([fd, memory.put('ab'), 2]), 2);
+    assert.equal(fns._tell.handler([copy]), 2, 'one position');
+    assert.equal(fns._write.handler([copy, memory.put('c'), 1]), 1);
+    assert.equal(text('C:\\game\\dup.txt'), 'abc');
+
+    const console1 = fns._dup.handler([1]);
+    assert.equal(fns._dup2.handler([fd, 1]), 0);
+    assert.equal(fns._write.handler([1, memory.put('d'), 1]), 1);
+    assert.equal(text('C:\\game\\dup.txt'), 'abcd', 'stdout writes to the file');
+    assert.equal(fns._dup2.handler([console1, 1]), 0);
+    assert.equal(fns._write.handler([1, memory.put('e'), 1]), 1);
+    assert.deepEqual(console.map(([, written])=>written), ['e'], 'and to the console again');
+
+    assert.equal(fns._close.handler([fd]), 0);
+    assert.equal(fns._close.handler([copy]), 0);
+    assert.equal(fns._close.handler([console1]), 0);
+    assert.deepEqual(files.closed, ['C:\\game\\dup.txt'], 'closed once, by the last holder');
+    assert.equal(fns._dup2.handler([0, -1]), -1, 'a target out of reach');
+    assert.equal(fns._dup.handler([77]), -1, 'a number not open');
+    assert.deepEqual(errno, [EBADF, EBADF]);
+});
+
+test('__pioinfo holds each descriptor of its first block as a program reads it in place', ()=>{
+    // Wine's msvcrt test__open_osfhandle and test_ioinfo_flags read the
+    // table directly: the handle and wxflag of a descriptor open, the
+    // handle INVALID_HANDLE_VALUE and no flags once it is closed.
+    const WX_OPEN = 0x01;
+    const WX_TTY = 0x40;
+    const WX_TEXT = 0x80;
+    const memory = fakeMemory();
+    const files = fakeVolume({ 'C:\\game\\info.tst': new Uint8Array(0) },
+        { directories: ['C:\\', 'C:\\game'] });
+    const handles = fakeHandles(files);
+    const TABLE = 0x80000;
+    let placed = 0;
+    const descriptors = createDescriptors({
+        files, handles, errno: ()=>{}, writeMemory: memory.writeMemory, ioinfo: ()=>placed,
+    });
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({ ...memory, files },
+        descriptors));
+    assert.deepEqual(fns.__pioinfo.pointers, [{ at: 0, to: '__pioinfo', offset: 256 }],
+        'the first pointer is to the block after the 64 of them');
+    memory.writeMemory(TABLE, fns.__pioinfo.data());
+    placed = TABLE;
+    const view = new DataView(memory.bytes.buffer);
+    /** @param {number} fd */
+    const entry = fd=>({ handle: view.getInt32(TABLE + 256 + fd * 36, true),
+        wxflag: memory.bytes[TABLE + 256 + fd * 36 + 4] });
+
+    assert.deepEqual(entry(1), { handle: 2, wxflag: WX_OPEN | WX_TTY | WX_TEXT }, 'stdout');
+    assert.deepEqual(entry(7), { handle: INVALID_HANDLE_VALUE, wxflag: 0 }, 'not open');
+
+    const handle = handles.create('C:\\game\\info.tst');
+    const adopted = fns._open_osfhandle.handler([handle, 0]);
+    assert.deepEqual(entry(adopted), { handle, wxflag: WX_OPEN }, 'binary, on its handle');
+    assert.equal(fns._close.handler([adopted]), 0);
+    assert.deepEqual(entry(adopted), { handle: INVALID_HANDLE_VALUE, wxflag: 0 });
+
+    const opened = fns._open.handler([memory.put('C:\\game\\info.tst'), O_RDWR | O_TEXT, 0]);
+    assert.deepEqual(entry(opened), { handle: INVALID_HANDLE_VALUE, wxflag: WX_OPEN | WX_TEXT },
+        'no handle until one is asked for');
+    const asked = fns._get_osfhandle.handler([opened]);
+    assert.deepEqual(entry(opened), { handle: asked, wxflag: WX_OPEN | WX_TEXT });
+});

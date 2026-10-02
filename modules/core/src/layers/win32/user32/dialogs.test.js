@@ -87,9 +87,12 @@ function fakeHandles(){
  *           dispatch?: (wndProc: number, message: any, thread?: unknown) => number,
  *           allocate?: (bytes: number) => number,
  *           call?: (entry: number, args: number[], thread?: unknown) => any,
- *           unattended?: boolean, answer?: (dialog: any) => number | Promise<number> }} [options]
+ *           unattended?: boolean, answer?: (dialog: any) => number | Promise<number>,
+ *           bitmapFromDib?: (info: number, bits: number) => number }} [options]
  */
-function setup({ resources = {}, dispatch = ()=>0, allocate, call, unattended, answer } = {}){
+function setup({ resources = {}, dispatch = ()=>0, allocate, call, unattended, answer,
+    bitmapFromDib } = {})
+{
     const memory = fakeMemory();
     const queue = createMessageQueue();
     const fns = createWindowFunctions({
@@ -122,6 +125,7 @@ function setup({ resources = {}, dispatch = ()=>0, allocate, call, unattended, a
                 : null),
         /** @param {number} instance */
         moduleBase: instance=>(instance === HINSTANCE ? MODULE_BASE : 0),
+        bitmapFromDib,
     });
     const table = /** @type {Record<string, { argBytes: number,
         handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
@@ -187,7 +191,8 @@ function writer(memory, base){
  *
  * @param {any} memory
  * @param {{ id: number, x: number, y: number, cx: number, cy: number, style?: number,
- *           className?: string, ordinal?: number, title?: string, data?: number[] }[]} controls
+ *           className?: string, ordinal?: number, title?: string, titleOrdinal?: number,
+ *           data?: number[] }[]} controls
  * @param {{ style?: number, menu?: string, title?: string }} [options]
  */
 function putTemplate(memory, controls, options = {}){
@@ -215,7 +220,14 @@ function putTemplate(memory, controls, options = {}){
         {
             template.sz(control.className ?? 'BUTTON');
         }
-        template.sz(control.title ?? '');
+        if (control.titleOrdinal !== undefined)
+        {
+            template.ordinal(control.titleOrdinal);
+        }
+        else
+        {
+            template.sz(control.title ?? '');
+        }
         // The creation data: in this layout its size word counts itself.
         template.u16(control.data ? (control.data.length + 1) * 2 : 0);
         for (const word of control.data ?? [])
@@ -1018,16 +1030,75 @@ test('an extended template is read with its own layout, font block and item ids'
         (fns.GetDlgItemTextA.handler([dialog, 101, OUT, 32]), OUT), 32), 'Cancel');
 });
 
-test('ending a dialog destroys it and the controls it owns', ()=>{
+test('EndDialog hides a dialog, and destroying it takes the controls it owns', ()=>{
+    // EndDialog destroys nothing on Windows: a modal dialog is destroyed by
+    // the loop running it once it sees the dialog ended, and a modeless one
+    // -- a framework's modal loop is one -- by the DestroyWindow after.
     const { memory, fns } = setup();
-    putTemplate(memory, [{ id: 500, x: 0, y: 0, cx: 4, cy: 4 }]);
+    const WS_VISIBLE = 0x10000000;
+    putTemplate(memory, [{ id: 500, x: 0, y: 0, cx: 4, cy: 4 }], { style: WS_VISIBLE });
     const dialog = fns.CreateDialogIndirectParamA.handler(
         [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
     const control = fns.GetDlgItem.handler([dialog, 500]);
+    assert.equal(fns.IsWindowVisible.handler([dialog]), 1);
 
     assert.equal(fns.EndDialog.handler([dialog, 7]), 1);
+    assert.equal(fns.IsWindow.handler([dialog]), 1, 'ended, not destroyed');
+    assert.equal(fns.IsWindowVisible.handler([dialog]), 0, 'but hidden');
+    assert.equal(fns.DestroyWindow.handler([dialog]), 1);
     assert.equal(fns.IsWindow.handler([dialog]), 0);
     assert.equal(fns.IsWindow.handler([control]), 0, 'a child outliving its parent is a leak');
+});
+
+test("a static showing a bitmap loads it from its template's module by the name it gives",
+    ()=>{
+        // A launcher's banner is a static whose title in the template is the
+        // ordinal of a bitmap in the module the template came from, which the
+        // static loads as it is made; left unloaded, the banner is blank.
+        const RT_BITMAP = 2;
+        const SS_BITMAP = 0x0e;
+        const STATIC_ATOM = 0x82;
+        const STM_GETIMAGE = 0x0173;
+        /** @type {number[]} */
+        const made = [];
+        const { memory, fns } = setup({
+            resources: { [`${RT_BITMAP}:104`]: 0x100 },
+            bitmapFromDib: (/** @type {number} */ info)=>{
+                made.push(info);
+                return 0x4440;
+            },
+        });
+        putTemplate(memory, [
+            { id: 7, x: 0, y: 0, cx: 10, cy: 10, ordinal: STATIC_ATOM, style: SS_BITMAP,
+                titleOrdinal: 104 },
+            { id: 8, x: 0, y: 10, cx: 10, cy: 10, ordinal: STATIC_ATOM, title: 'Words' },
+        ]);
+        const dialog = fns.CreateDialogIndirectParamA.handler(
+            [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+        const picture = fns.GetDlgItem.handler([dialog, 7]);
+        assert.equal(fns.SendMessageA.handler([picture, STM_GETIMAGE, 0, 0]), 0x4440);
+        assert.deepEqual(made, [MODULE_BASE + 0x100], "bitmap 104, of the template's module");
+        assert.equal(fns.SendMessageA.handler([fns.GetDlgItem.handler([dialog, 8]),
+            STM_GETIMAGE, 0, 0]), 0, 'and a static of text loads nothing');
+    });
+
+test('a dropdown combo box a template makes is as tall as its field', ()=>{
+    // The template's height is the dropped list's, as for one CreateWindowEx
+    // makes; the dialog manager's controls are told WM_CREATE like any.
+    const COMBOBOX_ATOM = 0x85;
+    const CBS_DROPDOWNLIST = 0x0003;
+    const WS_VSCROLL = 0x00200000;
+    const { memory, fns } = setup();
+    putTemplate(memory, [{ id: 9, x: 0, y: 0, cx: 40, cy: 60, ordinal: COMBOBOX_ATOM,
+        style: CBS_DROPDOWNLIST | WS_VSCROLL }]);
+    const dialog = fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    const combo = fns.GetDlgItem.handler([dialog, 9]);
+    const RECT = 0x13000;
+    fns.GetWindowRect.handler([combo, RECT]);
+    const height = memory.u32(RECT + 12) - memory.u32(RECT + 4);
+    assert.ok(height > 8 && height < 40, `the field's height: ${height}`);
+    assert.equal(fns.GetWindowLongA.handler([combo, -16]) & WS_VSCROLL, 0);
 });
 
 test('a message is reported as not a dialog message, so the caller dispatches it', ()=>{

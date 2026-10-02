@@ -20,7 +20,8 @@
 
 import { formatToString, varargsSlots } from '../msvcrt/format.js';
 import {
-    ANSI_PAGE, LANGID_EN_US, OEM_PAGE, decodeAnsi, encodeAnsi, mapCaseAnsi, transcodeSingleByte,
+    ANSI_PAGE, LANGID_EN_US, OEM_PAGE, decodeAnsi, decodeOem, encodeAnsi, encodeOem, mapCaseAnsi,
+    transcodeSingleByte,
 } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
 import { dibToBgra, groupImageId } from './cursors.js';
@@ -49,6 +50,7 @@ import {
     writeU32s,
 } from './structs.js';
 import { readText, textBytes } from './unicode.js';
+import { LOGFONTA, LOGFONTW_SIZE, logFontBytes } from '../gdi32/structs.js';
 import { threadIdOf } from './messages.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
@@ -79,6 +81,8 @@ const SM_CMONITORS = 80;
 const SM_CXVIRTUALSCREEN = 78;
 const SM_CYVIRTUALSCREEN = 79;
 const SM_CYMIN = 29;
+const SM_CXSIZE = 30;
+const SM_CXMENUSIZE = 54;
 const SM_CYMINTRACK = 35;
 const SM_CYSMCAPTION = 51;
 const SM_CXSMSIZE = 52;
@@ -277,6 +281,44 @@ function mappingForVk(vk){
 function mappingForScan(scan){
     const physical = codeForScan(scan, false);
     return physical ? keyFor(physical) : null;
+}
+
+/**
+ * The US layout's key names by scan code, the extended keys' at 0x100 past
+ * theirs: what GetKeyNameText answers.
+ *
+ * @type {Map<number, string>}
+ */
+const KEY_NAMES = new Map(/** @type {[number, string][]} */ ([
+    [0x01, 'Esc'], ...[...'1234567890-='].map((name, at)=>[0x02 + at, name]),
+    [0x0e, 'Backspace'], [0x0f, 'Tab'], ...[...'QWERTYUIOP[]'].map((name, at)=>[0x10 + at, name]),
+    [0x1c, 'Enter'], [0x1d, 'Ctrl'], ...[..."ASDFGHJKL;'`"].map((name, at)=>[0x1e + at, name]),
+    [0x2a, 'Shift'], [0x2b, '\\'], ...[...'ZXCVBNM,./'].map((name, at)=>[0x2c + at, name]),
+    [0x36, 'Right Shift'], [0x37, 'Num *'], [0x38, 'Alt'], [0x39, 'Space'], [0x3a, 'Caps Lock'],
+    ...Array.from({ length: 10 }, (_, at)=>[0x3b + at, `F${at + 1}`]),
+    [0x45, 'Pause'], [0x46, 'Scroll Lock'], [0x47, 'Num 7'], [0x48, 'Num 8'], [0x49, 'Num 9'],
+    [0x4a, 'Num -'], [0x4b, 'Num 4'], [0x4c, 'Num 5'], [0x4d, 'Num 6'], [0x4e, 'Num +'],
+    [0x4f, 'Num 1'], [0x50, 'Num 2'], [0x51, 'Num 3'], [0x52, 'Num 0'], [0x53, 'Num Del'],
+    [0x54, 'Sys Req'], [0x56, '\\'], [0x57, 'F11'], [0x58, 'F12'],
+    [0x11c, 'Num Enter'], [0x11d, 'Right Ctrl'], [0x135, 'Num /'], [0x137, 'Prnt Scrn'],
+    [0x138, 'Right Alt'], [0x145, 'Num Lock'], [0x146, 'Break'], [0x147, 'Home'], [0x148, 'Up'],
+    [0x149, 'Page Up'], [0x14b, 'Left'], [0x14d, 'Right'], [0x14f, 'End'], [0x150, 'Down'],
+    [0x151, 'Page Down'], [0x152, 'Insert'], [0x153, 'Delete'], [0x15b, 'Left Windows'],
+    [0x15c, 'Right Windows'], [0x15d, 'Application'],
+]));
+
+/** What bit 25 of a key message's lParam folds together: the right keys into the left. */
+const SIDELESS = new Map([[0x36, 0x2a], [0x11d, 0x1d], [0x138, 0x38]]);
+
+/**
+ * The name of the key a key message's lParam names, '' for one with none.
+ *
+ * @param {number} lParam
+ */
+function keyNameOf(lParam){
+    const key = ((lParam >>> 16) & 0xff) | ((lParam & 0x01000000) !== 0 ? 0x100 : 0);
+    const named = (lParam & 0x02000000) !== 0 ? SIDELESS.get(key) ?? key : key;
+    return KEY_NAMES.get(named) ?? '';
 }
 
 /**
@@ -1014,6 +1056,20 @@ export function createSystemFunctions({ host, live, windows, classes }){
         return clipped.length;
     };
 
+    /** GetKeyNameTextA/W at one width. @param {boolean} wide */
+    const keyNameText = wide=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [lParam, buffer, size])=>{
+            if ((buffer >>> 0) === 0 || (size | 0) <= 0)
+            {
+                return 0;
+            }
+            return (wide ? writeWideString : writeString)(buffer >>> 0,
+                keyNameOf(lParam >>> 0), size | 0);
+        },
+    });
+
     /** @param {number} address */
     const readU32 = address=>{
         const bytes = host.readMemory(address, 4);
@@ -1458,12 +1514,59 @@ export function createSystemFunctions({ host, live, windows, classes }){
     };
 
     /**
-     * SystemParametersInfo, both spellings: the work area and the hover
-     * parameters TrackMouseEvent works by, and a refusal for everything else.
+     * NONCLIENTMETRICS: the frame GetSystemMetrics describes, each size the
+     * one its metric is a pixel bigger than where Windows derives the metric
+     * from it, and the fonts the frame is drawn in -- Tahoma at eight points,
+     * bold in a caption. A size of either layout is filled, the one with
+     * iPaddedBorderWidth on the end too, as Wine fills both; any other is
+     * refused untouched.
      *
-     * @param {number} action @param {number} value
+     * @param {number} address @param {boolean} wide
      */
-    const systemParameter = (action, value)=>{
+    const nonClientMetrics = (address, wide)=>{
+        const font = wide ? LOGFONTW_SIZE : LOGFONTA.SIZE;
+        const size = 24 + 5 * font + 16;
+        const asked = host.readMemory(address, 4);
+        const cbSize = (asked[0] | asked[1] << 8 | asked[2] << 16 | asked[3] << 24) >>> 0;
+        if (cbSize !== size && cbSize !== size + 4)
+        {
+            return 0;
+        }
+        /** @param {number} weight */
+        const face = weight=>logFontBytes({ height: -11, width: 0, escapement: 0,
+            orientation: 0, weight, italic: 0, underline: 0, strikeOut: 0, charSet: 0,
+            outPrecision: 0, clipPrecision: 0, quality: 0, pitchAndFamily: 0,
+            faceName: 'Tahoma' }, wide);
+        const bytes = new Uint8Array(cbSize);
+        const view = new DataView(bytes.buffer);
+        /** @param {number} at @param {number[]} values */
+        const put = (at, values)=>values.forEach((one, index)=>{
+            view.setInt32(at + index * 4, one, true);
+        });
+        put(0, [cbSize, BORDER, SCROLLBAR, SCROLLBAR, metric(SM_CXSIZE), CAPTION_HEIGHT - 1]);
+        bytes.set(face(700), 24);
+        const smallCaption = 24 + font;
+        put(smallCaption, [metric(SM_CXSMSIZE), metric(SM_CYSMSIZE)]);
+        bytes.set(face(700), smallCaption + 8);
+        const menu = smallCaption + 8 + font;
+        put(menu, [metric(SM_CXMENUSIZE), MENU_HEIGHT - 1]);
+        for (const at of [menu + 8, menu + 8 + font, menu + 8 + 2 * font])
+        {
+            bytes.set(face(400), at);
+        }
+        host.writeMemory(address, bytes);
+        return 1;
+    };
+
+    /**
+     * SystemParametersInfo, both spellings: the work area, the hover
+     * parameters TrackMouseEvent works by and the non-client metrics, and a
+     * refusal for everything else.
+     *
+     * @param {number} action @param {number} value @param {boolean} wide
+     */
+    const systemParameter = (action, value, wide)=>{
+        const SPI_GETNONCLIENTMETRICS = 0x0029;
         const SPI_GETWORKAREA = 0x0030;
         const SPI_GETMOUSEHOVERWIDTH = 0x0062;
         const SPI_GETMOUSEHOVERHEIGHT = 0x0064;
@@ -1473,6 +1576,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
             return 0;
         }
         switch (action >>> 0){
+            case SPI_GETNONCLIENTMETRICS:
+                return nonClientMetrics(value >>> 0, wide);
             case SPI_GETWORKAREA:
                 writeRect(host, value,
                     { left: 0, top: 0, right: screen.width, bottom: screen.height });
@@ -1691,14 +1796,15 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * BOOL SystemParametersInfoA(UINT uiAction, UINT uiParam, PVOID pvParam,
          *                            UINT fWinIni)
          *
-         * Only the work area, the one a window uses to place itself, and the
-         * hover parameters are answered. Everything else reports failure
-         * rather than a default that would contradict the screen above.
+         * Only the work area, the one a window uses to place itself, the
+         * hover parameters and the non-client metrics are answered. Everything
+         * else reports failure rather than a default that would contradict the
+         * screen above.
          */
         SystemParametersInfoA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([action, , value])=>systemParameter(action, value),
+            handler: ([action, , value])=>systemParameter(action, value, false),
         },
 
         /**
@@ -1710,7 +1816,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
         SystemParametersInfoW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([action, , value])=>systemParameter(action, value),
+            handler: ([action, , value])=>systemParameter(action, value, true),
         },
 
         /**
@@ -2459,6 +2565,100 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 }
                 host.writeMemory(target >>> 0, transcodeSingleByte(
                     host.readMemory(source >>> 0, length + 1), OEM_PAGE, ANSI_PAGE));
+                return 1;
+            },
+        },
+
+        /** BOOL CharToOemA(LPCSTR lpszSrc, LPSTR lpszDst) */
+        CharToOemA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([source, target])=>{
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const text = host.readCString(source >>> 0, 0x10000);
+                host.writeMemory(target >>> 0, transcodeSingleByte(
+                    host.readMemory(source >>> 0, text.length + 1), ANSI_PAGE, OEM_PAGE));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL OemToCharBuffW(LPCSTR lpszSrc, LPWSTR lpszDst, DWORD cchDstLength)
+         *
+         * Exactly that many OEM bytes, each to the character the OEM page
+         * holds there.
+         */
+        OemToCharBuffW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([source, target, count])=>{
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const text = decodeOem(host.readMemory(source >>> 0, count >>> 0));
+                host.writeMemory(target >>> 0, textBytes(text, true).subarray(0, text.length * 2));
+                return 1;
+            },
+        },
+
+        /** BOOL OemToCharW(LPCSTR lpszSrc, LPWSTR lpszDst) */
+        OemToCharW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([source, target])=>{
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const length = host.readCString(source >>> 0, 0x10000).length;
+                const text = decodeOem(host.readMemory(source >>> 0, length));
+                host.writeMemory(target >>> 0, textBytes(text, true));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL CharToOemBuffW(LPCWSTR lpszSrc, LPSTR lpszDst, DWORD cchDstLength)
+         *
+         * Exactly that many characters, each to its OEM byte, or to the
+         * default character where the page has none.
+         */
+        CharToOemBuffW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([source, target, count])=>{
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const units = host.readMemory(source >>> 0, (count >>> 0) * 2);
+                let text = '';
+                for (let at = 0; at + 1 < units.length; at += 2)
+                {
+                    text += String.fromCharCode(units[at] | units[at + 1] << 8);
+                }
+                host.writeMemory(target >>> 0, encodeOem(text));
+                return 1;
+            },
+        },
+
+        /** BOOL CharToOemW(LPCWSTR lpszSrc, LPSTR lpszDst) */
+        CharToOemW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([source, target])=>{
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const text = readWideString(source >>> 0);
+                const bytes = new Uint8Array(text.length + 1);
+                bytes.set(encodeOem(text));
+                host.writeMemory(target >>> 0, bytes);
                 return 1;
             },
         },
@@ -3491,6 +3691,19 @@ export function createSystemFunctions({ host, live, windows, classes }){
         },
 
         /**
+         * int GetKeyNameTextA/W(LONG lParam, LPTSTR lpString, int cchSize)
+         *
+         * The US layout's name of the key a key message's lParam names -- its
+         * scan code, with the extended bit, and bit 25 to say left and right
+         * are one -- as a key-binding screen shows it. A key with no name
+         * answers zero and an empty string.
+         *
+         * @param {boolean} wide
+         */
+        GetKeyNameTextA: keyNameText(false),
+        GetKeyNameTextW: keyNameText(true),
+
+        /**
          * HKL GetKeyboardLayout(DWORD idThread)
          *
          * The input locale of a thread -- always the same one, this build
@@ -3604,6 +3817,18 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ()=>HKL_EN_US,
         },
 
+        /**
+         * HKL LoadKeyboardLayoutEx(HKL hklUnload, LPCWSTR pwszKLID, UINT Flags)
+         *
+         * LoadKeyboardLayoutW in the place of a layout already loaded: with
+         * none named to replace there is nothing to load into, and NULL.
+         */
+        LoadKeyboardLayoutEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([unload])=>((unload >>> 0) === 0 ? 0 : HKL_EN_US),
+        },
+
         /** BOOL UnloadKeyboardLayout(HKL hkl) */
         UnloadKeyboardLayout: {
             argBytes: 4,
@@ -3674,6 +3899,25 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([character])=>keyForCharacter(character & 0xff) ?? 0xffff,
+        },
+
+        /**
+         * DWORD OemKeyScan(WORD wOemChar)
+         *
+         * The scan code that types an OEM character in the low word and the
+         * shift state VkKeyScan gives it in the high, or -1 when no key types
+         * it. Only the low byte names the character.
+         */
+        OemKeyScan: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([oem])=>{
+                const character = decodeOem(Uint8Array.of(oem & 0xff)).charCodeAt(0);
+                const key = keyForCharacter(character);
+                const scan = key === null ? 0 : mapVirtualKey(key & 0xff, MAPVK_VK_TO_VSC);
+                return key === null || scan === 0 ? 0xffffffff
+                    : ((key & 0xff00) << 8 | scan) >>> 0;
+            },
         },
 
         /** SHORT VkKeyScanW(WCHAR ch) */

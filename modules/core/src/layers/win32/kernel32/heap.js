@@ -38,15 +38,17 @@ const MEM_RESERVE = 0x00002000;
 const MEM_DECOMMIT = 0x00004000;
 const MEM_RELEASE = 0x00008000;
 const MEM_RESET = 0x00080000;
+const MEM_WRITE_WATCH = 0x00200000;
+/** GetWriteWatch's one flag: start the watch over once the pages are told. */
+const WRITE_WATCH_FLAG_RESET = 0x1;
 
 /**
  * Every VirtualAlloc type bit accepted. MEM_TOP_DOWN asks for the highest
- * address that fits and MEM_WRITE_WATCH for the pages written to be tracked;
- * both are hints whose absence nothing observes, and a program passing one is
- * not refused for it. MEM_RESET_UNDO, MEM_PHYSICAL and MEM_LARGE_PAGES promise
- * what this arena cannot, and fall outside.
+ * address that fits, a hint whose absence nothing observes; MEM_WRITE_WATCH
+ * makes a reservation GetWriteWatch answers for. MEM_RESET_UNDO, MEM_PHYSICAL
+ * and MEM_LARGE_PAGES promise what this arena cannot, and fall outside.
  */
-const ALLOCATION_TYPES = MEM_COMMIT | MEM_RESERVE | MEM_RESET | 0x00100000 | 0x00200000;
+const ALLOCATION_TYPES = MEM_COMMIT | MEM_RESERVE | MEM_RESET | 0x00100000 | MEM_WRITE_WATCH;
 
 /** What HeapSize returns when it cannot answer: (SIZE_T)-1. */
 const INVALID_SIZE = 0xffffffff;
@@ -724,6 +726,20 @@ export function createHeapFunctions(host){
      */
     const committed = new Map();
 
+    /** The reservations made with MEM_WRITE_WATCH, by base. */
+    const watched = new Set();
+
+    /**
+     * The watched reservation a range lies wholly inside, or null.
+     *
+     * @param {number} address @param {number} size
+     */
+    const watchedRegion = (address, size)=>{
+        const block = size === 0 ? null : allocator.blockContaining(address);
+        return block && block.owner === VIRTUAL && watched.has(block.address)
+            && address + size <= block.address + block.capacity ? block : null;
+    };
+
     /**
      * Marks [from, to) of a reservation committed or not.
      *
@@ -1269,6 +1285,10 @@ export function createHeapFunctions(host){
                         markCommitted(start, (requested & ~(PAGE_SIZE - 1)) >>> 0,
                             start + span, true);
                     }
+                    if ((kind & MEM_WRITE_WATCH) !== 0)
+                    {
+                        watched.add(start);
+                    }
                     zeroHandedOver(start, span);
                     return start;
                 }
@@ -1381,6 +1401,10 @@ export function createHeapFunctions(host){
                 {
                     markCommitted(address, address, address + rounded, true);
                 }
+                if ((kind & MEM_WRITE_WATCH) !== 0)
+                {
+                    watched.add(address);
+                }
                 zeroHandedOver(address, span);
                 return address;
             },
@@ -1429,6 +1453,7 @@ export function createHeapFunctions(host){
                     allocator.free(address);
                     decommitted.delete(address);
                     committed.delete(address);
+                    watched.delete(address);
                     return 1;
                 }
                 // Decommit keeps the reservation. Page-level commit state is not
@@ -1450,6 +1475,78 @@ export function createHeapFunctions(host){
                 giveBack(block.address, Math.max(page, block.address), to);
                 markCommitted(block.address, Math.max(page, block.address), to, false);
                 return 1;
+            },
+        },
+
+        /**
+         * UINT GetWriteWatch(DWORD dwFlags, PVOID lpBaseAddress, SIZE_T dwRegionSize,
+         *   PVOID *lpAddresses, ULONG_PTR *lpdwCount, LPDWORD lpdwGranularity)
+         *
+         * The pages of a MEM_WRITE_WATCH reservation written since the watch
+         * began. Writes are not tracked, so every committed page of the range
+         * is told as written: what a collector rescans is more than it must,
+         * never less. A range outside a watched reservation, or no room for
+         * an answer, fails with (UINT)-1.
+         */
+        GetWriteWatch: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([flags, base, bytes, addresses, count, granularity])=>{
+                const address = base >>> 0;
+                const block = watchedRegion(address, bytes >>> 0);
+                if ((flags & ~WRITE_WATCH_FLAG_RESET) !== 0 || !block)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0xffffffff;
+                }
+                const room = (count >>> 0) === 0 ? -1 : readDword(count >>> 0);
+                if (room === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0xffffffff;
+                }
+                if (room < 0 || (granularity >>> 0) === 0 || (addresses >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_NOACCESS);
+                    return 0xffffffff;
+                }
+                host.divergence?.('GetWriteWatch',
+                    'writes are not tracked; every committed page is told as written');
+                const end = address + (bytes >>> 0);
+                /** @type {number[]} */
+                const written = [];
+                for (const range of committed.get(block.address) ?? [])
+                {
+                    let page = Math.max(range.from, address & ~(PAGE_SIZE - 1));
+                    for (; page < Math.min(range.to, end) && written.length < room;
+                        page += PAGE_SIZE)
+                    {
+                        written.push(page >>> 0);
+                    }
+                }
+                written.forEach((page, at)=>writeDword((addresses >>> 0) + at * 4, page));
+                writeDword(count >>> 0, written.length);
+                writeDword(granularity >>> 0, PAGE_SIZE);
+                return 0;
+            },
+        },
+
+        /**
+         * UINT ResetWriteWatch(LPVOID lpBaseAddress, SIZE_T dwRegionSize)
+         *
+         * Starts a watch over; with no writes tracked there is nothing to
+         * clear, and only the range is checked.
+         */
+        ResetWriteWatch: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([base, bytes])=>{
+                if (!watchedRegion(base >>> 0, bytes >>> 0))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0xffffffff;
+                }
+                return 0;
             },
         },
 

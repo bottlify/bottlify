@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createNtdllFunctions } from './functions.js';
+import { UNLOAD_KEY } from '../advapi32/functions.js';
 
 const PROCESS_HEAP = 0x8;
 
@@ -251,4 +252,100 @@ test('RtlGetCurrentPeb reads the process block out of the running thread\'s', ()
     assert.equal(createNtdllFunctions(host).RtlGetCurrentPeb.handler([]), 0x7f403000);
     host.teb = ()=>0;
     assert.equal(createNtdllFunctions(host).RtlGetCurrentPeb.handler([]), 0);
+});
+
+test('RtlImageNtHeader finds the PE headers an image points at, and nothing in anything else', ()=>{
+    // Wine's kernel32 process.c test_SuspendProcessState (create_process)
+    // patches a mapped image's subsystem through what this answers.
+    const host = fakeHost();
+    const fns = createNtdllFunctions(host);
+    const image = 0x400;
+    host.bytes.set([0x4d, 0x5a], image);
+    host.bytes.set([0x80, 0, 0, 0], image + 0x3c);
+    host.bytes.set([0x50, 0x45, 0, 0], image + 0x80);
+    assert.equal(fns.RtlImageNtHeader.handler([image]), image + 0x80);
+    host.bytes[image + 0x81] = 0;
+    assert.equal(fns.RtlImageNtHeader.handler([image]), 0, 'no PE signature');
+    assert.equal(fns.RtlImageNtHeader.handler([image + 4]), 0, 'no DOS stub');
+    assert.equal(fns.RtlImageNtHeader.handler([0]), 0);
+    assert.equal(fns.RtlImageNtHeader.argBytes, 4);
+});
+
+test('NtUnloadKey names a hive the native way and unloads it through the registry', ()=>{
+    // advapi32's registry test: a hive with a handle open on it cannot be
+    // unloaded, and the user's default hive is no loaded one.
+    const host = fakeHost();
+    /** @type {[number, string][]} */
+    const asked = [];
+    const fns = createNtdllFunctions({ ...host, advapi32: {
+        [UNLOAD_KEY]: (/** @type {number} */ root, /** @type {string} */ path)=>{
+            asked.push([root, path]);
+            return 0xc0000121;
+        },
+    } });
+    /** @param {string} name */
+    const attributes = name=>{
+        const view = new DataView(host.bytes.buffer);
+        for (let at = 0; at < name.length; at++)
+        {
+            view.setUint16(0x300 + at * 2, name.charCodeAt(at), true);
+        }
+        view.setUint16(0x200, name.length * 2, true);
+        view.setUint16(0x202, name.length * 2, true);
+        view.setUint32(0x204, 0x300, true);
+        view.setUint32(0x100, 24, true);
+        view.setUint32(0x108, 0x200, true);
+        return 0x100;
+    };
+    const unload = fns.NtUnloadKey;
+    assert.equal(unload.argBytes, 4);
+    assert.equal(unload.handler([attributes('\\REGISTRY\\Machine\\Test')]), 0xc0000121);
+    assert.equal(unload.handler([attributes('\\REGISTRY\\User\\.Default')]), 0xc0000121);
+    assert.deepEqual(asked, [[0x80000002, 'Test'], [0x80000003, '.Default']]);
+    assert.equal(unload.handler([attributes('\\Somewhere\\Else')]), 0xc0000034);
+    assert.equal(unload.handler([0]), 0xc000000d);
+    assert.ok(!('NtUnloadKey' in createNtdllFunctions(host)), 'without a registry, unexported');
+});
+
+test('NtQuerySystemTime is GetSystemTimeAsFileTime answered as a status', ()=>{
+    const host = fakeHost();
+    /** @type {number[]} */
+    const asked = [];
+    host.kernel32 = /** @type {any} */ ({ ...host.kernel32, GetSystemTimeAsFileTime: { argBytes: 4,
+        handler: (/** @type {number[]} */ [out])=>{
+            asked.push(out);
+            host.bytes.set([1, 2, 3, 4, 5, 6, 7, 8], out);
+            return 0;
+        } } });
+    const fns = createNtdllFunctions(host);
+    assert.equal(fns.NtQuerySystemTime.handler([0x180]), 0);
+    assert.deepEqual(asked, [0x180]);
+    assert.deepEqual([...host.bytes.subarray(0x180, 0x188)], [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.equal(fns.NtQuerySystemTime.handler([0]), 0xc0000005, 'nowhere to put it');
+});
+
+test('a heap block keeps a user value and user flags, and a pointer no block is refused', ()=>{
+    // kernel32's heap test: RtlSetUserValueHeap, RtlSetUserFlagsHeap, RtlGetUserInfoHeap.
+    const host = fakeHost();
+    /** @type {number[]} */
+    const errors = [];
+    host.kernel32 = /** @type {any} */ ({ ...host.kernel32,
+        HeapValidate: { argBytes: 12, handler: (/** @type {number[]} */ [, , block])=>
+            (block === 0x2000 ? 1 : 0) },
+        SetLastError: { argBytes: 4, handler: (/** @type {number[]} */ [code])=>errors.push(code) },
+    });
+    const fns = createNtdllFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(fns.RtlGetUserInfoHeap.handler([0x10, 0, 0x2000, 0x180, 0x184]), 1);
+    assert.deepEqual([view.getUint32(0x180, true), view.getUint32(0x184, true)], [0, 0x200]);
+    assert.equal(fns.RtlSetUserValueHeap.handler([0x10, 0, 0x2000, 0xdeadbeef]), 1);
+    assert.equal(fns.RtlSetUserFlagsHeap.handler([0x10, 0, 0x2000, 0, 0x1000]), 0,
+        'a flag no program may set');
+    assert.equal(fns.RtlSetUserFlagsHeap.handler([0x10, 0, 0x2000, 0x400, 0x800]), 1);
+    fns.RtlGetUserInfoHeap.handler([0x10, 0, 0x2000, 0x180, 0x184]);
+    assert.deepEqual([view.getUint32(0x180, true), view.getUint32(0x184, true)],
+        [0xdeadbeef, 0xa00]);
+    assert.equal(fns.RtlGetUserInfoHeap.handler([0x10, 0, 0x3000, 0x180, 0x184]), 0,
+        'no block there');
+    assert.deepEqual(errors, [87, 87]);
 });
