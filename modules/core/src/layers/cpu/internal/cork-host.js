@@ -68,6 +68,12 @@ const DEFAULT_EFLAGS = 0x2;
 const YIELD_CHUNK = 10_000;
 /** The flat 32-bit code selector the segments are implicit at. */
 const FLAT_CS = 0x08;
+/** #UD, the fault an instruction the processor does not know raises. */
+const INVALID_OPCODE = 6;
+/** #PF. */
+const PAGE_FAULT = 14;
+/** How many of those the diagnostics name. */
+const UNTIERED_KEPT = 16;
 /**
  * How far the JavaScript interpreter carries a process's hosts before the wasm
  * tier takes over, in their instructions (`wasmInterpreterAfter`'s default),
@@ -104,6 +110,9 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * @property {number} [thunkBase]  Where the thunk table and its park loop begin.
  * @property {number} initialStack Initial guest ESP.
  * @property {import('../engine.js').EngineConfig} [cork]  The translator's config.
+ * @property {number} [noExecuteBelow]  Addresses below this run nothing -- an
+ *     instruction fetched there is a page fault -- whatever reads and writes
+ *     they answer.
  * @property {number} [closedBelow]  Addresses below this are no-access: a fetch, a
  *           store or an interpreted read there faults. Zero, the default, closes none.
  */
@@ -124,7 +133,9 @@ export const CORK_TSC_MHZ = 3000;
  */
 export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
-        closedBelow = 0 } = config;
+        closedBelow = 0, noExecuteBelow = 0 } = config;
+    // Where code may run from: a closed range runs nothing either.
+    const runsFrom = Math.max(closedBelow, noExecuteBelow) >>> 0;
     for (const name of ENGINE_EXPORTS)
     {
         if (engine?.[name] === undefined)
@@ -174,6 +185,9 @@ export function createCorkHost(config){
     /** @type {((value: number) => void) | null} */
     let trapHandler = null;
     let trapCrossings = 0;
+    /** The instructions met that neither tier carries, as they were answered. */
+    /** @type {string[]} */
+    const untiered = [];
     /** The last slices, newest last: where each began and ended, what it
      * retired, the traps it crossed and whether it halted -- what a run that
      * makes no progress is read by.
@@ -546,6 +560,14 @@ export function createCorkHost(config){
             || wasmSwitch || runtime.entryOf(interpreter.eip, x87Top()) >= 0,
         onStep: (/** @type {number} */ at, /** @type {boolean} */ jumped)=>{
             lastStart = at;
+            // Nothing runs below `runsFrom`: a call through a null pointer
+            // faults there, as it does on Windows, rather than sliding through
+            // zeroes into whatever lies above.
+            if (at < runsFrom)
+            {
+                throw Object.assign(new Error('a fetch from the null range'),
+                    { vector: PAGE_FAULT, eip: at });
+            }
             // Neither the park loop nor a slide through zero-filled memory
             // (add [eax], al, twice a step) is a path: the ring keeps the code
             // that led there.
@@ -598,6 +620,12 @@ export function createCorkHost(config){
      * @returns {number}
      */
     const interpretRange = (address, budget, force = false, jumpedIn = false)=>{
+        if (address < runsFrom)
+        {
+            setEip(address);
+            takeFault(PAGE_FAULT);
+            return 0;
+        }
         if (wasmTier === null || force)
         {
             return interpretJs(address, budget, force, jumpedIn, false);
@@ -787,10 +815,10 @@ export function createCorkHost(config){
             interpret(state, budget, hooks);
         }
         catch (e){
-            const fault = /** @type {{ vector?: number, eip?: number }} */ (e);
-            if (typeof fault.vector === 'number')
+            const fault = /** @type {{ vector?: number, eip?: number, op?: string }} */ (e);
+            if (typeof fault.vector === 'number' || typeof fault.op === 'string')
             {
-                state.eip = fault.eip ?? address;
+                state.eip = fault.eip ?? lastStart;
             }
             thrown = e;
         }
@@ -814,9 +842,17 @@ export function createCorkHost(config){
             }
             if (typeof fault.op === 'string')
             {
-                const at = typeof fault.eip === 'number' ? fault.eip : lastStart;
-                throw new Error(`cpu: cork has no tier for 0x${hex(ram[at] ?? 0, 2)}`
-                    + ` (${fault.op}) (eip 0x${hex(at)})`, { cause: thrown });
+                // An instruction neither tier carries is answered as a
+                // processor answers one it does not know: an invalid-opcode
+                // fault the program's own handlers can take. Kept in the
+                // diagnostics, where it once stopped the whole engine.
+                const at = eip();
+                if (untiered.length < UNTIERED_KEPT)
+                {
+                    untiered.push(`0x${hex(ram[at] ?? 0, 2)} (${fault.op}) at 0x${hex(at)}`);
+                }
+                takeFault(INVALID_OPCODE);
+                return retired;
             }
             throw thrown;
         }
@@ -1064,8 +1100,11 @@ export function createCorkHost(config){
         engine: ()=>'cork',
         /** The translator's runtime, for the layer's sampler and diagnostics. */
         cork: ()=>runtime,
-        corkDiagnostics: ()=>(wasmTier === null ? runtime.diagnostics()
-            : { ...runtime.diagnostics(), interpretedRelaxedReads: wasmTier.relaxedReads() }),
+        corkDiagnostics: ()=>({
+            ...runtime.diagnostics(),
+            ...wasmTier === null ? {} : { interpretedRelaxedReads: wasmTier.relaxedReads() },
+            ...untiered.length === 0 ? {} : { untiered: [...untiered] },
+        }),
 
         /** Lets the machine run: slices until it halts or is stopped. */
         run(){

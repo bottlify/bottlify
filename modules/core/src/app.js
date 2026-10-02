@@ -3019,6 +3019,9 @@ async function buildApp(options){
             // Windows would not, and reads zero there; closed, it faults.
             // Closed again once that is found (roadmap/00-cork-defects.md).
             closedBelow: 0,
+            // Nothing runs there all the same: a call through a null pointer
+            // faults, as on Windows, rather than sliding through the zeroes.
+            noExecuteBelow: 0x10000,
             engine: options.engine ?? DEFAULT_ENGINE,
             engineUrl: (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
                 ? corkArtifacts(options.cork).moduleUrl : null,

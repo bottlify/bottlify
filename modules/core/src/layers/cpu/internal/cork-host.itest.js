@@ -8,8 +8,8 @@
  * `engine: 'cork'` runs with nothing of the emulator loaded: the cork host's
  * own memory and the engine loaded by URL. Step 5.2 wires the interpreter
  * tier in, so an address the translator has no entry for runs on cork's own
- * decoder and evaluator; an instruction the evaluator has no model for is the
- * engine's no-tier answer, and a fault becomes the host's fault record.
+ * decoder and evaluator; an instruction the evaluator has no model for is an
+ * invalid-opcode fault, and a fault becomes the host's fault record.
  */
 
 import { test } from 'node:test';
@@ -53,21 +53,24 @@ test('the interpreter tier runs what the translator has no entry for', ()=>{
     assert.equal(h.haltedFlag(), 1);
 });
 
-test('an instruction with no model is the engine\'s no-tier answer', ()=>{
+test('an instruction with no model is an invalid-opcode fault the program can take', ()=>{
     const h = host();
     // sldt [eax], which no user program runs and the model has no case for.
     load(h, 0x1000, [0x0f, 0x00, 0x00]);
-    assert.throws(()=>h.runSlice(1), /cpu: cork has no tier for 0x/);
+    h.runSlice(1);
+    assert.equal(h.fault()?.vector, 6, '#UD');
 });
 
-test('the no-tier answer names the instruction met, not the range it started at', ()=>{
-    const h = host();
-    // Three nops then sldt [eax]: the run starts at 0x1000, the instruction
-    // with no model is at 0x1003.
-    load(h, 0x1000, [0x90, 0x90, 0x90, 0x0f, 0x00, 0x00, 0xf4]);
-    assert.throws(()=>h.runSlice(100),
-        (/** @type {Error} */ e)=>/0x0f \(0f 00\) \(eip 0x00001003\)/.test(e.message));
-});
+test('the fault and the diagnostics name the instruction met, not the range it started at',
+    ()=>{
+        const h = host();
+        // Three nops then sldt [eax]: the run starts at 0x1000, the instruction
+        // with no model is at 0x1003.
+        load(h, 0x1000, [0x90, 0x90, 0x90, 0x0f, 0x00, 0x00, 0xf4]);
+        h.runSlice(100);
+        assert.equal(h.fault()?.eip, 0x1003);
+        assert.deepEqual(h.corkDiagnostics().untiered, ['0x0f (0f 00) at 0x00001003']);
+    });
 
 test('an interpreted trap reaches the call channel', ()=>{
     const h = host();

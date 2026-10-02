@@ -306,6 +306,9 @@ export function createCpuModule(){
                 // Addresses below this are no-access under cork alone; zero
                 // closes none, and the emulator reads them whatever it says.
                 closedBelow: config?.closedBelow ?? 0,
+                // And below this nothing runs under cork alone, whatever reads
+                // and writes the range answers.
+                noExecuteBelow: config?.noExecuteBelow ?? 0,
                 trapPort: config?.trapPort ?? 0xb077,
                 entryVector: config?.entryVector ?? 0x7000,
                 initialStack: config?.initialStack ?? 0x300000,
@@ -438,6 +441,7 @@ export function createCpuModule(){
                             initialStack: settings.initialStack,
                             cork: settings.cork,
                             closedBelow: settings.closedBelow,
+                            noExecuteBelow: settings.noExecuteBelow,
                         });
                         state.cork = state.host.cork();
                         if (state.guestClock !== null)
