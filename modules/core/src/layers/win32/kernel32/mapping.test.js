@@ -297,6 +297,22 @@ test('CreateNamedPipe is refused as Windows 9x refuses it, and says so', ()=>{
     assert.match(said[1], /^CreateNamedPipeW: /);
 });
 
+test('the other named-pipe calls are refused the same way, each popping its own arguments', ()=>{
+    // Wine's kernel32 process.c connects the pipe it could not create.
+    const { fns, errors, said } = setup();
+    const table = /** @type {Record<string, any>} */ (fns);
+    for (const [name, argBytes] of /** @type {[string, number][]} */ ([
+        ['ConnectNamedPipe', 8], ['DisconnectNamedPipe', 4], ['WaitNamedPipeA', 8],
+        ['WaitNamedPipeW', 8], ['TransactNamedPipe', 28], ['GetNamedPipeInfo', 20],
+        ['GetNamedPipeHandleStateA', 28], ['SetNamedPipeHandleState', 16]]))
+    {
+        assert.equal(table[name].argBytes, argBytes, name);
+        assert.equal(table[name].handler(), 0, name);
+        assert.equal(errors.at(-1), 120, 'ERROR_CALL_NOT_IMPLEMENTED');
+        assert.match(said.at(-1) ?? '', new RegExp(`^${name}: `));
+    }
+});
+
 test('CreateMailslot is refused, and says so', ()=>{
     const { fns, errors, said } = setup();
     for (const entry of [fns.CreateMailslotA, fns.CreateMailslotW])

@@ -522,3 +522,20 @@ test('a STARTUPINFO\'s output and error files are handed to the child, the paren
     assert.equal(host.requests.at(-1).standardFiles, undefined,
         'without the flag the child keeps the console');
 });
+
+test('this process and its children are in the interactive session, and no other id is', ()=>{
+    // Wine's kernel32 process.c test_session_info.
+    const host = fakeHost();
+    const fns = createSpawnFunctions(host);
+    const child = host.kernel.processes.create({ imagePath: 'C:/App/child.exe', commandLine: '' });
+    for (const id of [0x1000, child.id])
+    {
+        host.view.setUint32(0x100, 0xdeadbeef, true);
+        assert.equal(fns.ProcessIdToSessionId.handler([id, 0x100]), 1);
+        assert.equal(host.view.getUint32(0x100, true), 1);
+    }
+    assert.equal(fns.ProcessIdToSessionId.handler([0x7777, 0x100]), 0);
+    assert.equal(host.errors.at(-1), 87);
+    assert.equal(fns.WTSGetActiveConsoleSessionId.handler(), 1);
+    assert.equal(fns.ProcessIdToSessionId.argBytes, 8);
+});

@@ -42,6 +42,8 @@ const ERROR_PARTIAL_COPY = 299;
 /** dwCreationFlags, the one bit that changes what a create does here. */
 const CREATE_SUSPENDED = 0x00000004;
 const DEBUG_PROCESS = 0x00000001;
+/** The session an interactive user's processes run in. */
+const INTERACTIVE_SESSION = 1;
 const DEBUG_ONLY_THIS_PROCESS = 0x00000002;
 
 /** STARTUPINFO's dwFlags bit that says its three handles are the child's own. */
@@ -485,6 +487,33 @@ export function createSpawnFunctions(host){
                 return kernel.handles.open('process', child);
             },
         },
+
+        /**
+         * BOOL ProcessIdToSessionId(DWORD dwProcessId, DWORD *pSessionId)
+         *
+         * Every process here is the interactive user's, in session one -- the
+         * one WTSGetActiveConsoleSessionId names -- and an id that is no
+         * process is refused.
+         */
+        ProcessIdToSessionId: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([id, out])=>{
+                const wanted = id >>> 0;
+                const known = wanted === ((host.processId ?? 0x1000) >>> 0)
+                    || kernel.processes.all().some((/** @type {any} */ made)=>made.id === wanted);
+                if (!known || (out >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                writeDword(out >>> 0, INTERACTIVE_SESSION);
+                return 1;
+            },
+        },
+
+        /** DWORD WTSGetActiveConsoleSessionId(void): the interactive session. */
+        WTSGetActiveConsoleSessionId: { argBytes: 0, handler: ()=>INTERACTIVE_SESSION },
 
         /**
          * UINT WinExec(LPCSTR lpCmdLine, UINT uCmdShow)

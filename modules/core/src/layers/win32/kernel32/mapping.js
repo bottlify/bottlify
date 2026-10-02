@@ -129,6 +129,11 @@ export function createMappingFunctions(host){
         host.divergence?.(api, 'there are no named pipes; refused as Windows 9x refuses it');
         return fail(ERROR_CALL_NOT_IMPLEMENTED, INVALID_HANDLE_VALUE);
     };
+    /** @param {string} api */
+    const refusePipeCall = api=>{
+        host.divergence?.(api, 'there are no named pipes; refused as Windows 9x refuses it');
+        return fail(ERROR_CALL_NOT_IMPLEMENTED, 0);
+    };
 
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
@@ -455,6 +460,34 @@ export function createMappingFunctions(host){
         CreateNamedPipeW: {
             argBytes: 32,
             handler: ()=>refuseNamedPipe('CreateNamedPipeW'),
+        },
+
+        /**
+         * The rest of the named-pipe calls, refused the same way, since no
+         * handle can be a named pipe's:
+         *
+         *   BOOL ConnectNamedPipe(HANDLE, LPOVERLAPPED)
+         *   BOOL DisconnectNamedPipe(HANDLE)
+         *   BOOL WaitNamedPipeA/W(LPCTSTR lpNamedPipeName, DWORD nTimeOut)
+         *   BOOL TransactNamedPipe(HANDLE, LPVOID, DWORD, LPVOID, DWORD, LPDWORD, LPOVERLAPPED)
+         *   BOOL GetNamedPipeInfo(HANDLE, LPDWORD, LPDWORD, LPDWORD, LPDWORD)
+         *   BOOL GetNamedPipeHandleStateA(HANDLE, LPDWORD, LPDWORD, LPDWORD, LPDWORD,
+         *                                 LPSTR, DWORD)
+         *   BOOL SetNamedPipeHandleState(HANDLE, LPDWORD, LPDWORD, LPDWORD)
+         */
+        ConnectNamedPipe: { argBytes: 8, handler: ()=>refusePipeCall('ConnectNamedPipe') },
+        DisconnectNamedPipe: { argBytes: 4, handler: ()=>refusePipeCall('DisconnectNamedPipe') },
+        WaitNamedPipeA: { argBytes: 8, handler: ()=>refusePipeCall('WaitNamedPipeA') },
+        WaitNamedPipeW: { argBytes: 8, handler: ()=>refusePipeCall('WaitNamedPipeW') },
+        TransactNamedPipe: { argBytes: 28, handler: ()=>refusePipeCall('TransactNamedPipe') },
+        GetNamedPipeInfo: { argBytes: 20, handler: ()=>refusePipeCall('GetNamedPipeInfo') },
+        GetNamedPipeHandleStateA: {
+            argBytes: 28,
+            handler: ()=>refusePipeCall('GetNamedPipeHandleStateA'),
+        },
+        SetNamedPipeHandleState: {
+            argBytes: 16,
+            handler: ()=>refusePipeCall('SetNamedPipeHandleState'),
         },
 
         /**
