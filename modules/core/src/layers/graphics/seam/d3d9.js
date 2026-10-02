@@ -1285,8 +1285,12 @@ export function createDirect3D9Seam(
             const hr = device.GetDirect3D(held);
             if (hr === D3D_OK && held.direct3D)
             {
-                fields.writeU32(out >>> 0,
-                    publisher.publish(held.direct3D, rootInterfaces, IID_IDirect3D9));
+                // The object that made the device, as it was made: one made by
+                // Direct3DCreate9Ex is handed back as its IDirect3D9Ex, whose
+                // table begins with IDirect3D9's, as Windows hands it back.
+                fields.writeU32(out >>> 0, exRoots.has(held.direct3D)
+                    ? publisher.publish(held.direct3D, rootExInterfaces, IID_IDirect3D9Ex)
+                    : publisher.publish(held.direct3D, rootInterfaces, IID_IDirect3D9));
             }
             return hr;
         },

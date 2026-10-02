@@ -2015,3 +2015,21 @@ test('a create refused for its shared handle leaves no pointer behind', ()=>{
         assert.equal(h.box.memory.readU32(out), 0, `${name} cleared its out-parameter`);
     }
 });
+
+test("an Ex device's GetDirect3D hands back the IDirect3D9Ex that made it", ()=>{
+    // d3d9ex.c test_reset_ex calls IDirect3D9Ex methods through what
+    // GetDirect3D answers: the plain interface's table ends before them.
+    const h = seamed();
+    assert.equal(h.seam.publishRootEx(h.root, 0x2200), D3D_OK);
+    const ex = h.box.memory.readU32(0x2200);
+    const { hr, device } = h.createDevice(ex);
+    assert.equal(hr, D3D_OK);
+    assert.equal(h.device(device, 'GetDirect3D', [0x3000]), D3D_OK);
+    assert.equal(h.box.memory.readU32(0x3000), ex);
+
+    const other = seamed();
+    const plain = other.create();
+    const made = other.createDevice(plain);
+    assert.equal(other.device(made.device, 'GetDirect3D', [0x3004]), D3D_OK);
+    assert.equal(other.box.memory.readU32(0x3004), plain, 'a plain device, the plain interface');
+});

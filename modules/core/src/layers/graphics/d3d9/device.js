@@ -1038,6 +1038,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         for (const surface of backBuffers)
         {
             retireSurface(surface);
+            // A back buffer a program still holds past a reset is the
+            // chain's no longer: its container is the device (Wine's
+            // d3d9ex test_backbuffer_resize).
+            surface.container = null;
         }
         if (autoDepthStencil)
         {

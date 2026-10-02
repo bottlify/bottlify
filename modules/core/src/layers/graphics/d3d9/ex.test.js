@@ -255,3 +255,23 @@ test("an Ex device keeps a system-memory texture or surface in the program's own
     assert.equal(plain.surface.LockRect(locked, null, 0), D3D_OK);
     assert.deepEqual([locked.pBits, locked.Pitch], [MEMORY, 512]);
 });
+
+test("a back buffer an Ex device's program holds past a reset is the chain's no longer", ()=>{
+    // Wine's d3d9ex.c test_backbuffer_resize: its container is the device.
+    const device = make(true);
+    /** @type {{ surface?: any }} */
+    const out = {};
+    assert.equal(device.GetBackBuffer(0, 0, 0, out), D3D_OK);
+    const old = out.surface;
+    assert.notEqual(old.container, null, 'the chain holds it');
+    assert.equal(device.Reset({
+        swapEffect: D3DSWAPEFFECT.DISCARD, backBufferWidth: 80, backBufferHeight: 60,
+        backBufferFormat: D3DFMT.A8R8G8B8,
+    }), D3D_OK);
+    assert.equal(old.container, null);
+    /** @type {{ surface?: any }} */
+    const fresh = {};
+    assert.equal(device.GetBackBuffer(0, 0, 0, fresh), D3D_OK);
+    assert.notEqual(fresh.surface, old);
+    assert.notEqual(fresh.surface.container, null);
+});
