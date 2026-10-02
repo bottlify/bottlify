@@ -124,7 +124,14 @@ silence inside sound, clicks (a step far beyond the signal's own), and exact rep
 `tools/install-watch.mjs` is the same question for an installer in Node: it
 runs one unattended and prints every process's threads, waits and parked
 calls every few seconds (`app.standing()`), and with `--journal S` the last
-cross-process COM calls S seconds in.
+cross-process COM calls S seconds in. `--bundle ID` runs an installed
+program's launcher or entry the same way, with `--click`, `--key`, `--shots`
+and, with `--attended`, its message boxes left on the desktop to answer.
+
+`tools/arg-bytes-audit.mjs <spec directory>` checks the bytes every stdcall
+entry of the win32 layer pops against Wine's export spec files kept locally:
+one argument too many moves the caller's stack a call at a time, and the
+program returns to nowhere far from the call that did it.
 
 ## `frames.mjs` -- where a frame's time goes
 

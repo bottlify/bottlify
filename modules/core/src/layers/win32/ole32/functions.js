@@ -43,6 +43,8 @@ const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
 const E_NOTIMPL = 0x80004001;
 const E_NOINTERFACE = 0x80004002;
+/** What a call the apartment model does not allow answers. */
+const CO_E_NOT_SUPPORTED = 0x80004021;
 /** Some of the interfaces CoCreateInstanceEx was asked for, not all. */
 const CO_S_NOTALLINTERFACES = 0x00080012;
 /** MULTI_QI: the interface asked for, the pointer found, and the answer. */
@@ -1219,16 +1221,25 @@ export function createOleFunctions(host){
         },
 
         /**
-         * DWORD CoGetCurrentLogicalThreadId(void)
+         * HRESULT CoGetCurrentLogicalThreadId(GUID *pguid)
          *
-         * The identifier of the calling thread's apartment, which for a thread
-         * in an apartment of its own is its own thread id: the same number
-         * GetCurrentThreadId answers, and the one a program uses to tell its
-         * own logical thread from another's.
+         * A GUID naming the calling thread's logical thread, the same one
+         * every time that thread asks and another for any other thread; never
+         * GUID_NULL. Its last word is the thread's id, which makes it its own.
          */
         CoGetCurrentLogicalThreadId: {
-            argBytes: 0,
-            handler: ()=>(host.currentThread()?.id ?? 0) >>> 0,
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const id = (host.currentThread()?.id ?? 0) >>> 0;
+                writeGuid(host, out >>> 0, `{1063CB43-B0F3-4A56-B7C1-${
+                    id.toString(16).toUpperCase().padStart(12, '0')}}`);
+                return S_OK;
+            },
         },
 
         /** void CoUninitialize(void) */
@@ -1410,6 +1421,40 @@ export function createOleFunctions(host){
         OleUninitialize: {
             argBytes: 0,
             handler: leaveApartment,
+        },
+
+        /**
+         * HRESULT CoRegisterMessageFilter(LPMESSAGEFILTER lpMessageFilter,
+         *   LPMESSAGEFILTER *lplpMessageFilter)
+         *
+         * A single-threaded apartment's filter, kept with a reference and the
+         * one it replaces handed back to the caller, or let go of when the
+         * caller asked not to have it; a thread in the multithreaded
+         * apartment, or in none, has no filter to set. Nothing calls into
+         * one: no call here ever waits on another apartment's answer while
+         * messages arrive.
+         */
+        CoRegisterMessageFilter: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([filter, previous])=>{
+                const apartment = host.currentThread()?.ole32;
+                if (!apartment || apartment.model !== COINIT_APARTMENTTHREADED)
+                {
+                    return CO_E_NOT_SUPPORTED;
+                }
+                const thread = host.callerThread?.();
+                const held = apartment.messageFilter ?? 0;
+                apartment.messageFilter = filter >>> 0;
+                if ((previous >>> 0) !== 0)
+                {
+                    writeU32(previous >>> 0, held);
+                }
+                const taken = (filter >>> 0) !== 0
+                    ? callMethod(filter >>> 0, SLOT_ADD_REF, [], thread) : S_OK;
+                return andThen(taken, ()=>(held !== 0 && (previous >>> 0) === 0
+                    ? callMethod(held, SLOT_RELEASE, [], thread).then(()=>S_OK) : S_OK));
+            },
         },
 
         /**

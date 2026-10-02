@@ -254,11 +254,23 @@ const initialize = (fns, mode)=>fns.CoInitializeEx.handler([0, mode]);
 const createInstance = (fns, { clsid = CLSID_ARG, outer = 0, iid = IID_ARG, ppv = PPV } = {})=>
     fns.CoCreateInstance.handler([clsid, outer, 1, iid, ppv]);
 
-test('CoGetCurrentLogicalThreadId answers the calling thread\'s id', ()=>{
+test('CoGetCurrentLogicalThreadId writes a GUID of the calling thread\'s own', ()=>{
+    // compobj.c test_CoGetCurrentLogicalThreadId: NULL is refused, and the
+    // GUID is never GUID_NULL. It takes a pointer, which a stdcall pops.
     const { host, fns } = setup();
-    assert.equal(fns.CoGetCurrentLogicalThreadId.handler(), 0x100);
+    const OUT = 0x7200;
+    /** @returns {string} */
+    const read = ()=>[...host.bytes.subarray(OUT, OUT + 16)]
+        .map(byte=>byte.toString(16).padStart(2, '0')).join('');
+    assert.equal(fns.CoGetCurrentLogicalThreadId.handler([0]), 0x80070057, 'E_INVALIDARG');
+    assert.equal(fns.CoGetCurrentLogicalThreadId.handler([OUT]), S_OK);
+    const first = read();
+    assert.notEqual(first, '0'.repeat(32), 'never GUID_NULL');
+    assert.equal(fns.CoGetCurrentLogicalThreadId.handler([OUT]), S_OK);
+    assert.equal(read(), first, 'the same for the same thread');
     host.run(host.threads.second);
-    assert.equal(fns.CoGetCurrentLogicalThreadId.handler(), 0x104);
+    fns.CoGetCurrentLogicalThreadId.handler([OUT]);
+    assert.notEqual(read(), first, 'and another for another');
 });
 
 test('CoInitialize nests and only the matching CoUninitialize leaves', ()=>{
@@ -817,7 +829,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoGetApartmentType: 8,
         CoIncrementMTAUsage: 4,
         CoDecrementMTAUsage: 4,
-        CoGetCurrentLogicalThreadId: 0,
+        CoGetCurrentLogicalThreadId: 4,
         CoInitializeSecurity: 36,
         CoUninitialize: 0,
         OleInitialize: 4,
@@ -874,6 +886,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         OleIsCurrentClipboard: 4,
         OleSetMenuDescriptor: 20,
         CoCreateInstanceEx: 24,
+        CoRegisterMessageFilter: 8,
         PropVariantCopy: 8,
         PropVariantClear: 4,
     };
@@ -997,6 +1010,31 @@ test('CoCreateInstanceEx makes the object once and asks it for every interface i
         [[CREATED, S_OK], [0, 0x80004002], [CREATED, S_OK]]);
         assert.deepEqual(asked, [[IID_OTHER_ARG, RESULTS + 16], [IID_ARG, RESULTS + 28]],
             'the first interface is the one it was made with, the rest asked of it');
+    });
+
+test('a single-threaded apartment keeps one message filter and hands back the one replaced',
+    async()=>{
+        // compobj.c test_CoRegisterMessageFilter.
+        const { fns, host, calls, view } = withGuestCalls();
+        const PREVIOUS = 0x7100;
+        host.currentThread().ole32 = null;
+        assert.equal(fns.CoRegisterMessageFilter.handler([GUEST_OBJECT, PREVIOUS]), 0x80004021,
+            'no apartment, no filter: CO_E_NOT_SUPPORTED');
+        initialize(fns, 0);
+        assert.equal(fns.CoRegisterMessageFilter.handler([GUEST_OBJECT, PREVIOUS]), 0x80004021,
+            'nor in the multithreaded apartment');
+        await fns.CoUninitialize.handler();
+        initialize(fns, COINIT_APARTMENTTHREADED);
+        calls.length = 0;
+        view.setUint32(PREVIOUS, 0xdead, true);
+        assert.equal(await fns.CoRegisterMessageFilter.handler([0, PREVIOUS]), S_OK);
+        assert.equal(host.u32(PREVIOUS), 0, 'there was none before');
+        assert.equal(await fns.CoRegisterMessageFilter.handler([GUEST_OBJECT, PREVIOUS]), S_OK);
+        assert.equal(host.u32(PREVIOUS), 0);
+        assert.deepEqual(calls.map(call=>call.slot), [1], 'the filter is held');
+        assert.equal(await fns.CoRegisterMessageFilter.handler([0, 0]), S_OK);
+        assert.deepEqual(calls.map(call=>call.slot), [1, 2],
+            'and let go of when the caller does not take it back');
     });
 
 test('the last CoUninitialize revokes the class objects its apartment registered', async()=>{
