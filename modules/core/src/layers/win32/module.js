@@ -2047,6 +2047,14 @@ export function createWin32Module(){
                         // Where RegSaveKey writes a hive and RegLoadKey reads one.
                         files: volume,
                         divergence: config?.divergence,
+                        // The events a change notification signals: kernel32's own.
+                        events: {
+                            /** @param {number} handle */
+                            set: handle=>libraries['KERNEL32.dll'].SetEvent.handler([handle]) !== 0,
+                            /** @param {number} handle */
+                            reset: handle=>
+                                libraries['KERNEL32.dll'].ResetEvent.handler([handle]) !== 0,
+                        },
                         // A SID has to live where a program can compare it byte by byte.
                         /** @param {number} bytes */
                         allocate: bytes=>heap.allocate(bytes),

@@ -1166,3 +1166,63 @@ test('a key saved to a file loads under a root, writes its changes back as it un
     assert.equal(await fns.RegLoadAppKeyA.handler([FILE, OUT_HANDLE, 0, 0, 0]),
         ERROR_FILE_NOT_FOUND);
 });
+
+test('RegNotifyChangeKeyValue answers one change to the key or under it, and a close', async()=>{
+    // advapi32's registry test, test_RegNotifyChangeKeyValue.
+    const memory = fakeMemory();
+    /** @type {string[]} */
+    const told = [];
+    const fns = /** @type {any} */ (createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createHive(),
+        events: {
+            set: handle=>told.push(`set ${handle}`) > 0,
+            reset: handle=>told.push(`reset ${handle}`) > 0,
+        },
+    }));
+    const NAME_AND_LAST_SET = 0x5;
+    const EVENT = 0x77;
+    /** @param {number} base @param {string} path */
+    const create = (base, path)=>{
+        memory.putString(SUBKEY, path);
+        assert.equal(fns.RegCreateKeyExA.handler(
+            [base, SUBKEY, 0, 0, 0, 0, 0, OUT_HANDLE, 0]), ERROR_SUCCESS);
+        return memory.dword(OUT_HANDLE);
+    };
+    const key = create(HKEY_LOCAL_MACHINE, 'Watched');
+    assert.equal(fns.RegNotifyChangeKeyValue.handler([key, 1, NAME_AND_LAST_SET, EVENT, 1]),
+        ERROR_SUCCESS);
+    assert.deepEqual(told, ['reset 119'], 'reset as it is asked for');
+    const sub = create(key, 'Sub');
+    assert.deepEqual(told, ['reset 119', 'set 119'], 'a subkey made');
+    create(key, 'Sub');
+    assert.equal(told.length, 2, 'once, and a key that was there already is no change');
+
+    fns.RegNotifyChangeKeyValue.handler([key, 1, NAME_AND_LAST_SET, EVENT, 1]);
+    const deeper = create(sub, 'Deeper');
+    assert.equal(told.at(-1), 'set 119', 'under it, watching the subtree');
+
+    fns.RegNotifyChangeKeyValue.handler([key, 0, NAME_AND_LAST_SET, EVENT, 1]);
+    memory.putString(INPUT, 'v');
+    fns.RegSetValueA.handler([deeper, 0, REG_SZ, INPUT, 0]);
+    assert.equal(told.at(-1), 'reset 119', 'deeper values not, without the subtree');
+    memory.putString(NAME, 'own');
+    fns.RegSetValueExA.handler([key, NAME, 0, REG_SZ, INPUT, 2]);
+    assert.equal(told.at(-1), 'set 119', 'its own values');
+
+    fns.RegNotifyChangeKeyValue.handler([key, 0, NAME_AND_LAST_SET, EVENT, 1]);
+    fns.RegCloseKey.handler([key]);
+    assert.equal(told.at(-1), 'set 119', 'a close signals');
+
+    const again = create(HKEY_LOCAL_MACHINE, 'Watched');
+    assert.equal(fns.RegNotifyChangeKeyValue.handler([again, 0, 0, EVENT, 1]),
+        ERROR_INVALID_PARAMETER, 'no kind of change');
+    assert.equal(fns.RegNotifyChangeKeyValue.handler([again, 0, 1, 0, 1]),
+        ERROR_INVALID_PARAMETER, 'no event to signal');
+    const waited = fns.RegNotifyChangeKeyValue.handler([again, 0, 1, 0, 0]);
+    assert.ok(waited instanceof Promise, 'without one, the caller waits');
+    create(again, 'Another');
+    assert.equal(await waited, ERROR_SUCCESS);
+});

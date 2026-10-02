@@ -38,6 +38,13 @@ const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_INVALID_SID = 1337;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_ALREADY_EXISTS = 183;
+
+/** What RegNotifyChangeKeyValue watches for: a subkey made or deleted, a value set. */
+const REG_NOTIFY_CHANGE_NAME = 0x1;
+const REG_NOTIFY_CHANGE_LAST_SET = 0x4;
+/** Every change it can watch, the four kinds, and the flag that frees it of its thread. */
+const REG_NOTIFY_CHANGE_ALL = 0xf;
+const REG_NOTIFY_THREAD_AGNOSTIC = 0x10000000;
 const ERROR_BADDB = 1009;
 const STATUS_SUCCESS = 0;
 const STATUS_ACCESS_DENIED = 0xc0000022;
@@ -129,6 +136,9 @@ const USER_NAME = 'User';
  *           The volume a hive is saved to and loaded from. Without it a
  *           save is refused and a load finds no file.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {{ set: (handle: number) => boolean, reset: (handle: number) => boolean }} [events]
+ *           The kernel's events, which a change notification signals. Without
+ *           them an asynchronous RegNotifyChangeKeyValue finds no event.
  */
 
 /** @param {number[]} numbers */
@@ -143,7 +153,88 @@ const largest = numbers=>numbers.reduce((most, number)=>Math.max(most, number), 
  * @param {RegistryHost} host
  */
 export function createRegistryFunctions(host){
-    const { hive } = host;
+    /**
+     * The changes RegNotifyChangeKeyValue is waiting for, each answered once:
+     * the key a handle named, whether its subkeys count, the kinds of change,
+     * and what to do when one comes.
+     *
+     * @type {{ handle: number, key: any, subtree: boolean, filter: number,
+     *     settle: () => void }[]}
+     */
+    const watchers = [];
+
+    /**
+     * A change of a kind to a key: every watcher it concerns is answered and
+     * forgotten.
+     *
+     * @param {any} key @param {number} kind
+     */
+    const notify = (key, kind)=>{
+        for (const watcher of [...watchers])
+        {
+            if ((watcher.filter & kind) !== 0 && (watcher.key === key
+                || (watcher.subtree && nodesUnder(watcher.key).has(key))))
+            {
+                watchers.splice(watchers.indexOf(watcher), 1);
+                watcher.settle();
+            }
+        }
+    };
+
+    /**
+     * The hive, its changes told to whoever watches: a subkey made or
+     * deleted changes its parent's names, a value set or deleted its key.
+     */
+    const hive = {
+        ...host.hive,
+        /** @param {any} key @param {string | null} [path] */
+        create(key, path){
+            let parent = key;
+            for (const part of typeof path === 'string' ? path.split('\\').filter(Boolean) : [])
+            {
+                const next = host.hive.open(parent, part);
+                if (!next)
+                {
+                    break;
+                }
+                parent = next;
+            }
+            const made = host.hive.create(key, path);
+            if (made.created)
+            {
+                notify(parent, REG_NOTIFY_CHANGE_NAME);
+            }
+            return made;
+        },
+        /** @param {any} key @param {string | null} [path] */
+        remove(key, path){
+            const parts = typeof path === 'string' ? path.split('\\').filter(Boolean) : [];
+            const doomed = host.hive.open(key, path);
+            const parent = parts.length > 0 ? host.hive.open(key, parts.slice(0, -1).join('\\'))
+                : null;
+            const result = host.hive.remove(key, path);
+            if (result === 'deleted')
+            {
+                notify(parent ?? doomed, REG_NOTIFY_CHANGE_NAME);
+            }
+            return result;
+        },
+        /** @param {any} key @param {string} name @param {number} type @param {Uint8Array} data */
+        setValue(key, name, type, data){
+            const value = host.hive.setValue(key, name, type, data);
+            notify(key, REG_NOTIFY_CHANGE_LAST_SET);
+            return value;
+        },
+        /** @param {any} key @param {string} name */
+        deleteValue(key, name){
+            const deleted = host.hive.deleteValue(key, name);
+            if (deleted)
+            {
+                notify(key, REG_NOTIFY_CHANGE_LAST_SET);
+            }
+            return deleted;
+        },
+    };
 
     /** @type {Map<number, import('./registry.js').RegistryKey>} */
     const handles = new Map();
@@ -1388,6 +1479,12 @@ export function createRegistryFunctions(host){
                     appKeys.delete(key);
                     writeHive(held, file, true);
                 }
+                // A key closed while a change is awaited on it signals the wait.
+                for (const watcher of watchers.filter(one=>one.handle === key))
+                {
+                    watchers.splice(watchers.indexOf(watcher), 1);
+                    watcher.settle();
+                }
                 freed.push(key);
                 return ERROR_SUCCESS;
             },
@@ -1687,6 +1784,46 @@ export function createRegistryFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([file, out])=>loadAppKey(WIDE.read(file >>> 0), out >>> 0),
+        },
+
+        /**
+         * LONG RegNotifyChangeKeyValue(HKEY, BOOL bWatchSubtree, DWORD dwNotifyFilter,
+         *                              HANDLE hEvent, BOOL fAsynchronous)
+         *
+         * One change of the kinds asked for, to the key or under it: the event
+         * is reset now and signalled when it comes, or the caller waits for it.
+         * A change after the registering thread has gone is still told, as
+         * REG_NOTIFY_THREAD_AGNOSTIC asks.
+         */
+        RegNotifyChangeKeyValue: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, subtree, filter, event, asynchronous])=>{
+                const key = keyOf(handle >>> 0);
+                if (!key)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                const kinds = filter >>> 0;
+                if ((kinds & ~(REG_NOTIFY_CHANGE_ALL | REG_NOTIFY_THREAD_AGNOSTIC)) !== 0
+                    || (kinds & REG_NOTIFY_CHANGE_ALL) === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const watcher = { handle: handle >>> 0, key, subtree: subtree !== 0, filter: kinds };
+                if (asynchronous !== 0)
+                {
+                    if ((event >>> 0) === 0 || !host.events?.reset(event >>> 0))
+                    {
+                        return ERROR_INVALID_PARAMETER;
+                    }
+                    watchers.push({ ...watcher, settle: ()=>void host.events?.set(event >>> 0) });
+                    return ERROR_SUCCESS;
+                }
+                return new Promise(resolve=>{
+                    watchers.push({ ...watcher, settle: ()=>resolve(ERROR_SUCCESS) });
+                });
+            },
         },
 
         [UNLOAD_KEY]: unload,

@@ -222,6 +222,29 @@ export function createNtdllFunctions(host){
             : {}),
 
         /**
+         * NTSTATUS NtQuerySystemTime(PLARGE_INTEGER SystemTime)
+         *
+         * GetSystemTimeAsFileTime's clock, as a status: no place to put it is
+         * an access violation.
+         */
+        ...(kernel32.GetSystemTimeAsFileTime
+            ? {
+                NtQuerySystemTime: {
+                    argBytes: 4,
+                    /** @param {number[]} args */
+                    handler: ([out])=>{
+                        if ((out >>> 0) === 0)
+                        {
+                            return STATUS.ACCESS_VIOLATION;
+                        }
+                        kernel32.GetSystemTimeAsFileTime.handler([out >>> 0]);
+                        return STATUS.SUCCESS;
+                    },
+                },
+            }
+            : {}),
+
+        /**
          * NTSTATUS NtUnloadKey(POBJECT_ATTRIBUTES TargetKey)
          *
          * A hive RegLoadKey mounted, named the native way --

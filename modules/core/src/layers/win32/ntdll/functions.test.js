@@ -306,3 +306,20 @@ test('NtUnloadKey names a hive the native way and unloads it through the registr
     assert.equal(unload.handler([0]), 0xc000000d);
     assert.ok(!('NtUnloadKey' in createNtdllFunctions(host)), 'without a registry, unexported');
 });
+
+test('NtQuerySystemTime is GetSystemTimeAsFileTime answered as a status', ()=>{
+    const host = fakeHost();
+    /** @type {number[]} */
+    const asked = [];
+    host.kernel32 = /** @type {any} */ ({ ...host.kernel32, GetSystemTimeAsFileTime: { argBytes: 4,
+        handler: (/** @type {number[]} */ [out])=>{
+            asked.push(out);
+            host.bytes.set([1, 2, 3, 4, 5, 6, 7, 8], out);
+            return 0;
+        } } });
+    const fns = createNtdllFunctions(host);
+    assert.equal(fns.NtQuerySystemTime.handler([0x180]), 0);
+    assert.deepEqual(asked, [0x180]);
+    assert.deepEqual([...host.bytes.subarray(0x180, 0x188)], [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.equal(fns.NtQuerySystemTime.handler([0]), 0xc0000005, 'nowhere to put it');
+});
