@@ -54,6 +54,15 @@ export const STATUS = Object.freeze({
     CANNOT_DELETE: 0xc0000121,
     /** RtlVerifyVersionInfo's answer when the system does not meet the request. */
     REVISION_MISMATCH: 0xc0000059,
+    /** What a section is refused with or answers. */
+    NOT_MAPPED_VIEW: 0xc0000019,
+    INVALID_VIEW_SIZE: 0xc000001f,
+    INVALID_FILE_FOR_SECTION: 0xc0000020,
+    OBJECT_TYPE_MISMATCH: 0xc0000024,
+    SECTION_TOO_BIG: 0xc0000040,
+    SECTION_NOT_IMAGE: 0xc0000049,
+    MAPPED_FILE_SIZE_ZERO: 0xc000011e,
+    INVALID_IMAGE_NOT_MZ: 0xc000012f,
 });
 
 /** The Win32 errors this table produces. */
@@ -81,9 +90,12 @@ const ERROR = Object.freeze({
     WAIT_TIMEOUT: 258,
     NO_MORE_ITEMS: 259,
     DIRECTORY: 267,
+    BAD_EXE_FORMAT: 193,
     MR_MID_NOT_FOUND: 317,
+    INVALID_ADDRESS: 487,
     IO_PENDING: 997,
     NOACCESS: 998,
+    FILE_INVALID: 1006,
     REVISION_MISMATCH: 1306,
     NO_SYSTEM_RESOURCES: 1450,
 });
@@ -127,6 +139,16 @@ const TO_DOS_ERROR = new Map([
     [STATUS.NAME_TOO_LONG, ERROR.FILENAME_EXCED_RANGE],
     [STATUS.CANNOT_DELETE, ERROR.ACCESS_DENIED],
     [STATUS.REVISION_MISMATCH, ERROR.REVISION_MISMATCH],
+    [STATUS.NOT_MAPPED_VIEW, ERROR.INVALID_ADDRESS],
+    // A view that does not fit is refused as access is: MapViewOfFile's
+    // answer for a length past the end.
+    [STATUS.INVALID_VIEW_SIZE, ERROR.ACCESS_DENIED],
+    [STATUS.INVALID_FILE_FOR_SECTION, ERROR.BAD_EXE_FORMAT],
+    [STATUS.OBJECT_TYPE_MISMATCH, ERROR.INVALID_HANDLE],
+    [STATUS.SECTION_TOO_BIG, ERROR.NOT_ENOUGH_MEMORY],
+    [STATUS.SECTION_NOT_IMAGE, ERROR.INVALID_PARAMETER],
+    [STATUS.MAPPED_FILE_SIZE_ZERO, ERROR.FILE_INVALID],
+    [STATUS.INVALID_IMAGE_NOT_MZ, ERROR.BAD_EXE_FORMAT],
 ]);
 
 /** What an unmapped status becomes, and the one code that means "no mapping". */

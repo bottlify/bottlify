@@ -153,8 +153,27 @@ test('an information class this engine cannot answer is refused', ()=>{
         fns.NtQuerySystemInformation.handler([2, BUFFER, 0x100, 0]),
         STATUS.INVALID_INFO_CLASS);
     assert.equal(
-        fns.NtQueryInformationProcess.handler([0, 34, BUFFER, 0x100, 0]),
+        fns.NtQueryInformationProcess.handler([0, 1, BUFFER, 0x100, 0]),
         STATUS.INVALID_INFO_CLASS);
+});
+
+test('data runs as code, permanently, and a program asking to change that is refused', ()=>{
+    // No page refuses to execute here, so the execute flags are those of a
+    // system whose DEP is always off: enabled, and permanent -- which is what
+    // makes Windows refuse a change, as it is refused here.
+    const MEM_EXECUTE_OPTION_ENABLE = 0x2;
+    const MEM_EXECUTE_OPTION_PERMANENT = 0x8;
+    const host = fakeHost();
+    const fns = createQueryFunctions(host);
+    assert.equal(fns.NtQueryInformationProcess.handler([-1, 0x22, BUFFER, 4, RETURN_LENGTH]),
+        STATUS.SUCCESS);
+    assert.equal(host.view.getUint32(BUFFER, true),
+        MEM_EXECUTE_OPTION_ENABLE | MEM_EXECUTE_OPTION_PERMANENT);
+    host.view.setUint32(BUFFER, 0x1, true);
+    assert.equal(fns.NtSetInformationProcess.handler([-1, 0x22, BUFFER, 4]),
+        STATUS.ACCESS_DENIED);
+    assert.equal(fns.NtSetInformationProcess.handler([-1, 12, BUFFER, 4]), STATUS.SUCCESS,
+        'any other class is taken');
 });
 
 test('the length a class needs is reported even when the buffer is too small', ()=>{

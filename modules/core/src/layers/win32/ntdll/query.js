@@ -76,6 +76,14 @@ const PROCESS_BASIC = Object.freeze({
 const SYSTEM_BASIC_INFORMATION = 0;
 const PROCESS_BASIC_INFORMATION = 0;
 const PROCESS_DEBUG_PORT = 7;
+const PROCESS_EXECUTE_FLAGS = 0x22;
+
+/**
+ * The process's execute flags: data runs as code, and that cannot be changed.
+ * It is what this engine does -- no page refuses to execute -- told the way
+ * a system whose DEP is always off tells it.
+ */
+const EXECUTE_FLAGS = 0x2 | 0x8;
 const OBJECT_BASIC_INFORMATION = 0;
 
 /**
@@ -374,7 +382,7 @@ export function createQueryFunctions(host){
                     host.writeMemory(buffer >>> 0, struct);
                     return STATUS.SUCCESS;
                 }
-                if (wanted === PROCESS_DEBUG_PORT)
+                if (wanted === PROCESS_DEBUG_PORT || wanted === PROCESS_EXECUTE_FLAGS)
                 {
                     writeU32If(returnLength >>> 0, 4);
                     if ((length >>> 0) < 4 || buffer === 0)
@@ -384,10 +392,34 @@ export function createQueryFunctions(host){
                     // No debugger is attached, and that is the truth rather than
                     // an evasion: this is asked by code that means to behave
                     // differently under one, and it would find none.
-                    writeU32If(buffer >>> 0, 0);
+                    writeU32If(buffer >>> 0, wanted === PROCESS_EXECUTE_FLAGS ? EXECUTE_FLAGS : 0);
                     return STATUS.SUCCESS;
                 }
                 return STATUS.INVALID_INFO_CLASS;
+            },
+        },
+
+        /**
+         * NTSTATUS NtSetInformationProcess(HANDLE ProcessHandle,
+         *                                  PROCESSINFOCLASS ProcessInformationClass,
+         *                                  PVOID ProcessInformation,
+         *                                  ULONG ProcessInformationLength)
+         *
+         * The execute flags are permanent, so changing them is refused as
+         * Windows refuses a permanent policy. Every other class is taken and
+         * kept nowhere, and says so.
+         */
+        NtSetInformationProcess: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, infoClass])=>{
+                if ((infoClass >>> 0) === PROCESS_EXECUTE_FLAGS)
+                {
+                    return STATUS.ACCESS_DENIED;
+                }
+                host.divergence?.('NtSetInformationProcess',
+                    `information class ${infoClass >>> 0} is taken and ignored`);
+                return STATUS.SUCCESS;
             },
         },
 

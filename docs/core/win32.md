@@ -538,7 +538,10 @@ gets its own heap, hive, queue and COM registry.
   `MEM_COMMIT` alone at an address commits inside an existing reservation, 487 outside one;
   `MEM_RESET` keeps the pages and their contents, since there is no paging to spare them from. A
   type with none of those, `MEM_RESET` with another, or a zero size is `ERROR_INVALID_PARAMETER`
-  (87); `MEM_TOP_DOWN` and `MEM_WRITE_WATCH` are accepted and ignored. `VirtualFree` takes exactly
+  (87); `MEM_TOP_DOWN` is accepted and ignored. A `MEM_WRITE_WATCH` reservation is one
+  `GetWriteWatch` and `ResetWriteWatch` answer for; writes are not tracked, so `GetWriteWatch`
+  tells every committed page of the range as written -- more than a collector must rescan, never
+  less -- and says so as a divergence. `VirtualFree` takes exactly
   one of `MEM_DECOMMIT` and `MEM_RELEASE` (87 otherwise); a release takes the reservation's base
   and no size (487 for an interior address, 87 for a size), a decommit any pages inside it. Both
   set the last error on every refusal. The compiled `virtual.exe` (`src/virtual.itest.js`) checks
@@ -898,8 +901,15 @@ yet. A read that fails once parked writes `ERROR_IO_DEVICE` for the parked threa
 is running by then. File mappings (`kernel32/mapping.js`) are a copy read at map time and written
 back at unmap, and park the same way; a mapping handle and each view hold the file they map, as a
 duplicated file handle does, so a program may close the file, the mapping and the view in any
-order and the file closes with the last of them. The standard handles are never files: writing to
-them goes to `onOutput`.
+order and the file closes with the last of them. A mapping is a section with the attributes
+`CreateFileMapping` and ntdll's `NtCreateSection` share: over a file it is `SEC_FILE`, keeping
+only `SEC_NOCACHE`/`SEC_WRITECOMBINE`, over the page file what was asked (`SEC_COMMIT` when
+nothing was) in whole pages; the combinations Windows refuses are refused with its errors, a
+read-only section past its file's end is `ERROR_NOT_ENOUGH_MEMORY`, and a `SEC_IMAGE` view holds
+the file as it lies rather than laid out, said as a divergence. `NtQuerySection` reports them,
+`NtMapViewOfSection`/`NtUnmapViewOfSection` are `MapViewOfFile`'s views in this process. No
+handle keeps the access it was opened with, so one without `SECTION_QUERY` is answered as one
+with it. The standard handles are never files: writing to them goes to `onOutput`.
 
 ### Drives and discs
 
