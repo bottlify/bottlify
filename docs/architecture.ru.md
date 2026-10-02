@@ -2,8 +2,8 @@
 
 English version: [architecture.md](architecture.md).
 
-По коду `bottlify` cf293c0 и `bottlify-ui` ec1a29c, 2 октября 2026. Пути без префикса считаются от
-`modules/` в bottlify, пути с `ui/` — от корня bottlify-ui. Если схема разошлась с кодом, прав код.
+Пути без префикса считаются от `modules/` в bottlify, пути с `ui/` — от корня bottlify-ui. Если
+схема разошлась с кодом, прав код.
 
 1. [Что это](#1-что-это)
 2. [Из чего состоит](#2-из-чего-состоит)

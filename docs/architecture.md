@@ -2,9 +2,8 @@
 
 Русская версия: [architecture.ru.md](architecture.ru.md).
 
-As of `bottlify` cf293c0 and `bottlify-ui` ec1a29c, 2 October 2026. Paths without a prefix are
-relative to `modules/` in bottlify; paths starting with `ui/` are relative to the root of
-bottlify-ui. Where a diagram and the code disagree, the code is right.
+Paths without a prefix are relative to `modules/` in bottlify; paths starting with `ui/` are
+relative to the root of bottlify-ui. Where a diagram and the code disagree, the code is right.
 
 1. [What it is](#1-what-it-is)
 2. [What it is made of](#2-what-it-is-made-of)
