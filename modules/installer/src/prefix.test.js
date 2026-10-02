@@ -90,6 +90,14 @@ test('the system\'s own tree is never mistaken for the installation', ()=>{
     ])), 'C:\\Games\\Title');
 });
 
+test('the setup InstallShield keeps for maintenance is not the installation', ()=>{
+    // As deep as the program, one executable each, and sorted ahead of it.
+    assert.equal(chooseRoot(tree([
+        'C:\\Program Files\\InstallShield Installation Information\\{91B323B5}\\Setup.exe',
+        'C:\\Program Files\\Publisher\\Title\\title.exe',
+    ])), 'C:\\Program Files\\Publisher\\Title');
+});
+
 test('what an installer unpacks beside itself is the distribution, not the installation', ()=>{
     // A self-extractor unpacks its setup next to itself, a level shallower
     // than any Program Files directory the setup then installs into.

@@ -71,7 +71,10 @@ export function placementOf(manifest){
  * Directories a program is entitled to write to that are not part of what was
  * installed. The system's own tree is recreated by the engine, not carried.
  */
-const SYSTEM_ROOTS = ['windows', 'temp', 'tmp', 'program files\\common files'];
+// The system's own directories, and the copy of its setup InstallShield keeps
+// for maintenance beside the program it installed.
+const SYSTEM_ROOTS = ['windows', 'temp', 'tmp', 'program files\\common files',
+    'program files\\installshield installation information'];
 
 /**
  * @typedef {Object} MediaFile
