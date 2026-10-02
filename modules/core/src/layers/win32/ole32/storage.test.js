@@ -320,7 +320,7 @@ test('StgCreateDocfile makes the file at once and hands out an IStorage over it'
     assert.equal(host.readWide(host.u32(STAT)), PATH, 'the root is named by its path');
     assert.ok(host.heap.block(host.u32(STAT)), 'from task memory');
     assert.equal(host.u32(STAT + 4), STGTY_STORAGE);
-    assert.equal(host.u32(STAT + 40), CREATE_MODE);
+    assert.equal(host.u32(STAT + 40), CREATE_MODE & ~STGM.CREATE, 'opened as, not made as');
     assert.equal(call(root, 'Stat', [STAT, STATFLAG_NONAME]), S_OK);
     assert.equal(host.u32(STAT), 0, 'no name when none was asked for');
 
@@ -595,6 +595,38 @@ test('EnumElements walks a snapshot of the storage with names from task memory',
         'more than one needs somewhere to say how many');
 });
 
+test('a docfile is created writable, and exclusive unless transacted', ()=>{
+    // ole32's storage32 test_create_storage_modes: each of these is refused
+    // before any file is made, so the one that follows creates it.
+    const STG_E_INVALIDPARAMETER = 0x80030057 | 0;
+    const STGM_SHARE_DENY_WRITE = 0x20;
+    const STGM_TRANSACTED = 0x10000;
+    const STGM_PRIORITY = 0x40000;
+    const { host, fns } = setup();
+    host.putWide(NAME, PATH);
+    for (const mode of [
+        0, STGM.CREATE, STGM.CREATE | STGM.READWRITE, STGM.CREATE | STGM.SHARE_EXCLUSIVE,
+        STGM.CREATE | STGM_SHARE_DENY_WRITE | STGM.READWRITE, STGM.SHARE_EXCLUSIVE | STGM.READ,
+        STGM_PRIORITY, RW | STGM_TRANSACTED | STGM.WRITE, RW | STGM_TRANSACTED | 0x8,
+        RW | STGM_TRANSACTED | 0x80, RW | STGM_TRANSACTED | 0x800000,
+        STGM_SHARE_DENY_NONE | STGM.READWRITE, STGM_TRANSACTED | STGM_SHARE_DENY_WRITE,
+    ])
+    {
+        assert.equal(fns.StgCreateDocfile.handler([NAME, mode, 0, OUT]), STG_E_INVALIDFLAG,
+            `0x${mode.toString(16)}`);
+    }
+    assert.equal(fns.StgCreateDocfile.handler([NAME, CREATE_MODE, 1, OUT]),
+        STG_E_INVALIDPARAMETER, 'the reserved word');
+    assert.equal(host.files.stat(PATH), null, 'nothing was made');
+    for (const mode of [RW, STGM.CREATE | STGM.READWRITE | STGM_TRANSACTED,
+        STGM.CREATE | STGM_SHARE_DENY_NONE | STGM.READWRITE | STGM_TRANSACTED])
+    {
+        assert.equal(fns.StgCreateDocfile.handler([NAME, mode | STGM.CREATE, 0, OUT]), S_OK,
+            `0x${mode.toString(16)}`);
+        host.release(host.u32(OUT));
+    }
+});
+
 test('docfile modes: what is refused, what is reported, what is a temporary', ()=>{
     const { host, fns } = setup();
     host.putWide(NAME, PATH);
@@ -692,6 +724,54 @@ test('a memory stream lives in a global block the program can lock', ()=>{
     assert.equal(fns.CreateStreamOnHGlobal.handler([0x1234, 0, OUT]), E_INVALIDARG,
         'not a block');
     assert.equal(fns.GetHGlobalFromStream.handler([0x1234, OUT2]), E_INVALIDARG);
+});
+
+test('a docfile lives in an ILockBytes over a global block, and opens again from it', ()=>{
+    // ole32's storage32, clipboard and ole2 tests keep docfiles in memory
+    // this way: CreateILockBytesOnHGlobal, then StgCreateDocfileOnILockBytes.
+    const STGTY_LOCKBYTES = 3;
+    const { host, fns, call, createStream, write, read } = setup();
+    assert.equal(fns.CreateILockBytesOnHGlobal.handler([0, 1, OUT]), S_OK);
+    const bytes = host.u32(OUT);
+    assert.equal(call(bytes, 'Stat', [STAT, STATFLAG_NONAME]), S_OK);
+    assert.deepEqual([host.u32(STAT + 4), host.u32(STAT + 8)], [STGTY_LOCKBYTES, 0]);
+    host.bytes.set(Uint8Array.of(1, 2, 3), BUFFER);
+    assert.equal(call(bytes, 'WriteAt', [10, 0, BUFFER, 3, COUNT]), S_OK);
+    assert.equal(call(bytes, 'ReadAt', [9, 0, BUFFER + 0x10, 8, COUNT]), S_OK);
+    assert.equal(host.u32(COUNT), 4, 'up to the end, which the write moved to 13');
+    assert.deepEqual(host.bytes.slice(BUFFER + 0x10, BUFFER + 0x14), Uint8Array.of(0, 1, 2, 3));
+    assert.equal(call(bytes, 'SetSize', [0, 0]), S_OK);
+    assert.equal(fns.StgIsStorageILockBytes.handler([bytes]), S_FALSE);
+
+    assert.equal(fns.StgCreateDocfileOnILockBytes.handler([bytes, CREATE_MODE, 0, OUT2]), S_OK);
+    const root = host.u32(OUT2);
+    assert.equal(call(root, 'Stat', [STAT, 0]), S_OK);
+    assert.deepEqual([host.u32(STAT), host.u32(STAT + 40)], [0, RW], 'no name, opened as RW');
+    const stream = createStream(root, 'Data');
+    write(stream, Uint8Array.of(5, 6, 7));
+    host.release(stream);
+    host.release(bytes);
+    host.release(root);
+    assert.equal(fns.GetHGlobalFromILockBytes.handler([bytes, OUT3]), E_INVALIDARG,
+        'the program\'s ILockBytes is gone');
+
+    // The block outlived the ILockBytes because the docfile held it; a new
+    // ILockBytes over a block that holds a docfile opens it again.
+    assert.equal(fns.CreateILockBytesOnHGlobal.handler([0, 1, OUT]), S_OK);
+    const again = host.u32(OUT);
+    assert.equal(fns.StgCreateDocfileOnILockBytes.handler([again, CREATE_MODE, 0, OUT2]), S_OK);
+    const made = host.u32(OUT2);
+    write(createStream(made, 'Data'), Uint8Array.of(5, 6, 7));
+    assert.equal(call(made, 'Commit', [0]), S_OK);
+    assert.equal(fns.StgIsStorageILockBytes.handler([again]), S_OK);
+    assert.equal(fns.GetHGlobalFromILockBytes.handler([again, OUT3]), S_OK);
+    const block = host.u32(OUT3);
+    assert.deepEqual([...host.bytes.slice(block, block + 4)], [0xd0, 0xcf, 0x11, 0xe0],
+        'a compound file in the block');
+    assert.equal(fns.StgOpenStorageOnILockBytes.handler([again, 0, RO, 0, 0, OUT2]), S_OK);
+    host.putWide(NAME, 'Data');
+    assert.equal(call(host.u32(OUT2), 'OpenStream', [NAME, 0, RO, 0, OUT3]), S_OK);
+    assert.deepEqual([...read(host.u32(OUT3), 8)], [5, 6, 7]);
 });
 
 test('a memory stream seeks in a DWORD, and a seek it refuses keeps the position', ()=>{

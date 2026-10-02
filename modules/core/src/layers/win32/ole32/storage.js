@@ -46,6 +46,7 @@ const STG_E_FILEALREADYEXISTS = 0x80030050 | 0;
 const STG_E_INVALIDPARAMETER = 0x80030057 | 0;
 const STG_E_INVALIDNAME = 0x800300fc | 0;
 const STG_E_INVALIDFLAG = 0x800300ff | 0;
+const STG_E_MEDIUMFULL = 0x80030070 | 0;
 
 /** STGM_* -- the open mode a storage, stream or docfile is asked for. */
 const STGM_ACCESS_MASK = 0x3;
@@ -59,10 +60,24 @@ const STGM_TRANSACTED = 0x10000;
 const STGM_CONVERT = 0x20000;
 const STGM_CREATE = 0x1000;
 const STGM_DELETEONRELEASE = 0x4000000;
+const STGM_PRIORITY = 0x40000;
+/**
+ * Every STGM bit there is: the access, the sharing, STGM_CREATE,
+ * STGM_TRANSACTED, STGM_CONVERT, STGM_PRIORITY, STGM_NOSCRATCH,
+ * STGM_NOSNAPSHOT, STGM_DIRECT_SWMR, STGM_DELETEONRELEASE and STGM_SIMPLE.
+ */
+const STGM_KNOWN = STGM_ACCESS_MASK | STGM_SHARE_MASK | STGM_CREATE | STGM_TRANSACTED
+    | STGM_CONVERT | STGM_PRIORITY | 0x100000 | 0x200000 | 0x400000 | STGM_DELETEONRELEASE
+    | 0x8000000;
+
+/** STGFMT_*, StgCreateStorageEx's formats: the two that are a compound file. */
+const STGFMT_STORAGE = 0;
+const STGFMT_DOCFILE = 5;
 
 /** STGTY_*, in STATSTG.type. */
 const STGTY_STORAGE = 1;
 const STGTY_STREAM = 2;
+const STGTY_LOCKBYTES = 3;
 
 const STATFLAG_NONAME = 1;
 const STREAM_SEEK_SET = 0;
@@ -86,6 +101,8 @@ export const IID_IPERSISTSTREAM = '{00000109-0000-0000-C000-000000000046}';
 const CLSID_STORAGE = '{7B5B0B8E-1F8C-4B36-9D1C-2A6D4E4B0010}';
 const CLSID_STREAM = '{7B5B0B8E-1F8C-4B36-9D1C-2A6D4E4B0011}';
 const CLSID_ENUM = '{7B5B0B8E-1F8C-4B36-9D1C-2A6D4E4B0012}';
+const CLSID_LOCKBYTES = '{7B5B0B8E-1F8C-4B36-9D1C-2A6D4E4B0013}';
+const IID_ILOCKBYTES = '{0000000A-0000-0000-C000-000000000046}';
 
 /**
  * IPersistStream's slots after IUnknown's three: GetClassID, IsDirty, Load,
@@ -152,6 +169,9 @@ const MAX_PATH = 260;
  * @property {string | null} path   Null for a tree with no file behind it.
  * @property {boolean} deleteOnRelease
  * @property {number} objects
+ * @property {StreamBacking} [lockBytes]  The byte array of an ILockBytes it
+ *           lives in instead of a file, held until the last object goes.
+ * @property {() => void} [done]  Told when the last object goes.
  */
 
 /**
@@ -185,7 +205,8 @@ const MAX_PATH = 260;
  * @property {Document} document
  * @property {import('./cfb.js').CfbEntry} entry
  * @property {number} mode
- * @property {string} name  The path for the root, the element name below it.
+ * @property {string | null} name  The path for the root, the element name below
+ *           it; none for the root of a docfile in an ILockBytes.
  */
 
 /**
@@ -286,7 +307,7 @@ export function createStorageFunctions(host){
 
     /** @type {import('./objects.js').ComClassDefinition | null} */
     let pending = null;
-    for (const clsid of [CLSID_STORAGE, CLSID_STREAM, CLSID_ENUM])
+    for (const clsid of [CLSID_STORAGE, CLSID_STREAM, CLSID_ENUM, CLSID_LOCKBYTES])
     {
         host.registry.registerClass(clsid, ()=>pending);
     }
@@ -345,6 +366,15 @@ export function createStorageFunctions(host){
      * @param {Document} document
      */
     const flush = document=>{
+        if (document.lockBytes)
+        {
+            const bytes = serializeCompoundFile(document.root);
+            if (!document.lockBytes.resize(bytes.length) || !document.lockBytes.write(0, bytes))
+            {
+                diverge('IStorage::Commit', 'a docfile did not fit its ILockBytes');
+            }
+            return;
+        }
         if (document.path === null || !host.files)
         {
             return;
@@ -384,6 +414,7 @@ export function createStorageFunctions(host){
             {
                 flush(document);
             }
+            document.done?.();
         };
     };
 
@@ -815,15 +846,20 @@ export function createStorageFunctions(host){
 
     /** @returns {import('./objects.js').ComMethod[]} */
     const storageMethods = ()=>[
-        { name: 'CreateStream', argBytes: 24, invoke: (object, [pwcsName, grfMode, , , ppstm])=>{
+        { name: 'CreateStream', argBytes: 24, invoke: (object, [pwcsName, grfMode, r1, r2, out_])=>{
             /** @type {StorageState} */
             const state = object.state;
-            const out = ppstm >>> 0;
+            const out = out_ >>> 0;
             if (out === 0)
             {
                 return STG_E_INVALIDPOINTER;
             }
             writeU32(out, 0);
+            // The two reserved words.
+            if (r1 !== 0 || r2 !== 0)
+            {
+                return STG_E_INVALIDPARAMETER;
+            }
             const name = elementName(pwcsName >>> 0);
             if (name === null)
             {
@@ -1133,7 +1169,8 @@ export function createStorageFunctions(host){
                 return STG_E_INVALIDPOINTER;
             }
             return writeStat(pstatstg >>> 0, {
-                name: state.name, type: STGTY_STORAGE, size: 0, mode: state.mode,
+                // The mode as opened: STGM_CREATE was how, not what it is now.
+                name: state.name, type: STGTY_STORAGE, size: 0, mode: state.mode & ~STGM_CREATE,
                 entry: state.entry,
             }, flags >>> 0);
         } },
@@ -1246,6 +1283,27 @@ export function createStorageFunctions(host){
     };
 
     /**
+     * What creating a docfile takes beyond opening one, as ole32's storage
+     * tests have Windows answer: a flag that is none, both access bits, a
+     * priority open or no write access is no mode to create in, and one
+     * that is not transacted must be exclusive.
+     *
+     * @param {string} api @param {number} mode
+     * @returns {number} S_OK or the refusal
+     */
+    const checkCreateMode = (api, mode)=>{
+        const access = mode & STGM_ACCESS_MASK;
+        if ((mode & ~STGM_KNOWN) !== 0 || access === STGM_ACCESS_MASK || access === STGM_READ
+            || (mode & STGM_PRIORITY) !== 0
+            || ((mode & STGM_TRANSACTED) === 0
+                && (mode & STGM_SHARE_MASK) !== STGM_SHARE_EXCLUSIVE))
+        {
+            return STG_E_INVALIDFLAG;
+        }
+        return checkDocfileMode(api, mode);
+    };
+
+    /**
      * Reads a file whole; null when it is not there. The bytes may still be
      * on their way, in which case the caller parks on them.
      *
@@ -1285,6 +1343,27 @@ export function createStorageFunctions(host){
      * @returns {number} an HRESULT
      */
     const publishMemoryStream = (hGlobal, deleteOnRelease, out)=>{
+        const backing = memoryBacking(hGlobal, deleteOnRelease);
+        if (typeof backing === 'number')
+        {
+            return backing;
+        }
+        return publishStream(/** @type {StreamState} */ ({
+            backing, mode: STGM_READWRITE | STGM_SHARE_EXCLUSIVE, position: 0,
+            document: null,
+        }), out);
+    };
+
+    /**
+     * A byte array over a block of the process heap, which CreateStreamOnHGlobal
+     * and CreateILockBytesOnHGlobal both stand on: every holder retains it,
+     * and with `deleteOnRelease` the block goes with the last.
+     *
+     * @param {number} hGlobal  A block, or 0 for a new empty one.
+     * @param {boolean} deleteOnRelease
+     * @returns {StreamBacking | number} the backing, or an HRESULT
+     */
+    const memoryBacking = (hGlobal, deleteOnRelease)=>{
         let handle = hGlobal;
         if (handle === 0)
         {
@@ -1373,10 +1452,100 @@ export function createStorageFunctions(host){
             },
         };
         let holders = 0;
-        return publishStream(/** @type {StreamState} */ ({
-            backing, mode: STGM_READWRITE | STGM_SHARE_EXCLUSIVE, position: 0,
-            document: null,
-        }), out);
+        return backing;
+    };
+
+    /**
+     * ILockBytes over a backing, after IUnknown: offsets are ULARGE_INTEGERs
+     * passed by value, and the high half of one is past any block here.
+     *
+     * @returns {import('./objects.js').ComMethod[]}
+     */
+    const lockBytesMethods = ()=>[
+        { name: 'ReadAt', argBytes: 24, invoke: (object, [low, high, pv, cb, pcbRead])=>{
+            /** @type {StreamBacking} */
+            const backing = object.state.backing;
+            if ((pv >>> 0) === 0)
+            {
+                return STG_E_INVALIDPOINTER;
+            }
+            const offset = (high >>> 0) === 0 ? low >>> 0 : Infinity;
+            const bytes = offset >= backing.size() ? new Uint8Array(0)
+                : backing.read(offset, Math.min(cb >>> 0, backing.size() - offset));
+            if (bytes.length > 0)
+            {
+                host.writeMemory(pv >>> 0, bytes);
+            }
+            if ((pcbRead >>> 0) !== 0)
+            {
+                writeU32(pcbRead >>> 0, bytes.length);
+            }
+            return S_OK;
+        } },
+        { name: 'WriteAt', argBytes: 24, invoke: (object, [low, high, pv, cb, pcbWritten])=>{
+            /** @type {StreamBacking} */
+            const backing = object.state.backing;
+            if ((pv >>> 0) === 0)
+            {
+                return STG_E_INVALIDPOINTER;
+            }
+            const count = cb >>> 0;
+            if ((high >>> 0) !== 0
+                || (count > 0 && !backing.write(low >>> 0, host.readMemory(pv >>> 0, count))))
+            {
+                return STG_E_MEDIUMFULL;
+            }
+            if ((pcbWritten >>> 0) !== 0)
+            {
+                writeU32(pcbWritten >>> 0, count);
+            }
+            return S_OK;
+        } },
+        { name: 'Flush', argBytes: 4, invoke: ()=>S_OK },
+        { name: 'SetSize', argBytes: 12, invoke: (object, [low, high])=>
+            ((high >>> 0) === 0 && object.state.backing.resize(low >>> 0)
+                ? S_OK : STG_E_MEDIUMFULL) },
+        // A block of memory has no regions to lock, as Windows' says.
+        { name: 'LockRegion', argBytes: 24, invoke: ()=>STG_E_INVALIDFUNCTION },
+        { name: 'UnlockRegion', argBytes: 24, invoke: ()=>STG_E_INVALIDFUNCTION },
+        { name: 'Stat', argBytes: 12, invoke: (object, [pstatstg, flags])=>{
+            if ((pstatstg >>> 0) === 0)
+            {
+                return STG_E_INVALIDPOINTER;
+            }
+            return writeStat(pstatstg >>> 0, {
+                name: null, type: STGTY_LOCKBYTES, size: object.state.backing.size(),
+                mode: 0, entry: null,
+            }, flags >>> 0);
+        } },
+    ];
+
+    /**
+     * The byte array of one of our ILockBytes, or null for one a program
+     * implemented.
+     *
+     * @param {number} pointer
+     * @returns {StreamBacking | null}
+     */
+    const lockBytesAt = pointer=>stateAt(pointer, CLSID_LOCKBYTES)?.backing ?? null;
+
+    /**
+     * A docfile in an ILockBytes' byte array: written there when committed
+     * and when its last object goes, and holding the array until then, so
+     * the program may release the ILockBytes first.
+     *
+     * @param {StreamBacking} lockBytes @param {import('./cfb.js').CfbEntry} root
+     * @param {number} mode @param {number} out
+     */
+    const publishDocfileOn = (lockBytes, root, mode, out)=>{
+        const release = lockBytes.retain?.();
+        /** @type {Document} */
+        const document = {
+            root, path: null, lockBytes, deleteOnRelease: false, objects: 0,
+            done: ()=>release?.(),
+        };
+        flush(document);
+        return publishStorage({ document, entry: root, mode, name: null }, out);
     };
 
     let temporaries = 0;
@@ -1400,7 +1569,7 @@ export function createStorageFunctions(host){
         return STG_E_INVALIDFUNCTION;
     };
 
-    return {
+    const table = {
         /**
          * HRESULT StgCreateDocfile(const OLECHAR *pwcsName, DWORD grfMode,
          *                          DWORD reserved, IStorage **ppstgOpen)
@@ -1412,19 +1581,23 @@ export function createStorageFunctions(host){
         StgCreateDocfile: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([pwcsName, grfMode, , ppstgOpen])=>{
+            handler: ([pwcsName, grfMode, reserved, ppstgOpen])=>{
                 const out = ppstgOpen >>> 0;
                 if (out === 0)
                 {
                     return STG_E_INVALIDPOINTER;
                 }
                 writeU32(out, 0);
+                if (reserved !== 0)
+                {
+                    return STG_E_INVALIDPARAMETER;
+                }
                 let mode = grfMode >>> 0;
                 if ((mode & STGM_CREATE) !== 0 && (mode & STGM_CONVERT) !== 0)
                 {
                     return STG_E_INVALIDFLAG;
                 }
-                const refused = checkDocfileMode('StgCreateDocfile', mode);
+                const refused = checkCreateMode('StgCreateDocfile', mode);
                 if (refused !== S_OK)
                 {
                     return refused;
@@ -1553,12 +1726,108 @@ export function createStorageFunctions(host){
         StgCreateDocfileOnILockBytes: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([, , , out])=>refuse('StgCreateDocfileOnILockBytes', out >>> 0),
+            handler: ([plkbyt, grfMode, , out])=>{
+                const lockBytes = lockBytesAt(plkbyt >>> 0);
+                if (!lockBytes)
+                {
+                    return refuse('StgCreateDocfileOnILockBytes', out >>> 0);
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return STG_E_INVALIDPOINTER;
+                }
+                writeU32(out >>> 0, 0);
+                const refused = checkCreateMode('StgCreateDocfileOnILockBytes', grfMode >>> 0);
+                return refused !== S_OK ? refused
+                    : publishDocfileOn(lockBytes, createRoot(), grfMode >>> 0, out >>> 0);
+            },
         },
         StgOpenStorageOnILockBytes: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([, , , , , out])=>refuse('StgOpenStorageOnILockBytes', out >>> 0),
+            handler: ([plkbyt, , grfMode, , , out])=>{
+                const lockBytes = lockBytesAt(plkbyt >>> 0);
+                if (!lockBytes)
+                {
+                    return refuse('StgOpenStorageOnILockBytes', out >>> 0);
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return STG_E_INVALIDPOINTER;
+                }
+                writeU32(out >>> 0, 0);
+                const refused = checkDocfileMode('StgOpenStorageOnILockBytes', grfMode >>> 0);
+                if (refused !== S_OK)
+                {
+                    return refused;
+                }
+                const root = parseCompoundFile(lockBytes.read(0, lockBytes.size()));
+                return root ? publishDocfileOn(lockBytes, root, grfMode >>> 0, out >>> 0)
+                    : STG_E_FILEALREADYEXISTS;
+            },
+        },
+
+        /** HRESULT StgIsStorageILockBytes(ILockBytes *plkbyt) */
+        StgIsStorageILockBytes: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([plkbyt])=>{
+                const lockBytes = lockBytesAt(plkbyt >>> 0);
+                if (!lockBytes)
+                {
+                    diverge('StgIsStorageILockBytes',
+                        'an ILockBytes a program implemented is not read');
+                    return S_FALSE;
+                }
+                return isCompoundFile(lockBytes.read(0, lockBytes.size())) ? S_OK : S_FALSE;
+            },
+        },
+
+        /**
+         * HRESULT CreateILockBytesOnHGlobal(HGLOBAL hGlobal, BOOL fDeleteOnRelease,
+         *                                   ILockBytes **pplkbyt)
+         *
+         * A byte array over a block of the process heap, as a memory stream
+         * is: the program's block, grown as written past, freed with the last
+         * holder when asked.
+         */
+        CreateILockBytesOnHGlobal: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hGlobal, fDeleteOnRelease, pplkbyt])=>{
+                const out = pplkbyt >>> 0;
+                if (out === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out, 0);
+                const backing = memoryBacking(hGlobal >>> 0, (fDeleteOnRelease >>> 0) !== 0);
+                if (typeof backing === 'number')
+                {
+                    return backing;
+                }
+                const release = backing.retain?.();
+                return publish(CLSID_LOCKBYTES, {
+                    state: { backing },
+                    interfaces: [{ id: IID_ILOCKBYTES, methods: lockBytesMethods() }],
+                    destroy: ()=>release?.(),
+                }, IID_ILOCKBYTES, out);
+            },
+        },
+
+        /** HRESULT GetHGlobalFromILockBytes(ILockBytes *plkbyt, HGLOBAL *phglobal) */
+        GetHGlobalFromILockBytes: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([plkbyt, phglobal])=>{
+                const lockBytes = lockBytesAt(plkbyt >>> 0);
+                if ((phglobal >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(phglobal >>> 0, lockBytes?.handle?.() ?? 0);
+                return lockBytes ? S_OK : E_INVALIDARG;
+            },
         },
 
         /**
@@ -1858,7 +2127,44 @@ export function createStorageFunctions(host){
                 return bytes instanceof Promise ? bytes.then(load) : load(bytes);
             },
         },
+
+        /**
+         * HRESULT StgCreateStorageEx(const WCHAR *pwcsName, DWORD grfMode, DWORD stgfmt,
+         *     DWORD grfAttrs, STGOPTIONS *pStgOptions, PSECURITY_DESCRIPTOR,
+         *     REFIID riid, void **ppObjectOpen)
+         *
+         * StgCreateDocfile's docfile, in its two formats' names, as an
+         * IStorage. Asked for 4096-byte sectors it is written in 512 all the
+         * same, which a program reading it back through ole32 cannot tell.
+         */
+        StgCreateStorageEx: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([pwcsName, grfMode, stgfmt, , options, , riid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return STG_E_INVALIDPOINTER;
+                }
+                writeU32(out >>> 0, 0);
+                if ((stgfmt >>> 0) !== STGFMT_STORAGE && (stgfmt >>> 0) !== STGFMT_DOCFILE)
+                {
+                    diverge('StgCreateStorageEx', `format ${stgfmt >>> 0} is not made; `
+                        + 'only a compound file is');
+                    return STG_E_INVALIDPARAMETER;
+                }
+                if ((riid >>> 0) === 0 || readGuid(host, riid >>> 0) !== IID_ISTORAGE)
+                {
+                    return E_NOINTERFACE;
+                }
+                if ((options >>> 0) !== 0 && readU32((options >>> 0) + 4) > 512)
+                {
+                    diverge('StgCreateStorageEx', 'a larger sector is asked for and 512 is used');
+                }
+                return table.StgCreateDocfile.handler([pwcsName, grfMode, 0, out]);
+            },
+        },
     };
+    return table;
 }
 
 /** The mode a docfile stream is asked for in tests and by callers here. */
