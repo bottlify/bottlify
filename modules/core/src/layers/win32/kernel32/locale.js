@@ -587,6 +587,12 @@ export const encodeAnsi = text=>encodeSingleByte(text, ANSI_PAGE).bytes;
  */
 export const decodeAnsi = bytes=>decodeSingleByte(bytes, ANSI_PAGE);
 
+/** Bytes of the OEM page as text, as MultiByteToWideChar(CP_OEMCP) reads them. @param {Uint8Array} bytes */
+export const decodeOem = bytes=>decodeSingleByte(bytes, OEM_PAGE);
+
+/** Text in the OEM page, as WideCharToMultiByte(CP_OEMCP) writes it. @param {string} text */
+export const encodeOem = text=>encodeSingleByte(text, OEM_PAGE).bytes;
+
 /**
  * Bytes of the ANSI page with their case changed, one byte to one byte.
  *

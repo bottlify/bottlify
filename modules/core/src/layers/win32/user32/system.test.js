@@ -1446,6 +1446,45 @@ test('OemToCharA copies through the terminator and refuses a null on either side
     assert.equal(fns.OemToCharA.argBytes, 8);
 });
 
+test('the wide and uncounted OEM conversions agree with the counted ANSI ones', ()=>{
+    // 0x81 is u-umlaut in page 437, U+00FC as a character, 0xfc in Windows-1252.
+    const { memory, fns } = setup();
+    memory.writeMemory(TEXT_BUFFER, Uint8Array.of(0x81, 0x61, 0x00, 0x7a));
+    memory.fill(OUT_BUFFER, 16);
+    assert.equal(fns.OemToCharBuffW.handler([TEXT_BUFFER, OUT_BUFFER, 2]), 1);
+    assert.deepEqual([...memory.readMemory(OUT_BUFFER, 6)],
+        [0xfc, 0x00, 0x61, 0x00, UNTOUCHED & 0xff, UNTOUCHED & 0xff], 'counted: no terminator');
+    assert.equal(fns.OemToCharW.handler([TEXT_BUFFER, OUT_BUFFER]), 1);
+    assert.deepEqual([...memory.readMemory(OUT_BUFFER, 6)], [0xfc, 0x00, 0x61, 0x00, 0, 0]);
+    assert.equal(fns.CharToOemW.handler([OUT_BUFFER, OUT_BUFFER + 8]), 1);
+    assert.deepEqual([...memory.readMemory(OUT_BUFFER + 8, 3)], [0x81, 0x61, 0x00]);
+    // A character page 437 has no byte for becomes the default character.
+    memory.writeMemory(OUT_BUFFER, Uint8Array.of(0xac, 0x20, 0x62, 0x00));
+    assert.equal(fns.CharToOemBuffW.handler([OUT_BUFFER, OUT_BUFFER + 8, 2]), 1);
+    assert.deepEqual([...memory.readMemory(OUT_BUFFER + 8, 2)], [0x3f, 0x62]);
+    memory.writeMemory(TEXT_BUFFER, Uint8Array.of(0xfc, 0x61, 0x00));
+    assert.equal(fns.CharToOemA.handler([TEXT_BUFFER, OUT_BUFFER]), 1);
+    assert.deepEqual([...memory.readMemory(OUT_BUFFER, 3)], [0x81, 0x61, 0x00]);
+    for (const name of ['OemToCharW', 'CharToOemW', 'CharToOemA'])
+    {
+        assert.equal(fns[name].handler([0, OUT_BUFFER]), 0, `${name} refuses a null`);
+    }
+});
+
+test('OemKeyScan answers the scan code and shift state that type an OEM character', ()=>{
+    // input.c's test_OemKeyScan: VkKeyScan's shift state moved to the high
+    // word, MapVirtualKey's scan code in the low, -1 for a character no key
+    // types; only the low byte of the argument counts.
+    const { fns } = setup();
+    assert.equal(fns.OemKeyScan.handler([0x61]), 0x0000001e, 'a');
+    assert.equal(fns.OemKeyScan.handler([0x41]), 0x0001001e, 'A, with shift');
+    assert.equal(fns.OemKeyScan.handler([0x141]), 0x0001001e, 'the high byte ignored');
+    assert.equal(fns.OemKeyScan.handler([0x01]), 0x0002001e, 'control and A');
+    assert.equal(fns.OemKeyScan.handler([0x31]), 0x00000002, '1');
+    assert.equal(fns.OemKeyScan.handler([0x81]), 0xffffffff, 'u-umlaut: no key on this layout');
+    assert.equal(fns.OemKeyScan.argBytes, 4);
+});
+
 test('wvsprintfA reads its arguments through the list it was handed', ()=>{
     const { memory, fns } = setup();
     memory.putString(FORMAT_BUFFER, '%s scored %d of %d');
@@ -1958,6 +1997,9 @@ test('the one layout there is is named, listed, activated and loaded', ()=>{
     assert.equal(memory.u32(OUT_BUFFER), layout);
     assert.equal(fns.ActivateKeyboardLayout.handler([layout, 0]), layout);
     assert.equal(fns.LoadKeyboardLayoutA.handler([TEXT_BUFFER, 1]), layout);
+    // input.c's test_LoadKeyboardLayoutEx: a layout to replace, or nothing.
+    assert.equal(fns.LoadKeyboardLayoutEx.handler([0, TEXT_BUFFER, 0]), 0);
+    assert.equal(fns.LoadKeyboardLayoutEx.handler([layout, TEXT_BUFFER, 0]), layout);
 });
 
 test('GetKeyboardLayout answers the one supported layout for any thread, including zero', ()=>{

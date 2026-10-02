@@ -20,7 +20,8 @@
 
 import { formatToString, varargsSlots } from '../msvcrt/format.js';
 import {
-    ANSI_PAGE, LANGID_EN_US, OEM_PAGE, decodeAnsi, encodeAnsi, mapCaseAnsi, transcodeSingleByte,
+    ANSI_PAGE, LANGID_EN_US, OEM_PAGE, decodeAnsi, decodeOem, encodeAnsi, encodeOem, mapCaseAnsi,
+    transcodeSingleByte,
 } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
 import { dibToBgra, groupImageId } from './cursors.js';
@@ -2568,6 +2569,100 @@ export function createSystemFunctions({ host, live, windows, classes }){
             },
         },
 
+        /** BOOL CharToOemA(LPCSTR lpszSrc, LPSTR lpszDst) */
+        CharToOemA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([source, target])=>{
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const text = host.readCString(source >>> 0, 0x10000);
+                host.writeMemory(target >>> 0, transcodeSingleByte(
+                    host.readMemory(source >>> 0, text.length + 1), ANSI_PAGE, OEM_PAGE));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL OemToCharBuffW(LPCSTR lpszSrc, LPWSTR lpszDst, DWORD cchDstLength)
+         *
+         * Exactly that many OEM bytes, each to the character the OEM page
+         * holds there.
+         */
+        OemToCharBuffW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([source, target, count])=>{
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const text = decodeOem(host.readMemory(source >>> 0, count >>> 0));
+                host.writeMemory(target >>> 0, textBytes(text, true).subarray(0, text.length * 2));
+                return 1;
+            },
+        },
+
+        /** BOOL OemToCharW(LPCSTR lpszSrc, LPWSTR lpszDst) */
+        OemToCharW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([source, target])=>{
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const length = host.readCString(source >>> 0, 0x10000).length;
+                const text = decodeOem(host.readMemory(source >>> 0, length));
+                host.writeMemory(target >>> 0, textBytes(text, true));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL CharToOemBuffW(LPCWSTR lpszSrc, LPSTR lpszDst, DWORD cchDstLength)
+         *
+         * Exactly that many characters, each to its OEM byte, or to the
+         * default character where the page has none.
+         */
+        CharToOemBuffW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([source, target, count])=>{
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const units = host.readMemory(source >>> 0, (count >>> 0) * 2);
+                let text = '';
+                for (let at = 0; at + 1 < units.length; at += 2)
+                {
+                    text += String.fromCharCode(units[at] | units[at + 1] << 8);
+                }
+                host.writeMemory(target >>> 0, encodeOem(text));
+                return 1;
+            },
+        },
+
+        /** BOOL CharToOemW(LPCWSTR lpszSrc, LPSTR lpszDst) */
+        CharToOemW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([source, target])=>{
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const text = readWideString(source >>> 0);
+                const bytes = new Uint8Array(text.length + 1);
+                bytes.set(encodeOem(text));
+                host.writeMemory(target >>> 0, bytes);
+                return 1;
+            },
+        },
+
         /**
          * LPSTR CharLowerA(LPSTR lpsz) / LPSTR CharUpperA(LPSTR lpsz)
          *
@@ -3722,6 +3817,18 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ()=>HKL_EN_US,
         },
 
+        /**
+         * HKL LoadKeyboardLayoutEx(HKL hklUnload, LPCWSTR pwszKLID, UINT Flags)
+         *
+         * LoadKeyboardLayoutW in the place of a layout already loaded: with
+         * none named to replace there is nothing to load into, and NULL.
+         */
+        LoadKeyboardLayoutEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([unload])=>((unload >>> 0) === 0 ? 0 : HKL_EN_US),
+        },
+
         /** BOOL UnloadKeyboardLayout(HKL hkl) */
         UnloadKeyboardLayout: {
             argBytes: 4,
@@ -3792,6 +3899,25 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([character])=>keyForCharacter(character & 0xff) ?? 0xffff,
+        },
+
+        /**
+         * DWORD OemKeyScan(WORD wOemChar)
+         *
+         * The scan code that types an OEM character in the low word and the
+         * shift state VkKeyScan gives it in the high, or -1 when no key types
+         * it. Only the low byte names the character.
+         */
+        OemKeyScan: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([oem])=>{
+                const character = decodeOem(Uint8Array.of(oem & 0xff)).charCodeAt(0);
+                const key = keyForCharacter(character);
+                const scan = key === null ? 0 : mapVirtualKey(key & 0xff, MAPVK_VK_TO_VSC);
+                return key === null || scan === 0 ? 0xffffffff
+                    : ((key & 0xff00) << 8 | scan) >>> 0;
+            },
         },
 
         /** SHORT VkKeyScanW(WCHAR ch) */
