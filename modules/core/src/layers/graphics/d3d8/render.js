@@ -4304,7 +4304,7 @@ export function createRenderer(options){
             arena.reset();
             recording = {
                 commands: [], pipelines: [], pass: null, viewport: null, scissor: '', arena,
-                drawsTaken: 0,
+                drawsTaken: 0, cut: /** @type {number | undefined} */ (undefined),
             };
         }
         return recording;
@@ -7265,6 +7265,7 @@ export function createRenderer(options){
         submit(){
             const recorded = ensureFrame();
             recording = null;
+            recorded.cut = backend.markPresent();
             recorded.dump = dump;
             dump = [];
             kept = 0;
@@ -7289,6 +7290,7 @@ export function createRenderer(options){
             const gpu = surfaceFor(surface);
             const recorded = ensureFrame();
             recording = null;
+            recorded.cut = backend.markPresent();
             recorded.dump = dump;
             const read = chain.then(()=>replay(recorded, null, gpu));
             chain = read.then(()=>undefined, failure);
@@ -7676,7 +7678,7 @@ export function createRenderer(options){
             recording = null;
             // Before the replay chain, so a rename in the next frame's
             // recording retires this frame's backings against this present.
-            backend.markPresent();
+            recorded.cut = backend.markPresent();
             // The dump travels with its frame: the GPU-side check is appended
             // at replay, which happens after another frame may have begun.
             recorded.dump = dump;
@@ -7785,7 +7787,7 @@ export function createRenderer(options){
                 {
                     return null;
                 }
-                const frame = backend.beginFrame();
+                const frame = backend.beginFrame({ cut: null });
                 const reader = frame.snapshot(shown);
                 frame.end();
                 return reader();
@@ -7901,7 +7903,7 @@ export function createRenderer(options){
      */
     async function replay(recorded, surface, snapshot = null){
         const pipelines = await Promise.allSettled(recorded.pipelines);
-        const frame = backend.beginFrame();
+        const frame = backend.beginFrame({ cut: recorded.cut });
         // A frame counts when a query is open as it starts or opens in it,
         // and then every pass of it can: a BEGIN may land in any of them.
         const counts = countingQuery !== null

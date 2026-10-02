@@ -689,12 +689,16 @@ export function createBackend(options){
         destroySurface,
 
         /**
-         * A frame has been recorded and queued for replay. Renames after
-         * this retire backings that belong to it, so every dynamic buffer
-         * counts the present.
+         * What has been recorded so far is cut off and queued for replay as
+         * one frame -- at a present, or at a flush or read-back that sends
+         * the recording before one. Renames after this retire backings that
+         * belong to the next cut, so every dynamic buffer counts it.
+         *
+         * @returns {number} the cut, which the frame that replays it names
+         *     to `beginFrame`
          */
         markPresent(){
-            frameCounts.presents++;
+            return frameCounts.presents++;
         },
 
         /**
@@ -826,9 +830,15 @@ export function createBackend(options){
         uploadTexture,
 
         /**
+         * @param {{ cut?: number | null }} [options]  The cut (`markPresent`)
+         *     whose recording this frame replays: once it is submitted, the
+         *     backings retired while it was recorded are free. Null for a
+         *     frame that replays no recording (a read of what is shown).
+         *     Absent for a caller that records into the frame directly, so
+         *     that every cut marked before it is on the queue when it ends.
          * @returns {any} the frame, which owns the only encoder there will be
          */
-        beginFrame(){
+        beginFrame({ cut } = {}){
             if (openFrame && !openFrame.ended)
             {
                 throw new Error('A frame is already open');
@@ -1144,7 +1154,19 @@ export function createBackend(options){
                     resolved?.destroy();
                     occlusion?.set.destroy();
 
-                    frameCounts.submits++;
+                    // Counted by the cut and not by the submit: a frame that
+                    // replays no recording, or one sent ahead of its present,
+                    // would otherwise count as a frame its recording has not
+                    // reached, and hand back a backing a later frame's draws
+                    // still read. Cuts are replayed in the order they are made.
+                    if (typeof cut === 'number')
+                    {
+                        frameCounts.submits = Math.max(frameCounts.submits, cut + 1);
+                    }
+                    else if (cut === undefined)
+                    {
+                        frameCounts.submits = frameCounts.presents;
+                    }
                     for (let i = dying.length - 1; i >= 0; i--)
                     {
                         if (dying[i].at < frameCounts.submits)

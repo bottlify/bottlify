@@ -2232,12 +2232,13 @@ export function createGpuRenderer(services){
      * @param {Recording} recording
      * @param {DrawableSurfaces} target
      * @param {any} shown   the opaque copy this frame is shown through
+     * @param {number} cut   the backend's cut this recording was queued as
      */
-    const replay = async(recording, target, shown)=>{
+    const replay = async(recording, target, shown, cut)=>{
         const show = pipelineFor(showKey(COLOUR_FORMAT), generateShow(),
             showDescriptor(COLOUR_FORMAT), SINGLE_TEXTURE_PLAN);
         const built = await Promise.allSettled([...recording.pipelines, show]);
-        const frame = backend.beginFrame();
+        const frame = backend.beginFrame({ cut });
         const probing = recording === newest;
         // Which candidates the read-backs go to: the window the probe named,
         // or the frame's last draws sampling the texture. Chosen here, where
@@ -2533,9 +2534,9 @@ export function createGpuRenderer(services){
             }
             const shown = target.shown[target.current];
             target.current ^= 1;
-            backend.markPresent();
+            const cut = backend.markPresent();
             chain = chain
-                .then(()=>replay(recording, target, shown))
+                .then(()=>replay(recording, target, shown, cut))
                 .catch(error=>{
                     unflushed.delete(recording.id);
                     if (failures.length < 16)

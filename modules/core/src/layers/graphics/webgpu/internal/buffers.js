@@ -25,8 +25,9 @@
  *   buffer has to be resent. When no such draw has read it, the write goes into
  *   the live backing and only the locked range travels, which is the ordinary
  *   case of a program that fills a buffer and then draws from it. `markRead` is
- *   how a recorder says a draw has read the current backing; the flag is
- *   dropped at `endFrame`, once the frames that read it are submitted.
+ *   how a recorder says a draw has read the current backing, and the frame
+ *   it was recorded in is what has to be submitted before a write goes in
+ *   place again.
  *
  * A rename that keeps the old contents need not send them again: with a
  * `carry` the old backing is copied into the new one on the GPU, all but the
@@ -46,7 +47,7 @@ export const LockFlags = {
     /**
      * A caller that knows a recorded draw reads the bytes it is about to
      * overwrite and wants the backing renamed. Not a guest flag: a guest with
-     * neither flag leaves the decision to `readSinceSubmit`, while a caller
+     * neither flag leaves the decision to `markRead`, while a caller
      * that tracks the range itself says so here.
      */
     RENAME: 4,
@@ -172,10 +173,13 @@ export function createDynamicBuffer(options){
     let carryInto = null;
     let dirtyStart = -1;
     let dirtyEnd = -1;
-    // Whether a draw recorded in a frame not yet submitted read the live
-    // backing. A lock that would overwrite bytes such a draw still reads has to
-    // rename; otherwise the write can go into the backing in place.
-    let readSinceSubmit = false;
+    // The frame (counted in presents) of the last draw recorded to read the
+    // live backing. Until that frame is submitted, a lock that would overwrite
+    // bytes such a draw still reads has to rename; otherwise the write can go
+    // into the backing in place. A frame number and not a flag: the frame a
+    // submit ends is not always the one being recorded, which may have read
+    // the backing already.
+    let readIn = -1;
     /** @type {any} */
     let held = null;
 
@@ -218,7 +222,7 @@ export function createDynamicBuffer(options){
         gpu = available.length > 0 ? available.shift() : allocate();
         renames++;
         // Nothing has read the replacement yet.
-        readSinceSubmit = false;
+        readIn = -1;
         carryInto = null;
         if (options.carry)
         {
@@ -270,7 +274,7 @@ export function createDynamicBuffer(options){
             {
                 rename();
             }
-            else if (!(flags & LockFlags.NOOVERWRITE) && readSinceSubmit)
+            else if (!(flags & LockFlags.NOOVERWRITE) && readIn >= frames.submits)
             {
                 // A draw not yet submitted read the bytes this lock may
                 // overwrite, and the old contents stay observable, so the
@@ -313,9 +317,9 @@ export function createDynamicBuffer(options){
          * draw at replay.
          */
         markRead(){
-            if (!readSinceSubmit)
+            if (readIn !== frames.presents)
             {
-                readSinceSubmit = true;
+                readIn = frames.presents;
                 touch();
             }
         },
@@ -358,14 +362,12 @@ export function createDynamicBuffer(options){
             if (own)
             {
                 frames.submits++;
+                // A frame ended with no present marked was a cut all the same.
+                frames.presents = Math.max(frames.presents, frames.submits);
             }
             const submits = frames.submits;
             // Its carry was copied with the frame; later writes go in place.
             carryInto = null;
-            // Every frame that could have read the live backing is submitted by
-            // the time this runs (the replay chain is serial), so a lock is
-            // free to write in place again.
-            readSinceSubmit = false;
             for (let index = retired.length - 1; index >= 0; index--)
             {
                 if (retired[index].at < submits)

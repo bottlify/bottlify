@@ -700,7 +700,9 @@ export function createPresenter(options = {}){
         });
         counters.uploads++;
         counters.bytes += needed;
-        const frame = using.beginFrame();
+        // Nothing recorded rides on it: the cuts the renderers made are
+        // counted by their own frames.
+        const frame = using.beginFrame({ cut: null });
         frame.present(target);
         frame.end();
         return undefined;

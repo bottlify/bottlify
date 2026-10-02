@@ -307,6 +307,33 @@ test('a lock with neither flag after a read carries the rest on the GPU and send
         'and the old one what the draw read');
 });
 
+test('a lock with neither flag renames while the frame being recorded read the backing, though '
+    + 'an earlier frame is submitted in between', ()=>{
+    // Frames are recorded ahead of their replay: the frame before ends on the
+    // queue while this one is half recorded, and a draw of this one already
+    // read the bytes the lock overwrites.
+    const gpu = createFakeDevice();
+    const frames = { presents: 0, submits: 0 };
+    const dynamic = createDynamicBuffer({
+        device: gpu.device, queue: gpu.queue, size: 256, usage: 0, label: 'vertices', frames,
+    });
+    fill(dynamic, 0, 64, LockFlags.NONE, 0x22);
+    frames.presents++;
+    dynamic.markRead();
+    const read = dynamic.gpu;
+    frames.submits++;
+    dynamic.endFrame();
+    fill(dynamic, 0, 64, LockFlags.NONE, 0x33);
+    assert.notEqual(dynamic.gpu, read, 'renamed: the recorded draw keeps its bytes');
+
+    frames.presents++;
+    frames.submits++;
+    dynamic.endFrame();
+    const live = dynamic.gpu;
+    fill(dynamic, 0, 64, LockFlags.NONE, 0x44);
+    assert.equal(dynamic.gpu, live, 'once that frame is submitted, a write goes in place');
+});
+
 test('carried ranges are the complement of what was written, in order', ()=>{
     assert.deepEqual(carriedRanges({ from: null, to: null, size: 100,
         written: [{ start: 40, end: 60 }, { start: 0, end: 8 }, { start: 50, end: 70 }] }),
