@@ -2017,15 +2017,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
         /**
          * The minimum index and vertex count are the hints this version's
-         * signature carries; nothing here needs them.
+         * signature carries, which say only which bytes a later lock must not
+         * overwrite under the draw.
          *
          * @param {number} type
-         * @param {number} _minIndex
-         * @param {number} _numVertices
+         * @param {number} minIndex
+         * @param {number} numVertices
          * @param {number} startIndex
          * @param {number} primitiveCount
          */
-        DrawIndexedPrimitive(type, _minIndex, _numVertices, startIndex, primitiveCount){
+        DrawIndexedPrimitive(type, minIndex, numVertices, startIndex, primitiveCount){
             const hr = drawPreconditions(type, primitiveCount);
             if (hr !== D3D_OK)
             {
@@ -2035,7 +2036,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             // test_draw_primitive).
             if (renderer && stream(0).buffer && indices)
             {
-                renderer.drawIndexedPrimitive(model, type, startIndex, primitiveCount);
+                renderer.drawIndexedPrimitive(model, type, startIndex, primitiveCount, minIndex,
+                    numVertices);
             }
             return D3D_OK;
         },

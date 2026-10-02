@@ -997,6 +997,47 @@ test('a sub-image write uploads only its rectangle, at its own origin', async()=
     assert.equal(sub.bytes.length, 4 * 2 * 4, 'only the rectangle\'s bytes, not the whole level');
 });
 
+test('a sub-image write after a draw sampled the texture reaches only the draws after it',
+    async()=>{
+        // Each draw samples the texels as they stood when it was made. The
+        // queue runs a direct write before a frame not yet flushed, so a
+        // write after a draw of that frame keeps its place in it.
+        const r = rig();
+        const { context } = r;
+        const draw = await definedTexture(r);
+        const order = ()=>r.gpu.calls.map((/** @type {any} */ call)=>call.op)
+            .filter((/** @type {string} */ op)=>/^(writeTexture|copyBufferToTexture|draw|submit)$/
+                .test(op));
+        /** @param {number} value */
+        const write = value=>context.glTexSubImage2D(GL.TEXTURE_2D, 0, 0, 0, 2, 2, GL.RGBA,
+            GL.UNSIGNED_BYTE, new Uint8Array(2 * 2 * 4).fill(value));
+        const before = order().length;
+
+        draw();
+        write(1);
+        draw();
+        await r.swap();
+        assert.deepEqual(order().slice(before),
+            ['draw', 'copyBufferToTexture', 'draw', 'draw', 'submit'],
+            'the write lands between the two draws (the last draw shows the frame)');
+
+        // The next frame is recorded before this one is flushed.
+        draw();
+        r.renderer.present(context);
+        write(2);
+        draw();
+        await r.swap();
+        assert.deepEqual(order().slice(before + 5),
+            ['draw', 'draw', 'submit', 'copyBufferToTexture', 'draw', 'draw', 'submit'],
+            'a frame still waiting for the queue does not see the next frame\'s write');
+
+        write(3);
+        draw();
+        await r.swap();
+        assert.deepEqual(order().slice(before + 12), ['writeTexture', 'draw', 'draw', 'submit'],
+            'once nothing unflushed samples it, a write goes straight to the queue');
+    });
+
 test('two overlapping sub-image writes upload their union once', async()=>{
     const r = rig();
     const { context } = r;

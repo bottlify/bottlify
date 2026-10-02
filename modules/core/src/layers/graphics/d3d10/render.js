@@ -2258,8 +2258,8 @@ export function createRenderer(services){
         handedOver = recordedCount;
         const counting = recordingCounters;
         recordingCounters = new Set();
-        backend.markPresent();
-        chain = chain.then(()=>replay(recorded, surface)).catch(failure=>{
+        const cut = backend.markPresent();
+        chain = chain.then(()=>replay(recorded, surface, cut)).catch(failure=>{
             counters.failures.push(String(failure && failure.message || failure));
             diverge(`a frame could not be replayed: ${failure && failure.message || failure}`);
             for (const counter of counting)
@@ -2288,11 +2288,12 @@ export function createRenderer(services){
     /**
      * @param {any[]} recorded
      * @param {any} surface
+     * @param {number} cut   the backend's cut the recording was queued as
      */
-    async function replay(recorded, surface){
+    async function replay(recorded, surface, cut){
         const pipelinesNeeded = await Promise.allSettled(
             recorded.map(command=>command.pipeline ?? null));
-        const frame = backend.beginFrame();
+        const frame = backend.beginFrame({ cut });
         /** @type {{ read: () => Promise<any>, command: any }[]} */
         const readers = [];
         const counting = recorded.some(command=>command.occlusion);

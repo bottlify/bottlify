@@ -1227,7 +1227,10 @@ resource -- which is where a renderer drawing on the engine's thread reads them 
 through the pointer between the unlock and the draw is drawn either way. What only a renderer knows -- an occlusion query's count, a render
 target's pixels for a lock, a context or a copy, `GetFrontBuffer(Data)` -- is the twin's answer,
 and the program waits for the worker to reach the call; a present waits only while the worker
-owes more than two presents and its own bound. The renderer's diagnostics are the twin's as of
+owes more than two presents and its own bound. The worker sends its frames back one at a time: each present is copied into a
+texture of the worker's own, and the newest goes once the program's thread has shown the one
+before, so a program that presents faster than its frames can cross costs no more than one
+crossing per frame shown; `diagnostics().worker.dropped` counts those a newer one replaced. The renderer's diagnostics are the twin's as of
 the last time they were asked for, one asking behind. A structure passed from the same place in a
 call with the same keys crosses as its shape's number and its values, and one of numbers only as
 bare doubles. In the bench (`tools/graphics-bench --remote`, SwiftShader, 400 draws a frame) the

@@ -445,6 +445,39 @@ test('a backing a buffer retired comes back to its pool once its frame is submit
     frame.end();
 });
 
+test('a backing a recorded frame still reads stays retired through frames that end ahead of it',
+    ()=>{
+        // Frames are recorded ahead of their replay. A frame that replays no
+        // recording (a read of what is shown) ends on the queue all the same;
+        // counted as a recorded frame, it handed back a backing the next
+        // frame's draws still read, and the ring's next wrap wrote over them.
+        const { gpu, backend } = harness();
+        const buffer = backend.createDynamicBuffer({ size: 256, usage: 0, label: 'b' });
+        const made = ()=>gpu.calls.filter(call=>call.op === 'createBuffer'
+            && String(call.descriptor?.label).startsWith('b#')).length;
+        const { DISCARD } = backend.LockFlags;
+        buffer.unlock(buffer.lock(0, 64, DISCARD));
+        buffer.markRead();
+        const first = backend.markPresent();
+        // The next frame draws from the backing, then wraps the ring.
+        buffer.markRead();
+        const read = buffer.gpu;
+        buffer.unlock(buffer.lock(0, 64, DISCARD));
+        buffer.markRead();
+        backend.beginFrame({ cut: null }).end();
+        backend.beginFrame({ cut: first }).end();
+        for (let wrap = 0; wrap < 2; wrap++)
+        {
+            buffer.unlock(buffer.lock(0, 64, DISCARD));
+            assert.notEqual(buffer.gpu, read, 'its draws are not submitted: not reused');
+        }
+        const second = backend.markPresent();
+        backend.beginFrame({ cut: second }).end();
+        const before = made();
+        buffer.unlock(buffer.lock(0, 64, DISCARD));
+        assert.equal(made(), before, 'once they are, the pool hands it back');
+    });
+
 test('the snapshot is deep enough to find a regression that is not in the top rows', ()=>{
     const { backend } = harness();
     const vertices = backend.createDynamicBuffer({ size: 4096, usage: 0, label: 'vertices' });

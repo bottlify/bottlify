@@ -79,6 +79,36 @@ function partOf(args){
     return args.slice(0, end).join(',');
 }
 
+/**
+ * A lock's address and the bytes from it the program may write, null for the
+ * rest of the block it lies in.
+ *
+ * @typedef {{ address: number, length: number | null }} Locked
+ */
+
+/**
+ * How many bytes from the address a lock handed out it covers, where its
+ * arguments say: a buffer's size (zero is the rest of the buffer), or a
+ * rectangle's rows at the pitch the lock answered with. Null where they do
+ * not -- a whole level, a box -- and the rest of the block is taken.
+ *
+ * @param {string} name @param {any[]} args @param {any} out  the structure the lock answered into
+ * @returns {number | null}
+ */
+function lockedLength(name, args, out){
+    if (name === 'Lock' && typeof args[1] === 'number')
+    {
+        return args[1] > 0 ? args[1] : null;
+    }
+    if (name.startsWith('LockRect') && typeof out.Pitch === 'number' && out.Pitch > 0)
+    {
+        const rect = args.find(arg=>arg !== null && typeof arg === 'object'
+            && typeof arg.top === 'number' && typeof arg.bottom === 'number');
+        return rect ? Math.max(0, rect.bottom - rect.top) * out.Pitch : null;
+    }
+    return null;
+}
+
 /** No arguments to look through. */
 const NOTHING = /** @type {readonly unknown[]} */ (Object.freeze([]));
 
@@ -244,9 +274,11 @@ export function createRecording(options){
     const raws = new WeakMap();
     /**
      * The guest address each lock of an object handed out and that is not
-     * yet unlocked, by the part of it the lock named.
+     * yet unlocked, by the part of it the lock named, with the bytes from it
+     * the lock covers where its arguments say -- null for the rest of the
+     * block it lies in.
      *
-     * @type {WeakMap<object, Map<string, number>>}
+     * @type {WeakMap<object, Map<string, Locked>>}
      */
     const lockedAt = new WeakMap();
     /** The stand-ins of the caller's services, passed where the services were. @type {WeakSet<object>} */
@@ -331,32 +363,31 @@ export function createRecording(options){
     };
 
     /**
-     * Where the bytes the locks an unlock ends let the program write begin --
-     * all of the object's, when it names no part -- each running from the
-     * address its lock handed out to the end of the block that lies in; the
-     * object's own bytes when no lock handed any out, as a context over a
-     * surface writes them.
+     * The bytes the locks an unlock ends let the program write -- all of the
+     * object's locks, when it names no part -- each from the address its lock
+     * handed out, for as many bytes as it covered; the object's own bytes when
+     * no lock handed any out, as a context over a surface writes them.
      *
      * @param {object} object @param {string} part
-     * @returns {number[]}
+     * @returns {Locked[]}
      */
-    const lockedAddresses = (object, part)=>{
+    const lockedRanges = (object, part)=>{
         const locks = lockedAt.get(object);
-        /** @type {number[]} */
-        const addresses = [];
-        for (const [named, address] of locks ?? [])
+        /** @type {Locked[]} */
+        const ranges = [];
+        for (const [named, locked] of locks ?? [])
         {
             if (part === '' || named === part)
             {
-                addresses.push(address);
+                ranges.push(locked);
                 locks?.delete(named);
             }
         }
-        if (addresses.length === 0 && typeof (/** @type {any} */ (object).base) === 'number')
+        if (ranges.length === 0 && typeof (/** @type {any} */ (object).base) === 'number')
         {
-            addresses.push(/** @type {any} */ (object).base);
+            ranges.push({ address: /** @type {any} */ (object).base, length: null });
         }
-        return addresses;
+        return ranges;
     };
 
     /**
@@ -364,12 +395,20 @@ export function createRecording(options){
      * begin, and the objects they belong to: sent with the next call that may
      * read them, or that is made on one of those objects.
      */
-    const pending = { addresses: /** @type {Set<number>} */ (new Set()),
+    const pending = { addresses: /** @type {Map<number, number | null>} */ (new Map()),
         objects: /** @type {Set<object>} */ (new Set()) };
+
+    /** @param {Locked} locked */
+    const pend = ({ address, length })=>{
+        const held = pending.addresses.get(address);
+        pending.addresses.set(address, held === undefined ? length
+            : held === null || length === null ? null : Math.max(held, length));
+    };
 
     /** The pending bytes, read now; none are pending after. */
     const takePending = ()=>{
-        const taken = [...pending.addresses].flatMap(blockFrom);
+        const taken = [...pending.addresses].flatMap(([address, length])=>
+            rangeFrom({ address, length }));
         pending.addresses.clear();
         pending.objects.clear();
         return taken;
@@ -401,15 +440,21 @@ export function createRecording(options){
     };
 
     /**
-     * From an address to the end of the allocation it lies in.
+     * A locked range's bytes: as many as the lock covered, or from its
+     * address to the end of the allocation it lies in, and never past that.
      *
-     * @param {number} address
+     * @param {Locked} locked
      * @returns {{ address: number, bytes: Uint8Array }[]}
      */
-    const blockFrom = address=>{
+    const rangeFrom = ({ address, length })=>{
         const found = blockAt(address);
-        return found < 0 ? []
-            : [{ address, bytes: readMemory(address, blocks.ends[found] - address) }];
+        if (found < 0)
+        {
+            return [];
+        }
+        const rest = blocks.ends[found] - address;
+        return [{ address,
+            bytes: readMemory(address, length === null ? rest : Math.min(length, rest)) }];
     };
 
     /**
@@ -609,18 +654,15 @@ export function createRecording(options){
             }
             if (unlocking)
             {
-                const addresses = lockedAddresses(target, name === 'ReleaseDC' ? '' : partOf(args));
+                const ranges = lockedRanges(target, name === 'ReleaseDC' ? '' : partOf(args));
                 if (deferring)
                 {
-                    for (const address of addresses)
-                    {
-                        pending.addresses.add(address);
-                    }
+                    ranges.forEach(pend);
                     pending.objects.add(target);
                 }
                 else
                 {
-                    shipped = [...shipped ?? [], ...addresses.flatMap(blockFrom)];
+                    shipped = [...shipped ?? [], ...ranges.flatMap(rangeFrom)];
                 }
             }
             allocs = null;
@@ -708,7 +750,8 @@ export function createRecording(options){
                     if (locking && typeof bits === 'number')
                     {
                         const locks = lockedAt.get(target) ?? new Map();
-                        locks.set(partOf(args), bits);
+                        locks.set(partOf(args),
+                            { address: bits, length: lockedLength(name, args, arg) });
                         lockedAt.set(target, locks);
                     }
                 }
