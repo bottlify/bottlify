@@ -188,6 +188,22 @@ const calleesOf = exit=>(exit.kind === 'call' || exit.kind === 'indirect' && exi
     ? exit.targets : []);
 
 /**
+ * Whether a block ends in a call that leaves its region: a direct call whose
+ * callee is not formed in, or an indirect one that no prediction or table
+ * formed a callee of in. Under `callReturn` such a call is a wasm call, and
+ * its return address the block's way on.
+ *
+ * @param {Block} block
+ * @param {{ has(start: number): boolean }} starts  the region's block starts
+ */
+export function callsOut(block, starts){
+    const { kind, targets, table, predicted } = block.exit;
+    const last = block.instructions[block.instructions.length - 1];
+    return kind === 'call' ? !starts.has(targets[0])
+        : kind === 'indirect' && last?.op === 'call' && table === undefined && !predicted;
+}
+
+/**
  * Where each `ret` of the region may come back to inside it: the return
  * addresses of the calls -- direct, or indirect with their callees predicted
  * -- whose callee is formed into the region with them (the callee's start and

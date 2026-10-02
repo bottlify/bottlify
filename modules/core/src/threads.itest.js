@@ -93,9 +93,10 @@ test('the threads really did run, and really did take turns', { timeout: 15000 }
     const { diagnostics } = await runFixture();
     const byName = Object.fromEntries(diagnostics.map((/** @type {any} */ d)=>[d.name, d]));
 
-    // Three threads: main plus two workers, all of them finished.
+    // Three threads: main plus two workers. Main waits for each worker's event,
+    // not for its end, so a worker may still be between its SetEvent and its
+    // ExitThread when main exits -- as on Windows, where ExitProcess ends it.
     assert.equal(byName.kernel.metrics.threads, 3);
-    assert.equal(byName.kernel.metrics.byState.terminated, 2, 'both workers ended');
 
     // If the scheduler had run each thread to completion in turn, this would be
     // 3. Contention on the mutex forces many more, and that is the point: the

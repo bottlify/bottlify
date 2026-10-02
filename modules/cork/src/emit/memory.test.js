@@ -315,10 +315,11 @@ test('a store into a code page outside the code\'s own granules is no stale', ()
  *
  * @param {number[]} bytes
  * @param {{ regs?: Record<string, number>, code?: [number, number][],
- *     inaccessible?: number[], data?: [number, number[]][] }} [start]
+ *     inaccessible?: number[], data?: [number, number[]][],
+ *     machine?: Parameters<typeof createTestMachine>[0] }} [start]
  */
-function once(bytes, { regs = {}, code = [], inaccessible = [], data = [] } = {}){
-    const m = createTestMachine();
+function once(bytes, { regs = {}, code = [], inaccessible = [], data = [], machine = {} } = {}){
+    const m = createTestMachine(machine);
     m.write(CODE, [...bytes, 0xf4]);
     for (const [address, values] of data)
     {
@@ -383,6 +384,48 @@ test('pushes and pops are one group off esp, checked once', ()=>{
     assert.equal(clean.exit.kind, Exit.HALT);
     assert.equal(clean.m.reg('edx'), 2);
     assert.equal(clean.m.reg('esi'), 1);
+});
+
+test('with looseStacks the group off esp alone tests no page; one with an index, or off another '
+    + 'register, still does', ()=>{
+    const loose = { precise: false, looseStacks: true };
+    // push eax; push ebx; pop edx; pop esi -- into 0x4ffc, a page marked inaccessible
+    // and one holding code: a thread's stack holds neither while the runtime keeps
+    // regions loose, so neither is looked for.
+    const stack = [0x50, 0x53, 0x5a, 0x5e];
+    /** @type {{ inaccessible?: number[], code?: [number, number][] }[]} */
+    const marked = [{ inaccessible: [0x4000, 0x5000] }, { code: [[0x4f00, 0x200]] }];
+    for (const marks of marked)
+    {
+        const strict = once(stack, { regs: { esp: 0x5004 }, ...marks,
+            machine: { precise: false } });
+        assert.equal(strict.exit.kind, Exit.UNTRANSLATED);
+        const r = once(stack, { regs: { esp: 0x5004, eax: 1, ebx: 2 }, ...marks, machine: loose });
+        assert.equal(r.exit.kind, Exit.HALT);
+        assert.equal(r.m.reg('edx'), 2);
+        assert.equal(r.m.reg('esi'), 1);
+        assert.equal(r.m.readU32(0x4ffc), 2, 'the push stored');
+    }
+    // push dword [0x3000]; pop eax: the push's other access, the read, is no
+    // window, and the push is left out of the plan with it -- untested all the same.
+    const through = once([0xff, 0x35, 0x00, 0x30, 0, 0, 0x58], { regs: { esp: 0x5004 },
+        inaccessible: [0x5000], data: [[0x3000, [7, 0, 0, 0]]], machine: loose });
+    assert.equal(through.exit.kind, Exit.HALT);
+    assert.equal(through.m.reg('eax'), 7);
+    // A precise machine relaxes nothing, looseStacks or not.
+    const precise = once(stack, { regs: { esp: 0x5004 }, inaccessible: [0x4000],
+        machine: { precise: true, looseStacks: true } });
+    assert.equal(precise.exit.kind, Exit.UNTRANSLATED);
+    // mov [esp+ecx*4], eax and mov [ebp], eax into an inaccessible page.
+    for (const [bytes, regs] of /** @type {[number[], Record<string, number>][]} */ ([
+        [[0x89, 0x04, 0x8c], { esp: 0x5000, ecx: 0 }],
+        [[0x89, 0x45, 0x00], { ebp: 0x5000 }],
+    ]))
+    {
+        const r = once(bytes, { regs, inaccessible: [0x5000], machine: loose });
+        assert.equal(r.exit.kind, Exit.UNTRANSLATED);
+        assert.equal(r.retired, 0);
+    }
 });
 
 test('a register the block rewrites starts a group of its own', ()=>{
@@ -622,7 +665,8 @@ test('an SSE store checks its page and code in one test, exact at both edges', (
     assert.equal(over.exit.eip, CODE);
 });
 
-test('outside precise a read past RAM wraps into it; a store, or precise, faults', ()=>{
+test('outside precise a read past RAM wraps into it, and a store leaves before it for the host,'
+    + ' which faults; precise, both fault', ()=>{
     const read = [0xa1, 0x10, 0x00, 0x10, 0x00];   // mov eax, [0x100010]: 1 MiB of RAM, 16 past it
     const store = [0xa3, 0x10, 0x00, 0x10, 0x00];  // mov [0x100010], eax
     /** @param {number[]} bytes @param {boolean} precise */
@@ -636,12 +680,58 @@ test('outside precise a read past RAM wraps into it; a store, or precise, faults
     const wrapped = runAt(read, false);
     assert.equal(wrapped.exit.kind, Exit.HALT);
     assert.equal(wrapped.m.reg('eax'), 0x12345678, 'the read found RAM at 0x10');
-    const faulting = /** @type {[number[], boolean][]} */ ([[read, true], [store, false], [store, true]]);
+    // The store a window of its own: its exit is the block's, before the store, for the
+    // host's interpreter to run it and raise the fault -- this machine has none, and
+    // stops where it left with nothing run (kind -2).
+    const held = runAt(store, false);
+    assert.deepEqual([held.exit.kind, held.exit.eip], [-2, CODE]);
+    assert.equal(held.m.readU32(0x10), 0x12345678, 'nothing stored, wrapped or not');
+    const faulting = /** @type {[number[], boolean][]} */ ([[read, true], [store, true]]);
     for (const [bytes, precise] of faulting)
     {
         const { exit } = runAt(bytes, precise);
         assert.equal(exit.kind, Exit.FAULT, `${bytes[0].toString(16)} precise ${precise}`);
         assert.equal(exit.eip, CODE);
+    }
+});
+
+test('the operand of a jmp, call or push through memory is a read: outside precise past RAM it'
+    + ' wraps, precise it faults', ()=>{
+    // jmp [0x100010]; call [0x100010]; push [0x100010]; pop eax -- 16 past 1 MiB of RAM,
+    // which wraps to 0x10, where the address of a hlt is
+    const target = CODE + 0x40;
+    const forms = /** @type {[string, number[]][]} */ ([
+        ['jmp', [0xff, 0x25, 0x10, 0x00, 0x10, 0x00]],
+        ['call', [0xff, 0x15, 0x10, 0x00, 0x10, 0x00]],
+        ['push', [0xff, 0x35, 0x10, 0x00, 0x10, 0x00, 0x58, 0xf4]],
+    ]);
+    for (const [name, bytes] of forms)
+    {
+        for (const precise of [false, true])
+        {
+            const m = createTestMachine({ precise });
+            m.write(CODE, bytes);
+            m.write(target, [0xf4]);
+            m.write(0x10, [target & 0xff, target >>> 8 & 0xff, target >>> 16 & 0xff, 0]);
+            m.setReg('esp', STACK);
+            const exit = m.runProgram(CODE);
+            if (precise)
+            {
+                assert.equal(exit.kind, Exit.FAULT, `${name} precise`);
+                assert.equal(exit.eip, CODE, `${name} precise`);
+                continue;
+            }
+            assert.equal(exit.kind, Exit.HALT, name);
+            if (name === 'push')
+            {
+                assert.equal(m.reg('eax'), target, 'the push read RAM at 0x10');
+            }
+            else
+            {
+                assert.equal(m.eip(), target + 1, `${name} went where RAM at 0x10 says`);
+            }
+            assert.equal(m.reg('esp'), name === 'call' ? STACK - 4 : STACK, name);
+        }
     }
 });
 

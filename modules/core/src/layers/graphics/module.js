@@ -8,6 +8,7 @@ import { createBackend } from './webgpu/backend.js';
 import { createDirectDraw } from './ddraw/objects.js';
 import { createDirect3D8 } from './d3d8/device.js';
 import { createDirect3D9 } from './d3d9/device.js';
+import { connectGraphicsWorker } from './remote/connect.js';
 import { createGraphicsLibraries } from './seam/exports.js';
 import { createOpengl } from './opengl/exports.js';
 import { createVulkan } from './vulkan/runtime.js';
@@ -213,9 +214,10 @@ export function createGraphicsModule(){
              *
              * @type {{ backend: any, factories: any, created: string[], seam: any,
              *     presenter: any, presenterGiven: boolean, shown: any, disposed: boolean,
-             *     gammaOwners: Set<any> }}
+             *     gammaOwners: Set<any>, remote: any }}
              */
             const state = {
+                remote: null,
                 backend: null,
                 factories: null,
                 created: [],
@@ -280,8 +282,8 @@ export function createGraphicsModule(){
              * destroyed is the run ending, not the GPU failing under the program.
              */
             const loss = { happened: false, /** @type {Set<() => void>} */ watchers: new Set() };
-            device?.device?.lost?.then?.((/** @type {{ reason?: string }} */ info)=>{
-                if (info?.reason === 'destroyed')
+            const lose = ()=>{
+                if (loss.happened)
                 {
                     return;
                 }
@@ -291,6 +293,12 @@ export function createGraphicsModule(){
                     watcher();
                 }
                 loss.watchers.clear();
+            };
+            device?.device?.lost?.then?.((/** @type {{ reason?: string }} */ info)=>{
+                if (info?.reason !== 'destroyed')
+                {
+                    lose();
+                }
             });
             /**
              * @param {() => void} watcher
@@ -316,6 +324,36 @@ export function createGraphicsModule(){
              * @type {import('./webgpu/internal/latency.js').FrameQueued}
              */
             const frameQueued = submitted=>state.shown?.queued(submitted) ?? null;
+
+            /**
+             * The graphics worker, when the assembling caller made one: the
+             * Direct3D 8 and 9 devices draw there, on a GPU device of its own,
+             * and this thread keeps only their state (`remote/`). Its frames
+             * come back to be shown as this thread's own are, and its GPU
+             * going away is this one's as far as those devices are concerned.
+             */
+            const remote = device?.worker
+                ? connectGraphicsWorker({
+                    worker: device.worker,
+                    device: device.device,
+                    presentTo: device.presentTo,
+                    writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                    divergence: config?.divergence,
+                    lost: lose,
+                    failed: message=>config?.divergence?.('graphics',
+                        `the graphics worker stopped playing a device's calls: ${message}`),
+                })
+                : null;
+            state.remote = remote;
+            /**
+             * A Direct3D 8 or 9 root, drawn here or in the graphics worker.
+             *
+             * @param {'d3d8' | 'd3d9'} name @param {(services: any) => any} factory
+             * @param {any} services
+             */
+            const direct3d = (name, factory, services)=>(remote
+                ? remote.root(name, factory, services)
+                : factory(services));
 
             /** Everything an API needs from outside itself, in one place. */
             const services = {
@@ -387,7 +425,7 @@ export function createGraphicsModule(){
                 // the backend here is what builds it: a program reaching this call
                 // is about to draw.
                 /** @returns {any} */
-                d3d8: (/** @type {any} */ caps)=>createDirect3D8({
+                d3d8: (/** @type {any} */ caps)=>direct3d('d3d8', createDirect3D8, {
                     ...caps,
                     // What the configuration asks for and the adapter actually
                     // offers, rather than a default that says yes on every machine
@@ -400,7 +438,7 @@ export function createGraphicsModule(){
                     // Asked for only when this build has a GPU, as Direct3D 9's
                     // is: a device made in a headless assembly still keeps and
                     // answers every state a program sets.
-                    backend: device ? api.backend() : undefined,
+                    backend: device && !remote ? api.backend() : undefined,
                     readMemory: services.readMemory,
                     windowMemory: services.windowMemory,
                     // A lock of a render target brings its pixels back into the
@@ -440,7 +478,7 @@ export function createGraphicsModule(){
                 // assembly still answers everything a program can ask about state,
                 // which is what "degraded, not broken" means for this layer.
                 /** @returns {any} */
-                d3d9: (/** @type {any} */ caps)=>createDirect3D9({
+                d3d9: (/** @type {any} */ caps)=>direct3d('d3d9', createDirect3D9, {
                     ...caps,
                     // The same configuration-and-adapter answer Direct3D 8 gets:
                     // Direct3D 9 put the question in CheckDeviceFormat rather than
@@ -448,7 +486,7 @@ export function createGraphicsModule(){
                     // art to load. A device told no decompresses on its own CPU, in
                     // emulated x86, and hands over surfaces four times the size.
                     compressedTextures: gatedCompressedTextures(caps),
-                    backend: device ? api.backend() : undefined,
+                    backend: device && !remote ? api.backend() : undefined,
                     readMemory: services.readMemory,
                     // The copies between surfaces (UpdateSurface, StretchRect,
                     // GetRenderTargetData) move bytes only through this; the
@@ -1127,6 +1165,9 @@ export function createGraphicsModule(){
                     // What a program actually asked for says more about a run than
                     // what the build could have offered.
                     created: instance.created,
+                    // Whether Direct3D 8 and 9 draw in the graphics worker, and
+                    // how many roots it plays.
+                    worker: instance.remote ? instance.remote.diagnostics() : null,
                     seam: instance.seam.diagnostics(),
                     // State the program set in the guest, and the calls that never
                     // crossed: the saving is a number here, not a belief.
@@ -1151,6 +1192,7 @@ export function createGraphicsModule(){
             const instance = current;
             if (instance)
             {
+                instance.remote?.dispose();
                 if (instance.backend)
                 {
                     instance.backend.dispose();

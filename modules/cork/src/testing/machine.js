@@ -31,7 +31,7 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @param {{ ramSize?: number, codePages?: boolean, trapPort?: number,
  *     trap?: (value: number) => number, rdtsc?: () => bigint,
  *     leaveOut?: string[], precise?: boolean, structure?: boolean,
- *     resume?: boolean }} [given]
+ *     resume?: boolean, looseStacks?: boolean }} [given]
  *     trapPort: `out dx, eax` to it calls
  *     `trap` from inside the region (answering 1 when it moved EIP), as under a host with
  *     a call channel; without `trap`, one that answers 0; precise: nothing relaxed -- on
@@ -39,11 +39,12 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  *     structure: the regions' loops as wasm loops (`prepareModule`), as the emitter's default
  *     unless a test asks or `CORK_STRUCTURE` in the environment says 0 or 1, so a suite can
  *     be run under the other form; resume: a miss of the hash calls what `setTier` put in the
- *     table's `TIER_SLOT`
+ *     table's `TIER_SLOT`; looseStacks: a store through esp alone tests no page, outside
+ *     precise (`prepareModule`)
  */
 export function createTestMachine(given = {}){
     const { ramSize = 1 << 20, codePages = false, trapPort, trap, rdtsc, leaveOut = [],
-        precise = true, resume = false } = given;
+        precise = true, resume = false, looseStacks = false } = given;
     const forced = globalThis.process?.env?.CORK_STRUCTURE;
     const structure = given.structure
         ?? (forced === '1' ? true : forced === '0' ? false : undefined);
@@ -156,7 +157,7 @@ export function createTestMachine(given = {}){
             const region = formRegion(read, entry, regionOptions);
             const m = new ModuleBuilder();
             const context = prepareModule(m, layout, found, {}, {
-                undoLog, hash: table !== null && hash, wide, narrow, precise, resume,
+                undoLog, hash: table !== null && hash, wide, narrow, precise, resume, looseStacks,
                 ...(structure === undefined ? {} : { structure }),
                 ...(trapPort === undefined ? {} : { trapPort }), leaveOut: new Set(leaveOut),
             });

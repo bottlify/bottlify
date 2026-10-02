@@ -5,9 +5,10 @@
  */
 
 import { test } from 'node:test';
+import { readFileSync, readdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../testing/machine.js';
-import { formRegion } from '../region.js';
+import { formRegion, inlineReturns } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 import { ownLayout } from '../runtime/layout.js';
 import {
@@ -749,6 +750,50 @@ test('a loop a call leaves from is entered in its middle by the return, and is n
     blocks.push(shaped(4, 'ret', [], 5));
     const { loops } = planStructure(regionOf(blocks), new Map([[4, [2]]]));
     assert.equal(loops.size, 1);
+});
+
+test('with callReturn a call whose callee is formed in adds no way on: a region no call leaves'
+    + ' has the structure it has without', ()=>{
+    // An edge from such a call to its return address made the callee's first block a
+    // block inside a loop, with no entry: every caller from another region missed there,
+    // and the region was formed again with copies of its loops.
+    const images = new URL('../../../../tools/cork-bench/images/', import.meta.url);
+    const base = 0x401000;
+    let compared = 0;
+    for (const name of readdirSync(images).filter(file=>file.endsWith('.bin')).sort())
+    {
+        const image = readFileSync(new URL(name, images));
+        const read = (/** @type {number} */ address)=>image[address - base] ?? 0;
+        // Every direct call's target in the image.
+        const starts = new Set([base]);
+        for (let i = 0; i + 5 <= image.length; i++)
+        {
+            const target = base + i + 5 + image.readInt32LE(i + 1);
+            if (image[i] === 0xe8 && target >= base && target < base + image.length)
+            {
+                starts.add(target);
+            }
+        }
+        for (const start of starts)
+        {
+            const region = formRegion(read, start, {});
+            const blocks = new Set(region.blocks.map(block=>block.start));
+            const calls = region.blocks.filter(block=>block.exit.kind === 'call'
+                || block.exit.kind === 'indirect');
+            if (calls.length === 0 || calls.some(block=>!blocks.has(block.exit.targets[0])))
+            {
+                continue;
+            }
+            const returns = inlineReturns(region);
+            const plain = planStructure(region, returns);
+            const called = planStructure(region, returns, true);
+            assert.deepEqual([called.order, [...called.loops], called.reentered],
+                [plain.order, [...plain.loops], plain.reentered],
+                `${name} at ${start.toString(16)}`);
+            compared++;
+        }
+    }
+    assert.ok(compared >= 5, `${compared} regions whose every call is formed in`);
 });
 
 test('a region formed in the middle of a loop has the loop the code has, its entry inside it', ()=>{

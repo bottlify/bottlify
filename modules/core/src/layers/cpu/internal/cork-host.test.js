@@ -144,9 +144,32 @@ test('the interpreter\'s retired instructions read back through instructionCount
     const loop = host();
     // mov ecx, 2000; dec ecx; jnz -3; hlt -- 1 + 2000*2 + 1 = 4002.
     load(loop, 0x2000, [0xb9, 0xd0, 0x07, 0, 0, 0x49, 0x75, 0xfd, 0xf4]);
-    loop.runSlice(1 << 16);
+    // To its halt, however many slices: an interpreted slice also ends on time.
+    for (let slices = 0; !loop.halted() && slices < 1000; slices++)
+    {
+        loop.runSlice(1 << 16);
+    }
     assert.equal(loop.instructionCount(), 4002);
 });
+
+test('a slice that interprets ends once it has taken its time, and the next goes on from there',
+    ()=>{
+        // Nothing translated: mov ecx, 1500000; dec ecx; jnz -3; hlt -- three million
+        // instructions, interpreted, under one slice's budget of all of them.
+        const h = host({ cork: { translate: false } });
+        load(h, 0x2000, [0xb9, 0x60, 0xe3, 0x16, 0, 0x49, 0x75, 0xfd, 0xf4]);
+        const total = 1 + 1_500_000 * 2 + 1;
+        const first = h.runSlice(total);
+        assert.ok(first < total, `the first slice ended early (${first})`);
+        let slices = 1;
+        while (!h.halted() && slices < 100_000)
+        {
+            h.runSlice(total);
+            slices++;
+        }
+        assert.equal(h.halted(), true);
+        assert.equal(h.instructionCount(), total, 'every instruction once, across the slices');
+    });
 
 test('an instruction no tier carries is an invalid-opcode fault, and the slice counts what ran',
     ()=>{
@@ -166,7 +189,9 @@ test('an instruction no tier carries is an invalid-opcode fault, and the slice c
 test('a call through a null pointer faults where nothing runs, and the range still reads', ()=>{
     // The first 64 KiB stay open to reads, which a title leans on, but a
     // call into them slid through zeroes into the entry vector and ran it.
-    const h = host({ noExecuteBelow: 0x10000 });
+    // The JavaScript tier: the wasm tier does not fence its fetches yet, and
+    // once a process has started it, every host's interpreted code runs there.
+    const h = host({ noExecuteBelow: 0x10000, cork: { wasmInterpreter: false } });
     // mov eax, [0x100]; xor ecx, ecx; call ecx -- at 0x20000.
     load(h, 0x20000, [0xa1, 0x00, 0x01, 0x00, 0x00, 0x31, 0xc9, 0xff, 0xd1, 0xf4]);
     h.writePhysical(0x100, Uint8Array.of(0x78, 0x56, 0x34, 0x12));
@@ -500,7 +525,11 @@ function runCounted(counted, code, cork = {}){
     const before = { ...counted.retired };
     const h = host({ engine: counted.counting, cork: { translate: false, ...cork } });
     load(h, 0x1000, code);
-    h.runSlice(100_000);
+    // To its halt, however many slices: an interpreted slice also ends on time.
+    for (let slices = 0; !h.halted() && slices < 1000; slices++)
+    {
+        h.runSlice(100_000);
+    }
     assert.ok(h.halted());
     return { js: counted.retired.js - before.js, wasm: counted.retired.wasm - before.wasm };
 }
@@ -534,15 +563,21 @@ test('the stretch is the process\'s: hosts add to it, a host after the tier star
     });
 
 test('a slow slice accounts for itself only when the translator\'s timings are asked for', ()=>{
-    // mov ecx, 250000; L: add eax, ecx; xor ebx, eax; dec ecx; jnz L; hlt -- a
-    // million instructions on the JavaScript interpreter in one slice, past its
-    // 20 ms floor (the wasm tier runs them in less).
+    // mov dx, 0x1234; out dx, eax; hlt -- the port's handler holds the slice past
+    // its 20 ms floor, as a host call the program waits on does.
     for (const timings of [false, true])
     {
-        const h = host({ cork: { translate: false, wasmInterpreter: false, timings } });
-        load(h, 0x1000,
-            [0xb9, 0x90, 0xd0, 0x03, 0x00, 0x01, 0xc8, 0x31, 0xc3, 0x49, 0x75, 0xf9, 0xf4]);
-        assert.equal(h.runSlice(2_000_000), 1 + 250_000 * 4 + 1);
+        const h = host({ cork: { translate: false, timings } });
+        h.onTrap(()=>{
+            const until = performance.now() + 25;
+            while (performance.now() < until)
+            {
+                // the host call's own time
+            }
+        });
+        load(h, 0x1000, [0x66, 0xba, 0x34, 0x12, 0xef, 0xf4]);
+        // The slice ends past the handler, its time spent, before the hlt.
+        assert.equal(h.runSlice(100), 2);
         const stalls = /** @type {any} */ (h.cork().diagnostics()).stalls;
         assert.deepEqual(stalls.map((/** @type {{ what: string }} */ one)=>one.what.split(' ')[0]),
             timings ? ['slice'] : [], `timings ${timings}`);

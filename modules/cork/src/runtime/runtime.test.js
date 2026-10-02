@@ -479,12 +479,12 @@ test('a page whose regions partly go keeps the code range of the ones left on it
 test('a region that leaves a block inside its loop to the host on purpose is not formed again'
     + ' for it', async()=>{
     const m = machine();
-    // mov ecx, 10; L: inc edx; test dl, 1; jz N; mov eax, [ebx]; mov esi, [ebx+4]; N: dec
-    // ecx; jnz L; hlt -- the loads a block of their own inside the loop, with no entry, one
+    // mov ecx, 10; L: inc edx; test dl, 1; jz N; mov [ebx], eax; mov [ebx+4], esi; N: dec
+    // ecx; jnz L; hlt -- the stores a block of their own inside the loop, with no entry, one
     // window tested at its start, and ebx past the RAM: the window faults, and the region
     // leaves there for the host to raise the fault.
-    m.write(CODE, [0xb9, 10, 0, 0, 0, 0x42, 0xf6, 0xc2, 0x01, 0x74, 0x05, 0x8b, 0x03,
-        0x8b, 0x73, 0x04, 0x49, 0x75, 0xf2, 0xf4]);
+    m.write(CODE, [0xb9, 10, 0, 0, 0, 0x42, 0xf6, 0xc2, 0x01, 0x74, 0x05, 0x89, 0x03,
+        0x89, 0x73, 0x04, 0x49, 0x75, 0xf2, 0xf4]);
     m.runtime.noteHot(CODE);
     await m.runtime.translatePending();
     for (let i = 0; i < 100; i++)
@@ -503,7 +503,9 @@ test('a region that leaves a block inside its loop to the host on purpose is not
 });
 
 test('a store into a code page leaves stale and drops the page\'s regions', async()=>{
-    const m = machine();
+    // Precise: the store's own test, and the stale exit after it (outside precise the
+    // store is a window, below).
+    const m = machine({ precise: true });
     // The loop at CODE; a writer at CODE + 0x100 that stores into the loop's page.
     m.write(CODE, COUNTDOWN);
     // mov byte [0x1008], 0x90; hlt
@@ -525,6 +527,65 @@ test('a store into a code page leaves stale and drops the page\'s regions', asyn
     assert.equal(d.regions, 0);
     assert.equal(d.invalidations, 2);
     assert.equal(d.exits.stale, 1);
+});
+
+test('outside precise a store into a code page leaves before it for the host, nothing stored',
+    async()=>{
+        const m = machine();
+        m.write(CODE, COUNTDOWN);
+        // mov byte [0x1008], 0x90; hlt
+        m.write(CODE + 0x100, [0xc6, 0x05, 0x08, 0x10, 0, 0, 0x90, 0xf4]);
+        m.runtime.noteHot(CODE);
+        m.runtime.noteHot(CODE + 0x100);
+        assert.equal(await m.runtime.translatePending(), 2);
+        const exit = m.runtime.run(m.runtime.entryOf(CODE + 0x100), 1000);
+        // The store's window finds code in its granule: the host's interpreter runs the
+        // store, and its write drops the page's regions.
+        assert.equal(exit.kind, 'untranslated');
+        assert.equal(m.eip(), CODE + 0x100, 'before the store');
+        assert.equal(new Uint8Array(m.memory.buffer)[m.layout.ramBase + 0x1008], COUNTDOWN[8],
+            'nothing stored');
+    });
+
+test('code translated on a thread\'s stack drops the regions that store through esp untested, '
+    + 'and the store that reaches it then leaves for the host', async()=>{
+    const STACK = 0x80000;
+    const m = machine();
+    m.runtime.noteStack(STACK, 0x10000);
+    // push eax; hlt
+    m.write(CODE, [0x50, 0xf4]);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 1);
+    assert.equal(m.runtime.diagnostics().looseStacks, true);
+    // A loop on a page of the stack: the push's region goes, and is formed again tested.
+    m.write(STACK + 0x8000, COUNTDOWN);
+    m.runtime.noteHot(STACK + 0x8000);
+    assert.equal(await m.runtime.translatePending(), 1);
+    let d = m.runtime.diagnostics();
+    assert.equal(d.looseStacks, false);
+    assert.equal(d.stackCode, 1);
+    assert.equal(m.runtime.entryOf(CODE), -1, 'the loose region is gone');
+    assert.notEqual(m.runtime.entryOf(STACK + 0x8000), -1);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 1);
+    // The push over the loop's hlt: before it, nothing stored.
+    m.setReg(4, STACK + 0x800c);
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
+    assert.equal(exit.kind, 'untranslated');
+    assert.equal(m.eip(), CODE);
+    assert.equal(new Uint8Array(m.memory.buffer)[m.layout.ramBase + STACK + 0x8008], 0xf4);
+    // A stack named over code already translated switches off as well, once only.
+    const n = machine();
+    n.write(STACK, COUNTDOWN);
+    n.runtime.noteHot(STACK);
+    assert.equal(await n.runtime.translatePending(), 1);
+    n.runtime.noteStack(STACK - 0x1000, 0x2000);
+    n.runtime.noteStack(STACK - 0x1000, 0x2000);
+    d = n.runtime.diagnostics();
+    assert.equal(d.looseStacks, false);
+    assert.equal(d.stackCode, 1);
+    // precise is never loose.
+    assert.equal(machine({ precise: true }).runtime.diagnostics().looseStacks, false);
 });
 
 test('a page invalidated too often becomes volatile and is not translated again', async()=>{
@@ -934,6 +995,59 @@ test('a store that answers at once has a batch published in the call that formed
         third.runtime.diagnostics().lookedUpLater], [0, 1]);
 });
 
+test('a batch the store answers whole sends the next for the asks still owed, a turn later',
+    async()=>{
+        // A bottle's next run: the store answers every batch at once, so no
+        // worker's answer comes back to send the next, and the host asks only
+        // when the interpreter notes a new start -- which code already queued
+        // is not.
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const starts = [0x2000, 0x3000, 0x4000];
+        /** @type {Map<string, Uint8Array>} */
+        const records = new Map();
+        let answersNow = true;
+        const store = {
+            get: async(/** @type {string} */ key)=>records.get(key) ?? null,
+            put: async(/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+                records.set(key, bytes);
+            },
+            getNow: (/** @type {string} */ key)=>(answersNow
+                ? records.get(key) ?? null : undefined),
+        };
+        /** @param {number} count */
+        const machineWith = count=>{
+            const m = machine({ store, bundleId: 'test', batchRegions: 1 });
+            m.setReg(4, 0x80000);
+            for (const at of starts.slice(0, count))
+            {
+                m.write(at, COUNTDOWN);
+                m.runtime.noteHot(at, 0, 2);
+            }
+            return m;
+        };
+        const first = machineWith(3);
+        for (let i = 0; i < 3; i++)
+        {
+            await first.runtime.translatePending();
+            await settle();
+        }
+        assert.ok(starts.every(at=>first.runtime.entryOf(at) >= 0), 'all three stored');
+        const next = machineWith(3);
+        answersNow = false;
+        assert.equal(await next.runtime.translatePending(), 0,
+            'the first batch asks the store later');
+        await next.runtime.translatePending();
+        await next.runtime.translatePending();
+        answersNow = true;
+        for (let i = 0; i < 10 && !starts.every(at=>next.runtime.entryOf(at) >= 0); i++)
+        {
+            await settle();
+        }
+        assert.deepEqual(starts.map(at=>next.runtime.entryOf(at) >= 0), [true, true, true],
+            'the owed asks are answered with no further ask');
+        assert.equal(next.runtime.diagnostics().cacheHits, 3);
+    });
+
 test('a runtime that goes leaves the store it was handed open for the others sharing it',
     async()=>{
         // The shape of a store over a directory: once closed it answers
@@ -1152,7 +1266,8 @@ test('the diagnostics histogram names the untranslated exits and why each target
 
 test('a return block the tracker cannot reach gets a region of its own, not a broken entry',
     async()=>{
-        const m = machine();
+        // The call leaves: made as a wasm call, its return block is reached across it.
+        const m = machine({ callReturn: false });
         const RA = CODE + 7;
         // fninit; call F (elsewhere); RA: mov eax, [0x2000]; fld dword [0x2000];
         // fstp st0; hlt -- the integer head emits, the x87 is refused, so the
@@ -1699,7 +1814,7 @@ test('a transfer to a region of its own module is not a crossing; one into anoth
         return; // no hash: every transfer is the host's
     }
     // The loop and its callee in one batch: one module.
-    const one = machine({ leafCalls: false, dispatch: true });
+    const one = machine({ leafCalls: false, dispatch: true, callReturn: false });
     one.write(CODE, callLoop(1000));
     one.setReg(4, 0x80000);
     one.runtime.noteHot(CODE);
@@ -1708,7 +1823,7 @@ test('a transfer to a region of its own module is not a crossing; one into anoth
     assert.equal(one.reg(2), 1000);
     assert.equal(one.runtime.diagnostics().crossings, 0);
     // The callee first, in a batch of its own: each call and each return crosses.
-    const two = machine({ leafCalls: false, mergeAfter: 0, dispatch: true });
+    const two = machine({ leafCalls: false, mergeAfter: 0, dispatch: true, callReturn: false });
     two.write(CODE, callLoop(1000));
     two.setReg(4, 0x80000);
     two.runtime.noteHot(CODE + 14);
@@ -1728,7 +1843,8 @@ test('a placed module whose regions have all gone gives its range of the table b
     // The callee and the loop in modules of their own, dropped and made again
     // three hundred times, as a program rewriting its code in place has them:
     // six hundred ranges, where the table starts with 256 indices.
-    const m = machine({ leafCalls: false, mergeAfter: 0, volatileAfter: 1000, dispatch: true });
+    const m = machine({ leafCalls: false, mergeAfter: 0, volatileAfter: 1000, dispatch: true,
+        callReturn: false });
     for (let round = 0; round < 300; round++)
     {
         m.write(CODE, callLoop(100));
@@ -1753,7 +1869,8 @@ test('two modules that keep transferring into each other are gathered into one, 
     {
         return;
     }
-    const m = machine({ leafCalls: false, mergeAfter: 1000, worker: true, dispatch: true });
+    const m = machine({ leafCalls: false, mergeAfter: 1000, worker: true, dispatch: true,
+        callReturn: false });
     // Enough calls for the crossings to be read (every 2^20 translated instructions).
     m.write(CODE, callLoop(300_000));
     m.setReg(4, 0x80000);
@@ -2006,7 +2123,7 @@ test('an indirect call sampled going to a few small callees has them formed into
     {
         return; // no hash, no transfers to count
     }
-    const m = machine({ countTransfers: true, callTargets: true });
+    const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
     const { code, table, slots, f, g, h } = dispatchLoop(1600);
     m.write(CODE, code);
     m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
@@ -2212,12 +2329,14 @@ async function runToHalt(m){
     let retired = 0;
     for (let turn = 0; turn < 64; turn++)
     {
-        if (m.runtime.entryOf(m.eip()) < 0)
+        // The entry for the x87 top the machine has, as the host asks.
+        const top = new DataView(m.memory.buffer).getUint8(m.layout.x87Top);
+        if (m.runtime.entryOf(m.eip(), top) < 0)
         {
-            m.runtime.noteHot(m.eip());
+            m.runtime.noteHot(m.eip(), top);
             await m.runtime.translatePending();
         }
-        const exit = m.runtime.run(m.runtime.entryOf(m.eip()), 10_000_000);
+        const exit = m.runtime.run(m.runtime.entryOf(m.eip(), top), 10_000_000);
         retired += exit.retired;
         if (exit.kind === 'halt')
         {
@@ -2256,6 +2375,85 @@ test('with callReturn a call out of a region returns into it as a wasm call: the
         assert.ok(called.transfers <= plain.transfers / 2 + 2,
             `returns do not go through the hash: ${called.transfers} of ${plain.transfers}`);
     }
+});
+
+test('with callReturn an x87 callee returns the stack as it left it: its top, its empty mask and'
+    + ' its registers in their places', async()=>{
+    // mov ecx, 1; L: call F; dec ecx; jnz L; hlt; F: fld1; fldz; fxch; ret -- the return
+    // with the top and the mask its plain forms keep in locals, the registers exchanged.
+    const program = [
+        0xb9, 1, 0, 0, 0, 0xe8, 0x04, 0, 0, 0, 0x49, 0x75, 0xf8, 0xf4,
+        0xd9, 0xe8, 0xd9, 0xee, 0xd9, 0xc9, 0xc3,
+    ];
+    /** @type {number[][]} */
+    const results = [];
+    for (const callReturn of [false, true])
+    {
+        const m = machine({ leafCalls: false, callReturn });
+        m.write(CODE, program);
+        m.setReg(4, 0x80000);
+        new DataView(m.memory.buffer).setUint32(m.layout.eip, CODE, true);
+        await runToHalt(m);
+        const view = new DataView(m.memory.buffer);
+        results.push([view.getUint8(m.layout.x87Top), view.getUint8(m.layout.x87Empty),
+            ...[0, 1, 2, 3, 4, 5, 6, 7].map(k=>view.getFloat64(m.layout.x87 + k * 16, true))]);
+    }
+    assert.deepEqual(results[0].slice(0, 4), [6, 0x3f, 0, 0], 'two pushes from top 0');
+    assert.deepEqual(results[0].slice(8), [1, 0], 'ST0 (register 6) 1, ST1 0 after the exchange');
+    assert.deepEqual(results[1], results[0]);
+});
+
+/**
+ * A run of `program` at CODE to its halt with callReturn off and on: the transfers, edx,
+ * the dword at DATA and the x87 top and empty mask of each.
+ *
+ * @param {number[]} program
+ */
+async function bothWays(program){
+    /** @type {{ transfers: number, state: number[] }[]} */
+    const runs = [];
+    for (const callReturn of [false, true])
+    {
+        const m = machine({ leafCalls: false, callReturn, countTransfers: true });
+        m.write(CODE, program);
+        m.setReg(4, 0x80000);
+        const view = new DataView(m.memory.buffer);
+        view.setUint32(m.layout.eip, CODE, true);
+        await runToHalt(m);
+        runs.push({ transfers: m.runtime.diagnostics().transfers ?? 0,
+            state: [m.reg(1), m.reg(2), m.reg(4), view.getUint32(m.layout.ramBase + 0x3000, true),
+                view.getUint8(m.layout.x87Top), view.getUint8(m.layout.x87Empty)] });
+    }
+    return runs;
+}
+
+test('with callReturn a region with x87 makes its calls as wasm calls and goes on after them',
+    async()=>{
+        // mov ecx, 100; L: call F; fld1; fstp dword [0x3000]; dec ecx; jnz L; hlt;
+        // F: inc edx; ret
+        const [plain, called] = await bothWays([
+            0xb9, 100, 0, 0, 0, 0xe8, 0x0c, 0, 0, 0, 0xd9, 0xe8, 0xd9, 0x1d, 0, 0x30, 0, 0,
+            0x49, 0x75, 0xf0, 0xf4, 0x42, 0xc3,
+        ]);
+        assert.deepEqual(called.state, plain.state);
+        assert.deepEqual(called.state, [0, 100, 0x80000, 0x3f800000, 0, 0xff]);
+        if (plain.transfers > 0)
+        {
+            assert.ok(called.transfers <= plain.transfers / 2 + 2,
+                `returns do not go through the hash: ${called.transfers} of ${plain.transfers}`);
+        }
+    });
+
+test('with callReturn a callee that returns a float on the x87 stack has its caller leave at the'
+    + ' return address, the stack as the callee left it', async()=>{
+    // mov ecx, 100; L: call F; fstp dword [0x3000]; inc edx; dec ecx; jnz L; hlt;
+    // F: fld1; ret -- the top after the call one below the call's
+    const [plain, called] = await bothWays([
+        0xb9, 100, 0, 0, 0, 0xe8, 0x0b, 0, 0, 0, 0xd9, 0x1d, 0, 0x30, 0, 0,
+        0x42, 0x49, 0x75, 0xf1, 0xf4, 0xd9, 0xe8, 0xc3,
+    ]);
+    assert.deepEqual(called.state, plain.state);
+    assert.deepEqual(called.state, [0, 100, 0x80000, 0x3f800000, 0, 0xff]);
 });
 
 test('with callReturn calls deeper than the stack of waiting calls go on as plain transfers',

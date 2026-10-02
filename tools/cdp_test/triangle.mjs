@@ -145,6 +145,9 @@ async function runOne({ cdp, sessionId, executable }){
         words: TRIANGLE_REPORT.length,
         maxTurns: 20000,
         samples: EXPECTED.map(entry=>({ name: entry.name, x: entry.x, y: entry.y })),
+        // The Direct3D device drawn in the graphics worker, its frame sent back.
+        graphicsWorker: process.argv.includes('--graphics-worker')
+            && (process.argv[process.argv.indexOf('--graphics-worker') + 1] ?? true),
     });
     await cdp.send('Runtime.evaluate',
         { expression: `window.__bottlify__.start(${request}); null`, returnByValue: true },

@@ -832,6 +832,14 @@ export function createTexture(options){
     });
     /** @type {SurfaceFamily} */
     const family = { locks: 0, dc: null };
+    // Every face's block as the texture is made. A renderer takes the top
+    // level's at once and the others at the first draw that samples them; a
+    // device made without one would place them later, and elsewhere, than its
+    // twin with one (`remote/replay.js`) is given them.
+    for (let face = 0; face < faces; face++)
+    {
+        chains[face] = options.allocate(offsetOf(options.levels));
+    }
 
     /** @returns {LockRectangle} the whole top level */
     const whole = ()=>({ left: 0, top: 0, right: options.width, bottom: options.height });
@@ -1442,6 +1450,11 @@ export function createVolumeTexture(options){
             return volume ? volume.UnlockBox() : D3DERR_INVALIDCALL;
         },
     };
+    // Every level's block as the texture is made, as a texture's chains are.
+    for (let level = 0; level < options.levels; level++)
+    {
+        volumeFor(level);
+    }
     return texture;
 }
 

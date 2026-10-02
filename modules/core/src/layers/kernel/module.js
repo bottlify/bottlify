@@ -262,6 +262,11 @@ export function createKernelModule(){
                         low = slot.base;
                         top = slot.base + slot.size;
                     }
+                    // The translator stores through esp untested while no code
+                    // lies on a stack; a caller that names no low end has the
+                    // reserve a thread gets by default.
+                    const base = low ?? Math.max(0, top - 0x100000);
+                    cpu.noteStack?.(base, top - base);
                     // Sixteen rather than the eight the frame needs: a thread that
                     // returns pops its return address and then the stub it returns
                     // into pops again, and a stack pointer that lands exactly on

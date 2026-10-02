@@ -233,8 +233,9 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
         t.diagnostic(`free: ${JSON.stringify(free)}`);
         assert.equal(free.code, 0);
         assert.equal(free.failed, 0);
+        // No present waited. The counting thread may still have run: an
+        // interpreted slice also ends on time, whatever the presents do.
         assert.equal(free.latency?.held, 0);
         assert.ok(free.latency.peak > 4, `${free.latency.peak} frames behind at most`);
-        assert.equal(free.moved, 0, 'every present answered within its own call');
     });
 }

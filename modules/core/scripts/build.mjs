@@ -167,15 +167,17 @@ if (rewritten.length > 0)
 // profilers, the records only a report reads. The source, which the tests and
 // the harness run, has no such define and keeps them.
 const DIAGNOSTICS_OFF = { 'import.meta.BOTTLIFY_DIAGNOSTICS': 'false' };
-// Three entries, one build: the module a page imports and the workers it
-// starts -- the engine and the log keeper. Bundled apart because a worker is
-// loaded by URL, not imported, and each carries what it needs. All sit in
-// dist/, so the vendor directory below is the same for each.
+// Four entries, one build: the module a page imports and the workers it
+// starts -- the engine and the log keeper -- and the one the engine starts,
+// that Direct3D draws in. Bundled apart because a worker is loaded by URL,
+// not imported, and each carries what it needs. All sit in dist/, so the
+// vendor directory below is the same for each.
 await build({
     entryPoints: [
         join(SRC, 'index.js'),
         join(SRC, 'host', 'engine.worker.js'),
         join(SRC, 'host', 'log.worker.js'),
+        join(SRC, 'host', 'graphics.worker.js'),
     ],
     bundle: true,
     format: 'esm',
@@ -235,5 +237,5 @@ for (const name of LEGAL)
     await copyFile(join(REPO, name), join(ROOT, name));
 }
 await writeChecksums();
-console.log('dist: core.js + engine.worker.js + log.worker.js + cork/ + '
+console.log('dist: core.js + engine.worker.js + log.worker.js + graphics.worker.js + cork/ + '
     + `${vendored} vendor artifacts + checksums.json`);

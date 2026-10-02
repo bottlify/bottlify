@@ -61,7 +61,7 @@ import { I32 } from './flags.js';
 import { Local, Exit, STATE_PARAMS } from './region.js';
 import { prepare, writeReg } from './integer.js';
 import { PRECISION, noteStore } from './memory.js';
-import { inlineReturns } from '../region.js';
+import { callsOut, inlineReturns } from '../region.js';
 import { exactWrites } from '../ir-x87.js';
 
 /** @typedef {import('./region.js').RegionEmitter} E */
@@ -220,17 +220,56 @@ export function step(instruction, state){
 }
 
 /**
+ * The top a call leaves, as the code after it takes it: one below the call's
+ * when the first x87 instruction there reads a register before anything
+ * pushes -- a function returns its float in ST0, the caller's stack empty at
+ * the call, as the x87 calling conventions have it -- and the call's
+ * otherwise. The code after a call made as a wasm call tests the top the
+ * callee left against this one (`x87AfterCall`).
+ *
+ * @param {import('../region.js').Block} block  the return address's
+ * @param {number} top  the top at the call
+ */
+export function topAfterCall(block, top){
+    const state = { top, slot: [0, 1, 2, 3, 4, 5, 6, 7] };
+    for (const instruction of block.instructions)
+    {
+        if (!isX87(instruction))
+        {
+            continue;
+        }
+        const use = stackUse(instruction, state);
+        if (use.sources.length > 0)
+        {
+            return (top - 1) & 7;
+        }
+        if (use.pushes || use.whole !== null || use.marks.length > 0)
+        {
+            break;
+        }
+    }
+    return top;
+}
+
+/**
  * The tracker over a region: the state at each block's start, propagated
  * from the entry along the region's edges; a block met with two different
  * states is cut (null). The entry block's state is the identity mapping at
  * `entryTop`.
  *
+ * With `callReturn` a call that leaves the region (`callsOut`) is a wasm call
+ * the region goes on after: an edge to its return address, the top the
+ * callee is taken to leave (`topAfterCall`) and the registers in their own
+ * locals, which the state block hands back -- the code after the call tests
+ * that the callee left the top so.
+ *
  * @param {import('../region.js').Region} region
  * @param {number} entryTop
+ * @param {boolean} [callReturn]
  * @returns {{ states: (StackState | null)[], cut: Set<number>, ends: (StackState | null)[] }}
  *     `ends`: the state at each block's end (null when the block is cut or tracking stops in it)
  */
-export function trackRegion(region, entryTop){
+export function trackRegion(region, entryTop, callReturn = false){
     const blocks = region.blocks;
     const count = blocks.length;
     const index = new Map(blocks.map((block, i)=>[block.start, i]));
@@ -275,6 +314,9 @@ export function trackRegion(region, entryTop){
         }
         return out;
     };
+    /** By call block, its return address's block when the call is a wasm call. */
+    const returnOf = blocks.map(block=>(callReturn && callsOut(block, index)
+        ? index.get(block.exit.next) ?? -1 : -1));
 
     // A fixed point rather than one forward sweep. A block met with two
     // different tops is cut, and a cut block seeds nothing -- so the sweep is
@@ -318,12 +360,15 @@ export function trackRegion(region, entryTop){
                 // them decides. (The block itself exits before the instruction.)
                 continue;
             }
-            for (const j of successors(i))
+            const after = returnOf[i];
+            for (const j of after >= 0 ? [...successors(i), after] : successors(i))
             {
                 const known = pending[j];
+                const arriving = j === after ? { top: topAfterCall(blocks[j], state.top),
+                    slot: [0, 1, 2, 3, 4, 5, 6, 7] } : state;
                 if (known === undefined)
                 {
-                    pending[j] = cloneState(state);
+                    pending[j] = cloneState(arriving);
                     work.push(j);
                 }
                 else if (known !== null && known.top !== state.top)
@@ -560,14 +605,21 @@ const movesMask = instruction=>instruction.op === 'emms'
  * passes; a program that faults on purpose fails it before the block and is
  * run by the host.
  *
+ * With `callReturn` a call that leaves the region comes back to its return
+ * address inside it (`trackRegion`), and the callee may have left the stack
+ * words in any shape: the return knows nothing of them, but what the block
+ * tests as an entry, which the return tests as well (`x87AfterCall`); and no
+ * need of the code after the call is the call's.
+ *
  * @param {import('../region.js').Region} region
  * @param {(StackState | null)[]} states  the tracker's, a cut block's null
  * @param {Set<number>} cut
  * @param {boolean} speculate
+ * @param {boolean} [callReturn]
  * @returns {{ known: Shape[], needs: (Shape | null)[] }}  `known`: at each block's start;
  *     `needs`: what each block the region can be entered at tests, null where it tests nothing
  */
-export function planStack(region, states, cut, speculate){
+export function planStack(region, states, cut, speculate, callReturn = false){
     const blocks = region.blocks;
     const index = new Map(blocks.map((block, i)=>[block.start, i]));
     const entryState = states[index.get(region.entry) ?? 0];
@@ -586,6 +638,16 @@ export function planStack(region, states, cut, speculate){
             to.push(...returns.get(block.start) ?? []);
         }
         return [...new Set(to.map(target=>index.get(target) ?? -1))];
+    });
+    // The calls made as wasm calls, each by the block its return comes back to.
+    /** @type {number[][]} */
+    const returnedFrom = blocks.map(()=>[]);
+    blocks.forEach((block, p)=>{
+        const at = callReturn && callsOut(block, index) ? index.get(block.exit.next) : undefined;
+        if (at !== undefined)
+        {
+            returnedFrom[at].push(p);
+        }
     });
     /** @type {number[][]} */
     const predecessors = blocks.map(()=>[]);
@@ -714,7 +776,8 @@ export function planStack(region, states, cut, speculate){
     {
         changed = false;
         blocks.forEach((_, i)=>{
-            if (!runs[i] && predecessors[i].some(p=>runs[p] && own[p].end !== null))
+            if (!runs[i] && [...predecessors[i], ...returnedFrom[i]]
+                .some(p=>runs[p] && own[p].end !== null))
             {
                 runs[i] = true;
                 changed = true;
@@ -737,6 +800,10 @@ export function planStack(region, states, cut, speculate){
             for (const p of arriving[i])
             {
                 shape = meet(shape, after[p]);
+            }
+            if (returnedFrom[i].some(p=>runs[p] && own[p].end !== null))
+            {
+                shape = meet(shape, entries[i] ? needs[i] ?? NOTHING : NOTHING);
             }
             if (!sameShape(shape, known[i]))
             {
@@ -854,9 +921,10 @@ export function regionHasMmx(region, leaveOut){
  *
  * @param {import('../region.js').Region} region
  * @param {Set<string>} leaveOut @param {number} entryTop @param {boolean} checked
+ * @param {boolean} [callReturn]  a call that leaves the region is a wasm call (`trackRegion`)
  * @returns {X87Analysis}
  */
-export function analyseX87(region, leaveOut, entryTop, checked){
+export function analyseX87(region, leaveOut, entryTop, checked, callReturn = false){
     const uses = !leaveOut.has('x87')
         && region.blocks.some(block=>block.instructions.some(isX87));
     if (!uses)
@@ -869,10 +937,10 @@ export function analyseX87(region, leaveOut, entryTop, checked){
     const tracksExact = !hasMmx
         && any(({ op, operands })=>op === 'fild' && operands[1].size === 8)
         && any(({ op, operands })=>(op === 'fistp' || op === 'fisttp') && operands[0].size === 8);
-    const { states, cut, ends } = trackRegion(region, entryTop);
+    const { states, cut, ends } = trackRegion(region, entryTop, callReturn);
     const { known: shapes, needs } = hasMmx
         ? { known: region.blocks.map(()=>NOTHING), needs: [] }
-        : planStack(region, states, cut, !checked);
+        : planStack(region, states, cut, !checked, callReturn);
     return { hasMmx, tracksExact, states, ends, cut, shapes, needs };
 }
 
@@ -1261,6 +1329,43 @@ export function x87Reloaded(e){
     x.stack = NOTHING;
     x.exact = 0;
     x.exactNaN = 0;
+}
+
+/**
+ * After a call made as a wasm call came back and the state block was taken
+ * back (`callAndReturn`): the stack as the callee left it. The code after the
+ * call is compiled for the top the callee is taken to leave (`topAfterCall`) and, where that
+ * block is an entry, for the shape it tests as one (`planStack`); a callee
+ * that left another -- a function returning a float pushes one -- has the
+ * region leave at the return address, untranslated, where the runtime takes
+ * the stack as it is. The registers come back in their own locals.
+ *
+ * @param {E} e @param {number} next  the return address, a block of the region
+ * @param {number} top  the top the code after the call is compiled for
+ */
+export function x87AfterCall(e, next, top){
+    const { b } = e;
+    const x = e.x87;
+    x87Reloaded(e);
+    b.localGet(Local.x87Top).i32const(top).op(I32.ne);
+    e.openGuard('moved', EMPTY);
+    e.exitAt(next, Exit.UNTRANSLATED);
+    e.close();
+    const need = x.needs[/** @type {number} */ (e.labels.get(next))];
+    if (need)
+    {
+        // As the entry's test (`x87EntryCheck`): held is 0 in the mask, empty 1.
+        b.localGet(Local.x87Empty);
+        if (need.empty !== 0)
+        {
+            b.i32const(need.empty).op(I32.xor);
+        }
+        b.i32const(need.held | need.empty).op(I32.and);
+        e.openGuard('unshaped', EMPTY);
+        e.exitAt(next, Exit.UNTRANSLATED, SHAPE);
+        e.close();
+    }
+    x.current = { top, slot: [0, 1, 2, 3, 4, 5, 6, 7] };
 }
 
 /**

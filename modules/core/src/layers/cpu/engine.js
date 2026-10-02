@@ -59,6 +59,8 @@
  * @property {number} [callProfile] Cork's own: where translated code notes its indirect calls
  *     while the runtime asks -- a flag, a count, and sixteen pairs of the call's address and
  *     its target, the last calls (`callTargets`); absent, no profile.
+ * @property {number} [origin]     Cork's own: i32, the budget the current run started with,
+ *     which the retired count is taken from when it leaves for the host.
  * @property {number} tables       Wasm address of the engine's own tables.
  * @property {number} codePages    Wasm address of the other executor's byte-per-page
  *                                 "has compiled code" table (hybrid), or -1: a store into
@@ -275,6 +277,9 @@
  *     from the wide ones to single, and from single to a test at every rounding operation.
  * @property {number} [interpretedRelaxedReads]  x87 status words the interpreter tier in wasm
  *     stored (`fnstsw`) while not `precise`: reads that may see a bit only `precise` keeps.
+ * @property {boolean} [looseStacks]  Whether stores through esp alone go untested: until code
+ *     is translated on a thread's stack (`noteStack`).
+ * @property {number} [stackCode]  Times code on a stack switched that off (once at most).
  * @property {boolean} [wide]  Whether x87 regions are still compiled for wide precision.
  * @property {'wide' | 'narrow' | 'mixed'} [precision]  The precision control new x87 regions are
  *     compiled for: the wide ones, single, or either (a test at every rounding operation).
@@ -352,6 +357,8 @@
  *     A hold of the engine thread since that `performance.now`, kept when over the floor.
  * @property {(page: number) => boolean} holdsPage  Whether a published region spans the page
  *     (the pages the emulator's handoff bit is set for).
+ * @property {(base: number, size: number) => void} noteStack  A thread's stack: a store
+ *     through esp may go untested while no translated code lies on one.
  * @property {() => EngineDiagnostics} diagnostics  The whole snapshot, for a report: it
  *     sorts and explains the exit targets, so it is not for a slice.
  * @property {() => Pick<EngineDiagnostics, 'regions' | 'modules' | 'invalidations'
