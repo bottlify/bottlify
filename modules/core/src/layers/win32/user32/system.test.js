@@ -3046,3 +3046,29 @@ test('RealGetWindowClass answers the class name, as no window is made on a syste
         assert.equal(memory.readCString(OUT_BUFFER, 32), 'MainWnd');
         assert.equal(fns.RealGetWindowClassA.handler([0x9999, OUT_BUFFER, 32]), 0);
     });
+
+test('GetKeyNameText names a key from its scan code, the extended bit and the sideless bit', ()=>{
+    // Wine's user32 input.c test_keynames; GetKeyNameTextA was missing, and
+    // a key-binding screen asks it for every key it shows.
+    const { memory, fns } = setup();
+    /** @param {number} lParam */
+    const name = lParam=>{
+        memory.bytes.fill(0x2d, 0x100, 0x120);
+        const length = fns.GetKeyNameTextA.handler([lParam, 0x100, 32]);
+        return new TextDecoder().decode(memory.bytes.slice(0x100, 0x100 + length));
+    };
+    assert.equal(name(0x01480000), 'Up');
+    assert.equal(name(0x011d0000), 'Right Ctrl');
+    assert.equal(name(0x021d0000), 'Ctrl');
+    assert.equal(name(0xe0450000), 'Pause', 'the top bits are the message\'s, not the key\'s');
+    assert.equal(name(0x01450000), 'Num Lock');
+    assert.equal(name(0x00390000), 'Space');
+    assert.equal(name(0x001e0000), 'A');
+    assert.equal(name(0x03380000), 'Alt', 'the right Alt with left and right as one');
+    assert.equal(fns.GetKeyNameTextA.handler([0x007f0000, 0x100, 32]), 0, 'a key with no name');
+    assert.equal(memory.bytes[0x100], 0, 'and an empty string');
+    const length = fns.GetKeyNameTextW.handler([0x002a0000, 0x100, 3]);
+    assert.equal(length, 2, 'cut to the room with its terminator');
+    assert.deepEqual([...memory.bytes.slice(0x100, 0x106)], [0x53, 0, 0x68, 0, 0, 0]);
+    assert.equal(fns.GetKeyNameTextW.argBytes, 12);
+});

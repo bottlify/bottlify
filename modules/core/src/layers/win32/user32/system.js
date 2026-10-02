@@ -283,6 +283,44 @@ function mappingForScan(scan){
 }
 
 /**
+ * The US layout's key names by scan code, the extended keys' at 0x100 past
+ * theirs: what GetKeyNameText answers.
+ *
+ * @type {Map<number, string>}
+ */
+const KEY_NAMES = new Map(/** @type {[number, string][]} */ ([
+    [0x01, 'Esc'], ...[...'1234567890-='].map((name, at)=>[0x02 + at, name]),
+    [0x0e, 'Backspace'], [0x0f, 'Tab'], ...[...'QWERTYUIOP[]'].map((name, at)=>[0x10 + at, name]),
+    [0x1c, 'Enter'], [0x1d, 'Ctrl'], ...[..."ASDFGHJKL;'`"].map((name, at)=>[0x1e + at, name]),
+    [0x2a, 'Shift'], [0x2b, '\\'], ...[...'ZXCVBNM,./'].map((name, at)=>[0x2c + at, name]),
+    [0x36, 'Right Shift'], [0x37, 'Num *'], [0x38, 'Alt'], [0x39, 'Space'], [0x3a, 'Caps Lock'],
+    ...Array.from({ length: 10 }, (_, at)=>[0x3b + at, `F${at + 1}`]),
+    [0x45, 'Pause'], [0x46, 'Scroll Lock'], [0x47, 'Num 7'], [0x48, 'Num 8'], [0x49, 'Num 9'],
+    [0x4a, 'Num -'], [0x4b, 'Num 4'], [0x4c, 'Num 5'], [0x4d, 'Num 6'], [0x4e, 'Num +'],
+    [0x4f, 'Num 1'], [0x50, 'Num 2'], [0x51, 'Num 3'], [0x52, 'Num 0'], [0x53, 'Num Del'],
+    [0x54, 'Sys Req'], [0x56, '\\'], [0x57, 'F11'], [0x58, 'F12'],
+    [0x11c, 'Num Enter'], [0x11d, 'Right Ctrl'], [0x135, 'Num /'], [0x137, 'Prnt Scrn'],
+    [0x138, 'Right Alt'], [0x145, 'Num Lock'], [0x146, 'Break'], [0x147, 'Home'], [0x148, 'Up'],
+    [0x149, 'Page Up'], [0x14b, 'Left'], [0x14d, 'Right'], [0x14f, 'End'], [0x150, 'Down'],
+    [0x151, 'Page Down'], [0x152, 'Insert'], [0x153, 'Delete'], [0x15b, 'Left Windows'],
+    [0x15c, 'Right Windows'], [0x15d, 'Application'],
+]));
+
+/** What bit 25 of a key message's lParam folds together: the right keys into the left. */
+const SIDELESS = new Map([[0x36, 0x2a], [0x11d, 0x1d], [0x138, 0x38]]);
+
+/**
+ * The name of the key a key message's lParam names, '' for one with none.
+ *
+ * @param {number} lParam
+ */
+function keyNameOf(lParam){
+    const key = ((lParam >>> 16) & 0xff) | ((lParam & 0x01000000) !== 0 ? 0x100 : 0);
+    const named = (lParam & 0x02000000) !== 0 ? SIDELESS.get(key) ?? key : key;
+    return KEY_NAMES.get(named) ?? '';
+}
+
+/**
  * MapVirtualKeyA/MapVirtualKeyExA's five translations, over `keys.js`'s
  * physical-key table: never a second copy of what already maps a browser key
  * to a scan code and virtual key for `input`'s router.
@@ -1016,6 +1054,20 @@ export function createSystemFunctions({ host, live, windows, classes }){
         host.writeMemory(address, encodeAnsi(`${clipped}\0`));
         return clipped.length;
     };
+
+    /** GetKeyNameTextA/W at one width. @param {boolean} wide */
+    const keyNameText = wide=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [lParam, buffer, size])=>{
+            if ((buffer >>> 0) === 0 || (size | 0) <= 0)
+            {
+                return 0;
+            }
+            return (wide ? writeWideString : writeString)(buffer >>> 0,
+                keyNameOf(lParam >>> 0), size | 0);
+        },
+    });
 
     /** @param {number} address */
     const readU32 = address=>{
@@ -3542,6 +3594,19 @@ export function createSystemFunctions({ host, live, windows, classes }){
             /** @param {number[]} args */
             handler: ([code, mapType])=>mapVirtualKey(code >>> 0, mapType >>> 0),
         },
+
+        /**
+         * int GetKeyNameTextA/W(LONG lParam, LPTSTR lpString, int cchSize)
+         *
+         * The US layout's name of the key a key message's lParam names -- its
+         * scan code, with the extended bit, and bit 25 to say left and right
+         * are one -- as a key-binding screen shows it. A key with no name
+         * answers zero and an empty string.
+         *
+         * @param {boolean} wide
+         */
+        GetKeyNameTextA: keyNameText(false),
+        GetKeyNameTextW: keyNameText(true),
 
         /**
          * HKL GetKeyboardLayout(DWORD idThread)
