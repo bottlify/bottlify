@@ -1656,14 +1656,17 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * A texture's storage, for whoever needs to know what a lock hands out.
      *
      * @param {{ width: number, height: number, levels: number, format: number, pool: number,
-     *           usage: number, cube?: boolean }} spec
+     *           usage: number, cube?: boolean, allocate?: (bytes: number) => number,
+     *           free?: (address: number) => void }} spec
+     *        `allocate` and `free`: where the levels are kept, when not in
+     *        memory of the device's own.
      */
     const makeTexture = spec=>{
         const texture = createTexture({
             ...spec,
             count: explicitCount(spec.pool),
-            allocate,
-            free,
+            allocate: spec.allocate ?? allocate,
+            free: spec.free ?? free,
             // This version refuses a lock rectangle that is not one.
             rejectsMalformedRects: true,
         });
@@ -3403,8 +3406,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {number} format
          * @param {number} pool
          * @param {{ texture?: any }} out
+         * @param {number} [userMemory]  An Ex device's memory of the program's
+         *     own for the texture's one level, in the system-memory pool alone.
          */
-        CreateTexture(width, height, levels, usage, format, pool, out){
+        CreateTexture(width, height, levels, usage, format, pool, out, userMemory = 0){
             if (unmanaged(pool) || !blockAligned(format, width, height))
             {
                 return D3DERR_INVALIDCALL;
@@ -3419,9 +3424,14 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (userMemory !== 0 && (pool !== D3DPOOL.SYSTEMMEM || levels !== 1))
+            {
+                return D3DERR_INVALIDCALL;
+            }
             out.texture = makeTexture({
                 width, height, format, pool, usage,
                 ...chainOf(usage, format, levels, fullMipCount(width, height)),
+                ...userMemory === 0 ? {} : { allocate: ()=>userMemory, free: ()=>{} },
             });
             return D3D_OK;
         },
@@ -3567,12 +3577,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {number} pool
          * @param {{ surface?: any }} out
          * @param {number} [usage]  What an Ex create adds.
+         * @param {number} [userMemory]  An Ex device's memory of the program's own
+         *     for the surface, in the system-memory pool alone.
          */
-        CreateOffscreenPlainSurface(width, height, format, pool, out, usage = 0){
+        CreateOffscreenPlainSurface(width, height, format, pool, out, usage = 0, userMemory = 0){
             const info = FORMAT_INFO[format];
             if (!info || pool === D3DPOOL.MANAGED || (info.depth && !caps.depthPlain)
                 || (info.video && !videoPoolAllowed(pool, true))
-                || !(width > 0) || !(height > 0) || !blockAligned(format, width, height))
+                || !(width > 0) || !(height > 0) || !blockAligned(format, width, height)
+                || (userMemory !== 0 && pool !== D3DPOOL.SYSTEMMEM))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -3583,8 +3596,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 format,
                 pool,
                 usage,
-                base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(pool, ()=>retireSurface(surface)),
+                base: userMemory || allocate(surfaceBytes(format, width, height)),
+                // The program's own memory stays the program's.
+                count: explicitCount(pool, ()=>(userMemory === 0 ? retireSurface(surface)
+                    : renderer?.retire(surface))),
                 rejectsMalformedRects: true,
             });
             out.surface = surface;

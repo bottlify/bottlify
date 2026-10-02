@@ -1995,3 +1995,23 @@ test('a state block applied mirrors into the block only the states it holds', ()
     assert.equal(h.box.memory.readU32(block + SHADOW.STAGE_STATES
         + (SHADOW.STAGE_STATE_STRIDE + 1) * 4), 2);
 });
+
+test('a create refused for its shared handle leaves no pointer behind', ()=>{
+    // d3d9ex.c test_user_memory goes on to use what a refused create left in
+    // its out-parameter: a pointer from an earlier call there is a call into
+    // a freed object.
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const out = 0x3000;
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['CreateTexture', [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+        ['CreateOffscreenPlainSurface', [8, 4, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+        ['CreateVertexBuffer', [16, 0, 0, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+    ]))
+    {
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(h.device(device, name, args), D3DERR_INVALIDCALL, name);
+        assert.equal(h.box.memory.readU32(out), 0, `${name} cleared its out-parameter`);
+    }
+});

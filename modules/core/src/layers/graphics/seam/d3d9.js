@@ -58,7 +58,7 @@ import {
     ADAPTER_STRING_LENGTH, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES,
 } from '../d3d8/structs.js';
-import { D3DFMT_INDEX, D3DFMT, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
+import { D3DFMT_INDEX, D3DFMT, D3DPOOL, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
 import { vertexCountOf } from '../d3d8/render.js';
 import { createCursorTeller } from './cursor.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
@@ -1200,6 +1200,24 @@ export function createDirect3D9Seam(
      */
     const sharedHandleRefused = shared=>(shared >>> 0) !== 0;
 
+    /**
+     * What a create's shared-handle pointer asks of an extended device for a
+     * resource in the system-memory pool: the handle it holds is the address
+     * of memory of the program's own to keep the resource in. Any other use of
+     * one is refused, as above.
+     *
+     * @param {any} device @param {number} shared @param {number} pool
+     * @returns {number | null} the memory, 0 for none, null for a refusal
+     */
+    const userMemoryOf = (device, shared, pool)=>{
+        if ((shared >>> 0) === 0)
+        {
+            return 0;
+        }
+        return device?.extended && (pool >>> 0) === D3DPOOL.SYSTEMMEM
+            ? fields.readU32(shared >>> 0) >>> 0 : null;
+    };
+
     /** How wide each index a draw reads is. */
     const indexWidth = (/** @type {number} */ format)=>(format >>> 0) === D3DFMT_INDEX.INDEX32
         ? 4
@@ -1493,15 +1511,16 @@ export function createDirect3D9Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateTexture: (device, [width, height, levels, usage, format, pool, out, shared])=>{
-            if (sharedHandleRefused(shared) || (out >>> 0) === 0)
+            const userMemory = userMemoryOf(device, shared, pool);
+            if (userMemory === null || (out >>> 0) === 0)
             {
-                return D3DERR_INVALIDCALL;
+                return clearAndRefuse(out, D3DERR_INVALIDCALL);
             }
             /** @type {{ texture?: any }} */
             const held = {};
             const hr = device.CreateTexture(
                 width >>> 0, height >>> 0, levels >>> 0, usage >>> 0,
-                format >>> 0, pool >>> 0, held);
+                format >>> 0, pool >>> 0, held, userMemory);
             if (hr === D3D_OK && held.texture)
             {
                 return handBack(held.texture, textureInterfaces, IID_IDirect3DTexture9,
@@ -1550,7 +1569,9 @@ export function createDirect3D9Seam(
         CreateVertexBuffer: (device, [length, usage, fvf, pool, out, shared])=>{
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
-                return D3DERR_INVALIDCALL;
+                // A buffer is never kept in the program's own memory.
+                return clearAndRefuse(out, userMemoryOf(device, shared, pool) === null
+                    || (out >>> 0) === 0 ? D3DERR_INVALIDCALL : D3DERR_NOTAVAILABLE);
             }
             /** @type {{ buffer?: any }} */
             const held = {};
@@ -1569,7 +1590,9 @@ export function createDirect3D9Seam(
         CreateIndexBuffer: (device, [length, usage, format, pool, out, shared])=>{
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
-                return D3DERR_INVALIDCALL;
+                // A buffer is never kept in the program's own memory.
+                return clearAndRefuse(out, userMemoryOf(device, shared, pool) === null
+                    || (out >>> 0) === 0 ? D3DERR_INVALIDCALL : D3DERR_NOTAVAILABLE);
             }
             /** @type {{ buffer?: any }} */
             const held = {};
@@ -1624,14 +1647,15 @@ export function createDirect3D9Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateOffscreenPlainSurface: (device, [width, height, format, pool, out, shared])=>{
-            if (sharedHandleRefused(shared) || (out >>> 0) === 0)
+            const userMemory = userMemoryOf(device, shared, pool);
+            if (userMemory === null || (out >>> 0) === 0)
             {
-                return D3DERR_INVALIDCALL;
+                return clearAndRefuse(out, D3DERR_INVALIDCALL);
             }
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = device.CreateOffscreenPlainSurface(
-                width >>> 0, height >>> 0, format >>> 0, pool >>> 0, held);
+                width >>> 0, height >>> 0, format >>> 0, pool >>> 0, held, 0, userMemory);
             if (hr === D3D_OK && held.surface)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface9,
