@@ -547,6 +547,47 @@ test('outside precise a store into a code page leaves before it for the host, no
             'nothing stored');
     });
 
+test('code translated on a thread\'s stack drops the regions that store through esp untested, '
+    + 'and the store that reaches it then leaves for the host', async()=>{
+    const STACK = 0x80000;
+    const m = machine();
+    m.runtime.noteStack(STACK, 0x10000);
+    // push eax; hlt
+    m.write(CODE, [0x50, 0xf4]);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 1);
+    assert.equal(m.runtime.diagnostics().looseStacks, true);
+    // A loop on a page of the stack: the push's region goes, and is formed again tested.
+    m.write(STACK + 0x8000, COUNTDOWN);
+    m.runtime.noteHot(STACK + 0x8000);
+    assert.equal(await m.runtime.translatePending(), 1);
+    let d = m.runtime.diagnostics();
+    assert.equal(d.looseStacks, false);
+    assert.equal(d.stackCode, 1);
+    assert.equal(m.runtime.entryOf(CODE), -1, 'the loose region is gone');
+    assert.notEqual(m.runtime.entryOf(STACK + 0x8000), -1);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 1);
+    // The push over the loop's hlt: before it, nothing stored.
+    m.setReg(4, STACK + 0x800c);
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
+    assert.equal(exit.kind, 'untranslated');
+    assert.equal(m.eip(), CODE);
+    assert.equal(new Uint8Array(m.memory.buffer)[m.layout.ramBase + STACK + 0x8008], 0xf4);
+    // A stack named over code already translated switches off as well, once only.
+    const n = machine();
+    n.write(STACK, COUNTDOWN);
+    n.runtime.noteHot(STACK);
+    assert.equal(await n.runtime.translatePending(), 1);
+    n.runtime.noteStack(STACK - 0x1000, 0x2000);
+    n.runtime.noteStack(STACK - 0x1000, 0x2000);
+    d = n.runtime.diagnostics();
+    assert.equal(d.looseStacks, false);
+    assert.equal(d.stackCode, 1);
+    // precise is never loose.
+    assert.equal(machine({ precise: true }).runtime.diagnostics().looseStacks, false);
+});
+
 test('a page invalidated too often becomes volatile and is not translated again', async()=>{
     const m = machine({ volatileAfter: 3 });
     m.write(CODE, COUNTDOWN);

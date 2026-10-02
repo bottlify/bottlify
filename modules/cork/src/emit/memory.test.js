@@ -315,10 +315,11 @@ test('a store into a code page outside the code\'s own granules is no stale', ()
  *
  * @param {number[]} bytes
  * @param {{ regs?: Record<string, number>, code?: [number, number][],
- *     inaccessible?: number[], data?: [number, number[]][] }} [start]
+ *     inaccessible?: number[], data?: [number, number[]][],
+ *     machine?: Parameters<typeof createTestMachine>[0] }} [start]
  */
-function once(bytes, { regs = {}, code = [], inaccessible = [], data = [] } = {}){
-    const m = createTestMachine();
+function once(bytes, { regs = {}, code = [], inaccessible = [], data = [], machine = {} } = {}){
+    const m = createTestMachine(machine);
     m.write(CODE, [...bytes, 0xf4]);
     for (const [address, values] of data)
     {
@@ -383,6 +384,42 @@ test('pushes and pops are one group off esp, checked once', ()=>{
     assert.equal(clean.exit.kind, Exit.HALT);
     assert.equal(clean.m.reg('edx'), 2);
     assert.equal(clean.m.reg('esi'), 1);
+});
+
+test('with looseStacks the group off esp alone tests no page; one with an index, or off another '
+    + 'register, still does', ()=>{
+    const loose = { precise: false, looseStacks: true };
+    // push eax; push ebx; pop edx; pop esi -- into 0x4ffc, a page marked inaccessible
+    // and one holding code: a thread's stack holds neither while the runtime keeps
+    // regions loose, so neither is looked for.
+    const stack = [0x50, 0x53, 0x5a, 0x5e];
+    /** @type {{ inaccessible?: number[], code?: [number, number][] }[]} */
+    const marked = [{ inaccessible: [0x4000, 0x5000] }, { code: [[0x4f00, 0x200]] }];
+    for (const marks of marked)
+    {
+        const strict = once(stack, { regs: { esp: 0x5004 }, ...marks,
+            machine: { precise: false } });
+        assert.equal(strict.exit.kind, Exit.UNTRANSLATED);
+        const r = once(stack, { regs: { esp: 0x5004, eax: 1, ebx: 2 }, ...marks, machine: loose });
+        assert.equal(r.exit.kind, Exit.HALT);
+        assert.equal(r.m.reg('edx'), 2);
+        assert.equal(r.m.reg('esi'), 1);
+        assert.equal(r.m.readU32(0x4ffc), 2, 'the push stored');
+    }
+    // A precise machine relaxes nothing, looseStacks or not.
+    const precise = once(stack, { regs: { esp: 0x5004 }, inaccessible: [0x4000],
+        machine: { precise: true, looseStacks: true } });
+    assert.equal(precise.exit.kind, Exit.UNTRANSLATED);
+    // mov [esp+ecx*4], eax and mov [ebp], eax into an inaccessible page.
+    for (const [bytes, regs] of /** @type {[number[], Record<string, number>][]} */ ([
+        [[0x89, 0x04, 0x8c], { esp: 0x5000, ecx: 0 }],
+        [[0x89, 0x45, 0x00], { ebp: 0x5000 }],
+    ]))
+    {
+        const r = once(bytes, { regs, inaccessible: [0x5000], machine: loose });
+        assert.equal(r.exit.kind, Exit.UNTRANSLATED);
+        assert.equal(r.retired, 0);
+    }
 });
 
 test('a register the block rewrites starts a group of its own', ()=>{

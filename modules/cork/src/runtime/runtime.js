@@ -178,6 +178,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // leaves there; on, what the emulator leaves (docs/core/cpu.md lists every
         // relaxation). Off, as games run: the tests and the hardware corpus turn it on.
         precise: false,
+        // A store through esp alone tests no page while no translated code lies
+        // on a thread's stack (`noteStack`), which the runtime then switches off
+        // for good: a stack holds no code unless a program runs code there.
+        looseStacks: true,
         // How long a batch may be with the worker, on time the engine thread was
         // free to hear its answer, before it is given up (tests shorten it).
         inFlightMs: 10_000,
@@ -199,6 +203,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @type {'wide' | 'narrow' | 'mixed'}
      */
     let precision = settings.wideFirst === true ? 'wide' : 'mixed';
+    /** Whether regions are made loose (`looseStacks`): until code is translated on a stack. */
+    let loose = settings.looseStacks !== false && settings.precise !== true
+        && settings.undoLog !== true;
+    /** The pages of the threads' stacks the host named (`noteStack`). @type {Set<number>} */
+    const stackPages = new Set();
     /** How a region is formed, the same on this thread, in a batch and in a relink. */
     const formOptions = { maxBlocks: settings.maxRegionBlocks,
         maxBytes: settings.maxRegionBytes, leafCalls: settings.leafCalls,
@@ -484,6 +493,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {boolean} [linked]  its function is in a relinked module already
      * @property {boolean} [wide]  an x87 region compiled for the wide precision controls
      * @property {boolean} [narrow]  an x87 region compiled for single precision
+     * @property {boolean} [loose]  compiled with its stores through esp untested (`looseStacks`)
      * @property {boolean} [checked]  an x87 region whose entries test nothing of the stack's shape
      * @property {boolean} [copies]  its blocks inside its loops are entered through copies
      *     (`emitRegion`); without, they have no entry (`closed`)
@@ -577,6 +587,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
         queueDrops: 0, queueEvictions: 0,
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, precisionSwitches: 0,
+        stackCode: 0,
         // Batches the store answered in the call that formed them, and a turn later.
         lookedUpNow: 0, lookedUpLater: 0,
         shapeMisses: 0, shapeChecked: 0, x87RelaxedReads: 0,
@@ -782,6 +793,26 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             pages.set(page, PageFlag.VOLATILE);
             counts.volatilePages++;
+        }
+    };
+
+    /**
+     * Code is translated on a page of a thread's stack: the regions that store
+     * through esp untested go, and every region from now on tests them -- a
+     * store through esp could write the code itself.
+     */
+    const stackCodeSeen = ()=>{
+        if (!loose)
+        {
+            return;
+        }
+        loose = false;
+        counts.stackCode++;
+        const on = new Set([...regions].filter(record=>record.loose)
+            .flatMap(record=>[...record.pages]));
+        for (const page of on)
+        {
+            invalidatePage(page);
         }
     };
 
@@ -996,6 +1027,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         narrow: precision === 'narrow',
         structure: settings.structure,
         precise: settings.precise === true,
+        looseStacks: loose,
         leaveOut,
         timings: import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.timings === true,
         ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
@@ -1202,6 +1234,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      *
      * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string,
      *     wide?: boolean, narrow?: boolean, checked?: boolean, copies?: boolean,
+     *     loose?: boolean,
      *     replaces?: RegionRecord, targets?: [number, number[]][], copying?: boolean,
      *     waited?: boolean }} one
      *     replaces: the region it is formed again from, with the callees of its indirect calls
@@ -1228,6 +1261,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             || (one.waited === true && hashRegion(read, region) !== region.hash)
             || (one.wide && precision !== 'wide')
             || (one.narrow && precision !== 'narrow')
+            || (one.loose && !loose)
             || (one.checked !== true && checkedAt(region, one.entryTop)))
         {
             // A page of it was written while the batch was built.
@@ -1289,7 +1323,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             entry: region.entry, pages: region.pages, slots: [], table: -1,
             spans: region.blocks.map(block=>[block.start, block.end]), extents,
             entryTop: one.entryTop, hash: region.hash, labels: JSON.stringify(built.labels),
-            linked: built.linked === true, wide: one.wide === true,
+            linked: built.linked === true, wide: one.wide === true, loose: one.loose === true,
             narrow: one.narrow === true, checked: one.checked === true,
             copies: one.copies === true, closed, blocks: built.labels.length,
         };
@@ -1385,6 +1419,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             pages.markCode(block.start, block.end - block.start);
         }
+        if (loose && stackPages.size > 0 && [...region.pages].some(page=>stackPages.has(page)))
+        {
+            stackCodeSeen();
+        }
         for (const page of region.pages)
         {
             if (!byPage.get(page)?.size)
@@ -1437,12 +1475,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * precision controls or for single, or checked, is another translation of the same
      * bytes.
      * @param {{ region: { entry: number, hash: string }, entryTop: number, wide?: boolean,
-     *     narrow?: boolean, checked?: boolean, copies?: boolean }} one */
+     *     narrow?: boolean, checked?: boolean, copies?: boolean, loose?: boolean }} one */
     const regionKey = one=>cacheKey({
         version: CACHE_VERSION, features: found, variant, layoutId: layout.id,
         bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
         hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}`
-            + `${one.narrow ? '-n' : ''}${one.checked ? '-c' : ''}${one.copies ? '-k' : ''}`,
+            + `${one.narrow ? '-n' : ''}${one.checked ? '-c' : ''}${one.copies ? '-k' : ''}`
+            + `${one.loose ? '-s' : ''}`,
     });
 
     /**
@@ -1589,7 +1628,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 const one = { region: { entry: record.entry, hash: record.hash },
                     entryTop: record.entryTop, wide: record.wide, narrow: record.narrow,
-                    checked: record.checked, copies: record.copies };
+                    checked: record.checked, copies: record.copies, loose: record.loose };
                 store.put(regionKey(one), packRegion({ ...result.region,
                     module: new Uint8Array(0), moduleKey: key, linked: true })).catch(()=>{});
             }
@@ -1930,7 +1969,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
                 cached: null, wide: record.wide === true && precision === 'wide',
-                narrow: record.narrow === true && precision === 'narrow',
+                narrow: record.narrow === true && precision === 'narrow', loose,
                 checked: record.checked === true, copies: record.copies === true,
                 replaces: record, targets: [...targets] });
         }
@@ -1973,7 +2012,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 ...called });
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
                 cached: null, wide: record.wide === true && precision === 'wide',
-                narrow: record.narrow === true && precision === 'narrow',
+                narrow: record.narrow === true && precision === 'narrow', loose,
                 checked: record.checked === true, copies: true, copying: true, replaces: record,
                 ...(record.targets === undefined ? {} : { targets: record.targets }) });
             if (formed.length >= settings.batchRegions)
@@ -2253,6 +2292,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             one.wide = precision === 'wide' && usesX87(one.region);
             one.narrow = precision === 'narrow' && usesX87(one.region);
+            one.loose = loose;
             one.checked = checkedAt(one.region, one.entryTop);
         }
         if (unbuilt.length > 0 && worker !== null)
@@ -2408,7 +2448,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         /** @type {{ region: import('../region.js').Region, entryTop: number,
          *     stamp: string, cached: import('./cache.js').CachedRegion | null, wide?: boolean,
          *     narrow?: boolean, checked?: boolean, moduleBytes?: Uint8Array | null,
-         *     waited?: boolean }[]} */
+         *     waited?: boolean, loose?: boolean }[]} */
         const formed = [];
         const formedAt = clock();
         // The block starts of the regions this batch formed with no x87 in
@@ -2481,7 +2521,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null,
                 wide: precision === 'wide' && usesX87(region),
-                narrow: precision === 'narrow' && usesX87(region),
+                narrow: precision === 'narrow' && usesX87(region), loose,
                 checked: checkedAt(region, entryTop) });
             if (!usesX87(region))
             {
@@ -2818,6 +2858,18 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         noteStall,
         /** @param {number} page */
         holdsPage: page=>(pages.get(page) & PageFlag.HAS_CODE) !== 0,
+        noteStack(base, size){
+            const first = base >>> 12;
+            const last = (base + Math.max(size, 1) - 1) >>> 12;
+            for (let page = first; page <= last; page++)
+            {
+                stackPages.add(page);
+                if ((pages.get(page) & PageFlag.HAS_CODE) !== 0)
+                {
+                    stackCodeSeen();
+                }
+            }
+        },
         /** One turn the host forced an interpreted instruction through, for
          * the progress guarantee's diagnostics. */
         forcedStep(){
@@ -2887,6 +2939,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // x87 regions compiled for the wide precision controls until this is
                 // 1, for single until it is 2 (`precision`).
                 precisionSwitches: counts.precisionSwitches,
+                // Whether stores through esp go untested (`looseStacks`), and how
+                // often code on a stack switched that off (once at most).
+                looseStacks: loose,
+                stackCode: counts.stackCode,
                 wide: precision === 'wide',
                 precision,
                 // Entries that found the x87 stack in another shape than their

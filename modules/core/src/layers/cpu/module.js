@@ -171,7 +171,7 @@ export function createCpuModule(){
              *              leaves: number },
              *          faultHandler: ((fault: any) => boolean) | null,
              *          guestClock: (() => number) | null,
-             *          yieldCheck: (() => boolean) | null }}
+             *          yieldCheck: (() => boolean) | null, stacks: [number, number][] }}
              */
             const state = {
                 host: null, thunks: null, running: false, tableWritten: false,
@@ -184,6 +184,9 @@ export function createCpuModule(){
                 yieldCheck: null,
                 // The translator's figures at the last frame, for the frame's own columns.
                 corkFrame: { instructions: 0, retired: 0, translateMs: 0, leaves: 0 },
+                // The threads' stacks the kernel named, for a host made after it did.
+                /** @type {[number, number][]} */
+                stacks: [],
             };
             /**
              * Once a frame: every bucket the sampler has credited past the
@@ -440,6 +443,10 @@ export function createCpuModule(){
                             closedBelow: settings.closedBelow,
                         });
                         state.cork = state.host.cork();
+                        for (const [base, size] of state.stacks)
+                        {
+                            state.host.noteStack(base, size);
+                        }
                         if (state.guestClock !== null)
                         {
                             state.host.useGuestClock(state.guestClock);
@@ -934,6 +941,17 @@ export function createCpuModule(){
                     context.reg32[5] = stackTop; // EBP
                     context.inHlt = 0;
                     return context;
+                },
+
+                /**
+                 * A thread's stack: the translator stores through esp untested while
+                 * no translated code lies on one (cork's `looseStacks`).
+                 *
+                 * @param {number} base @param {number} size
+                 */
+                noteStack(base, size){
+                    state.stacks.push([base >>> 0, size >>> 0]);
+                    state.host?.noteStack?.(base >>> 0, size >>> 0);
                 },
 
                 instructionCount: ()=>started().instructionCount(),

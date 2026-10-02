@@ -1313,6 +1313,18 @@ function copyReg(values, r, from, by){
  * @param {E} e @param {Group[]} checks @param {number} [at]
  */
 export function emitGroupChecks(e, checks, at = -1){
+    if (e.context.looseStacks === true)
+    {
+        // A window off esp alone is a thread's stack, where no translated
+        // code lies while the module is loose: neither a fault nor a code
+        // store to find. The esp of a guest that moved it elsewhere goes
+        // unwatched, which the runtime's `noteStack` accepts.
+        checks = checks.filter(group=>group.base !== 4 || group.index >= 0);
+        if (checks.length === 0)
+        {
+            return;
+        }
+    }
     const { b } = e;
     const table = e.layout.tables + Tables.PAGE_FLAGS;
     // Held: the epilogue's hash probe would find this very address's entry
@@ -1630,6 +1642,11 @@ function planned(e, size, store){
  */
 export function stackAccess(e, size){
     e.b.localGet(Local.reg + 4).localSet(Local.addr);
+    if (e.context.looseStacks === true)
+    {
+        planned(e, size, false);
+        return;
+    }
     checkAccess(e, size);
 }
 

@@ -1348,6 +1348,17 @@ to its end: tens of microseconds each, which ran a title's scene at 240 ns an in
     it reads RAM there instead. Stores, and every access under `precise`, are tested as before.
     Doom 3's GUI text measure, its own bytes under node with branch hints, went 2.6-2.7 ->
     2.1-2.3 ns a character.
+  - a store through esp alone -- a push, a call, `[esp+disp]`, with no index register -- is
+    not tested against the page flags while no translated code lies on a thread's stack
+    (`looseStacks`, on by default): the kernel names every thread's stack to the engine
+    (`cpu.noteStack`), and the first region translated on one of those pages -- or a stack
+    named over a page that already holds translated code -- drops the regions compiled that
+    way, and every region from then on tests them again (`looseStacks` in the diagnostics turns
+    false, `stackCode` counts it). What goes is a stack overflow's #GP into a page marked
+    inaccessible (no stack page is), and a store through an esp a program pointed at a page of
+    its own code. Stores through any other register, or through esp with an index, are tested
+    as before. The browser suite's geomean (Chromium, sixteen workloads) went 1303 -> 1385
+    MIPS, 1.06x; vm and path, whose frames live on the stack, 1.08-1.14x.
 
   C0, C2 and C3, the stack, its faults, precision and rounding control, every value (but for
   single precision's rounding at the ends of the range), and every defined flag a branch,

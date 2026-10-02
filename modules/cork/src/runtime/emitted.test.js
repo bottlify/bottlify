@@ -57,6 +57,7 @@ const EMITTED = {
     68: '8a43dbe66f04a042',
     69: '4b9bb89828ba6a0d',
     70: 'f4fb69e60a252195',
+    71: 'c7182f7bf6fe0988',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
@@ -73,16 +74,19 @@ function digest(){
     {
         const image = readFileSync(new URL(name, IMAGES));
         const read = (/** @type {number} */ address)=>image[address - BASE] ?? 0;
-        for (const entry of ENTRIES)
+        // Both ways a store through esp is translated (`looseStacks`).
+        for (const [entry, looseStacks] of ENTRIES.flatMap(at=>[
+            /** @type {const} */ ([at, false]), /** @type {const} */ ([at, true])]))
         {
             const region = formRegion(read, entry, {});
             const m = new ModuleBuilder();
-            const context = prepareModule(m, layout, FEATURES, {},
-                { hash: true, trapPort: 0xb077, resume: true, callReturn: true });
+            const context = prepareModule(m, layout, FEATURES, {}, { hash: true,
+                trapPort: 0xb077, resume: true, callReturn: true, looseStacks });
             const translation = emitRegion(context, region, { entryTop: 0, checked: false });
             finishModule(context, [translation.functionIndex]);
             m.exportFunction('region', translation.functionIndex);
-            hash.update(`${name}:${entry.toString(16)}:`).update(m.toBytes());
+            hash.update(`${name}:${entry.toString(16)}:${looseStacks ? 's:' : ''}`)
+                .update(m.toBytes());
         }
     }
     return hash.digest('hex').slice(0, 16);

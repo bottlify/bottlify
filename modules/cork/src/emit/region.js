@@ -229,6 +229,8 @@ const LOCAL_TYPES = [
  *     computed, an undefined flag is as the cheapest code leaves it, which no program can
  *     rely on (real processors differ there), single is rounded by Veltkamp's split, and an
  *     instruction that only reads memory is not tested against the page flags (`checkAccess`)
+ * @property {boolean} [looseStacks]  a store through esp alone tests no page: no translated
+ *     code lies on a thread's stack (`prepareModule`)
  * @property {number} codeHit         the helper telling whether a byte lies in translated code
  * @property {number} spanHit         whether a store to a span of bytes reaches translated code
  * @property {number} windowHit       an access group's window test (`emitGroupChecks`)
@@ -269,8 +271,10 @@ const LOCAL_TYPES = [
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
  *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
- *     resume?: boolean, callReturn?: boolean }}
- *     [options]  undoLog:
+ *     resume?: boolean, callReturn?: boolean, looseStacks?: boolean }}
+ *     [options]  looseStacks: a store through esp alone tests no page (`emitGroupChecks`),
+ *     which holds while no translated code lies on a thread's stack (the runtime's
+ *     `noteStack`); undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
  *     tail calls); trapPort: `out dx, eax` to it leaves with a trap exit; place: with
@@ -286,7 +290,8 @@ const LOCAL_TYPES = [
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
-        place = 0, profileCalls = false, resume = false, callReturn = false } = {})
+        place = 0, profileCalls = false, resume = false, callReturn = false,
+        looseStacks = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -373,6 +378,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (precise)
     {
         context.precise = true;
+    }
+    else if (looseStacks && undoLog !== true)
+    {
+        context.looseStacks = true;
     }
     if (profileCalls && (layout.callProfile ?? -1) >= 0)
     {
