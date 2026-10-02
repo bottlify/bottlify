@@ -390,3 +390,53 @@ test('a texture written after its unlock, before a draw samples it, is drawn as 
     played.forEach((frame, index)=>assert.ok(frame === direct[index],
         `frame ${index} asked the same`));
 });
+
+test('a buffer locked a few bytes at a time sends those bytes at each unlock, not the rest of it',
+    ()=>{
+        // A dynamic vertex buffer a program fills a draw's worth at a time: an
+        // unlock sent everything from the lock's address to the buffer's end.
+        const ram = new Uint8Array(4 << 20);
+        let next = RAM_BASE + (1 << 20);
+        const services = {
+            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+                ram.slice(at - RAM_BASE, at - RAM_BASE + length),
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += bytes + 0x100;
+                return at;
+            },
+        };
+        let sent = 0;
+        const played = playedDirect3D(createDirect3D9, { ...services, readMemory: true });
+        const sender = createSender({
+            post: message=>{
+                sent += message.buffer.byteLength;
+                played.read(message.buffer, call=>{
+                    played.play(call);
+                });
+            },
+            later: flush=>flush(),
+        });
+        const d3d = recordedDirect3D(createDirect3D9, services, sender);
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+            backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+        D3D_OK);
+        /** @type {{ buffer?: any }} */
+        const made = {};
+        assert.equal(out.device.CreateVertexBuffer(1 << 20, 0x200, 0, D3DPOOL.DEFAULT, made),
+            D3D_OK);
+        const before = sent;
+        for (let lock = 0; lock < 50; lock++)
+        {
+            /** @type {{ pBits?: number }} */
+            const locked = {};
+            assert.equal(made.buffer.Lock(lock * 256, 256, locked, 0), D3D_OK);
+            ram.fill(lock + 1, /** @type {number} */ (locked.pBits) - RAM_BASE,
+                /** @type {number} */ (locked.pBits) - RAM_BASE + 256);
+            assert.equal(made.buffer.Unlock(), D3D_OK);
+        }
+        assert.ok(sent - before < 50 * 256 * 2,
+            `${sent - before} bytes sent for 50 locks of 256`);
+    });
