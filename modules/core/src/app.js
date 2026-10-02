@@ -874,9 +874,8 @@ export function timedWait({ hidden, macrotask, timer }){
  * @property {(pending: YieldPending) => Promise<void> | null} yield
  *     At every turn boundary: a promise to await before the next turn, or
  *     null to go straight on. `pending` says what the host may have an answer
- *     for -- calls suspended on it, ranges in flight, callers on an empty
- *     message queue, a turn that retired nothing -- so a host can yield only
- *     when there is something to deliver.
+ *     for -- calls suspended on it, ranges in flight, a turn that retired
+ *     nothing -- so a host can yield only when there is something to deliver.
  * @property {(until: { timer: boolean, sleep: boolean, deadlineMs: number | null,
  *     wakes: Promise<void>[] }) => Promise<void>} wait
  *     The turn found something waiting on the host. `sleep` says nothing at
@@ -895,7 +894,8 @@ export function timedWait({ hidden, macrotask, timer }){
  * What a turn boundary knows about whether the host has anything to deliver.
  *
  * @typedef {Object} YieldPending
- * @property {number} suspended   Host calls suspended on anything at all.
+ * @property {number} suspended   Host calls suspended on the host: not the
+ *     callers parked on a queue of the guest's own, which `idlers` counts.
  * @property {number} fetching    Range requests outstanding.
  * @property {number} idlers      Callers parked on an empty message queue.
  * @property {number} spun        Turns in a row that retired no instruction.
@@ -922,9 +922,13 @@ export const PAGE_YIELD_MS = 2;
  * deliver -- a call answered, a range arrived, a message posted, a turn that
  * retired nothing and so is waiting on the host -- and otherwise at most once
  * per `intervalMs`, which is what bounds how long an input event or a
- * decoder's output waits behind the guest. The clock is reset when the trip
- * ends, not when it begins: a trip the browser stretched to compose a frame
- * has already given the thread away for that long.
+ * decoder's output waits behind the guest. A caller parked on an empty
+ * message queue is not such a thing: the loop lets it look again every turn
+ * without the host, and what the page posts to it waits no longer than the
+ * interval -- while a trip a turn, behind a thread that is copying, cost more
+ * than the copying. The clock is reset when the trip ends, not when it
+ * begins: a trip the browser stretched to compose a frame has already given
+ * the thread away for that long.
  *
  * @param {Object} deps
  * @param {() => Promise<void>} deps.macrotask
@@ -936,7 +940,7 @@ export const PAGE_YIELD_MS = 2;
 export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false }){
     let rested = now();
     return pending=>{
-        if (pending.suspended === 0 && pending.fetching === 0 && pending.idlers === 0
+        if (pending.suspended === 0 && pending.fetching === 0
             && pending.spun === 0 && !signalled() && now() - rested < intervalMs)
         {
             return null;
@@ -1043,12 +1047,20 @@ const IDLE_LOOK_MS = 4;
  * @param {Object} state
  * @param {number} state.fetching   Range requests outstanding.
  * @param {number} state.idlers     Callers parked on an empty message queue.
- * @param {number} state.suspended  Host calls suspended on anything at all.
+ * @param {number} state.suspended  Host calls suspended on the host, the
+ *     callers parked on the guest's own queue left out.
  * @param {number} state.spun       Turns in a row that retired no instruction.
  * @returns {{ phase: string, timer: boolean } | null} null to go straight on.
  */
 export function idleWait({ fetching, idlers, suspended, spun }){
     if (idlers === 0 && suspended === 0)
+    {
+        return null;
+    }
+    // A caller parked on the guest's own queue has had its look this turn, and
+    // while the guest still retires instructions its next turn is work: only an
+    // answer that has to come from the host is worth handing the thread over.
+    if (spun === 0 && suspended === 0 && fetching === 0)
     {
         return null;
     }
@@ -5576,8 +5588,15 @@ async function buildApp(options){
                     sound?.pump();
                     journal.end('pump');
 
+                    // A caller parked on a queue of the guest's own is a
+                    // suspended call too, but the guest answers it, at the look
+                    // every turn gives it below: what is left waits on the
+                    // host. Counted before the look, when every such caller is
+                    // parked rather than halfway through looking.
+                    const queued = idlers.length;
+                    const onHost = Math.max(0, bridge.suspended() - queued);
                     const turnYield = pacing.yield({
-                        suspended: bridge.suspended(), fetching, idlers: idlers.length, spun,
+                        suspended: onHost, fetching, idlers: queued, spun,
                     });
                     if (turnYield)
                     {
@@ -5641,12 +5660,7 @@ async function buildApp(options){
                     // together. The timer is kept for the case it is right for,
                     // which is a machine that really can do nothing until the
                     // host answers.
-                    const wait = idleWait({
-                        fetching,
-                        idlers: idlers.length,
-                        suspended: bridge.suspended(),
-                        spun,
-                    });
+                    const wait = idleWait({ fetching, idlers: queued, suspended: onHost, spun });
                     if (wait)
                     {
                         journal.begin(wait.phase, journal.PhaseKind.HOST);
