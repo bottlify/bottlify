@@ -164,9 +164,12 @@ const six = value=>(value << 2) | (value >>> 4);
  * and a view made for every row would cost what it saves.
  */
 const views = {
-    /** @type {ArrayBufferLike | null} */ in16Of: null, in16: new Uint16Array(0),
-    /** @type {ArrayBufferLike | null} */ in32Of: null, in32: new Uint32Array(0),
-    /** @type {ArrayBufferLike | null} */ outOf: null, out: new Uint32Array(0),
+    /** @type {ArrayBufferLike | null} */ in16Of: null,
+    /** @type {Uint16Array<ArrayBufferLike>} */ in16: new Uint16Array(0),
+    /** @type {ArrayBufferLike | null} */ in32Of: null,
+    /** @type {Uint32Array<ArrayBufferLike>} */ in32: new Uint32Array(0),
+    /** @type {ArrayBufferLike | null} */ outOf: null,
+    /** @type {Uint32Array<ArrayBufferLike>} */ out: new Uint32Array(0),
 };
 
 /** A 5-6-5 pixel as its B, G, R, A word, for every pixel there is; made when first needed. */
