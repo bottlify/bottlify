@@ -120,16 +120,62 @@ test('EnumTimeFormatsA hands each format to the callback until it stops', async(
         },
     });
 
-    assert.equal(await fns.EnumTimeFormatsA.handler([0x1234, 0x0409, 0, 0]), 0,
+    assert.equal(await fns.EnumTimeFormatsA.handler([0x1234, 0x0409, 0]), 0,
         'the callback stopped the run');
     assert.deepEqual(seen, ['h:mm:ss tt', 'hh:mm:ss tt', 'H:mm:ss'],
         'the locale formats, first three then stopped');
-    assert.equal(fns.EnumTimeFormatsA.argBytes, 16);
+    // Three arguments, as winnls.h declares it: a fourth popped moved the
+    // caller's stack, and a program that enumerated twice returned to nowhere.
+    assert.equal(fns.EnumTimeFormatsA.argBytes, 12);
+    assert.equal(fns.EnumTimeFormatsW.argBytes, 12);
+});
+
+test("EnumDateFormatsA hands out each kind of date, the locale's own picture first", async()=>{
+    // locale.c test_EnumDateFormatsA: the first format is GetLocaleInfo's.
+    const host = fakeHost();
+    /** @type {string[]} */
+    let seen = [];
+    let next = 0x800;
+    const fns = createLocaleFunctions({
+        ...host,
+        callerThread: ()=>({ id: 1 }),
+        /** @param {number} bytes */
+        allocate: bytes=>{
+            const at = next;
+            next += bytes + 8;
+            return at;
+        },
+        free: ()=>{},
+        /** @param {number} entry @param {number[]} args */
+        call: async(entry, [buffer])=>{
+            void entry;
+            let text = '';
+            for (let at = 0; host.bytes[buffer + at] !== 0; at++)
+            {
+                text += String.fromCharCode(host.bytes[buffer + at]);
+            }
+            seen.push(text);
+            return 1;
+        },
+    });
+    /** @param {number} flags */
+    const first = async flags=>{
+        seen = [];
+        assert.equal(await fns.EnumDateFormatsA.handler([0x1234, 0x0409, flags]), 1);
+        return seen[0];
+    };
+    assert.equal(await first(0), 'M/d/yyyy', 'no kind is the short dates');
+    assert.equal(await first(0x40000000), 'M/d/yyyy', 'LOCALE_USE_CP_ACP changes nothing');
+    assert.equal(await first(1), 'M/d/yyyy');
+    assert.equal(await first(2), 'dddd, MMMM dd, yyyy');
+    assert.equal(await first(8), 'MMMM, yyyy');
+    assert.equal(fns.EnumDateFormatsA.handler([0x1234, 0x0409, 0x10]), 0, 'an unknown kind');
+    assert.equal(fns.EnumDateFormatsA.argBytes, 12);
 });
 
 test('EnumTimeFormatsA fails without a callback or a bridge to call through', ()=>{
     const fns = createLocaleFunctions(fakeHost());
-    assert.equal(fns.EnumTimeFormatsA.handler([0, 0x0409, 0, 0]), 0);
+    assert.equal(fns.EnumTimeFormatsA.handler([0, 0x0409, 0]), 0);
 });
 
 

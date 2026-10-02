@@ -149,6 +149,17 @@ const SHORT_TIME = 'h:mm tt';
 const TIME_FORMATS = ['h:mm:ss tt', 'hh:mm:ss tt', 'H:mm:ss', 'HH:mm:ss',
     'h:mm tt', 'hh:mm tt', 'H:mm', 'HH:mm'];
 
+/** And the date formats EnumDateFormats does, by kind, the locale's own first. */
+const YEAR_MONTH = 'MMMM, yyyy';
+const SHORT_DATE_FORMATS = [SHORT_DATE, 'M/d/yy', 'MM/dd/yy', 'MM/dd/yyyy', 'yy/MM/dd',
+    'yyyy-MM-dd', 'dd-MMM-yy'];
+const LONG_DATE_FORMATS = [LONG_DATE, 'MMMM dd, yyyy', 'dddd, dd MMMM, yyyy', 'dd MMMM, yyyy'];
+const YEAR_MONTH_FORMATS = [YEAR_MONTH];
+
+/** EnumDateFormats' kinds besides DATE_LONGDATE: DATE_SHORTDATE, DATE_YEARMONTH. */
+const DATE_SHORTDATE = 0x00000001;
+const DATE_YEARMONTH = 0x00000008;
+
 /** sizeof(SYSTEMTIME), which the date and time formats are given one of. */
 const SYSTEMTIME_SIZE = 16;
 
@@ -221,6 +232,7 @@ const LOCALE_STRINGS = Object.freeze({
     0x0000001E: ':',                       // STIME
     0x0000001F: SHORT_DATE,                // SSHORTDATE
     0x00000020: LONG_DATE,                 // SLONGDATE
+    0x00001006: YEAR_MONTH,                // SYEARMONTH
     0x00000028: 'AM',                      // S1159
     0x00000029: 'PM',                      // S2359
     // SDAYNAME1..7 and SABBREVDAYNAME1..7 start the week on Monday.
@@ -626,15 +638,16 @@ export function createLocaleFunctions(host){
     const writeFormatted = (text, buffer, count)=>writeAnswer(text, buffer, count, false);
 
     /**
-     * EnumTimeFormats' body: each format as a NUL-terminated string in guest
-     * memory, the callback called with it, and the whole run stopped the moment
-     * the callback answers zero. The answer is the callback's last answer, or
-     * zero when it never ran -- a null callback, no allocation, no bridge.
+     * EnumTimeFormats' and EnumDateFormats' body: each format as a
+     * NUL-terminated string in guest memory, the callback called with it, and
+     * the whole run stopped the moment the callback answers zero. The answer is
+     * the callback's last answer, or zero when it never ran -- a null
+     * callback, no allocation, no bridge.
      *
-     * @param {number} proc @param {number} lParam @param {boolean} wide
+     * @param {number} proc @param {readonly string[]} formats @param {boolean} wide
      * @returns {number | Promise<number>}
      */
-    const enumerateTimeFormats = (proc, lParam, wide)=>{
+    const enumerateFormats = (proc, formats, wide)=>{
         const call = host.call;
         const allocate = host.allocate;
         if (!call || !allocate || (proc >>> 0) === 0)
@@ -642,7 +655,7 @@ export function createLocaleFunctions(host){
             return 0;
         }
         const thread = host.callerThread?.();
-        const longest = TIME_FORMATS.reduce((max, format)=>Math.max(max, format.length), 0);
+        const longest = formats.reduce((max, format)=>Math.max(max, format.length), 0);
         const block = allocate((longest + 1) * (wide ? 2 : 1));
         if (block === 0)
         {
@@ -650,7 +663,7 @@ export function createLocaleFunctions(host){
         }
         const run = async()=>{
             let answer = 1;
-            for (const format of TIME_FORMATS)
+            for (const format of formats)
             {
                 const text = format + String.fromCharCode(0);
                 if (wide)
@@ -662,7 +675,7 @@ export function createLocaleFunctions(host){
                     const { bytes } = encodeSingleByte(text, ANSI_CODE_PAGE);
                     host.writeMemory(block, bytes);
                 }
-                answer = (await call(proc >>> 0, [block, lParam >>> 0], thread)) | 0;
+                answer = (await call(proc >>> 0, [block], thread)) | 0;
                 if (answer === 0)
                 {
                     break;
@@ -672,6 +685,25 @@ export function createLocaleFunctions(host){
             return answer;
         };
         return run();
+    };
+
+    /**
+     * EnumDateFormats: the list its kind names, the code page flag set aside.
+     *
+     * @param {number} proc @param {number} flags @param {boolean} wide
+     * @returns {number | Promise<number>}
+     */
+    const enumerateDateFormats = (proc, flags, wide)=>{
+        const kind = flags & ~LOCALE_USE_CP_ACP;
+        const formats = kind === 0 || kind === DATE_SHORTDATE ? SHORT_DATE_FORMATS
+            : kind === DATE_LONGDATE ? LONG_DATE_FORMATS
+                : kind === DATE_YEARMONTH ? YEAR_MONTH_FORMATS : null;
+        if (formats === null)
+        {
+            host.setLastError(ERROR_INVALID_FLAGS);
+            return 0;
+        }
+        return enumerateFormats(proc, formats, wide);
     };
 
     /**
@@ -1116,8 +1148,32 @@ export function createLocaleFunctions(host){
         },
 
         /**
+         * BOOL EnumDateFormatsA/W(DATEFMT_ENUMPROCA/W lpDateFmtEnumProc,
+         *     LCID Locale, DWORD dwFlags)
+         *
+         * The locale's short dates (also for no kind at all), long dates or
+         * year-and-month pictures, to the callback one at a time as
+         * EnumTimeFormats hands out times; any other kind is ERROR_INVALID_FLAGS.
+         */
+        EnumDateFormatsA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([proc, , flags])=>enumerateDateFormats(proc, flags >>> 0, false),
+        },
+        EnumDateFormatsW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([proc, , flags])=>enumerateDateFormats(proc, flags >>> 0, true),
+        },
+
+        /**
          * BOOL EnumTimeFormatsA/W(TIMEFMT_ENUMPROCA/W lpTimeFmtProc,
-         *     LCID Locale, DWORD dwFlags, LPARAM lParam)
+         *     LCID Locale, DWORD dwFlags)
+         *
+         * Three arguments, and the callback takes the format alone:
+         * EnumTimeFormatsEx is the form with an lParam. Popping a fourth
+         * argument moved the caller's stack four bytes a call, and a program
+         * that enumerated twice returned to nowhere.
          *
          * The locale's time formats, handed to the program's callback one at a
          * time until it answers zero, then the answer (nonzero) returned. The
@@ -1126,14 +1182,14 @@ export function createLocaleFunctions(host){
          * the bridge to call into, is a failure rather than a silent no-op.
          */
         EnumTimeFormatsA: {
-            argBytes: 16,
+            argBytes: 12,
             /** @param {number[]} args */
-            handler: ([proc, , , lParam])=>enumerateTimeFormats(proc, lParam, false),
+            handler: ([proc])=>enumerateFormats(proc, TIME_FORMATS, false),
         },
         EnumTimeFormatsW: {
-            argBytes: 16,
+            argBytes: 12,
             /** @param {number[]} args */
-            handler: ([proc, , , lParam])=>enumerateTimeFormats(proc, lParam, true),
+            handler: ([proc])=>enumerateFormats(proc, TIME_FORMATS, true),
         },
 
         /**
