@@ -1064,10 +1064,12 @@ export function installArrayCalls(context, kernel){
             const group = kernel.shareGroup();
             for (const name of names)
             {
-                if (name === 0 || !group.buffers.objects.has(name))
+                const object = name === 0 ? undefined : group.buffers.objects.get(name);
+                if (!object)
                 {
                     continue;
                 }
+                kernel.bufferDeleted?.(object);
                 group.buffers.remove(name);
                 for (const query of [GL.ARRAY_BUFFER_BINDING, GL.ELEMENT_ARRAY_BUFFER_BINDING])
                 {

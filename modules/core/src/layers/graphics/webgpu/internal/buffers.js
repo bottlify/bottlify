@@ -335,6 +335,24 @@ export function createDynamicBuffer(options){
             }
         },
 
+        /**
+         * The buffer is done with: what is still dirty goes to the queue --
+         * draws recorded before this read it at the frame's submit -- and
+         * every backing it holds is handed back, each with the presents
+         * counted when it was last read, to be destroyed once that many
+         * frames are submitted. The buffer is not used again.
+         *
+         * @returns {{ gpu: any, at: number }[]}
+         */
+        release(){
+            flush();
+            const backings = [{ gpu, at: frames.presents }, ...retired,
+                ...available.map(one=>({ gpu: one, at: -1 }))];
+            retired.length = 0;
+            available.length = 0;
+            return backings;
+        },
+
         /** A frame was submitted; the backings its draws read are free now. */
         endFrame(){
             if (own)

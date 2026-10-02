@@ -648,6 +648,7 @@ export function createGpuRenderer(services){
                 const aligned = alignUp(bytes.byteLength);
                 if (aligned > buffer.size)
                 {
+                    backend.releaseDynamicBuffer?.(buffer);
                     buffer = backend.createDynamicBuffer({ size: aligned * 2, usage, label });
                     cursor = 0;
                     fresh = true;
@@ -930,15 +931,31 @@ export function createGpuRenderer(services){
      */
     const bufferFor = buffer=>{
         let record = buffers.get(buffer);
+        /** @type {number} */
+        let capacity = Math.max(4, alignUp(buffer.size));
         if (record && record.size !== buffer.size)
         {
-            record = undefined;
+            if (buffer.size <= record.gpu.size)
+            {
+                // Given another size that still fits: the same backing takes
+                // the new contents, which the store marked written.
+                record.size = buffer.size;
+            }
+            else
+            {
+                // Outgrown: the old backing goes, and the new one has room to
+                // grow again -- a program that keeps respecifying a buffer at
+                // other sizes made a backing for every size, each kept.
+                backend.releaseDynamicBuffer?.(record.gpu);
+                capacity = Math.max(4, 2 ** Math.ceil(Math.log2(alignUp(buffer.size))));
+                record = undefined;
+            }
         }
         if (!record)
         {
             record = {
                 gpu: backend.createDynamicBuffer({
-                    size: Math.max(4, alignUp(buffer.size)),
+                    size: capacity,
                     usage: BufferUsage.VERTEX | BufferUsage.INDEX | BufferUsage.COPY_DST,
                     label: `gl-buffer:${buffer.name}`,
                 }),
@@ -2420,6 +2437,22 @@ export function createGpuRenderer(services){
         && a.height === b.height && a.minDepth === b.minDepth && a.maxDepth === b.maxDepth;
 
     return {
+        /**
+         * A buffer object the program deleted: its GPU copy goes back once the
+         * frames that drew from it are submitted.
+         *
+         * @param {import('./objects.js').BufferObject} buffer
+         */
+        releaseBuffer(buffer){
+            const record = buffers.get(buffer);
+            if (record)
+            {
+                buffers.delete(buffer);
+                backend.releaseDynamicBuffer?.(record.gpu);
+            }
+            indexScanCache.delete(buffer);
+        },
+
         /**
          * Backs a context's drawable with a colour pair and a depth-stencil
          * surface of its size.

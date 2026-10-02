@@ -127,6 +127,44 @@ test('a draw from a buffer object binds the buffer as it lies, unread here', asy
     assert.match(r.presented[0].surface.label, /gl-shown\[0\]/);
 });
 
+test('a buffer object given other sizes keeps one GPU copy while it fits and lets an outgrown or '
+    + 'deleted one go once its frame is submitted', async()=>{
+    const r = rig();
+    const { context } = r;
+    triangle(r, 0x1000);
+    triangle(r, 0x1000 + 3 * STRIDE);
+    context.glGenBuffersARB(1);
+    context.glBindBufferARB(GL.ARRAY_BUFFER, 1);
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glEnableClientState(GL.TEXTURE_COORD_ARRAY);
+    context.glVertexPointer(3, GL.FLOAT, STRIDE, 0);
+    context.glTexCoordPointer(2, GL.FLOAT, STRIDE, 12);
+    r.words(0x2000, [0, 1, 2]);
+    const copies = ()=>r.gpu.of('createBuffer')
+        .filter(call=>/^gl-buffer:1#/.test(call.descriptor.label)).map(call=>call.createBuffer);
+    const destroyed = ()=>new Set(r.gpu.of('destroy').map(call=>call.buffer));
+    /** @param {number} size */
+    const drawWith = async size=>{
+        context.glBufferDataARB(GL.ARRAY_BUFFER, size, 0x1000, GL.STATIC_DRAW);
+        context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+        await r.swap();
+    };
+    await drawWith(3 * STRIDE);
+    assert.equal(copies().length, 1);
+    await drawWith(6 * STRIDE);
+    assert.equal(copies().length, 2, 'outgrown: a second copy');
+    await r.swap();
+    assert.ok(destroyed().has(copies()[0]), 'and the first one gone once its frame was submitted');
+    await drawWith(3 * STRIDE);
+    await drawWith(5 * STRIDE);
+    assert.equal(copies().length, 2, 'smaller sizes fit the copy there is');
+    context.glDeleteBuffersARB([1]);
+    await r.swap();
+    await r.swap();
+    assert.ok(copies().every(copy=>destroyed().has(copy)), 'deleted: every copy gone');
+    assert.equal(r.renderer.diagnostics().fallbacks, 0);
+});
+
 test('a write into a range a recorded draw read renames; one elsewhere does not', async()=>{
     const r = rig();
     const { context } = r;

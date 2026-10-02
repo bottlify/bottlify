@@ -211,8 +211,11 @@ export function createBackend(options){
         },
     });
 
-    /** @type {any[]} */
-    const dynamicBuffers = [];
+    /** @type {Set<any>} */
+    const dynamicBuffers = new Set();
+    /** Backings of released buffers, each destroyed once its frame is submitted.
+     * @type {{ gpu: any, at: number }[]} */
+    const dying = [];
     // The frames presented and submitted, one count for every dynamic buffer,
     // and the buffers with work at the frame's end: a run makes a buffer for
     // every buffer object it ever creates, and a frame that visited them all
@@ -737,8 +740,26 @@ export function createBackend(options){
                 frames: frameCounts,
                 touched,
             });
-            dynamicBuffers.push(buffer);
+            dynamicBuffers.add(buffer);
             return buffer;
+        },
+
+        /**
+         * A dynamic buffer its owner is done with -- a buffer object deleted or
+         * given another size, a ring outgrown: its GPU memory goes back once
+         * the frames that read it are submitted, where it was held for the
+         * rest of the run.
+         *
+         * @param {any} buffer
+         */
+        releaseDynamicBuffer(buffer){
+            if (!dynamicBuffers.delete(buffer))
+            {
+                return;
+            }
+            touchedBuffers.delete(buffer);
+            dying.push(...buffer.release());
+            profiler.count('buffersReleased');
         },
 
         /** @param {any} descriptor */
@@ -1124,6 +1145,14 @@ export function createBackend(options){
                     occlusion?.set.destroy();
 
                     frameCounts.submits++;
+                    for (let i = dying.length - 1; i >= 0; i--)
+                    {
+                        if (dying[i].at < frameCounts.submits)
+                        {
+                            dying[i].gpu.destroy?.();
+                            dying.splice(i, 1);
+                        }
+                    }
                     for (const buffer of touchedBuffers)
                     {
                         buffer.endFrame();
@@ -1178,7 +1207,7 @@ export function createBackend(options){
                 shaderMessages: shaders.messages(),
                 pipelines: pipelines.stats(),
                 uniforms: uniforms.stats(),
-                buffers: dynamicBuffers.map(buffer=>buffer.diagnostics()),
+                buffers: [...dynamicBuffers].map(buffer=>buffer.diagnostics()),
                 frameOpen: !!(openFrame && !openFrame.ended),
                 pendingTextureCopies: pendingCopies.length,
                 // Read against the page's own record of when it copied each
@@ -1191,7 +1220,7 @@ export function createBackend(options){
 
         dispose(){
             disposed = true;
-            dynamicBuffers.length = 0;
+            dynamicBuffers.clear();
             touchedBuffers.clear();
             // Staged between frames but never encoded: their buffers are not on
             // any frame's list, so dropping the queue without destroying them

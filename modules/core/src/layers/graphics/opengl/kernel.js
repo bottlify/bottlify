@@ -51,6 +51,8 @@
  *           Copies a rectangle of the framebuffer into a texture level on the
  *           device, as a render pass into a view of that level. Null in a build
  *           that draws on the processor, where the copy reads `framebuffer()`.
+ * @property {((buffer: import('./objects.js').BufferObject) => void) | null} bufferDeleted
+ *           a buffer object deleted, for the renderer to let its copy go
  * @property {() => boolean} gpuBacked   whether the framebuffer's pixels live on
  *           a device rather than in `framebuffer()`, which then holds nothing
  * @property {() => any} currentVertex  the current attributes, as a vertex
