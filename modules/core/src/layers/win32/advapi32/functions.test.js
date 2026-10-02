@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRegistryFunctions } from './functions.js';
+import { REGISTRY_NATIVES, createRegistryFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import {
     createHive,
@@ -1225,4 +1225,139 @@ test('RegNotifyChangeKeyValue answers one change to the key or under it, and a c
     assert.ok(waited instanceof Promise, 'without one, the caller waits');
     create(again, 'Another');
     assert.equal(await waited, ERROR_SUCCESS);
+});
+
+test('the native registry calls work the same keys through the same handles', ()=>{
+    // Wine's registry test calls them on keys the Reg* functions opened, and
+    // a key one opens the other must read, write and close.
+    const STATUS_SUCCESS = 0;
+    const STATUS_BUFFER_OVERFLOW = 0x80000005;
+    const STATUS_NO_MORE_ENTRIES = 0x8000001a;
+    const STATUS_INVALID_HANDLE = 0xc0000008;
+    const STATUS_BUFFER_TOO_SMALL = 0xc0000023;
+    const STATUS_OBJECT_NAME_NOT_FOUND = 0xc0000034;
+    const STATUS_CANNOT_DELETE = 0xc0000121;
+    const KEY_VALUE_BASIC = 0;
+    const KEY_VALUE_PARTIAL = 2;
+    const KEY_FULL = 2;
+    const { memory, fns, create } = setup();
+    const native = /** @type {any} */ (fns)[REGISTRY_NATIVES];
+    const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        native.entries[name].handler(args) >>> 0;
+    /** @param {number} at @param {string} text  A UNICODE_STRING at `at`, its text after it. */
+    const counted = (at, text)=>{
+        memory.putDword(at, text.length * 2 | (text.length * 2 + 2) << 16);
+        memory.putDword(at + 4, at + 8);
+        for (let i = 0; i < text.length; i++)
+        {
+            memory.bytes[at + 8 + i * 2] = text.charCodeAt(i);
+            memory.bytes[at + 9 + i * 2] = 0;
+        }
+        return at;
+    };
+    /** @param {number} root @param {string} name */
+    const attributes = (root, name)=>{
+        memory.putDword(0x900, 24);
+        memory.putDword(0x904, root);
+        memory.putDword(0x908, counted(0x920, name));
+        return 0x900;
+    };
+
+    const parent = create('Software\\NativeParent');
+    assert.ok(parent >= 0x40000004, 'apart from every handle the kernel issues');
+    assert.equal(call('NtCreateKey', [OUT_HANDLE, 0, attributes(parent, 'Child'), 0, 0, 0,
+        OUT_DISPOSITION]), STATUS_SUCCESS);
+    const child = memory.dword(OUT_HANDLE);
+    assert.equal(memory.dword(OUT_DISPOSITION), REG_CREATED_NEW_KEY);
+    assert.equal(call('NtCreateKey', [OUT_HANDLE, 0, attributes(parent, 'Child'), 0, 0, 0,
+        OUT_DISPOSITION]), STATUS_SUCCESS);
+    assert.equal(memory.dword(OUT_DISPOSITION), REG_OPENED_EXISTING_KEY);
+    assert.equal(call('NtCreateKey', [OUT_HANDLE, 0, attributes(parent, 'Gone\\Deep'), 0, 0, 0, 0]),
+        STATUS_OBJECT_NAME_NOT_FOUND, 'one level at a time');
+    assert.equal(call('NtOpenKey', [OUT_HANDLE, 0,
+        attributes(0, '\\Registry\\Machine\\Software\\NativeParent\\Child')]), STATUS_SUCCESS);
+    assert.equal(call('NtOpenKey', [OUT_HANDLE, 0, attributes(0, '\\Registry\\PerfData')]),
+        STATUS_OBJECT_NAME_NOT_FOUND);
+
+    memory.bytes.set([0x6f, 0, 0x6b, 0, 0, 0], INPUT);
+    assert.equal(call('NtSetValueKey', [child, counted(0xa00, 'Word'), 0, REG_SZ, INPUT, 6]),
+        STATUS_SUCCESS);
+    assert.equal(fns.RegQueryValueExA.handler([child, (memory.putString(NAME, 'Word'), NAME), 0,
+        OUT_TYPE, OUT_DATA, (memory.putDword(OUT_SIZE, 16), OUT_SIZE)]), ERROR_SUCCESS);
+    assert.equal(memory.string(OUT_DATA), 'ok', 'what the native call wrote, Reg* reads');
+    assert.equal(call('NtQueryValueKey', [child, counted(0xa00, 'Word'), KEY_VALUE_PARTIAL,
+        OUT_INFO, 0x40, OUT_SIZE]), STATUS_SUCCESS);
+    assert.deepEqual(
+        [memory.dword(OUT_INFO + 4), memory.dword(OUT_INFO + 8), memory.dword(OUT_SIZE)],
+        [REG_SZ, 6, 18], 'type, data length, and the whole answer');
+    assert.equal(call('NtQueryValueKey', [child, counted(0xa00, 'Word'), KEY_VALUE_PARTIAL,
+        OUT_INFO, 4, OUT_SIZE]), STATUS_BUFFER_TOO_SMALL);
+    assert.equal(call('NtQueryValueKey', [child, counted(0xa00, 'Word'), KEY_VALUE_PARTIAL,
+        OUT_INFO, 12, OUT_SIZE]), STATUS_BUFFER_OVERFLOW);
+    assert.equal(call('NtEnumerateValueKey', [child, 0, KEY_VALUE_BASIC, OUT_INFO, 0x40, 0]),
+        STATUS_SUCCESS);
+    assert.equal(memory.dword(OUT_INFO + 8), 8, 'the name, four characters');
+    assert.equal(call('NtEnumerateValueKey', [child, 1, KEY_VALUE_BASIC, OUT_INFO, 0x40, 0]),
+        STATUS_NO_MORE_ENTRIES);
+
+    assert.equal(call('NtQueryKey', [parent, KEY_FULL, OUT_INFO, 0x40, 0]), STATUS_SUCCESS);
+    assert.equal(memory.dword(OUT_INFO + 20), 1, 'one subkey');
+    assert.equal(call('NtEnumerateKey', [parent, 0, 0, OUT_INFO, 0x40, 0]), STATUS_SUCCESS);
+    assert.equal(memory.dword(OUT_INFO + 12), 10, 'its name, five characters');
+    assert.equal(call('NtQueryKey', [HKEY_LOCAL_MACHINE, KEY_FULL, OUT_INFO, 0x40, 0]),
+        STATUS_INVALID_HANDLE, 'a predefined root is no handle to these calls');
+
+    assert.equal(call('NtDeleteValueKey', [child, counted(0xa00, 'Word')]), STATUS_SUCCESS);
+    assert.equal(call('NtDeleteValueKey', [child, counted(0xa00, 'Word')]),
+        STATUS_OBJECT_NAME_NOT_FOUND);
+    assert.equal(call('NtDeleteKey', [parent]), STATUS_CANNOT_DELETE, 'it has a subkey');
+    assert.equal(call('NtDeleteKey', [child]), STATUS_SUCCESS);
+    assert.equal(call('NtOpenKey', [OUT_HANDLE, 0, attributes(parent, 'Child')]),
+        STATUS_OBJECT_NAME_NOT_FOUND);
+
+    assert.equal(native.close(child), STATUS_SUCCESS);
+    assert.equal(native.close(child), null, 'closed, so no longer this table\'s');
+    assert.equal(native.close(HKEY_LOCAL_MACHINE), STATUS_INVALID_HANDLE);
+    assert.equal(native.close(8), null, 'a kernel handle is left to the kernel');
+});
+
+test('RegRenameKey gives a key or its subkey a new name, its values going with it', ()=>{
+    // Wine's registry test_RegRenameKey: no names at all is a bad parameter,
+    // a subkey that is not there is not found, and the key itself may be
+    // renamed through its own handle.
+    const ERROR_ALREADY_EXISTS = 183;
+    const { memory, fns, create, setString } = setup();
+    /** @param {number} at @param {string} text */
+    const wide = (at, text)=>{
+        for (let i = 0; i <= text.length; i++)
+        {
+            memory.bytes[at + i * 2] = i < text.length ? text.charCodeAt(i) : 0;
+            memory.bytes[at + i * 2 + 1] = 0;
+        }
+        return at;
+    };
+    const parent = create('Software\\RenameParent');
+    const child = create('Software\\RenameParent\\Old');
+    assert.equal(setString(child, 'kept', 'yes'), ERROR_SUCCESS);
+    assert.equal(fns.RegRenameKey.handler([parent, 0, 0]), ERROR_INVALID_PARAMETER);
+    assert.equal(fns.RegRenameKey.handler([0, 0, wide(0x800, 'x')]), ERROR_INVALID_HANDLE);
+    assert.equal(fns.RegRenameKey.handler([parent, wide(0x800, 'Nothing'), wide(0x840, 'x')]),
+        ERROR_FILE_NOT_FOUND);
+    assert.equal(fns.RegRenameKey.handler([parent, wide(0x800, 'Old'), wide(0x840, 'New')]),
+        ERROR_SUCCESS);
+    memory.putString(SUBKEY, 'Software\\RenameParent\\New');
+    assert.equal(fns.RegOpenKeyExA.handler([HKEY_LOCAL_MACHINE, SUBKEY, 0, 0, OUT_HANDLE]),
+        ERROR_SUCCESS);
+    memory.putString(NAME, 'kept');
+    memory.putDword(OUT_SIZE, 16);
+    assert.equal(fns.RegQueryValueExA.handler([memory.dword(OUT_HANDLE), NAME, 0, OUT_TYPE,
+        OUT_DATA, OUT_SIZE]), ERROR_SUCCESS);
+    assert.equal(memory.string(OUT_DATA), 'yes', 'the values went with the key');
+    memory.putString(SUBKEY, 'Software\\RenameParent\\Old');
+    assert.equal(fns.RegOpenKeyExA.handler([HKEY_LOCAL_MACHINE, SUBKEY, 0, 0, OUT_HANDLE]),
+        ERROR_FILE_NOT_FOUND);
+    assert.equal(fns.RegRenameKey.handler([child, 0, wide(0x800, 'Itself')]), ERROR_SUCCESS,
+        'the handle still holds the key, under its new name');
+    create('Software\\RenameParent\\Other');
+    assert.equal(fns.RegRenameKey.handler([child, 0, wide(0x800, 'Other')]), ERROR_ALREADY_EXISTS);
 });

@@ -923,6 +923,31 @@ export function createHive({ processorMhz = PROCESSOR.mhz, windows = windowsVers
             return value;
         },
 
+        /**
+         * Gives a subkey a new name beside its siblings; its values and
+         * subkeys go with it, and every handle on it stays on it. Not
+         * through the classes root, whose keys are two sides' at once.
+         *
+         * @param {RegistryKey} parent @param {string} name @param {string} to
+         * @returns {'renamed' | 'missing' | 'taken'}
+         */
+        rename(parent, name, to){
+            const node = isClasses(parent) ? null : parent.keys.get(fold(name));
+            if (!node || isClasses(parent))
+            {
+                return 'missing';
+            }
+            if (fold(name) !== fold(to) && parent.keys.has(fold(to)))
+            {
+                return 'taken';
+            }
+            parent.keys.delete(fold(name));
+            node.name = to;
+            parent.keys.set(fold(to), node);
+            changed();
+            return 'renamed';
+        },
+
         /** @param {RegistryKey} key @param {string} name @returns {boolean} */
         deleteValue(key, name){
             const deleted = writable(key)?.values.delete(fold(name)) ?? false;

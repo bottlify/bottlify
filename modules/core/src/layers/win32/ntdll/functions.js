@@ -34,7 +34,7 @@ import { createWaitFunctions } from './waits.js';
 import { createPathFunctions } from './paths.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
 import { STATUS, toDosError } from './status.js';
-import { UNLOAD_KEY } from '../advapi32/functions.js';
+import { REGISTRY_NATIVES, UNLOAD_KEY } from '../advapi32/functions.js';
 
 /**
  * The C runtime functions ntdll publishes under its own name.
@@ -275,10 +275,14 @@ export function createNtdllFunctions(host){
     // here reaches it.
     const natives = Object.assign({}, ...Object.values(kernel32)
         .map(entry=>entry?.natives ?? {}));
+    // The registry's native calls ride on advapi32's table, whose keys and
+    // handles they are, and a key handle closes there.
+    const registry = host.advapi32?.[REGISTRY_NATIVES] ?? null;
 
     return {
         ...alias(kernel32, KERNEL32_ALIASES),
         ...natives,
+        ...registry?.entries ?? {},
         ...alias(crt, Object.fromEntries(CRT_EXPORTS.map(name=>[name, name]))),
 
         ...createCountedStringFunctions({
@@ -401,8 +405,9 @@ export function createNtdllFunctions(host){
                 NtClose: {
                     argBytes: 4,
                     /** @param {number[]} args */
-                    handler: ([handle])=>(kernel32.CloseHandle.handler([handle]) !== 0
-                        ? STATUS.SUCCESS : STATUS.INVALID_HANDLE),
+                    handler: ([handle])=>registry?.close(handle >>> 0)
+                        ?? (kernel32.CloseHandle.handler([handle]) !== 0
+                            ? STATUS.SUCCESS : STATUS.INVALID_HANDLE),
                 },
             }
             : {}),
