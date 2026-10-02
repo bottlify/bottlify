@@ -1810,7 +1810,9 @@ export function createRegistryFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const watcher = { handle: handle >>> 0, key, subtree: subtree !== 0, filter: kinds };
+                const watcher = {
+                    handle: handle >>> 0, key, subtree: subtree !== 0, filter: kinds,
+                };
                 if (asynchronous !== 0)
                 {
                     if ((event >>> 0) === 0 || !host.events?.reset(event >>> 0))
