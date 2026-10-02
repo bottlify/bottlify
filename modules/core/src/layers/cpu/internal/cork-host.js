@@ -46,6 +46,8 @@ const TSC_DRIFT_MS = 16;
 
 /** The translator's page flag that closes a page (`PageFlag.INACCESSIBLE`). */
 const PAGE_INACCESSIBLE = 1;
+/** cork's NO_EXECUTE: a page that reads and runs nothing. */
+const PAGE_NO_EXECUTE = 16;
 
 /** The default x87 control word: double-extended precision, round to nearest. */
 const DEFAULT_CONTROL_WORD = 0x037f;
@@ -390,6 +392,12 @@ export function createCorkHost(config){
     if (closedBelow > 0)
     {
         runtime.pages?.markRange(0, closedBelow, PAGE_INACCESSIBLE);
+    }
+    // And nothing below `runsFrom` runs on either interpreter: the wasm tier
+    // leaves a fetch there to the host, which faults it.
+    if (runsFrom > 0)
+    {
+        runtime.pages?.markRange(0, runsFrom, PAGE_NO_EXECUTE);
     }
 
     /**

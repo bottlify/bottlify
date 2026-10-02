@@ -24,8 +24,13 @@ import { Tables } from './layout.js';
  * translated region's loop, which the runtime forms copies for once translated
  * code keeps leaving for it: the interpreter tier in wasm (`interp-wasm.c`, the
  * same bit) leaves a miss of the hash there to the host, which counts it.
+ * NO_EXECUTE marks a page that reads but runs nothing -- the null range: a
+ * fetch there leaves the wasm tier for the host, which faults it, and nothing
+ * there is translated.
  */
-export const PageFlag = Object.freeze({ INACCESSIBLE: 1, HAS_CODE: 2, VOLATILE: 4, CLOSED: 8 });
+export const PageFlag = Object.freeze({
+    INACCESSIBLE: 1, HAS_CODE: 2, VOLATILE: 4, CLOSED: 8, NO_EXECUTE: 16,
+});
 
 /** Bytes in a guest page. */
 export const GUEST_PAGE = 4096;
