@@ -65,6 +65,10 @@ const CRT_EXPORTS = [
  * The names ntdll exports for functions kernel32 exports too, and what they are
  * called there. Each pair is the same entry point on a real machine.
  */
+/** 'MZ' and 'PE' with two zero bytes, as an image's two headers begin. */
+const IMAGE_DOS_SIGNATURE = 0x5a4d;
+const IMAGE_NT_SIGNATURE = 0x00004550;
+
 const KERNEL32_ALIASES = Object.freeze({
     RtlAllocateHeap: 'HeapAlloc',
     RtlFreeHeap: 'HeapFree',
@@ -238,6 +242,34 @@ export function createNtdllFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([status])=>toDosError(status),
+        },
+
+        /**
+         * PIMAGE_NT_HEADERS RtlImageNtHeader(PVOID BaseOfImage)
+         *
+         * The headers an image's DOS stub points at, when the stub is one and
+         * they carry the PE signature; NULL for anything else.
+         */
+        RtlImageNtHeader: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([base])=>{
+                const at = base >>> 0;
+                if (at === 0)
+                {
+                    return 0;
+                }
+                const read = (/** @type {number} */ address)=>{
+                    const bytes = host.readMemory(address, 4);
+                    return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+                };
+                if ((read(at) & 0xffff) !== IMAGE_DOS_SIGNATURE)
+                {
+                    return 0;
+                }
+                const headers = (at + read(at + 0x3c)) >>> 0;
+                return read(headers) === IMAGE_NT_SIGNATURE ? headers : 0;
+            },
         },
 
         /** PPEB RtlGetCurrentPeb(void): where the running thread's block says it is. */

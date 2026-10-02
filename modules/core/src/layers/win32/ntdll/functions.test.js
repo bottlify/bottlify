@@ -252,3 +252,20 @@ test('RtlGetCurrentPeb reads the process block out of the running thread\'s', ()
     host.teb = ()=>0;
     assert.equal(createNtdllFunctions(host).RtlGetCurrentPeb.handler([]), 0);
 });
+
+test('RtlImageNtHeader finds the PE headers an image points at, and nothing in anything else', ()=>{
+    // Wine's kernel32 process.c test_SuspendProcessState (create_process)
+    // patches a mapped image's subsystem through what this answers.
+    const host = fakeHost();
+    const fns = createNtdllFunctions(host);
+    const image = 0x400;
+    host.bytes.set([0x4d, 0x5a], image);
+    host.bytes.set([0x80, 0, 0, 0], image + 0x3c);
+    host.bytes.set([0x50, 0x45, 0, 0], image + 0x80);
+    assert.equal(fns.RtlImageNtHeader.handler([image]), image + 0x80);
+    host.bytes[image + 0x81] = 0;
+    assert.equal(fns.RtlImageNtHeader.handler([image]), 0, 'no PE signature');
+    assert.equal(fns.RtlImageNtHeader.handler([image + 4]), 0, 'no DOS stub');
+    assert.equal(fns.RtlImageNtHeader.handler([0]), 0);
+    assert.equal(fns.RtlImageNtHeader.argBytes, 4);
+});

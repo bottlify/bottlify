@@ -6596,8 +6596,13 @@ export async function createApp(options){
     const processes = new Map();
     /** @type {Map<any, unknown>} */
     const names = new Map();
-    /** Which image each machine was built for, for `standing()`. @type {Map<any, string>} */
-    const images = new Map();
+    /**
+     * Which image each machine was built for, for `standing()`: weak, so a
+     * machine whose process is over goes, its gigabyte of memory with it.
+     *
+     * @type {WeakMap<any, string>}
+     */
+    const images = new WeakMap();
     /** @type {Set<Promise<unknown>>} */
     const servers = new Set();
     /** @type {Set<any>} */

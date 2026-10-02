@@ -17,6 +17,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 import {
@@ -641,3 +643,49 @@ for (const engine of /** @type {const} */ (['cork']))
             assert.equal(console.join('').includes('child'), false, 'nothing went to the console');
         });
 }
+
+test('a child that ran beside its parent is let go once it has exited', { timeout: 120000 },
+    async t=>{
+        // Each machine holds a gigabyte of guest memory: one kept after its
+        // process ended is a gigabyte the run never gets back, and Wine's
+        // process test, starting dozens, ran out of room for the next.
+        v8.setFlagsFromString('--expose-gc');
+        const gc = vm.runInNewContext('gc');
+        const [wasm, parent, child] = await Promise.all([
+            readFile(new URL('v86.wasm', PREBUILT)),
+            readFile(new URL('../test/fixtures/spawn.exe', import.meta.url)),
+            readFile(new URL('../test/fixtures/spawn_child.exe', import.meta.url)),
+        ]);
+        const app = await createApp({
+            executable: new Uint8Array(parent),
+            imagePath: 'C:\\App\\spawn.exe',
+            engine: 'cork',
+            storage: { load: async()=>({
+                files: [{ path: 'C:\\App\\spawn_child.exe', bytes: new Uint8Array(child) }],
+            }) },
+            v86: {
+                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+            },
+        });
+        t.after(()=>app.dispose());
+        // The fixture reports through its standard output, which goes nowhere
+        // without a sink and fails its checks.
+        /** @type {string[]} */
+        const output = [];
+        app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
+            output.push(text));
+        /** @type {WeakRef<object>[]} */
+        const children = [];
+        // While a child runs, the facade's methods are its machine's own.
+        app.on('process-started', ()=>children.push(new WeakRef(app.diagnostics)));
+        assert.equal(await app.run({ timeoutMs: 60000 }), 0, output.join(''));
+        assert.equal(children.length, 2, 'two children ran');
+        for (let round = 0; round < 4; round++)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 10));
+            gc();
+        }
+        assert.deepEqual(children.map(ref=>ref.deref() === undefined), [true, true],
+            'neither machine is held once its process is over');
+    });
