@@ -223,3 +223,70 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
             assert.equal(code, 5);
         });
 }
+
+/**
+ * A vectored handler registered first in line, an invalid opcode it fixes by
+ * stepping past it in the context, and the handler removed again: the
+ * exception reaches the handler with no frame on the chain at all.
+ *
+ * Exits 0, 1 when the handler ran other than once, 2 when it saw another
+ * code, 3 when the removal failed.
+ */
+function buildVectoredExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['AddVectoredExceptionHandler',
+            'RemoveVectoredExceptionHandler', 'ExitProcess'] },
+        data: { calls: [0, 0, 0, 0], seen: [0, 0, 0, 0], handle: [0, 0, 0, 0] },
+        codeSize: 0x100,
+        code: ({ iat, at, code })=>{
+            const handler = code(0x80);
+            const main = [
+                0x68, ...u32(handler),                           // push handler
+                0x6a, 0x01,                                      // push 1: first
+                0xff, 0x15, ...u32(iat('AddVectoredExceptionHandler')),
+                0xa3, ...u32(at('handle')),                      // mov [handle], eax
+                0x0f, 0x0b,                                      // ud2
+                0xff, 0x35, ...u32(at('handle')),                // push dword [handle]
+                0xff, 0x15, ...u32(iat('RemoveVectoredExceptionHandler')),
+                0x6a, 0x03,                                      // push 3
+                0x85, 0xc0, 0x74, 0x1e,                          // test eax, eax; jz exit
+                0x58,                                            // pop eax
+                0x6a, 0x01,                                      // push 1
+                0x83, 0x3d, ...u32(at('calls')), 0x01,           // cmp dword [calls], 1
+                0x75, 0x13,                                      // jne exit
+                0x58,                                            // pop eax
+                0x6a, 0x02,                                      // push 2
+                0x81, 0x3d, ...u32(at('seen')), ...u32(0xc000001d), // cmp [seen], ILLEGAL
+                0x75, 0x03,                                      // jne exit
+                0x58,                                            // pop eax
+                0x6a, 0x00,                                      // push 0
+                0xff, 0x15, ...u32(iat('ExitProcess')),          // exit: ExitProcess
+            ];
+            const handle = [
+                0x8b, 0x44, 0x24, 0x04,                          // mov eax, [esp+4]: pointers
+                0x8b, 0x08,                                      // mov ecx, [eax]: the record
+                0x8b, 0x09,                                      // mov ecx, [ecx]: its code
+                0x89, 0x0d, ...u32(at('seen')),                  // mov [seen], ecx
+                0xff, 0x05, ...u32(at('calls')),                 // inc dword [calls]
+                0x8b, 0x40, 0x04,                                // mov eax, [eax+4]: the context
+                0x83, 0x80, ...u32(0xb8), 0x02,                  // add context.Eip, 2
+                0xb8, ...u32(0xffffffff),                        // EXCEPTION_CONTINUE_EXECUTION
+                0xc2, 0x04, 0x00,                                // ret 4
+            ];
+            const bytes = new Array(0x100).fill(0xcc);
+            bytes.splice(0, main.length, ...main);
+            bytes.splice(0x80, handle.length, ...handle);
+            return bytes;
+        },
+    });
+}
+
+for (const engine of /** @type {const} */ (['cork', 'emulator']))
+{
+    test(`a vectored handler takes an exception before any frame and goes on from its context, `
+        + `under ${engine}`, { timeout: 60000 }, async t=>{
+        const { code } = await runExecutable(t, buildVectoredExe(), engine);
+        assert.equal(code, 0, '1: the handler ran other than once; 2: it saw another code;'
+            + ' 3: it could not be removed');
+    });
+}

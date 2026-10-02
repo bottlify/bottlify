@@ -71,6 +71,10 @@ const IMAGE_DOS_SIGNATURE = 0x5a4d;
 const IMAGE_NT_SIGNATURE = 0x00004550;
 
 const KERNEL32_ALIASES = Object.freeze({
+    RtlAddVectoredExceptionHandler: 'AddVectoredExceptionHandler',
+    RtlRemoveVectoredExceptionHandler: 'RemoveVectoredExceptionHandler',
+    RtlAddVectoredContinueHandler: 'AddVectoredContinueHandler',
+    RtlRemoveVectoredContinueHandler: 'RemoveVectoredContinueHandler',
     RtlAllocateHeap: 'HeapAlloc',
     RtlFreeHeap: 'HeapFree',
     RtlReAllocateHeap: 'HeapReAlloc',
