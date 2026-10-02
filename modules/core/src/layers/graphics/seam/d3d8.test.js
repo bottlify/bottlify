@@ -1728,9 +1728,9 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
     // without D3DDEVCAPS_DRAWPRIMTLVERTEX turned every adapter down while
     // these three sat one bit over, and its game asked for a DirectX 8 card.
     assert.equal(caps.DevCaps, 0x00010000 | 0x00080000 | 0x00000400 | 0x00002000 | 0x00008000
-        | 0x00000010 | 0x00000200 | 0x00001000, 'HWTRANSFORMANDLIGHT, HWRASTERIZATION, '
-        + 'DRAWPRIMTLVERTEX, DRAWPRIMITIVES2, DRAWPRIMITIVES2EX, EXECUTESYSTEMMEMORY, '
-        + 'TEXTUREVIDEOMEMORY, TEXTURENONLOCALVIDMEM');
+        | 0x00000010 | 0x00000200 | 0x00001000 | 0x00000800, 'HWTRANSFORMANDLIGHT, '
+        + 'HWRASTERIZATION, DRAWPRIMTLVERTEX, DRAWPRIMITIVES2, DRAWPRIMITIVES2EX, '
+        + 'EXECUTESYSTEMMEMORY, TEXTUREVIDEOMEMORY, TEXTURENONLOCALVIDMEM, CANRENDERAFTERFLIP');
     // A colour cursor is claimed, because the device keeps the bitmap it is
     // handed and the host shows it. A title was measured drawing its own
     // cursor, from the wrong cell of its sheet, when this field read zero.
