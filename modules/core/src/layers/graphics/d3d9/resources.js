@@ -63,7 +63,10 @@ export const D3DLOCK_NO_DIRTY_UPDATE = 0x00008000;
  */
 
 /**
- * @param {{ implicit?: boolean, onFirstRef?: () => void, onLastRef?: () => void }} [options]
+ * @param {{ implicit?: boolean, onFirstRef?: () => void, onLastRef?: () => void,
+ *           onZero?: () => void }} [options]
+ *        `onZero`: the program's count reached zero, whether or not the device
+ *        still holds the resource bound.
  * @returns {ReferenceCount}
  */
 export function createReferenceCount(options = {}){
@@ -108,6 +111,10 @@ export function createReferenceCount(options = {}){
                 return 0;
             }
             count--;
+            if (count === 0)
+            {
+                options.onZero?.();
+            }
             // An implicit resource outlives its own count: the device owns
             // it, so the pointer a program kept stays the same one.
             if (count === 0 && held === 0)

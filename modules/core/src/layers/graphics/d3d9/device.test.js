@@ -665,3 +665,103 @@ test('a full-screen device\'s gamma ramp is the display\'s, and a windowed one\'
     assertFullyReleased(headless);
     assert.equal(createDevice().caps.fullscreenGamma, false, 'nor without a display at all');
 });
+
+test('a buffer released to nothing while bound lives on until it is unbound', ()=>{
+    // Wine's d3d9ex.c test_reset_ex: a vertex and an index buffer bound and
+    // released are handed back by GetStreamSource and GetIndices, the same
+    // objects; a buffer released while unbound goes at once, as before.
+    let next = 0x10000;
+    /** @type {number[]} */
+    const freed = [];
+    const d3d = createDirect3D9({
+        /** @param {number} bytes */
+        allocate: bytes=>(next += bytes + 0x100) - bytes - 0x100,
+        /** @param {number} address */
+        free: address=>{
+            freed.push(address);
+        },
+    });
+    /** @type {{ device?: any }} */
+    const made = {};
+    assert.equal(d3d.CreateDevice({
+        swapEffect: D3DSWAPEFFECT.DISCARD, backBufferWidth: 64, backBufferHeight: 64,
+        backBufferFormat: D3DFMT.X8R8G8B8,
+    }, made), D3D_OK);
+    freed.length = 0;
+    const device = made.device;
+    const buffer = ()=>{
+        /** @type {{ buffer?: any }} */
+        const out = {};
+        assert.equal(device.CreateVertexBuffer(16, 0, 0, D3DPOOL.DEFAULT, out), D3D_OK);
+        return out.buffer;
+    };
+
+    const loose = buffer();
+    assert.equal(loose.release(), 0);
+    assert.equal(loose.destroyed, true, 'unbound, it goes with its last reference');
+    assert.deepEqual(freed, [loose.base]);
+
+    const vertices = buffer();
+    assert.equal(device.SetStreamSource(0, vertices, 0, 16), D3D_OK);
+    const deviceCount = device.refCount;
+    assert.equal(vertices.release(), 0);
+    assert.equal(vertices.destroyed, false, 'bound, it lives on');
+    assert.equal(device.refCount, deviceCount - 1, 'holding no reference on the device');
+    /** @type {{ buffer?: any, offset?: number, stride?: number }} */
+    const bound = {};
+    assert.equal(device.GetStreamSource(0, bound), D3D_OK);
+    assert.equal(bound.buffer, vertices);
+    assert.equal(vertices.release(), 0, 'the reference GetStreamSource took');
+
+    /** @type {{ buffer?: any }} */
+    const indexOut = {};
+    assert.equal(device.CreateIndexBuffer(16, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.DEFAULT, indexOut),
+        D3D_OK);
+    const indices = indexOut.buffer;
+    assert.equal(device.SetIndices(indices), D3D_OK);
+    assert.equal(indices.release(), 0);
+    /** @type {{ buffer?: any }} */
+    const held = {};
+    assert.equal(device.GetIndices(held), D3D_OK);
+    assert.equal(held.buffer, indices);
+    assert.equal(indices.release(), 0);
+
+    freed.length = 0;
+    assert.equal(device.SetStreamSource(0, null, 0, 0), D3D_OK);
+    assert.equal(device.SetIndices(null), D3D_OK);
+    assert.equal(vertices.destroyed, true, 'unbound at last, it goes');
+    assert.equal(indices.destroyed, true);
+    assert.deepEqual(freed.sort(), [vertices.base, indices.base].sort());
+
+    // A buffer still bound when the device goes goes with it.
+    const last = buffer();
+    assert.equal(device.SetStreamSource(1, last, 0, 16), D3D_OK);
+    assert.equal(last.release(), 0);
+    assert.equal(device.release(), 0, 'the device holds no count for what it keeps bound');
+    assert.equal(last.destroyed, true);
+});
+
+test('a state block moves the binding hold with the buffers it applies', ()=>{
+    const device = createDevice();
+    const buffer = ()=>{
+        /** @type {{ buffer?: any }} */
+        const out = {};
+        assert.equal(device.CreateVertexBuffer(16, 0, 0, D3DPOOL.DEFAULT, out), D3D_OK);
+        return out.buffer;
+    };
+    const first = buffer();
+    const second = buffer();
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    assert.equal(device.SetStreamSource(0, second, 0, 16), D3D_OK);
+    /** @type {{ block?: any }} */
+    const out = {};
+    assert.equal(device.EndStateBlock(out), D3D_OK);
+    assert.equal(device.SetStreamSource(0, first, 0, 16), D3D_OK);
+    assert.equal(first.release(), 0);
+    assert.equal(first.destroyed, false);
+    assert.equal(out.block.Apply(), D3D_OK);
+    assert.equal(first.destroyed, true, 'replaced by the block, the released buffer goes');
+    assert.equal(second.destroyed, false);
+    assert.equal(second.release(), 0);
+    assert.equal(second.destroyed, false, 'the block bound it, so it stays');
+});

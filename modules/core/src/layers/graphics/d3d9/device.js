@@ -813,7 +813,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const pixelConstants = createConstantFile(CONSTANT_FILE.pixel);
 
     /** @type {Map<number, { buffer: any, offset: number, stride: number }>} */
-    const streams = new Map();
+    const streams = new BindingMap();
     /** @type {Map<number, number>} */
     const streamFrequencies = new Map();
     /** @type {Map<number, any>} */
@@ -945,11 +945,16 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      *     reference goes, before the device's is released.
      */
     const explicitCount = (pool = D3DPOOL.MANAGED, onGone = ()=>{})=>{
+        // The reference a resource holds on the device follows the program's
+        // count: one the device keeps bound past the program's last Release
+        // holds none, and taking it back takes one again (Wine's d3d9ex
+        // test_reset_ex ends with the device's count at zero).
         count.addRef();
-        const made = createReferenceCount({ onLastRef: ()=>{
-            onGone();
-            count.release();
-        } });
+        const made = createReferenceCount({
+            onFirstRef: ()=>count.addRef(),
+            onZero: ()=>count.release(),
+            onLastRef: onGone,
+        });
         pooled.add({ pool, count: made });
         return made;
     };
@@ -1190,7 +1195,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      *           format?: number }} options
      */
     const createBuffer = options=>{
-        const bufferCount = explicitCount(options.pool);
+        // Its storage goes back when the last reference does, the program's or
+        // the device's binding, whichever is later.
+        const bufferCount = explicitCount(options.pool, ()=>free(base));
         const base = allocate(options.length);
         let locked = false;
         const buffer = {
@@ -1200,15 +1207,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             get refCount(){
                 return bufferCount.value;
             },
-            addRef: ()=>bufferCount.addRef(),
-            release(){
-                const left = bufferCount.release();
-                if (bufferCount.destroyed)
-                {
-                    free(base);
-                }
-                return left;
+            get destroyed(){
+                return bufferCount.destroyed;
             },
+            reachable: ()=>!bufferCount.destroyed,
+            addRef: ()=>bufferCount.addRef(),
+            release: ()=>bufferCount.release(),
+            /** The device binds it (see `createReferenceCount`). */
+            hold: ()=>bufferCount.hold?.(),
+            letGo: ()=>bufferCount.letGo?.(),
 
             /**
              * A size of zero means "to the end", which is the only way a
@@ -1460,7 +1467,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             return indices;
         },
         set indices(value){
-            indices = value;
+            indices = rebound(indices, value);
         },
         get nPatchMode(){
             return nPatchMode;
@@ -1541,8 +1548,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * afterwards has to bind it again.
      */
     const unbindStreamZero = ()=>{
-        stream(0).buffer = null;
-        indices = null;
+        stream(0).buffer = rebound(stream(0).buffer, null);
+        indices = rebound(indices, null);
         baseVertexIndex = 0;
     };
 
@@ -1757,7 +1764,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         streams.clear();
         streamFrequencies.clear();
         textures.clear();
-        indices = null;
+        indices = rebound(indices, null);
         baseVertexIndex = 0;
     };
 
@@ -1816,6 +1823,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 stopWatchingLoss?.();
                 showGamma(true);
+                // What it kept bound goes with it.
+                streams.clear();
+                indices = rebound(indices, null);
                 retireImplicitSurfaces();
                 // The reference CreateDevice took on the object that made it.
                 identity?.direct3D?.release?.();
@@ -3114,7 +3124,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     record.indices = buffer ?? null;
                 },
                 ()=>{
-                    indices = buffer ?? null;
+                    indices = rebound(indices, buffer ?? null);
                 }, true);
         },
 
@@ -3158,7 +3168,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     });
                 },
                 ()=>{
-                    bound.buffer = buffer ?? null;
+                    bound.buffer = rebound(bound.buffer, buffer ?? null);
                     if (buffer)
                     {
                         bound.offset = offset;
@@ -4381,6 +4391,51 @@ function fullMipCount(width, height){
         levels++;
     }
     return levels;
+}
+
+/**
+ * A binding's move from one resource to another: the device holds what it
+ * binds, so a resource the program released to nothing while bound lives on
+ * until it is unbound, as Windows keeps it (Wine's d3d9ex test_reset_ex).
+ *
+ * @param {any} previous @param {any} next
+ * @returns {any} next
+ */
+function rebound(previous, next){
+    if (previous !== next)
+    {
+        next?.hold?.();
+        previous?.letGo?.();
+    }
+    return next;
+}
+
+/**
+ * The device's streams, whose records carry the binding's hold with them:
+ * a record set over another moves it, and clearing them lets every one go.
+ *
+ * @extends {Map<number, { buffer: any, offset: number, stride: number }>}
+ */
+class BindingMap extends Map {
+    /** @param {number} index @param {{ buffer: any, offset: number, stride: number }} record */
+    set(index, record){
+        rebound(this.get(index)?.buffer ?? null, record?.buffer ?? null);
+        return super.set(index, record);
+    }
+
+    /** @param {number} index */
+    delete(index){
+        this.get(index)?.buffer?.letGo?.();
+        return super.delete(index);
+    }
+
+    clear(){
+        for (const record of this.values())
+        {
+            record.buffer?.letGo?.();
+        }
+        super.clear();
+    }
 }
 
 /**

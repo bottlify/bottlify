@@ -882,6 +882,10 @@ export function createDirect3D9Seam(
         if (shadow)
         {
             buffer.guestState = ()=>shadow.attachBuffer(buffer);
+            // A binding the guest made and the host has not read is adopted
+            // before the buffer's count is touched: the device holds what is
+            // bound, and a Release of the last reference must find it held.
+            buffer.settleGuestRefs = ()=>shadow.sync();
         }
     };
 
