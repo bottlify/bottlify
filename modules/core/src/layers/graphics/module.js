@@ -957,7 +957,13 @@ export function createGraphicsModule(){
                 // reading in guest memory, so the device claims that address and
                 // the presenter shows the texture instead of the stale bytes.
                 render: ()=>({
-                    backend: device ? api.backend() : undefined,
+                    // With a graphics worker, devices keep their state here and
+                    // draw there, as Direct3D 8 and 9 devices do.
+                    remote: remote
+                        ? (/** @type {any} */ ddraw, /** @type {any} */ renderServices)=>
+                            remote.root('d3d7', ()=>null, { ...renderServices, ddraw })
+                        : undefined,
+                    backend: device && !remote ? api.backend() : undefined,
                     readMemory: services.readMemory,
                     // A lock, a device context or a blit of a render target brings
                     // what the GPU drew back into the guest's bytes first.

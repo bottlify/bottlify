@@ -6,14 +6,15 @@
 
 /**
  * The program's thread's end of the graphics worker (`worker.js`): each
- * Direct3D 8 or 9 root and each OpenGL root made here is a recorded one whose
- * twin the worker plays, over a port of its own, and each frame the worker presents comes
+ * Direct3D 7, 8 or 9 root and each OpenGL root made here is a recorded one
+ * whose twin the worker plays, over a port of its own, and each frame the worker presents comes
  * back as a picture that is copied into a texture of this thread's device
  * and presented as a frame drawn here would be.
  */
 
 import { createSender } from './channel.js';
 import { recordedDirect3D } from './direct3d.js';
+import { recordedDirect3D7 } from './d3d7.js';
 import { recordedOpengl } from './opengl.js';
 
 /** GPUTextureUsage, here without the browser's global. */
@@ -49,8 +50,8 @@ function plainOf(services){
 
 /**
  * @typedef {Object} GraphicsWorkerEnd
- * @property {(api: 'd3d8' | 'd3d9' | 'opengl', factory: (services: any) => any, services: any)
- *     => any} root
+ * @property {(api: 'd3d7' | 'd3d8' | 'd3d9' | 'opengl', factory: (services: any) => any,
+ *     services: any) => any} root
  *     a root the program is given, whose twin the worker plays
  * @property {() => { roots: number, frames: number }} diagnostics
  * @property {() => void} dispose
@@ -149,9 +150,15 @@ export function connectGraphicsWorker(options){
                 on: { wrote: writeMemory, divergence, lost, failed },
             });
             port1.onmessage = event=>sender.receive(event.data);
-            return api === 'opengl'
-                ? recordedOpengl(factory, services, sender)
-                : recordedDirect3D(factory, services, sender);
+            switch (api)
+            {
+                case 'opengl':
+                    return recordedOpengl(factory, services, sender);
+                case 'd3d7':
+                    return recordedDirect3D7(services.ddraw, services, sender);
+                default:
+                    return recordedDirect3D(factory, services, sender);
+            }
         },
         diagnostics: ()=>({ roots: ports.length, frames }),
         dispose(){

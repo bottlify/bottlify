@@ -5,7 +5,7 @@
  */
 
 /**
- * The graphics worker: Direct3D 8 and 9 devices and OpenGL contexts played
+ * The graphics worker: Direct3D 7, 8 and 9 devices and OpenGL contexts played
  * on a GPU device of its own, off the thread the program runs on.
  *
  * The program's thread makes a root it records (`direct3d.js`) and sends
@@ -21,7 +21,7 @@
  *                                    bytes read back; anything else keeps them.
  *                                    Answered every time it is asked.
  *   { type: 'root', api, options, port }
- *                                    `api` 'd3d8', 'd3d9' or 'opengl', `options` the
+ *                                    `api` 'd3d7', 'd3d8', 'd3d9' or 'opengl', `options` the
  *                                    plain part of what the root was made with;
  *                                    `{ type: 'close' }` on the port ends it
  * Messages from it:
@@ -39,6 +39,7 @@ import { createFrameLatency } from '../webgpu/internal/latency.js';
 import { createReceiver } from './channel.js';
 import { playedDirect3D } from './direct3d.js';
 import { playedOpengl } from './opengl.js';
+import { playedDirect3D7 } from './d3d7.js';
 
 /** @type {Record<string, (services: any) => any>} */
 const FACTORIES = { d3d8: createDirect3D8, d3d9: createDirect3D9 };
@@ -181,8 +182,20 @@ export function serveGraphics(scope, deps){
             post({ type: 'wrote', writes: [{ address, bytes: bytes.slice() }] });
         /** @param {any} submitted */
         const frameQueued = submitted=>latency.queued(submitted);
-        const played = api === 'opengl'
-            ? playedOpengl(createOpenglRoot, {
+        /** @type {any} */
+        let played;
+        if (api === 'd3d7')
+        {
+            played = playedDirect3D7({
+                ...options,
+                backend,
+                createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
+                writeMemory: wrote,
+            });
+        }
+        else if (api === 'opengl')
+        {
+            played = playedOpengl(createOpenglRoot, {
                 ...options,
                 backend: ()=>backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
@@ -193,8 +206,11 @@ export function serveGraphics(scope, deps){
                 divergence: (/** @type {string} */ detail)=>
                     post({ type: 'divergence', api: 'OpenGL', detail }),
                 frameQueued,
-            })
-            : playedDirect3D(FACTORIES[api], {
+            });
+        }
+        else
+        {
+            played = playedDirect3D(FACTORIES[api], {
                 ...options,
                 backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
@@ -215,6 +231,7 @@ export function serveGraphics(scope, deps){
                 frameQueued,
                 gamma: options.gamma ? { applies: ()=>true, set: ()=>{} } : undefined,
             });
+        }
         const receiver = createReceiver({ played, post });
         port.onmessage = event=>{
             if (event.data?.type === 'close')

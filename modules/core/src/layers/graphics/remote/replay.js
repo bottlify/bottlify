@@ -86,6 +86,13 @@ const NOTHING = /** @type {readonly unknown[]} */ (Object.freeze([]));
 const DEVICE_OBJECTS = new WeakSet();
 
 /**
+ * Objects of another model a recording names by number without wrapping
+ * them -- a DirectDraw surface a Direct3D 7 device draws into -- which the
+ * caller hands back as it got them. @type {WeakSet<object>}
+ */
+const ADOPTED = new WeakSet();
+
+/**
  * Whether a value is one of a device's objects -- the device, a resource, a
  * swap chain: an object with methods. Descriptors, structures and the objects
  * a call writes its answers into have none.
@@ -96,6 +103,10 @@ const DEVICE_OBJECTS = new WeakSet();
 function isDeviceObject(value){
     if (value === null || typeof value !== 'object' || Array.isArray(value)
         || ArrayBuffer.isView(value) || value instanceof Promise)
+    {
+        return false;
+    }
+    if (ADOPTED.has(value))
     {
         return false;
     }
@@ -210,13 +221,16 @@ function visit(value, bind){
  * @returns {{ root: any, allocated: (address: number, bytes: number) => void,
  *     freed: (address: number) => void,
  *     wrote: (address: number, bytes: Uint8Array) => void,
- *     read: (address: number, bytes: Uint8Array) => void, outward: (value: any) => any }}
+ *     read: (address: number, bytes: Uint8Array) => void, outward: (value: any) => any,
+ *     adopt: (object: object) => void }}
  *     `allocated` and `freed` are told every allocation the recorded device
  *     makes and gives back, `wrote` every write it makes into guest memory,
  *     and `read` -- by a device that reads the program's memory at the call
  *     rather than through its locks -- every read, whose bytes the played
  *     device is sent ahead of the call; `outward` is a value of the device's
- *     as the caller is given it
+ *     as the caller is given it; `adopt` numbers an object of another model,
+ *     unwrapped, as the next the played side binds -- what the call just
+ *     recorded answered there
  */
 export function createRecording(options){
     const { root, readMemory, transport, answered = ()=>false, answers = new Set() } = options;
@@ -440,7 +454,7 @@ export function createRecording(options){
     const copyOut = (into, from)=>{
         if (into === null || typeof into !== 'object' || from === null || typeof from !== 'object'
             || ArrayBuffer.isView(into) || raws.has(into) || isDeviceObject(into)
-            || services.has(into))
+            || services.has(into) || ADOPTED.has(into))
         {
             return;
         }
@@ -856,6 +870,10 @@ export function createRecording(options){
             writer.u32(1);
             writer.memory(address, bytes);
             transport.recorded();
+        },
+        adopt(object){
+            ADOPTED.add(object);
+            numbers.set(object, next++);
         },
         read(address, bytes){
             // Written into the record when the call is finished, before the

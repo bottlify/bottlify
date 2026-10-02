@@ -99,6 +99,9 @@ const FILTER_NUMBERING = Object.freeze({
  *     Where a flipped surface gets shown from. The device claims the address
  *     of every surface it renders into, so a present of that address shows
  *     the texture rather than the guest bytes nobody drew.
+ * @property {(ddraw: any, services: RenderServices) => any} [remote]
+ *     Makes the Direct3D 7 object in this one's place, whose devices draw
+ *     elsewhere (`remote/d3d7.js`).
  */
 
 /** How many indices the scratch record can carry; a bigger draw grows it. */
@@ -730,21 +733,23 @@ export function createDirect3D7(ddraw, services = {}){
          * The depth this device draws against is the GPU's copy, so a
          * DirectDraw depth fill of the buffer attached to its target is a
          * depth clear there, over the rectangle filled and nothing else.
+         *
+         * @param {any} surface @param {any} rect @param {number} value
          */
-        const stopWatchingDepth = ddraw.watchDepthFills?.(
-            (/** @type {any} */ surface, /** @type {any} */ rect, /** @type {number} */ value)=>{
-                if (!renderer || attachedDepth(renderTarget) !== surface)
-                {
-                    return;
-                }
-                const range = surface.pixelFormat.greenMask >>> 0 || 0xffff;
-                const kept = viewport;
-                viewport = fullTarget({ width: renderTarget.width, height: renderTarget.height });
-                renderer.clear(model, rect
-                    ? [{ x1: rect.left, y1: rect.top, x2: rect.right, y2: rect.bottom }]
-                    : [], D3DCLEAR.ZBUFFER, 0, ((value & range) >>> 0) / range, 0);
-                viewport = kept;
-            }) ?? (()=>{});
+        const depthFilled = (surface, rect, value)=>{
+            if (!renderer || attachedDepth(renderTarget) !== surface)
+            {
+                return;
+            }
+            const range = surface.pixelFormat.greenMask >>> 0 || 0xffff;
+            const kept = viewport;
+            viewport = fullTarget({ width: renderTarget.width, height: renderTarget.height });
+            renderer.clear(model, rect
+                ? [{ x1: rect.left, y1: rect.top, x2: rect.right, y2: rect.bottom }]
+                : [], D3DCLEAR.ZBUFFER, 0, ((value & range) >>> 0) / range, 0);
+            viewport = kept;
+        };
+        const stopWatchingDepth = ddraw.watchDepthFills?.(depthFilled) ?? (()=>{});
 
         /**
          * The colour target drawn at the address a surface shows, if this
@@ -762,27 +767,30 @@ export function createDirect3D7(ddraw, services = {}){
          * a lock, a device context, a blit out of it -- they are read back,
          * and the caller waits; once it has written them, they go up to the
          * target at its next use. A depth buffer has no way back.
+         *
+         * @param {any} surface
+         * @returns {Promise<void> | null}
          */
-        const stopWatchingPixels = ddraw.watchPixels?.({
-            readBack: (/** @type {any} */ surface)=>{
-                const adapter = drawnAt(surface);
-                if (!adapter || !renderer || !write)
-                {
-                    return null;
-                }
-                return renderer.readSurface(adapter).then(
-                    (/** @type {{ data: Uint8Array }} */ pixels)=>{
-                        writePixels(adapter, pixels.data, write);
-                    });
-            },
-            written: (/** @type {any} */ surface)=>{
-                const adapter = drawnAt(surface);
-                if (adapter && renderer)
-                {
-                    renderer.markDirty(adapter);
-                }
-            },
-        }) ?? (()=>{});
+        const readBack = surface=>{
+            const adapter = drawnAt(surface);
+            if (!adapter || !renderer || !write)
+            {
+                return null;
+            }
+            return renderer.readSurface(adapter).then(
+                (/** @type {{ data: Uint8Array }} */ pixels)=>{
+                    writePixels(adapter, pixels.data, write);
+                });
+        };
+        /** @param {any} surface */
+        const written = surface=>{
+            const adapter = drawnAt(surface);
+            if (adapter && renderer)
+            {
+                renderer.markDirty(adapter);
+            }
+        };
+        const stopWatchingPixels = ddraw.watchPixels?.({ readBack, written }) ?? (()=>{});
 
         const device = {
             description,
@@ -1537,6 +1545,14 @@ export function createDirect3D7(ddraw, services = {}){
                 presenting = buffer;
                 return renderer?.present(model);
             },
+
+            // What DirectDraw tells the device of its surfaces, as calls: what
+            // a device drawn elsewhere is told the same things through.
+            /** @param {number} buffer */
+            Present: buffer=>device.present(buffer),
+            DepthFilled: depthFilled,
+            ReadBack: readBack,
+            PixelsWritten: written,
 
             /** Settled when every presented frame has reached the backend. */
             idle(){

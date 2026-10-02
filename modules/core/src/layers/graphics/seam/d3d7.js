@@ -123,7 +123,10 @@ export function createDirect3D7Seam(
         {
             return existing;
         }
-        const made = createDirect3D7(root, typeof render === 'function' ? render() : render ?? {});
+        const services = typeof render === 'function' ? render() : render ?? {};
+        const made = services.remote
+            ? services.remote(root, services)
+            : createDirect3D7(root, services);
         objects.set(root, made);
         return made;
     };

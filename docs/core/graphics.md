@@ -33,7 +33,7 @@ allows because `win32` is declared.
 
 | option | type | default | meaning |
 |---|---|---|---|
-| `device` | `{ device, queue, adapter?, canvas?, screen?, presentTo?, onFrame?, onPresented?, onPresentFailed?, dumpDraws?, maxDraws?, skipTexture?, probeTexture?, fog?, mips?, worker? }` or absent | absent | The GPU. `worker` is a graphics worker that has answered `open` (`remote/worker.js`): the Direct3D 8 and 9 devices and the OpenGL contexts are then recorded here and played there (`remote/`), and its frames are copied onto this device and handed to `presentTo` as this thread's own are; `diagnostics().worker` counts the roots it plays and the frames it sent back. `device` and `queue` are the WebGPU objects; `presentTo(frame)` receives a finished frame in a build that did not supply a presenter; `canvas`/`screen` and the three frame callbacks are what the run's presenter is made from. Absent, `available()` is false, `backend()` throws on first use, and every API still answers state questions. The layer watches `device.lost`: once the GPU device is lost for any reason but its own destruction, every Direct3D 8 and 9 device made on it is lost, and one made afterwards starts lost (see *Limitations*). |
+| `device` | `{ device, queue, adapter?, canvas?, screen?, presentTo?, onFrame?, onPresented?, onPresentFailed?, dumpDraws?, maxDraws?, skipTexture?, probeTexture?, fog?, mips?, worker? }` or absent | absent | The GPU. `worker` is a graphics worker that has answered `open` (`remote/worker.js`): the Direct3D 7, 8 and 9 devices and the OpenGL contexts are then recorded here and played there (`remote/`), and its frames are copied onto this device and handed to `presentTo` as this thread's own are; `diagnostics().worker` counts the roots it plays and the frames it sent back. `device` and `queue` are the WebGPU objects; `presentTo(frame)` receives a finished frame in a build that did not supply a presenter; `canvas`/`screen` and the three frame callbacks are what the run's presenter is made from. Absent, `available()` is false, `backend()` throws on first use, and every API still answers state questions. The layer watches `device.lost`: once the GPU device is lost for any reason but its own destruction, every Direct3D 8 and 9 device made on it is lost, and one made afterwards starts lost (see *Limitations*). |
 | `presenter` | a presenter made by the run, or absent | made from `device` | The canvas, its configured format, the pacer and the texture the primary is copied into. It is a service of the run rather than of a machine, so the assembling caller makes one and hands the same object to every machine the run is rebuilt on; the layer attaches its own backend and address space to it, presents and claims through what the attachment answers, and at `dispose()` detaches rather than disposing it. The last frame one process presented stays on the canvas until the next presents. |
 | `device.adapter` | `{ vendor?, architecture?, description? }` | absent | What `GetAdapterIdentifier` and `vkGetPhysicalDeviceProperties` describe. |
 | `compressedTextures` | boolean | `false` | Whether a kept S3TC texture travels to the device as BC blocks instead of decoded `rgba8unorm`, once the format is legal to create at all -- `CheckDeviceFormat` and `glCompressedTexImage2D` answer a DXT format creatable either way, whatever this flag says. Applies to OpenGL and Direct3D 8/9 alike; DirectDraw has no DXT/FOURCC surface path for it to apply to, and Vulkan's flag instead gates whether `textureCompressionBC` is *advertised* as a supported feature -- a legality signal, not an upload choice, pre-existing before this flag and exercised by no title. The device's own `texture-compression-bc` feature still gates it either way: `true` here without the feature is `false`. Off by default: measured to stall the GPU process on the one machine this project has run it on; a build turns it on once it is checked clean on its own hardware. Set through `createApp`'s `graphics` option, which is forwarded to this layer as given. |
@@ -1247,6 +1247,22 @@ the processor is decided alike on both sides. `wglShareLists` crosses as the sou
 its objects. A swap waits as a Direct3D present does. Over the fake device, a frame of 276
 `glDrawElements` of 300 to 3,000 client indices over vertices in a buffer object cost the
 engine's thread 2.3 to 3.1 ms recorded against 6.1 to 7.2 ms drawing it there, and sent 1.8 MiB.
+
+A Direct3D 7 object in the graphics worker (`remote/d3d7.js`) is recorded the same way, but what
+its devices draw into and sample are DirectDraw surfaces, another model's objects that the
+program locks, blits and flips behind the device's back. A surface crosses by number: it is
+described to the worker -- its size, caps, pixel format, colour key, the depth buffer attached,
+and each mip level's address and uniqueness value -- when a device first meets it, and again
+before a clear, a draw or a present once any of that changed, so a flip that trades two
+surfaces' addresses reaches the worker before the frame it shows. A texture level's bytes go
+ahead of the draw that samples it once its uniqueness value says the program wrote them, an
+index array's with the draw that names it, a vertex buffer's with its unlock. What DirectDraw
+tells a device -- a depth fill of its depth buffer, a target the program wrote, a target about to
+be read -- reaches the worker as calls, the read-back answered there; the addresses a device draws
+into are claimed with the presenter here, and a present of one is paced as a Direct3D 8 present
+is. The DirectX 3, 5 and 6 devices are views over a Direct3D 7 device and go the same way. Over
+the fake device, a frame of 400 lit, textured `DrawIndexedPrimitiveVB` calls with indices by
+pointer cost the engine's thread 23.5 to 26.7 ms drawn there and 3.2 to 4.2 ms recorded.
 
 ## Tests
 
