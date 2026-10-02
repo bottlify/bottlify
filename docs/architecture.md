@@ -2,7 +2,7 @@
 
 Русская версия: [architecture.ru.md](architecture.ru.md).
 
-As of `bottlify` d066d2b and `bottlify-ui` bea9c9b, 2 October 2026. Paths without a prefix are
+As of `bottlify` cf293c0 and `bottlify-ui` ec1a29c, 2 October 2026. Paths without a prefix are
 relative to `modules/` in bottlify; paths starting with `ui/` are relative to the root of
 bottlify-ui. Where a diagram and the code disagree, the code is right.
 
@@ -151,7 +151,7 @@ flowchart TB
 | Page main thread | the browser | always | The launcher's interface, the `createApp` call and DOM events live here. Per frame it does one thing only: polls the gamepads (`requestAnimationFrame` → `input.poll`) |
 | Engine thread | the page, `core/src/host/create.js` | always. With `?host=thread` the engine runs on the page's thread instead, over the same protocol | The program runs in long quanta. On the page's thread it would be interrupted by garbage collection and the interface's rendering, and a click would wait for the quantum to end. Synchronous OPFS access also exists only in a worker. A WebGPU device cannot move between threads, so the worker opens its own and gets the canvas as an `OffscreenCanvas` |
 | Log keeper | the page, `core/src/host/remote.js` | always. Without `Worker`, a `MessageChannel` on the page takes its place | The engine writes its journal, counters and tables into shared memory and answers no questions. The keeper drains the ring before it laps, keeps the history and works out frames, the profile and the per-module breakdown. Logging then costs neither the page nor the engine anything |
-| Graphics thread | the engine thread, `core/src/host/graphics-worker.js` (called from `serve.js`) | at start, if the engine has a canvas and `device.graphicsWorker: false` is not set. Survives a change of program. If it opens no device within 10 s, Direct3D draws on the engine thread | Direct3D 8 and 9 calls are played here on a WebGPU device of its own. In the `tools/graphics-bench --remote` bench the engine thread spends 0.69 ms a frame instead of 2.95 |
+| Graphics thread | the engine thread, `core/src/host/graphics-worker.js` (called from `serve.js`) | at start, if the engine has a canvas and `device.graphicsWorker: false` is not set (`?graphicsWorker=off` in the launcher). Survives a change of program. If it opens no device within 10 s, everything draws on the engine thread | Its job is to draw all the graphics, so the engine thread only keeps state and answers the program. Today Direct3D 7, 8, 9 and OpenGL are played here on a WebGPU device of its own; Direct3D 10 and Vulkan will move here too. In the `tools/graphics-bench --remote` bench the engine thread spends 0.69 ms a Direct3D frame instead of 2.95 |
 | Translation thread | cork's runtime inside the engine thread, `cork/src/runtime/translator.js` | when the engine is cork. Until it answers `ready`, regions are translated on the engine thread | Emits wasm for regions, builds a module and compiles it. The engine thread does not wait for it: it posts a batch and publishes the result between frames, whenever it arrives |
 | AudioWorklet | the page, `ui/src/engine/session.js` | if the page is cross-origin isolated (`crossOriginIsolated`) and sound is on | The Web Audio real-time thread. It reads the voices from shared memory on its own clock, so sound does not break up even while the engine is busy |
 
@@ -175,7 +175,7 @@ flowchart LR
   once (`transferControlToOffscreen`), and from then on only the engine draws into it.
 - **Engine → log keeper.** Shared memory only: the keeper looks into the ring every 200 ms. Without
   `SharedArrayBuffer` the page forwards the records to it as messages.
-- **Engine ⇄ graphics.** Each Direct3D device has a `MessageChannel` of its own. Calls go into one
+- **Engine ⇄ graphics.** Direct3D 7, 8, 9 and OpenGL each have a `MessageChannel` of their own. Calls go into one
   buffer per batch, and the buffer is transferred without a copy. Back come the frame as an
   `ImageBitmap` and the answers to calls only the renderer knows.
 - **Engine ⇄ translation.** Regions missing from the store go one way; module bytes and an already
@@ -223,7 +223,7 @@ sequenceDiagram
   P->>E: run
   Note over E: the program's first instruction
   loop every frame
-    E->>G: a batch of Direct3D 8/9 calls
+    E->>G: a batch of Direct3D and OpenGL calls
     G-->>E: frame as ImageBitmap
     E->>E: presenter: frame into the OffscreenCanvas
   end
@@ -233,7 +233,7 @@ The order matters in three places.
 
 - **The WebGPU device and the graphics thread open before the layers.** The engine's `createApp`
   receives the graphics thread in its device options (`device.worker`), so the `graphics` layer knows
-  while it is being built where Direct3D 8/9 will draw.
+  while it is being built where Direct3D and OpenGL will draw.
 - **The session is applied before the program's first instruction,** so the program sees its saves
   and registry from the very start.
 - **The program starts only on `run`,** once the page has attached the log, input and sound.
@@ -494,22 +494,27 @@ tables in `core/src/layers/win32/<dll>/`, the search order in `core/src/app.js`
 
 ## 7. Graphics
 
+The graphics thread is there to draw all of the program's graphics. The engine thread keeps only
+the devices' state and answers the program, while their twins draw on the graphics thread, on a
+WebGPU device of its own. Direct3D 7, 8, 9 and OpenGL work this way today. Direct3D 10 and Vulkan
+still draw on the engine thread and will move to the graphics thread next.
+
 | Where | What it does |
 | --- | --- |
 | Page | Hands the `<canvas>` to the engine once (`transferControlToOffscreen`) and fits it into the window, keeping its proportions (`ui/src/components/PlayScreen.jsx`) |
-| Engine thread | Every graphics API the program uses. The Direct3D 8/9 device keeps the state and answers the program, but draws nothing itself. Direct3D 7, Direct3D 10, OpenGL and Vulkan draw right here through the WebGPU backend. DirectDraw and GDI draw into software surfaces in the program's memory, which the presenter uploads. The presenter also puts the finished frame into the `OffscreenCanvas` |
-| Graphics thread | The Direct3D 8/9 device's twin plays the same calls on its own WebGPU device and returns the frame as an `ImageBitmap` |
+| Engine thread | Every graphics API the program uses. The Direct3D 7, 8 and 9 devices and the OpenGL contexts keep the state and answer the program, but draw nothing themselves. Direct3D 10 and Vulkan still draw right here through the WebGPU backend. DirectDraw and GDI draw into software surfaces in the program's memory, which the presenter uploads. The presenter also puts the finished frame into the `OffscreenCanvas` |
+| Graphics thread | The twins of the Direct3D 7, 8 and 9 devices and the OpenGL contexts play the same calls on the thread's own WebGPU device and return the frame as an `ImageBitmap` |
 | OPFS | Not used. Pipeline and shader caches live in memory only |
 
 ```mermaid
 %%{init: {"theme": "base", "flowchart": {"curve": "step", "nodeSpacing": 30, "rankSpacing": 50, "padding": 10}, "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "13px", "primaryColor": "#FFFFFF", "primaryBorderColor": "#2F3A40", "primaryTextColor": "#1B2328", "lineColor": "#5C6970", "clusterBkg": "#F3F5F6", "clusterBorder": "#9AA6AC", "edgeLabelBackground": "#FFFFFF"}}}%%
 flowchart TB
   subgraph E1["Engine thread"]
-    D89["Direct3D 8/9<br/>state and answers, no renderer"]
-    D7["Direct3D 7, 10, OpenGL, Vulkan<br/>WebGPU backend, the engine's device"]
+    D89["Direct3D 7, 8, 9, OpenGL<br/>state and answers, no renderer"]
+    D7["Direct3D 10, Vulkan<br/>still drawn here, through WebGPU"]
     SW["DirectDraw, GDI<br/>surfaces in program memory"]
   end
-  TW["<b>Graphics thread</b><br/>the device's twin:<br/>WebGPU backend, its own device"]
+  TW["<b>Graphics thread</b><br/>the devices' twins:<br/>WebGPU backend, its own device"]
   PR["<b>Engine thread</b><br/>presenter"]
   CV["the page's canvas"]
   D89 -->|"batch of calls"| TW
@@ -519,15 +524,17 @@ flowchart TB
   PR -->|"OffscreenCanvas"| CV
 ```
 
-- **How calls travel.** Each Direct3D 8/9 call is written into a binary batch as it is made
-  (`remote/wire.js`). The batch goes at the end of the turn (`queueMicrotask`), or at once if a call
-  waits for an answer. Resource bytes ride in the same batch: for a buffer, what the program wrote
-  between `Lock` and `Unlock`; for a texture, everything written up to the next call that may read it.
-  A renderer on the engine thread reads the bytes at those same moments, so the picture comes out the
+- **How calls travel.** Each call is written into a binary batch as it is made (`remote/wire.js`).
+  The batch goes at the end of the turn (`queueMicrotask`), or at once if a call waits for an answer.
+  Resource bytes ride in the same batch. For a Direct3D buffer that is what the program wrote between
+  `Lock` and `Unlock`; for a texture, everything written up to the next call that may read it.
+  OpenGL reads the program's memory at the call itself, so whatever a call read goes ahead of it.
+  The DirectDraw surfaces Direct3D 7 draws into cross by number and are described again when they
+  change. A renderer on the engine thread reads the bytes at those same moments, so the picture comes out the
   same wherever Direct3D draws.
 - **Who waits for whom.** `Present` waits for the graphics thread only when it is more than two frames
-  behind. Only the calls whose result only the renderer knows wait for an answer: `GetData`
-  (occlusion queries included), `GetRenderTargetData`, `GetFrontBuffer(Data)`, plus `LockRect`,
+  behind. Only the calls whose result only the renderer knows wait for an answer. For Direct3D 8/9 those are
+  `GetData` (occlusion queries included), `GetRenderTargetData`, `GetFrontBuffer(Data)`, plus `LockRect`,
   `GetDC` and `CopyRects` on a render target. And what waits is the program's thread, not the
   engine's: the bridge parks it in the scheduler, and the program's other threads keep running.
 - **Shaders.** Direct3D 8/9 shader bytecode is parsed and translated to WGSL
@@ -536,8 +543,8 @@ flowchart TB
 - **Textures** go to the GPU as `bgra8unorm`, and DXT-compressed ones are decoded on the CPU by
   default. They reach the GPU in their BC format only with the `graphics.compressedTextures` flag,
   and only on a device with `texture-compression-bc`.
-- **When something breaks.** If the graphics thread does not open, Direct3D draws on the engine
-  thread and a warning goes to the console. If the WebGPU device is lost, `Present` and `Reset` return
+- **When something breaks.** If the graphics thread does not open, Direct3D and OpenGL draw on the
+  engine thread and a warning goes to the console. If the WebGPU device is lost, `Present` and `Reset` return
   `D3DERR_DEVICELOST` (`D3DERR_DEVICEREMOVED` on 9Ex). There is no recovery: new frames simply stop
   arriving.
 
