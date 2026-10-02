@@ -650,3 +650,35 @@ test('byte-exact: a surface read through a window is the picture its rows copied
         assert.equal(copied.reads.copies, height);
     }
 });
+
+test('a row expanded a word at a time is the row expanded a byte at a time, at every depth', ()=>{
+    // A row that starts off its pixel's alignment is expanded a byte at a
+    // time; the same bytes where they align, a word at a time.
+    let seed = 3;
+    const random = ()=>{
+        seed = (seed * 1103515245 + 12345) >>> 0;
+        return (seed >>> 16) & 0xff;
+    };
+    const palette = Array.from({ length: 256 }, ()=>(random() << 16) | (random() << 8) | random());
+    for (const bitCount of [8, 16, 32])
+    {
+        const width = 37;
+        const bytes = Uint8Array.from({ length: width * 4 + 8 }, random);
+        const aligned = new Uint8Array(width * 4);
+        const unaligned = new Uint8Array(width * 4 + 1);
+        expandRow(bytes, width, bitCount, palette, aligned, 4, 0);
+        const shifted = new Uint8Array(bytes.length + 1);
+        shifted.set(bytes, 1);
+        expandRow(shifted, width, bitCount, palette, unaligned, 5, 1);
+        assert.deepEqual([...aligned], [...unaligned.subarray(1)], `${bitCount} bits`);
+        expandRow(bytes, width, bitCount, null, aligned, 4, 0);
+        expandRow(shifted, width, bitCount, null, unaligned, 5, 1);
+        assert.deepEqual([...aligned], [...unaligned.subarray(1)], `${bitCount} bits, no palette`);
+    }
+    palette[7] = 0x123456;
+    const row = Uint8Array.of(7, 7, 7, 7);
+    const out = new Uint8Array(16);
+    expandRow(row, 4, 8, palette, out);
+    assert.deepEqual([...out.subarray(0, 4)], [0x12, 0x34, 0x56, 0xff],
+        'a palette changed in place is read as it is now');
+});

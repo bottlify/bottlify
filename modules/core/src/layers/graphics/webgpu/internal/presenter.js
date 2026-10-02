@@ -159,6 +159,116 @@ const six = value=>(value << 2) | (value >>> 4);
  */
 
 /**
+ * Whole-buffer views, kept while the buffer they view is the one asked of:
+ * a surface is expanded a row at a time out of one memory into one target,
+ * and a view made for every row would cost what it saves.
+ */
+const views = {
+    /** @type {ArrayBufferLike | null} */ in16Of: null, in16: new Uint16Array(0),
+    /** @type {ArrayBufferLike | null} */ in32Of: null, in32: new Uint32Array(0),
+    /** @type {ArrayBufferLike | null} */ outOf: null, out: new Uint32Array(0),
+};
+
+/** A 5-6-5 pixel as its B, G, R, A word, for every pixel there is; made when first needed. */
+let wide565 = new Uint32Array(0);
+
+/** An 8-bit row's palette as B, G, R, A words, and the entries it was made from. */
+const palettes = { words: new Uint32Array(256), from: /** @type {number[]} */ ([]),
+    /** @type {readonly number[] | null} */ of: null };
+
+/** What a row with no palette shows: black. */
+const NO_PALETTE = new Uint32Array(256).fill(0xff000000);
+
+/** @param {readonly number[] | null} palette */
+const paletteWords = palette=>{
+    if (palette === null)
+    {
+        return NO_PALETTE;
+    }
+    let same = palettes.of === palette;
+    for (let index = 0; same && index < 256; index++)
+    {
+        same = palettes.from[index] === (palette[index] ?? 0);
+    }
+    if (!same)
+    {
+        for (let index = 0; index < 256; index++)
+        {
+            const entry = palette[index] ?? 0;
+            palettes.from[index] = entry;
+            palettes.words[index] = (0xff000000 | ((entry & 0xff) << 16) | (entry & 0xff00)
+                | ((entry >>> 16) & 0xff)) >>> 0;
+        }
+        palettes.of = palette;
+    }
+    return palettes.words;
+};
+
+/**
+ * `expandRow` over words: four bytes of the target at a time, read from the
+ * row by its own width. The platforms this runs on are little-endian, which
+ * is what makes a B, G, R, A word and a guest pixel the same bytes.
+ *
+ * @param {Uint8Array} row @param {number} width @param {number} bitCount
+ * @param {number[] | null} palette @param {Uint8Array} out
+ * @param {number} inAt  the row's first byte, in its buffer
+ * @param {number} toAt  the target's first word, in its buffer
+ */
+function expandWords(row, width, bitCount, palette, out, inAt, toAt){
+    if (views.outOf !== out.buffer)
+    {
+        views.outOf = out.buffer;
+        views.out = new Uint32Array(out.buffer, 0, out.buffer.byteLength >>> 2);
+    }
+    const target = views.out;
+    if (bitCount === 32)
+    {
+        if (views.in32Of !== row.buffer)
+        {
+            views.in32Of = row.buffer;
+            views.in32 = new Uint32Array(row.buffer, 0, row.buffer.byteLength >>> 2);
+        }
+        const source = views.in32;
+        const from = inAt >>> 2;
+        for (let x = 0; x < width; x++)
+        {
+            target[toAt + x] = (source[from + x] | 0xff000000) >>> 0;
+        }
+        return;
+    }
+    if (bitCount === 16)
+    {
+        if (wide565.length === 0)
+        {
+            wide565 = new Uint32Array(0x10000);
+            for (let word = 0; word < 0x10000; word++)
+            {
+                wide565[word] = (0xff000000 | (five(word >>> 11) << 16)
+                    | (six((word >>> 5) & 0x3f) << 8) | five(word & 0x1f)) >>> 0;
+            }
+        }
+        if (views.in16Of !== row.buffer)
+        {
+            views.in16Of = row.buffer;
+            views.in16 = new Uint16Array(row.buffer, 0, row.buffer.byteLength >>> 1);
+        }
+        const source = views.in16;
+        const from = inAt >>> 1;
+        for (let x = 0; x < width; x++)
+        {
+            target[toAt + x] = wide565[source[from + x]];
+        }
+        return;
+    }
+    const words = paletteWords(palette);
+    const bytes = new Uint8Array(row.buffer, inAt, width);
+    for (let x = 0; x < width; x++)
+    {
+        target[toAt + x] = words[bytes[x]];
+    }
+}
+
+/**
  * One row of a surface, as B, G, R, A bytes.
  *
  * A PALETTEENTRY is the bytes red, green, blue, flags in that order, so a
@@ -177,6 +287,14 @@ const six = value=>(value << 2) | (value >>> 4);
  *     time without a view made for every row.
  */
 export function expandRow(row, width, bitCount, palette, out, rowAt = 0, outAt = 0){
+    const inAt = row.byteOffset + rowAt;
+    const toAt = out.byteOffset + outAt;
+    if (toAt % 4 === 0 && (bitCount === 8 || inAt % (bitCount >>> 3) === 0)
+        && (bitCount === 8 || bitCount === 16 || bitCount === 32))
+    {
+        expandWords(row, width, bitCount, palette, out, inAt, toAt >>> 2);
+        return;
+    }
     if (bitCount === 32)
     {
         for (let x = 0; x < width; x++)
