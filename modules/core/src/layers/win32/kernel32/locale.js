@@ -125,6 +125,7 @@ const CP437_HIGH = [
  */
 export const LANGID_EN_US = 0x0409;
 const LCID_EN_US = 0x0409;
+const LOCALE_INVARIANT = 0x007F;
 const LOCALE_USER_DEFAULT = 0x0400;
 const LOCALE_SYSTEM_DEFAULT = 0x0800;
 
@@ -183,7 +184,9 @@ const SYSTEMTIME_SIZE = 16;
  * @property {number} grouping       Digits to a group, 0 for none.
  * @property {string} decimal
  * @property {string} thousand
- * @property {number} negativeOrder  Where the sign goes, 0..4.
+ * @property {number} negativeOrder  Where the sign goes, 0..4 (0..15 for money).
+ * @property {number} [positiveOrder] Where a currency symbol goes, 0..3.
+ * @property {string} [symbol]       The currency's.
  */
 
 /**
@@ -197,11 +200,125 @@ const NUMBER_DEFAULTS = Object.freeze({
     digits: 2, leadingZero: 1, grouping: 3, decimal: '.', thousand: ',', negativeOrder: 1,
 });
 
+/**
+ * GetCurrencyFormat's picture when handed none: the number's, with a dollar
+ * sign in front and a negative amount in parentheses.
+ *
+ * @type {Readonly<NumberPicture>}
+ */
+const CURRENCY_DEFAULTS = Object.freeze({
+    ...NUMBER_DEFAULTS, negativeOrder: 0, positiveOrder: 0, symbol: '$',
+});
+
 /** sizeof(NUMBERFMTA): six DWORD-sized fields, two of them pointers. */
 const NUMBERFMTA_SIZE = 24;
+/** sizeof(CURRENCYFMTA): NUMBERFMTA's, then PositiveOrder and the symbol. */
+const CURRENCYFMTA_SIZE = 32;
+
+/**
+ * Where a currency symbol goes ($) around an amount (1), by PositiveOrder and
+ * by NegativeOrder.
+ */
+const CURRENCY_POSITIVE = ['$1', '1$', '$ 1', '1 $'];
+const CURRENCY_NEGATIVE = ['($1)', '-$1', '$-1', '$1-', '(1$)', '-1$', '1-$', '1$-',
+    '-1 $', '-$ 1', '1 $-', '$ 1-', '$ -1', '1- $', '($ 1)', '(1 $)'];
+
+/** GetCPInfoEx's names for the pages there are. */
+const PAGE_NAMES = Object.freeze({
+    1252: '1252  (ANSI - Latin I)',
+    437: '437   (OEM - United States)',
+    65001: '65001 (UTF-8)',
+});
+/** Where CodePageName starts in CPINFOEXA and CPINFOEXW, and its characters. */
+const CPINFOEX_NAME = 24;
+const MAX_PATH = 260;
 
 /** ERROR_CALL_NOT_IMPLEMENTED, for the one function here that is not. */
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
+
+/** FoldString's mappings (winnls.h). */
+const MAP_FOLDCZONE = 0x10;
+const MAP_PRECOMPOSED = 0x20;
+const MAP_COMPOSITE = 0x40;
+const MAP_FOLDDIGITS = 0x80;
+const MAP_EXPAND_LIGATURES = 0x2000;
+const MAP_FLAGS = MAP_FOLDCZONE | MAP_PRECOMPOSED | MAP_COMPOSITE | MAP_FOLDDIGITS
+    | MAP_EXPAND_LIGATURES;
+
+/** What MAP_EXPAND_LIGATURES makes of each ligature Windows expands. */
+const LIGATURES = new Map(Object.entries({
+    'Æ': 'AE', 'Þ': 'TH', 'ß': 'ss', 'æ': 'ae', 'þ': 'th', 'Ĳ': 'IJ', 'ĳ': 'ij', 'Œ': 'OE',
+    'œ': 'oe', 'Ǆ': 'DŽ', 'ǅ': 'Dž', 'ǆ': 'dž', 'Ǉ': 'LJ', 'ǈ': 'Lj', 'ǉ': 'lj', 'Ǌ': 'NJ',
+    'ǋ': 'Nj', 'ǌ': 'nj', 'Ǣ': 'ĀĒ', 'ǣ': 'āē', 'Ǳ': 'DZ', 'ǲ': 'Dz', 'ǳ': 'dz', 'Ǽ': 'ÁÉ',
+    'ǽ': 'áé', 'װ': 'וו', 'ױ': 'וי', 'ײ': 'יי', 'ﬀ': 'ff', 'ﬁ': 'fi', 'ﬂ': 'fl', 'ﬃ': 'ffi',
+    'ﬄ': 'ffl', 'ﬅ': 'ſt', 'ﬆ': 'st',
+}));
+
+/**
+ * The digits MAP_FOLDDIGITS folds that are not decimal digits in Unicode's
+ * sense -- superscripts, circled and bracketed forms and the like -- as
+ * [first code point, its digit, the last digit of the run].
+ */
+const OTHER_DIGITS = [
+    [0x00b2, 2, 3], [0x00b9, 1, 1], [0x2070, 0, 0], [0x2074, 4, 9], [0x2080, 0, 9],
+    [0x2460, 1, 9], [0x2474, 1, 9], [0x2488, 1, 9], [0x24ea, 0, 0], [0x24f5, 1, 9],
+    [0x24ff, 0, 0], [0x2776, 1, 9], [0x2780, 1, 9], [0x278a, 1, 9], [0x3007, 0, 0],
+    [0x3021, 1, 9], [0x1369, 1, 9],
+];
+
+/**
+ * The ASCII digit a character folds to, or null. A decimal digit's value is
+ * its distance from the zero of its run: Unicode encodes every set of them
+ * as ten in a row, 0 to 9.
+ *
+ * @param {number} code
+ */
+const digitOf = code=>{
+    const isDecimal = (/** @type {number} */ at)=>/\p{Nd}/u.test(String.fromCodePoint(at));
+    if (isDecimal(code))
+    {
+        let start = code;
+        while (isDecimal(start - 1))
+        {
+            start--;
+        }
+        return (code - start) % 10;
+    }
+    const run = OTHER_DIGITS.find(([first, low, high])=>
+        code >= first && code <= first + high - low);
+    return run ? run[1] + code - run[0] : null;
+};
+
+/**
+ * FoldString's mappings over a string: the ligatures expanded, the
+ * compatibility zone folded (on Windows today a compatibility normalisation,
+ * which composes too), the digits made ASCII, then composed or decomposed.
+ *
+ * @param {string} text @param {number} flags
+ */
+const fold = (text, flags)=>{
+    let out = text;
+    if ((flags & MAP_EXPAND_LIGATURES) !== 0)
+    {
+        out = [...out].map(character=>LIGATURES.get(character) ?? character).join('');
+    }
+    if ((flags & MAP_FOLDCZONE) !== 0)
+    {
+        out = out.normalize('NFKC');
+    }
+    if ((flags & MAP_FOLDDIGITS) !== 0)
+    {
+        out = [...out].map(character=>{
+            const digit = digitOf(/** @type {number} */ (character.codePointAt(0)));
+            return digit === null ? character : String(digit);
+        }).join('');
+    }
+    if ((flags & MAP_PRECOMPOSED) !== 0)
+    {
+        out = out.normalize('NFC');
+    }
+    return (flags & MAP_COMPOSITE) !== 0 ? out.normalize('NFD') : out;
+};
 
 /** The pages this build can actually convert; IsValidCodePage answers from it. */
 const KNOWN_PAGES = [CP_WINDOWS_1252, CP_OEM_437, CP_UTF8];
@@ -277,6 +394,30 @@ const LOCALE_STRINGS = Object.freeze({
  */
 const LANGUAGE_NAMES = new Map([[UI_LANGUAGE, LOCALE_STRINGS[0x0000005C]]]);
 
+/** EnumCalendarInfo's calendars: every one, and the one this locale has. */
+const ENUM_ALL_CALENDARS = 0xffffffff;
+const CAL_GREGORIAN = 1;
+/** CAL_NOUSEROVERRIDE, CAL_USE_CP_ACP and CAL_RETURN_NUMBER: how to answer, not what. */
+const CAL_FLAGS = 0x80000000 | 0x40000000 | 0x20000000;
+
+/**
+ * The Gregorian calendar's answers by CALTYPE (winnls.h): its number and
+ * name, its date pictures, its day names -- Monday first, as CAL_SDAYNAME1
+ * is -- and month names, and the year a two-digit year stops before.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+const CALENDAR_INFO = Object.freeze({
+    1: '1', 2: 'Gregorian Calendar', 5: SHORT_DATE, 6: LONG_DATE, 47: YEAR_MONTH, 48: '2049',
+    56: 'MMMM d', 33: '', 46: '',
+    ...Object.fromEntries([1, 2, 3, 4, 5, 6, 0].flatMap((day, at)=>[
+        [7 + at, DAYS[day]], [14 + at, DAYS[day].slice(0, 3)], [49 + at, DAYS[day].slice(0, 2)],
+    ])),
+    ...Object.fromEntries(MONTHS.flatMap((month, at)=>[
+        [21 + at, month], [34 + at, month.slice(0, 3)],
+    ])),
+});
+
 /**
  * The LCTYPEs whose value is a number: answered as its digits, or with
  * LOCALE_RETURN_NUMBER as the DWORD itself.
@@ -326,7 +467,8 @@ const DEFAULT_CHAR = 0x3f;
 /** @param {number} page */
 const resolvePage = page=>{
     const wanted = page >>> 0;
-    if (wanted === CP_ACP)
+    // CP_THREAD_ACP: the thread's locale's ANSI page, and there is one locale.
+    if (wanted === CP_ACP || wanted === 3)
     {
         return ANSI_CODE_PAGE;
     }
@@ -653,9 +795,6 @@ export function createLocaleFunctions(host){
         return needed;
     };
 
-    /** @param {string} text @param {number} buffer @param {number} count */
-    const writeFormatted = (text, buffer, count)=>writeAnswer(text, buffer, count, false);
-
     /**
      * EnumTimeFormats' and EnumDateFormats' body: each format as a
      * NUL-terminated string in guest memory, the callback called with it, and
@@ -664,9 +803,10 @@ export function createLocaleFunctions(host){
      * callback, no allocation, no bridge.
      *
      * @param {number} proc @param {readonly string[]} formats @param {boolean} wide
+     * @param {number[]} [after]  The arguments the callback takes after the text.
      * @returns {number | Promise<number>}
      */
-    const enumerateFormats = (proc, formats, wide)=>{
+    const enumerateFormats = (proc, formats, wide, after = [])=>{
         const call = host.call;
         const allocate = host.allocate;
         if (!call || !allocate || (proc >>> 0) === 0)
@@ -694,7 +834,7 @@ export function createLocaleFunctions(host){
                     const { bytes } = encodeSingleByte(text, ANSI_CODE_PAGE);
                     host.writeMemory(block, bytes);
                 }
-                answer = (await call(proc >>> 0, [block], thread)) | 0;
+                answer = (await call(proc >>> 0, [block, ...after], thread)) | 0;
                 if (answer === 0)
                 {
                     break;
@@ -710,9 +850,10 @@ export function createLocaleFunctions(host){
      * EnumDateFormats: the list its kind names, the code page flag set aside.
      *
      * @param {number} proc @param {number} flags @param {boolean} wide
+     * @param {number[]} [after]  The arguments the callback takes after the text.
      * @returns {number | Promise<number>}
      */
-    const enumerateDateFormats = (proc, flags, wide)=>{
+    const enumerateDateFormats = (proc, flags, wide, after = [])=>{
         const kind = flags & ~LOCALE_USE_CP_ACP;
         const formats = kind === 0 || kind === DATE_SHORTDATE ? SHORT_DATE_FORMATS
             : kind === DATE_LONGDATE ? LONG_DATE_FORMATS
@@ -722,65 +863,115 @@ export function createLocaleFunctions(host){
             host.setLastError(ERROR_INVALID_FLAGS);
             return 0;
         }
-        return enumerateFormats(proc, formats, wide);
+        return enumerateFormats(proc, formats, wide, after);
     };
 
     /**
-     * A NUMBERFMTA read out of the guest, or the locale's own picture when the
-     * caller passed none.
+     * A NUMBERFMT or CURRENCYFMT read out of the guest, or the locale's own
+     * picture when the caller passed none.
      *
-     * @param {number} address
-     * @returns {Readonly<NumberPicture>}
+     * @param {number} address @param {boolean} wide @param {boolean} currency
+     * @returns {Readonly<NumberPicture> | null} null for a picture Windows refuses
      */
-    const numberPicture = address=>{
+    const numberPicture = (address, wide, currency)=>{
         if (address === 0)
         {
-            return NUMBER_DEFAULTS;
+            return currency ? CURRENCY_DEFAULTS : NUMBER_DEFAULTS;
         }
-        const view = new DataView(host.readMemory(address, NUMBERFMTA_SIZE).slice().buffer);
+        const view = new DataView(host.readMemory(address,
+            currency ? CURRENCYFMTA_SIZE : NUMBERFMTA_SIZE).slice().buffer);
+        const strings = (currency ? [12, 16, 28] : [12, 16]).map(at=>view.getUint32(at, true));
+        const negativeOrder = view.getUint32(20, true);
+        const positiveOrder = currency ? view.getUint32(24, true) : 0;
+        // A separator or symbol missing, or an order past the last there is,
+        // is a picture Windows refuses.
+        if (strings.includes(0) || negativeOrder > (currency ? 15 : 4) || positiveOrder > 3)
+        {
+            return null;
+        }
+        const [decimal, thousand, symbol] = strings.map(text=>
+            (wide ? readWideSpan : readAnsiSpan)(text, -1));
         return {
             digits: view.getUint32(0, true),
             leadingZero: view.getUint32(4, true),
             grouping: view.getUint32(8, true),
-            decimal: readAnsiSpan(view.getUint32(12, true), -1),
-            thousand: readAnsiSpan(view.getUint32(16, true), -1),
-            negativeOrder: view.getUint32(20, true),
+            decimal, thousand, negativeOrder, positiveOrder, symbol,
         };
     };
 
     /**
-     * A number as text, in the picture given.
+     * The integer digits in groups, as a Grouping number says: its decimal
+     * digits are the group sizes from the point leftwards, the last repeated
+     * -- unless it is 0, which leaves the rest in one run (3 is 1,234,567;
+     * 32 is 12,34,567; 30 is 1234,567).
+     *
+     * @param {string} whole @param {number} grouping @param {string} separator
+     */
+    const group = (whole, grouping, separator)=>{
+        const text = String(grouping);
+        const repeats = !text.endsWith('0');
+        const sizes = [...(repeats ? text : text.slice(0, -1))].map(Number);
+        const parts = [];
+        let rest = whole;
+        for (let at = 0; rest.length > 0; at++)
+        {
+            const size = sizes[Math.min(at, sizes.length - 1)] ?? 0;
+            if (size === 0 || (!repeats && at >= sizes.length) || rest.length <= size)
+            {
+                parts.unshift(rest);
+                break;
+            }
+            parts.unshift(rest.slice(rest.length - size));
+            rest = rest.slice(0, rest.length - size);
+        }
+        return parts.join(separator);
+    };
+
+    /**
+     * A number, or an amount of money, as text in the picture given.
      *
      * The value arrives as text too -- digits, one optional point, one
      * optional leading minus -- and is never turned into a float on the way:
-     * a size in bytes has more digits than a double keeps.
+     * a size in bytes has more digits than a double keeps. It is rounded half
+     * up at the last place the picture keeps, on the digits themselves.
      *
      * @param {string} value @param {Readonly<NumberPicture>} picture
+     * @param {boolean} currency
      * @returns {string | null} null when the value is not a number
      */
-    const formatNumber = (value, picture)=>{
+    const formatNumber = (value, picture, currency)=>{
         const match = /^(-?)(\d*)(?:\.(\d*))?$/.exec(value);
         if (!match || match[2].length + (match[3]?.length ?? 0) === 0)
         {
             return null;
         }
-        let whole = match[2].replace(/^0+(?=\d)/, '');
-        if (whole === '' || whole === '0')
+        const kept = match[2].length + picture.digits;
+        const all = `${match[2]}${match[3] ?? ''}`.padEnd(kept + 1, '0');
+        let digits = all.slice(0, kept);
+        if (all.charCodeAt(kept) >= 0x35)
+        {
+            // Plus one, carried through the trailing nines; past the first
+            // digit it makes the number a digit longer.
+            const nines = digits.length - digits.replace(/9+$/, '').length;
+            const head = digits.slice(0, digits.length - nines);
+            digits = `${head === '' ? '1'
+                : `${head.slice(0, -1)}${Number(head[head.length - 1]) + 1}`}${'0'.repeat(nines)}`;
+        }
+        let whole = digits.slice(0, digits.length - picture.digits).replace(/^0+/, '');
+        const fraction = digits.slice(digits.length - picture.digits);
+        if (whole === '')
         {
             whole = picture.leadingZero !== 0 ? '0' : '';
         }
-        // Grouping counts from the point leftwards; a group of zero is no
-        // grouping at all. Only the single-digit form is honoured (3 or 0):
-        // the "3;0" forms are a later era's and no caller here uses them.
-        const group = picture.grouping % 10;
-        if (group > 0)
-        {
-            whole = whole.replace(
-                new RegExp(`\\B(?=(\\d{${group}})+(?!\\d))`, 'g'), picture.thousand);
-        }
-        const fraction = (match[3] ?? '').padEnd(picture.digits, '0').slice(0, picture.digits);
+        whole = group(whole, picture.grouping, picture.thousand);
         const magnitude = fraction === '' ? whole : `${whole}${picture.decimal}${fraction}`;
-        const negative = match[1] === '-' && /[1-9]/.test(match[2] + (match[3] ?? ''));
+        const negative = match[1] === '-' && /[1-9]/.test(digits);
+        if (currency)
+        {
+            const shape = negative ? CURRENCY_NEGATIVE[picture.negativeOrder]
+                : CURRENCY_POSITIVE[picture.positiveOrder ?? 0];
+            return shape.replace('$', picture.symbol ?? '').replace('1', magnitude);
+        }
         if (!negative)
         {
             return magnitude;
@@ -895,11 +1086,13 @@ export function createLocaleFunctions(host){
         {
             const bytes = host.readMemory(address, SYSTEMTIME_SIZE);
             const view = new DataView(bytes.buffer, bytes.byteOffset, SYSTEMTIME_SIZE);
+            const [year, month, day] = [0, 2, 6].map(at=>view.getUint16(at, true));
             return {
-                year: view.getUint16(0, true),
-                month: view.getUint16(2, true),
-                weekday: view.getUint16(4, true),
-                day: view.getUint16(6, true),
+                year,
+                month,
+                // The date's own weekday: a caller's wDayOfWeek is not read.
+                weekday: new Date(Date.UTC(year, month - 1, day)).getUTCDay(),
+                day,
                 hour: view.getUint16(8, true),
                 minute: view.getUint16(10, true),
                 second: view.getUint16(12, true),
@@ -965,6 +1158,15 @@ export function createLocaleFunctions(host){
         let at = 0;
         while (at < picture.length)
         {
+            // Text in single quotes is written as it stands, and two quotes
+            // together, in or out of them, are one.
+            if (picture[at] === '\'')
+            {
+                const quoted = /^'((?:[^']|'')*)'?/.exec(picture.slice(at)) ?? ['\'', ''];
+                out += quoted[0] === '\'\'' ? '\'' : quoted[1].replace(/''/g, '\'');
+                at += quoted[0].length;
+                continue;
+            }
             const found = tokens.find(([token])=>picture.startsWith(token, at));
             if (found)
             {
@@ -1121,6 +1323,233 @@ export function createLocaleFunctions(host){
     /** The same answer as ntdll's own entry gives it. @param {number} error */
     const asStatus = error=>(error === 0 ? STATUS.SUCCESS
         : error === ERROR_INSUFFICIENT_BUFFER ? STATUS.BUFFER_TOO_SMALL : STATUS.INVALID_PARAMETER);
+
+    /** @param {number} error @returns {0} */
+    const refuse = error=>{
+        host.setLastError(error);
+        return 0;
+    };
+
+    /**
+     * The locale a name names, or 0 for one this machine does not have: no
+     * name is the user's, "" the invariant locale, and
+     * LOCALE_NAME_SYSTEM_DEFAULT the system's.
+     *
+     * @param {number} address
+     */
+    const localeOfName = address=>{
+        if (address === 0)
+        {
+            return LCID_EN_US;
+        }
+        const name = readWideSpan(address, -1).toLowerCase();
+        if (name === '')
+        {
+            return LOCALE_INVARIANT;
+        }
+        return name === LOCALE_STRINGS[0x0000005C].toLowerCase()
+            || name === '!x-sys-default-locale' ? LCID_EN_US : 0;
+    };
+
+    /**
+     * EnumCalendarInfo or its Ex form, at either width:
+     *
+     *     BOOL EnumCalendarInfo(CALINFO_ENUMPROC, LCID, CALID Calendar, CALTYPE)
+     *
+     * The callback is given the Gregorian calendar's answer to the CALTYPE --
+     * the one calendar the locale has, so asking for another enumerates none
+     * -- and the Ex form's callback the calendar's number after it.
+     *
+     * @param {boolean} wide @param {boolean} ex
+     */
+    const calendarInfo = (wide, ex)=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [proc, locale, calendar, type])=>{
+            const text = CALENDAR_INFO[(type >>> 0) & ~CAL_FLAGS];
+            if (!isOurLocale(locale >>> 0) || text === undefined)
+            {
+                return refuse(ERROR_INVALID_FLAGS);
+            }
+            const wanted = calendar >>> 0;
+            return wanted !== ENUM_ALL_CALENDARS && wanted !== CAL_GREGORIAN ? 1
+                : enumerateFormats(proc, [text], wide, ex ? [CAL_GREGORIAN] : []);
+        },
+    });
+
+    /**
+     * FoldString, at either width:
+     *
+     *     int FoldStringW(DWORD dwMapFlags, LPCWSTR lpSrcStr, int cchSrc,
+     *                     LPWSTR lpDestStr, int cchDest)
+     *
+     * Composing, decomposing and expanding ligatures exclude one another; one
+     * buffer for source and destination, no source or an empty one, and a
+     * negative room are refused. The ANSI form folds the text the ANSI page
+     * decodes and writes back what that page can hold of the answer.
+     *
+     * @param {boolean} wide
+     */
+    const foldString = wide=>({
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [flags, source, sourceChars, destination, room])=>{
+            const asked = flags >>> 0;
+            const exclusive = [MAP_PRECOMPOSED, MAP_COMPOSITE, MAP_EXPAND_LIGATURES]
+                .filter(bit=>(asked & bit) !== 0).length;
+            if (asked === 0 || (asked & ~MAP_FLAGS) !== 0 || exclusive > 1)
+            {
+                return refuse(ERROR_INVALID_FLAGS);
+            }
+            if ((source >>> 0) === 0 || (sourceChars | 0) === 0 || (room | 0) < 0
+                || (source >>> 0) === (destination >>> 0))
+            {
+                return refuse(ERROR_INVALID_PARAMETER);
+            }
+            const span = sourceSpan(source >>> 0, sourceChars, wide ? 2 : 1);
+            const folded = fold(wide ? readWide(source >>> 0, span.length)
+                : decodeSingleByte(host.readMemory(source >>> 0, span.length), ANSI_CODE_PAGE),
+            asked);
+            const bytes = wide ? null : encodeSingleByte(folded, ANSI_CODE_PAGE).bytes;
+            const length = bytes ? bytes.length : folded.length;
+            if ((room | 0) === 0)
+            {
+                return length;
+            }
+            if (length > (room | 0))
+            {
+                return refuse(ERROR_INSUFFICIENT_BUFFER);
+            }
+            if (bytes)
+            {
+                host.writeMemory(destination >>> 0, bytes);
+            }
+            else
+            {
+                writeWide(destination >>> 0, folded);
+            }
+            return length;
+        },
+    });
+
+    /**
+     * GetCPInfo's CPINFO, or with a width GetCPInfoEx's CPINFOEX, for a page
+     * this build converts; any other is refused.
+     *
+     * MaxCharSize, then DefaultChar, then the lead-byte ranges. Every page
+     * here is single byte or UTF-8, so no lead-byte range is reported and the
+     * array stays zero -- which is how a caller learns the page has no
+     * double-byte sequences.
+     *
+     * @param {number} page @param {number} info @param {boolean | null} wide
+     */
+    const pageInfo = (page, info, wide)=>{
+        const resolved = resolvePage(page);
+        if (!KNOWN_PAGES.includes(resolved))
+        {
+            return refuse(ERROR_INVALID_PARAMETER);
+        }
+        const name = PAGE_NAMES[/** @type {keyof typeof PAGE_NAMES} */ (resolved)];
+        const bytes = new Uint8Array(wide === null ? CPINFO_SIZE
+            : CPINFOEX_NAME + MAX_PATH * (wide ? 2 : 1));
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, resolved === CP_UTF8 ? 4 : 1, true);
+        bytes[4] = DEFAULT_CHAR;
+        if (wide !== null)
+        {
+            view.setUint16(CPINFO_SIZE, 0xfffd, true);
+            view.setUint32(CPINFO_SIZE + 2, resolved, true);
+            [...name].forEach((character, at)=>(wide
+                ? view.setUint16(CPINFOEX_NAME + at * 2, character.charCodeAt(0), true)
+                : view.setUint8(CPINFOEX_NAME + at, character.charCodeAt(0))));
+        }
+        host.writeMemory(info, bytes);
+        return 1;
+    };
+
+    /**
+     * A date GetDateFormat takes: one of the Gregorian calendar's that
+     * Windows' clock can hold, its time of day and weekday never looked at.
+     *
+     * @param {NonNullable<ReturnType<typeof timeOf>>} when
+     */
+    const isDate = when=>when.year >= 1601 && when.year <= 30827
+        && when.month >= 1 && when.month <= 12 && when.day >= 1
+        && when.day <= new Date(Date.UTC(when.year, when.month, 0)).getUTCDate();
+
+    /** @param {NonNullable<ReturnType<typeof timeOf>>} when */
+    const isTimeOfDay = when=>when.hour < 24 && when.minute < 60 && when.second < 60;
+
+    /**
+     * GetDateFormat or GetTimeFormat, at either width:
+     *
+     *     int GetDateFormatA/W(LCID, DWORD dwFlags, const SYSTEMTIME *,
+     *                          LPCTSTR lpFormat, LPTSTR lpDateStr, int cchDate)
+     *
+     * A NULL SYSTEMTIME means now, which is the only reason this needs a clock
+     * at all. A NULL format means the locale's own short or long picture,
+     * chosen by the flags; a picture of the caller's comes with no flags for
+     * a date, and without LOCALE_NOUSEROVERRIDE for a time.
+     *
+     * @param {boolean} wide @param {boolean} date
+     */
+    const whenFormat = (wide, date)=>({
+        argBytes: 24,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [, flags, time, format, buffer, count])=>{
+            const asked = flags >>> 0;
+            if ((buffer >>> 0) === 0 && (count | 0) !== 0)
+            {
+                return refuse(ERROR_INVALID_PARAMETER);
+            }
+            if ((format >>> 0) !== 0 && (date ? asked : asked & LOCALE_NOUSEROVERRIDE) !== 0)
+            {
+                return refuse(ERROR_INVALID_FLAGS);
+            }
+            const when = timeOf(time >>> 0);
+            if (!when || !(date ? isDate(when) : isTimeOfDay(when)))
+            {
+                return refuse(ERROR_INVALID_PARAMETER);
+            }
+            const picture = (format >>> 0) !== 0
+                ? (wide ? readWideSpan : readAnsiSpan)(format >>> 0, -1)
+                : date ? ((asked & DATE_LONGDATE) !== 0 ? LONG_DATE : SHORT_DATE)
+                    : ((asked & TIME_NOSECONDS) !== 0 ? SHORT_TIME : LONG_TIME);
+            return writeAnswer(render(picture, when), buffer >>> 0, count | 0, wide);
+        },
+    });
+
+    /**
+     * GetNumberFormat or GetCurrencyFormat, at either width:
+     *
+     *     int GetNumberFormatA/W(LCID, DWORD dwFlags, LPCTSTR lpValue,
+     *         const NUMBERFMT *lpFormat, LPTSTR lpNumberStr, int cchNumber)
+     *
+     * The flags are LOCALE_NOUSEROVERRIDE alone, which cannot come with a
+     * picture of the caller's; there is no user to override anything, so
+     * otherwise they change nothing.
+     *
+     * @param {boolean} wide @param {boolean} currency
+     */
+    const amountFormat = (wide, currency)=>({
+        argBytes: 24,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [locale, flags, value, format, buffer, count])=>{
+            if (!isOurLocale(locale >>> 0) || ((buffer >>> 0) === 0 && (count | 0) !== 0))
+            {
+                return refuse(ERROR_INVALID_PARAMETER);
+            }
+            if ((format >>> 0) !== 0 && (flags >>> 0) !== 0)
+            {
+                return refuse(ERROR_INVALID_FLAGS);
+            }
+            const picture = numberPicture(format >>> 0, wide, currency);
+            const text = picture && formatNumber(
+                (wide ? readWideSpan : readAnsiSpan)(value >>> 0, -1), picture, currency);
+            return text === null ? refuse(ERROR_INVALID_PARAMETER)
+                : writeAnswer(text, buffer >>> 0, count | 0, wide);
+        },
+    });
 
     const table = {
         /** UINT GetACP(VOID) */
@@ -1490,78 +1919,17 @@ export function createLocaleFunctions(host){
             handler: ([proc])=>enumerateFormats(proc, TIME_FORMATS, true),
         },
 
-        /**
-         * int GetDateFormatA(LCID, DWORD dwFlags, const SYSTEMTIME *,
-         *                    LPCSTR lpFormat, LPSTR lpDateStr, int cchDate)
-         *
-         * A NULL SYSTEMTIME means now, which is the only reason this needs a
-         * clock at all. A NULL format means the locale's own short or long
-         * picture, chosen by the flags.
-         */
-        GetDateFormatA: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([, flags, time, format, buffer, count])=>{
-                const when = timeOf(time >>> 0);
-                if (!when)
-                {
-                    host.setLastError(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-                const picture = format !== 0
-                    ? readAnsiSpan(format >>> 0, -1)
-                    : ((flags >>> 0) & DATE_LONGDATE) !== 0 ? LONG_DATE : SHORT_DATE;
-                return writeFormatted(render(picture, when), buffer >>> 0, count | 0);
-            },
-        },
+        /** GetDateFormatA/W and GetTimeFormatA/W: see whenFormat. */
+        GetDateFormatA: whenFormat(false, true),
+        GetDateFormatW: whenFormat(true, true),
+        GetTimeFormatA: whenFormat(false, false),
+        GetTimeFormatW: whenFormat(true, false),
 
-        /**
-         * int GetTimeFormatA(LCID, DWORD dwFlags, const SYSTEMTIME *,
-         *                    LPCSTR lpFormat, LPSTR lpTimeStr, int cchTime)
-         */
-        GetTimeFormatA: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([, flags, time, format, buffer, count])=>{
-                const when = timeOf(time >>> 0);
-                if (!when)
-                {
-                    host.setLastError(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-                const picture = format !== 0
-                    ? readAnsiSpan(format >>> 0, -1)
-                    : ((flags >>> 0) & TIME_NOSECONDS) !== 0 ? SHORT_TIME : LONG_TIME;
-                return writeFormatted(render(picture, when), buffer >>> 0, count | 0);
-            },
-        },
-
-        /**
-         * int GetNumberFormatA(LCID, DWORD dwFlags, LPCSTR lpValue,
-         *                      const NUMBERFMTA *lpFormat, LPSTR lpNumberStr, int cchNumber)
-         *
-         * The flags are LOCALE_NOUSEROVERRIDE alone, and there is no user to
-         * override anything, so they are not read.
-         */
-        GetNumberFormatA: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([locale, , value, format, buffer, count])=>{
-                if (!isOurLocale(locale >>> 0))
-                {
-                    host.setLastError(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-                const text = formatNumber(
-                    readAnsiSpan(value >>> 0, -1), numberPicture(format >>> 0));
-                if (text === null)
-                {
-                    host.setLastError(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-                return writeFormatted(text, buffer >>> 0, count | 0);
-            },
-        },
+        /** GetNumberFormatA/W and GetCurrencyFormatA/W: see amountFormat. */
+        GetNumberFormatA: amountFormat(false, false),
+        GetNumberFormatW: amountFormat(true, false),
+        GetCurrencyFormatA: amountFormat(false, true),
+        GetCurrencyFormatW: amountFormat(true, true),
 
         /** UINT GetOEMCP(VOID) */
         GetOEMCP: { argBytes: 0, handler: ()=>OEM_CODE_PAGE },
@@ -1576,19 +1944,24 @@ export function createLocaleFunctions(host){
         GetCPInfo: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([page, info])=>{
-                const resolved = resolvePage(page);
-                const bytes = new Uint8Array(CPINFO_SIZE);
-                // MaxCharSize, then DefaultChar, then the lead-byte ranges. Every
-                // page here is single byte or UTF-8, so no lead-byte range is
-                // reported and the array stays zero -- which is how a caller
-                // learns the page has no double-byte sequences.
-                new DataView(bytes.buffer).setUint32(
-                    0, resolved === CP_UTF8 ? 4 : 1, true);
-                bytes[4] = DEFAULT_CHAR;
-                host.writeMemory(info >>> 0, bytes);
-                return 1;
-            },
+            handler: ([page, info])=>pageInfo(page, info >>> 0, null),
+        },
+
+        /**
+         * BOOL GetCPInfoExA/W(UINT CodePage, DWORD dwFlags, LPCPINFOEX lpCPInfoEx)
+         *
+         * CPINFO, then the Unicode default character, the page's number and
+         * its name.
+         */
+        GetCPInfoExA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([page, , info])=>pageInfo(page, info >>> 0, false),
+        },
+        GetCPInfoExW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([page, , info])=>pageInfo(page, info >>> 0, true),
         },
 
         /**
@@ -1713,7 +2086,7 @@ export function createLocaleFunctions(host){
             /** @param {number[]} args */
             handler: ([locale, infoType, source, count, types])=>{
                 void locale;
-                if ((infoType >>> 0) !== CT_CTYPE1)
+                if ((infoType >>> 0) !== CT_CTYPE1 || (source >>> 0) === 0 || (types >>> 0) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -1743,7 +2116,7 @@ export function createLocaleFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([infoType, source, count, types])=>{
-                if ((infoType >>> 0) !== CT_CTYPE1)
+                if ((infoType >>> 0) !== CT_CTYPE1 || (source >>> 0) === 0 || (types >>> 0) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -1819,6 +2192,31 @@ export function createLocaleFunctions(host){
                 writeWide(destination >>> 0, mapped);
                 return mapped.length;
             },
+        },
+
+        /** FoldStringA/W: see foldString. */
+        FoldStringA: foldString(false),
+        FoldStringW: foldString(true),
+
+        /** EnumCalendarInfoA/W and EnumCalendarInfoExA/W: see calendarInfo. */
+        EnumCalendarInfoA: calendarInfo(false, false),
+        EnumCalendarInfoW: calendarInfo(true, false),
+        EnumCalendarInfoExA: calendarInfo(false, true),
+        EnumCalendarInfoExW: calendarInfo(true, true),
+
+        /**
+         * BOOL EnumDateFormatsExEx(DATEFMT_ENUMPROCEXEX lpDateFmtEnumProcExEx,
+         *     LPCWSTR lpLocaleName, DWORD dwFlags, LPARAM lParam)
+         *
+         * EnumDateFormatsW by the locale's name, the callback given the
+         * calendar's number and the caller's lParam after each picture.
+         */
+        EnumDateFormatsExEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([proc, name, flags, parameter])=>(localeOfName(name >>> 0) === 0
+                ? refuse(ERROR_INVALID_PARAMETER)
+                : enumerateDateFormats(proc, flags >>> 0, true, [CAL_GREGORIAN, parameter >>> 0])),
         },
     };
 

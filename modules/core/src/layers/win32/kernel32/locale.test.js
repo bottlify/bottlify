@@ -755,3 +755,195 @@ test("a thread's preferred UI languages are its own: the ones known kept, the re
     assert.equal(fns.SetThreadPreferredUILanguages.handler([MUI_LANGUAGE_NAME, LIST, 0]), 1);
     assert.equal(fns.GetThreadUILanguage.handler(), UI_LANGUAGE, 'an empty list clears it all');
 });
+
+test('numbers and money are rounded half up, grouped as Grouping says, refused as Windows', ()=>{
+    // locale.c test_GetNumberFormatA / test_GetCurrencyFormatA.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const NUO = 0x80000000;
+    const OUT = 0x200;
+    /**
+     * @param {Record<string, any>} fn @param {string} value
+     * @param {number} [format] @param {number} [flags]
+     */
+    const ask = (fn, value, format = 0, flags = 0)=>{
+        host.plantAnsi(0x100, value);
+        const length = fn.handler([0x0409, flags, 0x100, format, OUT, 64]);
+        return length === 0 ? null
+            : new TextDecoder().decode(host.bytes.slice(OUT, OUT + length - 1));
+    };
+    assert.equal(ask(fns.GetNumberFormatA, '2353.119', 0, NUO), '2,353.12', 'rounded');
+    assert.equal(ask(fns.GetNumberFormatA, '2353.111'), '2,353.11', 'truncated');
+    assert.equal(ask(fns.GetNumberFormatA, '999.995'), '1,000.00', 'carried a digit longer');
+    assert.equal(ask(fns.GetCurrencyFormatA, '2353'), '$2,353.00');
+    assert.equal(ask(fns.GetCurrencyFormatA, '-2353'), '($2,353.00)');
+
+    // A CURRENCYFMTA: digits, leading zero, grouping, two separators, the
+    // negative and positive orders, the symbol.
+    const view = new DataView(host.bytes.buffer);
+    host.plantAnsi(0x300, '.');
+    host.plantAnsi(0x304, ',');
+    host.plantAnsi(0x308, '$');
+    /** @param {number} grouping @param {number} [negative] */
+    const picture = (grouping, negative = 0)=>{
+        [1, 0, grouping, 0x300, 0x304, negative, 0, 0x308]
+            .forEach((value, at)=>view.setUint32(0x340 + at * 4, value, true));
+        return 0x340;
+    };
+    for (const [grouping, expected] of /** @type {[number, string][]} */ ([
+        [31, '$1,2,3,4,5,6,7,890.0'], [312, '$12,34,56,7,890.0'],
+        [310, '$123456,7,890.0'], [0, '$1234567890.0']]))
+    {
+        assert.equal(ask(fns.GetCurrencyFormatA, '1234567890', picture(grouping)), expected);
+    }
+    assert.equal(ask(fns.GetNumberFormatA, '123456789', picture(23)), '1,234,567,89.0');
+    assert.equal(ask(fns.GetCurrencyFormatA, '-1', picture(3, 14)), '($ 1.0)');
+
+    host.errors.length = 0;
+    assert.equal(ask(fns.GetNumberFormatA, '2353', picture(3), NUO), null, 'a picture and flags');
+    assert.equal(ask(fns.GetCurrencyFormatA, '23,53'), null, 'not a number');
+    assert.equal(ask(fns.GetCurrencyFormatA, '0-'), null, 'a trailing minus');
+    view.setUint32(0x340 + 12, 0, true);
+    assert.equal(ask(fns.GetNumberFormatA, '2353', 0x340), null, 'no decimal separator');
+    assert.deepEqual(host.errors, [ERROR_INVALID_FLAGS, ERROR_INVALID_PARAMETER,
+        ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
+    host.plantAnsi(0x100, '23');
+    assert.equal(fns.GetCurrencyFormatA.handler([0x0409, 0, 0x100, 0, 0, 64]), 0,
+        'no buffer but room claimed');
+    assert.equal(fns.GetCurrencyFormatW.argBytes, 24);
+});
+
+test("GetDateFormatW takes the date's own weekday and refuses a date before 1601", ()=>{
+    // locale.c test_GetDateFormatW.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number[]} fields year, month, weekday, day, hour, minute, second */
+    const plantTime = fields=>
+        fields.forEach((value, at)=>view.setUint16(0x80 + at * 2, value, true));
+    host.plantWide(0x100, 'dddd d MMMM yyyy');
+    plantTime([2002, 10, 45612, 23, 65432, 34512, 65535]);
+    let length = fns.GetDateFormatW.handler([0x0409, 0, 0x80, 0x100, 0x200, 64]);
+    assert.equal(host.readWide(0x200, length - 1), 'Wednesday 23 October 2002',
+        'the weekday and time of day as given are not read');
+    plantTime([1601, 1, 0, 1, 0, 0, 0]);
+    length = fns.GetDateFormatW.handler([0x0409, 0, 0x80, 0x100, 0x200, 64]);
+    assert.equal(host.readWide(0x200, length - 1), 'Monday 1 January 1601');
+    host.plantWide(0x100, "h 'o''clock' tt");
+    view.setUint16(0x80 + 8, 8, true);
+    length = fns.GetTimeFormatW.handler([0x0409, 0, 0x80, 0x100, 0x200, 64]);
+    assert.equal(host.readWide(0x200, length - 1), "8 o'clock AM", 'quoted text as it stands');
+
+    host.errors.length = 0;
+    plantTime([1600, 12, 0, 31, 23, 59, 59]);
+    assert.equal(fns.GetDateFormatW.handler([0x0409, 0, 0x80, 0x100, 0x200, 64]), 0);
+    assert.equal(fns.GetDateFormatW.handler([0x0800, 2, 0, 0x100, 0x200, 64]), 0,
+        "flags with a picture of the caller's");
+    assert.equal(fns.GetDateFormatW.handler([0x0409, 0, 0, 0x100, 0, 64]), 0, 'no buffer');
+    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_FLAGS,
+        ERROR_INVALID_PARAMETER]);
+});
+
+test('FoldStringW folds digits, the compatibility zone and ligatures, and refuses misuse', ()=>{
+    // locale.c test_FoldStringW.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    /** @param {number} flags @param {string} text */
+    const fold = (flags, text)=>{
+        host.plantWide(0x100, text);
+        const length = fns.FoldStringW.handler([flags, 0x100, -1, 0x300, 128]);
+        return host.readWide(0x300, length - 1);
+    };
+    assert.equal(fold(0x80, '٣²①９\u{1d7ce}x'), '32190x', 'MAP_FOLDDIGITS');
+    assert.equal(fold(0x10, 'Ｗineϋǰ ª'), 'Wineϋǰ a',
+        'MAP_FOLDCZONE');
+    assert.equal(fold(0x2000, 'ÆßﬃǄ'), 'AEssffiDŽ',
+        'MAP_EXPAND_LIGATURES');
+    assert.equal(fold(0x40, 'é'), 'é', 'MAP_COMPOSITE');
+
+    host.errors.length = 0;
+    host.plantWide(0x100, 'A');
+    for (const flags of [0, 0x20 | 0x40, 0x20 | 0x2000, 0x40 | 0x2000])
+    {
+        assert.equal(fns.FoldStringW.handler([flags, 0x100, 256, 0x300, 256]), 0);
+    }
+    assert.equal(fns.FoldStringW.handler([0x10, 0x100, -1, 0x100, 256]), 0, 'one buffer');
+    assert.equal(fns.FoldStringW.handler([0x10, 0, -1, 0x300, 256]), 0, 'no source');
+    assert.equal(fns.FoldStringW.handler([0x10, 0x100, 0, 0x300, 256]), 0, 'an empty one');
+    assert.equal(fns.FoldStringW.handler([0x10, 0x100, -1, 0x300, -1]), 0, 'negative room');
+    assert.deepEqual(host.errors, [...Array(4).fill(ERROR_INVALID_FLAGS),
+        ...Array(4).fill(ERROR_INVALID_PARAMETER)]);
+    assert.equal(fns.FoldStringW.handler([0x10, 0x100, 1, 0x300, 256]), 1,
+        'a counted source has no terminator to add');
+});
+
+test('GetCPInfoEx names the page, and a page this build cannot convert is refused', ()=>{
+    // locale.c test_GetCPInfo.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(fns.GetCPInfoExW.handler([CP_UTF8, 0, 0x100]), 1);
+    assert.equal(view.getUint32(0x100, true), 4, 'MaxCharSize');
+    assert.equal(view.getUint16(0x100 + 18, true), 0xfffd, 'UnicodeDefaultChar');
+    assert.equal(view.getUint32(0x100 + 20, true), CP_UTF8, 'CodePage');
+    assert.equal(host.readWide(0x100 + 24, 13), '65001 (UTF-8)');
+    assert.equal(fns.GetCPInfoExA.handler([CP_ACP, 0, 0x400]), 1);
+    assert.equal(view.getUint32(0x400 + 20, true), CP_WINDOWS_1252);
+
+    host.errors.length = 0;
+    assert.equal(fns.GetCPInfoExW.handler([0xbeef, 0, 0x100]), 0);
+    assert.equal(fns.GetCPInfo.handler([42, 0x100]), 0, 'CP_SYMBOL');
+    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
+});
+
+test('the calendar and by-name date enumerations hand the Gregorian calendar over', async()=>{
+    // locale.c test_EnumCalendarInfo* and test_EnumDateFormatsExEx.
+    const host = fakeHost();
+    /** @type {{ text: string, rest: number[] }[]} */
+    const seen = [];
+    let next = 0x800;
+    const fns = createLocaleFunctions({
+        ...host,
+        callerThread: ()=>({ id: 1 }),
+        /** @param {number} bytes */
+        allocate: bytes=>{
+            const at = next;
+            next += bytes + 8;
+            return at;
+        },
+        free: ()=>{},
+        /** @param {number} entry @param {number[]} args */
+        call: async(entry, [text, ...rest])=>{
+            void entry;
+            seen.push({ text: host.readWide(text, host.stringLength(text, 2)), rest });
+            return 1;
+        },
+    });
+    const ENUM_ALL_CALENDARS = 0xffffffff;
+    const CAL_RETURN_NUMBER = 0x20000000;
+    assert.equal(await fns.EnumCalendarInfoExW.handler(
+        [0x1234, 0x0400, ENUM_ALL_CALENDARS, CAL_RETURN_NUMBER | 1]), 1);
+    assert.equal(await fns.EnumCalendarInfoW.handler([0x1234, 0x0409, 1, 7]), 1);
+    assert.deepEqual(seen, [{ text: '1', rest: [1] }, { text: 'Monday', rest: [] }],
+        'CAL_ICALINTVALUE with the calendar after it, then CAL_SDAYNAME1');
+    assert.equal(fns.EnumCalendarInfoA.handler([0x1234, 0x0409, 1, 0x7777]), 0, 'no such CALTYPE');
+
+    seen.length = 0;
+    host.plantWide(0x100, 'en-US');
+    assert.equal(await fns.EnumDateFormatsExEx.handler([0x1234, 0x100, 2, 0xabcd]), 1);
+    assert.deepEqual(seen[0], { text: 'dddd, MMMM dd, yyyy', rest: [1, 0xabcd] });
+    host.errors.length = 0;
+    host.plantWide(0x100, 'deadbeef');
+    assert.equal(fns.EnumDateFormatsExEx.handler([0x1234, 0x100, 1, 0]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER]);
+});
+
+test('GetStringType refuses a missing string or type buffer', ()=>{
+    // locale.c test_GetStringTypeW: "NULL src".
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    assert.equal(fns.GetStringTypeW.handler([CT_CTYPE1, 0, 0, 0]), 0);
+    assert.equal(fns.GetStringTypeW.handler([CT_CTYPE1, 0, 5, 0x200]), 0);
+    assert.equal(fns.GetStringTypeA.handler([0x0409, CT_CTYPE1, 0, 5, 0x200]), 0);
+    assert.deepEqual(host.errors, Array(3).fill(ERROR_INVALID_PARAMETER));
+});
