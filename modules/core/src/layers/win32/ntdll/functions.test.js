@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createNtdllFunctions } from './functions.js';
+import { UNLOAD_KEY } from '../advapi32/functions.js';
 
 const PROCESS_HEAP = 0x8;
 
@@ -268,4 +269,40 @@ test('RtlImageNtHeader finds the PE headers an image points at, and nothing in a
     assert.equal(fns.RtlImageNtHeader.handler([image + 4]), 0, 'no DOS stub');
     assert.equal(fns.RtlImageNtHeader.handler([0]), 0);
     assert.equal(fns.RtlImageNtHeader.argBytes, 4);
+});
+
+test('NtUnloadKey names a hive the native way and unloads it through the registry', ()=>{
+    // advapi32's registry test: a hive with a handle open on it cannot be
+    // unloaded, and the user's default hive is no loaded one.
+    const host = fakeHost();
+    /** @type {[number, string][]} */
+    const asked = [];
+    const fns = createNtdllFunctions({ ...host, advapi32: {
+        [UNLOAD_KEY]: (/** @type {number} */ root, /** @type {string} */ path)=>{
+            asked.push([root, path]);
+            return 0xc0000121;
+        },
+    } });
+    /** @param {string} name */
+    const attributes = name=>{
+        const view = new DataView(host.bytes.buffer);
+        for (let at = 0; at < name.length; at++)
+        {
+            view.setUint16(0x300 + at * 2, name.charCodeAt(at), true);
+        }
+        view.setUint16(0x200, name.length * 2, true);
+        view.setUint16(0x202, name.length * 2, true);
+        view.setUint32(0x204, 0x300, true);
+        view.setUint32(0x100, 24, true);
+        view.setUint32(0x108, 0x200, true);
+        return 0x100;
+    };
+    const unload = fns.NtUnloadKey;
+    assert.equal(unload.argBytes, 4);
+    assert.equal(unload.handler([attributes('\\REGISTRY\\Machine\\Test')]), 0xc0000121);
+    assert.equal(unload.handler([attributes('\\REGISTRY\\User\\.Default')]), 0xc0000121);
+    assert.deepEqual(asked, [[0x80000002, 'Test'], [0x80000003, '.Default']]);
+    assert.equal(unload.handler([attributes('\\Somewhere\\Else')]), 0xc0000034);
+    assert.equal(unload.handler([0]), 0xc000000d);
+    assert.ok(!('NtUnloadKey' in createNtdllFunctions(host)), 'without a registry, unexported');
 });

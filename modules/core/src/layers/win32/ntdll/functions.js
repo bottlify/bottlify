@@ -34,6 +34,7 @@ import { createWaitFunctions } from './waits.js';
 import { createPathFunctions } from './paths.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
 import { STATUS, toDosError } from './status.js';
+import { UNLOAD_KEY } from '../advapi32/functions.js';
 
 /**
  * The C runtime functions ntdll publishes under its own name.
@@ -121,6 +122,9 @@ const KERNEL32_ALIASES = Object.freeze({
  *           process block. Absent, the default.
  * @property {(handle: number) => string | null} [handleType]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {Record<string | symbol, any>} [advapi32]
+ *           The assembled ADVAPI32.dll table, whose registry NtUnloadKey
+ *           unloads a hive from. Absent, NtUnloadKey stays unexported.
  */
 
 /**
@@ -138,6 +142,9 @@ const alias = (table, names)=>Object.fromEntries(
 
 /** Where a thread block keeps its process's block. */
 const TEB_PEB = 0x30;
+
+/** @param {Uint8Array} bytes  Four of them, little-endian. */
+const readU32 = bytes=>(bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
 
 /**
  * Builds the function table: name -> { argBytes, handler }.
@@ -212,6 +219,48 @@ export function createNtdllFunctions(host){
         ...(MEMORY_ENTRIES.every(name=>kernel32[name])
             ? createMemoryFunctions({ readMemory: host.readMemory,
                 writeMemory: host.writeMemory, kernel32, allocate })
+            : {}),
+
+        /**
+         * NTSTATUS NtUnloadKey(POBJECT_ATTRIBUTES TargetKey)
+         *
+         * A hive RegLoadKey mounted, named the native way --
+         * \REGISTRY\Machine\<key> or \REGISTRY\User\<key> -- unloaded
+         * through the same table: a key that is no loaded hive is refused,
+         * one a handle is still open on cannot go.
+         */
+        ...(host.advapi32?.[UNLOAD_KEY]
+            ? {
+                NtUnloadKey: {
+                    argBytes: 4,
+                    /** @param {number[]} args */
+                    handler: ([attributes])=>{
+                        const name = (attributes >>> 0) === 0 ? 0
+                            : readU32(host.readMemory((attributes >>> 0) + 8, 4));
+                        if (name === 0)
+                        {
+                            return STATUS.INVALID_PARAMETER;
+                        }
+                        const length = host.readMemory(name, 2);
+                        const buffer = readU32(host.readMemory(name + 4, 4));
+                        const units = host.readMemory(buffer, length[0] | length[1] << 8);
+                        let path = '';
+                        for (let at = 0; at + 1 < units.length; at += 2)
+                        {
+                            path += String.fromCharCode(units[at] | units[at + 1] << 8);
+                        }
+                        const match = /^\\registry\\(machine|user)\\(.+)$/i.exec(path);
+                        if (!match)
+                        {
+                            return STATUS.OBJECT_NAME_NOT_FOUND;
+                        }
+                        const HKEY_LOCAL_MACHINE = 0x80000002;
+                        const HKEY_USERS = 0x80000003;
+                        return host.advapi32?.[UNLOAD_KEY](match[1].toLowerCase() === 'machine'
+                            ? HKEY_LOCAL_MACHINE : HKEY_USERS, match[2]);
+                    },
+                },
+            }
             : {}),
 
         /**

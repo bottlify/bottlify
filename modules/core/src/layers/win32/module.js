@@ -2044,6 +2044,9 @@ export function createWin32Module(){
                         readCString,
                         hive,
                         setLastError: setError,
+                        // Where RegSaveKey writes a hive and RegLoadKey reads one.
+                        files: volume,
+                        divergence: config?.divergence,
                         // A SID has to live where a program can compare it byte by byte.
                         /** @param {number} bytes */
                         allocate: bytes=>heap.allocate(bytes),
@@ -2262,6 +2265,7 @@ export function createWin32Module(){
                 windows,
                 handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
                 divergence: config?.divergence,
+                advapi32: libraries['ADVAPI32.dll'],
             });
 
             /** Every function, whichever library exports it. */

@@ -112,6 +112,16 @@ function makeKey(name){
 }
 
 /**
+ * A key outside every root: the tree RegLoadAppKey opens a hive file as,
+ * which no path from a root reaches.
+ *
+ * @returns {RegistryNode}
+ */
+export function detachedKey(){
+    return makeKey('');
+}
+
+/**
  * Splits a subkey path. A leading or trailing separator is tolerated because
  * guest code builds these paths by concatenation and often leaves one behind.
  *

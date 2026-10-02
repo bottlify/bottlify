@@ -25,7 +25,7 @@
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { COMPUTER_NAME } from '../kernel32/drives.js';
-import { HKEY_CURRENT_USER } from './registry.js';
+import { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, detachedKey } from './registry.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -37,6 +37,25 @@ const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_INVALID_SID = 1337;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
+const ERROR_ALREADY_EXISTS = 183;
+const ERROR_BADDB = 1009;
+const STATUS_SUCCESS = 0;
+const STATUS_ACCESS_DENIED = 0xc0000022;
+const STATUS_CANNOT_DELETE = 0xc0000121;
+
+/** What a file RegSaveKey writes starts with: the tree follows as JSON. */
+const HIVE_MAGIC = 'BTLHIVE1\n';
+
+/**
+ * Where the table keeps its hive unloading for ntdll's NtUnloadKey: a key
+ * no name in a module's exports can be.
+ */
+export const UNLOAD_KEY = Symbol('unloadKey');
+
+/**
+ * @typedef {{ values?: { name: string, type: number, data: number[] }[],
+ *     keys?: (HiveTree & { name: string })[] }} HiveTree
+ */
 
 /** The count is a byte and the format allows eight. */
 const MAX_SUB_AUTHORITIES = 8;
@@ -106,6 +125,10 @@ const USER_NAME = 'User';
  *           SID. Without it those calls fail as an out-of-memory would, which
  *           is a result a program is written to handle.
  * @property {(code: number) => void} [setLastError]
+ * @property {import('../ole32/storage.js').StorageFiles} [files]
+ *           The volume a hive is saved to and loaded from. Without it a
+ *           save is refused and a load finds no file.
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /** @param {number[]} numbers */
@@ -806,6 +829,268 @@ export function createRegistryFunctions(host){
         return ERROR_SUCCESS;
     };
 
+
+    /**
+     * A key's subtree as a hive file holds it: its values and its subkeys,
+     * not its own name.
+     *
+     * @param {import('./registry.js').RegistryKey} key
+     * @returns {HiveTree}
+     */
+    const exportTree = key=>({
+        values: hive.values(key).map(value=>({
+            name: value.name, type: value.type, data: [...value.data],
+        })),
+        keys: hive.subkeys(key).map(name=>({
+            name, ...exportTree(/** @type {any} */ (hive.open(key, name))),
+        })),
+    });
+
+    /** @param {import('./registry.js').RegistryKey} key @param {HiveTree} tree */
+    const importTree = (key, tree)=>{
+        for (const value of tree.values ?? [])
+        {
+            hive.setValue(key, value.name, value.type >>> 0, Uint8Array.from(value.data ?? []));
+        }
+        for (const child of tree.keys ?? [])
+        {
+            importTree(hive.create(key, child.name).key, child);
+        }
+    };
+
+    /** The subkey and everything under it, deepest first. @param {any} parent @param {string} name */
+    const removeTree = (parent, name)=>{
+        const key = hive.open(parent, name);
+        if (key)
+        {
+            for (const child of hive.subkeys(key))
+            {
+                removeTree(key, child);
+            }
+            hive.remove(parent, name);
+        }
+    };
+
+    /** @param {any} key @returns {Set<any>} the key and every key under it */
+    const nodesUnder = key=>{
+        const nodes = new Set([key]);
+        for (const name of hive.subkeys(key))
+        {
+            for (const node of nodesUnder(hive.open(key, name)))
+            {
+                nodes.add(node);
+            }
+        }
+        return nodes;
+    };
+
+    /** @param {any} key Whether a handle is open on the key or under it. */
+    const heldUnder = key=>{
+        const nodes = nodesUnder(key);
+        return [...handles.values()].some(held=>nodes.has(held));
+    };
+
+    /**
+     * Writes a key's subtree to a file of the volume: this library's own
+     * format, read back by RegLoadKey and RegLoadAppKey, not a hive Windows
+     * could mount.
+     *
+     * @param {any} key @param {string} path @param {boolean} replace
+     * @returns {number} a Win32 error
+     */
+    const writeHive = (key, path, replace)=>{
+        const files = host.files;
+        if (!files)
+        {
+            return ERROR_ACCESS_DENIED;
+        }
+        if (!replace && files.stat(path)?.exists)
+        {
+            return ERROR_ALREADY_EXISTS;
+        }
+        const node = files.open(path, { write: true, create: true, truncate: true });
+        if (!node)
+        {
+            return ERROR_ACCESS_DENIED;
+        }
+        files.write(node, 0, new TextEncoder().encode(
+            `${HIVE_MAGIC}${JSON.stringify(exportTree(key))}`));
+        files.close(node);
+        if (!saidFormat)
+        {
+            saidFormat = true;
+            host.divergence?.('RegSaveKey', 'a saved key is this engine\'s own format, read back '
+                + 'by RegLoadKey here, not a hive file Windows could load');
+        }
+        return ERROR_SUCCESS;
+    };
+    let saidFormat = false;
+
+    /**
+     * A file RegSaveKey wrote, as its tree, or the error a load answers.
+     *
+     * @param {string} path
+     * @returns {Promise<HiveTree | number> | HiveTree | number}
+     */
+    const readHive = path=>{
+        const files = host.files;
+        const found = files?.stat(path);
+        if (!files || !found?.exists || found.isDirectory)
+        {
+            return ERROR_FILE_NOT_FOUND;
+        }
+        const node = files.open(path, { read: true });
+        if (!node)
+        {
+            return ERROR_ACCESS_DENIED;
+        }
+        /** @param {Uint8Array} bytes */
+        const parse = bytes=>{
+            files.close(node);
+            const text = new TextDecoder().decode(bytes);
+            if (!text.startsWith(HIVE_MAGIC))
+            {
+                return ERROR_BADDB;
+            }
+            try
+            {
+                return /** @type {HiveTree} */ (JSON.parse(text.slice(HIVE_MAGIC.length)));
+            }
+            catch {
+                return ERROR_BADDB;
+            }
+        };
+        const bytes = files.read(node, 0, found.size);
+        return bytes instanceof Promise ? bytes.then(parse) : parse(bytes);
+    };
+
+    /**
+     * Hives loaded under a root, by `root\name` folded: the file each came
+     * from, written back when it is unloaded.
+     *
+     * @type {Map<string, { file: string, root: number, name: string }>}
+     */
+    const loaded = new Map();
+    /** @param {number} root @param {string} name */
+    const loadedName = (root, name)=>`${root}\\${name.toLowerCase()}`;
+
+    /**
+     * RegLoadKey in either spelling: the file's tree under a new key of
+     * HKEY_LOCAL_MACHINE or HKEY_USERS.
+     *
+     * @param {number} handle @param {string | null} name @param {string | null} path
+     */
+    const loadKey = (handle, name, path)=>{
+        const root = hive.root(handle);
+        if (!root || (handle !== HKEY_LOCAL_MACHINE && handle !== HKEY_USERS) || !name || !path)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        if (hive.open(root, name))
+        {
+            return ERROR_ALREADY_EXISTS;
+        }
+        /** @param {HiveTree | number} tree */
+        const mount = tree=>{
+            if (typeof tree === 'number')
+            {
+                return tree;
+            }
+            importTree(hive.create(root, name).key, tree);
+            loaded.set(loadedName(handle, name), { file: path, root: handle, name });
+            return ERROR_SUCCESS;
+        };
+        const tree = readHive(path);
+        return tree instanceof Promise ? tree.then(mount) : mount(tree);
+    };
+
+    /**
+     * Unloads a hive RegLoadKey mounted, writing what it holds now back to
+     * its file: as an NTSTATUS, which RegUnLoadKey turns into a Win32 error.
+     * A key that is no loaded hive is refused, as a hive the system keeps
+     * is; one a handle is still open on cannot go.
+     *
+     * @param {number} handle @param {string} name
+     * @returns {number}
+     */
+    const unload = (handle, name)=>{
+        const record = loaded.get(loadedName(handle, name));
+        const root = hive.root(handle);
+        const key = root ? hive.open(root, name) : null;
+        if (!record || !key)
+        {
+            return STATUS_ACCESS_DENIED;
+        }
+        if (heldUnder(key))
+        {
+            return STATUS_CANNOT_DELETE;
+        }
+        writeHive(key, record.file, true);
+        removeTree(root, name);
+        loaded.delete(loadedName(handle, name));
+        return STATUS_SUCCESS;
+    };
+
+    /** @param {number} handle @param {string | null} name */
+    const unloadKey = (handle, name)=>{
+        if (!hive.root(handle) || !name)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        const status = unload(handle, name);
+        return status === STATUS_SUCCESS ? ERROR_SUCCESS : ERROR_ACCESS_DENIED;
+    };
+
+    /**
+     * RegSaveKey's spellings, narrow and wide, with and without flags.
+     *
+     * @param {TextForm} form @param {number} argBytes
+     */
+    const saveKeyWith = (form, argBytes)=>({
+        argBytes,
+        /** @param {number[]} args */
+        handler: ([handle, file])=>{
+            const key = keyOf(handle >>> 0);
+            if (!key)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const path = form.read(file >>> 0);
+            return path ? writeHive(key, path, false) : ERROR_INVALID_PARAMETER;
+        },
+    });
+
+    /**
+     * Keys RegLoadAppKey opened, by handle: a tree of their own outside
+     * every root, written back to their file when the handle is closed.
+     *
+     * @type {Map<number, string>}
+     */
+    const appKeys = new Map();
+
+    /** @param {string | null} path @param {number} out */
+    const loadAppKey = (path, out)=>{
+        if (!path || out === 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        /** @param {HiveTree | number} tree */
+        const open = tree=>{
+            if (typeof tree === 'number')
+            {
+                return tree;
+            }
+            const key = detachedKey();
+            importTree(key, tree);
+            const handle = allocate(key);
+            appKeys.set(handle, path);
+            writeDword(out, handle);
+            return ERROR_SUCCESS;
+        };
+        const tree = readHive(path);
+        return tree instanceof Promise ? tree.then(open) : open(tree);
+    };
+
     return {
         RegOpenKeyExA: openKeyEx,
 
@@ -1078,7 +1363,11 @@ export function createRegistryFunctions(host){
          */
         FreeSid: { argBytes: 4, handler: ()=>0 },
 
-        /** LONG RegCloseKey(HKEY) */
+        /**
+         * LONG RegCloseKey(HKEY)
+         *
+         * A key RegLoadAppKey opened is written back to its file as it goes.
+         */
         RegCloseKey: {
             argBytes: 4,
             /** @param {number[]} args */
@@ -1088,9 +1377,16 @@ export function createRegistryFunctions(host){
                 {
                     return ERROR_SUCCESS;
                 }
-                if (!handles.delete(key))
+                const held = handles.get(key);
+                if (!held || !handles.delete(key))
                 {
                     return ERROR_INVALID_HANDLE;
+                }
+                const file = appKeys.get(key);
+                if (file !== undefined)
+                {
+                    appKeys.delete(key);
+                    writeHive(held, file, true);
                 }
                 freed.push(key);
                 return ERROR_SUCCESS;
@@ -1332,5 +1628,67 @@ export function createRegistryFunctions(host){
             handler: ([machine, handle, result])=>
                 connectRegistry(WIDE.read(machine >>> 0), handle >>> 0, result >>> 0),
         },
+
+        /**
+         * LONG RegSaveKeyA(HKEY, LPCSTR lpFile, LPSECURITY_ATTRIBUTES)
+         *
+         * The key and everything under it into a new file; one already there
+         * is ERROR_ALREADY_EXISTS.
+         */
+        RegSaveKeyA: saveKeyWith(ANSI, 12),
+        RegSaveKeyW: saveKeyWith(WIDE, 12),
+        /** LONG RegSaveKeyExA(HKEY, LPCSTR, LPSECURITY_ATTRIBUTES, DWORD Flags) */
+        RegSaveKeyExA: saveKeyWith(ANSI, 16),
+        RegSaveKeyExW: saveKeyWith(WIDE, 16),
+
+        /**
+         * LONG RegLoadKeyA(HKEY, LPCSTR lpSubKey, LPCSTR lpFile)
+         *
+         * A saved key mounted as a new subkey of HKEY_LOCAL_MACHINE or
+         * HKEY_USERS until RegUnLoadKey writes it back.
+         */
+        RegLoadKeyA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, name, file])=>
+                loadKey(handle >>> 0, ANSI.read(name >>> 0), ANSI.read(file >>> 0)),
+        },
+        RegLoadKeyW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, name, file])=>
+                loadKey(handle >>> 0, WIDE.read(name >>> 0), WIDE.read(file >>> 0)),
+        },
+
+        /** LONG RegUnLoadKeyA(HKEY, LPCSTR lpSubKey) */
+        RegUnLoadKeyA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, name])=>unloadKey(handle >>> 0, ANSI.read(name >>> 0)),
+        },
+        RegUnLoadKeyW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, name])=>unloadKey(handle >>> 0, WIDE.read(name >>> 0)),
+        },
+
+        /**
+         * LONG RegLoadAppKeyA(LPCSTR lpFile, PHKEY, REGSAM, DWORD dwOptions, DWORD Reserved)
+         *
+         * A saved key opened as a tree of the process's own, reached through
+         * the handle alone.
+         */
+        RegLoadAppKeyA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([file, out])=>loadAppKey(ANSI.read(file >>> 0), out >>> 0),
+        },
+        RegLoadAppKeyW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([file, out])=>loadAppKey(WIDE.read(file >>> 0), out >>> 0),
+        },
+
+        [UNLOAD_KEY]: unload,
     };
 }
