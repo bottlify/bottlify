@@ -412,6 +412,39 @@ test('dispose() destroys the staging buffers of a frame that was opened and neve
         'a fault mid-frame does not leak the open frame\'s staging buffer');
 });
 
+test('a backing a buffer retired comes back to its pool once its frame is submitted, though no '
+    + 'frame touches the buffer again', ()=>{
+    // The frame's end visits only the buffers with work for it; one waiting to
+    // free a retired backing stays among them until it has.
+    const { gpu, backend } = harness();
+    const idle = Array.from({ length: 200 }, (_, i)=>backend.createDynamicBuffer({
+        size: 256, usage: 0, label: `idle${i}` }));
+    const buffer = backend.createDynamicBuffer({ size: 256, usage: 0, label: 'b' });
+    const made = ()=>gpu.calls.filter(call=>call.op === 'createBuffer'
+        && String(call.descriptor?.label).startsWith('b#')).length;
+    let frame = backend.beginFrame();
+    buffer.unlock(buffer.lock(0, 64, backend.LockFlags.NONE));
+    buffer.markRead();
+    // Presented before the rename, as a frame recorded and queued is: the
+    // backing waits for a submit past this frame's.
+    backend.markPresent();
+    buffer.unlock(buffer.lock(0, 64, backend.LockFlags.DISCARD));
+    assert.equal(made(), 2, 'renamed: a second backing');
+    frame.end();
+    for (let i = 0; i < 2; i++)
+    {
+        frame = backend.beginFrame();
+        idle[i].unlock(idle[i].lock(0, 16, backend.LockFlags.NONE));
+        backend.markPresent();
+        frame.end();
+    }
+    frame = backend.beginFrame();
+    buffer.markRead();
+    buffer.unlock(buffer.lock(0, 64, backend.LockFlags.DISCARD));
+    assert.equal(made(), 2, 'the retired backing taken back, no third one made');
+    frame.end();
+});
+
 test('the snapshot is deep enough to find a regression that is not in the top rows', ()=>{
     const { backend } = harness();
     const vertices = backend.createDynamicBuffer({ size: 4096, usage: 0, label: 'vertices' });

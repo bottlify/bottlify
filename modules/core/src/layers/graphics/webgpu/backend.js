@@ -213,6 +213,17 @@ export function createBackend(options){
 
     /** @type {any[]} */
     const dynamicBuffers = [];
+    // The frames presented and submitted, one count for every dynamic buffer,
+    // and the buffers with work at the frame's end: a run makes a buffer for
+    // every buffer object it ever creates, and a frame that visited them all
+    // three times at its end -- to flush, to count the present, to free the
+    // backings retired -- spent its time on buffers it never touched.
+    const frameCounts = { presents: 0, submits: 0 };
+    /** @type {Set<any>} */
+    const touchedBuffers = new Set();
+    const touched = (/** @type {any} */ buffer)=>{
+        touchedBuffers.add(buffer);
+    };
     /** Renames' carries waiting for the frame's end. @type {import('./internal/buffers.js').Carry[]} */
     const carries = [];
     /** @type {any[]} */
@@ -680,10 +691,7 @@ export function createBackend(options){
          * counts the present.
          */
         markPresent(){
-            for (const buffer of dynamicBuffers)
-            {
-                buffer.markPresent();
-            }
+            frameCounts.presents++;
         },
 
         /**
@@ -726,6 +734,8 @@ export function createBackend(options){
                     profiler.bufferUpload(label, bytes),
                 carry: (/** @type {import('./internal/buffers.js').Carry} */ carry)=>
                     carries.push(carry),
+                frames: frameCounts,
+                touched,
             });
             dynamicBuffers.push(buffer);
             return buffer;
@@ -1073,7 +1083,7 @@ export function createBackend(options){
                     }
 
                     const endUpload = profiler.phase('uploads');
-                    for (const buffer of dynamicBuffers)
+                    for (const buffer of touchedBuffers)
                     {
                         buffer.flush();
                     }
@@ -1113,9 +1123,14 @@ export function createBackend(options){
                     resolved?.destroy();
                     occlusion?.set.destroy();
 
-                    for (const buffer of dynamicBuffers)
+                    frameCounts.submits++;
+                    for (const buffer of touchedBuffers)
                     {
                         buffer.endFrame();
+                        if (!buffer.retiring)
+                        {
+                            touchedBuffers.delete(buffer);
+                        }
                     }
                     uniforms.endFrame();
 
@@ -1177,6 +1192,7 @@ export function createBackend(options){
         dispose(){
             disposed = true;
             dynamicBuffers.length = 0;
+            touchedBuffers.clear();
             // Staged between frames but never encoded: their buffers are not on
             // any frame's list, so dropping the queue without destroying them
             // first would leak one per queued copy.

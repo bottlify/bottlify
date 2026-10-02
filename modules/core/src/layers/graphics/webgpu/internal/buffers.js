@@ -121,6 +121,13 @@ export function carriedRanges(carry){
  * @param {(label: string, bytes: number)=>void} [options.onUpload]
  * @param {(carry: Carry)=>void} [options.carry]  Takes the GPU copy a rename
  *     that keeps the contents needs; without it, the whole buffer is resent.
+ * @param {{ presents: number, submits: number }} [options.frames]  The frames
+ *     presented and submitted, counted once for every buffer of a backend; without
+ *     it the buffer counts its own `markPresent` and `endFrame` calls.
+ * @param {(buffer: any)=>void} [options.touched]  Told each time the buffer comes
+ *     to have work at the frame's end -- bytes to flush, a draw that read it, a
+ *     backing retired: the frame's end then visits it, and not every buffer the
+ *     run ever made.
  * @returns {any}
  */
 export function createDynamicBuffer(options){
@@ -143,8 +150,13 @@ export function createDynamicBuffer(options){
     // vertices instead.
     /** @type {{ gpu: any, at: number }[]} */
     const retired = [];
-    let presents = 0;
-    let submits = 0;
+    // A backend's frames when it counts them for all its buffers, else this
+    // buffer's own.
+    const frames = options.frames ?? { presents: 0, submits: 0 };
+    const own = options.frames === undefined;
+    /** @type {any} */
+    let self = null;
+    const touch = ()=>options.touched?.(self);
     let generation = 0;
     let renames = 0;
     // What the uploads cost, for a report: each write is a trip to the GPU
@@ -201,7 +213,8 @@ export function createDynamicBuffer(options){
         // already recorded read that buffer object, not the new one.
         flush();
         const old = gpu;
-        retired.push({ gpu, at: presents });
+        retired.push({ gpu, at: frames.presents });
+        touch();
         gpu = available.length > 0 ? available.shift() : allocate();
         renames++;
         // Nothing has read the replacement yet.
@@ -217,9 +230,13 @@ export function createDynamicBuffer(options){
         dirtyEnd = capacity;
     };
 
-    return {
+    self = {
         get gpu(){
             return gpu;
+        },
+        /** Whether a retired backing waits for its frame's submit to come back to the pool. */
+        get retiring(){
+            return retired.length > 0;
         },
         get renames(){
             return renames;
@@ -284,6 +301,7 @@ export function createDynamicBuffer(options){
             dirtyStart = dirtyStart < 0 ? lock.offset : Math.min(dirtyStart, lock.offset);
             dirtyEnd = Math.max(dirtyEnd, end);
             held = null;
+            touch();
         },
 
         flush,
@@ -295,7 +313,11 @@ export function createDynamicBuffer(options){
          * draw at replay.
          */
         markRead(){
-            readSinceSubmit = true;
+            if (!readSinceSubmit)
+            {
+                readSinceSubmit = true;
+                touch();
+            }
         },
 
         /**
@@ -307,12 +329,19 @@ export function createDynamicBuffer(options){
          * from here on belongs to it, not to the frames already in flight.
          */
         markPresent(){
-            presents++;
+            if (own)
+            {
+                frames.presents++;
+            }
         },
 
         /** A frame was submitted; the backings its draws read are free now. */
         endFrame(){
-            submits++;
+            if (own)
+            {
+                frames.submits++;
+            }
+            const submits = frames.submits;
             // Its carry was copied with the frame; later writes go in place.
             carryInto = null;
             // Every frame that could have read the live backing is submitted by
@@ -346,4 +375,5 @@ export function createDynamicBuffer(options){
             };
         },
     };
+    return self;
 }
