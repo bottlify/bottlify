@@ -49,7 +49,8 @@ import { identity, invert, multiply, transpose } from './matrix.js';
 import { normalMatrix } from './lighting.js';
 import { FACE_STRIDE, createTextureObject, levelKey } from './objects.js';
 import {
-    CANONICAL_LAYOUT, expandIndices, isList, packVertices, planLayout, scanIndices, topologyOf,
+    CANONICAL_LAYOUT, clientReads, expandIndices, isList, packVertices, planLayout, scanIndices,
+    topologyOf,
 } from './gpu-layout.js';
 import {
     FRAGMENT_PROGRAM_BINDING, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS,
@@ -1935,7 +1936,7 @@ export function createGpuRenderer(services){
      * layout.
      *
      * @param {object} context
-     * @param {import('./pipeline.js').Scene} scene
+     * @param {() => import('./pipeline.js').Scene} scene  built when the draw is recorded
      * @param {number} mode
      * @param {readonly import('./pipeline.js').PipelineVertex[]} vertices
      */
@@ -1949,7 +1950,7 @@ export function createGpuRenderer(services){
         const indices = expanded
             ? { ...scratchIndices.write(expanded), format: 'uint32', count: expanded.length }
             : null;
-        record(context, scene, CANONICAL_LAYOUT, [packed], indices,
+        record(context, scene(), CANONICAL_LAYOUT, [packed], indices,
             indices ? indices.count : vertices.length, 0, 0, topologyOf(mode));
     };
 
@@ -1999,13 +2000,10 @@ export function createGpuRenderer(services){
     /**
      * @param {object} context
      * @param {DrawRequest} request
-     * @param {import('./pipeline.js').Scene} scene
+     * @param {() => import('./pipeline.js').Scene} scene  built when the draw is recorded
      */
     const drawArrays = (context, request, scene)=>{
-        // A vertex program replaces the fixed lighting, so a lit scene only
-        // takes the processor path when the position comes from the fixed
-        // pipeline.
-        if ((scene.lighting && !scene.programs.vertex) || !drawables.has(context))
+        if (!drawables.has(context))
         {
             return false;
         }
@@ -2020,35 +2018,25 @@ export function createGpuRenderer(services){
         {
             return true;
         }
-        const min = scanned ? scanned.min : request.first;
-        const max = scanned ? scanned.max : request.first + request.count - 1;
-        const allClient = layout.slots.every(slot=>slot.buffer === 0);
-        // Client-memory slots are copied from the first vertex the draw reaches
-        // when every slot is one, and from vertex zero when a buffer object
-        // shares the draw, so that one index numbers every slot alike.
-        const from = allClient ? min : 0;
-        const slots = layout.slots.map(slot=>{
-            if (slot.buffer !== 0)
-            {
-                const object = request.bufferObject(slot.buffer);
-                if (!object)
-                {
-                    return null;
-                }
-                const gpuBuffer = bufferFor(object);
-                const recording = recordingOf(context);
-                gpuBuffer.reads.note(recording.id, slot.base + min * slot.stride,
-                    slot.base + (max + 1) * slot.stride);
-                return { gpu: gpuBuffer.gpu.gpu, offset: slot.base };
-            }
-            const bytes = request.read(slot.base + from * slot.stride,
-                (max + 1 - from) * slot.stride);
-            return scratchVertices.write(bytes);
-        });
-        if (slots.some(slot=>slot === null))
+        if (layout.slots.some(slot=>slot.buffer !== 0 && !request.bufferObject(slot.buffer)))
         {
             return false;
         }
+        const min = scanned ? scanned.min : request.first;
+        const max = scanned ? scanned.max : request.first + request.count - 1;
+        const { from, reads } = clientReads(layout.slots, min, max);
+        const slots = layout.slots.map((slot, index)=>{
+            const read = reads[index];
+            if (read)
+            {
+                return scratchVertices.write(request.read(read.at, read.length));
+            }
+            const gpuBuffer = bufferFor(/** @type {any} */ (request.bufferObject(slot.buffer)));
+            const recording = recordingOf(context);
+            gpuBuffer.reads.note(recording.id, slot.base + min * slot.stride,
+                slot.base + (max + 1) * slot.stride);
+            return { gpu: gpuBuffer.gpu.gpu, offset: slot.base };
+        });
         const list = isList(request.mode);
         /** @type {{ gpu: any, offset: number, format: string, count: number } | null} */
         let indices = null;
@@ -2072,7 +2060,7 @@ export function createGpuRenderer(services){
                 ...scratchIndices.write(expanded), format: 'uint32', count: expanded.length,
             };
         }
-        record(context, scene, layout, /** @type {{ gpu: any, offset: number }[]} */ (slots),
+        record(context, scene(), layout, slots,
             indices, indices ? indices.count : request.count,
             indices ? 0 : request.first - from, 0 - from, topologyOf(request.mode));
         return true;
@@ -2444,11 +2432,11 @@ export function createGpuRenderer(services){
          * @param {import('./objects.js').BufferObject} buffer
          */
         releaseBuffer(buffer){
-            const record = buffers.get(buffer);
-            if (record)
+            const held = buffers.get(buffer);
+            if (held)
             {
                 buffers.delete(buffer);
-                backend.releaseDynamicBuffer?.(record.gpu);
+                backend.releaseDynamicBuffer?.(held.gpu);
             }
             indexScanCache.delete(buffer);
         },

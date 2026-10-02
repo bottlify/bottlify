@@ -361,11 +361,12 @@ export function createGlContext(options = {}){
         drawVertices,
         // A draw by arrays reaches the device only when it is neither being
         // compiled into a list -- a list holds vertices, not pointers -- nor
+        // lit by the fixed pipeline, which is done on the processor, nor
         // refused by the renderer for a shape it cannot bind.
         drawArrays: gpu
-            ? request=>(compiling || !attached
+            ? request=>(compiling || !attached || scenes.litFixed()
                 ? false
-                : gpu.drawArrays(context, request, scenes.scene()))
+                : gpu.drawArrays(context, request, scenes.scene))
             : null,
         copyToTexture: gpu
             ? (texture, level, face, xoffset, yoffset, x, y, width, height)=>
@@ -1732,7 +1733,7 @@ export function createGlContext(options = {}){
         {
             if (attached)
             {
-                gpu.draw(context, scenes.scene(), mode, vertices);
+                gpu.draw(context, scenes.scene, mode, vertices);
             }
             return;
         }

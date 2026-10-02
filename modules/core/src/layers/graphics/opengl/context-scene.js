@@ -109,6 +109,38 @@ export function createSceneBuilder(kernel){
     const side = kernel.side;
     const on = (/** @type {number} */ cap)=>record(cap).values[0] !== 0;
 
+    // A program stage is what the renderer draws with only when its cap
+    // is on, its target has a program bound, and that program loaded: an
+    // enabled cap with nothing valid bound draws the fixed pipeline, as
+    // it does on hardware.
+    /**
+     * @param {number} target
+     * @param {'vertex' | 'fragment'} kind
+     * @returns {import('./pipeline.js').SceneProgram | null}
+     */
+    const stage = (target, kind)=>{
+        const programsSide = side.programs;
+        if (!programsSide || record(target).values[0] === 0)
+        {
+            return null;
+        }
+        const program = programsSide.boundProgram(target);
+        if (!program || !program.parsed || program.parsed.kind !== kind)
+        {
+            return null;
+        }
+        return {
+            name: program.name,
+            version: program.version,
+            text: program.text,
+            ir: program.parsed,
+            local: program.local,
+            localVersion: program.localVersion,
+            env: /** @type {Float32Array} */ (programsSide.env.get(target)),
+            envVersion: programsSide.envVersion(target),
+        };
+    };
+
     /** @returns {import('./pipeline.js').Scene & { lit: (vertex: any, eye: number[]) => number[] }} */
     function scene(){
         const modelview = kernel.stacks.modelview.current;
@@ -195,37 +227,7 @@ export function createSceneBuilder(kernel){
             }
         }
 
-        // A program stage is what the renderer draws with only when its cap
-        // is on, its target has a program bound, and that program loaded: an
-        // enabled cap with nothing valid bound draws the fixed pipeline, as
-        // it does on hardware.
         const programsSide = side.programs;
-        /**
-         * @param {number} target
-         * @param {'vertex' | 'fragment'} kind
-         * @returns {import('./pipeline.js').SceneProgram | null}
-         */
-        const stage = (target, kind)=>{
-            if (!programsSide || record(target).values[0] === 0)
-            {
-                return null;
-            }
-            const program = programsSide.boundProgram(target);
-            if (!program || !program.parsed || program.parsed.kind !== kind)
-            {
-                return null;
-            }
-            return {
-                name: program.name,
-                version: program.version,
-                text: program.text,
-                ir: program.parsed,
-                local: program.local,
-                localVersion: program.localVersion,
-                env: /** @type {Float32Array} */ (programsSide.env.get(target)),
-                envVersion: programsSide.envVersion(target),
-            };
-        };
         const programs = {
             vertex: stage(GL.VERTEX_PROGRAM_ARB, 'vertex'),
             fragment: stage(GL.FRAGMENT_PROGRAM_ARB, 'fragment'),
@@ -380,6 +382,12 @@ export function createSceneBuilder(kernel){
 
     return {
         scene,
+        /**
+         * Whether a draw is lit by the fixed pipeline, which the renderer
+         * leaves to the processor: lighting on, and no vertex program in its
+         * place. Asked without building the scene.
+         */
+        litFixed: ()=>on(GL.LIGHTING) && stage(GL.VERTEX_PROGRAM_ARB, 'vertex') === null,
         /**
          * @param {number} mode
          * @param {any[]} vertices

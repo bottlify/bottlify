@@ -460,6 +460,24 @@ export function scanIndices(bytes, type, count){
 }
 
 /**
+ * What of client memory a draw by arrays reads, one entry per slot -- null for
+ * a slot in a buffer object: from the first vertex the draw reaches when every
+ * slot is client memory, and from vertex zero when a buffer object shares the
+ * draw, so that one index numbers every slot alike. The renderer copies these
+ * ranges and a renderer elsewhere is sent them, so both ask here.
+ *
+ * @param {readonly DrawSlot[]} slots
+ * @param {number} min @param {number} max  the vertices the draw reaches
+ * @returns {{ from: number, reads: ({ at: number, length: number } | null)[] }}
+ *     `from` the vertex the client ranges begin at
+ */
+export function clientReads(slots, min, max){
+    const from = slots.every(slot=>slot.buffer === 0) ? min : 0;
+    return { from, reads: slots.map(slot=>(slot.buffer !== 0 ? null
+        : { at: slot.base + from * slot.stride, length: (max + 1 - from) * slot.stride })) };
+}
+
+/**
  * The list indices of a draw whose vertices are numbered `first` onward,
  * through an index list when it has one: what a non-list mode is drawn with.
  *
