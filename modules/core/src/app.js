@@ -4063,7 +4063,10 @@ async function buildApp(options){
             // back to. Code of its own that hands a call to the host jumps to
             // a trap answering as the export, and named as it; the jump's
             // displacement is the loader's, which places the code.
-            ...fn.code ? codeExport(fn, `${name}!${exported}`) : fn.data ? { data: fn.data() } : {
+            // A variable may hold other exports' addresses: a vtable's slots.
+            ...fn.code ? codeExport(fn, `${name}!${exported}`) : fn.data ? {
+                data: fn.data(), pointers: fn.pointers, entry: fn.entry,
+            } : {
                 target: fn.guest
                     ? fn.guest({
                         /** @param {string} label @param {any} trap */

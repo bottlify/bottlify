@@ -78,6 +78,14 @@ const encoder = new TextEncoder();
  *   In `code`: the four bytes at `at` are a relative jump's displacement to
  *   the guest address `target`, filled in here, where the code's own address
  *   is known -- a direct jump into a host stub, as a trampoline makes.
+ * @property {{ at: number, to: string }[]} [pointers]
+ *   In `data`: the four bytes at `at` are the address of the export named
+ *   `to`, filled in here, where every export has its place -- a vtable's
+ *   slots, and the runtime type information a vtable and a type point into.
+ * @property {number} [entry]
+ *   For `data`: the export's address is this many bytes into it. A vtable is
+ *   exported at its first slot, with the word before it pointing at its
+ *   class's type information, where a cast or `typeid` looks for it.
  */
 
 /**
@@ -182,6 +190,11 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
     const bytes = new Uint8Array(size);
     const view = new DataView(bytes.buffer);
     const entryPointRva = entryIndex < 0 ? 0 : trampolinesRva + entryIndex * TRAMPOLINE_STRIDE;
+    /** @param {number} index @returns {number} the export's RVA */
+    const exportRva = index=>(dataRvas.has(index)
+        ? /** @type {number} */ (dataRvas.get(index)) + (exports[index].entry ?? 0)
+        : codeRvas.get(index) ?? trampolinesRva + index * TRAMPOLINE_STRIDE);
+    const indexOf = new Map(exports.map((entry, index)=>[entry.name, index]));
 
     writeHeaders(bytes, view, {
         base, size, sectionSize, dataRva, dataSize,
@@ -195,6 +208,15 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
         if (entry.data)
         {
             bytes.set(entry.data, rva);
+            for (const { at, to } of entry.pointers ?? [])
+            {
+                const target = indexOf.get(to);
+                if (target === undefined)
+                {
+                    throw new Error(`export "${entry.name}" points at "${to}", which is not one`);
+                }
+                view.setUint32(rva + at, base + exportRva(target), true);
+            }
         }
         else if (entry.code)
         {
@@ -211,7 +233,7 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
             // so any pair of guest addresses is reachable regardless of sign.
             view.setUint32(rva + 1, ((entry.target ?? 0) - (base + rva + 5)) >>> 0, true);
         }
-        view.setUint32(functionsRva + (ordinals[index] - ordinalBase) * 4, rva, true);
+        view.setUint32(functionsRva + (ordinals[index] - ordinalBase) * 4, exportRva(index), true);
     });
 
     view.setUint32(exportDirectoryRva + 12, stringRvas[0], true); // Name
@@ -238,8 +260,7 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
     strings.forEach((text, index)=>bytes.set(encoder.encode(text), stringRvas[index]));
 
     const table = new Map(exports.map((entry, index)=>[entry.name, {
-        address: base + (dataRvas.get(index) ?? codeRvas.get(index)
-            ?? trampolinesRva + index * TRAMPOLINE_STRIDE),
+        address: base + exportRva(index),
         ordinal: ordinals[index],
     }]));
 

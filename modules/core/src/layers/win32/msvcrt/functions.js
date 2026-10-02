@@ -31,6 +31,7 @@ import {
     createWideFunctions, createWideClassificationFunctions, createMultiByteFunctions,
 } from './mbstring.js';
 import { createCxxFunctions } from './cxx.js';
+import { createClassFunctions } from './classes.js';
 import { guestEntry, guestExport } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
@@ -850,6 +851,19 @@ export function createMsvcrtFunctions(host){
         }),
         ...createScanFunctions(host),
         ...createCxxFunctions(host),
+        // The exception classes own their messages on the heap.
+        ...(host.allocate && host.free
+            ? createClassFunctions({
+                readMemory: host.readMemory,
+                writeMemory: host.writeMemory,
+                readCString: host.readCString,
+                allocate: host.allocate,
+                free: host.free,
+                callGuest: host.callGuest,
+                ...host.addressOf ? { addressOf: host.addressOf } : {},
+                ...host.currentThread ? { currentThread: host.currentThread } : {},
+            })
+            : {}),
 
         // The start-up runs before main and needs more of the machine than the
         // rest of the runtime: a heap to put argv in, the command line the

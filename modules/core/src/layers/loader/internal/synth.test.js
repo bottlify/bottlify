@@ -446,3 +446,32 @@ test('a jump out of a function that is code of its own lands where it was aimed'
         assert.equal(module.bytes[rva + 10], 0xc3, 'the rest of the body as it was');
     }
 });
+
+test('a variable may hold other exports\' addresses, and be exported part way in', ()=>{
+    // A vtable: the class's locator in the word before it, the export's
+    // address at its first slot, the slots the addresses of the functions.
+    const module = synthesiseModule({
+        name: 'MSVCRT.dll',
+        base: BASE,
+        exports: [
+            { name: 'what', target: 0x2000 },
+            { name: 'locator', data: new Uint8Array(20) },
+            { name: 'vtable', data: new Uint8Array(12), entry: 4,
+                pointers: [{ at: 0, to: 'locator' }, { at: 4, to: 'what' },
+                    { at: 8, to: 'vtable' }] },
+        ],
+    });
+    const decoded = decodeExports(module.bytes);
+    const vtable = /** @type {number} */ (module.addressOf('vtable'));
+    const rva = decoded.functionRvas[decoded.nameOrdinals[decoded.names.indexOf('vtable')]];
+    assert.equal(vtable, BASE + rva, 'the directory and addressOf agree on the entry');
+    const view = new DataView(module.bytes.buffer);
+    assert.equal(view.getUint32(rva - 4, true), module.addressOf('locator'));
+    assert.equal(view.getUint32(rva, true), module.addressOf('what'));
+    assert.equal(view.getUint32(rva + 4, true), vtable, 'a pointer to an entry is to the entry');
+    assert.throws(()=>synthesiseModule({
+        name: 'MSVCRT.dll',
+        base: BASE,
+        exports: [{ name: 'vtable', data: new Uint8Array(4), pointers: [{ at: 0, to: 'none' }] }],
+    }), /points at "none"/);
+});
