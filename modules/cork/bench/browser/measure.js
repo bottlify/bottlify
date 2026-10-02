@@ -7,11 +7,14 @@
 /**
  * One measured run of a benchmark workload: the engine made, the program run to
  * its exit, the guest instructions it retired over the wall time of the run.
- * No store of translations: a run starts as a bottle's first run does.
+ * No store of translations unless asked: a run starts as a bottle's first run
+ * does. `store: 'local'` keeps the product's own, so a second run in the same
+ * browser profile starts as a bottle's next run does.
  *
  * @param {(options: any) => Promise<any>} createApp
  * @param {Uint8Array} executable
- * @param {{ engine?: string, cork?: object, v86?: object, commandLine?: string }} options
+ * @param {{ engine?: string, cork?: object, v86?: object, commandLine?: string,
+ *     store?: 'local', report?: boolean }} options
  */
 export async function measureOnce(createApp, executable, options){
     const app = await createApp({
@@ -19,7 +22,7 @@ export async function measureOnce(createApp, executable, options){
         engine: options.engine ?? 'cork',
         exitNotice: false,
         ...options.v86 ? { v86: options.v86 } : {},
-        cork: { config: { store: null, ...options.cork } },
+        cork: { config: { ...options.store === 'local' ? {} : { store: null }, ...options.cork } },
         ...options.commandLine ? { commandLine: options.commandLine } : {},
     });
     let code = null;
@@ -48,5 +51,11 @@ export async function measureOnce(createApp, executable, options){
         // Only from a bundle built with the instruments and a run asking for `timings`.
         timings: Object.fromEntries(Object.entries(cpu.cork ?? {})
             .filter(([key, value])=>key.endsWith('Ms') && value > 0)),
+        // The engine thread's long holds and the regions the store answered, from
+        // the same bundles and runs.
+        stalls: cpu.cork?.stalls ?? null,
+        cacheHits: cpu.cork?.cacheHits ?? null,
+        // The translator's whole report, when a run asks for it.
+        ...options.report === true ? { cork: cpu.cork ?? null } : {},
     };
 }

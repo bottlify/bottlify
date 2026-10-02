@@ -995,6 +995,59 @@ test('a store that answers at once has a batch published in the call that formed
         third.runtime.diagnostics().lookedUpLater], [0, 1]);
 });
 
+test('a batch the store answers whole sends the next for the asks still owed, a turn later',
+    async()=>{
+        // A bottle's next run: the store answers every batch at once, so no
+        // worker's answer comes back to send the next, and the host asks only
+        // when the interpreter notes a new start -- which code already queued
+        // is not.
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const starts = [0x2000, 0x3000, 0x4000];
+        /** @type {Map<string, Uint8Array>} */
+        const records = new Map();
+        let answersNow = true;
+        const store = {
+            get: async(/** @type {string} */ key)=>records.get(key) ?? null,
+            put: async(/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+                records.set(key, bytes);
+            },
+            getNow: (/** @type {string} */ key)=>(answersNow
+                ? records.get(key) ?? null : undefined),
+        };
+        /** @param {number} count */
+        const machineWith = count=>{
+            const m = machine({ store, bundleId: 'test', batchRegions: 1 });
+            m.setReg(4, 0x80000);
+            for (const at of starts.slice(0, count))
+            {
+                m.write(at, COUNTDOWN);
+                m.runtime.noteHot(at, 0, 2);
+            }
+            return m;
+        };
+        const first = machineWith(3);
+        for (let i = 0; i < 3; i++)
+        {
+            await first.runtime.translatePending();
+            await settle();
+        }
+        assert.ok(starts.every(at=>first.runtime.entryOf(at) >= 0), 'all three stored');
+        const next = machineWith(3);
+        answersNow = false;
+        assert.equal(await next.runtime.translatePending(), 0,
+            'the first batch asks the store later');
+        await next.runtime.translatePending();
+        await next.runtime.translatePending();
+        answersNow = true;
+        for (let i = 0; i < 10 && !starts.every(at=>next.runtime.entryOf(at) >= 0); i++)
+        {
+            await settle();
+        }
+        assert.deepEqual(starts.map(at=>next.runtime.entryOf(at) >= 0), [true, true, true],
+            'the owed asks are answered with no further ask');
+        assert.equal(next.runtime.diagnostics().cacheHits, 3);
+    });
+
 test('a runtime that goes leaves the store it was handed open for the others sharing it',
     async()=>{
         // The shape of a store over a directory: once closed it answers

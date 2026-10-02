@@ -2541,7 +2541,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             counts.lookedUpNow++;
             counts.lookupMs += clock() - lookupAt;
-            return finishBatch(formed, store);
+            const published = finishBatch(formed, store);
+            // A batch the store answered whole has no answer to come back
+            // with, which is what sends the next one for the asks still owed:
+            // the next goes after this turn, as it would after the worker's.
+            if (outstanding === null)
+            {
+                queueMicrotask(sendNext);
+            }
+            return published;
         }
         // A store that cannot answer at once answers off the slice path:
         // the batch's records are requested here and the slice goes on. The
