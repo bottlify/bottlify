@@ -503,7 +503,12 @@ function runCounted(counted, code, cork = {}){
     const before = { ...counted.retired };
     const h = host({ engine: counted.counting, cork: { translate: false, ...cork } });
     load(h, 0x1000, code);
-    h.runSlice(100_000);
+    // Slices to the halt: one that interprets ends on time, which a loaded
+    // machine reaches before the program does.
+    for (let slices = 0; !h.halted() && slices < 1000; slices++)
+    {
+        h.runSlice(100_000);
+    }
     assert.ok(h.halted());
     return { js: counted.retired.js - before.js, wasm: counted.retired.wasm - before.wasm };
 }
