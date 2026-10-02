@@ -684,9 +684,9 @@ export function createDialogFunctions(options){
                 // A class the program registered is the program's, procedure and
                 // all: a template names its own controls this way, and one of
                 // them keeps its state in the extra bytes and sets it up in
-                // WM_CREATE like a window made any other way. A system class has
-                // no procedure here, and a control that answered messages from
-                // nowhere would be inventing behaviour.
+                // WM_CREATE like a window made any other way. A system class's
+                // procedure is the window manager's, and is told WM_CREATE the
+                // same way.
                 const cls = classNamed(control.className);
                 // A control is a child of the dialog whatever its template
                 // says, told nothing of its parent's creation, and a border
@@ -725,7 +725,7 @@ export function createDialogFunctions(options){
                 // The class and title are in the template, not in guest
                 // memory, so the CREATESTRUCT names neither: a procedure that
                 // reads them there finds NULL. The ceiling on this.
-                return after(cls ? announce(record, [extended, 0, 0, style,
+                return after(record.wndProc !== 0 ? announce(record, [extended, 0, 0, style,
                     placed.x, placed.y, placed.width, placed.height,
                     dialog.hwnd, control.id, instance >>> 0, control.data], false, thread) : 0,
                 ()=>after(picture(record, control, instance >>> 0, thread),

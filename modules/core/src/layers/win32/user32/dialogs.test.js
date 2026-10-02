@@ -87,7 +87,8 @@ function fakeHandles(){
  *           dispatch?: (wndProc: number, message: any, thread?: unknown) => number,
  *           allocate?: (bytes: number) => number,
  *           call?: (entry: number, args: number[], thread?: unknown) => any,
- *           unattended?: boolean, answer?: (dialog: any) => number | Promise<number> }} [options]
+ *           unattended?: boolean, answer?: (dialog: any) => number | Promise<number>,
+ *           bitmapFromDib?: (info: number, bits: number) => number }} [options]
  */
 function setup({ resources = {}, dispatch = ()=>0, allocate, call, unattended, answer,
     bitmapFromDib } = {})
@@ -1080,6 +1081,25 @@ test("a static showing a bitmap loads it from its template's module by the name 
         assert.equal(fns.SendMessageA.handler([fns.GetDlgItem.handler([dialog, 8]),
             STM_GETIMAGE, 0, 0]), 0, 'and a static of text loads nothing');
     });
+
+test('a dropdown combo box a template makes is as tall as its field', ()=>{
+    // The template's height is the dropped list's, as for one CreateWindowEx
+    // makes; the dialog manager's controls are told WM_CREATE like any.
+    const COMBOBOX_ATOM = 0x85;
+    const CBS_DROPDOWNLIST = 0x0003;
+    const WS_VSCROLL = 0x00200000;
+    const { memory, fns } = setup();
+    putTemplate(memory, [{ id: 9, x: 0, y: 0, cx: 40, cy: 60, ordinal: COMBOBOX_ATOM,
+        style: CBS_DROPDOWNLIST | WS_VSCROLL }]);
+    const dialog = fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    const combo = fns.GetDlgItem.handler([dialog, 9]);
+    const RECT = 0x13000;
+    fns.GetWindowRect.handler([combo, RECT]);
+    const height = memory.u32(RECT + 12) - memory.u32(RECT + 4);
+    assert.ok(height > 8 && height < 40, `the field's height: ${height}`);
+    assert.equal(fns.GetWindowLongA.handler([combo, -16]) & WS_VSCROLL, 0);
+});
 
 test('a message is reported as not a dialog message, so the caller dispatches it', ()=>{
     // Claiming a message was handled would swallow every keystroke a dialog is
