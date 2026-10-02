@@ -271,6 +271,123 @@ export function drawKey(state){
     ].join('|');
 }
 
+/** @param {ArrayLike<any>} a @param {ArrayLike<any>} b */
+const sameItems = (a, b)=>{
+    if (a.length !== b.length)
+    {
+        return false;
+    }
+    for (let i = 0; i < a.length; i++)
+    {
+        if (a[i] !== b[i])
+        {
+            return false;
+        }
+    }
+    return true;
+};
+
+/**
+ * @param {DrawState['stencil']} a @param {DrawState['stencil']} b
+ * @param {boolean} masks
+ */
+const sameStencil = (a, b, masks)=>a === b || (!!a && !!b && a.func === b.func
+    && a.fail === b.fail && a.zfail === b.zfail && a.zpass === b.zpass
+    && (!masks || (a.readMask === b.readMask && a.writeMask === b.writeMask)));
+
+/**
+ * Whether two states have the same `drawKey`, without building either: every
+ * value the key prints, compared as it is printed or more strictly, so a true
+ * answer always means equal keys and a false one at worst builds a key that
+ * turns out the same. Most draws keep the state of the draw before them, and
+ * the key is a string of a hundred-odd characters made on every one. Every
+ * object a state holds is made for that state and not changed after, but a
+ * unit's combiner, which is why a unit in COMBINE mode is never the same.
+ *
+ * @param {DrawState} a @param {DrawState} b
+ * @returns {boolean}
+ */
+export function sameKeyInputs(a, b){
+    if (a.topology !== b.topology || a.targetFormat !== b.targetFormat
+        || a.depthFormat !== b.depthFormat || !a.colourSum !== !b.colourSum
+        || a.alphaFunc !== b.alphaFunc || !a.flat !== !b.flat || a.cull !== b.cull
+        || !a.frontIsCcw !== !b.frontIsCcw || a.colourMask !== b.colourMask
+        || !sameItems(a.strides, b.strides)
+        || a.attributes.length !== b.attributes.length || a.units.length !== b.units.length)
+    {
+        return false;
+    }
+    for (let i = 0; i < a.attributes.length; i++)
+    {
+        const x = a.attributes[i];
+        const y = b.attributes[i];
+        if (x !== y && (x.name !== y.name || x.slot !== y.slot || x.offset !== y.offset
+            || x.format !== y.format))
+        {
+            return false;
+        }
+    }
+    for (let i = 0; i < a.units.length; i++)
+    {
+        const x = a.units[i];
+        const y = b.units[i];
+        if (x.index !== y.index || !x.cube !== !y.cube || x.mode !== y.mode
+            || !x.hasColour !== !y.hasColour || !x.hasAlpha !== !y.hasAlpha
+            || !x.intensity !== !y.intensity || !x.rgbOnly !== !y.rgbOnly
+            || !sameItems(x.generation, y.generation))
+        {
+            return false;
+        }
+        // A unit's combiner is the context's own record, changed in place by
+        // glTexEnv: the state a previous draw kept may name the very object
+        // this one does, so there is nothing to compare it with.
+        if (x.mode === GL.COMBINE)
+        {
+            return false;
+        }
+    }
+    const fa = a.fog;
+    const fb = b.fog;
+    if (fa !== fb
+        && (!fa || !fb || fa.mode !== fb.mode || !fa.fromCoordinate !== !fb.fromCoordinate))
+    {
+        return false;
+    }
+    const ba = a.blend;
+    const bb = b.blend;
+    if (ba !== bb && (!ba || !bb || ba.src !== bb.src || ba.dst !== bb.dst))
+    {
+        return false;
+    }
+    if (!a.depth.test !== !b.depth.test || !a.depth.write !== !b.depth.write
+        || a.depth.func !== b.depth.func)
+    {
+        return false;
+    }
+    if (!sameStencil(a.stencil, b.stencil, true)
+        || !sameStencil(a.stencilBack ?? a.stencil, b.stencilBack ?? b.stencil, false))
+    {
+        return false;
+    }
+    const pa = a.polygonOffset;
+    const pb = b.polygonOffset;
+    if (pa !== pb && (!pa || !pb || pa.factor !== pb.factor || pa.units !== pb.units))
+    {
+        return false;
+    }
+    const va = a.vertexProgram;
+    const vb = b.vertexProgram;
+    if (va !== vb && (!va || !vb || va.name !== vb.name || va.version !== vb.version))
+    {
+        return false;
+    }
+    const ga = a.fragmentProgram;
+    const gb = b.fragmentProgram;
+    return ga === gb ? !ga || (a.viewportHeight ?? 0) === (b.viewportHeight ?? 0)
+        : !!ga && !!gb && ga.name === gb.name && ga.version === gb.version
+            && (a.viewportHeight ?? 0) === (b.viewportHeight ?? 0);
+}
+
 /**
  * The WGSL type an attribute arrives as.
  *

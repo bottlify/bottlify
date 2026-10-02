@@ -59,6 +59,7 @@ import {
 import {
     CLEAR_UNIFORM_FLOATS, COPY_UNIFORM_FLOATS, UNIFORM, UNITS, clearDescriptor, clearKey,
     copyKey, drawDescriptor, drawKey, generateClear, generateCopy, generateDraw, generateShow,
+    sameKeyInputs,
     showDescriptor, showKey,
 } from './wgsl.js';
 
@@ -1733,6 +1734,14 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * The state and key of the draw before: most draws keep both, and the key
+     * is a long string to build.
+     *
+     * @type {{ state: import('./wgsl.js').DrawState, key: string } | null}
+     */
+    let lastDraw = null;
+
+    /**
      * Records one draw of a laid-out vertex stream.
      *
      * @param {object} context
@@ -1771,7 +1780,9 @@ export function createGpuRenderer(services){
                 + ' both, so the front face\'s were applied to the back face\'s test too');
         }
         const state = drawStateOf(scene, layout, topology);
-        const key = drawKey(state);
+        const key = lastDraw !== null && sameKeyInputs(state, lastDraw.state)
+            ? lastDraw.key : drawKey(state);
+        lastDraw = { state, key };
         const generated = generatedFor(key, state);
         const recording = recordingOf(context);
         if (generated.programs?.error)
