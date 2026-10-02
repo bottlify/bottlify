@@ -14,6 +14,7 @@ const MM_WOM_CLOSE = 0x3bc;
 const MM_WOM_DONE = 0x3bd;
 
 const CALLBACK_WINDOW = 0x00010000;
+const CALLBACK_THREAD = 0x00020000;
 const CALLBACK_FUNCTION = 0x00030000;
 const CALLBACK_EVENT = 0x00050000;
 
@@ -644,6 +645,14 @@ test('the notifier sends each form somewhere different', async()=>{
     notify({ ...notice, kind: CALLBACK_EVENT, target: 0x88 });
     assert.deepEqual(signalled, [0x88], 'the event form says only that something happened');
     assert.equal(posted.length, 1, 'and posts nothing');
+
+    // To the thread the program named, which is often one of its own doing
+    // nothing but pump for these -- not whichever thread looks first.
+    notify({ ...notice, kind: CALLBACK_THREAD, target: 0x2040 });
+    assert.deepEqual(posted[1], {
+        hwnd: 0, message: MM_WOM_DONE, wParam: 0x1000, lParam: 0x300, thread: 0x2040,
+    });
+    posted.pop();
 
     assert.equal(await notify({ ...notice, kind: CALLBACK_FUNCTION, target: 0x99 }), 0);
     assert.deepEqual(called, [{
