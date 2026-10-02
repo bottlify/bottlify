@@ -5,6 +5,7 @@
  */
 
 import { UI_LANGUAGE } from '../../loader/internal/resources.js';
+import { STATUS } from '../ntdll/status.js';
 
 /**
  * Code pages and the string conversions built on them.
@@ -43,6 +44,18 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_INVALID_FLAGS = 1004;
 const ERROR_NO_UNICODE_TRANSLATION = 1113;
+const ERROR_GEN_FAILURE = 31;
+
+/** How the preferred-UI-language calls name a language, and which they list (winnls.h). */
+const MUI_LANGUAGE_ID = 0x04;
+const MUI_LANGUAGE_NAME = 0x08;
+const MUI_UI_FALLBACK = 0x30;
+const MUI_THREAD_LANGUAGES = 0x40;
+const MUI_MACHINE_LANGUAGE_SETTINGS = 0x400;
+/** The filters GetThreadPreferredUILanguages takes and nothing here filters out. */
+const MUI_FILTERS = 0x001 | 0x100 | 0x200;
+/** A thread keeps this many of the languages it names, as Windows does. */
+const THREAD_LANGUAGE_LIMIT = 5;
 
 /** MultiByteToWideChar's flag that turns a malformed sequence into a failure. */
 const MB_ERR_INVALID_CHARS = 0x8;
@@ -257,6 +270,12 @@ const LOCALE_STRINGS = Object.freeze({
     0x00001007: 'US Dollar',               // SENGCURRNAME
     0x00001008: 'US Dollar',               // SNATIVECURRNAME
 });
+
+/**
+ * The languages a preferred-UI-language list can name, by LANGID: the one this
+ * machine has, so a list naming only others is refused as naming none.
+ */
+const LANGUAGE_NAMES = new Map([[UI_LANGUAGE, LOCALE_STRINGS[0x0000005C]]]);
 
 /**
  * The LCTYPEs whose value is a number: answered as its digits, or with
@@ -959,6 +978,150 @@ export function createLocaleFunctions(host){
         return out;
     };
 
+    /** @param {number} address */
+    const readLong = address=>
+        new DataView(host.readMemory(address, 4).slice().buffer).getUint32(0, true);
+
+    /** @param {number} address @param {number} value */
+    const writeLong = (address, value)=>{
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        host.writeMemory(address, bytes);
+    };
+
+    /**
+     * What a thread said of its user interface's language: the languages
+     * SetThreadPreferredUILanguages gave it, and the one SetThreadUILanguage
+     * did, which wins over them.
+     *
+     * @type {WeakMap<object, { languages: number[], ui: number }>}
+     */
+    const threadLanguages = new WeakMap();
+    const unthreaded = { languages: /** @type {number[]} */ ([]), ui: 0 };
+    const languagesOf = ()=>{
+        const thread = host.callerThread?.();
+        if (!thread || typeof thread !== 'object')
+        {
+            return unthreaded;
+        }
+        const known = threadLanguages.get(thread);
+        if (known)
+        {
+            return known;
+        }
+        const fresh = { languages: /** @type {number[]} */ ([]), ui: 0 };
+        threadLanguages.set(thread, fresh);
+        return fresh;
+    };
+
+    /** @param {number} id @param {number} flags */
+    const languageText = (id, flags)=>((flags & MUI_LANGUAGE_ID) !== 0
+        ? id.toString(16).toUpperCase().padStart(4, '0') : LANGUAGE_NAMES.get(id) ?? '');
+
+    /** @param {string} text @param {number} flags @returns {number} 0 for none known */
+    const languageOf = (text, flags)=>{
+        if ((flags & MUI_LANGUAGE_ID) !== 0)
+        {
+            const id = /^[0-9a-f]{1,4}$/i.test(text) ? parseInt(text, 16) : 0;
+            return LANGUAGE_NAMES.has(id) ? id : 0;
+        }
+        const name = text.toLowerCase();
+        return [...LANGUAGE_NAMES].find(([, known])=>known.toLowerCase() === name)?.[0] ?? 0;
+    };
+
+    const BOTH_NAMINGS = MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME;
+
+    /**
+     * Only the flags a call takes, naming its languages one way at most.
+     *
+     * @param {number} flags @param {number} allowed
+     */
+    const namingFlags = (flags, allowed)=>(flags & ~allowed) === 0
+        && (flags & BOTH_NAMINGS) !== BOTH_NAMINGS;
+
+    /**
+     * The answer the preferred-UI-language calls share: a multi-string, each
+     * language terminated and an empty string closing the list, its size in
+     * characters with every terminator counted. With no buffer and a size of
+     * zero, the size and count alone; a buffer too small is refused, told the
+     * size it needs.
+     *
+     * @param {number[]} languages @param {number} flags
+     * @param {number} countAddress @param {number} buffer @param {number} sizeAddress
+     * @returns {number} 0, or the Win32 error the call fails with
+     */
+    const answerLanguages = (languages, flags, countAddress, buffer, sizeAddress)=>{
+        if (countAddress === 0 || sizeAddress === 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        const room = readLong(sizeAddress);
+        if (buffer === 0 && room !== 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        const text = languages.length === 0 ? '\0\0'
+            : `${languages.map(id=>`${languageText(id, flags)}\0`).join('')}\0`;
+        writeLong(sizeAddress, text.length);
+        if (buffer !== 0 && room < text.length)
+        {
+            return ERROR_INSUFFICIENT_BUFFER;
+        }
+        if (buffer !== 0)
+        {
+            writeWide(buffer, text);
+        }
+        writeLong(countAddress, languages.length);
+        return 0;
+    };
+
+    /**
+     * The machine's languages and the user's are both the one there is.
+     *
+     * @param {number} allowed @returns {(args: number[]) => number}
+     */
+    const fixedLanguages = allowed=>([flags, count, buffer, size])=>
+        (namingFlags(flags >>> 0, allowed)
+            ? answerLanguages([UI_LANGUAGE], flags >>> 0, count >>> 0, buffer >>> 0, size >>> 0)
+            : ERROR_INVALID_PARAMETER);
+    const systemLanguages = fixedLanguages(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME
+        | MUI_MACHINE_LANGUAGE_SETTINGS);
+    const userLanguages = fixedLanguages(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME);
+
+    /**
+     * The thread's own languages; without MUI_THREAD_LANGUAGES, the user's
+     * when it named none, and with the fallbacks asked for merged in after.
+     *
+     * @param {number[]} args
+     */
+    const threadPreferred = ([flags, count, buffer, size])=>{
+        const asked = flags >>> 0;
+        if (!namingFlags(asked, MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | MUI_UI_FALLBACK
+            | MUI_THREAD_LANGUAGES | MUI_FILTERS))
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        const { languages } = languagesOf();
+        const merged = (asked & MUI_THREAD_LANGUAGES) !== 0 ? languages
+            : [...new Set(languages.length === 0 || (asked & MUI_UI_FALLBACK) !== 0
+                ? [...languages, UI_LANGUAGE] : languages)];
+        return answerLanguages(merged, asked, count >>> 0, buffer >>> 0, size >>> 0);
+    };
+
+    /** A Win32 answer: TRUE, or FALSE with the error for GetLastError. @param {number} error */
+    const asBool = error=>{
+        if (error !== 0)
+        {
+            host.setLastError(error);
+            return 0;
+        }
+        return 1;
+    };
+
+    /** The same answer as ntdll's own entry gives it. @param {number} error */
+    const asStatus = error=>(error === 0 ? STATUS.SUCCESS
+        : error === ERROR_INSUFFICIENT_BUFFER ? STATUS.BUFFER_TOO_SMALL : STATUS.INVALID_PARAMETER);
+
     const table = {
         /** UINT GetACP(VOID) */
         GetACP: { argBytes: 0, handler: ()=>ANSI_CODE_PAGE },
@@ -1028,6 +1191,141 @@ export function createLocaleFunctions(host){
          * test_ConvertDefaultLocale) require of the pair.
          */
         GetUserDefaultUILanguage: { argBytes: 0, handler: ()=>UI_LANGUAGE },
+
+        /**
+         * BOOL GetSystemPreferredUILanguages(DWORD dwFlags, PULONG pulNumLanguages,
+         *     PZZWSTR pwszLanguagesBuffer, PULONG pcchLanguagesBuffer)
+         */
+        GetSystemPreferredUILanguages: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>asBool(systemLanguages(args)),
+            natives: {
+                /**
+                 * NTSTATUS RtlGetSystemPreferredUILanguages(DWORD, ULONG, PULONG,
+                 *     PZZWSTR, PULONG): the same, with a second argument that
+                 *     changes nothing.
+                 */
+                RtlGetSystemPreferredUILanguages: {
+                    argBytes: 20,
+                    /** @param {number[]} args */
+                    handler: ([flags, , count, buffer, size])=>
+                        asStatus(systemLanguages([flags, count, buffer, size])),
+                },
+            },
+        },
+
+        /**
+         * BOOL GetUserPreferredUILanguages(DWORD dwFlags, PULONG pulNumLanguages,
+         *     PZZWSTR pwszLanguagesBuffer, PULONG pcchLanguagesBuffer)
+         */
+        GetUserPreferredUILanguages: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>asBool(userLanguages(args)),
+            natives: {
+                /** NTSTATUS RtlGetUserPreferredUILanguages(DWORD, ULONG, PULONG, PZZWSTR, PULONG) */
+                RtlGetUserPreferredUILanguages: {
+                    argBytes: 20,
+                    /** @param {number[]} args */
+                    handler: ([flags, , count, buffer, size])=>
+                        asStatus(userLanguages([flags, count, buffer, size])),
+                },
+            },
+        },
+
+        /**
+         * BOOL GetThreadPreferredUILanguages(DWORD dwFlags, PULONG pulNumLanguages,
+         *     PZZWSTR pwszLanguagesBuffer, PULONG pcchLanguagesBuffer)
+         */
+        GetThreadPreferredUILanguages: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>asBool(threadPreferred(args)),
+            natives: {
+                /** NTSTATUS RtlGetThreadPreferredUILanguages(DWORD, PULONG, PZZWSTR, PULONG) */
+                RtlGetThreadPreferredUILanguages: {
+                    argBytes: 16,
+                    /** @param {number[]} args */
+                    handler: args=>asStatus(threadPreferred(args)),
+                },
+            },
+        },
+
+        /**
+         * BOOL SetThreadPreferredUILanguages(DWORD dwFlags, PCZZWSTR pwszLanguagesBuffer,
+         *     PULONG pulNumLanguages)
+         *
+         * The languages of the list this machine knows, each once and five at
+         * most, become the thread's; a list naming none of them is refused, and
+         * no list or an empty one clears what the thread had.
+         */
+        SetThreadPreferredUILanguages: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([flags, list, count])=>{
+                const asked = flags >>> 0;
+                if (!namingFlags(asked, MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | MUI_FILTERS))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const named = [];
+                for (let at = list >>> 0, length; at !== 0
+                    && (length = host.stringLength(at, 2)) !== 0; at += (length + 1) * 2)
+                {
+                    named.push(readWide(at, length));
+                }
+                const state = languagesOf();
+                const known = [...new Set(named.map(text=>languageOf(text, asked)))]
+                    .filter(id=>id !== 0).slice(0, THREAD_LANGUAGE_LIMIT);
+                if (named.length !== 0 && known.length === 0)
+                {
+                    host.setLastError(ERROR_GEN_FAILURE);
+                    return 0;
+                }
+                state.languages = known;
+                state.ui = 0;
+                if (known.length !== 0 && (count >>> 0) !== 0)
+                {
+                    writeLong(count >>> 0, known.length);
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * LANGID GetThreadUILanguage(void)
+         *
+         * The language SetThreadUILanguage gave the thread, else the first it
+         * prefers, else the user's.
+         */
+        GetThreadUILanguage: {
+            argBytes: 0,
+            handler: ()=>{
+                const { ui, languages } = languagesOf();
+                return ui || (languages[0] ?? UI_LANGUAGE);
+            },
+        },
+
+        /**
+         * LANGID SetThreadUILanguage(LANGID LangId)
+         *
+         * Takes the language as the thread's and answers it; zero changes
+         * nothing and answers the thread's language as it stands.
+         */
+        SetThreadUILanguage: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([language])=>{
+                const state = languagesOf();
+                if ((language & 0xffff) !== 0)
+                {
+                    state.ui = language & 0xffff;
+                }
+                return state.ui || (state.languages[0] ?? UI_LANGUAGE);
+            },
+        },
 
         /**
          * BOOL IsValidCodePage(UINT CodePage)

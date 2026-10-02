@@ -629,3 +629,129 @@ test('SetLocaleInfo replaces a string for this user, and LOCALE_NOUSEROVERRIDE r
 
         assert.equal(fns.SetLocaleInfoA.handler([0x409, SDECIMAL, 0]), 0, 'no value');
     });
+
+test('the preferred UI languages are listed as Windows lists them, sized and refused alike', ()=>{
+    // locale.c test_GetSystemPreferredUILanguages / test_GetUserPreferredUILanguages.
+    const host = fakeHost();
+    const fns = createLocaleFunctions({ ...host, callerThread: ()=>({ id: 1 }) });
+    const MUI_LANGUAGE_ID = 0x4;
+    const MUI_LANGUAGE_NAME = 0x8;
+    const MUI_MACHINE_LANGUAGE_SETTINGS = 0x400;
+    const COUNT = 0x100;
+    const SIZE = 0x104;
+    const BUFFER = 0x200;
+    const view = new DataView(host.bytes.buffer);
+    /** @param {Record<string, any>} fn @param {number} flags @param {number} buffer @param {number} size */
+    const ask = (fn, flags, buffer, size)=>{
+        view.setUint32(COUNT, 0, true);
+        view.setUint32(SIZE, size, true);
+        return fn.handler([flags, COUNT, buffer, SIZE]);
+    };
+    const size = ()=>view.getUint32(SIZE, true);
+
+    for (const fn of [fns.GetSystemPreferredUILanguages, fns.GetUserPreferredUILanguages])
+    {
+        assert.equal(fn.argBytes, 16);
+        assert.equal(ask(fn, 0, 0, 0), 1);
+        assert.equal(size(), 7, 'a name and two terminators');
+        assert.equal(view.getUint32(COUNT, true), 1);
+        assert.equal(ask(fn, MUI_LANGUAGE_ID, 0, 0), 1);
+        assert.equal(size(), 6, 'four hex digits and two terminators');
+        assert.equal(ask(fn, MUI_LANGUAGE_ID, BUFFER, 6), 1);
+        assert.equal(host.readWide(BUFFER, 6), '0409\0\0');
+        assert.equal(ask(fn, MUI_LANGUAGE_NAME, BUFFER, 7), 1);
+        assert.equal(host.readWide(BUFFER, 7), 'en-US\0\0');
+
+        host.errors.length = 0;
+        assert.equal(ask(fn, MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME, 0, 0), 0, 'both namings');
+        assert.equal(ask(fn, 0x01, 0, 0), 0, 'MUI_FULL_LANGUAGE');
+        assert.equal(ask(fn, MUI_LANGUAGE_ID, 0, 1), 0, 'a size with no buffer');
+        assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER,
+            ERROR_INVALID_PARAMETER]);
+        host.errors.length = 0;
+        assert.equal(ask(fn, MUI_LANGUAGE_ID, BUFFER, 5), 0);
+        assert.deepEqual(host.errors, [ERROR_INSUFFICIENT_BUFFER]);
+        assert.equal(size(), 6, 'told the size it needs');
+    }
+    assert.equal(ask(fns.GetSystemPreferredUILanguages, MUI_MACHINE_LANGUAGE_SETTINGS, 0, 0), 1);
+    assert.equal(ask(fns.GetUserPreferredUILanguages, MUI_MACHINE_LANGUAGE_SETTINGS, 0, 0), 0,
+        'the user has no machine settings');
+
+    // ntdll's: the same answer as a status, past a second argument.
+    const natives = fns.GetSystemPreferredUILanguages.natives;
+    view.setUint32(SIZE, 0, true);
+    assert.equal(natives.RtlGetSystemPreferredUILanguages.handler(
+        [MUI_LANGUAGE_ID, 0, COUNT, 0, SIZE]), 0);
+    assert.equal(size(), 6);
+    view.setUint32(SIZE, 1, true);
+    assert.equal(natives.RtlGetSystemPreferredUILanguages.handler(
+        [MUI_LANGUAGE_ID, 0, COUNT, BUFFER, SIZE]), 0xc0000023, 'STATUS_BUFFER_TOO_SMALL');
+});
+
+test("a thread's preferred UI languages are its own: the ones known kept, the rest refused", ()=>{
+    // locale.c test_GetThreadPreferredUILanguages and test_SetThreadUILanguage,
+    // and START_TEST, which sets "en-US" through the call before anything else.
+    const host = fakeHost();
+    const first = { id: 1 };
+    let thread = first;
+    const fns = createLocaleFunctions({ ...host, callerThread: ()=>thread });
+    const MUI_LANGUAGE_NAME = 0x8;
+    const MUI_THREAD_LANGUAGES = 0x40;
+    const MUI_UI_FALLBACK = 0x30;
+    const ERROR_GEN_FAILURE = 31;
+    const LIST = 0x300;
+    const COUNT = 0x100;
+    const SIZE = 0x104;
+    const BUFFER = 0x200;
+    const view = new DataView(host.bytes.buffer);
+    /** @param {string} text */
+    const plantList = text=>{
+        for (let at = 0; at < text.length; at++)
+        {
+            view.setUint16(LIST + at * 2, text.charCodeAt(at), true);
+        }
+        view.setUint32(LIST + text.length * 2, 0, true);
+    };
+    const threadList = ()=>{
+        view.setUint32(SIZE, 64, true);
+        assert.equal(fns.GetThreadPreferredUILanguages.handler(
+            [MUI_LANGUAGE_NAME | MUI_THREAD_LANGUAGES, COUNT, BUFFER, SIZE]), 1);
+        return host.readWide(BUFFER, view.getUint32(SIZE, true));
+    };
+
+    assert.equal(fns.SetThreadPreferredUILanguages.argBytes, 12);
+    assert.equal(fns.SetThreadPreferredUILanguages.handler([MUI_LANGUAGE_NAME, 0, 0]), 1,
+        'no list clears, and no count is fine');
+    assert.equal(threadList(), '\0\0', 'a thread names nothing of its own');
+    view.setUint32(SIZE, 0, true);
+    assert.equal(fns.GetThreadPreferredUILanguages.handler(
+        [MUI_LANGUAGE_NAME | MUI_UI_FALLBACK, COUNT, 0, SIZE]), 1);
+    assert.equal(view.getUint32(COUNT, true), 1, "and is then given the user's");
+
+    plantList('xx-YY\0en-US\0en-US\0');
+    view.setUint32(COUNT, 0xdeadbeef, true);
+    assert.equal(fns.SetThreadPreferredUILanguages.handler([MUI_LANGUAGE_NAME, LIST, COUNT]), 1);
+    assert.equal(view.getUint32(COUNT, true), 1, 'the known ones, each once');
+    assert.equal(threadList(), 'en-US\0\0');
+
+    thread = { id: 2 };
+    assert.equal(threadList(), '\0\0', "another thread's are its own");
+    thread = first;
+
+    plantList('aa-BB\0cc-DD\0');
+    view.setUint32(COUNT, 0xdeadbeef, true);
+    host.errors.length = 0;
+    assert.equal(fns.SetThreadPreferredUILanguages.handler([MUI_LANGUAGE_NAME, LIST, COUNT]), 0);
+    assert.deepEqual(host.errors, [ERROR_GEN_FAILURE]);
+    assert.equal(view.getUint32(COUNT, true), 0xdeadbeef, 'the count left alone');
+    assert.equal(threadList(), 'en-US\0\0', 'and the list too');
+
+    // SetThreadUILanguage: zero answers the language as it stands.
+    assert.equal(fns.SetThreadUILanguage.handler([0]), fns.GetThreadUILanguage.handler());
+    assert.equal(fns.SetThreadUILanguage.handler([0x0813]), 0x0813);
+    assert.equal(fns.SetThreadUILanguage.handler([0]), 0x0813);
+    assert.equal(fns.GetThreadUILanguage.handler(), 0x0813);
+    plantList('\0');
+    assert.equal(fns.SetThreadPreferredUILanguages.handler([MUI_LANGUAGE_NAME, LIST, 0]), 1);
+    assert.equal(fns.GetThreadUILanguage.handler(), UI_LANGUAGE, 'an empty list clears it all');
+});
