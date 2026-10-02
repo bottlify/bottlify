@@ -765,3 +765,24 @@ test('a state block moves the binding hold with the buffers it applies', ()=>{
     assert.equal(second.release(), 0);
     assert.equal(second.destroyed, false, 'the block bound it, so it stays');
 });
+
+test('a signed bump-map format is a texture, sampled and never drawn into', ()=>{
+    // Wine's d3d9 visual.c texbem_test assumes a ps_1_1 device makes V8U8
+    // textures; the bump-map tests ask CheckDeviceFormat first.
+    const d3d = createDirect3D9();
+    const device = createDevice();
+    for (const format of [D3DFMT.V8U8, D3DFMT.Q8W8V8U8])
+    {
+        assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, format), D3D_OK);
+        assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE, format),
+            D3DERR_NOTAVAILABLE);
+        assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.AUTOGENMIPMAP, D3DRTYPE.TEXTURE, format),
+            0x0876086f, 'D3DOK_NOAUTOGEN');
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(128, 128, 1, 0, format, D3DPOOL.MANAGED, out), D3D_OK);
+        assert.equal(device.CreateTexture(128, 128, 1, D3DUSAGE.RENDERTARGET, format,
+            D3DPOOL.DEFAULT, {}), D3DERR_INVALIDCALL);
+        assert.equal(device.CreateRenderTarget(64, 64, format, false, {}), D3DERR_INVALIDCALL);
+    }
+});

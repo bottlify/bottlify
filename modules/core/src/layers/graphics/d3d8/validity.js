@@ -90,13 +90,14 @@ export function createResult(surfaceType, format, pool, usage, support){
         return usage === 0 && videoPoolAllowed(pool, surfaceType === SURFACE_TYPE.PLAIN)
             ? D3D_OK : D3DERR_INVALIDCALL;
     }
-    if (isCompressed(format))
+    if (isCompressed(format) || FORMAT_INFO[format]?.signed)
     {
         // Legal on every device of the era regardless of `compressedTextures`
         // -- that flag only chooses how the surface's bytes reach the GPU
         // (blocks or a decode), never whether the format exists. Nothing may
         // be drawn into a compressed surface, whatever the adapter supports --
-        // the blocks are not writable by the pipeline.
+        // the blocks are not writable by the pipeline -- nor into a signed
+        // one, which is only ever sampled.
         if (surfaceType === SURFACE_TYPE.RENDER_TARGET
             || surfaceType === SURFACE_TYPE.DEPTH_STENCIL)
         {

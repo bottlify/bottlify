@@ -34,6 +34,7 @@ import {
 import { createDirect3D8 } from './device.js';
 import {
     IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, colorToFloats, expandTexels, eyePosition,
+    gpuFormatOf,
     normalMatrixOf, viewerDirection,
     HARDWARE_SAMPLER, filledIndices, listIndices, multiplyMatrices, packLight, pipelineStateOf,
     samplerFlagsOf,
@@ -3848,4 +3849,12 @@ test('recorded: the fog interpolation scene fogs as Windows does in every mode',
             }
         }
     }
+});
+
+test('a signed bump map is sampled from rgba8snorm, U and V as they lie and the rest at one', ()=>{
+    // Wine's d3d9 visual.c texbem_test: a ps_1_1 device's V8U8 texture.
+    assert.equal(gpuFormatOf(D3DFMT.V8U8, 128, 128, true), 'rgba8snorm');
+    assert.equal(gpuFormatOf(D3DFMT.Q8W8V8U8, 4, 4, false), 'rgba8snorm');
+    assert.deepEqual([...expandTexels(D3DFMT.V8U8, Uint8Array.from([0x80, 0x7f, 0x01, 0xff]), 2)],
+        [0x80, 0x7f, 0x7f, 0x7f, 0x01, 0xff, 0x7f, 0x7f]);
 });

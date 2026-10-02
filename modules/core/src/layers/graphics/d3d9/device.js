@@ -518,7 +518,7 @@ export function createDirect3D9(options = {}){
             // which only chooses how a created texture's bytes travel to the
             // GPU; nothing draws into blocks, so a target or depth usage is
             // still refused.
-            if (isCompressed(format) && (wantsTarget || wantsDepth))
+            if ((isCompressed(format) || info.signed) && (wantsTarget || wantsDepth))
             {
                 return D3DERR_NOTAVAILABLE;
             }
@@ -3534,7 +3534,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          */
         CreateRenderTarget(width, height, format, lockable, out, usage = 0){
             const info = FORMAT_INFO[format];
-            if (!info || info.depth || isCompressed(format) || !(width > 0) || !(height > 0))
+            if (!info || info.depth || info.signed || isCompressed(format)
+                || !(width > 0) || !(height > 0))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -4377,7 +4378,7 @@ function chainOf(usage, format, levels, full){
 
 /** @param {number} format */
 function generatesMips(format){
-    return !isCompressed(format) && !FORMAT_INFO[format]?.depth;
+    return !isCompressed(format) && !FORMAT_INFO[format]?.depth && !FORMAT_INFO[format]?.signed;
 }
 
 /**
@@ -4472,7 +4473,8 @@ function checkTextureArguments(usage, format, pool, caps, cube){
     // how the surface's bytes travel to the GPU (blocks or a decode) -- and
     // never as something the pipeline draws into: the blocks are not writable
     // by it.
-    if (isCompressed(format) && (usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL)) !== 0)
+    if ((isCompressed(format) || info.signed)
+        && (usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL)) !== 0)
     {
         return D3DERR_INVALIDCALL;
     }

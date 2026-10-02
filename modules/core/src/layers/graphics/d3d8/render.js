@@ -595,6 +595,17 @@ const TEXEL_EXPANSION = Object.freeze({
         }
         return out;
     },
+    // The signed formats go to `rgba8snorm`, red first: U and V as they lie,
+    // and the channels V8U8 lacks at 1, as Direct3D samples them.
+    [D3DFMT.V8U8]: (pixels, count)=>{
+        const out = new Uint8Array(count * 4);
+        for (let index = 0; index < count; index++)
+        {
+            out.set([pixels[index * 2], pixels[index * 2 + 1], 0x7f, 0x7f], index * 4);
+        }
+        return out;
+    },
+    [D3DFMT.Q8W8V8U8]: pixels=>pixels,
 });
 
 /** @param {number} value five bits @returns {number} eight */
@@ -640,6 +651,8 @@ export function expandTexels(format, pixels, count){
 
 /** The WebGPU format every uncompressed colour target and texture is. */
 export const COLOR_FORMAT = 'bgra8unorm';
+/** What a signed format is sampled from: its channels come back -1..1. */
+const SIGNED_FORMAT = 'rgba8snorm';
 
 /**
  * The block-compressed formats, by the D3DFMT they arrive as.
@@ -743,6 +756,10 @@ export function gpuFormatOf(format, width, height, compressedTextures){
     if (!info)
     {
         throw new Error(`Surface format ${format} has no backend counterpart`);
+    }
+    if (info.signed)
+    {
+        return SIGNED_FORMAT;
     }
     if (!info.depth)
     {
