@@ -521,9 +521,7 @@ export function createRemoting(host){
             host.bstr.free(bstr);
         },
         createSafeArray: (vt, bounds)=>host.safeArray?.create(vt, bounds) ?? 0,
-        destroySafeArray: array=>{
-            host.safeArray?.destroy(array);
-        },
+        destroySafeArray: array=>host.safeArray?.destroy(array),
         exportInterface: (pointer, iid, transfer)=>exportInterface(pointer, iid, transfer, thread),
         importInterface: (reference, iid)=>importInterface(reference, iid, thread),
         releaseInterface: pointer=>callSlot(pointer, SLOT_RELEASE, [], thread),

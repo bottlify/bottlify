@@ -182,8 +182,8 @@ const MAX_PROGID = 255;
  * @property {{ copy: (bstr: number) => number, free: (bstr: number) => unknown }} [bstr]
  *           oleaut32's SysAllocString and SysFreeString, for a BSTR a
  *           PROPVARIANT holds. Absent, such a value cannot be copied.
- * @property {{ copy: (array: number, out: number) => number,
- *              destroy: (array: number) => number }} [safeArray]
+ * @property {{ copy: (array: number, out: number) => number | Promise<number>,
+ *              destroy: (array: number) => number | Promise<number> }} [safeArray]
  *           oleaut32's SafeArrayCopy and SafeArrayDestroy, likewise.
  * @property {(window: number) => boolean} [isWindow]
  *           Whether a handle names a window that exists, as user32's IsWindow
