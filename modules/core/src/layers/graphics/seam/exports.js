@@ -48,6 +48,17 @@ const E_FAIL = 0x80004005 | 0;
  * identifier for either.
  */
 const SHADER_VALIDATOR = '{6c4b1bd5-2f36-4b9e-9a41-3d0b7f1e8c27}';
+/**
+ * gdi32's half of OpenGL in a bottle without OpenGL: the answers of a machine
+ * with no OpenGL driver -- no pixel format, none set, no swap.
+ */
+const NO_OPENGL = Object.freeze({
+    pixelFormat: Object.freeze({
+        size: ()=>0, count: ()=>0, choose: ()=>0, describe: ()=>null, set: ()=>false, get: ()=>0,
+    }),
+    swapBuffers: ()=>false,
+    entry: ()=>null,
+});
 /** The shader versions Direct3D 8 validates: vs_1_0-1_1 and ps_1_0-1_4. */
 const VERTEX_SHADER_VERSIONS = [0xfffe0100, 0xfffe0101];
 const PIXEL_SHADER_VERSIONS = [0xffff0100, 0xffff0101, 0xffff0102, 0xffff0103, 0xffff0104];
@@ -67,6 +78,9 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *
  * @param {Object} deps
  * @param {any} deps.graphics   The graphics api: create(name), available().
+ * @param {readonly string[]} [deps.only]  The libraries this bottle has
+ *        (`choice.js`); every library when absent. The others are neither in
+ *        the table nor built.
  * @param {any} deps.memory     readMemory/writeMemory.
  * @param {(object: any, interfaceId: string) => number} deps.publishInterface
  * @param {(object: any, interfaceId: string) => boolean} [deps.unpublishInterface]
@@ -141,8 +155,8 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *             shadow: () => any }}
  */
 export function createGraphicsLibraries(
-    { graphics, memory, publishInterface, unpublishInterface, screen, gdi, present, flipQueued,
-        publisher: shared, callGuest,
+    { graphics, only, memory, publishInterface, unpublishInterface, screen, gdi, present,
+        flipQueued, publisher: shared, callGuest,
         free, exportAddress, processHeapAllocate,
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
@@ -262,32 +276,46 @@ export function createGraphicsLibraries(
         }
         return fault === null ? S_OK : E_FAIL;
     };
-    const d3d8 = createDirect3D8Seam({
+    /** @param {string} library */
+    const has = library=>!only || only.includes(library);
+    /**
+     * What `make` builds, when the bottle has `library`; null otherwise, typed
+     * as built because every handler that reaches it leaves with the library.
+     *
+     * @template T
+     * @param {string} library @param {() => T} make
+     * @returns {T}
+     */
+    function built(library, make){
+        return has(library) ? make() : /** @type {T} */ (/** @type {unknown} */ (null));
+    }
+    const d3d8 = built('D3D8.dll', ()=>createDirect3D8Seam({
         publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution,
         windowClientSize, now,
         identity: ()=>graphics.adapter?.() ?? null,
-    });
-    const d3d9 = createDirect3D9Seam({
+    }));
+    const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
         publisher, memory, screen, divergence, cursor, resolution, windowClientSize, gdi, now,
         allocate, allocateCode,
         identity: ()=>graphics.adapter?.() ?? null,
-    });
-    const d3d10 = createDirect3D10Seam({
+    }));
+    const d3d10 = built('D3D10.dll', ()=>createDirect3D10Seam({
         publisher, memory, allocate, free,
         deviceOptions: ()=>graphics.create('d3d10'),
         factoryOptions: { windowClientSize: ()=>screen() },
-    });
-    const vulkan = createVulkanSeam({ graphics, memory, divergence, resolution });
-    const d3d7 = createDirect3D7Seam({
+    }));
+    const vulkan = built('vulkan-1.dll',
+        ()=>createVulkanSeam({ graphics, memory, divergence, resolution }));
+    const d3d7 = built('DDRAW.dll', ()=>createDirect3D7Seam({
         publisher, memory, render, callGuest, currentThread, scratch,
-    });
-    const d3dLegacy = createLegacyDirect3DSeam({
+    }));
+    const d3dLegacy = built('DDRAW.dll', ()=>createLegacyDirect3DSeam({
         publisher, memory, d3d7: d3d7.shared, callGuest, currentThread, scratch,
         // A first-generation device is asked of a surface, whose object the
         // DirectDraw seam knows; that seam is made next, beside these tables.
         ownerOf: surface=>ddraw.ownerOf(surface),
-    });
-    const ddraw = createDirectDrawSeam({
+    }));
+    const ddraw = built('DDRAW.dll', ()=>createDirectDrawSeam({
         publisher, memory, screen, gdi, present, flipQueued, callGuest, currentThread, scratch,
         now, schedule,
         extraInterfaces: [d3d7.interface, ...d3dLegacy.interfaces],
@@ -297,7 +325,7 @@ export function createGraphicsLibraries(
         deactivated,
         deactivations,
         resolution,
-    });
+    }));
 
     /** What a program has actually asked us to make, for a report. */
     /** @type {string[]} */
@@ -368,12 +396,12 @@ export function createGraphicsLibraries(
         }
     }
 
-    const libraries = {
+    const table = {
         'OPENGL32.dll': openglTable,
 
         // After OPENGL32, so that where its exports are placed is known when
         // GLU32's code, which calls them, is placed.
-        'GLU32.dll': createGlu({
+        'GLU32.dll': has('GLU32.dll') && createGlu({
             memory,
             exportAddress,
             withContext: body=>openglRuntime().withContext(body),
@@ -496,9 +524,9 @@ export function createGraphicsLibraries(
             },
         },
 
-        ...d3d10.libraries,
+        ...d3d10?.libraries,
 
-        'vulkan-1.dll': vulkan.library,
+        'vulkan-1.dll': vulkan?.library,
 
         'DDRAW.dll': {
             /**
@@ -614,6 +642,10 @@ export function createGraphicsLibraries(
             },
         },
     };
+    // The bottle's libraries alone: one it lacks is absent as a missing file
+    // is, and nothing behind it was built.
+    const libraries = /** @type {Record<string, Record<string, any>>} */ (Object.fromEntries(
+        Object.entries(table).filter(([name, exports])=>exports && has(name))));
 
     return {
         libraries,
@@ -626,7 +658,7 @@ export function createGraphicsLibraries(
          * one negotiation, and a second runtime here would give a program a
          * format from one list and a context from another.
          */
-        opengl: {
+        opengl: has('OPENGL32.dll') ? {
             pixelFormat: {
                 size: ()=>openglRuntime().pixelFormat.size(),
                 count: ()=>openglRuntime().pixelFormat.count(),
@@ -651,7 +683,7 @@ export function createGraphicsLibraries(
              * @returns {((args: number[]) => number) | null}
              */
             entry: name=>openglRuntime().entry(name),
-        },
+        } : NO_OPENGL,
 
         diagnostics: ()=>({
             created: [...created],
@@ -661,20 +693,20 @@ export function createGraphicsLibraries(
             // nothing at all about what it drew through them. The OpenGL
             // runtime joins the answer when it is the one that drew: its
             // renderer is made lazily, so it is asked only if it exists.
-            device: d3d8.diagnostics() ?? d3d9.diagnostics()
+            device: d3d8?.diagnostics() ?? d3d9?.diagnostics()
                 ?? (opengl ? opengl.diagnostics().gpu : null),
             // Every compressed block the program handed OpenGL, as a digest.
             compressedTextures: opengl ? opengl.diagnostics().compressed : null,
             imageDigests: opengl ? opengl.diagnostics().images : [],
             keptImages: opengl ? opengl.diagnostics().kept : [],
             imageTimes: opengl ? opengl.diagnostics().imageTimes : [],
-            vulkan: vulkan.diagnostics(),
+            vulkan: vulkan?.diagnostics() ?? null,
         }),
 
         /**
          * What the guest set without crossing, and how much of it. Flat, so a
          * report prints it beside the crossings it stands in for.
          */
-        shadow: ()=>d3d8.shadow(),
+        shadow: ()=>d3d8?.shadow() ?? null,
     };
 }

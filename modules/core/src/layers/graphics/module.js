@@ -20,6 +20,7 @@ import {
     viewOf,
 } from './gdi/surface.js';
 import { textExtent } from './gdi/text.js';
+import { GRAPHICS_CHOICES, graphicsChoice } from './choice.js';
 
 /**
  * A window as the window manager lists it: enough to know where it is on
@@ -199,6 +200,10 @@ export function createGraphicsModule(){
          * @returns {Promise<any>}
          */
         async create(config, host){
+            // The bottle's own graphics API, when it names one: its roots and
+            // libraries alone are built. Refused before anything else if unknown.
+            const choice = graphicsChoice(config?.choice);
+            const stack = choice ? GRAPHICS_CHOICES[choice] : null;
             const memory = host.requireApi('memory');
             const win32 = host.requireApi('win32');
             const bridge = host.requireApi('bridge');
@@ -600,6 +605,13 @@ export function createGraphicsModule(){
                     ...options,
                 }),
             };
+            for (const name of Object.keys(factories))
+            {
+                if (stack && !stack.apis.includes(name))
+                {
+                    delete factories[name];
+                }
+            }
 
             /**
              * The libraries a program links against to reach any of this.
@@ -882,6 +894,7 @@ export function createGraphicsModule(){
 
             state.seam = createGraphicsLibraries({
                 graphics: api,
+                only: stack?.libraries,
                 memory: services,
                 // Guest memory for the state a program sets without crossing,
                 // and where to say when what it set there is not what the device

@@ -39,7 +39,7 @@ import { REGISTRY_PATH, collect, prefixOptions } from './prefix.js';
 import { isDiscMedia } from './disc.js';
 import { packBundle } from './pack.js';
 import { finish, partSink } from './upload.js';
-import { windowsChoice } from './windows.js';
+import { graphicsChoice, windowsChoice } from './windows.js';
 
 export {
     MEDIA_DIRECTORY, REGISTRY_PATH, chooseRoot, collect, guessEntry, placementOf, prefixOptions,
@@ -53,7 +53,9 @@ export {
     DESTINATION, detectFamily, dialogCalled, responseFile, responseFileV5, silentOptions,
 } from './silent.js';
 export { PART_BYTES, finish, partSink } from './upload.js';
-export { WINDOWS_CHOICES, windowsChoice } from './windows.js';
+export {
+    GRAPHICS_CHOICES, WINDOWS_CHOICES, graphicsChoice, windowsChoice,
+} from './windows.js';
 
 /**
  * The part of a running engine this module reads. Narrow on purpose: an install
@@ -124,14 +126,16 @@ export function collectFrom(app, media, root){
  * @param {import('./upload.js').Endpoint} options.endpoint
  * @param {string} options.id                Names the bottle, and its directory.
  * @param {Record<string, unknown>} [options.manifest]  Title, description, cover,
- *        and the Windows the bottle runs under, `windows` (`windows.js`); absent is
- *        the engine's default, and a name that is not one of the four is refused.
+ *        the Windows the bottle runs under, `windows`, and the graphics it
+ *        prefers, `graphics` (`windows.js`); absent is the engine's default, and a
+ *        name the engine does not know is refused.
  * @param {(report: PublishReport) => void} [options.report]
  * @returns {Promise<{ packed: import('./pack.js').PackedSummary,
  *                      answer: import('./upload.js').BottleAnswer }>}
  */
 export async function publish({ prefix, endpoint, id, manifest = {}, report }){
     windowsChoice(manifest.windows);
+    graphicsChoice(manifest.graphics);
     // The registry is always there, so it is not evidence that anything ran.
     if (!prefix.files.some(file=>file.path !== REGISTRY_PATH))
     {

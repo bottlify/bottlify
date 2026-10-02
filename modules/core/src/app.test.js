@@ -469,6 +469,12 @@ test('a Windows that is not one of the four is refused before anything is built'
         /unknown Windows version "win98": the choices are win2000, winxp, win7, win10/);
 });
 
+test('a graphics choice nobody knows is refused before anything is built', async()=>{
+    const options = /** @type {any} */ ({ executable: new Uint8Array(0), graphicsApi: 'glide' });
+    await assert.rejects(createApp(options),
+        /unknown graphics choice "glide": the choices are directx7, directx8, directx9, directx10, opengl/);
+});
+
 test('a library loaded as data answers for its resources by the handle it was given', ()=>{
     // LoadLibraryEx hands out a data file's base with a low bit set -- one for
     // a view of the file as it lies on disk, two for one laid out as an image
