@@ -158,3 +158,28 @@ test('the clock cannot be set', ()=>{
     const { fns } = setup();
     assert.equal(fns.SetLocalTime.handler(), 0);
 });
+
+test('GetFileInformationByHandleEx answers the four classes and refuses the rest', ()=>{
+    // Wine's kernel32 process.c (test_handle_list_attribute) asks a name of it.
+    const { fns, bytes, errors } = setup();
+    const view = new DataView(bytes.buffer);
+    assert.equal(fns.GetFileInformationByHandleEx.handler([8, 1, 0x400, 24]), 1);
+    assert.equal(view.getBigUint64(0x408, true), 0x1234n, 'FileStandardInfo: the end of file');
+    assert.equal(view.getUint32(0x410, true), 1, 'one link');
+    assert.equal(fns.GetFileInformationByHandleEx.handler([8, 2, 0x400, 0x100]), 1);
+    const length = view.getUint32(0x400, true);
+    const name = String.fromCharCode(...Array.from({ length: length / 2 },
+        (_, at)=>view.getUint16(0x404 + at * 2, true)));
+    assert.equal(name.endsWith('WAR3.EXE') && !name.includes(':'), true,
+        'FileNameInfo: the path below the drive');
+    assert.equal(fns.GetFileInformationByHandleEx.handler([8, 2, 0x400, 8]), 0);
+    assert.equal(errors.at(-1), 234, 'ERROR_MORE_DATA for a name that does not fit');
+    assert.equal(view.getUint32(0x400, true), length, 'with its whole length still told');
+    assert.equal(fns.GetFileInformationByHandleEx.handler([8, 0, 0x400, 16]), 0);
+    assert.equal(errors.at(-1), 24, 'ERROR_BAD_LENGTH');
+    assert.equal(fns.GetFileInformationByHandleEx.handler([8, 21, 0x400, 64]), 0);
+    assert.equal(errors.at(-1), 87, 'a class this build does not answer');
+    assert.equal(fns.GetFileInformationByHandleEx.handler([99, 0, 0x400, 40]), 0);
+    assert.equal(errors.at(-1), 6);
+    assert.equal(fns.GetFileInformationByHandleEx.argBytes, 16);
+});

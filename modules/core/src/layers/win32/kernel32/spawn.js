@@ -38,6 +38,34 @@ const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 /** ReadProcessMemory of a range nothing is at. */
 const ERROR_PARTIAL_COPY = 299;
+const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_BAD_LENGTH = 24;
+const ERROR_NOT_SUPPORTED = 50;
+const ERROR_GEN_FAILURE = 31;
+const ERROR_OBJECT_NAME_EXISTS = 5010;
+
+/** A PROC_THREAD_ATTRIBUTE_LIST's header and each attribute after it, in bytes. */
+const ATTRIBUTE_LIST_HEADER = 20;
+const ATTRIBUTE_ENTRY = 12;
+/**
+ * The attributes a list takes, each with the sizes its value may have: the
+ * parent process and a pseudo-console are a handle, a handle or job list
+ * whole handles, the ideal processor a PROCESSOR_NUMBER, group affinity a
+ * GROUP_AFFINITY, a mitigation policy a DWORD or a DWORD64, the machine type
+ * a USHORT.
+ *
+ * @type {Map<number, (size: number) => boolean>}
+ */
+const ATTRIBUTE_SIZES = new Map([
+    [0x00020000, size=>size === 4],
+    [0x00020002, size=>size % 4 === 0],
+    [0x00030005, size=>size === 4],
+    [0x00030003, size=>size === 12],
+    [0x00020007, size=>size === 4 || size === 8],
+    [0x0002000d, size=>size % 4 === 0],
+    [0x00020016, size=>size === 4],
+    [0x00020019, size=>size === 2],
+]);
 
 /** dwCreationFlags, the one bit that changes what a create does here. */
 const CREATE_SUSPENDED = 0x00000004;
@@ -487,6 +515,92 @@ export function createSpawnFunctions(host){
                 return kernel.handles.open('process', child);
             },
         },
+
+        /**
+         * BOOL InitializeProcThreadAttributeList(LPPROC_THREAD_ATTRIBUTE_LIST,
+         *     DWORD dwAttributeCount, DWORD dwFlags, PSIZE_T lpSize)
+         *
+         * The list's header -- mask, room, count, a word of padding never
+         * written, a word kept zero -- then twelve bytes an attribute: its
+         * number, its size and where its value is. With too little room, or
+         * no list, the size it needs.
+         */
+        InitializeProcThreadAttributeList: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([list, count, flags, size])=>{
+                if ((flags >>> 0) !== 0 || (size >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const needed = ATTRIBUTE_LIST_HEADER + (count >>> 0) * ATTRIBUTE_ENTRY;
+                const room = readDword(size >>> 0);
+                writeDword(size >>> 0, needed);
+                if ((list >>> 0) === 0 || room < needed)
+                {
+                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                    return 0;
+                }
+                writeDword(list >>> 0, 0);
+                writeDword((list >>> 0) + 4, count >>> 0);
+                writeDword((list >>> 0) + 8, 0);
+                writeDword((list >>> 0) + 16, 0);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL UpdateProcThreadAttribute(LPPROC_THREAD_ATTRIBUTE_LIST, DWORD dwFlags,
+         *     DWORD_PTR Attribute, PVOID lpValue, SIZE_T cbSize, PVOID, PSIZE_T)
+         *
+         * An attribute of a kind Windows takes, of the size that kind has,
+         * added once to a list with room left; CreateProcess reads none of
+         * them here.
+         */
+        UpdateProcThreadAttribute: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([list, , attribute, value, size])=>{
+                const wanted = attribute >>> 0;
+                const length = size >>> 0;
+                const fits = ATTRIBUTE_SIZES.get(wanted);
+                if (!fits)
+                {
+                    host.setLastError(ERROR_NOT_SUPPORTED);
+                    return 0;
+                }
+                if (!fits(length))
+                {
+                    host.setLastError(ERROR_BAD_LENGTH);
+                    return 0;
+                }
+                const at = list >>> 0;
+                const mask = readDword(at);
+                const bit = (1 << (wanted & 0xffff)) >>> 0;
+                if ((mask & bit) !== 0)
+                {
+                    host.setLastError(ERROR_OBJECT_NAME_EXISTS);
+                    return 0;
+                }
+                const count = readDword(at + 8);
+                if (count >= readDword(at + 4))
+                {
+                    host.setLastError(ERROR_GEN_FAILURE);
+                    return 0;
+                }
+                const entry = at + ATTRIBUTE_LIST_HEADER + count * ATTRIBUTE_ENTRY;
+                writeDword(entry, wanted);
+                writeDword(entry + 4, length);
+                writeDword(entry + 8, value >>> 0);
+                writeDword(at + 8, count + 1);
+                writeDword(at, (mask | bit) >>> 0);
+                return 1;
+            },
+        },
+
+        /** VOID DeleteProcThreadAttributeList(LPPROC_THREAD_ATTRIBUTE_LIST): nothing is held. */
+        DeleteProcThreadAttributeList: { argBytes: 4, handler: ()=>0 },
 
         /**
          * BOOL ProcessIdToSessionId(DWORD dwProcessId, DWORD *pSessionId)
