@@ -41,6 +41,8 @@ const ERROR_PARTIAL_COPY = 299;
 
 /** dwCreationFlags, the one bit that changes what a create does here. */
 const CREATE_SUSPENDED = 0x00000004;
+const DEBUG_PROCESS = 0x00000001;
+const DEBUG_ONLY_THIS_PROCESS = 0x00000002;
 
 /** STARTUPINFO's dwFlags bit that says its three handles are the child's own. */
 const STARTF_USESTDHANDLES = 0x00000100;
@@ -289,6 +291,10 @@ export function createSpawner(host){
             // child has exactly one thread until it is really running.
             made.handle = kernel.handles.open('process', made);
             made.threadHandle = kernel.handles.open('process-thread', made);
+            // A child its parent debugs reports its creation and its exit to
+            // WaitForDebugEvent.
+            made.debugEvents = (flags & (DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS)) !== 0
+                ? ['create', 'exit'] : null;
             host.spawned?.(made);
             return made;
         },

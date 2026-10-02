@@ -27,6 +27,7 @@
 import { decodeAnsi } from './locale.js';
 
 /** Codes this surface reports. */
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 
@@ -39,6 +40,7 @@ const CONSOLE_CODE_PAGE = 1252;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
  * @property {(handle: number, text: string) => void} write  Where output goes.
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /**
@@ -143,6 +145,55 @@ export function createConsoleIoFunctions(host){
             argBytes: 8,
             handler: ()=>fail(ERROR_INVALID_HANDLE),
         },
+
+        /**
+         * BOOL GetConsoleScreenBufferInfo(HANDLE, PCONSOLE_SCREEN_BUFFER_INFO)
+         *
+         * No handle is a console's screen buffer, for the reason GetConsoleMode
+         * fails.
+         */
+        GetConsoleScreenBufferInfo: {
+            argBytes: 8,
+            handler: ()=>fail(ERROR_INVALID_HANDLE),
+        },
+
+        /** BOOL SetConsoleCursorPosition(HANDLE, COORD), the COORD by value: the same. */
+        SetConsoleCursorPosition: {
+            argBytes: 8,
+            handler: ()=>fail(ERROR_INVALID_HANDLE),
+        },
+
+        /**
+         * BOOL SetConsoleCP(UINT wCodePageID) and SetConsoleOutputCP: the one
+         * page there is is taken, any other refused.
+         */
+        SetConsoleCP: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([page])=>((page >>> 0) === CONSOLE_CODE_PAGE ? 1
+                : fail(ERROR_INVALID_PARAMETER)),
+        },
+        SetConsoleOutputCP: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([page])=>((page >>> 0) === CONSOLE_CODE_PAGE ? 1
+                : fail(ERROR_INVALID_PARAMETER)),
+        },
+
+        /**
+         * BOOL AllocConsole(void) and FreeConsole(void): there is no console
+         * to make, and none to leave -- leaving it is what the process already
+         * has done, so that succeeds.
+         */
+        AllocConsole: {
+            argBytes: 0,
+            handler: ()=>{
+                host.divergence?.('AllocConsole', 'refused: there is no console to make, '
+                    + 'and output stays where the standard handles send it');
+                return fail(ERROR_ACCESS_DENIED);
+            },
+        },
+        FreeConsole: { argBytes: 0, handler: ()=>1 },
 
         /**
          * BOOL SetConsoleCtrlHandler(PHANDLER_ROUTINE HandlerRoutine, BOOL Add)

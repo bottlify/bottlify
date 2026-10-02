@@ -1352,6 +1352,7 @@ export function createWin32Module(){
                         readMemory,
                         writeMemory,
                         setLastError: setError,
+                        divergence: config?.divergence,
                         write: (/** @type {number} */ handle, /** @type {string} */ text)=>
                             sink(handle, text),
                     }),

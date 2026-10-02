@@ -1169,3 +1169,100 @@ test('an Open call with no name at all is ERROR_INVALID_PARAMETER, not "no such 
     assert.equal(fns.OpenEventA.handler([0x1f0003, 0, 0x500]), 0);
     assert.equal(errors.at(-1), ERROR_FILE_NOT_FOUND, 'a name nothing holds');
 });
+
+test('a snapshot lists the children still running and every thread, each walk to its end', ()=>{
+    // Wine's kernel32 process.c test_Toolhelp walks the threads to find a
+    // suspended child's; Thread32First was missing, a null pointer called.
+    const { fns, host, written, errors } = setup();
+    host.processId = 0x2a4;
+    host.imagePath = ()=>'C:\\App\\Setup.exe';
+    const bytes = new Uint8Array(0x1000);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    const kernel = /** @type {any} */ (host.kernel);
+    kernel.threads = ()=>[{ id: 0x10, state: 'running' }, { id: 0x14, state: 'terminated' },
+        { id: 0x18, state: 'blocked' }];
+    kernel.processes = {
+        STILL_ACTIVE: 259,
+        all: ()=>[
+            { id: 0x300, threadId: 0x304, imagePath: 'C:\\App\\child.exe', exitCode: 259 },
+            { id: 0x310, threadId: 0x314, imagePath: 'C:\\App\\gone.exe', exitCode: 0 },
+        ],
+    };
+    const snapshot = fns.CreateToolhelp32Snapshot.handler([0x2 | 0x4, 0]);
+    /** @param {string} first @param {string} next @param {number} size */
+    const walk = (first, next, size)=>{
+        const seen = [];
+        bytes.set([size & 0xff, size >> 8, 0, 0], 0x100);
+        const table = /** @type {Record<string, any>} */ (fns);
+        for (let ok = table[first].handler([snapshot, 0x100]); ok;
+            ok = table[next].handler([snapshot, 0x100]))
+        {
+            const entry = /** @type {Uint8Array} */ (written.get(0x100));
+            const view = new DataView(entry.buffer, entry.byteOffset);
+            seen.push([view.getUint32(8, true), view.getUint32(size === 28 ? 12 : 24, true)]);
+        }
+        assert.equal(errors.at(-1), 18, 'the walk ends with ERROR_NO_MORE_FILES');
+        return seen;
+    };
+    assert.deepEqual(walk('Process32First', 'Process32Next', 296),
+        [[0x2a4, 0], [0x300, 0x2a4]], 'this process, then the child still running');
+    assert.deepEqual(walk('Thread32First', 'Thread32Next', 28),
+        [[0x10, 0x2a4], [0x18, 0x2a4], [0x304, 0x300]], 'the live threads and the child\'s');
+    assert.equal(fns.Thread32First.argBytes, 8);
+    assert.equal(fns.Thread32Next.argBytes, 8);
+
+    const processesOnly = fns.CreateToolhelp32Snapshot.handler([0x2, 0]);
+    bytes.set([28, 0, 0, 0], 0x100);
+    assert.equal(fns.Thread32First.handler([processesOnly, 0x100]), 0,
+        'a snapshot taken without threads has none to walk');
+});
+
+test("OpenThread opens a live thread or a child's first, and refuses any other", ()=>{
+    // Wine's kernel32 process.c test_Toolhelp opens the thread the walk found.
+    const { fns, host, errors } = setup();
+    const kernel = /** @type {any} */ (host.kernel);
+    const live = { id: 0x10, state: 'blocked' };
+    const child = { id: 0x300, threadId: 0x304, exitCode: 259 };
+    kernel.threads = ()=>[live, { id: 0x14, state: 'terminated' }];
+    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[child] };
+    /** @type {[string, any][]} */
+    const opened = [];
+    const open = kernel.handles.open;
+    kernel.handles.open = (/** @type {string} */ type, /** @type {any} */ object)=>{
+        opened.push([type, object]);
+        return open(type, object);
+    };
+    assert.notEqual(fns.OpenThread.handler([0x1f03ff, 0, 0x10]), 0);
+    assert.notEqual(fns.OpenThread.handler([0x1f03ff, 0, 0x304]), 0);
+    assert.deepEqual(opened, [['thread', live], ['process-thread', child]]);
+    assert.equal(fns.OpenThread.handler([0x1f03ff, 0, 0x14]), 0, 'an ended thread');
+    assert.equal(fns.OpenThread.handler([0x1f03ff, 0, 0x999]), 0, 'nobody');
+    assert.deepEqual(errors.slice(-2), [87, 87]);
+    assert.equal(fns.OpenThread.argBytes, 12);
+});
+
+test('a handle reads back the flags a duplicate or SetHandleInformation gave it', ()=>{
+    // Wine's kernel32 process.c test_DuplicateHandle: GetHandleInformation was missing.
+    const { fns, host, errors } = setup();
+    const bytes = new Uint8Array(0x1000);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.writeMemory = (address, data)=>bytes.set(data, address);
+    const event = fns.CreateEventA.handler([0, 1, 0, 0]);
+    const read = (/** @type {number} */ handle)=>{
+        assert.equal(fns.GetHandleInformation.handler([handle, 0x200]), 1);
+        return bytes[0x200];
+    };
+    assert.equal(read(event), 0);
+    assert.equal(fns.DuplicateHandle.handler([0xffffffff, event, 0xffffffff, 0x100, 0, 1, 2]), 1);
+    const inherited = bytes[0x100] | bytes[0x101] << 8 | bytes[0x102] << 16;
+    assert.equal(read(inherited), 1, 'HANDLE_FLAG_INHERIT');
+    assert.equal(fns.SetHandleInformation.handler([event, 3, 2]), 1);
+    assert.equal(read(event), 2, 'HANDLE_FLAG_PROTECT_FROM_CLOSE alone');
+    assert.equal(fns.SetHandleInformation.handler([event, 2, 0]), 1);
+    assert.equal(read(event), 0);
+    assert.equal(fns.GetHandleInformation.handler([0x7777, 0x200]), 0);
+    assert.equal(fns.GetHandleInformation.handler([0xffffffff, 0x200]), 0, 'a pseudo-handle');
+    assert.deepEqual(errors.slice(-2), [6, 6]);
+    assert.deepEqual([fns.GetHandleInformation.argBytes, fns.SetHandleInformation.argBytes],
+        [8, 12]);
+});
