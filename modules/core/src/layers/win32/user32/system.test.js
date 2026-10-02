@@ -1767,6 +1767,64 @@ test('SystemParametersInfo answers the hover time and the hover rectangle', ()=>
         .map(ask), [4, 4, HOVER_TIME]);
 });
 
+test('SPI_GETNONCLIENTMETRICS answers the frame the metrics describe and its fonts', ()=>{
+    // A launcher takes its menu font from here without looking at the answer:
+    // left unwritten, the structure's height was whatever its stack held, and
+    // every label came out three million pixels tall.
+    const { memory, fns } = setup();
+    const SPI_GETNONCLIENTMETRICS = 0x0029;
+    /** @param {number} at */
+    const i32 = at=>memory.u32(OUT_BUFFER + at) | 0;
+    /** @param {number} at @param {boolean} wide */
+    const face = (at, wide)=>{
+        let name = '';
+        for (let index = 0; index < 32; index++)
+        {
+            const unit = wide
+                ? memory.bytes[OUT_BUFFER + at + 28 + index * 2]
+                    | memory.bytes[OUT_BUFFER + at + 29 + index * 2] << 8
+                : memory.bytes[OUT_BUFFER + at + 28 + index];
+            if (unit === 0)
+            {
+                break;
+            }
+            name += String.fromCharCode(unit);
+        }
+        return name;
+    };
+    const metric = (/** @type {number} */ index)=>fns.GetSystemMetrics.handler([index]);
+    for (const [name, sizes, font] of /** @type {const} */ ([
+        ['SystemParametersInfoA', [340, 344], 60], ['SystemParametersInfoW', [500, 504], 92]]))
+    {
+        for (const size of sizes)
+        {
+            memory.fill(OUT_BUFFER, 130);
+            memory.putU32s(OUT_BUFFER, [size]);
+            assert.equal(fns[name].handler([SPI_GETNONCLIENTMETRICS, size, OUT_BUFFER, 0]), 1);
+            assert.deepEqual([4, 8, 12, 16, 20].map(i32), [1, metric(2), metric(3), metric(30),
+                metric(4) - 1], 'border, scroll bars, caption buttons, caption');
+            const smallCaption = 24 + font;
+            const menu = smallCaption + 8 + font;
+            assert.deepEqual([smallCaption, smallCaption + 4, menu, menu + 4].map(i32),
+                [metric(52), metric(53), metric(54), metric(15) - 1]);
+            const fonts = [24, smallCaption + 8, menu + 8, menu + 8 + font, menu + 8 + 2 * font];
+            assert.deepEqual(fonts.map(at=>[i32(at), i32(at + 16), face(at, font === 92)]), [
+                [-11, 700, 'Tahoma'], [-11, 700, 'Tahoma'], [-11, 400, 'Tahoma'],
+                [-11, 400, 'Tahoma'], [-11, 400, 'Tahoma']],
+            `caption, small caption, menu, status and message fonts at ${size} bytes`);
+            if (size % 4 === 0 && size === sizes[1])
+            {
+                assert.equal(i32(size - 4), 0, 'and a padded border of nothing');
+            }
+        }
+        memory.fill(OUT_BUFFER, 4);
+        memory.putU32s(OUT_BUFFER, [sizes[0] - 4]);
+        assert.equal(fns[name].handler([SPI_GETNONCLIENTMETRICS, 0, OUT_BUFFER, 0]), 0,
+            'a size that is neither layout is refused');
+        assert.equal(memory.u32(OUT_BUFFER + 4), UNTOUCHED);
+    }
+});
+
 test('wsprintfA reads its arguments off the stack and pops none of them', ()=>{
     // cdecl: the caller cleans up, so the count declared here says how many
     // slots to read. Declaring too few is a conversion that gets nothing.

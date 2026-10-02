@@ -49,6 +49,7 @@ import {
     writeU32s,
 } from './structs.js';
 import { readText, textBytes } from './unicode.js';
+import { LOGFONTA, LOGFONTW_SIZE, logFontBytes } from '../gdi32/structs.js';
 import { threadIdOf } from './messages.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
@@ -79,6 +80,8 @@ const SM_CMONITORS = 80;
 const SM_CXVIRTUALSCREEN = 78;
 const SM_CYVIRTUALSCREEN = 79;
 const SM_CYMIN = 29;
+const SM_CXSIZE = 30;
+const SM_CXMENUSIZE = 54;
 const SM_CYMINTRACK = 35;
 const SM_CYSMCAPTION = 51;
 const SM_CXSMSIZE = 52;
@@ -1458,12 +1461,59 @@ export function createSystemFunctions({ host, live, windows, classes }){
     };
 
     /**
-     * SystemParametersInfo, both spellings: the work area and the hover
-     * parameters TrackMouseEvent works by, and a refusal for everything else.
+     * NONCLIENTMETRICS: the frame GetSystemMetrics describes, each size the
+     * one its metric is a pixel bigger than where Windows derives the metric
+     * from it, and the fonts the frame is drawn in -- Tahoma at eight points,
+     * bold in a caption. A size of either layout is filled, the one with
+     * iPaddedBorderWidth on the end too, as Wine fills both; any other is
+     * refused untouched.
      *
-     * @param {number} action @param {number} value
+     * @param {number} address @param {boolean} wide
      */
-    const systemParameter = (action, value)=>{
+    const nonClientMetrics = (address, wide)=>{
+        const font = wide ? LOGFONTW_SIZE : LOGFONTA.SIZE;
+        const size = 24 + 5 * font + 16;
+        const asked = host.readMemory(address, 4);
+        const cbSize = (asked[0] | asked[1] << 8 | asked[2] << 16 | asked[3] << 24) >>> 0;
+        if (cbSize !== size && cbSize !== size + 4)
+        {
+            return 0;
+        }
+        /** @param {number} weight */
+        const face = weight=>logFontBytes({ height: -11, width: 0, escapement: 0,
+            orientation: 0, weight, italic: 0, underline: 0, strikeOut: 0, charSet: 0,
+            outPrecision: 0, clipPrecision: 0, quality: 0, pitchAndFamily: 0,
+            faceName: 'Tahoma' }, wide);
+        const bytes = new Uint8Array(cbSize);
+        const view = new DataView(bytes.buffer);
+        /** @param {number} at @param {number[]} values */
+        const put = (at, values)=>values.forEach((one, index)=>{
+            view.setInt32(at + index * 4, one, true);
+        });
+        put(0, [cbSize, BORDER, SCROLLBAR, SCROLLBAR, metric(SM_CXSIZE), CAPTION_HEIGHT - 1]);
+        bytes.set(face(700), 24);
+        const smallCaption = 24 + font;
+        put(smallCaption, [metric(SM_CXSMSIZE), metric(SM_CYSMSIZE)]);
+        bytes.set(face(700), smallCaption + 8);
+        const menu = smallCaption + 8 + font;
+        put(menu, [metric(SM_CXMENUSIZE), MENU_HEIGHT - 1]);
+        for (const at of [menu + 8, menu + 8 + font, menu + 8 + 2 * font])
+        {
+            bytes.set(face(400), at);
+        }
+        host.writeMemory(address, bytes);
+        return 1;
+    };
+
+    /**
+     * SystemParametersInfo, both spellings: the work area, the hover
+     * parameters TrackMouseEvent works by and the non-client metrics, and a
+     * refusal for everything else.
+     *
+     * @param {number} action @param {number} value @param {boolean} wide
+     */
+    const systemParameter = (action, value, wide)=>{
+        const SPI_GETNONCLIENTMETRICS = 0x0029;
         const SPI_GETWORKAREA = 0x0030;
         const SPI_GETMOUSEHOVERWIDTH = 0x0062;
         const SPI_GETMOUSEHOVERHEIGHT = 0x0064;
@@ -1473,6 +1523,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
             return 0;
         }
         switch (action >>> 0){
+            case SPI_GETNONCLIENTMETRICS:
+                return nonClientMetrics(value >>> 0, wide);
             case SPI_GETWORKAREA:
                 writeRect(host, value,
                     { left: 0, top: 0, right: screen.width, bottom: screen.height });
@@ -1691,14 +1743,15 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * BOOL SystemParametersInfoA(UINT uiAction, UINT uiParam, PVOID pvParam,
          *                            UINT fWinIni)
          *
-         * Only the work area, the one a window uses to place itself, and the
-         * hover parameters are answered. Everything else reports failure
-         * rather than a default that would contradict the screen above.
+         * Only the work area, the one a window uses to place itself, the
+         * hover parameters and the non-client metrics are answered. Everything
+         * else reports failure rather than a default that would contradict the
+         * screen above.
          */
         SystemParametersInfoA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([action, , value])=>systemParameter(action, value),
+            handler: ([action, , value])=>systemParameter(action, value, false),
         },
 
         /**
@@ -1710,7 +1763,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
         SystemParametersInfoW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([action, , value])=>systemParameter(action, value),
+            handler: ([action, , value])=>systemParameter(action, value, true),
         },
 
         /**
