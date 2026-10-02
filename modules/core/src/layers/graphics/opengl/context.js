@@ -440,6 +440,17 @@ export function createGlContext(options = {}){
             shareGroup.contexts++;
         },
 
+        /**
+         * Shares the objects of another context's group from here on: the
+         * group is named by the context that holds it, so that a recorded
+         * call carries a context rather than the group's every object.
+         *
+         * @param {{ shareGroup: ReturnType<typeof createShareGroup> }} source
+         */
+        shareLists(source){
+            context.adoptShareGroup(source.shareGroup);
+        },
+
         destroy(){
             destroyed = true;
             shareGroup.contexts--;

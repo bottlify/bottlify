@@ -6,14 +6,15 @@
 
 /**
  * The program's thread's end of the graphics worker (`worker.js`): each
- * Direct3D 8 or 9 root made here is a recorded one whose twin the worker
- * plays, over a port of its own, and each frame the worker presents comes
+ * Direct3D 8 or 9 root and each OpenGL root made here is a recorded one whose
+ * twin the worker plays, over a port of its own, and each frame the worker presents comes
  * back as a picture that is copied into a texture of this thread's device
  * and presented as a frame drawn here would be.
  */
 
 import { createSender } from './channel.js';
 import { recordedDirect3D } from './direct3d.js';
+import { recordedOpengl } from './opengl.js';
 
 /** GPUTextureUsage, here without the browser's global. */
 const USAGE = { COPY_SRC: 0x01, COPY_DST: 0x02, TEXTURE_BINDING: 0x04, RENDER_ATTACHMENT: 0x10 };
@@ -48,7 +49,8 @@ function plainOf(services){
 
 /**
  * @typedef {Object} GraphicsWorkerEnd
- * @property {(api: 'd3d8' | 'd3d9', factory: (services: any) => any, services: any) => any} root
+ * @property {(api: 'd3d8' | 'd3d9' | 'opengl', factory: (services: any) => any, services: any)
+ *     => any} root
  *     a root the program is given, whose twin the worker plays
  * @property {() => { roots: number, frames: number }} diagnostics
  * @property {() => void} dispose
@@ -147,7 +149,9 @@ export function connectGraphicsWorker(options){
                 on: { wrote: writeMemory, divergence, lost, failed },
             });
             port1.onmessage = event=>sender.receive(event.data);
-            return recordedDirect3D(factory, services, sender);
+            return api === 'opengl'
+                ? recordedOpengl(factory, services, sender)
+                : recordedDirect3D(factory, services, sender);
         },
         diagnostics: ()=>({ roots: ports.length, frames }),
         dispose(){

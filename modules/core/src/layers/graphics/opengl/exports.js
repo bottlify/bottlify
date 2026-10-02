@@ -49,7 +49,7 @@ import {
     PIXELFORMATDESCRIPTOR,
 } from './pixelformat.js';
 import { createWgl } from './wgl.js';
-import { createGpuRenderer } from './gpu.js';
+import { createOpenglRoot } from './root.js';
 import { compressedDigest, imageDigests, imageTimes, keptImages } from './context-textures.js';
 import { imageBytes, unpackImage } from './texture.js';
 import { packImage } from './context-pixels.js';
@@ -334,6 +334,10 @@ const LIST_TYPES = new Map([
  * @property {boolean} [raster]
  *           `false` leaves primitives drawn on the processor unrasterised, so a
  *           run without a device measures everything but the rasteriser.
+ * @property {(factory: typeof createOpenglRoot,
+ *             services: import('./root.js').OpenglRootServices) => any} [remote]
+ *           Makes the root elsewhere: its contexts keep their state here and
+ *           draw in the graphics worker, whose frames come back to be shown.
  */
 
 /** A context handle that names none. */
@@ -355,6 +359,33 @@ export function createOpengl(services){
             : { key: `hdc:${hdc >>> 0}`, width: screen().width, height: screen().height }));
     const exportAddress = services.exportAddress ?? null;
 
+    /** @type {import('./root.js').OpenglRootServices} */
+    const rootServices = {
+        readMemory: services.readMemory,
+        windowMemory: services.windowMemory,
+        writeMemory: services.writeMemory,
+        allocate: services.scratch?.allocate,
+        backend: services.backend,
+        createSampler: services.createSampler,
+        frameQueued: services.frameQueued,
+        divergence: detail=>services.divergence?.('OpenGL', detail),
+        raster: services.raster,
+        compressedTextures: services.compressedTextures,
+        dumpDraws: services.dumpDraws,
+        maxDraws: services.maxDraws,
+        skipTexture: services.skipTexture,
+        probeTexture: services.probeTexture,
+    };
+    // A context draws on a device -- here or in the graphics worker -- when
+    // there is one, and on the processor otherwise.
+    const onDevice = services.remote !== undefined
+        || (services.backend !== undefined && services.createSampler !== undefined);
+    const root = services.remote
+        ? services.remote(createOpenglRoot, rootServices)
+        : createOpenglRoot(rootServices);
+    /** Whether a context was made, and with it the renderer. */
+    let madeContext = false;
+
     const wgl = createWgl({
         gdi: { describeDrawable },
         currentThread: services.currentThread ?? (()=>0),
@@ -369,10 +400,10 @@ export function createOpengl(services){
         // lookup are one promise, and both are kept or neither is.
         extensions: exportAddress ? { ...GL_EXTENSIONS, ...WGL_EXTENSIONS } : {},
         divergence: detail=>services.divergence?.('OpenGL', detail),
-        get gpu(){
-            return gpuRenderer();
+        createContext: options=>{
+            madeContext = true;
+            return root.CreateContext(options);
         },
-        raster: services.raster,
     });
 
     /** @type {Map<number, any>} guest handle -> the context it names */
@@ -391,29 +422,6 @@ export function createOpengl(services){
     /** @type {Map<string, number>} what a program called that is not implemented */
     const unimplemented = new Map();
 
-    /**
-     * The device renderer, made when the first context is: a program that
-     * never makes a context never builds a GPU.
-     *
-     * @type {ReturnType<typeof createGpuRenderer> | null}
-     */
-    let gpu = null;
-    const gpuRenderer = ()=>{
-        if (!gpu && services.backend && services.createSampler)
-        {
-            gpu = createGpuRenderer({
-                backend: services.backend(),
-                createSampler: services.createSampler,
-                divergence: detail=>services.divergence?.('OpenGL', detail),
-                dumpDraws: services.dumpDraws,
-                maxDraws: services.maxDraws,
-                skipTexture: services.skipTexture,
-                probeTexture: services.probeTexture,
-                compressedTextures: services.compressedTextures,
-            });
-        }
-        return gpu ?? undefined;
-    };
     /** @type {Set<number>} the handles whose pictures the presenter has been told are the device's */
     const claimed = new Set();
 
@@ -683,13 +691,13 @@ export function createOpengl(services){
         {
             return null;
         }
-        if (gpu)
+        if (onDevice)
         {
-            const shown = gpu.present(context);
+            const shown = root.Swap(context);
             const handle = handles.get(context) ?? 0;
             // Counted once its replay is on the queue, whether or not a
             // handle names its picture for the presenter.
-            const held = shown ? services.frameQueued?.(gpu.settled()) ?? null : null;
+            const held = shown ? root.Present() : null;
             if (!shown || handle === 0)
             {
                 return held;
@@ -1942,7 +1950,7 @@ export function createOpengl(services){
             // What a program reached for and did not get is the most useful
             // thing this layer can say about a run that drew nothing.
             unimplemented: Object.fromEntries(unimplemented),
-            gpu: gpu ? gpu.diagnostics() : null,
+            gpu: onDevice && madeContext ? root.diagnostics() : null,
             compressed: `${compressedDigest.count}:${compressedDigest.bytes}:`
                 + compressedDigest.hash.toString(16),
             images: imageDigests.slice(),

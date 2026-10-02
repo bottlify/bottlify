@@ -209,10 +209,14 @@ function visit(value, bind){
  * @param {ReadonlySet<string>} [options.answers]  the only methods `answered` is asked about
  * @returns {{ root: any, allocated: (address: number, bytes: number) => void,
  *     freed: (address: number) => void,
- *     wrote: (address: number, bytes: Uint8Array) => void, outward: (value: any) => any }}
+ *     wrote: (address: number, bytes: Uint8Array) => void,
+ *     read: (address: number, bytes: Uint8Array) => void, outward: (value: any) => any }}
  *     `allocated` and `freed` are told every allocation the recorded device
- *     makes and gives back, and `wrote` every write it makes into guest
- *     memory; `outward` is a value of the device's as the caller is given it
+ *     makes and gives back, `wrote` every write it makes into guest memory,
+ *     and `read` -- by a device that reads the program's memory at the call
+ *     rather than through its locks -- every read, whose bytes the played
+ *     device is sent ahead of the call; `outward` is a value of the device's
+ *     as the caller is given it
  */
 export function createRecording(options){
     const { root, readMemory, transport, answered = ()=>false, answers = new Set() } = options;
@@ -241,6 +245,8 @@ export function createRecording(options){
     let allocs = null;
     /** What the current call wrote into guest memory. @type {{ address: number, bytes: Uint8Array }[] | null} */
     let writes = null;
+    /** What the current call read of guest memory. @type {{ address: number, bytes: Uint8Array }[] | null} */
+    let reads = null;
     /** How deep in calls the program is: a call the device makes back through the caller is part of its own. */
     let depth = 0;
 
@@ -605,6 +611,7 @@ export function createRecording(options){
             }
             allocs = null;
             writes = null;
+            reads = null;
             depth++;
             let result;
             let failed = true;
@@ -619,8 +626,14 @@ export function createRecording(options){
                 // What the call set, which the checker cannot follow into it.
                 const made = /** @type {number[] | null} */ (allocs);
                 const wrote = /** @type {{ address: number, bytes: Uint8Array }[] | null} */ (writes);
+                const read = /** @type {{ address: number, bytes: Uint8Array }[] | null} */ (reads);
                 allocs = null;
                 writes = null;
+                reads = null;
+                if (read)
+                {
+                    shipped = shipped ? [...shipped, ...read] : read;
+                }
                 // Whatever the call did, the record is finished, so the next
                 // one starts where it should.
                 const shipping = shipped !== null && shipped.length > 0;
@@ -844,6 +857,20 @@ export function createRecording(options){
             writer.memory(address, bytes);
             transport.recorded();
         },
+        read(address, bytes){
+            // Written into the record when the call is finished, before the
+            // program runs again: a window the read handed out still holds
+            // the bytes it read, since no call writes what it read.
+            if (depth > 0)
+            {
+                (reads ??= []).push({ address, bytes });
+                return;
+            }
+            writer.u8(OP.WROTE);
+            writer.u32(1);
+            writer.memory(address, bytes);
+            transport.recorded();
+        },
     };
 }
 
@@ -863,7 +890,8 @@ export function createRecording(options){
  *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
  *         => void }}
  *     `play` answers a waited call with its `PlayedAnswer` (or a promise of
- *     one), and a paced one with the promise its device holds the caller on;
+ *     one), a paced one with the promise its device holds the caller on, and
+ *     any other with what the call answered;
  *     `allocate` is the played device's, the next address its recorded call
  *     was given; `read` reads a batch of calls
  */
@@ -972,7 +1000,9 @@ export function createPlayer({ root, ship, read }){
                 }
                 return call.wait === WAIT.PACED ? answer : undefined;
             }
-            return call.wait === WAIT.ANSWER ? { answer, outs: args } : undefined;
+            // An unwaited call's answer is what a carrier that is asked for
+            // it after the call -- what a device says of itself -- passes on.
+            return call.wait === WAIT.ANSWER ? { answer, outs: args } : answer;
         },
         object: number=>objects[number],
         allocate(){

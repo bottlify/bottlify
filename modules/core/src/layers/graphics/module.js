@@ -558,6 +558,12 @@ export function createGraphicsModule(){
                     // On the configuration rather than the device handle: it
                     // concerns the build that has no device.
                     raster: config?.raster,
+                    // With a graphics worker, contexts keep their state here and
+                    // draw there, as Direct3D 8 and 9 devices do.
+                    remote: remote
+                        ? (/** @type {any} */ factory, /** @type {any} */ rootServices)=>
+                            remote.root('opengl', factory, rootServices)
+                        : undefined,
                     ...options,
                 }),
                 // Direct3D 10's seam makes the device itself from what a program

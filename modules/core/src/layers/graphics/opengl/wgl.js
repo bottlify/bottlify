@@ -96,6 +96,10 @@ import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './
  * @property {boolean} [keepPrimitives]
  *           Handed to every context: keep what each one draws for a test to
  *           read back (see `GlContextOptions.keepPrimitives`).
+ * @property {(options: { extensions: string[] }) => any} [createContext]
+ *           Makes a context in place of this module, which then hands it none of
+ *           the above but the extensions: a root's (`root.js`), whose memory and
+ *           renderer are its own.
  */
 
 /**
@@ -287,15 +291,18 @@ export function createWgl(options){
             // The WGL extensions are looked up here and reported through
             // their own string; the GL string names only GL extensions, and
             // not the hidden ones, which stay obtainable but unannounced.
-            const context = createGlContext({
-                extensions: Object.keys(extensions).filter(name=>!name.startsWith('WGL_')
-                    && !HIDDEN_GL_EXTENSIONS.has(name)),
-                memory: contextMemory,
-                divergence: options.divergence,
-                gpu: options.gpu,
-                raster: options.raster,
-                keepPrimitives: options.keepPrimitives,
-            });
+            const contextExtensions = Object.keys(extensions).filter(name=>!name.startsWith('WGL_')
+                && !HIDDEN_GL_EXTENSIONS.has(name));
+            const context = options.createContext
+                ? options.createContext({ extensions: contextExtensions })
+                : createGlContext({
+                    extensions: contextExtensions,
+                    memory: contextMemory,
+                    divergence: options.divergence,
+                    gpu: options.gpu,
+                    raster: options.raster,
+                    keepPrimitives: options.keepPrimitives,
+                });
             live.set(context, {
                 key: drawable.key,
                 formatIndex: index,
@@ -414,7 +421,7 @@ export function createWgl(options){
             {
                 return false;
             }
-            destination.adoptShareGroup(source.shareGroup);
+            destination.shareLists(source);
             return true;
         },
 

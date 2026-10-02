@@ -5,8 +5,8 @@
  */
 
 /**
- * The graphics worker: Direct3D 8 and 9 devices played on a GPU device of
- * its own, off the thread the program runs on.
+ * The graphics worker: Direct3D 8 and 9 devices and OpenGL contexts played
+ * on a GPU device of its own, off the thread the program runs on.
  *
  * The program's thread makes a root it records (`direct3d.js`) and sends
  * its twin here with a port of its own; the calls come in on that port
@@ -21,7 +21,7 @@
  *                                    bytes read back; anything else keeps them.
  *                                    Answered every time it is asked.
  *   { type: 'root', api, options, port }
- *                                    `api` 'd3d8' or 'd3d9', `options` the
+ *                                    `api` 'd3d8', 'd3d9' or 'opengl', `options` the
  *                                    plain part of what the root was made with;
  *                                    `{ type: 'close' }` on the port ends it
  * Messages from it:
@@ -33,10 +33,12 @@
 
 import { createDirect3D8 } from '../d3d8/device.js';
 import { createDirect3D9 } from '../d3d9/device.js';
+import { createOpenglRoot } from '../opengl/root.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFrameLatency } from '../webgpu/internal/latency.js';
 import { createReceiver } from './channel.js';
 import { playedDirect3D } from './direct3d.js';
+import { playedOpengl } from './opengl.js';
 
 /** @type {Record<string, (services: any) => any>} */
 const FACTORIES = { d3d8: createDirect3D8, d3d9: createDirect3D9 };
@@ -174,28 +176,45 @@ export function serveGraphics(scope, deps){
         const { device, backend, latency } = await /** @type {Promise<any>} */ (opened);
         /** @type {(message: any, transfer?: Transferable[]) => void} */
         const post = (message, transfer)=>port.postMessage(message, transfer ?? []);
-        const played = playedDirect3D(FACTORIES[api], {
-            ...options,
-            backend,
-            createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
-            // The program has memory; what of it this side reads is what it is sent.
-            readMemory: true,
-            writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
-                post({ type: 'wrote', writes: [{ address, bytes: bytes.slice() }] }),
-            divergence: (/** @type {string} */ name, /** @type {string} */ detail)=>
-                post({ type: 'divergence', api: name, detail }),
-            onDeviceLost: (/** @type {() => void} */ watcher)=>{
-                if (lost)
-                {
-                    watcher();
-                    return ()=>{};
-                }
-                losers.add(watcher);
-                return ()=>losers.delete(watcher);
-            },
-            frameQueued: (/** @type {any} */ submitted)=>latency.queued(submitted),
-            gamma: options.gamma ? { applies: ()=>true, set: ()=>{} } : undefined,
-        });
+        /** @param {number} address @param {Uint8Array} bytes */
+        const wrote = (address, bytes)=>
+            post({ type: 'wrote', writes: [{ address, bytes: bytes.slice() }] });
+        /** @param {any} submitted */
+        const frameQueued = submitted=>latency.queued(submitted);
+        const played = api === 'opengl'
+            ? playedOpengl(createOpenglRoot, {
+                ...options,
+                backend: ()=>backend,
+                createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
+                // Blocks are uploaded as blocks only where this device takes them.
+                compressedTextures: options.compressedTextures === true
+                    && device.features?.has?.('texture-compression-bc') === true,
+                writeMemory: wrote,
+                divergence: (/** @type {string} */ detail)=>
+                    post({ type: 'divergence', api: 'OpenGL', detail }),
+                frameQueued,
+            })
+            : playedDirect3D(FACTORIES[api], {
+                ...options,
+                backend,
+                createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
+                // The program has memory; what of it this side reads is what it is sent.
+                readMemory: true,
+                writeMemory: wrote,
+                divergence: (/** @type {string} */ name, /** @type {string} */ detail)=>
+                    post({ type: 'divergence', api: name, detail }),
+                onDeviceLost: (/** @type {() => void} */ watcher)=>{
+                    if (lost)
+                    {
+                        watcher();
+                        return ()=>{};
+                    }
+                    losers.add(watcher);
+                    return ()=>losers.delete(watcher);
+                },
+                frameQueued,
+                gamma: options.gamma ? { applies: ()=>true, set: ()=>{} } : undefined,
+            });
         const receiver = createReceiver({ played, post });
         port.onmessage = event=>{
             if (event.data?.type === 'close')
