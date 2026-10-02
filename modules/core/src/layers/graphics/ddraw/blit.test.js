@@ -291,3 +291,59 @@ test('byte-exact: BltFast copies at an offset and refuses to fall off the surfac
     }), 0);
     assert.deepEqual(grid(memory, dest)[2], [1, 2, 3, 4], 'only the zero destination pixels took');
 });
+
+test('a fill, a copy and a source-keyed copy with nothing clipped land as the clipped loop lands '
+    + 'them, at every depth, over a window that sees the writes', ()=>{
+    // A clip list holding the whole destination clips nothing and takes the
+    // pixel-at-a-time loop; without one the same blit is done a row at a time.
+    let seed = 7;
+    const random = ()=>{
+        seed = (seed * 1103515245 + 12345) >>> 0;
+        return seed >>> 8;
+    };
+    for (const bytesPerPixel of [1, 2, 4])
+    {
+        for (let trial = 0; trial < 40; trial++)
+        {
+            const runs = [false, true].map(clipped=>{
+                seed = trial * 31 + bytesPerPixel;
+                const bytes = new Uint8Array(0x4000);
+                for (let at = 0; at < bytes.length; at++)
+                {
+                    bytes[at] = random() & 3;
+                }
+                const memory = {
+                    bytes,
+                    readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+                        bytes.slice(at, at + length),
+                    windowMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+                        bytes.subarray(at, at + length),
+                    writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>
+                        bytes.set(value, at),
+                };
+                const dest = { ...surface(0x100, 13, 9, bytesPerPixel, 13 * bytesPerPixel + 3),
+                    keyMask: trial % 3 === 0 ? 0x0f0f0f0f : undefined };
+                const src = { ...surface(0x1000, 7, 5, bytesPerPixel), keyMask: dest.keyMask };
+                const destRect = { left: 1 + random() % 5, top: random() % 4, right: 0, bottom: 0 };
+                destRect.right = destRect.left + 7;
+                destRect.bottom = destRect.top + 5;
+                const clipList = clipped ? [{ left: 0, top: 0, right: 13, bottom: 9 }] : undefined;
+                const key = { low: 1, high: 1 + (trial & 1) };
+                const kind = trial % 3;
+                if (kind === 0)
+                {
+                    assert.equal(blt({ memory, dest, destRect, flags: DDBLT_COLORFILL,
+                        fx: { fillColor: 0x01020304 + trial }, clipList }), 0);
+                }
+                else
+                {
+                    assert.equal(blt({ memory, dest, destRect, src,
+                        flags: kind === 2 ? DDBLT_KEYSRC : 0, fx: { srcColorKey: key },
+                        clipList }), 0);
+                }
+                return bytesOf(memory, dest);
+            });
+            assert.deepEqual(runs[0], runs[1], `${bytesPerPixel} bytes a pixel, trial ${trial}`);
+        }
+    }
+});

@@ -237,6 +237,11 @@ export function writePixel(memory, surface, x, y, value){
  */
 function transfer(job){
     const { memory, dest, destRect, src, srcColorKey, destColorKey, clipList } = job;
+    if (destColorKey === undefined && (clipList === undefined || clipList.length === 0)
+        && transferWhole(job))
+    {
+        return;
+    }
     const bpp = dest.bytesPerPixel;
     const width = destRect.right - destRect.left;
     const height = destRect.bottom - destRect.top;
@@ -286,6 +291,85 @@ function transfer(job){
 }
 
 /**
+ * `transfer` where every pixel of the rectangle is the destination's to
+ * write -- no destination key, no clipper -- and nothing is stretched: a
+ * fill, a copy, and a copy under a source key, a row at a time rather than a
+ * byte at a time. The same bytes land as the general loop's, and a blit it
+ * does not cover (three bytes a pixel, a stretch) is left to that loop.
+ *
+ * @param {Parameters<typeof transfer>[0]} job
+ * @returns {boolean} whether it was done here
+ */
+function transferWhole(job){
+    const { memory, dest, destRect, src, srcColorKey } = job;
+    const bpp = dest.bytesPerPixel;
+    const width = destRect.right - destRect.left;
+    const height = destRect.bottom - destRect.top;
+    const srcRect = job.srcRect;
+    if (bpp === 3 || (src && srcRect && (srcRect.right - srcRect.left !== width
+        || srcRect.bottom - srcRect.top !== height)))
+    {
+        return false;
+    }
+    const rowLength = width * bpp;
+    const at = (/** @type {number} */ y)=>dest.buffer + y * dest.pitch + destRect.left * bpp;
+    const row = rowOf(rowLength);
+    if (!src)
+    {
+        const fill = (job.fill & pixelMask(dest)) >>> 0;
+        for (let column = 0; column < rowLength; column += bpp)
+        {
+            for (let byte = 0; byte < bpp; byte++)
+            {
+                row[column + byte] = (fill >>> (byte * 8)) & 0xff;
+            }
+        }
+        for (let y = destRect.top; y < destRect.bottom; y++)
+        {
+            memory.writeMemory(at(y), row);
+        }
+        return true;
+    }
+    const held = snapshotBytes;
+    if (srcColorKey === undefined)
+    {
+        for (let r = 0; r < height; r++)
+        {
+            memory.writeMemory(at(destRect.top + r),
+                held.subarray(r * rowLength, (r + 1) * rowLength));
+        }
+        return true;
+    }
+    // A pixel of the source key keeps what the destination held; the rest
+    // of the row is the source's.
+    const keyMask = src.keyMask ?? 0xffffffff;
+    const low = (srcColorKey.low & keyMask) >>> 0;
+    const high = (srcColorKey.high & keyMask) >>> 0;
+    const current = spanOf(memory, dest, destRect);
+    const words = bpp === 4 ? new Uint32Array(held.buffer, 0, held.length >>> 2)
+        : bpp === 2 ? new Uint16Array(held.buffer, 0, held.length >>> 1) : held;
+    const into = bpp === 4 ? new Uint32Array(row.buffer, row.byteOffset, width)
+        : bpp === 2 ? new Uint16Array(row.buffer, row.byteOffset, width) : row;
+    for (let r = 0; r < height; r++)
+    {
+        const from = r * dest.pitch;
+        row.set(current.subarray(from, from + rowLength));
+        const first = r * width;
+        for (let column = 0; column < width; column++)
+        {
+            const value = words[first + column];
+            const bits = (value & keyMask) >>> 0;
+            if (bits < low || bits > high)
+            {
+                into[column] = value;
+            }
+        }
+        memory.writeMemory(at(destRect.top + r), row);
+    }
+    return true;
+}
+
+/**
  * The source rectangle, read into `snapshotBytes` before anything is
  * written, row after row with no pitch between them. The snapshot is what
  * makes a self-overlapping blit and a stretched one the same loop.
@@ -305,11 +389,7 @@ function snapshot(memory, src, rect){
     for (let row = 0; row < rows; row++)
     {
         const from = row * src.pitch;
-        const to = row * rowLength;
-        for (let at = 0; at < rowLength; at++)
-        {
-            into[to + at] = span[from + at];
-        }
+        into.set(span.subarray(from, from + rowLength), row * rowLength);
     }
 }
 
