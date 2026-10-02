@@ -2987,13 +2987,26 @@ export function createRenderer(options){
             `#${binding.stage}:${binding.placeholder
                 ? 'placeholder'
                 : describeTexture(binding.texture)}`).join(' ');
+        const state = prepared.state;
         dump.push(`#${dump.length} program n=${count}`
-            + ` vs=${prepared.state.vertexShader} ps=${prepared.state.pixelShader}`
+            + ` vs=${state.vertexShader} ps=${state.pixelShader}`
             + ` decl=${program.declarationId}`
             // The fog stage below model 3 runs after the shader too, so a
             // program's draw is another place its numbers can be wrong.
-            + ` fog=${fogSourceOf(prepared.state) === FOG_SOURCE.NONE
+            + ` fog=${fogSourceOf(state) === FOG_SOURCE.NONE
                 ? '-' : fogSettingOf(model)}`
+            // Blending, the alpha test and the colour mask run after any
+            // shader, and without a pixel shader so does the stage cascade:
+            // a quad drawn under them can paint nothing at all.
+            + ` cw=${state.colorWrite}`
+            + ` blend=${state.blend ? `${state.srcBlend},${state.destBlend}` : '-'}`
+            + ` aTest=${state.alphaTest
+                ? `${state.alphaFunc}/${model.renderStates.get(D3DRS.ALPHAREF) ?? 0}` : '-'}`
+            + (state.pixelShader === -1 && state.stages
+                ? ` stages=${state.stages.map((/** @type {any} */ stage)=>
+                    `${stage.colorOp}(${stage.colorArg1},${stage.colorArg2})`
+                    + `/${stage.alphaOp}(${stage.alphaArg1},${stage.alphaArg2})`).join(' ')}`
+                : '')
             + ` target=${describeTarget(model)}`
             + ` view=${model.viewport.rect.x},${model.viewport.rect.y}`
             + `+${model.viewport.rect.width}x${model.viewport.rect.height}`

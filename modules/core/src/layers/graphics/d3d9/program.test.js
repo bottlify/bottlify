@@ -493,6 +493,66 @@ test('a programmable draw is not blind to the dump: shaders, declaration and sam
     assert.equal(h.device.release(), 0);
 });
 
+test('a screen quad in target pixels draws past a bound vertex shader, which runs again after',
+    async()=>{
+        const h = harness({ dumpDraws: true });
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetTexture(0, h.texture);
+        // XYZRHW, a colour and a coordinate set: a movie frame's quad. The
+        // shader reads dcl_position, which these vertices do not carry; run,
+        // it would place every vertex at c0..c3's last column and draw nothing.
+        const RHW_STRIDE = 28;
+        const quad = new DataView(new ArrayBuffer(RHW_STRIDE * 3));
+        [[0, 0], [8, 0], [0, 8]].forEach(([x, y], index)=>{
+            const at = index * RHW_STRIDE;
+            quad.setFloat32(at, x, true);
+            quad.setFloat32(at + 4, y, true);
+            quad.setFloat32(at + 8, 0.5, true);
+            quad.setFloat32(at + 12, 1, true);
+            quad.setUint32(at + 16, 0xffffffff, true);
+            quad.setFloat32(at + 20, x / 8, true);
+            quad.setFloat32(at + 24, y / 8, true);
+        });
+        assert.equal(h.device.SetFVF(0x144), D3D_OK);
+        assert.equal(h.device.BeginScene(), D3D_OK);
+        assert.equal(h.device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1,
+            new Uint8Array(quad.buffer), RHW_STRIDE), D3D_OK);
+        assert.equal(h.device.EndScene(), D3D_OK);
+        assert.equal(h.device.Present(), D3D_OK);
+        await h.device.idle();
+        assert.deepEqual(h.reports, []);
+        let diagnostics = h.device.diagnostics();
+        assert.equal(diagnostics.programmable, 0);
+        assert.equal(diagnostics.draws, 1);
+        assert.doesNotMatch(diagnostics.lastDump[0], /^#0 program /);
+        const [pipeline] = h.gpu.of('createRenderPipeline').map(call=>call.descriptor);
+        assert.deepEqual(pipeline.vertex.buffers[0].attributes.find(
+            (/** @type {any} */ attribute)=>attribute.offset === 0),
+        { shaderLocation: 0, offset: 0, format: 'float32x4' },
+        'the position is read from the vertices, all four components');
+
+        // DrawPrimitiveUP let go of stream zero.
+        h.device.SetStreamSource(0, h.vb, 0, STRIDE);
+        h.device.SetVertexDeclaration(h.declaration);
+        await h.draw();
+        diagnostics = h.device.diagnostics();
+        assert.equal(diagnostics.programmable, 1, 'untransformed vertices run the shader');
+        assert.match(diagnostics.lastDump[0], new RegExp(`^#0 program n=3 vs=${vs.shader.id} `));
+
+        h.device.SetTexture(0, null);
+        h.device.SetVertexShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        vs.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
 test('a pixel shader over fixed-function vertices gets a vertex stage of its own', async()=>{
     const h = harness();
     /** @type {{ shader?: any }} */

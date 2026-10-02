@@ -75,8 +75,8 @@ import { processStreams } from '../d3d8/process.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import {
-    MAX_STREAMS, createVertexDeclaration, elementsOfFvf, fixedFunctionLayoutOf, fvfOfElements,
-    validateElements,
+    D3DDECLUSAGE, MAX_STREAMS, createVertexDeclaration, elementsOfFvf, fixedFunctionLayoutOf,
+    fvfOfElements, validateElements,
 } from './declaration.js';
 import {
     CONSTANT_FILE, SHADER_KIND, createConstantFile, createShader, validateShader, versionOf,
@@ -1318,6 +1318,32 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         return true;
     };
 
+    /** @type {WeakMap<object, boolean>} */
+    const transformedDeclarations = new WeakMap();
+    /**
+     * The vertex shader a draw runs: the bound one, unless the bound
+     * declaration carries a POSITIONT element. Vertices already in target
+     * pixels skip vertex processing altogether, a bound shader included --
+     * which stays bound for the next draw through untransformed vertices. A
+     * program that draws its screen quads that way without unbinding its
+     * shader would otherwise run the shader on a position it never feeds.
+     */
+    const drawnVertexShader = ()=>{
+        const declaration = vertexDeclaration.declaration;
+        if (!vertexShader || !declaration)
+        {
+            return vertexShader;
+        }
+        let transformed = transformedDeclarations.get(declaration);
+        if (transformed === undefined)
+        {
+            transformed = /** @type {boolean} */ (declaration.elements.some(
+                (/** @type {any} */ element)=>element.Usage === D3DDECLUSAGE.POSITIONT));
+            transformedDeclarations.set(declaration, transformed);
+        }
+        return transformed ? null : vertexShader;
+    };
+
     /**
      * The layout the fixed-function pipeline reads the bound declaration
      * through when no vertex format spells it, worked out once per declaration.
@@ -1327,7 +1353,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const fixedFunctionLayouts = new WeakMap();
     const fixedFunctionLayout = ()=>{
         const declaration = vertexDeclaration.declaration;
-        if (!declaration || vertexShader || effectiveFvf() !== 0)
+        if (!declaration || drawnVertexShader() || effectiveFvf() !== 0)
         {
             return null;
         }
@@ -1513,7 +1539,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * as declined on its own.
      */
     const noteUndrawable = ()=>{
-        if (vertexShader || pixelShader)
+        if (drawnVertexShader() || pixelShader)
         {
             // The renderer builds the program and says what it could not.
             return;
@@ -2882,17 +2908,18 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             held.vertexShader = vertexShader;
             held.pixelShader = pixelShader;
             held.declaration = vertexDeclaration;
+            const vertex = drawnVertexShader();
             held.answer = {
-                vertexShader: vertexShader ? vertexShader.id : 0,
+                vertexShader: vertex ? vertex.id : 0,
                 fvf: effectiveFvf(),
                 fixedFunctionLayout: fixedFunctionLayout(),
-                fixedFunctionVertex: !vertexShader,
+                fixedFunctionVertex: !vertex,
                 pixelShader: pixelShader ? pixelShader.id : 0,
-                program: vertexShader || pixelShader
+                program: vertex || pixelShader
                     ? {
-                        vertex: vertexShader?.parsed ?? null,
-                        vertexShader: vertexShader ?? null,
-                        vertexId: vertexShader?.id ?? 0,
+                        vertex: vertex?.parsed ?? null,
+                        vertexShader: vertex ?? null,
+                        vertexId: vertex?.id ?? 0,
                         pixel: pixelShader?.parsed ?? null,
                         pixelShader: pixelShader ?? null,
                         pixelId: pixelShader?.id ?? 0,

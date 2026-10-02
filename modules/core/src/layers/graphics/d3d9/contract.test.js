@@ -335,6 +335,63 @@ test('a draw with a shader bound succeeds, and the renderer is handed the whole 
     assert.equal(device.release(), 0);
 });
 
+test('pre-transformed vertices skip a bound vertex shader, which stays bound for the next draw',
+    ()=>{
+        const { device } = make({ caps: { vertexShaderVersion: { major: 2, minor: 0 },
+            pixelShaderVersion: { major: 2, minor: 0 } } });
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        device.CreateVertexShader(VS_2_0_EMPTY, vs);
+        device.SetVertexShader(vs.shader);
+        const XYZRHW_DIFFUSE = 0x044;
+        assert.equal(device.SetFVF(XYZRHW_DIFFUSE), D3D_OK);
+        assert.equal(device.stageProcessing.vertexShader, 0);
+        assert.equal(device.stageProcessing.fixedFunctionVertex, true);
+        assert.equal(device.stageProcessing.program, null);
+        assert.equal(device.stageProcessing.fvf, XYZRHW_DIFFUSE);
+        /** @type {{ shader?: any }} */
+        const bound = {};
+        device.GetVertexShader(bound);
+        assert.equal(bound.shader, vs.shader, 'the shader is skipped, not unbound');
+        bound.shader.release();
+
+        // A declaration that carries POSITIONT is the same as the format.
+        /** @type {{ declaration?: any }} */
+        const transformed = {};
+        assert.equal(device.CreateVertexDeclaration([
+            element(D3DDECLUSAGE.POSITIONT, D3DDECLTYPE.FLOAT4, 0),
+            element(D3DDECLUSAGE.TEXCOORD, D3DDECLTYPE.FLOAT2, 16),
+        ], transformed), D3D_OK);
+        device.SetVertexDeclaration(transformed.declaration);
+        assert.equal(device.stageProcessing.vertexShader, 0);
+        assert.equal(device.stageProcessing.program, null);
+
+        // A pixel shader still runs over them.
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        device.CreatePixelShader(PS_2_0_EMPTY, ps);
+        device.SetPixelShader(ps.shader);
+        const program = device.stageProcessing.program;
+        assert.ok(program);
+        assert.equal(program.vertex, null);
+        assert.equal(program.vertexId, 0);
+        assert.equal(program.pixel, ps.shader.parsed);
+        device.SetPixelShader(null);
+
+        // Untransformed vertices run the shader again.
+        assert.equal(device.SetFVF(FVF_XYZ), D3D_OK);
+        assert.equal(device.stageProcessing.vertexShader, vs.shader.id);
+        assert.equal(device.stageProcessing.fixedFunctionVertex, false);
+        assert.equal(device.stageProcessing.program?.vertex, vs.shader.parsed);
+
+        device.SetVertexShader(null);
+        device.SetVertexDeclaration(null);
+        transformed.declaration.release();
+        vs.shader.release();
+        ps.shader.release();
+        assert.equal(device.release(), 0);
+    });
+
 test('shader constants are bounded per file, and read back what was set', ()=>{
     const { device } = make();
     assert.equal(device.SetVertexShaderConstantF(0, [1, 2, 3, 4, 5, 6, 7, 8], 2), D3D_OK);
