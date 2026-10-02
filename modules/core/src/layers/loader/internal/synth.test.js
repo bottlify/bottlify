@@ -469,6 +469,15 @@ test('a variable may hold other exports\' addresses, and be exported part way in
     assert.equal(view.getUint32(rva - 4, true), module.addressOf('locator'));
     assert.equal(view.getUint32(rva, true), module.addressOf('what'));
     assert.equal(view.getUint32(rva + 4, true), vtable, 'a pointer to an entry is to the entry');
+    const table = synthesiseModule({
+        name: 'MSVCRT.dll',
+        base: BASE,
+        exports: [{ name: 'table', data: new Uint8Array(12),
+            pointers: [{ at: 0, to: 'table', offset: 8 }] }],
+    });
+    assert.equal(new DataView(table.bytes.buffer).getUint32(
+        /** @type {number} */ (table.addressOf('table')) - BASE, true),
+    /** @type {number} */ (table.addressOf('table')) + 8, 'a pointer into an export');
     assert.throws(()=>synthesiseModule({
         name: 'MSVCRT.dll',
         base: BASE,

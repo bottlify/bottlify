@@ -170,15 +170,22 @@ test('fprintf on a stream that is not one is a negative count', ()=>{
     assert.equal(fns.fprintf.handler([0x999, memory.put('x'), 0]), -1);
 });
 
-test('setvbuf accepts a stream and a real mode, and does nothing observable', ()=>{
+test('setvbuf accepts a stream and a real mode, and the record says the size asked for', ()=>{
+    // `_bufsiz` is what a program reads to size its own writes, Wine's
+    // test_write_flush among them: msvcrt's 4096 from fopen, setvbuf's
+    // size after it.
     const { memory, fns } = build();
     const stream = fns.fopen.handler([memory.put('C:\\data.bin'), memory.put('rb')]);
     const IONBF = 0x0004;
     const IOFBF = 0x0000;
     const IOLBF = 0x0040;
+    const FILE_BUFSIZ = 24;
+    const bufsiz = ()=>new DataView(memory.bytes.buffer).getUint32(stream + FILE_BUFSIZ, true);
+    assert.equal(bufsiz(), 4096);
 
     assert.equal(fns.setvbuf.handler([stream, 0, IONBF, 0]), 0);
     assert.equal(fns.setvbuf.handler([stream, 0, IOFBF, 512]), 0);
+    assert.equal(bufsiz(), 512);
     assert.equal(fns.setvbuf.handler([stream, 0, IOLBF, 512]), 0);
     assert.equal(fns.setvbuf.handler([stream, 0, 0x1234, 0]), -1, 'not a mode this runtime has');
     assert.equal(fns.setvbuf.handler([0x999, 0, IONBF, 0]), -1, 'not a stream at all');
@@ -652,7 +659,8 @@ test('freopen moves stdout to a file, and fclose puts it back on the console', (
     fns.putchar.handler([0x21]);
     assert.equal(text('C:\\log.txt'), '7\r\n!');
     assert.deepEqual(console, []);
-    assert.notEqual(memory.u32(stdout + 16), 1, 'the record names the file\'s descriptor');
+    assert.equal(memory.u32(stdout + 16), 1,
+        'the stream keeps its number, which the file now holds, as on Windows');
 
     assert.equal(fns.fclose.handler([stdout]), 0);
     fns.putchar.handler([0x3f]);

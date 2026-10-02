@@ -37,6 +37,13 @@ const FILE_SIZE = 32;
 const FILE_CNT = 4;
 const FILE_FLAG = 12;
 const FILE_FILE = 16;
+/**
+ * `_bufsiz`: the buffer a stream would have, msvcrt's 4096 unless setvbuf
+ * named another. Nothing is held in it here, but a program sizes its own
+ * writes by it.
+ */
+const FILE_BUFSIZ = 24;
+const DEFAULT_BUFFER = 4096;
 
 /**
  * `_iob`: the runtime's own streams, stdin, stdout and stderr first, twenty
@@ -288,6 +295,7 @@ export function createStdioFunctions(host){
         host.writeMemory(record, new Uint8Array(FILE_SIZE));
         const stream = { record, fd, flags: 0, pushback: [] };
         standOn(stream, fd, flags);
+        writeU32(record + FILE_BUFSIZ, DEFAULT_BUFFER);
         streams.set(record, stream);
         return record;
     };
@@ -786,7 +794,15 @@ export function createStdioFunctions(host){
                     forget(stream);
                     return 0;
                 }
-                standOn(stream, fd, parsed.flags);
+                // A standard stream keeps its number, as on Windows, where
+                // the close freed it and the open took the lowest free.
+                const index = standardIndex(stream.record);
+                const kept = index < 0 ? fd : descriptors.duplicate(fd, index);
+                if (kept !== fd)
+                {
+                    descriptors.close(fd);
+                }
+                standOn(stream, kept, parsed.flags);
                 return stream.record;
             });
         }),
@@ -1406,11 +1422,15 @@ export function createStdioFunctions(host){
          * valid request is accepted and does nothing -- which is the
          * buffering this call already promised.
          */
-        setvbuf: cdecl(16, ([pointer, , mode])=>{
+        setvbuf: cdecl(16, ([pointer, , mode, size])=>{
             const stream = streamOf(pointer);
             if (!stream || (mode !== IOFBF && mode !== IOLBF && mode !== IONBF))
             {
                 return -1;
+            }
+            if (mode !== IONBF)
+            {
+                writeU32(stream.record + FILE_BUFSIZ, size >>> 0);
             }
             return 0;
         }),

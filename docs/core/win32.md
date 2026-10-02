@@ -1037,9 +1037,15 @@ nothing implements).
   `ferror` and `getc` macros read what the functions do. `_stat`/`_fstat` fill the 36-byte
   `struct _stat`; `_findfirst`/`_findnext` walk a directory as `FindFirstFile` does into a
   `_finddata_t`. `printf`, `vprintf` and `puts` are `fprintf` and `fputs` on `stdout`, so they
-  follow it wherever `freopen` moved it. Every printer formats a double as msvcrt does
-  (`msvcrt/format.js`, `cvtDigits`, which `_ecvt` and `_fcvt` share): seventeen significant
-  digits rounded half up, zeros past them, an exponent of three digits, and an infinity or NaN as
+  follow it wherever `freopen` moved it. `_dup` and `_dup2` make a second descriptor on a file,
+  sharing its position; `_dup2` onto 0, 1 or 2 sends that standard number to the file, and
+  `freopen` of a standard stream puts its file on the stream's own number, as Windows does --
+  closing a file there gives the number back to the console. `__pioinfo` is msvcrt.dll's table
+  as a program reads it in place: the first block of 32 entries, each descriptor's handle (none
+  until one is asked for) and `wxflag` written as it opens and closes. A stream's `_bufsiz` says
+  4096, or what `setvbuf` named, though nothing is held in it. Every printer formats a double as
+  msvcrt does (`msvcrt/format.js`, `cvtDigits`, which `_ecvt` and `_fcvt` share): seventeen
+  significant digits rounded half up, zeros past them, an exponent of three digits, and an infinity or NaN as
   `1#INF`, `1#QNAN`, `1#SNAN` or `1#IND` rounded as if digits (`%.2f` of one is `1.#J`); a
   conversion it does not know is written as its own character. The scanners (`msvcrt/scan.js`)
   read as msvcrt does -- width digits and length modifiers in any order, a character that is no

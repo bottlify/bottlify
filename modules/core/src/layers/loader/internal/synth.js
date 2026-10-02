@@ -78,10 +78,11 @@ const encoder = new TextEncoder();
  *   In `code`: the four bytes at `at` are a relative jump's displacement to
  *   the guest address `target`, filled in here, where the code's own address
  *   is known -- a direct jump into a host stub, as a trampoline makes.
- * @property {{ at: number, to: string }[]} [pointers]
+ * @property {{ at: number, to: string, offset?: number }[]} [pointers]
  *   In `data`: the four bytes at `at` are the address of the export named
- *   `to`, filled in here, where every export has its place -- a vtable's
- *   slots, and the runtime type information a vtable and a type point into.
+ *   `to`, `offset` bytes into it, filled in here, where every export has its
+ *   place -- a vtable's slots, the runtime type information a vtable and a
+ *   type point into, a table's pointers to the blocks it holds.
  * @property {number} [entry]
  *   For `data`: the export's address is this many bytes into it. A vtable is
  *   exported at its first slot, with the word before it pointing at its
@@ -208,14 +209,14 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
         if (entry.data)
         {
             bytes.set(entry.data, rva);
-            for (const { at, to } of entry.pointers ?? [])
+            for (const { at, to, offset = 0 } of entry.pointers ?? [])
             {
                 const target = indexOf.get(to);
                 if (target === undefined)
                 {
                     throw new Error(`export "${entry.name}" points at "${to}", which is not one`);
                 }
-                view.setUint32(rva + at, base + exportRva(target), true);
+                view.setUint32(rva + at, base + exportRva(target) + offset, true);
             }
         }
         else if (entry.code)
