@@ -381,7 +381,11 @@ export function expandMode(mode, count){
 /**
  * Reads an index list out of its bytes into a format the GPU takes, and finds
  * the range of vertices it reaches. Unsigned bytes are widened to sixteen
- * bits, the narrowest index format there is.
+ * bits, the narrowest index format there is. Sixteen- and 32-bit indices on
+ * their own alignment are answered as a view of the bytes, not a copy: a
+ * draw writes them into the device's ring right after, and a copy here was a
+ * second pass and an allocation for every draw. A caller that keeps them
+ * past the call keeps them only as long as the bytes stay as they are.
  *
  * @param {Uint8Array} bytes
  * @param {number} type   GL_UNSIGNED_BYTE, GL_UNSIGNED_SHORT or GL_UNSIGNED_INT
@@ -393,19 +397,18 @@ export function scanIndices(bytes, type, count){
     let max = 0;
     if (type === GL.UNSIGNED_INT)
     {
-        const indices = new Uint32Array(count);
-        // A 4-aligned span reads straight into the copy through a typed view
-        // of the same bytes -- no `DataView` and no per-index byte-swap call,
-        // just the platform's own little-endian layout, which is what every
-        // engine target this runs on already uses. An unaligned span (not
-        // promised by the API, but not refused either) falls back to the
-        // byte-exact read.
+        // A 4-aligned span is read through a typed view of the same bytes --
+        // the platform's own little-endian layout, which every engine target
+        // this runs on uses. An unaligned span (not promised by the API, but
+        // not refused either) is copied byte-exact.
+        let indices;
         if (bytes.byteOffset % 4 === 0)
         {
-            indices.set(new Uint32Array(bytes.buffer, bytes.byteOffset, count));
+            indices = new Uint32Array(bytes.buffer, bytes.byteOffset, count);
         }
         else
         {
+            indices = new Uint32Array(count);
             const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
             for (let i = 0; i < count; i++)
             {
@@ -419,6 +422,17 @@ export function scanIndices(bytes, type, count){
             max = index > max ? index : max;
         }
         return { indices, format: 'uint32', min, max };
+    }
+    if (type === GL.UNSIGNED_SHORT && bytes.byteOffset % 2 === 0)
+    {
+        const indices = new Uint16Array(bytes.buffer, bytes.byteOffset, count);
+        for (let i = 0; i < count; i++)
+        {
+            const index = indices[i];
+            min = index < min ? index : min;
+            max = index > max ? index : max;
+        }
+        return { indices, format: 'uint16', min, max };
     }
     const indices = new Uint16Array(count);
     if (type === GL.UNSIGNED_SHORT)

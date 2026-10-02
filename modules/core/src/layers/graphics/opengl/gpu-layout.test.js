@@ -184,6 +184,25 @@ test('a 4-aligned uint32 index list is scanned with a typed view, not a DataView
     assert.deepEqual([scanned.min, scanned.max], [2, 9]);
 });
 
+test('aligned 16- and 32-bit index lists come back as views of their own bytes, not copies, an '
+    + 'unaligned 16-bit one as a copy', ()=>{
+    const words = new Uint8Array(new Uint32Array([5, 2, 9, 3]).buffer);
+    const wide = scanIndices(words, GL.UNSIGNED_INT, 4);
+    assert.equal(wide.indices.buffer, words.buffer, 'a view of the program\'s bytes');
+    assert.deepEqual([wide.min, wide.max], [2, 9]);
+    const shorts = new Uint8Array(new Uint16Array([7, 1, 30]).buffer);
+    const half = scanIndices(shorts, GL.UNSIGNED_SHORT, 3);
+    assert.equal(half.indices.buffer, shorts.buffer);
+    assert.deepEqual([[...half.indices], half.min, half.max], [[7, 1, 30], 1, 30]);
+    const odd = new Uint8Array(7);
+    new DataView(odd.buffer).setUint16(1, 7, true);
+    new DataView(odd.buffer).setUint16(3, 1, true);
+    new DataView(odd.buffer).setUint16(5, 30, true);
+    const shifted = scanIndices(odd.subarray(1), GL.UNSIGNED_SHORT, 3);
+    assert.notEqual(shifted.indices.buffer, odd.buffer, 'one byte off: a copy');
+    assert.deepEqual([[...shifted.indices], shifted.min, shifted.max], [[7, 1, 30], 1, 30]);
+});
+
 test('an unaligned uint32 index list still scans correctly, through the byte-exact fallback',
     ()=>{
         // One pad byte, then four indices: a span one byte off the word
