@@ -144,7 +144,12 @@ test('the interpreter\'s retired instructions read back through instructionCount
     const loop = host();
     // mov ecx, 2000; dec ecx; jnz -3; hlt -- 1 + 2000*2 + 1 = 4002.
     load(loop, 0x2000, [0xb9, 0xd0, 0x07, 0, 0, 0x49, 0x75, 0xfd, 0xf4]);
-    loop.runSlice(1 << 16);
+    // As many slices as it takes: a slice that interprets ends on time, and a
+    // loaded machine interprets four thousand instructions past it.
+    for (let slices = 0; !loop.halted() && slices < 1000; slices++)
+    {
+        loop.runSlice(1 << 16);
+    }
     assert.equal(loop.instructionCount(), 4002);
 });
 
