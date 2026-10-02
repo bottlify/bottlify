@@ -1328,6 +1328,59 @@ test('recorded: a texture is uploaded after it is unlocked, and only then', asyn
     assert.deepEqual([...gpu.of('writeTexture')[1].bytes], [1, 1, 1, 255]);
 });
 
+test('recorded: a texture rewritten after a draw sampled it reaches only the draws after the write',
+    async()=>{
+        // Each draw samples the texels as they stood when it was made. The
+        // queue runs a direct write before a frame not yet submitted, so a
+        // write after a draw of that frame has to keep its place in it.
+        const h = harness();
+        const { device, gpu } = h;
+        const texture = textureFrom(h, 1, 1, D3DFMT.X8R8G8B8, Uint8Array.from([9, 8, 7, 0]));
+        assert.equal(device.SetTexture(0, texture), D3D_OK);
+        selectTexture(device);
+        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+        const draw = ()=>{
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28),
+                D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+        };
+        /** @param {number} value */
+        const write = value=>{
+            /** @type {{ pBits?: number }} */
+            const locked = {};
+            assert.equal(texture.LockRect(0, locked, null, 0), D3D_OK);
+            h.write(/** @type {number} */ (locked.pBits), Uint8Array.from([value, value, value, 0]));
+            assert.equal(texture.UnlockRect(0), D3D_OK);
+        };
+        const order = ()=>gpu.calls.map((/** @type {any} */ call)=>call.op)
+            .filter((/** @type {string} */ op)=>/^(writeTexture|copyBufferToTexture|draw|submit)$/
+                .test(op));
+
+        draw();
+        write(1);
+        draw();
+        await h.present();
+        assert.deepEqual(order(), ['writeTexture', 'draw', 'copyBufferToTexture', 'draw', 'submit'],
+            'the second write lands between the two draws');
+
+        // The next frame is recorded before this one reaches the queue.
+        draw();
+        assert.equal(device.Present(), D3D_OK);
+        write(2);
+        draw();
+        await h.present();
+        assert.deepEqual(order().slice(5),
+            ['draw', 'submit', 'copyBufferToTexture', 'draw', 'submit'],
+            'a frame still waiting for the queue does not see the next frame\'s write');
+
+        // Once nothing unsubmitted samples it, a write goes straight to the queue.
+        write(3);
+        draw();
+        await h.present();
+        assert.deepEqual(order().slice(10), ['writeTexture', 'draw', 'submit']);
+    });
+
 test('recorded: a managed texture keeps its GPU copy through a lock that promised no change',
     async()=>{
         // Wine's d3d8 add_dirty_rect_test: a managed texture's read-only and
@@ -3391,7 +3444,8 @@ test('recorded: a texture rewritten between two draws is uploaded before the sec
     // Recorded commands. The upload owed to a texture happens inside the draw
     // that samples it, so a preparation that already holds the view of that
     // texture has to be built again when the program rewrites its bytes --
-    // otherwise the frame samples what the texture held last time.
+    // otherwise the frame samples what the texture held last time. The first
+    // draw samples it too, so the second upload is the frame's, between them.
     const h = harness();
     const { device, gpu } = h;
     const texture = textureFrom(h, 1, 1, D3DFMT.X8R8G8B8, Uint8Array.from([1, 2, 3, 255]));
@@ -3410,9 +3464,12 @@ test('recorded: a texture rewritten between two draws is uploaded before the sec
     assert.equal(device.EndScene(), D3D_OK);
     await h.present();
     assert.deepEqual(device.diagnostics().prepared, { built: 2, reused: 0 });
-    const uploads = gpu.of('writeTexture');
-    assert.equal(uploads.length, 2, 'the new bytes went up as well as the old');
-    assert.deepEqual([...uploads[1].bytes.subarray(0, 4)], [9, 8, 7, 255]);
+    assert.equal(gpu.count('writeTexture'), 1, 'the old bytes went straight to the queue');
+    const [copy] = gpu.of('copyBufferToTexture');
+    assert.ok(copy, 'the new bytes went up as well as the old');
+    const staged = gpu.of('writeBuffer').find((/** @type {any} */ call)=>
+        call.buffer === copy.source.buffer);
+    assert.deepEqual([...staged.bytes.subarray(0, 4)], [9, 8, 7, 255]);
 });
 
 test('recorded: a frame of a match prepares once per state change, not once per draw', async()=>{

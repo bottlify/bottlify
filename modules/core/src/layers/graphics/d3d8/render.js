@@ -2346,6 +2346,8 @@ export function createRenderer(options){
     const dumping = ()=>dumpDraws || (dumpEvery > 0 && counters.frames % dumpEvery === 0);
     /** Draws kept in the frame being recorded, against `maxDraws`. */
     let kept = 0;
+    /** Frames whose commands have reached the queue: those numbered below this. */
+    let submittedFrames = 0;
 
     const counters = {
         frames: 0,
@@ -4095,8 +4097,9 @@ export function createRenderer(options){
      * texture and goes up out of the frame's order.
      *
      * @param {any} record @param {number} level @param {number} width @param {number} height
+     * @param {boolean} ordered
      */
-    const uploadVolumeLevel = (record, level, width, height)=>{
+    const uploadVolumeLevel = (record, level, width, height, ordered)=>{
         /** @type {{ volume?: any }} */
         const held = {};
         if (record.texture.GetVolumeLevel(level, held) !== D3D_OK || !held.volume)
@@ -4110,7 +4113,7 @@ export function createRenderer(options){
             format: gpuFormatOf(record.format, record.width, record.height, false),
             mipLevel: level, width, height, depth,
             texels: expandTexels(record.format, bytes, width * height * depth),
-        }, false);
+        }, ordered);
         (record.written ??= new Set()).add(level);
     };
 
@@ -4169,6 +4172,14 @@ export function createRenderer(options){
         }
         if (record.dirtyLevels.size > 0)
         {
+            // The queue runs a direct write before any frame not yet
+            // submitted, so a level that such a frame's draws already sample
+            // would reach them with bytes written after they were drawn.
+            // Direct3D gives each draw the texels as they stood when it was
+            // made; the upload then keeps its place among the frame's
+            // commands instead.
+            const ordered = record.ordered
+                || (record.usedIn !== undefined && record.usedIn >= submittedFrames);
             frameStats.uploads++;
             record.uploads = (record.uploads || 0) + 1;
             const gpuFormat = gpuFormatOf(record.format, record.width, record.height,
@@ -4187,7 +4198,7 @@ export function createRenderer(options){
                 const height = levelExtent(record.height, level);
                 if (record.volume)
                 {
-                    uploadVolumeLevel(record, level, width, height);
+                    uploadVolumeLevel(record, level, width, height, ordered);
                     continue;
                 }
                 // The level's own storage, made if the program never touched
@@ -4213,7 +4224,7 @@ export function createRenderer(options){
                 // format expandTexels does not know), so it is decompressed
                 // instead of expanded; everything else is widened to the one
                 // uncompressed format the backend samples.
-                const room = decodes && !record.ordered && !dumpDraws
+                const room = decodes && !ordered && !dumpDraws
                     ? decodeRoom(width * height * 4) : undefined;
                 const texels = keepsBlocks
                     ? bytes
@@ -4222,7 +4233,7 @@ export function createRenderer(options){
                         : expandTexels(record.format, bytes, width * height);
                 uploadTexels(record.gpu,
                     { format: gpuFormat, mipLevel: level, width, height, texels, layer: face },
-                    record.ordered);
+                    ordered);
                 if (level === 0)
                 {
                     markMips(record);
@@ -4254,6 +4265,7 @@ export function createRenderer(options){
             record.dirtyLevels.clear();
             record.dirty = false;
         }
+        record.usedIn = counters.frames;
         return record.gpu;
     };
 
@@ -4772,6 +4784,7 @@ export function createRenderer(options){
         const made = samplerPlan.map((/** @type {any} */ planned, /** @type {number} */ index)=>({
             stage: planned.stage,
             texture: boundTextures[index],
+            record: boundTextures[index] ? textures.get(boundTextures[index]) : null,
             view: boundViews[index],
             sampler: boundSamplers[index],
             placeholder: !boundTextures[index],
@@ -5234,6 +5247,7 @@ export function createRenderer(options){
         const samplerBindings = sampled.map((texture, index)=>({
             stage: index,
             texture,
+            record: texture ? textures.get(texture) : null,
             view: texture ? uploadIfDirty(texture).view : placeholderView(),
             sampler: pieces.samplers[index],
             placeholder: !texture,
@@ -5747,6 +5761,9 @@ export function createRenderer(options){
             else
             {
                 frameStats.textures.add(binding.view);
+                // A preparation served again samples without asking for an
+                // upload, and a later write has to know this frame reads it.
+                binding.record.usedIn = counters.frames;
             }
         }
         const frame = ensureViewport(model);
@@ -5825,7 +5842,7 @@ export function createRenderer(options){
      *     The block every draw of this state copies, with the two world rows still to write.
      * @property {readonly Light[] | null} [packedLights]
      *     The lights the template's rows hold, as `enabledLights` listed them.
-     * @property {{ view: any, sampler: any, placeholder?: boolean }[]} stageBindings
+     * @property {{ view: any, sampler: any, placeholder?: boolean, record?: any }[]} stageBindings
      * @property {import('../webgpu/internal/pipeline.js').LightingState | null} lighting
      * @property {string} fogSetting            Built on first use; a frame's diagnostics read it.
      * @property {import('../webgpu/internal/vertexformat.js').VertexLayout | null} layout
@@ -6609,6 +6626,7 @@ export function createRenderer(options){
             const texture = cascade.textures[index];
             return {
                 texture,
+                record: texture ? textures.get(texture) : null,
                 view: texture ? uploadIfDirty(texture).view : placeholderView(),
                 sampler: samplerFor(model.stageStates(index)),
                 // Which of those two it was, recorded rather than inferred: a
@@ -7710,8 +7728,10 @@ export function createRenderer(options){
                 frameHistory.shift();
             }
             frameStats = blankFrameStats();
-            counters.frames++;
-            chain = chain.then(()=>replay(recorded, surface)).catch(failure);
+            const replayed = ++counters.frames;
+            chain = chain.then(()=>replay(recorded, surface)).then(()=>{
+                submittedFrames = replayed;
+            }).catch(failure);
             if (released.size > 0)
             {
                 const bound = new Set(model.textures.values());
