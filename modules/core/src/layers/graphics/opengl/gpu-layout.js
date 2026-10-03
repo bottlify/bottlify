@@ -93,6 +93,28 @@ export const ATTRIBUTE_NAMES = Object.freeze([
  * @returns {VertexFormat | null}
  */
 export function vertexFormatOf(type, size, normalised){
+    // Asked for every array of every draw, and a handful of answers covers
+    // every program: each is made once, and never changed by whoever reads it.
+    const key = type * 64 + size * 2 + (normalised ? 1 : 0);
+    let known = VERTEX_FORMATS.get(key);
+    if (known === undefined)
+    {
+        known = makeVertexFormat(type, size, normalised);
+        VERTEX_FORMATS.set(key, known);
+    }
+    return known;
+}
+
+/** @type {Map<number, VertexFormat | null>} */
+const VERTEX_FORMATS = new Map();
+
+/**
+ * @param {number} type
+ * @param {number} size
+ * @param {boolean} normalised
+ * @returns {VertexFormat | null}
+ */
+function makeVertexFormat(type, size, normalised){
     const bytes = componentBytes(type) * size;
     switch (type)
     {
@@ -167,11 +189,19 @@ export function planLayout(arrays){
         // opened at the pointer rounded down so that the attribute's own
         // offset takes up the remainder.
         const align = Math.min(4, format.bytes);
-        let slot = slots.findIndex(candidate=>candidate.buffer === pointer.buffer
-            && candidate.stride === stride
-            && pointer.pointer >= candidate.base
-            && pointer.pointer - candidate.base + format.bytes <= stride
-            && (pointer.pointer - candidate.base) % align === 0);
+        let slot = -1;
+        for (let index = 0; index < slots.length; index++)
+        {
+            const candidate = slots[index];
+            if (candidate.buffer === pointer.buffer && candidate.stride === stride
+                && pointer.pointer >= candidate.base
+                && pointer.pointer - candidate.base + format.bytes <= stride
+                && (pointer.pointer - candidate.base) % align === 0)
+            {
+                slot = index;
+                break;
+            }
+        }
         if (slot < 0)
         {
             if (slots.length === MAX_SLOTS)

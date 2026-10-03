@@ -376,6 +376,7 @@ export function createGlContext(options = {}){
         bufferDeleted: gpu ? buffer=>gpu.releaseBuffer(buffer) : null,
         gpuBacked: ()=>gpu !== null && attached,
         currentVertex,
+        currentAttributes,
         side: {},
     };
 
@@ -1711,6 +1712,26 @@ export function createGlContext(options = {}){
             normal: [...record(GL.CURRENT_NORMAL).values],
             texCoord: [...side.texCoords[0]],
             texCoords: side.texCoords.map((/** @type {number[]} */ coords)=>[...coords]),
+            fogCoord: record(GL.CURRENT_FOG_COORDINATE).values[0],
+        };
+    }
+
+    /**
+     * The current attributes for a draw's state, read where they are kept:
+     * each record's values and each unit's coordinates are replaced whole on
+     * a change and never written in place, so a reader may keep what it is
+     * handed. A vertex to fill in is `currentVertex`'s, which is a copy.
+     *
+     * @returns {{ color: readonly number[], secondary: readonly number[],
+     *     normal: readonly number[], texCoords: readonly (readonly number[])[],
+     *     fogCoord: number }}
+     */
+    function currentAttributes(){
+        return {
+            color: record(GL.CURRENT_COLOR).values,
+            secondary: record(GL.CURRENT_SECONDARY_COLOR).values,
+            normal: record(GL.CURRENT_NORMAL).values,
+            texCoords: kernel.side.texCoords.slice(),
             fogCoord: record(GL.CURRENT_FOG_COORDINATE).values[0],
         };
     }
