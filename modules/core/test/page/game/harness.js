@@ -1528,6 +1528,12 @@ export function createHarness(canvas, how = {}){
                     app.debug.hook(base + spec.offset, spec);
                 }
             });
+            // The program's own image is mapped before the run, with no
+            // library-loaded of its own.
+            if (String(request.imagePath).toLowerCase().endsWith(spec.module) && app.image?.base)
+            {
+                app.debug.hook(app.image.base + spec.offset, spec);
+            }
         }
 
         // What the device mixed, between two moments of the run, when asked.
