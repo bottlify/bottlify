@@ -3467,3 +3467,63 @@ test('LockWindowUpdate locks one window at a time, and a null window unlocks it'
     assert.equal(fns.LockWindowUpdate.handler([0]), 1);
     assert.equal(fns.LockWindowUpdate.handler([0x12345]), 0, 'no window, no lock');
 });
+
+test('an MDI frame keeps its documents in an MDIClient: made, activated in turn, destroyed, '
+    + 'chosen from the Window menu', async()=>{
+    const WM_MDICREATE = 0x0220;
+    const WM_MDIDESTROY = 0x0221;
+    const WM_MDIACTIVATE = 0x0222;
+    const WM_MDIGETACTIVE = 0x0229;
+    const WM_COMMAND = 0x0111;
+    const CLIENT_CLASS = 0x10400;
+    const CLIENT_CREATE = 0x10500;
+    const CHILD_CREATE = 0x10600;
+    // With a heap, which the CREATESTRUCT a window's WM_CREATE carries is put in.
+    const { fns, memory, dispatched } = setup({ heap: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const frame = await createWindow(fns, memory);
+    memory.putString(CLIENT_CLASS, 'mdiclient');
+    // CLIENTCREATESTRUCT: no Window menu, children numbered from 0xff00.
+    memory.putU32s(CLIENT_CREATE, [0, 0xff00]);
+    const client = await fns.CreateWindowExA.handler([0x200, CLIENT_CLASS, 0,
+        WS_CHILD | WS_VISIBLE | 0x06000001, 0, 0, 0, 0, frame, 0xe900, HINSTANCE, CLIENT_CREATE]);
+    assert.notEqual(client, 0, 'the MDIClient class exists');
+    assert.equal(await fns.SendMessageA.handler([client, WM_MDIGETACTIVE, 0, 0]), 0);
+
+    // MDICREATESTRUCTA: the frame's own class, its title, the instance, a cascaded place.
+    const makeChild = ()=>{
+        memory.putU32s(CHILD_CREATE, [CLASS_NAME, TITLE, HINSTANCE, CW_USEDEFAULT, CW_USEDEFAULT,
+            CW_USEDEFAULT, CW_USEDEFAULT, 0, 0x1234]);
+        return /** @type {Promise<number>} */ (fns.SendMessageA.handler([client, WM_MDICREATE,
+            0, CHILD_CREATE]));
+    };
+    const first = await makeChild();
+    assert.notEqual(first, 0);
+    assert.equal(fns.GetParent.handler([first]), client, 'a child of the client');
+    assert.equal(fns.GetDlgCtrlID.handler([first]), 0xff00, 'numbered from the first id');
+    assert.equal(fns.IsWindowVisible.handler([first]), 1);
+    assert.equal(await fns.SendMessageA.handler([client, WM_MDIGETACTIVE, 0, 0]), first);
+    const create = dispatched.find(m=>m.hwnd === first && m.message === 0x0001);
+    assert.equal(memory.u32(create.lParam), CHILD_CREATE,
+        'WM_CREATE carries the MDICREATESTRUCT as its creation parameter');
+    assert.ok(dispatched.some(m=>m.hwnd === first && m.message === WM_MDIACTIVATE
+        && m.wParam === 0 && m.lParam === first), 'told it is activated');
+
+    const second = await makeChild();
+    assert.equal(await fns.SendMessageA.handler([client, WM_MDIGETACTIVE, 0, 0]), second);
+    assert.ok(dispatched.some(m=>m.hwnd === first && m.message === WM_MDIACTIVATE
+        && m.wParam === first && m.lParam === second), 'the first told it is deactivated');
+    assert.equal(fns.GetDlgCtrlID.handler([second]), 0xff01);
+
+    // The Window menu's command for the first activates it, through DefFrameProc.
+    assert.equal(await fns.DefFrameProcA.handler([frame, client, WM_COMMAND, 0xff00, 0]), 0);
+    assert.equal(await fns.SendMessageA.handler([client, WM_MDIGETACTIVE, 0, 0]), first);
+
+    // Closing the active child is its client's WM_MDIDESTROY; the other goes active.
+    assert.equal(await fns.DefMDIChildProcA.handler([first, WM_CLOSE, 0, 0]), 0);
+    assert.equal(fns.IsWindow.handler([first]), 0, 'destroyed');
+    assert.equal(await fns.SendMessageA.handler([client, WM_MDIGETACTIVE, 0, 0]), second);
+    assert.equal(await fns.SendMessageA.handler([client, WM_MDIDESTROY, second, 0]), 0);
+    assert.equal(await fns.SendMessageA.handler([client, WM_MDIGETACTIVE, 0, 0]), 0);
+});
