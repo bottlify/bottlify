@@ -477,3 +477,43 @@ test('an event query answers on the program\'s side; an occlusion query asks the
     assert.equal(answeredByRenderer({ type: D3DQUERYTYPE.OCCLUSION }, 'GetData', []), true);
     assert.equal(answeredByRenderer({}, 'GetRenderTargetData', []), true);
 });
+
+test('a getter of plain state answers on the program\'s side and sends nothing', ()=>{
+    // The shadow block reads states back after a state block is applied, a
+    // getter a state: each was recorded and played for an answer the recording
+    // device already had.
+    let sent = 0;
+    const played = playedDirect3D(createDirect3D9, {});
+    const sender = createSender({
+        post: message=>{
+            sent += message.buffer.byteLength;
+            played.read(message.buffer, call=>{
+                played.play(call);
+            });
+        },
+        later: flush=>flush(),
+    });
+    const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+        backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+    D3D_OK);
+    const device = out.device;
+    assert.equal(device.SetRenderState(D3DRS.LIGHTING, 0), D3D_OK);
+    const before = sent;
+    assert.ok(before > 0);
+    /** @type {{ value?: number }} */
+    const value = {};
+    for (let read = 0; read < 10; read++)
+    {
+        assert.equal(device.GetRenderState(D3DRS.LIGHTING, value), D3D_OK);
+    }
+    assert.equal(value.value, 0, 'the state as set');
+    /** @type {{ matrix?: ArrayLike<number> }} */
+    const matrix = {};
+    assert.equal(device.GetTransform(D3DTS.WORLD, matrix), D3D_OK);
+    assert.equal(sent, before, 'nothing sent for the reads');
+    assert.equal(device.SetRenderState(D3DRS.LIGHTING, 1), D3D_OK);
+    assert.ok(sent > before, 'a set still is');
+});
