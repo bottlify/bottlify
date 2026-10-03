@@ -151,7 +151,7 @@ flowchart TB
 | Page main thread | the browser | always | The launcher's interface, the `createApp` call and DOM events live here. Per frame it does one thing only: polls the gamepads (`requestAnimationFrame` → `input.poll`) |
 | Engine thread | the page, `core/src/host/create.js` | always. With `?host=thread` the engine runs on the page's thread instead, over the same protocol | The program runs in long quanta. On the page's thread it would be interrupted by garbage collection and the interface's rendering, and a click would wait for the quantum to end. Synchronous OPFS access also exists only in a worker. A WebGPU device cannot move between threads, so the worker opens its own and gets the canvas as an `OffscreenCanvas` |
 | Log keeper | the page, `core/src/host/remote.js` | always. Without `Worker`, a `MessageChannel` on the page takes its place | The engine writes its journal, counters and tables into shared memory and answers no questions. The keeper drains the ring before it laps, keeps the history and works out frames, the profile and the per-module breakdown. Logging then costs neither the page nor the engine anything |
-| Graphics thread | the engine thread, `core/src/host/graphics-worker.js` (called from `serve.js`) | at start, if the engine has a canvas and `device.graphicsWorker: false` is not set (`?graphicsWorker=off` in the launcher). Survives a change of program. If it opens no device within 10 s, everything draws on the engine thread | Its job is to draw all the graphics, so the engine thread only keeps state and answers the program. Today Direct3D 7, 8, 9 and OpenGL are played here on a WebGPU device of its own; Direct3D 10 and Vulkan will move here too. In the `tools/graphics-bench --remote` bench the engine thread spends 0.69 ms a Direct3D frame instead of 2.95 |
+| Graphics thread | the engine thread, `core/src/host/graphics-worker.js` (called from `serve.js`) | at start, if the engine has a canvas and `device.graphicsWorker: false` is not set (`?graphicsWorker=off` in the launcher). Survives a change of program. If it opens no device within 10 s, everything draws on the engine thread | Its job is to draw all the graphics, so the engine thread only keeps state and answers the program. Today Direct3D 7, 8, 9 and OpenGL are played here on a WebGPU device of its own; Direct3D 10 and Vulkan will move here too. It arrived in cork 1.3. In the `tools/graphics-bench --remote` bench the engine thread spends 0.69 ms a Direct3D frame instead of 2.95 |
 | Translation thread | cork's runtime inside the engine thread, `cork/src/runtime/translator.js` | when the engine is cork. Until it answers `ready`, regions are translated on the engine thread | Emits wasm for regions, builds a module and compiles it. The engine thread does not wait for it: it posts a batch and publishes the result between frames, whenever it arrives |
 | AudioWorklet | the page, `ui/src/engine/session.js` | if the page is cross-origin isolated (`crossOriginIsolated`) and sound is on | The Web Audio real-time thread. It reads the voices from shared memory on its own clock, so sound does not break up even while the engine is busy |
 
@@ -496,8 +496,9 @@ tables in `core/src/layers/win32/<dll>/`, the search order in `core/src/app.js`
 
 The graphics thread is there to draw all of the program's graphics. The engine thread keeps only
 the devices' state and answers the program, while their twins draw on the graphics thread, on a
-WebGPU device of its own. Direct3D 7, 8, 9 and OpenGL work this way today. Direct3D 10 and Vulkan
-still draw on the engine thread and will move to the graphics thread next.
+WebGPU device of its own. The graphics thread arrived in cork 1.3, for Direct3D 8 and 9 at first;
+OpenGL and Direct3D 7 moved there in cork 1.6. Direct3D 10 and Vulkan still draw on the engine
+thread and will move to the graphics thread next.
 
 | Where | What it does |
 | --- | --- |
