@@ -163,6 +163,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // Diagnostic: every store key put and every one missed, as
         // `entry:hash:top`, in the diagnostics -- what tells two runs' keys apart.
         traceStore: false,
+        // Diagnostic: the regions still published whose bytes no longer form
+        // as they did -- translated code a write left standing -- in the
+        // diagnostics (`staleRegions`), formed again when they are asked for.
+        checkStale: false,
+        // Diagnostic: addresses in [from, to) are left to the interpreter.
+        interpretRange: /** @type {[number, number] | null} */ (null),
         // Batch modules published before the running regions are gathered into
         // big ones (0: never), and how many regions go into each of those:
         // a tail call into another module costs more the more modules there are,
@@ -926,7 +932,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
 
     /** @param {number} address */
     const translatable = address=>(pages.get(address >>> 12)
-        & (PageFlag.VOLATILE | PageFlag.INACCESSIBLE | PageFlag.NO_EXECUTE)) === 0;
+        & (PageFlag.VOLATILE | PageFlag.INACCESSIBLE | PageFlag.NO_EXECUTE)) === 0
+        // A diagnostic: a range left to the interpreter, to find which code a
+        // translation goes wrong in by halving it.
+        && !(settings.interpretRange && address >= settings.interpretRange[0]
+            && address < settings.interpretRange[1]);
 
     /**
      * Why the translator has no entry at an untranslated exit's target, the
@@ -2714,7 +2724,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 this.missAt(view().getUint32(layout.eip, true), view().getUint8(layout.x87Top),
                     code >>> 8 === HELD);
             }
-            if (kind === 'stale')
+            // Looked at whatever the run left by: a rep that stored into code and
+            // ran out of budget on a later page in bulk leaves by the budget, and
+            // the run that finishes it stores no code of its own.
+            if (kind === 'stale' || view().getUint32(layout.tables + Tables.STALE_END, true) !== 0)
             {
                 // Every page the run's stores into code reached, from the
                 // lowest of them to the highest.
@@ -3013,6 +3026,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // Translated x87 status-word reads that may see what `precise`
                 // alone keeps: where a strange result is worth a run with it.
                 x87RelaxedReads: counts.x87RelaxedReads,
+                // With `checkStale`, the regions still published whose bytes no
+                // longer form as they did: translated code a write did not drop.
+                ...(settings.checkStale ? { staleRegions: [...regions]
+                    .filter(record=>formRegion(read, record.entry, { ...formOptions, translatable,
+                        ...(record.targets === undefined
+                            ? {} : { callTargets: new Map(record.targets) }) }).hash
+                        !== record.hash)
+                    .map(record=>`0x${record.entry.toString(16)}`) } : {}),
                 ...nanFirst(view(), layout),
                 stalls: [...stalls],
                 ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.traceStore

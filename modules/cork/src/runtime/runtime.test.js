@@ -2571,3 +2571,83 @@ test('under precise the first x87 NaN made from numbers, NaN result, stack fault
     await runToHalt(loose);
     assert.equal(loose.runtime.diagnostics().nanFirst, undefined);
 });
+
+test('a rep movs over several pages of translated code drops every page\'s regions, not only '
+    + 'the last one it wrote', async()=>{
+    for (const precise of [false, true])
+    {
+        const m = machine({ precise });
+        // A countdown loop on each of three pages, each translated: its region is the code
+        // a program overwrites, as a compiler of its own does when it compiles again over
+        // the code it compiled before.
+        const loops = [0x10000, 0x11000, 0x12000];
+        for (const at of loops)
+        {
+            m.write(at + 0x100, COUNTDOWN);
+            m.runtime.noteHot(at + 0x100);
+        }
+        // mov esi, 0x30000; mov edi, 0x10000; mov ecx, 0xc00; cld; rep movsd; hlt -- three
+        // pages of new bytes over the three, in one instruction.
+        const copier = 0x20000;
+        m.write(copier, [0xbe, 0, 0, 3, 0, 0xbf, 0, 0, 1, 0, 0xb9, 0, 0x0c, 0, 0, 0xfc,
+            0xf3, 0xa5, 0xf4]);
+        m.write(0x30000, new Array(0x3000).fill(0x90));
+        m.runtime.noteHot(copier);
+        await m.runtime.translatePending();
+        for (const at of loops)
+        {
+            assert.notEqual(m.runtime.entryOf(at + 0x100), -1, `the loop at ${at.toString(16)}`);
+        }
+        new DataView(m.memory.buffer).setUint32(m.layout.eip, copier, true);
+        // The host resumes the copy where an exit leaves it, as the slice loop does.
+        for (let turn = 0; turn < 16 && m.eip() < copier + 0x12; turn++)
+        {
+            const entry = m.runtime.entryOf(m.eip());
+            if (entry < 0)
+            {
+                m.runtime.noteHot(m.eip());
+                await m.runtime.translatePending();
+            }
+            m.runtime.run(m.runtime.entryOf(m.eip()), 1_000_000);
+        }
+        assert.ok(m.eip() >= copier + 0x12, 'the copy ran to its end');
+        assert.equal(m.reg(1), 0);
+        for (const at of loops)
+        {
+            assert.equal(m.runtime.entryOf(at + 0x100), -1,
+                `precise ${precise}: the loop at ${at.toString(16)}, overwritten, is dropped`);
+        }
+    }
+});
+
+test('a rep stos that stored into code and runs out of budget on a later page in bulk still '
+    + 'drops the code it wrote, the runtime looking at the note at that exit', async()=>{
+    const m = machine();
+    // A countdown loop translated at 0x10100; the copy starts on it and goes on through
+    // three plain pages, where it runs in bulk.
+    m.write(0x10100, COUNTDOWN);
+    m.runtime.noteHot(0x10100);
+    // mov edi, 0x10100; mov ecx, 0xfc0; xor eax, eax; cld; rep stosd; hlt
+    const copier = 0x20000;
+    m.write(copier, [0xbf, 0, 1, 1, 0, 0xb9, 0xc0, 0x0f, 0, 0, 0x31, 0xc0, 0xfc, 0xf3, 0xab,
+        0xf4]);
+    m.runtime.noteHot(copier);
+    await m.runtime.translatePending();
+    assert.notEqual(m.runtime.entryOf(0x10100), -1);
+    new DataView(m.memory.buffer).setUint32(m.layout.eip, copier, true);
+    // Enough for the elements on the loop's page one at a time, not for the bulk after.
+    const first = m.runtime.run(m.runtime.entryOf(copier), 960 + 40);
+    assert.equal(first.kind, 'budget', 'the budget ran out in the bulk part');
+    assert.ok(m.reg(1) > 0 && m.reg(7) > 0x11000, 'past the loop\'s page, the copy not done');
+    for (let turn = 0; turn < 8 && m.reg(1) !== 0; turn++)
+    {
+        if (m.runtime.entryOf(m.eip()) < 0)
+        {
+            m.runtime.noteHot(m.eip());
+            await m.runtime.translatePending();
+        }
+        m.runtime.run(m.runtime.entryOf(m.eip()), 1_000_000);
+    }
+    assert.equal(m.reg(1), 0, 'the copy finished');
+    assert.equal(m.runtime.entryOf(0x10100), -1, 'the loop it overwrote is dropped');
+});

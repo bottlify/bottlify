@@ -679,6 +679,12 @@ function describeCork(cork, say){
         + ` (no record ${cork.missNoRecord ?? 0}, no module ${cork.missNoModule ?? 0})`
         + `  store batches: ${cork.lookedUpNow ?? 0} at once / ${cork.lookedUpLater ?? 0}`
         + ' a turn later');
+    if (cork.staleRegions)
+    {
+        // --cork-config checkStale: translated code a write left standing.
+        say(`    stale regions: ${cork.staleRegions.length} `
+            + cork.staleRegions.slice(0, 20).join(' '));
+    }
     // Under precise, a NaN hunt's first events, in the order they came (`#n`).
     const nan = [
         cork.nanFirst && [cork.nanFirst, `NaN made from ${cork.nanFirst.a} and ${cork.nanFirst.c}`],

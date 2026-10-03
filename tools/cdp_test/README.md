@@ -274,6 +274,15 @@ Reading it:
 - An unresolved import is a real answer, not noise: a program that cannot bind
   one may take a different path silently.
 
+### Translated code gone wrong
+
+When a title fails only translated (`--cork-config '{"translate":false}'`
+runs it whole on the interpreter): `{"interpretRange":[from,to]}` leaves
+those addresses to the interpreter, so halving the range finds the code
+whose translation breaks; `{"checkStale":true}` puts `stale regions` in the
+report -- published regions whose bytes no longer form as they did, code a
+write should have dropped and did not.
+
 ### A NaN
 
 A float exception (0xC0000090 and its kin), NaN vertices or an object that
