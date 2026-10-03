@@ -1703,6 +1703,49 @@ export function createShadow(deps){
             new Uint8Array(floats.buffer));
     };
 
+    /**
+     * One stage state, as the device answers it, into its slot.
+     *
+     * @param {number} stage @param {number} type
+     */
+    const refreshStageState = (stage, type)=>{
+        if (stage >= SHADOW.STAGE_COUNT || type >= SHADOW.STAGE_STATE_STRIDE)
+        {
+            return;
+        }
+        /** @type {{ value?: number }} */
+        const out = {};
+        const slot = stage * SHADOW.STAGE_STATE_STRIDE + type;
+        seenStageStates[slot] = device.GetTextureStageState(stage, type, out) === 0
+            ? (out.value ?? 0) >>> 0
+            : 0;
+        deps.writeMemory(address + SHADOW.STAGE_STATES + slot * 4,
+            dwordBytes(seenStageStates[slot]));
+    };
+
+    /**
+     * One sampler state, as the device answers it, into the slot of the stage
+     * state key it is kept under (`mirrorStageStates`).
+     *
+     * @param {number} sampler @param {number} type
+     */
+    const refreshSamplerState = (sampler, type)=>{
+        const key = deps.samplerStates?.[type];
+        if (key === undefined || type === 0 || key >= SHADOW.STAGE_STATE_STRIDE
+            || type >= SHADOW.SAMPLER_KEY_COUNT || sampler >= SHADOW.STAGE_COUNT)
+        {
+            return;
+        }
+        /** @type {{ value?: number }} */
+        const out = {};
+        const slot = sampler * SHADOW.STAGE_STATE_STRIDE + key;
+        seenStageStates[slot] = device.GetSamplerState?.(sampler, type, out) === 0
+            ? (out.value ?? 0) >>> 0
+            : 0;
+        deps.writeMemory(address + SHADOW.STAGE_STATES + slot * 4,
+            dwordBytes(seenStageStates[slot]));
+    };
+
     const mirror = ()=>{
         mirrorRenderStates();
         mirrorTransforms();
@@ -2119,8 +2162,10 @@ export function createShadow(deps){
          * each Apply hundreds of calls into the device.
          *
          * @param {{ renderStates?: Iterable<number>, transforms?: Iterable<number>,
-         *     bindings?: boolean, textures?: boolean, stageStates?: boolean,
-         *     material?: boolean }} [touched]
+         *     bindings?: boolean, textures?: boolean,
+         *     stageStates?: true | Iterable<number>, samplerStates?: Iterable<number>,
+         *     material?: boolean }} [touched]  stage and sampler states by
+         *     (stage << 8) | type, or every stage state (true)
          */
         remirror(touched){
             if (address === 0)
@@ -2153,9 +2198,17 @@ export function createShadow(deps){
             {
                 mirrorTextures();
             }
-            if (touched.stageStates)
+            if (touched.stageStates === true)
             {
                 mirrorStageStates();
+            }
+            for (const key of touched.stageStates === true ? [] : touched.stageStates ?? [])
+            {
+                refreshStageState(key >>> 8, key & 0xff);
+            }
+            for (const key of touched.samplerStates ?? [])
+            {
+                refreshSamplerState(key >>> 8, key & 0xff);
             }
             if (touched.material)
             {
