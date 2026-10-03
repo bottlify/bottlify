@@ -79,3 +79,57 @@ test('the worker sends one frame at a time, the newest, and counts those replace
             port2.close();
         }
     });
+
+test('told to, the worker sends its frames as bytes from then on', async()=>{
+    const gpu = createFakeDevice();
+    Object.assign(gpu.device, { queue: gpu.queue });
+    /** @type {any[]} */
+    const posted = [];
+    /** @type {any} */
+    const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
+        onmessage: null };
+    serveGraphics(scope, {
+        gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
+            requestDevice: async()=>gpu.device }) },
+        canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
+            transferToImageBitmap: ()=>({ width, height, close: ()=>{} }) }),
+    });
+    scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
+    await settle();
+    const { port1, port2 } = new MessageChannel();
+    scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2 } });
+    const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
+        transfer), framesAhead: 100 });
+    port1.onmessage = event=>sender.receive(event.data);
+    const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+    /** @type {{ device?: any }} */
+    const out = {};
+    d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+        backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out);
+    const frames = ()=>posted.filter(message=>message.type === 'frame');
+    const draw = async(/** @type {number} */ colour)=>{
+        out.device.BeginScene();
+        out.device.Clear(0, null, D3DCLEAR.TARGET, colour, 1, 0);
+        out.device.EndScene();
+        await out.device.Present();
+        await out.device.idle();
+        await settle();
+    };
+    try
+    {
+        await draw(0xff000001);
+        assert.ok(frames()[0].bitmap, 'a picture first');
+        scope.onmessage({ data: { type: 'frames', frames: 'pixels' } });
+        scope.onmessage({ data: { type: 'shown' } });
+        await draw(0xff000002);
+        assert.equal(frames().length, 2);
+        assert.equal(frames()[1].bitmap, undefined);
+        assert.ok(frames()[1].pixels instanceof Uint8Array, 'then bytes');
+        assert.equal(frames()[1].width, 8);
+    }
+    finally
+    {
+        port1.close();
+        port2.close();
+    }
+});
