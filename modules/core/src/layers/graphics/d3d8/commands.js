@@ -18,9 +18,7 @@
  * from the pointer the program passed.
  *
  * Between two entries into the host every setter and draw a program makes
- * most is here or in the host, never in the shadow block's marks: the ring
- * keeps their order, which a block of the latest values cannot, and a draw
- * that waits needs it.
+ * most is here: the ring keeps their order, which a draw that waits needs.
  */
 
 import { IDIRECT3DDEVICE8_SLOTS } from '../seam/vtables.js';
@@ -66,6 +64,8 @@ const ints = new Int32Array(scratch);
  * @property {number} [pointer]
  * @property {number} [bytes]
  * @property {{ arg: number, shift: number, most: number }} [count]
+ * @property {{ arg: number, cases: readonly [number, number][], otherwise: number }} [choose]
+ *     or a size chosen by an argument's value: the bytes of the case it equals, or `otherwise`
  * @property {boolean} [draws]
  * @property {(device: any, call: CommandArgs) => number} make
  */
