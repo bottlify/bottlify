@@ -94,6 +94,9 @@ import { isParkedCall } from './parking.js';
  *     resolved here once so the crossing stores a number and looks nothing up.
  * @property {number} sinkRevision  The journal revision `sinkOn` was asked at.
  * @property {boolean} sinkOn       Whether the sink wants this function's calls.
+ * @property {number} calls        Calls made to it.
+ * @property {number} sampledMs    Host ms the timed ones of them took, each standing for
+ *     `TRAP_SAMPLE` calls on average (`dispatch`).
  */
 
 /**
@@ -200,6 +203,9 @@ const HOOK_AREA = 'call.hook';
 /** How many calls one timed crossing stands for, on average (`sampleInterval`). */
 const TRAP_SAMPLE = 32;
 const TRAP_WEIGHT = Object.freeze({ weight: TRAP_SAMPLE });
+
+/** How many functions the report names by the host time they took. */
+const BY_FUNCTION_KEPT = 80;
 
 /**
  * A ring record. The text of the answer is the one thing about a call that
@@ -955,6 +961,7 @@ class Dispatcher {
 
         const at = this.callCount++ & CALL_RING - 1;
         this.ids[at] = id;
+        entry.calls++;
 
         // Everything the handler might need about where it was called from,
         // read before it runs: a handler that calls the guest back writes
@@ -1229,6 +1236,8 @@ class Dispatcher {
             writer: typeof this.memory?.writer === 'function' ? this.memory.writer(fn.name) : -1,
             sinkRevision: -1,
             sinkOn: true,
+            calls: 0,
+            sampledMs: 0,
         };
         if (hook)
         {
@@ -1272,28 +1281,34 @@ class Dispatcher {
         // what is left as this phase's own time -- the handler runs inside
         // it and takes its own -- is the price of the boundary.
         //
-        // It is the number that decides where speed is lost. A title's menu
-        // makes about thirty thousand of these a second while every handler
-        // in the report costs a fraction of a millisecond a frame, and
-        // until this existed there was no way to tell a machine slowed by
-        // its own emulation from one slowed by leaving it so often.
-        // A production bundle times no crossing at all.
-        const profiler = this.profiler;
-        if (import.meta.BOTTLIFY_DIAGNOSTICS === false || profiler === null
-            || --this.untilSample > 0)
+        // One crossing in about TRAP_SAMPLE is timed, in every build, and its
+        // time charged to the function it crossed into: what the host's share
+        // of a run is made of, by function, at two clock reads a sample. A
+        // title's menu makes tens of thousands of crossings a second and a
+        // draw-heavy scene hundreds of thousands, and until this existed
+        // there was no way to tell a machine slowed by its own emulation from
+        // one slowed by leaving it so often.
+        if (--this.untilSample > 0)
         {
             this.cross(id);
             return;
         }
         this.untilSample = this.sampleInterval();
-        profiler.begin('trap', 'host');
+        const profiler = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? this.profiler : null;
+        profiler?.begin('trap', 'host');
+        const began = performance.now();
         try
         {
             this.cross(id);
         }
         finally
         {
-            profiler.end('trap', TRAP_WEIGHT);
+            const entry = this.functions[id];
+            if (entry !== undefined)
+            {
+                entry.sampledMs += performance.now() - began;
+            }
+            profiler?.end('trap', TRAP_WEIGHT);
         }
     }
 
@@ -1307,6 +1322,7 @@ class Dispatcher {
     }
 
     diagnostics(){
+        const entries = /** @type {Entry[]} */ (this.functions.filter(Boolean));
         return {
             implemented: this.implemented,
             calls: this.callCount,
@@ -1316,6 +1332,17 @@ class Dispatcher {
             // last. A program stuck in a loop says so here in a line; a stack
             // trace only shows where the loop was when it was interrupted.
             hot: this.hot(40),
+            // Where the host's time went, by function, since the start: the
+            // calls made and the ms the timed ones stand for, the heaviest
+            // first.
+            hostMs: Math.round(entries.reduce((sum, entry)=>sum + entry.sampledMs, 0)
+                * TRAP_SAMPLE),
+            byFunction: entries
+                .filter(entry=>entry.calls > 0)
+                .sort((left, right)=>right.sampledMs - left.sampledMs || right.calls - left.calls)
+                .slice(0, BY_FUNCTION_KEPT)
+                .map(entry=>`${entry.name} ${entry.calls} ${
+                    Math.round(entry.sampledMs * TRAP_SAMPLE)}ms`),
         };
     }
 

@@ -1605,3 +1605,19 @@ test('a sink with no revision to ask again by is handed every call', ()=>{
     dispatcher.dispatch(1);
     assert.deepEqual(sunk, ['X.dll!Y', 'X.dll!Y']);
 });
+
+test('the report counts every call by function and charges each the host time sampled', ()=>{
+    const m = machine();
+    m.dispatcher.register(1, { name: 'X!Often', ...STDCALL, argBytes: 0, handler: ()=>0 });
+    m.dispatcher.register(2, { name: 'X!Once', ...STDCALL, argBytes: 0, handler: ()=>0 });
+    for (let call = 0; call < 500; call++)
+    {
+        m.dispatcher.dispatch(1);
+    }
+    m.dispatcher.dispatch(2);
+    const report = m.dispatcher.diagnostics();
+    const rows = report.byFunction.map((/** @type {string} */ row)=>row.split(' ').slice(0, 2));
+    assert.deepEqual(rows.find((/** @type {string[]} */ row)=>row[0] === 'X!Often'), ['X!Often', '500']);
+    assert.deepEqual(rows.find((/** @type {string[]} */ row)=>row[0] === 'X!Once'), ['X!Once', '1']);
+    assert.ok(report.hostMs >= 0);
+});

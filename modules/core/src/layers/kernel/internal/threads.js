@@ -179,8 +179,10 @@ export function createScheduler(options){
         }
         return second % BUSY_SECONDS;
     };
-    const wall = import.meta.BOTTLIFY_DIAGNOSTICS !== false
-        ? options.wall ?? (()=>performance.now()) : ()=>0;
+    // Read in every build: two reads a slice, a few thousand slices a second,
+    // and without them a report of a production run says nothing of which
+    // thread the machine was spent on.
+    const wall = options.wall ?? (()=>performance.now());
     /**
      * Told what a parked thread is about to be resumed with: which wait it
      * was in and the value the call answers. The only record of that answer
@@ -667,7 +669,7 @@ export function createScheduler(options){
             // -- went without the processor, and what had it instead: the
             // slices run meanwhile by thread, and the time spent outside any.
             // A gap longer than what it keeps written ahead is heard.
-            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && next.shortWait
+            if (next.shortWait
                 && next.lastRanAt !== undefined)
             {
                 const t = wall();
@@ -711,9 +713,7 @@ export function createScheduler(options){
             // would report every faulting thread as having left its stack.
             watchStack(next);
             const from = cpu.eip?.() ?? 0;
-            // How long it held the machine is a report's alone, and a
-            // production bundle reads no clock for it.
-            const began = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? wall() : 0;
+            const began = wall();
             readyAtSlice.clear();
             for (const thread of threads)
             {
@@ -723,30 +723,27 @@ export function createScheduler(options){
                 }
             }
             const instructions = cpu.runSlice(quantum);
-            const held = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? wall() - began : 0;
-            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+            const held = wall() - began;
+            recentTurns.push({ thread: next.name ?? '?', ms: held, end: began + held,
+                outside: lastEnd === 0 ? 0 : began - lastEnd });
+            const slot = busySlot(began);
+            const name = next.name ?? '?';
+            let seconds = busyByThread.get(name);
+            if (seconds === undefined)
             {
-                recentTurns.push({ thread: next.name ?? '?', ms: held, end: began + held,
-                    outside: lastEnd === 0 ? 0 : began - lastEnd });
-                const slot = busySlot(began);
-                const name = next.name ?? '?';
-                let seconds = busyByThread.get(name);
-                if (seconds === undefined)
-                {
-                    seconds = new Array(BUSY_SECONDS).fill(0);
-                    busyByThread.set(name, seconds);
-                }
-                seconds[slot] += held;
-                // Only the part of the gap inside the window.
-                const windowStart = (Math.floor(began / 1000) - BUSY_SECONDS + 1) * 1000;
-                between[slot] += lastEnd === 0 ? 0 : began - Math.max(lastEnd, windowStart);
-                if (recentTurns.length > 256)
-                {
-                    recentTurns.shift();
-                }
-                lastEnd = began + held;
-                next.lastRanAt = lastEnd;
+                seconds = new Array(BUSY_SECONDS).fill(0);
+                busyByThread.set(name, seconds);
             }
+            seconds[slot] += held;
+            // Only the part of the gap inside the window.
+            const windowStart = (Math.floor(began / 1000) - BUSY_SECONDS + 1) * 1000;
+            between[slot] += lastEnd === 0 ? 0 : began - Math.max(lastEnd, windowStart);
+            if (recentTurns.length > 256)
+            {
+                recentTurns.shift();
+            }
+            lastEnd = began + held;
+            next.lastRanAt = lastEnd;
             next.instructions += instructions;
             next.sincePublished += instructions;
             // Where the heaviest slice of the interval began: one page names
@@ -760,7 +757,7 @@ export function createScheduler(options){
             }
             const slowest = slowSlices[slowSlices.length - 1];
             const kept = slowSlices.length < SLOW_SLICES_KEPT || held > slowest.ms;
-            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && held >= SLOW_SLICE_MS && kept)
+            if (held >= SLOW_SLICE_MS && kept)
             {
                 slowSlices.push({
                     ms: held, instructions, from, at: cpu.eip?.() ?? 0, thread: next.name ?? null,
