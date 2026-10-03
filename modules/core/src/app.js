@@ -27,7 +27,6 @@ import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
-import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { resolveTranslationStore } from './layers/cpu/internal/translation-store.js';
 import { createBlockCache, resolveBlockStore }
@@ -78,15 +77,6 @@ import { createReplicas } from './replicas.js';
  *           it attaches to the same compiled module and linear memory rather
  *           than instantiate the binary again. Set by `createApp` on a rebuilt
  *           machine and not something a caller supplies.
- * @property {Object} [system]            The engine's own read-only volume.
- * @property {{ path: string, bytes: Uint8Array }[]} [system.files]
- *           Files to mount read-only under `C:\WINDOWS\system32\`, a name
- *           each, as though the machine had always had them. The engine carries
- *           none of its own: a library a title's installer puts there (the
- *           DirectX setup's `d3dx9_*`) is written to the drive like any other
- *           file. Absent, the volume has no system layer. The bytes are handed
- *           in the way the decoder's are, because what a build carries is the
- *           assembling caller's decision.
  * @property {number} [stackSize]
  * @property {number} [memorySize]   Guest RAM in bytes; a power of two.
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
@@ -1346,36 +1336,6 @@ export function resolveLibraryPath(name, imagePath){
 /** Where Windows looks for a bare library name after the program's own directory. */
 const SYSTEM_LIBRARY_DIRECTORIES = ['C:\\WINDOWS\\system32\\', 'C:\\WINDOWS\\'];
 
-/** The directory the engine's own volume appears under, without a trailing separator. */
-export const SYSTEM_VOLUME_DIRECTORY = 'WINDOWS\\system32';
-
-/**
- * The engine's read-only volume, as a store, from the files the caller handed in.
- *
- * The paths the caller gave are bare names -- `d3dx9_26.dll` -- because that is
- * what a runtime directory is; where they appear is this engine's decision and
- * is the same place Windows keeps them. Absent any files the volume has no
- * system layer at all.
- *
- * @param {any} system  The `system` option, or nothing.
- * @returns {import('./layers/filesystem/internal/memory-store.js').SourceStore | null}
- */
-export function systemVolume(system){
-    const files = system?.files ?? [];
-    if (files.length === 0)
-    {
-        return null;
-    }
-    /** @type {Record<string, Uint8Array>} */
-    const seed = {};
-    for (const file of files)
-    {
-        // Forward slashes are accepted and normalised, so a caller that built a
-        // path with them does not silently miss the search that uses backslashes.
-        seed[`${SYSTEM_VOLUME_DIRECTORY}\\${file.path.replace(/\//g, '\\')}`] = file.bytes;
-    }
-    return createMemoryStore(seed);
-}
 
 /**
  * Every place a LoadLibrary at run time looks, in order: beside the
@@ -2998,12 +2958,6 @@ async function buildApp(options){
     const ownsTranslationStore = storeSpec === 'local';
 
     const core = await assembleModules({
-        filesystem: {
-            // The host's own files live in the volume before the bundle is
-            // mounted, so every drive gets them, and the bundle's own copy of
-            // one, when it has one, still wins.
-            system: systemVolume(options.system),
-        },
         kernel: {
             // How many guest instructions a thread runs before the next one
             // gets a turn. Lowering it is how a sampled profile gets enough

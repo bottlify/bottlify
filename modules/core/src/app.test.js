@@ -531,13 +531,13 @@ test('a redistributable runtime is answered by the engine whoever brought a copy
     assert.equal(ours('mss32.dll'), false, 'the sound library itself runs as shipped');
 });
 
-test('a library missing beside the program is read from the system volume', async()=>{
+test('a library missing beside the program is read from system32', async()=>{
     // The runtime a title links against lives in `system32`, where its
     // installer's `DXSETUP` put it. A search that stopped beside the
     // executable would report every one of them missing.
     const d3dx = new Uint8Array([1, 2, 3, 4]);
     const filesystem = await filesystemModule.create({
-        system: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }),
+        drives: { C: { source: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }) } },
     });
     const read = shippedLibraryReader(filesystem, null, IMAGE);
 
@@ -546,12 +546,13 @@ test('a library missing beside the program is read from the system volume', asyn
     assert.equal(await read('nothing.dll'), null);
 });
 
-test('a file beside the program still wins over the system volume', async()=>{
+test('a file beside the program still wins over system32', async()=>{
     const beside = new Uint8Array([9]);
     const system = new Uint8Array([7]);
     const filesystem = await filesystemModule.create({
-        system: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': system }),
-        drives: { C: { source: createMemoryStore({ 'App\\d3dx9_26.dll': beside }) } },
+        drives: { C: { source: createMemoryStore({
+            'WINDOWS\\system32\\d3dx9_26.dll': system, 'App\\d3dx9_26.dll': beside,
+        }) } },
     });
     const read = shippedLibraryReader(filesystem, null, IMAGE);
     assert.deepEqual([.../** @type {Uint8Array} */ (await read('d3dx9_26.dll'))], [9]);
@@ -567,7 +568,7 @@ test('an import the engine has a table for is planned from the system file', asy
         code: ()=>[0xc3],
     }));
     const filesystem = await filesystemModule.create({
-        system: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }),
+        drives: { C: { source: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }) } },
     });
 
     const { order, missing } = await planDependencies({
