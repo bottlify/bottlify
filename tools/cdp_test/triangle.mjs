@@ -189,9 +189,9 @@ async function runOne({ cdp, sessionId, executable }){
  */
 export async function triangle(){
     const server = await serveStatic({
-        // The whole package, because the page reaches both the sources and the
-        // prebuilt emulator through ordinary relative URLs; giving it a root
-        // per directory would mean an import map that says the same thing.
+        // The whole package, because the page reaches the sources through
+        // ordinary relative URLs; giving it a root per directory would mean an
+        // import map that says the same thing.
         sandboxDir: PACKAGE_DIR,
         srcDir: join(PACKAGE_DIR, 'src'),
         // The translator package beside core, where app.js resolves the default engine.

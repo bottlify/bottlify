@@ -192,8 +192,8 @@ test('a plain request keeps no bundle store, and a warm-store request names one'
     assert.deepEqual(bundleStoreOptions({}), { store: null, prefetch: false, id: undefined },
         'unset means no cache, same as before this request field existed');
     assert.deepEqual(
-        bundleStoreOptions({ store: 'local', prefetch: true, bundleId: 'doom-3' }),
-        { store: 'local', prefetch: true, id: 'doom-3' });
+        bundleStoreOptions({ store: 'local', prefetch: true, bundleId: 'some-title' }),
+        { store: 'local', prefetch: true, id: 'some-title' });
 });
 
 test('a seeded file reaches the volume as the bytes it was, at the path it was given', ()=>{

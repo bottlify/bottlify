@@ -19,15 +19,6 @@ self.onmessage = async(/** @type {MessageEvent} */ event)=>{
     try
     {
         const executable = new Uint8Array(await (await fetch(exeUrl)).arrayBuffer());
-        if (options.engine === 'emulator')
-        {
-            // The emulator's build sits beside the bundle, as it does beside the package.
-            const wasm = await fetch(new URL('./vendor/v86.wasm', self.location.href));
-            options.v86 = {
-                moduleUrl: new URL('./vendor/libv86.mjs', self.location.href).href,
-                wasmBytes: await wasm.arrayBuffer(),
-            };
-        }
         self.postMessage(JSON.stringify(await measureOnce(createApp, executable, options)));
     }
     catch (e){
