@@ -197,6 +197,21 @@ test('a run of zero bytes past a call ends the region as data, not as four thous
     assert.equal(region.refused.get('00 00'), 1);
 });
 
+test('a breakpoint ends the code before it: padding past a call is not a block a byte', ()=>{
+    // 1000: call F; 1005: int3 x 0x200; F = 1205: inc eax; ret -- a call that
+    // does not return, the compiler's padding after it, and the callee past it.
+    const F = 0x1205;
+    const code = [0xe8, ...[F - 0x1005, 0, 0, 0].map((v, i)=>(F - 0x1005) >>> i * 8 & 0xff),
+        ...new Array(0x200).fill(0xcc), 0x40, 0xc3];
+    const region = regionOf(code);
+    assert.deepEqual(region.entries, [0x1000, 0x1005, F], 'the call, its padding\'s first '
+        + 'breakpoint, and the callee formed in');
+    assert.equal(region.blocks.find(block=>block.start === 0x1005)?.exit.kind, 'trap');
+    // `int 3` returns past itself, as any software interrupt does.
+    const interrupt = regionOf([0xcd, 0x03, 0x90]);
+    assert.deepEqual(interrupt.entries, [0x1000, 0x1002]);
+});
+
 test('a small leaf callee is formed into its caller, and only its rets return inside', ()=>{
     // 1000: call F (e8 01 00 00 00)   1005: ret        F = 1006: inc eax; ret
     const leaf = regionOf([0xe8, 1, 0, 0, 0, 0xc3, 0x40, 0xc3]);

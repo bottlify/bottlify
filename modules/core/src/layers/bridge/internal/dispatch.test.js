@@ -437,6 +437,41 @@ test('the call log is bounded, and a long run does not grow it', ()=>{
     assert.equal(dispatcher.diagnostics().lastCall, 'Tick');
 });
 
+test('the detail ring names, argues and answers each call it still holds once it has come round',
+    ()=>{
+        const m = machine({ args: [7, 9] });
+        m.dispatcher.register(1, { name: 'X!Two', ...STDCALL, argBytes: 8, handler: ()=>2 });
+        m.dispatcher.register(2, { name: 'X!None', ...STDCALL, argBytes: 0, handler: ()=>-1 });
+        /** @type {any[]} */
+        const seenInFlight = [];
+        m.dispatcher.register(3, {
+            name: 'X!Looks', ...STDCALL, argBytes: 0,
+            handler: ()=>{
+                seenInFlight.push(m.dispatcher.detailed(1)[0]);
+                return 3;
+            },
+        });
+        for (let at = 0; at < 4096 * 2 + 5; at++)
+        {
+            m.memory.writeU32(0x3004, at % 1000);
+            m.dispatcher.dispatch(at % 2 === 0 ? 1 : 2);
+        }
+        m.dispatcher.dispatch(3);
+
+        const last = m.dispatcher.detailed(4);
+        assert.deepEqual(last.map(call=>[call.name, call.args, call.result]), [
+            ['X!Two', [194, 9], '0x2'],
+            ['X!None', [], '0xffffffff'],
+            ['X!Two', [196, 9], '0x2'],
+            ['X!Looks', [], '0x3'],
+        ]);
+        assert.equal(m.dispatcher.detailed().length, 4096);
+        assert.deepEqual(m.dispatcher.recent(2), ['X!Two', 'X!Looks']);
+        assert.equal(seenInFlight[0].name, 'X!Looks', 'a call in flight is in the ring already');
+        assert.equal(seenInFlight[0].kind, 'threw',
+            'and reads as unfinished, not as the call its slot held before');
+    });
+
 test('the crossing is timed apart from the handler it carries', ()=>{
     // A title's menu makes about thirty thousand of these a second while every
     // handler in a report costs a fraction of a millisecond a frame. Without

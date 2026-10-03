@@ -207,8 +207,9 @@ function paintedHost(fills, presents, clips){
  * @param {boolean} [options.heap] Whether the build has guest memory to put a
  *        CREATESTRUCT in. Without it a window is made and nothing is announced,
  *        which is the degraded path a build with no heap takes.
- * @param {(message: any) => any} [options.reply] What a window procedure answers,
- *        so a test can refuse a window or make the answer arrive late.
+ * @param {(message: any, thread: any) => any} [options.reply] What a window
+ *        procedure answers, so a test can refuse a window or make the answer
+ *        arrive late; told the thread the call named, if it named one.
  * @param {(args: number[]) => number} [options.waitForObjects] kernel32's wait, faked.
  * @param {() => number} [options.now] The guest clock, for a wait with a deadline.
  * @param {(entry: number, args: number[]) => any} [options.hookReply] What a hook
@@ -280,7 +281,7 @@ function setup({
         dispatch: (wndProc, message, thread)=>{
             dispatched.push(thread === undefined
                 ? { wndProc, ...message } : { wndProc, ...message, thread });
-            return reply ? reply(message) : 0x1234;
+            return reply ? reply(message, thread) : 0x1234;
         },
         call: (entry, args, thread)=>{
             called.push({ entry, args, thread });
@@ -1857,6 +1858,31 @@ test('ShowWindow answers only after the procedures it sent to have run', async()
     assert.deepEqual(dispatched.map(entry=>entry.message),
         [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_SIZE],
         'the activation and the size went once the show message was answered');
+});
+
+test('past the show message\'s answer, the activation and the size run on the thread that '
+    + 'called ShowWindow', async()=>{
+    // Past an await the processor is another thread's, and callerThread names
+    // that one: what ShowWindow sends after the first answer has to run on the
+    // thread it named before it.
+    const OTHER = { name: 'other' };
+    const caller = { current: THREAD };
+    const { fns, memory, dispatched } = setup({ caller,
+        reply: message=>(message.message === WM_SHOWWINDOW
+            ? Promise.resolve().then(()=>{
+                caller.current = OTHER;
+                return 0;
+            })
+            : 0) });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+
+    await fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    const shown = dispatched.findIndex(entry=>entry.message === WM_SHOWWINDOW);
+    const later = dispatched.slice(shown + 1).map(entry=>[entry.message, entry.thread?.name]);
+    assert.deepEqual(later, [[0x001c, 'main'], [WM_NCACTIVATE, 'main'], [0x0006, 'main'],
+        [0x0007, 'main'], [WM_SIZE, 'main']]);
 });
 
 test('WaitMessage yields until there is something to retrieve, and takes nothing', async()=>{
@@ -3607,8 +3633,37 @@ test('an MDI frame keeps its documents in an MDIClient: made, activated in turn,
     const CLIENT_CLASS = 0x10400;
     const CLIENT_CREATE = 0x10500;
     const CHILD_CREATE = 0x10600;
+    // The bridge's rule: a program's procedure answers later, and past that
+    // answer the processor is another thread's -- callerThread names that
+    // one, and a call into the guest that names no thread cannot be made.
+    const OTHER = { name: 'other' };
+    const caller = { current: THREAD };
+    /** @type {string[]} */
+    const wrong = [];
     // With a heap, which the CREATESTRUCT a window's WM_CREATE carries is put in.
-    const { fns, memory, dispatched } = setup({ heap: true });
+    const { fns: table, memory, dispatched } = setup({ heap: true, caller,
+        reply: (message, thread)=>{
+            const runOn = thread ?? (caller.current === THREAD ? THREAD : null);
+            if (!runOn)
+            {
+                throw new Error('a guest callback made after an await must name the thread');
+            }
+            if (runOn !== THREAD)
+            {
+                wrong.push(`0x${message.message.toString(16)} ran on ${runOn.name}`);
+            }
+            return Promise.resolve().then(()=>{
+                caller.current = OTHER;
+                return message.message === 0x0081 ? 1 : 0;
+            });
+        } });
+    // Each call the program makes holds the processor until its first await.
+    const fns = new Proxy(/** @type {any} */ (table), { get: (target, name)=>({
+        handler: (/** @type {number[]} */ args)=>{
+            caller.current = THREAD;
+            return target[name].handler(args);
+        },
+    }) });
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     const frame = await createWindow(fns, memory);
@@ -3655,4 +3710,5 @@ test('an MDI frame keeps its documents in an MDIClient: made, activated in turn,
     assert.equal(await fns.SendMessageA.handler([client, WM_MDIGETACTIVE, 0, 0]), second);
     assert.equal(await fns.SendMessageA.handler([client, WM_MDIDESTROY, second, 0]), 0);
     assert.equal(await fns.SendMessageA.handler([client, WM_MDIGETACTIVE, 0, 0]), 0);
+    assert.deepEqual(wrong, [], 'every procedure ran on the thread whose call it answered');
 });

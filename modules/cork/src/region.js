@@ -700,13 +700,16 @@ export function formRegion(read, entry,
                     follow(target, depth);
                 }
             }
-            else if (exit.kind === 'call' || exit.kind === 'trap'
+            else if (exit.kind === 'call' || exit.kind === 'trap' && decoded.op !== 'int3'
                 || block.instructions[block.instructions.length - 1]?.op === 'call')
             {
                 // The callee's return lands after the call, direct or through
                 // a register or a table, and the host's trap resumes after
                 // the port write: a block there lets the return come back
-                // into translated code.
+                // into translated code. Not after a breakpoint: compilers pad
+                // between functions with int3, and following each to the next
+                // byte made a block of every byte of the padding, until the
+                // region had none left for the callees it forms in.
                 follow(exit.next, depth);
                 const predicted = exit.kind !== 'indirect' ? undefined
                     : callTargets?.get(decoded.eip) ?? slotCallee(read, decoded, leafAt);

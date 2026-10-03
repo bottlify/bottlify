@@ -150,6 +150,14 @@ test('SHLWAPI\'s wide spellings read wide strings', async()=>{
     await win32Module.dispose();
 });
 
+test('DirectX 8.1\'s NAT helper is one of the machine\'s libraries, so it loads', async()=>{
+    // The version check the DirectX SDK's samples taught takes a d3d8.dll
+    // with dpnhpast.dll beside it for DirectX 8.1 and d3d8.dll alone for 8.0.
+    const { libraries } = await build();
+    assert.equal(typeof libraries['DPNHPAST.dll']?.DllGetClassObject?.handler, 'function');
+    await win32Module.dispose();
+});
+
 test('ADVPACK answers IsNTAdmin from the same token the advapi32 calls read', async()=>{
     const { libraries } = await build();
     assert.equal(libraries['ADVPACK.dll'].IsNTAdmin.handler(), 1);

@@ -411,6 +411,12 @@ function parse(argv){
         graphics: argv.includes('--graphics-config')
             ? JSON.parse(argv[argv.indexOf('--graphics-config') + 1])
             : null,
+        // The graphics a bottle chooses in the launcher -- `directx8` leaves the
+        // machine DirectDraw and Direct3D 8 and reports DirectX 8.1 -- as
+        // `createApp`'s `graphicsApi` takes it.
+        graphicsApi: argv.includes('--graphics-api')
+            ? argv[argv.indexOf('--graphics-api') + 1]
+            : null,
         // Fields of the audio layer's configuration, the same way:
         // `--audio-config {"mp3":false}` runs the program's own MP3 decoder.
         entry: argv.includes('--entry') ? argv[argv.indexOf('--entry') + 1] : null,
@@ -1370,6 +1376,7 @@ export async function game(options){
             probeTexture: options.probeTexture,
             fog: options.fog,
             graphics: options.graphics,
+            graphicsApi: options.graphicsApi ?? undefined,
             audio: options.audio ?? undefined,
             captureAudio: options.captureAudio ?? undefined,
             trace: options.trace,

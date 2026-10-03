@@ -132,14 +132,14 @@ function callAndReturn(e, next, pushTarget){
         // call that leaves by itself does.
         e.staleCheck = false;
         b.localGet(Local.stale);
-        e.openIf('stale');
+        e.openGuard('stale');
         e.exitDynamic(Exit.STALE);
         e.close();
     }
     b.i32const(0).load('i32', { offset: depth }).localTee(Local.t1)
         .i32const(CallStack.LIMIT).op(I32.geU)
         .localGet(Local.budget).i32const(0).op(I32.leS).op(I32.or);
-    e.openIf('plain');
+    e.openGuard('plain');
     e.exitDynamic(Exit.UNTRANSLATED);
     e.close();
     b.localGet(Local.t1).i32const(2).op(I32.shl).i32const(next)
@@ -163,7 +163,7 @@ function callAndReturn(e, next, pushTarget){
     }
     b.call(/** @type {number} */ (e.context.transfer)).localTee(Local.t0)
         .i32const(Exit.RETURNED).op(I32.ne);
-    e.openIf('elsewhere');
+    e.openGuard('elsewhere');
     // Left for the host somewhere inside: the state block holds it all.
     b.i32const(0).localGet(Local.t1).store('i32', { offset: depth });
     b.localGet(Local.t0).return();
@@ -886,7 +886,7 @@ export function emitInstruction(e, instruction, flagsLive){
                 e.storeState();
                 e.resetRun();
                 b.localGet(Local.reg).call(e.context.trap);
-                e.openIf('moved');
+                e.openGuard('moved');
                 e.loadState();
                 b.i32const(0).load('i32', { offset: e.layout.eip }).localSet(Local.eip);
                 e.exitDynamic(Exit.UNTRANSLATED);

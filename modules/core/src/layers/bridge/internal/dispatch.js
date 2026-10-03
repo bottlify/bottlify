@@ -88,6 +88,7 @@ import { isParkedCall } from './parking.js';
  *     mismatches: number, ms: number } | null} hookStats
  * @property {boolean} readsError
  * @property {number[]} args        The argument array, reused while answers are prompt.
+ * @property {number} kept          How many of them the ring keeps.
  * @property {number} writer
  *     Where the memory layer charges what this call writes into the guest,
  *     resolved here once so the crossing stores a number and looks nothing up.
@@ -107,23 +108,29 @@ import { isParkedCall } from './parking.js';
  */
 
 /**
- * How many call names the ring keeps. Enough that a failure report shows the
- * shape of what led to it, small enough that it is a rounding error in memory.
+ * How many calls the ring keeps, with their arguments and answers.
+ *
+ * Generous, because the call that explains a failure is routinely hundreds
+ * back: a program that has just failed spends its last moments in its own
+ * error reporting, and the answer that was wrong came before all of it. Names
+ * alone say what a program was doing; arguments and answers say what it asked
+ * and what it was told, which is the only way to see an answer that was wrong
+ * rather than missing. Small enough that it is a rounding error in memory.
+ * A power of two: the crossing masks its index into the ring.
  */
 const CALL_RING = 4096;
 
-/**
- * How many calls are kept with their arguments and answers.
- *
- * Fewer than the names, because each carries arguments and an answer. Still
- * generous, because the call that explains a failure is routinely hundreds
- * back: a program that has just failed spends its last moments in its own
- * error reporting, and the answer that was wrong came before all of it. Names
- * alone say what a program was doing; these say what it asked and what it was
- * told, which is the only way to see an answer that was wrong rather than
- * missing.
- */
-const DETAIL_RING = 4096;
+/** How many of a call's arguments the ring keeps. */
+const KEPT_ARGS = 6;
+
+/** How a call ended, as the ring keeps it, by the number it keeps. */
+const KINDS = ['threw', 'answered', 'fellThrough', 'parked', 'waiting', 'forwarded'];
+const THREW = 0;
+const ANSWERED = 1;
+const FELL_THROUGH = 2;
+const PARKED_KIND = 3;
+const WAITING = 4;
+const FORWARDED = 5;
 
 /** Indices into the cpu's register file, in the encoding's order. */
 const EAX = 0;
@@ -221,22 +228,6 @@ function makeRecord(){
     };
     return /** @type {CallRecord} */ (Object.defineProperty(record, 'result', RESULT));
 }
-
-/**
- * A record as a reader may keep it: the ring writes over its own when it
- * comes round.
- *
- * @param {CallRecord} record
- */
-const copyOf = record=>({
-    name: record.name,
-    from: record.from,
-    args: record.args.slice(),
-    strings: record.strings ? record.strings.slice() : null,
-    kind: record.kind,
-    result: describe(record),
-    error: record.error,
-});
 
 /** The last error of a dispatcher that was handed no reader. */
 const NO_ERROR = ()=>0;
@@ -444,21 +435,35 @@ class Dispatcher {
          * grow at all, failing inside the dispatcher with a message about
          * array length that says nothing about the guest.
          *
-         * @type {string[]}
+         * A slot a call, `callCount` its index, in typed arrays a field
+         * each, and a record made of a slot only when somebody reads it: a
+         * record object per slot was written field by field on every
+         * crossing, each name and array a store the collector has to be told
+         * about, and that bookkeeping was as much of a crossing as all the
+         * rest of it.
          */
-        this.called = new Array(CALL_RING).fill('');
-        this.ringAt = 0;
-        /** @type {CallRecord[]} */
-        this.records = new Array(DETAIL_RING).fill(null);
+        this.ids = new Int32Array(CALL_RING);
+        this.froms = new Int32Array(CALL_RING);
+        this.argWords = new Int32Array(CALL_RING * KEPT_ARGS);
+        this.argCounts = new Uint8Array(CALL_RING);
+        this.kinds = new Uint8Array(CALL_RING);
+        this.answers = new Float64Array(CALL_RING);
+        this.errors = new Float64Array(CALL_RING);
         /**
-         * By ring slot, an argument array of each length its record has
-         * held, made the first time: consecutive calls take different
-         * counts, and a record whose array was the wrong length was given a
-         * new one -- an allocation on most crossings of a mixed run.
-         * @type {(number[] | null)[][]}
+         * The text each argument pointed at, by slot, read only when tracing
+         * asked for it.
+         * @type {((string | null)[] | null)[]}
          */
-        this.recordArgs = new Array(DETAIL_RING).fill(null);
-        this.detailAt = 0;
+        this.strings = new Array(CALL_RING).fill(null);
+        /** What a sink is handed, written over for each call it is handed. */
+        this.sinkRecord = makeRecord();
+        /**
+         * The sink record's argument array of each length, made the first
+         * time: a record whose array was the wrong length was given a new
+         * one, an allocation on most traced crossings of a mixed run.
+         * @type {(number[] | undefined)[]}
+         */
+        this.sinkArgs = [];
         /** Guest address of each stub, so a return address can be given a name. */
         /** @type {Map<number, string>} */
         this.byAddress = new Map();
@@ -622,12 +627,12 @@ class Dispatcher {
      * @returns {string[]}
      */
     history(count){
-        const kept = Math.min(count, this.ringAt, CALL_RING);
+        const kept = Math.min(count, this.callCount, CALL_RING);
         /** @type {string[]} */
         const out = [];
         for (let back = kept; back > 0; back--)
         {
-            out.push(this.called[(this.ringAt - back) % CALL_RING]);
+            out.push(this.nameAt((this.callCount - back) & CALL_RING - 1));
         }
         return out;
     }
@@ -779,14 +784,14 @@ class Dispatcher {
      * registers go now that the handler has said whether it computed the
      * call itself.
      *
-     * @param {Entry} entry @param {CallRecord} record @param {number[]} args
+     * @param {Entry} entry @param {boolean} answered @param {number[]} args
      * @param {number} pushed @param {number} esp
      */
-    finishHook(entry, record, args, pushed, esp){
+    finishHook(entry, answered, args, pushed, esp){
         const cpu = this.cpu;
         if (entry.site)
         {
-            if (record.kind === 'answered')
+            if (answered)
             {
                 // The kernel may have edited any of the eight; every one
                 // is written back, ESP last of the registers (it may have
@@ -831,7 +836,7 @@ class Dispatcher {
         // half of it getting here, and the pushed word is the only
         // place that still holds it. ECX was never touched.
         cpu.writeReg32('edx', this.memory.readU32(pushed));
-        if (record.kind === 'answered')
+        if (answered)
         {
             // The kernel computed the call itself: return to the
             // caller as the guest function's own `ret cleanup` would,
@@ -857,10 +862,10 @@ class Dispatcher {
      * A call that did not answer by returning: parked, or waiting on a
      * promise.
      *
-     * @param {Entry} entry @param {number[]} args @param {CallRecord} record
+     * @param {Entry} entry @param {number[]} args @param {number} at  Its slot in the ring.
      * @param {any} result @param {CallFrame} frame
      */
-    settleLate(entry, args, record, result, frame){
+    settleLate(entry, args, at, result, frame){
         // The handler still holds these and will read them after whatever it
         // is waiting for: they are its now, and the next call gets fresh
         // ones. Paid only by a call that already costs a wait, never by the
@@ -870,7 +875,7 @@ class Dispatcher {
         // A parked call's EAX belongs to whatever wakes the thread, and it
         // carries the wait's own result. Writing a placeholder here would
         // overwrite the answer before the guest ever sees it.
-        if (record.kind === 'parked')
+        if (this.kinds[at] === PARKED_KIND)
         {
             return;
         }
@@ -887,7 +892,7 @@ class Dispatcher {
         const onCall = this.onCall;
         if (onCall !== null && this.sinks(entry))
         {
-            const asked = copyOf(record);
+            const asked = this.recordAt(at);
             result.then((/** @type {number} */ value)=>{
                 asked.result = `0x${(value >>> 0).toString(16)} (was waiting)`;
                 onCall(asked);
@@ -948,8 +953,8 @@ class Dispatcher {
             ? this.readSite(entry, pushed, esp)
             : this.readCall(entry, regs, pushed, esp);
 
-        this.callCount++;
-        this.called[this.ringAt++ % CALL_RING] = entry.name;
+        const at = this.callCount++ & CALL_RING - 1;
+        this.ids[at] = id;
 
         // Everything the handler might need about where it was called from,
         // read before it runs: a handler that calls the guest back writes
@@ -970,50 +975,36 @@ class Dispatcher {
         frame.restingStack = esp + 4 + entry.cleanup;
         frame.hostReturn = hostReturn;
 
-        // The ring's records are made once and written over: a record and
-        // an argument array allocated per call, thirty thousand times a
-        // second, was the garbage collector's whole share of a frame.
-        // Whoever reads the ring gets a copy; a sink gets the record for
-        // the length of its call and nothing longer.
-        const detail = this.detailAt++ % DETAIL_RING;
-        const record = this.records[detail] ??= makeRecord();
-        record.name = entry.name;
         // Which instruction made this call. Read from the frame that was
         // captured above rather than the stack, because a handler that
         // calls the guest back has overwritten the stack by the time
         // anybody reads this.
-        record.from = hostReturn;
+        this.froms[at] = hostReturn;
         // Copied, because a handler that writes through a pointer can
         // change what the arguments describe before anyone reads them.
-        const kept = Math.min(args.length, 6);
-        // An array of the length kept rather than `length` set: setting it
-        // is a trip into the runtime every time, a fifth of the crossing.
-        const sized = this.recordArgs[detail] ??= [null, null, null, null, null, null, null];
-        const into = sized[kept] ??= new Array(kept);
+        const kept = entry.kept;
+        const argWords = this.argWords;
         for (let i = 0; i < kept; i++)
         {
-            into[i] = args[i];
+            argWords[at * KEPT_ARGS + i] = args[i];
         }
-        record.args = into;
+        this.argCounts[at] = kept;
         // Read now rather than later when asked for: a string a program
         // assembled on its own stack has been overwritten several
         // frames deep by the time anybody reads the trace, and what
         // comes back then belongs to whatever ran next.
         if (this.traceStrings)
         {
-            const strings = record.strings ??= [];
+            const strings = this.strings[at] ??= [];
             strings.length = kept;
             for (let i = 0; i < kept; i++)
             {
                 strings[i] = this.peekString(args[i]);
             }
         }
-        else
-        {
-            record.strings = null;
-        }
-        record.kind = 'threw';
-        record.error = 0;
+        const kinds = this.kinds;
+        kinds[at] = THREW;
+        this.errors[at] = 0;
 
         const hookTraced = entry.hook && this.traceHookEntry(entry, esp, hostReturn, args);
 
@@ -1064,30 +1055,30 @@ class Dispatcher {
             // a reader then chases a failure that did not happen.
             if (entry.forwards)
             {
-                record.kind = 'forwarded';
+                kinds[at] = FORWARDED;
             }
             else if (entry.hook)
             {
                 // A hook's handler answers synchronously with whether it
                 // computed the call itself; there is no guest to park or
                 // wait for on this side of the decision.
-                record.kind = result === true ? 'answered' : 'fellThrough';
-                record.answer = record.kind === 'answered' ? 1 : 0;
+                kinds[at] = result === true ? ANSWERED : FELL_THROUGH;
+                this.answers[at] = result === true ? 1 : 0;
             }
             else if (isParkedCall(result))
             {
-                record.kind = 'parked';
+                kinds[at] = PARKED_KIND;
                 late = true;
             }
             else if (typeof (/** @type {any} */ (result))?.then === 'function')
             {
-                record.kind = 'waiting';
+                kinds[at] = WAITING;
                 late = true;
             }
             else
             {
-                record.kind = 'answered';
-                record.answer = Number(result);
+                kinds[at] = ANSWERED;
+                this.answers[at] = Number(result);
             }
         }
         finally
@@ -1118,7 +1109,7 @@ class Dispatcher {
             {
                 const block = this.errorOffset < 0 ? 0 : frame.thread?.tebAddress ?? 0;
                 const reader = this.reader;
-                record.error = block === 0
+                this.errors[at] = block === 0
                     ? this.lastError()
                     : reader !== null
                         ? reader.readU32(block + this.errorOffset)
@@ -1130,14 +1121,14 @@ class Dispatcher {
                 // for them. Peeking every argument for a sink that does
                 // not read the strings cost more than the whole dispatch:
                 // measured at 1.6 of 2.3 microseconds per call.
-                this.onCall(record);
+                this.onCall(this.sinkRecordOf(at));
             }
         }
 
         if (entry.hookStats !== null)
         {
             entry.hookStats.calls++;
-            if (record.kind === 'answered')
+            if (kinds[at] === ANSWERED)
             {
                 entry.hookStats.handled++;
             }
@@ -1148,15 +1139,15 @@ class Dispatcher {
         }
         if (late)
         {
-            this.settleLate(entry, args, record, result, frame);
+            this.settleLate(entry, args, at, result, frame);
             return;
         }
         if (entry.hook)
         {
-            this.finishHook(entry, record, args, pushed, esp);
+            this.finishHook(entry, kinds[at] === ANSWERED, args, pushed, esp);
             if (hookTraced)
             {
-                this.traceHookExit(entry, record.kind);
+                this.traceHookExit(entry, KINDS[kinds[at]]);
             }
             return;
         }
@@ -1234,6 +1225,7 @@ class Dispatcher {
                 ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
             readsError: this.errorReader && fn.lastError !== false,
             args: new Array(site ? 8 : stackWords + registerArgs),
+            kept: Math.min(site ? 8 : stackWords + registerArgs, KEPT_ARGS),
             writer: typeof this.memory?.writer === 'function' ? this.memory.writer(fn.name) : -1,
             sinkRevision: -1,
             sinkOn: true,
@@ -1318,7 +1310,8 @@ class Dispatcher {
         return {
             implemented: this.implemented,
             calls: this.callCount,
-            lastCall: this.ringAt === 0 ? null : this.called[(this.ringAt - 1) % CALL_RING],
+            lastCall: this.callCount === 0 ? null
+                : this.nameAt((this.callCount - 1) & CALL_RING - 1),
             // What the guest has been doing, rather than the one thing it did
             // last. A program stuck in a loop says so here in a line; a stack
             // trace only shows where the loop was when it was interrupted.
@@ -1333,18 +1326,72 @@ class Dispatcher {
      *
      * @param {number} [count]
      */
-    detailed(count = DETAIL_RING){
-        const kept = Math.min(count, this.detailAt, DETAIL_RING);
+    detailed(count = CALL_RING){
+        const kept = Math.min(count, this.callCount, CALL_RING);
         /** @type {any[]} */
         const out = [];
         for (let back = kept; back > 0; back--)
         {
-            const record = this.records[(this.detailAt - back) % DETAIL_RING];
-            const copy = copyOf(record);
-            copy.strings ??= record.args.map(value=>this.peekString(value));
+            const copy = this.recordAt((this.callCount - back) & CALL_RING - 1);
+            copy.strings ??= copy.args.map(value=>this.peekString(value));
             out.push(copy);
         }
         return out;
+    }
+
+    /** @param {number} at  A slot of the ring. */
+    nameAt(at){
+        return /** @type {Entry} */ (this.functions[this.ids[at]]).name;
+    }
+
+    /**
+     * A slot of the ring as a record a reader may keep: the ring writes over
+     * its own when it comes round.
+     *
+     * @param {number} at
+     */
+    recordAt(at){
+        const kind = KINDS[this.kinds[at]];
+        /** @type {number[]} */
+        const args = [];
+        for (let i = 0; i < this.argCounts[at]; i++)
+        {
+            args.push(this.argWords[at * KEPT_ARGS + i]);
+        }
+        return {
+            name: this.nameAt(at),
+            from: this.froms[at] >>> 0,
+            args,
+            strings: this.strings[at]?.slice() ?? null,
+            kind,
+            result: kind === 'answered' ? `0x${(this.answers[at] >>> 0).toString(16)}` : kind,
+            error: this.errors[at],
+        };
+    }
+
+    /**
+     * A slot of the ring as the record a sink is handed, written over for
+     * the next call: a sink has it for the length of its call and nothing
+     * longer.
+     *
+     * @param {number} at
+     */
+    sinkRecordOf(at){
+        const record = this.sinkRecord;
+        const kept = this.argCounts[at];
+        const args = this.sinkArgs[kept] ??= new Array(kept);
+        for (let i = 0; i < kept; i++)
+        {
+            args[i] = this.argWords[at * KEPT_ARGS + i];
+        }
+        record.name = this.nameAt(at);
+        record.from = this.froms[at] >>> 0;
+        record.args = args;
+        record.strings = this.traceStrings ? this.strings[at] : null;
+        record.error = this.errors[at];
+        record.answer = this.answers[at];
+        record.kind = KINDS[this.kinds[at]];
+        return record;
     }
 
     /**
@@ -1352,7 +1399,7 @@ class Dispatcher {
      * still holds, which is every one of them until it wraps.
      */
     calls(){
-        return this.history(this.ringAt);
+        return this.history(this.callCount);
     }
 
     /** @param {number} count @returns {string[]} the last few, oldest first */

@@ -66,8 +66,11 @@ class Parking {
         this.onBegin = onBegin;
         // Depth rather than a flag: a guest callback can trap into another host
         // function, and that one is as much in flight as its caller.
-        /** @type {CallFrame[]} */
-        this.inFlight = [];
+        // Written at the depth rather than pushed and popped: a push and a pop
+        // on every crossing were a fifth of what parking cost it.
+        /** @type {(CallFrame | null)[]} */
+        this.inFlight = [null];
+        this.depth = 0;
         this.parked = 0;
         /** The call that parked last, by name: what a thread that never wakes was waiting in. */
         this.lastParked = '';
@@ -79,7 +82,13 @@ class Parking {
         // stack address with no owner, and a reader of `current()` cannot
         // tell its own thread's stack from somebody else's.
         frame.thread = this.kernel.currentThread();
-        this.inFlight.push(frame);
+        // A frame is the same object at its depth from one call to the next,
+        // and storing it again is a store the collector has to be told about.
+        const depth = this.depth++;
+        if (this.inFlight[depth] !== frame)
+        {
+            this.inFlight[depth] = frame;
+        }
         if (this.onBegin !== null)
         {
             this.onBegin(frame);
@@ -87,13 +96,12 @@ class Parking {
     }
 
     endCall(){
-        this.inFlight.pop();
+        this.depth--;
     }
 
     /** @returns {CallFrame | null} the call being handled right now */
     current(){
-        const inFlight = this.inFlight;
-        return inFlight.length > 0 ? inFlight[inFlight.length - 1] : null;
+        return this.depth > 0 ? this.inFlight[this.depth - 1] : null;
     }
 
     /**
@@ -118,7 +126,7 @@ class Parking {
 
     /** @returns {string[]} every call being handled, outermost first */
     chain(){
-        return this.inFlight.map(frame=>frame.name);
+        return this.inFlight.slice(0, this.depth).map(frame=>/** @type {CallFrame} */ (frame).name);
     }
 
     /**

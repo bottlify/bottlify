@@ -886,12 +886,17 @@ export function planStack(region, states, cut, speculate, callReturn = false){
  * @property {number} empty    registers known empty
  * @property {number} stale    registers whose bit in the empty-mask local is not yet written
  * @property {number} dirty    registers known marked in the dirty-mask local
+ * @property {number} pending  registers written on the block's straight path and not yet
+ *     marked in the dirty-mask local: only the epilogue's and a call's stores read the
+ *     mask, each after a flush, so the marks are one write where the block's flush is
  * @property {number} top      the top as the block's pushes and pops left it
  * @property {boolean} topStale  the top local is not yet written
  */
 
 /** @returns {Known} */
-const unknown = ()=>({ block: -1, held: 0, empty: 0, stale: 0, dirty: 0, top: 0, topStale: false });
+const unknown = ()=>({
+    block: -1, held: 0, empty: 0, stale: 0, dirty: 0, pending: 0, top: 0, topStale: false,
+});
 
 /**
  * Whether a region translates an MMX instruction: one with an mm operand that
@@ -1285,10 +1290,10 @@ export function x87Normalise(e, from = e.x87.current){
 }
 
 /**
- * Writes the empty-mask and top locals the block's plain forms left stale
- * (see `Known`). `commit` says the write is on the block's straight path, so
- * the locals are current from here; an exit's or an edge's write inside a
- * branch leaves them stale for the path that goes on.
+ * Writes the empty-mask, top and dirty-mask locals the block's plain forms
+ * left stale (see `Known`). `commit` says the write is on the block's straight
+ * path, so the locals are current from here; an exit's or an edge's write
+ * inside a branch leaves them stale for the path that goes on.
  *
  * @param {E} e @param {boolean} commit
  */
@@ -1308,10 +1313,16 @@ function x87Flush(e, commit){
     {
         b.i32const(known.top).localSet(Local.x87Top);
     }
+    if (known.pending !== 0)
+    {
+        b.localGet(Local.x87Dirty).i32const(known.pending).op(I32.or).localSet(Local.x87Dirty);
+    }
     if (commit)
     {
         known.stale = 0;
         known.topStale = false;
+        known.dirty |= known.pending;
+        known.pending = 0;
     }
 }
 
@@ -1566,17 +1577,30 @@ export function emitX87(e, instruction, flagsLive){
         b.localGet(stLocal).op(I64.reinterpretF64).localSet(e.mmLocal(physical));
         b.localGet(x.form).i32const(~(1 << physical)).op(I32.and).localSet(x.form);
     };
-    /** Marks a physical register dirty, unless the block has already. @param {number} physical */
+    /**
+     * Marks a physical register dirty, unless the block has already: on the
+     * block's straight path, for the block's flush to write with the others
+     * (`Known`); inside a branch of the instruction's own, at once, so the mark
+     * is the branch's alone -- the epilogue stores a dirty register even when
+     * it is empty, and one this way did not write holds no value of its own.
+     *
+     * @param {number} physical
+     */
     const markDirty = physical=>{
-        if (safe && (known.dirty & (1 << physical)) !== 0)
+        const bit = 1 << physical;
+        if (safe && ((known.dirty | known.pending) & bit) !== 0)
         {
             return;
         }
-        b.localGet(Local.x87Dirty).i32const(1 << physical).op(I32.or)
-            .localSet(Local.x87Dirty);
+        if (safe && e.controls.length === e.blockDepth)
+        {
+            known.pending |= bit;
+            return;
+        }
+        b.localGet(Local.x87Dirty).i32const(bit).op(I32.or).localSet(Local.x87Dirty);
         if (safe)
         {
-            known.dirty |= 1 << physical;
+            known.dirty |= bit;
         }
     };
     /** Marks ST(i) written. @param {number} i */

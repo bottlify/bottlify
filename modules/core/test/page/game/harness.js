@@ -1402,6 +1402,8 @@ export function createHarness(canvas, how = {}){
             // The graphics layer's own configuration, whatever fields the run
             // names: a switch the layer defaults off is turned on per run here.
             graphics: request.graphics ?? undefined,
+            // The bottle's graphics choice, as the launcher passes it.
+            graphicsApi: request.graphicsApi ?? undefined,
             // Peeks every pointer argument on every call, which the launcher
             // never pays for. A run that wants the strings (read afterwards,
             // which is exactly when a stack one is gone) asks for them; a
