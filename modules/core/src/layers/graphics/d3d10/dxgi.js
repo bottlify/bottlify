@@ -45,6 +45,7 @@ import {
 } from './constants.js';
 import { backBufferUsage, highestAccessibleBuffer, swapChainDescResult } from './validity.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
+import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 
 /** DXGI_ERROR_NOT_CURRENTLY_AVAILABLE: what the browser has no way to give. */
 const DXGI_ERROR_NOT_CURRENTLY_AVAILABLE = 0x887a0022;
@@ -124,7 +125,7 @@ export function outputModes(size, format){
  * @type {readonly AdapterConfig[]}
  */
 const DEFAULT_ADAPTERS = Object.freeze([{
-    description: 'Bottlify Rendering Adapter',
+    description: VIDEO_ADAPTER_NAME,
     vendorId: 0,
     deviceId: 0,
     outputs: [{

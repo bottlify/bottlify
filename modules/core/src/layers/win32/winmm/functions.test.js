@@ -346,8 +346,8 @@ test('waveOutGetDevCapsW names the device in UTF-16, the fields after it moved',
     const m = machine();
     m.memory.fill(0xcc, 0x10400, 0x10400 + 84);
     assert.equal(m.winmm.waveOutGetDevCapsW.handler([0, 0x10400, 84]), 0);
-    assert.equal(new TextDecoder('utf-16le').decode(m.memory.slice(0x10408, 0x10408 + 34)),
-        'Bottlify Wave Out');
+    assert.equal(new TextDecoder('utf-16le').decode(m.memory.slice(0x10408, 0x10408 + 44)),
+        'Bottlify Sound Adapter');
     assert.equal(m.memory[0x10400 + 76], 2, 'wChannels after the 32 WCHARs');
     assert.equal(m.winmm.waveOutGetDevCapsW.handler([1, 0x10400, 84]), 2);
 });

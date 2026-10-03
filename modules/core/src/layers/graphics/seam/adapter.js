@@ -13,6 +13,8 @@
  * whether it is on one card.
  */
 
+import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
+
 /**
  * WebGPU's word for a vendor against the PCI id a program's card database is
  * keyed by. Only vendors with a WebGPU spelling appear; anything else is
@@ -49,7 +51,9 @@ export const ADAPTER_GUID = Uint8Array.from([
  */
 
 /**
- * The PCI vendor id and the description a program is shown for an adapter.
+ * The PCI vendor id and the description a program is shown for an adapter:
+ * the vendor the browser's adapter has, which a program's card database is
+ * keyed by, and the machine's own name for its video adapter.
  *
  * @param {AdapterIdentity | null} known
  * @returns {{ vendorId: number, description: string }}
@@ -57,8 +61,6 @@ export const ADAPTER_GUID = Uint8Array.from([
 export function describeAdapter(known){
     return {
         vendorId: PCI_VENDOR_IDS[(known?.vendor ?? '').toLowerCase()] ?? 0,
-        description: known?.description
-            || [known?.vendor, known?.architecture].filter(Boolean).join(' ')
-            || 'WebGPU adapter',
+        description: VIDEO_ADAPTER_NAME,
     };
 }

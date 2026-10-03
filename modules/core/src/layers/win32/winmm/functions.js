@@ -36,6 +36,7 @@
 
 import { parseWave } from './wave.js';
 import { MAX_PERIOD } from './timers.js';
+import { SOUND_ADAPTER_NAME } from '../devices.js';
 
 /** Success, and the errors a caller distinguishes. */
 const MMSYSERR_NOERROR = 0;
@@ -387,7 +388,7 @@ const WAVEOUTCAPSW = Object.freeze({
 const NEVER_MAPPED = 0x10000;
 
 /** What the one wave-out device calls itself. */
-const WAVE_OUT_NAME = 'Bottlify Wave Out';
+const WAVE_OUT_NAME = SOUND_ADAPTER_NAME;
 
 /**
  * The device's interface name, which DRV_QUERYDEVICEINTERFACE answers: a
