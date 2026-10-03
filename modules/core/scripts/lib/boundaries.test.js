@@ -19,7 +19,7 @@ test('an import of an engine package from the core is a boundary issue', ()=>{
 });
 
 test('anything else passes, including a name that merely starts alike', ()=>{
-    assert.equal(enginePackageIssue('./internal/v86-host.js'), null);
+    assert.equal(enginePackageIssue('./internal/cork-host.js'), null);
     assert.equal(enginePackageIssue('node:fs'), null);
     assert.equal(enginePackageIssue('@bottlify/corkscrew'), null);
 });
@@ -47,7 +47,7 @@ function issuesWith(extra){
         mkdirSync(dirname(join(src, path)), { recursive: true });
         writeFileSync(join(src, path), contents);
     }
-    mkdirSync(join(vendor, 'v86'), { recursive: true });
+    mkdirSync(join(vendor, 'prebuilt'), { recursive: true });
     const requires = new Map([['a', new Set()], ['b', new Set()], ['cpu', new Set()]]);
     try
     {
@@ -68,8 +68,10 @@ test('the rules that were always checked still catch what they name', ()=>{
         .length, 1, 'an undeclared layer');
     assert.equal(issuesWith({ 'system/x.js': 'import { bModule } from \'../layers/b/module.js\';' })
         .length, 1, 'system importing a layer');
-    assert.equal(issuesWith({ 'layers/a/x.js': 'import v from \'../../../vendor/v86/libv86.js\';' })
-        .length, 1, 'vendor outside cpu');
+    assert.equal(issuesWith({ 'layers/a/x.js': 'import v from \'../../../vendor/prebuilt/x.js\';' })
+        .length, 1, 'vendor from a layer');
+    assert.equal(issuesWith({ 'layers/cpu/x.js': 'import v from \'../../../vendor/prebuilt/x.js\';' })
+        .length, 1, 'vendor from the cpu layer too');
 });
 
 test('every form of import is seen, not only a string after `from`', ()=>{
@@ -79,12 +81,14 @@ test('every form of import is seen, not only a string after `from`', ()=>{
         'a computed import()': 'const p = \'../b/module.js\'; export const m = await import(p);',
         'a workspace package': 'import x from \'@bottlify/networking\'; export default x;',
         'an npm package': 'import x from \'left-pad\'; export default x;',
-        'vendor by URL': 'export const u = new URL(\'../../../vendor/v86/libv86.js\', import.meta.url);',
+        'vendor by URL': 'export const u = new URL(\'../../../vendor/prebuilt/x.wasm\', import.meta.url);',
     };
     for (const [form, code] of Object.entries(forms))
     {
         assert.equal(issuesWith({ 'layers/a/x.js': code }).length, 1, form);
     }
+    assert.equal(issuesWith({ 'layers/cpu/x.js': forms['vendor by URL'] }).length, 1,
+        'vendor by URL from the cpu layer');
     assert.equal(issuesWith({ 'layers/a/x.mjs': 'import { bModule } from \'../b/module.js\';' })
         .length, 1, 'an .mjs file');
 });
@@ -94,6 +98,8 @@ test('what the design allows stays allowed', ()=>{
         // The cpu layer and the root load an engine by a URL chosen at launch.
         'layers/cpu/load.js': 'export const load = url=>import(url);',
         'app.js': 'export const load = url=>import(/* webpackIgnore: true */ url);',
+        // The root reaches the package's binaries by URL.
+        'zstd.js': 'export const u = new URL(\'../vendor/prebuilt/x.wasm\', import.meta.url);',
         // The platform's own modules are not a dependency.
         'layers/a/fs.js': 'import { readFileSync } from \'node:fs\'; export { readFileSync };',
         // Prose is not an import.

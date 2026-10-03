@@ -5,11 +5,9 @@
  */
 
 /**
- * The publish gate with the emulator optional: a `dist/` that leaves out the
- * emulator (and the video decoder) passes, because `cork` is the default and
- * neither is fetched for a launch that selects it; when a binary is present
- * it is still held to a size floor, and a missing file the package actually
- * promises still fails.
+ * The publish gate with the prebuilt binaries optional: a `dist/` that leaves
+ * out the video decoder passes; when a binary is present it is still held to a
+ * size floor, and a missing file the package actually promises still fails.
  */
 
 import { test } from 'node:test';
@@ -21,8 +19,6 @@ const manifest = {
         '.': './dist/core.js',
         './engine.worker.js': './dist/engine.worker.js',
         './worklet.js': './dist/worklet.js',
-        './libv86.mjs': './dist/vendor/libv86.mjs',
-        './v86.wasm': './dist/vendor/v86.wasm',
         './video-decoder.wasm': './dist/vendor/video-decoder.wasm',
         './package.json': './package.json',
     },
@@ -41,19 +37,19 @@ const core = [
     { path: 'THIRD-PARTY-NOTICES.md', size: 64 },
 ];
 
-test('a dist without the emulator passes', ()=>{
+test('a dist without the optional binaries passes', ()=>{
     assert.deepEqual(packageProblems(core, manifest), []);
 });
 
 test('a binary present is held to the size floor', ()=>{
-    const files = [...core, { path: 'dist/vendor/v86.wasm', size: 1024 }];
+    const files = [...core, { path: 'dist/vendor/video-decoder.wasm', size: 1024 }];
     const problems = packageProblems(files, manifest);
-    assert.ok(problems.some(problem=>problem.includes('dist/vendor/v86.wasm')),
+    assert.ok(problems.some(problem=>problem.includes('dist/vendor/video-decoder.wasm')),
         JSON.stringify(problems));
 });
 
 test('a full-size binary passes', ()=>{
-    const files = [...core, { path: 'dist/vendor/v86.wasm', size: 300 * 1024 }];
+    const files = [...core, { path: 'dist/vendor/video-decoder.wasm', size: 300 * 1024 }];
     assert.deepEqual(packageProblems(files, manifest), []);
 });
 

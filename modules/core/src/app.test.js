@@ -17,7 +17,7 @@ import {
     resolveLibraryPath, startDirectoryOf, libraryCandidates, timedWait, pagePacing,
     PAGE_YIELD_MS,
     retryingFetch,
-    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound, emulatorArtifacts,
+    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound, emulatorOf,
     heapSizeFor,
     spaceAbove,
     resourceLookup,
@@ -1165,24 +1165,19 @@ test('the guest clock is credited with all the wall time between credits, capped
     assert.deepEqual(advanced, [3, 4, 0, 250, 2000]);
 });
 
-test('the emulator is found beside the module unless the caller names it', ()=>{
-    // A caller starting a bundle from code should not have to know where the
-    // package keeps its emulator; naming a part overrides that part only.
-    const here = 'https://example.test/lib/dist/core.js';
-    const own = emulatorArtifacts(undefined, here);
-    assert.match(own.moduleUrl, /libv86\.mjs$/);
-    assert.match(String(own.wasmUrl), /v86\.wasm$/);
-    assert.equal(own.wasmBytes, null);
-    assert.equal(new URL(own.moduleUrl).origin, 'https://example.test', 'relative to the module');
-
-    const theirs = emulatorArtifacts({ moduleUrl: 'https://cdn.test/v86.mjs' }, here);
-    assert.equal(theirs.moduleUrl, 'https://cdn.test/v86.mjs');
-    assert.match(String(theirs.wasmUrl), /v86\.wasm$/, 'the rest is still the package\'s own');
-
+test('the emulator is the caller\'s: named without one, it is refused as not installed', ()=>{
+    // The package carries no emulator, so `engine: 'emulator'` needs both
+    // halves handed in, and cork -- the default -- needs neither.
     const bytes = new ArrayBuffer(4);
-    const given = emulatorArtifacts({ wasmBytes: bytes }, here);
-    assert.equal(given.wasmBytes, bytes);
-    assert.equal(given.wasmUrl, null, 'bytes in hand are not fetched again');
+    assert.equal(emulatorOf({}), null, 'the default engine is cork');
+    assert.equal(emulatorOf({ engine: 'cork', v86: { moduleUrl: 'x', wasmBytes: bytes } }), null,
+        'cork ignores an emulator it was handed');
+    assert.deepEqual(emulatorOf({ engine: 'emulator', v86: { moduleUrl: 'x', wasmBytes: bytes } }),
+        { moduleUrl: 'x', wasmBytes: bytes });
+    for (const v86 of [undefined, { moduleUrl: 'x' }, { wasmBytes: bytes }])
+    {
+        assert.throws(()=>emulatorOf({ engine: 'emulator', v86 }), /emulator is not installed/);
+    }
 });
 
 test('the space above the program moves up past an image too large for the fixed layout', ()=>{

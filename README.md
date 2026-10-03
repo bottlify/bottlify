@@ -1,15 +1,14 @@
 # Bottlify
 
-Bottlify runs original Win32 x86 games in the browser: a forked [v86](https://github.com/bottlify/v86)
-for x86 emulation in a Web Worker, plus a from-scratch Win32/DirectX HLE layer on WebGPU, WebAudio
-and OPFS. No plugins, no install, no server in the render path.
+Bottlify runs original Win32 x86 games in the browser: cork, our own x86 → WebAssembly translator,
+in a Web Worker, plus a from-scratch Win32/DirectX HLE layer on WebGPU, WebAudio and OPFS. No
+plugins, no install, no server in the render path.
 
 ## Status
 
 The engine runs end to end through one public call, `createApp()`, on a thread of its own: the
-page keeps the canvas, the keyboard and mouse and the audio context; the worker keeps the emulator,
-the Win32 layer, the GPU device and the mixer. A 64 KiB ROM of our own takes the CPU straight into
-protected mode with no BIOS; the loader maps a PE32 image and synthesises a real in-guest module per
+page keeps the canvas, the keyboard and mouse and the audio context; the worker keeps the
+translator, the Win32 layer, the GPU device and the mixer. The loader maps a PE32 image and synthesises a real in-guest module per
 system library, so an address from `GetProcAddress` is the one an import was bound to; threads run
 under a scheduler whose quantum is retired guest instructions; the bridge marshals `stdcall`,
 `cdecl` and `thiscall`, parks a caller that cannot be answered yet, calls back into guest code and
@@ -35,19 +34,20 @@ build can run without.
 ```sh
 npm ci
 npm run typecheck && npm run lint && npm test && npm run check:boundaries
-npm run fetch:v86 && npm run fetch:video-decoder   # the pinned emulator and decoder binaries
+npm run fetch:video-decoder && npm run fetch:corpus   # the pinned decoder and the test corpus
 npm run test:integration && npm run build
 npm run cdp:probe   # boots the core in a real browser, checks the worker answers ping
 ```
 
-Building the vendored v86 from source needs Docker (`npm run build:v86 -- --docker`, then
-`npm run verify:reproducibility`); everyday development takes the prebuilt artifacts instead.
+The v86 emulator is not part of the repository or the package: `createApp({ engine: 'emulator',
+v86: { moduleUrl, wasmBytes } })` runs it for a caller that brings its own build.
 
 ## Layout
 
 - `modules/core/` — `@bottlify/core`, the engine package: `src/system/` is the module contract,
   `src/layers/<name>/` one directory per layer, `src/host/` the page and worker ends of
-  `createApp`, `vendor/v86` the emulator submodule.
+  `createApp`.
+- `modules/cork/` — `@bottlify/cork`, the x86 → WebAssembly translator the core loads by URL.
 - `modules/networking/`, `modules/installer/` — the Winsock relay, and adding a program by running
   its installer; each a workspace of its own.
 - `tools/cdp_test/` — dev-only browser harness (`npm run cdp:probe`, `cdp:game`, `cdp:frames`).

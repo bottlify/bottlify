@@ -55,12 +55,10 @@ import { createReplicas } from './replicas.js';
 /**
  * @typedef {Object} AppOptions
  * @property {Uint8Array} executable      The program to run.
- * @property {Object} [v86]               Emulator artifacts, when the package's
- *           own are not wanted: any of these overrides its counterpart, and
- *           what is not named is taken from beside this module.
- * @property {string} [v86.moduleUrl]     The emulator's module.
- * @property {string} [v86.wasmUrl]       Where its binary is fetched from.
- * @property {ArrayBuffer} [v86.wasmBytes]  Or the binary itself.
+ * @property {Object} [v86]               The emulator, for `engine: 'emulator'`. The
+ *           package carries none: a caller that wants it brings both halves.
+ * @property {string} [v86.moduleUrl]     The emulator's module (`libv86.mjs`).
+ * @property {ArrayBuffer} [v86.wasmBytes]  Its binary (`v86.wasm`).
  * @property {Object} [cork]              The translator, for every engine but `emulator`.
  * @property {string} [cork.moduleUrl]    Its entry module; the package beside core by default.
  * @property {import('./layers/cpu/engine.js').EngineConfig} [cork.config]  Its settings;
@@ -179,8 +177,8 @@ import { createReplicas } from './replicas.js';
  *     The emulator's compiler budgets, by config index. For measurement.
  * @property {'emulator' | 'cork'} [engine]
  *     Which execution engine runs the program (`docs/core/cpu.md`'s "Engines").
- *     Default `cork`. Chosen per launch: a launcher passes the person's
- *     choice for the bundle, or the bundle manifest's suggestion.
+ *     Default `cork`, the one the package carries; `emulator` only with `v86`
+ *     handed in, and refused without it.
  * @property {boolean} [sampling]  The `cpu` layer's always-on guest sampler
  *     (`docs/core/cpu.md`'s "Sampling"). `false` turns it off, for a caller
  *     measuring the emulator's own compiler rather than the guest's code.
@@ -1232,12 +1230,13 @@ export function clockCredit(source, clock, cap){
 }
 
 /**
- * Where the emulator's artifacts are, relative to this module.
+ * Where the package's own binaries are, relative to this module: the bundle
+ * decoder's wasm build.
  *
  * A built package carries them beside itself and the build says where; the
  * source tree keeps them in its prebuilt directory. One expression rather
- * than two entry points, so a caller that imports either gets an engine that
- * boots without being told where its own emulator is.
+ * than two entry points, so a caller that imports either finds them without
+ * being told.
  */
 const VENDOR = /** @type {{ env?: { BOTTLIFY_VENDOR?: string } }} */ (import.meta).env?.BOTTLIFY_VENDOR
     ?? '../vendor/prebuilt/';
@@ -1261,21 +1260,25 @@ export function corkArtifacts(asked, here = import.meta.url){
 }
 
 /**
- * The emulator to boot: what the caller named, and the package's own for the
- * rest.
+ * The emulator the caller brought, for `engine: 'emulator'`; null for any other
+ * engine. The package carries no emulator, so a launch that names it without
+ * handing one in is refused before anything is built.
  *
- * @param {{ moduleUrl?: string, wasmUrl?: string, wasmBytes?: ArrayBuffer } | undefined} asked
- * @param {string} [here]  The module the defaults are relative to.
- * @returns {{ moduleUrl: string, wasmUrl: string | null, wasmBytes: ArrayBuffer | null }}
+ * @param {Pick<AppOptions, 'engine' | 'v86'>} options
+ * @returns {{ moduleUrl: string, wasmBytes: ArrayBuffer } | null}
  */
-export function emulatorArtifacts(asked, here = import.meta.url){
-    return {
-        moduleUrl: asked?.moduleUrl ?? new URL(`${VENDOR}libv86.mjs`, here).href,
-        wasmUrl: asked?.wasmBytes
-            ? null
-            : (asked?.wasmUrl ?? new URL(`${VENDOR}v86.wasm`, here).href),
-        wasmBytes: asked?.wasmBytes ?? null,
-    };
+export function emulatorOf(options){
+    if ((options.engine ?? DEFAULT_ENGINE) !== 'emulator')
+    {
+        return null;
+    }
+    const { moduleUrl, wasmBytes } = options.v86 ?? {};
+    if (!moduleUrl || !wasmBytes)
+    {
+        throw new Error('cpu: the emulator is not installed -- engine "emulator" needs'
+            + ' the caller\'s v86, as `v86: { moduleUrl, wasmBytes }`');
+    }
+    return { moduleUrl, wasmBytes };
 }
 
 /**
@@ -3422,7 +3425,7 @@ async function buildApp(options){
             compatibility: compatibilityOf(options.executable),
             // The speed the registry reports: the rate the engine's rdtsc
             // advances at. The emulator's counter keeps the default.
-            processorMhz: options.engine === 'cork' ? CORK_TSC_MHZ : undefined,
+            processorMhz: (options.engine ?? DEFAULT_ENGINE) === 'cork' ? CORK_TSC_MHZ : undefined,
             // The one namespace a named mutex, event, semaphore, timer and
             // file mapping all share, carried in from outside this build so a
             // name a parent registered is one a child still finds: the table
@@ -3845,38 +3848,9 @@ async function buildApp(options){
     const audio = core.api('audio');
     const input = core.api('input');
 
-    const chosen = options.engine ?? DEFAULT_ENGINE;
-    if (chosen === 'cork')
-    {
-        // Cork runs with nothing of the emulator loaded: its own host, its own
-        // memory, and the translator named by `engineUrl`.
-        await cpu.boot();
-    }
-    else
-    {
-        const emulator = emulatorArtifacts(options.v86);
-        /** @type {ArrayBuffer} */
-        let wasmBytes;
-        if (emulator.wasmBytes)
-        {
-            wasmBytes = emulator.wasmBytes;
-        }
-        else
-        {
-            try
-            {
-                wasmBytes = await bytesAt(/** @type {string} */ (emulator.wasmUrl));
-            }
-            catch (e){
-                // A build without the emulator's artifacts: the layer is
-                // optional, and a launch that names it is told so rather than
-                // handed a fetch's error.
-                throw new Error('cpu: the emulator is not available in this build'
-                    + ` (engine "${chosen}" needs it)`, { cause: e });
-            }
-        }
-        await cpu.boot({ moduleUrl: emulator.moduleUrl, wasmBytes });
-    }
+    // Cork runs with nothing of the emulator loaded: its own host, its own
+    // memory, and the translator named by `engineUrl`.
+    await cpu.boot(emulatorOf(options) ?? undefined);
 
     // A processor exception goes to the handlers the program registered
     // before it stops the machine. The thread waits the way a host call does
@@ -6493,6 +6467,7 @@ export async function createApp(options){
     // fails later somewhere that says nothing about why.
     windowsVersion(options.windows);
     graphicsChoice(options.graphicsApi);
+    emulatorOf(options);
     // Both outlive every process: subscriptions a caller made before the first
     // child existed still have to fire for the last one, and the record of what
     // asked for a replacement is worthless if it dies with the asker.

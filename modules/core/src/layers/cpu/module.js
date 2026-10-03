@@ -29,24 +29,18 @@ export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
 
 /**
  * The execution engines a launch may select (`engine.js` for the contract):
- * `emulator`, the vendored emulator alone, and `cork`, the translator alone.
+ * `cork`, the translator, and `emulator`, v86 -- which the package does not
+ * carry, so only a caller that brings it can boot it.
  */
 export const ENGINES = Object.freeze(['emulator', 'cork']);
 
-/** The engines a launch can run today. */
-const BUILT_ENGINES = new Set(ENGINES);
-
-/**
- * The engine a launch that names none runs: the translator. The emulator stays
- * an engine a launch may select, and the reference the translator's suites
- * judge it against.
- */
+/** The engine a launch that names none runs: the translator. */
 export const DEFAULT_ENGINE = 'cork';
 
 /**
  * cpu — the guest CPU and the channel the guest calls us through.
  *
- * The only layer that knows an emulator is underneath. Everything above it
+ * The only layer that knows which engine is underneath. Everything above it
  * talks about running, stopping, registers, physical memory and traps.
  */
 
@@ -144,10 +138,6 @@ export function createCpuModule(){
             if (!ENGINES.includes(engine))
             {
                 throw new Error(`cpu: unknown engine "${engine}" (${ENGINES.join(', ')})`);
-            }
-            if (!BUILT_ENGINES.has(engine))
-            {
-                throw new Error(`cpu: engine "${engine}" is not built yet`);
             }
 
             /**
@@ -406,18 +396,18 @@ export function createCpuModule(){
                  * Starts the selected engine.
                  *
                  * Separate from `create` on purpose: building the module graph should
-                 * be cheap and should not require the several megabytes of vendor
-                 * artifacts, so that a consumer can inspect a build -- or run one with
-                 * the guest never started -- without paying for an emulator.
+                 * be cheap and should not load an engine, so that a consumer can
+                 * inspect a build -- or run one with the guest never started --
+                 * without paying for one.
                  *
                  * Throws if *this instance* has already booted. A different
                  * instance that has booted -- the one a process replacement is
                  * retiring, say -- has no bearing on this one: each keeps its own
                  * machine, and only its own.
                  *
-                 * Under `cork`, no emulator artifact is fetched or instantiated; the
-                 * translator module named by `engineUrl` supplies the host's own
-                 * memory and runtime.
+                 * Under `cork` the translator module named by `engineUrl` supplies the
+                 * host's own memory and runtime, and `artifacts` is not read; under
+                 * `emulator` it is the v86 the caller brought.
                  *
                  * @param {Object} [artifacts]
                  * @param {string} [artifacts.moduleUrl]
@@ -462,10 +452,8 @@ export function createCpuModule(){
                         const { moduleUrl, wasmBytes } = artifacts;
                         if (!moduleUrl || !wasmBytes)
                         {
-                            // A build without the emulator's artifacts, or a launch
-                            // that named none: the optional layer is not there.
-                            throw new Error('cpu: the emulator is not available in this'
-                                + ` build (engine "${engine}" needs it)`);
+                            throw new Error('cpu: the emulator is not installed -- engine'
+                                + ' "emulator" needs the caller\'s v86 (moduleUrl, wasmBytes)');
                         }
                         const emulator = await createV86Host({ ...settings, moduleUrl, wasmBytes });
                         state.host = emulator;
