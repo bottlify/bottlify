@@ -169,6 +169,21 @@ test('ETO_OPAQUE fills the caller rectangle whatever the background mode says', 
     assert.equal(surface.read(0, 1), INK, 'the string is drawn where it was asked for');
 });
 
+test('the background is filled a row at a time, not a pixel at a time', ()=>{
+    const surface = canvas(32, 16);
+    /** @type {number[][]} */
+    const fills = [];
+    const fill = /** @type {NonNullable<typeof surface.fill>} */ (surface.fill);
+    surface.fill = (left, top, right, bottom, pixel)=>{
+        fills.push([left, top, right, bottom]);
+        fill.call(surface, left, top, right, bottom, pixel);
+    };
+    draw(surface, { x: 2, y: 1, bkMode: OPAQUE, align: TA_LEFT | TA_TOP });
+    draw(surface, { flags: ETO_OPAQUE, rect: { left: 16, top: 1, right: 20, bottom: 4 } });
+    assert.deepEqual(fills, [[2, 1, 14, 11], [16, 1, 20, 4]]);
+    assert.equal(surface.read(19, 3), PAPER);
+});
+
 test('ETO_CLIPPED narrows the clip and does not replace it', ()=>{
     const surface = canvas(32, 16);
     const painter = createPainter(surface, { left: 0, top: 0, right: 8, bottom: 16 });
