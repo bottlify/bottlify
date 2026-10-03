@@ -218,7 +218,7 @@ arrays out of each `module.js` rather than trusting a separately-maintained rule
   `wasm32-unknown-unknown` Rust target. **When bumping the v86 submodule or touching this pipeline,
   re-check its Makefile for new toolchain requirements before assuming the Dockerfile still
   covers it** — this is exactly the kind of gap that looks fine until someone actually runs the
-  build (see `docs/core/` for the concrete gaps found and fixed at Phase 0 review time).
+  build.
 - `scripts/verify-reproducibility.mjs` rebuilds v86 in a clean container and diffs SHA-256 hashes
   against `dist/vendor/manifest.json` — anything but a byte-for-byte match fails the build. This is
   the enforcement of "Phase 0 acceptance: a clean clone builds reproducibly", not a nice-to-have.

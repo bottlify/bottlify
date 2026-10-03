@@ -208,8 +208,8 @@ time on frames nobody sees. *Recorded 2026-09-26; the choice predates this repos
 Some programs refuse a Windows older than they were written for and some one newer, so no single
 answer serves every title: `createApp`'s `windows` option (and a bottle manifest's `windows` field)
 picks one of `win2000`, `winxp`, `win7` and `win10`, each at the last service pack its release
-had, and every place a program reads the version from answers that one (`docs/core/win32.md`'s
-"The version a program is told"):
+had, and every place a program reads the version from answers that one (`docs/core/api.md`'s
+`windows` option):
 
 | choice | version | service pack | suite | profile layout |
 |--------|---------|--------------|-------|----------------|

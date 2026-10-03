@@ -81,9 +81,9 @@ came from, and `dist/checksums.json` covers everything in the package.
 
 ## Documentation
 
-[`docs/core/`](https://github.com/bottlify/bottlify/tree/main/docs/core) documents the module
-contract, the layer graph and the configuration shape — what each layer promises, and what a build
-with a layer switched off still does.
+[`docs/core/`](https://github.com/bottlify/bottlify/tree/main/docs/core) documents `createApp`'s
+options and controller, the module contract and each layer's configuration, and what is not there
+yet.
 
 ## Licence
 

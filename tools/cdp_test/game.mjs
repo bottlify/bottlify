@@ -1248,8 +1248,7 @@ export async function game(options){
     // The same sidecar convention as `hooks.json`: per-title content beside
     // the manifest, absent for most bundles. Maps an image name to its
     // function starts, sorted ascending, for folding the sampler's address
-    // buckets into names below -- this driver's own job, never the engine's
-    // (`docs/core/cpu.md`'s "Sampling").
+    // buckets into names below -- this driver's own job, never the engine's.
     const symbolsPath = join(directory, 'symbols.json');
     const symbols = existsSync(symbolsPath)
         ? JSON.parse(await readFile(symbolsPath, 'utf8'))
