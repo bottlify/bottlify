@@ -22,6 +22,7 @@ import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
 import { createProcessBlocks, TEB } from './layers/win32/kernel32/teb.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
+import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
@@ -154,6 +155,13 @@ import { createReplicas } from './replicas.js';
  *     the profile folders the registry, the shell and the environment name.
  *     Windows 10 tells a program whose manifest does not declare it 6.2, as
  *     the real one does. Default `winxp`; any other name is refused.
+ * @property {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'opengl'} [graphicsApi]
+ *     The graphics a bottle prefers: every DirectX up to the one named --
+ *     DirectX 9 has DirectDraw and Direct3D 8 as well -- or OpenGL alone. Only
+ *     those system libraries exist and only their wrappers are built, and the
+ *     registry, the setup library, DxDiag and the DirectX libraries' file
+ *     versions name its DirectX -- 7.0, 8.1, or 9.0c for 9 and 10. Absent,
+ *     every library and DirectX 9.0c; any other name is refused.
  * @property {{ network?: any, trustedRoots?: (Uint8Array | string)[] }} [win32]
  *     `network` is the transport under Winsock, in the shape the win32 layer's
  *     `wsock32/transport.js` names: what a relay client hands back, or an
@@ -170,12 +178,12 @@ import { createReplicas } from './replicas.js';
  * @property {Record<string, number>} [jit]
  *     The emulator's compiler budgets, by config index. For measurement.
  * @property {'emulator' | 'cork'} [engine]
- *     Which execution engine runs the program (`docs/core/cpu.md`'s "Engines").
- *     Default `cork`. Chosen per launch: a launcher passes the person's
- *     choice for the bundle, or the bundle manifest's suggestion.
- * @property {boolean} [sampling]  The `cpu` layer's always-on guest sampler
- *     (`docs/core/cpu.md`'s "Sampling"). `false` turns it off, for a caller
- *     measuring the emulator's own compiler rather than the guest's code.
+ *     Which execution engine runs the program. Default `cork`. Chosen per
+ *     launch: a launcher passes the person's choice for the bundle, or the
+ *     bundle manifest's suggestion.
+ * @property {boolean} [sampling]  The `cpu` layer's always-on guest sampler.
+ *     `false` turns it off, for a caller measuring the emulator's own compiler
+ *     rather than the guest's code.
  * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
  *           it is what makes `sample` a profile rather than a rumour.
  * @property {boolean} [preemption]  End a slice early when a thread of higher
@@ -216,8 +224,8 @@ import { createReplicas } from './replicas.js';
  * @property {any} [device]          The GPU to draw on, when there is one.
  * @property {{ presenter?: any, compressedTextures?: boolean, maxFrameLatency?: number }}
  *           [graphics]
- *           The graphics layer's configuration (docs/core/graphics.md, the
- *           Configuration table), forwarded to it as given: `compressedTextures`
+ *           The graphics layer's configuration (docs/core/configuration.md,
+ *           graphics), forwarded to it as given: `compressedTextures`
  *           turns the block-compressed upload path on where the device has the
  *           feature, and `maxFrameLatency` is how many frames the device may
  *           still be working on when a present answers (three; zero for no
@@ -3038,7 +3046,7 @@ async function buildApp(options){
             // Looked up once: it is asked on every crossing.
             lastError: ()=>(win32Api ??= core.api('win32')).lastError(),
             // Where the reader above finds it for a thread with a block,
-            // read there directly (bridge.md).
+            // read there directly.
             lastErrorOffset: TEB.LAST_ERROR,
             // Costly and off unless asked for; see the dispatcher.
             traceStrings: options.traceStrings ?? false,
@@ -3260,6 +3268,7 @@ async function buildApp(options){
             // build composes below -- the device, the presenter, the screen --
             // is the run's and wins over a caller's value of the same name.
             ...options.graphics,
+            choice: options.graphicsApi,
             // The display's raster -- the vertical blank, the scan line --
             // runs on the guest's clock, which only this assembly can reach:
             // a program times its spin on the blank with its own timers.
@@ -3408,6 +3417,8 @@ async function buildApp(options){
             // The Windows the machine is, and what the program says it knows,
             // which is all Windows 10 needs to decide what to tell it.
             windows: options.windows,
+            directx: options.graphicsApi
+                ? GRAPHICS_CHOICES[options.graphicsApi].directx ?? undefined : undefined,
             compatibility: compatibilityOf(options.executable),
             // The speed the registry reports: the rate the engine's rdtsc
             // advances at. The emulator's counter keeps the default.
@@ -5039,8 +5050,8 @@ async function buildApp(options){
                 // `oracle` never skips the guest's own code, whatever the
                 // kernel decided: that is the whole of the differential
                 // guard, and it is the sidecar's flag, not the kernel's.
-                // A site hook has no in-browser oracle (see loader.md);
-                // its `mode` is always `replace`.
+                // A site hook has no in-browser oracle; its `mode` is always
+                // `replace`.
                 return entry.mode === 'oracle' ? false : handled;
             };
         };
@@ -6481,6 +6492,7 @@ export async function createApp(options){
     // Refused before anything is built: a machine made to the wrong Windows
     // fails later somewhere that says nothing about why.
     windowsVersion(options.windows);
+    graphicsChoice(options.graphicsApi);
     // Both outlive every process: subscriptions a caller made before the first
     // child existed still have to fire for the last one, and the record of what
     // asked for a replacement is worthless if it dies with the asker.

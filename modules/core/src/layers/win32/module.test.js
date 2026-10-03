@@ -460,6 +460,11 @@ test('a Windows that is not one of the four is refused when the layer is made', 
         /win2000, winxp, win7, win10/);
 });
 
+test('a DirectX that is not one of the three is refused when the layer is made', async()=>{
+    await assert.rejects(win32Module.create({ directx: '6' }, stubHost()),
+        /unknown DirectX "6": the choices are 7, 8, 9/);
+});
+
 test('the configured Windows\'s profile folders are made on the volume at start', async()=>{
     // The folders the registry and the environment name for this Windows, and
     // not the other layout's.

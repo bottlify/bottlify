@@ -348,6 +348,40 @@ export const DIRECTX_VERSION = '4.09.00.0904';
 export const DIRECTX_RELEASE = Object.freeze({ major: 9, minor: 0, letter: 'c' });
 
 /**
+ * @typedef {Object} DirectXRelease
+ * @property {string} version  As the setup library reads it back.
+ * @property {number} major    And as DxDiag names the release.
+ * @property {number} minor
+ * @property {string} letter   A space where the release had none.
+ */
+
+/**
+ * The releases a bottle's graphics choice may make the machine report, by
+ * major version: 7.0, 8.1 and the default 9.0c.
+ *
+ * @type {Readonly<Record<'7' | '8' | '9', DirectXRelease>>}
+ */
+export const DIRECTX_RELEASES = Object.freeze({
+    7: Object.freeze({ version: '4.07.00.0700', major: 7, minor: 0, letter: ' ' }),
+    8: Object.freeze({ version: '4.08.01.0881', major: 8, minor: 1, letter: ' ' }),
+    9: Object.freeze({ version: DIRECTX_VERSION, ...DIRECTX_RELEASE }),
+});
+
+/**
+ * InstalledVersion's eight bytes for a version string: the minor in the first
+ * dword and the release and build in the second, each pair of the build's
+ * digits a byte read as hex -- 4.09.00.0904 is 00 00 00 09 00 00 09 04.
+ *
+ * @param {string} version
+ * @returns {Uint8Array}
+ */
+export function installedVersionOf(version){
+    const [, minor, release, build] = version.split('.');
+    return Uint8Array.of(0, 0, 0, Number(minor), 0, Number(release),
+        parseInt(build.slice(0, 2), 16), parseInt(build.slice(2), 16));
+}
+
+/**
  * @param {Readonly<Record<string, string>>} table @param {string[]} names
  * @returns {Record<string, string>}
  */
@@ -379,9 +413,10 @@ const IN_PROCESS_CLASSES = Object.freeze([
  * actually holds, so what a program reads here it can then open.
  *
  * @param {WindowsVersion} windows
+ * @param {DirectXRelease} [directx]  A bottle's own; absent, 9.0c.
  * @returns {readonly MachineKey[]}
  */
-const machineKeys = windows=>{
+const machineKeys = (windows, directx)=>{
     const folders = shellFolders(windows);
     const userFolders = pick(folders, ['Desktop', 'Programs', 'Start Menu', 'Startup',
         'Personal', 'AppData', 'Local AppData', 'Fonts']);
@@ -447,11 +482,13 @@ const machineKeys = windows=>{
         // treats the machine as having none and installs the whole runtime over
         // the interfaces the drawing layer answers for.
         { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\DirectX', values: {
-            Version: DIRECTX_VERSION,
-            InstalledVersion: Uint8Array.of(0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x09, 0x04),
+            Version: (directx ?? DIRECTX_RELEASES[9]).version,
+            InstalledVersion: installedVersionOf((directx ?? DIRECTX_RELEASES[9]).version),
             InstalledCount: 1,
             RC: 0,
-        } },
+        // A bottle's own release is put back at every start, over whatever a
+        // setup wrote there: it describes the machine, as the Windows does.
+        }, ...directx ? { owned: ['Version', 'InstalledVersion'] } : {} },
         { root: HKEY_CURRENT_USER, path: 'Software\\Microsoft\\Windows\\CurrentVersion\\Run' },
         { root: HKEY_CURRENT_USER,
             path: 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders',
@@ -539,13 +576,18 @@ const classesKey = path=>({
  * index-based enumeration answer the same thing twice. Overwriting a value
  * leaves it where it was; only deleting and re-adding moves it to the end.
  *
- * @param {{ processorMhz?: number, windows?: WindowsVersion }} [options]
+ * @param {{ processorMhz?: number, windows?: WindowsVersion,
+ *     directx?: DirectXRelease }} [options]
  *        `processorMhz` is the speed the processor key reports: the rate the
  *        engine's rdtsc advances at, which is the engine's to say. `windows` is
- *        the Windows the machine's keys describe; absent, the default.
+ *        the Windows the machine's keys describe, `directx` the DirectX; absent,
+ *        the defaults.
  */
-export function createHive({ processorMhz = PROCESSOR.mhz, windows = windowsVersion() } = {}){
-    const furnishings = machineKeys(windows);
+export function createHive(
+    { processorMhz = PROCESSOR.mhz, windows = windowsVersion(), directx } = {},
+)
+{
+    const furnishings = machineKeys(windows, directx);
     /** @type {Map<number, RegistryNode>} */
     const roots = new Map();
 
@@ -921,6 +963,31 @@ export function createHive({ processorMhz = PROCESSOR.mhz, windows = windowsVers
                 changed();
             }
             return value;
+        },
+
+        /**
+         * Gives a subkey a new name beside its siblings; its values and
+         * subkeys go with it, and every handle on it stays on it. Not
+         * through the classes root, whose keys are two sides' at once.
+         *
+         * @param {RegistryKey} parent @param {string} name @param {string} to
+         * @returns {'renamed' | 'missing' | 'taken'}
+         */
+        rename(parent, name, to){
+            const node = isClasses(parent) ? null : parent.keys.get(fold(name));
+            if (!node || isClasses(parent))
+            {
+                return 'missing';
+            }
+            if (fold(name) !== fold(to) && parent.keys.has(fold(to)))
+            {
+                return 'taken';
+            }
+            parent.keys.delete(fold(name));
+            node.name = to;
+            parent.keys.set(fold(to), node);
+            changed();
+            return 'renamed';
         },
 
         /** @param {RegistryKey} key @param {string} name @returns {boolean} */

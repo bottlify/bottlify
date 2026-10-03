@@ -56,7 +56,7 @@ export const Convention = {
      * which is the low half of the very register this convention carries an
      * argument in. Nothing else here puts a live argument where the trap
      * sequence writes, so this is the one convention whose stub cannot be the
-     * plain `out; ret` shape (see `bridge.md`'s "Conventions").
+     * plain `out; ret` shape.
      */
     FASTCALL: 'fastcall',
 };

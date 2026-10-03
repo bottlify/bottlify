@@ -195,7 +195,7 @@ test('slices against a real emulator credit the address the guest ran at', async
         `the heaviest bucket is at 0x${top.address.toString(16)}, not the guest's loop`);
     assert.ok(top.instructions > 0);
     // No clock per slice: the sampler credits instructions only, and a reader
-    // derives milliseconds from the guest phase (cpu.md, "Sampling").
+    // derives milliseconds from the guest phase.
     assert.equal(top.ms, undefined);
 
     api.stop();

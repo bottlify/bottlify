@@ -2427,22 +2427,16 @@ async function bothWays(program){
     return runs;
 }
 
-test('with callReturn a region with x87 makes its calls as wasm calls and goes on after them',
-    async()=>{
-        // mov ecx, 100; L: call F; fld1; fstp dword [0x3000]; dec ecx; jnz L; hlt;
-        // F: inc edx; ret
-        const [plain, called] = await bothWays([
-            0xb9, 100, 0, 0, 0, 0xe8, 0x0c, 0, 0, 0, 0xd9, 0xe8, 0xd9, 0x1d, 0, 0x30, 0, 0,
-            0x49, 0x75, 0xf0, 0xf4, 0x42, 0xc3,
-        ]);
-        assert.deepEqual(called.state, plain.state);
-        assert.deepEqual(called.state, [0, 100, 0x80000, 0x3f800000, 0, 0xff]);
-        if (plain.transfers > 0)
-        {
-            assert.ok(called.transfers <= plain.transfers / 2 + 2,
-                `returns do not go through the hash: ${called.transfers} of ${plain.transfers}`);
-        }
-    });
+test('with callReturn a region with x87 calls by leaving, its state as without', async()=>{
+    // mov ecx, 100; L: call F; fld1; fstp dword [0x3000]; dec ecx; jnz L; hlt;
+    // F: inc edx; ret
+    const [plain, called] = await bothWays([
+        0xb9, 100, 0, 0, 0, 0xe8, 0x0c, 0, 0, 0, 0xd9, 0xe8, 0xd9, 0x1d, 0, 0x30, 0, 0,
+        0x49, 0x75, 0xf0, 0xf4, 0x42, 0xc3,
+    ]);
+    assert.deepEqual(called.state, plain.state);
+    assert.deepEqual(called.state, [0, 100, 0x80000, 0x3f800000, 0, 0xff]);
+});
 
 test('with callReturn a callee that returns a float on the x87 stack has its caller leave at the'
     + ' return address, the stack as the callee left it', async()=>{
@@ -2454,6 +2448,20 @@ test('with callReturn a callee that returns a float on the x87 stack has its cal
     ]);
     assert.deepEqual(called.state, plain.state);
     assert.deepEqual(called.state, [0, 100, 0x80000, 0x3f800000, 0, 0xff]);
+});
+
+test('with callReturn a region\'s control word reaches the callee, though the call is compiled'
+    + ' before the block that loads it', async()=>{
+    // mov word [0x3004], 0x0c7f; mov ecx, 100; L: call F; fldcw [0x3004]; dec ecx; jnz L;
+    // fnstcw [0x3008]; hlt; F: fnstcw [0x3000]; ret -- from the second time round F sees
+    // the word the loop loaded, and the word after the call is the region's own
+    const [plain, called] = await bothWays([
+        0x66, 0xc7, 0x05, 0x04, 0x30, 0, 0, 0x7f, 0x0c, 0xb9, 100, 0, 0, 0,
+        0xe8, 0x10, 0, 0, 0, 0xd9, 0x2d, 0x04, 0x30, 0, 0, 0x49, 0x75, 0xf2,
+        0xd9, 0x3d, 0x08, 0x30, 0, 0, 0xf4, 0xd9, 0x3d, 0, 0x30, 0, 0, 0xc3,
+    ]);
+    assert.equal(plain.state[3], 0xc7f, 'the callee stored the word the caller loaded');
+    assert.deepEqual(called.state, plain.state);
 });
 
 test('with callReturn calls deeper than the stack of waiting calls go on as plain transfers',

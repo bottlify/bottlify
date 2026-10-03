@@ -175,8 +175,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // Everything the translator relaxes for speed kept exact instead: the x87
         // exception flags and their tests, signalling NaNs, underflow and C1, and
         // the flags an instruction leaves undefined -- off, what the cheapest code
-        // leaves there; on, what the emulator leaves (docs/core/cpu.md lists every
-        // relaxation). Off, as games run: the tests and the hardware corpus turn it on.
+        // leaves there; on, what the emulator leaves. Off, as games run: the tests and
+        // the hardware corpus turn it on.
         precise: false,
         // A store through esp alone tests no page while no translated code lies
         // on a thread's stack (`noteStack`), which the runtime then switches off

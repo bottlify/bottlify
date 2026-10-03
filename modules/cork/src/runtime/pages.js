@@ -14,7 +14,7 @@
  * `stale` exit and the runtime invalidates what it translated there. The
  * null page is *not* marked: the emulator lets a program read address 0
  * today and hybrid parity keeps it so; marking it, and the memory layer's
- * read-only regions, is the owner's policy switch (`docs/core/cpu.md`).
+ * read-only regions, is the owner's policy switch.
  */
 
 import { Tables } from './layout.js';
