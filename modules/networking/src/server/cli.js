@@ -41,7 +41,8 @@ export function parseArguments(argv){
  *
  * Compared whole-label rather than by substring: a suffix rule for
  * `*.example.com` must not admit `example.com.attacker.net`, and a plain
- * `endsWith` admits exactly that.
+ * `endsWith` admits exactly that. A rule of `*` alone admits every host, for a
+ * relay run on one's own machine that is meant to be an open one.
  *
  * @param {string[]} allow @param {string} host
  */
@@ -49,6 +50,10 @@ export function permits(allow, host){
     const wanted = host.toLowerCase();
     return allow.some(rule=>{
         const pattern = rule.toLowerCase();
+        if (pattern === '*')
+        {
+            return true;
+        }
         return pattern.startsWith('*.')
             ? wanted.endsWith(pattern.slice(1)) && wanted.length > pattern.length - 1
             : wanted === pattern;

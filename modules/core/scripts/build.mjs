@@ -146,8 +146,16 @@ if (rewritten.length > 0)
 // guard reads `import.meta.BOTTLIFY_DIAGNOSTICS !== false`, which this folds to
 // `false`, and the minifier drops what it guards -- the clock reads, the
 // profilers, the records only a report reads. The source, which the tests and
-// the harness run, has no such define and keeps them.
-const DIAGNOSTICS_OFF = { 'import.meta.BOTTLIFY_DIAGNOSTICS': 'false' };
+// the harness run, has no such define and keeps them; so does a bundle built
+// with `--diagnostics` (or BOTTLIFY_DIAGNOSTICS=1), for a launcher whose runs
+// are to be measured.
+const keepDiagnostics = process.argv.includes('--diagnostics')
+    || process.env.BOTTLIFY_DIAGNOSTICS === '1';
+const DIAGNOSTICS_OFF = keepDiagnostics ? {} : { 'import.meta.BOTTLIFY_DIAGNOSTICS': 'false' };
+if (keepDiagnostics)
+{
+    console.log('diagnostics: kept in the bundle');
+}
 // Four entries, one build: the module a page imports and the workers it
 // starts -- the engine and the log keeper -- and the one the engine starts,
 // that Direct3D draws in. Bundled apart because a worker is loaded by URL,
