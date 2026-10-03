@@ -114,7 +114,7 @@ const u32 = value=>Uint8Array.from([value & 0xff, value >>> 8 & 0xff,
  *   invalid exception and condition codes an x87 arithmetic or compare sets
  *   from it (`cvttps2pi mm1, xmm1; faddp`, `pshufw mm0, mm1, 0x1b; fmul st0,
  *   st1`, `fxch st1; pxor mm1, mm1; fcomp`). The translator holds the value as
- *   a double, as `docs/core/cpu.md` says it does, and the emulator holds the
+ *   a double, and the emulator holds the
  *   80-bit encoding the MMX write left; a double cannot carry that encoding's
  *   payload, and its arithmetic raises the invalid exception by the f64 rule
  *   where the emulator raises it by the 80-bit one (an unsupported encoding)

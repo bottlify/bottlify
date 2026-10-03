@@ -67,7 +67,7 @@ function buildLoopExe(iterations = ITERATIONS){
             0xff, 0x15, ...u32(iat('ExitProcess')),
             // Never reached. Without it the emulator's compiler takes the
             // data after the call for code and compiles it and the zeros
-            // after it with the loop (cpu.md, Limitations).
+            // after it with the loop.
             0xf4, // hlt
         ],
     });

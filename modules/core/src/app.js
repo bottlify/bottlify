@@ -178,12 +178,12 @@ import { createReplicas } from './replicas.js';
  * @property {Record<string, number>} [jit]
  *     The emulator's compiler budgets, by config index. For measurement.
  * @property {'emulator' | 'cork'} [engine]
- *     Which execution engine runs the program (`docs/core/cpu.md`'s "Engines").
- *     Default `cork`. Chosen per launch: a launcher passes the person's
- *     choice for the bundle, or the bundle manifest's suggestion.
- * @property {boolean} [sampling]  The `cpu` layer's always-on guest sampler
- *     (`docs/core/cpu.md`'s "Sampling"). `false` turns it off, for a caller
- *     measuring the emulator's own compiler rather than the guest's code.
+ *     Which execution engine runs the program. Default `cork`. Chosen per
+ *     launch: a launcher passes the person's choice for the bundle, or the
+ *     bundle manifest's suggestion.
+ * @property {boolean} [sampling]  The `cpu` layer's always-on guest sampler.
+ *     `false` turns it off, for a caller measuring the emulator's own compiler
+ *     rather than the guest's code.
  * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
  *           it is what makes `sample` a profile rather than a rumour.
  * @property {boolean} [preemption]  End a slice early when a thread of higher
@@ -224,8 +224,8 @@ import { createReplicas } from './replicas.js';
  * @property {any} [device]          The GPU to draw on, when there is one.
  * @property {{ presenter?: any, compressedTextures?: boolean, maxFrameLatency?: number }}
  *           [graphics]
- *           The graphics layer's configuration (docs/core/graphics.md, the
- *           Configuration table), forwarded to it as given: `compressedTextures`
+ *           The graphics layer's configuration (docs/core/configuration.md,
+ *           graphics), forwarded to it as given: `compressedTextures`
  *           turns the block-compressed upload path on where the device has the
  *           feature, and `maxFrameLatency` is how many frames the device may
  *           still be working on when a present answers (three; zero for no
@@ -3046,7 +3046,7 @@ async function buildApp(options){
             // Looked up once: it is asked on every crossing.
             lastError: ()=>(win32Api ??= core.api('win32')).lastError(),
             // Where the reader above finds it for a thread with a block,
-            // read there directly (bridge.md).
+            // read there directly.
             lastErrorOffset: TEB.LAST_ERROR,
             // Costly and off unless asked for; see the dispatcher.
             traceStrings: options.traceStrings ?? false,
@@ -5050,8 +5050,8 @@ async function buildApp(options){
                 // `oracle` never skips the guest's own code, whatever the
                 // kernel decided: that is the whole of the differential
                 // guard, and it is the sidecar's flag, not the kernel's.
-                // A site hook has no in-browser oracle (see loader.md);
-                // its `mode` is always `replace`.
+                // A site hook has no in-browser oracle; its `mode` is always
+                // `replace`.
                 return entry.mode === 'oracle' ? false : handled;
             };
         };

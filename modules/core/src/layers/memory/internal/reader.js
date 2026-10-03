@@ -12,8 +12,8 @@
  * A class rather than closures a `create()` makes: its methods are one set of
  * functions for the realm, optimised once and inlined into their callers in
  * every machine a process makes, where a closure of a later machine starts
- * unoptimised and is compiled around what the machines before it left
- * (`docs/core/memory.md`). What differs between machines -- the table, the
+ * unoptimised and is compiled around what the machines before it left.
+ * What differs between machines -- the table, the
  * RAM, the spans read last -- is the instance's.
  */
 

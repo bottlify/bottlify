@@ -349,7 +349,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
                 // word's own call down through the cpu layer's api to its host
                 // cost more than the read -- and several times more in a
                 // process's second machine, whose code finds no single machine's
-                // functions to count on (docs/core/bridge.md).
+                // functions to count on.
                 if (raw.readU32sInto)
                 {
                     raw.readU32sInto(address, count, into, at);
