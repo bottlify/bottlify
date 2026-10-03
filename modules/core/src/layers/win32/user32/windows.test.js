@@ -3455,3 +3455,15 @@ test('GetMessage on a window already destroyed fails at once rather than waiting
     assert.equal(fns.GetMessageW.handler([MSG_BUFFER, hwnd, 0, 0]), -1);
     assert.equal(errors.at(-1), 1400, 'ERROR_INVALID_WINDOW_HANDLE');
 });
+
+test('LockWindowUpdate locks one window at a time, and a null window unlocks it', ()=>{
+    const { fns, memory, hwnd } = withWindow();
+    const other = createWindow(fns, memory, { style: 0, x: 0, y: 0, width: 50, height: 40 });
+    assert.equal(fns.LockWindowUpdate.handler([hwnd]), 1);
+    assert.equal(fns.LockWindowUpdate.handler([other]), 0, 'a second while one is locked');
+    assert.equal(fns.LockWindowUpdate.handler([hwnd]), 0, 'nor the same one again');
+    assert.equal(fns.LockWindowUpdate.handler([0]), 1, 'unlocked');
+    assert.equal(fns.LockWindowUpdate.handler([other]), 1, 'and another can be locked then');
+    assert.equal(fns.LockWindowUpdate.handler([0]), 1);
+    assert.equal(fns.LockWindowUpdate.handler([0x12345]), 0, 'no window, no lock');
+});
