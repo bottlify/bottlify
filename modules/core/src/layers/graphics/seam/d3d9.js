@@ -71,18 +71,27 @@ import { createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
-    commandCode, createShadow, getRenderStateCode, getTextureStageStateCode, getTransformCode,
-    lockCode, unlockCode,
-    setMaterialCode,
-    setRenderStateCode, setSamplerStateCode, setStreamSource9Code, setTextureCode,
-    setTextureStageStateCode, setTransformCode, setBindingCode, SHADOW,
+    RENDER_STATE_MIRROR, TRANSFORM_MIRROR, commandCode, createShadow, getRenderStateCode,
+    getTextureStageStateCode, getTransformCode, lockCode, stageStateMirror, unlockCode,
 } from './shadow.js';
 import { D3DTSS9, SAMPLER_STATE_KEY } from '../d3d9/samplerstates.js';
-import { COMMANDS, commandSlot } from '../d3d9/commands.js';
+import { COMMANDS, commandObjects, commandSlot } from '../d3d9/commands.js';
 
 /** Direct3D 9's stage state types below 32, a bit each: what the guest routine takes. */
 const STAGE_STATE_TYPES_9 = Object.values(D3DTSS9)
     .reduce((mask, type)=>(type < 32 ? mask | (1 << type) : mask), 0) >>> 0;
+
+/**
+ * What the command routines of the setters whose getters run in the guest
+ * keep in the block for them (`shadow.js`).
+ *
+ * @type {Record<string, any[]>}
+ */
+const GETTER_MIRRORS = {
+    SetRenderState: [...RENDER_STATE_MIRROR],
+    SetTransform: [...TRANSFORM_MIRROR],
+    SetTextureStageState: stageStateMirror(STAGE_STATE_TYPES_9),
+};
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c | 0;
@@ -2475,28 +2484,13 @@ export function createDirect3D9Seam(
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const deviceGuests = allocate
         ? {
-            SetRenderState: ({ trap })=>placeCode(at=>setRenderStateCode(at, trap)),
             GetRenderState: ({ trap })=>placeCode(at=>getRenderStateCode(at, trap)),
-            SetTransform: ({ trap })=>placeCode(at=>setTransformCode(at, trap)),
             GetTransform: ({ trap })=>placeCode(at=>getTransformCode(at, trap)),
-            SetTextureStageState: ({ trap })=>placeCode(at=>setTextureStageStateCode(at, trap,
-                STAGE_STATE_TYPES_9)),
             GetTextureStageState: ({ trap })=>placeCode(at=>getTextureStageStateCode(at, trap,
                 STAGE_STATE_TYPES_9)),
-            SetMaterial: ({ trap })=>placeCode(at=>setMaterialCode(at, trap)),
-            SetSamplerState: ({ trap })=>placeCode(at=>setSamplerStateCode(at, trap)),
-            SetTexture: ({ trap })=>placeCode(at=>setTextureCode(at, trap, 'slow')),
-            SetStreamSource: ({ trap })=>placeCode(at=>setStreamSource9Code(at, trap)),
-            SetVertexDeclaration: ({ trap })=>placeCode(at=>
-                setBindingCode(at, trap, SHADOW.DECLARATION)),
-            SetIndices: ({ trap })=>placeCode(at=>setBindingCode(at, trap, SHADOW.INDICES)),
-            SetVertexShader: ({ trap })=>placeCode(at=>
-                setBindingCode(at, trap, SHADOW.VERTEX_SHADER)),
-            SetPixelShader: ({ trap })=>placeCode(at=>
-                setBindingCode(at, trap, SHADOW.PIXEL_SHADER)),
             ...Object.fromEntries(Object.entries(COMMANDS).map(([name, shape])=>[name,
-                (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>
-                    commandCode(at, trap, { ...shape, slot: commandSlot(name) }))])),
+                (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at, trap,
+                    { ...shape, slot: commandSlot(name), mirror: GETTER_MIRRORS[name] }))])),
         }
         : {};
     const deviceInterfaces = [
@@ -2941,11 +2935,8 @@ export function createDirect3D9Seam(
                 name: 'IDirect3DDevice9',
                 bindings: 'd3d9',
                 samplerStates: SAMPLER_STATE_KEY,
-                // A device the program shares between threads takes each
-                // call when it is made, as the runtime serialises them.
-                commands: ((behaviourFlags >>> 0) & D3DCREATE.MULTITHREADED) !== 0
-                    ? undefined
-                    : { take: records=>held.device.commands(records) },
+                commands: { take: records=>held.device.commands(records,
+                    commandObjects(records, publisher.objectAt)) },
             });
             shadows.set(held.device, shadow);
             held.device.guestState = ()=>shadow.address();

@@ -1921,14 +1921,12 @@ test('with guest memory, shaders set in the guest reach the device', ()=>{
     assert.deepEqual(h.divergences, []);
 });
 
-test('with guest memory, the setters and GetRenderState of a device run in the guest', ()=>{
-    // Direct3D 9's render states, transforms, stage states and material take
-    // Direct3D 8's routines, and its sampler states share the stage state
-    // slots through the block's table; its streams and its declaration take
-    // routines of their own, and its draws stay traps. What
-    // the guest wrote reaches the device on the way into any host method, a
-    // reset puts the block back to the defaults, and a state block applied
-    // is mirrored into it.
+test('with guest memory, a device\'s setters and draws run in the guest, and its getters answer'
+    + ' from the block', ()=>{
+    // The setters and the draws a program makes most write the command ring
+    // (`commands.itest.js`); the getters that run in the guest read the block,
+    // which the setters keep and the host mirrors -- at creation and after a
+    // reset. A draw from the program's own memory stays with the host.
     const h = seamed({ shadow: true });
     const root = h.create();
     const { device } = h.createDevice(root);
@@ -1937,57 +1935,18 @@ test('with guest memory, the setters and GetRenderState of a device run in the g
     for (const name of ['SetRenderState', 'GetRenderState', 'SetTransform', 'GetTransform',
         'SetTextureStageState', 'GetTextureStageState', 'SetMaterial', 'SetSamplerState',
         'SetTexture', 'SetStreamSource', 'SetVertexDeclaration', 'SetIndices', 'SetVertexShader',
-        'SetPixelShader'])
+        'SetPixelShader', 'SetFVF', 'SetVertexShaderConstantF', 'DrawPrimitive',
+        'DrawIndexedPrimitive'])
     {
         assert.ok(guest(name), `${name} runs in the guest`);
     }
-    assert.ok(!guest('DrawPrimitive') && !guest('SetFVF'));
+    assert.ok(!guest('DrawPrimitiveUP') && !guest('Clear') && !guest('Present'));
 
     const block = h.box.memory.readU32(device + 4);
     assert.notEqual(block, 0, 'the block is one word past the interface pointer');
     const at = (/** @type {number} */ offset)=>block + offset;
     assert.equal(h.box.memory.readU32(at(SHADOW.RENDER_STATES + D3DRS.CULLMODE * 4)), 3);
-
-    // As the routine leaves it: the value, its mark, the two counters.
     h.box.memory.writeU32(at(SHADOW.RENDER_STATES + D3DRS.CULLMODE * 4), 1);
-    h.box.memory.writeU32(at(SHADOW.RENDER_STATE_MARKS + (D3DRS.CULLMODE >>> 5) * 4),
-        1 << (D3DRS.CULLMODE & 31));
-    h.box.memory.writeU32(at(SHADOW.RENDER_STATE_CALLS), 1);
-    h.box.memory.writeU32(at(SHADOW.CALLS), 1);
-    const value = 0x3100;
-    assert.equal(h.device(device, 'GetRenderState', [D3DRS.CULLMODE, value]), D3D_OK);
-    assert.equal(h.fields.readU32(value), 1, 'adopted on the way into the host');
-
-    // A sampler state as the routine leaves it: MAGFILTER (5) of sampler 1.
-    const key = SAMPLER_STATE_KEY[5];
-    assert.equal(h.box.memory.readU32(at(SHADOW.SAMPLER_KEYS + 4)) >>> 8 & 0xff, key,
-        'the table names its slot');
-    h.box.memory.writeU32(at(SHADOW.STAGE_STATES + (32 + key) * 4), 1);
-    h.box.memory.writeU32(at(SHADOW.STAGE_STATE_MARKS + 4), 1 << key);
-    h.box.memory.writeU32(at(SHADOW.STAGE_STATE_CALLS), 1);
-    h.box.memory.writeU32(at(SHADOW.CALLS), 2);
-    assert.equal(h.device(device, 'GetSamplerState', [1, 5, value]), D3D_OK);
-    assert.equal(h.fields.readU32(value), 1, 'the sampler state adopted');
-
-    // A texture bound in the guest is the one GetTexture hands back; one let
-    // go of before the host looked is adopted first, and its stage made stale.
-    assert.equal(h.device(device, 'CreateTexture',
-        [4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, value, 0]), D3D_OK);
-    const texture = h.fields.readU32(value);
-    const bind = (/** @type {number} */ stage, /** @type {number} */ calls)=>{
-        h.box.memory.writeU32(at(SHADOW.TEXTURES + stage * 4), texture);
-        h.box.memory.writeU32(at(SHADOW.TEXTURE_CALLS), calls);
-        h.box.memory.writeU32(at(SHADOW.CALLS), 2 + calls);
-    };
-    bind(1, 1);
-    assert.equal(h.device(device, 'GetTexture', [1, value]), D3D_OK);
-    assert.equal(h.fields.readU32(value), texture);
-    h.release(texture);
-    bind(2, 2);
-    assert.equal(h.release(texture), 0);
-    assert.equal(h.box.memory.readU32(at(SHADOW.TEXTURES + 8)), STALE_POINTER);
-    assert.equal(h.box.memory.readU32(at(SHADOW.TEXTURES + 4)), STALE_POINTER);
-
     const { parameters } = h.createDevice(root);
     assert.equal(h.device(device, 'Reset', [parameters]), D3D_OK);
     assert.equal(h.box.memory.readU32(at(SHADOW.RENDER_STATES + D3DRS.CULLMODE * 4)), 3,
@@ -2101,17 +2060,24 @@ test("an Ex device's GetDirect3D hands back the IDirect3D9Ex that made it", ()=>
 test('with guest memory, the calls the command ring carried are made at the next entry, in order',
     ()=>{
         // As the routines leave them (`commands.itest.js`): records in the ring
-        // and the head past them. A call the device refuses was told D3D_OK in
-        // the guest, so it is a divergence, said once.
+        // and the head past them. Each draw meets the state set just before
+        // it, not the latest. A call the device refuses was told D3D_OK in the
+        // guest, so it is a divergence, said once; and a record a routine has
+        // taken the space for but not finished stops the host until it is.
         const h = seamed({ shadow: true });
         const root = h.create();
         const { device } = h.createDevice(root);
         const viewportSlot = slot(IDIRECT3DDEVICE9_SLOTS, 'SetViewport');
         assert.ok(h.box.isGuest(device, viewportSlot), 'SetViewport runs in the guest');
+        assert.ok(h.box.isGuest(device, slot(IDIRECT3DDEVICE9_SLOTS, 'DrawIndexedPrimitive')));
         const owner = h.box.memory.readU32(device + 4);
         const ring = h.box.memory.readU32(owner + SHADOW.COMMANDS);
         assert.notEqual(ring, 0, 'the device has a ring');
         assert.ok(h.box.memory.readU32(owner + SHADOW.COMMAND_BYTES) >= 0x8000);
+        const out = 0x3000;
+        assert.equal(h.device(device, 'CreateTexture', [4, 4, 1, 0, D3DFMT.A8R8G8B8,
+            D3DPOOL.MANAGED, out, 0]), D3D_OK);
+        const texture = h.box.memory.readU32(out);
         /** @type {number[]} */
         const words = [];
         /** @param {string} name @param {number[]} args @param {number[]} data */
@@ -2124,45 +2090,59 @@ test('with guest memory, the calls the command ring carried are made at the next
         const one = new Uint32Array(new Float32Array([1]).buffer)[0];
         record('SetViewport', [-1], [8, 16, 32, 24, 0, one]);
         record('LightEnable', [2, 1]);
+        record('SetRenderState', [D3DRS.CULLMODE, 1]);
+        record('SetTexture', [0, texture]);
+        record('DrawIndexedPrimitive', [4, 0, 0, 4, 0, 2]);
+        record('SetRenderState', [D3DRS.CULLMODE, 3]);
+        record('SetTexture', [0, 0]);
+        record('DrawIndexedPrimitive', [4, 0, 0, 4, 0, 2]);
         record('SetViewport', [-1], [0, 0, 64, 48, 0, one]);
         // Past the 256 registers a hardware device has: refused, twice.
         record('SetVertexShaderConstantF', [255, -1, 2], new Array(8).fill(one));
         record('SetVertexShaderConstantF', [255, -1, 2], new Array(8).fill(one));
+        const whole = words.length * 4;
+        // One more whose space was taken and whose length is not there yet.
+        record('LightEnable', [5, 1]);
+        words[whole / 4 + 1] = 0;
         h.box.memory.writeBytes(ring, new Uint8Array(new Uint32Array(words).buffer));
         h.box.memory.writeU32(owner + SHADOW.COMMAND_HEAD, words.length * 4);
-        h.box.memory.writeU32(owner + SHADOW.COMMAND_CALLS, 5);
-        h.box.memory.writeU32(owner + SHADOW.CALLS, 5);
 
-        const out = 0x3000;
+        const made = h.object(device);
+        /** @type {[number, any][]} */
+        const draws = [];
+        const draw = made.DrawIndexedPrimitive.bind(made);
+        /** @param {any[]} args */
+        made.DrawIndexedPrimitive = (...args)=>{
+            /** @type {{ value?: number }} */
+            const cull = {};
+            /** @type {{ texture?: any }} */
+            const bound = {};
+            made.GetRenderState(D3DRS.CULLMODE, cull);
+            made.GetTexture(0, bound);
+            draws.push([cull.value ?? -1, bound.texture ?? null]);
+            // What GetTexture handed back carries a reference of its own.
+            bound.texture?.release();
+            return draw(...args);
+        };
         assert.equal(h.device(device, 'GetViewport', [out]), D3D_OK);
         assert.deepEqual(h.fields.readStruct(out, D3DVIEWPORT9, ['MinZ', 'MaxZ']),
             { X: 0, Y: 0, Width: 64, Height: 48, MinZ: 0, MaxZ: 1 }, 'the later viewport won');
+        assert.deepEqual(draws, [[1, h.object(texture)], [3, null]],
+            'each draw with the state set before it');
         assert.equal(h.device(device, 'GetLightEnable', [2, out]), D3D_OK);
         assert.notEqual(h.box.memory.readU32(out), 0, 'and the light is on');
         const refusals = h.divergences.filter(line=>line.includes('SetVertexShaderConstantF'));
         assert.equal(refusals.length, 1, h.divergences.join('\n'));
-        assert.equal(h.seam.shadow()?.commandCalls, 5);
+        assert.equal(h.seam.shadow()?.commandCalls, 11);
+        assert.equal(h.device(device, 'GetLightEnable', [5, out]), D3DERR_INVALIDCALL,
+            'the unfinished one is not made: light 5 is still one the device has never had');
 
-        // Read once: the next entry makes none of them again.
-        assert.equal(h.device(device, 'SetViewport', [0x3100]), D3D_OK);
-        h.fields.writeStruct(0x3100, D3DVIEWPORT9, { X: 1, Y: 2, Width: 3, Height: 4, MinZ: 0,
-            MaxZ: 1 }, ['MinZ', 'MaxZ']);
-        assert.equal(h.device(device, 'SetViewport', [0x3100]), D3D_OK);
-        assert.equal(h.device(device, 'GetViewport', [out]), D3D_OK);
-        assert.equal(h.box.memory.readU32(out + 8), 3);
-        assert.equal(h.seam.shadow()?.commandCalls, 5);
+        h.box.memory.writeU32(ring + whole + 4, 16);
+        assert.equal(h.device(device, 'GetLightEnable', [5, out]), D3D_OK);
+        assert.notEqual(h.box.memory.readU32(out), 0, 'until it is whole');
+        assert.equal(h.seam.shadow()?.commandCalls, 12);
+        assert.equal(draws.length, 2, 'and nothing is made twice');
+        h.release(texture);
         assert.equal(h.release(device), 0);
         h.release(root);
     });
-
-test('a device made for several threads has no command ring, and takes each call as it comes', ()=>{
-    const h = seamed({ shadow: true });
-    const root = h.create();
-    const { device } = h.createDevice(root, {},
-        D3DCREATE.HARDWARE_VERTEXPROCESSING | D3DCREATE.MULTITHREADED);
-    const owner = h.box.memory.readU32(device + 4);
-    assert.notEqual(owner, 0);
-    assert.equal(h.box.memory.readU32(owner + SHADOW.COMMANDS), 0);
-    assert.equal(h.release(device), 0);
-    h.release(root);
-});

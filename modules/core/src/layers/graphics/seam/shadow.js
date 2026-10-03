@@ -19,10 +19,18 @@
  * address handed back and a range remembered, and an unlock is the buffer's
  * block appended to a ring in the device's block. The host replays each
  * remembered lock and unlock against the real buffer when it next looks, and
- * that is when the bytes reach the renderer -- before any draw, because a
- * draw is a crossing. A lock the guest holds across a crossing is mirrored as
- * a lock the host holds, so a second lock, through either path, is refused
- * the way the real interface refuses it.
+ * that is when the bytes reach the renderer -- before any draw it makes. A
+ * lock the guest holds across a crossing is mirrored as a lock the host
+ * holds, so a second lock, through either path, is refused the way the real
+ * interface refuses it.
+ *
+ * Direct3D 9 goes further: its setters and its draws write each call into a
+ * command ring (`commandCode`), and the host makes them, in order, when it
+ * next looks -- after the buffers, before anything else. The order is what a
+ * block of latest values cannot keep and a draw that waits needs; the block
+ * stays for the getters that run in the guest, which the routines keep
+ * current. While a draw waits, a lock that may overwrite what it reads is the
+ * host's, which makes the draw first.
  *
  * The block is one-way and untrusted. The guest writes it, and nothing the
  * host derives from state -- a pipeline, a shader, a binding -- is keyed on
@@ -172,8 +180,12 @@ export const SHADOW = {
     COMMANDS: 4568,
     COMMAND_BYTES: 4572,
     COMMAND_HEAD: 4576,
-    /** Commands the guest wrote, counted by it. */
-    COMMAND_CALLS: 4580,
+    /**
+     * Raised by a draw the ring holds, cleared by the host when it takes the
+     * ring: while it is up, a lock in the guest that may overwrite what a
+     * draw reads is the host's.
+     */
+    DRAWS_PENDING: 4580,
     SIZE: 4584,
 };
 
@@ -262,6 +274,11 @@ const ZERO_MARKS = new Uint8Array(SHADOW.MARK_WORDS * 4);
 
 /** A lock for reading has nothing to remember; the host takes it. */
 const D3DLOCK_READONLY = 0x10;
+/**
+ * A lock that promises not to overwrite what a draw already made reads: the
+ * one a buffer may take in the guest while the command ring holds a draw.
+ */
+const D3DLOCK_NOOVERWRITE = 0x1000;
 
 /** D3DTS_WORLD is 256 and WORLD1..3 follow it; they take the slots after TEXTURE7. */
 const WORLD_TYPE = 256;
@@ -590,12 +607,21 @@ export function setTransformCode(at, trap){
  * what was locked before the host last looked, and the flags.
  *
  * The cases left to the host: a lock already held (the host refuses it), a
- * lock for reading, an empty or out-of-range lock, and a null out-pointer.
+ * lock for reading, an empty or out-of-range lock, a null out-pointer -- and,
+ * while the device's command ring holds a draw the host has not made, any
+ * lock but NOOVERWRITE: the bytes that draw reads are the buffer's until
+ * then, and the host makes it before it takes the lock.
  *
  *     cmp dword [ecx+LOCKED], 0
  *     jne slow
  *     test dword [esp+20], READONLY
  *     jnz slow
+ *     mov edx, [ecx+DEVICE]
+ *     cmp dword [edx+DRAWS_PENDING], 0
+ *     je free
+ *     test dword [esp+20], NOOVERWRITE
+ *     jz slow
+ *   free:
  *     mov eax, [esp+8]            ; offset
  *     mov edx, [esp+12]           ; size
  *     test edx, edx
@@ -654,6 +680,12 @@ export function lockCode(at, trap){
         { jcc: 0x75, to: 'hop' },                                // jne hop
         [0xf7, 0x44, 0x24, 0x14, ...dword(D3DLOCK_READONLY)],    // test dword [esp+20], 0x10
         { jcc: 0x75, to: 'hop' },                                // jnz hop
+        [0x8b, 0x51, BUFFER.DEVICE],                             // mov edx, [ecx+28]
+        [0x83, 0xba, ...dword(SHADOW.DRAWS_PENDING), 0x00],      // cmp dword [edx+disp], 0
+        { jcc: 0x74, to: 'free' },                               // je free
+        [0xf7, 0x44, 0x24, 0x14, ...dword(D3DLOCK_NOOVERWRITE)], // test dword [esp+20], 0x1000
+        { jcc: 0x74, to: 'hop' },                                // jz hop
+        { label: 'free' },
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
         [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
         [0x85, 0xd2],                                            // test edx, edx
@@ -1312,8 +1344,9 @@ export function getSurfaceLevelCode(at, trap){
 }
 
 /**
- * A method a command routine takes: what the record holds and how much of
- * what the method reads through a pointer is copied with it.
+ * A method a command routine takes: what the record holds, how much of what
+ * the method reads through a pointer is copied with it, and what else the
+ * routine does in the guest.
  *
  * @typedef {Object} CommandShape
  * @property {number} slot  the method's slot, which names it to the host
@@ -1322,43 +1355,46 @@ export function getSurfaceLevelCode(at, trap){
  * @property {number} [bytes]  how many bytes that is, or else
  * @property {{ arg: number, shift: number, most: number }} [count]  the argument
  *     counting its elements, `1 << shift` bytes each, at most `most` of them
+ * @property {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]
+ *     } [mirror]  guest code run first, with the block in ECX, that keeps what
+ *     a getter in the guest reads current; it may leave for the host through
+ *     `out`, and leaves ECX and the stack as it found them
+ * @property {boolean} [draws]  a draw: a lock in the guest that may overwrite
+ *     what it reads waits for the host to make it
  */
 
 /**
- * A method that answers only D3D_OK, as guest code that writes the call
- * into the device's command ring for the host to make at its next entry --
- * the arguments, and a copy of what a pointer argument points at, with the
- * pointer made to point at the copy. What the host would refuse it refuses
- * then, and reports; a null pointer, a count past `most`, a full ring or a
- * device without one is the host's now.
+ * A call as guest code that writes it into the device's command ring for the
+ * host to make at its next entry -- the arguments, and a copy of what a
+ * pointer argument points at, with the pointer made to point at the copy.
+ * The program is told D3D_OK; what the host would refuse it refuses then,
+ * and reports. A null pointer, a count past `most`, a full ring, a device
+ * without one and whatever `mirror` declines are the host's now.
  *
- * The record is written whole before the head moves past it, in one store,
- * so a host entry on another thread between any two instructions finds
- * either all of it or none.
+ * Space is taken with `lock cmpxchg` on the head, so two threads never take
+ * the same bytes, and a record counts once its length -- written last -- is
+ * there: a host entry between any two instructions of a routine reads the
+ * records before it and stops at one not yet whole.
  *
- *     (prologue)
- *     cmp dword [ecx+COMMANDS], 0
- *     je slow
- *     [mov eax, [esp+8+4*pointer]; test eax, eax; jz slow]
- *     mov edx, bytes | mov edx, [esp+8+4*count]; test; jz; cmp edx, most; ja; shl edx, shift
+ *     (prologue; no ring: early)  ...  mirror  ...  pointer and count checks
  *     push ebx; push esi; push edi
  *     mov ebx, ecx                ; the block
- *     lea esi, [edx + ARGS + 4*args]   ; the record's length
- *     mov edi, [ebx+COMMAND_HEAD]
- *     lea eax, [edi+esi]
- *     cmp eax, [ebx+COMMAND_BYTES]
+ *     lea esi, [edx + ARGS + 4*args]   ; the record's length; EDX the copy's
+ *   reserve:
+ *     mov eax, [ebx+COMMAND_HEAD]
+ *     lea edi, [eax+esi]
+ *     cmp edi, [ebx+COMMAND_BYTES]
  *     ja full
- *     add edi, [ebx+COMMANDS]     ; the record
+ *     lock cmpxchg [ebx+COMMAND_HEAD], edi
+ *     jne reserve
+ *     add eax, [ebx+COMMANDS]     ; the record
+ *     mov edi, eax
  *     mov dword [edi], slot
- *     mov [edi+4], esi
- *     mov eax, [esp+20+4*i] / lea eax, [edi+ARGS+4*args]; mov [edi+ARGS+4*i], eax  (each)
- *     [mov esi, [esp+20+4*pointer]] ; the copy
- *     lea edi, [edi+ARGS+4*args]
- *     [mov ecx, edx; shr ecx, 2; rep movsd]
- *     sub edi, [ebx+COMMANDS]
- *     mov [ebx+COMMAND_HEAD], edi
- *     inc dword [ebx+COMMAND_CALLS]
- *     inc dword [ebx+CALLS]
+ *     (each argument into [edi+ARGS+4*i]; the pointer as the copy's address)
+ *     [mov esi, source; lea edi, [edi+ARGS+4*args]; mov ecx, edx; shr ecx, 2;
+ *      rep movsd; mov edi, eax; lea esi, [edx + ARGS + 4*args]]
+ *     mov [edi+BYTES], esi        ; whole
+ *     [mov dword [ebx+DRAWS_PENDING], 1]
  *     pop edi; pop esi; pop ebx
  *     xor eax, eax
  *     ret 4+4*args
@@ -1370,7 +1406,7 @@ export function getSurfaceLevelCode(at, trap){
  * @returns {Uint8Array}
  */
 export function commandCode(at, trap, shape){
-    const { slot, args, pointer = -1, bytes = 0, count } = shape;
+    const { slot, args, pointer = -1, bytes = 0, count, mirror = [], draws = false } = shape;
     const header = COMMAND.ARGS + 4 * args;
     if (pointer >= 0 && !count && (bytes <= 0 || (bytes & 3) !== 0))
     {
@@ -1378,9 +1414,14 @@ export function commandCode(at, trap, shape){
     }
     /** @type {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} */
     const parts = [
-        ...prologue('out'),
+        ...prologue('early'),
         [0x83, 0xb9, ...dword(SHADOW.COMMANDS), 0x00],           // cmp dword [ecx+disp], 0
-        { jcc: 0x74, to: 'out' },                                // je out
+        { jcc: 0x74, to: 'early' },                              // je early
+        { jcc: 0xeb, to: 'body' },                               // jmp body
+        { label: 'early' },
+        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
+        { label: 'body' },
+        ...mirror,
     ];
     if (pointer >= 0)
     {
@@ -1411,13 +1452,16 @@ export function commandCode(at, trap, shape){
         [0x53, 0x56, 0x57],                                      // push ebx; push esi; push edi
         [0x89, 0xcb],                                            // mov ebx, ecx
         [0x8d, 0xb2, ...dword(header)],                          // lea esi, [edx+header]
-        [0x8b, 0xbb, ...dword(SHADOW.COMMAND_HEAD)],             // mov edi, [ebx+disp]
-        [0x8d, 0x04, 0x37],                                      // lea eax, [edi+esi]
-        [0x3b, 0x83, ...dword(SHADOW.COMMAND_BYTES)],            // cmp eax, [ebx+disp]
+        { label: 'reserve' },
+        [0x8b, 0x83, ...dword(SHADOW.COMMAND_HEAD)],             // mov eax, [ebx+disp]
+        [0x8d, 0x3c, 0x30],                                      // lea edi, [eax+esi]
+        [0x3b, 0xbb, ...dword(SHADOW.COMMAND_BYTES)],            // cmp edi, [ebx+disp]
         { jcc: 0x77, to: 'full', near: true },                   // ja full
-        [0x03, 0xbb, ...dword(SHADOW.COMMANDS)],                 // add edi, [ebx+disp]
-        [0xc7, 0x07, ...dword(slot)],                            // mov dword [edi], slot
-        [0x89, 0x77, COMMAND.BYTES]);                            // mov [edi+4], esi
+        [0xf0, 0x0f, 0xb1, 0xbb, ...dword(SHADOW.COMMAND_HEAD)], // lock cmpxchg [ebx+disp], edi
+        { jcc: 0x75, to: 'reserve' },                            // jne reserve
+        [0x03, 0x83, ...dword(SHADOW.COMMANDS)],                 // add eax, [ebx+disp]
+        [0x89, 0xc7],                                            // mov edi, eax
+        [0xc7, 0x07, ...dword(slot)]);                           // mov dword [edi], slot
     for (let arg = 0; arg < args; arg++)
     {
         parts.push(arg === pointer
@@ -1427,21 +1471,22 @@ export function commandCode(at, trap, shape){
     }
     if (pointer >= 0)
     {
-        parts.push([0x8b, 0x74, 0x24, 20 + 4 * pointer]);        // mov esi, [esp+20+4p]
-    }
-    parts.push([0x8d, 0xbf, ...dword(header)]);                  // lea edi, [edi+header]
-    if (pointer >= 0)
-    {
         parts.push(
+            [0x89, 0xf8],                                        // mov eax, edi
+            [0x8b, 0x74, 0x24, 20 + 4 * pointer],                // mov esi, [esp+20+4p]
+            [0x8d, 0xbf, ...dword(header)],                      // lea edi, [edi+header]
             [0x89, 0xd1],                                        // mov ecx, edx
             [0xc1, 0xe9, 0x02],                                  // shr ecx, 2
-            [0xf3, 0xa5]);                                       // rep movsd
+            [0xf3, 0xa5],                                        // rep movsd
+            [0x89, 0xc7],                                        // mov edi, eax
+            [0x8d, 0xb2, ...dword(header)]);                     // lea esi, [edx+header]
+    }
+    parts.push([0x89, 0x77, COMMAND.BYTES]);                     // mov [edi+4], esi
+    if (draws)
+    {
+        parts.push([0xc7, 0x83, ...dword(SHADOW.DRAWS_PENDING), ...dword(1)]); // mov [ebx+disp], 1
     }
     parts.push(
-        [0x2b, 0xbb, ...dword(SHADOW.COMMANDS)],                 // sub edi, [ebx+disp]
-        [0x89, 0xbb, ...dword(SHADOW.COMMAND_HEAD)],             // mov [ebx+disp], edi
-        [0xff, 0x83, ...dword(SHADOW.COMMAND_CALLS)],            // inc dword [ebx+disp]
-        counted(3),                                              // inc dword [ebx+12]
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 4 + 4 * args, 0x00],                              // ret 4+4*args
@@ -1450,6 +1495,68 @@ export function commandCode(at, trap, shape){
         { jcc: 0xeb, to: 'slow', near: true });                  // jmp slow
     return routine(at, trap, parts);
 }
+
+/**
+ * What a command routine for SetRenderState keeps in the block for
+ * GetRenderState in the guest: the value, for a state the block holds; any
+ * other state is the host's.
+ */
+export const RENDER_STATE_MIRROR = Object.freeze([
+    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
+    [0x3d, ...dword(SHADOW.RENDER_STATE_COUNT)],                 // cmp eax, 256
+    { jcc: 0x73, to: 'out', near: true },                        // jae out
+    [0x8b, 0x54, 0x24, 0x0c],                                    // mov edx, [esp+12]
+    [0x89, 0x94, 0x81, ...dword(SHADOW.RENDER_STATES)],          // mov [ecx+eax*4+disp], edx
+]);
+
+/** The same for SetTransform: the matrix into its type's slot. */
+export const TRANSFORM_MIRROR = Object.freeze([
+    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
+    [0x3d, ...dword(WORLD_SLOT)],                                // cmp eax, 24
+    { jcc: 0x72, to: 'slot' },                                   // jb slot
+    [0x2d, ...dword(WORLD_TYPE - WORLD_SLOT)],                   // sub eax, 232
+    [0x3d, ...dword(WORLD_SLOT)],                                // cmp eax, 24
+    { jcc: 0x72, to: 'out', near: true },                        // jb out
+    [0x3d, ...dword(SHADOW.TRANSFORM_SLOTS)],                    // cmp eax, 28
+    { jcc: 0x73, to: 'out', near: true },                        // jae out
+    { label: 'slot' },
+    [0x8b, 0x54, 0x24, 0x0c],                                    // mov edx, [esp+12]
+    [0x85, 0xd2],                                                // test edx, edx
+    { jcc: 0x74, to: 'out', near: true },                        // jz out
+    [0x56, 0x57],                                                // push esi; push edi
+    [0x89, 0xd6],                                                // mov esi, edx
+    [0x89, 0xc7],                                                // mov edi, eax
+    [0xc1, 0xe7, 0x06],                                          // shl edi, 6
+    [0x8d, 0xbc, 0x39, ...dword(SHADOW.TRANSFORMS)],             // lea edi, [ecx+edi+disp]
+    [0x89, 0xca],                                                // mov edx, ecx
+    [0xb9, ...dword(16)],                                        // mov ecx, 16
+    [0xf3, 0xa5],                                                // rep movsd
+    [0x89, 0xd1],                                                // mov ecx, edx
+    [0x5f, 0x5e],                                                // pop edi; pop esi
+]);
+
+/**
+ * The same for SetTextureStageState, given the types the version has: the
+ * value into its stage's slot. A stage past the block, or a type it does not
+ * hold, is the host's.
+ *
+ * @param {number} types
+ */
+export const stageStateMirror = types=>[
+    [0x8b, 0x44, 0x24, 0x0c],                                    // mov eax, [esp+12]
+    [0x3d, ...dword(SHADOW.STAGE_STATE_STRIDE)],                 // cmp eax, 32
+    { jcc: 0x73, to: 'out', near: true },                        // jae out
+    [0xba, ...dword(types)],                                     // mov edx, imm32
+    [0x0f, 0xa3, 0xc2],                                          // bt edx, eax
+    { jcc: 0x73, to: 'out', near: true },                        // jnc out
+    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
+    [0x3d, ...dword(SHADOW.STAGE_COUNT)],                        // cmp eax, 8
+    { jcc: 0x73, to: 'out', near: true },                        // jae out
+    [0xc1, 0xe0, 0x05],                                          // shl eax, 5
+    [0x03, 0x44, 0x24, 0x0c],                                    // add eax, [esp+12]
+    [0x8b, 0x54, 0x24, 0x10],                                    // mov edx, [esp+16]
+    [0x89, 0x94, 0x81, ...dword(SHADOW.STAGE_STATES)],           // mov [ecx+eax*4+disp], edx
+];
 
 
 /**
@@ -2311,31 +2418,81 @@ export function createShadow(deps){
 
     /**
      * Makes the calls the guest wrote into the command ring since the host
-     * last read it, in order. The head is the guest's, moved only past a
-     * whole record; the host starts the ring over only when it is nearly
-     * full, which is when the routines leave their commands to it.
+     * last read it, in order: every record whose length is there, up to the
+     * first one a routine has taken the space for and not yet finished. The
+     * head is the guest's; the host starts the ring over -- zeroing what it
+     * read, so that a length is only ever a finished record's -- once it has
+     * read everything up to a head near the end.
      */
     const takeCommands = ()=>{
+        if (readWord(address + SHADOW.DRAWS_PENDING) !== 0)
+        {
+            // Lowered before the head is read: a draw written after this
+            // raises it again, and one before it is read now.
+            deps.writeMemory(address + SHADOW.DRAWS_PENDING, ZERO_MARKS.subarray(0, 4));
+        }
         const head = readWord(address + SHADOW.COMMAND_HEAD);
         if (head === commandTail)
         {
             return;
         }
-        if (head > commandTail && head <= COMMAND_RING_BYTES)
-        {
-            commandsTaken += /** @type {ShadowCommands} */ (deps.commands).take(
-                deps.readMemory(commands + commandTail, head - commandTail));
-        }
-        else
+        if (head < commandTail || head > COMMAND_RING_BYTES)
         {
             refuse(`${name}::commands`, 'the command ring\'s head went back');
+            commandTail = head;
+            return;
         }
-        commandTail = head;
-        if (head > COMMAND_RING_BYTES - COMMAND_SLACK)
+        const words = readWords(commands + commandTail, (head - commandTail) >>> 2);
+        let whole = 0;
+        while (whole < words.length)
         {
+            const length = words[whole + (COMMAND.BYTES >>> 2)] >>> 2;
+            if (length === 0)
+            {
+                break;
+            }
+            if (length < (COMMAND.ARGS >>> 2) || whole + length > words.length)
+            {
+                refuse(`${name}::commands`, 'a command record the routines could not have written');
+                whole = words.length;
+                break;
+            }
+            whole += length;
+        }
+        if (whole > 0)
+        {
+            commandsTaken += /** @type {ShadowCommands} */ (deps.commands).take(
+                new Uint8Array(words.buffer, words.byteOffset, whole * 4));
+        }
+        commandTail += whole * 4;
+        if (commandTail === head && head > COMMAND_RING_BYTES - COMMAND_SLACK)
+        {
+            // A routine between reading the head and taking its space finds
+            // the head moved and takes it again, from the start.
+            deps.writeMemory(commands, new Uint8Array(head));
             deps.writeMemory(address + SHADOW.COMMAND_HEAD, dwordBytes(0));
             commandTail = 0;
         }
+    };
+
+    /**
+     * Replays the locks and unlocks of buffers the guest let go of since the
+     * host last looked, and empties the ring of them.
+     *
+     * @param {number} heads  how many the ring holds
+     * @param {Uint32Array} [block]  the block as read, when it was
+     */
+    const settleUnlocked = (heads, block)=>{
+        const ring = block
+            ? block.slice(SHADOW.RING >>> 2,
+                (SHADOW.RING >>> 2) + Math.min(heads, SHADOW.RING_CAPACITY))
+            : readWords(address + SHADOW.RING, Math.min(heads, SHADOW.RING_CAPACITY)).slice();
+        for (const buffer of ring)
+        {
+            settle(buffer);
+        }
+        deps.writeMemory(address + SHADOW.RING_HEAD, ZERO_MARKS.subarray(0, 4));
+        seenCounters[RING_GROUP] = 0;
     };
 
     /** The block, made and mirrored on first use. */
@@ -2352,6 +2509,7 @@ export function createShadow(deps){
                 commands = deps.commands ? allocatePage(COMMAND_RING_BYTES) : 0;
                 if (commands !== 0)
                 {
+                    deps.writeMemory(commands, new Uint8Array(COMMAND_RING_BYTES));
                     deps.writeMemory(address + SHADOW.COMMANDS,
                         dwordsBytes([commands, COMMAND_RING_BYTES]));
                 }
@@ -2534,6 +2692,13 @@ export function createShadow(deps){
             }
             if (commands !== 0)
             {
+                // What the buffers the guest let go of hold reaches the device
+                // before the draws in the ring that read it.
+                const unlocked = readWord(address + SHADOW.RING_HEAD);
+                if (unlocked !== 0)
+                {
+                    settleUnlocked(unlocked);
+                }
                 takeCommands();
             }
             const calls = readWord(address + SHADOW.CALLS);
@@ -2593,14 +2758,7 @@ export function createShadow(deps){
             const ringHead = counters[RING_GROUP];
             if (ringHead !== 0)
             {
-                const ring = block.slice((SHADOW.RING >>> 2),
-                    (SHADOW.RING >>> 2) + Math.min(ringHead, SHADOW.RING_CAPACITY));
-                for (const buffer of ring)
-                {
-                    settle(buffer);
-                }
-                deps.writeMemory(address + SHADOW.RING_HEAD, ZERO_MARKS.subarray(0, 4));
-                seenCounters[RING_GROUP] = 0;
+                settleUnlocked(ringHead, block);
             }
         },
 

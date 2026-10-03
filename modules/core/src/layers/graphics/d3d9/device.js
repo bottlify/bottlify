@@ -2076,10 +2076,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * it, so one this device refuses is a divergence, said once.
          *
          * @param {Uint8Array} records
+         * @param {readonly any[]} [objects]  what the records' object arguments name, in order
          * @returns {number} how many calls were made
          */
-        commands(records){
-            return runCommands(/** @type {any} */ (device), records, (name, hr)=>report(
+        commands(records, objects = []){
+            return runCommands(/** @type {any} */ (device), records, objects, (name, hr)=>report(
                 `commands:${name}`, name === 'commands'
                     ? 'a command ring held a record its routines could not have written'
                     : `${name} made in the guest was answered D3D_OK; the device answers ${

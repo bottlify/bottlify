@@ -380,8 +380,8 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.PIXEL_SHADER + 4, SHADOW.COMMANDS);
     assert.equal(SHADOW.COMMANDS + 4, SHADOW.COMMAND_BYTES);
     assert.equal(SHADOW.COMMAND_BYTES + 4, SHADOW.COMMAND_HEAD);
-    assert.equal(SHADOW.COMMAND_HEAD + 4, SHADOW.COMMAND_CALLS);
-    assert.equal(SHADOW.COMMAND_CALLS + 4, SHADOW.SIZE);
+    assert.equal(SHADOW.COMMAND_HEAD + 4, SHADOW.DRAWS_PENDING);
+    assert.equal(SHADOW.DRAWS_PENDING + 4, SHADOW.SIZE);
     assert.ok(SHADOW.CALLS > SHADOW.TRANSFORM_CALLS && SHADOW.CALLS < SHADOW.RENDER_STATES,
         'the count of every call in the header, where a disp8 reaches it');
     assert.equal(BUFFER.SIZE, 32);

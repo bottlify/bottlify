@@ -31,7 +31,7 @@ import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
 const PROGRAM = 0x8000;
 /** Past the program, which is a few hundred bytes of pushes and calls. */
 const ROUTINES = {
-    renderState: 0x8800, transform: 0x8880, lock: 0x8900, unlock: 0x89a0,
+    renderState: 0x8800, transform: 0x8880, lock: 0x8900, unlock: 0x89b0,
     stream: 0x8a00, indices: 0x8a80, shader: 0x8b00, texture: 0x8b80, stageState: 0x8c00,
     material: 0x8c80, surfaceLevel: 0x8d80, getState: 0x8e00, sampler: 0x8e80, texture9: 0x8f00,
     getStage: 0x8f80, getTransform: 0x9100, stream9: 0x9200, declaration: 0x9300,

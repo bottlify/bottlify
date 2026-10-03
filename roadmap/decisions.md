@@ -429,20 +429,26 @@ under `cork`, which has no emulator compiler; the launcher's per-bundle engine s
 owner's. The paired browser table (`--engine emulator` as the control) that would confirm the
 target ns per instruction is the owner's to run. *2026-09-22, cork 5.5.*
 
-**Direct3D 9's shader constants, viewport, lights, clip planes, scissor rectangle and software
-vertex processing are set in the guest and made by the host at its next entry; the program is
-told D3D_OK at the call.** A guest routine writes the call and a copy of what it points at into a
-command ring in the device's guest memory (`seam/shadow.js`, `commandCode`), and the host hands
-the run of records to the device in one call (`d3d9/commands.js`) -- which, with the graphics
-worker, is one recorded call that the played device makes in full. Measured on a node harness of
-the real engine path (cork, bridge, seam, recording, a worker thread) with a draw loop that sets
-constants, a viewport and a light per draw: the engine thread's host time fell from 730–825 ms
-to 558–561 ms per 100 000 draws. A call the device refuses was answered D3D_OK in the guest, so
-the refusal is reported as a divergence once per method -- the same terms on which the shadow
-block already takes render states and transforms. A null pointer, a count past the most a device
-of this version has, a recording state block or a full ring take the host's path, which answers
-as the device does. A device created `D3DCREATE_MULTITHREADED` has no ring: the runtime serialises
-such a device's calls, and the ring's single writer assumes the program does. *2026-10-03, 1.8.*
+**Direct3D 9's setters and draws are made in the guest and played by the host at its next
+entry; the program is told D3D_OK at the call.** Render, stage and sampler states, transforms,
+the material, textures, streams, indices, the declaration and format, shaders and their
+constants, the viewport, lights, clip planes, the scissor rectangle, software vertex processing,
+`DrawPrimitive` and `DrawIndexedPrimitive` each have a guest routine that writes the call, and a
+copy of what it points at, into a command ring in the device's guest memory
+(`seam/shadow.js`, `commandCode`); the host hands the run of records to the device in one call
+(`d3d9/commands.js`) -- with the graphics worker, one recorded call the played device makes in
+full. One ordered ring, rather than the shadow block's latest values, is what lets a draw wait:
+each draw meets the state set just before it. Measured on a node harness of the real engine
+path (cork, bridge, seam, recording, a worker thread), a loop of ten calls per draw: the engine
+thread's host time fell from 730–825 ms to 450–470 ms per 100 000 draws, its crossings from
+500 000 to 100 000. A call the device refuses was answered D3D_OK in the guest, so the refusal
+is a divergence once per method -- the terms on which the shadow block already took render
+states. A null pointer, a count past the most a device of this version has, a recording state
+block or a full ring take the host's path, which answers as the device does; while a draw waits
+in the ring, a buffer lock other than NOOVERWRITE does too, since the bytes that draw reads are
+the buffer's until it is made. Space in the ring is taken with `lock cmpxchg` and a record counts
+once its length, written last, is there, so a device shared between threads keeps the ring.
+*2026-10-03, 1.8.*
 
 ## C. Process model and porting
 
