@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PIECE_SIZE, createMemoryStore } from './memory-store.js';
+import { PIECE_SIZE, bytesOf, createMemoryStore } from './memory-store.js';
 
 const bytes = Uint8Array.from([1, 2, 3]);
 
@@ -93,6 +93,31 @@ test('shared bytes stay as they were handed out, whatever is written after', ()=
     store.write('b.dat', 0, Uint8Array.of(2));
     assert.deepEqual([...given], new Array(10).fill(1), 'nor are adopted bytes');
     assert.deepEqual([...store.read('b.dat', 0, 8)], [2, 1, 1, 1]);
+});
+
+test('contents handed to another store are its pieces, and neither sees the other\'s writes', ()=>{
+    // A child process's volume begins as its parent's: gigabytes an installer
+    // laid down are not copied for the program it starts, and what either
+    // writes afterwards is its own.
+    const parent = createMemoryStore({ 'dir': null });
+    const child = createMemoryStore({ 'dir': null });
+    parent.write('dir\\big.gcf', 0, new Uint8Array(2 * PIECE_SIZE + 3).fill(5));
+    const contents = parent.contents?.('dir\\big.gcf');
+    assert.ok(contents && !contents.flat && contents.pieces.length === 3);
+    child.adoptContents?.('dir\\big.gcf', contents);
+    assert.deepEqual(child.stat('dir\\big.gcf'), { directory: false, size: 2 * PIECE_SIZE + 3 });
+
+    child.write('dir\\big.gcf', 1, Uint8Array.of(7));
+    parent.write('dir\\big.gcf', PIECE_SIZE + 1, Uint8Array.of(8));
+    assert.deepEqual([...child.read('dir\\big.gcf', 0, 3)], [5, 7, 5]);
+    assert.deepEqual([...parent.read('dir\\big.gcf', 0, 3)], [5, 5, 5],
+        'the child\'s write stays the child\'s');
+    assert.deepEqual([...child.read('dir\\big.gcf', PIECE_SIZE, 3)], [5, 5, 5],
+        'and the parent\'s the parent\'s');
+    child.truncate('dir\\big.gcf', 2 * PIECE_SIZE + 1);
+    assert.equal(parent.read('dir\\big.gcf', 2 * PIECE_SIZE + 2, 1)[0], 5, 'a cut too');
+    assert.equal(bytesOf(contents)[1], 5, 'and what was handed out is as it was');
+    assert.equal(bytesOf(contents).length, 2 * PIECE_SIZE + 3);
 });
 
 test('a read is clamped to what is there rather than failing', ()=>{

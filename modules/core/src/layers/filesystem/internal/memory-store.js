@@ -67,6 +67,19 @@ import { ErrorCode, fsError } from './errors.js';
  * @property {(from: string, to: string) => void} [move]  Gives a file another
  *           path, its bytes staying where they are; `to` must not exist and its
  *           parent must. A store that cannot leaves it out, and a move copies.
+ * @property {(path: string) => FileContents} [contents]  A file's contents as
+ *           another store of this kind takes them without copying: what one
+ *           process's volume hands the next. Neither store's later writes reach
+ *           the other's, each copying a piece before it first changes it.
+ * @property {(path: string, contents: FileContents) => void} [adoptContents]
+ *           Makes a file of contents another store handed out.
+ */
+
+/**
+ * A file's contents in the form they are kept: whole, or in pieces.
+ *
+ * @typedef {{ size: number, flat: Uint8Array | null,
+ *     pieces: (Uint8Array | undefined)[] }} FileContents
  */
 
 /** @typedef {SourceStore & WritableStoreMethods} WritableStore */
@@ -101,11 +114,36 @@ export const PIECE_SIZE = 1 << 20;
  * A file: its size, and its bytes either in pieces of PIECE_SIZE -- the last
  * one growing by doubling until it is whole, a missing one all zeroes -- or
  * whole in `flat`, as it arrived or as `share` handed it out. `shared` means
- * `flat` is also someone else's, so the first change copies it into pieces.
+ * `flat` is also someone else's, so the first change copies it into pieces;
+ * `lent` marks the pieces another store holds too, each copied before it is
+ * first changed here.
  *
  * @typedef {{ directory: boolean, size: number, pieces: (Uint8Array | undefined)[],
- *     flat: Uint8Array | null, shared: boolean }} StoredFile
+ *     flat: Uint8Array | null, shared: boolean, lent: boolean[] | null }} StoredFile
  */
+
+/**
+ * The bytes of contents a store handed out, whole: what a reader that wants
+ * one array, a session written out or a bottle packed, is given.
+ *
+ * @param {FileContents} contents
+ * @returns {Uint8Array}
+ */
+export function bytesOf(contents){
+    if (contents.flat)
+    {
+        return contents.flat;
+    }
+    const out = new Uint8Array(contents.size);
+    contents.pieces.forEach((piece, index)=>{
+        if (piece)
+        {
+            const at = index * PIECE_SIZE;
+            out.set(piece.subarray(0, Math.max(0, Math.min(piece.length, contents.size - at))), at);
+        }
+    });
+    return out;
+}
 
 /**
  * Builds a store, optionally seeded.
@@ -123,7 +161,7 @@ export function createMemoryStore(seed = {}){
 
     /** @param {Uint8Array | null} flat @returns {StoredFile} */
     const fileOf = flat=>({ directory: false, size: flat?.length ?? 0, pieces: [], flat,
-        shared: false });
+        shared: false, lent: null });
 
     /** @param {string} path */
     const makeDirectory = path=>{
@@ -213,6 +251,7 @@ export function createMemoryStore(seed = {}){
         entry.flat = null;
         entry.shared = false;
         entry.pieces = [];
+        entry.lent = null;
         for (let at = 0; at < entry.size; at += PIECE_SIZE)
         {
             entry.pieces.push(flat.slice(at, Math.min(at + PIECE_SIZE, entry.size)));
@@ -220,14 +259,20 @@ export function createMemoryStore(seed = {}){
     };
 
     /**
-     * The piece at `index` able to hold `needed` bytes: a short last piece is
-     * doubled, so a small file costs what it holds, not a whole piece.
+     * The piece at `index`, this store's own, able to hold `needed` bytes: a
+     * short last piece is doubled, so a small file costs what it holds, not a
+     * whole piece, and one another store holds too is copied first.
      *
      * @param {StoredFile} entry @param {number} index @param {number} needed
      */
     const pieceFor = (entry, index, needed)=>{
         const piece = entry.pieces[index];
-        if (piece && piece.length >= needed)
+        const lent = entry.lent?.[index] === true;
+        if (lent && entry.lent)
+        {
+            entry.lent[index] = false;
+        }
+        if (piece && piece.length >= needed && !lent)
         {
             return piece;
         }
@@ -326,9 +371,10 @@ export function createMemoryStore(seed = {}){
                 const last = Math.floor(size / PIECE_SIZE);
                 const within = size % PIECE_SIZE;
                 entry.pieces.length = Math.min(entry.pieces.length, within === 0 ? last : last + 1);
-                if (within !== 0)
+                const piece = entry.pieces[last];
+                if (within !== 0 && piece)
                 {
-                    entry.pieces[last]?.fill(0, within);
+                    pieceFor(entry, last, piece.length).fill(0, within);
                 }
             }
             entry.size = size;
@@ -348,6 +394,7 @@ export function createMemoryStore(seed = {}){
                 copyOut(entry, 0, entry.size, flat, 0);
                 entry.flat = flat;
                 entry.pieces = [];
+                entry.lent = null;
             }
             entry.shared = true;
             return entry.flat;
@@ -358,8 +405,31 @@ export function createMemoryStore(seed = {}){
             const entry = file(path);
             entry.flat = bytes;
             entry.pieces = [];
+            entry.lent = null;
             entry.size = bytes.length;
             entry.shared = true;
+        },
+
+        /** @param {string} path @returns {FileContents} */
+        contents(path){
+            const entry = existing(path);
+            if (entry.flat)
+            {
+                entry.shared = true;
+                return { size: entry.size, flat: entry.flat, pieces: [] };
+            }
+            entry.lent = entry.pieces.map(()=>true);
+            return { size: entry.size, flat: null, pieces: entry.pieces.slice() };
+        },
+
+        /** @param {string} path @param {FileContents} contents */
+        adoptContents(path, contents){
+            const entry = file(path);
+            entry.size = contents.size;
+            entry.flat = contents.flat;
+            entry.shared = contents.flat !== null;
+            entry.pieces = contents.pieces.slice();
+            entry.lent = contents.flat ? null : entry.pieces.map(()=>true);
         },
 
         /** @param {string} from @param {string} to */

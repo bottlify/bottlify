@@ -6,7 +6,7 @@
 
 import { ErrorCode, fsError } from './internal/errors.js';
 import { Disposition, SeekFrom, createFileTable } from './internal/handles.js';
-import { createMemoryStore } from './internal/memory-store.js';
+import { bytesOf, createMemoryStore } from './internal/memory-store.js';
 import { createOverlay } from './internal/tree.js';
 import {
     createDirectoryState,
@@ -25,6 +25,37 @@ const MOVE_CHUNK = 1 << 20;
  * @returns {string[]}
  */
 const splitComponents = path=>path.split(/[\\/]/).filter(Boolean);
+
+/**
+ * A file of the writable layer as `export` and `changesSince` hand it on: its
+ * contents as the store keeps them, which a volume of the same kind takes in
+ * `apply` without copying -- a child process's volume is its parent's -- and
+ * its bytes whole, made only when something reads them: a session written
+ * out, a bottle packed.
+ *
+ * @param {any} tree @param {string[]} components @param {string} path
+ * @returns {{ path: string, bytes: Uint8Array,
+ *     contents?: import('./internal/memory-store.js').FileContents }}
+ */
+const handedOut = (tree, components, path)=>{
+    const contents = tree.contentsOf(components);
+    if (!contents)
+    {
+        return { path, bytes: tree.share(components) };
+    }
+    /** @type {Uint8Array | null} */
+    let whole = contents.flat;
+    const entry = /** @type {{ path: string, bytes: Uint8Array,
+        contents?: import('./internal/memory-store.js').FileContents }} */ ({ path });
+    Object.defineProperty(entry, 'bytes', {
+        enumerable: true,
+        get: ()=>(whole ??= bytesOf(contents)),
+    });
+    // Not enumerable: a copy of the entry, or one posted to another thread,
+    // carries the bytes and not the store's pieces.
+    Object.defineProperty(entry, 'contents', { value: contents });
+    return entry;
+};
 
 /**
  * filesystem -- the volume a Win32 program sees: drive letters, Windows path
@@ -277,7 +308,8 @@ export function createFilesystemModule(){
                  * open. Half an applied save is worse than none: the program reads
                  * a header from the new one and a body from the old.
                  *
-                 * @param {{ path: string, bytes?: Uint8Array, delete?: boolean }[]} batch
+                 * @param {{ path: string, bytes?: Uint8Array, delete?: boolean,
+                 *     contents?: import('./internal/memory-store.js').FileContents }[]} batch
                  * @param {{ quiet?: boolean }} [options]  `quiet`: what arrives is
                  *        another copy's, and `changesSince` does not report it back.
                  * @returns {number} how many entries were applied
@@ -329,7 +361,14 @@ export function createFilesystemModule(){
                             {
                                 tree.createFile(components);
                             }
-                            tree.replace(components, entry.bytes ?? new Uint8Array(0));
+                            if (entry.contents)
+                            {
+                                tree.replace(components, null, entry.contents);
+                            }
+                            else
+                            {
+                                tree.replace(components, entry.bytes ?? new Uint8Array(0));
+                            }
                         }
                         return batch.length;
                     }
@@ -368,7 +407,7 @@ export function createFilesystemModule(){
                         const found = tree?.stat(components);
                         out.push(!tree || !found || found.directory
                             ? { path, delete: true }
-                            : { path, bytes: tree.share(components) });
+                            : handedOut(tree, components, path));
                     }
                     return out;
                 },
@@ -399,10 +438,7 @@ export function createFilesystemModule(){
                         for (const entry of tree.writableFiles())
                         {
                             const components = splitComponents(entry.path);
-                            out.push({
-                                path: formatPath(key, components),
-                                bytes: tree.share(components),
-                            });
+                            out.push(handedOut(tree, components, formatPath(key, components)));
                         }
                     }
                     return out;
