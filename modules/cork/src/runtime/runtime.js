@@ -2716,12 +2716,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             if (kind === 'stale')
             {
+                // Every page the run's stores into code reached, from the
+                // lowest of them to the highest.
                 const address = pages.staleAddress();
                 const size = pages.staleSize();
-                invalidatePage(address >>> 12);
-                if (((address + size - 1) >>> 12) !== (address >>> 12))
+                pages.clearStale();
+                const last = size > 0 ? (address + size - 1) >>> 12 : -1;
+                for (let page = address >>> 12; page <= last; page++)
                 {
-                    invalidatePage((address + size - 1) >>> 12);
+                    invalidatePage(page);
                 }
                 // The other executor's compiled page, if that is what was hit.
                 imports.dirtyCode?.(address, size);

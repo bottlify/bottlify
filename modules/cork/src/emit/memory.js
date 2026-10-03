@@ -213,9 +213,24 @@ function noteCodeStore(e, size){
     }
     e.openGuard('code', EMPTY);
     b.i32const(1).localSet(Local.stale);
-    b.i32const(0).localGet(Local.addr)
-        .store('i32', { offset: e.layout.tables + Tables.STALE_ADDRESS });
-    b.i32const(0).i32const(size).store('i32', { offset: e.layout.tables + Tables.STALE_SIZE });
+    // The span grows rather than being overwritten: one instruction stores
+    // into code more than once before the exit after it -- a `rep movs` or
+    // `rep stos` element after element, page after page; `pushad` across two
+    // pages -- and every page each store reached is code to drop.
+    const low = e.layout.tables + Tables.STALE_LOW;
+    const end = e.layout.tables + Tables.STALE_END;
+    // Unsigned maxima of the complemented lowest byte and of the end, each
+    // read twice: no scratch local is free across every store's emission.
+    const higher = (/** @type {() => void} */ value, /** @type {number} */ offset)=>{
+        b.i32const(0);
+        value();
+        b.i32const(0).load('i32', { offset });
+        value();
+        b.i32const(0).load('i32', { offset }).op(I32.gtU);
+        b.select().store('i32', { offset });
+    };
+    higher(()=>b.localGet(Local.addr).i32const(-1).op(I32.xor), low);
+    higher(()=>b.localGet(Local.addr).i32const(size).op(I32.add), end);
     e.close();
     e.staleCheck = true;
 }
