@@ -65,6 +65,39 @@ test('threads take turns in order', ()=>{
     assert.equal(c.instructions, 1000);
 });
 
+test('a slice that runs out inside an unbroken routine runs on to its end, on the same turn', ()=>{
+    // The processor's EIP after each slice: the first ends inside the routine,
+    // the next two still in it, the fourth past it; the next thread's slice
+    // ends inside nothing.
+    const cpu = fakeCpu(1000);
+    const eips = [0x5010, 0x5020, 0x5030, 0x6000, 0x7000];
+    /** @type {number[]} */
+    const asked = [];
+    const run = {
+        ...cpu,
+        eip: ()=>eips[Math.min(asked.length - 1, eips.length - 1)],
+        /** @param {number} max */
+        runSlice: max=>{
+            asked.push(max);
+            return Math.min(max, 1000);
+        },
+    };
+    const sched = createScheduler({ cpu: run, switcher: createSwitcher({ cpu: run }),
+        quantum: 5000 });
+    sched.atomicCode(0x9000, 0x10);
+    sched.atomicCode(0x5000, 0x40);
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'b' });
+
+    assert.equal(sched.runOnce().ran?.name, 'a');
+    assert.equal(asked.length, 4, 'the quantum, then three steps until EIP left the routine');
+    assert.equal(asked[0], 5000);
+    assert.ok(asked.slice(1).every(max=>max < 5000), 'each step a short one');
+    assert.equal(a.instructions, 1000 + 3 * 512, 'and every step charged to the thread');
+    assert.equal(sched.runOnce().ran?.name, 'b', 'then the next thread has its turn');
+    assert.equal(asked.length, 5, 'whose slice ended outside any routine');
+});
+
 test('every turn restores the incoming thread onto its own TEB', ()=>{
     const { cpu, sched } = scheduler();
     sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });

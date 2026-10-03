@@ -98,6 +98,14 @@ export function absolutePriority(relative){
 }
 
 /**
+ * How far a slice that ended inside an unbroken routine runs on: steps of a
+ * few hundred instructions, a handful of them -- more than the longest such
+ * routine with the most it copies, and a bound should one ever wait.
+ */
+const ATOMIC_STEP = 512;
+const ATOMIC_STEPS = 16;
+
+/**
  * @param {Object} options
  * @param {any} options.cpu        The cpu layer's API.
  * @param {any} options.switcher   The single switch primitive.
@@ -129,6 +137,26 @@ export function createScheduler(options){
     // by default, and small enough to make for every scheduler a test builds.
     const pages = options.pages ?? new Float64Array(1024 * 1024 * 1024 / PAGE + 1);
     const counters = options.counters ?? new Float64Array(SCHEDULER_COUNTERS.length);
+    /** The routines a slice does not end inside, as sorted, disjoint [start, end) spans. */
+    const atomic = { starts: /** @type {number[]} */ ([]), ends: /** @type {number[]} */ ([]) };
+    /** @param {number} eip */
+    const insideAtomic = eip=>{
+        let low = 0;
+        let high = atomic.starts.length;
+        while (low < high)
+        {
+            const middle = (low + high) >>> 1;
+            if (atomic.starts[middle] <= eip)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+        return low > 0 && eip < atomic.ends[low - 1];
+    };
     const threadTable = options.threadTable ?? null;
     const slowSliceTable = options.slowSliceTable ?? null;
     const intern = options.intern ?? (()=>-1);
@@ -511,6 +539,23 @@ export function createScheduler(options){
         current: ()=>current,
 
         /**
+         * Code a slice is not to end inside: a routine of the host's that
+         * other threads must never see half done, and that never waits.
+         *
+         * @param {number} address @param {number} length
+         */
+        atomicCode(address, length){
+            const start = address >>> 0;
+            let at = 0;
+            while (at < atomic.starts.length && atomic.starts[at] < start)
+            {
+                at++;
+            }
+            atomic.starts.splice(at, 0, start);
+            atomic.ends.splice(at, 0, start + (length >>> 0));
+        },
+
+        /**
          * Whether the running thread should give the processor up at the host
          * call it is in: a thread of higher priority became ready during this
          * slice -- its timed wait came due, or the running thread set what it
@@ -722,7 +767,16 @@ export function createScheduler(options){
                     readyAtSlice.add(thread);
                 }
             }
-            const instructions = cpu.runSlice(quantum);
+            let instructions = cpu.runSlice(quantum);
+            // A slice that ran out inside a routine the host placed to run
+            // unbroken -- one writing a record another thread's entry into the
+            // host reads -- runs on to the routine's end: none of them waits,
+            // so the end is a few instructions away.
+            for (let more = 0; more < ATOMIC_STEPS && atomic.starts.length !== 0
+                && next.state === ThreadState.RUNNING && insideAtomic(cpu.eip?.() ?? 0); more++)
+            {
+                instructions += cpu.runSlice(ATOMIC_STEP);
+            }
             const held = wall() - began;
             recentTurns.push({ thread: next.name ?? '?', ms: held, end: began + held,
                 outside: lastEnd === 0 ? 0 : began - lastEnd });

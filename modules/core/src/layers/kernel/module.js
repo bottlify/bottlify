@@ -354,6 +354,19 @@ export function createKernelModule(){
                     thread.resumeRegisters = registers ?? null;
                 },
                 currentThread: ()=>live() ? state.scheduler.current() : null,
+                /**
+                 * Guest code no slice ends inside (see the scheduler's
+                 * `atomicCode`): a routine of the host's that writes what other
+                 * threads read, and never waits.
+                 *
+                 * @param {number} address @param {number} length
+                 */
+                atomicCode: (address, length)=>{
+                    if (live())
+                    {
+                        state.scheduler.atomicCode(address, length);
+                    }
+                },
                 /** Whether a thread of higher priority is due the processor now (see the scheduler). */
                 preemptionDue: ()=>live() && state.scheduler.preemptionDue(state.refreshClock),
                 /**
