@@ -980,3 +980,23 @@ test('every block start of a structured region runs as the flat dispatch runs it
         }
     }
 });
+
+test('a call made as a wasm call has its rare ways out hinted unlikely', ()=>{
+    // mov ecx, 5; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret -- with callReturn the
+    // call leaves only past the depth of waiting calls or on a spent budget, and goes up
+    // only when the callee left for the host: both ways hinted, beside the loop's own.
+    const layout = ownLayout({ ramSize: 1 << 22 });
+    const features = { simd: true, tailCalls: true, defaultNaNNegative: false };
+    const program = [0xb9, 5, 0, 0, 0, 0xe8, 0x04, 0, 0, 0, 0x49, 0x75, 0xf8, 0xf4, 0x42, 0xc3];
+    const region = formRegion(address=>program[address - CODE] ?? 0xf4, CODE, { leafCalls: false });
+    /** @param {boolean} callReturn */
+    const hinted = callReturn=>{
+        const m = new ModuleBuilder();
+        const index = emitRegion(prepareModule(m, layout, features, {},
+            { hash: true, callReturn }), region, { entryTop: 0, checked: false }).functionIndex;
+        const { body, hints } = m.functions[index - m.importedFunctions];
+        assert.ok(hints.every(at=>body[at] === 0x04 || body[at] === 0x0d), 'every hint an if');
+        return hints.length;
+    };
+    assert.ok(hinted(true) >= hinted(false) + 2, `${hinted(true)} hints, ${hinted(false)} without`);
+});
