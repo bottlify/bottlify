@@ -136,6 +136,35 @@ test('a clip with a hole draws round the hole, every other pixel once', ()=>{
     assert.equal(surface.read(5, 5), RED_PIXEL, 'a rectangle clip has no hole');
 });
 
+test('a picture is drawn by its alpha, scaled, and round a hole in the clip', ()=>{
+    const { drawing, surface } = fixture();
+    // Two by two: opaque red, transparent, half blue, opaque white.
+    const bgra = Uint8Array.of(0, 0, 255, 255, 9, 9, 9, 0, 255, 0, 0, 128, 255, 255, 255, 255);
+    const picture = { width: 2, height: 2, bgra };
+    assert.equal(drawing.drawPicture(HDC, 1, 1, picture), true);
+    assert.equal(surface.read(1, 1), RED_PIXEL);
+    assert.equal(surface.read(2, 1), BACKGROUND, 'no alpha leaves what was there');
+    assert.equal(surface.read(1, 2), 0x00101090, 'half alpha is blended over it');
+    assert.equal(surface.read(2, 2), 0x00ffffff);
+
+    drawing.drawPicture(HDC, 8, 8, picture, 4, 4);
+    assert.equal(surface.read(9, 9), RED_PIXEL, 'each pixel two by two');
+    assert.equal(surface.read(10, 9), BACKGROUND);
+    assert.equal(surface.read(11, 11), 0x00ffffff);
+
+    clearSurface(surface, BACKGROUND);
+    drawing.setClipRegion(HDC, [
+        { left: 0, top: 0, right: 16, bottom: 2 },
+        { left: 0, top: 2, right: 1, bottom: 16 },
+        { left: 2, top: 2, right: 16, bottom: 16 },
+    ]);
+    drawing.drawPicture(HDC, 0, 0, { width: 1, height: 1, bgra: Uint8Array.of(0, 0, 255, 255) },
+        4, 4);
+    assert.equal(surface.read(1, 1), RED_PIXEL);
+    assert.equal(surface.read(1, 3), BACKGROUND, 'the hole kept');
+    assert.equal(surface.read(2, 3), RED_PIXEL);
+});
+
 test('a blit inside one surface under a region reads its source before writing over it', ()=>{
     const { drawing, surface } = fixture();
     for (let y = 0; y < 16; y++)

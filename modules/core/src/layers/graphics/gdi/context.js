@@ -797,6 +797,60 @@ export function createGdiDrawing(options = {}){
         },
 
         /**
+         * A picture of four bytes a pixel -- blue, green, red, alpha, top row
+         * first, as an icon is decoded -- drawn at a point, scaled to the size
+         * asked for: a pixel of no alpha leaves what is under it, one of some
+         * is blended over it. What DrawIcon and DrawIconEx put down.
+         *
+         * @param {number} hdc @param {number} x @param {number} y
+         * @param {{ width: number, height: number, bgra: Uint8Array }} picture
+         * @param {number} [width] @param {number} [height]
+         * @returns {boolean}
+         */
+        drawPicture(hdc, x, y, picture, width = picture.width, height = picture.height){
+            const context = contextOf(hdc);
+            if (!context || width <= 0 || height <= 0)
+            {
+                return false;
+            }
+            const surface = context.surface;
+            const { bgra } = picture;
+            clipped(context, ()=>{
+                const clip = context.clip;
+                const top = Math.max(0, clip.top - y);
+                for (let row = top; row < height && y + row < clip.bottom; row++)
+                {
+                    const from = Math.floor(row * picture.height / height) * picture.width;
+                    for (let column = Math.max(0, clip.left - x);
+                        column < width && x + column < clip.right; column++)
+                    {
+                        const at = (from + Math.floor(column * picture.width / width)) * 4;
+                        const alpha = bgra[at + 3];
+                        if (alpha === 0)
+                        {
+                            continue;
+                        }
+                        let pixel = (bgra[at + 2] << 16) | (bgra[at + 1] << 8) | bgra[at];
+                        if (alpha !== 255)
+                        {
+                            const under = surface.read(x + column, y + row);
+                            pixel = 0;
+                            for (let shift = 0; shift <= 16; shift += 8)
+                            {
+                                const over = bgra[at + (shift >>> 3)];
+                                const back = (under >>> shift) & 0xff;
+                                pixel |= Math.round(back + (over - back) * alpha / 255) << shift;
+                            }
+                        }
+                        surface.write(x + column, y + row, pixel);
+                    }
+                }
+                return true;
+            });
+            return true;
+        },
+
+        /**
          * int GetDIBits(...): the context's pixels, back out in the caller's
          * own format.
          *

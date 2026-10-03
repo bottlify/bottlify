@@ -499,6 +499,10 @@ const OPAQUE = 2;
  * @property {(hdc: number, text: string) => { width: number, height: number,
  *     ascent: number }} measure
  * @property {(hdc: number, x: number, y: number, bitmap: number) => boolean} bitmap
+ * @property {(hdc: number, x: number, y: number,
+ *     picture: { width: number, height: number, bgra: Uint8Array },
+ *     width?: number, height?: number) => boolean} [picture]
+ *           A decoded icon drawn at a point, its transparent pixels left out.
  */
 
 /**
@@ -509,6 +513,9 @@ const OPAQUE = 2;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {Drawing | null} draw
+ * @property {(handle: number) => import('./cursors.js').CursorPicture | null} [picture]
+ *           The picture an icon or cursor handle stands for, null for one this
+ *           build cannot read: what a static showing an icon draws.
  * @property {(hwnd: number) => any | null} live
  * @property {(hwnd: number) => any | null} windowOf   Live or destroyed.
  * @property {(record: any) => { width: number, height: number }} clientSize
@@ -1305,8 +1312,11 @@ export function createControlProcedures(host){
             case SS_BITMAP: {
                 background(hdc, rect, brush, COLOR_3DFACE);
                 const image = state.image ?? 0;
-                if (image !== 0 && !draw.bitmap(hdc, rect.left, rect.top, image)
-                    && !state.imageDivergenceSaid)
+                const picture = image !== 0 ? host.picture?.(image) ?? null : null;
+                const drawn = picture
+                    ? draw.picture?.(hdc, rect.left, rect.top, picture) === true
+                    : draw.bitmap(hdc, rect.left, rect.top, image);
+                if (image !== 0 && !drawn && !state.imageDivergenceSaid)
                 {
                     state.imageDivergenceSaid = true;
                     host.divergence?.('Static',

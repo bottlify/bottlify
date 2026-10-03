@@ -80,6 +80,9 @@ const ESTIMATED_LINE_HEIGHT = 16;
  *           Where a call that answers other than Windows would says so.
  * @property {() => unknown} [callerThread]
  *           Whose call is being handled, read before anything is awaited.
+ * @property {(handle: number) => import('./cursors.js').CursorPicture | null} [picture]
+ *           The picture an icon handle stands for, or null for one that has
+ *           none this build can read.
  */
 
 /**
@@ -456,6 +459,28 @@ export function createPaintFunctions(options){
         if (record.painting === hdc)
         {
             record.painting = 0;
+        }
+    };
+
+    /**
+     * An icon's picture drawn at a point, at its own size for a width of 0;
+     * one that cannot be drawn is said once and left out.
+     *
+     * @param {number} hdc @param {number} x @param {number} y @param {number} icon
+     * @param {number} width @param {number} height
+     */
+    const drawIcon = (hdc, x, y, icon, width, height)=>{
+        const picture = host.picture?.(icon >>> 0) ?? null;
+        if (picture && host.draw?.picture?.(hdc >>> 0, x | 0, y | 0, picture,
+            width || picture.width, height || picture.height))
+        {
+            return;
+        }
+        if (!iconDivergenceSaid)
+        {
+            iconDivergenceSaid = true;
+            host.divergence?.('DrawIcon', 'an icon without a picture this build can read is'
+                + ' left out; the call succeeds');
         }
     };
 
@@ -987,20 +1012,55 @@ export function createPaintFunctions(options){
         /**
          * BOOL DrawIcon(HDC hDC, int X, int Y, HICON hIcon)
          *
-         * An icon is a resource nothing here decodes into pixels yet, so
-         * nothing is drawn -- and the call succeeds, because a program draws
-         * an icon for decoration and stops for nothing if the decoration is
-         * refused. Said once per run, since a progress display draws its icon
-         * on every tick.
+         * The icon at its own size, its transparent pixels leaving what is
+         * under them. One whose picture cannot be read -- a standard icon, a
+         * form the decoder does not take -- is left out and the call still
+         * succeeds, because a program draws an icon for decoration and stops
+         * for nothing if the decoration is refused. Said once per run, since a
+         * progress display draws its icon on every tick.
          */
         DrawIcon: {
             argBytes: 16,
-            handler: ()=>{
-                if (!iconDivergenceSaid)
+            /** @param {number[]} args */
+            handler: ([hdc, x, y, icon])=>{
+                drawIcon(hdc, x, y, icon, 0, 0);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL DrawIconEx(HDC hdc, int xLeft, int yTop, HICON hIcon, int cxWidth,
+         *   int cyWidth, UINT istepIfAniCur, HBRUSH hbrFlickerFreeDraw, UINT diFlags)
+         *
+         * DrawIcon at the size asked for: a width or height of zero is the
+         * icon's own, or the system's icon size with DI_DEFAULTSIZE. A brush
+         * fills the rectangle first, as the flicker-free form draws over it;
+         * flags asking for neither the image nor the mask draw nothing.
+         */
+        DrawIconEx: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([hdc, x, y, icon, width, height, step, brush, flags])=>{
+                void step;
+                const DI_NORMAL = 0x0003;
+                const DI_DEFAULTSIZE = 0x0008;
+                const SYSTEM_ICON = 32;
+                if ((flags & DI_NORMAL) === 0)
                 {
-                    iconDivergenceSaid = true;
-                    host.divergence?.('DrawIcon', 'icons are not painted; the call succeeds');
+                    return 0;
                 }
+                const size = (/** @type {number} */ asked, /** @type {number} */ own)=>((asked | 0) > 0
+                    ? asked | 0 : (flags & DI_DEFAULTSIZE) !== 0 ? SYSTEM_ICON : own);
+                const picture = host.picture?.(icon >>> 0) ?? null;
+                const w = size(width, picture?.width ?? SYSTEM_ICON);
+                const h = size(height, picture?.height ?? SYSTEM_ICON);
+                if ((brush >>> 0) !== 0)
+                {
+                    host.draw?.fillWith?.(hdc >>> 0,
+                        { left: x | 0, top: y | 0, right: (x | 0) + w, bottom: (y | 0) + h },
+                        brush >>> 0);
+                }
+                drawIcon(hdc, x, y, icon, w, h);
                 return 1;
             },
         },

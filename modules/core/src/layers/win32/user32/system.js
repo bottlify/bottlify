@@ -552,6 +552,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
         object.picture ??= resourcePicture(object.instance, object.name, kind === 'cursor');
         return object.picture;
     };
+    host.pictures?.(cursorPicture);
 
     /**
      * A cursor's or icon's picture out of a module: the image of the standard

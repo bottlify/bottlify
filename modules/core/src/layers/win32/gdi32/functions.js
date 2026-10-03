@@ -4220,6 +4220,19 @@ export function createGdiFunctions(host){
             },
 
             /**
+             * A decoded icon -- blue, green, red, alpha, a pixel -- drawn at a
+             * point at the size asked for, its transparent pixels leaving what
+             * is under them.
+             *
+             * @param {number} hdc @param {number} x @param {number} y
+             * @param {{ width: number, height: number, bgra: Uint8Array }} picture
+             * @param {number} [width] @param {number} [height]
+             */
+            picture: (hdc, x, y, picture, width, height)=>
+                drawing.bound(hdc)?.drawPicture(hdc >>> 0, x | 0, y | 0, picture, width, height)
+                    === true,
+
+            /**
              * A bitmap the program owns, drawn at a point, or nothing when it
              * has no pixels this layer can reach.
              *

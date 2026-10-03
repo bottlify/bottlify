@@ -3489,10 +3489,22 @@ export function createWindowFunctions(host){
         });
     };
 
+    /**
+     * The picture an icon or cursor handle stands for, for what draws one --
+     * DrawIcon, a static showing an icon. system.js decodes it, and hands
+     * over how once it is made (`pictures` below).
+     *
+     * @type {(handle: number) => import('./cursors.js').CursorPicture | null}
+     */
+    let pictureOf = ()=>null;
+
     const paint = createPaintFunctions({
         // The drawing with the system colours on it, which FillRect needs
         // for a brush named as a colour index.
-        host: Object.assign(Object.create(host), { draw }),
+        host: Object.assign(Object.create(host), {
+            draw,
+            picture: (/** @type {number} */ handle)=>pictureOf(handle),
+        }),
         live, WM_PAINT, geometry, send, invalidated, painted, shown,
         descendants: (/** @type {any} */ record)=>paintedDescendantsOf(record),
     });
@@ -3564,6 +3576,7 @@ export function createWindowFunctions(host){
         writeMemory: host.writeMemory,
         readMemory: host.readMemory,
         draw,
+        picture: (/** @type {number} */ handle)=>pictureOf(handle),
         live,
         windowOf: hwnd=>windows.get(hwnd >>> 0) ?? null,
         clientSize: record=>geometry.clientSize(record),
@@ -4138,6 +4151,10 @@ export function createWindowFunctions(host){
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
                 isChild, repaint,
                 appear, uncover,
+                /** @param {(handle: number) => any} decode */
+                pictures: decode=>{
+                    pictureOf = decode;
+                },
                 shown, raise, restack, desktop: desktopWindow,
                 isDesktop: (/** @type {any} */ record)=>record !== null && record === desktop,
                 sysColorBrush: (/** @type {number} */ index)=>(draw
