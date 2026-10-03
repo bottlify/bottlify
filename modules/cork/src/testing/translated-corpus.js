@@ -17,7 +17,7 @@
  * Run in parts, `emit/corpus-N.itest.js`, each every `of`-th case from its
  * own offset, so a part stays inside the minute the runner gives a file.
  *
- * Needs the corpus (`npm run fetch:corpus`); no emulator.
+ * Needs the corpus (`npm run fetch:corpus`).
  */
 
 import { test } from 'node:test';

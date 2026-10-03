@@ -147,13 +147,12 @@ test('a disc crosses the port protocol as the Blob it was chosen as', { timeout:
             0x50, 0xff, 0x15, ...u32(iat('ExitProcess')), //           push eax
         ],
     });
-    // No emulator: the default engine needs none, which the typedef does not yet say.
-    const app = await createHostedApp(/** @type {any} */ ({
+    const app = await createHostedApp({
         host: 'thread',
         executable: program,
         imagePath: 'D:\\SETUP.EXE',
         discs: [{ image: new Blob([buildIso({ files: { 'SETUP.EXE': program } })]) }],
-    }));
+    });
     t.after(()=>app.dispose());
     assert.equal(await app.run({ timeoutMs: 40000 }), DRIVE_CDROM);
 });

@@ -2,9 +2,8 @@
 
 Русская версия: [architecture.ru.md](architecture.ru.md).
 
-As of `bottlify` cf293c0 and `bottlify-ui` ec1a29c, 2 October 2026. Paths without a prefix are
-relative to `modules/` in bottlify; paths starting with `ui/` are relative to the root of
-bottlify-ui. Where a diagram and the code disagree, the code is right.
+Paths without a prefix are relative to `modules/` in bottlify; paths starting with `ui/` are
+relative to the root of bottlify-ui. Where a diagram and the code disagree, the code is right.
 
 1. [What it is](#1-what-it-is)
 2. [What it is made of](#2-what-it-is-made-of)
@@ -198,7 +197,6 @@ sequenceDiagram
   participant A as AudioWorklet
   Note over S,P: the launcher, ui/src/engine/session.js
   P->>S: /engine/core.js, /bundles/id/entry, the video decoder's wasm
-  P->>P: the DirectX system volume from Cache Storage
   P->>P: AudioContext, addModule(worklet.js)
   Note over P,E: createApp, core/src/host/
   P->>E: new Worker(engine.worker.js)
@@ -483,9 +481,9 @@ flowchart TD
 - **A real DLL** is parsed and relocated by the loader, its dependencies are loaded first, its
   imports (delayed ones included) are bound, and its `DllMain` is called through the bridge as
   program code. TLS is supported for the main image and for statically loaded libraries.
-- **The system volume** is the DirectX runtime (`d3dx9_*` and other Microsoft redistributables). The
-  launcher mounts it read-only at `C:\WINDOWS\system32\`. Without it, the engine's table answers for
-  `d3dx9_*`.
+- **DirectX's redistributables** (`d3dx9_*` and the rest) are not part of the engine: a game brings
+  them, through its installer's DirectX setup, which puts them in `C:\WINDOWS\system32\`, or as DLLs
+  beside its `.exe`. Without them, the engine's table answers for `d3dx9_*`.
 
 Where to look in the code: `core/src/layers/loader/internal/synth.js` (the image),
 `core/src/layers/cpu/internal/thunks.js` (the stubs), `core/src/layers/bridge/` (the bridge), the
@@ -693,7 +691,6 @@ address: from another machine, without a secure context, there is neither OPFS n
 | Block cache | OPFS: `<id>.blocks`, `<id>.present`, `<id>.order` | bundle blocks already fetched from the server | Block N sits at offset N × the block size (taken from the bundle's header, 256 KiB by default). `.present` is a bitmap of the fetched blocks, `.order` the order they were first asked for in (up to 4096). Access goes through synchronous handles: at most 16 are open, and the one unused the longest closes first |
 | cork translations | OPFS: `cork/<id>.v3/` | translated regions | `records` holds the records one after another, `index` a log of where each one is. The index is read once, a miss touches no disk, a hit is one read at an offset. New records are appended in batches; the file is compacted, with a 1 GiB cap |
 | Session | OPFS: `<id>.session` | the files the program wrote, and its registry | All in one deflate-raw stream. Applied before the first instruction, saved 250 ms after the program stops writing. The bundle itself never changes |
-| System volume | Cache Storage: `bottlify-system-volume` | the DirectX runtime: `d3dx9_*` and other redistributables | The page downloads it once and mounts it read-only at `C:\WINDOWS\system32\` |
 | Settings | localStorage | the launcher's settings, time to first frame | — |
 
 How the program reads a file:
@@ -724,4 +721,4 @@ flowchart TD
 Where to look in the code: `core/src/layers/filesystem/internal/bundle/cache.js` (blocks),
 `core/src/layers/filesystem/internal/opfs-store.js` (handles),
 `core/src/layers/cpu/internal/translation-store.js` (translations), `core/src/storage.js`
-(sessions), `ui/src/engine/session.js` (the system volume).
+(sessions).

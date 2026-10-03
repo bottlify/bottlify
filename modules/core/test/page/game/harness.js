@@ -219,7 +219,7 @@ export function profile(layout){
  * The `cpu` layer's always-on sampler, named against the memory layer's
  * module layout the same way a bridge call's own `from` address is
  * (`result.bridge.recent`'s `fromName`). The engine reports raw address
- * buckets on purpose (`docs/core/cpu.md`'s "Sampling") and leaves this
+ * buckets on purpose and leaves this
  * resolving step to whoever reads them.
  *
  * @param {{ slices: number, overflow: number, top: { address: number,
@@ -240,56 +240,6 @@ export function guestSamples(sampler, layout){
             instructions: bucket.instructions,
             samples: bucket.samples,
         })),
-    };
-}
-
-/**
- * The emulator's own account of where the guest ran, when one was kept:
- * the hottest blocks by instructions, and the same by page.
- *
- * @param {any} app  The running application, or nothing yet.
- * @param {string[]} layout  As the memory layer reports it.
- */
-function exactProfile(app, layout){
-    const account = app?.guestProfile?.read();
-    if (!account || account.entries.length === 0)
-    {
-        return null;
-    }
-    const where = symboliser(layout);
-    let retired = 0;
-    /** @type {Map<string, number>} */
-    const pages = new Map();
-    for (const entry of account.entries)
-    {
-        retired += entry.instructions;
-        const page = where(entry.address, ~0xfff);
-        pages.set(page, (pages.get(page) ?? 0) + entry.instructions);
-    }
-    const share = (/** @type {number} */ count)=>count / Math.max(1, retired);
-    return {
-        blocks: account.entries.length,
-        retired,
-        dropped: account.dropped,
-        // The window's own modules, whole rather than top-of, so a share of the
-        // guest's time is a share of every instruction it retired.
-        modules: byModule(account.entries.map(entry=>(
-            { address: entry.address, weight: entry.instructions })), layout),
-        pages: [...pages].sort((left, right)=>right[1] - left[1]).slice(0, 16)
-            .map(([at, count])=>({ at, count, share: share(count) })),
-        hot: [...account.entries].sort((left, right)=>right.instructions - left.instructions)
-            .slice(0, 8192)
-            .map(entry=>({
-                at: where(entry.address),
-                instructions: entry.instructions,
-                hits: entry.hits,
-                share: share(entry.instructions),
-                // The bytes at the entry, for a reader with a disassembler:
-                // an address alone says where, not what. Fifteen bytes holds
-                // any x86 instruction in full.
-                bytes: Array.from(app.debug.read(entry.address, 16))
-                    .map((/** @type {number} */ byte)=>byte.toString(16).padStart(2, '0')).join(' '),
-            })),
     };
 }
 
@@ -585,7 +535,7 @@ function drainSound(app, capture = null, elsewhere = undefined){
     let readAt = performance.now();
     setInterval(()=>{
         // By elapsed time rather than a fixed count per turn: this page's main
-        // thread is inside the emulator most of the time, so the reads are late
+        // thread is inside the engine most of the time, so the reads are late
         // and bursty, and only the clock keeps the total honest.
         const owed = Math.floor((performance.now() - readAt) * sampleRate / 1000);
         const frames = Math.min(ring.capacity, owed);
@@ -595,7 +545,7 @@ function drainSound(app, capture = null, elsewhere = undefined){
         }
         // The clock moves on by what was really taken, not by what was asked
         // for. A device reading on its own thread never misses its turn; this
-        // one is on the thread the emulator is holding, and a read that gave up
+        // one is on the thread the engine is holding, and a read that gave up
         // whatever it was late for would model a device running slow -- which
         // is indistinguishable, in a report, from an engine that cannot feed
         // one.
@@ -1212,9 +1162,6 @@ function filesUnder(app, directory){
  *     Where a frame's time goes, asked while the run is still going. A report
  *     at the end of a run answers what a whole run cost; this answers what one
  *     frame costs, which is the question a frame rate is.
- * @property {() => boolean} exactRestart
- *     Begins the emulator's own account afresh, so a window measures itself
- *     and not the loading before it.
  * @property {(list?: string) => Promise<{ processes: any[], events: string[], desktop: any,
  *     files: { path: string, size: number }[] }>} standing
  *     Every process standing, read while the run goes on: its threads and
@@ -1287,9 +1234,6 @@ export function createHarness(canvas, how = {}){
             return { ok: false, gpu: false, reason: handle.reason };
         }
 
-        const wasm = await fetch(new URL('../../../vendor/prebuilt/v86.wasm', import.meta.url))
-            .then(response=>response.arrayBuffer());
-
         // Optional, and asked for anyway: without it a program's cinematic is a
         // graph with nothing in it, which is a real state of a machine and not the
         // one worth measuring. A build that has no decoder to fetch runs as before.
@@ -1347,8 +1291,7 @@ export function createHarness(canvas, how = {}){
                 // there is of a program's own code, which makes no host call to
                 // record what it decided.
                 profile: profile(layers.memory?.layout ?? []),
-                exact: exactProfile(running, layers.memory?.layout ?? []),
-                // Whether the emulator honoured the slice it was given. A quantum
+                // Whether the engine honoured the slice it was given. A quantum
                 // that is not kept is time one thread holds the machine while a
                 // frame waits, and it is invisible in every other number here.
                 slices: {
@@ -1391,17 +1334,15 @@ export function createHarness(canvas, how = {}){
                 // crossing, so not one of the rows above -- read next to them.
                 kernelGlCalls: layers.app?.kernelGlCalls ?? 0,
                 trapCapacity: layers.cpu?.trapCapacity ?? 0,
-                jit: layers.cpu?.jit ?? null,
                 // The always-on sampler's own raw buckets, cumulative since
-                // boot, the way `jit.published` above already is -- a caller
-                // wanting one window's own top list takes two readings a
-                // window apart and deltas them by bucket key, the overlay's
-                // own pattern (`docs/core/cpu.md`'s "Sampling").
+                // boot -- a caller wanting one window's own top list takes two
+                // readings a window apart and deltas them by bucket key, the
+                // overlay's own pattern.
                 samples: layers.cpu?.samples ?? null,
                 // Which guest address belongs to which module, so a driver
-                // can name `jit.published`'s own addresses without waiting
-                // for the final result (`result.bridge.recent` already does
-                // this resolution itself, but only after the run ends).
+                // can name the sampler's addresses without waiting for the
+                // final result (`result.bridge.recent` already does this
+                // resolution itself, but only after the run ends).
                 memoryLayout: layers.memory?.layout ?? [],
                 presents: presentState.presents,
                 // What we send to the card against what the program actually
@@ -1455,10 +1396,6 @@ export function createHarness(canvas, how = {}){
                 ? { categories: request.logCategories, capacity: request.logCapacity,
                     bytes: request.logBytes }
                 : undefined,
-            v86: {
-                moduleUrl: new URL('../../../vendor/prebuilt/libv86.mjs', import.meta.url).href,
-                wasmBytes: wasm,
-            },
             media: decoder ? { wasmBytes: decoder } : undefined,
             imagePath: request.imagePath,
             screen: request.screen ?? undefined,
@@ -1494,16 +1431,12 @@ export function createHarness(canvas, how = {}){
                     }
                 }
                 : undefined,
+            // The translator's own settings for the run.
+            cork: request.cork || undefined,
             // Sampled guest execution, when asked for. A program that decides
             // something inside its own code makes no host call to record, and the
             // instruction pointer is then the only account of what it was doing --
             // which is exactly the situation once a game reaches its own main loop.
-            // Which execution engine runs the program, and the translator's
-            // own settings when it is one with a translator: a run compares
-            // engines on the same route by naming one here.
-            engine: request.engine || undefined,
-            cork: request.cork || undefined,
-            jit: request.jit || undefined,
             sampling: request.sampling,
             quantum: request.quantum || undefined,
             sample: request.profile || request.quantum ? recordSample : undefined,
@@ -1539,7 +1472,7 @@ export function createHarness(canvas, how = {}){
                     // demo's frame N is the same frame in every run.
                     // Counted from the first present instead, when a program whose
                     // clock steps once per frame is to be caught at the same game
-                    // moment by two engines whose stalls fall in different places.
+                    // moment by two runs whose stalls fall in different places.
                     const counted = request.snapFromStart
                         ? presentState.presents : presentState.sinceStall ?? 0;
                     if (request.snapFrame && !request.snapFromStart && counted === 0)
@@ -1621,12 +1554,6 @@ export function createHarness(canvas, how = {}){
         // intended turn mid-run rather than holding one velocity for the whole
         // run. Null when no pointer was asked for.
         /** @type {any} */ (globalThis).__bottlifyPointer__ = request.pointer ?? null;
-        if (request.exact)
-        {
-            // Kept by the emulator itself rather than sampled, so it costs the
-            // guest a call per block; asked for, never on by default.
-            app.guestProfile.start();
-        }
 
         const started = performance.now();
         try
@@ -1723,7 +1650,6 @@ export function createHarness(canvas, how = {}){
             kernelGlCalls: metrics('app').kernelGlCalls ?? 0,
         };
         result.profile = profile(layout);
-        result.exact = exactProfile(running, layout);
         result.samples = guestSamples(metrics('cpu').samples, layout);
         // Named rather than left to `scalars`: the translator's report is an
         // object of objects (`exitsByTarget`, `refused`, `refusedWhy`), so the
@@ -1869,20 +1795,6 @@ export function createHarness(canvas, how = {}){
             ? { processes: await standingOf(running), events: runningEvents,
                 desktop: desktopOf(running), files: list ? filesUnder(running, list) : [] }
             : { processes: [], events: runningEvents, desktop: null, files: [] }),
-        exactRestart: ()=>{
-            // The sampled account is cleared with the emulator's own, so a
-            // window that begins here is measured by itself and not by the
-            // loading and the view before it.
-            resetSamples();
-            return Boolean(running?.guestProfile.start());
-        },
-        // A window is measured while it is held, so the account can be turned
-        // off again for the turn to the next one -- which otherwise pays a
-        // per-instruction tax while the camera moves.
-        exactStop: ()=>{
-            running?.guestProfile.stop();
-            return Boolean(running);
-        },
         errors,
         get presents(){
             return { count: presentState.presents, gaps: presentState.gaps.slice() };

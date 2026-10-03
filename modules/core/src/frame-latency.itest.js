@@ -25,12 +25,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -156,11 +153,9 @@ function buildPresentingExe(){
  * Runs the program over a device that finishes one submit every few
  * milliseconds.
  *
- * @param {number | undefined} maxFrameLatency
- * @param {'cork' | 'emulator'} engine
+ * @param {number} [maxFrameLatency]
  */
-async function run(maxFrameLatency, engine){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+async function run(maxFrameLatency){
     const gpu = createFakeDevice({ workDone: true });
     const gpuDevice = /** @type {any} */ (gpu.device);
     gpuDevice.features = new Set();
@@ -168,16 +163,11 @@ async function run(maxFrameLatency, engine){
     const pace = setInterval(()=>gpu.finish(1), 3);
     const app = await createApp({
         executable: buildPresentingExe(),
-        engine,
         device: {
             device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
             adapter: { vendor: 'fake', architecture: '', description: 'a stand-in' },
         },
         graphics: { maxFrameLatency },
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
     try
     {
@@ -208,34 +198,31 @@ async function run(maxFrameLatency, engine){
     }
 }
 
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`a program presenting faster than its device waits at Present while its other threads`
-        + ` run, under ${engine}`, { timeout: 60000 }, async t=>{
-        const bound = await run(undefined, engine);
-        t.diagnostic(`bound: ${JSON.stringify(bound)}`);
-        assert.equal(bound.code, 0);
-        assert.equal(bound.failed, 0, 'every present answered D3D_OK');
-        assert.ok(bound.latency, 'the run presenter counts frames in flight');
-        assert.equal(bound.latency.limit, 3, 'three by default');
-        assert.equal(bound.latency.frames, FRAMES);
-        assert.ok(bound.latency.held > 0, 'presents waited for the device');
-        assert.ok(bound.latency.peak <= 4,
-            `the device was never more than the bound and the waiting frame behind (${
-                bound.latency.peak})`);
-        assert.ok(/** @type {number} */ (bound.moved) > 0,
-            'the counting thread ran while a present waited');
-    });
+test('a program presenting faster than its device waits at Present while its other threads'
+    + ' run', { timeout: 60000 }, async t=>{
+    const bound = await run();
+    t.diagnostic(`bound: ${JSON.stringify(bound)}`);
+    assert.equal(bound.code, 0);
+    assert.equal(bound.failed, 0, 'every present answered D3D_OK');
+    assert.ok(bound.latency, 'the run presenter counts frames in flight');
+    assert.equal(bound.latency.limit, 3, 'three by default');
+    assert.equal(bound.latency.frames, FRAMES);
+    assert.ok(bound.latency.held > 0, 'presents waited for the device');
+    assert.ok(bound.latency.peak <= 4,
+        `the device was never more than the bound and the waiting frame behind (${
+            bound.latency.peak})`);
+    assert.ok(/** @type {number} */ (bound.moved) > 0,
+        'the counting thread ran while a present waited');
+});
 
-    test(`with no bound the program runs ahead of its device and no present waits, under ${
-        engine}`, { timeout: 60000 }, async t=>{
-        const free = await run(0, engine);
-        t.diagnostic(`free: ${JSON.stringify(free)}`);
-        assert.equal(free.code, 0);
-        assert.equal(free.failed, 0);
-        // No present waited. The counting thread may still have run: an
-        // interpreted slice also ends on time, whatever the presents do.
-        assert.equal(free.latency?.held, 0);
-        assert.ok(free.latency.peak > 4, `${free.latency.peak} frames behind at most`);
-    });
-}
+test('with no bound the program runs ahead of its device and no present waits', {
+    timeout: 60000 }, async t=>{
+    const free = await run(0);
+    t.diagnostic(`free: ${JSON.stringify(free)}`);
+    assert.equal(free.code, 0);
+    assert.equal(free.failed, 0);
+    // No present waited. The counting thread may still have run: an
+    // interpreted slice also ends on time, whatever the presents do.
+    assert.equal(free.latency?.held, 0);
+    assert.ok(free.latency.peak > 4, `${free.latency.peak} frames behind at most`);
+});

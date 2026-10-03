@@ -217,9 +217,6 @@ async function run(request){
         return { ok: false, reason: handle.reason, gpu: false };
     }
 
-    const wasm = await fetch(new URL('../../../vendor/prebuilt/v86.wasm', import.meta.url))
-        .then(response=>response.arrayBuffer());
-
     // Asked for, the Direct3D devices draw in the graphics worker, on a
     // device of its own, and its frames come back to this one.
     const graphics = request.graphicsWorker
@@ -236,10 +233,6 @@ async function run(request){
     let presented = null;
     const app = await createApp({
         executable: fromBase64(request.exe),
-        v86: {
-            moduleUrl: new URL('../../../vendor/prebuilt/libv86.mjs', import.meta.url).href,
-            wasmBytes: wasm,
-        },
         screen: { width: 320, height: 240, bitsPerPixel: 32 },
         device: {
             device: handle.device,

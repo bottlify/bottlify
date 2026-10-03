@@ -59,6 +59,7 @@ import {
 import {
     CLEAR_UNIFORM_FLOATS, COPY_UNIFORM_FLOATS, UNIFORM, UNITS, clearDescriptor, clearKey,
     copyKey, drawDescriptor, drawKey, generateClear, generateCopy, generateDraw, generateShow,
+    sameKeyInputs,
     showDescriptor, showKey,
 } from './wgsl.js';
 
@@ -628,6 +629,7 @@ export function createGpuRenderer(services){
      * @property {string} format   the surface's own format: `TEXTURE_FORMAT`,
      *           or a BC format when every level travels as blocks
      * @property {Map<number, any>} views   a level as a target, by level key, once drawn into
+     * @property {number} [usedIn]  the last frame whose commands sample or write it
      */
     /** @type {WeakMap<import('./objects.js').TextureObject, TextureRecord>} */
     const textures = new WeakMap();
@@ -639,7 +641,8 @@ export function createGpuRenderer(services){
      * @param {string} label @param {number} usage @param {number} size
      */
     const ring = (label, usage, size)=>{
-        let buffer = backend.createDynamicBuffer({ size, usage, label });
+        // Each draw reads only what it wrote, so a wrap keeps nothing.
+        let buffer = backend.createDynamicBuffer({ size, usage, label, keep: false });
         let cursor = 0;
         let fresh = true;
         return {
@@ -650,7 +653,8 @@ export function createGpuRenderer(services){
                 if (aligned > buffer.size)
                 {
                     backend.releaseDynamicBuffer?.(buffer);
-                    buffer = backend.createDynamicBuffer({ size: aligned * 2, usage, label });
+                    buffer = backend.createDynamicBuffer({ size: aligned * 2, usage, label,
+                        keep: false });
                     cursor = 0;
                     fresh = true;
                 }
@@ -827,12 +831,14 @@ export function createGpuRenderer(services){
     };
 
     /**
-     * The GPU copy of a texture, uploaded or brought up to date.
+     * The GPU copy of a texture, uploaded or brought up to date for a command
+     * of `recording`.
      *
      * @param {import('./objects.js').TextureObject} texture
+     * @param {Recording} recording
      * @returns {TextureRecord}
      */
-    const textureFor = texture=>{
+    const textureFor = (texture, recording)=>{
         const cube = texture.target === GL.TEXTURE_CUBE_MAP;
         const base = /** @type {import('./objects.js').TextureLevel} */ (
             texture.levels.get(levelKey(0)));
@@ -883,6 +889,20 @@ export function createGpuRenderer(services){
                 texture.dirty.set(key, null);
             }
         }
+        // The queue runs a direct write before every frame not yet flushed,
+        // so one whose commands already use the texture would see texels
+        // written after them; the upload then takes its place among the
+        // commands of the frame being recorded.
+        const ordered = record.usedIn !== undefined && unflushed.has(record.usedIn);
+        /** @param {any} request */
+        const upload = request=>{
+            if (ordered)
+            {
+                recording.commands.push({ kind: 'upload', upload: { ...request, staging: true } });
+                return;
+            }
+            backend.uploadTexture(request);
+        };
         for (const [key, rect] of texture.dirty)
         {
             const level = key % FACE_STRIDE;
@@ -897,29 +917,32 @@ export function createGpuRenderer(services){
             {
                 const compressed = /** @type {NonNullable<typeof image.compressed>} */ (
                     image.compressed);
-                backend.uploadTexture({
+                upload({
                     texture: record.gpu.texture,
                     format: bcFormat,
                     mipLevel: level,
                     width: image.width,
                     height: image.height,
                     origin: { x: 0, y: 0, z: face },
-                    data: compressed.bytes,
+                    data: ordered ? compressed.bytes.slice() : compressed.bytes,
                 });
                 continue;
             }
             const area = rect ?? { x: 0, y: 0, width: image.width, height: image.height };
-            backend.uploadTexture({
+            upload({
                 texture: record.gpu.texture,
                 format: TEXTURE_FORMAT,
                 mipLevel: level,
                 width: area.width,
                 height: area.height,
                 origin: { x: area.x, y: area.y, z: face },
-                data: sliceRect(image, area),
+                // A command keeps bytes of its own: the slice may be a view
+                // of the level the program goes on writing.
+                data: ordered ? sliceRect(image, area).slice() : sliceRect(image, area),
             });
         }
         texture.dirty.clear();
+        record.usedIn = recording.id;
         return record;
     };
 
@@ -1713,6 +1736,14 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * The state and key of the draw before: most draws keep both, and the key
+     * is a long string to build.
+     *
+     * @type {{ state: import('./wgsl.js').DrawState, key: string } | null}
+     */
+    let lastDraw = null;
+
+    /**
      * Records one draw of a laid-out vertex stream.
      *
      * @param {object} context
@@ -1751,7 +1782,9 @@ export function createGpuRenderer(services){
                 + ' both, so the front face\'s were applied to the back face\'s test too');
         }
         const state = drawStateOf(scene, layout, topology);
-        const key = drawKey(state);
+        const key = lastDraw !== null && sameKeyInputs(state, lastDraw.state)
+            ? lastDraw.key : drawKey(state);
+        lastDraw = { state, key };
         const generated = generatedFor(key, state);
         const recording = recordingOf(context);
         if (generated.programs?.error)
@@ -1796,7 +1829,7 @@ export function createGpuRenderer(services){
         /** @type {RecordedBinding[]} */
         const bindings = sampled.map(({ entry, texture })=>({
             binding: entry.binding,
-            view: textureFor(texture).gpu.view,
+            view: textureFor(texture, recording).gpu.view,
             sampler: samplerFor(texture),
             texture,
         }));
@@ -2084,7 +2117,8 @@ export function createGpuRenderer(services){
         {
             return;
         }
-        const textureRecord = textureFor(texture);
+        const recording = recordingOf(context);
+        const textureRecord = textureFor(texture, recording);
         const key = levelKey(level, face);
         let view = textureRecord.views.get(key);
         if (!view)
@@ -2111,7 +2145,6 @@ export function createGpuRenderer(services){
             };
             textureRecord.views.set(key, view);
         }
-        const recording = recordingOf(context);
         const pipeline = pipelineFor(copyKey(TEXTURE_FORMAT), generateCopy(),
             showDescriptor(TEXTURE_FORMAT), SINGLE_TEXTURE_PLAN);
         const uniforms = new Float32Array(COPY_UNIFORM_FLOATS);
@@ -2212,12 +2245,13 @@ export function createGpuRenderer(services){
      * @param {Recording} recording
      * @param {DrawableSurfaces} target
      * @param {any} shown   the opaque copy this frame is shown through
+     * @param {number} cut   the backend's cut this recording was queued as
      */
-    const replay = async(recording, target, shown)=>{
+    const replay = async(recording, target, shown, cut)=>{
         const show = pipelineFor(showKey(COLOUR_FORMAT), generateShow(),
             showDescriptor(COLOUR_FORMAT), SINGLE_TEXTURE_PLAN);
         const built = await Promise.allSettled([...recording.pipelines, show]);
-        const frame = backend.beginFrame();
+        const frame = backend.beginFrame({ cut });
         const probing = recording === newest;
         // Which candidates the read-backs go to: the window the probe named,
         // or the frame's last draws sampling the texture. Chosen here, where
@@ -2289,6 +2323,13 @@ export function createGpuRenderer(services){
             for (let at = 0; at < recording.commands.length; at++)
             {
                 const command = recording.commands[at];
+                if (command.kind === 'upload')
+                {
+                    // A staged copy closes the pass it lands in.
+                    backend.uploadTexture(command.upload);
+                    pass = null;
+                    continue;
+                }
                 const outcome = built[command.pipeline];
                 if (outcome.status === 'rejected')
                 {
@@ -2506,9 +2547,9 @@ export function createGpuRenderer(services){
             }
             const shown = target.shown[target.current];
             target.current ^= 1;
-            backend.markPresent();
+            const cut = backend.markPresent();
             chain = chain
-                .then(()=>replay(recording, target, shown))
+                .then(()=>replay(recording, target, shown, cut))
                 .catch(error=>{
                     unflushed.delete(recording.id);
                     if (failures.length < 16)

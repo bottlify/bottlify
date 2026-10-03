@@ -15,8 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-        with:
-          submodules: recursive
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -26,17 +24,14 @@ jobs:
       - run: npm run lint
       - run: npm run test
       - run: npm run check:boundaries
-      # Integration tests drive a real v86 build, fetched from our fork's release.
-      - run: npm run fetch:v86
-      # The build refuses to make a package that cannot boot, so the decoder has
-      # to be here too -- and the release test packs and installs the result.
+      # The release test packs and installs the built package, decoder included.
       # It is a release of this repository, which is private: the plain download
       # URL answers 404, so the fetch goes through the API with the job's token.
       - run: npm run fetch:video-decoder
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      # The translator's differential suites judge it against the hardware corpus
-      # and the emulator; with CI set they fail rather than skip without them.
+      # The translator's corpus suites judge it against the hardware recording;
+      # with CI set they fail rather than skip without it.
       - run: npm run fetch:corpus
       - run: npm run test:integration
       - run: npm run build
@@ -46,8 +41,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-        with:
-          submodules: recursive
       - uses: actions/setup-node@v5
         with:
           node-version: 22

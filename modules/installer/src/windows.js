@@ -43,3 +43,34 @@ export function windowsChoice(value){
     }
     return found;
 }
+
+/** @typedef {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'opengl'} GraphicsChoice */
+
+/**
+ * The graphics a bottle may prefer, as `graphics` in its manifest: the
+ * engine's `graphicsApi` names, which it refuses any other of as well.
+ *
+ * @type {readonly GraphicsChoice[]}
+ */
+export const GRAPHICS_CHOICES = Object.freeze(
+    ['directx7', 'directx8', 'directx9', 'directx10', 'opengl']);
+
+/**
+ * The name itself, or undefined for none -- every API, the engine's default.
+ * Anything else is refused, naming the five.
+ * @param {unknown} value
+ * @returns {GraphicsChoice | undefined}
+ */
+export function graphicsChoice(value){
+    if (value === undefined || value === null)
+    {
+        return undefined;
+    }
+    const found = GRAPHICS_CHOICES.find(choice=>choice === value);
+    if (found === undefined)
+    {
+        throw new Error(`unknown graphics choice ${JSON.stringify(value)}: `
+            + `the choices are ${GRAPHICS_CHOICES.join(', ')}`);
+    }
+    return found;
+}

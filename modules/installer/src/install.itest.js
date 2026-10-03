@@ -24,14 +24,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { createApp } from '../../core/src/app.js';
 import { collect, prefixOptions } from './prefix.js';
 import { discOptions, isDiscImage } from './disc.js';
-
-const PREBUILT = new URL('../../core/vendor/prebuilt/', import.meta.url);
 
 /** Long enough for a program to reach its first window, short enough to fail fast. */
 const TURNS = 400000;
@@ -57,9 +55,6 @@ test('a distribution runs in a prefix and what it wrote comes back out', async t
         },
     };
     const onDisc = await isDiscImage(image);
-    // The emulator is optional: without its artifacts the default engine runs.
-    const wasm = existsSync(new URL('v86.wasm', PREBUILT))
-        ? await readFile(new URL('v86.wasm', PREBUILT)) : null;
     const disc = onDisc ? await discOptions({ name: basename(path), disc: image }) : null;
     const prefix = disc
         ?? prefixOptions({ name: basename(path), bytes: new Uint8Array(await readFile(path)) });
@@ -70,10 +65,6 @@ test('a distribution runs in a prefix and what it wrote comes back out', async t
         storage: prefix.storage,
         ...disc ? { discs: disc.discs, commandLine: disc.commandLine } : {},
         traceStrings: true,
-        ...wasm ? { v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        } } : {},
     });
 
     /** @type {string} */

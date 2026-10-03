@@ -2,10 +2,10 @@
 
 Run an original Win32 x86 program in a browser tab.
 
-The package is an x86 machine (a fork of [v86](https://github.com/copy/v86), running in a Web
-Worker) with a from-scratch Win32 and DirectX layer written on top of it. There is no Windows
-underneath: the PE loader maps the executable, synthesises a real in-guest module for each system
-library, and the emulated CPU executes the program's own code. Calls that leave the program and
+The package is an x86 machine running in a Web Worker -- the program's own code translated to
+WebAssembly by cork, this project's translator -- with a from-scratch Win32 and DirectX layer
+written on top of it. There is no Windows underneath: the PE loader maps the executable and
+synthesises a real in-guest module for each system library. Calls that leave the program and
 enter `kernel32`, `user32`, `gdi32`, `ole32`, `winmm`, `wsock32`, DirectDraw, Direct3D 7/8/9 or
 OpenGL are answered by this package, and its rendering goes out through WebGPU, its sound through
 WebAudio, and its filesystem into OPFS.
@@ -39,23 +39,21 @@ Node 22+ to build against; a browser with WebGPU to run in.
 
 ## Use
 
-`createApp()` needs the program to run plus the emulator artifacts that ship inside this package.
-Each is a subpath export, so a bundler resolves it the same way it resolves the entry point.
+`createApp()` needs the program to run; the translator ships inside this package and is found
+beside it. The video decoder is a subpath export, so a bundler resolves it the same way it
+resolves the entry point.
 
 ```js
 import { createApp } from '@bottlify/core';
 
 // Vite: `?url` resolves a bare specifier through the package's `exports` and emits the file as an
 // asset. webpack 5 and Parcel do the same for a `.wasm` import through an asset/resource rule.
-import v86ModuleUrl from '@bottlify/core/libv86.mjs?url';
-import v86WasmUrl from '@bottlify/core/v86.wasm?url';
 import decoderWasmUrl from '@bottlify/core/video-decoder.wasm?url';
 
 const load = async url=>(await fetch(url)).arrayBuffer();
 
 const app = await createApp({
     executable: new Uint8Array(await (await fetch('/game/game.exe')).arrayBuffer()),
-    v86: { moduleUrl: v86ModuleUrl, wasmBytes: await load(v86WasmUrl) },
     // Optional. Left out, the media layer comes up and reports that nothing can be played.
     media: { wasmBytes: await load(decoderWasmUrl) },
     // Where the program is told it was loaded from, so it looks for its data next to itself.
@@ -65,25 +63,28 @@ const app = await createApp({
 await app.run();
 ```
 
-Without a bundler — native ES modules, or Node — the same subpaths resolve through
-`import.meta.resolve('@bottlify/core/v86.wasm')`, which is what the package's own release test uses.
+Without a bundler — native ES modules, or Node — the same subpath resolves through
+`import.meta.resolve('@bottlify/core/video-decoder.wasm')`.
+
+The v86 emulator is an engine a caller may select, and the package does not carry it:
+`createApp({ engine: 'emulator', v86: { moduleUrl, wasmBytes } })` runs the build the caller
+brings, and `engine: 'emulator'` without one is refused as not installed.
 
 The controller `createApp()` returns also carries `stop()`, `dispose()`, `diagnostics()` and an
 `input.attach(canvas)` for handing it a surface to draw on and read events from.
 
 ## Where the wasm comes from
 
-`v86.wasm` and `libv86.mjs` are built by [our v86 fork](https://github.com/bottlify/v86) in its own
-CI; `video-decoder.wasm` is built from a fork of FFmpeg. Neither is compiled here and neither is
-committed: the build pulls a pinned release, verifies it against a checked-in lock, and copies it
-into `dist/vendor/`. `dist/vendor/manifest.json` records the SHA-256 and the release each artifact
+`video-decoder.wasm` is FFmpeg compiled to WebAssembly by this repository's `vendor` workflow. It
+is not compiled by the package build and not committed: the build pulls a pinned release, verifies
+it against a checked-in lock, and copies it into `dist/vendor/`. `dist/vendor/manifest.json` records the SHA-256 and the release each artifact
 came from, and `dist/checksums.json` covers everything in the package.
 
 ## Documentation
 
-[`docs/core/`](https://github.com/bottlify/bottlify/tree/main/docs/core) documents the module
-contract, the layer graph and the configuration shape — what each layer promises, and what a build
-with a layer switched off still does.
+[`docs/core/`](https://github.com/bottlify/bottlify/tree/main/docs/core) documents `createApp`'s
+options and controller, the module contract and each layer's configuration, and what is not there
+yet.
 
 ## Licence
 

@@ -13,8 +13,7 @@
  * invocation, printing `file.c:line: Test failed: ...` for every check that did
  * not hold and a closing `N tests executed (...)` line. A check that holds on
  * Windows and fails here is a divergence in our recreation of that contract,
- * which is exactly what this measures -- node only, no browser, on the default
- * engine unless told otherwise.
+ * which is exactly what this measures -- node only, no browser.
  *
  * The binaries are LGPL and stay local: `winetest.exe` lives in
  * `to_install/wine-tests/` (ignored), the tests are lifted out of it into the
@@ -45,16 +44,7 @@
  *     --failures <n>      failed checks listed per test in the markdown (default 20)
  *     --out <dir>         where report.json and report.md go
  *     --baseline <json>   an earlier report to compare against, before -> after
- *     --engine <name>     the execution engine (the translator by default)
  *     --cork-config <json>  the translator's settings, over the ones used here
- *     --reference <engine>  runs each test that did not pass again on this engine
- *                         (`emulator`) and sets apart what fails only on the first
- *
- * The translator is built to run games fast rather than to be every corner of
- * the x86 architecture, so a check that fails only under it is a different kind
- * of finding from one that fails on the reference processor too: the first is
- * the translator's, and may not matter to any game; the second is the Win32
- * layers', whichever engine runs them. `--reference` measures which is which.
  */
 
 import { fork } from 'node:child_process';
@@ -64,7 +54,6 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = new URL('../', import.meta.url);
-const PREBUILT = new URL('modules/core/vendor/prebuilt/', ROOT);
 const LOCAL = new URL('to_install/wine-tests/', ROOT);
 
 /** The i386 winetest.exe of Wine's daily CI build, the newest one. */
@@ -297,20 +286,6 @@ export function classify(result, parsed){
  * @property {string[]} divergences
  * @property {string[]} missing
  * @property {string} tail       the last lines the program printed
- * @property {ReferenceRun | null} [reference]  the same test on the reference engine
- */
-
-/**
- * @typedef {Object} ReferenceRun
- * @property {string} engine
- * @property {string} status
- * @property {number | null} executed
- * @property {number} failures
- * @property {FailedCheck[]} onlyHere  checks that failed on the tested engine and
- *     not on this one, by file:line
- * @property {boolean} statusOnlyHere  the run ended worse on the tested engine: it
- *     hung or crashed the engine where the reference stopped or finished, stopped
- *     where it finished, or failed where it passed
  */
 
 /**
@@ -346,45 +321,10 @@ export function summarise(module, test, result){
 const FINISHED = new Set(['pass', 'fail']);
 
 /**
- * How badly a run ended, for telling which of two ended worse: a hang or the
- * engine's own failure is worse than the program stopping on something it
- * met, which is worse than finishing.
- *
- * @param {string} status
- */
-const endingRank = status=>(status === 'pass' ? 0 : status === 'fail' ? 1
-    : ['timeout', 'deadlock', 'engine-crash'].includes(status) ? 3 : 2);
-
-/**
  * What every test asks for and is meant not to find: the name a test looks up
  * to tell Wine from Windows. Its absence is what makes it hold us to Windows.
  */
 const EXPECTED_MISSING = new Set(['ntdll.dll!wine_server_call']);
-
-/**
- * Sets a test's result against the same test on the reference engine.
- *
- * A check is the translator's when its line fails here and not there: the
- * Win32 layers are the same code on both engines, and the processor is the
- * one thing that differs. A line checked in a loop counts by its line, since
- * a loop's iterations need not fail alike on both.
- *
- * @param {TestReport} tested @param {TestReport} reference @param {string} engine
- * @returns {ReferenceRun}
- */
-export function againstReference(tested, reference, engine){
-    const there = new Set(reference.failed.map(check=>`${check.file}:${check.line}`));
-    return {
-        engine,
-        status: reference.status,
-        executed: reference.executed,
-        failures: reference.failures,
-        onlyHere: tested.failed.filter(check=>!there.has(`${check.file}:${check.line}`)),
-        // A hang here where the reference processor raised the exception the
-        // program's own filter reported is the translator's too.
-        statusOnlyHere: endingRank(tested.status) > endingRank(reference.status),
-    };
-}
 
 /**
  * Finds `<module>_test.exe` among winetest's resources.
@@ -428,19 +368,16 @@ async function buildId(winetest){
  * run ended from outside still reports how far it got.
  *
  * @param {string} exePath @param {string} test
- * @param {{ timeout: number, engine?: string, corkConfig: object }} settings
+ * @param {{ timeout: number, corkConfig: object }} settings
  */
 async function runChild(exePath, test, settings){
     const send = (/** @type {any} */ message)=>new Promise(resolve=>{
         process.send?.(message, undefined, {}, ()=>resolve(undefined));
     });
     const { createApp } = await import('../modules/core/src/app.js');
-    const { DEFAULT_ENGINE } = await import('../modules/core/src/layers/cpu/module.js');
     const executable = new Uint8Array(await readFile(exePath));
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
     const name = exePath.split(/[\\/]/).pop() ?? 'test.exe';
     const imagePath = `C:\\winetest\\${name}`;
-    const engine = settings.engine;
 
     /** @type {Set<string>} */
     const unimplemented = new Set();
@@ -459,21 +396,15 @@ async function runChild(exePath, test, settings){
     {
         app = await createApp({
             executable,
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
             imagePath,
             commandLine: test === '' ? `"${imagePath}"` : `"${imagePath}" ${test}`,
             // The program on its own volume, where GetModuleFileName says it is:
             // a test that reads its own resources or copies itself opens it.
             files: [{ path: imagePath, bytes: executable }],
-            engine,
-            ...((engine ?? DEFAULT_ENGINE) === 'cork'
-                ? { cork: { config: { feed: 'slice', timings: true,
-                    worker: true, workerUrl: new URL(
-                        'modules/cork/src/runtime/translator.worker.js', ROOT).href,
-                    ...settings.corkConfig } } } : {}),
+            cork: { config: { feed: 'slice', timings: true,
+                worker: true, workerUrl: new URL(
+                    'modules/cork/src/runtime/translator.worker.js', ROOT).href,
+                ...settings.corkConfig } },
             storage: null,
         });
         app.attachLog((/** @type {number} */ stream, /** @type {string} */ text)=>
@@ -526,7 +457,7 @@ async function runChild(exePath, test, settings){
  * Runs one test program in a child process and waits for its result.
  *
  * @param {string} exePath @param {string} test
- * @param {{ timeout: number, engine?: string, corkConfig: object }} settings
+ * @param {{ timeout: number, corkConfig: object }} settings
  * @returns {Promise<ChildResult>}
  */
 function runInChild(exePath, test, settings){
@@ -586,7 +517,7 @@ function parseArgs(argv){
         return at === -1 ? fallback : argv[at + 1];
     };
     const flags = new Set(['--winetest', '--preset', '--timeout', '--jobs', '--failures', '--out',
-        '--baseline', '--engine', '--cork-config', '--reference', '--winetest-url']);
+        '--baseline', '--cork-config', '--winetest-url']);
     /** @type {string[]} */
     const specs = [];
     for (let i = 0; i < argv.length; i++)
@@ -610,9 +541,7 @@ function parseArgs(argv){
         failures: Number(value('--failures', '20')),
         out: value('--out'),
         baseline: value('--baseline'),
-        engine: value('--engine'),
         corkConfig: JSON.parse(value('--cork-config', '{}') ?? '{}'),
-        reference: value('--reference'),
         specs,
     };
 }
@@ -686,7 +615,7 @@ function compared(now, before){
 }
 
 /**
- * @param {{ build: string | null, engine: string, started: string, tests: TestReport[] }} report
+ * @param {{ build: string | null, started: string, tests: TestReport[] }} report
  * @param {{ failures: number, baseline: { tests: TestReport[] } | null }} options
  * @returns {string}
  */
@@ -697,8 +626,7 @@ export function markdown(report, { failures, baseline }){
     const lines = [
         `# Wine conformance tests under Bottlify`,
         '',
-        `Tests from Wine build ${report.build ?? 'unknown'}, engine ${report.engine}, `
-            + `started ${report.started}.`,
+        `Tests from Wine build ${report.build ?? 'unknown'}, started ${report.started}.`,
         '',
     ];
 
@@ -708,21 +636,10 @@ export function markdown(report, { failures, baseline }){
     {
         byModule.set(test.module, [...byModule.get(test.module) ?? [], test]);
     }
-    const referenced = report.tests.find(t=>t.reference)?.reference?.engine ?? null;
-    /** The failed checks of a test that are the translator's alone. @param {TestReport} t */
-    const onlyHere = t=>t.reference?.onlyHere.length ?? 0;
-    if (referenced)
-    {
-        lines.push(`Every test that did not pass ran again on the ${referenced} engine; `
-            + `\`${report.engine}-only\` counts the failed checks that held there, `
-            + `and \`*\` marks a run that ended worse than it did there.`, '');
-    }
     lines.push('## By library', '');
-    lines.push(`| library | tests | pass | executed | failures |${
-        referenced ? ` ${report.engine}-only |` : ''} todo | skipped | not finished |${
+    lines.push(`| library | tests | pass | executed | failures | todo | skipped | not finished |${
         baseline ? ' failures before |' : ''}`);
-    lines.push(`|---|---|---|---|---|${referenced ? '---|' : ''}---|---|---|${
-        baseline ? '---|' : ''}`);
+    lines.push(`|---|---|---|---|---|---|---|---|${baseline ? '---|' : ''}`);
     for (const [module, tests] of byModule)
     {
         const sum = (/** @type {(t: TestReport) => number} */ pick)=>tests
@@ -731,28 +648,19 @@ export function markdown(report, { failures, baseline }){
             .reduce((total, t)=>total + (t?.failures ?? 0), 0);
         const unfinished = tests.filter(t=>!FINISHED.has(t.status));
         lines.push(`| ${module} | ${tests.length} | ${tests.filter(t=>t.status === 'pass').length}`
-            + ` | ${sum(t=>t.executed ?? 0)} | ${sum(t=>t.failures)} |${
-                referenced ? ` ${sum(onlyHere)} |` : ''} ${sum(t=>t.todo ?? 0)}`
-            + ` | ${sum(t=>t.skipped)} | ${unfinished.map(t=>`${t.test} (${t.status}${
-                t.reference?.statusOnlyHere ? '*' : ''})`).join(', ')}`
+            + ` | ${sum(t=>t.executed ?? 0)} | ${sum(t=>t.failures)} | ${sum(t=>t.todo ?? 0)}`
+            + ` | ${sum(t=>t.skipped)} | ${unfinished.map(t=>`${t.test} (${t.status})`).join(', ')}`
             + ` |${baseline ? ` ${failedBefore} |` : ''}`);
     }
 
     lines.push('', '## By test', '');
-    lines.push(`| test | status | executed | failures |${
-        referenced ? ` ${report.engine}-only | on ${referenced} |` : ''}`
-        + ` todo | skipped | seconds |${
-            baseline ? ' before -> after |' : ''}`);
-    lines.push(`|---|---|---|---|${referenced ? '---|---|' : ''}---|---|---|${
-        baseline ? '---|' : ''}`);
+    lines.push(`| test | status | executed | failures | todo | skipped | seconds |${
+        baseline ? ' before -> after |' : ''}`);
+    lines.push(`|---|---|---|---|---|---|---|${baseline ? '---|' : ''}`);
     for (const test of report.tests)
     {
-        const there = test.reference;
-        lines.push(`| ${key(test)} | ${test.status}${there?.statusOnlyHere ? '*' : ''}`
-            + ` | ${test.executed ?? '-'} | ${test.failures} |${referenced
-                ? ` ${there ? onlyHere(test) : '-'} | ${there
-                    ? `${there.status}, ${there.failures}` : '-'} |` : ''}`
-            + ` ${test.todo ?? '-'} | ${test.skipped} | ${(test.wallMs / 1000).toFixed(1)} |${
+        lines.push(`| ${key(test)} | ${test.status} | ${test.executed ?? '-'} | ${test.failures}`
+            + ` | ${test.todo ?? '-'} | ${test.skipped} | ${(test.wallMs / 1000).toFixed(1)} |${
                 baseline ? ` ${compared(test, earlier.get(key(test)))} |` : ''}`);
     }
 
@@ -828,37 +736,16 @@ export function markdown(report, { failures, baseline }){
         }
     };
 
-    // What fails on the reference processor too is the Win32 layers'; what
-    // fails on the tested engine alone is listed apart, below.
     lines.push('', '## Failed checks', '');
     for (const test of report.tests.filter(t=>t.failed.length > 0 || t.exceptions.length > 0))
     {
-        const translator = new Set(test.reference?.onlyHere ?? []);
-        const shared = test.failed.filter(check=>!translator.has(check));
-        lines.push(`### ${key(test)} (${test.failures} failures${
-            translator.size > 0 ? `, ${translator.size} of them ${report.engine}-only` : ''})`, '');
-        listChecks(shared);
+        lines.push(`### ${key(test)} (${test.failures} failures)`, '');
+        listChecks(test.failed);
         for (const exception of test.exceptions)
         {
             lines.push(`- ${cell(exception)}${test.lastSeen ? ` (after ${test.lastSeen})` : ''}`);
         }
         lines.push('');
-    }
-
-    const translatorTests = report.tests.filter(t=>onlyHere(t) > 0 || t.reference?.statusOnlyHere);
-    if (translatorTests.length > 0)
-    {
-        lines.push(`## Only on ${report.engine} (held on ${referenced})`, '');
-        lines.push('The translator is built to run games fast, not to be the whole '
-            + 'architecture: these may matter to no game, and are set apart for that.', '');
-        for (const test of translatorTests)
-        {
-            const there = /** @type {ReferenceRun} */ (test.reference);
-            lines.push(`### ${key(test)}: ${test.status} here, ${there.status} on ${referenced}`
-                + ` (${there.failures} failures there)`, '');
-            listChecks(there.onlyHere);
-            lines.push('');
-        }
     }
 
     const missing = report.tests.map(t=>({ test: t, names: (t.missing ?? [])
@@ -950,11 +837,9 @@ async function main(){
     const build = await buildId(winetest);
     const extracted = new URL('extracted/', LOCAL);
     await mkdir(extracted, { recursive: true });
-    const settings = { timeout: options.timeout, engine: options.engine,
-        corkConfig: options.corkConfig };
-    const { DEFAULT_ENGINE } = await import('../modules/core/src/layers/cpu/module.js');
-    console.log(`winetest build ${build ?? 'unknown'}, engine ${options.engine ?? DEFAULT_ENGINE},`
-        + ` ${options.jobs} at a time, ${options.timeout} s each`);
+    const settings = { timeout: options.timeout, corkConfig: options.corkConfig };
+    console.log(`winetest build ${build ?? 'unknown'}, ${options.jobs} at a time,`
+        + ` ${options.timeout} s each`);
 
     /** @type {{ module: string, test: string, exePath: string }[]} */
     const plan = [];
@@ -1004,28 +889,8 @@ async function main(){
         return report;
     }), options.jobs);
 
-    if (options.reference)
-    {
-        const referenceSettings = { ...settings, engine: options.reference };
-        const again = results
-            .map((report, index)=>({ report, exePath: plan[index].exePath }))
-            .filter(({ report })=>report.status !== 'pass' && report.status !== 'no-such-test');
-        console.log(`\n${again.length} tests again on ${options.reference}:`);
-        await pool(again.map(({ report, exePath })=>async()=>{
-            const reference = summarise(report.module, report.test,
-                await runInChild(exePath, report.test, referenceSettings));
-            report.reference = againstReference(report, reference, options.reference);
-            console.log(`  ${`${report.module}:${report.test}`.padEnd(28)}`
-                + ` ${reference.status.padEnd(15)}`
-                + ` failures ${String(reference.failures).padStart(5)}`
-                + ` ${options.engine ?? DEFAULT_ENGINE}-only ${report.reference.onlyHere.length}`
-                + (report.reference.statusOnlyHere ? ', ended worse' : ''));
-        }), options.jobs);
-    }
-
     const report = {
         build,
-        engine: options.engine ?? DEFAULT_ENGINE,
         started: started.toISOString(),
         tests: [...unavailable, ...results],
     };

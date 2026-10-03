@@ -9,9 +9,8 @@
  * function in its cdecl and `_CI` forms under a double-precision control word
  * and under the single-precision one Direct3D leaves, the answer stored and
  * errno read through `_errno()` after, the whole written to the console and
- * held to the x87's model of the source (`scripts/guest-code/model.mjs`) --
- * to the bit under cork, and under the emulator, whose transcendentals are
- * its own library's, within the units in the last place each is allowed.
+ * held to the x87's model of the source (`scripts/guest-code/model.mjs`), to
+ * the bit.
  * The calls a function answers itself never reach the host; the ones it
  * leaves to the handler do, and set errno as msvcrt does.
  */
@@ -25,7 +24,6 @@ import { EDOM, ERANGE } from './layers/win32/msvcrt/globals.js';
 import * as sources from './layers/win32/msvcrt/inguest-math.js';
 import { loadModel } from '../scripts/guest-code/model.mjs';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 const SOURCE = new URL('./layers/win32/msvcrt/inguest-math.js', import.meta.url);
 
 /** @param {number} value */
@@ -163,18 +161,10 @@ function buildMathExe(){
 /**
  * Runs the program; answers the doubles and errno values it wrote and the
  * host's calls by name.
- *
- * @param {'cork' | 'emulator'} engine
  */
-async function run(engine){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+async function run(){
     const app = await createApp({
         executable: buildMathExe(),
-        engine,
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
     /** @type {string[]} */
     const output = [];
@@ -235,49 +225,30 @@ function expected(/** @type {Case} */ c){
     return fn.length > c.args.length ? fn(helpers, ...c.args) : fn(...c.args);
 }
 
-/**
- * How far the emulator may be from the model, in units in the last place:
- * its transcendentals are its own library's, its `f2xm1` 2^x less one in
- * doubles (sinh of 0.1 came five units off), and a rounding to 24 bits under
- * single precision rounds a different double differently.
- */
-const ALLOWED = /** @type {Record<string, number>} */ ({
-    sin: 1, cos: 1, tan: 1, atan: 1, atan2: 1, asin: 2, acos: 2, exp: 2, log: 1, log10: 1,
-    sinh: 6, cosh: 2, tanh: 3,
-});
-
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`the runtime's mathematics through the import, under ${engine}`, { timeout: 120000 },
-        async()=>{
-            const { values, errnos, crossed } = await run(engine);
-            /** @type {string[]} */
-            const wrong = [];
-            let largest = 0;
-            CASES.forEach((c, i)=>{
-                const what = `${c.name}(${c.args}) under 0x${c.control.toString(16)}`;
-                const want = expected(c);
-                const distance = ulps(values[i], want);
-                const allowed = engine === 'cork' ? 0
-                    : (ALLOWED[c.name.replace(/^_CI/, '')] ?? 0) * (c.control === 0x27f ? 1
-                        : 2 ** 29);
-                largest = Math.max(largest, distance);
-                if (distance > allowed)
-                {
-                    wrong.push(`${what}: ${values[i]} where the model answers ${want} `
-                        + `(${distance} ulp)`);
-                }
-                if (errnos[i] !== (c.errno ?? 0))
-                {
-                    wrong.push(`${what}: errno ${errnos[i]}, not ${c.errno ?? 0}`);
-                }
-            });
-            assert.deepEqual(wrong, []);
-            for (const name of new Set(CASES.map(c=>c.name)))
+test(`the runtime's mathematics through the import`, { timeout: 120000 },
+    async()=>{
+        const { values, errnos, crossed } = await run();
+        /** @type {string[]} */
+        const wrong = [];
+        CASES.forEach((c, i)=>{
+            const what = `${c.name}(${c.args}) under 0x${c.control.toString(16)}`;
+            const want = expected(c);
+            const distance = ulps(values[i], want);
+            if (distance > 0)
             {
-                const handed = CASES.filter(c=>c.name === name && c.hosted).length;
-                assert.equal(crossed.get(`msvcrt.dll!${name}`) ?? 0, handed,
-                    `${name}: only the calls it hands over crossed into the host`);
+                wrong.push(`${what}: ${values[i]} where the model answers ${want} `
+                    + `(${distance} ulp)`);
+            }
+            if (errnos[i] !== (c.errno ?? 0))
+            {
+                wrong.push(`${what}: errno ${errnos[i]}, not ${c.errno ?? 0}`);
             }
         });
-}
+        assert.deepEqual(wrong, []);
+        for (const name of new Set(CASES.map(c=>c.name)))
+        {
+            const handed = CASES.filter(c=>c.name === name && c.hosted).length;
+            assert.equal(crossed.get(`msvcrt.dll!${name}`) ?? 0, handed,
+                `${name}: only the calls it hands over crossed into the host`);
+        }
+    });

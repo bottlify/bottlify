@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createVersionFunctions } from './functions.js';
+import { createVersionFunctions, systemVersionResource } from './functions.js';
 import { WINDOWS_VERSIONS } from '../kernel32/versions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 
@@ -647,4 +647,18 @@ test('VerInstallFileA without a volume reports it cannot create the file', ()=>{
     const version = /** @type {any} */ (createVersionFunctions(host));
     assert.equal(version.VerInstallFileA.handler([0, 0, 0, 0, 0, 0, 0, 0]), 0x800,
         'VIF_CANNOTCREATE by its documented value');
+});
+
+test('a DirectX library\'s file names the DirectX the bottle reports', ()=>{
+    const resource = systemVersionResource('ddraw.dll', WINDOWS_VERSIONS.winxp, '4.07.00.0700');
+    const text = String.fromCharCode(...new Uint16Array(resource.buffer, resource.byteOffset,
+        resource.length >> 1));
+    assert.ok(text.includes('4.07.00.0700'), 'FileVersion and ProductVersion');
+    assert.ok(!text.includes('4.09.00.0904'));
+    const fixed = new DataView(resource.buffer, resource.byteOffset);
+    // VS_FIXEDFILEINFO follows its signature, the file version two dwords on.
+    const signature = [...Array(resource.length >> 2).keys()]
+        .find(word=>fixed.getUint32(word * 4, true) === 0xfeef04bd) ?? -1;
+    assert.equal(fixed.getUint32(signature * 4 + 8, true), 0x00040007,
+        'the fixed block\'s file version, too');
 });

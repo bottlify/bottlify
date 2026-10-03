@@ -22,14 +22,14 @@ import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { BOTTLE_REGISTRY_PATH, createApp, READ_AHEAD_BYTES } from './app.js';
+import { BOTTLE_REGISTRY_PATH, BOTTLE_SYSTEM_PATH, createApp, READ_AHEAD_BYTES } from './app.js';
 import { writeBundle } from './bundle-node.js';
 import { createHive, HKEY_LOCAL_MACHINE, REG_SZ } from './layers/win32/advapi32/registry.js';
+import { buildExe } from '../../../tools/make-pe.mjs';
 
 /** The fixture's blocks, small so a read of a few bytes still misses one. */
 const BLOCK_SIZE = 64 * 1024;
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 const FIXTURE = new URL('../test/fixtures/session.exe', import.meta.url);
 
 /** What the fixture reads and prints, planted in the bundle rather than written. */
@@ -79,17 +79,10 @@ test('a program reads a file out of a bundle, fetching only what it touches',
     { timeout: 30000 }, async t=>{
         const source = await bundleWith(PLANTED);
         t.after(()=>source.cleanup());
-        const [wasm, exe] = await Promise.all([
-            readFile(new URL('v86.wasm', PREBUILT)),
-            readFile(FIXTURE),
-        ]);
+        const exe = await readFile(FIXTURE);
 
         const app = await createApp({
             executable: new Uint8Array(exe),
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
             // Mounted at the root rather than in an installation directory: this
             // fixture asks for an absolute path, and what is under test here is
             // the transport -- a read that misses, waits for its block and is
@@ -125,17 +118,10 @@ test('what the bundle holds is visible to the program, and stays read-only',
     { timeout: 30000 }, async t=>{
         const source = await bundleWith(PLANTED);
         t.after(()=>source.cleanup());
-        const [wasm, exe] = await Promise.all([
-            readFile(new URL('v86.wasm', PREBUILT)),
-            readFile(FIXTURE),
-        ]);
+        const exe = await readFile(FIXTURE);
 
         const app = await createApp({
             executable: new Uint8Array(exe),
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
             // Mounted at the root rather than in an installation directory: this
             // fixture asks for an absolute path, and what is under test here is
             // the transport -- a read that misses, waits for its block and is
@@ -204,18 +190,11 @@ test('a session arriving from outside lands on the volume the bundle is mounted 
         // never seen again on the next start.
         const source = await bundleWith(PLANTED);
         t.after(()=>source.cleanup());
-        const [wasm, exe] = await Promise.all([
-            readFile(new URL('v86.wasm', PREBUILT)),
-            readFile(FIXTURE),
-        ]);
+        const exe = await readFile(FIXTURE);
         const kept = { path: 'C:\\Save\\profile.w3p', bytes: new Uint8Array([1, 2, 3]) };
 
         const app = await createApp({
             executable: new Uint8Array(exe),
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
             bundle: { fetch: source.fetch, prefix: '' },
             storage: { load: async()=>({ files: [kept], registry: null }) },
         });
@@ -235,17 +214,10 @@ test('what the program never read is fetched anyway, in the gaps', { timeout: 12
     // the window one miss already brings in is whole before the filler ever
     // looks at it, which would leave the filler nothing to show for itself.
     const source = await bundleWith(PLANTED, 2 * READ_AHEAD_BYTES);
-    const [wasm, exe] = await Promise.all([
-        readFile(new URL('v86.wasm', PREBUILT)),
-        readFile(FIXTURE),
-    ]);
+    const exe = await readFile(FIXTURE);
 
     const app = await createApp({
         executable: new Uint8Array(exe),
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
         bundle: { fetch: source.fetch, store: fakeStore(), id: 'filled' },
     });
 
@@ -340,16 +312,9 @@ test('the registry a bottle carries is the machine\'s from the start, under what
         saved.setValue(saved.create(/** @type {any} */ (saved.root(HKEY_LOCAL_MACHINE)),
             'SOFTWARE\\Vendor\\Game\\1.0').key, 'Language', REG_SZ, text('French'));
 
-        const [wasm, exe] = await Promise.all([
-            readFile(new URL('v86.wasm', PREBUILT)),
-            readFile(FIXTURE),
-        ]);
+        const exe = await readFile(FIXTURE);
         const app = await createApp({
             executable: new Uint8Array(exe),
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
             bundle: { fetch, store: null },
             storage: { load: async()=>({ files: [], registry: saved.toJSON() }) },
         });
@@ -364,4 +329,85 @@ test('the registry a bottle carries is the machine\'s from the start, under what
         };
         assert.equal(read('InstallDir'), 'C:\\Games\\Game');
         assert.equal(read('Language'), 'French', 'what the session saved since is kept');
+    });
+
+/** @param {number} value @returns {number[]} */
+const u32 = value=>[
+    value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
+];
+
+/**
+ * A library exporting `Answer`, which returns 42, its DllMain answering TRUE:
+ * made movable and marked a DLL, a relocation directory of one empty block
+ * after the code, since it has no absolute address of its own.
+ */
+function answerLibrary(){
+    const file = buildExe({
+        imports: { 'KERNEL32.dll': ['GetVersion'] },
+        exports: [{ name: 'Answer', offset: 0x10 }],
+        codeSize: 0x60,
+        code: ()=>[
+            0xb8, ...u32(1), 0xc2, 0x0c, 0x00, //       DllMain: mov eax, TRUE; ret 12
+            ...new Array(8).fill(0xcc),
+            0xb8, ...u32(42), 0xc3, //                  Answer: mov eax, 42; ret
+        ],
+    });
+    const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    const coff = view.getUint32(0x3c, true) + 4;
+    const optional = coff + 20;
+    view.setUint16(coff + 18, view.getUint16(coff + 18, true) | 0x2000, true);
+    view.setUint32(optional + 96 + 5 * 8, 0x1040, true);
+    view.setUint32(optional + 96 + 5 * 8 + 4, 8, true);
+    view.setUint32(0x240, 0x1000, true);
+    view.setUint32(0x244, 8, true);
+    return file;
+}
+
+test('what a bottle\'s installation left in system32 is found there, and loaded by bare name',
+    { timeout: 30000 }, async t=>{
+        // A setup puts the runtime its program links against in system32 --
+        // what a DirectX setup installs -- and the program looks nowhere else.
+        const root = await mkdtemp(join(tmpdir(), 'btl-src-'));
+        const out = await mkdtemp(join(tmpdir(), 'btl-out-'));
+        const [folder, system] = BOTTLE_SYSTEM_PATH.split('\\');
+        await mkdir(join(root, folder, system), { recursive: true });
+        const library = answerLibrary();
+        await writeFile(join(root, folder, system, 'runtime.dll'), library);
+        await writeFile(join(root, 'game.dat'), randomBytes(1024));
+        const path = join(out, 'bundle.btl');
+        await writeBundle({ root, output: path, blockSize: BLOCK_SIZE });
+        const handle = await open(path, 'r');
+        t.after(async()=>{
+            await handle.close();
+            await rm(root, { recursive: true, force: true });
+            await rm(out, { recursive: true, force: true });
+        });
+        /** @param {number} offset @param {number} length */
+        const fetch = async(offset, length)=>{
+            const buffer = Buffer.alloc(length);
+            await handle.read(buffer, 0, length, offset);
+            return new Uint8Array(buffer);
+        };
+
+        const app = await createApp({
+            executable: buildExe({
+                imports: { 'runtime.dll': ['Answer'], 'KERNEL32.dll': ['ExitProcess'] },
+                code: ({ iat })=>[
+                    0xff, 0x15, ...u32(iat('Answer')), //       call [Answer]
+                    0x50, //                                    push eax
+                    0xff, 0x15, ...u32(iat('ExitProcess')), //  call [ExitProcess]
+                ],
+            }),
+            imagePath: 'C:\\Games\\Game\\Game.exe',
+            bundle: { fetch, store: null, prefix: 'Games\\Game' },
+        });
+        t.after(()=>app.dispose());
+
+        assert.deepEqual([...app.files.read('C:\\WINDOWS\\system32\\runtime.dll')], [...library],
+            'the library is where Windows keeps it');
+        const placed = app.files.list('C:\\Games\\Game')
+            .map((/** @type {any} */ entry)=>entry.name);
+        assert.deepEqual(placed, ['game.dat'], 'and not where the bottle carried it');
+        assert.equal(await app.run({ timeoutMs: 20000 }), 42,
+            'the program bound its import to it and called it');
     });

@@ -2,32 +2,21 @@
 # Licensed under the Mozilla Public License, version 2.0
 # See LICENSE for details
 #
-# The reproducible v86 build, kept out of `ci` on purpose.
+# The package's prebuilt binaries, built in clean containers and kept out of
+# `ci` on purpose: the bytes cannot change unless a build's own inputs move, so
+# they are rebuilt when those change, on a weekly schedule that would catch a
+# base image drifting under us, and on demand.
 #
-# It rebuilds the emulator in a clean container and demands a byte-for-byte
-# match against the recorded hashes. That answers exactly one question -- does
-# the pinned submodule still build to the same bytes -- and the answer cannot
-# change unless the submodule pointer or this pipeline moves. Running it on
-# every push spent ten minutes of a runner to re-confirm a fact nobody had
-# touched, so it now runs when its own inputs change, on a weekly schedule that
-# would catch a base image drifting under us, and on demand.
-#
-# The video decoder -- FFmpeg compiled to WebAssembly -- is built here for the
-# same reasons and on the same triggers. It is published as a release of this
-# repository only on demand: `gh workflow run vendor.yml` from the commit whose
-# decoder is wanted, then `npm run fetch:video-decoder -- --update <tag>` pins
-# what it published.
+# The video decoder -- FFmpeg compiled to WebAssembly -- and the zstd decoder
+# are published as releases of this repository only on demand: `gh workflow
+# run vendor.yml` from the commit whose build is wanted, then
+# `npm run fetch:video-decoder -- --update <tag>` pins what it published.
 name: vendor
 
 on:
   push:
     branches: [main]
     paths:
-      - 'modules/core/vendor/**'
-      - 'modules/core/scripts/build-v86.mjs'
-      - 'modules/core/scripts/Dockerfile.v86'
-      - 'modules/core/scripts/v86-make-and-hash.sh'
-      - 'modules/core/scripts/verify-reproducibility.mjs'
       - 'modules/core/scripts/build-video-decoder.mjs'
       - 'modules/core/scripts/Dockerfile.video-decoder'
       - 'modules/core/scripts/video-decoder/**'
@@ -37,11 +26,6 @@ on:
       - '.github/workflows/vendor.yml'
   pull_request:
     paths:
-      - 'modules/core/vendor/**'
-      - 'modules/core/scripts/build-v86.mjs'
-      - 'modules/core/scripts/Dockerfile.v86'
-      - 'modules/core/scripts/v86-make-and-hash.sh'
-      - 'modules/core/scripts/verify-reproducibility.mjs'
       - 'modules/core/scripts/build-video-decoder.mjs'
       - 'modules/core/scripts/Dockerfile.video-decoder'
       - 'modules/core/scripts/video-decoder/**'
@@ -140,24 +124,3 @@ jobs:
               --title "video-decoder $TAG" --notes "$NOTES" \
               video-decoder.wasm SHA256SUMS video-decoder.manifest.json
           fi
-
-  vendor:
-    name: vendor (v86 build in container + reproducibility)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          submodules: recursive
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      # Asked for by environment rather than by flag: `-- --docker` has to
-      # survive being forwarded through a workspace script, and an npm that
-      # swallows it silently builds natively instead -- which is how this job
-      # failed for weeks on a runner with no Rust wasm target.
-      - run: npm run build:v86
-        env:
-          BOTTLIFY_V86_DOCKER: '1'
-      - run: npm run verify:reproducibility

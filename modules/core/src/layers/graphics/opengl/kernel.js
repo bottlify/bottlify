@@ -55,6 +55,8 @@
  *           a buffer object deleted, for the renderer to let its copy go
  * @property {() => boolean} gpuBacked   whether the framebuffer's pixels live on
  *           a device rather than in `framebuffer()`, which then holds nothing
+ * @property {() => any} currentAttributes  the current attributes, shared and not to
+ *           be written
  * @property {() => any} currentVertex  the current attributes, as a vertex
  * @property {Record<string, any>} side  state that is not a query: texture
  *           units, lights, arrays -- each installer adds its own

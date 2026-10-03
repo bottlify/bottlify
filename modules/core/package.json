@@ -1,7 +1,7 @@
 {
   "name": "@bottlify/core",
-  "version": "0.1.0",
-  "description": "Run original Win32 x86 programs in the browser: x86 emulation plus a from-scratch Win32/DirectX layer on WebGPU, WebAudio and OPFS.",
+  "version": "0.9.0",
+  "description": "Run original Win32 x86 programs in the browser: x86 translated to WebAssembly plus a from-scratch Win32/DirectX layer on WebGPU, WebAudio and OPFS.",
   "type": "module",
   "license": "MPL-2.0",
   "homepage": "https://github.com/bottlify/bottlify#readme",
@@ -16,8 +16,6 @@
   "keywords": [
     "win32",
     "x86",
-    "emulator",
-    "v86",
     "directx",
     "direct3d",
     "webgpu",
@@ -37,8 +35,6 @@
     "./iso": "./src/iso.js",
     "./engine.worker.js": "./dist/engine.worker.js",
     "./worklet.js": "./dist/worklet.js",
-    "./libv86.mjs": "./dist/vendor/libv86.mjs",
-    "./v86.wasm": "./dist/vendor/v86.wasm",
     "./video-decoder.wasm": "./dist/vendor/video-decoder.wasm",
     "./package.json": "./package.json"
   },
@@ -58,14 +54,11 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
-    "build:v86": "node scripts/build-v86.mjs",
     "build:video-decoder": "node scripts/build-video-decoder.mjs",
     "build:zstd": "node scripts/build-zstd.mjs",
     "build:guest-code": "node scripts/build-guest-code.mjs",
-    "fetch:v86": "node scripts/fetch-v86.mjs",
     "fetch:video-decoder": "node scripts/fetch-video-decoder.mjs",
     "fetch:zstd": "node scripts/fetch-zstd.mjs",
-    "verify:reproducibility": "node scripts/verify-reproducibility.mjs",
     "check:boundaries": "node scripts/check-boundaries.mjs",
     "check:package": "node scripts/check-package.mjs",
     "typecheck": "tsc --project jsconfig.json",

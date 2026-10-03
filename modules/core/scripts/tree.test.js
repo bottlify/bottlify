@@ -6,7 +6,7 @@
 
 /**
  * The repository commits no symbolic link. A worktree points its ignored
- * artifact directories (the prebuilt emulator, the corpus) at the main
+ * artifact directories (the prebuilt binaries, the corpus) at the main
  * checkout's with a link, and a commit that takes the link in stores an
  * absolute path of the machine that made it: a checkout of that commit in the
  * main checkout replaces the directory with a link to itself and the fetched

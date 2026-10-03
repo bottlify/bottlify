@@ -10,8 +10,9 @@ import { windowsVersion } from '../kernel32/versions.js';
 import { createComRegistry } from './objects.js';
 import {
     CLSID_DXDIAG_PROVIDER, DXDIAG_DX9_SDK_VERSION, DXDIAG_E_INSUFFICIENT_BUFFER,
-    IID_IDXDIAG_CONTAINER, IID_IDXDIAG_PROVIDER, registerDxDiagClasses,
+    IID_IDXDIAG_CONTAINER, IID_IDXDIAG_PROVIDER, dxDiagTree, registerDxDiagClasses,
 } from './dxdiag.js';
+import { DIRECTX_RELEASES } from '../advapi32/registry.js';
 import { ADAPTER_NAME, ADAPTER_RAM } from './wbem.js';
 
 const S_OK = 0;
@@ -278,4 +279,13 @@ test('the display device says how much video memory there is, and the mode Initi
     assert.equal(host.call(now, 'GetProp', [host.wide('dwWidth'), VARIANT]), S_OK);
     assert.equal(host.view.getUint32(VARIANT + 8, true), 800);
     assert.deepEqual(host.reported, []);
+});
+
+test('a bottle that names its DirectX is that release in DxDiag_SystemInfo', ()=>{
+    const tree = dxDiagTree(windowsVersion(), { width: 640, height: 480, bitsPerPixel: 32 },
+        DIRECTX_RELEASES[8]);
+    const system = tree.children.get('DxDiag_SystemInfo')?.properties;
+    assert.deepEqual(['dwDirectXVersionMajor', 'dwDirectXVersionMinor', 'szDirectXVersionLetter',
+        'szDirectXVersionEnglish'].map(name=>system?.get(name)?.value),
+    [8, 1, ' ', '4.08.0001.0881']);
 });

@@ -91,9 +91,29 @@ export function crossable(value, depth = 0){
  * @param {number} [options.framesAhead]  presents the played side may still owe before one waits
  * @param {(flush: () => void) => void} [options.later]  how a batch waits for the end of the turn
  * @param {SenderEvents} [options.on]
+ * @param {() => number} [options.now]  the clock the waits are timed by
  */
-export function createSender({ post, framesAhead = 2, later = queueMicrotask, on = {} }){
+export function createSender({ post, framesAhead = 2, later = queueMicrotask, on = {},
+    now = ()=>performance.now() })
+{
     const writer = createWriter();
+    /**
+     * The calls the program's thread waited on the played side for, by name:
+     * how many, and the milliseconds from the call to its answer -- what turns
+     * two threads drawing side by side into one waiting on the other.
+     *
+     * @type {Map<string, { count: number, ms: number, maxMs: number }>}
+     */
+    const waits = new Map();
+    /** @param {string} name @param {number} since */
+    const waited = (name, since)=>{
+        const ms = now() - since;
+        const held = waits.get(name) ?? { count: 0, ms: 0, maxMs: 0 };
+        held.count++;
+        held.ms += ms;
+        held.maxMs = Math.max(held.maxMs, ms);
+        waits.set(name, held);
+    };
     let pending = false;
     let serial = 0;
     /** @type {Map<number, (reply: any) => void>} */
@@ -150,7 +170,11 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                 const number = ++serial;
                 writer.u32(number);
                 flush();
-                return new Promise(resolve=>waiting.set(number, resolve));
+                const since = now();
+                return new Promise(resolve=>waiting.set(number, reply=>{
+                    waited(name, since);
+                    resolve(reply);
+                }));
             }
             if (wait === WAIT.PACED)
             {
@@ -161,8 +185,12 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                 {
                     return undefined;
                 }
+                const since = now();
                 return new Promise(resolve=>held.push({ count: owed,
-                    release: ()=>resolve(0) }));
+                    release: ()=>{
+                        waited(`${name} (held)`, since);
+                        resolve(0);
+                    } }));
             }
             soon();
             return undefined;
@@ -217,6 +245,11 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
 
         /** How many presents the played side still owes. */
         behind: ()=>presents - presented,
+
+        /** The calls waited on, by name, with the milliseconds they took. */
+        waits: ()=>Object.fromEntries([...waits].map(([name, sum])=>[name, {
+            count: sum.count, ms: Math.round(sum.ms), maxMs: Math.round(sum.maxMs),
+        }])),
     };
 }
 

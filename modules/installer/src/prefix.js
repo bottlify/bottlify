@@ -44,6 +44,17 @@ export const MEDIA_DIRECTORY = 'C:\\Install';
  */
 export const REGISTRY_PATH = '.bottlify\\registry.json';
 
+/**
+ * Where what the installation added to `C:\WINDOWS\system32` travels inside
+ * the tree -- the libraries its DirectX setup installed, say -- beside the
+ * registry. The engine mounts it back in system32 when the bottle runs (core's
+ * `BOTTLE_SYSTEM_PATH`, the same path).
+ */
+export const SYSTEM_PATH = '.bottlify\\system32';
+
+/** The system directory on any drive, folded. */
+const SYSTEM32 = /^[a-z]:\\windows\\system32\\/;
+
 /** Where the engine mounts a bundle that says nothing of where it belongs. */
 const DEFAULT_PLACE = 'App';
 
@@ -103,13 +114,19 @@ const SYSTEM_ROOTS = ['windows', 'temp', 'tmp', 'program files\\common files',
 /**
  * @typedef {Object} Prefix
  * @property {string} root          Absolute guest path the tree was taken from.
- * @property {PrefixFile[]} files   Everything under it, the registry included.
- * @property {string[]} outside     Absolute paths the root does not cover.
+ * @property {PrefixFile[]} files   Everything under it, the registry and what the
+ *                                  install added to system32 (`SYSTEM_PATH`) included.
+ * @property {string[]} outside     Absolute paths neither the root nor system32 covers.
+ * @property {string[]} [answered]  What the install put in system32 that names a
+ *                                  library the engine synthesises itself: not carried.
  * @property {string | null} entry  Best guess at the program to start.
  */
 
 /** @param {string} path */
 const fold = path=>path.toLowerCase();
+
+/** A library's file name as the engine keys it: no case, `.dll` optional. @param {string} name */
+const libraryKey = name=>fold(name).replace(/\.dll$/, '');
 
 /** @param {string} path @returns {string} */
 const directoryOf = path=>{
@@ -300,14 +317,22 @@ export function guessEntry(files){
 /**
  * Everything the install produced, as a tree ready to be packed.
  *
+ * What it added to system32 is kept too, under `SYSTEM_PATH`: a setup puts the
+ * runtime its program links against there -- the D3DX libraries a DirectX
+ * setup installs -- and the program finds it there and nowhere else. A file
+ * there that names a library the engine synthesises as Windows' own is left
+ * out, because mounted back it would be mapped in place of the engine's.
+ *
  * @param {Object} options
  * @param {PrefixFile[]} options.files  The writable layer, absolute guest paths.
  * @param {any} [options.registry]      The hive, as `toJSON` gives it.
  * @param {string[]} [options.seeded]   Paths put there before the run.
  * @param {string} [options.root]       Overrides the chosen root.
+ * @param {string[]} [options.synthesised]  The libraries the engine synthesises as
+ *        Windows' own, by file name (the app's `systemLibraries()`).
  * @returns {Prefix}
  */
-export function collect({ files, registry, seeded = [], root }){
+export function collect({ files, registry, seeded = [], root, synthesised = [] }){
     const planted = new Set(seeded.map(fold));
     const produced = files.filter(file=>!planted.has(fold(file.path)));
 
@@ -316,15 +341,31 @@ export function collect({ files, registry, seeded = [], root }){
     const chosen = root ?? recordedRoot(produced, registry) ?? chooseRoot(produced);
     const under = fold(chosen.endsWith('\\') ? chosen : `${chosen}\\`);
 
+    const engines = new Set(synthesised.map(libraryKey));
     /** @type {PrefixFile[]} */
     const inside = [];
+    /** @type {PrefixFile[]} */
+    const system = [];
     /** @type {string[]} */
     const outside = [];
+    /** @type {string[]} */
+    const answered = [];
     for (const file of produced)
     {
-        if (fold(file.path).startsWith(under))
+        const folded = fold(file.path);
+        const inSystem = SYSTEM32.exec(folded);
+        const name = inSystem ? file.path.slice(inSystem[0].length) : '';
+        if (inSystem && !name.includes('\\') && engines.has(libraryKey(name)))
+        {
+            answered.push(file.path);
+        }
+        else if (folded.startsWith(under))
         {
             inside.push({ path: file.path.slice(under.length), bytes: file.bytes });
+        }
+        else if (inSystem)
+        {
+            system.push({ path: `${SYSTEM_PATH}\\${name}`, bytes: file.bytes });
         }
         else
         {
@@ -333,6 +374,7 @@ export function collect({ files, registry, seeded = [], root }){
     }
 
     const entry = guessEntry(inside);
+    inside.push(...system);
     if (registry !== undefined)
     {
         inside.push({
@@ -340,5 +382,5 @@ export function collect({ files, registry, seeded = [], root }){
             bytes: new TextEncoder().encode(JSON.stringify(registry)),
         });
     }
-    return { root: chosen, files: inside, outside, entry };
+    return { root: chosen, files: inside, outside, answered, entry };
 }

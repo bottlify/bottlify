@@ -20,11 +20,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** Names no library will ever export, so the test cannot be overtaken by an implementation. */
 const DECORATED = '_BottlifyNoSuchStdcall@8';
@@ -91,13 +88,8 @@ function buildImportsExe(){
 
 /** @param {import('node:test').TestContext} t */
 async function startApp(t){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
     const app = await createApp({
         executable: buildImportsExe(),
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
     t.after(()=>app.dispose());
     return app;

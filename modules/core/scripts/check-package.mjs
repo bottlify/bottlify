@@ -14,13 +14,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
  * file the package promises through `exports`.
  *
  * The failure this exists to prevent is a package that installs cleanly and
- * then cannot start a machine, because the emulator binaries live in a
- * gitignored directory and a build run without them would otherwise be silent.
- * Since 5.5 the emulator is an optional layer: a build without it ships and
- * passes here, because `cork` is the default and the emulator's exports are
- * fetched only for a launch that selects it. The emulator and the video
- * decoder are held to a size floor when present, so a truncated artifact is
- * still caught.
+ * then cannot start a machine, because a file it needs was left out of the
+ * build. The binaries in the gitignored prebuilt directory are optional: a
+ * build without the video decoder ships and passes here, and one that has it
+ * holds it to a size floor, so a truncated artifact is still caught.
  */
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -32,8 +29,6 @@ const BINARY_MIN_BYTES = 256 * 1024;
 /** The vendor binaries a build may leave out: optional components, held to a
  * floor only when present. */
 export const OPTIONAL_VENDOR = new Set([
-    'dist/vendor/libv86.mjs',
-    'dist/vendor/v86.wasm',
     'dist/vendor/video-decoder.wasm',
     'dist/vendor/zstd.wasm',
 ]);
@@ -54,8 +49,8 @@ export function packageProblems(files, manifest){
             .map(/** @param {string} t */ t=>t.replace(/^\.\//, ''))
             .filter(path=>!OPTIONAL_VENDOR.has(path)),
         'dist/vendor/manifest.json',
-        // The translator, loaded by URL rather than exported: without it a
-        // package with no emulator starts no machine at all.
+        // The translator, loaded by URL rather than exported: without it the
+        // package starts no machine at all.
         'dist/cork/index.js',
         'dist/cork/translator.worker.js',
         'LICENSE',

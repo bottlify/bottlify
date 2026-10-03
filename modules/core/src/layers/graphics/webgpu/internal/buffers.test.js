@@ -307,6 +307,72 @@ test('a lock with neither flag after a read carries the rest on the GPU and send
         'and the old one what the draw read');
 });
 
+test('a lock with neither flag renames while the frame being recorded read the backing, though '
+    + 'an earlier frame is submitted in between', ()=>{
+    // Frames are recorded ahead of their replay: the frame before ends on the
+    // queue while this one is half recorded, and a draw of this one already
+    // read the bytes the lock overwrites.
+    const gpu = createFakeDevice();
+    const frames = { presents: 0, submits: 0 };
+    const dynamic = createDynamicBuffer({
+        device: gpu.device, queue: gpu.queue, size: 256, usage: 0, label: 'vertices', frames,
+    });
+    fill(dynamic, 0, 64, LockFlags.NONE, 0x22);
+    frames.presents++;
+    dynamic.markRead();
+    const read = dynamic.gpu;
+    frames.submits++;
+    dynamic.endFrame();
+    fill(dynamic, 0, 64, LockFlags.NONE, 0x33);
+    assert.notEqual(dynamic.gpu, read, 'renamed: the recorded draw keeps its bytes');
+
+    frames.presents++;
+    frames.submits++;
+    dynamic.endFrame();
+    const live = dynamic.gpu;
+    fill(dynamic, 0, 64, LockFlags.NONE, 0x44);
+    assert.equal(dynamic.gpu, live, 'once that frame is submitted, a write goes in place');
+});
+
+test('a NOOVERWRITE lock over bytes a draw not yet submitted reads renames, and one beside them '
+    + 'does not', ()=>{
+    const { dynamic, endFrame } = carrying(4096);
+    fill(dynamic, 0, 4096, LockFlags.DISCARD, 0x22);
+    endFrame();
+    dynamic.markRead(1024, 2048);
+    const read = dynamic.gpu;
+    fill(dynamic, 2048, 512, LockFlags.NOOVERWRITE, 0x33);
+    assert.equal(dynamic.gpu, read, 'beside the range: in place');
+    fill(dynamic, 1536, 512, LockFlags.NOOVERWRITE, 0x44);
+    assert.notEqual(dynamic.gpu, read, 'over it: renamed');
+    endFrame();
+    assert.ok(read.bytes.subarray(1536, 2048).every((/** @type {number} */ byte)=>byte === 0x22),
+        'the draw reads what it was drawn with');
+    assert.ok(dynamic.gpu.bytes.subarray(1536, 2048).every(
+        (/** @type {number} */ byte)=>byte === 0x44), 'and the next draws the new bytes');
+    assert.equal(dynamic.diagnostics().overwrites, 1);
+});
+
+test('a buffer that keeps nothing renames on DISCARD with no carry and sends only what follows',
+    ()=>{
+        // A renderer's scratch ring: each draw reads what it wrote since the wrap.
+        const gpu = createFakeDevice();
+        /** @type {any[]} */
+        const carries = [];
+        const dynamic = createDynamicBuffer({
+            device: gpu.device, queue: gpu.queue, size: 4096, usage: 0, label: 'scratch',
+            keep: false, carry: carry=>carries.push(carry),
+        });
+        fill(dynamic, 0, 4096, LockFlags.DISCARD, 0x22);
+        dynamic.flush();
+        const before = gpu.of('writeBuffer').length;
+        fill(dynamic, 0, 64, LockFlags.DISCARD, 0x33);
+        dynamic.flush();
+        assert.equal(carries.length, 0, 'nothing carried');
+        const sent = gpu.of('writeBuffer').slice(before);
+        assert.equal(sent.reduce((sum, one)=>sum + one.size, 0), 64, 'only the new bytes');
+    });
+
 test('carried ranges are the complement of what was written, in order', ()=>{
     assert.deepEqual(carriedRanges({ from: null, to: null, size: 100,
         written: [{ start: 40, end: 60 }, { start: 0, end: 8 }, { start: 50, end: 70 }] }),

@@ -13,15 +13,15 @@
  *
  * @param {(options: any) => Promise<any>} createApp
  * @param {Uint8Array} executable
- * @param {{ engine?: string, cork?: object, v86?: object, commandLine?: string,
- *     store?: 'local', report?: boolean }} options
+ * @param {{ cork?: object, commandLine?: string, store?: 'local', report?: boolean }} options
  */
 export async function measureOnce(createApp, executable, options){
     const app = await createApp({
         executable,
-        engine: options.engine ?? 'cork',
+        // Named rather than left to the default: a bundle may be built from a
+        // checkout whose default is another engine.
+        engine: 'cork',
         exitNotice: false,
-        ...options.v86 ? { v86: options.v86 } : {},
         cork: { config: { ...options.store === 'local' ? {} : { store: null }, ...options.cork } },
         ...options.commandLine ? { commandLine: options.commandLine } : {},
     });

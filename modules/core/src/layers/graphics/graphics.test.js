@@ -310,6 +310,28 @@ test('Direct3D 10 is handed block compression as 8 and 9 are, the guest clock an
     await graphicsModule.dispose();
 });
 
+test('a bottle that names its DirectX gets every DirectX up to it, and nothing else', async()=>{
+    const directx8 = await graphicsModule.create({ choice: 'directx8' }, hostWith(fakeMemory()));
+    assert.deepEqual(directx8.apis(), ['ddraw', 'd3d8']);
+    assert.deepEqual(Object.keys(directx8.libraries()).sort(), ['D3D8.dll', 'DDRAW.dll']);
+    assert.throws(()=>directx8.create('d3d9'), /no such API/);
+    assert.throws(()=>directx8.create('opengl'), /no such API/);
+    await graphicsModule.dispose();
+
+    const opengl = await graphicsModule.create({ choice: 'opengl' }, hostWith(fakeMemory()));
+    assert.deepEqual(opengl.apis(), ['opengl']);
+    assert.deepEqual(Object.keys(opengl.libraries()).sort(), ['GLU32.dll', 'OPENGL32.dll']);
+    await graphicsModule.dispose();
+
+    const every = await graphicsModule.create({}, hostWith(fakeMemory()));
+    assert.deepEqual(every.apis().sort(), ['d3d10', 'd3d8', 'd3d9', 'ddraw', 'opengl', 'vulkan'],
+        'no choice is every API');
+    await graphicsModule.dispose();
+
+    await assert.rejects(graphicsModule.create({ choice: 'glide' }, hostWith(fakeMemory())),
+        /unknown graphics choice "glide"/);
+});
+
 test('an API is made by name, and an unknown one says so', async()=>{
     const api = await graphicsModule.create({}, hostWith(fakeMemory()));
 

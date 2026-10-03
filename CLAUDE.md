@@ -17,19 +17,19 @@ known. The last message of the step says which of the two it is, with the eviden
 
 Project State
 
-Bottlify runs original Win32 x86 games in the browser: a fork of v86 (x86 emulation in a Web
-Worker) plus a from-scratch Win32/DirectX HLE layer on top of WebGPU/WebAudio/OPFS.
+Bottlify runs original Win32 x86 games in the browser: cork, our own x86 → wasm translator, in a
+Web Worker, plus a from-scratch Win32/DirectX HLE layer on top of WebGPU/WebAudio/OPFS.
 
 The plan is `roadmap/v2/`: the engine becomes a multi-worker platform whose capacity follows the
-load, then x86-64, Direct3D 11, and ARM and ARM64. Day-to-day work is ordered by
+load, then x86-64 and ARM and ARM64, with Direct3D 11 alongside. Day-to-day work is ordered by
 `roadmap/00-TODO-list.md` (local), which opens with the week's goal; installers and networking are
 areas in it, not phases.
 
-What runs today, end to end through `createApp()`: the default engine is cork, our own x86 → wasm
-translator (`modules/cork`), which runs with nothing of the emulator loaded; the v86 emulator stays an
-engine a launch selects by name (`emulator`, `hybrid`, `differential`), where a 64 KiB ROM of our own
-(no BIOS) takes the CPU straight into protected mode, and the reference the differential suites judge
-cork against. The loader maps a 32-bit PE and synthesises a real in-guest module per
+What runs today, end to end through `createApp()`: the engine is cork, our own x86 → wasm
+translator (`modules/cork`), judged by its tests against the hardware corpus and against its own
+instruction model (`ir.js`, `ir-x87.js`, `ir-simd.js`). The v86 emulator is not in the repository:
+`engine: 'emulator'` runs only a build the caller brings (`v86: { moduleUrl, wasmBytes }`), through
+the cpu layer's adapter and a 64 KiB ROM of our own (no BIOS). The loader maps a 32-bit PE and synthesises a real in-guest module per
 system library, so an address from `GetProcAddress` is the one an import was bound to; threads run
 under a round-robin scheduler whose quantum is retired guest instructions; the bridge marshals
 stdcall, cdecl and thiscall, parks a caller that cannot be answered yet, calls back into guest code,
@@ -54,12 +54,14 @@ else in there is tracked and ships with the repo, so it is written for a reader 
 `00-installers-bundles.md`, `00-diagnostics.md` — each holding that area's open work followed by its
 pitfalls (the hard-won bugs that each cost weeks; `00-pitfalls.md` maps the old section numbers to
 files). `roadmap/00-product-plan.md` is the product around the engine (public API, launcher, accounts,
-sharing, Steam, thresholds); `roadmap/00-references.md` is the external reading list. The product model, the rules and the layer graph are this file and `docs/core/`; the plan is `roadmap/v2/`, and earlier plans and decisions are in git history.
+sharing, Steam, thresholds); `roadmap/00-references.md` is the external reading list. The product model, the rules and the layer graph are this file and `docs/core/`; the plan is `roadmap/v2/`; the decisions still in force are `roadmap/decisions.md`, and earlier plans are in git history.
 
 The tracked part:
 
 - `roadmap/README.md` — the index, and the first thing to read.
 - `roadmap/v2/` — the plan: the target architecture, its stages and their acceptance.
+- `roadmap/decisions.md` — behaviour this project chose rather than derived from a specification,
+  each defended on its merits and recorded as reconsidered when it is.
 
 The pitfalls sections of the area files (index: `roadmap/00-pitfalls.md`) are not optional reading before touching the kernel, bridge, graphics or
 audio layers: it is the register of what has already cost weeks once.
@@ -74,8 +76,9 @@ Repo layout:
 - `modules/core/` — `@bottlify/core`. `src/system/` is the module contract/host/registry/config
   machinery; `src/layers/<name>/` is one directory per architectural layer (see graph below), each
   with `api.js` (JSDoc interface) + `module.js` (the `BottlifyModule` definition).
-  `vendor/v86/` is the v86 submodule (see "Vendoring v86"). `scripts/` holds build, vendor-build,
-  reproducibility-check and boundary-check tooling, all zero-dependency Node scripts.
+  `vendor/prebuilt/` (gitignored) holds the pinned decoder binaries the build copies in.
+  `scripts/` holds build, vendor-build and boundary-check tooling, all zero-dependency Node
+  scripts.
 - `tools/cdp_test/` — the Phase 0 acceptance harness: launches a headless Chromium via CDP, serves
   `modules/core/test/page/`, and asserts the worker answers a ping. Dev tooling; never imported by
   a package.
@@ -89,31 +92,31 @@ Repo layout:
   part of the contract and are enforced by `tsc --checkJs --noEmit` (`modules/core/jsconfig.json`),
   not by writing `.ts`. Where JSDoc can't express something, a `.d.ts` lives next to the code
   (ambient types only — no translated/compiled TS ships in the product).
-- **WASM only where it's already required** — the vendored v86 emulator. Our own code is JS until
-  profiling proves a hot path needs WASM (performance is a correctness concern, not a default).
-- **Zero runtime dependencies** in `@bottlify/core`. Everything external is vendored inside the
-  package (`vendor/v86`) or built into `dist/`; nothing in the running product does a network
-  `fetch` for its own code.
+- **WASM only where it's already required** — the code cork emits, and the prebuilt decoders
+  (FFmpeg, zstd). Our own code is JS until profiling proves a hot path needs WASM (performance is a
+  correctness concern, not a default).
+- **Zero runtime dependencies** in `@bottlify/core`. Everything external is built into `dist/`;
+  nothing in the running product does a network `fetch` for its own code.
 - **Tests:** Node's built-in `node:test`, zero test dependencies, `*.test.js` colocated with the
   code it tests (no separate `test/` tree for unit tests — `modules/core/test/page/` is the
   cdp_test browser sandbox, not unit tests).
 
 2. Ownership & Third-Party Code
 
-- **v86 is the one external dependency we keep**, forked at `github.com/bottlify/v86`, vendored as a
-  git submodule pinned to a specific commit (recorded in `modules/core/vendor/v86`'s submodule
-  pointer). Patches to v86 live on our fork's own branch, one commit per patch, each a candidate to
-  upstream — never edited in place inside `vendor/` without a corresponding fork commit.
-- **Those patches are written from scratch, not adapted.** Knowing that a defect exists and where it
+- **v86 is not part of the repository.** Our fork, `github.com/bottlify/v86`, keeps its patches on
+  its own branch, one commit per patch, each a candidate to upstream, and its releases host the
+  nasm corpus the translator's tests fetch. The cpu layer keeps an adapter for a v86 build a caller
+  brings; nothing here builds or ships one.
+- **Patches are written from scratch, not adapted.** Knowing that a defect exists and where it
   lives is the valuable part and is worth taking from anywhere; the patch itself is ours, written
-  against the behaviour of the code in `vendor/v86`. Verify the claim against that source first —
-  a reported defect may already be fixed in the version we vendor, and acting on a second-hand
+  against the behaviour of the code it changes. Verify the claim against that source first — a
+  reported defect may already be fixed in the version in hand, and acting on a second-hand
   description would then "fix" something that is not broken.
 - **Wine is a source of knowledge, not code**: conformance-test expectations (which arguments
   succeed, which fail, what the observable semantics are) inform our HLE implementations; nothing is
   copied or translated from Wine's source.
 - **Anything reused from someone else's work gets a `THIRD-PARTY-NOTICES.md` entry, in the same
-  commit that introduces it** — not just whole vendored dependencies like v86. A smaller borrowed
+  commit that introduces it** — not just whole components like FFmpeg. A smaller borrowed
   piece (an algorithm, a snippet, an approach lifted from a library, blog post, or another repo
   rather than written fresh for this project) is still someone else's work and still needs
   attribution there.
@@ -185,7 +188,7 @@ last phase.
 Layer dependency graph (enforced by `scripts/check-boundaries.mjs`, not just documented):
 
 ```
-cpu → vendor/v86, log (only cpu may import vendor/) log → (nothing)
+cpu → log                                          log → (nothing)
 memory → cpu, log                                   filesystem → log
 kernel → cpu, memory, log                           loader → cpu, memory, log
 bridge → cpu, kernel, memory, log
@@ -195,30 +198,12 @@ graphics / audio / input → win32, bridge, memory
 
 `system/*` never imports `layers/*` (contract lives in `system/`, layers implement it — not the
 other way round); a layer imports another layer only if it's declared in `requires`; nothing outside
-`src/` is importable except `vendor/` through `layers/cpu`; the whole `src/` import graph must be
-acyclic. All of this is checked by `npm run check:boundaries`, which parses the real `requires`
-arrays out of each `module.js` rather than trusting a separately-maintained rule file.
+`src/` is importable (`vendor/` holds binaries, which only the root of `src/` reaches, by URL); the
+whole `src/` import graph must be acyclic. All of this is checked by `npm run check:boundaries`,
+which parses the real `requires` arrays out of each `module.js` rather than trusting a
+separately-maintained rule file.
 
-5. Vendoring v86
-
-- `modules/core/vendor/v86` is a git submodule of the fork, pinned to a specific commit — never
-  "whatever HEAD happens to be". Updating it is a deliberate act: pull, rebuild, run the full
-  regression/acceptance suite, then commit the new submodule pointer.
-- The reproducible build path is Docker (`scripts/Dockerfile.v86` + `scripts/v86-make-and-hash.sh`,
-  driven by `scripts/build-v86.mjs --docker`), because v86's own Makefile needs a full toolchain
-  beyond `rustc`: Node (the `gen/generate_{jit,interpreter,analyzer}.js` scripts that emit
-  `src/rust/gen/*.rs` before `cargo` ever runs), a JRE + `wget` (Closure Compiler, fetched by the
-  Makefile's own rule on first use), `clang` targeting `wasm32` (the two C objects,
-  `softfloat.c`/`zstddeclib.c`), `python3` (`tools/rust-lld-wrapper`), and the
-  `wasm32-unknown-unknown` Rust target. **When bumping the v86 submodule or touching this pipeline,
-  re-check its Makefile for new toolchain requirements before assuming the Dockerfile still
-  covers it** — this is exactly the kind of gap that looks fine until someone actually runs the
-  build (see `docs/core/` for the concrete gaps found and fixed at Phase 0 review time).
-- `scripts/verify-reproducibility.mjs` rebuilds v86 in a clean container and diffs SHA-256 hashes
-  against `dist/vendor/manifest.json` — anything but a byte-for-byte match fails the build. This is
-  the enforcement of "Phase 0 acceptance: a clean clone builds reproducibly", not a nice-to-have.
-
-5a. Optimisation Discipline
+5. Optimisation Discipline
 
 - **An optimisation works on a test before it touches the engine.** First a test that reproduces
   a scenario that really occurs -- in node, on the instructions a title actually runs (a block
@@ -256,7 +241,6 @@ npm run lint             # eslint.config.mjs — flat config, zero warnings tole
 npm test                 # node --test "src/**/*.test.js"
 npm run check:boundaries # scripts/check-boundaries.mjs — layer graph + acyclic import check
 npm run build            # esbuild → modules/core/dist/, plus dist/checksums.json
-npm run build:v86 -- --docker && npm run verify:reproducibility   # vendor pipeline (needs Docker)
 npm run cdp:probe        # tools/cdp_test — browser → worker → ping → screenshot, the Phase 0 acceptance test
 ```
 
@@ -266,11 +250,10 @@ single ESLint environment could without per-file overrides duplicating that conf
 in `eslint:recommended` stays on — it has already caught real dead code during Phase 0 review (an unused
 helper function, a useless variable initializer).
 
-CI (`.github/workflows/ci.yml`) runs three independent jobs: `core` (install → typecheck → lint →
-test → check:boundaries → build), `probe` (the cdp_test acceptance scenario, with a real headless
-Chrome), and `vendor` (the Docker v86 build + reproducibility check). All three must be green for a
-change to land; a red `vendor` job on an unrelated change usually means the Dockerfile's toolchain
-has drifted from what v86's Makefile actually needs — check there first, not in application code.
+CI (`.github/workflows/ci.yml`) runs two independent jobs: `core` (install → typecheck → lint →
+test → check:boundaries → integration tests → build) and `probe` (the cdp_test acceptance scenario,
+with a real headless Chrome). Both must be green for a change to land. `.github/workflows/vendor.yml`
+rebuilds the prebuilt decoders (FFmpeg, zstd) in containers when their own inputs change.
 
 8. Delegating Work
 
@@ -305,7 +288,7 @@ Rules that keep concurrent work from colliding:
 - **Require verification, and require honesty about its absence.** Ask for "say plainly if you could
   not verify this" — a report that assumes success is worse than no report.
 - **Verify a second-hand claim before acting on it.** One reported defect in the emulator turned out
-  not to apply to the version we vendor; acting on the description would have "fixed" something that
+  not to apply to the version we used; acting on the description would have "fixed" something that
   was not broken.
 
 Choosing the agent kind:

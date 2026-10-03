@@ -22,13 +22,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
 import { IDIRECT3DDEVICE8_SLOTS } from './layers/graphics/seam/vtables.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -216,23 +213,16 @@ function buildShadowExe(){
     });
 }
 
-/** @param {'cork' | 'emulator'} engine */
-async function run(engine){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+async function run(){
     const gpu = createFakeDevice();
     const gpuDevice = /** @type {any} */ (gpu.device);
     gpuDevice.features = new Set();
     gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
     const app = await createApp({
         executable: buildShadowExe(),
-        engine,
         device: {
             device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
             adapter: { vendor: 'fake', architecture: '', description: 'a stand-in' },
-        },
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
         },
     });
     try
@@ -263,28 +253,25 @@ async function run(engine){
     }
 }
 
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`what a Direct3D 8 program sets in the guest is what it reads back, under ${engine}`,
-        { timeout: 60000 }, async t=>{
-            const result = await run(engine);
-            t.diagnostic(JSON.stringify(result));
-            assert.equal(result.code, 0);
-            assert.equal(result.main, 0, 'every value the main thread set read back as set');
-            assert.equal(result.worker, 0, 'and every value the second thread set');
-            const { shadow } = result;
-            assert.ok(shadow, 'the device kept its state in the guest');
-            assert.equal(shadow.renderStateCalls, MAIN * 3 + WORKER,
-                'every render state in the guest');
-            assert.equal(shadow.stageStateCalls, MAIN * 2 + WORKER);
-            assert.equal(shadow.transformCalls, MAIN * 2);
-            assert.deepEqual(shadow.refused, 0);
-            // An entry that found something compared what was set since the one
-            // before: at most the three states, two stage states and two
-            // matrices of one iteration of each thread -- where a scan of the
-            // three groups compared 960 words.
-            assert.ok(shadow.synced >= MAIN, `${shadow.synced} entries found something`);
-            assert.ok(shadow.compared / shadow.synced <= 3 + 2 + 32 + 1 + 1,
-                `${shadow.compared} words over ${shadow.synced} entries`);
-        });
-}
+test(`what a Direct3D 8 program sets in the guest is what it reads back`,
+    { timeout: 60000 }, async t=>{
+        const result = await run();
+        t.diagnostic(JSON.stringify(result));
+        assert.equal(result.code, 0);
+        assert.equal(result.main, 0, 'every value the main thread set read back as set');
+        assert.equal(result.worker, 0, 'and every value the second thread set');
+        const { shadow } = result;
+        assert.ok(shadow, 'the device kept its state in the guest');
+        assert.equal(shadow.renderStateCalls, MAIN * 3 + WORKER,
+            'every render state in the guest');
+        assert.equal(shadow.stageStateCalls, MAIN * 2 + WORKER);
+        assert.equal(shadow.transformCalls, MAIN * 2);
+        assert.deepEqual(shadow.refused, 0);
+        // An entry that found something compared what was set since the one
+        // before: at most the three states, two stage states and two
+        // matrices of one iteration of each thread -- where a scan of the
+        // three groups compared 960 words.
+        assert.ok(shadow.synced >= MAIN, `${shadow.synced} entries found something`);
+        assert.ok(shadow.compared / shadow.synced <= 3 + 2 + 32 + 1 + 1,
+            `${shadow.compared} words over ${shadow.synced} entries`);
+    });

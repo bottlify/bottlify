@@ -2,22 +2,25 @@
 
 Cork is a user-mode x86-32 → WebAssembly translator with a runtime: it translates a program's
 code ahead of execution into wasm functions the browser compiles to native code, and runs them
-with the guest's flat memory as their memory. It is one of the execution engines
-`@bottlify/core`'s `cpu` layer can run a program on; the vendored emulator is the other.
+with the guest's flat memory as their memory. It is the execution engine `@bottlify/core`'s `cpu`
+layer runs a program on by default, and the only one the core package carries; a v86 emulator a
+caller brings is the other.
 
-The package is separate from the core on purpose. A launch that selects the emulator runs with
-this package absent, so the core never imports it: the `cpu` layer defines the executor
-contract (`modules/core/src/layers/cpu/engine.js`) and loads an engine by a module URL given in
-its configuration, the way it loads the emulator. This package's `createEngine` implements that
-contract for 32-bit code; a 64-bit engine is expected to be a package of its own on the same
-seam, reusing the building blocks exported here (`./wasm`, `./runtime`).
+The package is separate from the core on purpose. The core never imports it: the `cpu` layer
+defines the executor contract (`modules/core/src/layers/cpu/engine.js`) and loads an engine by a
+module URL given in its configuration. This package's `createEngine` implements that contract for
+32-bit code; a 64-bit engine is expected to be a package of its own on the same seam, reusing the
+building blocks exported here (`./wasm`, `./runtime`).
 
-Nothing here needs the emulator. The emulator is used only by this package's integration
-tests, as the oracle the differential harness compares translated code against; those tests
-also need the nasm instruction corpus (`npm run fetch:corpus`, pinned by `corpus-lock.json`,
-fetched into the gitignored `vendor/`), every case of which is run on the emulator through
-this project's own machine and compared with the state real hardware recorded.
+Nothing here needs an emulator. The integration tests judge the translator two ways. The nasm
+instruction corpus (`npm run fetch:corpus`, pinned by `corpus-lock.json`, fetched into the
+gitignored `vendor/`) runs every case through the decoder, both interpreter tiers and translated
+code, and the three that execute it are held to the state real hardware recorded. The sequence
+corpus (`testing/sequences-judge.js`, `emit/sequences-N.itest.js`) runs generated runs of
+instructions on cork's own instruction model -- the JavaScript interpreter over `ir.js`,
+`ir-x87.js` and `ir-simd.js`, with no wasm tier -- and on translated code, and compares the two
+bit for bit.
 
 Where it goes next: `roadmap/v2/`. Zero runtime
-dependencies; vanilla ES modules with JSDoc; tests are `node:test`, colocated (`*.test.js`
-without the emulator, `*.itest.js` with it).
+dependencies; vanilla ES modules with JSDoc; tests are `node:test`, colocated (`*.test.js` for
+units, `*.itest.js` for the corpus suites).

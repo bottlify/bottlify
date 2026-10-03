@@ -13,6 +13,7 @@ import { VARYING_TEXCOORDS, emitVertex } from './arb-wgsl.js';
 import { CANONICAL_LAYOUT } from './gpu-layout.js';
 import {
     UNIFORM, clearDescriptor, clearKey, copyKey, drawDescriptor, drawKey, generateClear,
+    sameKeyInputs,
     generateCopy, generateDraw, generateShow, showDescriptor,
 } from './wgsl.js';
 
@@ -104,6 +105,77 @@ test('every field the descriptor or the shader reads changes the key', ()=>{
         const key = drawKey(state(variant));
         assert.ok(!keys.has(key), `${JSON.stringify(variant)} folds into another key`);
         keys.add(key);
+    }
+});
+
+test('two states are the same to sameKeyInputs exactly when their keys are equal', ()=>{
+    // The draw keeps the previous draw's key when this says nothing it prints
+    // has changed, so a true answer for different keys would draw with the
+    // wrong pipeline; a false one for equal keys would only cost the string.
+    const stencil = { func: GL.ALWAYS, fail: GL.KEEP, zfail: GL.KEEP, zpass: GL.INCR,
+        readMask: 0xff, writeMask: 0xff };
+    const vertex = /** @type {any} */ ({ name: 3, version: 1 });
+    const fragment = /** @type {any} */ ({ name: 4, version: 2 });
+    /** @type {Partial<import('./wgsl.js').DrawState>[]} */
+    const variants = [
+        {},
+        { attributes: CANONICAL_LAYOUT.attributes.slice(0, 1) },
+        { attributes: CANONICAL_LAYOUT.attributes.map(a=>({ ...a })) },
+        { strides: [64] },
+        { topology: 'line-list' },
+        { units: [unit()] },
+        { units: [unit({ index: 1 })] },
+        { units: [unit({ cube: true })] },
+        { units: [unit({ intensity: true })] },
+        { units: [unit({ rgbOnly: true })] },
+        { units: [unit({ hasColour: false })] },
+        { units: [unit({ generation: [GL.OBJECT_LINEAR, null, null, null] })] },
+        { units: [unit({ generation: [GL.EYE_LINEAR, null, null, null] })] },
+        { units: [unit({
+            combine: { ...createTextureEnvironment().combine, rgb: GL.DOT3_RGBA } })] },
+        { units: [unit({ mode: GL.COMBINE })] },
+        { units: [unit({ mode: GL.COMBINE,
+            combine: { ...createTextureEnvironment().combine, rgb: GL.DOT3_RGBA } })] },
+        { units: [unit({ mode: GL.COMBINE, combine: { ...createTextureEnvironment().combine,
+            sourceRgb: [GL.PRIMARY_COLOR, GL.TEXTURE, GL.CONSTANT] } })] },
+        { colourSum: true },
+        { fog: { mode: GL.LINEAR, fromCoordinate: false } },
+        { fog: { mode: GL.LINEAR, fromCoordinate: true } },
+        { fog: { mode: GL.EXP, fromCoordinate: false } },
+        { alphaFunc: GL.GREATER },
+        { flat: true },
+        { blend: { src: GL.ONE, dst: GL.ONE } },
+        { blend: { src: GL.ONE, dst: GL.ZERO } },
+        { depth: { test: false, func: GL.LESS, write: true } },
+        { depth: { test: true, func: GL.LEQUAL, write: true } },
+        { depth: { test: true, func: GL.LESS, write: false } },
+        { stencil },
+        { stencil: { ...stencil, readMask: 0x0f } },
+        { stencil, stencilBack: { ...stencil, zpass: GL.DECR } },
+        { stencil, stencilBack: { ...stencil, writeMask: 0 } },
+        { cull: 'back' },
+        { frontIsCcw: false },
+        { colourMask: 0x8 },
+        { polygonOffset: { factor: 0, units: -600 } },
+        { polygonOffset: { factor: 1, units: -600 } },
+        { viewportHeight: 480 },
+        { vertexProgram: vertex },
+        { vertexProgram: { ...vertex, version: 2 } },
+        { fragmentProgram: fragment },
+        { fragmentProgram: fragment, viewportHeight: 480 },
+        { fragmentProgram: { ...fragment, name: 5 } },
+    ];
+    const states = variants.flatMap(variant=>[state(variant), structuredClone(state(variant))]);
+    for (const a of states)
+    {
+        for (const b of states)
+        {
+            const combined = a.units.some(u=>u.mode === GL.COMBINE)
+                || b.units.some(u=>u.mode === GL.COMBINE);
+            // A combining unit is never the same: its record changes in place.
+            assert.equal(sameKeyInputs(a, b), !combined && drawKey(a) === drawKey(b),
+                `${drawKey(a)}\n${drawKey(b)}`);
+        }
     }
 });
 

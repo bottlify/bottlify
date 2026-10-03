@@ -3,9 +3,11 @@
 - **[`v2/`](v2/README.md)** — the plan: the engine becomes a multi-worker platform whose capacity
   follows the load, single-thread mode first and exactly as today; then x86-64 on that platform,
   Direct3D 11, and ARM and ARM64. Start there; in Russian, [`v2/README.ru.md`](v2/README.ru.md).
+- **[`decisions.md`](decisions.md)** — behaviour this project chose rather than derived from a
+  specification, each entry dated and defended on its merits; the ones v2 will replace say so.
 
-The documents before v2 — the phase history, cork's design and integration plan, and the register
-of decisions — were retired when v2 was written. They remain in git history.
+The documents before v2 — the phase history and cork's design and integration plan — were retired
+when v2 was written. They remain in git history.
 
 The `00-*` files beside these are **not in git** (`.gitignore` excludes `roadmap/00-*`):
 `00-TODO-list.md` is an index of them -- the week's goal and one file per area (cork, v86,

@@ -45,7 +45,9 @@ import { createRegistryFunctions } from './advapi32/functions.js';
 import { ADMINISTRATORS_SID, createTokenFunctions, isTokenMember } from './advapi32/tokens.js';
 import { createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
-import { createHive, profileDirectories, shellFolders } from './advapi32/registry.js';
+import {
+    DIRECTX_RELEASES, createHive, profileDirectories, shellFolders,
+} from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
@@ -201,6 +203,15 @@ export function createWin32Module(){
             // Before anything else: a Windows that is not one of the four is a
             // configuration error, not a machine to build.
             const windows = windowsVersion(config?.windows);
+            // The DirectX a bottle's graphics choice names, by major version;
+            // absent, the default 9.0c, which a setup may still overwrite.
+            const directx = config?.directx === undefined ? undefined
+                : DIRECTX_RELEASES[/** @type {'7' | '8' | '9'} */ (String(config.directx))];
+            if (config?.directx !== undefined && !directx)
+            {
+                throw new Error(`unknown DirectX ${JSON.stringify(config.directx)}: `
+                    + `the choices are ${Object.keys(DIRECTX_RELEASES).join(', ')}`);
+            }
             // What the running program is told, which Windows 10 decides from
             // what the program says it knows; everything else keeps the truth.
             const reported = reportedVersion(windows, config?.compatibility);
@@ -370,7 +381,7 @@ export function createWin32Module(){
                 file.position += volume.write(node, file.position, encodeAnsi(text));
                 volume.close(node);
             };
-            const hive = createHive({ processorMhz: config?.processorMhz, windows });
+            const hive = createHive({ processorMhz: config?.processorMhz, windows, directx });
             // The guest's clock, because a timer is due against the clock the
             // program itself reads, and the input layer's key state, because a
             // hot key fires on a combination and only the layer that sees the
@@ -971,7 +982,7 @@ export function createWin32Module(){
             // and a configuration tool how much video memory there is.
             registerDxDiagClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
-                windows, screen: config?.screen, divergence: config?.divergence,
+                windows, directx, screen: config?.screen, divergence: config?.divergence,
             });
 
             // One way of starting a program, behind three spellings of asking for
@@ -1707,6 +1718,7 @@ export function createWin32Module(){
                     // expanded file: the same volume every other file call uses.
                     files: volume,
                     windows,
+                    directx: directx?.version,
                 }),
 
                 'LZ32.dll': createLzFunctions({ readCString, writeMemory, files: volume }),
@@ -1768,7 +1780,7 @@ export function createWin32Module(){
 
                 // The DirectX setup library a game's autorun asks for the
                 // installed runtime's version before it decides to install one.
-                'DSETUP.dll': createDsetupFunctions({ writeMemory }),
+                'DSETUP.dll': createDsetupFunctions({ writeMemory, directx: directx?.version }),
 
                 // An installer's INF files, cabinets and file queues, over the
                 // volume every file call uses; a queue's notifications go to the
@@ -2293,6 +2305,17 @@ export function createWin32Module(){
                  * @returns {string[]}
                  */
                 knownDlls: ()=>[...KNOWN_DLLS],
+
+                /**
+                 * The libraries with a table here that are not Windows' own but a
+                 * redistributable a setup installs -- the D3DX helpers. The
+                 * table only stands in for a program that brought none; a copy
+                 * an installation put in system32 is what a program means to
+                 * load, where a copy of Windows' own would displace the engine's.
+                 *
+                 * @returns {string[]}
+                 */
+                redistributables: ()=>Object.keys(d3dxLibraries({})),
 
                 /**
                  * What an undecorated export of a library is, when nothing else

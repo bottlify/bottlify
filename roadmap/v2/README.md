@@ -2,23 +2,26 @@
 
 Русская версия: [README.ru.md](README.ru.md).
 
-**Status:** proposed 2026-10-03, against `main` cf293c0. How the engine works today is in
+**Status:** proposed 2026-10-03, revised against `main` 6554baf0. How the engine works today is in
 [`docs/architecture.md`](../../docs/architecture.md); this document is where it goes next.
 
 v2 turns the engine from one thread that does everything into a platform of workers whose number
 follows the load: one worker while one copes, four when two are choking, never four held idle. On
-that platform come, in order, x86-64 programs, Direct3D 11, and ARM and ARM64 programs.
+that platform come, in order, x86-64 programs and ARM and ARM64 programs; Direct3D 11 depends on
+none of it and can be built alongside.
 
 1. [Why](#why)
 2. [Where we are](#where-we-are)
 3. [Where v2 goes](#where-v2-goes)
 4. [Principles](#principles)
-5. [Stage 1 — Layering: one engine, two modes](#stage-1--layering-one-engine-two-modes)
-6. [Stage 2 — The multi-worker platform with auto-scaled capacity](#stage-2--the-multi-worker-platform-with-auto-scaled-capacity)
-7. [Stage 3 — x86-64](#stage-3--x86-64)
-8. [Stage 4 — Direct3D 11](#stage-4--direct3d-11)
-9. [Stage 5 — ARM and ARM64](#stage-5--arm-and-arm64)
-10. [Open questions](#open-questions)
+5. [Before stage 1 — two measurements](#before-stage-1--two-measurements)
+6. [Stage 1 — Layering, one executor](#stage-1--layering-one-executor)
+7. [Stage 2 — Processes and services in workers of their own](#stage-2--processes-and-services-in-workers-of-their-own)
+8. [Stage 3 — More executors per process](#stage-3--more-executors-per-process)
+9. [Stage 4 — x86-64](#stage-4--x86-64)
+10. [Stage 5 — Direct3D 11](#stage-5--direct3d-11)
+11. [Stage 6 — ARM and ARM64](#stage-6--arm-and-arm64)
+12. [Open questions](#open-questions)
 
 ## Why
 
@@ -69,8 +72,7 @@ These hold through every stage.
 
 1. **One engine, two modes.** Single-thread mode is today's behaviour: one executor, plain
    translations, no atomics. Multi-thread mode is the same code with more executors and the atomic
-   variant of every translation. The driver chooses the mode at run time; it is never a different
-   build.
+   variant of every translation. The mode is chosen at run time; it is never a different build.
 2. **Capacity follows the load.** No worker is kept that has nothing to do; one is added when the
    ones there are falling behind. The minimums reproduce today: one executor, one translation
    worker, no host-work worker, one graphics worker.
@@ -79,28 +81,60 @@ These hold through every stage.
    memory. An executor with nothing to run sleeps on `Atomics.wait` and is woken by
    `Atomics.notify`. The page's signal word, incremented on every message it posts, is the first
    such ring already.
-4. **Shared memory from the start.** `shared` is fixed when a `WebAssembly.Memory` is created and
-   cannot change later, and an unshared memory cannot be handed to another worker. Plain loads and
-   stores on shared memory cost the same, so single-thread mode loses nothing by it.
+4. **Shared memory from the start, so the page is cross-origin isolated.** `shared` is fixed when a
+   `WebAssembly.Memory` is created and cannot change later, and an unshared memory cannot be handed
+   to another worker. Plain loads and stores on shared memory cost the same, so single-thread mode
+   loses nothing by it. What it costs is the page: a `SharedArrayBuffer` exists only under
+   `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy`, which constrain how the player
+   is embedded (an iframe, third-party resources, sign-in pop-ups). Today shared memory is optional
+   — the audio ring and the log journal fall back without it; from stage 1 the engine requires it,
+   and the product has to say so.
 5. **Each stage lands in single-thread mode first** and is accepted there before multi-thread mode
    is switched on for it.
+6. **A run can be made reproducible.** Today a run is a function of its inputs: one executor, a
+   quantum counted in guest instructions, a journal of what the host answered. That is what lets a
+   bug from a browser run be replayed in node and bisected there. Every stage keeps a pinned mode —
+   one executor, no scaling decisions, the same journal as `main` — and the journal records every
+   decision the driver takes, so a run that went wrong under scaling can be replayed pinned.
 
-## Stage 1 — Layering: one engine, two modes
+Acceptance is measured as the translator's work is today: frame times in a browser vary by a tenth
+to a quarter from one run to the next, so "within noise of `main`" hides a regression of that size.
+A stage is accepted on the thresholds in the product plan, on node benchmarks run alternated against
+`main`, and on instruction counts (callgrind) where a change claims to cost nothing.
 
-**Goal.** The right layers, so that today's engine runs in single-thread mode exactly as it does now
-and can run in multi-thread mode, where atomic operations are needed.
+## Before stage 1 — two measurements
+
+The plan's largest cost and its largest gain both rest on numbers nobody has yet.
+
+- **The atomic tax.** Wasm has only sequentially consistent atomics, and x86 programs rely on x86's
+  store order: neither stores nor loads are reordered among themselves. On an ARM host plain loads
+  may be reordered, so the atomic variant needs ordered loads as well as ordered stores, and on an
+  x86 host an ordered wasm store is an `xchg`. Measure the variant — every guest load and store
+  atomic, `lock` as read-modify-write — on the instruction corpus's workloads and the cork
+  benchmarks, on x86-64 and arm64 hosts.
+- **How parallel the programs are.** The kernel's scheduler already knows, every turn, how many of
+  a process's threads are ready. Record the share of time two or more are ready, per title, over
+  the titles the project runs. Several executors pay only where that share is large (stage 3).
+
+Neither needs any of the stages: both are a script and a counter.
+
+## Stage 1 — Layering, one executor
+
+**Goal.** The layers the platform needs, with today's engine running on them exactly as it does
+now: one executor, plain translations.
 
 **Work.**
 
-- **Shared guest memory.** `cork-host.js` creates the guest memory with `shared: true`. Nothing
-  else changes in single-thread mode.
-- **Two translation variants.**
-  - *plain* — today's code.
-  - *atomic* — `lock`-prefixed instructions become wasm atomic read-modify-writes, stores become
-    ordered, and an atomic access to an address that is not naturally aligned takes a fallback
-    path, since a misaligned wasm atomic traps where x86 does not.
-
-  The store's key already carries a variant (`runtime/cache.js`); the two are kept side by side.
+- **Shared guest memory.** `cork-host.js` creates the guest memory with `shared: true`; the page
+  is cross-origin isolated (principle 4).
+- **An executor's state is not in the code.** Translated code reaches the state block, the call
+  stack of wasm calls, the entry hash and the other tables by absolute offsets compiled into every
+  module (`load offset: layout.eflags`). Two executors over one memory need a state block each, so
+  either each executor has translations of its own — no sharing, and `emitBatch` per executor — or
+  the emitter addresses that state from a base the instance is given. The second keeps one cache
+  for all executors at the cost of an add per access, to be measured on the benchmarks before it
+  is chosen. The function table's indices must then be the same in every executor, or the entry
+  hash becomes per executor too.
 - **Executors.** In the `cpu` layer an executor becomes a thing of its own: a thread with its own
   module instances, function table and state block over the shared memory. Publishing a
   translation and dropping one when code is written are addressed to every executor: page flags in
@@ -108,34 +142,40 @@ and can run in multi-thread mode, where atomic operations are needed.
 - **Win32 split in two.** The system-wide half (process table, registry, file system, window
   manager, named objects, clipboard) and the per-process half (handles, heaps, modules, TLS,
   message queue, Direct3D and OpenGL recording), with one interface between them. In single-thread
-  mode it is a direct call; across threads, a ring and a wait.
+  mode it is a direct call; across threads, a ring and a wait. A wait for a reply to `SendMessage`
+  is not a plain wait: a thread blocked in it must still take the messages other threads send to
+  its own windows, or two threads sending to each other deadlock; the interface carries that from
+  the start.
 - **Inbound rings** for input, I/O completions, renderer answers and published translations, in
   place of `postMessage` into the thread that runs program code.
 
-**What multi-thread mode costs, and when it pays.** The atomic variant makes every executor slower
-by some tax *t*, still to be measured on the corpus and the benchmarks. Two executors win when their
-speedup *S* satisfies *S* × (1 − *t*) > 1. At *t* = 20 % that is *S* > 1.25, which by Amdahl's law
-needs more than 40 % of the work to run in parallel. The driver switches to multi-thread mode only
-when two or more of a process's threads are ready to run most of the time, so a program with one
-busy thread never pays the tax.
+**Accepted when** every existing suite passes unchanged, the journal of a pinned run is the same
+bytes as `main`'s on the integration programs, and the benchmarks are within the product plan's
+thresholds of `main`.
 
-**Accepted when** in single-thread mode every existing suite passes unchanged and benchmark frame
-times are within noise of `main`, and in multi-thread mode with a single executor the same suites
-pass on the atomic variant.
-
-## Stage 2 — The multi-worker platform with auto-scaled capacity
+## Stage 2 — Processes and services in workers of their own
 
 **Goal.** The engine thread becomes the system, processes run in workers of their own, and the
-services scale with the load.
+services scale with the load. Every process still has one executor.
+
+This is where the evidence in [Why](#why) points: the graphics worker's gain came from taking work
+off the thread that runs the program, not from running the program's threads at once.
 
 **Work.**
 
 - **Split the engine worker** into the coordinator (event loop, I/O, network, system-wide Win32,
   pools, driver) and process workers (cork, per-process Win32).
 - **Processes side by side.** Each process runs in its own worker with its own memory, sized per
-  process (`memorySize`). This replaces process replacement and the copy-back after a child exits:
-  the registry and files are the system's, so what one process writes another sees at once.
-  Separate memories also remove the reason replacement was chosen, two images wanting `0x400000`.
+  process (`memorySize`). This replaces process replacement (`roadmap/decisions.md`, C) and the
+  copy-back after a child exits: the registry and files are the system's, so what one process
+  writes another sees at once. Separate memories also remove the reason replacement was chosen,
+  two images wanting `0x400000`.
+- **What two processes share in memory.** A named file mapping two processes both map, a DLL's
+  shared section, `ReadProcessMemory` and `WriteProcessMemory` all expect one set of bytes visible
+  from two address spaces, and a region of one `WebAssembly.Memory` cannot be shown inside
+  another. Each needs a mechanism of its own — a copy kept coherent at the points the program can
+  observe (a wait, a message, a call that maps or unmaps), or a second shared memory both process
+  workers import — chosen per case by measurement; launchers and installers are where they occur.
 - **Service pools.** Translation ×M (`emitBatch` is already a pure function). Host work ×K: zstd
   blocks, the video decoder, `ijl15`, MP3, block fetch. Graphics takes the canvas and the APIs still
   drawn on the engine thread: Direct3D 10, Vulkan, DirectDraw and GDI presentation.
@@ -144,14 +184,11 @@ services scale with the load.
   `navigator.hardwareConcurrency` minus the fixed threads (page, coordinator, AudioWorklet,
   graphics). Workers write their own state into shared memory — busy or idle, queue length, time
   at work — the way the engine already publishes its journal and counters for the log keeper, so
-  the driver only reads. Each decision is a comparison of a few numbers between scheduler turns.
-- **More executors per process** by switching modes at a safe point: every thread stops at a
-  quantum boundary, published translations are dropped, the atomic variants are loaded, and work
-  resumes. Back to one executor the same way.
+  the driver only reads. Each decision is a comparison of a few numbers between scheduler turns,
+  and each is written to the journal (principle 6).
 
 | Pool | Min | Max | Grows when | Shrinks |
 | --- | --- | --- | --- | --- |
-| Executors of a process | 1 | budget, at most the process's thread count | two or more of its threads are ready most of the time | rarely, after a long quiet spell: it is a mode switch |
 | Translation | 1 | budget | hot code waits for translation, the batch queue grows | after seconds idle |
 | Host work | 0 | budget | program threads wait on decoding or block fetch | after seconds idle |
 | Graphics, log keeper, AudioWorklet | 1 | 1 | — | — |
@@ -159,19 +196,61 @@ services scale with the load.
 | Setting | Today | Larger |
 | --- | --- | --- |
 | Processes, P | 1: a child and its parent take turns | P process workers, each with its own memory |
-| Executors per process, N | 1: on the engine thread | N per process, atomic translation variant |
+| Executors per process, N | 1: on the engine thread | 1 here; N with the atomic variant in stage 3 |
 | Translation, M | 1 worker | M workers, batches split between them |
 | Host work, K | 0: all on the engine thread | K workers; the program thread waits as it waits for a file |
 | Graphics (`graphicsWorker`) | 1: Direct3D 7, 8, 9, OpenGL | 1: all graphics and the canvas |
-| Guest memory | ordinary `WebAssembly.Memory` | shared (`shared: true`) from the start |
+| Guest memory | ordinary `WebAssembly.Memory` | shared (`shared: true`) from stage 1 |
 
-**Accepted when** with the minimums frame times on the benchmark set are no worse than `main`, a
-parent and a child process run at the same time and see each other's registry and file writes,
-and under a synthetic load the driver grows and shrinks each pool without oscillating.
+**Accepted when** with the minimums the benchmarks are within the thresholds of `main`, a parent
+and a child process run at the same time and see each other's registry and file writes, and under
+a synthetic load the driver grows and shrinks each pool without oscillating.
 
-## Stage 3 — x86-64
+## Stage 3 — More executors per process
 
-**Goal.** 64-bit programs, on the multi-thread platform from the start.
+**Goal.** A process whose threads are ready at the same time runs them at the same time — where the
+measurement before stage 1 says that pays.
+
+**Work.**
+
+- **The atomic variant.**
+  - *plain* — today's code.
+  - *atomic* — `lock`-prefixed instructions become wasm atomic read-modify-writes, loads and stores
+    are ordered as x86 orders them, and an atomic access to an address that is not naturally
+    aligned takes a fallback path (a lock held across the access), since a misaligned wasm atomic
+    traps where x86 does not.
+
+  The store's key already carries a variant (`runtime/cache.js`); the two are kept side by side.
+  The interpreters, JavaScript and wasm, get the same variant: the host runs them where no region
+  can be made.
+- **What the translator assumes of one executor.** Some of cork's optimisations hold only while
+  nothing else writes memory between two instructions: stores to the stack without a page check
+  (no translated code on a stack page), page checks hoisted out of loops for a window of accesses,
+  leaving at once after a store into code. Each is re-examined for the atomic variant, and kept,
+  narrowed or turned off there.
+- **Choosing the mode.** Switching a running process means every thread stops at a quantum
+  boundary, its translations are dropped and the atomic ones loaded — seconds of stall for a
+  program with thousands of regions. So the mode is chosen when a process starts, from what the
+  translation store recorded of the program's earlier runs, and switched while it runs only after
+  a long spell that contradicts it.
+
+| Pool | Min | Max | Grows when | Shrinks |
+| --- | --- | --- | --- | --- |
+| Executors of a process | 1 | budget, at most the process's thread count | two or more of its threads are ready most of the time | rarely, after a long quiet spell: it is a mode switch |
+
+**What it costs, and when it pays.** The atomic variant makes every executor slower by the tax *t*
+measured before stage 1. Two executors win when their speedup *S* satisfies *S* × (1 − *t*) > 1.
+At *t* = 20 % that is *S* > 1.25, which by Amdahl's law needs more than 40 % of the work to run in
+parallel. A program with one busy thread never pays the tax.
+
+**Accepted when** in multi-thread mode with a single executor every suite passes on the atomic
+variant, a test set of programs that synchronise through `lock` instructions and plain stores
+(message passing, spin locks, interlocked counters) gives the same results as on one executor, and
+the titles the measurement picked run faster than on one executor by the product plan's margin.
+
+## Stage 4 — x86-64
+
+**Goal.** 64-bit programs, on the platform built above.
 
 **Work.**
 
@@ -192,8 +271,8 @@ and under a synthetic load the driver grows and shrinks each pool without oscill
   convention instead of stdcall, cdecl and thiscall. COM method tables with 8-byte slots.
 - **Exceptions.** x64 SEH is table-based (`.pdata` and `.xdata` unwind information) rather than a
   chain of frames on the stack, so the dispatcher is new.
-- **PE32+** in the loader (`pe.js` accepts i386 only today), synthesised PE32+ system DLLs and
-  64-bit trap stubs. `out dx, eax` works the same in 64-bit mode.
+- **PE32+** in the loader (`loader/internal/pe.js` accepts i386 only today), synthesised PE32+
+  system DLLs and 64-bit trap stubs. `out dx, eax` works the same in 64-bit mode.
 - **The address space.** A 64-bit program expects addresses above 4 GiB; its image defaults to
   `0x140000000`. Either wasm `memory64`, with a 64-bit index, or a 32-bit memory with everything
   placed inside a 4 GiB window, relocating images below it. The emitter's address type is one
@@ -202,19 +281,21 @@ and under a synthetic load the driver grows and shrinks each pool without oscill
 **Accepted when** a set of 64-bit test programs and the x86-64 instruction corpus pass on
 cork-x64, alone and beside a 32-bit process.
 
-## Stage 4 — Direct3D 11
+## Stage 5 — Direct3D 11
 
-**Goal.** Direct3D 11, which most 64-bit games draw with. The `graphics` layer has DirectDraw,
-Direct3D 7 to 10, OpenGL and Vulkan today.
+**Goal.** Direct3D 11, which most 64-bit games draw with — and many 32-bit ones from the years
+before them. It needs nothing of stages 1 to 4 and can be built alongside any of them. The
+`graphics` layer has DirectDraw, Direct3D 7 to 10, OpenGL and Vulkan today.
 
-**Work.** Direct3D 11 and its DXGI on the WebGPU backend, recorded in the process worker and played
-in the graphics worker as Direct3D 7 to 9 are; shader bytecode (shader models 4 and 5) translated to
-WGSL; what Direct3D 10 already has (DXGI formats, its pipeline objects) shared rather than copied.
+**Work.** Direct3D 11 and its DXGI on the WebGPU backend, recorded where the program runs and
+played in the graphics worker as Direct3D 7 to 9 are; shader bytecode (shader models 4 and 5)
+translated to WGSL; what Direct3D 10 already has (DXGI formats, its pipeline objects) shared rather
+than copied.
 
 **Accepted when** the layer's unit and contract tests and reference-frame comparisons cover it as
 they cover Direct3D 9, and a Direct3D 11 program draws in the browser harness.
 
-## Stage 5 — ARM and ARM64
+## Stage 6 — ARM and ARM64
 
 **Goal.** Windows programs built for ARM (PE machine `0x01C4`) and ARM64 (`0xAA64`), as further
 engine packages on the same executor contract, chosen per process the way cork and cork-x64 are.
@@ -223,11 +304,20 @@ one executor.
 
 ## Open questions
 
+- **The atomic tax** (measured before stage 1): how much the atomic variant costs per executor on
+  x86 and on ARM hosts, and whether ordering can be limited to fewer than every load and store
+  without breaking programs that rely on x86's order. Wasm offers no acquire and release
+  orderings yet; the proposal that adds them would change the answer.
+- **Executor state: a base or translations per executor** (stage 1), decided by measuring the add
+  per access against a cache per executor.
+- **Memory shared between processes** (stage 2): which mechanism for named mappings, shared
+  sections and cross-process reads and writes, and which programs need them coherent rather than
+  copied at a wait.
+- **Cross-origin isolation:** which ways of embedding the player it rules out, and whether any of
+  them matter to the product.
 - **The x64 address space:** `memory64` or a 4 GiB window. `memory64` ships in Chrome and Firefox;
   whether Safari has it decides whether it can be the only path.
-- **The atomic tax:** how much the atomic variant costs per executor on x86 and on ARM hosts, and
-  whether ordered stores can be limited to fewer than every store without breaking programs that
-  rely on x86's store order.
 - **Memory per process on phones:** how many process memories a phone's browser allows at once,
-  and the default `memorySize` for a helper process.
-- **Stage 5's scope:** whether it is Windows-on-ARM programs alone, as written here.
+  and the default `memorySize` for a helper process. A shared memory reserves its maximum when it
+  is created.
+- **Stage 6's scope:** whether it is Windows-on-ARM programs alone, as written here.

@@ -16,6 +16,8 @@
  * the cursor stay where they are.
  *
  * Messages to the worker:
+ *   { type: 'shown' }                the program's thread has shown the frame sent
+ *                                    last; the next goes when it has
  *   { type: 'open', frames }         `frames` 'bitmap' sends each presented
  *                                    frame back as a picture, 'pixels' as its
  *                                    bytes read back; anything else keeps them.
@@ -26,8 +28,10 @@
  *                                    `{ type: 'close' }` on the port ends it
  * Messages from it:
  *   { type: 'opened', adapter } | { type: 'failed', message }
- *   { type: 'frame', bitmap, frameIndex, format }
- *   { type: 'frame', pixels, bytesPerRow, width, height, frameIndex, format }
+ *   { type: 'frame', bitmap, frameIndex, format, dropped }
+ *   { type: 'frame', pixels, bytesPerRow, width, height, frameIndex, format, dropped }
+ *                                    one at a time, the newest presented; `dropped`
+ *                                    counts those a newer one replaced unsent
  *   { type: 'lost', reason }
  */
 
@@ -44,7 +48,8 @@ import { playedDirect3D7 } from './d3d7.js';
 /** @type {Record<string, (services: any) => any>} */
 const FACTORIES = { d3d8: createDirect3D8, d3d9: createDirect3D9 };
 
-/** GPUTextureUsage.COPY_DST, here without the browser's global. */
+/** GPUTextureUsage.COPY_SRC and COPY_DST, here without the browser's global. */
+const COPY_SRC = 0x01;
 const COPY_DST = 0x02;
 /** GPUBufferUsage.MAP_READ and COPY_DST, and GPUMapMode.READ. */
 const BUFFER_MAP_READ = 0x01;
@@ -72,23 +77,79 @@ export function serveGraphics(scope, deps){
     let lost = false;
 
     /**
-     * A presented frame as a picture, sent back.
+     * The newest frame presented and not yet sent, kept in a texture of its
+     * own: the renderer draws its next frame into the surface it presented.
+     *
+     * @type {{ texture: any, width: number, height: number, format: string,
+     *     frameIndex: number, fresh: boolean } | null}
+     */
+    let newest = null;
+    /** Whether a frame sent has not yet been shown by the program's thread. */
+    let sending = false;
+    /** Frames presented that a newer one replaced before they were sent. */
+    let dropped = 0;
+
+    /**
+     * A presented frame, kept to be sent back: at once when the frame before
+     * it has been shown, after that otherwise -- and then the newest of what
+     * came meanwhile. A program presents as often as it draws, and a picture
+     * crossing to the program's thread and onto its device costs a
+     * synchronisation of two devices' queues each time; one in flight keeps
+     * that to the rate the program's thread shows them at, and off the
+     * played device's way.
      *
      * @param {any} device
      * @param {{ surface: { texture: any, width: number, height: number, format: string },
      *     frameIndex: number }} frame
      */
     const present = (device, frame)=>{
+        if (frames !== 'pixels' && frames !== 'bitmap')
+        {
+            return;
+        }
         const { surface } = frame;
+        if (!newest || newest.width !== surface.width || newest.height !== surface.height
+            || newest.format !== surface.format)
+        {
+            newest?.texture.destroy();
+            newest = {
+                texture: device.createTexture({ label: 'graphics-worker-newest',
+                    size: [surface.width, surface.height], format: surface.format,
+                    usage: COPY_SRC | COPY_DST }),
+                width: surface.width, height: surface.height, format: surface.format,
+                frameIndex: frame.frameIndex, fresh: false,
+            };
+        }
+        if (newest.fresh)
+        {
+            dropped++;
+        }
+        const encoder = device.createCommandEncoder();
+        encoder.copyTextureToTexture({ texture: surface.texture }, { texture: newest.texture },
+            [surface.width, surface.height]);
+        device.queue.submit([encoder.finish()]);
+        newest.fresh = true;
+        newest.frameIndex = frame.frameIndex;
+        if (!sending)
+        {
+            send(device);
+        }
+    };
+
+    /** @param {any} device */
+    const send = device=>{
+        if (!newest?.fresh)
+        {
+            return;
+        }
+        newest.fresh = false;
+        sending = true;
         if (frames === 'pixels')
         {
-            readPixels(device, frame);
+            readPixels(device, { surface: newest, frameIndex: newest.frameIndex });
             return;
         }
-        if (frames !== 'bitmap')
-        {
-            return;
-        }
+        const surface = newest;
         if (!screen || screen.canvas.width !== surface.width
             || screen.canvas.height !== surface.height)
         {
@@ -106,8 +167,8 @@ export function serveGraphics(scope, deps){
             { texture: screen.getCurrentTexture() }, [surface.width, surface.height]);
         device.queue.submit([encoder.finish()]);
         const bitmap = screen.canvas.transferToImageBitmap();
-        scope.postMessage({ type: 'frame', bitmap, frameIndex: frame.frameIndex,
-            format: surface.format }, [bitmap]);
+        scope.postMessage({ type: 'frame', bitmap, frameIndex: surface.frameIndex,
+            format: surface.format, dropped }, [bitmap]);
     };
 
     /**
@@ -134,8 +195,11 @@ export function serveGraphics(scope, deps){
             const pixels = new Uint8Array(buffer.getMappedRange()).slice();
             buffer.destroy();
             scope.postMessage({ type: 'frame', pixels, bytesPerRow, width, height, frameIndex,
-                format }, [pixels.buffer]);
-        }, ()=>buffer.destroy());
+                format, dropped }, [pixels.buffer]);
+        }, ()=>{
+            buffer.destroy();
+            sending = false;
+        });
     };
 
     const open = async()=>{
@@ -252,6 +316,10 @@ export function serveGraphics(scope, deps){
                 opened ??= open();
                 opened.then(({ adapter })=>scope.postMessage({ type: 'opened', adapter }),
                     e=>scope.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
+                break;
+            case 'shown':
+                sending = false;
+                opened?.then(({ device })=>send(device), ()=>{});
                 break;
             case 'root':
                 root(data.api, data.options ?? {}, data.port).catch(e=>

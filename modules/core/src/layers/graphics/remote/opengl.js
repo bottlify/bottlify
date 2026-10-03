@@ -97,7 +97,7 @@ export function playedOpengl(factory, services){
         ...services,
         model: false,
         readMemory: mirror.read,
-        windowMemory: mirror.read,
+        windowMemory: (address, length)=>mirror.window(address, length),
         writeMemory: (address, bytes)=>{
             mirror.write(address, bytes);
             if (!playing)

@@ -133,7 +133,6 @@ function buildParentExe(){
 
 test('the reader keeps its level, its cursor and its sink across a replacement',
     { timeout: 30000 }, async t=>{
-        const wasm = await readFile(new URL('v86.wasm', PREBUILT));
         // The decoder binary is fetched, not tracked; without it this test still
         // exercises the replacement, and the instance sharing below is skipped.
         const decoder = await readFile(new URL('video-decoder.wasm', PREBUILT)).catch(()=>null);
@@ -166,10 +165,6 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
             } : undefined,
             // The child the parent hands over to has to be on the volume.
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\Child.exe', bytes: child }] }) },
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
         });
         t.after(()=>app.dispose());
 
@@ -409,17 +404,12 @@ function buildMutexChildExe(){
 }
 
 test('a mutex the parent named is ERROR_ALREADY_EXISTS when the child names it too', async t=>{
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
     const child = buildMutexChildExe();
 
     const app = await createApp({
         executable: buildMutexParentExe(),
         imagePath: 'C:\\App\\Parent.exe',
         storage: { load: async()=>({ files: [{ path: 'C:\\App\\Child.exe', bytes: child }] }) },
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
     t.after(()=>app.dispose());
 

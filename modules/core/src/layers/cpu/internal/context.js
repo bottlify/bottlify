@@ -18,10 +18,10 @@
  *
  * Cork alone keeps the whole register file in one 512-byte state block, so its
  * record is a copy of that block plus the halted flag. The emulator's record
- * stays beside it until the emulator path is retired.
+ * stays beside it for the emulator a caller brings.
  *
- * Every field was located and round-tripped against the vendored v86 before
- * being listed. Two of them are the traps:
+ * Every field was located and round-tripped against v86 before being listed.
+ * Two of them are the traps:
  *
  *   - Arithmetic flags are lazy. The raw `flags` word is missing OF, SF, AF and
  *     PF while `flags_changed` is non-zero -- measured, not theorised: after an

@@ -96,6 +96,9 @@ const RELAXED_TAG = 0x7ffe;
 /** The default control word `fninit` leaves. */
 const DEFAULT_CONTROL = 0x37f;
 
+/** The instructions that write the control word. */
+const CONTROL_WRITERS = new Set(['fldcw', 'fninit', 'fnsave', 'fldenv', 'frstor']);
+
 
 /**
  * The vector of an untranslated exit a region takes at its entry when the
@@ -986,9 +989,15 @@ export function prepareX87(e, entryTop, checked = false,
         e.localTypes.push(ValType.i32);
         form = base + 13;
     }
+    // Known before any block is compiled: blocks are compiled in their order,
+    // not the order they run in, and a call compiled ahead of the block that
+    // loads the word would hand its callee the word the region came in with,
+    // and take that one back with the state after the call.
+    const controlWritten = e.region.blocks.some(block=>block.instructions.some(
+        instruction=>CONTROL_WRITERS.has(instruction.op)));
     return {
         active: true, hasMmx, base, form, temp: base + 8, temp2: base + 9, temp3: base + 10,
-        states, ends, cut, current: null, landed: null, controlWritten: false, checkedPrecision: -1,
+        states, ends, cut, current: null, landed: null, controlWritten, checkedPrecision: -1,
         known: unknown(), shapes, needs, stack: NOTHING, guards: 0, relaxedReads: 0,
         tracksExact, exact: 0, exactNaN: 0, shadow: new Array(8).fill(-1),
     };
@@ -1190,18 +1199,22 @@ export function x87StoreRegisters(e, written){
  */
 export function x87BlockStart(e, index){
     const x = e.x87;
+    // Whatever a block before it left stale was written on its every way out;
+    // what is known of the stack words there is the plan's. A cut block too:
+    // the exit it is compiled as is reached from other blocks than the one
+    // emitted before it, and that one -- a block that ended in a `ret` or a
+    // `hlt`, whose own exits wrote its stale words -- left them uncommitted.
+    x.known = unknown();
+    x.exact = 0;
+    x.exactNaN = 0;
     if (x.cut.has(index))
     {
         x.current = null;
+        x.stack = NOTHING;
         return false;
     }
     x.current = x.states[index] === null ? null : cloneState(/** @type {StackState} */ (x.states[index]));
-    // Whatever a block before it left stale was written on its every way out;
-    // what is known of the stack words there is the plan's.
-    x.known = unknown();
     x.stack = x.shapes[index] ?? NOTHING;
-    x.exact = 0;
-    x.exactNaN = 0;
     if (x.current !== null)
     {
         e.b.i32const(x.current.top).localSet(Local.x87Top);
@@ -1804,11 +1817,50 @@ export function emitX87(e, instruction, flagsLive){
     };
 
     /**
+     * Two NaN operands' result into `x.temp3`, chosen as the x87 chooses it --
+     * a quiet one over a signalling one, then the larger significand, then the
+     * positive, quieted (the model's `twoNaN`) -- where the host's operation
+     * keeps whichever its operand order put first.
+     *
+     * @param {number} a @param {number} c  the locals holding the operands
+     */
+    const twoNaN = (a, c)=>{
+        const bitsOf = (/** @type {number} */ local)=>b.localGet(local).op(I64.reinterpretF64);
+        const quietOf = (/** @type {number} */ local)=>bitsOf(local)
+            .i64const(0x0008000000000000n).op(I64.and).i64const(0n).op(I64.ne);
+        const fractionOf = (/** @type {number} */ local)=>bitsOf(local)
+            .i64const(0x000fffffffffffffn).op(I64.and);
+        b.localGet(a).localGet(a).op(F64.ne);
+        b.localGet(c).localGet(c).op(F64.ne);
+        b.op(I32.and);
+        e.openGuard('twoNaN', EMPTY);
+        bitsOf(a);
+        bitsOf(c);
+        quietOf(a);
+        fractionOf(a);
+        fractionOf(c);
+        b.op(I64.gtU);
+        bitsOf(a).i64const(0n).op(I64.ltS).op(I32.eqz);
+        fractionOf(a);
+        fractionOf(c);
+        b.op(I64.ne);
+        b.select();
+        quietOf(a);
+        quietOf(c);
+        b.op(I32.ne);
+        b.select();
+        b.select();
+        b.i64const(0x0008000000000000n).op(I64.or).op(F64.reinterpretI64).localSet(x.temp3);
+        e.close();
+    };
+
+    /**
      * The result on the stack, a NaN the operation itself made given the
      * processor's sign: x86 hands out the negative indefinite, a host whose
      * default NaN is positive hands out the other, and the corpus tells
      * them apart through a store. A NaN that came in as an operand is
-     * propagated as it was.
+     * propagated as it was; under `precise`, of two the x87's choice
+     * (`twoNaN`).
      *
      * With `invalid`, the same NaN out of operands that were not raises IE
      * too: the arithmetic's invalid operation, found by the one compare.
@@ -1832,7 +1884,8 @@ export function emitX87(e, instruction, flagsLive){
             invalid = false;
             memory = null;
         }
-        if (!fix && !invalid && memory === null)
+        const choose = precise && inputs.length > 1;
+        if (!fix && !invalid && memory === null && !choose)
         {
             return;
         }
@@ -1840,6 +1893,10 @@ export function emitX87(e, instruction, flagsLive){
         b.localSet(x.temp3);
         b.localGet(x.temp3).localGet(x.temp3).op(F64.ne);
         e.openGuard('nan', EMPTY);
+        if (choose)
+        {
+            twoNaN(inputs[0], inputs[1]);
+        }
         if (!fix && invalid)
         {
             // The rare branch as one call, so the hot path around it stays

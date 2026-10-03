@@ -5,11 +5,10 @@
  */
 
 /**
- * What a program's mathematics costs, in node, and whether the engines agree
- * on its answers: a program runs one kind of operation N times in a loop
- * over 256 doubles (or sixteen matrices and vectors), and the same loop runs
- * with the operation's loads and stores but not the operation; the
- * difference over N is the operation's cost. Each operation is either a
+ * What a program's mathematics costs, in node: a program runs one kind of
+ * operation N times in a loop over 256 doubles (or sixteen matrices and
+ * vectors), and the same loop runs with the operation's loads and stores but
+ * not the operation; the difference over N is the operation's cost. Each operation is either a
  * call into a library -- msvcrt's maths in its cdecl and `_CI` forms and its
  * number reading, d3dx9's matrices, vectors, quaternions, planes and halves,
  * kernel32's MulDiv and ntdll's 64-bit division -- or the x87's own
@@ -17,9 +16,8 @@
  * so the cost of the call's way stands beside the cost of the translator's
  * own code.
  *
- *   node tools/math-bench.mjs [N] [--rounds R] [--engine cork|emulator]
- *       [--pc 53|24|both] [--rows REGEX] [--root DIR] [--json]
- *   node tools/math-bench.mjs --check [--pc ...] [--rows ...] [--root DIR]
+ *   node tools/math-bench.mjs [N] [--rounds R] [--pc 53|24|both] [--rows REGEX]
+ *       [--root DIR] [--json]
  *   node tools/math-bench.mjs --compare BEFORE.json AFTER.json
  *
  * The control word is set at the program's start: 0x27f (double precision,
@@ -29,13 +27,9 @@
  * is the default count; a row that does more in one turn (a matrix, an array
  * of points) scales it down and is reported per element.
  *
- * `--check` runs every row once under cork and once under the emulator and
- * sets their answers side by side -- the loop's last pass over its outputs,
- * which the program writes to its console as hex -- and a digest of each:
- * an operation whose answer is exact must agree to the bit, and one that is
- * not (the transcendentals, which each engine computes with its host's
- * library) is reported with the largest distance between the two in units
- * in the last place.
+ * The loop's last pass over its outputs is written to the console as hex,
+ * and `--json` carries a digest of it per row, so two runs' answers can be
+ * set against each other as well as their times.
  *
  * `--root DIR` times the engine of another checkout; `--json` prints the
  * results for `--compare`, which sets two runs side by side.
@@ -64,7 +58,6 @@ const DUMPED = SLOTS * 8 + 3 * ITEMS * 64;
  * @property {string} name
  * @property {Record<string, string[]>} [imports]
  * @property {'double' | 'float' | 'int'} out      What an output slot holds.
- * @property {boolean} exact                        The engines' answers agree to the bit.
  * @property {number} [per]                         Elements one turn computes (default 1).
  * @property {number} [scale]                       N is divided by it for this row.
  * @property {(x: Asm) => number[]} body           One turn, the operation in.
@@ -99,17 +92,16 @@ const pushItem = address=>[0x8d, 0x85, ...u32(address), 0x50];
  * A cdecl function of doubles in msvcrt: the arguments pushed, the call,
  * the result stored; without it, a result read back from the argument.
  *
- * @param {string} name @param {number} arity @param {boolean} exact
- * @param {Row['domain']} [domain]
+ * @param {string} name @param {number} arity @param {Row['domain']} [domain]
  * @returns {Row}
  */
-function cdecl(name, arity, exact, domain = 'any'){
+function cdecl(name, arity, domain = 'any'){
     const load = (/** @type {Asm} */ x)=>[
         ...arity === 2 ? [...fldIn(x.at('in2')), ...pushDouble] : [],
         ...fldIn(x.at('in')), ...pushDouble,
     ];
     return {
-        name, imports: { 'msvcrt.dll': [name] }, out: 'double', exact, domain,
+        name, imports: { 'msvcrt.dll': [name] }, out: 'double', domain,
         body: x=>[...load(x), ...callIat(x.iat(name)), 0x83, 0xc4, arity * 8,
             ...fstpOut(x.at('out'))],
         base: x=>[...load(x), 0xdd, 0x04, 0x24, 0x83, 0xc4, arity * 8, ...fstpOut(x.at('out'))],
@@ -119,15 +111,14 @@ function cdecl(name, arity, exact, domain = 'any'){
 /**
  * The same function's `_CI` form: the arguments on the x87 stack.
  *
- * @param {string} name @param {number} arity @param {boolean} exact
- * @param {Row['domain']} [domain]
+ * @param {string} name @param {number} arity @param {Row['domain']} [domain]
  * @returns {Row}
  */
-function intrinsic(name, arity, exact, domain = 'any'){
+function intrinsic(name, arity, domain = 'any'){
     const load = (/** @type {Asm} */ x)=>[...fldIn(x.at('in')),
         ...arity === 2 ? fldIn(x.at('in2')) : []];
     return {
-        name, imports: { 'msvcrt.dll': [name] }, out: 'double', exact, domain,
+        name, imports: { 'msvcrt.dll': [name] }, out: 'double', domain,
         body: x=>[...load(x), ...callIat(x.iat(name)), ...fstpOut(x.at('out'))],
         base: x=>[...load(x), ...arity === 2 ? [0xdd, 0xd8] : [], ...fstpOut(x.at('out'))],
     };
@@ -137,17 +128,17 @@ function intrinsic(name, arity, exact, domain = 'any'){
  * The x87's instructions inline: `op` on the argument (and a second one
  * pushed after it), one double left.
  *
- * @param {string} name @param {number} arity @param {number[]} op @param {boolean} exact
+ * @param {string} name @param {number} arity @param {number[]} op
  * @param {Row['domain']} [domain]
  * @returns {Row}
  */
-function inline(name, arity, op, exact, domain = 'any'){
+function inline(name, arity, op, domain = 'any'){
     const load = (/** @type {Asm} */ x)=>[...fldIn(x.at('in')),
         ...arity === 2 ? fldIn(x.at('in2')) : []];
     // Sixteen times the turns: an instruction costs a few nanoseconds, and the
     // difference has to stand clear of a run's start.
     return {
-        name, out: 'double', exact, domain, scale: 1 / 16,
+        name, out: 'double', domain, scale: 1 / 16,
         body: x=>[...load(x), ...op, ...fstpOut(x.at('out'))],
         base: x=>[...load(x), ...arity === 2 ? [0xdd, 0xd8] : [], ...fstpOut(x.at('out'))],
     };
@@ -156,14 +147,13 @@ function inline(name, arity, op, exact, domain = 'any'){
 /**
  * A stdcall d3dx9 function of pointers into the item arrays (`#n` a dword
  * pushed as it is, `+k:` an item array's pointer k bytes on); `first`
- * pushed last. One whose answers involve the x87's transcendentals is not
- * exact: each engine computes those with its host's library.
+ * pushed last.
  *
  * @param {string} name @param {string[]} args  Each array's name, first first.
- * @param {'float'} out @param {number} [per] @param {boolean} [exact]
+ * @param {'float'} out @param {number} [per]
  * @returns {Row}
  */
-function d3dx(name, args, out, per = 1, exact = true){
+function d3dx(name, args, out, per = 1){
     const pushes = (/** @type {Asm} */ x)=>[...args].reverse().flatMap(arg=>{
         if (arg.startsWith('#'))
         {
@@ -173,7 +163,7 @@ function d3dx(name, args, out, per = 1, exact = true){
         return pushItem(x.at(array) + Number(offset ?? 0));
     });
     return {
-        name, imports: { 'd3dx9_26.dll': [name] }, out, exact, per, scale: 2 * per,
+        name, imports: { 'd3dx9_26.dll': [name] }, out, per, scale: 2 * per,
         body: x=>[...pushes(x), ...callIat(x.iat(name))],
         base: x=>[...pushes(x), 0x83, 0xc4, args.length * 4],
     };
@@ -200,18 +190,18 @@ const FPREM = [0xd9, 0xc9, 0xd9, 0xf8, 0xdf, 0xe0, 0xf6, 0xc4, 0x04, 0x75, 0xf7,
 
 /** @type {Row[]} */
 const ROWS = [
-    cdecl('sqrt', 1, true, 'positive'),
-    cdecl('sin', 1, false, 'small'),
-    cdecl('cos', 1, false, 'small'),
-    cdecl('atan2', 2, false),
-    { ...cdecl('pow', 2, true, 'positive'), name: 'pow(x,2)', twice: true },
-    { ...cdecl('pow', 2, false, 'positive'), name: 'pow(x,y)' },
-    cdecl('exp', 1, false, 'small'),
-    cdecl('log', 1, false, 'positive'),
-    cdecl('fmod', 2, true),
-    cdecl('floor', 1, true),
+    cdecl('sqrt', 1, 'positive'),
+    cdecl('sin', 1, 'small'),
+    cdecl('cos', 1, 'small'),
+    cdecl('atan2', 2),
+    { ...cdecl('pow', 2, 'positive'), name: 'pow(x,2)', twice: true },
+    { ...cdecl('pow', 2, 'positive'), name: 'pow(x,y)' },
+    cdecl('exp', 1, 'small'),
+    cdecl('log', 1, 'positive'),
+    cdecl('fmod', 2),
+    cdecl('floor', 1),
     {
-        name: '_ftol', imports: { 'msvcrt.dll': ['_ftol'] }, out: 'int', exact: true,
+        name: '_ftol', imports: { 'msvcrt.dll': ['_ftol'] }, out: 'int',
         domain: 'small',
         body: x=>[...fldIn(x.at('in')), ...callIat(x.iat('_ftol')),
             0x89, 0x87, ...u32(x.at('out')), 0x89, 0x97, ...u32(x.at('out') + 4)],
@@ -220,21 +210,21 @@ const ROWS = [
     },
     {
         // The text of a number a program's configuration holds, a pointer to it pushed.
-        name: 'atof', imports: { 'msvcrt.dll': ['atof'] }, out: 'double', exact: true,
+        name: 'atof', imports: { 'msvcrt.dll': ['atof'] }, out: 'double',
         body: x=>[...pushText(x), ...callIat(x.iat('atof')), 0x83, 0xc4, 0x04,
             ...fstpOut(x.at('out'))],
         base: x=>[...pushText(x), 0x58, 0xd9, 0xee, ...fstpOut(x.at('out'))],
     },
     {
         // Seventeen significant digits: past the fast path, the handler's.
-        name: 'atof(long)', imports: { 'msvcrt.dll': ['atof'] }, out: 'double', exact: true,
+        name: 'atof(long)', imports: { 'msvcrt.dll': ['atof'] }, out: 'double',
         body: x=>[...pushText(x), ...callIat(x.iat('atof')), 0x83, 0xc4, 0x04,
             ...fstpOut(x.at('out'))],
         base: x=>[...pushText(x), 0x58, 0xd9, 0xee, ...fstpOut(x.at('out'))],
     },
     ...['strtod', 'strtod(long)'].map(name=>/** @type {Row} */ ({
         // The same texts, the end written where a program keeps it.
-        name, imports: { 'msvcrt.dll': ['strtod'] }, out: 'double', exact: true,
+        name, imports: { 'msvcrt.dll': ['strtod'] }, out: 'double',
         body: x=>[0x68, ...u32(x.at('slack')), ...pushText(x), ...callIat(x.iat('strtod')),
             0x83, 0xc4, 0x08, ...fstpOut(x.at('out'))],
         base: x=>[0x68, ...u32(x.at('slack')), ...pushText(x), 0x58, 0x58, 0xd9, 0xee,
@@ -242,14 +232,14 @@ const ROWS = [
     })),
     {
         // _controlfp(_PC_53, _MCW_PC): the precision set, as a program keeps setting it.
-        name: '_controlfp', imports: { 'msvcrt.dll': ['_controlfp'] }, out: 'int', exact: true,
+        name: '_controlfp', imports: { 'msvcrt.dll': ['_controlfp'] }, out: 'int',
         body: x=>[0x68, ...u32(0x30000), 0x68, ...u32(0x10000),
             ...callIat(x.iat('_controlfp')), 0x83, 0xc4, 0x08, 0x89, 0x87, ...u32(x.at('out'))],
         base: x=>[0x68, ...u32(0x30000), 0x68, ...u32(0x10000), 0x83, 0xc4, 0x08,
             0x89, 0x87, ...u32(x.at('out'))],
     },
     {
-        name: '_fpclass', imports: { 'msvcrt.dll': ['_fpclass'] }, out: 'int', exact: true,
+        name: '_fpclass', imports: { 'msvcrt.dll': ['_fpclass'] }, out: 'int',
         body: x=>[...fldIn(x.at('in')), ...pushDouble, ...callIat(x.iat('_fpclass')), 0x83, 0xc4,
             0x08, 0x89, 0x87, ...u32(x.at('out'))],
         base: x=>[...fldIn(x.at('in')), ...pushDouble, 0x83, 0xc4, 0x08,
@@ -257,7 +247,7 @@ const ROWS = [
     },
     {
         // div(1000, 7): the quotient in EAX, the remainder in EDX, both stored.
-        name: 'div', imports: { 'msvcrt.dll': ['div'] }, out: 'int', exact: true,
+        name: 'div', imports: { 'msvcrt.dll': ['div'] }, out: 'int',
         body: x=>[0x6a, 0x07, 0x68, ...u32(1000), ...callIat(x.iat('div')), 0x83, 0xc4, 0x08,
             0x89, 0x87, ...u32(x.at('out')), 0x89, 0x97, ...u32(x.at('out') + 4)],
         base: x=>[0x6a, 0x07, 0x68, ...u32(1000), 0x83, 0xc4, 0x08,
@@ -265,7 +255,7 @@ const ROWS = [
     },
     {
         // MulDiv(a double's low word, 7, 3000), stdcall: a scaling a program does per item.
-        name: 'MulDiv', imports: { 'KERNEL32.dll': ['MulDiv'] }, out: 'int', exact: true,
+        name: 'MulDiv', imports: { 'KERNEL32.dll': ['MulDiv'] }, out: 'int',
         body: x=>[0x68, ...u32(3000), 0x6a, 0x07, 0xff, 0xb7, ...u32(x.at('in')),
             ...callIat(x.iat('MulDiv')), 0x89, 0x87, ...u32(x.at('out'))],
         base: x=>[0x68, ...u32(3000), 0x6a, 0x07, 0xff, 0xb7, ...u32(x.at('in')), 0x83, 0xc4, 0x0c,
@@ -274,7 +264,7 @@ const ROWS = [
     {
         // _alldiv(a double's bits, the high word of another's): a 64-bit value by a
         // divisor of one word, as a program divides a count of ticks; callee pops.
-        name: '_alldiv', imports: { 'ntdll.dll': ['_alldiv'] }, out: 'int', exact: true,
+        name: '_alldiv', imports: { 'ntdll.dll': ['_alldiv'] }, out: 'int',
         body: x=>[0x6a, 0x00, 0xff, 0xb7, ...u32(x.at('in2') + 4),
             0xff, 0xb7, ...u32(x.at('in') + 4), 0xff, 0xb7, ...u32(x.at('in')),
             ...callIat(x.iat('_alldiv')),
@@ -283,14 +273,14 @@ const ROWS = [
             0xff, 0xb7, ...u32(x.at('in') + 4), 0xff, 0xb7, ...u32(x.at('in')), 0x83, 0xc4, 0x10,
             0x89, 0x87, ...u32(x.at('out')), 0x89, 0x97, ...u32(x.at('out') + 4)],
     },
-    intrinsic('_CIsqrt', 1, true, 'positive'),
-    intrinsic('_CIsin', 1, false, 'small'),
-    intrinsic('_CIcos', 1, false, 'small'),
-    intrinsic('_CIatan2', 2, false),
-    intrinsic('_CIpow', 2, false, 'positive'),
-    intrinsic('_CIexp', 1, false, 'small'),
-    intrinsic('_CIlog', 1, false, 'positive'),
-    intrinsic('_CIfmod', 2, true),
+    intrinsic('_CIsqrt', 1, 'positive'),
+    intrinsic('_CIsin', 1, 'small'),
+    intrinsic('_CIcos', 1, 'small'),
+    intrinsic('_CIatan2', 2),
+    intrinsic('_CIpow', 2, 'positive'),
+    intrinsic('_CIexp', 1, 'small'),
+    intrinsic('_CIlog', 1, 'positive'),
+    intrinsic('_CIfmod', 2),
     d3dx('D3DXMatrixMultiply', ['mOut', 'mA', 'mB'], 'float'),
     d3dx('D3DXMatrixInverse', ['mOut', 'det', 'mA'], 'float'),
     d3dx('D3DXVec3Transform', ['vOut', 'v', 'mA'], 'float'),
@@ -305,32 +295,31 @@ const ROWS = [
             0xd9, 0x9d, ...u32(x.at('det'))],
     },
     d3dx('D3DXMatrixRotationYawPitchRoll', ['mOut', float(0.3), float(-1.2), float(2.5)],
-        'float', 1, false),
+        'float'),
     d3dx('D3DXMatrixPerspectiveFovLH', ['mOut', float(Math.PI / 4), float(4 / 3), float(1),
-        float(1000)], 'float', 1, false),
+        float(1000)], 'float'),
     d3dx('D3DXMatrixLookAtLH', ['mOut', 'v', '+16:v', '+32:v'], 'float'),
     d3dx('D3DXMatrixTransformation', ['mOut', 'v', 'q', '+16:v', '+32:v', '+16:q', '+48:v'],
         'float'),
     d3dx('D3DXMatrixDecompose', ['vOut', '+16:vOut', '+32:vOut', 'mA'], 'float'),
-    d3dx('D3DXQuaternionSlerp', ['vOut', 'q', '+16:q', float(0.3)], 'float', 1, false),
-    d3dx('D3DXQuaternionSquad', ['vOut', 'q', '+16:q', '+32:q', '+48:q', float(0.7)], 'float', 1,
-        false),
+    d3dx('D3DXQuaternionSlerp', ['vOut', 'q', '+16:q', float(0.3)], 'float'),
+    d3dx('D3DXQuaternionSquad', ['vOut', 'q', '+16:q', '+32:q', '+48:q', float(0.7)], 'float'),
     d3dx('D3DXQuaternionRotationMatrix', ['vOut', 'mA'], 'float'),
     d3dx('D3DXPlaneFromPoints', ['vOut', 'v', '+16:v', '+32:v'], 'float'),
     d3dx('D3DXPlaneIntersectLine', ['vOut', 'v', '+16:v', '+32:v'], 'float'),
     d3dx('D3DXVec3Project', ['vOut', 'v', 'viewport', 'mA', 'mB', '+64:mA'], 'float'),
     d3dx('D3DXVec3Unproject', ['vOut', 'v', 'viewport', 'mA', 'mB', '+64:mA'], 'float'),
     d3dx('D3DXFloat32To16Array', ['vOut', 'v', `#${ITEMS * 4}`], 'float', ITEMS * 4),
-    inline('fsqrt', 1, [0xd9, 0xfa], true, 'positive'),
-    inline('fsin', 1, [0xd9, 0xfe], false, 'small'),
-    inline('fcos', 1, [0xd9, 0xff], false, 'small'),
-    inline('fsincos', 1, [0xd9, 0xfb, 0xde, 0xc1], false, 'small'),
-    inline('fpatan', 2, [0xd9, 0xf3], false),
-    inline('fyl2x', 2, [0xd9, 0xc9, 0xd9, 0xf1], false, 'positive'),
-    inline('f2xm1+fscale', 1, EXP2, false, 'small'),
-    inline('fprem', 2, FPREM, true),
-    inline('frndint', 1, [0xd9, 0xfc], true),
-    inline('fmul+fadd', 2, [0xd9, 0xc1, 0xde, 0xc9, 0xde, 0xc1], true),
+    inline('fsqrt', 1, [0xd9, 0xfa], 'positive'),
+    inline('fsin', 1, [0xd9, 0xfe], 'small'),
+    inline('fcos', 1, [0xd9, 0xff], 'small'),
+    inline('fsincos', 1, [0xd9, 0xfb, 0xde, 0xc1], 'small'),
+    inline('fpatan', 2, [0xd9, 0xf3]),
+    inline('fyl2x', 2, [0xd9, 0xc9, 0xd9, 0xf1], 'positive'),
+    inline('f2xm1+fscale', 1, EXP2, 'small'),
+    inline('fprem', 2, FPREM),
+    inline('frndint', 1, [0xd9, 0xfc]),
+    inline('fmul+fadd', 2, [0xd9, 0xc1, 0xde, 0xc9, 0xde, 0xc1]),
 ];
 
 /**
@@ -489,25 +478,16 @@ export function program(row, n, withOp, control){
  * The engine of a checkout: runs a program to its exit and answers the wall
  * time of the run and what it wrote to its console.
  *
- * @param {string} root @param {'cork' | 'emulator'} engine
+ * @param {string} root
  */
-async function engineOf(root, engine){
+async function engineOf(root){
     const { createApp } = await import(
         pathToFileURL(join(root, 'modules', 'core', 'src', 'app.js')).href);
-    /** @type {Record<string, unknown>} */
-    const extra = {};
-    if (engine === 'emulator')
-    {
-        const prebuilt = join(root, 'modules', 'core', 'vendor', 'prebuilt');
-        const wasm = await readFile(join(prebuilt, 'v86.wasm'));
-        extra.v86 = {
-            moduleUrl: pathToFileURL(join(prebuilt, 'libv86.mjs')).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        };
-    }
     /** @param {Uint8Array} executable */
     return async executable=>{
-        const app = await createApp({ executable, engine, ...extra });
+        // Named rather than left to the default: `--root` may be a checkout
+        // whose default is another engine.
+        const app = await createApp({ executable, engine: 'cork' });
         /** @type {string[]} */
         const output = [];
         app.on('output', (/** @type {any} */ payload)=>output.push(payload.text));
@@ -541,45 +521,6 @@ function median(values){
 /** @param {number} control */
 const pcName = control=>((control & 0x300) === 0 ? 'PC24' : 'PC53');
 
-/**
- * The distance in units in the last place between two answers of a row, the
- * largest over its outputs: 0 when they are the same bits, Infinity when one
- * is a NaN and the other not.
- *
- * @param {Row} row @param {Uint8Array} left @param {Uint8Array} right
- */
-function ulps(row, left, right){
-    const a = new DataView(left.buffer, left.byteOffset, left.byteLength);
-    const b = new DataView(right.buffer, right.byteOffset, right.byteLength);
-    let largest = 0;
-    const width = row.out === 'double' ? 8 : 4;
-    const [from, to] = row.out === 'float' ? [SLOTS * 8, DUMPED] : [0, SLOTS * 8];
-    for (let at = from; at < to; at += width)
-    {
-        if (row.out === 'int')
-        {
-            largest = Math.max(largest, a.getUint32(at, true) === b.getUint32(at, true) ? 0
-                : Infinity);
-            continue;
-        }
-        const x = width === 8 ? a.getFloat64(at, true) : a.getFloat32(at, true);
-        const y = width === 8 ? b.getFloat64(at, true) : b.getFloat32(at, true);
-        if (Object.is(x, y) || Number.isNaN(x) && Number.isNaN(y))
-        {
-            continue;
-        }
-        if (Number.isNaN(x) || Number.isNaN(y) || Math.sign(x) !== Math.sign(y))
-        {
-            largest = Infinity;
-            continue;
-        }
-        const i = width === 8 ? a.getBigInt64(at, true) : BigInt(a.getInt32(at, true));
-        const j = width === 8 ? b.getBigInt64(at, true) : BigInt(b.getInt32(at, true));
-        largest = Math.max(largest, Number(i > j ? i - j : j - i));
-    }
-    return largest;
-}
-
 /** @param {string[]} argv */
 function options(argv){
     /** @param {string} flag */
@@ -587,25 +528,18 @@ function options(argv){
         const at = argv.indexOf(flag);
         return at >= 0 ? argv[at + 1] : undefined;
     };
-    const engine = value('--engine') ?? 'cork';
-    if (engine !== 'cork' && engine !== 'emulator')
-    {
-        throw new Error(`--engine is cork or emulator, not ${engine}`);
-    }
     const pc = value('--pc') ?? 'both';
-    const flagged = new Set(['--rounds', '--engine', '--root', '--rows', '--pc', '--compare']);
+    const flagged = new Set(['--rounds', '--root', '--rows', '--pc', '--compare']);
     const positional = argv.filter((arg, i)=>!arg.startsWith('--')
         && !flagged.has(argv[i - 1] ?? ''));
     const pattern = new RegExp(value('--rows') ?? '.');
     return {
         n: Number(positional[0] ?? 1_000_000),
         rounds: Number(value('--rounds') ?? 3),
-        engine: /** @type {'cork' | 'emulator'} */ (engine),
         controls: pc === '24' ? [0x07f] : pc === '53' ? [0x27f] : [0x27f, 0x07f],
         rows: ROWS.filter(row=>pattern.test(row.name)),
         root: resolve(value('--root') ?? HERE),
         json: argv.includes('--json'),
-        check: argv.includes('--check'),
         compare: argv.includes('--compare')
             ? argv.slice(argv.indexOf('--compare') + 1, argv.indexOf('--compare') + 3) : null,
     };
@@ -625,7 +559,7 @@ function options(argv){
 
 /** @param {ReturnType<typeof options>} o */
 async function measure(o){
-    const run = await engineOf(o.root, o.engine);
+    const run = await engineOf(o.root);
     // The process's first run pays for compiling the engine; no row should.
     for (const row of o.rows.slice(0, 1))
     {
@@ -673,39 +607,7 @@ async function measure(o){
             }
         }
     }
-    return { n: o.n, rounds: o.rounds, engine: o.engine, root: o.root, results };
-}
-
-/** @param {ReturnType<typeof options>} o */
-async function check(o){
-    const cork = await engineOf(o.root, 'cork');
-    const emulator = await engineOf(o.root, 'emulator');
-    const lines = [`${'row'.padEnd(28)} ${'pc'.padEnd(5)} ${'cork'.padEnd(17)} `
-        + `${'emulator'.padEnd(17)} agreement`];
-    for (const row of o.rows)
-    {
-        for (const control of o.controls)
-        {
-            try
-            {
-                const exe = program(row, 4096, true, control);
-                const [a, b] = [(await cork(exe)).bytes, (await emulator(exe)).bytes];
-                const digest = (/** @type {Uint8Array} */ bytes)=>createHash('sha256')
-                    .update(bytes).digest('hex').slice(0, 16);
-                const distance = ulps(row, a, b);
-                const verdict = distance === 0 ? 'bit for bit'
-                    : `${row.exact ? 'DIFFERS: ' : ''}${distance === Infinity ? 'NaN or sign'
-                        : `${distance} ulp`} at most`;
-                lines.push(`${row.name.padEnd(28)} ${pcName(control).padEnd(5)} `
-                    + `${digest(a).padEnd(17)} ${digest(b).padEnd(17)} ${verdict}`);
-            }
-            catch (e){
-                lines.push(`${row.name.padEnd(28)} ${pcName(control).padEnd(5)} `
-                    + `${/** @type {Error} */ (e).message}`);
-            }
-        }
-    }
-    return lines.join('\n');
+    return { n: o.n, rounds: o.rounds, root: o.root, results };
 }
 
 /** @param {Result[][]} runs @param {string[]} labels */
@@ -736,10 +638,6 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href)
             JSON.parse(await readFile(path, 'utf8')).results));
         console.log(table(runs, ['before', 'after']));
     }
-    else if (o.check)
-    {
-        console.log(await check(o));
-    }
     else
     {
         const measured = await measure(o);
@@ -749,8 +647,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href)
         }
         else
         {
-            console.log(`N ${o.n}, ${o.rounds} rounds, ${o.engine}; ns an element, the median `
-                + 'over the rounds; host: calls into the host in the last run');
+            console.log(`N ${o.n}, ${o.rounds} rounds; ns an element, the median over the`
+                + ' rounds; host: calls into the host in the last run');
             console.log(table([measured.results], ['this']));
         }
     }

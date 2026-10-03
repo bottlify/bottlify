@@ -123,14 +123,6 @@ self.onmessage = ({ data })=>{
             self.postMessage({ type: 'answer', id: data.id,
                 value: harness?.journalRecent(data.count) ?? [] });
             break;
-        case 'exactRestart':
-            self.postMessage({ type: 'answer', id: data.id,
-                value: harness?.exactRestart() ?? false });
-            break;
-        case 'exactStop':
-            self.postMessage({ type: 'answer', id: data.id,
-                value: harness?.exactStop() ?? false });
-            break;
         case 'clearLog':
             sentLines = 0;
             self.postMessage({ type: 'answer', id: data.id,

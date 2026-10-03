@@ -15,13 +15,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { createV86Host } from '../../cpu/internal/v86-host.js';
+import { createCorkHost } from '../../cpu/internal/cork-host.js';
+import * as cork from '../../../../../cork/src/index.js';
 import {
     CLOCK, queryPerformanceCounterCode, queryPerformanceFrequencyCode, tickCountCode,
 } from './process.js';
-
-const PREBUILT = new URL('../../../../vendor/prebuilt/', import.meta.url);
 
 const PROGRAM = 0x8000;
 const COUNTER = 0x8100;
@@ -83,14 +81,13 @@ function program(){
 }
 
 test('the clock routines answer out of the block and leave a null pointer alone', async()=>{
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
-    const host = await createV86Host({
-        moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-        wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+    const host = createCorkHost({
+        engine: cork,
         memorySize: 64 * 1024 * 1024,
         trapPort: 0xb077,
         entryVector: 0x7000,
         initialStack: STACK,
+        cork: {},
     });
 
     host.writePhysical(COUNTER, queryPerformanceCounterCode(COUNTER, TRAP, BLOCK));
@@ -106,14 +103,14 @@ test('the clock routines answer out of the block and leave a null pointer alone'
     const { bytes: image, starts, end } = program();
     host.writePhysical(PROGRAM, image);
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
-    host.cpu().main_loop();
+    host.runSlice(1000);
 
     /** @param {number} at */
     const read = at=>{
         const bytes = host.readPhysical(at, 8);
         return new DataView(bytes.slice().buffer).getBigUint64(0, true);
     };
-    const eip = ()=>host.cpu().instruction_pointer[0] >>> 0;
+    const eip = ()=>host.readReg32('eip');
     /**
      * Runs one step from a fresh stack, and says whether it answered to the
      * program or left for the host. An answer must have left the stack where
@@ -123,18 +120,18 @@ test('the clock routines answer out of the block and leave a null pointer alone'
      * @param {number} index
      */
     const run = index=>{
-        host.cpu().instruction_pointer[0] = starts[index];
-        host.cpu().reg32[4] = STACK;
-        host.cpu().in_hlt[0] = 0;
-        host.cpu().run_slice(1000);
+        host.writeReg32('eip', starts[index]);
+        host.writeReg32('esp', STACK);
+        host.wake();
+        host.runSlice(1000);
         if (eip() === TRAP + 1)
         {
             return 'trap';
         }
         const after = index + 1 < starts.length ? starts[index + 1] : end;
         assert.equal(eip(), after, `step ${index} halted after its call`);
-        assert.equal(host.cpu().reg32[4] >>> 0, STACK, `step ${index} left the stack as it was`);
-        return host.cpu().reg32[0] >>> 0;
+        assert.equal(host.readReg32('esp'), STACK, `step ${index} left the stack as it was`);
+        return host.readReg32('eax');
     };
 
     assert.equal(run(0), 1, 'the counter answered TRUE');

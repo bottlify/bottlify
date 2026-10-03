@@ -26,10 +26,15 @@
  *
  * `root`, when given, makes the Direct3D root from its factory and services in
  * the scene's place: a root whose calls are recorded and sent elsewhere.
+ * `opengl` does the same for OpenGL's root (`createOpengl`'s `remote`), and
+ * `d3d7` for a Direct3D 7 object over its DirectDraw object (the seam's
+ * `remote`).
  *
  * @typedef {{ device: any, queue: any, reset: () => void,
  *     mark?: (name: 'recorded' | 'replayed') => void, modelOnly?: boolean,
- *     root?: (factory: (services: any) => any, services: any) => any }} SceneGpu
+ *     root?: (factory: (services: any) => any, services: any) => any,
+ *     opengl?: (factory: (services: any) => any, services: any) => any,
+ *     d3d7?: (ddraw: any, services: any) => any }} SceneGpu
  */
 
 const GRAPHICS = new URL(import.meta.url).searchParams.get('root')
@@ -49,6 +54,11 @@ const { FVF } = await import(`${GRAPHICS}/webgpu/internal/vertexformat.js`);
 const { blt, bltFast } = await import(`${GRAPHICS}/ddraw/blit.js`);
 const DDRAW = await import(`${GRAPHICS}/ddraw/constants.js`);
 const { createPresenter } = await import(`${GRAPHICS}/webgpu/internal/presenter.js`);
+const { createOpengl } = await import(`${GRAPHICS}/opengl/exports.js`);
+const { GL } = await import(`${GRAPHICS}/opengl/constants.js`);
+const { createDirect3D7 } = await import(`${GRAPHICS}/d3d7/device.js`);
+const D3D7 = await import(`${GRAPHICS}/d3d7/constants.js`);
+const { createDirectDraw } = await import(`${GRAPHICS}/ddraw/objects.js`);
 
 const RAM_BASE = 0x40000000;
 
@@ -410,6 +420,227 @@ function ddrawScene({ draws, depth, gpu }){
     };
 }
 
+/** A float's bits, as a guest pushes it. */
+const floatWord = (()=>{
+    const view = new DataView(new ArrayBuffer(4));
+    return (/** @type {number} */ value)=>{
+        view.setFloat32(0, value, true);
+        return view.getUint32(0, true);
+    };
+})();
+
+/**
+ * OpenGL as a game of the Doom 3 or Quake III era draws, through OPENGL32's
+ * own exports over a flat guest memory: a window's context, four textures,
+ * and a frame of `draws` glDrawElements of 300 to 3,000 32-bit indices from
+ * client memory, each after a texture bind, a blend, a depth mask, a matrix
+ * and a colour -- the vertices in a buffer object (`client: false`, Doom 3)
+ * or in client arrays the frame rewrites (`client: true`, Quake III) -- and a
+ * swap that waits for the frame's replay.
+ *
+ * @param {{ draws: number, gpu: SceneGpu, client: boolean }} scene
+ */
+function openglScene({ draws, gpu, client }){
+    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+        now: ()=>0 });
+    const bytes = new Uint8Array(24 << 20);
+    const view = new DataView(bytes.buffer);
+    let next = 16 << 20;
+    const opengl = createOpengl({
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            bytes.slice(at, at + length),
+        windowMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            bytes.subarray(at, at + length),
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>
+            bytes.set(value, at),
+        scratch: { allocate: (/** @type {number} */ size)=>{
+            const at = next;
+            next += size + 15 & ~15;
+            return at;
+        } },
+        screen: ()=>({ width: 640, height: 480 }),
+        present: ()=>{},
+        presenter: ()=>({ claim: ()=>{} }),
+        backend: ()=>backend,
+        createSampler: (/** @type {any} */ descriptor)=>gpu.device.createSampler?.(descriptor)
+            ?? ({ kind: 'sampler', descriptor }),
+        // A swap waits for its frame's replay, as the run's latency bound
+        // would once frames were in flight.
+        frameQueued: (/** @type {any} */ settled)=>settled,
+        exportAddress: ()=>0x10000000,
+        remote: gpu.opengl,
+    });
+    const table = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        opengl.table);
+    /** @param {string} name @param {number[]} args */
+    const gl = (name, ...args)=>table[name].handler(args);
+    const hdc = 0x900d;
+    gl('wglSetPixelFormat', hdc, 1, 0);
+    gl('wglMakeCurrent', hdc, gl('wglCreateContext', hdc));
+    const STRIDE = 32;
+    const VERTICES = 4096;
+    for (let i = 0; i < VERTICES; i++)
+    {
+        view.setFloat32(0x100000 + i * STRIDE, (i % 64) / 32 - 1, true);
+        view.setFloat32(0x100000 + i * STRIDE + 4, (i >> 6) / 32 - 1, true);
+        view.setFloat32(0x100000 + i * STRIDE + 8, 0.5, true);
+        view.setFloat32(0x100000 + i * STRIDE + 12, (i % 64) / 64, true);
+        view.setFloat32(0x100000 + i * STRIDE + 16, (i >> 6) / 64, true);
+    }
+    gl('glGenBuffersARB', 1, 0x1000);
+    const vbo = view.getUint32(0x1000, true);
+    if (!client)
+    {
+        gl('glBindBufferARB', GL.ARRAY_BUFFER, vbo);
+        gl('glBufferDataARB', GL.ARRAY_BUFFER, VERTICES * STRIDE, 0x100000, GL.STATIC_DRAW);
+        gl('glBindBufferARB', GL.ARRAY_BUFFER, 0);
+    }
+    gl('glGenTextures', 4, 0x1000);
+    const textures = [0, 1, 2, 3].map(i=>view.getUint32(0x1000 + i * 4, true));
+    for (const name of textures)
+    {
+        gl('glBindTexture', GL.TEXTURE_2D, name);
+        gl('glTexParameteri', GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+        gl('glTexImage2D', GL.TEXTURE_2D, 0, GL.RGBA, 64, 64, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+            0x80000);
+    }
+    const counts = Array.from({ length: draws }, (_, i)=>300 + (i * 997) % 2700);
+    let at = 0x200000;
+    const lists = counts.map(count=>{
+        const base = at;
+        for (let i = 0; i < count; i++)
+        {
+            view.setUint32(base + i * 4, (i * 7) % VERTICES, true);
+        }
+        at += count * 4 + 64;
+        return base;
+    });
+    gl('glEnable', GL.TEXTURE_2D);
+    gl('glEnable', GL.DEPTH_TEST);
+    let frames = 0;
+    return {
+        gpu,
+        async frame(){
+            gl('glClear', GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
+            gl('glEnableClientState', GL.VERTEX_ARRAY);
+            gl('glEnableClientState', GL.TEXTURE_COORD_ARRAY);
+            if (client)
+            {
+                // What moves this frame, written where the arrays point.
+                view.setFloat32(0x100000 + (frames % VERTICES) * STRIDE + 8, frames % 2, true);
+            }
+            else
+            {
+                gl('glBindBufferARB', GL.ARRAY_BUFFER, vbo);
+            }
+            const base = client ? 0x100000 : 0;
+            gl('glVertexPointer', 3, GL.FLOAT, STRIDE, base);
+            gl('glTexCoordPointer', 2, GL.FLOAT, STRIDE, base + 12);
+            for (let d = 0; d < draws; d++)
+            {
+                gl('glBindTexture', GL.TEXTURE_2D, textures[d & 3]);
+                gl('glEnable', GL.BLEND);
+                gl('glBlendFunc', GL.ONE, GL.ONE);
+                gl('glDepthMask', d & 1);
+                gl('glMatrixMode', GL.MODELVIEW);
+                gl('glLoadIdentity');
+                gl('glTranslatef', floatWord(d / draws), floatWord(0), floatWord(-0.5));
+                gl('glColor4f', floatWord(1), floatWord(1), floatWord(1), floatWord(1));
+                gl('glDrawElements', GL.TRIANGLES, counts[d], GL.UNSIGNED_INT, lists[d]);
+            }
+            frames++;
+            gpu.mark?.('recorded');
+            await gl('wglSwapBuffers', hdc);
+            gpu.mark?.('replayed');
+            gpu.reset();
+        },
+    };
+}
+
+/**
+ * Direct3D 7 as a game of its era draws: a 640x480 target with a depth
+ * buffer attached, two textures, and a frame of `draws` lit draws of a
+ * vertex buffer through indices by pointer, a world matrix and a texture
+ * before each, presented as a flip shows the target -- through the
+ * presenter's claim -- and waited for.
+ *
+ * @param {{ draws: number, gpu: SceneGpu }} scene
+ */
+function d3d7Scene({ draws, gpu }){
+    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+        now: ()=>0 });
+    const ram = new Uint8Array(4 << 20);
+    let next = 0x10000;
+    const root = createDirectDraw({ version: 7, screenWidth: 640, screenHeight: 480,
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes + 0xfff & ~0xfff;
+            return at;
+        } });
+    root.setCooperativeLevel(0x10044, DDRAW.DDSCL_NORMAL);
+    /** @type {Map<number, () => unknown>} */
+    const claims = new Map();
+    const services = {
+        backend: gpu.d3d7 ? undefined : backend,
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            ram.slice(at, at + length),
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>
+            ram.set(value, at),
+        createSampler: (/** @type {any} */ descriptor)=>gpu.device.createSampler?.(descriptor)
+            ?? ({ kind: 'sampler', descriptor }),
+        presenter: {
+            claim: (/** @type {number} */ buffer, /** @type {() => unknown} */ show)=>
+                claims.set(buffer, show),
+            release: (/** @type {number} */ buffer)=>claims.delete(buffer),
+        },
+    };
+    const d3d = gpu.d3d7 ? gpu.d3d7(root, services) : createDirect3D7(root, services);
+    /** @param {any} request */
+    const made = request=>root.createSurface(request).surface;
+    const ARGB = { size: 0x20, flags: DDRAW.DDPF_RGB | DDRAW.DDPF_ALPHAPIXELS, fourCC: 0,
+        bitCount: 32, redMask: 0xff0000, greenMask: 0xff00, blueMask: 0xff,
+        alphaMask: 0xff000000 };
+    const sized = DDRAW.DDSD_CAPS | DDRAW.DDSD_WIDTH | DDRAW.DDSD_HEIGHT;
+    const target = made({ flags: sized, caps: DDRAW.DDSCAPS_3DDEVICE | DDRAW.DDSCAPS_OFFSCREENPLAIN,
+        width: 640, height: 480 });
+    const depth = made({ flags: sized | DDRAW.DDSD_ZBUFFERBITDEPTH, caps: DDRAW.DDSCAPS_ZBUFFER,
+        width: 640, height: 480, zBufferBitDepth: 16 });
+    target.addAttachedSurface(depth);
+    const textures = [0, 1].map(()=>made({ flags: sized | DDRAW.DDSD_PIXELFORMAT,
+        caps: DDRAW.DDSCAPS_TEXTURE, width: 64, height: 64, pixelFormat: ARGB }));
+    const device = d3d.createDevice(D3D7.DEVICE_IDS.TNLHAL, target).device;
+    const fvf = FVF.XYZ | FVF.NORMAL | (1 << FVF.TEXCOUNT_SHIFT);
+    const buffer = d3d.createVertexBuffer({ caps: 0, fvf, numVertices: 24 }).buffer;
+    buffer.Lock(0, {});
+    buffer.Unlock();
+    const indices = 0x300000;
+    ram.set(new Uint8Array(Uint16Array.from({ length: 36 }, (_, i)=>i % 24).buffer), indices);
+    device.SetRenderState(D3D7.D3DRENDERSTATE.LIGHTING, 1);
+    device.SetLight(0, light());
+    device.LightEnable(0, 1);
+    const world = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 5, 1]);
+    return {
+        gpu,
+        async frame(){
+            device.BeginScene();
+            device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, 0xff000000, 1, 0);
+            for (let d = 0; d < draws; d++)
+            {
+                world[12] = (d % 20) / 10 - 1;
+                device.SetTransform(D3D7.D3DTRANSFORMSTATE.WORLD, world);
+                device.SetTexture(0, textures[d & 1]);
+                device.DrawIndexedPrimitiveVB(D3DPT.TRIANGLELIST, buffer, 0, 24, indices, 36);
+            }
+            device.EndScene();
+            gpu.mark?.('recorded');
+            await /** @type {() => unknown} */ (claims.get(target.buffer))();
+            await device.idle();
+            gpu.mark?.('replayed');
+            gpu.reset();
+        },
+    };
+}
+
 /**
  * Each scene by name: a builder of it over `draws` draws a frame on the GPU given.
  *
@@ -417,6 +648,9 @@ function ddrawScene({ draws, depth, gpu }){
  */
 export const SCENES = {
     'ddraw-32': (draws, gpu)=>ddrawScene({ draws, depth: 32, gpu }),
+    'gl-buffers': (draws, gpu)=>openglScene({ draws, gpu, client: false }),
+    'gl-client': (draws, gpu)=>openglScene({ draws, gpu, client: true }),
+    'd3d7-lit': (draws, gpu)=>d3d7Scene({ draws, gpu }),
     'ddraw-8': (draws, gpu)=>ddrawScene({ draws, depth: 8, gpu }),
     'd3d8-lit': (draws, gpu)=>directScene({ version: 8, draws, gpu }),
     'd3d8-moving': (draws, gpu)=>directScene({ version: 8, draws, gpu, moving: true }),
