@@ -716,6 +716,40 @@ export function createMappingFunctions(host){
         },
 
         /**
+         * BOOL FlushViewOfFile(LPCVOID lpBaseAddress, SIZE_T dwNumberOfBytesToFlush)
+         *
+         * What UnmapViewOfFile writes back, written back now and the view left
+         * in place: from the address to as many bytes on, or to the view's end
+         * for none. An address in no view is refused (ERROR_INVALID_PARAMETER,
+         * as Wine's kernelbase answers it); a view of no file, or one that
+         * cannot be written through, has nothing to write and succeeds.
+         */
+        FlushViewOfFile: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([address, count])=>{
+                const at = address >>> 0;
+                for (const [base, view] of views)
+                {
+                    if (at < base || at >= base + view.length)
+                    {
+                        continue;
+                    }
+                    const end = (count >>> 0) === 0
+                        ? base + view.length
+                        : Math.min(base + view.length, at + (count >>> 0));
+                    if (view.writable && view.mapping.node)
+                    {
+                        host.files.write(view.mapping.node, view.offset + (at - base),
+                            host.readMemory(at, end - at));
+                    }
+                    return 1;
+                }
+                return fail(ERROR_INVALID_PARAMETER);
+            },
+        },
+
+        /**
          * BOOL CreatePipe(PHANDLE hReadPipe, PHANDLE hWritePipe,
          *   LPSECURITY_ATTRIBUTES, DWORD nSize)
          *

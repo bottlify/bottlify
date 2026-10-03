@@ -128,6 +128,32 @@ test('a view of a file starts as that file, and is written back when unmapped', 
     assert.equal(file.data[2], 0x99);
 });
 
+test('a flushed view reaches its file at once, from the address flushed on, and stays', ()=>{
+    // What a program that keeps a file mapped -- a launcher's registry of
+    // what it has installed -- relies on to have its writes in the file while
+    // it goes on working through the view.
+    const { fns, bytes, file, fileHandle, errors } = setup();
+    const mapping = fns.CreateFileMappingA.handler([fileHandle, 0, PAGE_READWRITE, 0, 8, 0]);
+    const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_WRITE, 0, 0, 8]);
+    bytes[view + 1] = 0x11;
+    bytes[view + 5] = 0x55;
+    bytes[view + 6] = 0x66;
+
+    assert.equal(fns.FlushViewOfFile.argBytes, 8);
+    assert.equal(fns.FlushViewOfFile.handler([view + 4, 2]), 1);
+    assert.deepEqual([...file.data], [1, 2, 3, 4, 5, 0x55, 7, 8],
+        'the two bytes from the address flushed');
+    assert.equal(fns.FlushViewOfFile.handler([view + 1, 0]), 1);
+    assert.deepEqual([...file.data], [1, 0x11, 3, 4, 5, 0x55, 0x66, 8],
+        'and with no count, the rest of the view');
+    bytes[view] = 0x99;
+    assert.equal(fns.UnmapViewOfFile.handler([view]), 1, 'the view was still there');
+    assert.equal(file.data[0], 0x99);
+
+    assert.equal(fns.FlushViewOfFile.handler([view, 0]), 0, 'unmapped, there is nothing to flush');
+    assert.equal(errors.at(-1), 87);
+});
+
 test('a read-only view is not written back', ()=>{
     const { fns, bytes, file, fileHandle } = setup();
     const mapping = fns.CreateFileMappingA.handler([fileHandle, 0, PAGE_READONLY, 0, 8, 0]);
