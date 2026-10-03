@@ -2105,8 +2105,10 @@ export function createWindowFunctions(host){
      * @param {number[]} args  The extended style first, then the eleven that
      *                         both entry points share.
      * @param {boolean} [unicode]  Whether the two names are wide strings.
+     * @param {unknown} [caller]  The thread whose call this answers, named by
+     *     a caller that is past an await.
      */
-    const createWindow = (args, unicode = false)=>{
+    const createWindow = (args, unicode = false, caller = undefined)=>{
         const [exStyle, className, windowName, style, x, y, width, height, parent, menu, instance]
             = args;
         const cls = classOf(className, unicode);
@@ -2150,7 +2152,7 @@ export function createWindowFunctions(host){
         // Telling the host here is the only way it can know a handle it never
         // saw created.
         host.created?.(record.hwnd);
-        return announce(record, args, unicode);
+        return announce(record, args, unicode, caller);
     };
 
     /**
@@ -3565,10 +3567,37 @@ export function createWindowFunctions(host){
 
     // The MDI client: a built-in class whose procedure keeps a frame's document
     // windows, through the window manager's own calls (mdi.js).
+    /**
+     * DefWindowProc for a message, run on the thread a caller past an await
+     * names; a wide message reaches it converted, as DefWindowProcW's does.
+     *
+     * @param {number[]} args  hwnd, message, wParam, lParam
+     * @param {boolean} wide @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const defaultFor = ([hwnd, message, wParam, lParam], wide, thread)=>{
+        const record = windows.get(hwnd >>> 0);
+        if (!record)
+        {
+            return (message >>> 0) === WM_NCCREATE ? 1 : 0;
+        }
+        return translated(host, {
+            hwnd: hwnd >>> 0, message: message >>> 0, wParam: wParam >>> 0,
+            lParam: lParam >>> 0, ...wide ? { unicode: true } : {},
+        }, false, ansi=>defWindowProc(record, ansi, thread));
+    };
+
     const mdi = createMdi({
         host,
         call: (name, args)=>/** @type {any} */ (table)[name].handler(args),
-        send: (hwnd, message, wParam, lParam)=>send(hwnd, message, wParam, lParam),
+        send,
+        create: (args, thread)=>createWindow(args, false, thread),
+        show: (hwnd, cmdShow, thread)=>{
+            const record = live(hwnd);
+            return record ? showWindow(record, cmdShow, thread) : 0;
+        },
+        focus: setFocus,
+        destroy: (hwnd, thread)=>destroyWindow(hwnd, thread),
         defWindowProc,
         sizeOf: hwnd=>{
             const record = live(hwnd);
@@ -3780,25 +3809,31 @@ export function createWindowFunctions(host){
      * code that toggles a window reads this back.
      *
      * @param {any} record @param {number} cmdShow
+     * @param {unknown} [caller]  The thread whose call this answers, named by
+     *     a caller that is past an await.
      */
-    const showWindow = (record, cmdShow)=>{
+    const showWindow = (record, cmdShow, caller = undefined)=>{
+        // Named once, before anything is awaited: past the first message a
+        // procedure answers, the thread on the processor is somebody else.
+        const thread = caller ?? host.callerThread?.();
         const minimised = (record.style & WS_MINIMIZE) !== 0;
         if ((MINIMISING.has(cmdShow) && !minimised) || (RESTORING.has(cmdShow) && minimised))
         {
             // Minimising and restoring are a CBT hook's to forbid; the window
             // is still shown as asked, in the state it had.
-            return andThen(askCbt(HCBT_MINMAX, record.hwnd, cmdShow, host.callerThread?.()),
-                refused=>showNow(record, cmdShow, (refused | 0) !== 0));
+            return andThen(askCbt(HCBT_MINMAX, record.hwnd, cmdShow, thread),
+                refused=>showNow(record, cmdShow, (refused | 0) !== 0, thread));
         }
-        return showNow(record, cmdShow, false);
+        return showNow(record, cmdShow, false, thread);
     };
 
     /**
      * @param {any} record @param {number} cmdShow
      * @param {boolean} keepState  Whether a hook forbade minimising or restoring.
+     * @param {unknown} thread  The thread whose call this answers.
      * @returns {number | Promise<number>}
      */
-    const showNow = (record, cmdShow, keepState)=>{
+    const showNow = (record, cmdShow, keepState, thread)=>{
         const wasVisible = (record.style & WS_VISIBLE) !== 0;
         const hide = cmdShow === SW_HIDE;
         const covered = wasVisible && hide && shown(record)
@@ -3815,7 +3850,7 @@ export function createWindowFunctions(host){
         // guest while the guest's procedure is still pending -- and the guest
         // reuses its own stack under it.
         const greeting = wasVisible === hide || cmdShow === SW_SHOWNA
-            ? send(record.hwnd, WM_SHOWWINDOW, hide ? 0 : 1, 0, host.callerThread?.())
+            ? send(record.hwnd, WM_SHOWWINDOW, hide ? 0 : 1, 0, thread)
             : 0;
         record.style = hide
             ? (record.style & ~WS_VISIBLE) >>> 0
@@ -3835,8 +3870,7 @@ export function createWindowFunctions(host){
         let told = greeting;
         if (!hide && !SHOW_WITHOUT_ACTIVATING.has(cmdShow) && !isChild(record))
         {
-            told = andThen(greeting, ()=>activate(record.hwnd,
-                { thread: host.callerThread?.() }));
+            told = andThen(greeting, ()=>activate(record.hwnd, { thread }));
             raise(record);
         }
         if (!wasVisible && !hide)
@@ -3853,7 +3887,7 @@ export function createWindowFunctions(host){
             told = andThen(told, ()=>send(record.hwnd, WM_SIZE, SIZE_RESTORED,
                 ((((client.bottom - client.top) & 0xffff) << 16)
                     | ((client.right - client.left) & 0xffff)) >>> 0,
-                host.callerThread?.()));
+                thread));
         }
         if (covered)
         {
@@ -5300,14 +5334,14 @@ export function createWindowFunctions(host){
         DefFrameProcA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: args=>mdi.defFrame(args)
+            handler: args=>mdi.defFrame(args, host.callerThread?.())
                 ?? table.DefWindowProcA.handler([args[0], args[2], args[3], args[4]]),
         },
 
         DefFrameProcW: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: args=>mdi.defFrame(args)
+            handler: args=>mdi.defFrame(args, host.callerThread?.())
                 ?? table.DefWindowProcW.handler([args[0], args[2], args[3], args[4]]),
         },
 
@@ -5322,22 +5356,30 @@ export function createWindowFunctions(host){
         DefMDIChildProcA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: args=>andThen(mdi.defChild(args), answer=>answer
-                ?? table.DefWindowProcA.handler(args)),
+            handler: args=>{
+                // DefWindowProc may run past the client's answer, on this thread.
+                const thread = host.callerThread?.();
+                return andThen(mdi.defChild(args, thread), answer=>answer
+                    ?? defaultFor(args, false, thread));
+            },
         },
 
         DefMDIChildProcW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: args=>andThen(mdi.defChild(args), answer=>answer
-                ?? table.DefWindowProcW.handler(args)),
+            handler: args=>{
+                const thread = host.callerThread?.();
+                return andThen(mdi.defChild(args, thread), answer=>answer
+                    ?? defaultFor(args, true, thread));
+            },
         },
 
         /** BOOL TranslateMDISysAccel(HWND hWndClient, LPMSG lpMsg) */
         TranslateMDISysAccel: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([client, msg])=>mdi.translateAccelerator(client, msg),
+            handler: ([client, msg])=>mdi.translateAccelerator(client, msg,
+                host.callerThread?.()),
         },
     };
     // A message box is a dialog user32 makes out of its own calls, so it is

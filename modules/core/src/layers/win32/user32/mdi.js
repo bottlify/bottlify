@@ -18,6 +18,11 @@
  * one in its two parameters. Everything a document window is made of goes
  * through the window manager's own calls, so it is a window like any other.
  *
+ * Every step names the thread whose call it answers: making a child, then
+ * showing and activating it, are several procedures run one after another,
+ * and past the first one's answer the thread on the processor is somebody
+ * else.
+ *
  * What is not here: the Window menu's list of the children, and a maximized
  * child's caption and buttons moving into the frame's menu bar.
  */
@@ -104,12 +109,19 @@ const inTurn = steps=>steps.reduce((before, step)=>then(before, ()=>step()), 0);
  *             writeMemory: (address: number, data: Uint8Array) => void,
  *             keyState?: (key: number) => number },
  *     call: (name: string, args: number[]) => any,
- *     send: (hwnd: number, message: number, wParam: number, lParam: number) => Answer,
+ *     send: (hwnd: number, message: number, wParam: number, lParam: number,
+ *         thread?: unknown) => Answer,
+ *     create: (args: number[], thread: unknown) => Answer,
+ *     show: (hwnd: number, cmdShow: number, thread: unknown) => Answer,
+ *     focus: (hwnd: number, thread: unknown) => Answer,
+ *     destroy: (hwnd: number, thread: unknown) => Answer,
  *     defWindowProc: (record: any, message: any, thread?: unknown) => Answer,
  *     sizeOf: (hwnd: number) => { width: number, height: number },
  * }} options
+ *     `call` is for the calls that reach no procedure; the rest name the thread.
  */
-export function createMdi({ host, call, send, defWindowProc, sizeOf }){
+export function createMdi(options){
+    const { host, call, send, create, show, focus, destroy, defWindowProc, sizeOf } = options;
     /**
      * Each client's state, by its window: the Window menu, the first child's
      * id, the children by id, the active one, their stacking order (the
@@ -130,10 +142,10 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
      * Makes `child` the client's active window: the one before it told it is
      * deactivated, `child` raised, told it is activated and given the focus.
      *
-     * @param {number} client @param {number} child
+     * @param {number} client @param {number} child @param {unknown} thread
      * @returns {any}
      */
-    const activate = (client, child)=>{
+    const activate = (client, child, thread)=>{
         const state = clients.get(client);
         const old = state?.active ?? 0;
         if (!state || (child !== 0 && !state.order.includes(child)) || child === old)
@@ -146,14 +158,14 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
             state.order = [child, ...state.order.filter(other=>other !== child)];
         }
         return inTurn([
-            ()=>(old !== 0 ? send(old, WM_NCACTIVATE, 0, 0) : 0),
-            ()=>(old !== 0 ? send(old, WM_MDIACTIVATE, old, child) : 0),
+            ()=>(old !== 0 ? send(old, WM_NCACTIVATE, 0, 0, thread) : 0),
+            ()=>(old !== 0 ? send(old, WM_MDIACTIVATE, old, child, thread) : 0),
             ()=>(child !== 0
                 ? call('SetWindowPos', [child, 0, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE]) : 0),
-            ()=>(child !== 0 ? send(child, WM_NCACTIVATE, 1, 0) : 0),
-            ()=>(child !== 0 ? send(child, WM_MDIACTIVATE, old, child) : 0),
-            ()=>(child !== 0 ? call('SetFocus', [child]) : 0),
+            ()=>(child !== 0 ? send(child, WM_NCACTIVATE, 1, 0, thread) : 0),
+            ()=>(child !== 0 ? send(child, WM_MDIACTIVATE, old, child, thread) : 0),
+            ()=>(child !== 0 ? focus(child, thread) : 0),
             ()=>0,
         ]);
     };
@@ -162,16 +174,17 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
      * WM_MDICREATE: a child of the class and title the MDICREATESTRUCT names,
      * placed where it asks or cascaded from the last, shown and activated.
      *
-     * @param {number} client @param {number} create  the MDICREATESTRUCTA
+     * @param {number} client @param {number} params  the MDICREATESTRUCTA
+     * @param {unknown} thread
      * @returns {any} the child, or 0
      */
-    const createChild = (client, create)=>{
+    const createChild = (client, params, thread)=>{
         const state = clients.get(client);
-        if (!state || (create >>> 0) === 0)
+        if (!state || (params >>> 0) === 0)
         {
             return 0;
         }
-        const at = create >>> 0;
+        const at = params >>> 0;
         const style = readU32(host, at + 28);
         const all = (call('GetWindowLongA', [client, GWL_STYLE]) & MDIS_ALLCHILDSTYLES) !== 0;
         const childStyle = ((all ? style
@@ -193,9 +206,9 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
         {
             id++;
         }
-        return then(call('CreateWindowExA', [WS_EX_MDICHILD, readU32(host, at),
+        return then(create([WS_EX_MDICHILD, readU32(host, at),
             readU32(host, at + 4), childStyle, x, y, width, height, client, id,
-            readU32(host, at + 8), at]), made=>{
+            readU32(host, at + 8), at], thread), made=>{
             const child = made >>> 0;
             if (child === 0)
             {
@@ -204,11 +217,10 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
             state.ids.set(id, child);
             state.order.push(child);
             return inTurn([
-                ()=>call('ShowWindow', [child, (style & WS_MAXIMIZE) !== 0
-                    ? SW_SHOWMAXIMIZED : SW_SHOW]),
+                ()=>show(child, (style & WS_MAXIMIZE) !== 0 ? SW_SHOWMAXIMIZED : SW_SHOW, thread),
                 ()=>{
                     state.maximized = (style & WS_MAXIMIZE) !== 0;
-                    return activate(client, child);
+                    return activate(client, child, thread);
                 },
                 ()=>child,
             ]);
@@ -219,10 +231,10 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
      * WM_MDIDESTROY: the child goes, the next in the stacking order active in
      * its place first.
      *
-     * @param {number} client @param {number} child
+     * @param {number} client @param {number} child @param {unknown} thread
      * @returns {any}
      */
-    const destroyChild = (client, child)=>{
+    const destroyChild = (client, child, thread)=>{
         const state = clients.get(client);
         if (!state || !state.order.includes(child))
         {
@@ -230,7 +242,7 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
         }
         const next = state.order.find(other=>other !== child) ?? 0;
         return inTurn([
-            ()=>(state.active === child ? activate(client, next) : 0),
+            ()=>(state.active === child ? activate(client, next, thread) : 0),
             ()=>{
                 state.order = state.order.filter(other=>other !== child);
                 for (const [id, window] of state.ids)
@@ -244,7 +256,7 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
                 {
                     state.maximized = false;
                 }
-                return call('DestroyWindow', [child]);
+                return destroy(child, thread);
             },
             ()=>0,
         ]);
@@ -278,11 +290,11 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
                 clients.delete(client);
                 break;
             case WM_MDICREATE:
-                return createChild(client, lParam);
+                return createChild(client, lParam, thread);
             case WM_MDIDESTROY:
-                return destroyChild(client, wParam);
+                return destroyChild(client, wParam, thread);
             case WM_MDIACTIVATE:
-                return then(activate(client, wParam), ()=>0);
+                return then(activate(client, wParam, thread), ()=>0);
             case WM_MDIGETACTIVE:
                 if (lParam !== 0)
                 {
@@ -296,20 +308,20 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
                 }
                 // The next behind the active one, or with lParam the one at the back.
                 const target = lParam !== 0 ? state.order[state.order.length - 1] : state.order[1];
-                return then(activate(client, target), ()=>0);
+                return then(activate(client, target, thread), ()=>0);
             }
             case WM_MDIMAXIMIZE:
                 if (state && state.order.includes(wParam))
                 {
                     state.maximized = true;
-                    return then(call('ShowWindow', [wParam, SW_SHOWMAXIMIZED]), ()=>0);
+                    return then(show(wParam, SW_SHOWMAXIMIZED, thread), ()=>0);
                 }
                 return 0;
             case WM_MDIRESTORE:
                 if (state && state.order.includes(wParam))
                 {
                     state.maximized = false;
-                    return then(call('ShowWindow', [wParam, SW_RESTORE]), ()=>0);
+                    return then(show(wParam, SW_RESTORE, thread), ()=>0);
                 }
                 return 0;
             case WM_MDICASCADE: case WM_MDITILE: case WM_MDIICONARRANGE:
@@ -332,7 +344,7 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
             case WM_SETFOCUS:
                 if (state && state.active !== 0)
                 {
-                    return then(call('SetFocus', [state.active]), ()=>0);
+                    return then(focus(state.active, thread), ()=>0);
                 }
                 break;
             default:
@@ -347,9 +359,10 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
      * the focus goes to the client and through it to the active child.
      *
      * @param {number[]} args  hwnd, hwndMDIClient, message, wParam, lParam
+     * @param {unknown} thread
      * @returns {any}
      */
-    const defFrame = ([, clientArg, message, wParam, lParam])=>{
+    const defFrame = ([, clientArg, message, wParam, lParam], thread)=>{
         const client = clientArg >>> 0;
         const state = clients.get(client);
         if (!state)
@@ -360,13 +373,13 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
             case WM_COMMAND: {
                 const child = state.ids.get(wParam & 0xffff);
                 return child !== undefined && (lParam >>> 0) === 0
-                    ? then(activate(client, child), ()=>0) : null;
+                    ? then(activate(client, child, thread), ()=>0) : null;
             }
             case WM_SIZE:
                 return then(call('MoveWindow', [client, 0, 0, lParam & 0xffff,
                     lParam >>> 16 & 0xffff, 1]), ()=>0);
             case WM_SETFOCUS:
-                return then(call('SetFocus', [client]), ()=>0);
+                return then(focus(client, thread), ()=>0);
             default:
                 return null;
         }
@@ -378,9 +391,10 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
      * client's WM_MDIDESTROY, and the system menu's commands are the client's.
      *
      * @param {number[]} args  hwnd, message, wParam, lParam
+     * @param {unknown} thread
      * @returns {any}
      */
-    const defChild = ([hwnd, message, wParam])=>{
+    const defChild = ([hwnd, message, wParam], thread)=>{
         const child = hwnd >>> 0;
         const client = parentOf(child);
         const state = clients.get(client);
@@ -390,21 +404,22 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
         }
         switch (message >>> 0){
             case WM_CHILDACTIVATE:
-                return then(activate(client, child), ()=>0);
+                return then(activate(client, child, thread), ()=>0);
             case WM_SETFOCUS:
-                return state.active === child ? null : then(activate(client, child), ()=>null);
+                return state.active === child ? null
+                    : then(activate(client, child, thread), ()=>null);
             case WM_CLOSE:
-                return then(send(client, WM_MDIDESTROY, child, 0), ()=>0);
+                return then(send(client, WM_MDIDESTROY, child, 0, thread), ()=>0);
             case WM_SYSCOMMAND:
                 switch (wParam & 0xfff0){
                     case SC_CLOSE:
-                        return then(send(child, WM_CLOSE, 0, 0), ()=>0);
+                        return then(send(child, WM_CLOSE, 0, 0, thread), ()=>0);
                     case SC_MAXIMIZE:
-                        return then(send(client, WM_MDIMAXIMIZE, child, 0), ()=>0);
+                        return then(send(client, WM_MDIMAXIMIZE, child, 0, thread), ()=>0);
                     case SC_RESTORE:
-                        return then(send(client, WM_MDIRESTORE, child, 0), ()=>0);
+                        return then(send(client, WM_MDIRESTORE, child, 0, thread), ()=>0);
                     case SC_NEXTWINDOW:
-                        return then(send(client, WM_MDINEXT, child, 0), ()=>0);
+                        return then(send(client, WM_MDINEXT, child, 0, thread), ()=>0);
                     default:
                         return null;
                 }
@@ -417,10 +432,10 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
      * TranslateMDISysAccel's answer for one message: Ctrl+F4 closes the active
      * child and Ctrl+F6 moves to the next, as a child's system menu does.
      *
-     * @param {number} client @param {number} msg  the MSG
+     * @param {number} client @param {number} msg  the MSG @param {unknown} thread
      * @returns {any} 1 when the key was one of those
      */
-    const translateAccelerator = (client, msg)=>{
+    const translateAccelerator = (client, msg, thread)=>{
         const state = clients.get(client >>> 0);
         if (!state || (msg >>> 0) === 0 || state.active === 0)
         {
@@ -435,7 +450,7 @@ export function createMdi({ host, call, send, defWindowProc, sizeOf }){
             return 0;
         }
         return then(send(state.active, WM_SYSCOMMAND, key === VK_F4 ? SC_CLOSE : SC_NEXTWINDOW,
-            0), ()=>1);
+            0, thread), ()=>1);
     };
 
     return { procedure, defFrame, defChild, translateAccelerator, clients };
