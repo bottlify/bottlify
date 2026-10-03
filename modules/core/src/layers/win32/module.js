@@ -251,11 +251,12 @@ export function createWin32Module(){
              *     active: () => number, deactivated: () => boolean,
              *     deactivations: () => number, refresh: () => void,
              *     rawInput: (report: import('./user32/rawinput.js').RawInputEvent) => void,
-             *     modalLoop: import('./user32/windows.js').WindowService['modalLoop'] }} */
+             *     modalLoop: import('./user32/windows.js').WindowService['modalLoop'],
+             *     painting: () => boolean }} */
             let windowService = {
                 list: ()=>[], clientRect: ()=>null, place: ()=>false, active: ()=>0,
                 deactivated: ()=>false, deactivations: ()=>0, refresh: ()=>{}, rawInput: ()=>{},
-                modalLoop: ()=>0,
+                modalLoop: ()=>0, painting: ()=>false,
             };
 
             /** @type {(handle: number, text: string) => void} */
@@ -582,8 +583,17 @@ export function createWin32Module(){
                 // layer is above this one and cannot be imported from here, so the
                 // assembling caller hands it down -- and reads it lazily, because
                 // graphics is created after win32 and does not exist yet when this
-                // configuration is read.
-                graphics: config?.graphics,
+                // configuration is read. A draw into a window shows the
+                // desktop, except in the middle of a paint pass, which shows it
+                // once it is over (user32's present below).
+                graphics: config?.graphics && Object.assign(Object.create(config.graphics), {
+                    presentDesktop: ()=>{
+                        if (!windowService.painting())
+                        {
+                            config.graphics?.presentDesktop?.();
+                        }
+                    },
+                }),
                 // A font enumeration's callback is the program's own code.
                 call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                 callerThread: ()=>bridge.callerThread(),

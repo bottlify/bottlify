@@ -220,15 +220,17 @@ function paintedHost(fills, presents, clips){
  *        desktop on, so a test can see what is painted and what is shown.
  * @param {{ current: unknown }} [options.caller] Whose call the bridge names, for a
  *        test that moves between threads; THREAD otherwise.
+ * @param {() => number} [options.queueNow] The message queue's clock, for a test
+ *        that waits for something the queue does later.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
-    caller = { current: THREAD },
+    caller = { current: THREAD }, queueNow,
 } = {})
 {
     const memory = fakeMemory();
     const handles = fakeHandles();
-    const queue = createMessageQueue();
+    const queue = createMessageQueue(queueNow ? { now: queueNow } : {});
     /** @type {any[]} */
     const dispatched = [];
     /** @type {any[]} */
@@ -1611,13 +1613,124 @@ test('uncovering the desktop presents it, because a window no longer covers it',
     // The other direction, and it is not the same case: something the program
     // had on the screen left a hole, and the desktop showing through that hole
     // is a picture worth a frame.
-    const { fns, hwnd, presents } = withWindow({ paint: true });
+    let clock = 0;
+    const { fns, memory, presents } = setup({ paint: true, queueNow: ()=>clock });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
     fns.ShowWindow.handler([hwnd, SW_SHOW]);
     pump(fns, hwnd);
     fns.ShowWindow.handler([hwnd, SW_HIDE]);
+    clock += 1000;
     pump(fns, hwnd);
 
     assert.ok(presents.length >= 1, 'the desktop under the closed window is shown');
+});
+
+test('a window that goes shows the desktop only where no other window is', ()=>{
+    // A wizard destroys the page inside its frame and makes the next one: the
+    // frame, which paints no background of its own, keeps the old page's
+    // pixels until the new page paints over them. Painting the desktop colour
+    // there instead showed a hole onto the desktop between every two pages.
+    let clock = 0;
+    const { fns, memory, fills } = setup({ paint: true, queueNow: ()=>clock });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    const drain = ()=>{
+        while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+        {
+            fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+        }
+    };
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    drain();
+    const page = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd,
+        x: 0, y: 0, width: 100, height: 50 });
+    drain();
+    const DESKTOP = 0x808080;
+    const desktop = ()=>fills.filter(fill=>fill.color === DESKTOP && !fill.quiet)
+        .map(fill=>fill.rect);
+    fills.length = 0;
+    fns.DestroyWindow.handler([page]);
+    clock += 1000;
+    drain();
+    assert.deepEqual(desktop(), [], 'the page was inside its frame');
+
+    // Over the first window, from (200, 100) to (500, 300); the first spans
+    // (10, 20) to (310, 220).
+    const over = createWindow(fns, memory, { x: 200, y: 100, width: 300, height: 200 });
+    fns.ShowWindow.handler([over, SW_SHOW]);
+    drain();
+    fills.length = 0;
+    fns.ShowWindow.handler([over, SW_HIDE]);
+    clock += 1000;
+    drain();
+    assert.deepEqual(desktop(), [
+        { left: 310, top: 100, right: 500, bottom: 220 },
+        { left: 200, top: 220, right: 500, bottom: 300 },
+    ], 'beside and below the window it covered');
+
+    fills.length = 0;
+    fns.ShowWindow.handler([hwnd, SW_HIDE]);
+    clock += 1000;
+    drain();
+    assert.deepEqual(desktop(), [{ left: 10, top: 20, right: 310, bottom: 220 }],
+        'and all of the last one');
+});
+
+test('the desktop paints where a window went a moment later, under whatever came there', ()=>{
+    // A wizard that replaces its window between pages destroys one, pumps
+    // its messages and shows the next in the same place: the desktop shown
+    // in that gap was the whole window gone for a frame at every page.
+    let clock = 0;
+    const { fns, memory, fills, presents } = setup({ paint: true, queueNow: ()=>clock });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const desktop = ()=>fills.filter(fill=>fill.color === 0x808080 && !fill.quiet);
+    const first = createWindow(fns, memory);
+    fns.ShowWindow.handler([first, SW_SHOW]);
+    pump(fns, first);
+    fills.length = 0;
+    presents.length = 0;
+
+    fns.DestroyWindow.handler([first]);
+    clock += 10;
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0);
+    assert.deepEqual(desktop(), [], 'not in the gap');
+    const next = createWindow(fns, memory, { width: 200 });
+    fns.ShowWindow.handler([next, SW_SHOW]);
+    pump(fns, next);
+    clock += 1000;
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0);
+    assert.deepEqual(desktop().map(fill=>fill.rect),
+        [{ left: 210, top: 20, right: 310, bottom: 220 }],
+        'then only beside the window that took the place');
+    assert.ok(presents.length > 0, 'and shown');
+});
+
+test('the screen is half drawn while a shown window has an area to paint, and not for ever', ()=>{
+    // A draw in the middle of a pass -- a frame painted before the page inside
+    // it -- would show the window with nothing inside if the desktop were
+    // shown then; the window manager shows it when the pass is over.
+    let clock = 0;
+    const { fns, memory, service } = setup({ paint: true, now: ()=>clock });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    assert.equal(service.painting(), false, 'a hidden window paints nothing');
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    assert.equal(service.painting(), true, 'shown, it has everything to paint');
+    pump(fns, hwnd);
+    assert.equal(service.painting(), false, 'painted');
+
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
+    assert.equal(service.painting(), true);
+    clock += 300;
+    assert.equal(service.painting(), false, 'a window nobody paints holds nothing back for long');
+    pump(fns, hwnd);
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
+    assert.equal(service.painting(), true, 'and a new pass is held again');
 });
 
 test('a window with an area to paint is handed WM_PAINT when nothing else is queued', ()=>{
