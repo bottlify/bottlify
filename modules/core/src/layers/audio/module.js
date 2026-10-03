@@ -514,7 +514,7 @@ export function createAudioModule(){
 
                 /**
                  * Which of those are redistributable runtimes this engine answers
-                 * for whoever's copy the program brought (`roadmap/decisions.md`):
+                 * for whoever's copy the program brought:
                  * the MPEG provider a sound library loads out of its own directory
                  * is one, where DirectSound is a system library like any other.
                  */

@@ -1069,9 +1069,9 @@ export function idleWait({ fetching, idlers, suspended, spun }){
  * Whether a library is answered from this engine's table even when the program
  * brought a file of that name: a KnownDLL, which Windows never looks for beside
  * the program, or a redistributable runtime a layer stands in for -- a sound
- * library's MPEG provider, a JPEG library -- which the decision in
- * `roadmap/decisions.md` makes ours whoever's copy it is, since the program's
- * copy found first runs the whole decoder as emulated x86. Every other name the
+ * library's MPEG provider, a JPEG library -- which this engine makes ours
+ * whoever's copy it is, since the program's copy found first runs the whole
+ * decoder as emulated x86. Every other name the
  * program's own file wins, and the table is the fallback.
  *
  * @param {readonly string[]} knownDlls

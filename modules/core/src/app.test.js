@@ -518,7 +518,7 @@ test('a bare name is looked for beside the executable, then where the system kee
 
 test('a redistributable runtime is answered by the engine whoever brought a copy', ()=>{
     // A sound library loads its MPEG provider out of its own directory by full
-    // path; the engine stands in for that runtime (roadmap/decisions.md), so
+    // path; the engine stands in for that runtime, so
     // the program's copy is not what loads -- run as emulated x86 it was a
     // third of the machine. A KnownDLL is answered the same way; any other
     // library the engine has a table for still loses to the program's file.

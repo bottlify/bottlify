@@ -20,9 +20,10 @@ Project State
 Bottlify runs original Win32 x86 games in the browser: cork, our own x86 → wasm translator, in a
 Web Worker, plus a from-scratch Win32/DirectX HLE layer on top of WebGPU/WebAudio/OPFS.
 
-The phased plan is history: `roadmap/phases-history.md` holds the eleven phase documents' decisions
-and what landed. Work is ordered by `roadmap/00-TODO-list.md` (local), which opens with the week's
-goal; installers and networking are areas in it, not phases.
+The plan is `roadmap/v2/`: the engine becomes a multi-worker platform whose capacity follows the
+load, then x86-64 and ARM and ARM64, with Direct3D 11 alongside. Day-to-day work is ordered by
+`roadmap/00-TODO-list.md` (local), which opens with the week's goal; installers and networking are
+areas in it, not phases.
 
 What runs today, end to end through `createApp()`: the engine is cork, our own x86 → wasm
 translator (`modules/cork`), judged by its tests against the hardware corpus and against its own
@@ -53,18 +54,14 @@ else in there is tracked and ships with the repo, so it is written for a reader 
 `00-installers-bundles.md`, `00-diagnostics.md` — each holding that area's open work followed by its
 pitfalls (the hard-won bugs that each cost weeks; `00-pitfalls.md` maps the old section numbers to
 files). `roadmap/00-product-plan.md` is the product around the engine (public API, launcher, accounts,
-sharing, Steam, thresholds); `roadmap/00-references.md` is the external reading list. The product model, the rules and the layer graph are this file and `docs/core/`; the phase history is `roadmap/phases-history.md`.
+sharing, Steam, thresholds); `roadmap/00-references.md` is the external reading list. The product model, the rules and the layer graph are this file and `docs/core/`; the plan is `roadmap/v2/`; the decisions still in force are `roadmap/decisions.md`, and earlier plans are in git history.
 
-The rest is split by what a document is for, rather than numbered in one sequence — a global
-sequence forced a number on documents that were never a phase, and produced two files claiming the
-same one:
+The tracked part:
 
-- `roadmap/phases-history.md` — the eleven phase documents folded into one: the decisions kept
-  verbatim, the history compressed to what landed and when.
-- `roadmap/registers/` — consulted throughout rather than worked through: `carried-knowledge`,
-  `defects-carried-forward`, `decisions-and-optimisations`, `porting`, `process-creation`,
-  `ui-quick-start`.
 - `roadmap/README.md` — the index, and the first thing to read.
+- `roadmap/v2/` — the plan: the target architecture, its stages and their acceptance.
+- `roadmap/decisions.md` — behaviour this project chose rather than derived from a specification,
+  each defended on its merits and recorded as reconsidered when it is.
 
 The pitfalls sections of the area files (index: `roadmap/00-pitfalls.md`) are not optional reading before touching the kernel, bridge, graphics or
 audio layers: it is the register of what has already cost weeks once.

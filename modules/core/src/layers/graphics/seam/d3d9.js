@@ -1006,7 +1006,8 @@ export function createDirect3D9Seam(
                     renderStates: record.renderStates.keys(),
                     transforms: record.transforms.keys(),
                     textures: record.textures.size > 0,
-                    stageStates: record.stageStates.size > 0 || record.samplerStates.size > 0,
+                    stageStates: record.stageStates.keys(),
+                    samplerStates: record.samplerStates.keys(),
                     material: record.material !== undefined,
                     bindings: record.streams.size > 0 || record.indices !== undefined
                         || record.vertexShader !== undefined

@@ -44,8 +44,8 @@ import {
 import { guidBytes } from './d3d7.js';
 import { D3DCREATE, D3DDEVTYPE, D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
 import { D3DFMT, D3DPOOL, D3DRS } from '../d3d9/constants.js';
-import { D3DFMT_INDEX } from '../d3d8/constants.js';
-import { SAMPLER_STATE_KEY } from '../d3d9/samplerstates.js';
+import { D3DFMT_INDEX, D3DTSS } from '../d3d8/constants.js';
+import { D3DSAMP, SAMPLER_STATE_KEY } from '../d3d9/samplerstates.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { END_TOKEN, SHADER_KIND, versionToken } from '../d3d9/shader.js';
 import { displayModes } from '../../win32/user32/display.js';
@@ -1166,6 +1166,36 @@ test('a state block is recorded, handed back, and applied through its own vtable
     assert.equal(h.device(device, 'CreateStateBlock', [1, out]), D3D_OK);
     h.release(h.box.memory.readU32(out));
     assert.equal(h.release(block), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a state block applied brings the stage and sampler states it holds into the guest\'s'
+    + ' block, and reads no other', ()=>{
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const out = 0x3000;
+    assert.equal(h.device(device, 'BeginStateBlock'), D3D_OK);
+    assert.equal(h.device(device, 'SetTextureStageState', [2, D3DTSS.COLOROP, 7]), D3D_OK);
+    assert.equal(h.device(device, 'SetSamplerState', [1, D3DSAMP.MAGFILTER, 2]), D3D_OK);
+    assert.equal(h.device(device, 'EndStateBlock', [out]), D3D_OK);
+    const stateBlock = h.box.memory.readU32(out);
+    const block = h.box.memory.readU32(device + 4);
+    assert.notEqual(block, 0);
+    /** @param {number} stage @param {number} key */
+    const word = (stage, key)=>block + SHADOW.STAGE_STATES
+        + (stage * SHADOW.STAGE_STATE_STRIDE + key) * 4;
+    // Words the block does not hold, left as nothing on the device would leave
+    // them: an Apply that read every stage state back would overwrite them.
+    h.box.memory.writeU32(word(4, D3DTSS.COLOROP), 0xabcd);
+    h.box.memory.writeU32(word(5, SAMPLER_STATE_KEY[D3DSAMP.MAGFILTER]), 0xabcd);
+    assert.equal(h.box.call(stateBlock, slot(IDIRECT3DSTATEBLOCK9_SLOTS, 'Apply'), []), D3D_OK);
+    assert.equal(h.box.memory.readU32(word(2, D3DTSS.COLOROP)), 7);
+    assert.equal(h.box.memory.readU32(word(1, SAMPLER_STATE_KEY[D3DSAMP.MAGFILTER])), 2);
+    assert.equal(h.box.memory.readU32(word(4, D3DTSS.COLOROP)), 0xabcd);
+    assert.equal(h.box.memory.readU32(word(5, SAMPLER_STATE_KEY[D3DSAMP.MAGFILTER])), 0xabcd);
+    assert.equal(h.release(stateBlock), 0);
     assert.equal(h.release(device), 0);
     h.release(root);
 });
