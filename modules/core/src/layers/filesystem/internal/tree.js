@@ -31,6 +31,7 @@
 
 import { ErrorCode, fsError } from './errors.js';
 import { foldName, matchName } from './paths.js';
+import { bytesOf } from './memory-store.js';
 
 /**
  * @typedef {Object} Node
@@ -440,12 +441,30 @@ export function createOverlay({
         },
 
         /**
-         * Replaces a file's contents with `bytes`, taken as they are where the
-         * store can keep them without copying (see `share`).
+         * A file's contents as the writable store hands them to another of its
+         * kind without copying, or null when it cannot -- a file the source
+         * holds, a store that keeps none: `share` is the way then.
          *
-         * @param {string[]} components @param {Uint8Array} bytes
+         * @param {string[]} components
+         * @returns {import('./memory-store.js').FileContents | null}
          */
-        replace(components, bytes){
+        contentsOf(components){
+            const node = mustFind(components);
+            return !node.directory && node.inWritable && writable.contents
+                ? writable.contents(node.path)
+                : null;
+        },
+
+        /**
+         * Replaces a file's contents with `bytes`, taken as they are where the
+         * store can keep them without copying (see `share`) -- or with what
+         * another store's `contentsOf` handed out, given as `contents`, which
+         * a store that cannot adopt takes as their bytes.
+         *
+         * @param {string[]} components @param {Uint8Array | null} bytes
+         * @param {import('./memory-store.js').FileContents} [contents]
+         */
+        replace(components, bytes, contents){
             mustBeWritable(components);
             const node = mustFind(components);
             if (node.directory)
@@ -457,14 +476,22 @@ export function createOverlay({
                 materialiseParents(node);
                 node.inWritable = true;
             }
-            if (writable.adopt)
+            if (contents && writable.adoptContents)
             {
-                writable.adopt(node.path, bytes);
+                writable.adoptContents(node.path, contents);
             }
             else
             {
-                writable.truncate(node.path, 0);
-                writable.write(node.path, 0, bytes);
+                const whole = bytes ?? (contents ? bytesOf(contents) : new Uint8Array(0));
+                if (writable.adopt)
+                {
+                    writable.adopt(node.path, whole);
+                }
+                else
+                {
+                    writable.truncate(node.path, 0);
+                    writable.write(node.path, 0, whole);
+                }
             }
             node.modified = now();
             changed(node.path, 'written');
@@ -574,6 +601,47 @@ export function createOverlay({
             materialiseParents(node);
             writable.mkdir(node.path);
             node.inWritable = true;
+            return true;
+        },
+
+        /**
+         * Gives a file another name with its bytes where they are: what a
+         * rename is for a file only the writable layer holds. False, with
+         * nothing done, for one the source holds too -- the source keeps its
+         * name whatever happens -- or a store that cannot move a file; the
+         * caller copies it then.
+         *
+         * @param {string[]} from @param {string[]} to
+         * @returns {boolean}
+         */
+        moveFile(from, to){
+            mustBeWritable(from);
+            const node = mustFind(from);
+            if (node.directory || node.inSource || !node.inWritable || !writable.move)
+            {
+                return false;
+            }
+            const parent = parentOf(to);
+            const name = to[to.length - 1];
+            if (name === undefined)
+            {
+                throw fsError(ErrorCode.INVALID_PATH, 'A root is not a file');
+            }
+            const existing = parent.children.get(foldName(name));
+            if (existing && !existing.tombstone)
+            {
+                throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" already exists`);
+            }
+            const target = childFor(parent, name);
+            target.directory = false;
+            materialiseParents(target);
+            writable.move(node.path, target.path);
+            target.inWritable = true;
+            target.modified = node.modified;
+            node.inWritable = false;
+            forget(node);
+            changed(node.path, 'removed');
+            changed(target.path, 'written');
             return true;
         },
 

@@ -13,6 +13,7 @@ import { createProcessFunctions, createThreadState } from './kernel32/process.js
 import { TEB } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions } from './kernel32/files.js';
+import { createRichEditControls } from './riched/richedit.js';
 import { createSyncFunctions } from './kernel32/sync.js';
 import { createCodeArena } from './kernel32/code-arena.js';
 import { createGuestHeap } from './kernel32/guest-heap.js';
@@ -252,11 +253,12 @@ export function createWin32Module(){
              *     active: () => number, deactivated: () => boolean,
              *     deactivations: () => number, refresh: () => void,
              *     rawInput: (report: import('./user32/rawinput.js').RawInputEvent) => void,
-             *     modalLoop: import('./user32/windows.js').WindowService['modalLoop'] }} */
+             *     modalLoop: import('./user32/windows.js').WindowService['modalLoop'],
+             *     painting: () => boolean }} */
             let windowService = {
                 list: ()=>[], clientRect: ()=>null, place: ()=>false, active: ()=>0,
                 deactivated: ()=>false, deactivations: ()=>0, refresh: ()=>{}, rawInput: ()=>{},
-                modalLoop: ()=>0,
+                modalLoop: ()=>0, painting: ()=>false,
             };
 
             /** @type {(handle: number, text: string) => void} */
@@ -583,8 +585,17 @@ export function createWin32Module(){
                 // layer is above this one and cannot be imported from here, so the
                 // assembling caller hands it down -- and reads it lazily, because
                 // graphics is created after win32 and does not exist yet when this
-                // configuration is read.
-                graphics: config?.graphics,
+                // configuration is read. A draw into a window shows the
+                // desktop, except in the middle of a paint pass, which shows it
+                // once it is over (user32's present below).
+                graphics: config?.graphics && Object.assign(Object.create(config.graphics), {
+                    presentDesktop: ()=>{
+                        if (!windowService.painting())
+                        {
+                            config.graphics?.presentDesktop?.();
+                        }
+                    },
+                }),
                 // A font enumeration's callback is the program's own code.
                 call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                 callerThread: ()=>bridge.callerThread(),
@@ -1451,6 +1462,9 @@ export function createWin32Module(){
                     ...createFileFunctions({
                         divergence: config?.divergence,
                         readMemory,
+                        windowMemory: typeof memory.window === 'function'
+                            ? (address, length)=>memory.window(address, length)
+                            : undefined,
                         writeMemory,
                         readCString,
                         readWideString,
@@ -2025,11 +2039,12 @@ export function createWin32Module(){
                     // own system classes use: comctl32 owns their behaviour, not
                     // their registration.
                     registerControls: (controlHost, toolkit, register)=>{
-                        for (const definition of createCommonControls(controlHost, toolkit,
-                            imageLists, {
+                        for (const definition of [
+                            ...createCommonControls(controlHost, toolkit, imageLists, {
                                 loadBitmap: (instance, id)=>libraries['USER32.dll']
                                     ?.LoadBitmapA?.handler([instance, id]) ?? 0,
-                            }))
+                            }),
+                            ...createRichEditControls(controlHost, toolkit)])
                         {
                             register(definition);
                         }

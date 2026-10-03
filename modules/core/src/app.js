@@ -1637,12 +1637,17 @@ export const BOTTLE_SYSTEM_PATH = '.bottlify\\system32';
  * the last because this is asked from inside a guest call and cannot wait,
  * and a file the program has just written is on the volume already.
  *
+ * Only the headers, the resource directory and the block itself are read: an
+ * installer asks after every file it puts down, a gigabyte archive among them.
+ *
  * @param {any} filesystem
  * @param {string} path
  * @returns {Uint8Array | null}
  */
 export function versionResourceOf(filesystem, path){
     const RT_VERSION = 16;
+    const DIR_RESOURCE = 2;
+    const HEADER_BYTES = 0x1000;
     let handle;
     try
     {
@@ -1653,15 +1658,53 @@ export function versionResourceOf(filesystem, path){
     }
     try
     {
-        const bytes = filesystem.read(handle, filesystem.size(handle));
-        const image = parsePe(bytes);
-        const found = findResource(bytes, image, RT_VERSION, 1);
+        const size = filesystem.size(handle);
+        /** @param {number} offset @param {number} length */
+        const readAt = (offset, length)=>{
+            filesystem.seek(handle, offset);
+            return filesystem.read(handle, Math.max(0, Math.min(length, size - offset)));
+        };
+        /** @param {Uint8Array} bytes */
+        const viewOf = bytes=>new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        let head = readAt(0, HEADER_BYTES);
+        const peOffset = head.length >= 0x40 ? viewOf(head).getUint32(0x3c, true) : 0;
+        if (peOffset + 24 > head.length && head.length < size)
+        {
+            head = readAt(0, peOffset + HEADER_BYTES);
+        }
+        // The section table ends the headers: the file header's counts say where.
+        if (peOffset + 24 <= head.length)
+        {
+            const end = peOffset + 24 + viewOf(head).getUint16(peOffset + 20, true)
+                + viewOf(head).getUint16(peOffset + 6, true) * 40;
+            if (end > head.length && head.length < size)
+            {
+                head = readAt(0, end);
+            }
+        }
+        const image = parsePe(head);
+        const directory = image.directories[DIR_RESOURCE];
+        if (!directory || directory.size === 0)
+        {
+            return null;
+        }
+        // The directory alone, as a section of its own starting at its first
+        // byte: every offset the walk follows is inside it, and the leaf it
+        // ends at names the block's place in the file.
+        const tree = readAt(rvaToFileOffset(image, directory.address), directory.size);
+        const found = findResource(tree, {
+            ...image,
+            sizeOfHeaders: 0,
+            sections: [{ name: '.rsrc', virtualAddress: directory.address,
+                virtualSize: directory.size, rawSize: directory.size, rawOffset: 0,
+                readable: true, writable: false, executable: false }],
+        }, RT_VERSION, 1);
         if (!found)
         {
             return null;
         }
-        const at = rvaToFileOffset(image, found.rva);
-        return bytes.slice(at, at + found.size);
+        const block = readAt(rvaToFileOffset(image, found.rva), found.size);
+        return block.length === found.size ? block : null;
     }
     catch {
         return null;

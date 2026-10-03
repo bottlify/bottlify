@@ -310,6 +310,9 @@ export const WIN32_FIND_DATAA = Object.freeze({
 /**
  * @typedef {Object} FileHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, length: number) => Uint8Array} [windowMemory]
+ *           The guest's own bytes, not a copy, valid until the guest runs again:
+ *           what a write hands a volume that keeps a copy of what it is given.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, maxLength: number) => string} readWideString
@@ -2155,12 +2158,14 @@ export function createFileFunctions(host){
                     writeDwordIf(written >>> 0, 0);
                     return fail(ERROR_INVALID_USER_BUFFER);
                 }
-                // Copied, not passed on: the memory layer may hand back a view
-                // onto guest memory, and what the filesystem stores outlives
-                // this call.
+                // The guest's own bytes where the memory layer lends them: a
+                // volume keeps a copy of what it is written, never the array,
+                // and an installer writes gigabytes through here -- read into
+                // a copy, then copied again, then stored.
                 const bytes = count === 0
                     ? new Uint8Array(0)
-                    : host.readMemory(buffer >>> 0, count).slice();
+                    : host.windowMemory?.(buffer >>> 0, count)
+                        ?? host.readMemory(buffer >>> 0, count);
                 const pointer = overlapped >>> 0;
                 const at = pointer !== 0 && host.ports
                     ? host.ports.offsetOf(pointer)

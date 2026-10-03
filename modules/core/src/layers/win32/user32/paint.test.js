@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { layoutText } from './paint.js';
+import { createPaintFunctions, layoutText } from './paint.js';
 
 const DT_CENTER = 0x0001;
 const DT_RIGHT = 0x0002;
@@ -55,4 +55,55 @@ test('a word wider than the rectangle is cut where it stops fitting, never at no
         DT_WORDBREAK, PROPORTIONAL);
     assert.deepEqual(narrow.map(line=>line.text), ['W', 'W'],
         'one character a line when not even one fits');
+});
+
+test('DrawIcon puts the icon\'s picture down at its size, DrawIconEx at the size asked for', ()=>{
+    /** @type {any[]} */
+    const drawn = [];
+    /** @type {string[]} */
+    const said = [];
+    const picture = { width: 32, height: 32, bgra: new Uint8Array(32 * 32 * 4) };
+    const ICON = 0x30;
+    const { table } = createPaintFunctions({
+        host: /** @type {any} */ ({
+            readMemory: ()=>new Uint8Array(0),
+            writeMemory: ()=>{},
+            readCString: ()=>'',
+            picture: (/** @type {number} */ handle)=>(handle === ICON ? picture : null),
+            draw: {
+                picture: (/** @type {any[]} */ ...args)=>drawn.push(['picture', ...args]) > 0,
+                fillWith: (/** @type {any[]} */ ...args)=>drawn.push(['fill', ...args]) > 0,
+            },
+            divergence: (/** @type {string} */ api)=>said.push(api),
+        }),
+        live: ()=>null,
+        WM_PAINT: 0x000f,
+        geometry: /** @type {any} */ ({}),
+        send: ()=>0,
+        invalidated: ()=>{},
+        painted: ()=>{},
+    });
+    const HDC = 0x44;
+    assert.equal(table.DrawIcon.handler([HDC, 10, 20, ICON]), 1);
+    assert.deepEqual(drawn.pop(), ['picture', HDC, 10, 20, picture, 32, 32]);
+
+    const DI_NORMAL = 3;
+    const DI_DEFAULTSIZE = 8;
+    const BRUSH = 0x88;
+    assert.equal(table.DrawIconEx.argBytes, 36);
+    assert.equal(table.DrawIconEx.handler([HDC, 1, 2, ICON, 16, 0, 0, BRUSH, DI_NORMAL]), 1);
+    assert.deepEqual(drawn.splice(0), [
+        ['fill', HDC, { left: 1, top: 2, right: 17, bottom: 34 }, BRUSH],
+        ['picture', HDC, 1, 2, picture, 16, 32],
+    ], 'the brush first, then the icon sixteen wide and its own height');
+    picture.width = 48;
+    table.DrawIconEx.handler([HDC, 0, 0, ICON, 0, 0, 0, 0, DI_NORMAL | DI_DEFAULTSIZE]);
+    assert.deepEqual(drawn.pop(), ['picture', HDC, 0, 0, picture, 32, 32],
+        'DI_DEFAULTSIZE is the system\'s size, not the icon\'s');
+    assert.equal(table.DrawIconEx.handler([HDC, 0, 0, ICON, 0, 0, 0, 0, 0]), 0,
+        'neither image nor mask asked for');
+
+    assert.equal(table.DrawIcon.handler([HDC, 0, 0, 0x99]), 1, 'one with no picture succeeds');
+    assert.deepEqual(said, ['DrawIcon'], 'and is said');
+    assert.equal(drawn.length, 0);
 });

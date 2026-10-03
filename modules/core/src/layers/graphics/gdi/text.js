@@ -22,7 +22,7 @@
  * a question that already has one.
  */
 
-import { OPAQUE } from './brush.js';
+import { OPAQUE, solidPattern } from './brush.js';
 import { colorToPixel } from './surface.js';
 import { fillRect } from './shapes.js';
 import { GLYPH_COLUMNS, GLYPH_ROWS, glyphOf } from './glyphs.js';
@@ -171,7 +171,7 @@ export function extTextOut(painter, options){
     {
         // ETO_OPAQUE fills the caller's rectangle whatever the background mode
         // says: the flag is the request, and the mode is not consulted.
-        fillRect(clipped, options.rect, ()=>colorToPixel(options.bkColor));
+        fillRect(clipped, options.rect, solidPattern(options.bkColor));
     }
     else if (options.bkMode === OPAQUE)
     {
@@ -180,7 +180,7 @@ export function extTextOut(painter, options){
             top,
             right: left + width,
             bottom: top + metrics.cellHeight,
-        }, ()=>colorToPixel(options.bkColor));
+        }, solidPattern(options.bkColor));
     }
 
     const ink = colorToPixel(options.textColor);

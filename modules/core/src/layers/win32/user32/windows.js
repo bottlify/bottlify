@@ -51,6 +51,7 @@ import {
     writeWindowClassA,
 } from './structs.js';
 import { convertCharacter, readText, translated, writeText } from './unicode.js';
+import { subtractFromArea } from '../gdi32/rects.js';
 
 /** The messages whose wParam is a character code, in the encoding of the procedure. */
 const CHARACTER_MESSAGES = new Set([0x0102, 0x0103, 0x0106, 0x0107]);
@@ -119,6 +120,22 @@ const PRESSES = new Set([WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN, 0x020b,
 const SC_CLOSE = 0xf060;
 /** System colours the frame is painted from. */
 const COLOR_BACKGROUND = 1;
+
+/**
+ * How long after a window leaves part of the screen the desktop paints it, in
+ * milliseconds of the guest's clock: longer than a program takes to put the
+ * next window where the last one was, shorter than a person notices.
+ */
+const DESKTOP_REPAINT_MS = 100;
+/** The queue's name for that repaint, which a second departure joins. */
+const DESKTOP_REPAINT_KEY = 'desktop-repaint';
+
+/**
+ * How long, by the guest's clock, a window waiting to paint holds back the
+ * desktop's being shown after a draw: a pass a program pumps through takes a
+ * few milliseconds, one it never pumps through takes for ever.
+ */
+const PAINT_HOLD_MS = 250;
 const COLOR_ACTIVECAPTION = 2;
 const COLOR_INACTIVECAPTION = 3;
 const COLOR_MENU = 4;
@@ -414,6 +431,10 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           Runs a dialog another library made as DialogBox runs one, on the
  *           thread named, each message offered to `first` before the dialog
  *           manager: what a property sheet's own loop is on Windows.
+ * @property {() => boolean} painting
+ *           Whether a window on the screen is still to paint what it was asked
+ *           to: the screen is half drawn, and the window manager shows it once
+ *           the pass is over rather than now.
  */
 
 /**
@@ -2314,6 +2335,13 @@ export function createWindowFunctions(host){
 
     /** Whether something has been drawn since the desktop was last shown. */
     let presentPending = false;
+    /**
+     * When the windows on the screen last started to have something to
+     * paint, by the guest's clock; null while none has.
+     *
+     * @type {number | null}
+     */
+    let paintingSince = null;
     const painted = ()=>{
         presentPending = true;
     };
@@ -2450,19 +2478,72 @@ export function createWindowFunctions(host){
         .flatMap(child=>[child, ...descendantsOf(child)]);
 
     /**
-     * A part of the screen has nothing on it any more: the desktop shows
-     * through, and every window still under it repaints.
+     * The parts of the screen windows have left that the desktop has not
+     * painted over yet.
+     *
+     * @type {{ left: number, top: number, right: number, bottom: number }[]}
+     */
+    let exposed = [];
+
+    /**
+     * The desktop paints what windows left of the screen, where no window is
+     * now: what its own thread does on Windows, a moment after the window
+     * went rather than inside the call that took it away.
+     */
+    const repaintDesktop = ()=>{
+        let bare = exposed;
+        exposed = [];
+        for (const record of windows.values())
+        {
+            if (!record.destroyed && !isChild(record) && shown(record))
+            {
+                bare = subtractFromArea(bare, geometry.windowRect(record));
+            }
+        }
+        const hdc = bare.length > 0 ? host.dc?.()?.get(0, null) ?? 0 : 0;
+        if (hdc !== 0)
+        {
+            for (const piece of bare)
+            {
+                draw?.fill(hdc, piece, sysColor(COLOR_BACKGROUND));
+            }
+            host.dc?.()?.release(0, hdc);
+            painted();
+        }
+    };
+
+    /**
+     * A window left a part of the screen: every window still under it
+     * repaints, and the desktop shows through only where none of them is.
+     * Where one is, its pixels stay until it paints over them -- a parent
+     * with no background of its own keeps showing the child it had until it
+     * has another, as on Windows, rather than a hole onto the desktop.
+     *
+     * The desktop's own part is painted DESKTOP_REPAINT_MS later. A wizard
+     * that replaces its window between two pages destroys one and shows the
+     * next in the same place a few milliseconds apart, pumping messages in
+     * between; painted at once, the desktop was shown in that gap, the whole
+     * window gone for a frame at every page.
      *
      * @param {{ left: number, top: number, right: number, bottom: number }} rect
      */
     const uncover = rect=>{
         paintDesktop();
-        const hdc = host.dc?.()?.get(0, null) ?? 0;
-        if (hdc !== 0)
+        if (!host.queue.postLater)
         {
-            draw?.fill(hdc, rect, sysColor(COLOR_BACKGROUND));
-            host.dc?.()?.release(0, hdc);
-            painted();
+            exposed.push(rect);
+            repaintDesktop();
+        }
+        else
+        {
+            if (exposed.length === 0)
+            {
+                host.queue.postLater(DESKTOP_REPAINT_KEY, DESKTOP_REPAINT_MS, ()=>{
+                    repaintDesktop();
+                    return null;
+                });
+            }
+            exposed.push(rect);
         }
         for (const other of paintOrder())
         {
@@ -3416,10 +3497,22 @@ export function createWindowFunctions(host){
         });
     };
 
+    /**
+     * The picture an icon or cursor handle stands for, for what draws one --
+     * DrawIcon, a static showing an icon. system.js decodes it, and hands
+     * over how once it is made (`pictures` below).
+     *
+     * @type {(handle: number) => import('./cursors.js').CursorPicture | null}
+     */
+    let pictureOf = ()=>null;
+
     const paint = createPaintFunctions({
         // The drawing with the system colours on it, which FillRect needs
         // for a brush named as a colour index.
-        host: Object.assign(Object.create(host), { draw }),
+        host: Object.assign(Object.create(host), {
+            draw,
+            picture: (/** @type {number} */ handle)=>pictureOf(handle),
+        }),
         live, WM_PAINT, geometry, send, invalidated, painted, shown,
         descendants: (/** @type {any} */ record)=>paintedDescendantsOf(record),
     });
@@ -3491,6 +3584,7 @@ export function createWindowFunctions(host){
         writeMemory: host.writeMemory,
         readMemory: host.readMemory,
         draw,
+        picture: (/** @type {number} */ handle)=>pictureOf(handle),
         live,
         windowOf: hwnd=>windows.get(hwnd >>> 0) ?? null,
         clientSize: record=>geometry.clientSize(record),
@@ -3530,6 +3624,7 @@ export function createWindowFunctions(host){
         keyDown: key=>((host.keyState?.(key) ?? 0) & 0x8000) !== 0,
         allocate: host.allocate,
         release: host.release,
+        call: host.call,
         divergence: host.divergence,
     };
     const controls = createControlProcedures(controlHost);
@@ -3672,6 +3767,10 @@ export function createWindowFunctions(host){
                 return record.hwnd;
             }
         }
+        if (!waiting)
+        {
+            paintingSince = null;
+        }
         presentIfPainted();
         return 0;
     });
@@ -3694,6 +3793,29 @@ export function createWindowFunctions(host){
 
         modalLoop: (hwnd, { thread, first })=>(runModal
             ? runModal(hwnd >>> 0, thread, first) : 0),
+
+        /**
+         * A window on the screen has an area to paint, and has had one for
+         * less than PAINT_HOLD_MS: a draw then is the middle of a pass -- a
+         * frame painted before the window inside it, a page's controls before
+         * the page -- and the desktop is shown when the pass ends. A window
+         * nobody paints for longer holds nothing back: a program drawing
+         * through GetDC every frame and never pumping its messages still has
+         * its frames seen.
+         */
+        painting(){
+            for (const record of windows.values())
+            {
+                if (record.updateRect && !record.destroyed && shown(record))
+                {
+                    const at = host.now?.() ?? 0;
+                    paintingSince ??= at;
+                    return at - paintingSince < PAINT_HOLD_MS;
+                }
+            }
+            paintingSince = null;
+            return false;
+        },
 
         /**
          * One event of the mouse or the keyboard as the device reported it,
@@ -4087,6 +4209,10 @@ export function createWindowFunctions(host){
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
                 isChild, repaint,
                 appear, uncover,
+                /** @param {(handle: number) => any} decode */
+                pictures: decode=>{
+                    pictureOf = decode;
+                },
                 shown, raise, restack, desktop: desktopWindow,
                 isDesktop: (/** @type {any} */ record)=>record !== null && record === desktop,
                 sysColorBrush: (/** @type {number} */ index)=>(draw

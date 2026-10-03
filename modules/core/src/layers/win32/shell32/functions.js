@@ -839,6 +839,7 @@ export function createShellFunctions(host){
 
         /**
          * BOOL Shell_NotifyIconA(DWORD dwMessage, NOTIFYICONDATAA *lpData)
+         * BOOL Shell_NotifyIconW(DWORD dwMessage, NOTIFYICONDATAW *lpData)
          *
          * A notification icon lives on the taskbar, and there is no taskbar.
          * FALSE is what the real call answers when the shell's tray window is
@@ -846,6 +847,11 @@ export function createShellFunctions(host){
          * treats a machine without an Explorer: it carries on without the icon.
          */
         Shell_NotifyIconA: {
+            argBytes: 8,
+            handler: ()=>0,
+        },
+
+        Shell_NotifyIconW: {
             argBytes: 8,
             handler: ()=>0,
         },

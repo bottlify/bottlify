@@ -275,7 +275,9 @@ const textWidth = (text, average)=>[...text]
 function setup({ reply = ()=>0, engine = false } = {}){
     const memory = fakeMemory();
     const handles = fakeHandles();
-    const queue = createMessageQueue();
+    /** The queue's clock, which a test moves on to have what is due later happen. */
+    const clock = { now: 0 };
+    const queue = createMessageQueue({ now: ()=>clock.now });
     const desktop = createSurface({ width: SCREEN.width, height: SCREEN.height });
     /** @type {{ wndProc: number, hwnd: number, message: number, wParam: number,
      *     lParam: number }[]} */
@@ -419,7 +421,7 @@ function setup({ reply = ()=>0, engine = false } = {}){
 
     return {
         memory, queue, desktop, gdi, fns: table, dispatched, keysDown, pump, mouse, key, click,
-        commands, centre, faces, presents: ()=>presents,
+        commands, centre, faces, presents: ()=>presents, clock,
     };
 }
 
@@ -1628,6 +1630,10 @@ test('an unread message for a hidden window paints nothing and the desktop stays
     'plus the three-pixel dialog frame each side and the caption');
     const presentedBefore = context.presents();
     context.fns.MoveWindow.handler([dialog, 30, 10, 206, 145, 1]);
+    await context.pump(dialog);
+    assert.equal(context.desktop.read(8, 8), 0x00c0c0c0,
+        'the desktop paints where it was a moment later, not at once');
+    context.clock.now += 1000;
     await context.pump(dialog);
     assert.ok(context.presents() > presentedBefore, 'moving repainted and showed the desktop');
     assert.equal(context.desktop.read(8, 8), 0x00808080, 'the desktop shows where it was');

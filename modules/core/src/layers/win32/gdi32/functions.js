@@ -753,6 +753,9 @@ export function createGdiFunctions(host){
         viewportExt: { ...dc.viewportExt },
         windowExt: { ...dc.windowExt },
         position: { ...dc.position },
+        clip: dc.clip ? { ...dc.clip } : null,
+        clipRects: dc.clipRects ?? null,
+        clipSelected: dc.clipSelected,
     });
 
     /**
@@ -820,6 +823,9 @@ export function createGdiFunctions(host){
         dc.viewportExt = state.viewportExt;
         dc.windowExt = state.windowExt;
         dc.position = state.position;
+        dc.clip = state.clip;
+        dc.clipRects = state.clipRects;
+        dc.clipSelected = state.clipSelected;
     };
 
     /**
@@ -2049,6 +2055,7 @@ export function createGdiFunctions(host){
                     forEachSelection(discarded, object=>objects.release(object));
                 }
                 applyState(dc, dc.saved.pop());
+                drawing.restoreClip(handle);
                 return 1;
             },
         },
@@ -4087,6 +4094,7 @@ export function createGdiFunctions(host){
                     return false;
                 }
                 dc.clip = { ...rect };
+                dc.clipRects = null;
                 return drawing.bound(hdc)?.setClipRect(hdc >>> 0, rect) === true;
             },
 
@@ -4210,6 +4218,19 @@ export function createGdiFunctions(host){
                 const dc = dcOf(hdc);
                 return dc ? select(dc, font >>> 0) !== 0 : false;
             },
+
+            /**
+             * A decoded icon -- blue, green, red, alpha, a pixel -- drawn at a
+             * point at the size asked for, its transparent pixels leaving what
+             * is under them.
+             *
+             * @param {number} hdc @param {number} x @param {number} y
+             * @param {{ width: number, height: number, bgra: Uint8Array }} picture
+             * @param {number} [width] @param {number} [height]
+             */
+            picture: (hdc, x, y, picture, width, height)=>
+                drawing.bound(hdc)?.drawPicture(hdc >>> 0, x | 0, y | 0, picture, width, height)
+                    === true,
 
             /**
              * A bitmap the program owns, drawn at a point, or nothing when it

@@ -37,6 +37,7 @@
 
 import { readRect, writeU16, writeU32s } from '../user32/structs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { boundsOf, intersectArea, simplifyArea, subtractFromArea } from './rects.js';
 import {
     BITMAP,
     BITMAPCOREHEADER,
@@ -539,6 +540,16 @@ export function createDrawingFunctions(
             }
             interfaces.bind(handle >>> 0, surface, dc);
             dc.boundSurface = surface;
+            // A clip set before the pixels were bound, or before they were
+            // bound again, still holds.
+            if (dc.clipRects)
+            {
+                interfaces.setClipRegion(handle >>> 0, dc.clipRects);
+            }
+            else if (dc.clip)
+            {
+                interfaces.setClipRect(handle >>> 0, dc.clip);
+            }
         }
         // A window's pixels are the desktop's, and a program that fetches its
         // window's DC once and blits into it every frame -- never through
@@ -573,10 +584,13 @@ export function createDrawingFunctions(
      * @param {number} usage  What the colour table holds.
      * @param {any} dc  Whose palette a palette-relative table indexes.
      * @param {number} [lines]  How many rows the bits hold: all of them by default.
+     * @param {boolean} [lazy]  The bits and the colour table read when the drawing
+     *     first asks for them, for a caller that hands the DIB on and is done with it
+     *     before it returns: a picture the clip leaves out is never read.
      * @returns {{ header: import('./structs.js').BitmapInfoHeaderFields, bits: Uint8Array,
      *             colors: number[], masks: number[] } | null}
      */
-    const readDib = (info, bits, usage, dc, lines)=>{
+    const readDib = (info, bits, usage, dc, lines, lazy = false)=>{
         const header = readBitmapInfoHeader(host, info);
         const masked = header.compression === BI_BITFIELDS
             && (header.bitCount === 16 || header.bitCount === 32);
@@ -601,11 +615,32 @@ export function createDrawingFunctions(
         // DIB_PAL_INDICES has no table for biClrUsed to shorten.
         const size = 1 << header.bitCount;
         const count = usage === DIB_PAL_INDICES ? size : Math.min(header.clrUsed || size, size);
-        const colors = header.bitCount <= 8
+        const readColors = ()=>(header.bitCount <= 8
             ? readColorTable(info + header.size, count, usage, dc, colorEntryBytes(header))
-            : [];
-        return { header, bits: host.readMemory(bits, rle ? header.sizeImage : stride * rows),
-            colors, masks };
+            : []);
+        const readBits = ()=>host.readMemory(bits, rle ? header.sizeImage : stride * rows);
+        if (!lazy)
+        {
+            return { header, bits: readBits(), colors: readColors(), masks };
+        }
+        /** @type {Uint8Array | null} */
+        let read = null;
+        /** @type {number[] | null} */
+        let table = null;
+        return {
+            header,
+            masks,
+            get bits(){
+                const bytes = read ?? readBits();
+                read = bytes;
+                return bytes;
+            },
+            get colors(){
+                const colors = table ?? readColors();
+                table = colors;
+                return colors;
+            },
+        };
     };
 
     /**
@@ -677,8 +712,38 @@ export function createDrawingFunctions(
     /** @param {number} handle @param {any} dc @param {any} rect */
     const setClip = (handle, dc, rect)=>{
         dc.clip = { ...rect };
+        dc.clipRects = null;
         dc.clipSelected = true;
         bound(handle)?.setClipRect(handle >>> 0, rect);
+    };
+
+    /**
+     * The clip as the pieces it is made of: one rectangle, or the several a
+     * hole cut in it left.
+     *
+     * @param {any} dc
+     * @returns {import('./rects.js').Rect[]}
+     */
+    const clipAreaOf = dc=>dc.clipRects ?? [clipOf(dc)];
+
+    /**
+     * Clips to an area, and answers what kind of region it is.
+     *
+     * @param {number} handle @param {any} dc @param {import('./rects.js').Rect[]} pieces
+     */
+    const setClipArea = (handle, dc, pieces)=>{
+        const area = simplifyArea(pieces);
+        if (area.length <= 1)
+        {
+            const rect = area[0] ?? { left: 0, top: 0, right: 0, bottom: 0 };
+            setClip(handle, dc, rect);
+            return isEmpty(rect) ? NULLREGION : SIMPLEREGION;
+        }
+        dc.clip = boundsOf(area);
+        dc.clipRects = area;
+        dc.clipSelected = true;
+        bound(handle)?.setClipRegion(handle >>> 0, area);
+        return COMPLEXREGION;
     };
 
     /** @param {number} handle @returns {any | null} */
@@ -801,7 +866,8 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dcOf(dest));
+                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dcOf(dest),
+                    undefined, true);
                 if (!image)
                 {
                     return 0;
@@ -1585,6 +1651,7 @@ export function createDrawingFunctions(
                 if ((region >>> 0) === 0)
                 {
                     dc.clip = null;
+                    dc.clipRects = null;
                     dc.clipSelected = false;
                     bound(handle)?.setClipRect(handle >>> 0, clipOf(dc));
                     return SIMPLEREGION;
@@ -1628,7 +1695,7 @@ export function createDrawingFunctions(
         /**
          * int IntersectClipRect(HDC hdc, int left, int top, int right, int bottom)
          *
-         * The clip narrowed to the rectangle, which a rectangle always is.
+         * The clip narrowed to the rectangle, piece by piece.
          */
         IntersectClipRect: {
             argBytes: 20,
@@ -1639,24 +1706,19 @@ export function createDrawingFunctions(
                 {
                     return REGION_ERROR;
                 }
-                const clip = intersect(clipOf(dc), {
+                return setClipArea(handle, dc, intersectArea(clipAreaOf(dc), {
                     left: left | 0, top: top | 0, right: right | 0, bottom: bottom | 0,
-                });
-                setClip(handle, dc, clip);
-                return isEmpty(clip) ? NULLREGION : SIMPLEREGION;
+                }));
             },
         },
 
         /**
          * int ExcludeClipRect(HDC hdc, int left, int top, int right, int bottom)
          *
-         * A clip is one rectangle here, so taking a rectangle out of it is
-         * exact only when what is left is still one: nothing, or the clip
-         * less a band across its full width or height. That is the common
-         * case -- a program excludes the strip it has already painted -- and
-         * it is done. Any other cut would leave an L or a frame, which this
-         * model cannot hold; the clip is left as it was and the answer says
-         * the region is more complex than what is drawn under, which is true.
+         * The clip less the rectangle. A hole in the middle leaves a frame,
+         * which is a region of four pieces: a program that paints a picture,
+         * excludes it and then fills its whole client area relies on the fill
+         * going round the picture, not over it.
          */
         ExcludeClipRect: {
             argBytes: 20,
@@ -1667,42 +1729,15 @@ export function createDrawingFunctions(
                 {
                     return REGION_ERROR;
                 }
-                const clip = clipOf(dc);
-                const cut = intersect(clip, {
-                    left: left | 0, top: top | 0, right: right | 0, bottom: bottom | 0,
-                });
-                if (isEmpty(cut))
+                const area = clipAreaOf(dc);
+                const hole = { left: left | 0, top: top | 0, right: right | 0, bottom: bottom | 0 };
+                if (isEmpty(hole) || area.every(piece=>isEmpty(intersect(piece, hole))))
                 {
-                    return isEmpty(clip) ? NULLREGION : SIMPLEREGION;
+                    const pieces = area.filter(piece=>!isEmpty(piece));
+                    return pieces.length === 0 ? NULLREGION
+                        : pieces.length === 1 ? SIMPLEREGION : COMPLEXREGION;
                 }
-                const spansWidth = cut.left <= clip.left && cut.right >= clip.right;
-                const spansHeight = cut.top <= clip.top && cut.bottom >= clip.bottom;
-                /** @param {any} rect */
-                const keep = rect=>{
-                    setClip(handle, dc, rect);
-                    return isEmpty(rect) ? NULLREGION : SIMPLEREGION;
-                };
-                if (spansWidth && spansHeight)
-                {
-                    return keep({ left: 0, top: 0, right: 0, bottom: 0 });
-                }
-                if (spansWidth && cut.top <= clip.top)
-                {
-                    return keep({ ...clip, top: cut.bottom });
-                }
-                if (spansWidth && cut.bottom >= clip.bottom)
-                {
-                    return keep({ ...clip, bottom: cut.top });
-                }
-                if (spansHeight && cut.left <= clip.left)
-                {
-                    return keep({ ...clip, left: cut.right });
-                }
-                if (spansHeight && cut.right >= clip.right)
-                {
-                    return keep({ ...clip, right: cut.left });
-                }
-                return COMPLEXREGION;
+                return setClipArea(handle, dc, subtractFromArea(area, hole));
             },
         },
 
@@ -1721,7 +1756,8 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                return isEmpty(intersect(clipOf(dc), readRect(host, rect >>> 0))) ? 0 : 1;
+                const asked = readRect(host, rect >>> 0);
+                return clipAreaOf(dc).every(piece=>isEmpty(intersect(piece, asked))) ? 0 : 1;
             },
         },
 
@@ -2255,7 +2291,30 @@ export function createDrawingFunctions(
         return interfaces.extTextOutA(handle >>> 0, x | 0, y | 0, options >>> 0,
             (rect >>> 0) === 0 ? null : readRect(host, rect), text, advances) ? 1 : 0;
     };
-    return { functions, bound, setDIBits };
+    /**
+     * Gives the drawing layer the clip the DC's record holds again: what
+     * RestoreDC put back.
+     *
+     * @param {number} handle
+     */
+    const restoreClip = handle=>{
+        const dc = dcOf(handle);
+        const interfaces = dc?.boundSurface ? draw() : null;
+        if (!dc || !interfaces)
+        {
+            return;
+        }
+        if (dc.clipRects)
+        {
+            interfaces.setClipRegion(handle >>> 0, dc.clipRects);
+        }
+        else
+        {
+            interfaces.setClipRect(handle >>> 0, clipOf(dc));
+        }
+    };
+
+    return { functions, bound, setDIBits, restoreClip };
 }
 
 /**

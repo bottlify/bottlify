@@ -499,6 +499,10 @@ const OPAQUE = 2;
  * @property {(hdc: number, text: string) => { width: number, height: number,
  *     ascent: number }} measure
  * @property {(hdc: number, x: number, y: number, bitmap: number) => boolean} bitmap
+ * @property {(hdc: number, x: number, y: number,
+ *     picture: { width: number, height: number, bgra: Uint8Array },
+ *     width?: number, height?: number) => boolean} [picture]
+ *           A decoded icon drawn at a point, its transparent pixels left out.
  */
 
 /**
@@ -509,6 +513,9 @@ const OPAQUE = 2;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {Drawing | null} draw
+ * @property {(handle: number) => import('./cursors.js').CursorPicture | null} [picture]
+ *           The picture an icon or cursor handle stands for, null for one this
+ *           build cannot read: what a static showing an icon draws.
  * @property {(hwnd: number) => any | null} live
  * @property {(hwnd: number) => any | null} windowOf   Live or destroyed.
  * @property {(record: any) => { width: number, height: number }} clientSize
@@ -547,6 +554,8 @@ const OPAQUE = 2;
  *           build with no heap behind it, and then a notification that needs
  *           a structure cannot be sent.
  * @property {(address: number) => void} [release]
+ * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>} [call]
+ *           Calls the program's own code: a callback a control is handed.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {import('./objects.js').ClipboardService} [clipboard]
  *           The clipboard an edit copies to and pastes from. Absent, the
@@ -1308,8 +1317,11 @@ export function createControlProcedures(host){
             case SS_BITMAP: {
                 background(hdc, rect, brush, COLOR_3DFACE);
                 const image = state.image ?? 0;
-                if (image !== 0 && !draw.bitmap(hdc, rect.left, rect.top, image)
-                    && !state.imageDivergenceSaid)
+                const picture = image !== 0 ? host.picture?.(image) ?? null : null;
+                const drawn = picture
+                    ? draw.picture?.(hdc, rect.left, rect.top, picture) === true
+                    : draw.bitmap(hdc, rect.left, rect.top, image);
+                if (image !== 0 && !drawn && !state.imageDivergenceSaid)
                 {
                     state.imageDivergenceSaid = true;
                     host.divergence?.('Static',
@@ -1482,7 +1494,14 @@ export function createControlProcedures(host){
         const draw = /** @type {Drawing} */ (host.draw);
         const state = editState(record);
         const readOnly = (record.style & ES_READONLY) !== 0 || disabled(record);
-        background(hdc, rect, brush, readOnly ? COLOR_3DFACE : COLOR_WINDOW);
+        if (state.richBackground !== undefined)
+        {
+            draw.fill(hdc, rect, state.richBackground);
+        }
+        else
+        {
+            background(hdc, rect, brush, readOnly ? COLOR_3DFACE : COLOR_WINDOW);
+        }
         const grid = editGrid(record, hdc);
         const lines = editLines(record, grid.columns);
         const ink = color(disabled(record) ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT);
@@ -1785,12 +1804,14 @@ export function createControlProcedures(host){
         const readOnly = ()=>(record.style & ES_READONLY) !== 0;
         switch (message.message){
             case WM_PAINT:
-                return painting(record, (hdc, rect)=>after(
-                    controlColor(record, readOnly() || disabled(record)
+                // A rich edit paints in a background of its own and asks its
+                // parent for none.
+                return painting(record, (hdc, rect)=>after(state.richBackground !== undefined
+                    ? 0 : controlColor(record, readOnly() || disabled(record)
                         ? WM_CTLCOLORSTATIC : WM_CTLCOLOREDIT, hdc, thread), brush=>{
-                        paintEdit(record, hdc, rect, brush);
-                        return 0;
-                    }));
+                    paintEdit(record, hdc, rect, brush);
+                    return 0;
+                }));
             case WM_ERASEBKGND:
                 return 1;
             case WM_GETDLGCODE:
@@ -3248,7 +3269,7 @@ export function createControlProcedures(host){
             color, glyph, edge, buttonEdge, sunkenEdge, etchedFrame, drawText,
             clientRect, stateOf, notify, controlColor, background, painting,
             common, disabled, writeU32, writeString, scrollOf, itemHeight,
-            paintScrollBar, scrollHit, shrink, contains,
+            paintScrollBar, scrollHit, shrink, contains, editProc,
         },
     };
 }

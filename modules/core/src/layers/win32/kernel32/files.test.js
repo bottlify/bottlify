@@ -518,6 +518,30 @@ test('a write to a file lands at the position and moves it on', ()=>{
     assert.equal(fns.SetFilePointer.handler([handle, 0, 0, FILE_CURRENT]), 3);
 });
 
+test('a write hands the volume the guest\'s own bytes when the memory layer lends them', ()=>{
+    // A volume keeps a copy of what it is written; reading the buffer into a
+    // copy first, and copying that again, was most of an installer's write.
+    /** @type {Uint8Array[]} */
+    const handed = [];
+    const memory = { lent: /** @type {Uint8Array | null} */ (null) };
+    const { files, fns, open } = setup({
+        windowMemory: (/** @type {number} */ address, /** @type {number} */ length)=>{
+            memory.lent = new Uint8Array(64).fill(0x41).subarray(0, length);
+            return memory.lent;
+        },
+    });
+    files.put('C:\\GAME\\SAVE.DAT', 'abcd');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    const write = files.write.bind(files);
+    files.write = (/** @type {any} */ node, /** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>{
+        handed.push(bytes);
+        return write(node, at, bytes);
+    };
+    assert.equal(fns.WriteFile.handler([handle, BUFFER, 2, OUT_COUNT, 0]), 1);
+    assert.equal(handed[0], memory.lent, 'the lent bytes, not a copy of them');
+    assert.equal(files.text('C:\\GAME\\SAVE.DAT'), 'AAcd');
+});
+
 test('a zero-length write still reports a count', ()=>{
     const { memory, files, fns, open } = setup();
     files.put('C:\\GAME\\SAVE.DAT', 'abcd');

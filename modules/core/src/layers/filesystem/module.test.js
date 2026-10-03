@@ -274,6 +274,85 @@ test('a disposed volume answers not found rather than throwing', async()=>{
     assert.doesNotThrow(()=>fs.onChanged(()=>{}));
 });
 
+test('a rename moves a file the program wrote, and copies one the source holds', async()=>{
+    // An installer unpacks every file under a temporary name and renames it,
+    // a gigabyte at a time; a copy was seconds of the install for each.
+    const writable = createMemoryStore();
+    let written = 0;
+    const counting = {
+        ...writable,
+        /** @param {string} path @param {number} offset @param {Uint8Array} data */
+        write: (path, offset, data)=>{
+            written += data.length;
+            writable.write(path, offset, data);
+        },
+    };
+    const fs = await filesystemModule.create({ drives: { C: {
+        source: createMemoryStore({ 'Game\\Setup.EXE': 'binary' }),
+        writable: counting,
+    } } });
+    fs.createDirectory('C:\\Temp');
+    const handle = fs.open('C:\\Temp\\~GLH0000.TMP',
+        { write: true, disposition: fs.Disposition.CREATE_NEW });
+    fs.write(handle, new Uint8Array(1 << 20).fill(7));
+    fs.close(handle);
+    fs.setModified('C:\\Temp\\~GLH0000.TMP', Date.UTC(2004, 11, 21));
+    written = 0;
+
+    fs.createDirectory('C:\\Steam');
+    fs.rename('C:\\Temp\\~GLH0000.TMP', 'C:\\Steam\\Content.gcf');
+    assert.equal(written, 0, 'not a byte copied');
+    assert.equal(fs.stat('C:\\Temp\\~GLH0000.TMP'), null, 'the old name is gone');
+    const moved = fs.stat('c:\\steam\\content.GCF');
+    assert.equal(moved?.size, 1 << 20);
+    assert.equal(moved?.name, 'Content.gcf', 'spelt as it was renamed to');
+    assert.equal(moved?.modified, Date.UTC(2004, 11, 21), 'and as old as it was');
+    const reopened = fs.open('C:\\Steam\\Content.gcf');
+    assert.deepEqual([...fs.read(reopened, 3)], [7, 7, 7]);
+    fs.close(reopened);
+    assert.deepEqual(fs.list('C:\\Temp'), []);
+
+    fs.rename('C:\\Game\\Setup.EXE', 'C:\\Game\\Setup.old');
+    assert.equal(written, 6, 'what the source holds is copied');
+    assert.equal(fs.stat('C:\\Game\\Setup.EXE'), null, 'and its name does not come back');
+    assert.throws(()=>fs.rename('C:\\Steam\\Content.gcf', 'C:\\Game\\Setup.old'),
+        /already exists/);
+    assert.equal(fs.stat('C:\\Steam\\Content.gcf')?.size, 1 << 20,
+        'a refused move moves nothing');
+    await filesystemModule.dispose();
+});
+
+test('what one volume exports another takes as the same pieces, bytes made when read', async()=>{
+    const first = await filesystemModule.create({ drives: { C: {} } });
+    first.createDirectory('C:\\Steam');
+    const handle = first.open('C:\\Steam\\content.gcf',
+        { write: true, disposition: first.Disposition.CREATE_NEW });
+    first.write(handle, new Uint8Array((3 << 20) + 1).fill(3));
+    first.close(handle);
+    const exported = first.export();
+    await filesystemModule.dispose();
+
+    const writable = createMemoryStore();
+    let written = 0;
+    const counting = {
+        ...writable,
+        /** @param {string} path @param {number} offset @param {Uint8Array} data */
+        write: (path, offset, data)=>{
+            written += data.length;
+            writable.write(path, offset, data);
+        },
+    };
+    const second = await filesystemModule.create({ drives: { C: { writable: counting } } });
+    assert.equal(second.apply(exported), 1);
+    assert.equal(written, 0, 'not copied');
+    assert.equal(second.stat('C:\\Steam\\content.gcf')?.size, (3 << 20) + 1);
+    assert.equal(Object.keys(exported[0]).join(), 'path,bytes',
+        'the pieces do not travel in a copy');
+    assert.equal(exported[0].bytes.length, (3 << 20) + 1, 'the bytes, made when asked for');
+    assert.equal(exported[0].bytes, exported[0].bytes, 'once');
+    await filesystemModule.dispose();
+});
+
 test('diagnostics answers for the live instance', async()=>{
     await volume();
     const second = await filesystemModule.create(undefined);
@@ -376,7 +455,9 @@ test('a file handed from one volume to another is the same bytes until either wr
         const [exported] = ours.export('C');
         theirs.apply([exported]);
         const [again] = theirs.export('C');
-        assert.equal(again.bytes.buffer, exported.bytes.buffer, 'not copied on the way');
+        assert.ok(exported.contents?.pieces[0]);
+        assert.equal(again.contents?.pieces[0], exported.contents?.pieces[0],
+            'not copied on the way');
 
         const writing = theirs.open(at('data1.cab'), { write: true });
         theirs.write(writing, bytes('X'));

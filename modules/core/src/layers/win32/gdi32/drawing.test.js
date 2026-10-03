@@ -124,6 +124,10 @@ function fakeDrawing(){
         setClipRect(hdc, rect){
             calls.push(['setClipRect', hdc, rect]);
         },
+        /** @param {number} hdc @param {any[]} rects */
+        setClipRegion(hdc, rects){
+            calls.push(['setClipRegion', hdc, rects]);
+        },
         bitBlt(){
             calls.push(['bitBlt']);
             return true;
@@ -381,6 +385,37 @@ test('the blits that need no source, and the ones that scale, reach the service'
     assert.equal(fns.StretchDIBits.argBytes, 52);
 });
 
+test('StretchDIBits reads a DIB\'s bits and colours only when the drawing asks for them', ()=>{
+    // A window that repaints one bar of itself draws its whole picture into a
+    // clip that leaves the picture out; the drawing does not look at the bits
+    // then, and they are not copied out of the guest for nothing.
+    /** @type {any[]} */
+    const asked = [];
+    const graphics = fakeDrawing();
+    /** @param {number} hdc @param {any} request */
+    const stretchDIBits = (hdc, request)=>{
+        asked.push(request.image);
+        return 1;
+    };
+    /** @type {any} */ (graphics.drawing).stretchDIBits = stretchDIBits;
+    const { fns, hdc, memory } = setup(graphics.services);
+    const read = memory.readMemory;
+    let bitsRead = 0;
+    memory.readMemory = (address, length)=>{
+        bitsRead += address === 0x2000 ? 1 : 0;
+        return read(address, length);
+    };
+    memory.putU32s(0x800, [40, 2, 2, 0x00080001]);
+    assert.equal(fns.StretchDIBits.handler(
+        [hdc, 0, 0, 4, 4, 0, 0, 2, 2, 0x2000, 0x800, DIB_RGB_COLORS, SRCCOPY]), 1);
+    assert.equal(bitsRead, 0, 'a drawing that leaves the picture out reads none of it');
+    memory.bytes.set([0xab, 0, 0, 0, 0xcd], 0x2000);
+    assert.equal(asked[0].bits[0], 0xab, 'and one that draws it reads the bits as they are');
+    assert.equal(bitsRead, 1);
+    assert.equal(asked[0].colors.length, 256);
+    assert.equal(asked[0].bits, asked[0].bits, 'once');
+});
+
 test('a draw on a window\'s own context shows the desktop; one on a memory context does not', ()=>{
     // A program that fetches its window's DC once at start-up and blits into
     // it every frame -- never through BeginPaint/EndPaint, never releasing --
@@ -505,11 +540,12 @@ test('SetPixelV is SetPixel answered as a BOOL', ()=>{
         [['setPixel', hdc, 9, 10, 0x00abcdef]]);
 });
 
-test('a band excluded from the clip is taken off; a cut that would leave an L is not', ()=>{
+test('a band excluded from the clip is taken off; a hole leaves a frame of four pieces', ()=>{
     const graphics = fakeDrawing();
     const { fns, memory, hdc } = setup(graphics.services);
     const COMPLEXREGION = 3;
     const lastClip = ()=>graphics.calls.filter(call=>call[0] === 'setClipRect').at(-1)?.[2];
+    const lastRegion = ()=>graphics.calls.filter(call=>call[0] === 'setClipRegion').at(-1)?.[2];
 
     assert.equal(fns.ExcludeClipRect.argBytes, 20);
     assert.equal(fns.ExcludeClipRect.handler([hdc, 0, 0, 640, 100]), SIMPLEREGION,
@@ -519,22 +555,53 @@ test('a band excluded from the clip is taken off; a cut that would leave an L is
         'a band down the right, reaching past the surface');
     assert.deepEqual(lastClip(), { left: 0, top: 100, right: 600, bottom: 480 });
     assert.equal(fns.ExcludeClipRect.handler([hdc, 10, 200, 20, 210]), COMPLEXREGION,
-        'a hole in the middle cannot be one rectangle');
-    assert.deepEqual(lastClip(), { left: 0, top: 100, right: 600, bottom: 480 },
-        'so nothing changed');
-    assert.equal(fns.ExcludeClipRect.handler([hdc, 700, 0, 800, 480]), SIMPLEREGION,
+        'a hole in the middle');
+    assert.deepEqual(lastRegion(), [
+        { left: 0, top: 100, right: 600, bottom: 200 },
+        { left: 0, top: 200, right: 10, bottom: 210 },
+        { left: 20, top: 200, right: 600, bottom: 210 },
+        { left: 0, top: 210, right: 600, bottom: 480 },
+    ], 'is the clip round it');
+    assert.equal(fns.ExcludeClipRect.handler([hdc, 700, 0, 800, 480]), COMPLEXREGION,
         'a rectangle outside the clip takes nothing');
 
     memory.putU32s(STRUCT, [0, 0, 5, 5]);
     assert.equal(fns.RectVisible.handler([hdc, STRUCT]), 0, 'above the excluded band');
     memory.putU32s(STRUCT, [0, 95, 5, 105]);
     assert.equal(fns.RectVisible.handler([hdc, STRUCT]), 1, 'straddling its edge');
+    memory.putU32s(STRUCT, [11, 201, 19, 209]);
+    assert.equal(fns.RectVisible.handler([hdc, STRUCT]), 0, 'inside the hole');
     assert.equal(fns.RectVisible.handler([hdc, 0]), 0);
+
+    assert.equal(fns.IntersectClipRect.handler([hdc, 0, 150, 600, 205]), COMPLEXREGION,
+        'narrowing keeps the hole');
+    assert.deepEqual(lastRegion(), [
+        { left: 0, top: 150, right: 600, bottom: 200 },
+        { left: 0, top: 200, right: 10, bottom: 205 },
+        { left: 20, top: 200, right: 600, bottom: 205 },
+    ]);
+    assert.equal(fns.IntersectClipRect.handler([hdc, 30, 150, 600, 205]), SIMPLEREGION,
+        'and drops it once the rest is one rectangle');
+    assert.deepEqual(lastClip(), { left: 30, top: 150, right: 600, bottom: 205 });
 
     assert.equal(fns.ExcludeClipRect.handler([hdc, 0, 0, 640, 480]), NULLREGION,
         'everything: nothing is left');
     assert.equal(fns.RectVisible.handler([hdc, STRUCT]), 0);
     assert.equal(fns.ExcludeClipRect.handler([0x9999, 0, 0, 1, 1]), 0);
+});
+
+test('RestoreDC puts back the clip SaveDC found, a region too', ()=>{
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+    const last = ()=>graphics.calls.filter(call=>call[0] === 'setClipRect'
+        || call[0] === 'setClipRegion').at(-1);
+    assert.equal(fns.ExcludeClipRect.handler([hdc, 10, 10, 20, 20]), 3);
+    const level = fns.SaveDC.handler([hdc]);
+    assert.equal(fns.IntersectClipRect.handler([hdc, 0, 0, 5, 5]), SIMPLEREGION);
+    assert.deepEqual(last(), ['setClipRect', hdc, { left: 0, top: 0, right: 5, bottom: 5 }]);
+    assert.equal(fns.RestoreDC.handler([hdc, level]), 1);
+    assert.equal(last()?.[0], 'setClipRegion', 'the frame round the hole again');
+    assert.equal(last()?.[2].length, 4);
 });
 
 // --- objects a program reads back ---
